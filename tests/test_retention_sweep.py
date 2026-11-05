@@ -227,6 +227,13 @@ def rs(tmp_path, monkeypatch):
         # below has no `parents=True`, and the production path
         # (`<data root>/_pipeline/memory-graph`) is two segments deep.
         ("MEMORY_GRAPH_DIR", "memory-graph", True),
+        # Store 26 (#3789), the guard-refusal journal. A FILE and deliberately NOT created,
+        # for store 14's reason: an absent journal is the state of a box whose guards have
+        # never refused, and one of the four facts this store is pinned by is that the sweep
+        # prints `no journal yet` and creates nothing in that case. The month archives land
+        # beside it — `_archive_append` and `_rewrite_live_ledger` both write into
+        # `journal.parent` — so this one path redirects the whole store, siblings included.
+        ("SAFETY_DENIALS_JOURNAL", "safety/denials.jsonl", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1964,11 +1971,11 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 25, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 26, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "25 unbounded-growth stores" in text, (
+    assert "26 unbounded-growth stores" in text, (
         "the skill's description states a store count other than 22")
-    assert "25 in all" in text, "the skill's body states a store count other than 25"
+    assert "26 in all" in text, "the skill's body states a store count other than 26"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2057,8 +2064,10 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "twenty-two store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports twenty-two stores by design")
+    assert "twenty-three store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports twenty-three stores by design: "
+        "the three automod rungs collapse into one refusal line, and the #3789 "
+        "safety-denial store prints there like every data-root store before it")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2183,6 +2192,11 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # "25 unbounded-growth stores" is graded against the 25 lines the sweep
                       # prints rather than raising `unrecognised store-count numeral`.
                       "25": 25,
+                      # #3789 added the twenty-sixth store (the guard-refusal journal under
+                      # `safety/`), so a vault file saying "26 unbounded-growth stores" is
+                      # graded against the 26 lines the sweep prints rather than raising
+                      # `unrecognised store-count numeral`.
+                      "26": 26,
                       "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
@@ -2238,11 +2252,12 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    # #3499 added the twenty-fifth store line (the dated semantic-* recordings), so the
-    # census this guard compares prose against moved from 24 to 25.
-    assert len(_store_report) == 25, (
-        f"the sweep prints {len(_store_report)} store lines, not the 25 its report "
-        f"has had since #3499 added the memory-graph recordings: {_store_report}")
+    # #3499 added the twenty-fifth store line (the dated semantic-* recordings) and #3789
+    # the twenty-sixth (the guard-refusal journal under `safety/`), so the census this guard
+    # compares prose against moved from 24 to 25 to 26.
+    assert len(_store_report) == 26, (
+        f"the sweep prints {len(_store_report)} store lines, not the 26 its report "
+        f"has had since #3789 added the safety denial journal: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2309,7 +2324,14 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
                                                                   # one short in EITHER mode.
                                                                   rs._ceiling_samples_line(
                                                                       rs.sweep_ceiling_samples(False, time.time())
-                                                                  ).split(":")[0].strip()]), (
+                                                                  ).split(":")[0].strip(),
+                    # #3789 opens its line with the store name and ends it in the
+                    # month-archive bracket, so it matches none of the three suffixes:
+                    # a count taken through that selector is one short of the 26 lines.
+                    rs._safety_denials_line(
+                        rs.sweep_safety_denials(False, time.time(),
+                                                journal=rs.SAFETY_DENIALS_JOURNAL)
+                    ).split(":")[0].strip()]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -2352,16 +2374,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_twenty_two_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_twenty_three_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty-two store
-    lines while the skill says 22 — and SKILL.md now says so in those words. This
+    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty-three store
+    lines while the skill says 23 — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "22", which makes every sandbox run look like it lost three stores) or the
+    (just "23", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2370,7 +2392,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_two_stores_and_one
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints twenty-two store lines plus one refusal
+    the rule. A refused run therefore still prints twenty-three store lines plus one refusal
     line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
     nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
     three print here whatever the tree is, and the last two of those are asserted below
@@ -2381,7 +2403,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_two_stores_and_one
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 22, f"a refusal run should report twenty-two stores: {report}"
+    assert len(report) == 23, f"a refusal run should report twenty-three stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2593,7 +2615,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 25, (
+    assert len(items) == len(_store_report) == 26, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2654,6 +2676,21 @@ def test_the_task_description_names_every_store_the_sweep_prints(
         "the item names no window, so a reader of the prompt cannot tell what ages")
     assert "MEMORY_GRAPH_PROPOSALS_KEEP" in item25 and "semantic-verdicts-pairs.jsonl" in item25, (
         f"the item states neither the witness floor nor the five held names: {item25}")
+    # #3789's safety denial journal is the new append point: item 26, printed last, named by
+    # the printed label's first and last word (`safety`, `denials`) as every append since
+    # #2862 has been. Its item must name BOTH the window constant and the archive naming:
+    # this store's entire promise is that a folded row is readable back out of
+    # `denials-archive-<YYYYMM>.jsonl.gz`, and the worker writing the daily report is the
+    # reader who has to be able to say where the rows went.
+    assert items[25][0] == 26, items[25]
+    assert "safety" in items[25][1] and "denials" in items[25][1], items[25]
+    item26 = re.sub(r"\s+", " ", description[description.index("26 safety denials"):
+                                             description.index("Report all")])
+    assert "SAFETY_DENIALS_ARCHIVE_AGE_DAYS" in item26, (
+        "the item names no window, so a reader of the prompt cannot tell what ages")
+    assert "denials-archive-" in item26 and ".jsonl.gz" in item26, (
+        f"the item does not name the gzip the rows are folded into, which is the one fact a "
+        f"report about an archive-only store has to state: {item26}")
     # #3379's temp-scratch store: the item must name its own window constant, the same
     # rule item 21 and item 22 above take. "/tmp" is the FIRST word of the printed label,
     # so it is one of the two words the positional matcher requires — the item cannot be
@@ -7767,8 +7804,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "25 unbounded-growth stores" in front, front[:200]
-    assert "25 in all" in text, "the skill's body states a count other than 25"
+    assert "26 unbounded-growth stores" in front, front[:200]
+    assert "26 in all" in text, "the skill's body states a count other than 26"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -8776,7 +8813,7 @@ def test_an_absent_or_unreadable_canary_store_reports_zero_rows_and_is_never_cre
     `unreadable` is the same claim one level down: `iterdir()` raising `PermissionError`
     is the state a `chmod 000` reproduces, and a store that cannot be read is a store the
     report describes as empty-and-that-is-known, never an exception that kills the sweep
-    before the other twenty-two lines print.
+    before the other store lines print.
     """
     absent = Path(rs.INJECTION_CANARY_DIR) / "…".replace("…", "no-such-store")
     p = rs.sweep_injection_canary(False, path=absent)
@@ -8857,41 +8894,44 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
         "function holds — a mode string here is where a read becomes a write")
 
 
-def test_the_injection_canary_store_prints_sixth_last_and_the_refused_run_prints_twenty_two(
+def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prints_twenty_three(
         rs, monkeypatch, capsys):
-    """#2862 clause 4, re-pointed by #2924, #3188 and #3209: a refused run prints twenty
-    lines and a production run prints 24, with the canary line FOURTH-LAST in both.
+    """#2862 clause 4, re-pointed by #2924, #3188, #3209, #3379, #3499 and #3789: a refused
+    run prints twenty-three lines and a production run prints 26, with the canary line
+    SEVENTH-LAST in both.
 
-    Third-last is not a demotion, it is the pin that the append order is intact.
+    Seventh-last is not a demotion, it is the pin that the append order is intact.
     `test_the_task_description_names_every_store_the_sweep_prints` matches task 79's
     enumeration to the printed lines POSITIONALLY, so a store is added at the END and the
     items above it keep the rule they always had: #2924's ceiling sample store took the last
     slot, which moved the canary from -1 to -2, #3188's capture store then took it, moving
-    the canary to -3, and #3209's session scratch store took it last, moving it to -4. A
-    store inserted in the middle would silently re-point every item
+    the canary to -3, #3209's session scratch store to -4, #3379's /tmp scratch store to -5,
+    #3499's memory-graph store to -6, and #3789's safety-denial store to -7. A store inserted
+    in the middle would silently re-point every item
     at its neighbour's rule, which is the class of drift this file exists to catch — and the
     positional assert below is what would name it.
 
     The refused run is the other half: this store answers to `_TREE`, not to the
     production check, so a run from a worktree or sandbox counts it anyway — the corpus
     is a tracked directory present in every checkout, and refusing the deletions elsewhere
-    says nothing about it. That is why the count is 21 (24 minus the three automod
-    rungs that collapse into one refusal line) and not 19, and why the line still appears
-    after the refusal. The ceiling store answers to `DATA_ROOT` and survives the same
-    guard for the same reason; `test_the_ceiling_sample_store_prints_third_last_and_survives_the_refusal`
+    says nothing about it. That is why the count is 23 (26 less the three automod rungs that
+    collapse into one refusal line) and why the line still appears after the refusal. The
+    ceiling store answers to `DATA_ROOT` and survives the same guard for the same reason;
+    `test_the_ceiling_sample_store_prints_sixth_last_and_survives_the_refusal`
     pins that line's own position.
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 25, f"a production run prints 25 store lines: {lines}"
-    # #3499 appended the memory-graph store below it, so every position below moves by one.
-    assert lines[-6].split(":")[0].strip().startswith("injection-canary corpus"), lines[-6]
+    assert len(lines) == 26, f"a production run prints 26 store lines: {lines}"
+    # #3499 appended the memory-graph store below it and #3789 the safety-denial store below
+    # that, so this line sits seven from the end.
+    assert lines[-7].split(":")[0].strip().startswith("injection-canary corpus"), lines[-7]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 22, (
-        f"a refused run prints twenty-two store lines plus the refusal: {refused}")
-    assert refused[-6].split(":")[0].strip().startswith("injection-canary corpus"), refused[-6]
+    assert len(refused) == 23, (
+        f"a refused run prints twenty-three store lines plus the refusal: {refused}")
+    assert refused[-7].split(":")[0].strip().startswith("injection-canary corpus"), refused[-7]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -9103,7 +9143,7 @@ def test_a_ceiling_row_appended_while_the_sweep_read_survives_the_rewrite(rs, mo
     assert survivors[0]["mem_peak"] == late["mem_peak"], survivors[0]
 
 
-def test_the_ceiling_sample_store_prints_fifth_last_and_survives_the_refusal(rs, monkeypatch,
+def test_the_ceiling_sample_store_prints_sixth_last_and_survives_the_refusal(rs, monkeypatch,
                                                                        capsys):
     """Where the line prints, in both kinds of run.
 
@@ -9115,17 +9155,17 @@ def test_the_ceiling_sample_store_prints_fifth_last_and_survives_the_refusal(rs,
     file: a run from a round's worktree declines the loop's three refs and still bounds this
     one, so a box that only ever runs the sweep from a gate cannot let the store grow past
     the horizon while its report says nothing about it. That is the same argument that put
-    the canary line after the refusal, and it is why the refused run has 20 lines rather
-    than 19.
+    the canary line after the refusal, and it is why a refused run prints 23 lines: 26 less
+    the three automod rungs that collapse into one refusal line.
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 25, f"a production run prints 25 store lines: {report}"
-    assert report[-5].split(":")[0].strip().startswith("ceiling sample rows"), report[-5]
+    assert len(report) == 26, f"a production run prints 26 store lines: {report}"
+    assert report[-6].split(":")[0].strip().startswith("ceiling sample rows"), report[-6]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 22, f"a refused run prints twenty-two store lines: {refused}"
-    assert refused[-5].split(":")[0].strip().startswith("ceiling sample rows"), refused[-5]
+    assert len(refused) == 23, f"a refused run prints twenty-three store lines: {refused}"
+    assert refused[-6].split(":")[0].strip().startswith("ceiling sample rows"), refused[-6]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -9302,7 +9342,7 @@ def test_the_capture_store_horizon_is_the_shortest_window_in_the_file(rs):
         "behind 14 — the shortest delete window in this file — is stale")
 
 
-def test_the_capture_store_prints_fourth_last_and_survives_the_refusal(rs, monkeypatch, capsys):
+def test_the_capture_store_prints_fifth_last_and_survives_the_refusal(rs, monkeypatch, capsys):
     """Clause 5's report-half: the 22nd line, printed THIRD-TO-LAST since #3499 appended the
     memory-graph store below it, in both kinds of run.
 
@@ -9318,12 +9358,12 @@ def test_the_capture_store_prints_fourth_last_and_survives_the_refusal(rs, monke
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 25, f"a production run prints 25 store lines: {report}"
-    assert report[-4].split(":")[0].strip().startswith("canary tool-call captures"), report[-4]
+    assert len(report) == 26, f"a production run prints 26 store lines: {report}"
+    assert report[-5].split(":")[0].strip().startswith("canary tool-call captures"), report[-5]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 22, f"a refused run prints twenty-two store lines: {refused}"
-    assert refused[-4].split(":")[0].strip().startswith("canary tool-call captures"), refused[-4]
+    assert len(refused) == 23, f"a refused run prints twenty-three store lines: {refused}"
+    assert refused[-5].split(":")[0].strip().startswith("canary tool-call captures"), refused[-5]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -10102,7 +10142,7 @@ def test_the_temp_store_counts_only_the_uid_it_runs_as(rs, tmp_path, monkeypatch
     assert aged2.is_dir(), "the uid gate did not hold"
 
 
-def test_the_temp_store_line_prints_second_last_and_survives_the_refusal(rs, monkeypatch,
+def test_the_temp_store_line_prints_third_last_and_survives_the_refusal(rs, monkeypatch,
                                                                           capsys, tmp_path):
     """Clause 1 and clause 5's report-half: the 24th line, printed SECOND-TO-LAST since #3499
     appended the memory-graph store below it, in both kinds of run.
@@ -10127,16 +10167,16 @@ def test_the_temp_store_line_prints_second_last_and_survives_the_refusal(rs, mon
     # "one candidate" rather than "the one candidate was held because it is the newest".
     monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 25, f"a production run prints 25 store lines: {report}"
-    last = report[-2]
+    assert len(report) == 26, f"a production run prints 26 store lines: {report}"
+    last = report[-3]
     assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
     assert "1 would delete" in last, last
     assert "inode(s) candidate" in last, last
     assert victim.is_dir(), "the dry run deleted"
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 22, f"a refused run prints twenty-two store lines: {refused}"
-    assert refused[-2].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-2]
+    assert len(refused) == 23, f"a refused run prints twenty-three store lines: {refused}"
+    assert refused[-3].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-3]
 
 
 def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
@@ -10454,9 +10494,14 @@ def test_the_memory_graph_horizon_is_one_constant_quoted_in_the_store_and_regist
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  ")]
     mg = [ln for ln in lines if "memory-graph" in ln]
     assert len(mg) == 1, f"expected the store's one line among {len(lines)}, got {mg}"
-    assert lines.index(mg[0]) == len(lines) - 1, (
-        "the store does not print last, which is where an appended store has to print so "
-        "task 79's numbered enumeration still lines up positionally")
+    # #3499 clause 4 pinned this line as the LAST printed store line, which was true until
+    # #3789 appended the safety-denial store below it. What that clause was for — the store is
+    # registered and prints in the appended tail, not inserted among items 1-24 — is unchanged,
+    # so the position moves to second-to-last and the reason stays on the line.
+    assert lines.index(mg[0]) == len(lines) - 2, (
+        "the store does not print second-to-last, the slot #3499's append left it in once "
+        "#3789 appended another store: task 79's numbered enumeration is matched to these "
+        "lines positionally")
 
 
 def test_an_absent_memory_graph_directory_reports_itself_as_absent_and_is_not_created(rs):
@@ -10870,3 +10915,376 @@ def test_the_skill_states_the_coupled_horizon_and_the_cap_for_the_candidate_stor
         f"the row states a hold with no cap: {row}")
     assert "superseded_by_verdict" in row, (
         f"the row's keep-list claim no longer names the status every live file carries: {row}")
+
+
+# ---------------------------------------------------------------------------
+# Store 26 (#3789): ~/lloyd-data/safety/denials.jsonl — the guard-refusal journal.
+# ---------------------------------------------------------------------------
+
+_RS_DENIALS_PREFIX = "denials-archive-"
+
+
+def _denial_at(now: float, days_ago: float) -> str:
+    """The `at` spelling `append_denial` writes: UTC ISO-8601 to the second, `+00:00`."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - days_ago * 86400))
+
+
+def _denial_line(now: float, days_ago: float, *, guard: str = "bash_delete",
+                 session: str = "chat-x") -> bytes:
+    """One denial line the writer itself could have appended, as BYTES.
+
+    `json.dumps(row, sort_keys=True)` is `app/harness/denial_journal.py:220`'s own call with
+    its own key set, so a fold that re-serialised the parsed row would reproduce these bytes
+    exactly — which is why the byte-identity nodes below also plant a line this helper did
+    NOT write (`_denial_line_raw`).
+    """
+    row = {"at": _denial_at(now, days_ago), "guard": guard, "where": "dispatch",
+           "session": session, "session_class": "chat", "tool": "Bash",
+           "label": "rm -rf ./build", "reason": "destructive", "excerpt": "",
+           "commit": "0" * 40}
+    return (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _denial_line_raw(days_ago: float, now: float, body: str) -> bytes:
+    """A denial line whose bytes are NOT what `json.dumps` would emit for its own JSON.
+
+    The re-serialisation trap made checkable: the keys are unsorted, the separators are the
+    ragged ones a hand-written or older writer's line can carry, and `body` holds a double
+    space. Parse it, re-dump it with the writer's `sort_keys=True`, and the bytes move — so a
+    rung that folded via `json.dumps(json.loads(line))` fails the byte comparison in
+    `test_an_applied_denials_fold_keeps_the_live_lines_verbatim_and_touches_no_sibling`
+    instead of passing it.
+    """
+    return f'{{"guard": "bash_delete", "at": "{_denial_at(now, days_ago)}", "note": "{body}"}}\n'.encode("utf-8")
+
+
+def _denial_line_with(**fields) -> bytes:
+    """A denial line with `at` (or anything else) set verbatim — the undated cases."""
+    row = {"guard": "bash_delete", "where": "dispatch", "session": "chat-x",
+           "session_class": "chat", "tool": "Bash", "label": "x", "reason": "y"}
+    row.update(fields)
+    return (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _plant_denial_journal(rs, *lines: bytes) -> Path:
+    """Write `lines` as the redirected denial journal and return its path."""
+    journal = Path(rs.SAFETY_DENIALS_JOURNAL)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes(b"".join(lines))
+    return journal
+
+
+def _denials_archive_name(month: str) -> str:
+    return f"{_RS_DENIALS_PREFIX}{month}.jsonl.gz"
+
+
+def _denials_archive_bytes(dir: Path) -> int:
+    """Total bytes of the month gzips in `dir` — the directory's own answer."""
+    return sum(p.stat().st_size for p in sorted(dir.iterdir())
+               if p.is_file() and re.fullmatch(r"denials-archive-\d{6}\.jsonl\.gz", p.name))
+
+
+def test_denial_rows_past_the_window_fold_into_their_utc_month_and_younger_keep_their_bytes(rs):
+    """Clause 1: a row older than SAFETY_DENIALS_ARCHIVE_AGE_DAYS leaves the live journal
+    for `denials-archive-<that row's own UTC month>.jsonl.gz` beside it, and a row inside the
+    window keeps its exact bytes.
+
+    The two archived stamps fall in DIFFERENT UTC months on purpose: the bucket is the row's
+    month, not the month the sweep ran, so one file would pass a rung that filed every aged
+    row under `now`. The in-window row is compared against the exact line that went in —
+    the only comparison that says the fold re-emits the writer's bytes.
+
+    `kept_newest` is asserted here as well as in its own node: the newest row is the in-window
+    one in this fixture, so the flag has to read 1 for the right reason and not by accident.
+    """
+    now = time.time()
+    old_oct = _denial_line(now, 90.0, session="sess-oct")
+    old_aug = _denial_line(now, 45.0, session="sess-aug")
+    young = _denial_line(now, 2.0, session="sess-now")
+    journal = _plant_denial_journal(rs, old_oct, old_aug, young)
+
+    out = rs.sweep_safety_denials(True, now, journal=journal)
+
+    assert out["moved"] == 2 and out["archived"] == 2, out
+    assert out["refused"] is None, out
+    assert out["undated"] == 0 and out["kept_newest"] == 1, out
+    assert journal.read_bytes() == young, (
+        "the in-window row did not survive the fold byte for byte — the store must re-emit "
+        f"the writer's line, not a re-serialisation of it: {journal.read_bytes()!r}")
+
+    months = sorted({_utc_month(now, 90.0), _utc_month(now, 45.0)})
+    assert months[0] != months[1], "the fixture's two archived rows share a month"
+    for month, line in zip(months, (old_oct, old_aug)):
+        target = journal.parent / _denials_archive_name(month)
+        assert target.is_file(), (
+            f"no archive for {month}: {sorted(os.listdir(journal.parent))}")
+        assert gzip.decompress(target.read_bytes()) == line, (
+            f"{line[:40]!r} is not the byte line stored in {target.name}")
+    assert _denials_archive_name(_utc_month(now, 2.0)) not in os.listdir(journal.parent), (
+        "the fold created an archive bucket for the in-window row's month")
+
+
+def test_an_undated_denial_row_stays_in_the_live_file_and_is_counted_as_undated(rs):
+    """Clause 1's second half: a row whose `at` is missing or unparseable is NEVER folded —
+    it stays in the live file byte for byte and gets its own named bucket on the report line.
+
+    Three shapes of "undated" are planted together, because the store must not treat them
+    differently: no `at` key at all, an `at` that is not an ISO stamp, and a line that is not
+    JSON. The bucket is the point, and #1975 is the precedent named in the store's own
+    docstring: the ledger's first round produced `promotions-archive-None.jsonl.gz`, a row
+    filed under the literal string `None` because the month key came off a stamp the row did
+    not have. So the directory is listed for anything that is not
+    `denials-archive-<six digits>.jsonl.gz`, not merely checked for a `None` bucket.
+    """
+    now = time.time()
+    aged = _denial_line(now, 60.0)
+    young = _denial_line(now, 1.0)
+    missing = _denial_line_with()
+    unparseable = _denial_line_with(at="yesterday")
+    not_json = b'{"guard": "bash_delete", "at": 2026-09-01\n'
+    journal = _plant_denial_journal(rs, aged, missing, unparseable, not_json, young)
+
+    out = rs.sweep_safety_denials(True, now, journal=journal)
+
+    assert out["moved"] == 1, out
+    assert out["undated"] == 3, (
+        f"three undated shapes were planted and the store counted {out['undated']}: {out}")
+    live = journal.read_bytes()
+    for line, why in ((missing, "no `at` key"), (unparseable, "unparseable `at`"),
+                      (not_json, "not JSON"), (young, "in-window")):
+        assert line in live, f"the fold removed a row it must keep ({why}): {live!r}"
+
+    line_txt = rs._safety_denials_line(out)
+    assert "3 undated row(s) kept" in line_txt, line_txt
+    assert "1 archived" in line_txt, line_txt
+    stray = [n for n in os.listdir(journal.parent)
+             if n != journal.name
+             and not re.fullmatch(r"denials-archive-\d{6}\.jsonl\.gz", n)]
+    assert not stray, (
+        f"an undated row was filed somewhere other than the live file — #1975's "
+        f"promotions-archive-None.jsonl.gz shape: {stray}")
+
+
+def test_an_applied_denials_fold_keeps_the_live_lines_verbatim_and_touches_no_sibling(rs):
+    """Clause 2: after `--apply` the live file is the kept lines copied verbatim and never
+    unlinked, and nothing else in `safety/` is written or moved.
+
+    The planted raw line is what makes "verbatim" mean something: `_denial_line_raw`'s bytes
+    are valid JSON that `json.dumps(..., sort_keys=True)` would re-emit DIFFERENTLY (keys
+    reordered, separators normalised), so a fold that round-tripped rows through `json` fails
+    this comparison while still leaving a parseable journal behind.
+
+    The two siblings are the real neighbours of this store, not invented ones:
+    `app/paths.py:172-179` puts `denials.jsonl`, `tree-strays.jsonl` and
+    `tree-stray-acks.json` in the one `safety/` directory, and #2110 makes the strays file a
+    journal another subsystem reads. `.denials.jsonl.archiving` is the rename temp file
+    `_rewrite_live_ledger` writes in that same directory: it is gone by the time the fold
+    reports, and a leftover would be a second writer's half-file sitting where a reader globs.
+    """
+    now = time.time()
+    aged_a = _denial_line(now, 70.0, guard="write_protected_path")
+    aged_b = _denial_line(now, 40.0, guard="bash_delete")
+    kept_raw = _denial_line_raw(6.0, now, "unsorted  and  spaced")
+    kept_b = _denial_line(now, 3.0)
+    journal = _plant_denial_journal(rs, aged_a, aged_b, kept_raw, kept_b)
+    sibling = journal.parent / "tree-strays.jsonl"
+    sibling.write_bytes(b'{"at":"2026-10-01T00:00:00+00:00","kind":"added"}\n')
+    acks = journal.parent / "tree-stray-acks.json"
+    acks.write_bytes(b'{"seen": []}\n')
+    before = _dir_bytes(journal.parent)
+
+    out = rs.sweep_safety_denials(True, now, journal=journal)
+
+    assert out["moved"] == 2, out
+    assert journal.is_file(), (
+        "the fold removed the live journal; `scorecard._denials` opens this path on every "
+        "run and an absent file is a different report from a shorter one")
+    assert journal.read_bytes() == kept_raw + kept_b, (
+        "the kept bytes are not the bytes that went in — the fold re-serialised rather than "
+        f"copied: {journal.read_bytes()!r}")
+    assert sibling.read_bytes() == before["tree-strays.jsonl"], (
+        "the fold touched a sibling journal in safety/ — clause 2 allows only denials.jsonl "
+        "and its own month archives")
+    assert acks.read_bytes() == before["tree-stray-acks.json"], (
+        "the fold touched a sibling file in safety/")
+    assert not (journal.parent / ".denials.jsonl.archiving").exists(), (
+        "the rename temp file was left beside the journal")
+
+
+def test_a_journal_whose_every_row_is_aged_still_exists_after_the_fold_keeping_its_newest(rs):
+    """Clause 2 and clause 3 meet here: a journal with nothing inside the window still exists
+    afterwards, holding its newest row.
+
+    Every row is past 30 days, so the age rule alone would empty the file — and a window that
+    excludes the newest row excludes the WHOLE file, which is why the store keeps that one row
+    however old it is (store 19/#2924's rule, for the same reason: an emptied live store reads
+    as "this machine has never refused anything", and the fold's claim is only that rows older
+    than the window leave). The kept row is also the one a person debugging "when did a guard
+    last say no" opens the live file for.
+    """
+    now = time.time()
+    oldest = _denial_line(now, 200.0)
+    middle = _denial_line(now, 120.0)
+    newest = _denial_line(now, 60.0)
+    journal = _plant_denial_journal(rs, oldest, middle, newest)
+
+    out = rs.sweep_safety_denials(True, now, journal=journal)
+
+    assert out["moved"] == 2 and out["kept_newest"] == 1, out
+    assert journal.is_file(), (
+        "a fold that aged every row deleted the store instead of emptying it")
+    assert journal.read_bytes() == newest, (
+        f"the newest row was archived or the kept bytes changed: {journal.read_bytes()!r}")
+    assert gzip.decompress(
+        (journal.parent / _denials_archive_name(_utc_month(now, 200.0))).read_bytes()
+    ) == oldest
+
+
+def test_every_denial_row_the_fold_removes_comes_back_byte_for_byte_from_its_month_gzip(rs):
+    """Clause 3: read every archived row back through the shell an operator would use —
+    `gzip -dc <month>.jsonl.gz | grep -Fxq '<line>'` — and the newest row is in none of them.
+
+    This is the process boundary the store promises across: the recovery path is not the
+    Python that wrote the bytes but the coreutils a human reaches for at a terminal, so the
+    node shells out rather than decompressing in-process (which would also pass on a gzip the
+    stock tool cannot read). `-F -x` is fixed-string whole-line, the only comparison that says
+    the line is there AS A LINE and not merely somewhere in the stream. The pattern is passed
+    in argv, never interpolated into the script, because a denial row's text is JSON with
+    quotes in it.
+
+    `grep -x` on a line ending in `\\n` matches the stored bytes exactly: the writer's
+    terminator is part of the archived line, which is the same reason the fold copies lines
+    rather than records.
+    """
+    now = time.time()
+    aged = [(95.0, _denial_line(now, 95.0)), (80.0, _denial_line(now, 80.0)),
+            (47.0, _denial_line(now, 47.0)), (41.0, _denial_line(now, 41.0))]
+    young = _denial_line(now, 4.0)
+    journal = _plant_denial_journal(rs, *(line for _, line in aged), young)
+
+    out = rs.sweep_safety_denials(True, now, journal=journal)
+
+    assert out["moved"] == len(aged), out
+    archives = sorted(journal.parent.glob(f"{_RS_DENIALS_PREFIX}*.jsonl.gz"))
+    assert archives, "the fold reported rows archived and wrote no gzip"
+    for days_ago, line in aged:
+        target = journal.parent / _denials_archive_name(_utc_month(now, days_ago))
+        assert target.is_file(), f"no {target.name} for a row {days_ago}d old"
+        proc = subprocess.run(
+            ["bash", "-c", 'gzip -dc "$1" | grep -Fqx -- "$2"',
+             "denials-recovery-check", str(target), line.decode("utf-8")],
+            capture_output=True)
+        assert proc.returncode == 0, (
+            f"{line[:48]!r} is not recoverable line-for-line from {target.name} via "
+            f"gzip -dc | grep -Fxq (exit {proc.returncode}): {proc.stderr.decode()[:200]}")
+
+    recovered = b"".join(gzip.decompress(p.read_bytes()) for p in archives)
+    assert young not in recovered.splitlines(keepends=True), (
+        "the newest row was archived as well as kept — the fold duplicated live data")
+
+
+def test_the_safety_denials_line_reports_the_fold_and_names_every_archive_byte(rs, capsys,
+                                                                              monkeypatch):
+    """Clause 4: one line for the store, in the provenance store's shape, on a real `main()`
+    run — `no journal yet` while the file is absent, `N would archive` in a dry run, `N
+    archived (X -> Y bytes live, Z B out)` on the apply — and the month-archive byte total on
+    every one of them, including a gzip this run did not write.
+
+    Run through `main()` rather than the rung because the clause is about the line the worker
+    pastes into task 79's report and the line an operator approves `--apply` from. The
+    pre-existing 199912 archive is planted before the first run: clause 5's counted half is
+    that the fold does not move unbounded growth one file over, and a total that only ever
+    covered this run's output would hide the files that prove it. The number on the line is
+    then compared against the directory's own total, so the assertion is about the line and
+    not about the store's arithmetic agreeing with itself.
+
+    Dry-run byte-identity is taken over the whole `safety/` directory with the archive
+    planted, so "changed nothing" cannot be vacuously true of an empty one.
+    """
+    now = time.time()
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    absent = _store_line(capsys.readouterr().out, "safety denials")
+    assert "no journal yet" in absent, absent
+    assert "no month archive yet" in absent, absent
+
+    aged = _denial_line(now, 60.0)
+    young = _denial_line(now, 2.0)
+    journal = _plant_denial_journal(rs, aged, young)
+    preexisting = journal.parent / _denials_archive_name("199912")
+    preexisting.write_bytes(gzip.compress(b"an archive from somewhere else\n"))
+    before = _dir_bytes(journal.parent)
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = _store_line(capsys.readouterr().out, "safety denials")
+    assert f">{rs.SAFETY_DENIALS_ARCHIVE_AGE_DAYS}d" in dry, dry
+    assert ": 1 would archive (" in dry, (
+        "the dry run must name the count in the field that holds it, not beside one that "
+        f"could be a byte figure: {dry!r}")
+    assert _dir_bytes(journal.parent) == before, (
+        "the dry run wrote to the store — journal and archives must be byte-identical")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = _store_line(capsys.readouterr().out, "safety denials")
+    assert ": 1 archived (" in applied, applied
+    assert (f"{len(aged) + len(young)} -> {len(young)} bytes live," in applied), applied
+    assert f"{len(aged)} B out)" in applied, applied
+    named = re.search(r"\[(\d+) month archive\(s\), (\d+) B archived\]", applied)
+    assert named, f"the line never names the archive bytes: {applied!r}"
+    assert int(named.group(1)) == 2, applied
+    assert int(named.group(2)) == _denials_archive_bytes(journal.parent), (
+        f"the line's archive total ({named.group(2)}) is not the directory's "
+        f"({_denials_archive_bytes(journal.parent)}), so it excludes the gzip this run did "
+        f"not write: {applied!r}")
+
+
+def test_the_safety_denials_store_states_a_live_bound_under_the_witness_cap(rs):
+    """Clause 3 of #3789: the store's comment states the expected live bytes at the measured
+    rate and SHOWS they stay under `WITNESS_MAX_BYTES` — the alternative the item names is a
+    smaller window, so the number and the cap have to be comparable on the page.
+
+    Nothing here re-runs the measurement over the live store: a unit test must not read
+    `~/lloyd-data` (that is the owed-after-landing measurement, and it belongs to a later
+    run). What this node can and does check is that the figures the comment commits to are
+    arithmetically consistent — the quoted worst rolling 30-day volume divided by the cap
+    re-derived from `scripts/automod/backlog.py` reproduces the percentage and the headroom
+    the comment prints — and that the window the arithmetic is quoted for IS the constant the
+    store folds on. A comment that says "30 days fits under the cap" whose 30 is not the
+    constant, or whose percentage does not divide out, is a comment that went false.
+    """
+    cap_src = (_SCRIPT.parents[2] / "scripts" / "automod" / "backlog.py").read_text(
+        encoding="utf-8")
+    cap_m = re.search(r"^WITNESS_MAX_BYTES\s*=\s*([0-9_]+)", cap_src, re.M)
+    assert cap_m, "scripts/automod/backlog.py no longer defines WITNESS_MAX_BYTES in one line"
+    witness_cap = int(cap_m.group(1).replace("_", ""))
+
+    assert rs.SAFETY_DENIALS_ARCHIVE_AGE_DAYS == 30, (
+        "the store's window moved off the 30 days the item's clause 3 arithmetic settles on; "
+        "a smaller window is allowed only with its own measured bound beside it")
+
+    text = _SCRIPT.read_text(encoding="utf-8")
+    start = text.index("Store 26: ~/lloyd-data/safety/denials.jsonl")
+    # `#` becomes a space first: this is a comment block, so every source line opens
+    # with one and a bare flatten leaves the hash INSIDE the sentence being matched.
+    block = " ".join(text[start:text.index("def _safety_denial_seconds")]
+                     .replace("#", " ").split())
+    assert "1_048_576" in block, (
+        "the store's comment no longer names the cap in the spelling the source uses, so a "
+        "reader cannot compare the two numbers it claims to compare")
+    assert "per-day byte tally" in block, (
+        "the comment lost the method its bound was computed by — dividing file size by days "
+        "since the first row averages the ramp away, which is the error clause 3 rules out")
+    m = re.search(r"worst rolling 30-day volume in this journal is ([0-9,]+) B", block)
+    assert m, f"the comment states no rolling 30-day bound: {block[:400]}"
+    bound = int(m.group(1).replace(",", ""))
+    assert bound < witness_cap, (
+        f"a 30-day window holds {bound} B live, above the {witness_cap}-byte witness cap: "
+        "the store must take a smaller window, not a confident comment")
+    assert f"{100.0 * bound / witness_cap:.1f} %" in block, (
+        f"the comment's percentage does not divide out of {bound} / {witness_cap}: the "
+        "figure is prose, not arithmetic")
+    assert f"~{witness_cap / bound:.2f}x" in block, (
+        f"the comment's headroom does not match {witness_cap} / {bound} = "
+        f"{witness_cap / bound:.2f}")

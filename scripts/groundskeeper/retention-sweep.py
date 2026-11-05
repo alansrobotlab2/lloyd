@@ -4746,6 +4746,249 @@ def _memory_graph_line(p: dict) -> str:
     return f"{label}: {head} — {n} {verb}, {p['bytes'] / 1024:.0f} KiB {unit}{tail}"
 
 
+# ---------------------------------------------------------------------------
+# Store 26: ~/lloyd-data/safety/denials.jsonl — every refusal every guard in the harness
+# made, one JSONL row each, appended by `app/harness/denial_journal.py::append_denial`
+# (#3789). ARCHIVE-ONLY: a row this store removes stays readable out of a month gzip.
+# ---------------------------------------------------------------------------
+# The file's writer caps its FIELDS and never the file: `reason_text[:400]`, `LABEL_CHARS`
+# and `EXCERPT_CHARS` are the only limits in `denial_journal.py`, which holds no rotation,
+# no size check and no `unlink` anywhere — so the journal grows at whatever rate the guards
+# refuse. The load-bearing reader is `scripts/automod/scorecard.py::_denials`, which opens
+# the file and decodes EVERY line on every scorecard run to answer a question about its
+# `since` window: exactly the argument #2225 made for the provenance store, that it pays
+# for the file to answer a question about the last week of it, and it has been paying it
+# daily at 587 KB before any cap was in sight. The witness cap is the second reason and the
+# narrower one: `scripts/automod/backlog.py`'s `_witness_within_size_bound` declines a
+# whole-file witness above `WITNESS_MAX_BYTES = 1_048_576`, which does NOT stop a census —
+# per #2267 clause 3 / #2382 it publishes an extract demand to `owed` instead. So crossing
+# the cap is a degradation, and it was arriving: measured 2026-11-05T11:32Z the live file
+# was 587,120 B over 1,036 rows spanning 2026-10-01T05:03:34Z to 2026-11-05T11:32:07Z —
+# 16.3 KB/day over the whole span, 24.3 over the last 10 days, 29.3 over the last 7, single
+# worst day 51,957 B (2026-11-01) — which puts the crossing between 2026-11-22 and 12-04.
+#
+# EXPECTED LIVE BYTES UNDER THIS WINDOW, and why 30 days needs no smaller one: after a fold
+# the live file holds exactly the rows stamped inside the window, so its steady-state
+# ceiling is the largest volume any one 30-day span has actually produced. Computed as a
+# per-day byte tally of the rows' own `at` stamps — NOT the file size divided by days since
+# the first row, which averages the ramp away — the worst rolling 30-day volume in this
+# journal is 538,773 B (window starting 2026-10-07): 51.4 % of 1_048_576, so ~1.95x
+# headroom at the worst month the store has ever had. The rolling 21-day max is 390,226 B
+# and the 14-day max 287,730 B. A 30-day window therefore keeps the live store under the
+# witness cap at the observed worst, which is why the horizon below is stores 13/14/15's 30
+# and not a smaller number. (Numbers at filing; a fold run at that moment aged 92 rows /
+# 44,884 B — the head of the file, whose witness item #3789 records as owed before the
+# first --apply.)
+SAFETY_DENIALS_JOURNAL = DATA_ROOT / "safety" / "denials.jsonl"
+
+#: Days after which one denial row is past every reader's window and moves into its own
+#: month's gzip. The store's own rule, imported from nobody — the writer prunes nothing —
+#: chosen against the arithmetic above and set equal to stores 13/14/15's 30 because it
+#: answers the same question those windows answer: how far back does anything that opens
+#: this file look? For the scorecard it is a `since` window in days, not a year.
+SAFETY_DENIALS_ARCHIVE_AGE_DAYS = 30
+
+#: Prefix of the month buckets this store writes, named like the ledger (#1975),
+#: provenance (#2225) and voice-turn (#2273) archives so one naming rule covers every
+#: archive store — and so `main()`'s self-check for a temp file left beside the ledger has
+#: nothing new to learn. NOTHING UNLINKS THESE: clause 5's bound half is out of the
+#: pattern (no archive store prunes its own gzips), so their total is REPORTED on the
+#: store's line, and at the measured rate a month gz is tens of KB (~0.5 MB/year).
+SAFETY_DENIALS_ARCHIVE_PREFIX = "denials-archive-"
+
+
+def _safety_denial_seconds(line: bytes) -> float | None:
+    """Seconds for a denial row's own `at`, or None when it has no readable one.
+
+    `append_denial` stamps `at` with `datetime.now(timezone.utc).isoformat(timespec=
+    "seconds")` (`app/harness/denial_journal.py:210`), which is the form `_iso_seconds`
+    parses. A row whose `at` is absent, not a string, or whose line is not JSON at all is
+    NEVER an archive candidate: it stays in the live file and is counted undated, which is
+    the rule that keeps #1975's `promotions-archive-None.jsonl.gz` — a row filed under the
+    literal string `None` because the month key came off a stamp the row did not have —
+    from ever being written again here.
+    """
+    try:
+        row = json.loads(line)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(row, dict):
+        return None
+    return _iso_seconds(row.get("at"))
+
+
+def _denials_archive_tally(journal: Path) -> tuple[int, int]:
+    """(files, bytes) of the month archives sitting beside `journal`.
+
+    Counted from the DIRECTORY rather than from what this run wrote, which is the whole
+    point: the fold must not move unbounded growth one file over, and the only way an
+    operator can see THAT is a number that includes the gzips this run did not touch —
+    including the ones a later round's rule may decide to bound. Symlinks are neither
+    followed nor counted, store 7's rule for a matched entry applied to a glob this store
+    owns.
+    """
+    files = 0
+    total = 0
+    try:
+        candidates = sorted(journal.parent.glob(f"{SAFETY_DENIALS_ARCHIVE_PREFIX}*.jsonl.gz"))
+    except OSError:
+        return 0, 0
+    for path in candidates:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            files += 1
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return files, total
+
+
+def sweep_safety_denials(apply, now, *, journal=None, on_attempt=None) -> dict:
+    """Fold denial rows older than SAFETY_DENIALS_ARCHIVE_AGE_DAYS into month gzips.
+
+    ARCHIVE ONLY: every row is appended to `its own UTC month`'s gzip BEFORE the live file
+    is rewritten, and the live journal is never unlinked — the same order and the same
+    rename-over-that-was-never-deleted shape stores 13 and 14 use, for the same reason: the
+    guard's refusals are the audit trail of the rail, so a fold that lost a row would be a
+    delete wearing the word "archive".
+
+    Store 14's whole mechanism is reused rather than restated. `_archive_append` appends (a
+    month bucket from an earlier run grows, it is never rewritten), and
+    `_rewrite_live_ledger` renames the kept bytes over the journal only after it stops
+    growing — with `noun="journal"`, for store 14's reason: `append_denial` holds no lock
+    across its `open("a")`, so the graft-and-retry is what keeps a live refusal landing
+    mid-fold from being renamed out of existence (#2251's race, one implementation).
+
+    Two rules are this store's own. Undated rows are kept and counted apart, per
+    `_safety_denial_seconds`. And the row with the NEWEST parseable stamp is never archived
+    however old it is — store 19's rule (#2924 keeps the newest ceiling sample for the same
+    reason), and its content here is that a window measured against `now` which excludes the
+    newest row excludes the ENTIRE file: folding it would leave a live journal with no rows
+    at all on a machine whose guards refuse constantly, and the one thing a person debugging
+    "when did a guard last say no" opens this file for is that row. Keeping it costs one row
+    (~570 B at the measured mean) and cannot dent the bound above.
+
+    `on_attempt` is store 13's graft hook, passed straight through for the test that proves
+    a row landing mid-fold is grafted rather than stepped over; production never passes it.
+    """
+    journal = Path(journal) if journal is not None else SAFETY_DENIALS_JOURNAL
+    out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
+           "moved": 0, "archived": 0, "undated": 0, "kept_newest": 0,
+           "archive_files": 0, "archive_bytes": 0, "refused": None}
+
+    def with_archives(res: dict) -> dict:
+        # Taken on EVERY return, including the absent-journal one: an operator deciding
+        # whether the fold is working reads the archive total, and it is the archives that
+        # exist, not the ones written since they last looked.
+        res["archive_files"], res["archive_bytes"] = _denials_archive_tally(journal)
+        return res
+
+    try:
+        raw = journal.read_bytes()
+    except OSError:
+        return with_archives(out)          # absent journal: a guard that has never refused
+    out["present"] = True
+    out["before"] = out["after"] = len(raw)
+
+    lines = raw.splitlines(keepends=True)
+    stamps: list[float | None] = []
+    newest_at: float | None = None
+    newest_index = -1
+    for index, line in enumerate(lines):
+        seconds = _safety_denial_seconds(line)
+        stamps.append(seconds)
+        if seconds is None:
+            out["undated"] += 1
+        # `>=`, not `>`: on a tie the LATER line is the later append of an append-only file,
+        # and that is the newest row in the sense a reader means.
+        elif newest_at is None or seconds >= newest_at:
+            newest_at, newest_index = seconds, index
+
+    buckets: dict[str, list[bytes]] = {}
+    kept: list[bytes] = []
+    for index, line in enumerate(lines):
+        seconds = stamps[index]
+        if seconds is None:
+            kept.append(line)                                    # undated: stays, counted apart
+            continue
+        if index == newest_index:
+            out["kept_newest"] = 1
+            kept.append(line)                                    # never archived, however old
+            continue
+        if now - seconds <= SAFETY_DENIALS_ARCHIVE_AGE_DAYS * 86400:
+            kept.append(line)                                    # inside the window
+            continue
+        # The bucket is the ROW's month, never the month the sweep ran: a fold that filed
+        # every aged row under `now` would put October's refusals in a November gz and make
+        # "open last month's archive" meaningless.
+        buckets.setdefault(time.strftime("%Y%m", time.gmtime(seconds)), []).append(line)
+
+    out["moved"] = sum(len(rows) for rows in buckets.values())
+    out["bytes"] = sum(len(ln) for rows in buckets.values() for ln in rows)
+    if not buckets or not apply:
+        return with_archives(out)
+
+    def target_for(month: str) -> Path:
+        return journal.parent / f"{SAFETY_DENIALS_ARCHIVE_PREFIX}{month}.jsonl.gz"
+
+    def read_size() -> int:
+        return len(journal.read_bytes()) if journal.is_file() else -1
+
+    # Archives FIRST, live file second — store 13's order, the one that makes loss
+    # impossible. `_archive_append` skips lines the month gz already holds, because a
+    # rewrite that then refuses leaves every candidate in both places and a later pass would
+    # otherwise write them twice.
+    try:
+        for month in sorted(buckets):
+            _archive_append(target_for(month), buckets[month])
+    except OSError as exc:
+        out["refused"] = (f"archive append failed ({type(exc).__name__}: {exc}); "
+                          f"live journal intact")
+        return with_archives(out)
+
+    # The kept bytes are the original byte strings re-emitted — never a `json.dumps` of the
+    # parsed row, which would rewrite key order, separators and float formatting and turn a
+    # fold into a rewrite of every line the store kept. `len(raw)`, the snapshot's OWN end,
+    # is handed to the helper rather than a size re-read after that gzip loop: a re-read
+    # moves `seen` past any refusal `append_denial` landed while the archives were being
+    # built, and that row would sit in neither `body` nor the grafted tail while
+    # `os.replace` renamed the file over it (#2251's off-by-one, named in the helper).
+    settled, refusal = _rewrite_live_ledger(journal, b"".join(kept), len(raw),
+                                            on_attempt=on_attempt, noun="journal")
+    if not settled:
+        out["refused"] = refusal
+        return with_archives(out)
+    out["after"] = read_size()
+    out["archived"] = out["moved"]
+    return with_archives(out)
+
+
+def _safety_denials_line(p: dict) -> str:
+    """The report line for store 26, in store 14's shape: the count in the field before the
+    parenthesis, then `(X -> Y bytes live, Z B out)`, the `no journal yet` branch for an
+    absent store, and the month archives named on every branch — the fold's own output AND
+    the bytes already parked beside the store."""
+    label = f"  safety denials >{SAFETY_DENIALS_ARCHIVE_AGE_DAYS}d"
+    arch = (f" [{p['archive_files']} month archive(s), {p['archive_bytes']} B archived]"
+            if p["archive_files"] else " [no month archive yet]")
+    tail = (f" — {p['undated']} undated row(s) kept (no parseable `at`)"
+            if p["undated"] else "")
+    if not p["present"]:
+        return f"{label}: no journal yet — nothing to bound{arch}"
+    if p["refused"]:
+        return (f"{label}: REFUSED ({p['refused']}) — live journal intact, "
+                f"{p['archived']} row(s) already archived{arch}")
+    verb = "archived" if p["apply"] else "would archive"
+    if p["moved"] == 0:
+        return f"{label}: 0 {verb} ({p['before']} bytes live){tail}{arch}"
+    if not p["apply"]:
+        return (f"{label}: {p['moved']} {verb} ({p['before']} bytes live, "
+                f"{p['bytes']} B of it){tail}{arch}")
+    return (f"{label}: {p['moved']} {verb} ({p['before']} -> {p['after']} bytes live, "
+            f"{p['bytes']} B out){tail}{arch}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -4835,6 +5078,12 @@ def main() -> int:
     # outside the automod refusal guard — the memory-graph recordings are written by the
     # weekly semantic entity-resolution job and nothing about them is checkout-relative.
     memory_graph = sweep_memory_graph(args.apply, now)
+    # Store 26 (#3789): a data-root store for the same reason as the two above it — the
+    # automod gate is about refs and round directories, and a journal under the DATA_ROOT is
+    # neither. It is also archive-only: every row it removes stays readable in a month gz
+    # beside the file, so a run from a round's worktree risks nothing here that a run from
+    # the live tree does not.
+    denials = sweep_safety_denials(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -4971,6 +5220,11 @@ def main() -> int:
     # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209 and
     # #3379 — and this line is the 25th.
     print(_memory_graph_line(memory_graph))
+    # Store 26 (#3789), printed LAST and outside the refusal guard like the six lines above
+    # it. Appending rather than inserting keeps items 1-25 of task 79's enumeration where the
+    # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
+    # #3379 and #3499 — and this line is the 26th.
+    print(_safety_denials_line(denials))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0
