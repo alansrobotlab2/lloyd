@@ -2364,6 +2364,13 @@ def _vault_write(params: dict) -> dict:
         # refused the note it had created minutes earlier in its own run — a new failure
         # mode invented to fix an old one.
         _record_note_seen(target)
+        # A prompt-surface write is a trigger, not a curiosity. The next worker turn
+        # builds its position-0 prefix from the bytes replaced two lines above, so
+        # the warm #3771 pays for has to be fired *after this line* — a warm timed
+        # to a clock warms a prefix the consolidation pass then deletes, which is
+        # the item's named sequencing risk and the reason this hook sits on the
+        # write's success path rather than on an hour.
+        _notify_prompt_surface_write(path)
         result = {"success": True, "path": path, "bytes": byte_count}
         if replaced:
             # Say so: a writer that asked for one spelling and got another needs
@@ -2382,6 +2389,46 @@ def _vault_write(params: dict) -> dict:
         return result
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
+
+
+#: The vault-relative paths whose rewrite changes the position-0 prefix of every
+#: worker prompt. `build_system_prompt(platform="worker")` composes SOUL.md +
+#: MEMORY.md + the skills index (USER.md is excluded on the worker platform), so a
+#: rewrite of any of these three invalidates the warm blocks the pool's next job
+#: would otherwise have hit — and the trigger that fires here is the only signal
+#: that has the ordering right. Kept as a literal rather than derived from
+#: `app.prompt_surface`'s ratios table, whose keys are the same three names but
+#: which is a growth-guard module with no interest in prompt composition; the
+#: equality of the two lists is `tests/test_worker_prewarm.py`'s to hold.
+PROMPT_SURFACE_PATHS = ("lloyd/SOUL.md", "lloyd/MEMORY.md", "lloyd/USER.md")
+
+
+def _notify_prompt_surface_write(path: str) -> None:
+    """Tell the backend a loaded prompt surface just changed, so it can re-warm (#3771).
+
+    Fire-and-forget and silent by design. This sits on the success path of every
+    `vault_write`, including the nightly consolidation pass that writes MEMORY.md
+    hundreds of times a night, and the backend is the one that decides whether a
+    warm is allowed — the four admission rules and the already-warmed sha register
+    are in `app/worker_prewarm._refusal`, and a duplicate or ill-timed notice costs
+    a refusal row and nothing else. A writer must never block on, or fail because
+    of, a hint to another process: the backend being down is normal at the instant
+    a nightly job runs, and the consequence is that the poll warms the head instead.
+    """
+    if path not in PROMPT_SURFACE_PATHS:
+        return
+    try:
+        req = urllib.request.Request(
+            service_url("backend", "http://127.0.0.1:8080").rstrip("/")
+            + "/api/worker/prewarm",
+            data=json.dumps({"trigger": "prompt-surface-write"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=3.0):
+            pass
+    except Exception:  # noqa: BLE001 — a hint, never a write's outcome
+        logger.debug("worker prewarm notify failed for %s", path, exc_info=True)
 
 
 def _vault_overview(params: dict) -> dict:

@@ -456,6 +456,16 @@ engine_pressure:
   sample_interval_seconds: 5
   window_seconds: 300
   kv_warn_line: 0.65
+# The job prompt's pre-warm (#3771, app/worker_prewarm.py): one `max_tokens=1`
+# request over the worker platform's system prompt, fired only at the moments the
+# engine's cache is known to be empty — after a boot, and after a prompt-surface
+# rewrite — and only while the primary is idle. Its worth is the amortisation ratio
+# in `_pipeline/worker-prewarm.jsonl` (warms issued against runs that hit them); a
+# ratio under 1 means this belongs off, which is what the line below is for.
+worker_prewarm:
+  enabled: true
+  source: autotriage
+  poll_interval_seconds: 900
 compaction:
   mode: summarize
   summary_model: primary

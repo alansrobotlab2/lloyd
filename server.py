@@ -419,6 +419,13 @@ app.include_router(_automod_router.router)
 app.include_router(_browser_router.router)
 app.include_router(_desktop_router.router)
 app.include_router(_subagents_router.router)
+# #3771: `POST /api/worker/prewarm`, the trigger seam an out-of-process writer
+# (`agent_mcp/vault.py`, on a prompt-surface write's success path) reports through.
+# Imported here rather than in the block at the top: `threat-model.md` anchors
+# `./server.py:181` and `:241` into the peer gate below those lines, and an import
+# up there shifts them out of the definitions their sentences name.
+from app.routers import worker_prewarm as _worker_prewarm_router
+app.include_router(_worker_prewarm_router.router)
 
 # The runtime-state directories, created before anything in this process can
 # write to them (#712). `app.paths` no longer mkdirs at import, so the boot that
@@ -439,6 +446,15 @@ app.on_event("shutdown")(shutdown_cleanup)
 from app import engine_pressure as _engine_pressure  # noqa: E402
 app.on_event("startup")(_engine_pressure.start)
 app.on_event("shutdown")(_engine_pressure.stop)
+
+# The job prompt's pre-warm (#3771): one `max_tokens=1` request over the worker
+# system prompt, paid at the moments the engine's cache is known to be empty — a
+# boot, or a prompt-surface rewrite. Registered AFTER the sampler above because both
+# of its decisions read that gauge: the boot wait is a `/metrics` scrape
+# succeeding, and every warm refuses while the primary is serving somebody else.
+from app import worker_prewarm as _worker_prewarm  # noqa: E402
+app.on_event("startup")(_worker_prewarm.start)
+app.on_event("shutdown")(_worker_prewarm.stop)
 
 
 @app.on_event("shutdown")
