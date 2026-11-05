@@ -229,9 +229,12 @@ wrote a `confirmed` verdict for this item and nobody has re-triaged it since, an
 the loop MAY implement it), `confirmed-held` (confirmed, and the machine is HOLDING \
 it because a landed round's own clause verdict came back not `met` — it stays where \
 it is until that ruling is cleared, which takes a landed round or a re-triage, not a \
-board move), `confirmed-human-only` (confirmed, and its acceptance names a decision \
-the gate would really refuse — the finding stands, but the loop may not be the one \
-that acts on it), `none` (no confirmed verdict the state machine counts: never \
+board move), `confirmed-human-only` (confirmed, and either its acceptance names a \
+decision the gate would really refuse, or its `hand_run:` receipt does not pass — an \
+unexecuted hand-run is a command only an attended session may run, so the dispatcher \
+holds the item whatever its verdict says; either way the finding stands, but the loop \
+may not be the one that acts on it), `none` (no confirmed verdict the state machine \
+counts: never \
 triaged, or re-triaged since the confirmation). **On a `confirmed-human-only` line \
 the loop may not implement the item, so `up_next` is never the proposal for it — \
 propose `draft`, or propose nothing; never `done`, which would record the opposite \
@@ -856,14 +859,53 @@ def _triage_map(ledger) -> dict[int, str]:
 
     A row whose `item_id` is not an integer is skipped by `confirmed_verdicts` itself;
     nothing here re-widens that.
+
+    #3791 adds the OTHER route to that third value, because a confirmed verdict is
+    refused by two questions and the field had only ever asked one. A carrier — a
+    confirmed item whose `hand_run:` receipt does not pass — is refused by
+    `ready_confirmed`'s own skip (#3289), and `owed.hand_run_pending` is the single
+    predicate that decides it, the same one the four closers read. Before this, the
+    four live carriers (#3433 #3537 #3656 #3704) each read `triage=confirmed` on a
+    line the dispatcher had already refused, and the prompt's definition of that word
+    ("the loop MAY implement it") is false for them: #3766 put the verdict on every
+    line and the disagreement reproduced on the next two scored ticks, which is the
+    proof that showing `triage=` is not sufficient unless the value itself carries
+    the refusal. So the carrier reads `confirmed-human-only` too — one word for the
+    one observation the steward actually needs ("the loop may not be the one that
+    acts on this"), not a fifth value with a fifth rule.
+
+    It asks the receipt question and never the item's paths, exactly as the dispatch
+    skip does (#3027): an item that merely NAMES `~/lloyd-data/**` carries no block,
+    is not pending, and stays `confirmed`. And the question is asked only of ids that
+    are already bare `confirmed` — a held confirmation keeps `confirmed-held`, the
+    branch `desired_statuses` reaches before any carrier check, so the loop's two
+    surfaces still answer one question at a time and agree on the answer.
     """
     from scripts.automod import backlog as B
+    from scripts.automod import owed as O
     confirmed = B.confirmed_verdicts(ledger)
     held = B.held_confirmations(ledger)
     out = {int(iid): ("confirmed-human-only"
                       if B.is_human_only((rec or {}).get("acceptance"))
                       else "confirmed")
            for iid, rec in confirmed.items()}
+    # The carrier question, asked of the bare `confirmed` ids only. A `hand_run:`
+    # block lives on the ITEM, not the ledger, so this is the one place the field
+    # reaches outside `confirmed_verdicts`; it is a single walk of the open board,
+    # and `owed._receipt_passes` runs its subprocess only for an item that really
+    # carries a block, exactly as `ready_confirmed`'s skip does.
+    paths = ({i.id: i.path for i in B.open_items(None)}
+             if any(v == "confirmed" for v in out.values()) else {})
+    for iid, value in list(out.items()):
+        path = paths.get(iid) if value == "confirmed" else None
+        if path is None:
+            continue
+        try:
+            fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if O.hand_run_pending(fm)[0]:
+            out[iid] = "confirmed-human-only"
     for iid in held:
         try:
             key = int(iid)

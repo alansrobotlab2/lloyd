@@ -4676,3 +4676,162 @@ def test_nothing_the_machine_parks_as_not_for_the_loop_reads_bare_confirmed(boar
     # "not confirmed" over the board could not pass this node by accident.
     assert tm[34] == "confirmed", "a non-guard marker became a hold"
     assert tm[35] == "confirmed", "a plain confirmation became a hold"
+
+
+# ── #3791: a carrier is the same observation as a human-only confirmation ────
+#
+# #3784 gave `triage=` its fourth value for ONE of the two ways a confirmed item
+# is refused: `is_human_only` names a decision the gate would really refuse. The
+# other way is a `hand_run:` receipt that does not pass, and `ready_confirmed`
+# refuses the OFFER of a round over it (#3289) while the line went on reading
+# `triage=confirmed` — a word the prompt defines as "the loop MAY implement it".
+# That is the row #3791 was filed from: four carriers (#3433 #3537 #3656 #3704),
+# each told the loop may implement it, each answered `draft`, 8 of the window's
+# 19 disagreement rows, reproduced on two scored ticks AFTER #3766 put the
+# verdict on every line — which is the proof that showing `triage=` was never
+# going to be enough unless the VALUE carried the refusal.
+
+#: A receipt that exits 1, so `owed.hand_run_pending` answers pending. The command
+#: is the shape every live carrier's is: an attended apply over runtime data.
+PENDING_HAND_RUN = {"set": ["PS-9 -> PS-8"],
+                    "cmd": "cd ~/lloyd && .venvs/lloyd/bin/python "
+                           "scripts/memory/link_stranded_entities.py --apply",
+                    "receipt": "exit 1", "since": "2026-10-29T09:04:35+00:00"}
+
+#: The same block with a receipt that passes: the attended run happened, so this
+#: item is implementable and its line must stay bare `confirmed`. The pair is the
+#: clause — the field keys on the receipt measurement, not on the block's presence.
+PAID_HAND_RUN = {**PENDING_HAND_RUN, "receipt": "exit 0"}
+
+
+def test_a_confirmed_carrier_reads_confirmed_human_only_and_the_other_values_stay_put(board):
+    """Clause 1 of #3791 (the field). Five items, one new value, four unchanged.
+
+    #41 is the carrier: confirmed, `up_next`, a receipt exiting 1. #42 is the
+    contrast the clause turns on — the identical block whose receipt exits 0 — and
+    must still read plain `confirmed`, because a paid debt is not a refusal and a
+    field that parked paid carriers would withhold work the loop can do. #43 has no
+    block at all. #44 is a HELD confirmation that also carries a pending block, and
+    keeps `confirmed-held`: `desired_statuses` reaches its pool-room hold before any
+    carrier check, so the field has to answer the same question in the same order or
+    the two surfaces disagree about which hold is speaking. #45 is #3784's guard
+    marker, unchanged.
+
+    `TRIAGE_VALUES` is asserted by value AND length: the carrier deliberately reuses
+    the existing fourth value instead of adding a fifth, because a fifth value needs
+    a fifth rule in the prompt and the observation the model needs is one sentence
+    either way ("the loop may not be the one that acts on this").
+    """
+    from scripts.automod.backlog import is_human_only
+
+    assert W.TRIAGE_VALUES == ("confirmed", "confirmed-held",
+                               "confirmed-human-only", "none"), W.TRIAGE_VALUES
+    assert len(W.TRIAGE_VALUES) == 4, (
+        "the carrier was given a fifth value; one word per machine branch is the "
+        f"field's whole safety property and the field now has {W.TRIAGE_VALUES}")
+
+    _triage_item(board, 41, "up_next", hand_run=dict(PENDING_HAND_RUN))
+    _triage_item(board, 42, "up_next", hand_run=dict(PAID_HAND_RUN))
+    _triage_item(board, 43, "up_next")
+    _triage_item(board, 44, "up_next", held=True, hand_run=dict(PENDING_HAND_RUN))
+    _triage_item(board, 45, "up_next", acceptance=GUARD_MARKER)
+
+    # The premise, re-checked: the receipt, not the block, splits #41 from #42, and
+    # the guard marker of #45 is what makes ITS value, not this round's predicate.
+    from scripts.automod import owed as O
+    fm_pending, _ = B._split_frontmatter((board / "41-item-41.md").read_text(encoding="utf-8"))
+    fm_paid, _ = B._split_frontmatter((board / "42-item-42.md").read_text(encoding="utf-8"))
+    assert O.hand_run_pending(fm_pending)[0], "fixture lost its pending receipt"
+    assert not O.hand_run_pending(fm_paid)[0], "fixture lost its passing receipt"
+    assert is_human_only(B.confirmed_verdicts(S.LEDGER_PATH)[45].get("acceptance")), \
+        "fixture lost its guard"
+
+    tm = W._triage_map(S.LEDGER_PATH)
+    assert tm[41] == "confirmed-human-only", tm
+    assert tm[42] == "confirmed", tm
+    assert tm[43] == "confirmed", tm
+    assert tm[44] == "confirmed-held", tm
+    assert tm[45] == "confirmed-human-only", tm
+
+
+def test_no_carrier_the_machine_parks_is_ever_shown_as_a_line_the_loop_may_implement(board):
+    """Clause 2 of #3791 (the wire). The property over a ledger, and the line on it.
+
+    The clause is a universal, so it is measured as one: for every item
+    `desired_statuses` parks with its hand-run reason, the `triage=` value derived
+    from the same board is not bare `confirmed`, and the rendered line carries that
+    value and no destination. The parked set is asserted non-empty first, because an
+    empty conjunction is exactly how a guard like this passes while proving nothing.
+
+    `build_prompt` is called with no `triage=` argument on purpose: that default
+    path is the one `execute` takes when a caller forgets to pass a map, and it is
+    the path #3766 had to fix for the same reason.
+    """
+    _triage_item(board, 51, "up_next", hand_run=dict(PENDING_HAND_RUN))
+    _triage_item(board, 52, "up_next", hand_run=dict(PENDING_HAND_RUN))
+    _triage_item(board, 53, "up_next", hand_run=dict(PAID_HAND_RUN))
+
+    want = B.desired_statuses(S.LEDGER_PATH)
+    tm = W._triage_map(S.LEDGER_PATH)
+    parked = sorted(iid for iid, tup in want.items()
+                    if tup[0] == "draft" and "hand_run is still unexecuted" in tup[1])
+    assert parked == [51, 52], (
+        f"the machine no longer parks these carriers, so the loop below measures "
+        f"nothing: {parked} against {dict(want)}")
+
+    for iid in parked:
+        got = tm.get(iid, "none")
+        assert got != "confirmed", (
+            f"#{iid} is parked by the machine as unexecuted, but its line says "
+            f"{got!r} — the word the prompt defines as MAY implement")
+        assert got in W.TRIAGE_VALUES, f"#{iid}: {got!r} is not a defined value"
+    assert tm[53] == "confirmed", "a paid carrier became a hold"
+
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    prompt = W.build_prompt(events=[], items=items, n_open=len(items), since_ts=0.0)
+    for iid in parked:
+        found = re.findall(r"\btriage=(\S+)", _line(prompt, iid))
+        assert found == ["confirmed-human-only"], f"#{iid}: {found} on its own line"
+    _assert_no_line_names_a_destination(prompt, len(items))
+
+
+def test_the_prompt_definition_of_confirmed_human_only_names_the_unexecuted_hand_run():
+    """Clause 3 of #3791 (the prose). The value the model is told about matches the
+    predicate that derives it.
+
+    A field value whose definition does not mention one of the two ways it is
+    derived is a token that lies about half the items carrying it: the model reads
+    "its acceptance names a decision the gate would really refuse", sees an
+    acceptance with no marker, and concludes the loop may implement. So the
+    definition has to name the unexecuted hand_run — the command, the receipt, and
+    the reason an implement turn is not the one that runs it.
+
+    Each value's definition is read as ITS OWN parenthetical, and the check is
+    two-sided: `hand_run` is in the carrier value's, and in no other value's. A
+    character window around the value would pass on a definition that had drifted
+    onto a neighbour, which is the failure #3784's own review caught.
+    """
+    prompt = W.build_prompt(events=[], items=[], n_open=0, since_ts=0.0)
+    doc = prompt[prompt.index("- **`triage=`"):]
+    doc = doc[:doc.index("\n- ")]
+
+    defs = {}
+    for value in W.TRIAGE_VALUES:
+        anchor = f"`{value}` ("
+        k = doc.find(anchor)
+        assert k >= 0, f"`{value}` is enumerated without a definition: {doc}"
+        close = doc.find(")", k)
+        assert close > k, f"`{value}`'s definition never closes, so its scope is unreadable"
+        defs[value] = doc[k + len(anchor):close]
+
+    carrier = defs["confirmed-human-only"]
+    assert "hand_run" in carrier, (
+        f"the value a carrier now carries is never defined as one: {carrier}")
+    assert "receipt" in carrier, (
+        f"the definition does not say what makes a hand_run a refusal: {carrier}")
+    for value, text in defs.items():
+        if value == "confirmed-human-only":
+            continue
+        assert "hand_run" not in text, (
+            f"`{value}`'s definition names the hand_run case, so the model has two "
+            f"words for it and one rule: {text}")

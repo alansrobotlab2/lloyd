@@ -6342,6 +6342,44 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             retriages = retriage_counts(ledger)
             open_ids = {i.id for i in open_items(None)}
         return unfinished
+
+    def _pool_or_carrier(fm: dict, why: str) -> tuple[str, str]:
+        """The implement-pool status, unless dispatch cannot act on this item.
+
+        #3791: `ready_confirmed` refuses the OFFER of a round over an unexecuted
+        `hand_run:` receipt (#3289), while every route below proposed
+        `IMPLEMENT_POOL_STATUS` for exactly those items — so the reconciler wrote
+        `up_next` onto an item nothing can ever pick up. Measured on the live
+        board at triage: #3433 #3537 #3656 #3704 each read
+        `(up_next, 'triage confirmed it with an acceptance check')` here while
+        `owed.hand_run_pending` answered `held=True` with the reading
+        `exited 1: ACTIVE_NAME_EMBEDDING=21 PAIRS_LIVE=0/2 …`, and the board
+        steward — whose line told it a confirmed item is one the loop MAY
+        implement — answered `draft`, the true side, and was scored as
+        disagreeing with the machine. Eight of the window's 19 disagreement rows
+        were these four items over two scored ticks.
+
+        So the pool status asks the one question the four closers,
+        `apply_verdict` and the dispatcher already ask (#3461: the enumeration is
+        `owed.hand_run_pending`'s own docstring, and "a reader absent from it is
+        the bug #3461 is about"). The met-landing branch above has parked a held
+        carrier on this predicate since #3461; this is the same park for the
+        carriers that never had a round to land.
+
+        It keys on the RECEIPT MEASUREMENT and never on the item's paths: #3027's
+        contract that merely NAMES `~/lloyd-data/**` carries no block, is not
+        pending, and stays in the pool — and a carrier whose receipt exits 0 has
+        had its attended run, so it is offered again.
+        """
+        from scripts.automod import owed as _O
+        held_by, receipt_why = _O.hand_run_pending(fm)
+        if not held_by:
+            return (IMPLEMENT_POOL_STATUS, why)
+        return ("draft",
+                f"its hand_run is still unexecuted — receipt {held_by['receipt']!r} "
+                f"{receipt_why} — so the implement pool would name an item the "
+                f"dispatcher refuses to serve; the attended run is owed")
+
     out: dict[int, tuple[str, str]] = {}
     for item in open_items(boards):
         iid = item.id
@@ -6388,8 +6426,8 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             elif _awaits_triage(iid):
                 out[iid] = ("draft", "re-triaged; waiting for its second triage to confirm a contract")
             else:
-                out[iid] = ("up_next", "landed with a clause not met; offered once more for "
-                                       "exactly those clauses")
+                out[iid] = _pool_or_carrier(fm, "landed with a clause not met; offered "
+                                                "once more for exactly those clauses")
         elif landed and not partial:
             ev = landed_outcome.get(iid, {})
             acc = ev.get("acceptance")
@@ -6572,12 +6610,18 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                                            "or observation is still live), whatever the "
                                            "re-offer reads")
             else:
-                out[iid] = ("up_next", f"offered again — {verdict}: {detail[:120]}")
+                out[iid] = _pool_or_carrier(fm, f"offered again — {verdict}: {detail[:120]}")
         elif iid in confirmed and not is_human_only(confirmed[iid].get("acceptance")):
             if iid in held:
                 out[iid] = ("draft", "triage confirmed it; held until the implement pool has room")
             else:
-                out[iid] = ("up_next", "triage confirmed it with an acceptance check")
+                # #3791: not a bare `up_next`. A confirmed item whose `hand_run:`
+                # receipt does not pass is a carrier, and `ready_confirmed`
+                # refuses to OFFER a round for it (#3289), so proposing the pool
+                # status here named an item nothing can ever pick up — the
+                # disagreement #3791 was filed over. `_pool_or_carrier` asks the
+                # dispatcher's own predicate.
+                out[iid] = _pool_or_carrier(fm, "triage confirmed it with an acceptance check")
         elif iid in verdicts:
             # unverifiable / not_code / incomplete / human-only: triaged, not for
             # the loop. Stays where triage found it.

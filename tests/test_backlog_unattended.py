@@ -6599,3 +6599,139 @@ def test_the_hold_changes_no_dispatch_decision_for_the_item_the_pool_already_ref
         B.set_status(3508, status, f"dispatch column: {status}")
         assert [i.id for i, _ in B.ready_confirmed(S.LEDGER_PATH)] == [3509], status
         assert B.select_confirmed(S.LEDGER_PATH)[0].id == 3509, status
+
+
+# ── #3791: a carrier is never proposed at the pool status ───────────────────
+#
+# `ready_confirmed` refuses to OFFER a round over an unexecuted `hand_run:`
+# receipt (#3289), and `desired_statuses` proposed `up_next` for exactly those
+# items. The reconciler therefore wrote a status that nothing can pick up, and
+# the board steward — told by its own line that a confirmed item is one the loop
+# MAY implement — answered `draft` and was scored as disagreeing with the
+# machine. Measured at triage on the live window: 8 of its 19 disagreement rows
+# were these four items (#3433 #3537 #3656 #3704) over two scored ticks, each
+# with `hand_run_pending` reading held and `desired_statuses` reading
+# `('up_next', 'triage confirmed it with an acceptance check')`.
+#
+# The fix is one predicate at every route to the pool status, so the two
+# surfaces cannot hold different answers to "can dispatch act on this item". The
+# nodes below are the pair's agreement, not one side's list.
+
+_LIVE_RECEIPT = "exit 1"
+
+
+def test_a_confirmed_carrier_is_parked_at_draft_and_the_reconciler_writes_it(isolated):
+    """#3791 clause 1: the pool status asks the dispatcher's question, and the
+    park reaches the board.
+
+    #3433's own shape: confirmed with an acceptance, `up_next` on the board, a
+    `hand_run:` block whose receipt exits 1. The table must answer `draft`, and
+    the reason must name the RECEIPT and what running it said — not the item's
+    paths, which is the sentence that would park #3027's readable-heads case by
+    its prose instead of by its receipt. Then `reconcile_statuses` is run for
+    real, because a table nobody writes is not what the steward was scored
+    against: the board line, the `status_moved` row and the dispatcher all read
+    the file this call leaves behind.
+    """
+    _carrier(isolated, 3433, receipt=_LIVE_RECEIPT)
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[3433][0] != B.IMPLEMENT_POOL_STATUS, (
+        f"the table still wants the pool status for a carrier the dispatcher "
+        f"refuses: {want[3433]}")
+    assert want[3433][0] == "draft", want[3433]
+    why = want[3433][1]
+    assert _LIVE_RECEIPT in why and "exited 1" in why, (
+        f"the reason does not name the receipt and its reading, so a reader "
+        f"cannot tell a held item from one nobody attempted: {why!r}")
+    assert "ps-tasks" not in why, (
+        f"the reason cites the item's paths rather than the receipt measurement: "
+        f"{why!r}")
+
+    moved = B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert {"item_id": 3433, "from": "up_next", "to": "draft"} in moved, moved
+    fm, _ = B._split_frontmatter((isolated / "3433-ps-5-apply-carrier.md").read_text(
+        encoding="utf-8"))
+    assert fm["status"] == "draft", fm
+    assert B.desired_statuses(S.LEDGER_PATH, None)[3433][0] == "draft", (
+        "the park is not idempotent, so the reconciler will fight it every pass")
+
+
+def test_the_pool_park_keys_on_the_receipt_and_never_on_the_paths(isolated):
+    """#3791 clause 2: #3027's case and every paid carrier stay dispatchable.
+
+    Three items, three shapes, and the two directions of the clause. #3657
+    carries no `hand_run:` block at all — its body merely NAMES a runtime path,
+    which is #3027's readable-heads case — and stays `up_next`: parking it on its
+    prose is the failure that item exists to prevent. #3658's receipt exits
+    0 — the attended run happened, the debt is paid — and likewise stays
+    `up_next`, so a round can still take it. #3659 is the clause's other side: a
+    block whose `receipt:` was never run is pending, never a clean zero (#3017),
+    and is parked.
+
+    A park keyed on "the item mentions ~/lloyd-data" or on "the item carries a
+    `hand_run:` block" would redden this node, because #3657 and #3659 differ in
+    nothing but the block's receipt line and must land on opposite sides. The
+    receipt is flipped in place on #3658 at the end: the same file, with nothing
+    but the `receipt:` line changed, must go the other way.
+    """
+    _carrier(isolated, 3657, cmd=None)                  # names the path, no block
+    paid = _carrier(isolated, 3658, receipt="exit 0", cmd="test -e /etc/hostname")
+    _carrier(isolated, 3659, receipt=None)              # block, receipt never run
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[3657][0] == B.IMPLEMENT_POOL_STATUS, want[3657]
+    assert want[3658][0] == B.IMPLEMENT_POOL_STATUS, want[3658]
+    # #3659 is the opposite half and belongs to clause 2's other sentence: a
+    # block whose receipt was never run IS pending (#3017: never a clean zero),
+    # so it is NOT offered the pool status while the two above are.
+    assert want[3659][0] == "draft", want[3659]
+
+    paid.write_text(paid.read_text(encoding="utf-8").replace("receipt: exit 0",
+                                                             "receipt: exit 1"),
+                    encoding="utf-8")
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[3658][0] == "draft", (
+        "flipping only the receipt line left the pool status standing, so the "
+        f"park keyed on something other than the measurement: {want[3658]}")
+    assert want[3657][0] == B.IMPLEMENT_POOL_STATUS, want[3657]
+
+
+def test_no_item_the_pool_refuses_is_one_the_table_wants_at_the_pool_status(isolated):
+    """#3791 clause 3: the two surfaces hold one answer, over one board.
+
+    One fixture board, four items, and the clause read as the universal it is:
+    for every item on this board, if `ready_confirmed` does not offer it, then
+    `desired_statuses` must not want it at `IMPLEMENT_POOL_STATUS` either. The
+    two functions are called over the same board and the same ledger, once, so
+    the assertion is about the pair and not about a fixture that was chosen to
+    agree with itself.
+
+    The board deliberately carries BOTH halves of the receipt question — a
+    pending-receipt carrier and a passing-receipt carrier, differing in nothing but
+    their id and the one `receipt:` line — plus a no-block item naming a runtime
+    path and a block whose receipt was never run. The non-vacuity guards come
+    first: if the pool offered nothing the loop below would be an empty
+    conjunction, and if the passing carrier were refused the loop would be
+    satisfied by a pool that refuses everything.
+    """
+    _carrier(isolated, 4101, receipt="exit 1")          # pending: refused
+    _carrier(isolated, 4102, receipt="exit 0", cmd="test -e /etc/hostname")   # paid
+    _carrier(isolated, 4103, cmd=None)                  # no block at all
+    _carrier(isolated, 4104, receipt=None)              # block, never run
+    ids = {4101, 4102, 4103, 4104}
+
+    offered = {i.id for i, _ in B.ready_confirmed(S.LEDGER_PATH)}
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert 4102 in offered and 4103 in offered, (
+        f"the pool stopped offering the items it must offer, which would make the "
+        f"loop below vacuous: {sorted(offered)}")
+    assert 4101 in ids - offered, "the pending carrier was offered, so #3289 is undone"
+    assert want[4102][0] == B.IMPLEMENT_POOL_STATUS, want[4102]
+    assert want[4103][0] == B.IMPLEMENT_POOL_STATUS, want[4103]
+
+    for iid in sorted(ids - offered):
+        got = want.get(iid)
+        assert got is not None, f"#{iid} is on the board but the table has no answer"
+        assert got[0] != B.IMPLEMENT_POOL_STATUS, (
+            f"#{iid}: the pool refuses it and the table wants {got[0]!r} — that is "
+            f"the pair #3791 was filed over: {got}")
