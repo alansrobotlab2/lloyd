@@ -3097,7 +3097,7 @@ CORROBORATED_SOURCES = mt.CORROBORATED_ERROR_SOURCES
 
 
 def _live_buckets(since=None):
-    live = _ROOT / "_pipeline" / "trajectories"
+    live = _BUCKET_STORE
     if not live.exists():
         pytest.skip("no trajectories dir on this machine")
     return [p for p in sorted(live.glob("*.jsonl"))
@@ -3156,6 +3156,56 @@ def test_the_regenerated_window_flags_only_persisted_flag_failures():
         f"2026-09-05 flagged steps per session are {found}, expected {expected} "
         "— the extractor is not deriving them from `stats.is_error`")
     assert sum(len(e.get("error_tools") or []) for e in _entries(path)) == 6
+
+
+def test_live_buckets_reads_the_bucket_store_and_not_the_checkout(monkeypatch, tmp_path):
+    """#3803: this guard's path is the data root, never the code checkout, in BOTH arms.
+
+    The defect was one line: the guard built its store from `_ROOT`, the code checkout, and
+    `.gitignore` keeps `/_pipeline/` out of git, so no checkout — the live one, a round's
+    worktree, or CI's — has ever held a bucket there. Both corpus nodes above therefore took
+    the skip on every machine and their assertions never ran: a pass-or-retry argument over
+    #392 was graded against tests that execute nothing. The anchor is now the
+    module's own `_BUCKET_STORE`, built once from `production_data_root()`, which is the same
+    path whatever `$HOME` or `LLOYD_DATA` say — so conftest's scratch root cannot move it and
+    the guard cannot be re-anchored back into the tree it was just un-rooted from.
+
+    Each arm can fail, which is what #2637's review demanded of an absent-state branch. The
+    checkout arm holds a decoy bucket, so a guard still reading `_ROOT` reports
+    `2099-01-01.jsonl` and the first assertion goes red. The absent arm points the store at a
+    path that is not there while that decoy still stands in the checkout, so a guard reading
+    any checkout-rooted path returns the decoy instead of raising the ruled skip and
+    `pytest.fail` fires. The skip text is asserted verbatim because #2920 rules this site
+    non-convertible and pins its reason (`test_skip_inventory.py`), and it is caught with a
+    bare `except Skipped` rather than a raises-context because this file pins its own count
+    of skip-assertion sites at 8 and every one of those guards `tests/_live_data.py`.
+    """
+    checkout = tmp_path / "checkout"
+    _write_bucket(checkout / "_pipeline" / "trajectories", "2099-01-01.jsonl", ["decoy"])
+    store = tmp_path / "data-root" / "_pipeline" / "trajectories"
+    _write_bucket(store, "2099-01-02.jsonl", ["s1", "s1"])
+    monkeypatch.setattr(_THIS, "_ROOT", checkout)
+    monkeypatch.setattr(_THIS, "_BUCKET_STORE", store)
+
+    assert [p.name for p in _live_buckets()] == ["2099-01-02.jsonl"], (
+        "`_live_buckets` answered from the code checkout, where buckets are never written, "
+        "so the two corpus nodes above are back to skipping over an empty tree")
+    assert [p.name for p in _live_buckets(since="2099-01-02")] == ["2099-01-02.jsonl"], (
+        "the `since` window stopped filtering the store, so the regenerated-window node "
+        "above would scan buckets outside the window it names")
+
+    absent = tmp_path / "no-such-store"
+    monkeypatch.setattr(_THIS, "_BUCKET_STORE", absent)
+    try:
+        _live_buckets()
+    except pytest.skip.Exception as exc:
+        assert str(exc) == "no trajectories dir on this machine", (
+            f"the ruled skip reason was re-worded to {str(exc)!r}: #2920 rules this "
+            "site non-convertible and pins this exact text in two places")
+    else:
+        pytest.fail(
+            f"`_live_buckets` returned buckets for the absent store {absent} while a "
+            "checkout-shaped tree stood beside it, so the guard reads a checkout path")
 
 
 # ── session class: the frequency gate must not rank the loop (#493) ──────────

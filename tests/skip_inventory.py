@@ -90,10 +90,11 @@ BEFORE_MACHINE = 21
 #    check exists to avoid.
 # 2. `tests/test_trajectory_extraction.py`, the guard inside `_live_buckets` — skip
 #    reason `no trajectories dir on this machine`. This skips on machine state and
-#    nothing else: the regenerated-error corpus is not in the repo. Two nodes consume
+#    nothing else: the regenerated-error corpus is not in the repo. Three nodes consume
 #    the guard (`test_no_regenerated_bucket_promotes_the_keyword_sweep`,
-#    `test_the_regenerated_window_flags_only_persisted_flag_failures`), and neither may
-#    be turned into a pass on a machine holding no corpus.
+#    `test_the_regenerated_window_flags_only_persisted_flag_failures`, and
+#    `test_live_buckets_reads_the_bucket_store_and_not_the_checkout`). No corpus node may
+#    become a pass on a machine holding no corpus.
 # 3. `tests/_live_data.py` — skip reason `absent at`, which already names the path and
 #    the owner it wants. This is #1377's step-3 branch, and the file carries the record
 #    of what the other branches would have hidden: `SM_20260923_034250` promoted with

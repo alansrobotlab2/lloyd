@@ -907,16 +907,18 @@ def test_the_ruling_counts_agree_with_the_tree_and_the_stale_ones_are_gone():
     wrong in its attribution, and the number was right for the wrong reason: there are 8
     `pytest.raises(pytest.skip.Exception)` sites, and not one of them asserts `_live_buckets`
     — they assert the live-data guards `tests/_live_data.py` exports (`require_live_data`,
-    `require_live_volume`). So the block gives that guard no count at all and names its 2
-    consumers instead, which is a claim that cannot drift, and the stale `:331`/`:163` reserve
-    citations became their marker-reason texts.
+    `require_live_volume`). So the block gives that guard no count at all and names its
+    consumers instead — the two corpus nodes and, since #3803 re-anchored the guard to the
+    production data root, the one pin node that redirects the store — which is a claim that
+    cannot drift, and the stale `:331`/`:163` reserve citations became their
+    marker-reason texts.
     """
     text = _module_comment_text()
     traj = (ROOT / "tests" / "test_trajectory_extraction.py").read_text(encoding="utf-8")
     assert traj.count("pytest.raises(pytest.skip.Exception)") == 8, (
         "the count this node pins as the truth has moved; re-read the file and update both "
         "this figure and the block's sentence about what those sites guard")
-    assert len(_live_bucket_consumers()) == 2, \
+    assert len(_live_bucket_consumers()) == 3, \
         "`_live_buckets` gained or lost a consumer; the block names them, so update both"
     # The attribution, checked rather than trusted. Each raise-site reaches a guard of
     # `tests/_live_data.py` — the parametrized ones through an `ABSENCE_EDGES` row naming a
