@@ -977,6 +977,13 @@ def index_repair_hook_slugs(path: str | os.PathLike[str],
       not a repair — and the exemption must not be a way to buy a reserve-spending line;
     * a pointer to a slug the on-disk index already links is a second line to a linked topic
       spending reserve room to duplicate a link, #2613/#2649's shape;
+    * a pointer to a slug an EARLIER ADDED LINE OF THIS SAME WRITE already hooks — #2613's
+      duplicate link, caught inside one write rather than across two. The line-diff is a
+      multiset, so a second bullet for a slug the write already hooks leaves no residue, and
+      the per-line tests below see one legal hook line at a time: the exemption would pay for
+      one link out of the reserve twice and leave two bullets on the same topic in every
+      loaded prompt. Byte-identical lines or two lengths is beside the point, so the arm is
+      the slug, not the text;
     * an INDENTED bullet: `linked_topic_files` reads top-level lines only, so an indented
       pointer links nothing and the validator would still report the file unlinked — the
       exemption would have spent the room and fixed nothing;
@@ -1038,6 +1045,15 @@ def index_repair_hook_slugs(path: str | os.PathLike[str],
         slugs = {topic_slug(m.group(0)) for m in TOPIC_LINK_RE.finditer(line)}
         slugs.discard(None)
         if not slugs or not slugs <= unlinked:
+            return frozenset()
+        if not (slugs - hooked):
+            # Every pointer on this line names a slug an earlier added line of the SAME write
+            # has already hooked, so it repairs nothing the write has not already repaired and
+            # may not spend the reserve on it. `unlinked` comes from
+            # `unlinked_topic_slugs(current)` — the index ON DISK, computed once before this
+            # loop — so it never learns what this write hooked, and without this test both
+            # lines of `disk + hook + hook` pass. Measured by the SM_20261101_091244 review
+            # rung, and re-measured on #3787 for identical and non-identical pairs alike.
             return frozenset()
         hooked |= slugs
     return frozenset(hooked)

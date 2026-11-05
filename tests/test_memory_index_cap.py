@@ -2201,10 +2201,16 @@ def test_the_repair_exemption_shelters_no_other_write(memories_root):
     """Clause 3: every shape that is not exactly "adds only hook lines" keeps the refusal.
 
     Each case is a write whose prospective text sits inside the tight limit and inside the
-    reserve band, so the reserve is the arm being asked — and each adds something a hook line
-    is not. The list is the leak list from `index_repair_hook_slugs`'s docstring, and an
-    exemption that lets any of them through stops being a repair route and becomes a way to
-    buy a reserve-spending line.
+    reserve band, so the reserve is the arm being asked — and each adds something a single
+    hook line over an unhooked slug is not. The list is the leak list from
+    `index_repair_hook_slugs`'s docstring (and
+    `test_the_leak_list_names_both_duplicate_link_shapes` is the node that reads that list, so
+    the two cannot drift apart silently), and an exemption that lets any of them through stops
+    being a repair route and becomes a way to buy a reserve-spending line.
+
+    The disk fixture has 450 B of room and one hook line costs 184 B, so the two #3787 cases
+    land at 82 B and 16 B respectively — both inside the 602 B band, which is what makes the
+    refusal below the reserve's answer rather than another arm's.
     """
     session, root = memories_root
     limit = ceiling.tight_limit("MEMORY.md")
@@ -2235,6 +2241,17 @@ def test_the_repair_exemption_shelters_no_other_write(memories_root):
         "a hook line paid for by REMOVING another line": disk.replace(filler, "", 1) + hook,
         "a hook line plus a bumped front-matter stamp": disk.replace(
             "---\ntype: note\n---", "---\ntype: note\ntimestamp: '2026-11-01'\n---") + hook,
+        # ── the two shapes #3787 is about: one write, two bullets, ONE newly hooked slug.
+        # The line-diff is a multiset, so a second bullet for a slug the write already hooks
+        # has no residue, and `unlinked` is the ON-DISK index's gap — it never learns what this
+        # write hooked — so each line clears the per-line test alone and the reserve pays for
+        # one link twice. The SM_20261101_091244 review rung measured the identical pair;
+        # #3787's triage measured the pair whose lines differ in length, which is why both are
+        # here: the arm is the slug, so a case pinned only on byte-equal lines would leave the
+        # second shape unpinned and re-openable by padding a bullet.
+        "two identical hook lines for the same slug": disk + hook + hook,
+        "two hook lines of different lengths naming the same slug": disk + hook + _hook_line(
+            "orphan-rule", 250),
     }
     for label, prospective in cases.items():
         room = limit - len(prospective.encode())
@@ -2247,6 +2264,72 @@ def test_the_repair_exemption_shelters_no_other_write(memories_root):
         assert msg is not None, f"{label}: admitted, so the exemption leaks"
         assert "leaving only" in msg and f"{reserve:,}" in msg, (
             f"{label}: refused by the wrong arm, not the reserve: {msg}")
+
+
+def test_a_two_slug_repair_write_is_still_exempt_though_a_second_line_for_one_slug_is_not(
+        memories_root):
+    """Clause 4 (and the guard's other edge): the arm is the SLUG, not the line count.
+
+    Two writes over one fixture, the same byte length, differing only in which slug the second
+    bullet names. The two-SLUG pair is the shape that has worked since 2026-11-03 — two orphan
+    files written, both needing a hook line, one commit — and it must stay exempt even though
+    the room left (266 B) is inside the 602 B reserve, which is the reserve's own refusal
+    waiting for any write the arm does not shelter. The same-slug pair at the identical size is
+    #3787: refused.
+
+    Both halves are in one node because that is the only way to make the difference between
+    them the thing under test: an over-tight guard that refuses any second added line reddens
+    the first assertion, and the guard #3787 asked for reddens the second. A node per half
+    would let each pass while the other arm was dead.
+    """
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    reserve = ceiling.INDEX_ROOM_RESERVE_BYTES
+    disk = _repair_root(root, on_disk_room=634, orphans=("orphan-rule", "orphan-two"))
+    two_slugs = disk + _hook_line("orphan-rule", 184) + _hook_line("orphan-two", 184)
+    room = limit - len(two_slugs.encode())
+    assert room == 266, f"the write leaves {room} B, not the 266 B the fixture sizes for"
+    assert 0 <= room < reserve, (
+        f"{room} B is outside the band the reserve answers in, so the admission below would be "
+        "some other arm's None and grade nothing")
+
+    assert ceiling.index_repair_hook_slugs(root / "MEMORY.md", two_slugs) == frozenset(
+        {"orphan-rule", "orphan-two"}), (
+        "a repair write that hooks two DIFFERENT unhooked slugs lost its exemption: that is the "
+        "11-03 pattern, and refusing it re-freezes the nightly the exemption exists to unstick")
+    assert ceiling.memory_write_error(root / "MEMORY.md", two_slugs) is None, (
+        "the two-slug repair was refused by an arm other than the exemption")
+
+    one_slug = disk + _hook_line("orphan-rule", 184) + _hook_line("orphan-rule", 184)
+    assert len(one_slug.encode()) == len(two_slugs.encode()), (
+        "the two fixtures must differ only in the slug the second line names, or this node is "
+        "comparing a shape against a size rather than the guard against the guard")
+    assert ceiling.index_repair_hook_slugs(root / "MEMORY.md", one_slug) == frozenset(), (
+        f"the second line for an already-hooked slug was exempted, slugs "
+        f"{ceiling.index_repair_hook_slugs(root / 'MEMORY.md', one_slug)}: the reserve paid for "
+        "one link twice")
+    msg = ceiling.memory_write_error(root / "MEMORY.md", one_slug)
+    assert msg is not None and "leaving only" in msg and f"{reserve:,}" in msg, (
+        f"the same-slug pair was not refused by the reserve arm: {msg!r}")
+
+
+def test_the_leak_list_names_both_duplicate_link_shapes():
+    """Clause 1's second half: the docstring's leak list still lists what the guard enforces.
+
+    `test_the_repair_exemption_shelters_no_other_write` opens by saying its cases ARE that
+    leak list, which is a claim about prose in another file. Nothing read it, so a shortening
+    pass over the docstring could drop a bullet and leave the two agreeing only in the
+    generator's memory — the failure shape this repo keeps recording as an instrument and a
+    guard disagreeing about a list. Whitespace is normalised so the pin is on the phrase, not
+    on where the source happens to wrap.
+    """
+    doc = " ".join((ceiling.index_repair_hook_slugs.__doc__ or "").split())
+    assert "EARLIER ADDED LINE OF THIS SAME WRITE" in doc, (
+        "the leak list lost the bullet for a second added line to a slug the same write "
+        "already hooks, which is the shape this function's `slugs - hooked` test enforces")
+    assert "#2613/#2649's shape" in doc, (
+        "the bullet the new one sits beside — a pointer to a slug the ON-DISK index already "
+        "links — is gone, so the list no longer names the duplicate it was written for")
 
 
 def test_a_repair_write_is_still_refused_by_every_other_arm_with_that_arm_s_own_text(
