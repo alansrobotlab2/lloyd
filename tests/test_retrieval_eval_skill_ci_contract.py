@@ -311,3 +311,69 @@ def test_the_skill_reports_the_finding_without_touching_the_gold_set():
     # Both of the two moves that legitimately end the finding are named, so a reader
     # is told what is being waited on rather than that something is broken.
     assert "register" in low and "re-point" in low, body[:500]
+
+
+# ── #3800: a figure quoted without its window is a claim about the corpus ─────
+
+def test_step_four_windows_the_figures_that_retired_the_delta_rule():
+    """#3800: the bullet that retired `|Δ| > 0.05` carried its two figures as a
+    property of "the shipped baselines", but both were measured over ONE bounded
+    series — the 2026-09-04 .. 2026-09-17 window of 12 transitions at n=20 that
+    `scripts/eval_trend_stats.py` names in its own module docstring and backlog
+    #608 audited: there the largest discordance on any binary leg is two queries
+    (`doc_hit` 09-08 -> 09-09, `b=2 c=0`, exact McNemar p = 0.500) and the power to
+    detect a 0.10 paired change is 0.011.
+
+    The skill's copy is the only place the window was dropped, and dropping it
+    silently turned a bounded measurement into a claim about a corpus that keeps
+    growing. Nine more weeks of baselines arrived underneath the sentence, and
+    `scripts/eval_trend_stats.py --days 10` re-run on 2026-11-05 prints a largest
+    single-leg discordance above two queries and a power figure far above 0.011,
+    because its `n` is the joined paired-query count of whatever window it was
+    pointed at. The retirement is not in question — the leg carrying that larger
+    discordance still does not reject H0, which is the bullet's own conclusion with
+    more data behind it — so what is fixed here is the window, not the rule.
+
+    Hence the second half of this node: no rolling-window constant may take the
+    number's place either. A maximum-discordance figure over a rolling window moves
+    every night, so Step 4 may carry either a figure whose series is named or a
+    pointer to the line the audit printed with the date it was run — the rule the
+    bullet two above this one already states ("Quote it with the date it was run;
+    the corpus is live and the number moves"). The node exists because that rule
+    was violated two bullets below where it was written.
+    """
+    body = section("Step 4")
+    # Whitespace-normalised: the offending phrase was wrapped across two lines, so
+    # a literal grep for it returns nothing and reads as a passing check.
+    flat = " ".join(body.split())
+    assert "across the shipped baselines" not in flat, (
+        "the unwindowed claim is back: these figures are a property of one bounded "
+        "series, not of a corpus that keeps growing"
+    )
+
+    bullet_m = re.search(r"^- \*\*At n=20.*?(?=\n- |\n\n|\Z)", body,
+                         re.MULTILINE | re.DOTALL)
+    assert bullet_m, "Step 4 no longer carries the bullet that retires the 0.05 rule"
+    bullet = bullet_m.group(0)
+    stated = " ".join(bullet.split())
+
+    # The window, named in the same sentence as the figures it bounds.
+    for marker in ("2026-09-04", "2026-09-17", "12 transitions"):
+        assert marker in stated, f"the retirement bullet lost its measured series: {marker!r}"
+    window_at = stated.index("2026-09-04")
+    # Both stale figures are governed by it: each is stated AFTER the window is
+    # named, inside the same bullet, so neither reads as a property of the corpus.
+    for figure in ("largest discordance", "power to detect a 0.10"):
+        at = stated.find(figure)
+        assert at > window_at, f"{figure!r} is stated ahead of (or absent from) its window"
+    for figure in ("two queries", "0.500", "0.011"):
+        assert figure in stated, f"the figure {figure!r} no longer sits inside the window"
+
+    # No rolling-window constant in the figures' place. `16` covers the clause's
+    # `up to 16`; both name one night's --days reading and move nightly.
+    for banned in ("16", "35/"):
+        assert banned not in body, f"{banned!r} is a rolling-window constant inside Step 4"
+
+    # The retirement conclusion survived the re-wording, word for word.
+    for kept in ("resolution limit", "not a threshold", "pre-#608", "Do not reintroduce it"):
+        assert kept in bullet, f"the retirement conclusion lost {kept!r}"
