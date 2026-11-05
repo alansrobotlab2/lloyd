@@ -455,3 +455,10 @@ if IS_WORKTREE:
         " this prints: app.paths.describe_tree().",
         LLOYD_HOME, SESSIONS_DIR, VAULT_DERIVED_ROOT, AUTONOMY_RUNS_DIR,
     )
+
+
+# The Memory page's settled 3D layout, `{entity: [x, y, z]}`. Kept server-side so
+# every browser opens on a settled graph instead of re-running a ~7 s force layout
+# whenever its own copy no longer matches the node set. A cache: losing it costs
+# one re-layout, never data.
+ENTITY_GRAPH_LAYOUT_PATH = DATA_ROOT / "mc-entity-graph-layout.json"

@@ -4,6 +4,7 @@ import ChatPanel from './ChatPanel'
 import SessionsPanel from './SessionsPanel'
 import BacklogPage from './pages/BacklogPage'
 import MemoryPage from './pages/MemoryPage'
+import { preloadEntityGraphChunk, preloadMemoryGraph } from '../lib/entityGraphData'
 import ServicesPage from './pages/ServicesPage'
 import SkillsPage from './pages/SkillsPage'
 import ToolsPage from './pages/ToolsPage'
@@ -37,6 +38,9 @@ function preloadIdeChunk() {
   _ideChunkPreloaded = true
   void importIdePage().catch(() => { _ideChunkPreloaded = false })
 }
+// Hovering a nav item starts what its tab needs. Memory's includes the graph
+// data and stored layout, not just the chunk.
+const HOVER_PRELOAD = { ide: preloadIdeChunk, memory: preloadMemoryGraph }
 import RightChatSidebar from './RightChatSidebar'
 import { MessageCircle, PanelLeft, PanelLeftClose, Plus, ChevronDown, Bot, Menu } from 'lucide-react'
 import { MessageProvider } from '../contexts/MessageContext'
@@ -189,14 +193,21 @@ export default function Layout() {
     if (page === 'memory') setMemoryEverActive(true)
   }, [page])
 
-  // Preload the IDE chunk in the background once the rest of MC has had
-  // a chance to render. requestIdleCallback gives it the lowest priority
-  // — the user's first paint isn't blocked. This way, by the time they
-  // click the IDE tab the bundle is usually already cached.
+  // Preload the heavy tab chunks in the background once the rest of MC has
+  // had a chance to render. requestIdleCallback gives them the lowest
+  // priority — the user's first paint isn't blocked. This way, by the time
+  // they click the tab the bundle is usually already cached.
+  //
+  // The Memory graph's chunk goes first and the IDE's only after it lands.
+  // Under Vite dev the IDE preload is ~2,000 separate Monaco module requests
+  // taking several seconds, and a Memory click during that window waited
+  // ~5 s for its own chunk queued behind them (measured 2026-11-05).
   useEffect(() => {
     const w = window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }
     const ric = w.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500))
-    const handle = ric(() => preloadIdeChunk(), { timeout: 4000 })
+    const handle = ric(() => {
+      void preloadEntityGraphChunk().finally(() => preloadIdeChunk())
+    }, { timeout: 4000 })
     return () => {
       const w2 = window as unknown as { cancelIdleCallback?: (h: number) => void }
       if (w2.cancelIdleCallback) w2.cancelIdleCallback(handle as number)
@@ -335,7 +346,7 @@ export default function Layout() {
             onNavigate={setPage}
             collapsed={collapsed}
             onToggleCollapse={() => setCollapsed(c => !c)}
-            onHoverPreload={{ ide: preloadIdeChunk }}
+            onHoverPreload={HOVER_PRELOAD}
           />
         )}
 
@@ -382,7 +393,7 @@ export default function Layout() {
                 collapsed={false}
                 onToggleCollapse={() => {}}
                 isMobile
-                onHoverPreload={{ ide: preloadIdeChunk }}
+                onHoverPreload={HOVER_PRELOAD}
               />
             </SheetContent>
           </Sheet>

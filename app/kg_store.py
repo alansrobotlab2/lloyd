@@ -615,6 +615,28 @@ class _Edges:
     def all(self, include_expired: bool = True) -> list[dict]:
         return [self._row_to_dict(r) for r in self.all_rows(include_expired)]
 
+    def active_endpoints(self, exclude_types: Iterable[str] = (),
+                         min_confidence: float = 0.0) -> list[tuple]:
+        """`(source, target, type, confidence, provenance, created_at)` for
+        every active edge, as bare tuples.
+
+        For whole-graph views that need no more than that. `active()` shapes
+        every row into a dict and parses `classifier_meta` and `extra`; over
+        the 58k active edges that was ~1.3 s of the Memory graph's 1.5 s cold
+        build, for columns the graph never read.
+        """
+        where = ["expired_at IS NULL"]
+        params: list[Any] = []
+        ex = list(exclude_types)
+        if ex:
+            where.append("type NOT IN (%s)" % ",".join("?" * len(ex))); params.extend(ex)
+        if min_confidence > 0:
+            where.append("confidence >= ?"); params.append(float(min_confidence))
+        rows = self._s._query(
+            "SELECT source, target, type, confidence, provenance, created_at FROM edges "
+            "WHERE " + " AND ".join(where) + " ORDER BY id", tuple(params))
+        return [tuple(r) for r in rows]
+
     def active(self, source: Optional[str] = None, target: Optional[str] = None,
                types: Optional[Iterable[str]] = None, *, either: Optional[str] = None,
                min_confidence: float = 0.0) -> list[dict]:

@@ -25,6 +25,7 @@ import {
   type EntityGraphNode,
   type EntityGraphData,
 } from "../../api";
+import { importEntityGraph } from "../../lib/entityGraphData";
 import { Streamdown } from "streamdown";
 import { categoryOf, CATEGORY_CHIP_CLASS } from "../../lib/edgeCategories";
 import { KIND_COLOR } from "../../lib/entityKinds";
@@ -34,7 +35,7 @@ import { scheduleStatsRefetch } from "./memoryStatsRefresh";
 // out so it loads alongside the page instead of inside the app's entry bundle
 // — the palette it used to export now lives in lib/entityKinds, so importing
 // it here no longer drags the whole renderer in.
-const EntityGraph = lazy(() => import("../EntityGraph"));
+const EntityGraph = lazy(importEntityGraph);
 
 // Stands in for the graph while its chunk loads and before it is mounted.
 // Mirrors EntityGraph's own container so nothing shifts when it swaps in.

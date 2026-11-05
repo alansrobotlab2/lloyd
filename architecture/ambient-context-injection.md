@@ -73,7 +73,7 @@ meant to receive it (#2598).
 
 The cheap tier is still sold as costing nothing, but the exact phrase "zero SDK
 cost" is not in `agent_mcp/ambient.py` — it is the first line of the
-`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1366`).
+`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1383`).
 The tool description a producer actually reads says the signal is queued "at no
 cost" (`agent_mcp/ambient.py:65`) and the module docstring says "cheap prefetch
 drain (no SDK turn)" (`:11`); this page attributed the wording to the wrong file
@@ -282,7 +282,7 @@ User turns always win, and `/cancel` never drops one: `drain_pending`'s
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
-(`app/routers/sessions.py:1141`). That route wipes the session outright, so a
+(`app/routers/sessions.py:1158`). That route wipes the session outright, so a
 queued **user** turn it left behind would still run and still write nothing:
 `_append_messages` goes through `mutate_session`, which no-ops once the session
 JSON is gone — a full model turn spent on a transcript nobody will read again.

@@ -54,6 +54,7 @@ had in the tree, so a path `~/lloyd/X` became `~/lloyd-data/X`:
 ├── data/tool_overrides.yaml
 ├── usage.db  workers.db  research.db  failure-ledger.db
 ├── mc-state.json             # Mission Control's UI mirror — "mc" is not memory capture
+├── mc-entity-graph-layout.json # the Memory graph's settled layout; a cache
 └── memory-capture-state.json # the transcript watermark, off the tree since #2294
 ```
 

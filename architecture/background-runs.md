@@ -401,10 +401,10 @@ deletes, nothing rewrites the `platform` of an *existing* session
 (`_save_session_meta` stamps it only in its create branch,
 `app/sessions_io.py:1330`). Two in-tree routes remove a transcript, and
 what separates them is everything around the unlink: `DELETE
-/api/sessions/{session_id}` (`app/routers/sessions.py:1141`) cancels the current
+/api/sessions/{session_id}` (`app/routers/sessions.py:1158`) cancels the current
 turn, drains the queued turns in **both** tiers, discards the session's ambient
 prefetch and `rmtree`s the `<id>.tool-results` spill dir beside the transcript,
-while `POST /api/sessions/clear` (`app/routers/sessions.py:1669`) is a
+while `POST /api/sessions/clear` (`app/routers/sessions.py:1686`) is a
 bare `meta_path.unlink()` of the one id its body names — no cancel, no drain, no
 spill dir, no `logger` call at all. Neither leaves a per-session record a later
 reader could find, so this page records the emptiness and the missing witness and

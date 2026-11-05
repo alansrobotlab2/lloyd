@@ -803,10 +803,12 @@ def entity_world(tmp_path, monkeypatch):
                   "confidence": 0.8}, origin="test")
     entities_router._ENTITIES_CACHE.clear()
     entities_router._GRAPH_CACHE.clear()
+    entities_router._GRAPH_LAST.clear()
     yield st
     kg_store.reset()
     entities_router._ENTITIES_CACHE.clear()
     entities_router._GRAPH_CACHE.clear()
+    entities_router._GRAPH_LAST.clear()
 
 
 async def test_entities_list_shape_and_limit(client, entity_world):
@@ -884,6 +886,7 @@ async def test_entity_detail_serves_a_whole_family_under_its_canonical_name(
     st.facts_idx.reindex(root=tmp_path / "facts")
     entities_router._ENTITIES_CACHE.clear()
     entities_router._GRAPH_CACHE.clear()
+    entities_router._GRAPH_LAST.clear()
     whole = ["arch-001", "arch-002", "state-001"]
     try:
         body = (await client.get("/api/entity?name=TencentDB%20Agent%20Memory")).json()
@@ -901,6 +904,7 @@ async def test_entity_detail_serves_a_whole_family_under_its_canonical_name(
         kg_store.reset()
         entities_router._ENTITIES_CACHE.clear()
         entities_router._GRAPH_CACHE.clear()
+        entities_router._GRAPH_LAST.clear()
 
 
 async def test_entity_detail_splits_direction_and_names_the_other_end(client, entity_world):
@@ -955,6 +959,76 @@ async def test_entity_graph_include_isolated_and_min_confidence(client, entity_w
     assert "Orphan Concept" in {n["id"] for n in body["nodes"]}
     strict = (await client.get("/api/entity-graph?min_confidence=0.99")).json()
     assert strict["edgeCount"] == 0 and strict["nodeCount"] == 0
+
+
+async def test_entity_graph_after_a_write_answers_stale_then_fresh(client, entity_world):
+    """A store write must not make the next visit wait for a rebuild: the last
+    payload is answered at once, marked stale, and the rebuild it started is
+    what the following request gets."""
+    import asyncio
+    from app.routers import entities as entities_router
+
+    first = (await client.get("/api/entity-graph")).json()
+    assert first["stale"] is False and first["edgeCount"] == 1
+
+    entity_world.edges.add({"source": "vLLM", "target": "CUDA", "type": "depends_on",
+                            "confidence": 0.9, "provenance": "STATED"}, origin="test")
+    stale = (await client.get("/api/entity-graph")).json()
+    assert stale["stale"] is True
+    assert stale["edgeCount"] == 1, "the previous payload, not a half-built one"
+
+    for _ in range(100):                      # let the background rebuild finish
+        if not entities_router._GRAPH_BUILDS:
+            break
+        await asyncio.sleep(0.02)
+    fresh = (await client.get("/api/entity-graph")).json()
+    assert fresh["stale"] is False and fresh["edgeCount"] == 2
+    assert "CUDA" in {n["id"] for n in fresh["nodes"]}
+
+
+async def test_entity_graph_concurrent_cold_requests_share_one_build(
+        client, entity_world, monkeypatch):
+    import asyncio
+    from app.routers import entities as entities_router
+
+    calls = []
+    real = entities_router._build_entity_graph
+
+    def counting(*args):
+        calls.append(args)
+        return real(*args)
+
+    monkeypatch.setattr(entities_router, "_build_entity_graph", counting)
+    a, b = await asyncio.gather(client.get("/api/entity-graph"),
+                                client.get("/api/entity-graph"))
+    assert a.json() == b.json()
+    assert len(calls) == 1
+
+
+async def test_entity_graph_layout_round_trips_and_refuses_junk(client, tmp_path, monkeypatch):
+    from app.routers import entities as entities_router
+
+    monkeypatch.setattr(entities_router, "ENTITY_GRAPH_LAYOUT_PATH", tmp_path / "layout.json")
+    assert (await client.get("/api/entity-graph/layout")).json() == {"positions": {}}
+
+    r = await client.put("/api/entity-graph/layout",
+                         json={"positions": {"Lloyd": [1.234, -2, 3], "vLLM": [0, 0, 0]}})
+    assert r.status_code == 200 and r.json()["count"] == 2
+    got = (await client.get("/api/entity-graph/layout")).json()["positions"]
+    assert got == {"Lloyd": [1.2, -2.0, 3.0], "vLLM": [0.0, 0.0, 0.0]}
+
+    for bad in ({"positions": {"Lloyd": [1, 2]}},
+                {"positions": {"Lloyd": [1, 2, "x"]}},
+                {"positions": {"Lloyd": [1, 2, True]}},
+                {"positions": []},
+                {"nope": 1}):
+        assert (await client.put("/api/entity-graph/layout", json=bad)).status_code == 400
+    # A refused write leaves the stored layout alone.
+    assert (await client.get("/api/entity-graph/layout")).json()["positions"] == got
+
+    # An unreadable file reads as no layout, never a 500.
+    (tmp_path / "layout.json").write_text("{not json")
+    assert (await client.get("/api/entity-graph/layout")).json() == {"positions": {}}
 
 
 @pytest.mark.asyncio
@@ -1506,3 +1580,20 @@ async def test_the_health_row_publishes_a_held_backlog_without_calling_it_starva
         "the age key spans BOTH pairs on purpose, so no held lane can render as a "
         "source with nothing waiting")
     assert held["pending_wait_bound_seconds"] == 3600
+
+
+async def test_active_procs_skips_the_session_scan_without_a_claude_child(client, monkeypatch):
+    """The scan of every session file only matters for a `claude` subprocess,
+    which the in-process harness never spawns; MC polls this every 3 s."""
+    from app.routers import sessions as sessions_router
+
+    class _NoGlob:
+        def glob(self, *_a, **_k):
+            raise AssertionError("scanned the sessions dir with no claude child")
+
+        def __truediv__(self, _other):
+            raise AssertionError("read a session file with no claude child")
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", _NoGlob())
+    r = await client.get("/api/sessions/active-procs")
+    assert r.status_code == 200 and r.json() == {"procs": []}

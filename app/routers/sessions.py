@@ -1016,6 +1016,20 @@ def _find_active_claude_procs() -> list[dict]:
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return results
 
+    # The in-process harness spawns no `claude` subprocess, so on this tree
+    # there is normally none. Look for one before paying for the session map
+    # below: it stats every `*.json` in the sessions dir (12,004 on
+    # 2026-11-05) and parses 200 of them, and Mission Control polls this
+    # route every 3 s from every open tab.
+    def _is_claude(p) -> bool:
+        try:
+            return "claude" in p.name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+    children = [c for c in children if _is_claude(c)]
+    if not children:
+        return results
+
     sdk_to_session: dict[str, str] = {}
     for sf in sorted(SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:200]:
         try:
@@ -1070,8 +1084,11 @@ def _find_active_claude_procs() -> list[dict]:
 
 @router.get("/api/sessions/active-procs")
 async def get_active_procs():
-    """List active SDK subprocess sessions — includes ones whose SSE connection has dropped."""
-    return JSONResponse({"procs": _find_active_claude_procs()})
+    """List active SDK subprocess sessions — includes ones whose SSE connection has dropped.
+
+    Off the event loop: this ran the scan inline in an `async def`, and the
+    py-spy samples of a backend at 100% CPU on 2026-11-05 were all here."""
+    return JSONResponse({"procs": await asyncio.to_thread(_find_active_claude_procs)})
 
 
 @router.post("/api/sessions/{session_id}/kill-proc")

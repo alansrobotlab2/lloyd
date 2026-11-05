@@ -47,9 +47,9 @@ tab absent from the summarizer registry is not an error either:
 sent the user, which is why `architecture`, `settings` and `graph` register an
 explicit `lambda: {}` rather than being left out.
 The sixth list is the one that decides whether the tab draws anything:
-`const PAGES` in `web/src/components/Layout.tsx:80`, the map
-`PageComponent = PAGES[page]` (`:317`) looks up and the `{PageComponent && …}`
-guard (`:559`) renders. Its failure is the loudest-looking and the most
+`const PAGES` in `web/src/components/Layout.tsx:84`, the map
+`PageComponent = PAGES[page]` (`:328`) looks up and the `{PageComponent && …}`
+guard (`:570`) renders. Its failure is the loudest-looking and the most
 silent-actual: `mc_navigate` returns 200, the brief comes back, the frontend
 switches `page`, and the pane stays empty — the same "nothing moves" symptom as
 the hook list, one level deeper, and until #1274 `tests/test_mc_tab_parity.py`
@@ -58,7 +58,7 @@ parsed none of it. It parses the map now: the keys must satisfy
 constant — `STICKY_PAGES = {chat, ide, memory}` in the test file itself, not in
 `Layout.tsx` — because those three tabs are
 absent from the map on purpose: they are mounted elsewhere in `Layout.tsx` and
-deliberately kept mounted there (`:393`, `:530`, `:551`) so Monaco, the LiveKit
+deliberately kept mounted there (`:404`, `:541`, `:562`) so Monaco, the LiveKit
 room and the memory graph survive a tab switch. A fourth sticky tab has to be
 declared in that constant *and* really mounted — the same test refuses a
 declaration with no `page === '<name>'` guard behind it. Folding the three
@@ -513,6 +513,45 @@ browser still cannot arm a drain. Binding the backend to `127.0.0.1` as well
 too: `@router.websocket("/api/lsp/{language}")` is an `/api/*` path an
 HTTP-scope decorator cannot see at all, and a refused upgrade is closed before
 it is accepted. See [[infrastructure]].
+
+## The Memory graph
+
+The Memory tab's 3D graph (`web/src/components/EntityGraph.tsx`, data from
+`/api/entity-graph`) took 3–9 s to its first frame and then ~7 s of visible
+settling at ~22 fps (measured 2026-11-05, headless Chromium on the 3090). Five
+causes, each with its fix:
+
+- **Its chunk queued behind the IDE preload.** Under Vite dev the idle IDE
+  preload is ~2,000 separate Monaco module requests; a Memory click in that
+  window waited ~5 s for `EntityGraph.tsx`. The idle preload now loads the
+  graph chunk first and the IDE's only after it, and hovering the Memory nav
+  item starts the chunk, the graph and its layout
+  (`web/src/lib/entityGraphData.ts`, `preloadMemoryGraph`).
+- **The cold build was 1.5 s and every store write made one.** The cache keys
+  on the store version, and the KG takes ~1,100 edges a day. The build reads
+  six columns through `edges.active_endpoints()` instead of shaping all 58k
+  active edges into dicts (~300 ms), one build runs per parameter set at a
+  time, and after a write the last payload is answered at once with
+  `stale: true` while the rebuild runs; the page refetches it in the
+  background.
+- **The layout was thrown away whenever the node set changed.** It lived in
+  localStorage keyed on an exact node-set digest. It is now stored per entity
+  on the server (`ENTITY_GRAPH_LAYOUT_PATH`, `GET`/`PUT
+  /api/entity-graph/layout`): a load pins every node with a stored position
+  and seeds newcomers beside their neighbours (`placeNodes`), so a changed
+  graph settles only its newcomers and an unchanged one does not simulate.
+  Below half the nodes known, nothing is pinned and the whole graph settles.
+- **Every node was a transparent material of its own**, depth-sorted every
+  frame. Nodes share an opaque and a dimmed material per colour; links are
+  straight (a curved one rebuilt a 30-point bezier per link per tick); the
+  label pass runs only when the camera, the highlight or the layout moves.
+- **The backend's event loop was blocked by `/api/sessions/active-procs`**,
+  which MC polls every 3 s: it stat'ed all 12k session files and parsed 200 on
+  the loop, and every py-spy sample of a backend at 100% CPU was there. It now
+  looks for the (legacy, normally absent) `claude` child first, off the loop.
+
+With a stored layout the sandbox measured 715 ms from click to canvas at a
+steady 60 fps.
 
 ## Related
 

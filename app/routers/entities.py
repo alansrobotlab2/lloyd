@@ -7,19 +7,25 @@ re-parsed 60,622 markdown files per cold request, and it read the whole
 relationship JSON per call to answer "which edges touch this entity".
 """
 
+import asyncio
 import datetime as _dt
+import json
+import logging
+import math
 import re
+import threading
 import time
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app.entity_naming import normalize as _normalize_entity
 from app.kg_store import StoreUnavailable, store as _store
-from app.paths import VAULT_FACTS_ROOT
+from app.atomic_io import atomic_write_text
+from app.paths import ENTITY_GRAPH_LAYOUT_PATH, VAULT_FACTS_ROOT
 
 # Prefer the C-based YAML loader when available (~10x faster than safe_load).
 # All frontmatter we parse here is trusted vault content, so SafeLoader-level
@@ -42,6 +48,7 @@ def _jsonable(v):
 
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 _FACTS_ROOT = VAULT_FACTS_ROOT
 
@@ -287,22 +294,18 @@ def _build_entity_graph(include_isolated: bool, limit: int, min_confidence: floa
     # the same way round.
     pair_edges: dict[tuple[str, str], dict] = {}
     seen_directions: dict[tuple[str, str], set] = {}
-    for edge in st.edges.active():
-        src, tgt = edge["source"], edge["target"]
+    for src, tgt, etype, conf, provenance, created_at in st.edges.active_endpoints(
+            exclude_types=_STRUCTURAL_EDGE_TYPES, min_confidence=min_confidence):
         if not src or not tgt or src == tgt:
             continue
-        if edge["type"] in _STRUCTURAL_EDGE_TYPES:
-            continue
-        conf = float(edge["confidence"] or 0.0)
-        if conf < min_confidence:
-            continue
+        conf = float(conf or 0.0)
         key = (min(src, tgt), max(src, tgt))
         seen_directions.setdefault(key, set()).add((src, tgt))
         existing = pair_edges.get(key)
         if existing is None or conf > existing["weight"]:
             pair_edges[key] = {
-                "source": src, "target": tgt, "type": edge["type"], "weight": conf,
-                "provenance": edge["provenance"], "created_at": edge["created_at"],
+                "source": src, "target": tgt, "type": etype, "weight": conf,
+                "provenance": provenance, "created_at": created_at,
                 "bidirectional": False,
             }
     for key, e in pair_edges.items():
@@ -334,6 +337,46 @@ def _build_entity_graph(include_isolated: bool, limit: int, min_confidence: floa
             "includeIsolated": include_isolated, "minConfidence": min_confidence}
 
 
+# The last payload built for each parameter set, whatever store version it was
+# built at: `(signature, payload)`. Every knowledge-graph write moves the
+# signature (~1,100 edges a day, in bursts), so without this the first visit
+# after any write paid the whole rebuild. It is served while a rebuild runs.
+_GRAPH_LAST: dict = {}
+# One build per parameter set at a time. Concurrent requests for the same
+# graph — React StrictMode's double effect in dev, two open tabs — share it.
+_GRAPH_BUILDS: dict = {}
+
+
+def _graph_build(params: tuple, sig) -> "asyncio.Future":
+    """The build of `params` at `sig`, started now unless one is running.
+
+    Registered before returning, so a second caller in the same tick sees it
+    rather than starting another. Callers await it through `asyncio.shield`:
+    a client that disconnects must not cancel a build others are waiting on.
+    """
+    pending = _GRAPH_BUILDS.get(params)
+    if pending is not None:
+        return pending
+
+    async def _run() -> dict:
+        try:
+            payload = await run_in_threadpool(_build_entity_graph, *params)
+            _cache_put(_GRAPH_CACHE, (sig, *params), payload)
+            _GRAPH_LAST[params] = (sig, payload)
+            return payload
+        finally:
+            _GRAPH_BUILDS.pop(params, None)
+
+    task = asyncio.ensure_future(_run())
+    _GRAPH_BUILDS[params] = task
+    return task
+
+
+def _graph_refresh_done(task: "asyncio.Future") -> None:
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("entity-graph background rebuild failed: %s", task.exception())
+
+
 @router.get("/api/entity-graph")
 async def entity_graph(
     include_isolated: bool = Query(False, description="Include entities with no edges"),
@@ -345,16 +388,89 @@ async def entity_graph(
     Nodes default to those with at least one edge. Including the 20,000
     isolated entities made a 5.7 MB payload the browser then laid out, and
     nothing could be seen in it.
+
+    After a store write, the previous payload is answered at once with
+    `stale: true` while the rebuild runs in the background; the page refetches
+    to pick the fresh one up. Only a process that has never built this graph
+    waits for a build.
     """
     try:
         _store()
     except StoreUnavailable:
         return JSONResponse({"nodes": [], "edges": [], "nodeCount": 0, "edgeCount": 0,
                              "includeIsolated": include_isolated,
-                             "minConfidence": min_confidence})
-    key = (_facts_signature(), include_isolated, limit, min_confidence)
-    cached = _cache_get(_GRAPH_CACHE, key)
+                             "minConfidence": min_confidence, "stale": False})
+    params = (include_isolated, limit, min_confidence)
+    sig = _facts_signature()
+    cached = _cache_get(_GRAPH_CACHE, (sig, *params))
     if cached is not None:
-        return JSONResponse(cached)
-    payload = await run_in_threadpool(_build_entity_graph, include_isolated, limit, min_confidence)
-    return JSONResponse(_cache_put(_GRAPH_CACHE, key, payload))
+        return JSONResponse({**cached, "stale": False})
+    last = _GRAPH_LAST.get(params)
+    if last is not None:
+        if params not in _GRAPH_BUILDS:
+            _graph_build(params, sig).add_done_callback(_graph_refresh_done)
+        return JSONResponse({**last[1], "stale": True})
+    payload = await asyncio.shield(_graph_build(params, sig))
+    return JSONResponse({**payload, "stale": False})
+
+
+# ── /api/entity-graph/layout ─────────────────────────────────────────────────
+#
+# The settled layout, so a browser starts from positions instead of a ~7 s force
+# simulation. Stored per entity, not per node set: after a store write the graph
+# keeps most of its nodes, and the page pins the ones it has positions for and
+# settles only the newcomers. The page PUTs it whenever a layout settles.
+
+_LAYOUT_MAX_NODES = 30000
+_LAYOUT_LOCK = threading.Lock()
+
+
+def _read_layout() -> dict:
+    try:
+        data = json.loads(ENTITY_GRAPH_LAYOUT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    pos = data.get("positions") if isinstance(data, dict) else None
+    return pos if isinstance(pos, dict) else {}
+
+
+def _valid_positions(raw) -> dict | None:
+    """`{id: [x, y, z]}` with finite numbers, or None if anything else."""
+    if not isinstance(raw, dict) or len(raw) > _LAYOUT_MAX_NODES:
+        return None
+    out = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k or len(k) > 512:
+            return None
+        if (not isinstance(v, list) or len(v) != 3
+                or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
+                           and math.isfinite(c) for c in v)):
+            return None
+        out[k] = [round(float(c), 1) for c in v]
+    return out
+
+
+def _write_layout(positions: dict) -> None:
+    with _LAYOUT_LOCK:
+        ENTITY_GRAPH_LAYOUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(ENTITY_GRAPH_LAYOUT_PATH, json.dumps(
+            {"updatedAt": time.time(), "positions": positions}, separators=(",", ":")))
+
+
+@router.get("/api/entity-graph/layout")
+async def entity_graph_layout():
+    return JSONResponse({"positions": await run_in_threadpool(_read_layout)})
+
+
+@router.put("/api/entity-graph/layout")
+async def put_entity_graph_layout(request: Request):
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="body must be JSON")
+    positions = _valid_positions(body.get("positions") if isinstance(body, dict) else None)
+    if positions is None:
+        raise HTTPException(status_code=400,
+                            detail=f"positions must map up to {_LAYOUT_MAX_NODES} ids to [x, y, z]")
+    await run_in_threadpool(_write_layout, positions)
+    return JSONResponse({"ok": True, "count": len(positions)})

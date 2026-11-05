@@ -789,7 +789,13 @@ export interface EntityGraphData {
   edgeCount: number;
   includeIsolated: boolean;
   minConfidence: number;
+  /** The previous build, answered while a rebuild runs after a store write.
+   *  Fetch again shortly to get the fresh one. */
+  stale?: boolean;
 }
+
+/** The Memory graph's settled layout, entity id → [x, y, z]. */
+export type EntityGraphPositions = Record<string, [number, number, number]>;
 
 // ── Autonomy types ──────────────────────────────────────────────────────
 
@@ -1565,6 +1571,14 @@ export const api = {
     const qs = p.toString();
     return fetch(`${API_BASE}/entity-graph${qs ? "?" + qs : ""}`).then(r => r.json());
   },
+  entityGraphLayout: (): Promise<{ positions: EntityGraphPositions }> =>
+    fetch(`${API_BASE}/entity-graph/layout`).then(r => r.json()),
+  saveEntityGraphLayout: (positions: EntityGraphPositions): Promise<{ ok: boolean; count: number }> =>
+    fetch(`${API_BASE}/entity-graph/layout`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ positions }),
+    }).then(r => r.json()),
 
   // Autonomy
   autonomyTasks: (): Promise<{ tasks: AutonomyTask[] }> =>
