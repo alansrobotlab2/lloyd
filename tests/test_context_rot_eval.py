@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -111,14 +112,46 @@ def test_the_question_is_last_and_the_nonce_is_first(hays):
 # ── grading ───────────────────────────────────────────────────────────
 
 
-def test_grading_counts_a_salt_as_wrong_and_a_hedge_as_not_a_hit():
+def test_grading_counts_a_salt_as_wrong_and_a_hedge_as_its_own_class():
+    """The 2026-09-24 grid's `distract4` misses were mostly this shape — both
+    ports named, budget spent explaining the conflict — and its recorded
+    follow-up is that a hedge has to be a class of its own rather than a miss.
+    `hedged` is that class: `accuracy` still refuses to call it a hit (#3801)."""
     n = E.make_needles(2, 50_000)
     old = n.old_port
     assert E.grade(f"PORT: {n.port}", n, "single")["accuracy"] == 1.0
     assert E.grade(f"PORT: {old}", n, "distract4")["verdicts"]["port"] == "wrong"
-    assert E.grade(f"PORT: {n.port} or {old}", n, "distract4")["accuracy"] == 0.0
+    hedge = E.grade(f"PORT: {n.port} or {old}", n, "distract4")
+    assert hedge["outcomes"]["port"] == "hedged"
+    assert hedge["outcomes"]["port"] != "wrong"
+    assert hedge["counts"] == {"correct": 0, "hedged": 1, "wrong": 0, "miss": 0}
+    assert hedge["accuracy"] == 0.0
+    assert hedge["verdicts"]["port"] == "undecided"   # the shipped codes still land
     g = E.grade(f"CODENAME: {n.codename}\nPORT: {old}\nWINDOW: {n.window}", n, "multi3")
     assert g["accuracy"] == pytest.approx(2 / 3)
+    assert g["outcomes"] == {"codename": "correct", "port": "wrong", "window": "correct"}
+
+
+def test_the_four_outcomes_stay_apart():
+    """`hedged` needs a second PLANTED value, not any second number: naming the
+    true port next to an unrelated digit is a decision, and a wrong pick is not a
+    hedge however politely it is phrased."""
+    n = E.needles_for(E.Cell("repo", 50_000, 1, 0.5, "distractK", 4))
+    assert E.grade(f"PORT: {n.port}", n, "distractK")["outcomes"]["port"] == "correct"
+    assert E.grade(f"PORT: {n.lookalikes[1]}", n, "distractK")["outcomes"]["port"] == "wrong"
+    assert E.grade("I cannot tell from the notes", n, "distractK")["outcomes"]["port"] == "miss"
+    assert E.grade(f"PORT: {n.port} (the window opens at 9999)",
+                   n, "distractK")["outcomes"]["port"] == "correct"
+    assert E.grade(f"PORT: {n.old_port} rather than {n.lookalikes[2]}",
+                   n, "distractK")["outcomes"]["port"] == "wrong"
+
+
+def test_a_hedge_needs_no_label_and_multi3_reports_every_fact():
+    n = E.make_needles(1, 50_000)
+    free = E.grade(f"the codename is {n.codename} and the port is {n.old_port} "
+                   f"or maybe {n.port}", n, "multi3")
+    assert free["outcomes"] == {"codename": "correct", "port": "hedged", "window": "miss"}
+    assert free["counts"]["hedged"] == 1 and free["accuracy"] == pytest.approx(1 / 3)
 
 
 # ── guards ────────────────────────────────────────────────────────────
@@ -408,3 +441,218 @@ def test_decide_rewrites_the_report_from_a_json(tmp_path):
     doc = json.loads(p.read_text())
     assert doc["decision"]["action"] == "keep"
     assert "Verdict: keep" in p.with_suffix(".md").read_text()
+
+
+# ── the k arms (#3801): look-alike count at fixed length ─────────────────────
+
+
+def _planted_ports(lines):
+    """The four-digit values a distractor family actually states."""
+    return [v for line in lines for v in re.findall(r"\b\d{4}\b", line)]
+
+
+def test_distractk_plants_exactly_k_lookalikes_at_the_distract4_offsets():
+    """Clause 2: k is a parameter, the family is the sibling-port family, and the
+    depths are the ones `distract4` already uses — so a k cell differs from a
+    shipped cell in the count of look-alikes and in nothing else."""
+    for k in E.K_VALUES:
+        cell = E.Cell("repo", 50_000, 1, 0.3, "distractK", k)
+        items = E.placements(cell, E.needles_for(cell))
+        dist = [p for p in items if p[1] == "distractor"]
+        assert len(dist) == k, k
+        assert sum(p[1] == "port" for p in items) == 1, k       # the needle is still one line
+        want = sorted(min(0.98, max(0.02, (0.3 + j * E.DISTRACTOR_STEP) % 1.0))
+                      for j in range(1, k + 1))
+        assert sorted(p[0] for p in dist) == pytest.approx(want), k
+    four = E.Cell("repo", 50_000, 1, 0.3, "distractK", 4)
+    got = sorted(round(p[0], 2) for p in E.placements(four, E.needles_for(four))
+                 if p[1] == "distractor")
+    shipped = sorted(round(p[0], 2) for p in E.placements(
+        E.Cell("repo", 50_000, 1, 0.3, "distract4"), E.make_needles(1, 50_000))
+        if p[1] == "distractor")
+    assert got == shipped == [0.1, 0.5, 0.7, 0.9]
+
+
+def test_every_lookalike_is_a_wrong_answer_and_none_of_them_is_the_answer():
+    """k = 32 means 32 planted values, and every one of them has to be graded as
+    wrong or a hedge: a cell that plants 32 look-alikes but still salt-lists 4 is
+    a cell where 28 of the interference sources are free."""
+    for k in E.K_VALUES:
+        n = E.needles_for(E.Cell("repo", 50_000, 1, 0.5, "distractK", k))
+        lines = E.distract_lines(n, k)
+        planted = _planted_ports(lines)
+        assert len(lines) == k and len(planted) == k, k
+        assert len(set(planted)) == k, k                        # no value twice
+        assert n.port not in planted, k
+        assert set(planted) <= set(n.wrong_ports()), k
+        # the salt set grew with k: naming any planted value grades `wrong`, so a
+        # cell with 32 look-alikes cannot have 28 of them graded as a free pass.
+        for v in planted:
+            assert E.grade(f"PORT: {v}", n, "distractK")["outcomes"]["port"] == "wrong", (k, v)
+        svcs = re.findall(r"the ([a-z-]+) relay", "\n".join(lines))
+        assert len(set(svcs)) == len(svcs), k                   # distinct relays
+        if k > 1:
+            assert E.GRADED_RELAY not in svcs[1:], k            # stale port stated once
+
+
+def test_a_family_that_reused_a_relay_name_would_cross_the_duplicate_threshold():
+    """Why the labels are drawn from 35 distinct names: the same relay with two
+    ports is 0.714 under the calibrated predicate — above 0.6, i.e. #2271's
+    near-duplicate class, which is not the stimulus this arm is about."""
+    thr = E.dup_detect().DUP_JACCARD_THRESHOLD
+    same = E.dup_detect().similarity("# ops note: the billing-east relay listens on port 7254.",
+                                     "# ops note: the billing-east relay listens on port 7245.")
+    assert same == pytest.approx(0.7143, abs=1e-3) and same >= thr
+    n = E.needles_for(E.Cell("repo", 50_000, 1, 0.5, "distractK", 32))
+    assert E.family_jaccard(E.distract_lines(n, 32)) == 0.0909
+
+
+def test_a_k_cell_records_its_worst_pair_and_the_cap_above_it():
+    """The risk this pins: at k = 16 or 32 the look-alike family could quietly
+    become a duplicate family. Each cell carries its own worst pair under
+    `dup_detect`'s predicate plus the cap, and the measured families stay far
+    under the threshold, so the cap guards rather than binds here."""
+    for length in E.K_LENGTHS:
+        for seed in E.SEEDS:
+            n = E.needles_for(E.Cell("repo", length, seed, 0.5, "distractK", 32))
+            for arm in E.K_ARMS:
+                worst = max(E.family_jaccard(E.arm_lines(n, arm, k)) for k in E.K_VALUES)
+                assert worst < E.dup_detect().DUP_JACCARD_THRESHOLD, (length, seed, arm)
+                assert E.cap_k(n, arm) == max(E.K_VALUES), (length, seed, arm)
+    n = E.needles_for(E.Cell("repo", 50_000, 1, 0.5, "distractK", 16))
+    got = E.cell_distractors(E.Cell("repo", 50_000, 1, 0.5, "distractK", 16), n)
+    assert got == {"arm": "distractK", "k": 16, "planted": 16,
+                   "max_pairwise_jaccard": 0.0909, "dup_threshold": 0.6,
+                   "over_threshold": False, "cap_k": 32}
+    assert E.cell_distractors(E.Cell("repo", 50_000, 1, 0.5, "distract4"), E.make_needles(1, 50_000)) == {}
+
+
+def test_dissimilark_is_a_different_kind_of_fact_carrying_no_answer_value():
+    """Clause 4: the control arm holds the count and the note form and changes
+    the KIND — a relay's on-call owner, a name — so no value it states can be the
+    accepted port or one of the planted wrong ones. Similarity and count are only
+    separable because of this arm."""
+    for k in E.K_VALUES:
+        n = E.needles_for(E.Cell("repo", 50_000, 1, 0.5, "dissimilarK", k))
+        lines = E.dissimilar_lines(n, k)
+        text = "\n".join(lines)
+        assert len(lines) == k, k
+        assert k == 0 or all("on-call owner is" in line for line in lines), k
+        assert n.port not in text, k
+        assert not any(w in text for w in n.wrong_ports()), k
+        assert not re.search(r"\b\d{4}\b", text), k   # no port-shaped token at all
+        cell = E.Cell("repo", 50_000, 1, 0.3, "dissimilarK", k)
+        dist = [p for p in E.placements(cell, n) if p[1] == "distractor"]
+        assert len(dist) == k, k                                    # same count, same offsets
+        look = E.arm_lines(n, "distractK", k)
+        assert len(look) == len(lines), k                           # arms are the same size
+        assert set(_planted_ports(look)) & set(_planted_ports(lines)) == set(), k
+
+
+def test_the_k_arms_are_selectable_without_the_length_grid(monkeypatch, capsys):
+    """Clause 3: a run can name conditions, k values, lengths and depths, and
+    `--dry-run` reports the cell count having sent nothing and paused nothing."""
+    async def never(*a, **k):
+        raise AssertionError("dry run reached the engine or the pool")
+
+    monkeypatch.setattr(E, "ensure_idle", never)
+    monkeypatch.setattr(E, "one_request", never)
+    args = E.parse_args(["--dry-run", "--conditions", "distractK,dissimilarK",
+                         "--ks", "0,1,2,4,8,16,32", "--lengths", "50k,150k"])
+    cells = E.select_cells(args)
+    assert {c.length for c in cells} == set(E.K_LENGTHS)
+    assert {c.condition for c in cells} == set(E.K_ARMS)
+    assert {c.k for c in cells} == set(E.K_VALUES)
+    assert len(cells) == 2 * 2 * 3 * 5 * 2 * 7 == 840                # 2 shapes x lengths x seeds x depths x arms x k
+    assert E.dry_run(args) == 0
+    out = capsys.readouterr().out
+    assert "grid: 840 cells" in out
+    assert "distractK k=32" in out and "dissimilarK k=0" in out
+    assert "distract4" not in out.split("by condition:")[1].split("\n")[0]
+
+    sweep = E.parse_args(["--dry-run", "--k-sweep"])
+    assert len(E.select_cells(sweep)) == 168                          # depth held at K_DEPTH
+    plan = E.run_plan(sweep)
+    assert plan["lengths"] == E.K_LENGTHS and plan["depths"] == (E.K_DEPTH,)
+    assert plan["conditions"] == E.K_ARMS and plan["ks"] == E.K_VALUES
+    assert E.dry_run(sweep) == 0
+    out = capsys.readouterr().out
+    assert "grid: 168 cells" in out and "cap_k=32" in out
+
+    shipped = E.select_cells(E.parse_args([]))
+    assert len(shipped) == 450 and {c.k for c in shipped} == {0}       # default run is unchanged
+    with pytest.raises(SystemExit):
+        E.parse_args(["--ks", "3"])
+    with pytest.raises(SystemExit):
+        E.parse_args(["--conditions", "distract9"])
+
+
+def test_the_curve_reports_accuracy_and_hedging_against_k():
+    """What the pinned artifact has to be able to say per arm and length: the
+    largest k still at 0.9 correct, and the k where hedging first clears 0.1."""
+    def row(arm, k, correct, hedged, wrong=0, miss=0, length=50_000):
+        tot = correct + hedged + wrong + miss
+        return {"shape": "session", "length": length, "condition": arm, "k": k,
+                "counts": {"correct": correct, "hedged": hedged, "wrong": wrong, "miss": miss},
+                "accuracy": correct / tot,
+                "distractors": {"max_pairwise_jaccard": 0.091}}
+
+    rows = ([row("distractK", k, c, h) for k, c, h in
+             [(0, 3, 0), (1, 3, 0), (2, 3, 0), (4, 2, 1), (8, 1, 2), (16, 0, 3), (32, 0, 3)]]
+            + [row("dissimilarK", k, 3, 0) for k in E.K_VALUES]
+            + [row("distractK", 4, 2, 1, length=150_000)])
+    curve = E.k_curve(rows)
+    assert set(curve) == set(E.K_ARMS)
+    lo = curve["distractK"]["50000"]
+    assert lo["curve"]["8"]["correct"] == 0.3333
+    assert lo["curve"]["8"]["hedged"] == 0.6667
+    assert lo["largest_k_correct_at_least_0.9"] == 2
+    assert lo["first_k_hedged_over_0.1"] == 4
+    assert curve["distractK"]["150000"]["curve"]["4"]["n"] == 1
+    assert curve["dissimilarK"]["50000"]["largest_k_correct_at_least_0.9"] == 32
+    assert curve["dissimilarK"]["50000"]["first_k_hedged_over_0.1"] is None
+    assert E.k_curve([{"shape": "session", "length": 50_000, "condition": "distract4",
+                       "accuracy": 0.0}]) == {}
+
+
+def test_a_k_row_carries_its_k_its_budget_and_its_family(hays, monkeypatch):
+    """The row is the artifact's atom: without `k`, the raised `max_tokens` the
+    k arms ask for, and the family's worst pair, a pinned curve could be neither
+    re-read nor re-decided by a later reader. The engine is never reached — the
+    request is a stub that only records the budget it was handed."""
+    async def hay(shape, length, seed, counter):
+        return hays[shape]
+
+    async def idle(*a, **k):
+        return None
+
+    async def cold(base, msgs, max_tokens=E.MAX_TOKENS):
+        cold.seen.append(max_tokens)
+        return {"text": "PORT: 9999", "finish_reason": "stop", "ttft_s": 1.0,
+                "prompt_tokens": 50_000, "completion_tokens": 5}
+
+    cold.seen = []
+    monkeypatch.setattr(E, "sized_haystack", hay)
+    monkeypatch.setattr(E, "ensure_idle", idle)
+    monkeypatch.setattr(E, "one_request", cold)
+    cell = E.Cell("session", 50_000, 1, E.K_DEPTH, "distractK", 8)
+    rows = asyncio.run(E.run_cells([cell], base="http://x", client=None,
+                                   write=lambda r: None, first_idle_limit_s=1,
+                                   idle_limit_s=1, warm=False))
+    row = rows[0]
+    assert cold.seen == [E.K_ARM_MAX_TOKENS] == [128]      # the shipped 64 is not used here
+    assert row["k"] == 8 and row["max_tokens"] == 128
+    assert row["cell"] == "session-50k-s1-d50-distractK-k8"
+    assert row["distractors"] == {"arm": "distractK", "k": 8, "planted": 8,
+                                  "max_pairwise_jaccard": 0.0909, "dup_threshold": 0.6,
+                                  "over_threshold": False, "cap_k": 32}
+    assert row["needles"]["port"] and row["needles"]["port"] not in row["needles"]["wrong_ports"]
+    # the shipped 4 salts plus this cell's 8 look-alikes, deduped. Seed 1 / 50k
+    # answers 7658 and its look-alike family starts with the stale port 7586,
+    # which the shipped salts already name, so 4 + 8 dedupes to 11, not 12.
+    planted = _planted_ports(E.distract_lines(E.needles_for(cell), 8))
+    assert set(planted) <= set(row["needles"]["wrong_ports"])
+    assert len(row["needles"]["wrong_ports"]) == 11
+    assert row["verdicts"]["port"] == "wrong" and row["outcomes"]["port"] == "wrong"
+    assert sum(1 for w in row["placed"] if w["kind"] == "distractor") == 8
+    assert E.summarize(rows)["session"]["k_curve"]["distractK"]["50000"]["curve"]["8"]["wrong"] == 1.0

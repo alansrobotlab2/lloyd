@@ -27,6 +27,34 @@ temperature 0, `max_tokens` 64, priority 1:
                       0.2 of the haystack away: the relay's OLD port (stated
                       as pre-migration) and three sibling relays' ports, all
                       digit permutations of the answer.
+           distractK  the same stimulus with the look-alike COUNT as the
+                      parameter (#3801): k sibling-family ports, planted at
+                      exactly the depth offsets `distract4` uses, k from
+                      K_VALUES. This is the axis NVIDIA's result is actually
+                      about — their 32k/11% number is a claim about k at fixed
+                      length, and no length sweep can answer it.
+           dissimilarK the control arm: k distractors of a DIFFERENT kind of
+                      fact (a relay's owning team, never a port) at the same
+                      count and the same offsets. Without it the k curve
+                      measures item count, not similarity, and the paper's
+                      claim is specifically about similarity.
+
+The k arms are meant to run at TWO lengths (50k, 150k), not over the length
+grid: the 2026-09-24 artifact already shows `distract4` flat in length, so the
+cheap lengths are the point —
+`--conditions distractK,dissimilarK --ks 0,1,2,4,8,16,32 --lengths 50k,150k`.
+Their requests get `K_ARM_MAX_TOKENS` rather than `MAX_TOKENS`, because that
+artifact's own recorded follow-up is that a hedge inside 64 tokens cannot be
+told from a truncation; `grade()` now says which of the two it was, as a
+`hedged` outcome that is not a hit.
+
+A k cell records `max_pairwise_jaccard` over its own distractor set under
+`eval/dup_detect.py`'s calibrated predicate, plus `cap_k` — the largest k in
+`K_VALUES` whose family stays under `DUP_JACCARD_THRESHOLD`. At k = 16 or 32 a
+look-alike family can degrade into the near-duplicate class #2271 already
+measures clean (0.005 slot share), which is a different stimulus; the labels
+are drawn from 35 distinct relay names so within the requested range the cap
+guards rather than binds, and the printed number says which.
 
 Needles and distractors are `# ops note` lines inserted at a line boundary of
 a tool result (session) or of the document (repo), exactly as the compaction
@@ -86,6 +114,10 @@ Re-run whenever `models.primary.expect_model` changes.
     .venvs/lloyd/bin/python eval/run_context_rot_eval.py --lengths 50000 --limit 6
     .venvs/lloyd/bin/python eval/run_context_rot_eval.py              # both shapes, 450 cold
     .venvs/lloyd/bin/python eval/run_context_rot_eval.py --decide     # latest json
+    .venvs/lloyd/bin/python eval/run_context_rot_eval.py --dry-run --k-sweep
+    .venvs/lloyd/bin/python eval/run_context_rot_eval.py --k-sweep    # the #3801 run:
+        # 2 shapes x 2 lengths x 3 seeds x 1 depth x 2 arms x 7 k = 168 cold cells,
+        # so name a window: the runner halts the worker pool for every one of them.
 """
 
 from __future__ import annotations
@@ -135,6 +167,34 @@ MULTI_SPREAD = 0.01          # multi3's outer needles sit this far either side
 DISTRACTOR_STEP = 0.2        # distractors at depth + k·step (cyclic), k = 1..4
 DEPTH_TOLERANCE = 0.02       # what the tests hold the placement to
 
+# ── the k axis (#3801) ───────────────────────────────────────────────────────
+# The two arms that vary the look-alike count at fixed length. They are NOT in
+# `CONDITIONS`: the length grid and the trigger decision keep reading the three
+# shipped conditions, so a k sweep cannot move the 0.72/0.52 recommendation, and
+# the 2026-09-24 pin stays comparable only with itself.
+K_ARMS = ("distractK", "dissimilarK")
+K_VALUES = (0, 1, 2, 4, 8, 16, 32)
+K_LENGTHS = (50_000, 150_000)   # the two named lengths; 240k buys nothing here
+K_DEPTH = 0.5                   # one depth, not five: the arm varies k, not depth
+#: The k arms' answer budget. 64 tokens is what made the 2026-09-24 `distract4`
+#: misses unreadable (10 of 12 named both ports and ran out of budget explaining
+#: the conflict), so at k = 8, 16 and 32 a hedge has to be a decision, not a
+#: truncation. `grade()` reports the two apart either way.
+K_ARM_MAX_TOKENS = 128
+#: Look-alike labels: 7 stems × 5 directions = 35 distinct relay names, none of
+#: them the graded `billing-east`. Distinct labels are what keep the family off
+#: dup_detect's predicate — two lines naming the SAME relay with different ports
+#: score 0.714 on it (a 4-digit port is one token of a 10-token line), which is
+#: the near-duplicate class, not this one.
+LOOKALIKE_STEMS = ("billing", "search", "ledger", "auth", "cache", "queue", "index")
+LOOKALIKE_DIRS = ("east", "west", "central", "south", "north")
+GRADED_RELAY = "billing-east"
+#: The dissimilar arm's other kind of fact: who owns a relay. Values are words,
+#: so no dissimilar value token can ever be an accepted or a wrong port.
+OWNER_POOL = ("nadia", "tomas", "ivana", "priya", "dmitri", "yuki", "aisha",
+              "mateo", "freya", "oscar", "lin", "ravi", "sara", "jonas",
+              "amelie", "kofi", "elif", "nils", "rosa", "hugo")
+
 PASS_MEAN = 0.9              # A(L) >= 0.9·A(base)
 PASS_POSITION = 0.8          # every depth >= 0.8·A(base)
 KEEP_AT = 200_000            # L* at or past this keeps today's values
@@ -163,6 +223,15 @@ def recall_eval():
     return _load("run_compaction_recall_eval", ROOT / "eval" / "run_compaction_recall_eval.py")
 
 
+def dup_detect():
+    """The calibrated near-duplicate predicate (#2271), loaded lazily.
+
+    A k-arm cell ages its own distractor set through `similarity()` — the same
+    word-5-gram Jaccard the nightly `dup_slot_share` runs on, so "these are
+    look-alikes, not duplicates" is a claim in one predicate and not two."""
+    return _load("dup_detect", ROOT / "eval" / "dup_detect.py")
+
+
 # ---------------------------------------------------------------------------
 # Grid
 # ---------------------------------------------------------------------------
@@ -175,18 +244,40 @@ class Cell:
     seed: int
     depth: float
     condition: str
+    #: Look-alike count, meaningful only for a `K_ARMS` condition; 0 elsewhere,
+    #: and a 0-k cell's key is byte-identical to the pre-#3801 key so the rows
+    #: of the pinned 2026-09-24 grid still read the same way.
+    k: int = 0
 
     @property
     def key(self) -> str:
-        return f"{self.shape}-{self.length // 1000}k-s{self.seed}-d{int(round(self.depth * 100))}-{self.condition}"
+        base = (f"{self.shape}-{self.length // 1000}k-s{self.seed}"
+                f"-d{int(round(self.depth * 100))}-{self.condition}")
+        return base if self.k == 0 else f"{base}-k{self.k}"
+
+    @property
+    def max_tokens(self) -> int:
+        return K_ARM_MAX_TOKENS if self.condition in K_ARMS else MAX_TOKENS
 
 
 def build_grid(shapes=SHAPES, lengths=LENGTHS, depths=DEPTHS,
-               conditions=CONDITIONS, seeds=SEEDS) -> list[Cell]:
-    """Deterministic order: shape, length, seed, depth, condition — so one
-    haystack serves fifteen consecutive cells and is then dropped."""
-    return [Cell(sh, L, s, d, c) for sh in shapes for L in lengths for s in seeds
-            for d in depths for c in conditions]
+               conditions=CONDITIONS, seeds=SEEDS,
+               ks: tuple[int, ...] = (0,)) -> list[Cell]:
+    """Deterministic order: shape, length, seed, depth, condition, k — so one
+    haystack serves consecutive cells and is then dropped.
+
+    `ks` multiplies only the conditions in `K_ARMS`; a shipped condition gets
+    one cell whatever `ks` says, which is why the 225-per-shape grid is
+    unchanged when `ks` is left alone."""
+    out: list[Cell] = []
+    for sh in shapes:
+        for L in lengths:
+            for s in seeds:
+                for d in depths:
+                    for c in conditions:
+                        for k in (ks if c in K_ARMS else (0,)):
+                            out.append(Cell(sh, L, s, d, c, k))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -201,9 +292,13 @@ class Needles:
     old_port: str
     siblings: dict[str, str]
     window: str
+    #: Values planted as look-alikes by a `distractK` cell. Empty for every
+    #: other condition, which is what keeps the shipped grid's salt set — and
+    #: `test_salts_are_never_the_answer`'s `len(wrong) == 4` — untouched.
+    lookalikes: tuple[str, ...] = ()
 
     def wrong_ports(self) -> set[str]:
-        return {self.old_port, *self.siblings.values()} - {self.port}
+        return {self.old_port, *self.siblings.values(), *self.lookalikes} - {self.port}
 
 
 def make_needles(seed: int, length: int) -> Needles:
@@ -232,6 +327,170 @@ def distractor_lines(n: Needles) -> list[str]:
     return out
 
 
+# ── the k arms (#3801) ───────────────────────────────────────────────────────
+
+
+def lookalike_labels(k: int) -> tuple[str, ...]:
+    """k distinct relay names in the graded relay's own naming form, never it."""
+    names = [f"{stem}-{d}" for stem in LOOKALIKE_STEMS for d in LOOKALIKE_DIRS]
+    got = tuple(n for n in names if n != GRADED_RELAY)
+    if k > len(got):
+        raise ValueError(f"the look-alike family holds {len(got)} labels, not {k}")
+    return got[:k]
+
+
+def lookalike_values(port: str, k: int) -> tuple[str, ...]:
+    """Exactly k wrong port values for `port`, in look-alike order.
+
+    Tier 1 is the shipped stimulus — permutations of the answer's digits. It
+    runs out at 23 for a four-digit port with distinct digits, so tier 2 adds
+    one-digit neighbours (±1 in one position, never a leading zero) and tier 3
+    two-digit neighbours. Every one is the same length and the same shape as the
+    answer, which is what makes it compete for attention mass; the tiers are
+    ordered so a small k is the paper's exact stimulus and only a large k leans
+    on the neighbours."""
+    digs = list(port)
+    out: list[str] = []
+    seen = {port}
+
+    def take(cand: str) -> None:
+        if cand not in seen and cand[0] != "0" and len(cand) == len(port):
+            seen.add(cand)
+            out.append(cand)
+
+    for p in sorted({"".join(c) for c in recall_eval()._perms(digs)}):
+        take(p)
+    for i in range(len(digs)):
+        for step in (-1, 1):
+            take(port[:i] + str((int(digs[i]) + step) % 10) + port[i + 1:])
+    for i in range(len(digs)):
+        for j in range(i + 1, len(digs)):
+            for a in (-1, 1):
+                for b in (-1, 1):
+                    take(port[:i] + str((int(digs[i]) + a) % 10) + port[i + 1:j]
+                         + str((int(digs[j]) + b) % 10) + port[j + 1:])
+    if k > len(out):
+        raise ValueError(f"only {len(out)} look-alikes of {port}, not {k}")
+    return tuple(out[:k])
+
+
+def owner_names(k: int) -> tuple[str, ...]:
+    """k distinct owner names — the dissimilar arm's values, letters only."""
+    pool = list(OWNER_POOL)
+    round_no = 1
+    while len(pool) < k:
+        pool += [f"{o}-{chr(96 + round_no)}" for o in OWNER_POOL]
+        round_no += 1
+    return tuple(pool[:k])
+
+
+def distract_values(n: Needles, k: int) -> tuple[str, ...]:
+    """The k planted look-alike values: the graded relay's own stale port first
+    (the strongest look-alike `distract4` already salts), then k-1 values from
+    the answer's own digit family. k = 0 plants nothing."""
+    if k == 0:
+        return ()
+    rest = [v for v in lookalike_values(n.port, k) if v != n.old_port]
+    return (n.old_port, *rest[:k - 1])
+
+
+def distract_lines(n: Needles, k: int) -> list[str]:
+    """The look-alike arm: k lines that answer the SAME question with a
+    different port, all of them the shape of an ops note."""
+    vals = distract_values(n, k)
+    if not vals:
+        return []
+    out = [f"# ops note (pre-migration inventory, before the relay migration): "
+           f"the {GRADED_RELAY} relay listens on port {vals[0]}."]
+    out += [f"# ops note: the {svc} relay listens on port {p}."
+            for svc, p in zip(lookalike_labels(k - 1), vals[1:])]
+    return out
+
+
+def dissimilar_lines(n: Needles, k: int) -> list[str]:
+    """The control arm: k lines of a DIFFERENT kind of fact — who owns a relay.
+
+    Same count, same note form, same placement, and a value that is a name
+    rather than a port, so no value token here can ever be the accepted answer
+    or one of its wrong ones. That is the point: whatever the curve does to
+    these, it did not do to a port."""
+    return [f"# ops note: the {svc} relay's on-call owner is {o}."
+            for svc, o in zip(lookalike_labels(k), owner_names(k))]
+
+
+def family_jaccard(lines: list[str]) -> float:
+    """The worst pair in a distractor family, under dup_detect's predicate.
+
+    0.0 for fewer than two lines. This is the number that says whether the
+    family is still the look-alike stimulus or has slid into #2271's
+    near-duplicate class."""
+    D = dup_detect()
+    return round(max((D.similarity(a, b) for a, b in _pairs(lines)), default=0.0), 4)
+
+
+def _pairs(lines: list[str]):
+    for i in range(len(lines)):
+        for j in range(i + 1, len(lines)):
+            yield lines[i], lines[j]
+
+
+def cap_k(n: Needles, arm: str) -> int:
+    """The largest k in `K_VALUES` whose family stays under
+    `DUP_JACCARD_THRESHOLD`, or 0 if none does.
+
+    The families are nested (`distract_lines` at k is a prefix-extension of it
+    at k+1), so the largest qualifying k is also the point past which every
+    larger k is disqualified: a cell above the cap is the duplicate stimulus.
+
+    A k the family cannot even build — a port whose digit family plus neighbours
+    runs out below 32 — counts as no cap rather than an exception, because the
+    cap is a report and the cell that asks for that k raises on its own."""
+    thr = dup_detect().DUP_JACCARD_THRESHOLD
+    best = 0
+    for k in sorted(K_VALUES):
+        try:
+            lines = arm_lines(n, arm, k)
+        except ValueError:
+            break
+        if family_jaccard(lines) < thr:
+            best = k
+        else:
+            break
+    return best
+
+
+def arm_lines(n: Needles, arm: str, k: int) -> list[str]:
+    if arm == "distractK":
+        return distract_lines(n, k)
+    if arm == "dissimilarK":
+        return dissimilar_lines(n, k)
+    raise ValueError(f"{arm!r} is not a k arm")
+
+
+def cell_distractors(cell: Cell, n: Needles) -> dict[str, Any]:
+    """What this cell planted, as the row records it: count, the worst pair in
+    the family under the calibrated predicate, and the cap above which the
+    predicate would call the family duplicates."""
+    if cell.condition not in K_ARMS:
+        return {}
+    lines = arm_lines(n, cell.condition, cell.k)
+    thr = dup_detect().DUP_JACCARD_THRESHOLD
+    j = family_jaccard(lines)
+    return {"arm": cell.condition, "k": cell.k, "planted": len(lines),
+            "max_pairwise_jaccard": j, "dup_threshold": thr,
+            "over_threshold": j >= thr, "cap_k": cap_k(n, cell.condition)}
+
+
+def needles_for(cell: Cell) -> Needles:
+    """The cell's needles, with `lookalikes` holding exactly the values a
+    `distractK` cell planted — so a cell with 16 look-alikes in it grades 16
+    values as wrong answers, not the shipped 4."""
+    n = make_needles(cell.seed, cell.length)
+    if cell.condition == "distractK":
+        n.lookalikes = distract_values(n, cell.k)
+    return n
+
+
 QUESTION_PORT = (
     "Question: according to the notes in this conversation, which port does the "
     "billing-east relay listen on now, after the relay migration? Answer with "
@@ -252,7 +511,15 @@ def question_for(condition: str) -> str:
 
 
 def placements(cell: Cell, n: Needles) -> list[tuple[float, str, str]]:
-    """(depth, kind, line) for everything planted in this cell."""
+    """(depth, kind, line) for everything planted in this cell.
+
+    Every distractor — the shipped four or a k arm's k of them — goes at
+    `depth + j·DISTRACTOR_STEP (mod 1)`, the offsets `distract4` already uses.
+    The cycle has period 5, so past four items the five slots are reused and a
+    look-alike can land on the needle's own depth: that is deliberate. The k arm
+    varies the COUNT of look-alikes at fixed length, which is the paper's
+    stimulus; spreading 32 of them over the whole haystack would vary the spread
+    as well and answer a different question."""
     lines = needle_lines(n)
     d = cell.depth
     if cell.condition == "multi3":
@@ -261,9 +528,13 @@ def placements(cell: Cell, n: Needles) -> list[tuple[float, str, str]]:
                (min(0.99, d + MULTI_SPREAD), "window", lines["window"])]
     else:
         out = [(d, "port", lines["port"])]
+    dl: list[str] = []
     if cell.condition == "distract4":
-        rng = random.Random(f"distract:{cell.key}")
         dl = distractor_lines(n)
+    elif cell.condition in K_ARMS:
+        dl = arm_lines(n, cell.condition, cell.k)
+    if dl:
+        rng = random.Random(f"distract:{cell.key}")
         rng.shuffle(dl)
         for k, line in enumerate(dl, start=1):
             pos = (d + k * DISTRACTOR_STEP) % 1.0
@@ -423,27 +694,61 @@ _LINES = {
 }
 
 
+def _names_value(text: str, value: str, *, digits: bool) -> bool:
+    """Whether `text` names `value`, the same way the grader's predicate does:
+    digit-boundary-anchored for a number, so `7254` is not named by `17254`."""
+    if digits:
+        return re.search(rf"(?<!\d){re.escape(value)}(?!\d)", text) is not None
+    return value.lower() in text.lower()
+
+
 def grade(text: str, n: Needles, condition: str) -> dict[str, Any]:
-    """`hit` / `wrong` / `undecided` per fact, code only (undecided = miss).
-    The port is graded with every salted value as a wrong answer, and an
-    answer naming the right port AND a wrong one has not answered."""
+    """Four outcomes per fact, code only: `correct`, `hedged`, `wrong`, `miss`.
+
+    `accuracy` is `correct / facts`, so a hedge is NOT a hit — but it is no
+    longer folded into `wrong`, which is what made the 2026-09-24 grid
+    unreadable: 10 of its 12 `distract4` misses were answers naming both the old
+    and the current port and spending the 64-token budget explaining the
+    conflict, and the recorded follow-up was that a hedge has to be distinguishable
+    from both a wrong pick and a truncation. `verdicts` keeps the raw
+    `hit`/`wrong`/`undecided` codes the shipped rows carry, so the old artifact's
+    rows still mean what they mean.
+
+    A `hedged` fact is one whose answer names the accepted value AND at least one
+    planted look-alike; it has not answered, and it is the model reporting the
+    conflict rather than losing it. `miss` names neither.
+
+    The port is graded with every salted value as a wrong answer — for a
+    `distractK` cell, the k planted look-alikes are among them (`needles_for`).
+    """
     fv = recall_eval()._field_verdict
     text = text or ""
+    wanted = {"port": n.port, "codename": n.codename, "window": n.window}
     verdicts: dict[str, str] = {}
+    outcomes: dict[str, str] = {}
     for fact in facts_for(condition):
         m = None
         for m in _LINES[fact].finditer(text):
             pass
         line = m.group(1) if m else text
-        if fact == "port":
-            v = fv(line, n.port, n.wrong_ports(), digits=True, labelled=bool(m))
-        elif fact == "codename":
-            v = fv(line, n.codename, set(), digits=False, labelled=bool(m))
-        else:
-            v = fv(line, n.window, set(), digits=True, labelled=bool(m))
+        digits = fact != "codename"
+        wrong = n.wrong_ports() if fact == "port" else set()
+        v = fv(line, wanted[fact], wrong, digits=digits, labelled=bool(m))
         verdicts[fact] = v
+        if v == "hit":
+            outcomes[fact] = "correct"
+        elif v == "wrong":
+            outcomes[fact] = "wrong"
+        elif wrong and _names_value(line, wanted[fact], digits=digits) and any(
+                _names_value(line, w, digits=digits) for w in wrong):
+            outcomes[fact] = "hedged"
+        else:
+            outcomes[fact] = "miss"
     hits = sum(v == "hit" for v in verdicts.values())
-    return {"verdicts": verdicts, "accuracy": hits / len(verdicts)}
+    counts = {o: sum(1 for x in outcomes.values() if x == o)
+              for o in ("correct", "hedged", "wrong", "miss")}
+    return {"verdicts": verdicts, "outcomes": outcomes, "counts": counts,
+            "accuracy": hits / len(verdicts)}
 
 
 # ---------------------------------------------------------------------------
@@ -471,14 +776,15 @@ async def count_tokens(client, base: str, messages: list[dict]) -> int:
     return int(r.json()["count"])
 
 
-async def one_request(base: str, messages: list[dict]) -> dict:
+async def one_request(base: str, messages: list[dict], *,
+                      max_tokens: int = MAX_TOKENS) -> dict:
     from app.harness.client import stream_chat
     from app.harness.loop import _merge_usage
     t0 = time.monotonic()
     first = None
     usage: dict = {}
     text: list[str] = []
-    body = {**NO_THINK, "max_tokens": MAX_TOKENS, "temperature": 0}
+    body = {**NO_THINK, "max_tokens": max_tokens, "temperature": 0}
     async for chunk in stream_chat(base_url=base, model=MODEL, messages=messages,
                                    tools=None, extra_body=body, cancel_event=None,
                                    timeout_s=1800, priority=PRIORITY):
@@ -765,15 +1071,17 @@ async def run_cells(cells: list[Cell], *, base: str, client, write: Callable[[li
     for i, cell in enumerate(cells):
         if hay is None or (hay.shape, hay.length, hay.seed) != (cell.shape, cell.length, cell.seed):
             hay = await sized_haystack(cell.shape, cell.length, cell.seed, counter)
-        n = make_needles(cell.seed, cell.length)
+        n = needles_for(cell)
         items = placements(cell, n)
         planted, where = plant(hay, items)
         msgs = request_messages(hay, planted, cell, secrets.token_hex(8))
         await ensure_idle(base, limit_s=idle_limit_s, client=client)
-        cold = await one_request(base, msgs)
+        cold = await one_request(base, msgs, max_tokens=cell.max_tokens)
         row: dict[str, Any] = {
             "cell": cell.key, "shape": cell.shape, "length": cell.length,
             "seed": cell.seed, "depth": cell.depth, "condition": cell.condition,
+            "k": cell.k, "max_tokens": cell.max_tokens,
+            "distractors": cell_distractors(cell, n),
             "haystack_tokens": hay.tokens, "placed": where,
             "needles": {"port": n.port, "codename": n.codename, "window": n.window,
                         "wrong_ports": sorted(n.wrong_ports())},
@@ -781,7 +1089,7 @@ async def run_cells(cells: list[Cell], *, base: str, client, write: Callable[[li
         }
         if warm:
             await ensure_idle(base, limit_s=idle_limit_s, client=client)
-            w = await one_request(base, msgs)
+            w = await one_request(base, msgs, max_tokens=cell.max_tokens)
             w["same_answer"] = w["text"].strip() == cold["text"].strip()
             row["warm"] = w
         rows.append(row)
@@ -804,6 +1112,62 @@ def _mean(xs: list[float]) -> float | None:
 
 def _p50(xs: list[float]) -> float | None:
     return round(statistics.median(xs), 3) if xs else None
+
+
+#: The two readings the acceptance asks for beside each curve: how far the arm
+#: stays at or above 0.9 correct, and where hedging first becomes common.
+CORRECT_KEEP = 0.9
+HEDGE_FLAG = 0.1
+OUTCOMES = ("correct", "hedged", "wrong", "miss")
+
+
+def _outcome_rate(rs: list[dict], outcome: str) -> float | None:
+    """Share of graded FACTS with this outcome, over the rows given."""
+    tot = sum(sum(r["counts"].values()) for r in rs)
+    return round(sum(r["counts"][outcome] for r in rs) / tot, 4) if tot else None
+
+
+def k_curve(rows: list[dict]) -> dict[str, Any]:
+    """The dilution curve: outcome rates as a function of k, at fixed length.
+
+    Per arm and per length, one entry per k with the four outcome rates (over
+    graded facts, so the four sum to 1.0 for a cell with one fact), the accuracy
+    the length grid also reports, the cell count, and the worst pairwise
+    Jaccard any cell at that k measured. Then the two numbers the item asks
+    each arm for: the largest k still holding `correct >= CORRECT_KEEP`, and the
+    smallest k whose `hedged` rate is over `HEDGE_FLAG`.
+
+    Rows for the shipped conditions carry no `counts` and no `k`, so they are
+    absent here: this curve and the 2026-09-24 grid are different measurements
+    and the artifact that holds one must not be read as the other."""
+    out: dict[str, Any] = {}
+    for arm in K_ARMS:
+        rs = [r for r in rows if r.get("condition") == arm and r.get("counts")]
+        if not rs:
+            continue
+        per_len: dict[str, Any] = {}
+        for L in sorted({r["length"] for r in rs}):
+            rl = [r for r in rs if r["length"] == L]
+            curve: dict[str, Any] = {}
+            for k in sorted({r.get("k", 0) for r in rl}):
+                rk = [r for r in rl if r.get("k", 0) == k]
+                curve[str(k)] = {
+                    **{o: _outcome_rate(rk, o) for o in OUTCOMES},
+                    "accuracy": _mean([r["accuracy"] for r in rk]),
+                    "n": len(rk),
+                    "max_pairwise_jaccard": max(
+                        [(r.get("distractors") or {}).get("max_pairwise_jaccard") or 0.0
+                         for r in rk], default=0.0),
+                }
+            keep = [int(k) for k, v in curve.items() if (v["correct"] or 0) >= CORRECT_KEEP]
+            flag = [int(k) for k, v in curve.items() if (v["hedged"] or 0) > HEDGE_FLAG]
+            per_len[str(L)] = {
+                "curve": curve,
+                "largest_k_correct_at_least_0.9": max(keep) if keep else None,
+                "first_k_hedged_over_0.1": min(flag) if flag else None,
+            }
+        out[arm] = per_len
+    return out
 
 
 def summarize(rows: list[dict]) -> dict[str, Any]:
@@ -830,7 +1194,8 @@ def summarize(rows: list[dict]) -> dict[str, Any]:
                                            for r in rl if r.get("warm")]),
             }
         out[shape] = {"lengths": lengths, "accuracy": by_len,
-                      "distract4_by_depth": by_depth, "ttft": ttft, "n": len(rs)}
+                      "distract4_by_depth": by_depth, "ttft": ttft, "n": len(rs),
+                      "k_curve": k_curve(rs)}
     return out
 
 
@@ -1061,13 +1426,16 @@ def render_md(doc: dict[str, Any]) -> str:
             f"Engine: {json.dumps(meta.get('engine') or {})}. Pool: {'; '.join(meta.get('pool') or [])}.",
             ""]
     for shape, s in (doc.get("summary") or {}).items():
-        out += [f"## {shape}", "", "| length | single | multi3 | distract4 | cold TTFT p50 | warm TTFT p50 | prompt p50 |",
-                "|---|---|---|---|---|---|---|"]
+        present = {c for L in s["lengths"] for c in (s["accuracy"].get(str(L)) or {})}
+        conds = [c for c in list(CONDITIONS) + list(K_ARMS) if c in present]
+        out += [f"## {shape}", "",
+                "| length | " + " | ".join(conds) + " | cold TTFT p50 | warm TTFT p50 | prompt p50 |",
+                "|---|" + "---|" * (len(conds) + 3)]
         for L in s["lengths"]:
             a = s["accuracy"].get(str(L)) or {}
             t = s["ttft"].get(str(L)) or {}
-            out.append(f"| {L:,} | {a.get('single')} | {a.get('multi3')} | {a.get('distract4')} | "
-                       f"{t.get('cold_p50')} | {t.get('warm_p50')} | {t.get('prompt_tokens_p50')} |")
+            out.append(f"| {L:,} | " + " | ".join(str(a.get(c)) for c in conds) +
+                       f" | {t.get('cold_p50')} | {t.get('warm_p50')} | {t.get('prompt_tokens_p50')} |")
         depths = sorted({d for v in s["distract4_by_depth"].values() for d in v}, key=float)
         if depths:
             out += ["", "distract4 by depth:", "",
@@ -1075,6 +1443,20 @@ def render_md(doc: dict[str, Any]) -> str:
             for L in s["lengths"]:
                 v = s["distract4_by_depth"].get(str(L)) or {}
                 out.append(f"| {L:,} | " + " | ".join(str(v.get(d)) for d in depths) + " |")
+        for arm, per_len in (s.get("k_curve") or {}).items():
+            for L, cd in per_len.items():
+                out += ["", f"### {shape} {arm} at {int(L) // 1000}k — look-alike count at fixed "
+                            f"length (#3801). NOT comparable with the 2026-09-24 grid: different "
+                            f"conditions, and `hedged` is a new outcome class.",
+                        "", "| k | correct | hedged | wrong | miss | worst pair J | n |",
+                        "|---|---|---|---|---|---|---|"]
+                for k, v in cd["curve"].items():
+                    out.append(f"| {k} | " + " | ".join(
+                        "-" if v[o] is None else f"{v[o]:.2f}" for o in OUTCOMES) +
+                        f" | {v['max_pairwise_jaccard']:.3f} | {v['n']} |")
+                out += ["", f"Largest k with correct >= {CORRECT_KEEP}: "
+                            f"{cd['largest_k_correct_at_least_0.9']}; first k with hedged > "
+                            f"{HEDGE_FLAG}: {cd['first_k_hedged_over_0.1']}"]
         p = (rec.get("per_shape") or {}).get(shape) or {}
         out += ["", f"L* ({shape}) = {p.get('L_star')}; base A({p.get('base_length')}) = {p.get('base')}; "
                 f"first fail: {json.dumps(p.get('first_fail'))}", ""]
@@ -1106,11 +1488,46 @@ def _ints(s: str) -> tuple[int, ...]:
     return tuple(int(x.replace("_", "").replace("k", "000")) for x in s.split(",") if x.strip())
 
 
+def _conds(s: str) -> tuple[str, ...]:
+    got = tuple(x.strip() for x in s.split(",") if x.strip())
+    bad = [c for c in got if c not in CONDITIONS + K_ARMS]
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"unknown condition(s) {bad}; known: {', '.join(CONDITIONS + K_ARMS)}")
+    return got
+
+
+def _ks(s: str) -> tuple[int, ...]:
+    got = tuple(int(x) for x in s.replace(" ", "").split(",") if x != "")
+    bad = [k for k in got if k not in K_VALUES]
+    if bad:
+        raise argparse.ArgumentTypeError(f"k must be one of {list(K_VALUES)}, not {bad}")
+    return got
+
+
+def _floats(s: str) -> tuple[float, ...]:
+    return tuple(float(x) for x in s.split(",") if x.strip())
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--shape", choices=("repo", "session", "both"), default="both")
     ap.add_argument("--lengths", type=_ints, default=LENGTHS,
                     help="comma list, e.g. 50000,100k (default: the full grid)")
+    ap.add_argument("--depths", type=_floats, default=DEPTHS,
+                    help="comma list, e.g. 0.5 (default: the whole depth grid)")
+    ap.add_argument("--conditions", type=_conds, default=CONDITIONS,
+                    help=f"comma list from {', '.join(CONDITIONS + K_ARMS)} "
+                         "(default: the three shipped length-grid conditions)")
+    ap.add_argument("--ks", type=_ks, default=(0,),
+                    help=f"look-alike counts for the k arms, comma list from "
+                         f"{list(K_VALUES)} (default: 0, which is no k cells at all)")
+    ap.add_argument("--k-sweep", action="store_true",
+                    help=f"the #3801 run: --conditions {','.join(K_ARMS)} --ks "
+                         f"{','.join(str(k) for k in K_VALUES)} --lengths "
+                         f"{','.join(f'{L // 1000}k' for L in K_LENGTHS)} --depths "
+                         f"{K_DEPTH} (168 cold cells: the k axis at one depth, "
+                         f"because depth is not what this arm asks about)")
     ap.add_argument("--limit", type=int, default=0, help="run only the first N cells")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the grid and estimated token counts; touch neither engine nor pool")
@@ -1130,9 +1547,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+def run_plan(args: argparse.Namespace) -> dict[str, Any]:
+    """What this invocation actually selects, after `--k-sweep` expands.
+
+    One function so the cell list and the `meta.grid` written beside the rows can
+    never disagree about which lengths and k values a run covered — a partial
+    run whose meta claims the full grid would make `--decide` trust it."""
+    lengths = tuple(args.lengths)
+    depths = tuple(args.depths)
+    conds, ks = tuple(args.conditions), tuple(args.ks)
+    if getattr(args, "k_sweep", False):
+        lengths, depths, conds, ks = K_LENGTHS, (K_DEPTH,), K_ARMS, K_VALUES
+    return {"shapes": SHAPES if args.shape == "both" else (args.shape,),
+            "lengths": lengths, "depths": depths, "conditions": conds, "ks": ks}
+
+
 def select_cells(args: argparse.Namespace) -> list[Cell]:
-    shapes = SHAPES if args.shape == "both" else (args.shape,)
-    cells = build_grid(shapes=shapes, lengths=tuple(args.lengths))
+    p = run_plan(args)
+    cells = build_grid(shapes=p["shapes"], lengths=p["lengths"], depths=p["depths"],
+                       conditions=p["conditions"], ks=p["ks"])
     return cells[: args.limit] if args.limit else cells
 
 
@@ -1158,15 +1591,30 @@ def dry_run(args) -> int:
             h = seen[k]
             print(f"  {c.shape:8s} {c.length:>7,} seed {c.seed}: est {h.tokens:>7,} tokens, "
                   f"{haystack_chars(h.messages):>9,} chars, {len(h.messages)} messages")
-    by = {}
+    by: dict[str, int] = {}
     for c in cells:
-        by[c.condition] = by.get(c.condition, 0) + 1
+        name = c.condition if c.k == 0 else f"{c.condition}-k{c.k}"
+        by[name] = by.get(name, 0) + 1
     print("  by condition:", by)
+    for arm in K_ARMS:
+        ks = sorted({c.k for c in cells if c.condition == arm})
+        if not ks:
+            continue
+        n = needles_for(next(c for c in cells if c.condition == arm))
+        thr = dup_detect().DUP_JACCARD_THRESHOLD
+        cap = cap_k(n, arm)
+        for k in ks:
+            j = family_jaccard(arm_lines(n, arm, k))
+            print(f"  {arm} k={k}: worst pair {j:.3f} of {thr} "
+                  f"{'OVER THE CAP' if k > cap or j >= thr else 'under the cap'}"
+                  f" (cap_k={cap})")
     c = cells[0] if cells else None
     if c:
-        n = make_needles(c.seed, c.length)
+        n = needles_for(c)
         _msgs, where = plant(seen[(c.shape, c.length, c.seed)], placements(c, n))
-        print(f"  sample {c.key}: answer port {n.port}, salts {sorted(n.wrong_ports())}, placed {where}")
+        nd = sum(1 for w in where if w["kind"] == "distractor")
+        print(f"  sample {c.key}: answer port {n.port}, salts {sorted(n.wrong_ports())}, "
+              f"{nd} distractors placed")
     return 0
 
 
@@ -1174,14 +1622,17 @@ async def live(args) -> int:
     import httpx
 
     cells = select_cells(args)
+    plan = run_plan(args)
     base = _base_url(args)
     date = datetime.now().strftime("%Y-%m-%d")
     json_path = args.out or MEASUREMENTS / f"context-rot-{date}.json"
     meta: dict[str, Any] = {
         "date": date, "commit": _git_head(), "base": base, "expect_model": _expect_model(),
-        "priority": PRIORITY, "max_tokens": MAX_TOKENS,
-        "grid": {"shapes": sorted({c.shape for c in cells}), "lengths": list(args.lengths),
-                 "depths": list(DEPTHS), "conditions": list(CONDITIONS), "seeds": list(SEEDS),
+        "priority": PRIORITY,
+        "max_tokens": {"length_grid": MAX_TOKENS, "k_arms": K_ARM_MAX_TOKENS},
+        "grid": {"shapes": sorted({c.shape for c in cells}), "lengths": list(plan["lengths"]),
+                 "depths": list(plan["depths"]), "conditions": list(plan["conditions"]),
+                 "ks": list(plan["ks"]), "seeds": list(SEEDS),
                  "limit": args.limit, "cells": len(cells)},
     }
     doc: dict[str, Any] = {"meta": meta, "rows": [], "complete": False}
