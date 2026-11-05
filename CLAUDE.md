@@ -124,10 +124,16 @@ reader share one override, `LLOYD_DENIAL_JOURNAL`. Long version: `architecture/h
 The system prompt also tells the model what a refusal means
 (`prompt_builder._refusal_hint`): a `Tool call denied` result is a decision, not an error;
 no retry and no respelling through another tool, since every guard judges a detour by the
-same rule; a refusal naming a remedy is the way forward. Baseline before the paragraph
-(`eval/refusal_detour_baseline.py`, 2026-09-30): 23 of 400 stored refusals were followed
-within three calls by a same-effect retry, 30% of the hard-deny refusals. Re-run it to see
-whether the paragraph moved that.
+same rule; a refusal naming a remedy is the way forward. The 2026-09-30 baseline that
+paragraph was measured against is **RETIRED, and a fresh run is not comparable to it**:
+its targets were mined from the refusal's own prose, so a refusal that quoted no operand
+left the instrument nothing measurable and its printed `0.0` was an unmeasured pass, not
+compliance; and the corpus it counted has aged out — 38 `.json` sessions from 2026-09
+survive in the store (oldest `20260922_201704`) and the scanner globs `*.json`, never the
+gzipped majority. `eval/refusal_detour_baseline.py` now resolves the refused call's own
+operand through its `tool_call_id` and prints every guard's rate beside its measurable
+count; the current stratified reading, and why no number yet judges that paragraph, is in
+`architecture/harness.md`, "The refusal paragraph".
 
 **The injection canary bench** (`eval/run_injection_canary.py`, scenarios and corpus in
 `eval/injection_canary/`) is the positive class the P10 seams never had: twelve worker-style
