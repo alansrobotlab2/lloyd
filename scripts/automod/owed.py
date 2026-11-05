@@ -14,7 +14,10 @@ session: evidence (settled), a date (recheck), a ruling Lloyd makes under the
 delegation, a follow-up item, another implement attempt, or a close. The one
 class no software can act on — something only Alan's hands can do on the host —
 moves to `owed_outside`, which Mission Control lists; it is never a tag and
-never blocks the board.
+never blocks the board. Since #3809 an UNDISCHARGED row there is read back as an
+owed entry too, so an `outside` ruling keeps a debt in the queue instead of
+removing it from every reader: `done` on the row is the one field that clears it,
+from the queue and from Mission Control's list at the same time.
 
 Every writer here goes through `backlog.update_frontmatter` (or the item
 writers beside it), so the unparsed-YAML guard and the activity log hold.
@@ -53,6 +56,20 @@ MAX_RECHECKS = 4
 # read time from the item's `human_clauses`. It is what lets a ruling tell a
 # stranded clause from one the landing route recorded (#2055).
 STRANDED_ORIGIN = "human_clauses"
+
+# The origin an entry carries when it was synthesised at read time from the item's
+# own `owed_outside` row (#3809). Like `STRANDED_ORIGIN` it marks a read-time
+# derivation rather than a record, and every writer that could materialise an
+# entry into `owed` has to skip both — a derivation that becomes front matter by
+# side effect is the failure #2055 named.
+OUTSIDE_ORIGIN = "owed_outside"
+
+# How far out an `owed_outside` row is held after a pass that read it and did not
+# discharge it. A day, not `recheck_date`'s one-hour floor: the human half of an
+# `outside` ruling is a thing a person does between sittings, and #538 is exactly
+# the cost of re-ruling one clause every tick — six filings in 28 minutes, stopped
+# by dfe056f6 ("a clause ruled outside is one entry, not one per tick").
+OUTSIDE_RECHECK_HOURS = 24
 
 # How many items whose ONLY entries are derived one owed-check run may claim.
 # The scan on 2026-10-02 found 454 `status: done` items in #1999's state — 72 of
@@ -157,13 +174,115 @@ def _clause_key(value: Any) -> str:
     return m.group(1) if m else what
 
 
+def _open_item(fm: dict) -> bool:
+    """Whether the item is still open, as one measurement rather than two.
+
+    `derived_entries` reads a clause only for a CLOSED item and `outside_entries`
+    only for an OPEN one, so both edges of that boundary have to come from here: a
+    clause that read as derived and synthesised at once would be ruled on twice per
+    pass, which is #538 again in a new coat."""
+    from app.backlog_status import CLOSED_STATUSES
+    return str(fm.get("status") or "").strip().lower() not in CLOSED_STATUSES
+
+
+def _outside_row(rows: list, what: Any) -> dict | None:
+    """The `owed_outside` row whose text is `what`, or None.
+
+    Matched by `_clause_key`, not exact text, for the same reason `derived_entries`
+    dedupes by it: #3002 stripped the `N.` enumerator off a stored clause, so a
+    ruling and its clause can differ by nothing else. The caller mutates the row it
+    gets back — `apply_verdict`'s `outside` list holds these same dicts, so a
+    mutation is what the final `update_frontmatter` writes."""
+    key = _clause_key(_text(what))
+    for row in rows:
+        if isinstance(row, dict) and _clause_key(_text(row.get("what"))) == key:
+            return row
+    return None
+
+
+def outside_recheck_date(after: Any = "", now: datetime | None = None) -> str:
+    """The date an `owed_outside` row is next measured at, floored at
+    `OUTSIDE_RECHECK_HOURS` and still clamped to `MAX_RECHECK_DAYS`.
+
+    The floor is the #538 bound and it is why the date lives on the row: a
+    synthesised entry cannot be bounded by `derived_entries`' dedupe against
+    `owed_outside`, because the entry IS the row that dedupe would compare against.
+    A session naming a shorter wait is raised to the floor; none of the 6 rows on
+    the board on 2026-11-05 carried a recheck field at all."""
+    from datetime import timedelta
+    now = now or _now()
+    floor = now + timedelta(hours=OUTSIDE_RECHECK_HOURS)
+    at = floor
+    value = str(after or "").strip()
+    if value:
+        try:
+            at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            at = floor
+        at = max(at, floor)
+    return min(at, now + timedelta(days=MAX_RECHECK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def outside_entries(fm: dict) -> list[dict]:
+    """One `decide` entry per `owed_outside` row an OPEN item has not discharged.
+
+    The hole (#3809, measured 2026-11-05T19:1xZ at HEAD 01821481): ruling a clause
+    `outside` MOVES it out of `owed`, and that is the very thing that made the item
+    invisible — `_recorded` reads `owed` alone and `derived_entries` returns [] for
+    a non-closed status, so `entries_of` came back empty and `owing_items`'
+    `if not entries: continue` skipped the item. Six open items carried such a row
+    with `entries_of(fm) == []` and none of them was among the 157 items
+    `owing_items(stranded_cap=None)` returned; four had been discharged by hand at
+    2026-10-30T03:01:07Z and could not be reached again at all, and marking a row
+    `done` took it off `outside_list` while its item stayed `draft`. The one debt
+    with a human in the loop was the one no pass could re-measure. `hand_runs`
+    (#3017) was built open-items-only and deliberately unemptyable by an outcome
+    vocabulary for exactly this reason; this is that treatment for `outside`.
+
+    OPEN items only: for a closed one the row is already a settled ruling, and
+    `derived_entries`' dedupe against it is what keeps a ruled clause out of the
+    queue every tick — `tests/test_owed_check.py`'s #538 pin asserts a CLOSED item
+    with an outside row is not owing, and synthesising here would break it.
+
+    Dedupe is against the item's recorded entries as well as within the rows, so a
+    clause that is both recorded in `owed` and ruled outside (a reopen that
+    re-filed it) is selected once, not twice.
+
+    It is deliberately NOT bounded by `stranded_cap`: `MAX_STRANDED_PER_RUN` bounds
+    a historical back-fill of clauses no pass has ever seen, and letting it decide
+    which of Alan's named open debts gets measured would send the rest quiet by the
+    same route this fixes.
+    """
+    if not _open_item(fm):
+        return []
+    have = {_clause_key(e["what"]) for e in _recorded(fm)}
+    since = _since(fm)
+    out: list[dict] = []
+    for row in (fm.get(OUTSIDE_KEY) or []):
+        if not isinstance(row, dict) or row.get("done"):
+            continue
+        what = _text(row.get("what"))
+        key = _clause_key(what)
+        if not what or key in have:
+            continue
+        have.add(key)
+        out.append({"what": what, "kind": "decide",
+                    "since": str(row.get("since") or since),
+                    "recheck_after": str(row.get("recheck_after") or ""),
+                    "rechecks": int(row.get("rechecks") or 0),
+                    "origin": OUTSIDE_ORIGIN})
+    return out
+
+
 def derived_entries(fm: dict) -> list[dict]:
     """`human_clauses` strings that appear in none of `owed`, `owed_settled` and
     `owed_outside`.
 
-    Only a CLOSED item is derived from (the boundary `tests/test_backlog_unattended.py`
-    already encodes at :4595, where an open item's `entries_of` must be empty until
-    the landing mints its row). An open item's `human_clauses` are its round's
+    Only a CLOSED item is derived from (`_open_item`); the open half of that
+    boundary is `outside_entries`, which is the only other thing an open item can
+    owe without a recorded entry. An open item's `human_clauses` are its round's
     contract: `split_post_landing_clauses` shows the landing route owes only the
     POST-LANDING half of them and grades the landing-time half through the review
     rung, so deriving an open item's clauses would hand the owed job clauses its own
@@ -185,9 +304,8 @@ def derived_entries(fm: dict) -> list[dict]:
     nothing here. `owed_settled` counts as recorded: a clause that has already
     been ruled on is not stranded, whatever its text went on to become.
     """
-    from app.backlog_status import CLOSED_STATUSES
     from scripts.automod import backlog as B
-    if str(fm.get("status") or "").strip().lower() not in CLOSED_STATUSES:
+    if _open_item(fm):
         return []
     clauses = B.human_clauses_of(None, fm)
     if not clauses:
@@ -213,12 +331,16 @@ def derived_entries(fm: dict) -> list[dict]:
 
 
 def entries_of(fm: dict, *, derived: bool = True) -> list[dict]:
-    """The item's owed entries: what `owed` records, plus — since #2055 — one due
-    `check` entry per `human_clauses` string recorded in neither `owed` nor
-    `owed_settled`. `derived=False` is the writer's view (`_recorded` only)."""
+    """The item's owed entries: what `owed` records, plus two read-time
+    derivations — since #2055 one due `check` entry per `human_clauses` string
+    recorded in neither `owed` nor `owed_settled` (CLOSED items), and since #3809
+    one due `decide` entry per `owed_outside` row an OPEN item has not discharged.
+    `derived=False` is the writer's view (`_recorded` only), which is what keeps
+    either derivation from becoming front matter as a side effect."""
     out = _recorded(fm)
     if derived:
         out.extend(derived_entries(fm))
+        out.extend(outside_entries(fm))
     return out
 
 
@@ -294,7 +416,11 @@ def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None =
     oldest-first sort so which ones get ruled on first is the wait they have
     actually done, not the board's directory order. An item with at least one
     recorded entry is never held back by it — the bound is on the historical
-    back-fill, not on anything a route filed on purpose. `stranded_cap=None` asks
+    back-fill, not on anything a route filed on purpose. An item whose only entries
+    are synthesised from its `owed_outside` rows (#3809) is not held back either:
+    those are live rulings naming a named human action, not clauses no pass has ever
+    seen, and letting the cap decide which of them gets measured would send the rest
+    quiet by the very route #3809 is about. `stranded_cap=None` asks
     for the whole population, which is what a caller that is COUNTING rather than
     claiming wants.
     """
@@ -778,10 +904,29 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
     # no-op on the debt (#3017). A closed item is not held — `close_item` is
     # already a no-op there, and running a probe for it would be pure cost.
     hand_block, hand_why = hand_run_pending(fm) if is_open else ({}, "")
+
+    def _still_owed(entry: dict, **kw) -> None:
+        """Leave one entry owed, on the surface it came from.
+
+        `keep` is written into `owed`, so an entry that exists only because
+        `outside_entries` synthesised it from an `owed_outside` row must never be
+        appended there — #2055's rule, and `defer` has the same guard. Its date goes
+        on the row it came from, which is what bounds how often it is ruled on
+        (#538). `apply_verdict`'s five hold sites and `defer` all route through here
+        so one rule governs all of them."""
+        if entry.get("origin") == OUTSIDE_ORIGIN:
+            row = _outside_row(outside, entry.get("what"))
+            if row is not None:
+                row["recheck_after"] = outside_recheck_date(kw.get("recheck_after"), now)
+                if kw.get("note"):
+                    row["note"] = _text(kw["note"], 300)
+            return
+        keep.append(_compact({**entry, **kw}))
+
     for n, e in enumerate(entries, 1):
         a = by_n.get(n)
         if a is None:
-            keep.append(_compact(e))
+            _still_owed(e)
             continue
         out = a["outcome"]
         evidence, cut = _bounded(a.get("evidence"))
@@ -792,7 +937,7 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                  f"{evidence or 'no evidence arrived'}"}
         if out == "recheck":
             when = recheck_date(a.get("recheck_after") or "", now)
-            keep.append(_compact({**e, "recheck_after": when, "rechecks": e.get("rechecks", 0) + 1}))
+            _still_owed(e, recheck_after=when, rechecks=e.get("rechecks", 0) + 1)
             notes.append(f"#{n} recheck after {when[:10]}: {evidence}")
             continue
         if out == "reopen" and is_open:
@@ -807,9 +952,8 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                 # #2041 with nothing owed and a status the reconciler undid two
                 # minutes later (2026-10-02): no owner at all. Counted as a
                 # recheck, so `MAX_RECHECKS` bounds a pass that keeps asking.
-                keep.append(_compact({**e, "recheck_after": recheck_date("", now),
-                                      "rechecks": e.get("rechecks", 0) + 1,
-                                      "note": _text(refusal, 300)}))
+                _still_owed(e, recheck_after=recheck_date("", now),
+                            rechecks=e.get("rechecks", 0) + 1, note=_text(refusal, 300))
                 notes.append(f"#{n} reopen refused, still owed: {refusal}"[:300])
                 continue
         amend = a.get("amend_clause") if isinstance(a.get("amend_clause"), dict) else {}
@@ -822,9 +966,9 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                                   session_id=session_id)
                 notes.append(f"#{n} clause {amend.get('clause')} amended")
             except ValueError as exc:
-                keep.append(_compact({**e, "recheck_after": recheck_date("", now),
-                                      "rechecks": e.get("rechecks", 0) + 1,
-                                      "note": _text(f"amendment refused: {exc}", 300)}))
+                _still_owed(e, recheck_after=recheck_date("", now),
+                            rechecks=e.get("rechecks", 0) + 1,
+                            note=_text(f"amendment refused: {exc}", 300))
                 notes.append(f"#{n} amendment refused, still owed: {exc}"[:300])
                 continue
         if out == "outside":
@@ -832,10 +976,28 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             # restates the ask in place and keeps the date it has waited since.
             ask = {"what": e["what"], "needs": _text(a.get("outside") or evidence, 400),
                    "since": stamp}
+            if e.get("origin") == OUTSIDE_ORIGIN:
+                # The row is being re-ruled, so it needs the same bound a pass that
+                # only looked at it leaves (#538): without it the item is due again
+                # on the next tick and every ruling after the first is a re-ruling.
+                ask["recheck_after"] = outside_recheck_date("", now)
+            # Matched WITHOUT the `done` filter (#3809 clause 5): the old filter
+            # meant a clause whose row already carried `done` fell through to
+            # `outside.append(ask)`, giving one clause two rows — the discharged one
+            # hidden from `outside_list`, and a fresh one beside it that nothing
+            # discharges in place.
+            # Now the ruling restates the row and records the discharge it takes
+            # back, because a retraction written where humans read the alarm is the
+            # only record this clause has.
             same = [i for i, o in enumerate(outside) if isinstance(o, dict)
-                    and not o.get("done") and _text(o.get("what")) == _text(e["what"])]
+                    and _clause_key(_text(o.get("what"))) == _clause_key(_text(e["what"]))]
             if same:
-                ask["since"] = str(outside[same[0]].get("since") or stamp)
+                prior = outside[same[0]]
+                ask["since"] = str(prior.get("since") or stamp)
+                if prior.get("done"):
+                    ask["discharged_before"] = str(prior.get("done"))
+                    if prior.get("discharge"):
+                        ask["discharge_before"] = _text(prior.get("discharge"), 300)
                 outside = [o for i, o in enumerate(outside) if i not in same[1:]]
                 outside[same[0]] = ask
             else:
@@ -854,10 +1016,32 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             # deliberately not held — each moves the debt somewhere visible (a
             # filed child item, a fresh attempt) instead of settling it here, and
             # `close_item` still refuses the close whatever empties the list.
-            keep.append(_compact({**e, "recheck_after": recheck_date("", now),
-                                  "note": _hold_note(hand_block, hand_why)}))
+            _still_owed(e, recheck_after=recheck_date("", now),
+                        note=_hold_note(hand_block, hand_why))
             notes.append(f"#{n} held, still owed: {_hold_note(hand_block, hand_why)}")
             continue
+        if e.get("origin") == OUTSIDE_ORIGIN:
+            # #3809: this debt is a ROW, not an entry, and `settled` is the one
+            # answer that ends it. `done` plus the evidence goes on the row — the
+            # single field that clears it from `owing_items` and `outside_list`
+            # together. Appending to `owed_settled` would settle an entry that was
+            # never in `owed`, and the prose line that has stood in for a discharge
+            # on 12 backlog items (`owed_outside discharged by hand:
+            # 2026-10-30T03:01:07Z …`) is parsed by nothing, which is why four of
+            # them stayed `draft` and unreachable for six days. Every other answer
+            # leaves Alan's half outstanding, so the row keeps its slot and takes the
+            # date the next pass honours.
+            row = _outside_row(outside, e["what"])
+            if row is None:
+                row = {"what": e["what"], "since": stamp}
+                outside.append(row)
+            if out == "settled":
+                row["done"] = stamp
+                row["discharge"] = (evidence or _text(a.get("ruling"), 300)
+                                    or "no evidence given")
+                notes.append(f"#{n} outside debt discharged: {_text(row['discharge'], 160)}")
+                continue
+            row["recheck_after"] = outside_recheck_date("", now)
         record = {"what": e["what"], "outcome": out, "at": stamp}
         if evidence:
             record["evidence"] = evidence
@@ -882,7 +1066,7 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         elif out == "work":
             # No follow-up could be filed (cap reached, none named, or a
             # placeholder): still owed.
-            keep.append(_compact(e))
+            _still_owed(e)
             notes.append(f"#{n} work owed but not filed this pass")
             continue
         if out == "reopen":
@@ -990,11 +1174,35 @@ def hand_runs(boards: tuple[str, ...] | None = None) -> list[dict]:
 def defer(path: Path, entries: list[dict], due: list[int], *, hours: float = 24,
           why: str = "") -> bool:
     """Push due entries back without spending a recheck — for a pass that got
-    no answer (the session failed), which says nothing about the entry."""
+    no answer (the session failed), which says nothing about the entry.
+
+    An entry synthesised from an `owed_outside` row (#3809) has nowhere to be pushed
+    in `owed`: writing it there is the read-time-derivation-becomes-front-matter side
+    effect #2055 names, and the reason `add_owed` dedupes against `_recorded` rather
+    than `entries_of`. Its date goes on the ROW instead, floored at
+    `OUTSIDE_RECHECK_HOURS` whatever `hours` says — the #538 bound is not a caller's
+    knob to turn, and a sub-hour hold is the tick-per-ruling shape that produced six
+    filings in 28 minutes."""
     from datetime import timedelta
     from scripts.automod import backlog as B
-    when = (_now() + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = _now()
+    when = (now + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    synth = [e for i, e in enumerate(entries)
+             if e.get("origin") == OUTSIDE_ORIGIN and i in due]
     kept = [_compact({**e, "recheck_after": when}) if i in due else _compact(e)
-            for i, e in enumerate(entries)]
-    return B.update_frontmatter(path, {OWED_KEY: kept},
-                                activity=f"owed-check deferred {len(due)} entr(ies) to {when[:16]}: {why}"[:600])
+            for i, e in enumerate(entries)
+            if e.get("origin") != OUTSIDE_ORIGIN]
+    if not synth:
+        return B.update_frontmatter(
+            path, {OWED_KEY: kept or None},
+            activity=f"owed-check deferred {len(due)} entr(ies) to {when[:16]}: {why}"[:600])
+    fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
+    rows = list(fm.get(OUTSIDE_KEY) or [])
+    for e in synth:
+        row = _outside_row(rows, e.get("what"))
+        if row is not None:
+            row["recheck_after"] = outside_recheck_date(when, now)
+    return B.update_frontmatter(
+        path, {OWED_KEY: kept or None, OUTSIDE_KEY: rows},
+        activity=(f"owed-check deferred {len(due)} entr(ies) to {when[:16]}: {why}"
+                  f" [{len(synth)} held on their owed_outside row]"[:600]))

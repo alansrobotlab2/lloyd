@@ -191,7 +191,9 @@ entry's answer as the structured object you are asked for.
 
 
 def _entries_block(entries: list[dict], due: list[int]) -> str:
+    from scripts.automod import owed as O
     rows = []
+    ruled_outside = False
     for i, e in enumerate(entries):
         if i not in due:
             continue
@@ -200,12 +202,28 @@ def _entries_block(entries: list[dict], due: list[int]) -> str:
         # landing-time write, and a ruling has to be able to tell the two apart —
         # a stranded one has never been seen by any pass, so "already handled" is
         # not an available answer for it.
-        from scripts.automod import owed as O
         if e.get("origin") == O.STRANDED_ORIGIN:
             extra += ", derived from human_clauses: never recorded as owed"
+        # #3809: an `outside` ruling on an OPEN item used to be the last word that
+        # item ever heard — nothing read the row again, so the human half of the
+        # ruling could never be verified. It is back in the queue, and what it is
+        # measured against is a human action, not a diff.
+        elif e.get("origin") == O.OUTSIDE_ORIGIN:
+            ruled_outside = True
+            extra += ", ruled outside and never discharged: Alan's half"
         if e.get("note"):
             extra += f"; last answer not applied: {e['note']}"
         rows.append(f"{i + 1}. [{e['kind']}, owed since {e.get('since') or '?'}{extra}] {e['what']}")
+    if ruled_outside:
+        rows.append(
+            "\n> An entry marked `ruled outside and never discharged` is the HUMAN"
+            " half of a ruling this job already made (#3809) — the item stayed open"
+            " because nothing could verify it. Measure whether the action has been"
+            " done: `settled` is the answer that means it HAS, and it writes `done`"
+            " plus your evidence on the row — the one field that takes the debt off"
+            " this queue and off Mission Control's outside list together. A prose"
+            " line on the item discharges nothing. If it has not been done, `outside`"
+            " restates the ask in place rather than adding a second row.")
     return "\n".join(rows)
 
 

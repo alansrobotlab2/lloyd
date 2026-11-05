@@ -1107,6 +1107,193 @@ def test_a_clause_ruled_under_its_old_number_is_not_derived_again(isolated):
     assert [e["what"] for e in O.entries_of(fm_of(p))] == ["Nobody ruled on this."]
 
 
+# ── The open item ruled `outside` (#3809) ───────────────────────────────────
+#
+# An `outside` ruling moves a clause out of `owed` and into `owed_outside`, and
+# until 2026-11-05 that was the last word an OPEN item ever heard: `_recorded`
+# reads `owed` alone and `derived_entries` returns [] for a non-closed status, so
+# `entries_of` came back empty and `owing_items`' `if not entries: continue`
+# skipped the item — while the human action the ruling asks for is exactly the
+# thing that needs re-measuring. Measured 2026-11-05T19:1xZ on HEAD 01821481: 6
+# open items carried an `owed_outside` row (#3119, #3359, #3446, #3466, #3477,
+# #3782), all 6 with `entries_of(fm) == []` and none of them in the 157 items
+# `owing_items(stranded_cap=None)` returns, and 4 of the 6 had been discharged by
+# hand at 2026-10-30T03:01:07Z with nothing able to reach them again. The shape is
+# `hand_runs()`'s (#3017), which was built open-items-only and deliberately
+# unemptyable by an outcome vocabulary; `owed_outside` debt, the one with a human
+# in the loop, never got it. These pin the fix: the row reads as one `decide`
+# entry at read time, `done` on the row is the one field that clears both
+# surfaces, and the row carries its own recheck bound (#538).
+
+#: One human half, as the ruling that asks for it records it.
+_OUTSIDE_ASK = "flip task 105 to `frequency: weekly` in the autonomy task file"
+
+
+def _ruled_outside(isolated, item_id, *, status="draft", name="An outside debt") -> Path:
+    """An item whose ONLY debt is one undischarged `owed_outside` row: the exact
+    front matter an `outside` ruling leaves behind (`owed` is removed, not emptied)."""
+    return write_item(isolated, item_id, status=status, name=name, extra={
+        "owed_outside": [{"what": _OUTSIDE_ASK, "needs": "an edit in Alan's editor",
+                          "since": "2026-11-05T04:35:47"}]})
+
+
+def _owed_ids(now=None) -> list[int]:
+    return [o.item.id for o in O.owing_items(now=now)]
+
+
+def test_an_open_item_ruled_outside_is_selected_as_one_decide_entry(isolated):
+    """#3809 clause 1: an open item carrying an undischarged `owed_outside` row is
+    selected, as exactly one due `decide` entry whose text is the row's."""
+    p = _ruled_outside(isolated, 5000)
+    fm = fm_of(p)
+    assert "owed" not in fm, "the ruling moved the clause out of `owed`"
+    assert O._recorded(fm) == [], "the writer's view still records nothing"
+    owing = [o for o in O.owing_items() if o.item.id == 5000]
+    assert len(owing) == 1, "the human half keeps a queue slot"
+    (owing,) = owing
+    assert len(owing.entries) == 1 and owing.due == [0], "one entry, due now"
+    (entry,) = owing.entries
+    assert entry["kind"] == "decide", "nothing moves this item but the deciding job"
+    assert entry["what"] == _OUTSIDE_ASK, "the entry is the row, not a paraphrase"
+    assert entry["origin"] == O.OUTSIDE_ORIGIN
+    assert entry["since"] == "2026-11-05T04:35:47", "it has waited since the ruling"
+
+    # The other side of the seam: the session has to be told what it is measuring.
+    prompt = " ".join(OC.build_prompt(owing).split())
+    assert _OUTSIDE_ASK in prompt and "never discharged" in prompt, \
+        "the prompt names the row as an undischargeable-by-prose debt"
+
+
+def test_done_on_the_row_clears_it_from_the_queue_and_from_the_list(isolated):
+    """#3809 clause 2: ONE field, `done`, governs both edges of the transition —
+    the queue slot and Mission Control's list. #3782 is the case that shows the
+    two must agree: its row is listed today, and a one-field hand move used to be
+    able to make the debt vanish from the list while the queue never saw it at all."""
+    p = _ruled_outside(isolated, 5001)
+    assert 5001 in _owed_ids() and [r["item_id"] for r in O.outside_list()] == [5001]
+    fm = fm_of(p)
+    B.update_frontmatter(p, {"owed_outside": [dict(fm["owed_outside"][0],
+                                                   done="2026-11-05T18:00:00Z")]})
+    assert 5001 not in _owed_ids(), "off the queue"
+    assert O.outside_list() == [], "and off the one list Alan reads"
+    assert fm_of(p)["status"] == "draft", \
+        "a discharge is not a close: whether owed-check may close on one is its own ruling"
+
+
+def test_one_outside_row_is_not_ruled_on_twice_in_a_day(isolated):
+    """#3809 clause 3, the #538 bound. `derived_entries` bounds a re-ruling by
+    deduping against `owed_outside`, but a synthesised entry IS the row, so that
+    dedupe cannot bound it and an empty `recheck_after` is `_due()` on every tick —
+    the shape commit dfe056f6 ("a clause ruled outside is one entry, not one per
+    tick", #538: six filings in 28 minutes) exists to stop. The bound therefore has
+    to live on the row."""
+    now = datetime.now(timezone.utc)
+    p = _ruled_outside(isolated, 5002)
+    first = [o for o in O.owing_items(now=now) if o.item.id == 5002]
+    again = [o for o in O.owing_items(now=now) if o.item.id == 5002]
+    assert len(first) == len(again) == 1, "reading the board twice is not two slots"
+    assert len(first[0].due) == len(again[0].due) == 1, "one row is one due entry"
+
+    (owing,) = first
+    assert O.defer(p, owing.entries, owing.due, why="no structured answer this pass")
+    assert 5002 not in _owed_ids(now), "the date this pass stamped is one it honours"
+    assert 5002 in _owed_ids(now + timedelta(hours=25)), "a day later it is measured again"
+    assert fm_of(p)["owed_outside"][0]["recheck_after"], "the bound is on the row"
+
+
+def test_a_synthesised_entry_is_never_materialised_into_the_owed_key(isolated):
+    """#3809 clause 4, #2055: `defer` writes the entry list it is handed straight
+    into `owed`, and `apply_verdict`'s `keep` does the same, so a pass over a
+    synthesised entry would turn a read-time derivation into front matter — the
+    exact side effect `_recorded`'s docstring and `add_owed` exist to prevent. The
+    date goes on the ROW instead, which is also what makes the bound readable."""
+    now = datetime.now(timezone.utc)
+    when = (now + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    p = _ruled_outside(isolated, 5003)
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 5003]
+    assert O.defer(p, owing.entries, owing.due, why="no structured answer this pass")
+    fm = fm_of(p)
+    assert "owed" not in fm, "deferring the synthesised entry wrote it into `owed`"
+    assert fm["owed_outside"][0]["recheck_after"], "the date went on the row"
+
+    p2 = _ruled_outside(isolated, 5004)
+    (owing2,) = [o for o in O.owing_items(now=now) if o.item.id == 5004]
+    out = O.apply_verdict(p2, owing2.entries,
+                          [{"n": 1, "outcome": "recheck", "evidence": "still daily",
+                            "recheck_after": when}], item_id=5004)
+    fm2 = fm_of(p2)
+    assert "owed" not in fm2, "a recheck moved the row's date, not the row into `owed`"
+    assert fm2["owed_outside"][0]["recheck_after"] == when, "the date the session named"
+    assert out["remaining"] == 0 and fm2["status"] == "draft", \
+        "the debt is still there, so the item stays open"
+
+
+def test_an_outside_row_is_not_bounded_by_the_stranded_cap(isolated):
+    """The synthesis is not the #2055 back-fill and must not spend one of its
+    `MAX_STRANDED_PER_RUN` slots: a stranded clause is historical debt never seen
+    by any pass, while an undischarged `outside` row is a live ruling on a named
+    human action. With the cap applied to it, the 454-item bound would decide which
+    of Alan's open debts gets measured, and the rest go quiet by the same route
+    #3809 is about."""
+    for i in range(O.MAX_STRANDED_PER_RUN + 2):
+        _stranded(isolated, 6000 + i, [f"Rule on stranded thing {i}."],
+                  completed=f"2026-09-{10 + i:02d}T00:00:00")
+    _ruled_outside(isolated, 6100)
+    ids = _owed_ids()
+    assert 6100 in ids, "the outside row is not held back by the back-fill bound"
+    assert sum(1 for i in ids if i >= 6000 and i < 6100) == O.MAX_STRANDED_PER_RUN
+
+
+def test_a_verified_discharge_sets_done_on_the_row_not_a_prose_line(isolated):
+    """The discharge has to be structural: 12 backlog files carry an
+    `owed_outside discharged by hand: 2026-10-30T03:01:07Z …` line that `git grep
+    -n discharg -- scripts/ app/ workers/` shows is parsed by NOTHING, which is why
+    four of those items sat `draft` and unreachable for six days. `settled` on a
+    synthesised entry is the answer that means "I measured it and Alan's half is
+    done", and it writes `done` plus the evidence onto the row — never a
+    `owed_settled` record for an entry that was never in `owed`."""
+    now = datetime.now(timezone.utc)
+    p = _ruled_outside(isolated, 5006)
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 5006]
+    O.apply_verdict(p, owing.entries,
+                    [{"n": 1, "outcome": "settled",
+                      "evidence": "autonomy/105-check-health-census-weekly.md:14 is "
+                                  "`frequency: weekly` in HEAD"}], item_id=5006)
+    fm = fm_of(p)
+    row = fm["owed_outside"][0]
+    assert row.get("done"), "the row carries its discharge"
+    assert "frequency: weekly" in str(row.get("discharge")), "and what proved it"
+    assert "owed_settled" not in fm, "no owed entry was settled, so none is recorded"
+    assert "owed" not in fm
+    assert 5006 not in _owed_ids(now) and O.outside_list() == [], "both surfaces clear"
+
+
+def test_re_ruling_a_discharged_outside_row_restates_it_not_appends(isolated):
+    """#3809 clause 5. The same-clause lookup in `apply_verdict`'s outside branch
+    filtered on `not o.get("done")`, so a re-ruling of a clause whose row was
+    already discharged fell through to `outside.append(ask)`: a second,
+    undischargeable-in-place row for one clause, which `outside_list` then listed
+    again. Harmless while open items were never re-ruled; a live double-count the
+    moment the queue starts selecting them."""
+    p, entries = _owing(isolated, 5005, [_OUTSIDE_ASK], status="draft")
+    answer = [{"n": 1, "outcome": "outside", "evidence": "needs the editor",
+               "outside": "edit the autonomy task file"}]
+    O.apply_verdict(p, entries, answer, item_id=5005)
+    B.update_frontmatter(p, {"owed_outside": [dict(fm_of(p)["owed_outside"][0],
+                                                   done="2026-11-05T18:00:00Z")]})
+    assert O.outside_list() == [], "discharged: off both surfaces"
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "outside",
+                                  "evidence": "measured again: still `daily`",
+                                  "outside": "edit the autonomy task file"}], item_id=5005)
+    rows = fm_of(p)["owed_outside"]
+    assert len(rows) == 1, f"one row per clause, restated: {rows}"
+    assert not rows[0].get("done"), "the re-ruling took the discharge back"
+    assert rows[0]["discharged_before"] == "2026-11-05T18:00:00Z", \
+        "a retraction is written where humans read it, not overwritten silently"
+    assert [r["item_id"] for r in O.outside_list()] == [5005], "one row listed"
+
+
 # ── The pending hand-run (#3017) ────────────────────────────────────────────
 #
 # A decision can be RULED and still not EXECUTED. PS-3 is the case: seven entity
