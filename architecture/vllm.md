@@ -1336,7 +1336,7 @@ has still not been run as of 2026-09-11.
   that configuration's 400 W.
 
 - **The 2026-10-25 count: the filing condition is met on a fifth counted day, and its
-  qualifying event clears the gate by 0.002.**
+  qualifying event clears the gate by 0.2 pp, two quanta of the gauge.**
   **2026-10-25 00:00 → 2026-10-26 00:00 UTC**, gate **0.60**, the eleventh extract —
   `tests/fixtures/vllm_prefix_miss_2026-10-25.json`, committed byte-for-byte as the daily job
   wrote it (#3692). **463 turns, all 463 measured, 46 of them carrying misses gives 104 misses /
@@ -1375,14 +1375,29 @@ has still not been run as of 2026-09-11.
   on which the condition is met** — the report's evidence set is **the five extracts
   2026-09-27 (four events), 2026-09-29 (one event), 2026-10-01 (one event), 2026-10-15 (one
   event) and 2026-10-25 (one event)**.
-  Say what kind of qualifying event it is, because the margin is the finding. **0.598 clears the
-  0.60 gate by 0.002**, the same class the page already sets aside on 2026-09-27, where the
-  second event "clears the gate by 0.005 and is not the load-mix shape at all — but the margin is
-  thin, so it is named here rather than counted silently". A status line rounds to three decimals
-  and a one-line gap samples the engine at exactly one instant, so whether 0.598 is a real
-  sub-gate peak or a rounding artefact is not decidable from this extract; it is recorded as
-  marginal on the 0.595 precedent, and whether a 0.002 margin enters the qualifying set at all is
-  a ruling, not a reading. The day's own aggregate gives the join its context: **46 of 107**
+  Say what kind of qualifying event it is, because the margin is the finding — and the margin is
+  stated in the gauge's own units, not in a precision the gauge does not have. **0.598 clears the
+  0.60 gate by 0.2 pp**: all 6,620 `kv_samples` values in this extract carry exactly one decimal in
+  percent (min 0.0, max 87.0 — the same width as the day's own 0.870 peak), so the status line's
+  least count is **0.1 pp**, and 59.8 sits **two quanta** of it below the 60.0% gate
+  (0.2 pp = 2 × 0.1 pp). `0.002` is
+  the same gap in fraction units, kept only because it is the unit this section has quoted the
+  event in since #3692 filed it. What an earlier draft of this paragraph left open is ruled now, and
+  the least count is what rules it: whether 0.598 is a real sub-gate reading or a rounding artefact
+  is settled, not open — a value two quanta below 60.0 is not one rounded up onto it from over the
+  gate, so 0.598 is a real sub-gate peak. And admission is an **exclusion test**, ruled and not
+  open: an event with neither free-pool churn nor a gate-level KV explanation qualifies, so a
+  margin that thin does not have to be argued into the qualifying set — it is in, however thin, and
+  is recorded as marginal on the 0.595 precedent with its margin named, the way the page names its
+  second 2026-09-27 event ("clears the gate by 0.005 and is not the load-mix shape at all — but the
+  margin is thin, so it is named here rather than counted silently"). A marginal-only qualifying
+  day moves the evidence set and nothing else: §6.1's budget, this section's newest-clearing-day
+  headline and the vLLM#57032 ask are all unchanged, DROPPED, not owed. The status line after the
+  one inside the gap belongs to this prompt too: it reports **68.9%**, +9.1 pp on the 59.8 reading,
+  and its reported interval begins one interval after that in-gap line — about 9.5 s after the gap
+  ends, so it is this prompt's own post-admission pressure and not a second admission. Stamps here
+  are whole-second and truncated, so that wait is 9 to 10 s, not a measured 9.5. The day's own
+  aggregate gives the join its context: **46 of 107**
   gap-joined misses churned the free pool and **14** sat at or over the gate, so on a day where
   gate-level KV was common it was the likelier outcome that this turn's five misses were already
   explained — and four of the five were.

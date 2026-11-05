@@ -6012,6 +6012,124 @@ def test_the_eleventh_paragraph_states_the_ruled_stance_and_moves_only_the_evide
         "criteria; this item's day is a record and must not re-bound the acceptance bar")
 
 
+def test_the_marginal_admission_is_ruled_in_the_gauges_least_count_units(eleventh_raw, cfg):
+    """#3805: §10's 2026-10-25 bullet states the marginal-event ruling in the gauge's own units,
+    and the three open-question phrases are gone from the page.
+
+    #3692 ruled the admission while the page kept the question: the bullet carried "A status line
+    rounds to three decimals", called the sub-gate reading "not decidable from this extract", and
+    closed with "whether a 0.002 margin enters the qualifying set at all is / a ruling, not a
+    reading" — phrasing no later pass will re-derive, because the ruling it asks for already
+    exists (owed-check on #3692's log, 2026-11-05T15:34:32). Each half of the ruling below is
+    derived from the committed extract rather than repeated from the item:
+
+    * **Least count 0.1 pp, computed from the witness.** Every `kv_samples` share in this extract
+      carries exactly one decimal in percent (6,620 rows, min 0.0, max 87.0 — the day's own 0.870
+      peak). A node that only grepped "0.1 pp" would pass on a page that said "0.2 pp", so the width
+      set is read from the fixture first and only then looked for on the page.
+    * **The margin is two quanta, not one.** 60.0 − 59.8 = 0.2 pp = 2 × 0.1 pp. The item body's
+      "one quantum below" is false arithmetic and is not carried: a page that repeats it teaches the
+      error. `0.002` is that same gap in fraction units, kept as the unit #3692 filed it in and
+      placed AFTER the least-count figure. Being two quanta clear is also what closes the artefact
+      question — a reading cannot be a rounded-down over-gate value from two quanta below — so
+      the page says it is settled and says why, instead of leaving it open or deleting it.
+    * **Admission is an exclusion test**, so thinness never had to be argued into the set: the event
+      is in, named marginal with its margin, on the 0.595 precedent the page already names.
+    * **A marginal-only day moves the evidence set and nothing else** — §6.1's budget, the
+      newest-clearing-day headline and the vLLM#57032 ask (DROPPED, not owed) are named unchanged.
+    * **The next status line is this prompt's own post-admission pressure**, derived from the rows:
+      the line after the one whose interval contains the gap. Stamps are whole-second and
+      truncated, so the wait is published as 9 to 10 s beside the ≈9.5 s derived here (9.53 s on
+      this fixture), not as a tenth-precision figure on its own.
+
+    Clause 5's absences are counts over the whitespace-flattened PAGE, not greps. Two of the three
+    phrases wrapped a line boundary behind the bullet's 2-space continuation indent, so flattened
+    "is   a ruling, not a reading" carries three spaces and no line-based grep can find it — the
+    false zero that made the item's own stated grep read clean while the sentence stood there.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    page = DOC.read_text(encoding="utf-8")
+    fpage = _flat(page)
+    p = _flat(_counted_day_paragraph("2026-10-25"))
+
+    # ── clause 5: the questions have to be gone before the ruling can be the page's word
+    for gone in ("not decidable", "rounds to three decimals", "a ruling, not a reading"):
+        assert fpage.count(gone) == 0, (
+            f"{gone!r} is still on the page ({fpage.count(gone)}x flattened); #3692 ruled what "
+            "this phrasing leaves open, so the question would be outliving the answer")
+
+    # ── clause 1: the least count, derived, and the margin stated in it
+    widths = {len(str(v[1]).split(".")[1]) for v in eleventh_raw["kv_samples"]}
+    assert widths == {1}, (
+        f"the fixture's percent widths are {widths}, so 0.1 pp is no longer the least count and "
+        "the bullet's figure has no witness behind it")
+    assert "least count is 0.1 pp" in p, (
+        "the bullet never names the gauge's least count, which is the unit the ruling is stated in. "
+        "(_counted_day_paragraph strips `**`, so this asks for the figure un-emphasised.)")
+    margin_pp = round(gate * 100 - 59.8, 1)
+    assert margin_pp == 0.2 and round(margin_pp / 0.1) == 2, (gate, margin_pp)
+    assert "by 0.2 pp" in p and "2 × 0.1 pp" in p, (
+        f"the margin has to be given as {margin_pp} pp and derived as two quanta of 0.1 pp")
+    assert "two quanta" in p and "one quantum" not in p, (
+        "the page must say TWO quanta; 'one quantum below' was the item's false arithmetic")
+    assert "0.002" in p, (
+        "the fraction-unit equivalent has gone, and it is the unit every earlier bullet on this "
+        "section quotes a margin in — a reader reconciling this one with 2026-09-27's 0.005 needs it")
+    for at in [i for i in range(len(p)) if p.startswith("0.002", i)]:
+        assert "fraction" in p[at:at + 90], (
+            f"a bare 0.002 stands at {at}, outside the sentence that names it the fraction-unit "
+            "equivalent — the ruling says the margin is stated as the least count, so the old "
+            "figure survives only as that equivalent")
+    assert "a rounding artefact is settled, not open" in p, (
+        "the artefact alternative has to be closed as settled-not-open, not deleted: two quanta "
+        "below the gate is what rules it out, and the next reader needs the reason")
+
+    # ── clause 2: the exclusion test, stated as ruled rather than as an open question
+    assert "admission is an exclusion test, ruled and not open" in p, (
+        "the qualifying test's ruled shape is not on the page in the ruling's own words")
+    assert "neither free-pool churn nor a gate-level KV explanation" in p and "however thin" in p, (
+        "the two exclusions have to be named before 'however thin its margin' can mean anything")
+    assert "marginal on the 0.595 precedent" in p, (
+        "the name and the precedent it rests on are the ruling's own vocabulary")
+
+    # ── clause 3: the evidence set moves, and the bullet says so in as many words
+    assert "the evidence set and nothing else" in p, (
+        "the bullet has to say in as many words what a fifth, marginal-only qualifying day changes, "
+        "or the next reader takes it for a new bound on the bar")
+    assert "§6.1" in p and "vLLM#57032" in p and "DROPPED, not owed" in p, (
+        "the readings a marginal day does NOT move have to be named: budget and the ask alike")
+
+    # ── clause 4: the next status line, derived from the rows the paragraph is built on
+    ex = _with_pool(eleventh_raw)
+    # The day's ONE qualifying event, on the standing rule: a chat-turn miss with
+    # neither half explained. The `kind == "chat"` half is not decoration — filtering
+    # on churn-and-peak alone returns 30 events on this day, and calling any of them
+    # "the marginal one" would credit the wrong event with the paragraph's name.
+    qualifying = [e for e in _gap_events(ex, gate)
+                  if e["kind"] == "chat" and not e["churn"] and e["peak"] < gate]
+    assert len(qualifying) == 1, qualifying
+    ev, = qualifying
+    assert ev["iteration"] == 25 and round(ev["peak"], 3) == 0.598 and ev["n_lines"] == 1, ev
+    row = next(x for x in ex["misses"] if x[2] == ev["iteration"])
+    gap_end = row[0] - row[1] / 1000
+    rows = sorted([tuple(r) for r in ex["kv_samples"]])
+    spanned = [r for r in rows if row[6] <= r[0] <= gap_end + W.STATUS_INTERVAL_S]
+    assert len(spanned) == 1, spanned
+    in_gap, = spanned
+    nxt = rows[rows.index(in_gap) + 1]
+    assert (in_gap[1], nxt[1]) == (59.8, 68.9), (in_gap, nxt)
+    wait = (nxt[0] - W.STATUS_INTERVAL_S) - gap_end
+    assert 9.0 <= wait < 10.0, wait
+    assert "68.9" in p and "+9.1 pp" in p, (
+        f"the line after the in-gap one reads {nxt[1]}% ({nxt[1] - in_gap[1]:+.1f} pp over it); the "
+        "bullet has to carry both, or the next reader meets a second admission with no explanation")
+    assert "9.1 pp" in p and "9.1 pp over the in-gap" not in p.replace("68.9, +9.1 pp", ""), p
+    assert "post-admission pressure" in p, "the clause's reading: this prompt's own pressure"
+    assert "9 to 10 s" in p and "about 9.5 s" in p, (
+        f"derived wait is {wait:.2f} s on whole-second truncated stamps, so the page carries the "
+        "9-to-10 s range beside the ≈9.5 s rather than a tenth-precision figure alone")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ── #3691: the twelfth tracked day — 2026-10-29 ──────────────────────────────
 # The inverse of every other day in this family. The daily-job sweep that produced
