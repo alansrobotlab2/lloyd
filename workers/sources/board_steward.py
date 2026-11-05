@@ -224,13 +224,21 @@ flag is projected from the same rows the \
 five states above are read from, and it names no status the machine wants — only \
 whether a round is live.
 - **`triage=` is on EVERY board line, and it is the only thing that decides the \
-`up_next` -> `draft` rule.** Three values, no others: `confirmed` (a triage turn \
-wrote a `confirmed` verdict for this item and nobody has re-triaged it since), \
-`confirmed-held` (confirmed, and the machine is HOLDING it because a landed \
-round's own clause verdict came back not `met` — it stays where it is until that \
-ruling is cleared, which takes a landed round or a re-triage, not a board move), \
-`none` (no confirmed verdict the state machine counts: never triaged, or \
-re-triaged since the confirmation). It is derived from the same ledger rows the \
+`up_next` -> `draft` rule.** Four values, no others: `confirmed` (a triage turn \
+wrote a `confirmed` verdict for this item and nobody has re-triaged it since, and \
+the loop MAY implement it), `confirmed-held` (confirmed, and the machine is HOLDING \
+it because a landed round's own clause verdict came back not `met` — it stays where \
+it is until that ruling is cleared, which takes a landed round or a re-triage, not a \
+board move), `confirmed-human-only` (confirmed, and its acceptance names a decision \
+the gate would really refuse — the finding stands, but the loop may not be the one \
+that acts on it), `none` (no confirmed verdict the state machine counts: never \
+triaged, or re-triaged since the confirmation). **On a `confirmed-human-only` line \
+the loop may not implement the item, so `up_next` is never the proposal for it — \
+propose `draft`, or propose nothing; never `done`, which would record the opposite \
+of what the ruling says.** The fourth value is not a demotion and not a status: it \
+is the one case where a confirmation and a possible next move coexist, and the field \
+that used to call it `confirmed` was telling you to propose the move that was \
+already refused. It is derived from the same ledger rows the \
 machine reads, so a line and a machine that disagree about a VERDICT mean one of \
 them is broken — that is worth a proposal with a `reason` saying so. The verdict is \
 an OBSERVATION and not an instruction: `triage=confirmed` does not make an item your \
@@ -780,13 +788,30 @@ def round_flag(round_state: tuple | None) -> str:
     return "observation_live"
 
 
-#: The three values a board line's `triage=` field takes. None of them is a status,
+#: The four values a board line's `triage=` field takes. None of them is a status,
 #: which is the rail this field has to keep to: #3329's no-answer-sheet rule says the
 #: line may carry an OBSERVATION the model can check its proposal against, and may
 #: never carry the status `desired_statuses` wants. `confirmed` is the observation
 #: "#3433 has a confirmed verdict on the ledger that is newer than any re-triage mark
 #: on it", which is a fact about the ledger and not a destination.
-TRIAGE_VALUES = ("confirmed", "confirmed-held", "none")
+#:
+#: #3784 added the fourth because three were one too few: `confirmed` stood for two
+#: machine branches at once. `desired_statuses` asks a confirmed verdict a second
+#: question — `elif iid in confirmed and not is_human_only(...)`
+#: (`scripts/automod/backlog.py:6576`) — and a confirmation whose acceptance names a
+#: decision the gate would really refuse falls past that branch to
+#: `("draft", "triaged confirmed; not for the unattended loop")`
+#: (`scripts/automod/backlog.py:6584`), while a plain
+#: one goes to `up_next`. One word covering both meant the prompt's confirmed rule
+#: (`workers/sources/board_steward.py:305-308`) ordered the steward to propose
+#: `up_next` for an item the machine had
+#: already refused — a disagreement manufactured by the board line itself. Measured at
+#: triage: 10 open items take that parked branch and 7 of them (#3119 #3359 #3446
+#: #3466 #3477 #3645 #3782) read bare `triage=confirmed`, so seven more disagreement
+#: rows were pre-booked against a floor the board is already under. `confirmed-held`
+#: exists for the same reason — a verdict the ledger holds is a different observation
+#: from a verdict with no round — and a human-only confirmation is a third.
+TRIAGE_VALUES = ("confirmed", "confirmed-held", "confirmed-human-only", "none")
 
 
 def _triage_map(ledger) -> dict[int, str]:
@@ -794,7 +819,8 @@ def _triage_map(ledger) -> dict[int, str]:
 
     The point of this function is what it does NOT read. It calls the same
     `backlog.confirmed_verdicts` `desired_statuses` calls, and `held_confirmations`
-    too, so the field and the machine's own branch at `backlog.py:6571` answer from
+    too, so the field and the machine's own branch — `elif iid in confirmed and not
+    is_human_only(...)` at `scripts/automod/backlog.py:6576` — answer from
     one measurement: a verdict that `confirmed_verdicts` drops as older than the
     item's newest `backlog_retriage` mark is absent HERE as well, and the line says
     `triage=none` rather than showing a verdict the machine no longer counts. That
@@ -807,8 +833,26 @@ def _triage_map(ledger) -> dict[int, str]:
     `draft` and are never re-triaged, so a line that said merely `confirmed` would
     invite the model to keep such an item in the implement pool — the opposite error.
     An item held but with no live confirmed row is absent: `desired_statuses` only
-    consults `held` behind `iid in confirmed` (backlog.py:6576), so showing held for
+    consults `held` behind `iid in confirmed`
+    (`scripts/automod/backlog.py:6576`), so showing held for
     it would be a second, better-informed reader — #3677's exact defect.
+
+    A third branch reads `confirmed-human-only` (#3784), for the confirmed item whose
+    acceptance names a decision the gate would really refuse — #3782's opens
+    `human-only: ~/obsidian/autonomy/105-check-health-census-weekly.md:14`. That is the
+    case `desired_statuses` parks at `draft` "not for the unattended loop"
+    (`scripts/automod/backlog.py:6584`), so a line saying merely `confirmed` sent the
+    model to the prompt's
+    confirmed rule and the rule said `up_next`: the tick then scored the steward against
+    a table the board line had already made unreachable. The predicate is
+    `B.is_human_only` — the same call the parked branch makes, over the same
+    `acceptance` text — so a marker naming only runtime data (`~/lloyd-data/**`,
+    discarded via `_under_runtime_data_root`
+    (`scripts/automod/backlog.py:403-411`, #3027) stays `confirmed` and
+    the item remains implementable. Deliberately NOT a looser test such as "the
+    acceptance mentions `human-only`": that would read a landable item as parked, and a
+    false positive here costs work the loop could have done, which is the exact failure
+    the 2026-10-05 ruling removed for `unverifiable`.
 
     A row whose `item_id` is not an integer is skipped by `confirmed_verdicts` itself;
     nothing here re-widens that.
@@ -816,7 +860,10 @@ def _triage_map(ledger) -> dict[int, str]:
     from scripts.automod import backlog as B
     confirmed = B.confirmed_verdicts(ledger)
     held = B.held_confirmations(ledger)
-    out = {int(iid): "confirmed" for iid in confirmed}
+    out = {int(iid): ("confirmed-human-only"
+                      if B.is_human_only((rec or {}).get("acceptance"))
+                      else "confirmed")
+           for iid, rec in confirmed.items()}
     for iid in held:
         try:
             key = int(iid)

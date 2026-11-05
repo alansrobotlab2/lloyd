@@ -3555,6 +3555,50 @@ def _flags(prompt: str) -> dict[int, str]:
     return out
 
 
+#: The destination words a board line must never print: the four statuses an item's
+#: front matter takes (`draft`, `up_next`, `in_progress`, `done`) plus `ready`, which
+#: is how `board_health` counts a takeable implement-pool item. #3329's
+#: no-answer-sheet rail says `triage=` names an OBSERVATION about the ledger and never
+#: what `desired_statuses` wants, because the tick's proposal is scored against exactly
+#: that table.
+_STATUS_WORDS = ("draft", "up_next", "in_progress", "done", "ready")
+
+
+def _board_lines(prompt: str) -> list[str]:
+    """Every board line in a rendered prompt — the ONE pattern for it here.
+
+    A board line is `#<id> [status] …` (`_item_line`'s f-string), so this is the same
+    prefix `_line` and `_flags` match on. `^#` with no leading dash on purpose: no
+    rendered line begins `- #`, event lines open with a `%m-%d %H:%M UTC` stamp and
+    health lines are prose, which is why a `- #` guard silently selects nothing.
+    """
+    return [l for l in prompt.splitlines() if re.match(r"#\d+ ", l)]
+
+
+def _assert_no_line_names_a_destination(prompt: str, n_items: int) -> None:
+    """#3329's rail, swept over every board line, with the sweep's own reach pinned.
+
+    Two count assertions, not one property: a filter that stops matching empties the
+    loop and the property then passes over nothing, which is exactly how the first
+    commit's guard read — the review rung caught it by checking whether the body could
+    run, not by reading its intent. So: the sweep must find one line per shown item, and
+    one `triage=` per line, before the status check means anything.
+    """
+    lines = _board_lines(prompt)
+    assert len(lines) == n_items, (
+        f"the sweep matched {len(lines)} board lines for {n_items} shown items, so it "
+        f"is not looking at them: {prompt[:300]!r}")
+    checked = 0
+    for line in lines:
+        for v in re.findall(r"\btriage=(\S+)", line):
+            checked += 1
+            assert v not in _STATUS_WORDS, (
+                f"the triage field named a status, which is the answer sheet: {line}")
+    assert checked == n_items, (
+        f"{n_items} items shown but {checked} `triage=` values found: a board line lost "
+        "its verdict field, so this sweep is not sweeping")
+
+
 def test_every_shown_item_s_board_line_carries_one_derived_round_flag(board, monkeypatch):
     """Clause 1. Four items, four ledger situations, one `round_flag=` each.
 
@@ -4223,8 +4267,10 @@ def test_a_pair_whose_two_halves_name_the_same_status_is_dropped_rather_than_pri
 # `desired_statuses` wanted `up_next` for all four. All four ARE triage-confirmed.
 # The steward was never told: `_item_line` rendered status, name, created, tags,
 # round_flag and 280 body characters, and none of those carries a verdict — while
-# the prompt at `board_steward.py:278-283` told the model that "An item with no
-# triage verdict that sits in `up_next` goes back to `draft`". A rule whose
+# the prompt ordered the model to move "an item with no triage verdict that sits in
+# `up_next`" back to `draft` (that bullet is `workers/sources/board_steward.py:299-311`
+# now, having moved twice under #3766 and #3784; the same sentence is quoted verbatim
+# at :1022 of that file). A rule whose
 # condition is a field that is not on the line is a rule that fires on everything,
 # which is the same defect #3547 fixed for rounds by putting `round_flag=` on every
 # line. Trailing-7-day agreement at filing: judged=99, rate=0.8788 against
@@ -4278,10 +4324,11 @@ def test_every_board_line_names_the_verdict_confirmed_verdicts_derives(board):
         assert ((iid in held) if want == "confirmed-held" else
                 (iid in verdicts) if want == "confirmed" else iid not in verdicts), \
             f"#{iid}: `triage={want}` contradicts confirmed_verdicts/held_confirmations"
-    for line in board_text.splitlines():
-        if line.startswith("- #"):
-            assert not re.search(r"\btriage=(draft|up_next|in_progress|done|ready)\b", line), \
-                f"the triage field named a status, which is the answer sheet: {line}"
+    # #3329's rail, over every board line. This was a `line.startswith("- #")` loop,
+    # which matched nothing at all — so the docstring's "never be a status" was pinned
+    # by an assertion that could not fail. `_assert_no_line_names_a_destination` is the
+    # one pattern for a board line here, and it fails loudly when its own reach is zero.
+    _assert_no_line_names_a_destination(board_text, 4)
 
 
 def test_a_confirmed_verdict_older_than_the_retriage_mark_reads_none(board):
@@ -4385,3 +4432,247 @@ def test_a_confirmed_item_the_steward_parks_is_still_scored_as_a_disagreement(
         row["moves"]
     assert "triage=confirmed" in seen["prompt"], \
         "the steward was scored on a line that still never named the verdict"
+
+
+# ── #3784: a human-only confirmation is a different observation ────────────
+#
+# #3766 put the verdict on every board line, and the disagreement rate did not
+# recover, because a bare `confirmed` is not one observation but two machine
+# branches wearing one word. `desired_statuses` asks a second question of a
+# confirmed verdict — `elif iid in confirmed and not is_human_only(...)`
+# (scripts/automod/backlog.py:6576) — and a human-only confirmation falls past
+# it into `("draft", "triaged confirmed; not for the unattended loop")`
+# (scripts/automod/backlog.py:6584), while a plain one goes to `up_next`.
+# `_triage_map` never asked that second question: it mapped every confirmed id to
+# `confirmed`, and the prompt's `up_next` -> `draft` bullet in
+# workers/sources/board_steward.py:305-308 then orders the model to answer a
+# confirmed line with `up_next` or
+# nothing. On #3782, whose acceptance opens
+# `human-only: ~/obsidian/autonomy/105-check-health-census-weekly.md:14`, that
+# is a manufactured disagreement: the steward was told to propose the one status
+# the machine has already refused. Measured live on the ledger at triage, 10 open
+# items get the "not for the unattended loop" answer and 7 of them (#3119 #3359
+# #3446 #3466 #3477 #3645 #3782) read bare `triage=confirmed` — seven rows the
+# next under-floor tick will score as the model's error.
+
+
+#: A marker whose named path the gate would really refuse, so `is_human_only` is
+#: True by the #3027 rule — the shape #3782's own acceptance opens with.
+GUARD_MARKER = "human-only: ~/obsidian/autonomy/105-check-health-census-weekly.md:14"
+
+#: A marker that names only a runtime-data path, which `_under_runtime_data_root`
+#: answers True for so `_names_a_guard` skips the token
+#: (`scripts/automod/backlog.py:403-411`, #3027), and `is_human_only` is therefore
+#: False: the item stays implementable. The contrast is the point — the fourth value
+#: is keyed on the guard question, not on the marker's presence.
+NON_GUARD_MARKER = "human-only: ~/lloyd-data/_pipeline/thing.json"
+
+
+def test_a_human_only_confirmation_reads_confirmed_human_only_and_the_rest_do_not_move(
+        board):
+    """Clause 1. The field gains the machine's second question, and nothing else moves.
+
+    Four items, four situations, one assertion each. #21 is confirmed behind a guard,
+    which is the case the field could not express. #22 is a plain confirmation and #23
+    a held one — those two are #3766's values and must come back byte-identical, since
+    the round that shipped them is the reason the field exists. #24 is the trap: its
+    acceptance OPENS with `human-only:` but names only a `~/lloyd-data/**` path, which
+    `_names_a_guard` discards by decision (#3027), so the machine implements it and the
+    line must still say `confirmed`. A fix that keyed on the marker's presence instead
+    of on `is_human_only` would reddens #24 — and would park a landable item with a
+    decision nobody asked for, the exact failure the 2026-10-05 ruling removed.
+    """
+    from scripts.automod.backlog import is_human_only
+
+    assert W.TRIAGE_VALUES == ("confirmed", "confirmed-held",
+                               "confirmed-human-only", "none"), W.TRIAGE_VALUES
+    assert len(W.TRIAGE_VALUES) == 4, (
+        "the field's whole safety property is that each value maps to exactly one "
+        "machine branch; a fifth would need its own rule in the prompt")
+
+    _triage_item(board, 21, "up_next", acceptance=GUARD_MARKER)
+    _triage_item(board, 22, "up_next", acceptance="step: do the thing")
+    _triage_item(board, 23, "up_next", acceptance="step: do the thing", held=True)
+    _triage_item(board, 24, "up_next", acceptance=NON_GUARD_MARKER)
+
+    # The premise, re-checked rather than assumed: the fourth value exists only
+    # because `is_human_only` answers differently for #21 and #24.
+    confirmed = B.confirmed_verdicts(S.LEDGER_PATH)
+    assert is_human_only(confirmed[21].get("acceptance")), "fixture lost its guard"
+    assert not is_human_only(confirmed[24].get("acceptance")), (
+        "#3027's discard stopped holding, and #24 is no longer the contrast case")
+
+    tm = W._triage_map(S.LEDGER_PATH)
+    assert tm[21] == "confirmed-human-only", tm
+    assert tm[22] == "confirmed", tm
+    assert tm[23] == "confirmed-held", tm
+    assert tm[24] == "confirmed", tm
+
+
+def test_a_human_only_confirmed_line_renders_its_value_and_never_the_status_wanted(
+        board):
+    """Clause 2. The new value reaches the wire, and the answer sheet stays hidden.
+
+    #25 sits `up_next` with a confirmation behind a guard, so the machine wants
+    `draft`. The line has to carry the OBSERVATION (`triage=confirmed-human-only`) and
+    must not carry the destination: #3329's rule is that the board line may name a fact
+    the model checks its proposal against and never the status `desired_statuses` wants,
+    because this tick is scored against that table. So the assertion is two-sided — the
+    value is present on this item's line, and no `triage=` on any line of this board
+    names a status, which is what would make the disagreement rate meaningless.
+    """
+    import re as _re
+
+    _triage_item(board, 25, "up_next", acceptance=GUARD_MARKER)
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    assert len(items) == 1, "the item must be shown to be ruled on"
+    want = B.desired_statuses(S.LEDGER_PATH)
+    assert want[25][0] == "draft" and "not for the unattended loop" in want[25][1], (
+        f"the machine no longer parks a human-only confirmation, and this node is "
+        f"measuring nothing: {want.get(25)}")
+
+    prompt = W.build_prompt(events=[], items=items, n_open=1, since_ts=0.0)
+    line = _line(prompt, 25)
+    found = _re.findall(r"\btriage=(\S+)", line)
+    assert len(found) == 1, f"expected exactly one triage= on {line!r}, got {found}"
+    assert found[0] == "confirmed-human-only", (
+        f"#{25} is confirmed behind a guard and the line says {found[0]!r}; the model "
+        "reading it has no way to know the loop may not implement it")
+    # No `!= want[25][0]` assertion here: the review named that as unfailable,
+    # since `found[0] == "confirmed-human-only"` and `want[25][0] == "draft"`
+    # already entail it. The no-answer-sheet property is pinned by the sweep
+    # below, over EVERY board line against the set of status names.
+    #
+    # The sweep, and why it is not a loop over a guessed prefix: the first commit's
+    # `l.startswith("- #")` matched nothing at all — event lines open with a
+    # `%m-%d %H:%M UTC` stamp, health lines are prose, and no rendered line begins
+    # `- #` — so its body never ran and its assertion could not fail. The helper keys on
+    # `#<id> ` like `_line` and `_flags` do, and pins its own reach by count, so a
+    # filter that stops matching reddens the node instead of emptying the loop.
+    _assert_no_line_names_a_destination(prompt, len(items))
+
+
+def test_the_prompt_names_four_triage_values_and_rules_the_human_only_line():
+    """Clause 3. The model is told what the fourth value means, and what it forbids.
+
+    A value the prompt never defines is a token the model guesses at, which is the
+    failure #3547's own triage names. So the field doc must enumerate all four and say
+    the operative thing: on a `confirmed-human-only` line the loop may not implement the
+    item, so `up_next` is never the proposal for it — `draft`, or no move. The old
+    sentence "Three values, no others" has to go, because it is a false statement about
+    the field the moment the fourth exists.
+
+    The existing `up_next` -> `draft` bullet is deliberately NOT re-worded, and that is
+    the second half of this clause: its trigger is `triage=none` and its prohibition
+    names `confirmed` and `confirmed-held`, so it simply does not fire on the new value
+    — the least-diff place for the rule to live that cannot regress #3766's fix. The
+    assertions below are the ones that node already makes, restated here so a future
+    edit that quietly widens that bullet to the new value reddens something.
+    """
+    import re as _re
+
+    prompt = W.build_prompt(events=[], items=[], n_open=0, since_ts=0.0)
+
+    assert "- **`triage=`" in prompt, "the field is never named to the steward"
+    doc = prompt[prompt.index("- **`triage=`"):]
+    doc = doc[:doc.index("\n- ")]
+    assert "Three values, no others" not in doc, (
+        f"the field doc still asserts a cardinality the field does not have: {doc}")
+    for value in W.TRIAGE_VALUES:
+        assert value in doc, f"`{value}` is rendered but never defined: {doc}"
+
+    # The rule has to be pinned to ITS OWN sentence, and the only scope that
+    # does that is the bolded sentence itself: a character window around the
+    # value cannot test this (the review refused the first commit for exactly
+    # that — 700 back from the value plus the rest of the bullet still contained
+    # `up_next` and `draft` from the bullet's own header, so deleting the whole
+    # rule left the node green), and splitting on terminal punctuation cannot
+    # either, because the four-value enumeration is itself one sentence ending in
+    # `)`, so the definition and the rule land in the same fragment. So: find the
+    # rule by its own anchor, and fail when the anchor is absent — which is what
+    # deleting the sentence now does.
+    anchor = "**On a `confirmed-human-only` line"
+    k = doc.find(anchor)
+    assert k >= 0, (
+        "the value is named in the enumeration but the sentence that says what it "
+        "forbids is gone: the model has a token and no instruction, which is the "
+        "shape that produced the row this item is about")
+    close = doc.find("**", k + len(anchor))
+    assert close > k, "the rule sentence is not closed, so its scope is unreadable"
+    rule = doc[k:close]
+    # Clause scope, not sentence scope, for the prohibition itself: the rule
+    # sentence also forbids `done`, and a sentence-level `"never" in rule` was
+    # satisfied by that second clause — measured, softening "`up_next` is never
+    # the proposal" to "`up_next` is the proposal" left the node green because
+    # "never `done`" was still in the same sentence. So the negation has to be in
+    # the same clause as the move it forbids.
+    # The negation must come AFTER the move it refuses. A `"may not" in clause`
+    # test passed on the softened text — "the loop may not implement the item, so
+    # `up_next` is the proposal for it" — because `may not` was the REASON half of
+    # the same clause. So the check is on what follows the name.
+    after = [c[c.index("up_next") + len("up_next"):]
+             for c in _re.split(r"[;—]| - ", rule) if "up_next" in c]
+    assert after, f"no clause of the rule addresses `up_next`: {rule}"
+    assert any(("never" in a or "not" in a) for a in after), (
+        f"the rule does not forbid `up_next` after naming it: {after}")
+    assert "draft" in rule or "no move" in rule or "nothing" in rule, (
+        f"the rule forbids up_next without saying what to do instead: {rule}")
+    assert "implement" in rule, (
+        "the rule does not say WHY the move is forbidden — the loop may not "
+        f"implement the item is the fact the model needs: {rule}")
+
+    bullet_start = prompt.index("- **An `up_next` item")
+    bullet = prompt[bullet_start:prompt.index("\n- ", bullet_start + 1)]
+    assert "`triage=none`" in bullet, (
+        "the rule's trigger drifted off the field, which is #3766's fix")
+    assert "`triage=confirmed`" in bullet and "`triage=confirmed-held`" in bullet, (
+        "the confirmed prohibition drifted, which is #3766's fix")
+    assert "confirmed-human-only" not in bullet, (
+        "the up_next -> draft bullet must not acquire the human-only value: that case "
+        "is ruled where the values are defined, and naming it twice is how the two "
+        "copies disagree")
+
+
+def test_nothing_the_machine_parks_as_not_for_the_loop_reads_bare_confirmed(board):
+    """Clause 4. The property, over a ledger, not a fixture item.
+
+    The item's acceptance is stated as a universal: for every open item
+    `desired_statuses` answers `(draft, ...'not for the unattended loop')` for, the
+    `triage=` value derived from the same ledger rows is not bare `confirmed`. That is
+    the whole defect in one line — one word standing for two machine branches — and a
+    four-item table would only pin the four cases someone thought of. So this walks the
+    table the two functions agree on, over a board deliberately populated with every
+    verdict the parked branch can be reached by: a guard marker, a re-triaged guard,
+    an `unverifiable`, a non-guard marker (which must NOT be caught), and a plain
+    confirmation (which must not be caught either).
+
+    The direction of the risk is worth naming: a false positive here (an implementable
+    item reading `confirmed-human-only`) would park work the loop could do, which is the
+    2026-10-05 ruling's whole subject. A false negative costs agreement points and
+    re-files this item, which is what has happened eight times.
+    """
+    _triage_item(board, 31, "up_next", acceptance=GUARD_MARKER)
+    _triage_item(board, 32, "up_next", acceptance=GUARD_MARKER + " (and a second path)")
+    _triage_item(board, 33, "up_next", verdict="unverifiable", acceptance="")
+    _triage_item(board, 34, "up_next", acceptance=NON_GUARD_MARKER)
+    _triage_item(board, 35, "up_next", acceptance="step: do the thing")
+
+    want = B.desired_statuses(S.LEDGER_PATH)
+    tm = W._triage_map(S.LEDGER_PATH)
+    parked = sorted(iid for iid, tup in want.items()
+                    if tup[0] == "draft" and "not for the unattended loop" in tup[1])
+    assert parked, (
+        "the fixture reaches the parked branch for nobody, so the loop below is an "
+        "empty conjunction and proves nothing")
+
+    for iid in parked:
+        got = tm.get(iid, "none")
+        assert got != "confirmed", (
+            f"#{iid} is parked by the machine as not for the unattended loop, but its "
+            f"board line says {got!r} and the prompt orders up_next for that word")
+        assert got in W.TRIAGE_VALUES, f"#{iid}: {got!r} is not a defined value"
+
+    # And the two shapes that must survive untouched, checked by id so a blanket
+    # "not confirmed" over the board could not pass this node by accident.
+    assert tm[34] == "confirmed", "a non-guard marker became a hold"
+    assert tm[35] == "confirmed", "a plain confirmation became a hold"
