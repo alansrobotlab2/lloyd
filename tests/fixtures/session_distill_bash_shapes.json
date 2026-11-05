@@ -1,35 +1,37 @@
 {
- "commands_covered": 518,
- "commands_total": 720,
+ "commands_covered": 551,
+ "commands_tiered": 758,
+ "commands_total": 758,
  "derived_from": "messages[].tool_calls[].function.arguments (JSON-decoded)",
+ "durable_external_hits": [],
  "families_recorded": 24,
- "families_total": 180,
- "note": "Regenerate with LLOYD_RECORD_BASH_SHAPES=1 pytest tests/test_worker_capability_allowlist.py -k record_the_session_distill_bash and READ the diff: a family entering this list with a command the tier ladder calls durable-external is the finding, not noise. `families_total` exceeds `families_recorded` on purpose \u2014 the long tail is one-off shapes, and the coverage is published rather than implied by the file's length.",
+ "families_total": 181,
+ "note": "Regenerate with LLOYD_RECORD_BASH_SHAPES=1 pytest tests/test_worker_capability_allowlist.py -k record_the_session_distill_bash and READ the diff: a family entering this list with a command the tier ladder calls durable-external is the finding, not noise \u2014 and since #3781 it cannot be missed by falling in the tail either, because `durable_external_hits` lists every command across ALL `commands_tiered` that the ladder calls durable-external, kept family or not, and the recording node refuses to write a corpus containing one. `families_total` exceeds `families_recorded` on purpose \u2014 the long tail is one-off shapes, and the coverage of THIS list is published as `commands_covered` of `commands_total`; what is measured over the whole corpus is `commands_tiered` and `durable_external_hits`.",
  "shapes": [
   {
-   "command": "cd /home/alansrobotlab/lloyd-data/sessions && python3 -c \"\nimport json\nd=json.load(open('20260926_094011_ivb917.json'))\nprint(d['messages'][19]['content'][0]['text'])\n\"",
-   "count": 221,
+   "command": "cd <TRANSCRIPT> && python3 -c \"\nimport json\nd=json.load(open('<TRANSCRIPT>'))\nprint(d['messages'][19]['content'][0]['text'])\n\"",
+   "count": 242,
    "shape": "cd python3"
   },
   {
-   "command": "cd /home/alansrobotlab/lloyd\ngrep -rn \"persisted-output\" --include=*.py app/ | head\necho \"=== ===\"\ngrep -rn \"Output too large\" --include=*.py app/ | head",
-   "count": 42,
+   "command": "cd <HOME>/lloyd\ngrep -rn \"persisted-output\" --include=*.py app/ | head\necho \"=== ===\"\ngrep -rn \"Output too large\" --include=*.py app/ | head",
+   "count": 45,
    "shape": "cd echo grep head"
   },
   {
-   "command": "cd /home/alansrobotlab/lloyd-data/sessions && python3 -c \"\nimport json\nd=json.load(open('20261012_210336_iv319c.json'))\nm=d['messages']\nfor i,x in enumerate(m):\n    if x.get('role')!='thinking': continue\n    c=x.get('content') or ''\n    print('=====[%d] thinking (%d chars)'%(i,len(c)))\n    print(c[:2200])\n\" > /tmp/think.txt; wc -c /tmp/think.txt",
-   "count": 25,
+   "command": "cd <TRANSCRIPT> && python3 -c \"\nimport json\nd=json.load(open('<TRANSCRIPT>'))\nm=d['messages']\nfor i,x in enumerate(m):\n    if x.get('role')!='thinking': continue\n    c=x.get('content') or ''\n    print('=====[%d] thinking (%d chars)'%(i,len(c)))\n    print(c[:2200])\n\" > /tmp/think.txt; wc -c /tmp/think.txt",
+   "count": 27,
    "shape": "cd python3 wc"
+  },
+  {
+   "command": "ls -la <TRANSCRIPT>; wc -c <TRANSCRIPT>",
+   "count": 27,
+   "shape": "ls wc"
   },
   {
    "command": "python3 - <<'EOF'\nimport json\np=\"<TRANSCRIPT>\"\nd=json.load(open(p))\nmsgs=d[\"messages\"]\nfor i in [31,71]:\n    print(\"=\"*40, \"USER\", i)\n    print(msgs[i][\"content\"][0][\"text\"])\nEOF",
    "count": 25,
    "shape": "python3"
-  },
-  {
-   "command": "ls -la <TRANSCRIPT>; wc -c <TRANSCRIPT>",
-   "count": 24,
-   "shape": "ls wc"
   },
   {
    "command": "cd ~/lloyd && ls memory/topics/ 2>/dev/null | head -50; echo \"===\"; grep -rn \"_pipeline/tmp\" --include=SKILL.md skills/ 2>/dev/null | head -20",
@@ -47,9 +49,14 @@
    "shape": "echo grep head"
   },
   {
-   "command": "cd /home/alansrobotlab/lloyd-data/sessions && python3 -c \"\nimport json\nd=json.load(open('20261021_091127_iv17dc.json'))\nm=d['messages']\nfor i,x in enumerate(m):\n    print('=====',i,x.get('role'), list(x.keys()))\n\" | head -60",
-   "count": 12,
+   "command": "cd <TRANSCRIPT> && python3 -c \"\nimport json\nd=json.load(open('<TRANSCRIPT>'))\nm=d['messages']\nfor i,x in enumerate(m):\n    print('=====',i,x.get('role'), list(x.keys()))\n\" | head -60",
+   "count": 14,
    "shape": "cd head python3"
+  },
+  {
+   "command": "ls <HOME>/.venvs/ 2>&1 | head; echo \"--- does skill name the domain enum? ---\"; grep -rln \"CANONICAL_DOMAINS\\|okf_taxonomy\" <HOME>/lloyd/skills/ 2>/dev/null | head",
+   "count": 11,
+   "shape": "1 echo grep head ls"
   },
   {
    "command": "cd ~/obsidian && f=$(grep -rl \"name: file-read-resilience\" --include='*.md' . | head -1); echo \"FILE: $f\"; sed -n '1,80p' \"$f\"",
@@ -57,22 +64,17 @@
    "shape": "cd echo grep head sed"
   },
   {
-   "command": "cd /home/alansrobotlab/lloyd-data/sessions && python3 -c \"\nimport json\nd=json.load(open('20261012_155627_iv3ce9.json'))\nms=d['messages']\nfor i,m in enumerate(ms):\n    if m['role']=='thinking':\n        r=m.get('reasoning') or ''\n        print('=== THINK',i,'===')\n        print(r[:900]); print()\n\" 2>&1 | head -120",
+   "command": "cd <TRANSCRIPT> && python3 -c \"\nimport json\nd=json.load(open('<TRANSCRIPT>'))\nms=d['messages']\nfor i,m in enumerate(ms):\n    if m['role']=='thinking':\n        r=m.get('reasoning') or ''\n        print('=== THINK',i,'===')\n        print(r[:900]); print()\n\" 2>&1 | head -120",
    "count": 10,
    "shape": "1 cd head python3"
   },
   {
-   "command": "echo \"=== automod ledger in code ===\"; grep -rn \"ledger.sqlite\\|LEDGER_DB\\|ledger_path\\|automod/.*sqlite\" ~/lloyd/app/*.py ~/lloyd/workers/*.py 2>/dev/null | head -15; echo \"=== _pipeline top level ===\"; ls ~/lloyd-data/_pipeline/ 2>&1 | head -30",
-   "count": 10,
-   "shape": "1 echo grep head ls"
-  },
-  {
-   "command": "cd /home/alansrobotlab/lloyd-data/sessions && python3 -c \"\nimport json\nd=json.load(open('20261012_210336_iv319c.json'))\nm=d['messages']\nfor i,x in enumerate(m):\n    if x.get('role')!='thinking': continue\n    r=x.get('reasoning') or ''\n    print('=====[%d] reasoning (%d chars) ms=%s'%(i,len(r),x.get('reasoning_ms')))\n    print(r[:2500])\n\" > /tmp/reason.txt; wc -c /tmp/reason.txt; head -120 /tmp/reason.txt",
+   "command": "cd <TRANSCRIPT> && python3 -c \"\nimport json\nd=json.load(open('<TRANSCRIPT>'))\nm=d['messages']\nfor i,x in enumerate(m):\n    if x.get('role')!='thinking': continue\n    r=x.get('reasoning') or ''\n    print('=====[%d] reasoning (%d chars) ms=%s'%(i,len(r),x.get('reasoning_ms')))\n    print(r[:2500])\n\" > /tmp/reason.txt; wc -c /tmp/reason.txt; head -120 /tmp/reason.txt",
    "count": 10,
    "shape": "cd head python3 wc"
   },
   {
-   "command": "cd /home/alansrobotlab/obsidian && grep -rl 'transcript_path:' --include='*.md' . | head -10; echo \"--- count ---\"; grep -rl 'transcript_path:' --include='*.md' . | wc -l",
+   "command": "cd <HOME>/obsidian && grep -rl 'transcript_path:' --include='*.md' . | head -10; echo \"--- count ---\"; grep -rl 'transcript_path:' --include='*.md' . | wc -l",
    "count": 9,
    "shape": "cd echo grep head wc"
   },
@@ -92,14 +94,14 @@
    "shape": "sed"
   },
   {
-   "command": "cd /home/alansrobotlab/lloyd-data/sessions && /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python - <<'EOF'\nimport json\nd=json.load(open('20261007_112455_iv9a36.json'))\nms=d['messages']\ntxt=''.join(b.get('text','') for b in ms[15]['content'])\nprint(txt)\nEOF",
-   "count": 5,
-   "shape": "/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python cd"
+   "command": "ls <HOME>/lloyd | head -40; echo ---; find <HOME>/lloyd -maxdepth 3 -name \"SKILL.md\" -path \"*youtube*\" 2>/dev/null",
+   "count": 6,
+   "shape": "echo find head ls"
   },
   {
-   "command": "ls /home/alansrobotlab/lloyd | head -40; echo ---; find /home/alansrobotlab/lloyd -maxdepth 3 -name \"SKILL.md\" -path \"*youtube*\" 2>/dev/null",
+   "command": "cd <TRANSCRIPT> && <HOME>/lloyd/.venvs/lloyd/bin/python - <<'EOF'\nimport json\nd=json.load(open('<TRANSCRIPT>'))\nms=d['messages']\ntxt=''.join(b.get('text','') for b in ms[15]['content'])\nprint(txt)\nEOF",
    "count": 5,
-   "shape": "echo find head ls"
+   "shape": "<HOME>/lloyd/.venvs/lloyd/bin/python cd"
   },
   {
    "command": "sed -n '1000,1022p' ~/lloyd/config.yaml; echo \"=== barge ===\"; grep -n -i \"barge\" ~/lloyd/config.yaml | head -5",
@@ -117,17 +119,17 @@
    "shape": "python3 wc"
   },
   {
+   "command": "ls -la <HOME>/.venvs/lloyd/ 2>&1 | head; echo \"--- bin? ---\"; ls <HOME>/.venvs/lloyd/bin 2>&1 | head",
+   "count": 4,
+   "shape": "1 echo head ls"
+  },
+  {
    "command": "cd ~/obsidian && f=$(find skills -name \"SKILL.md\" -path \"*youtube-transcript/*\" 2>/dev/null | head -1); echo \"FILE: $f\"; grep -n 'Path.home()' \"$f\"; echo \"--- bash scratch line ---\"; grep -n \"TRANSCRIPT_DIR=\" \"$f\"",
    "count": 4,
    "shape": "cd echo find grep head"
-  },
-  {
-   "command": "SK=$(find ~ -name SKILL.md -path \"*youtube-transcript*\" 2>/dev/null | head -3); echo \"$SK\"; for f in $SK; do echo \"### $f\"; grep -in \"oembed\\|duration\\|reflow\" \"$f\" | head -20; done",
-   "count": 4,
-   "shape": "echo find grep head"
   }
  ],
  "source": "session-distill",
  "store": "/home/alansrobotlab/lloyd-data/sessions",
- "transcripts_read": 111
+ "transcripts_read": 118
 }
