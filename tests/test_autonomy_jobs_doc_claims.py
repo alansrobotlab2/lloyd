@@ -210,8 +210,19 @@ WATCH_JOBS = {
     # task file puts on its own verdict — it may call a check `vacuous` and must not
     # "retire, disable or weaken" one — which is why the tier table has it in
     # `Reports only` beside #97 rather than with #94, whose ledger rewrite is a write.
-    105: ("daily", "check_health_census", "check-health-census.jsonl",
+    105: ("weekly", "check_health_census", "check_health_census.jsonl",
           "retires, disables or weakens"),
+    # The #105 entry ABOVE, and why its Freq is the cadence its MODULE ships, not
+    # the `frequency:` its task file declares. `CADENCE` is weekly, the skill slug is
+    # `-weekly`, its `name:` is weekly and #103 beside it is weekly; the field read
+    # `daily` when #3777 landed (read 2026-11-05) and stayed there because moving a
+    # `frequency:` is a #724 dispatch-affecting write that every route refuses an
+    # unattended round — that one line is owed as #3782, and it arms nothing meanwhile
+    # since the task is `draft`. #3777 moved every artefact code CAN reach to weekly.
+    # `test_watch_105_cadence_is_the_module_not_its_frozen_field` below grades this entry
+    # against the module instead of the task file, and `tests/test_check_health_census.py`
+    # reads `JOURNAL_NAME` out of that module rather than copying it, so renaming either
+    # constant reddens both files instead of leaving one of them holding the old name.
     # #3456: the four probes read off ~/obsidian/autonomy/106-published-maxima-probe-daily-record.md
     # on 2026-11-01. `reads` is the recorder the task file exists to call — shipped in 621192c4 and
     # never invoked outside a test until this cadence — `writes` the one journal that command
@@ -3883,25 +3894,112 @@ def test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibi
     schedule in its own cell, then subject, then what it writes, then what it must
     not do — four probes, each matching only in the entry's own row.
 
-    The schedule is checked against the `frequency:` the task file declares rather
-    than against the run record's cadence for the reason #1102 states: #86 said
-    "every night" while a later hand typed `frequency: weekly`, and the cell is the
-    only place the two can be caught disagreeing. The other three probes are the
-    artefact and the bound the task file itself names, so a row that reads as
+    The schedule is checked against the cadence `WATCH_JOBS` pins rather than against
+    a run record, for the reason #1102 states: #86 said "every night" while a later
+    hand typed `frequency: weekly`, and the cell is the only place the two can be
+    caught disagreeing. For fourteen of the fifteen jobs that pin IS the `frequency:`
+    its task file declares, read off it by #2630; the exception is #105, whose field
+    is held at `daily` behind the #724 rail and whose pin follows the module's
+    `CADENCE` — see the note on that entry, and
+    `test_watch_105_cadence_is_the_module_not_its_frozen_field` below, which owns the
+    difference instead of letting this node state it wrongly. The other three probes
+    are the artefact and the bound the task file itself names, so a row that reads as
     self-evidently read-only but actually files a backlog draft fails here.
     """
     freq, reads, writes, prohibition = WATCH_JOBS[job]
     row = _watch_row(f"#{job}")
     cells = [c.strip() for c in row.strip().strip("|").split("|")]
     assert cells[1] == freq, (
-        f"#{job}'s row reads {cells[1]!r} where its task file's `frequency:` says "
-        f"{freq!r} — the same drift #1102's clause 2 was written for")
+        f"#{job}'s row reads {cells[1]!r} where `WATCH_JOBS[{job}]` pins {freq!r} — "
+        f"the same drift #1102's clause 2 was written for. For every job but #105 the "
+        f"pin is that task file's `frequency:`; for #105 it is "
+        f"`check_health_census.CADENCE`, because its field cannot move unattended.")
     for want, why in ((reads, "what it reads"), (writes, "what it writes"),
                       (prohibition, "what it must not do")):
         assert want in row, (
             f"#{job}'s entry never states {why} in terms (`{want}` is what "
             f"`~/obsidian/autonomy/{job}-*.md` names) — a schedule with a subject and "
             f"no reads or writes is what #2630 was filed for")
+
+
+def test_watch_105_cadence_is_the_module_not_its_frozen_field():
+    """#3777 clause 4: #105's row and its pin are graded against the module it watches.
+
+    The two graders above can only ask a row to match `WATCH_JOBS`, and #105's entry is the
+    one value in that table a task file does not supply — its `frequency:` is held at
+    `daily` by the #724 rail (#3782) while everything else about the job says weekly. So
+    this node drops the task file and reads the shipped module instead, which is the
+    artifact the cadence is actually executed at:
+
+    * `WATCH_JOBS[105]`'s cadence is the first word of `check_health_census.CADENCE`, and
+      its artefact is `check_health_census.JOURNAL_NAME` — both read from the module at
+      collection time, so neither value is a copy the module can move past. The table
+      shipped this cell with the journal's hyphenated spelling, which is the name of no
+      file anyone writes, and the doc's Writes cell repeated it;
+      `tests/test_check_health_census.py` holds the matching pin on the task file's own
+      `description`, which is the half of the pair a run is actually delivered.
+    * the row's Freq cell is that same word, and the row no longer quotes the
+      `--days 90 --record` command it used to: the window is `WINDOW_DAYS`, the parser
+      never accepted a `--days` flag, and the shipped line therefore exited 2 in argparse
+      instead of journaling a row. A doc that names an unrunnable command as a job's
+      procedure is the #3418 "a verdict that is only printed" shape one level up —
+      nothing was ever going to be printed.
+
+    The row's own flags are graded against the module's `--help`, not against a list
+    typed here: this file's prose may mention `--days` to explain why the row no longer
+    runs with it, so a bare substring ban would either catch the explanation or have to
+    be written around it, while "every flag the row quotes is a flag the module
+    advertises" is the property that was actually broken.
+
+    The node's own control is the module's surface: `CADENCE`, `JOURNAL_NAME` and the
+    advertised flag set are each proved non-empty before anything is compared to them,
+    because a substring test against an empty string is a pass that measured nothing.
+    """
+    import contextlib
+    import io
+
+    from scripts.maintenance import check_health_census as CHC
+
+    cadence, _reads, artefact, _bound = WATCH_JOBS[105]
+    assert CHC.CADENCE.strip(), "check_health_census.CADENCE is empty, so nothing below compares to anything"
+    assert CHC.JOURNAL_NAME.strip(), "check_health_census.JOURNAL_NAME is empty, ditto"
+    assert cadence == CHC.CADENCE.strip().split()[0], (
+        f"WATCH_JOBS[105] pins the cadence as {cadence!r} where the module this job runs "
+        f"says {CHC.CADENCE.strip()!r} — the field in the task file is frozen at `daily` "
+        f"pending #3782, so this pin is the only place the shipped cadence is recorded")
+    assert artefact == CHC.JOURNAL_NAME, (
+        f"WATCH_JOBS[105] pins the artefact as {artefact!r} where the module writes "
+        f"{CHC.JOURNAL_NAME!r}; the hyphenated spelling is not a file that exists")
+
+    cells = [c.strip() for c in _watch_row("#105").strip().strip("|").split("|")]
+    assert cells[1] == cadence, (
+        f"§Watch the machinery's #105 Freq cell reads {cells[1]!r} while the module ships "
+        f"{cadence!r} and WATCH_JOBS[105] says the same — #3777 moved both, so a row left "
+        f"at the old value is the drift, not the cadence")
+    assert CHC.JOURNAL_NAME in cells[4], (
+        f"#105's Writes cell does not name the journal the module appends to "
+        f"({CHC.JOURNAL_NAME!r}); what it names instead is {cells[4][:80]!r}…")
+    # Every flag the Reads cell quotes must be one the module advertises. The accepted
+    # set is captured from the module's own `--help` (argparse prints and exits 0), so a
+    # flag added to the parser needs no edit here and a flag the parser loses cannot stay
+    # quoted in the fleet document.
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout), pytest.raises(SystemExit) as caught:
+        CHC.main(["--help"])
+    assert caught.value.code == 0, f"`--help` exited {caught.value.code}, not 0"
+    advertised = set(re.findall(r"--[a-z][a-z-]*", stdout.getvalue()))
+    quoted = set(re.findall(r"`(--[a-z][a-z-]*)`", cells[3]))
+    assert advertised >= {"--record"}, (
+        f"the module advertised {sorted(advertised)} and not `--record`, so its flag "
+        "surface was not read and the subset check below proves nothing")
+    assert quoted, (
+        "#105's Reads cell quotes no `--flag` at all, so there is nothing to grade: the "
+        "row no longer states the command this job runs")
+    assert quoted <= advertised, (
+        f"#105's Reads cell quotes {sorted(quoted - advertised)}, which "
+        "`check_health_census.py --help` does not advertise — a flag the parser rejects "
+        "turns the shipped `command:` into an exit 2 in argparse, which is exactly how "
+        "this row's `--days 90` line behaved and why the job never journaled")
 
 
 def test_the_doc_no_longer_states_that_the_seven_have_no_entry():
@@ -6324,7 +6422,10 @@ CADENCE_CELLS: dict[str, dict[str, str]] = {
     # `frequency: daily` (read 2026-11-03), which is also what the per-row probe for
     # 107 asserts straight off that file; this dict's value is the one the row-set half
     # and the seeded-copy control below read, so an admitted §Watch row can no longer
-    # carry a cadence this section never looked at.
+    # carry a cadence this section never looked at. One entry in the derived fifteen is
+    # not a task file's `frequency:`: #105's is `check_health_census.CADENCE`, because
+    # its field is the one a #724 dispatch-affecting rail keeps frozen at `daily` until a
+    # person moves it (#3782). See the note on `WATCH_JOBS[105]`.
     "Watch the machinery": {f"#{jid}": cadence
                             for jid, (cadence, _r, _w, _b) in WATCH_JOBS.items()},
 }
@@ -6391,13 +6492,22 @@ def test_a_group_row_states_the_cadence_its_task_file_declares(group: str, job: 
     """Clauses 1 and 2, in the shape #1102 left for #86 and #2630 for §Watch: one node
     per row, the `Freq` cell against the cadence the task file declares.
 
-    The cell is checked against the declared `frequency:` and never against a run
-    record, for #1102's reason: the two are meant to agree, and the cell is the only
-    place they can be caught disagreeing. That distinction is load-bearing here rather
-    than academic — on the day #3333 was filed the run rows said 1/day, `backlog/2445`'s
+    The cell is checked against the pinned cadence and never against a run record, for
+    #1102's reason: the two are meant to agree, and the cell is the only place they can
+    be caught disagreeing. That distinction is load-bearing here rather than academic —
+    on the day #3333 was filed the run rows said 1/day, `backlog/2445`'s
     `closure_reason` still read "The cadence is real and current" over 3/day three runs
     a UTC day, and the doc said `3×/day`. The task file is the one of those three the
     scheduler reads.
+
+    `CADENCE_CELLS` spells §Ingest and §Bound entropy by hand off their task files and
+    DERIVES §Watch the machinery from `WATCH_JOBS`, so a value here is a task file's
+    `frequency:` except for #105, whose pin is its module's `CADENCE` while its field
+    sits frozen at `daily` behind the #724 rail (#3782). The message below therefore
+    names the pin, not the file: on the day #3777 moved that row to `weekly` the file it
+    is named after still said `daily`, and a failure text that asserted otherwise would
+    have been a false statement about a vault file inside the very node that exists to
+    catch cadence lies.
     """
     want = CADENCE_CELLS[group][job]
     have = _cadence_rows(_text(), group).get(job)
@@ -6407,10 +6517,11 @@ def test_a_group_row_states_the_cadence_its_task_file_declares(group: str, job: 
         f"{sorted(_cadence_rows(_text(), group))}")
     assert have == want, (
         f"§{group}'s {job} row states its cadence as {have!r} where "
-        f"`~/obsidian/autonomy/{job.lstrip('#')}-*.md` declares {want!r} — the drift "
-        f"#3333 was filed for, in both directions: #30 kept a `3×/day` cell past vault "
-        f"commit `1cc570a7` cutting its runs_per_day 3 → 1, and #79 read `weekly` "
-        f"against a daily retention sweep")
+        f"`CADENCE_CELLS[{group!r}]` pins {want!r} — the drift #3333 was filed for, in "
+        f"both directions: #30 kept a `3×/day` cell past vault commit `1cc570a7` cutting "
+        f"its runs_per_day 3 → 1, and #79 read `weekly` against a daily retention sweep. "
+        f"The pin is some task file's `frequency:` for every entry but #105, which "
+        f"follows its module's `CADENCE`; see the note on `WATCH_JOBS[105]`.")
 
 
 @pytest.mark.parametrize("group", CADENCE_TABLES,

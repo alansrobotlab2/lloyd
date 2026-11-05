@@ -952,9 +952,22 @@ def render(census: dict[str, Any], *, now_ts: Optional[float] = None) -> list[st
     return out
 
 
-def census_path() -> Path:
+def census_path(state_dir: Optional[Path] = None) -> Path:
     """The journal: beside `landed_outcomes_path()`, in the automod state dir — never inside
-    the checkout, where the guardian alerts on in-tree runtime data hourly (#1667)."""
+    the checkout, where the guardian alerts on in-tree runtime data hourly (#1667).
+
+    `state_dir` is the directory `--state-dir` resolved to, and honouring it is the
+    whole of the #3777 fix. `main` used to resolve that directory for READING the
+    ledger and then call `record(census)` with nothing, so the write fell through to
+    the default resolution below: a `--record --state-dir /tmp/fixtures` run appended
+    its row to the journal in the real state dir and left `/tmp/fixtures` empty. The
+    row it wrote there is newest and real, but its `window` is the scratch fixtures —
+    `first_ts: null`, `population.files: []` — so a reader that takes the last row of
+    a live journal reads `never executed` over a history that exists. That is the
+    finding this census exists to report about OTHER checks, printed about itself.
+    """
+    if state_dir is not None:
+        return Path(state_dir) / JOURNAL_NAME
     from scripts.automod import state as S
     return S.STATE_DIR / JOURNAL_NAME
 
@@ -993,7 +1006,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="tree to census; default this checkout. A fixture points it at a "
                          "throwaway git tree so the caller census can be tested hermetically")
     ap.add_argument("--record", action="store_true",
-                    help="append one dated row beside landed_outcomes_path()")
+                    help="append one dated row to check_health_census.jsonl in the "
+                         "state dir just read (default: beside landed_outcomes_path())")
     ap.add_argument("--json", action="store_true", help="print the row as JSON, write nothing")
     args = ap.parse_args(argv)
 
@@ -1016,7 +1030,12 @@ def main(argv: list[str] | None = None) -> int:
     for line in render(census):
         print(line)
     if args.record:
-        path = record(census)
+        # The row goes into the directory this run was pointed at, exactly as the
+        # ledger it describes was read from there — the same shape
+        # `gate_to_land_lag.py:382` has always had (`record(row, record_path(state_dir))`).
+        # `record(census)` with nothing was the #3777 leak: it journaled a
+        # fixture-windowed row into the live journal.
+        path = record(census, census_path(dirn))
         print(f"recorded {census['generated_at']} -> {path} "
               f"(check_health_census.jsonl; cadence {CADENCE})")
     print(f"report-only: nothing here retires, disables or weakens a check; disposition of "

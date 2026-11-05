@@ -21,11 +21,24 @@ What is pinned here, clause by clause:
    throwaway git tree: the fixed vocabulary, the command, the standing/one-off boundary rule
    printed before any health figure, and the no-caller list printed when empty.
 5. `test_every_never_failed_check_carries_an_injection_verdict_and_the_blinded_control_is_vacuous`
-   and `test_record_appends_exactly_one_dated_row_beside_the_landed_outcomes_journal`.
+   and `test_record_appends_exactly_one_dated_row_to_the_state_dir_it_was_given`.
+6. #3777, the caller half. `test_record_never_journals_to_the_default_when_a_state_dir_was_given`
+   — a `--record --state-dir /tmp/x` run writes into `/tmp/x` and nowhere near the default
+   journal. `test_the_shipped_command_of_autonomy_task_105_parses_and_exits_zero` and
+   `test_autonomy_task_105_names_the_journal_this_module_actually_writes` — the two lines of
+   `~/obsidian/autonomy/105-check-health-census-weekly.md` a run is built from must agree with
+   THIS module: no flag its parser rejects, and the journal name it is told is the name
+   `JOURNAL_NAME` carries.
 
-Hermetic throughout: every ledger row is a fixture, every classification runs over a throwaway
-git tree this file builds and deletes, and no node reads or writes the live automod state dir.
-The one assertion against the live filesystem names a PATH and never its contents.
+Hermetic except for #3777's two caller nodes: every ledger row is a fixture, every
+classification runs over a throwaway git tree this file builds and deletes, and no node reads or
+writes the live automod state dir. Those two nodes read the CONTENTS of one tracked vault file
+(the autonomy task whose `command:` invokes this module) and write nothing; like
+`tests/test_archived_skill_artifacts.py`, they are structural agreements between a shipped
+document and shipped code, so a nightly rewrite of either that breaks the agreement is meant to
+redden the tests rung rather than be skipped by it. The one older assertion against the live
+filesystem (`test_the_journal_path_sits_beside_landed_outcomes_and_outside_the_checkout`) names a
+PATH and never its contents.
 
 The shape of the fixture ledger — a live `promotions.jsonl`, monthly
 `promotions-archive-YYYYMM.jsonl.gz` files beside it, and non-gate rows like
@@ -463,24 +476,30 @@ def test_the_shipped_rung_probes_really_catch_their_faults():
     assert CHC._inject_static_does_not_compile() is True
 
 
-def test_record_appends_exactly_one_dated_row_beside_the_landed_outcomes_journal(
-        eval_tree, census_dir, tmp_path, monkeypatch, capsys):
-    """One row, next to `landed_outcomes.jsonl`, carrying every printed figure.
+def test_record_appends_exactly_one_dated_row_to_the_state_dir_it_was_given(
+        eval_tree, census_dir, capsys):
+    """One row, in the directory the run was pointed at, carrying every printed figure.
 
     The journal's existence is the acceptance clause: #3418 names "a verdict that is only
     printed" as a standing failure mode, and #2378 shipped a `--record` flag with no caller so
     its own journal never existed. The assertion here is that the printed lines and the stored
     row are the SAME numbers, because a journal that drifts from the print is a second
     instrument nobody reads.
+
+    Where the row lands is #3777's half: it goes into `census_dir`, the same directory the
+    ledger it just summarised was read from. It used to land wherever the default resolution
+    pointed, which is what `test_record_never_journals_to_the_default_when_a_state_dir_was_given`
+    pins as forbidden.
     """
     root, vault, baselines = eval_tree
-    journal = tmp_path / "state" / "check_health_census.jsonl"
-    monkeypatch.setattr(CHC, "census_path", lambda: journal)
+    journal = census_dir / CHC.JOURNAL_NAME
     rc = CHC.main(["--record", "--state-dir", str(census_dir), "--repo-root", str(root),
                    "--vault", str(vault), "--baselines", str(baselines)])
     assert rc == 0, rc
     printed = capsys.readouterr().out.splitlines()
-    assert journal.exists(), "the report printed and journaled nothing"
+    assert journal.exists(), (
+        f"--record wrote no {CHC.JOURNAL_NAME} inside the --state-dir it was given "
+        f"({census_dir}); the report printed and journaled elsewhere")
     rows = [json.loads(ln) for ln in journal.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1, f"--record appended {len(rows)} rows, expected exactly 1"
     row = rows[0]
@@ -522,6 +541,248 @@ def test_the_journal_path_sits_beside_landed_outcomes_and_outside_the_checkout()
         "the journal resolves inside the checkout, where the guardian alerts on runtime data")
 
 
+def test_record_never_journals_to_the_default_when_a_state_dir_was_given(
+        eval_tree, census_dir, tmp_path, monkeypatch):
+    """#3777 clause 5: `--record --state-dir /tmp/x` writes into `/tmp/x` and nowhere else.
+
+    The bug is the one this census exists to catch in other checks, aimed at itself. `main`
+    resolved `--state-dir` for READING the ledger and then called `record(census)` with
+    nothing, so the write went to the default resolution — the live journal. Measured on
+    2026-11-05 before the fix, twice: the triage run left a newest row on
+    `~/.local/state/lloyd-automod/check_health_census.jsonl` whose `window` was the scratch
+    fixtures (`first_ts: null`, `population.files: []`) while the scratch directory it was
+    given stayed empty, and the same shape reproduces in-suite against a redirected
+    `STATE_DIR`, which is what this node does. A reader that takes the LAST row of a journal
+    — the shape every other reader in this repo uses — read `never executed` over a ledger
+    with thousands of rows, and every `days_since_last_fail` in that row is relative to a
+    stamp no run produced.
+
+    The default resolution is reached here for real (no stub of `census_path`): this is the
+    node that would go red if the write ever drifts back to it while a state dir is in hand.
+    """
+    from scripts.automod import state as S
+
+    root, vault, baselines = eval_tree
+    default_journal_dir = tmp_path / "default-state"
+    default_journal_dir.mkdir()
+    monkeypatch.setattr(S, "STATE_DIR", default_journal_dir)
+    rc = CHC.main(["--record", "--state-dir", str(census_dir), "--repo-root", str(root),
+                   "--vault", str(vault), "--baselines", str(baselines)])
+    assert rc == 0, rc
+    assert (census_dir / CHC.JOURNAL_NAME).is_file(), (
+        f"the row went neither to the --state-dir it was given ({census_dir}) nor, by "
+        "design, anywhere else — so where did it go?")
+    assert not (default_journal_dir / CHC.JOURNAL_NAME).exists(), (
+        f"--record wrote {CHC.JOURNAL_NAME} into the DEFAULT state dir "
+        f"({default_journal_dir}) while a --state-dir was in hand: the #3777 leak is back, "
+        "and a fixture-windowed row is now newest in a live journal")
+
+
+#: The autonomy task whose front-matter `command:` is this module's only caller (#3777).
+TASK_105 = "autonomy/105-check-health-census-weekly.md"
+
+#: The automod state dir spelled as the tail a description can name without knowing whose
+#: home it is in — the three segments `scripts/automod/state.py:45-47` joins onto
+#: `Path.home()` for its default. The BASENAME is never spelled here: it is `CHC.JOURNAL_NAME`.
+STATE_DIR_TAIL = ".local/state/lloyd-automod"
+
+
+def _task_105_text() -> str:
+    """The live text of autonomy task 105, through the resolver that can move the vault.
+
+    `app.data_root.vault_root()` honours `LLOYD_VAULT_ROOT`, which is how a vault-land probe
+    child grades a mirror instead of the live vault (`tests/test_research_doc_claims.py:29-46`
+    is the precedent for reading it this way). Absent is a FAILURE, never a skip: a node that
+    grades a file it did not read is the vacuous pass this module's own control check exists
+    to name.
+    """
+    from app.data_root import vault_root
+
+    path = vault_root() / TASK_105
+    assert path.is_file(), (
+        f"{path} cannot be read, so neither the command nor the journal name a run is "
+        "built from has been checked — this is an unanswered question, not a clean result")
+    return path.read_text(encoding="utf-8")
+
+
+def _task_105_field(field: str) -> str:
+    """One front-matter field of task 105, parsed by the scheduler's own recovery parser."""
+    from app.harness.policy import front_matter_map
+
+    fields = front_matter_map(_task_105_text()) or {}
+    value = fields.get(field)
+    assert value, f"{TASK_105} carries no usable `{field}` front matter"
+    return " ".join(str(value).split())
+
+
+def test_the_shipped_command_of_autonomy_task_105_parses_and_exits_zero(eval_tree,
+                                                                        census_dir):
+    """#3777 clause 1: the `command:` that dispatches this module has to run.
+
+    It did not. The line shipped as `… scripts.maintenance.check_health_census --days 90
+    --record`, and this module's parser has never accepted a `--days` flag — the window is
+    `WINDOW_DAYS` and the flag only had to look like it was setting it. Every dispatch of
+    the shipped line therefore dies in argparse with `unrecognized arguments: --days 90`,
+    exit 2, before reading a single ledger row, and no census of gate rungs can see that
+    happening, because the check that died is this task and a task that dies in argparse
+    writes no row anywhere. The task is `draft` and has never dispatched, so the two rows
+    the live journal held when this node was written both came from a hand-run of the
+    module — the newest one carrying the empty `window` of the scratch fixtures it was
+    pointed at, which is the damage
+    `test_record_never_journals_to_the_default_when_a_state_dir_was_given` forecloses.
+
+    The flag list is taken from the FILE and handed to `main`, so the parser is the thing
+    being asked: an unknown flag raises `SystemExit(2)` out of argparse and reddens this node
+    rather than being filtered out first. `--json` is added because the clause's own check is
+    a read-only one — `--record` would journal a fixture-windowed row, which is exactly what
+    the node above exists to keep out of a real journal.
+    """
+    command = _task_105_field("command")
+    assert command.endswith("scripts.maintenance.check_health_census --record"), (
+        f"{TASK_105}'s command: is `{command}`, which no longer ends in the runnable form "
+        "`…scripts.maintenance.check_health_census --record`")
+    flags = command.rsplit("check_health_census", 1)[1].split()
+    assert "--days" not in flags, (
+        f"{TASK_105}'s command: names `--days`, which this module's parser rejects; the "
+        "window is WINDOW_DAYS and needs no flag")
+    root, vault, baselines = eval_tree
+    rc = CHC.main(flags + ["--state-dir", str(census_dir), "--repo-root", str(root),
+                           "--vault", str(vault), "--baselines", str(baselines), "--json"])
+    assert rc == 0, f"the shipped flag list exited {rc}, not 0"
+    assert not (census_dir / CHC.JOURNAL_NAME).exists(), (
+        "--json journalled a row; the flag's contract is print-and-write-nothing")
+
+
+def test_autonomy_task_105_names_the_journal_this_module_actually_writes():
+    """#3777 clause 2: the description a run is built from names a file that exists.
+
+    `description` is one of the two channels `_build_task_prompt` delivers, and until #3777 it
+    named the journal with every underscore turned into a hyphen, while `JOURNAL_NAME` and the
+    file on disk are `check_health_census.jsonl`. A run reading its own prompt was therefore
+    told the name of a journal that has never existed on this box, and sent to look for its
+    own output in the wrong place.
+
+    The basename is never hard-coded here: the expected name IS `CHC.JOURNAL_NAME`, so the
+    module renaming its journal moves this pin with it, and a description that lags one
+    character behind is what reddens the node. The directory half is the tail of the default
+    `STATE_DIR`, which a description can spell without knowing whose home it is in.
+    """
+    text = _task_105_text()
+    description = _task_105_field("description")
+    assert CHC.JOURNAL_NAME in description, (
+        f"the description names no journal this module writes: expected {CHC.JOURNAL_NAME} "
+        f"in `{description[:120]}…`")
+    assert f"{STATE_DIR_TAIL}/{CHC.JOURNAL_NAME}" in description, (
+        f"the description's journal path is not the default state dir plus JOURNAL_NAME "
+        f"(`{STATE_DIR_TAIL}/{CHC.JOURNAL_NAME}`)")
+    hyphenated = CHC.JOURNAL_NAME.replace("_", "-")
+    assert hyphenated not in text, (
+        f"{TASK_105} still carries the hyphenated spelling `{hyphenated}` somewhere, which "
+        "is the name of no file this module writes")
+
+
+NEAR_FLAG_NEGATIONS = ("never", "no such", "does not", "used to name", "not a flag",
+                       "no flag", "has no", "instead of")
+
+
+def test_autonomy_task_105s_body_states_the_cadence_the_module_ships():
+    """#3777 clause 3, the half the review rung found unpinned: the body's own cadence
+    paragraph. The first round retyped it and nothing pinned the result, so the review
+    rung's finding was that retyping it back would redden no node — which is the same hole
+    #1102 was written for on the cadence cells.
+
+    It asserts three things about the paragraph, all of them about what the body SAYS the
+    cadence is, and none about the `frequency:` field, which no round may move (#3782):
+    weekly is stated as the shipped cadence; daily is never stated as the shipped cadence;
+    and the retired argument — that the field is the schedule and the slug the stale name —
+    stays retired. That argument is what this file shipped with, and it is what a future
+    editor would restore, so it is named by its own words rather than by a paraphrase.
+    """
+    from scripts.maintenance import check_health_census as CHC
+
+    text = _task_105_text()
+    shipped = CHC.CADENCE.split(" ")[0]          # 'weekly', read off the module
+    assert shipped == "weekly", f"unexpected CADENCE {CHC.CADENCE!r}"
+    body = text[text.index("## Why this exists"):]
+    para = [ln for ln in body.splitlines() if "cadence" in ln.lower()]
+    assert para, f"{TASK_105}'s body never mentions its cadence at all"
+    joined = " ".join(para).lower()
+    assert shipped in joined, (
+        f"the body never states {shipped!r} as the cadence it ships; what it says about "
+        f"cadence is: {joined[:220]!r}")
+    assert "shipped cadence is daily" not in joined and "cadence is `frequency: daily`" \
+        not in joined.lower(), (
+        "the body states daily as the shipped cadence again — the claim #3777 removed")
+    for retired in ("the slug is the stale name", "field is the schedule"):
+        assert retired not in joined.lower(), (
+            f"the body revives the retired reading (`{retired}`), which rested on "
+            "tests/test_check_health_census_schedule_claims.py — a test that is not on "
+            "main — and argues the file out of its own module's cadence")
+    assert "#3782" in body, (
+        "the body no longer names the id carrying the field it cannot move, so a reader "
+        "of the file cannot tell the disagreement is known and owed")
+
+
+def test_the_skill_pages_command_is_the_one_that_runs_and_names_only_real_flags():
+    """#3777, the third surface: the paired SKILL.md is the other half of what a run reads.
+
+    It carried two flags this module has never accepted — the window flag the task file
+    also carried, and a probe-skipping flag it prescribed as the recovery for an erroring
+    probe. Obeying the page end to end produced one exit 2, then another, and the run
+    journalled nothing it had been told to journal. A dead flag in a skill page is worse
+    than a dead flag in a task file: the page exists to be followed by something with no
+    other source of procedure.
+
+    So the fenced command is pinned to the task's own `command:` field, and every flag the
+    page names in backticks must be one the module advertises on its own `--help` — the
+    interface read off the module rather than a list typed here, so a flag the parser gains
+    or loses needs no edit to this node. Flags named ONLY to say they do not exist are
+    allowed, and that allowance is the one thing here that could hide a new phantom flag: a
+    writer who names one inside a sentence of negation is not caught. The allowance is
+    deliberately narrow (160 characters either side) because a page's history sections are
+    exactly where a stale instruction gets re-blessed.
+    """
+    import contextlib
+    import io
+    import re
+
+    from app.paths import VAULT_ROOT
+
+    page = VAULT_ROOT / "skills" / "check-health-census-weekly" / "SKILL.md"
+    assert page.is_file(), f"{page} does not exist, so nothing documents how to run this"
+    text = page.read_text(encoding="utf-8")
+    fenced = re.findall(r"^```\n(.*?)\n```", text, re.M)
+    assert fenced, f"{page} has no fenced command block for a run to copy"
+    assert fenced[0].strip() == _task_105_field("command"), (
+        f"the skill hands a run `{fenced[0].strip()}` while {TASK_105}'s `command:` is "
+        f"`{_task_105_field('command')}` — one command, two spellings, and only one of "
+        "them is what the scheduler dispatches")
+
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout), pytest.raises(SystemExit) as caught:
+        CHC.main(["--help"])
+    assert caught.value.code == 0, f"`--help` exited {caught.value.code}, not 0"
+    advertised = set(re.findall(r"--[a-z][a-z-]*", stdout.getvalue()))
+    assert advertised >= {"--record"}, (
+        f"the module advertised {sorted(advertised)} and not `--record`, so its flag "
+        "surface was not read and the subset check below would prove nothing")
+    command_flags = set(re.findall(r"(--[a-z][a-z-]*)", fenced[0]))
+    assert command_flags <= advertised, (
+        f"the page's fenced command passes {sorted(command_flags - advertised)}, which "
+        "`--help` does not advertise — that line is an exit 2 in argparse")
+    named = set()
+    for m in re.finditer(r"`(--[a-z][a-z-]*)`", text):
+        around = text[max(0, m.start() - 160):m.end() + 160].lower()
+        if not any(neg in around for neg in NEAR_FLAG_NEGATIONS):
+            named.add(m.group(1))
+    assert named, f"{page} names no flag in backticks at all, so there is nothing to grade"
+    assert named <= advertised, (
+        f"the skill names {sorted(named - advertised)} as a flag to pass, and "
+        "`check_health_census.py --help` does not advertise it — every such flag is an "
+        "exit 2 for whoever obeys the page, which is how the window flag and the "
+        "probe-skipping flag behaved")
+
+
 def test_the_census_names_the_live_rungs_it_would_print_and_refuses_to_fabricate(tmp_path):
     """A state dir with no ledger at all prints zero rungs and says so, rather than inventing
     the fifteen it expects.
@@ -538,3 +799,38 @@ def test_the_census_names_the_live_rungs_it_would_print_and_refuses_to_fabricate
     out = "\n".join(lines(census))
     assert "gate_rung " not in out
     assert "no caller found" in out, "the caller half vanished with the ledger half"
+
+
+def test_the_fleet_document_row_for_this_job_states_weekly_and_the_real_journal():
+    """#3777 clause 4's other file, graded from HERE so clause 4 has a node in each file it
+    names. The §Watch the machinery row for #105 in architecture/autonomy-jobs.md must read
+    Freq `weekly`, name `JOURNAL_NAME` as its artefact, and quote no flag the module's
+    `--help` does not advertise.
+
+    Why this lives beside the module rather than only in the doc-claims file: this file owns
+    the constants, so a row that names a journal nobody writes or a cadence nobody ships is
+    caught by the code that decides both. It is deliberately a subset of
+    `test_watch_105_cadence_is_the_module_not_its_frozen_field`, which owns the full pair.
+    """
+    doc = Path(__file__).resolve().parent.parent / "architecture" / "autonomy-jobs.md"
+    text = doc.read_text(encoding="utf-8")
+    heading = "## Watch the machinery"  # the section _watch_row reads, spelled locally
+    assert heading in text, f"{doc} has no {heading!r} section"
+    rows = [ln for ln in text.split(heading, 1)[1].split("\n## ", 1)[0].splitlines()
+            if ln.startswith("| #105 ")]
+    assert len(rows) == 1, f"expected exactly one §Watch row for #105, found {len(rows)}"
+    cells = [c.strip() for c in rows[0].strip().strip("|").split("|")]
+    # No cell-count assert: the §Watch header declares six columns (`… | Writes | Must not`)
+    # while this row and #106's carry five, their author folding the bound into the Writes
+    # cell — a shape defect predating #3777, recorded on the item rather than pinned here.
+    # cells[1] is Freq and cells[4] is Writes under either shape, which is what this node
+    # reads, so it does not change meaning if the missing cell is ever filled in.
+    assert len(cells) >= 5, f"the #105 row has only {len(cells)} cells"
+    assert cells[1] == "weekly", (
+        f"the row's Freq cell reads {cells[1]!r} where the module ships "
+        f"{CHC.CADENCE.split(' ')[0]!r}")
+    assert CHC.JOURNAL_NAME in cells[4], (
+        f"the row's Writes cell does not name the journal this module appends to "
+        f"({CHC.JOURNAL_NAME!r}); it reads {cells[4][:70]!r}…")
+    assert CHC.JOURNAL_NAME.replace("_", "-") not in rows[0], (
+        "the row carries the journal's hyphenated spelling, which is the name of no file")
