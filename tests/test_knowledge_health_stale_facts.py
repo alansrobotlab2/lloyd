@@ -312,11 +312,59 @@ def _clean_hygiene() -> dict:
             "regrown": [], "new_dirs": 0, "regrowth_days": 7, "provenance": {}}
 
 
+#: The four inputs #3222 fixed for `_alarms()`, in positional order.
+ALARM_PARAMS_BASE = ("store_stats", "hygiene", "duplicate_id_files", "baseline")
+
+#: The one fifth input #3849 requires, and it is a requirement of the contract:
+#: clause 4 reads "Module constant `GHOST_INDEX_ROWS_ALARM_FLOOR = 60` gates the
+#: alarm: either count above it makes `_alarms()` return a line naming which
+#: population and how many", and a count `_alarms()` cannot receive cannot gate
+#: anything. Four nodes in this file asserted the four-tuple above as their whole
+#: proof, so that clause broke all four on a signature it was right to grow. They
+#: now assert what each of them was actually guarding: #3222's four inputs still
+#: in place, at most `index_ghosts` after them, and no parameter whose NAME
+#: carries the measurement the node keeps out of the alarm channel.
+ALARM_PARAM_GHOSTS = "index_ghosts"
+
+
+def _alarm_params(*, forbidding: tuple[str, ...]) -> tuple[str, ...]:
+    """`_alarms()`'s parameter names, under the #3849 allowance and a forbidden topic.
+
+    Three things have to fail here. One of #3222's four inputs renamed or
+    reordered — `baseline` has to stay the fourth, because the floor alarm reads it
+    positionally. A second measurement arriving beside the ghost counts, which is
+    how a verdict that was report-only becomes an exit code without anybody
+    editing an alarm line. And a parameter named for the topic the calling node
+    forbids, which is that node's actual subject: an exact-arity pin guarded it
+    only by refusing every fifth input, including the one the contract asked for.
+    """
+    params = tuple(inspect.signature(khr._alarms).parameters)
+    assert params[:4] == ALARM_PARAMS_BASE, (
+        f"`_alarms()` no longer opens with {ALARM_PARAMS_BASE} in that order: {params}")
+    extra = [p for p in params[4:] if p != ALARM_PARAM_GHOSTS]
+    assert extra == [], (
+        f"`_alarms()` gained {extra}: only {ALARM_PARAM_GHOSTS!r}, the one input "
+        f"clause 4 of #3849 names, may follow {ALARM_PARAMS_BASE}")
+    hits = [p for p in params if any(t in p for t in forbidding)]
+    assert hits == [], (
+        f"`_alarms()` can see {hits}, naming a measurement this file keeps out of "
+        "the alarm channel")
+    return params
+
+
 def test_alarm_inputs_do_not_include_staleness(tmp_path):
     """`_alarms` gains no stale/coverage parameter, so a non-zero stale count or
-    an unevaluable line cannot reach the alarm channel or the exit code."""
-    assert tuple(inspect.signature(khr._alarms).parameters) == (
-        "store_stats", "hygiene", "duplicate_id_files", "baseline")
+    an unevaluable line cannot reach the alarm channel or the exit code.
+
+    Graded on parameter names since #3849, not on arity: clause 4 of that item made
+    the signature five-ary deliberately, so the four-tuple equality this node
+    shipped with had stopped grading staleness and started pinning a signature the
+    contract had just changed. `_alarm_params` still refuses a parameter named for
+    a stale or unevaluable count, and the clean-store call at the bottom still has
+    to return no alarm for the reason this node exists — staleness, not a missing
+    floor (#3222).
+    """
+    _alarm_params(forbidding=("stale", "unevaluable", "coverage"))
     assert (khr.EXIT_OK, khr.EXIT_ALARM) == (0, 2)
 
     # Floor at the store's own count — usable, and not below half — so the empty alarm
@@ -1043,9 +1091,14 @@ def test_cardinality_fail_is_report_output_and_still_exits_zero(tmp_path, monkey
 
 def test_alarms_take_no_edge_type_input():
     """Pinned by signature: `_alarms()` cannot see the type distribution, so no
-    cardinality verdict can reach the exit code through it."""
-    assert list(inspect.signature(khr._alarms).parameters) == [
-        "store_stats", "hygiene", "duplicate_id_files", "baseline"]
+    cardinality verdict can reach the exit code through it.
+
+    The forbidden topic is the pin, not the arity — #3849 clause 4 legitimately
+    grew this signature by `index_ghosts`, and a parameter named for an edge type
+    or a cardinality share still cannot join it. The cardinality verdict stays a
+    printed FAIL and `_alarms()` stays unable to see what it is printed from.
+    """
+    _alarm_params(forbidding=("edge", "type", "cardinal"))
     # Floor at the store's own count, so the empty list below is the cardinality verdict
     # staying out of the alarms and not #3222's floor alarm going off unremarked.
     assert khr._alarms({"edges_active": 100}, {}, 0, 100) == []
@@ -1067,6 +1120,11 @@ def test_alarms_take_no_edge_type_input():
 TRACE_COVERAGE_RE = re.compile(
     r"Fact records carrying a `conflicts_with` resolution trace \| "
     r"([\d,]+) of ([\d,]+) fact records")
+
+#: The #3849 Index-vs-tree reconciliation row, matched by its own label so a claim
+#: about it cannot be satisfied by some other cell of the same Hygiene table.
+GHOST_ROW_RE = re.compile(
+    r"\| Index rows with no file or directory on the tree \| ([^|]*) \|")
 
 
 def _settled_pair(root: Path, *, traced: bool) -> Path:
@@ -1151,6 +1209,13 @@ def test_the_trace_line_never_moves_the_alarm_exit_code(tmp_path, monkeypatch):
     about the trace and nothing else. Before #3222 this node rode an absent floor, which
     the report read as "no opinion"; that same absence is now an alarm, so the floor has
     to be a real one.
+
+    The signature half of the proof names the trace rather than counting arguments:
+    #3849 clause 4 added `index_ghosts` to `_alarms()` on purpose, so an arity
+    equality here would have gone red on a legal input while saying nothing about a
+    traced record. A parameter named for a trace or a `conflicts_with` count is still
+    refused, which is the thing this node forbids, and the faked store below keeps
+    the ghost row itself printing its not-measured reason rather than a count.
     """
     root = tmp_path / "facts"
     out = tmp_path / "out"
@@ -1175,9 +1240,19 @@ def test_the_trace_line_never_moves_the_alarm_exit_code(tmp_path, monkeypatch):
     text = next(out.glob("knowledge-health-*.md")).read_text()
     m = TRACE_COVERAGE_RE.search(text)
     assert m is not None and m.group(1) == "1", text
-    assert list(inspect.signature(khr._alarms).parameters) == [
-        "store_stats", "hygiene", "duplicate_id_files", "baseline"], (
-        "_alarms() gained an input that can carry the trace count to the exit code")
+    # The prose above claims the faked store leaves the #3849 row unmeasured, so the
+    # row is read here rather than trusted: `_FakeStore` carries `edges` and `stats()`
+    # and nothing else, which is exactly the half-read store the row must refuse to
+    # print `0` for. A store-shaped fixture that made the reconciliation come out
+    # clean would silently retire clause 2's not-measured arm from every end-to-end
+    # node in this file.
+    ghost = GHOST_ROW_RE.search(text)
+    assert ghost is not None, (
+        "the #3849 Index-vs-tree reconciliation row is missing from a full run of "
+        "`main()` — it prints on every run, zero and failure alike")
+    assert "not measured" in ghost.group(0) and "AttributeError" in ghost.group(0), (
+        f"the row did not name the store failure it hit: {ghost.group(0)}")
+    _alarm_params(forbidding=("trace", "conflicts"))
 
 
 # ── clause 5 (#1817): the counter has to see the writer that actually runs ────
@@ -2323,12 +2398,23 @@ def test_an_empty_store_with_no_floor_still_exits_zero(tmp_path, monkeypatch):
 
 
 def test_the_unusable_state_rides_the_fourth_parameter_alone():
-    """Clause 4: no `measured=` flag and no fifth argument. The single `baseline: int`
-    carries the state because all three shapes reach it as `<= 0` — which is also why
-    this rail did not need the `recorded_zero` split #2968 needed in `guard_vacuity`."""
-    params = tuple(inspect.signature(khr._alarms).parameters)
-    assert params == ("store_stats", "hygiene", "duplicate_id_files", "baseline"), params
-    assert "measured" not in params and "baseline_measured" not in params, params
+    """Clause 4 (#3222): no `measured=` flag. The single `baseline: int` carries the
+    state because all three shapes reach it as `<= 0` — which is also why this rail did
+    not need the `recorded_zero` split #2968 needed in `guard_vacuity`.
+
+    This node's proof was an equality on the whole parameter tuple, which asserted two
+    things at once: that no flag was added beside `baseline`, and that nothing ever
+    would be. #3849 clause 4 disproved the second half by requiring `_alarms()` to gate
+    on the index-vs-walk ghost counts, so the node now pins the half that is its own
+    subject — `measured`-shaped flags refused, the four #3222 inputs still in order,
+    and the one licensed addition OPTIONAL, which is what keeps the four-argument calls
+    every other node in this file makes meaning what they meant before #3849.
+    """
+    _alarm_params(forbidding=("measured", "baseline_measured", "recorded_zero"))
+    ghost = inspect.signature(khr._alarms).parameters[ALARM_PARAM_GHOSTS]
+    assert ghost.default is None and ghost.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, (
+        f"`{ALARM_PARAM_GHOSTS}` is {ghost}: a required fifth parameter, or one that "
+        "is keyword-only, breaks the four-argument calls this file makes everywhere")
     # And it is the parameter that carries it, not a module-level fallback: the same
     # store, the same hygiene, only the floor differing, is the whole difference.
     assert khr._alarms({"edges_active": LIVE_FLOOR}, _clean_hygiene(), 0, 0) != []

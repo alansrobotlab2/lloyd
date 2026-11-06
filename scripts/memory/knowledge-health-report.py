@@ -51,6 +51,24 @@ SECTION_ROW_CAP = 50
 GOD_ENTITY_THRESHOLD = 20
 THIN_ENTITY_MAX_FACTS = 2
 STALE_DAYS_THRESHOLD = 60
+#: Either ghost population above this count makes the run an alarm rather than a
+#: footnote (#3849).
+#:
+#: Above the residue, below a leak. Measured 2026-11-06 over the live tree: 12 index
+#: fact rows the walk never accounted for and 43 `entities` rows with no directory, so
+#: the nightly run that first prints the row is silent — an alarm that fired on today's
+#: numbers would be noise from day one and the first thing deleted off the dashboards.
+#: The floor sits at 60 because the entity side is the one that moves: of the 43 ghosts,
+#: 31 were minted on 2026-09-23 (the migrate-and-rebuild day) and 12 have accrued since,
+#: the newest
+#: registered 2026-11-04, so growth of a few per month is already underway and crossing
+#: 60 means the accrual sped up by an order of magnitude — the point at which "residue"
+#: is the wrong word. A fact side above 60 says rows are being orphaned nightly rather
+#: than left behind once, which is the item's own rule for the alarm case.
+#:
+#: `entities.register()` never prunes (`app/kg_store.py:1326`), so no reindex can clear
+#: an entity ghost and this row cannot heal itself; the number is a report to a person.
+GHOST_INDEX_ROWS_ALARM_FLOOR = 60
 #: Share of ACTIVE records that have to carry one `created_at` calendar date before
 #: that date stops being a recording date and is a re-derivation stamp (#2179).
 #:
@@ -1194,6 +1212,189 @@ def _provenance_cell(pv: dict | None) -> str:
             f"(created_at {pv['created_at_pct']}%, source_doc {pv['source_doc_pct']}%)")
 
 
+def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
+                       store=None) -> dict:
+    """Index rows and registry entities the markdown tree cannot show, counted against
+    the walk that produced them (#3849).
+
+    `parsed_paths` is the walk's own output — `{path: records}` from `load_entities()`
+    — and `store` defaults to the process store, so the two sides of this comparison
+    are one walk and one store handle, not two measurements taken at different times.
+
+    It exists because the report measured both surfaces and never between them.
+    `Provenance coverage` denominates over `facts_idx.count()` and
+    `exact_duplicate_stats()` reads the index, while every other hygiene metric —
+    contamination, the untagged share, duplicate fact IDs, near-duplicates — is
+    measured over the walk. A guard on only one of two surfaces guards neither: an
+    index row whose file the walk never opened is certified by the provenance claim
+    and inspected by no other check, and an `entities` row with no directory is
+    invisible to the god/thin/orphan sections entirely.
+
+    The fact side, in two halves
+    ----------------------------
+    An index surplus is one of two things and they need different remedies, so both
+    are counted into the printed total and named separately:
+
+    - `unopened_rows` — the index holds a `file_path` the walk never opened. Two
+      causes live here. A file that no longer exists: 6 rows on four
+      `/tmp/blastroute2_u9ny_mb6/*.md` paths, leaked into the live store by an
+      uncommitted script on 2026-10-19, 2 of them still unexpired. And a file the
+      walk cannot reach at all: the fact writer builds
+      `<root>/<entity>/<entity>-<category>.md`, so an entity name containing a `/`
+      mkdir-parents a nested tree, while `load_entities()` and
+      `KGStore.facts_idx.reindex()` both walk exactly `root.iterdir()` +
+      `d.glob("*.md")` — so those files are invisible to the monitor AND to a full
+      rebuild. Two such files, 2 rows, on the live tree.
+    - `under_parsed_rows` — the index holds more rows for a file the walk DID open
+      than the walk parsed out of it. That is `parse_frontmatter()`'s
+      `text.find("---", 3)`: a fact whose own text contains `---` cuts the front
+      matter inside the record list, `yaml.safe_load` still succeeds, and everything
+      after the interior fence is dropped (measured 2026-11-06: one file with 6 index
+      rows parsed as 4, another 4 as 2, each leaving an `id: None` fragment).
+
+    Counting the second half is what stops this row reading as "the files are gone"
+    when the real story is that the reader loses records. Fixing that truncation
+    should move the fact side from 12 to 8 — that is how the two halves are told
+    apart in the field.
+
+    What is deliberately NOT counted
+    --------------------------------
+    - **Files the walk parsed that the index does not hold.** 0 paths on the live
+      tree (the index is a strict superset). A walk-side surplus would be the index
+      lagging the tree — the opposite fault with its own fix — so it is returned as
+      `unwalked_files` for the cell to name, never folded into either count.
+    - **Files the walk parsed MORE records from than the index holds.** Same reason:
+      `index_short_rows`, named, not counted.
+    - **Directories with no `entities` row.** `unregistered_dirs`: 2 today,
+      `Databricks AI` (whose only content is the nested `BI Genie`) and `Experiments`.
+      The reverse direction of the entity side, and the only thing that makes `dirs`
+      16,654 against `entities` 16,695 explicable, so it is returned rather than
+      dropped — but the count here is about registry rows the tree cannot show.
+
+    Failure is a value, never a zero
+    --------------------------------
+    A store that cannot be read yields `{"error": ...}` naming the cause, and the
+    caller must not print `0` for it. `KGStore.store()` raises `StoreUnavailable`
+    rather than opening an absent file precisely so a reader cannot get `0 rows` out
+    of nothing (#1236); a reconciliation that caught that and printed `0` would be the
+    loudest possible false clean, because `0` on this row reads as "both surfaces
+    agree".
+    """
+    from app.kg_store import StoreUnavailable
+
+    if store is None:
+        try:
+            store = _kg_store()
+        except StoreUnavailable as exc:
+            return {"error": f"store unavailable: {exc}"}
+        except Exception as exc:                       # a failed read is never a 0
+            return {"error": f"store could not be read: {type(exc).__name__}: {exc}"}
+
+    try:
+        index_counts: dict[str, int] = store.facts_idx.file_row_counts()
+        # `entities.all()` returns names, not rows — every registered name, expired or
+        # not, which is the population the tree is being compared against.
+        registry = [str(n) for n in store.entities.all()]
+    except Exception as exc:                           # a half-read store is a failure
+        return {"error": f"store read failed: {type(exc).__name__}: {exc}"}
+
+    # Both sides resolved, and both in the same call: `facts_idx.file_path` is a path
+    # relative to the root the WRITE happened under, and the walk's keys are built as
+    # `facts_dir / …`. Resolving only one of them makes a symlinked data root — the
+    # class of thing that has already moved under `~/lloyd-data/` once (#3095) — raise
+    # here, so the row prints its not-measured text rather than pairing a resolved
+    # walk against an unresolved index and calling 191,433 rows unopened.
+    root = Path(root)
+    try:
+        root_r = root.resolve()
+        walk_counts = {p.resolve().relative_to(root_r).as_posix(): n
+                       for p, n in parsed_paths.items()}
+    except ValueError as exc:
+        return {"error": f"a walked file is not under the facts root: {exc}"}
+
+    unopened_rows = under_parsed_rows = short_rows = 0
+    unopened_paths = under_parsed_paths = short_paths = 0
+    for fp, n_index in index_counts.items():
+        n_walk = walk_counts.get(fp)
+        if n_walk is None:
+            unopened_rows += n_index
+            unopened_paths += 1
+        elif n_index > n_walk:
+            under_parsed_rows += n_index - n_walk
+            under_parsed_paths += 1
+        elif n_index < n_walk:
+            short_rows += n_walk - n_index
+            short_paths += 1
+    unwalked = sum(1 for fp in walk_counts if fp not in index_counts)
+
+    # The directories the WALK can see, applying `load_entities()`' own skip rule, so
+    # a registry name whose only "directory" is one the walk ignores (`.`- or
+    # `_`-prefixed) still reads as a ghost rather than being legitimated by a tree the
+    # monitor never opens. 0 such directories exist on the live tree today (16,654
+    # subdirectories, none hidden or underscored), so this is not why the count is 43.
+    dirs = {d.name for d in root.iterdir()
+            if d.is_dir() and not d.name.startswith((".", "_"))} if root.is_dir() else set()
+    names = {n for n in registry if n}
+    ghosts = sorted(n for n in names if n not in dirs)
+
+    return {
+        "facts": unopened_rows + under_parsed_rows,
+        "entities": len(ghosts),
+        "unopened_rows": unopened_rows, "unopened_paths": unopened_paths,
+        "under_parsed_rows": under_parsed_rows,
+        "under_parsed_paths": under_parsed_paths,
+        "index_short_rows": short_rows, "index_short_paths": short_paths,
+        "unwalked_files": unwalked,
+        "unregistered_dirs": sorted(dirs - names),
+        "registry_rows": len(names),
+        "ghost_names": ghosts,
+    }
+
+
+def _index_ghost_cell(recon: dict | None) -> str:
+    """The Index-vs-tree reconciliation row (#3849).
+
+    Prints both counts on every run, including `0 fact rows / 0 entity rows` — a
+    reconciliation that disappeared when clean could not show the delta was FLAT over
+    consecutive reports, and a flat delta is the only evidence that separates residue
+    from a nightly leak. A store it could not read prints the reason rather than `0`:
+    `0` here means the two surfaces agree, so a failed read must never borrow it.
+
+    The fact surplus is decomposed because its halves name different broken things —
+    `N in files the walk never opened` (deleted files, plus files below the walk's
+    depth that neither the monitor nor a rebuild can reach) versus `N in files the
+    walk parsed short` (this report's own front-matter reader losing records after an
+    interior `---`). Which half moved says whether the store leaked or the monitor
+    went blind.
+    """
+    if recon is None:
+        return "not measured (no store read was attempted on this run)"
+    if "error" in recon:
+        return f"not measured ({recon['error']})"
+    out = (f"**{recon['facts']:,} fact rows / {recon['entities']:,} entity rows** with "
+           "no file or directory on the tree")
+    if recon["facts"]:
+        out += (f" ({recon['unopened_rows']:,} in files the walk never opened over "
+                f"{recon['unopened_paths']} path(s), {recon['under_parsed_rows']:,} in "
+                f"files the walk parsed short over {recon['under_parsed_paths']} path(s))")
+    if recon["entities"]:
+        out += (f" (registry names: {', '.join(repr(n) for n in recon['ghost_names'][:3])}"
+                f"{', …' if recon['entities'] > 3 else ''})")
+    tails = []
+    if recon["unwalked_files"]:
+        tails.append(f"{recon['unwalked_files']:,} walked file(s) absent from the index")
+    if recon["index_short_rows"]:
+        tails.append(f"{recon['index_short_rows']:,} row(s) the walk parsed beyond the "
+                     f"index over {recon['index_short_paths']} path(s)")
+    if recon["unregistered_dirs"]:
+        tails.append(f"{len(recon['unregistered_dirs'])} dir(s) with no registry row: "
+                     f"{', '.join(repr(d) for d in recon['unregistered_dirs'][:3])}"
+                     f"{', …' if len(recon['unregistered_dirs']) > 3 else ''}")
+    if tails:
+        out += ". Not counted as ghosts: " + "; ".join(tails)
+    return out
+
+
 def _age_phrase(days, date_str) -> str:
     """"waiting 37 days (since 2026-09-24)", or what it cannot say instead.
 
@@ -1441,6 +1642,7 @@ def generate_report(
     pointer_lag: list | None = None,
     mtime_witness=None,
     referential_ledger: Path | None = None,
+    index_ghosts: dict | None = None,
 ) -> str:
     """Generate the markdown health report.
 
@@ -1768,6 +1970,12 @@ def generate_report(
         # a bare number.
         lines.append(f"| Near-duplicate dirs coined since the baseline | {hygiene.get('regrowth_line') or 'not measured: no baseline was named'} |")
         lines.append(f"| Provenance coverage (created_at and source_doc) | {_provenance_cell(hygiene.get('provenance'))} |")
+        # Printed on EVERY run, zero included, and never as a bare `0` when the store
+        # could not be read. Both populations share one row because they are one
+        # question — does the index claim more than the tree holds — and their counts
+        # are never netted, because a missing file and a missing directory are
+        # different faults (#3849).
+        lines.append(f"| Index rows with no file or directory on the tree | {_index_ghost_cell(index_ghosts)} |")
         dup_cell = ("not measured" if duplicate_id_files is None
                     else str(duplicate_id_files))
         lines.append(f"| Files with duplicate fact IDs | {dup_cell} |")
@@ -2255,7 +2463,7 @@ GRAPH_BASELINE_RELPATH = f"{MEMORY_GRAPH_RELPATH}/graph-baseline.json"
 
 
 def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
-            baseline: int) -> list[str]:
+            baseline: int, index_ghosts: dict | None = None) -> list[str]:
     """Conditions that make this run an alarm rather than a report."""
     out = []
     if store_stats is None:
@@ -2299,6 +2507,26 @@ def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
                    f"contamination rail cannot see them and neither can a merge audit")
     if duplicate_id_files:
         out.append(f"{duplicate_id_files} fact files carry duplicate fact IDs")
+    # The index claiming more than the tree holds, past the floor (#3849). Only the
+    # over-floor case alarms: today's 12 and 43 are residue a person has to decide
+    # about, and a bell rung nightly over a number nobody can act on is a footnote with
+    # noise attached. Each population gets its own line naming WHICH store drifted,
+    # because the two have different remedies — an orphaned fact row is a writer or a
+    # vanished file, an orphaned entity row is a registration that never landed. An
+    # unmeasured population cannot alarm, the same convention that keeps an unreadable
+    # store from becoming a `0 edges` verdict above.
+    g = index_ghosts or {}
+    if g and not g.get("error"):
+        for key, phrase in (
+                ("facts", "facts_idx rows whose file_path the walk parsed no fact file "
+                          "for"),
+                ("entities", "`entities` rows naming no directory under the facts tree")):
+            n = g.get(key) or 0
+            if n > GHOST_INDEX_ROWS_ALARM_FLOOR:
+                out.append(f"{n:,} {phrase} — above the {GHOST_INDEX_ROWS_ALARM_FLOOR} "
+                           f"floor: rows are being orphaned, not left behind once. "
+                           f"`entities.register()` never prunes, so only a "
+                           f"referentially-checked prune clears them")
     return out
 
 
@@ -2382,6 +2610,19 @@ def main():
     entity_stats = compute_entity_stats(entities)
     rel_stats = compute_relationship_stats(edges, entities)
     stale_facts = find_stale_facts(entities, now, STALE_DAYS_THRESHOLD)
+
+    # The same walk and the same store, now compared to each other (#3849). Built from
+    # the entries `load_entities` already parsed — its own `Path` objects and its own
+    # record counts, which are the totals `Total facts` sums — so the row cannot be
+    # measuring a different tree from the one the report just described. Read-only: the
+    # index and the entity registry are never written here, and expiring what this
+    # counts is a decision for a person (27 `edges` rows name a ghost entity on one
+    # side, so a delete needs a referential check first).
+    index_ghosts = count_index_ghosts(
+        {entry["file"]: len(entry["facts"])
+         for entries in entities.values() for entry in entries},
+        args.facts_dir,
+    )
     stale_unevaluable = stale_coverage(entities)
     # Named again for the section's own line: `stale_unevaluable`'s n already carries
     # these facts (#2179), and printing the count that makes up the difference is what
@@ -2415,7 +2656,8 @@ def main():
                              pattern_staleness=stale_patterns,
                              pointer_lag=pointer_lag,
                              mtime_witness=witness,
-                             referential_ledger=args.referential_ledger)
+                             referential_ledger=args.referential_ledger,
+                             index_ghosts=index_ghosts)
 
     # Write output
     output_dir = args.output_dir
@@ -2484,7 +2726,7 @@ def main():
     except Exception:
         pass
 
-    alarms = _alarms(store_stats, hygiene, dup_id_files, baseline)
+    alarms = _alarms(store_stats, hygiene, dup_id_files, baseline, index_ghosts)
     rc = EXIT_OK
     if alarms:
         print("\nALARM:", file=sys.stderr)

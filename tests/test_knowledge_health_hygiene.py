@@ -1110,3 +1110,318 @@ def test_a_full_human_queue_leaves_the_nightly_exit_status_at_zero(tmp_path):
     # The same figure on the job's stdout, which is what an operator reads.
     assert ("Merge proposals left for a human: 3 gate-approved suffix clusters"
             in proc.stdout), proc.stdout[-1500:]
+
+
+# --- #3849: the index measured against the walk it never compared ----------------
+#
+# Everything above measures the markdown tree. The store on the other side of that
+# tree carried 12 fact rows and 43 entity rows the tree cannot show, and the one
+# report line that denominates over the index (`Provenance coverage`, printed as
+# 100.0% of 191,433) CERTIFIED those rows while every other hygiene metric ignored
+# them. These tests are the comparison, in both directions, on one store read.
+
+def _indexed_facts(root: Path, entity: str, category: str, ids: list[str]) -> Path:
+    """One fact file written on disk AND indexed, so the two surfaces agree on it.
+
+    The file is the shape `load_entities()` parses, and it reaches `facts_idx` only
+    through `update_file` with the same `root` — so an agreement in these fixtures is
+    a real agreement between the writer and the reader, and a disagreement is exactly
+    the fault being pinned, not an artefact of a hand-made index row.
+    """
+    d = root / entity
+    d.mkdir(parents=True, exist_ok=True)
+    body = "".join(
+        f'  - id: {i}\n    fact: "fact {i}"\n'
+        f"    created_at: '2026-10-01T00:00:00Z'\n"
+        f"    source_doc: 'knowledge/x-{i}.md'\n"
+        for i in ids)
+    p = d / f"{entity}-{category}.md"
+    p.write_text("---\ntype: facts\n"
+                 f'entity: "{entity}"\ncategory: {category}\n'
+                 "source_doc: 'knowledge/x.md'\n"
+                 f"facts:\n{body}---\n", encoding="utf-8")
+    return p
+
+
+def _two_entity_tree(tmp_path):
+    """A tree the walk parses cleanly: two entity dirs, one fact file each."""
+    root = tmp_path / "facts"
+    a = _indexed_facts(root, "Alpha", "state", ["st-001", "st-002"])
+    b = _indexed_facts(root, "Beta", "skill", ["skl-001"])
+    return root, [a, b]
+
+
+def _walked(root: Path) -> dict:
+    """The walk's own output exactly as the report builds it: file -> records."""
+    entities = khr.load_entities(root)
+    return {entry["file"]: len(entry["facts"])
+            for entries in entities.values() for entry in entries}
+
+
+def _one_deleted_file_one_dirless_entity(tmp_path):
+    """Two parsed entity dirs + an indexed file deleted from disk + a registered
+    entity that never made a directory. Clause 3's fixture, one build for both tests.
+    """
+    from app.kg_store import KGStore
+
+    root, files = _two_entity_tree(tmp_path)
+    db = KGStore(tmp_path / "kg.sqlite")
+    for f in files:
+        db.facts_idx.update_file(f, root=root)
+        db.entities.register(f.parent.name)
+    # An indexed file vanishes. Nothing in the report noticed: `reindex()` would
+    # expire the row and the nightly run never calls it.
+    gone = _indexed_facts(root, "Gamma", "state", ["st-001"])
+    db.facts_idx.update_file(gone, root=root)
+    db.entities.register("Gamma")
+    gone.unlink()
+    # A registry row that never landed a directory. Gamma's DIRECTORY is still there
+    # (only the file is unlinked), which is why `unregistered_dirs` stays empty here:
+    # Gamma is registered, so a directory the registry lacks is what is absent.
+    db.entities.register("Delta Unwritten")
+    return root, db
+
+
+def _unregistered_dir_and_a_short_parsed_file(tmp_path):
+    """The two populations every other fixture here pins only at zero.
+
+    - `Epsilon`: an EMPTY directory the registry has never heard of — clause 1's
+      REVERSE direction, and the live shape exactly: `Databricks AI` and `Experiments`
+      are the two directories with no `entities` row and each holds 0 top-level `.md`.
+      Empty, because `facts_idx.update_file` registers the entity it indexes, so any
+      indexed directory would be registered by construction and the reverse direction
+      could never be non-empty; and an empty one keeps `unwalked_files` at 0, so each
+      non-zero field below is the one this fixture set out to make non-zero.
+      Without it `unregistered_dirs` is `[]` in every fixture in this file, so an
+      implementation that returned `[]` unconditionally, or subtracted the dirs from
+      the ghost count, would pass every test.
+    - `Zeta`: indexed with three records, then rewritten on disk with two. The index
+      still carries three rows for a file the walk now parses at two — the live
+      `under_parsed_rows=4`, whose own cause is this report's front-matter reader
+      stopping at an interior `---`, reproduced here by the benign route so the test
+      pins the COUNT and not that bug.
+    """
+    from app.kg_store import KGStore
+
+    root = tmp_path / "facts"
+    db = KGStore(tmp_path / "kg.sqlite")
+    (root / "Epsilon").mkdir(parents=True, exist_ok=True)
+    zeta = _indexed_facts(root, "Zeta", "skill", ["sk-001", "sk-002", "sk-003"])
+    db.facts_idx.update_file(zeta, root=root)
+    db.entities.register("Zeta")      # Epsilon deliberately never registered
+    _indexed_facts(root, "Zeta", "skill", ["sk-001", "sk-002"])   # 3 rows, 2 on disk
+    return root, db
+
+
+def test_the_reverse_direction_and_the_short_parse_are_counted_as_themselves(tmp_path):
+    """Clause 1's remaining half: the reverse direction comes back as DATA, and the
+    surplus living in a file the walk DID open is its own number.
+
+    Every other fixture in this file has `unregistered_dirs == []` and
+    `under_parsed_rows == 0`, which is why an implementation that always returned an
+    empty list, or that netted directories against ghosts, survived the first review.
+    Here one directory has no registry row while zero entities are missing a directory,
+    so a netted `entities` would print `-1`, or `0` with the directories unmentioned,
+    and a `unregistered_dirs` that was never populated prints nothing.
+
+    `facts` must read 1 from `under_parsed_rows` alone with `unopened_rows` at 0: the
+    two halves name different broken things. The 4 of the live 12 that sit in
+    short-parsed files are this monitor going blind; the other 8 are the store holding
+    rows for files nobody can open — and only the second half falls the count to 8 if
+    the front-matter truncation is ever fixed.
+    """
+    root, db = _unregistered_dir_and_a_short_parsed_file(tmp_path)
+    try:
+        recon = khr.count_index_ghosts(_walked(root), root, store=db)
+        assert recon.get("error") is None, recon
+        assert recon["unregistered_dirs"] == ["Epsilon"], (
+            f"the directory with no registry row must come back as data: {recon}")
+        # Returned beside the ghost count, not folded into it: nothing is missing a
+        # directory here, so any subtraction would move this number.
+        assert recon["entities"] == 0 and recon["ghost_names"] == [], recon
+        assert (recon["under_parsed_rows"], recon["under_parsed_paths"]) == (1, 1), recon
+        assert (recon["unopened_rows"], recon["unopened_paths"]) == (0, 0), recon
+        assert recon["facts"] == 1, "the surplus is the short parse, and only that"
+        assert recon["unwalked_files"] == 0, (
+            "Epsilon holds no file for the index to lack; the empty dir is the only "
+            "thing about it the registry does not know")
+        assert recon["index_short_rows"] == 0, (
+            "the walk parses FEWER than the index here; the opposite tilt is a "
+            "different tail and must not absorb this one")
+
+        row = _report_line(_report(_hygiene(), index_ghosts=recon),
+                           "Index rows with no file")
+        assert "**1 fact rows / 0 entity rows**" in row, row
+        assert "1 in files the walk parsed short over 1 path(s)" in row, row
+        assert "0 in files the walk never opened" in row, row
+        assert "1 dir(s) with no registry row: 'Epsilon'" in row, (
+            f"the reverse direction must be printed as not-counted, not netted: {row}")
+    finally:
+        db.close()
+
+
+def test_the_row_counts_index_rows_the_walk_never_opened_and_dirless_entities(tmp_path):
+    """Clause 1: both counts come off ONE walk and ONE store read.
+
+    The store side is built by `facts_idx.update_file` from the very files the walk
+    parses, so a zero here means the two surfaces genuinely agree; then one fault per
+    population is introduced and each must land in its own count.
+    """
+    root, db = _one_deleted_file_one_dirless_entity(tmp_path)
+    try:
+        recon = khr.count_index_ghosts(_walked(root), root, store=db)
+        assert recon.get("error") is None, recon
+        assert recon["facts"] == 1, f"the deleted file's row must count once: {recon}"
+        assert recon["entities"] == 1, f"the dirless entity must count once: {recon}"
+        # The attribution, not just a total: which side of the fact fault, which name.
+        assert recon["unopened_rows"] == 1 and recon["unopened_paths"] == 1
+        assert recon["under_parsed_rows"] == 0 and recon["under_parsed_paths"] == 0
+        assert recon["unwalked_files"] == 0, "both surfaces hold the same two files"
+        assert recon["ghost_names"] == ["Delta Unwritten"], recon["ghost_names"]
+        assert recon["registry_rows"] == 4, "Alpha, Beta, Gamma and Delta are registered"
+        # The reverse direction is reported, not dropped: Gamma's directory went with
+        # the file, so no directory is left that the registry lacks.
+        assert recon["unregistered_dirs"] == [], recon["unregistered_dirs"]
+    finally:
+        db.close()
+
+
+def test_the_hygiene_row_prints_zero_and_names_the_failure_instead(tmp_path,
+                                                                   monkeypatch):
+    """Clause 2: the row is on the page at zero, and an unreadable store prints the
+    reason rather than `0`.
+
+    `0` on this row reads as "both surfaces agree" to every reader of the table
+    including `_alarms`, so a failed read that printed `0` would be the loudest
+    possible false clean. This is `KGStore.store()`'s own #1236 rule, applied to a
+    second reader: never hand a caller `0` rows for an absent file.
+    """
+    from app.kg_store import KGStore, StoreUnavailable
+
+    root, files = _two_entity_tree(tmp_path)
+    db = KGStore(tmp_path / "kg.sqlite")
+    try:
+        for f in files:
+            db.facts_idx.update_file(f, root=root)
+            db.entities.register(f.parent.name)
+        clean = khr.count_index_ghosts(_walked(root), root, store=db)
+        assert (clean["facts"], clean["entities"]) == (0, 0), clean
+        row = _report_line(_report(_hygiene(), index_ghosts=clean),
+                           "Index rows with no file")
+        assert "**0 fact rows / 0 entity rows**" in row, row
+    finally:
+        db.close()
+
+    class _LockedIndex:
+        def __init__(self):
+            self.file_row_counts = lambda: (_ for _ in ()).throw(
+                RuntimeError("database is locked"))
+
+    class _LockedStore:
+        facts_idx = _LockedIndex()
+
+        class entities:
+            @staticmethod
+            def all():
+                return []
+
+    broken = khr.count_index_ghosts(_walked(root), root, store=_LockedStore())
+    assert broken.get("error") and "database is locked" in broken["error"], broken
+    row = _report_line(_report(_hygiene(), index_ghosts=broken),
+                       "Index rows with no file")
+    assert "not measured" in row and "database is locked" in row, row
+    assert "fact rows" not in row, f"a failed read must never print a count: {row}"
+
+    def _absent():
+        raise StoreUnavailable("no knowledge-graph database at /x/kg.sqlite")
+    monkeypatch.setattr(khr, "_kg_store", _absent)
+    missing = khr.count_index_ghosts(_walked(root), root)
+    assert "no knowledge-graph database" in missing["error"], missing
+    row = _report_line(_report(_hygiene(), index_ghosts=missing),
+                       "Index rows with no file")
+    assert "not measured" in row and "knowledge-graph database" in row, row
+    assert "fact rows" not in row, row
+    # And a run that never measured at all (the key absent) still prints the row.
+    row = _report_line(_report(_hygiene()), "Index rows with no file")
+    assert "not measured" in row, row
+
+
+def test_one_missing_file_and_one_missing_directory_print_one_and_one(tmp_path):
+    """Clause 3: the two populations are counted separately and cannot cancel.
+
+    Exactly the item's fixture — two entity dirs the walk parses, the index holding
+    one fact row whose file was deleted, and one entity registered with no directory.
+    A single reconciled total would print 0 for one fault of each kind and read as
+    clean; a file that vanished and a directory that never existed are different
+    faults with different remedies, so the row prints 1 and 1.
+    """
+    root, db = _one_deleted_file_one_dirless_entity(tmp_path)
+    try:
+        recon = khr.count_index_ghosts(_walked(root), root, store=db)
+        assert (recon["facts"], recon["entities"]) == (1, 1), recon
+        row = _report_line(_report(_hygiene(), index_ghosts=recon),
+                           "Index rows with no file")
+        assert "**1 fact rows / 1 entity rows**" in row, row
+        # Neither population may print zero while both hold a fault. Matched on each
+        # population's own phrase, because the cell bolds the pair as one run —
+        # `"**0**" not in row` could not fire even under a netting implementation.
+        assert "0 fact rows" not in row and "/ 0 entity rows" not in row, (
+            f"the two faults netted out, which they must never do: {row}")
+        # Each half names its own population, so the attributions cannot blur.
+        assert "1 in files the walk never opened over 1 path(s)" in row, row
+        assert "registry names: 'Delta Unwritten'" in row, row
+    finally:
+        db.close()
+
+
+def _ghosts(facts: int, entities: int) -> dict:
+    return {"facts": facts, "entities": entities, "error": None,
+            "unopened_rows": facts, "unopened_paths": 1 if facts else 0,
+            "under_parsed_rows": 0, "under_parsed_paths": 0,
+            "index_short_rows": 0, "index_short_paths": 0,
+            "unwalked_files": 0, "unregistered_dirs": [],
+            "registry_rows": entities, "ghost_names": []}
+
+
+def test_the_ghost_alarm_fires_only_above_the_named_floor():
+    """Clause 4: `GHOST_INDEX_ROWS_ALARM_FLOOR = 60` gates the alarm.
+
+    Today's live readings are 12 fact rows and 43 entity rows, so the nightly exit
+    status on the day this lands is exactly what it was before — an alarm that fired
+    on the residue would be noise from day one, and a number nobody can act on
+    overnight is a footnote with a bell attached. Above the floor the line names WHICH
+    population drifted and how many, because an orphaned fact row (a vanished file, or
+    a scratch writer that reached the live store) and an orphaned entity row (a
+    registration that never landed) are not the same repair.
+    """
+    assert khr.GHOST_INDEX_ROWS_ALARM_FLOOR == 60
+    store = {"edges_active": 53416}
+
+    # Today's tree: silent, both populations, and at the floor exactly.
+    assert khr._alarms(store, _hygiene(), 0, 53416, _ghosts(12, 43)) == []
+    assert khr._alarms(store, _hygiene(), 0, 53416, _ghosts(60, 60)) == []
+
+    over_facts = khr._alarms(store, _hygiene(), 0, 53416, _ghosts(61, 12))
+    assert len(over_facts) == 1, over_facts
+    assert "61 facts_idx rows" in over_facts[0], over_facts[0]
+    assert "no directory" not in over_facts[0], (
+        f"the entity population is at 12, below the floor, so its own line must not "
+        f"appear: {over_facts[0]}")
+
+    over_entities = khr._alarms(store, _hygiene(), 0, 53416, _ghosts(12, 61))
+    assert len(over_entities) == 1, over_entities
+    assert "61 `entities` rows" in over_entities[0], over_entities[0]
+    assert "no directory" in over_entities[0], over_entities[0]
+
+    both = khr._alarms(store, _hygiene(), 0, 53416, _ghosts(61, 121))
+    assert len(both) == 2, both
+    assert any("61 facts_idx rows" in a for a in both), both
+    assert any("121 `entities` rows" in a for a in both), both
+
+    # An unmeasured population cannot alarm: a row that prints `not measured` must
+    # not also hand the run a clean exit code.
+    assert khr._alarms(store, _hygiene(), 0, 53416,
+                       {"error": "store unavailable: no such file"}) == []
+    assert khr._alarms(store, _hygiene(), 0, 53416, None) == []
+    # And the four-argument call every existing test uses is unaffected.
+    assert khr._alarms(store, _hygiene(), 0, 53416) == []

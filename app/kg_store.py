@@ -1464,6 +1464,26 @@ class _FactsIdx:
             return {r["entity"]: int(r["n"]) for r in self._s._query(sql)}
         return self._s.cached(key, build)
 
+    def file_row_counts(self) -> dict[str, int]:
+        """`file_path` → how many rows the index holds for that file.
+
+        Read-only, for a reader that reconciles the index against the markdown
+        tree (#3849). The knowledge-health report walks the tree and this table
+        counts the same facts from the other side, and nothing compared the two:
+        `Provenance coverage` is measured over the index while every other hygiene
+        metric is measured over the walk, so an index row whose file the walk never
+        opened is certified by one check and inspected by none.
+
+        Per path rather than one total, because a surplus has two causes with
+        different remedies — a file that no longer exists, and a file the reader
+        parsed fewer records out of than the index holds — and a count of distinct
+        paths cannot tell them apart. `file_path` is stored relative to the root
+        the write happened under (`_rows_for_file`), so a caller comparing it to a
+        walk must resolve its own files against that same root.
+        """
+        return {r["file_path"]: int(r["n"]) for r in self._s._query(
+            "SELECT file_path, COUNT(*) AS n FROM facts_idx GROUP BY file_path")}
+
     def categories_for(self, entity: str) -> list[str]:
         return [r["category"] for r in self._s._query(
             "SELECT DISTINCT category FROM facts_idx WHERE entity=? ORDER BY category", (entity,))]
