@@ -49,11 +49,14 @@ WORDS = ("alpha", "beta", "gamma", "delta")
 
 #: The clock the real scheduled pass runs on (#2893). `interval_seconds: 3600` with
 #: `min_interval_seconds: 86400` lets exactly one sweep through per day, and the
-#: sweep watermark says when the last one was: `workers.db` read
-#: `2026-10-17T02:38:29.088606+00:00` for that key when this fixture was written,
-#: under the name `last_sweep` had then (#3607). #2893's triage read the three logged pass
+#: sweep watermark says when the last one was: when this fixture was written
+#: `workers.db` held `2026-10-17T02:38:29.088606+00:00` for this source under
+#: `last_enqueued`, the name that was live then and that #3607 retired afterwards.
+#: That rename landed 2026-11-02T04:18Z, more than two weeks after the stamp, so the
+#: value reaches the interval gate through the fallback read on the retired key and
+#: was never held under `last_sweep`. #2893's triage read the three logged pass
 #: instants off the worker log as 01:51:42, 02:03:27 and 02:38:29 UTC, the last
-#: matching that watermark to the second. So the pass that owns day D is awake for
+#: matching that stamp to the second. So the pass that owns day D is awake for
 #: about the first two hours of D and never again. `NOW` above is midday — the one
 #: clock shape that cannot see the bug this section exists for.
 EARLY_PASS = datetime(2026, 10, 3, 2, 10, tzinfo=timezone.utc)
@@ -244,8 +247,9 @@ def test_the_scheduled_pass_reads_only_the_ledger_clock(tmp_path, monkeypatch):
 # of an enqueue. The name is free to change; the row a live deployment already holds is
 # the only record of its last real sweep, so the rename had to read the old name
 # (`workers/sources/failure_ledger.py`'s `WATERMARK_LEGACY_SWEEP`) without ever
-# writing it. These three nodes are those two halves and the edge case that decides
-# whether the fallback is a migration or a trap.
+# writing it. These four nodes are those two halves split across both names — the new
+# key read, the retired key read, and the write that lands on the new name only — plus
+# the edge case that decides whether the fallback is a migration or a trap.
 
 
 def _spy_sweep(monkeypatch) -> list[dict]:
@@ -449,6 +453,43 @@ def test_a_quiet_day_enqueues_nothing_and_says_so(tmp_path):
     assert report["findings"] == []
     assert report["queue_id"] is None
     assert queue.list_items(source=fl.SOURCE) == []
+
+
+# ------------------------------------------------- the retired key's literal --
+#
+# The four watermark nodes honour the retired name through a constant, never through
+# the string a live `workers.db` carries: `WATERMARK_LEGACY_SWEEP` IS
+# `fl.LEGACY_SWEEP_WATERMARK_KEY`, read once at import, so the gate's fallback read and
+# those nodes' seeds are the same name and can only move together. The node below
+# compares that name to the spelling on the row, which is the only way to see it move
+# alone (#3826).
+
+
+def test_the_retired_sweep_key_still_spells_last_enqueued():
+    """The row a deployment holds is named by this string, not by a constant.
+
+    Before this node the retired key's SPELLING was unpinned: measured at this round's
+    base commit, with `app/failure_ledger.py:859` set to `last_enqueued_MUTATED`,
+    `pytest -q tests/test_failure_ledger_dispatch.py -k "stamp or sweep or
+    stale_or_absent"` returned `4 passed, 15 deselected`. The fallback still appeared
+    to work because the pass and the seeds had moved to the new spelling together.
+
+    What that edit does in production is what the equality below is for: a deployment
+    whose last real sweep is recorded under `last_enqueued` reads as never swept, and
+    the next poll re-reads the 27 MB promotions ledger off-schedule — #3607's failure
+    mode, arriving by rename instead of by deletion. Whole-string equality, because a
+    key that merely CONTAINS the old name is as orphaned as one that dropped it.
+    """
+    assert fl.LEGACY_SWEEP_WATERMARK_KEY == "last_enqueued", (
+        f"the library's retired sweep key now spells "
+        f"{fl.LEGACY_SWEEP_WATERMARK_KEY!r}, while the row a deployment holds from "
+        "before #3607 is keyed `last_enqueued`: the interval gate would look for a row "
+        "that is not there and call a swept deployment never swept")
+    assert failure_ledger.WATERMARK_LEGACY_SWEEP == fl.LEGACY_SWEEP_WATERMARK_KEY, (
+        f"the scheduled pass reads {failure_ledger.WATERMARK_LEGACY_SWEEP!r} while the "
+        f"library pins {fl.LEGACY_SWEEP_WATERMARK_KEY!r}: the fallback read and the "
+        "literal above are naming different strings, and the first would stop seeing "
+        "the row the second describes")
 
 
 # ---------------------------------------------------------------------- handler --
