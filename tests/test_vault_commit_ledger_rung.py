@@ -10,7 +10,7 @@ loaded-memory lines into SOUL.md/USER.md"*), rewrote `lloyd/MEMORY.md` and
 in one commit, and `scripts/memory/memory_ledger.py retire` — the ledger's only
 deleter, because rows arrive on every knowledge write and nothing else removes them —
 answers that file with `refused, 7 orphan row(s) undispositioned (#2415)`. The ledger
-was at 86,023 B against the derived 102,400 B bound (`app/memory_ceiling.py:478`
+was at 86,023 B against the derived 102,400 B bound (`app/memory_ceiling.py:494`
 `LEDGER_MULTIPLIER = 4` times `memory_ceiling("MEMORY.md")`) when this item was
 triaged, so the growth bound is now a bound with no deleter behind it.
 
@@ -504,3 +504,264 @@ def test_the_second_door_lands_when_the_row_is_dispositioned_in_the_same_batch(l
 def _events(kind):
     import scripts.automod.state as S
     return [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == kind]
+
+
+# ── #3729: the SAME matcher also refuses the ADDITION direction ───────────────
+#
+# #3589 built this module to catch a commit that REMOVES a loaded line and leaves its
+# row live, and its join computes `head_anchors - staged_anchors` — removal-only. The
+# inverse was explicitly skipped: an anchor with no row "is either a line that never
+# had a row (an `unrepresentable` anchor …)". That sentence is the hole. A line whose
+# anchor holds the row parser's own field delimiter `|` can never HAVE a row, so a
+# commit that adds one strands nothing today and leaves the index holding a loaded line
+# no `retire` can ever reach — which is what 2026-11-02 shipped (`(2026-11-02) **`git
+# show X | python3 - <<'PY'` reads no bytes…`, `memory_ledger.py status` printing
+# `unrepresentable: 1` at it ever since). The write-path arm in
+# `app/memory_ceiling.memory_write_error` stops the tool call; these nodes pin the
+# commit door, which is what makes the run that landed the line SEE the refusal rather
+# than read a report a day later.
+
+#: An added line whose anchor trips `memory_ledger.representable`: the 60-character
+#: anchor contains the row parser's field delimiter `|`.
+PIPE_ADDED = ("- [project] (2026-01-07) **`git show HEAD | cat` shows no bytes** "
+              "-> topics/pipe-in-anchor\n")
+
+#: The same shape with a readable anchor: must still commit, or the door is a freeze.
+CLEAN_ADDED = ("- [project] (2026-01-07) **A pipe-free hook lands fine** "
+               "-> topics/pipe-free\n")
+
+#: The OTHER unrepresentable shape: an anchor that opens AND closes on a backtick, which
+#: no reader can tell from the legacy form where a row wrapped its anchor in backticks
+#: (`memory_ledger._anchor_field` strips one such pair). 56 characters, so the whole hook
+#: is inside the 60-character anchor and both backticks survive into it.
+BACKTICK_ADDED = "- `a hook wrapped entirely in backticks cannot be retired`\n"
+
+
+def test_adding_an_unrepresentable_line_refuses_at_door_one_before_git_commit(vault):
+    """#3729 clause 4, door one: the wrapper stops a commit that ADDS such a line."""
+    before = _head(vault)
+    (vault / MEMORY_REL).write_text(_memory() + PIPE_ADDED)
+
+    res = _run_wrapper(vault, "knowledge write: add one loaded line")
+
+    assert res.returncode != 0, (res.stdout, res.stderr, "the commit went through")
+    out = res.stdout + res.stderr
+    assert "UNREPRESENTABLE ANCHOR REFUSED" in out, out
+    assert "git show HEAD | cat" in out, out          # names the added line
+    assert "field delimiter" in out, out              # and which rule it broke
+    assert _head(vault) == before, "door one committed anyway"
+    assert _staged(vault) == [MEMORY_REL], _staged(vault)
+
+
+def test_the_addition_refusal_names_the_repair_and_causes_no_freeze(vault):
+    """The refusal routes the writer, and a pipe-free addition still lands.
+
+    A refusal whose advice cannot be followed is #2838's defect, so the message names
+    the rewrite; and because the live index already holds one such line, the door may
+    only report what the commit ADDS — proven here by committing the clean addition
+    over a vault whose HEAD copy of the bad line stays untouched.
+    """
+    before = _head(vault)
+    (vault / MEMORY_REL).write_text(_memory() + PIPE_ADDED)
+    refused = _run_wrapper(vault, "knowledge write: add one loaded line")
+    out = refused.stdout + refused.stderr
+    assert "Rewrite the hook" in out, out
+
+    (vault / MEMORY_REL).write_text(_memory() + CLEAN_ADDED)
+    ok = _run_wrapper(vault, "knowledge write: add one readable line")
+    assert ok.returncode == 0, (ok.stdout, ok.stderr)
+    # Real witnesses, not a sha-shaped-string check: `len(rev-parse HEAD) == 40` cannot
+    # fail on any git repo, so it proved nothing about the line this node is about. HEAD's
+    # own copy of the index must carry the readable line, and must NOT have carried the
+    # refused pipe line along with it — the door stages before it checks, so a line the
+    # refusal left in the INDEX would ride into whichever commit went through next.
+    assert _head(vault) != before, "the readable addition never reached HEAD"
+    head_index = _git(vault, "show", f"HEAD:{MEMORY_REL}").stdout
+    assert CLEAN_ADDED.strip() in head_index, head_index
+    assert PIPE_ADDED.strip() not in head_index, "the refused line rode along into HEAD"
+
+
+def test_the_matcher_reports_only_what_the_commit_adds(vault):
+    """Diff-relative on the addition side too: an unrepresentable line at HEAD is not
+    this commit's finding, so the rung cannot freeze the file it just refused."""
+    LSF = _load("lsf_under_test", ROOT / "scripts" / "util" / "ledger_strand_findings.py")
+    # Seed the bad line into HEAD with raw git, past the door: the point is a vault
+    # that ALREADY holds an unrepresentable line, which is the state the live vault is
+    # in today.
+    (vault / MEMORY_REL).write_text(_memory() + PIPE_ADDED)
+    _git(vault, "add", "-A")
+    _git(vault, "commit", "-q", "-m", "seed: the line the door would have refused")
+    assert ML.anchor_of(PIPE_ADDED) in {
+        ML.anchor_of(e) for e in ML.loaded_entries(
+            _git(vault, "show", f"HEAD:{MEMORY_REL}").stdout)}
+
+    # A later commit that touches no loaded index line says nothing about that line.
+    (vault / "backlog" / "10-other.md").write_text("---\nstatus: draft\n---\n# other\n")
+    res = _run_wrapper(vault, "backlog: one unrelated item",
+                       paths=["backlog/10-other.md"])
+    assert res.returncode == 0, (res.stdout, res.stderr)
+
+    # And the matcher's own answer for that vault is empty of addition findings.
+    added = LSF.unrepresentable_additions(vault)
+    assert [r["anchor"] for r in added] == [], added
+
+
+def test_the_second_door_refuses_an_added_unrepresentable_line(land_vault):
+    """Door two, in-process: the landing run is told, not a report the next day."""
+    import scripts.automod.vault_round as V
+
+    v = land_vault
+    before = _head(v)
+    (v / MEMORY_REL).write_text(_memory() + PIPE_ADDED)
+
+    with pytest.raises(V.VaultRoundError) as exc:
+        V.land([MEMORY_REL], "knowledge write: add one loaded line")
+
+    assert "UNREPRESENTABLE ANCHOR REFUSED" in str(exc.value), str(exc.value)
+    assert ML.anchor_of(PIPE_ADDED) in str(exc.value), str(exc.value)
+    assert _head(v) == before, "door two committed anyway"
+
+
+# ── #3818: the same matcher also COUNTS an added line that has no row ─────────
+#
+# The other half of the addition direction, and the opposite enforcement. An
+# `unrepresentable` anchor is permanent load no row can ever retire, so a door that lets it
+# through has let through something no later commit can repair — that one refuses. An
+# UNROWED representable line is a step the writer still controls: measured 2026-11-05,
+# `scripts/memory/memory_ledger.py status` printed `MEMORY.md: … 86 entries, 84 ledger rows
+# -> without a row: 1`, and that line reached disk through a commit door. #2415's owed
+# ruling 2 withheld the REQUIRE transition on purpose — a door that blocked every line
+# until its row existed fails every nightly while undispositioned rows sit in the curation
+# backlog — so this counts, prints the anchors, and commits. Whether it must REQUIRE the
+# row is #3543/#3539's open ruling, which is exactly why the census exists: it is the
+# measurement that ruling needs, not a pre-emption of it.
+
+#: The report's own leading token. Column 0 like every other verdict in this family, and
+#: the string both doors must print — a census worded differently at the two doors is a
+#: property of the door, not of the rule.
+CENSUS_HEAD = "UNROWED INDEX ADDS"
+
+
+def test_an_added_line_with_no_row_lands_and_is_counted_with_its_anchor(vault):
+    """#3818 clause 5, door one: rc 0, plus a count and the anchors printed.
+
+    `CLEAN_ADDED` is the same line the no-freeze node above commits, deliberately: this
+    node adds that commit OWES a row and shows the door reports it instead of blocking it.
+    Three things have to be true together, and each is a different failure — the commit
+    lands (a refusal would be the #2415 withheld rule), the count is printed (silence is
+    the state that let the 2026-11-05 line through), and the anchor is printed (a bare
+    count tells the curator nothing they can act on without opening the index).
+    """
+    before = _head(vault)
+    (vault / MEMORY_REL).write_text(_memory() + CLEAN_ADDED)
+
+    res = _run_wrapper(vault, "knowledge write: add one loaded line, row owed")
+
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert _head(vault) != before, "the census blocked a commit it may only report"
+    out = res.stdout + res.stderr
+    assert CENSUS_HEAD in out, out
+    assert "(report only, nothing is refused)" in out, out
+    assert "1 loaded index line(s)" in out, out
+    assert ML.anchor_of(CLEAN_ADDED) in out, out
+    assert MEMORY_LEDGER_REL in out, "the census did not name the ledger that owes the row"
+    # A census a reader could mistake for a block is its own failure mode.
+    assert "LEDGER STRAND REFUSED" not in out and "UNREPRESENTABLE ANCHOR REFUSED" not in out, out
+
+
+def test_a_commit_that_adds_no_loaded_index_line_prints_no_census(vault):
+    """Clause 5's second half: silence is the clean signal, not a printed zero.
+
+    The fixture's HEAD carries `UNROWED` — a loaded line with no row that is nobody's
+    backlog in this commit — so a census keyed on the whole file would report 1 here and
+    teach the reader to ignore the report. Diff-relative means exactly this: the count is
+    what THIS commit adds, and a commit that adds nothing says nothing.
+    """
+    (vault / "backlog" / "9-item.md").write_text("---\nstatus: done\n---\n# item\n")
+    _git(vault, "add", "-A")
+    assert LSF.unrowed_additions(vault) == [], "the census read HEAD's lines as this commit's"
+
+    res = _run_wrapper(vault, "backlog: close #9")
+
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert CENSUS_HEAD not in res.stdout + res.stderr, res.stderr
+
+
+def test_the_census_reads_the_staged_ledger_so_a_same_commit_row_is_not_reported(vault):
+    """The join is against the LEDGER'S INDEX COPY, the way #3589's strand join is.
+
+    Without the control this node cannot fail for the wrong reason: a census that skipped
+    the row lookup entirely would also print nothing here and look correct. So the same
+    vault is measured twice — once with the row unstaged, once staged — and the two answers
+    are the difference this rung draws.
+    """
+    (vault / MEMORY_REL).write_text(_memory() + CLEAN_ADDED)
+    (vault / MEMORY_LEDGER_REL).write_text(
+        (vault / MEMORY_LEDGER_REL).read_text() + _row(ML.anchor_of(CLEAN_ADDED)))
+
+    _git(vault, "add", "-A", "--", MEMORY_REL)          # the row is still only in the tree
+    owed = LSF.unrowed_additions(vault)
+    assert [r["anchor"] for r in owed] == [ML.anchor_of(CLEAN_ADDED)], owed
+
+    _git(vault, "add", "-A", "--", MEMORY_LEDGER_REL)   # the row joins the same commit
+    assert LSF.unrowed_additions(vault) == [], "a same-commit row did not cover the line"
+
+    res = _run_wrapper(vault, "knowledge write: add one loaded line WITH its row")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert CENSUS_HEAD not in res.stdout + res.stderr, res.stderr
+
+
+def test_the_second_door_prints_the_same_census_text_and_still_lands(land_vault, capsys):
+    """Door two, in-process: the SAME block, and the landing is not withheld (#2468).
+
+    The expected text is built by the matcher itself, from the staged state before the
+    landing, so this node fails on a door that paraphrases, reorders, or prints only a
+    count — the two doors differ in everything else about how they commit (bash exec'ing a
+    subprocess here, in-process with its own `git add` there), so the report is the one
+    thing that must not differ.
+    """
+    import scripts.automod.vault_round as V
+
+    v = land_vault
+    before = _head(v)
+    (v / MEMORY_REL).write_text(_memory() + CLEAN_ADDED)
+    _git(v, "add", "-A")
+    expected = LSF.census_report_text(LSF.unrowed_additions(v))
+    assert CENSUS_HEAD in expected, (
+        f"the census found nothing to report, so the comparison below could not fail: "
+        f"{expected!r}")
+
+    out = V.land([MEMORY_REL], "knowledge write: add one loaded line, row owed")
+    err = capsys.readouterr().err
+
+    assert out["ok"] is True, out
+    assert _head(v) != before, "door two withheld a landing the census may only report on"
+    assert expected in err, err
+    assert ML.anchor_of(CLEAN_ADDED) in err, err
+
+
+def test_the_backtick_rule_is_rendered_at_both_doors(land_vault):
+    """The second unrepresentable shape, through both real doors.
+
+    `addition_refusal_text` has two `why` branches and #3729's two door nodes seeded only
+    the pipe-bearing one, so the backtick sentence — the one a writer of a short
+    backticked hook actually meets — had never been rendered by a test. A door that
+    crashed while building that branch would have shipped green.
+    """
+    import scripts.automod.vault_round as V
+
+    v = land_vault
+    before = _head(v)
+    (v / MEMORY_REL).write_text(_memory() + BACKTICK_ADDED)
+
+    res = _run_wrapper(v, "knowledge write: add a backticked hook")
+    out = res.stdout + res.stderr
+    assert res.returncode != 0, (out, "door one committed an unretirable line")
+    assert "UNREPRESENTABLE ANCHOR REFUSED" in out, out
+    assert "opens AND closes on a backtick" in out, out
+    assert _head(v) == before, "door one committed anyway"
+
+    with pytest.raises(V.VaultRoundError) as exc:
+        V.land([MEMORY_REL], "knowledge write: add a backticked hook")
+    assert "opens AND closes on a backtick" in str(exc.value), str(exc.value)
+    assert _head(v) == before, "door two committed anyway"

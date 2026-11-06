@@ -43,6 +43,7 @@ import importlib.util
 import inspect
 import json
 import re
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -1649,3 +1650,96 @@ def test_the_multiplier_block_states_the_ruling_the_trigger_and_the_commands():
         "otherwise, and one of the two is a claim nobody checked")
     assert ceiling.ledger_ceiling("memory-md-ledger") == 102_400
     assert ceiling.ledger_ceiling("user-md-ledger") == 65_536
+
+
+# ── #3729 clause 5: one owner for the anchor rule, shared by both readers ─────
+
+def test_representable_has_exactly_one_definition_in_the_tree():
+    """The word `representable` is defined once, in the module both readers import.
+
+    Before #3729 the predicate lived in `scripts/memory/memory_ledger.py` and nothing
+    under `app/` could reach it: `memory_ledger.py:103` already imports
+    `app.memory_ceiling`, so `app/memory_ceiling.py` importing `memory_ledger` back at
+    module scope is a cycle — the same reason `MEMORY_LEDGERS` is duplicated at
+    `app/memory_ceiling.py` (that file's own comment says so). A duplicated predicate
+    is what lets the write guard and `status` disagree about what is unrepresentable,
+    which is the load-bearing disagreement of this whole item: the guard would wave a
+    line through that the report then calls unretirable, or refuse one the report
+    counts as covered.
+
+    A `git grep` over tracked files, not a walk of `sys.modules`: the failure mode is
+    a second COPY in a file nobody imports yet.
+    """
+    # Tracked files, so this node reads the COMMITTED tree: the gate runs it from the
+    # round's commit, and an untracked file would be invisible to `git grep` and read as
+    # "no owner" rather than "not committed yet".
+    out = subprocess.run(
+        ["git", "grep", "-l", r"^def representable", "--", "*.py"],
+        cwd=ROOT, capture_output=True, text=True).stdout.split()
+    assert out == ["app/ledger_anchor.py"], (
+        f"`representable` must be defined exactly once, in the shared module; found "
+        f"definitions in {out}")
+    out2 = subprocess.run(
+        ["git", "grep", "-l", r"^def anchor_of", "--", "*.py"],
+        cwd=ROOT, capture_output=True, text=True).stdout.split()
+    assert out2 == ["app/ledger_anchor.py"], (
+        f"`anchor_of` must have one owner too, or the two readers compute different "
+        f"anchors for one line; found {out2}")
+
+
+def test_the_write_guard_and_the_report_are_the_same_function_objects():
+    """Identity, not equality: `app.memory_ceiling` and `memory_ledger` import it.
+
+    `ml` is `scripts/memory/memory_ledger.py` loaded by path (the way the commit door
+    loads it), `ceiling` is `app.memory_ceiling`, which is where the write-path arm
+    lives. `is` is the assertion: two modules that each hold a function answering the
+    same way today are still free to diverge tomorrow, and this node would stay green.
+    The entry population is pinned the same way, because a shared predicate over two
+    different line populations is the same disagreement one level up.
+    """
+    from app import ledger_anchor
+
+    assert ml.representable is ceiling.representable is ledger_anchor.representable
+    assert ml.anchor_of is ceiling.anchor_of is ledger_anchor.anchor_of
+    assert ml.loaded_entries is ceiling.loaded_entries is ledger_anchor.loaded_entries
+    assert ledger_anchor.FIELD_SEP == "|" and ledger_anchor.ANCHOR_CHARS == 60
+    # The constants are pinned at their DEFINITION, not on an importer: `memory_ledger`
+    # names neither (it reads rows, it never joins or builds one), and requiring the import
+    # would keep a dead name alive just to satisfy this node.
+    for const in ("FIELD_SEP", "ANCHOR_CHARS"):
+        found = subprocess.run(["git", "grep", "-l", rf"^{const} = ", "--", "*.py"],
+                               cwd=ROOT, capture_output=True, text=True).stdout.split()
+        assert found == ["app/ledger_anchor.py"], f"{const} has more than one owner: {found}"
+
+    ledger_src = (ROOT / "scripts" / "memory" / "memory_ledger.py").read_text()
+    ceiling_src = (ROOT / "app" / "memory_ceiling.py").read_text()
+    assert "from app.ledger_anchor import" in ledger_src, "the report re-owns the rule"
+    assert "from app.ledger_anchor import" in ceiling_src, "the guard re-owns the rule"
+    assert "def representable" not in ledger_src, "the report kept a copy"
+    assert "def representable" not in ceiling_src, "the guard grew a copy"
+
+
+def test_the_shared_module_imports_nothing_from_either_reader():
+    """The cycle the item warns about stays broken.
+
+    `memory_ledger.py` imports `app.memory_ceiling` at module scope, so the shared
+    module may import from neither side or the pair closes into a loop that fails at
+    import time — a failure that would surface as every vault landing's `land()` being
+    unable to import its own rung.
+    """
+    # The module's REAL import statements, read off its AST: the docstring NAMES both
+    # readers to explain why the file exists, so grepping lines for "from " matches a
+    # prose sentence and grepping for "memory_ledger" reports a passing file as a cycle.
+    src = (ROOT / "app" / "ledger_anchor.py").read_text()
+    mods = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            mods.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            mods.add(node.module or "")
+    assert mods == {"__future__", "re"}, (
+        f"the shared anchor rule must depend on the standard library alone; it imports "
+        f"{sorted(mods)} — importing either reader at module scope closes the cycle "
+        f"`memory_ledger` -> `app.memory_ceiling` -> back, which fails at import time and "
+        f"would surface as every vault landing unable to import its own rung")
+    assert "def representable" in src

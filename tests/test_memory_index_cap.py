@@ -2534,3 +2534,162 @@ def test_the_validator_comments_state_the_rule_and_not_a_count_snapshot():
     assert "MEASURES" in header, "the header must say the count is measured, never remembered"
     assert "hook line" in header and "hook line" in arm.lower(), (
         "the comments must name the one write that clears an unlinked file")
+
+
+# ── #3729: a line the ledger can never retire is refused on the write path ───
+#
+# `representable()` (`scripts/memory/memory_ledger.py`) has always been able to tell,
+# from an entry line alone, that no ledger row will ever cover it: the anchor holds the
+# row's field delimiter `|`, or it opens and closes on a backtick. Until #3729 its only
+# caller was `status` itself, so the only reader of the verdict was the report that
+# prints it — and 2026-11-02 shipped one such line (`(2026-11-02) **`git show X |
+# python3 - <<'PY'` reads no bytes…**, whose anchor trips the pipe) while `status`
+# printed `unrepresentable: 1` and no writer was told. These tests are the write-path
+# half: the refusal, all five lanes, and the scoping that keeps the guard off the
+# lines a write did not add.
+
+#: A hook whose first 60 characters hold a pipe: the row parser cuts the anchor at it,
+#: so `representable()` answers False and `status` counts the line `unrepresentable`.
+PIPE_LINE = "- [project] (2026-11-02) **`grep -rn foo | head` proves the strand.**"
+
+#: A hook that opens AND closes on a backtick, which no reader can tell from the
+#: legacy form where a row wrapped its anchor in backticks
+#: (`memory_ledger._anchor_field` strips one such pair).
+BACKTICK_LINE = "- `short hook wrapped entirely in backticks`"
+
+_INDEX_HEAD = """---
+type: note
+---
+# Lloyd Long-Term Memory
+
+## Key Knowledge
+- [project] (2026-09-11) **A clean line with a real hook.** → topics/a-clean-line
+"""
+
+
+def test_memory_write_error_refuses_an_added_line_the_ledger_can_never_carry(memories_root):
+    """#3729 clause 1: `memory_write_error` refuses an added unrepresentable line.
+
+    The refusal names the line, which of the two rules it broke (the field delimiter
+    `|` inside the 60-character anchor, or an anchor opening AND closing on a
+    backtick), and the repair — the same shape as the long-line refusal, which goes
+    first among the existing arms precisely because it names an edit this write can
+    make. `status`'s own word `unrepresentable` is quoted so the writer can grep what
+    it just produced.
+    """
+    session, root = memories_root
+    path = root / "MEMORY.md"
+    path.write_text(_INDEX_HEAD, encoding="utf-8")
+
+    msg = ceiling.memory_write_error(path, _INDEX_HEAD + PIPE_LINE + "\n")
+    assert msg is not None, "a pipe-bearing added line reached the disk unrefused"
+    assert "can never carry" in msg, msg
+    assert "grep -rn foo | head" in msg, msg          # the line itself
+    assert "field delimiter" in msg, msg              # which rule it broke
+    assert "'|'" in msg, msg             # the delimiter itself, quoted: clause 2's wording
+    assert "unrepresentable" in msg, msg              # status's own word for it
+    assert "Rewrite the hook" in msg, msg             # the repair, not just the number
+
+    msg2 = ceiling.memory_write_error(
+        path.parent / "USER.md", path.read_text() + "\n" + BACKTICK_LINE + "\n")
+    assert msg2 is not None and "backtick" in msg2, msg2
+
+    # A write that adds nothing the ledger cannot carry is not refused by this arm.
+    assert ceiling.memory_write_error(
+        path, path.read_text()
+        + "- [project] (2026-11-03) **A second clean line.** → topics/two\n") is None
+
+
+def test_an_unrepresentable_line_is_refused_by_every_writer(memories_root):
+    """#3729 clause 2: the five lanes that can rewrite MEMORY.md all refuse one line.
+
+    `memory_add`, `memory_replace`, `Write`, `Edit` and `vault_write` all reach the file
+    and all call `memory_write_error` before writing, so one arm covers five doors —
+    this is the pin that keeps a future lane from being added beside the check. Each
+    lane is driven on the SAME resolved path with the SAME added line, and every one
+    has to leave the bytes untouched: a refusal that writes anyway is worse than no
+    guard, because the line is then on disk with no message attached to it.
+    """
+    import json as _json
+
+    from agent_mcp import builtin_fs, vault
+    session, root = memories_root
+    path = root / "MEMORY.md"
+    path.write_text(_INDEX_HEAD, encoding="utf-8")
+    before = path.read_bytes()
+    monkeypatch_vault = pytest.MonkeyPatch()
+    monkeypatch_vault.setattr(vault, "VAULT", root.parent)
+    monkeypatch_vault.setattr(vault, "AUDIT_LOG_DIR", root.parent / "audit")
+    monkeypatch_vault.setattr(vault, "AUDIT_LOG_FILE",
+                              root.parent / "audit" / "writes.jsonl")
+    try:
+        lanes = {
+            "memory_add": lambda: session._memory_add(
+                # A bullet, the way the tool is really called: `_memory_add` stamps
+                # the date and `add_entry` appends, so a bullet-less entry would not
+                # be a loaded line at all and the guard would be right to skip it.
+                {"type": "project",
+                 "entry": "- **`grep -rn foo | head` proves it.**"}),
+            "memory_replace": lambda: session._memory_replace(
+                {"file": "MEMORY.md", "old_text": "A clean line with a real hook.",
+                 "new_text": "**`grep -rn foo | head` replaces it.**"}),
+            "Write": lambda: builtin_fs._write(
+                {"file_path": str(path),
+                 "content": _INDEX_HEAD + PIPE_LINE + "\n"}),
+            "Edit": lambda: builtin_fs._edit(
+                {"file_path": str(path),
+                 "old_string": "- [project] (2026-09-11) **A clean line",
+                 "new_string": PIPE_LINE[:55], "replace_all": True}),
+            "vault_write": lambda: vault._vault_write(
+                {"path": "lloyd/MEMORY.md",
+                 "content": _INDEX_HEAD + PIPE_LINE + "\n"}),
+        }
+        for name, call in lanes.items():
+            out = call()
+            text = out if isinstance(out, str) else _json.dumps(out)
+            assert "error" in text, (name, out)
+            assert "can never carry" in text, (name, out)
+            assert path.read_bytes() == before, f"{name} refused AND wrote"
+    finally:
+        monkeypatch_vault.undo()
+
+
+def test_the_guard_off_a_line_the_file_already_holds_adds_no_freeze(memories_root):
+    """#3729 clause 3: the arm reads only what a write ADDS, so it is not a freeze.
+
+    The live `lloyd/MEMORY.md` holds one unrepresentable line today. An arm that read
+    the whole prospective text would refuse every future write to that file — including
+    the reword that would fix it — which is #2838's unfollowable refusal and #3416's
+    self-locked index in a new costume. The mechanism is the one `index_repair_hook_slugs`
+    already uses: read the file as it stands, diff whole lines, and ask only about the
+    lines that are new. A write that removes the bad line must therefore be accepted,
+    and a shrink that adds nothing must be too.
+    """
+    session, root = memories_root
+    path = root / "MEMORY.md"
+    path.write_text(_INDEX_HEAD + PIPE_LINE + "\n", encoding="utf-8")
+
+    # Same line already on disk, nothing new added: a shrink (dropping an unrelated
+    # clean line) still goes through.
+    shrunk = (_INDEX_HEAD.replace(
+        "- [project] (2026-09-11) **A clean line with a real hook.** → topics/a-clean-line\n",
+        "") + PIPE_LINE + "\n")
+    assert ceiling.memory_write_error(path, shrunk) is None
+
+    # Replacing the unrepresentable line with a clean one is the repair itself, and it
+    # has to be writable or the guard is the bug it was built to catch.
+    repaired = _INDEX_HEAD + "- [project] (2026-11-03) **A readable hook.** → topics/three\n"
+    assert ceiling.memory_write_error(path, repaired) is None
+
+    # And the same bad line again, added a SECOND time, is still refused: the set
+    # difference is by content, so a duplicate of an on-disk unrepresentable line is a
+    # line this write adds.
+    # Named asserts, not a `.count(...)`-style probe: a refusal that merely QUOTES the
+    # prospective line satisfies a count of that line's text, so an unrelated arm (the room
+    # reserve, the long-line cap) would pass this node with the addition arm never tested.
+    # `"can never carry"` is this arm's own sentence and `1 index line(s)` is its own count
+    # — the duplicate counted as exactly one add, by the arm that refuses adds.
+    dup = ceiling.memory_write_error(path, path.read_text() + PIPE_LINE + "\n")
+    assert dup is not None, "a duplicate of an on-disk unrepresentable line was accepted"
+    assert "can never carry" in dup, ("the refusal came from another arm", dup)
+    assert "1 index line(s)" in dup, ("the duplicate was not counted as exactly one add", dup)

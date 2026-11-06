@@ -547,7 +547,9 @@ def test_an_unreadable_ledger_is_printed_as_such(tmp_path):
 
     One thing this node deliberately does **not** claim: that the *other* loaded file's
     counts survive. They do not. `memory_ledger.status()` reads each ledger at
-    `scripts/memory/memory_ledger.py:199` outside the try that guards the index read, so a
+    #3729 moved `loaded_entries` to `app/ledger_anchor.py` (line 83 as this is written), so
+    the raise that used to sit at `scripts/memory/memory_ledger.py:199` is the shared
+    module's now; the pin below reads the function wherever its owner lives. A
     binary ledger raises `UnicodeDecodeError` out of `status()` itself, the validator's one
     `except Exception` catches it for the whole call, and `_ledger_block` then prints the
     reason *instead of* any per-file line — `USER.md`'s intact ledger goes uncounted

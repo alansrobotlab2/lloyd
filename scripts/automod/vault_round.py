@@ -2132,6 +2132,20 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     # tree is left exactly as found so adding the row's disposition to the same batch
     # is the whole fix.
     strand_lines, strand_unread = LSF.findings(VAULT)
+    # #3818: the report-only census of loaded lines this landing ADDS with no ledger row.
+    # Printed here, in the same order the bash door prints it (`main` prints the census to
+    # stderr before the refusal block), and for the same reason at both doors: the two
+    # doors differ in everything else about how they commit — one is bash exec'ing a
+    # subprocess, this one is in-process with its own `git add` — so a report that appeared
+    # at only one of them would read as a property of the door rather than of the rule.
+    # It NEVER changes the verdict: no list here is refused, nothing is raised, and the
+    # REQUIRE-a-row question stays the open #3543/#3539 ruling the census exists to
+    # illuminate rather than pre-empt.
+    census_text, census_unread = LSF.census_report(VAULT)
+    if census_text:
+        print(census_text, file=sys.stderr, flush=True)
+    elif census_unread:
+        print(f"vault_round.py: {census_unread}", file=sys.stderr, flush=True)
     if strand_unread:
         # Said out loud rather than read as clean: a strand check that could not run is
         # the same blindness `status()`'s printed count already was, and this door

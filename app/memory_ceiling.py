@@ -341,6 +341,22 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
         reserve = index_room_reserve_error(path, filename, prospective)
         if reserve is not None:
             return index_line_length_error(filename, prospective) or reserve
+
+    # #3729: a loaded index line whose anchor the ledger row parser can never
+    # carry is refused HERE, above the shrink escape, for the same reason #3562
+    # moved the room reserve above it: the reword that fixes such a hook arrives
+    # inside a trimming pass, and an arm below the escape would be blind to it.
+    # The arm reads only what the write ADDS (`index_unrepresentable_additions`),
+    # which is what keeps it off the one such line `lloyd/MEMORY.md` holds today.
+    # before `index_no_room_error` on purpose: the room verdict is the general one
+    # and would tell the writer to retire an entry to free bytes, when the fix
+    # here is to retype the hook — the ordering the long-line refusal follows.
+    # (Deliberately outside the scoped-bounds gate above: those bounds are a byte
+    # budget that flag may release, and an unretirable line is not a byte problem.)
+    unrep_msg = index_unrepresentable_error(path, prospective)
+    if unrep_msg is not None:
+        return unrep_msg
+
     if size < _on_disk_bytes(Path(path)):
         # The shrink escape, tested first so it covers every bound below — the
         # ceiling, the tight limit and the line cap — or the guard would refuse
@@ -1057,3 +1073,103 @@ def index_repair_hook_slugs(path: str | os.PathLike[str],
             return frozenset()
         hooked |= slugs
     return frozenset(hooked)
+
+
+# ── #3729: refusing a loaded index line the ledger can never retire ──────────────
+#
+# This block, and the `app.ledger_anchor` import under its heading, sit at the END of the
+# file on purpose. Six citations elsewhere in the tree name `app/memory_ceiling.py:114`,
+# `:151`, `:162`, `:248-259`, `:273` and `:333`; an import added to the header block would
+# shift every one of them off its symbol, and a line-number citation whose file has moved
+# is a claim that reads as checked while pointing at the wrong code. A module-scope import
+# below the code that uses it is legal Python — the global resolves when the function RUNS
+# — and `scripts/memory/memory_ledger.py` already carries a mid-file import of THIS module
+# under the same `# noqa: E402`.
+
+from collections import Counter
+
+from app.ledger_anchor import (  # noqa: E402  — below its users, for the line reason above
+    ANCHOR_CHARS, FIELD_SEP, anchor_of, loaded_entries, representable)
+
+#: The index files that owe a ledger row per loaded line, read off `MEMORY_LEDGERS` instead
+#: of restated. A third ledgered index added there is then guarded on the write path and by
+#: `status` with no second edit here; a second list that quietly drifted is exactly the
+#: disagreement #3729 was filed to prevent.
+LEDGERED_INDEX_NAMES = frozenset(MEMORY_LEDGERS.values())
+
+
+def index_unrepresentable_additions(path: str | os.PathLike[str],
+                                    prospective: str) -> list[str]:
+    """Loaded index lines this write ADDS whose anchor no ledger row can ever carry.
+
+    Diff-relative, exactly like `index_repair_hook_slugs` below and for the same reason:
+    `lloyd/MEMORY.md` holds such a line TODAY (`(2026-11-02) **`git show X | python3
+    - <<'PY'` reads no bytes…`), so a predicate over the whole prospective text would
+    refuse every future write to that file — including the reword that fixes it. That is
+    #2838's refusal whose advice cannot be followed and #3416's self-locked index in a
+    new costume, and it would be permanent: the file could never be edited out of it.
+
+    Counted as multisets, not sets. A line already on disk that the write carries
+    through is not an addition; one copy of an on-disk unrepresentable line that the
+    write DUPLICATES is, because that second copy is a loaded line this write added. The
+    file is read through the caller's own path, so a vault-rooted `MEMORY.md` and
+    `~/lloyd/MEMORY.md` resolve the same way the size ceiling already does.
+    """
+    name = _loaded_memory_name(path)
+    if name is None or name not in LEDGERED_INDEX_NAMES:
+        return []
+    try:
+        p = Path(path)
+        current = p.read_text(encoding="utf-8") if p.exists() else ""
+    except OSError:
+        # Same policy as the size ceiling's `_on_disk_bytes`: not knowing is not a
+        # refusal. A guard that failed closed over an unreadable index would lock the
+        # memory subsystem on one stat error.
+        return []
+    held: Counter = Counter(loaded_entries(current))
+    seen: Counter = Counter()
+    out: list[str] = []
+    for line in loaded_entries(prospective):
+        seen[line] += 1
+        if seen[line] > held[line] and not representable(anchor_of(line)):
+            out.append(line)
+    return out
+
+
+def index_unrepresentable_error(path: str | os.PathLike[str],
+                                prospective: str) -> str | None:
+    """Refuse a write that would add an index line the ledger can never retire.
+
+    The message names the line, which of the two rules its anchor broke, and the edit
+    that fixes it — the shape `memory_write_error`'s long-line arm already sets, and the
+    reason that arm is ordered first: a writer told what to retype can comply on the next
+    call. `unrepresentable` is quoted verbatim because it is the word
+    `memory_ledger.py status` prints, so a writer who has read the report recognises the
+    defect instead of meeting a new name for it.
+    """
+    bad = index_unrepresentable_additions(path, prospective)
+    if not bad:
+        return None
+    lines = [f"Loaded memory: this write adds {len(bad)} index line(s) a ledger row can "
+             f"never carry. A line in this file is retired by a row in its companion "
+             f"ledger keyed on the line's anchor — the first {ANCHOR_CHARS} characters — "
+             f"and these anchors are unrepresentable:"]
+    for line in bad:
+        anchor = anchor_of(line)
+        why = (f"its anchor contains {FIELD_SEP!r}, the ledger row's own field "
+               f"delimiter, so the row parser cuts the anchor and the row can never read "
+               f"back whole"
+               if FIELD_SEP in anchor
+               else "its anchor opens AND closes on a backtick, which no reader can tell "
+                    "from the legacy form where a row wrapped its anchor in backticks")
+        lines.append(f"  - {line.strip()}\n      why: {why}\n      anchor: {anchor}")
+    lines.append(
+        f"Rewrite the hook so the first {ANCHOR_CHARS} characters hold no {FIELD_SEP!r} — "
+        f"name the mechanism instead of the command line (`grep -rn foo {FIELD_SEP} head` "
+        f"reads better as \"grep -rn foo piped to head\") — and do not wrap a short hook "
+        f"entirely in backticks. A line that fails this is not curator backlog: no row "
+        f"will ever cover it, so it loads into every session's prompt forever, and "
+        f"`scripts/memory/memory_ledger.py status` counts it as `unrepresentable`. This "
+        f"check sees only the lines THIS write adds, so a file that already holds such a "
+        f"line stays writable and the fix is the reword, not a different tool.")
+    return "\n".join(lines)

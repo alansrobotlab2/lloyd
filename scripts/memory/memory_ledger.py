@@ -103,10 +103,6 @@ sys.path.insert(0, str(ROOT))
 from app.memory_ceiling import index_bounds_apply, tight_limit  # noqa: E402
 from app.data_root import vault_root
 
-#: How much of an entry identifies it. Long enough that two entries in one
-#: file never share it (checked: 0 collisions in USER.md and MEMORY.md on
-#: 2026-09-25), short enough that an edit to the end of a line keeps its row.
-ANCHOR_CHARS = 60
 #: Below the file's TIGHT limit (`app.memory_ceiling.tight_limit` — 80% of its
 #: ceiling for MEMORY.md, the line `validate_memory_index.py --mode full` holds the
 #: index to) the curator runs, so it acts while there is still room to write: one
@@ -118,10 +114,30 @@ ANCHOR_CHARS = 60
 HEADROOM_BYTES = 1024
 
 LEDGERS = {"USER.md": "user-md-ledger.md", "MEMORY.md": "memory-md-ledger.md"}
-#: What ends the anchor field. A pipe, not a backtick: the anchor is the loaded
-#: line's own first 60 characters, code spans and all, and every later field in
-#: the row is already pipe-separated (#1730 — see the module docstring).
-FIELD_SEP = "|"
+
+# #3729: the anchor rule (`ANCHOR_CHARS`, `FIELD_SEP`, `norm`, `anchor_of`,
+# `representable`) and the entry population (`loaded_entries`) are OWNED by
+# `app/ledger_anchor.py`, which BOTH this report and the write-path guard
+# (`app/memory_ceiling.memory_write_error`) import, so neither can hold a copy the
+# other disagrees with. They lived here while `status` was their only reader, and
+# that is the arrangement that let an unretirable line ship on 2026-11-02. The
+# row-WRITING half of the rule (`_anchor_field`, `_ROW`, `_CONT`, `ledger_rows`)
+# stays, because writing and reading rows is this command's job.
+from app.ledger_anchor import anchor_of, loaded_entries, norm as _norm, \
+    representable  # noqa: E402
+from app.ledger_anchor import ANCHOR_CHARS, FIELD_SEP  # noqa: E402  (see __all__ below)
+
+#: What this module exposes to the code that loads it BY PATH. A script run as a command
+#: has no public surface, but `scripts/util/ledger_strand_findings.py` loads it with
+#: `spec_from_file_location` in BOTH vault commit doors, and 14 nodes in
+#: `tests/test_memory_ledger.py` plus the orphan node in
+#: `tests/test_memory_index_ledger_orphans.py` reach in for `anchor_of`, `loaded_entries`,
+#: `ANCHOR_CHARS` and `FIELD_SEP` through that loaded object. Dropping the last two because
+#: pyflakes called them unused turned those nodes red with `AttributeError` in the gate's
+#: `tests` rung, so the surface is declared here: pyflakes reads `__all__` as a use, which
+#: is the honest statement — the names are used, just not by this file's own code.
+__all__ = ["ANCHOR_CHARS", "FIELD_SEP", "anchor_of", "loaded_entries", "representable"]
+
 # `memory_add` writes `- [project] (YYYY-MM-DD) <entry>`, so the type tag and
 # date stamp it prepends are optional in front of `anchor:`.
 _ROW = re.compile(r"^\s*-\s+(?:\[[a-z]+\]\s+)?(?:\(\d{4}-\d{2}-\d{2}\)\s+)?"
@@ -139,15 +155,7 @@ _CHECKED = re.compile(r"checked:\s*`?(\d{4}-\d{2}-\d{2})")
 _CONT = re.compile(r"^[ \t]+\S")
 
 
-def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
 
-
-def anchor_of(entry_line: str) -> str:
-    """The anchor for one loaded entry line."""
-    body = entry_line.strip()
-    body = re.sub(r"^(?:[-*]|>)\s*", "", body)
-    return _norm(body)[:ANCHOR_CHARS].rstrip()
 
 
 def _anchor_field(field: str) -> str:
@@ -165,34 +173,11 @@ def _anchor_field(field: str) -> str:
     return f
 
 
-def representable(anchor: str) -> bool:
-    """Whether a row can carry `anchor` and `ledger_rows` read it back whole.
-
-    Two shapes cannot: one containing the field delimiter, which the row parser
-    cuts at, and one that both opens and closes on a backtick, which no reader
-    can tell from the legacy wrapped form. A line with either is not curator
-    backlog — no row will ever cover it — so `status` counts it separately.
-    """
-    return FIELD_SEP not in anchor and not (anchor.startswith("`")
-                                            and anchor.endswith("`"))
 
 
-def loaded_entries(text: str) -> list[str]:
-    """Bullet lines outside the front matter: the entries a ledger row covers.
-
-    Blockquote paragraphs (USER.md's header) are the file's own rules about
-    itself and carry no row."""
-    out, in_fm = [], False
-    for i, line in enumerate(text.splitlines()):
-        if i == 0 and line.strip() == "---":
-            in_fm = True
-            continue
-        if in_fm:
-            in_fm = line.strip() != "---"
-            continue
-        if line.lstrip().startswith("- "):
-            out.append(line)
-    return out
+# `loaded_entries`, `anchor_of` and `representable` come from the import above:
+# the guard, this report and both vault commit doors count one population with
+# one predicate.
 
 
 def ledger_rows(text: str) -> list[dict]:
