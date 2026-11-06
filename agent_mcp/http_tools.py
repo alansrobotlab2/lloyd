@@ -546,9 +546,25 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
     # A non-loopback private address still denies, and the legacy check below it
     # is left in place untouched.
     from agent_mcp import egress
-    verdict = egress.guard("http_request", url, loopback_ok=loopback)
+    verdict = egress.guard("http_request", url, loopback_ok=loopback,
+                           headers=headers)
     if not verdict.allowed:
         return json.dumps({"error": verdict.reason})
+    # #3846: this is the one lane that carries caller-supplied credentials, so it is
+    # the one lane that hands its headers to the gate. `verdict.headers` is what came
+    # in with any vaulted placeholder swapped for the real value — but only when THIS
+    # url's `scheme://host` is a destination the credential is bound to; on any other
+    # host the placeholder goes out unchanged and the remote end says no, which is the
+    # outcome the whole design is for. No headers in, `verdict.headers` None, and the
+    # request sends exactly what it always sent.
+    #
+    # This comment sits BELOW the `egress.guard` call rather than above it, where it
+    # reads better, because `architecture/guard-coverage.md` cites
+    # `agent_mcp/http_tools.py:549` for that call and the witness anchor is graded by
+    # re-running the `git grep` and comparing printed lines: `:536` (2026-10-31) and
+    # `:549` (2026-11-06) are both recorded failures of exactly that kind, so 7 lines
+    # inserted above a cited call site move a fact a document asserts.
+    send_headers = verdict.headers if verdict.headers is not None else (headers or {})
     if egress._is_private_host(hostname) and not loopback:
         return json.dumps({"error": f'Blocked — private/internal hostname "{hostname}"'})
     # TLS verification is on for everything except the machine's own loopback,
@@ -557,7 +573,7 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
     # on any outbound call (added by an auto-generated commit, 2026-04-11).
     try:
         with make_sync_http_client(timeout=timeout_, verify=not loopback, follow_redirects=True) as client:
-            resp = client.request(method_, url, headers=headers or {}, content=body.encode() if body else b"")
+            resp = client.request(method_, url, headers=send_headers, content=body.encode() if body else b"")
             refused = _landed_hop_refusal(resp, loopback_ok=loopback)
             if refused:
                 return json.dumps({"error": refused})

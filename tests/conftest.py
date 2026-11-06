@@ -927,3 +927,65 @@ def credential_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     return home
+
+
+#: The env file for `credential_vault`, written here so the count is visible in one
+#: place. Three secret-shaped names plus three configuration names, in the same
+#: 6-name shape the real `~/lloyd/.env` has on this box: the three configuration
+#: names exist so a node can require that a placeholder pass changed exactly three
+#: variables and not six — an all-caps env file would otherwise let a change that
+#: vaulted a base URL or a model id through as "everything works".
+CREDENTIAL_VAULT_ENV = """\
+LLOYD_TEST_ALPHA_SECRET=alpha-real-value-0123456789
+LLOYD_TEST_BETA_KEY=beta-real-value-0123456789
+LLOYD_TEST_GAMMA_TOKEN=gamma-real-value-0123456789
+LLOYD_TEST_DELTA_BASE_URL=https://gateway.invalid
+LLOYD_TEST_EPSILON_MODEL_OPTION=fixture-model-a
+LLOYD_TEST_ZETA_MODE=off
+"""
+
+
+@pytest.fixture()
+def credential_vault(tmp_path, monkeypatch):
+    """A scratch `$HOME` whose `lloyd/.env` holds fixture credentials. #3846.
+
+    The sibling of `credential_home` above, and the same rule applies for a harder
+    reason: a node that measures the placeholder pass must not measure the box's own
+    secrets. `credential_home` seeds `lloyd/.env` with ONE `LLOYD_TEST_SECRET=` line,
+    which is what #3524 needs (one readable path); the placeholder tests need the file
+    to be a population — several secret-shaped names and several that are not — so a
+    node can say "exactly these three changed, and these three did not".
+
+    It matters under the promotion gate specifically, and not only for hygiene. The
+    gate's tests rung runs pytest with `HOME` set to a round home whose `lloyd` is the
+    checked-out TREE, so `Path.home()/"lloyd"/".env"` is a path that does not exist
+    there: a node that counted the vaulted names off that file counted zero and then
+    asserted three, and a node that hashed "the vaulted values" hashed nothing and
+    passed while proving nothing. Both readings are a fixture problem, and both are
+    this fixture's job to remove.
+
+    Patching `$HOME` alone moves everything the store resolves from `~`: the env file
+    (`env_file_path()` is `Path.home()/"lloyd"/".env"`) AND the credential registry
+    (`store_path()` is `os.path.expanduser("~/lloyd-data/secrets/credentials.json")`),
+    which is why the fixture does not also touch `$LLOYD_DATA` — the registry does not
+    read that name, and a second redirect would only make it unclear which of the two
+    moved. A node that wants a registry writes one at `credential_store.store_path()`,
+    which lands inside this scratch tree, so no test can read or write the real one.
+
+    The six names are ALSO put into this process's own environment, which is what
+    makes a "the child's environment is unchanged apart from the three vaulted names"
+    node able to say that: `app/config.py` loads `~/lloyd/.env` with
+    `os.environ.setdefault`, so on a real turn the vaulted names are in the process
+    env before a child is ever spawned, and a fixture that wrote only the file would
+    have the placeholder pass operating on names no child env carried.
+    """
+    home = tmp_path / "home"
+    env = home / "lloyd" / ".env"
+    env.parent.mkdir(parents=True, exist_ok=True)
+    env.write_text(CREDENTIAL_VAULT_ENV, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for line in CREDENTIAL_VAULT_ENV.splitlines():
+        key, _, value = line.partition("=")
+        monkeypatch.setenv(key.strip(), value.strip())
+    return home

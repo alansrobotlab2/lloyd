@@ -981,20 +981,73 @@ THE_READ_FOUR = {
 }
 
 
-def test_the_read_deny_set_is_exactly_one_constant():
-    """Membership is one module-level tuple, and it names the four credential
-    surfaces the §Intake example attack reaches for.
+#: The root #3846 adds, kept OUT of `THE_READ_FOUR` rather than appended to it. That
+#: constant's name is a claim about how many roots #3524 shipped, and
+#: `test_read_deny_reason_covers_each_root_and_no_sibling` iterates it as "each of
+#: those four" against a scratch home that seeds exactly those four; folding a fifth
+#: entry in would make the name false and widen that node's subject without a seed for
+#: it. A new root gets a new name, which is also what makes an accidental removal show
+#: up as a one-line diff rather than as a count that no longer matches.
+THE_READ_REGISTRY = "~/lloyd-data/secrets/credentials.json"
 
-    `~/lloyd/.env` is the file that example reads, and on this box it is real
+#: Pinned verbatim for the same reason the four reasons above are: the reason string
+#: is what the refused model reads and what the `denial_journal` row carries back, so
+#: a re-worded reason is a re-decided boundary.
+THE_READ_REGISTRY_REASON = ("the credential registry (which secrets exist, and "
+                            "where each may be spent)")
+
+
+def test_the_registry_root_is_the_registry_the_store_reads():
+    """The table's registry entry names the file `credential_store` actually reads.
+
+    The two are declared apart — a `~`-template in the deny table, a resolved path
+    function in the store — and only this node stops them drifting, which is the
+    failure that would matter: a deny root pointing at one file while the store opens
+    another denies something that does not exist and leaves the real registry
+    readable. Compared as TEXT against `STORE_TEMPLATE` on purpose, because
+    `store_path()` resolves `$LLOYD_DATA` and a test process may isolate it; what has
+    to agree is the declared location, and `PP.read_deny_reason` matches the same
+    template back out of an expanded target.
+
+    Hence the template being a literal in `app/harness/protected_paths.py` rather than
+    `credential_store.STORE_TEMPLATE` imported at its top: that module must not gain a
+    module-level line above 222, because the USER.md audit note cites line 222 and
+    `test_prompt_surface_budget.py::test_every_code_line_the_audit_cites_is_the_line_it_claims`
+    reads the citation, so an import there would redden a note-audit node in a file
+    this item has no business changing. This node is what replaces the compiler's
+    guarantee that the literal and the constant are one thing.
+    """
+    from app.harness import credential_store
+
+    entries = dict(PP.PROTECTED_READ_ROOTS)
+    assert THE_READ_REGISTRY in entries, (
+        "the registry is not a protected read root, so a tool that can `Read` a path "
+        "can enumerate which credentials exist and where each may be spent")
+    assert THE_READ_REGISTRY == credential_store.STORE_TEMPLATE, (
+        f"the deny table names {THE_READ_REGISTRY} while the store declares "
+        f"{credential_store.STORE_TEMPLATE}")
+    assert PP.read_deny_reason(str(credential_store.store_path())), (
+        "the predicate let the store's own resolved path through")
+
+
+def test_the_read_deny_set_is_exactly_one_constant():
+    """Membership is one module-level tuple, and it names the five credential
+    surfaces an injected turn reaches for.
+
+    `~/lloyd/.env` is the file the §Intake example reads, and on this box it is real
     (mode 600): the envelope that lets a transcript-injected turn `Read` it is
-    what this table is for. The other three are the same class of material —
-    a private key, a CLI token, the OpenClaw tree the write set already refuses
-    to write — and each entry's reason has to say what it covers, because the
-    refusal is the only thing the model reads before it moves on.
+    what this table is for. The three #3524 shipped beside it are the same class of
+    material — a private key, a CLI token, the OpenClaw tree the write set already
+    refuses to write. #3846's fifth is the credential registry, which holds no value
+    and is still a map of the attack surface. Every entry's reason has to say what it
+    covers, because the refusal is the only thing the model reads before it moves on,
+    and the count is asserted so an entry cannot vanish by being folded into a
+    directory above it.
     """
     entries = dict(PP.PROTECTED_READ_ROOTS)
-    assert len(entries) == 4, list(entries)
-    assert entries == THE_READ_FOUR, entries
+    assert len(entries) == 5, list(entries)
+    assert entries == {**THE_READ_FOUR,
+                       THE_READ_REGISTRY: THE_READ_REGISTRY_REASON}, entries
     assert all(entries.values()), "every entry must say what it is"
     # The file named by the doc's own example is in the set, not a directory
     # above it: an entry of `~/lloyd` would refuse the digest job's 121

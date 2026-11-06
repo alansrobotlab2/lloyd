@@ -134,12 +134,26 @@ CREATE TABLE IF NOT EXISTS egress_events (
   session_id    TEXT NOT NULL DEFAULT '',
   worker_source TEXT NOT NULL DEFAULT '',
   task_id       TEXT NOT NULL DEFAULT '',
-  reason        TEXT NOT NULL DEFAULT ''
+  reason        TEXT NOT NULL DEFAULT '',
+  -- #3846: which credential, if any, the gate swapped into this call, and whether
+  -- it did. Empty means the call carried no vaulted placeholder. The value is never
+  -- stored — only the name — so this table stays safe to read from a dashboard.
+  credentials   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS egress_events_at_idx ON egress_events(at);
 CREATE INDEX IF NOT EXISTS egress_events_host_idx ON egress_events(host, at);
 CREATE INDEX IF NOT EXISTS egress_events_scope_idx ON egress_events(scope, at);
 """
+
+#: Columns to add to a table that already exists. `CREATE TABLE IF NOT EXISTS` is a
+#: no-op on an existing table, so on the live store — which has 1478 rows today —
+#: the schema string alone would never create this column, and the INSERT would
+#: fail into `_record`'s fail-open branch and lose EVERY row while still returning a
+#: clean Decision. A new column therefore needs an entry here as well as one above.
+_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("credentials", "ALTER TABLE egress_events ADD COLUMN credentials"
+                    " TEXT NOT NULL DEFAULT ''"),
+)
 
 _DEFAULTS = {
     "telemetry": True,
@@ -147,6 +161,12 @@ _DEFAULTS = {
     "allow": [],
     "retention_days": 90,
 }
+
+# #3846: the substitution point. Imported at module level because it is on the
+# request path and a function-local import there would run on every guarded call.
+# `credential_store` reaches `app.harness.policy` only inside a function body, and
+# only when a scope actually asks for a grant, so this edge does not cycle.
+from app.harness import credential_store
 
 PRUNE_INTERVAL_S = 3600.0
 _last_prune = 0.0
@@ -595,7 +615,13 @@ def _connect(create: bool = True) -> sqlite3.Connection | None:
 
 def _ensure(conn: sqlite3.Connection) -> None:
     """Create the table once per process per file (keyed by resolved path, so a
-    test that moves the DB to a second tmp file still gets its schema)."""
+    test that moves the DB to a second tmp file still gets its schema).
+
+    Then run the additive migrations. They are per-file for the same reason the
+    schema is: the live store and a test's tmp store are different files, and a
+    column that exists in one and not the other is exactly the drift a new
+    `INSERT` column has to survive.
+    """
     key = str(db_path().resolve())
     if key in _init_done:
         return
@@ -603,6 +629,11 @@ def _ensure(conn: sqlite3.Connection) -> None:
         if key in _init_done:
             return
         conn.executescript(_SCHEMA)
+        have = {str(r[1]) for r in conn.execute(
+            "PRAGMA table_info(egress_events)").fetchall()}
+        for name, ddl in _MIGRATIONS:
+            if name not in have:
+                conn.execute(ddl)
         _init_done.add(key)
 
 
@@ -710,16 +741,24 @@ class Decision:
     would only get enforcement turned off.
     """
 
-    __slots__ = ("allowed", "decision", "reason", "destination", "host", "scope")
+    __slots__ = ("allowed", "decision", "reason", "destination", "host", "scope",
+                 "headers")
 
     def __init__(self, *, allowed: bool, decision: str, reason: str = "",
-                 destination: str = "", host: str = "", scope: str = ""):
+                 destination: str = "", host: str = "", scope: str = "",
+                 headers: "dict[str, str] | None" = None):
         self.allowed = allowed
         self.decision = decision
         self.reason = reason
         self.destination = destination
         self.host = host
         self.scope = scope
+        #: The headers to actually send, when the caller handed `guard` a
+        #: placeholder-bearing set: the real credential for a bound destination, the
+        #: placeholder unchanged for one that is not bound. None means the caller
+        #: passed no headers, which is every lane that does not carry a credential —
+        #: and those lanes send exactly what they always sent.
+        self.headers = headers
 
     @property
     def refusal(self) -> str:
@@ -782,11 +821,18 @@ def refusal_text(*, tool: str, destination: str, host: str, scope: str,
 
 def guard(tool: str, url: str = "", *, host: str = "",
           loopback_ok: bool = False, floor_off: bool = False,
-          session_id: str = "") -> Decision:
+          session_id: str = "",
+          headers: "dict[str, str] | None" = None) -> Decision:
     """One destination-tagged row, and the policy's answer. Call before any socket.
 
     `host` is passed directly by `http_search`, which takes no URL and has to
     name its backend explicitly.
+
+    `headers` opts a lane into #3846's credential substitution: pass the outbound
+    header dict and read `Decision.headers` back. The swap is keyed to the
+    destination computed here, so the credential, the destination and the decision
+    land on one row. Passing nothing — every lane that existed before this change —
+    is byte-for-byte today's behaviour, including the returned `headers` of `None`.
 
     Two inputs carry an existing decision rather than making a new one, and each
     is set by the lane that already had the behaviour:
@@ -851,6 +897,21 @@ def guard(tool: str, url: str = "", *, host: str = "",
             tool=tool, destination=destination, host=host, scope=scope,
             attended_here=attended_here, at=at)
 
+    # #3846: the credential swap happens HERE, on the destination this row is about
+    # to name, rather than in the caller. A caller that swapped its own headers
+    # would put the audit of the swap somewhere else than the record of the
+    # destination, and the one question this table has to answer is whether those
+    # two ever disagreed. Refusal is still not decided here — that is #628's axis,
+    # and `enforce` is untouched by this change.
+    # `({}, [])` and NOT `dict(headers)`: `dict(None)` raises, and it would raise
+    # on the branch that exists precisely to mean "this lane carries no headers" —
+    # which is every lane but `http_request`. Found by
+    # `test_an_existing_store_without_the_column_migrates_before_the_first_insert`,
+    # which is the first guarded call in the suite that passes no headers at all
+    # after the parameter existed.
+    sent_headers, swaps = ({}, []) if headers is None else \
+        credential_store.substitute_headers(headers, destination)
+
     # What the table's `reason` column carries. A denial carries the refusal
     # text the caller saw, so the table is the audit of what was said as well as
     # what was decided; a grant-required row carries just the tag, because the
@@ -865,9 +926,11 @@ def guard(tool: str, url: str = "", *, host: str = "",
         _record(tool=tool, destination=destination, host=host,
                 decision=decision, scope=scope, session_id=sid,
                 worker_source=ctx["worker_source"], task_id=ctx["task_id"],
-                reason=row_reason, at=at)
+                reason=row_reason, at=at,
+                credentials=";".join(f"{name}:{verb}" for name, verb in swaps))
     return Decision(allowed=allowed, decision=decision, reason=reason,
-                    destination=destination, host=host, scope=scope)
+                    destination=destination, host=host, scope=scope,
+                    headers=None if headers is None else sent_headers)
 
 
 def _interactive_scope() -> str:
@@ -890,7 +953,7 @@ def _session_id() -> str:
 
 def _record(*, tool: str, destination: str, host: str, decision: str,
             scope: str, session_id: str, worker_source: str, task_id: str,
-            reason: str, at: datetime) -> None:
+            reason: str, at: datetime, credentials: str = "") -> None:
     """Write the row, or lose it quietly. See the module docstring on fail-open."""
     try:
         conn = _connect()
@@ -898,11 +961,11 @@ def _record(*, tool: str, destination: str, host: str, decision: str,
             _ensure(conn)
             conn.execute(
                 f"INSERT INTO {TABLE} (at, tool, destination, host, decision,"
-                " scope, session_id, worker_source, task_id, reason)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " scope, session_id, worker_source, task_id, reason, credentials)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (_iso(at), tool, destination, host, decision, scope,
                  session_id or "", worker_source or "", task_id or "",
-                 (reason or "")[:500]))
+                 (reason or "")[:500], (credentials or "")[:200]))
             _maybe_prune(conn, now=time.monotonic())
         finally:
             conn.close()
@@ -911,8 +974,14 @@ def _record(*, tool: str, destination: str, host: str, decision: str,
 
 
 async def aguard(tool: str, url: str = "", *, host: str = "",
-                 loopback_ok: bool = False, floor_off: bool = False) -> Decision:
+                 loopback_ok: bool = False, floor_off: bool = False,
+                 headers: "dict[str, str] | None" = None) -> Decision:
     """`guard` off the event loop.
+
+    `headers` forwards #3846's substitution parameter. It exists here so the async
+    surface cannot quietly drop a credential swap that the sync surface performs:
+    two entries to one policy, where one of them forgets a rule, is how a guard
+    stops being a guard.
 
     The aggregator runs every tool call on one loop, and this path contains two
     SQLite statements and a session-file read. `http_fetch`/`http_request` are
@@ -924,7 +993,7 @@ async def aguard(tool: str, url: str = "", *, host: str = "",
     # answer does not rest on context propagation into the worker thread.
     return await asyncio.to_thread(
         guard, tool, url, host=host, loopback_ok=loopback_ok,
-        floor_off=floor_off, session_id=_session_id())
+        floor_off=floor_off, session_id=_session_id(), headers=headers)
 
 
 def _maybe_prune(conn: sqlite3.Connection, *, now: float) -> None:

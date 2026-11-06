@@ -49,7 +49,8 @@ sys.path.insert(0, str(ROOT))
 from app.harness import HookRegistry, denial_journal
 from app.harness.capabilities import (SOURCE_CAPABILITIES,
                                       UNTRUSTED_INGEST_SOURCES, envelope_for)
-from app.harness.protected_paths import read_deny_reason
+from app.harness import credential_store as cs
+from app.harness.protected_paths import PROTECTED_READ_ROOTS, read_deny_reason
 from app.harness.secret_read_deny import (DENY_MARKER, READ_TOOLS,
                                           install_secret_read_deny, target_paths)
 
@@ -579,3 +580,72 @@ def test_the_deny_names_no_tool_the_envelope_has_not_granted():
         "Bash came back on the source whose whole input is a fetched transcript, "
         "and nothing else closes a shell read of a credential: `_path_sandbox`'s "
         "--ro-bind mounts stop writes and leave the file readable")
+
+
+# ── #3846: the credential registry is itself a protected read ───────────────
+
+def test_the_registry_path_is_a_declared_read_root(credential_home):
+    """The registry's path is DECLARED, not hardcoded into a matcher elsewhere.
+
+    A `~`-template rather than an absolute path, for the reason the tuple's own
+    comment gives: a test with a scratch home moves the set with it, so this node
+    exercises the real rule instead of a fixture that only looks like it.
+    """
+    assert any(Path(t).expanduser() == Path(cs.STORE_TEMPLATE).expanduser()
+               for t, _label in PROTECTED_READ_ROOTS), (
+        "the registry is not in PROTECTED_READ_ROOTS, so the deny rail does not know "
+        "about it")
+
+
+def test_the_registry_is_named_by_the_deny_predicate_for_every_source(
+        credential_home):
+    """The RULE is source-independent: `read_deny_reason` refuses the registry path
+    whoever is asking, including an attended chat turn.
+
+    This is the half of #3846 clause 5 that lives in the rule rather than in the
+    hook, and it is the half that keeps the two from drifting: a later arm for the
+    attended fleet will find the path already named, and a reader auditing the
+    predicate sees the registry beside `.env` and `~/.ssh` rather than in a
+    separate list that only one caller consults.
+    """
+    reason = read_deny_reason(str(cs.store_path()))
+    assert reason, "read_deny_reason let the registry through"
+    # That the rule cannot be scoped to a subset of askers is checkable rather than
+    # rhetorical: the predicate takes a target and nothing else, so there is no
+    # parameter a caller could use to narrow it to the untrusted fleet.
+    import inspect
+    assert list(inspect.signature(read_deny_reason).parameters) == ["target"], (
+        "read_deny_reason gained a second parameter — a source-scoped registry deny "
+        "would no longer be the source-independent rule #3846 clause 5 asks for")
+
+
+@pytest.mark.parametrize("source", UNTRUSTED)
+def test_every_untrusted_ingest_source_is_refused_the_registry(source,
+                                                               credential_home):
+    """The armed half, across the fleet the deny is installed for today.
+
+    A worker that reads untrusted input cannot read which credentials exist or
+    where each may be spent — the registry holds no value, and this is not about a
+    value: a map of the attack surface is what an injected turn has no use for.
+    """
+    hooks = _hooks_for(source)
+    denied, _reason = _fire(hooks, "Read", {"file_path": str(cs.store_path())})
+    assert denied, f"{source} was allowed to read the credential registry"
+
+
+@pytest.mark.parametrize("source", ["", CHAT_SOURCE, "scheduled-task"])
+def test_this_change_did_not_arm_the_attended_fleet(source, credential_home):
+    # What this node pins is a BOUNDARY, and it is here because #3846's clause 5
+    # asks for "every scope including attended chat" and this diff does not go
+    # there. The predicate above already names the registry for those turns; the
+    # HOOK is still installed only for untrusted-ingest sources, which is #3524's
+    # decision and is pinned by `test_a_source_outside_the_fleet_gets_no_new_hook`
+    # and by `armed == (source in UNTRUSTED)` at the top of this file. Widening it
+    # means a fail-closed callback on every read of every human turn — the exact
+    # trade #3524's docstring refuses ("a gate that refuses normal work gets routed
+    # around"). Nothing here reads the registry on an attended turn, so the deny
+    # would guard an unused path while adding a way to break a working one. Left to
+    # a human on #3846; this node fails loudly if someone arms it by accident and
+    # nobody reads the clause.
+    hooks = _hooks_for(source)
+    assert not any("_secret_read_pretool_cb" in n for n in _hook_names(hooks))

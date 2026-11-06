@@ -344,6 +344,20 @@ PROTECTED_READ_ROOTS: tuple[tuple[str, str], ...] = (
     ("~/.ssh", "the SSH private keys"),
     ("~/.config/gh", "the GitHub CLI credentials"),
     ("~/.openclaw", "the OpenClaw credential tree"),
+    # #3846. The registry holds no secret VALUE — only which credentials exist and
+    # which destinations each is bound to — and that is still a map of the attack
+    # surface, which no tool's job requires. It is a read-deny root rather than a
+    # write-deny one because a placeholder-ing change must not be able to edit its
+    # own bindings from a turn that reads untrusted input.
+    # The template, not `credential_store.STORE_TEMPLATE`: a module-level import
+    # here would shift every line number the USER.md audit and the loaded-memory
+    # proof cite (`:222`, `:157`, `:224-225`), and those citations are pinned by
+    # `tests/test_prompt_surface_budget.py`, not by this comment. The equality of the
+    # two strings is therefore pinned by a node — see
+    # `test_the_registry_root_is_the_registry_the_store_reads` in
+    # tests/test_protected_paths.py, which imports the store locally and compares.
+    ("~/lloyd-data/secrets/credentials.json",
+     "the credential registry (which secrets exist, and where each may be spent)"),
 )
 
 

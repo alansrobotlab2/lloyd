@@ -78,6 +78,10 @@ from agent_mcp import (_bash_edit_diagnostics, _bash_schema_hint, _bash_tree_str
                        _path_sandbox, _resource_ceiling, _rpc, _task_registry,
                        _tool_sandbox)
 from agent_mcp._shared import get_bound_session, text_result
+# #3846: the child's environment is credential-filtered at every spawn site.
+# `app.harness` is imported from `agent_mcp` elsewhere too (`capabilities` at
+# `_resource_ceiling.py`), so this is not a new layering edge.
+from app.harness import credential_store
 
 logger = logging.getLogger("lloyd-builtin-bash")
 
@@ -254,6 +258,10 @@ async def _bash(args: dict[str, Any]) -> str:
         # gate reads exactly that. Background Bash is refused for a sandboxed session
         # above, so this call is never a bench or eval one.
         env = _merge_session_id(env, sandboxed=False)
+        # #3846: a detached child outlives the turn that spawned it and its output
+        # lands in a file the model reads back, so it is the least auditable of the
+        # three spawn sites and the last one that should still hold a real token.
+        env = _vault_for_child(env)
         return await _spawn_background(command, _background_label(args), cwd, env=env)
 
     # P9: `lloyd_rpc` env for the shell, only when the loop stamped this call
@@ -290,7 +298,12 @@ async def _bash(args: dict[str, Any]) -> str:
                 *sb_argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=_resource_ceiling.launcher_env(None),
+                # #3846: bwrap read-binds the tree and unsets the RPC names, but it
+                # inherits bwrap's own environment, and `launcher_env(None)` starts
+                # from `os.environ` — so the read-only bubble was never a credential
+                # boundary. A bench or eval arm must not measure what a real token
+                # makes possible, and a graded run's stdout goes to an artifact.
+                env=_vault_for_child(_resource_ceiling.launcher_env(None)),
                 start_new_session=True,
             )
         else:
@@ -326,16 +339,23 @@ async def _bash(args: dict[str, Any]) -> str:
                 # hand down. On the fail-open argv nothing bound anything read-only,
                 # so leaving an inherited `LLOYD_PATH_SANDBOX=enforced` in the child's
                 # environment has it reporting a substrate it is not running under.
-                env=_path_sandbox.child_env(
-                    # #3768: the session id merges in before the two env builders,
-                    # so it rides on the inherited environment rather than replacing
-                    # it. Unstamped (`rpc_env` None, which is every turn while
-                    # `harness.rpc.enabled` is false) the child still learns whose
-                    # Bash it is; sandboxed, `_merge_session_id` adds nothing and
-                    # bwrap unsets the name besides.
-                    _resource_ceiling.launcher_env(
-                        _merge_session_id(rpc_env, sandboxed=sandboxed)),
-                    sb_enforced),
+                env=_vault_for_child(
+                    _path_sandbox.child_env(
+                        # #3768: the session id merges in before the two env builders,
+                        # so it rides on the inherited environment rather than replacing
+                        # it. Unstamped (`rpc_env` None, which is every turn while
+                        # `harness.rpc.enabled` is false) the child still learns whose
+                        # Bash it is; sandboxed, `_merge_session_id` adds nothing and
+                        # bwrap unsets the name besides.
+                        _resource_ceiling.launcher_env(
+                            _merge_session_id(rpc_env, sandboxed=sandboxed)),
+                        sb_enforced),
+                    # #3846 applied OUTSIDE the two builders rather than inside them:
+                    # both are shared with other callers (`launcher_env` with the
+                    # autonomy launcher, `child_env` with the RPC layer), and a
+                    # credential rule belongs at the place a child is actually spawned,
+                    # not in a helper that several spawns do not happen in.
+                ),
                 start_new_session=True,
             )
     except Exception as exc:
@@ -521,6 +541,44 @@ def _merge_session_id(env: dict[str, str] | None, *, sandboxed: bool
     # identity; the freeze is privilege, and only one of them belongs in this function.
     base = os.environ if env is None else env
     return {**base, **extra}
+
+
+def _child_grant_scope() -> str:
+    """The grant scope of the turn whose command is about to be spawned, or "".
+
+    Read through `agent_mcp.egress.scope_context`, the same derivation the pool and
+    the destination gate use, so a credential grant and an egress grant are keyed
+    to one string and cannot mean different things. Empty means no scope, which
+    `credential_store` reads as no grant — the child gets placeholders.
+    """
+    try:
+        from agent_mcp import egress
+        return str(egress.scope_context().get("scope") or "")
+    except Exception as exc:  # noqa: BLE001 - no scope must mean placeholders
+        logger.debug("credential scope unavailable (%s); spawning with placeholders",
+                     exc)
+        return ""
+
+
+def _vault_for_child(env: dict[str, str] | None) -> dict[str, str]:
+    """Replace every vaulted credential in a spawn env with a placeholder (#3846).
+
+    Called at all three spawn sites — sandboxed foreground, plain foreground, and
+    background — because a guard that lives on one of two write surfaces is not a
+    guard: the value the child can read stops being a secret only if there is no
+    branch where it still is. A `None` arrives meaning "inherit `os.environ`" and
+    leaves as a complete materialised environment, never a narrowed dict, which is
+    #3768's trap (`_merge_session_id`'s docstring carries the failure it produced).
+
+    A scope holding a live `credential:<NAME>` grant gets the real value; everything
+    else in the environment is passed through untouched, including `PATH` and
+    `XDG_RUNTIME_DIR`, which the scope launcher named in `_resource_ceiling` and
+    ordinary commands need. (The launcher is deliberately not named by its command
+    here: a static node counts every occurrence of that command in this file, and
+    its zero is what pins the argv living in one module — the same reason
+    `_merge_session_id`'s comment spells it out.)
+    """
+    return credential_store.vaulted_env(env, scope=_child_grant_scope())
 
 
 async def _spawn_background(command: str, description: str, cwd: str | None = None,
