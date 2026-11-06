@@ -318,8 +318,11 @@ evidence — an `up_next` line reading `triage=none` is the one silence that is.
 `next_pick`: the `up_next` item the loop should implement next. A first \
 re-offer whose branch `automod/<round>` still exists is one fix cycle, not an \
 hour — prefer it. Then the oldest confirmed item. Never an item with a round \
-in flight, never a `grouped` member, never one whose acceptance begins \
-`human-only:`.
+in flight, never a `grouped` member, never a line reading \
+`triage=confirmed-human-only`: that value is the machine's own answer to \
+whether the loop may implement the item, read from the same rows the scoring \
+table is built from, and no other reading of an item — its body, its wording, \
+its history — substitutes for it in either direction.
 
 <ledger since="{since}" events="{n_events}">
 {events}

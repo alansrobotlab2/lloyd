@@ -4835,3 +4835,146 @@ def test_the_prompt_definition_of_confirmed_human_only_names_the_unexecuted_hand
         assert "hand_run" not in text, (
             f"`{value}`'s definition names the hand_run case, so the model has two "
             f"words for it and one rule: {text}")
+
+
+# ---------------------------------------------------------------------------
+# #3858 — the `next_pick` rule excluded an item on its ACCEPTANCE TEXT ("never
+# one whose acceptance begins `human-only:`"), which is the marker-only rule the
+# 2026-10-05 ruling retired (#2205/#2211/#2214, scripts/automod/backlog.py:332-345).
+# The machine reads the predicate `is_human_only` instead, so on tick
+# run_board-steward_20261106_170235_5e4f5e the steward proposed `draft` for #3852
+# — whose acceptance names only `~/lloyd-data/eval/2258/**`, which
+# `_names_a_guard` discards by ruled decision (#3027, backlog.py:269-272) — while
+# `desired_statuses` wanted `up_next`. That row is one of the 20 disagreements
+# keeping the trailing-7-day rate (judged=132, rate=0.8182) under owed-check's
+# 0.9 flip floor, and the prompt, not the board, is what produced it.
+# ---------------------------------------------------------------------------
+
+def _next_pick_para(prompt: str) -> str:
+    """The `next_pick` instruction of a rendered prompt, and nothing around it.
+
+    Scoped by its own anchor to the blank line that closes the paragraph, and
+    pinned for length: a window that stopped matching would hand the assertions
+    below an empty string, which is the failure #3784's review caught.
+    """
+    k = prompt.index("`next_pick`:")
+    seg = prompt[k:]
+    end = seg.index("\n\n")
+    para = seg[:end]
+    assert len(para) > 100, f"the next_pick paragraph is not the rule: {para!r}"
+    return para
+
+
+def test_the_next_pick_rule_no_longer_excludes_an_item_by_its_acceptance_text():
+    """Clause 1. The raw-marker exclusion is gone from the shipped prompt.
+
+    The sentence to remove is verbatim what the prompt shipped: `never one whose
+    acceptance begins` followed by the `human-only:` marker in backticks. Both
+    halves are asserted absent from the WHOLE rendered prompt (not just the
+    paragraph) because the exclusion's harm did not depend on where it sat: a
+    model that reads "never one whose acceptance begins human-only:" applies it to
+    any item whose acceptance OPENS with the marker, and on #3852 that was an
+    acceptance naming only runtime-data paths, which `is_human_only` answers False
+    for. A re-worded rule that still keys the exclusion on the acceptance text is
+    the same defect, so the paragraph is also asserted to mention the marker
+    nowhere — the marker token in backticks with its colon, which the verdict
+    value `confirmed-human-only` does not contain.
+    """
+    prompt = W.build_prompt(events=[], items=[], n_open=0, since_ts=0.0)
+    para = _next_pick_para(prompt)
+
+    assert "never one whose acceptance begins" not in prompt, (
+        "the acceptance-text exclusion is still shipped, so the steward keeps "
+        "applying the marker-only rule the 2026-10-05 ruling retired")
+    assert "`human-only:`" not in prompt, (
+        f"the marker itself is still in the prompt, wherever the rule sits: {para}")
+    assert "acceptance" not in para, (
+        f"the next_pick rule still reads the acceptance to decide a pick: {para}")
+
+
+def test_the_next_pick_human_only_exclusion_is_keyed_on_the_rendered_verdict():
+    """Clause 2. The exclusion survives, re-keyed on the value the line prints.
+
+    Dropping the sentence would be the wrong fix: a `confirmed-human-only` item
+    must NOT be a next pick, because `desired_statuses` parks it at `draft` "not
+    for the unattended loop" and picking it would be a disagreement of the opposite
+    sign. So the rule is asserted to name the rendered value — the exact phrase
+    `triage=confirmed-human-only`, which is what `_item_line` prints and what
+    `triage_value_for` derives from `B.is_human_only` — and to forbid it with a
+    `never`. Both scoped to the next_pick paragraph, so a sentence elsewhere in the
+    prompt cannot satisfy the node, and the negation scoped to the one
+    comma-delimited clause that holds the value, because a paragraph-level `never`
+    would still pass on a rule that merely names the value as a fourth thing to
+    prefer.
+    """
+    prompt = W.build_prompt(events=[], items=[], n_open=0, since_ts=0.0)
+    para = _next_pick_para(prompt)
+
+    assert "triage=confirmed-human-only" in para, (
+        "the next_pick rule names no verdict value, so the model has nothing to "
+        f"key the human-only exclusion on: {para}")
+    # The value must sit in a clause that FORBIDS it, not merely in the paragraph.
+    # A character window, or a `"never" in para`, would pass on "or a line reading
+    # `triage=confirmed-human-only`" — which reads as a fourth thing to prefer and
+    # is the softening that would put a parked item back in the running. So the
+    # comma-delimited clause holding the value is what has to open with the
+    # negation.
+    holding = [c for c in para.split(",") if "triage=confirmed-human-only" in c]
+    assert len(holding) == 1, (
+        f"the value is named by {len(holding)} clauses of one rule: {para}")
+    assert holding[0].strip().lower().startswith("never"), (
+        f"the rule names the value without forbidding it: {holding[0]!r}")
+    assert "confirmed-human-only" in W.TRIAGE_VALUES, (
+        f"the value the rule keys on is not the field's human-only branch: "
+        f"{W.TRIAGE_VALUES}")
+
+
+def test_a_non_guard_human_only_confirmation_stays_pickable_and_unparked(board):
+    """Clause 3. Re-keying does not widen what counts as human-only.
+
+    The trap #3027 set and #3784's fixture already names: an acceptance that OPENS
+    `human-only:` but names only a `~/lloyd-data/**` path is NOT a guard — the
+    runtime-data root is the loop's own, so `_names_a_guard` skips the token and
+    `is_human_only` answers False. #31 below is that shape and #32 is the real
+    guard (`~/obsidian/...`, a vault path), so the two must land on opposite sides
+    of BOTH surfaces at once: the board line's `triage=` and
+    `desired_statuses`'s destination. A fix that keyed next_pick on the marker's
+    presence would leave #31 rendered `confirmed` while dropping it from the pick
+    list, which is a silent second rail the machine does not have — so the
+    assertion is the cross-product, not each half alone: the value the pick rule
+    forbids is exactly the value the real guard's line renders, and is not the
+    value the runtime-data item's line renders.
+    """
+    _triage_item(board, 31, "up_next", acceptance=NON_GUARD_MARKER)
+    _triage_item(board, 32, "up_next", acceptance=GUARD_MARKER)
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    assert len(items) == 2, "both items must be on the board to be compared"
+
+    want = B.desired_statuses(S.LEDGER_PATH)
+    assert want[31][0] == "up_next", (
+        f"the machine stopped wanting to implement an item whose acceptance names "
+        f"only runtime-data paths — the fix widened the guard: {want.get(31)}")
+    assert want[32][0] == "draft" and "not for the unattended loop" in want[32][1], (
+        f"the real guard stopped parking: {want.get(32)}")
+
+    prompt = W.build_prompt(events=[], items=items, n_open=2, since_ts=0.0)
+    para = _next_pick_para(prompt)
+    v31 = re.findall(r"\btriage=(\S+)", _line(prompt, 31))
+    v32 = re.findall(r"\btriage=(\S+)", _line(prompt, 32))
+    assert len(v31) == 1 and len(v32) == 1, (f"{_line(prompt, 31)}\n{_line(prompt, 32)}")
+    assert v31[0] == "confirmed", (
+        f"#31 names no guard and its line says {v31[0]!r}; a widened guard would "
+        "park a landable item on a decision nobody made (#3027)")
+    assert v32[0] == "confirmed-human-only", f"#32's line says {v32[0]!r}"
+    # Whole tokens, never substrings: `triage=confirmed` is a prefix of
+    # `triage=confirmed-human-only`, so a `not in para` test on the shorter value
+    # fails on a correct prompt — measured on the first run of this node. Each
+    # value is compared as the token a board line would print for it.
+    forbidden = set(re.findall(r"triage=([a-z][a-z-]*)", para))
+    assert forbidden == {"confirmed-human-only"}, (
+        f"the pick rule forbids {sorted(forbidden)}, not the one human-only value")
+    assert v31[0] not in forbidden, (
+        "the pick rule forbids the value the runtime-data item's line renders, so "
+        "re-keying became a widening")
+    assert v32[0] in forbidden, (
+        "the pick rule does not forbid the value the real guard's line renders")
