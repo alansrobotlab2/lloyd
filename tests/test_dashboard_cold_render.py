@@ -1640,6 +1640,110 @@ def test_a_repointed_ledger_says_so(tmp_path, monkeypatch):
     print(f"repoint arm: {src.why[:100]}… | non-repoint arm: {same.why}")
 
 
+def test_a_scan_slower_than_its_ttl_is_still_fresh_when_it_lands():
+    """A cached value ages from when it exists, not from when its scan started.
+
+    A scan spends time reading the world, and the value it hands back is that
+    much old the moment it exists — nothing later makes it younger. So the entry
+    is stamped when `fn()` returns. Stamped when the scan *begins*, the entry
+    carries its own scan time as age before it has served anyone, and any scan
+    slower than its own TTL is born expired: never served, recomputed by every
+    reader for as long as the board lasts. That is not hypothetical here — the
+    backlog walk of 3,760 item files costs 3.43 s cold measured 2026-11-05 and is
+    assembled behind a 12.81 s health half on `_VAULT_SCAN_TTL_S` = 10.0, so its
+    entry was 16.7 s old by the time the response went out and the next page load
+    walked the board again. The warm cycle below is the stopwatch that measures
+    the consequence; this node pins the cause on a key of its own, with no board
+    and no stopwatch to be lenient about.
+
+    The two timings are a scan that takes measurable time (0.05 s) against a TTL
+    shorter than it (0.01 s), and the claim is a call count, so a loaded machine
+    can only widen the gap between them, never close it.
+    """
+    dash._cache.clear()
+    runs: list[int] = []
+
+    def slow_scan() -> str:
+        runs.append(len(runs) + 1)
+        time.sleep(0.05)
+        return "scanned"
+
+    ttl = 0.01
+    first = dash._cached("born_expired_probe", ttl, slow_scan)
+    second = dash._cached("born_expired_probe", ttl, slow_scan)
+
+    assert first == second == "scanned", (
+        f"a cached entry has to return the value its scan produced, got "
+        f"{first!r} then {second!r}")
+    assert len(runs) == 1, (
+        f"the scan ran {len(runs)} times for two calls made back to back, "
+        f"though the value was produced less than {ttl:.2f} s ago and the TTL is "
+        f"{ttl:.2f} s. An entry stamped at the start of its scan is born "
+        "expired — it arrives already older than the window it is sold on, so "
+        "every reader recomputes the whole scan. Stamp it when the value exists.")
+
+
+def test_the_short_ttl_half_of_a_section_is_measured_last(monkeypatch):
+    """A section assembled from two cached halves measures the short-TTL one last.
+
+    `_backlog` builds one payload out of a cached pair: the raw counts on
+    `_VAULT_SCAN_TTL_S`, and the `health` sub-object on `_SCORECARD_TTL_S`. Health
+    is the slow half — 12.81 s measured 2026-11-05 over the live ledger, longer
+    than the walk's 10.0 s TTL on its own — so whichever runs first is the one
+    that arrives at the browser older than the window it was sold on, and
+    measuring the walk first left its entry stale before the response was even
+    assembled. One page load later (the ~0.4 s between the two cycles the warm
+    test below times) that entry reads as expired and the board is walked again.
+
+    This node is that defect made measurable without a corpus or a stopwatch:
+    `health` is stubbed to sleep well past the walk's TTL — 0.50 s against a TTL
+    of 0.20 s, so the wrong order overshoots by 2.5x instead of sitting on the
+    boundary — and the claim is that when `_backlog()` returns, the short-TTL
+    half is still inside its own TTL, which is only true if it was measured after
+    the slow half. Both entries are read back out of `dash._cache`, and the
+    payload is checked for both halves so a reorder cannot quietly drop one.
+    """
+    board = dash.vault_root() / "backlog"
+    files = ([p for p in board.glob("*.md") if p.name[:1].isdigit()]
+             if board.exists() else [])
+    dash._cache.clear()
+    ttl, slow_for = 0.20, 0.50
+
+    def slow_health(backlog_dir) -> dict:
+        time.sleep(slow_for)
+        return {"pinned": "health half"}
+
+    monkeypatch.setattr(dash, "_VAULT_SCAN_TTL_S", ttl)
+    monkeypatch.setattr(dash, "_backlog_health", slow_health)
+    out = dash._backlog()
+
+    walk_entry = dash._cache.get("backlog")
+    health_entry = dash._cache.get("backlog_health")
+    assert walk_entry is not None and health_entry is not None, (
+        "`_backlog()` must leave both cached halves behind, got "
+        f"{'backlog' if walk_entry else '(no backlog entry)'} and "
+        f"{'backlog_health' if health_entry else '(no backlog_health entry)'}")
+    assert out.get("health") == {"pinned": "health half"}, (
+        f"the health half has to reach the payload it was computed for, got "
+        f"{out.get('health')!r}")
+    assert isinstance(out.get("total"), int), (
+        f"the raw-count half has to reach the payload too, got "
+        f"{out.get('total')!r}")
+
+    age = time.monotonic() - walk_entry[0]
+    assert age < ttl, (
+        f"the short-TTL half was {age:.2f} s old when `_backlog()` returned, "
+        f"past the {ttl:.2f} s the section sells it on, while the slow half it "
+        f"was assembled with took {slow_for:.2f} s to measure. Measuring the "
+        "fast half first serves it already stale and leaves its entry expired "
+        "for the next reader, which then walks the board again — "
+        f"{len(files)} item files on this board. Measure the short-TTL half last.")
+    assert walk_entry[0] > health_entry[0], (
+        f"the short-TTL entry (stamp {walk_entry[0]:.3f}) has to be taken after "
+        f"the long-TTL one ({health_entry[0]:.3f}); otherwise the half of the "
+        "payload that promises the least staleness is its oldest measurement")
+
+
 async def test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold(monkeypatch):
     """The cold bound is only meaningful against a much cheaper warm baseline.
 

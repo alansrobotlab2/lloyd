@@ -92,12 +92,30 @@ _cache: dict[str, tuple[float, Any]] = {}
 
 
 def _cached(key: str, ttl: float, fn) -> Any:
+    """One TTL-bounded entry per key, aged from when the value was PRODUCED.
+
+    The stamp is taken after `fn()` returns, because that is when the value
+    exists: a scan that spent `c` seconds reading the world leaves a value that
+    is already `c` seconds old, and nothing later can make it younger. Stamping
+    at the start instead charged every entry with its own scan time before
+    anyone had read it, so any scan slower than its TTL came out born expired —
+    never served, recomputed by every reader for the whole life of the board.
+    The case that measures here is `_backlog`'s walk of 3,760 item files
+    (3.43 s cold measured 2026-11-05) assembled behind a 12.81 s health half on
+    `_VAULT_SCAN_TTL_S` = 10.0: stamped at the start, the walk's entry had aged
+    past 10.0 s before the cycle that produced it had even finished (14.7-16.9 s
+    on the readings taken that day), so the next page load re-walked the board.
+    `tests/test_dashboard_cold_render.py`
+    ::test_a_scan_slower_than_its_ttl_is_still_fresh_when_it_lands reddens a
+    stamp taken before the value exists, and decides it on a call count rather
+    than a duration bound.
+    """
     hit = _cache.get(key)
     now = time.monotonic()
     if hit is not None and now - hit[0] < ttl:
         return hit[1]
     value = fn()
-    _cache[key] = (now, value)
+    _cache[key] = (time.monotonic(), value)
     return value
 
 
@@ -863,7 +881,6 @@ def _backlog() -> dict[str, Any]:
             "grouped": grouped,
         }
 
-    out = _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
     # What the raw counts hide — folded members, quarantined self-spawns, the
     # ready share of `up_next`, the day's net flow. `board_health` reads every
     # item file and the ledger, so it sits on the scorecard's minute rather
@@ -873,8 +890,34 @@ def _backlog() -> dict[str, Any]:
     # ledger already decoded — 5.63 s before #1204's loader and ledger-cache
     # work, against the "~2 s" this comment used to claim. Re-measure it with
     # the timing in `tests/test_dashboard_cold_render.py`.
-    return {**out, "health": _cached("backlog_health", _SCORECARD_TTL_S,
-                                     lambda: _backlog_health(backlog_dir))}
+    #
+    # THE HEALTH HALF IS COMPUTED FIRST AND THAT ORDER IS A FRESHNESS RULE, not
+    # a style choice. The two halves go into one payload on different TTLs, so
+    # whichever runs first is the one that reaches the browser older than the
+    # window it was sold on. This half is by far the slower: 12.81 s measured
+    # 2026-11-05 over the live ledger — 30,402,639 bytes at that reading, which
+    # the loop is still appending to — at 3,760 item files, longer than
+    # `_VAULT_SCAN_TTL_S` = 10.0 all by itself. Walking first therefore served
+    # `by_status` counts that were already ~13 s old, past the ten seconds this
+    # section promises for them, and `_cached` stamped that walk when it *began*,
+    # so the entry was older still by the time the response was assembled and the
+    # very next cycle — one page load, ~0.4 s later — found it expired and walked
+    # all 3,760 files again. That second walk, not a dead cache, is what held the
+    # warm cycle at 1.66-2.35 s and left
+    # `tests/test_dashboard_cold_render.py`
+    # ::test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold under its
+    # 10x bound in every reading taken that day (6.2x, 8.4x, 9.5x, 9.8x).
+    # Measuring the short-TTL half last, and stamping a cached value when it is
+    # produced rather than when its scan started, makes it the freshest thing in
+    # the response and retires that walk from the warm cycle;
+    # `test_the_short_ttl_half_of_a_section_is_measured_last` and
+    # `test_a_scan_slower_than_its_ttl_is_still_fresh_when_it_lands` pin the two
+    # halves of that with a health half slower than the walk's TTL, which reddens
+    # on the old order without any stopwatch.
+    health = _cached("backlog_health", _SCORECARD_TTL_S,
+                     lambda: _backlog_health(backlog_dir))
+    out = _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
+    return {**out, "health": health}
 
 
 def _backlog_health(backlog_dir) -> dict[str, Any] | None:
