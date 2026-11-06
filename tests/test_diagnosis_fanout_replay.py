@@ -988,6 +988,207 @@ def test_the_baseline_file_round_trips_its_fingerprint(tmp_path):
                             model="primary", token_ceiling=120_000)
 
 
+# ── #3866: the ceiling a reader sees is the one the rows carry ───────────────
+#
+# Until #3866 the only rows that stamped `token_ceiling` were the `kind: ceiling`
+# bookkeeping rows, which exist only for a fan-out that got cut off or a trace that
+# went over budget. On a corpus where every case finished, no row said what budget it
+# ran under, and `report` printed the `--ceiling` argument instead — so the live
+# 132-row Oct-13 corpus, whose arms were run at 200,000, was being presented under the
+# 600,000 a person happened to type, and the file's one consistency check compared
+# that argument with itself.
+
+async def _one_trace(case, theory):
+    """An investigator in `investigate_live`'s shape: one claim, one citation, 1000 tokens."""
+    return {"tool": "Task", "model": "primary", "tokens": 1000,
+            "claims": [{"claim": "pre-existing at base 0: the marker",
+                        "citations": [{"path": "app/loop.py", "line": 1}]}]}
+
+
+def _arms_at(tmp_path, cases, *, ceiling: int, run_id: str = "c3866") -> list[dict]:
+    """Run A, A-retry and B over `cases` at `ceiling` and hand back the recorded rows.
+
+    The arms are driven for real rather than hand-written because clause 1 is a claim
+    about what `run` RECORDS: a fixture that typed the key in by hand would pass with
+    the stamping code deleted.
+    """
+    rows_path = Path(tmp_path) / f"rows-{run_id}-{ceiling}.jsonl"
+    writer = RowWriter(rows_path)
+    theories = [f"theory {i}" for i in range(THEORIES_PER_CASE)]
+    for case in cases:
+        for arm in (ARM_A, ARM_RETRY):
+            asyncio.run(run_case_a(case, investigate=_one_trace, writer=writer,
+                                   run_id=run_id, arm=arm, token_ceiling=ceiling))
+        async def gen(case_arg, _theories=tuple(theories)):
+            return list(_theories)
+
+        asyncio.run(run_case_b(case, generate=gen, investigate=_one_trace,
+                              rank_fn=_rank_stub([0, 1, 2]), writer=writer,
+                              run_id=run_id, token_ceiling=ceiling))
+    return [json.loads(ln) for ln in rows_path.read_text().splitlines() if ln.strip()]
+
+
+def test_every_arm_s_verdict_row_stamps_the_ceiling_it_ran_under(tmp_path):
+    """Clause 1: arms A, A-retry and B each record `token_ceiling` on the verdict row.
+
+    The stamp is the ceiling THAT ARM enforced, not the module default and not the pass's
+    argument: the second half runs arm B at 1000 with 600-token theories, which the
+    cumulative check cuts off after two dispatches, and its verdict row has to say 1000.
+    A budget nobody recorded is a comparison nobody can check afterwards — this is the row
+    `report` reads, so it is the only place the figure can become evidence.
+    """
+    case = _cases(1)[0]
+    rows = _arms_at(tmp_path, [case], ceiling=99_000)
+    verdicts = [r for r in rows if r["kind"] == "verdict"]
+    assert sorted(r["arm"] for r in verdicts) == sorted([ARM_A, ARM_RETRY, ARM_B]), (
+        f"the three arms produced {[r['arm'] for r in verdicts]} verdict rows; every arm "
+        "has to be covered, because A-retry is the compute-matched arm the margin uses")
+    unstamped = [r["arm"] for r in verdicts if "token_ceiling" not in r]
+    assert not unstamped, (
+        f"verdict rows for {unstamped} carry no ceiling: the row that carries the answer "
+        "must also carry the budget it was produced under")
+    assert {r["token_ceiling"] for r in verdicts} == {99_000}, (
+        f"a verdict row stamped {sorted({r['token_ceiling'] for r in verdicts})} when "
+        "every arm ran at 99,000")
+
+    theories = [f"theory {i}" for i in range(THEORIES_PER_CASE)]
+    claims = {t: [{"claim": f"evidence for {t}",
+                   "citations": [{"path": "app/loop.py", "line": 1}]}] for t in theories}
+    generate, investigate = _fake_arm_b(theories, claims, tokens=600)
+    tight = tmp_path / "rows-tight.jsonl"
+    asyncio.run(run_case_b(case, generate=generate, investigate=investigate,
+                           rank_fn=_rank_stub([0, 1, 2]), writer=RowWriter(tight),
+                           run_id="tight", token_ceiling=1000))
+    cut = [json.loads(ln) for ln in tight.read_text().splitlines()]
+    assert [r["reason"] for r in cut if r["kind"] == "ceiling"] == ["token-ceiling"], (
+        "the cut-short half stopped being a cut-short half, so it no longer asks the "
+        "question: which ceiling does a fan-out that hit one record?")
+    verdict_b = [r for r in cut if r["kind"] == "verdict"]
+    assert len(verdict_b) == 1 and verdict_b[0]["token_ceiling"] == 1000, (
+        f"the arm that ran out of budget recorded "
+        f"{[r.get('token_ceiling') for r in verdict_b]}; it ran under 1000, and that is "
+        "the number its verdict row must carry rather than the shipped default")
+
+
+def test_the_printed_ceiling_is_the_one_the_verdict_rows_carry(tmp_path):
+    """Clause 2: `report` prints the rows' ceiling, and the argument is not it.
+
+    The rows were produced at 200,000 and the caller asks for 600,000. Before #3866 the
+    header printed 600000 because it printed `token_ceiling`, its own parameter; the only
+    honest answer here is 200000, and the argument gets said out loud as the mismatch it
+    is rather than silently becoming the headline's number.
+    """
+    cases = _cases(2)
+    rows = _arms_at(tmp_path, cases, ceiling=200_000)
+    lines, _ = format_report(rows, cases, baseline=None, corpus="fp",
+                             model="primary", token_ceiling=600_000,
+                             citation_root=tmp_path)
+    assert "ceiling: 200000" in lines[0], lines[0]
+    assert "600000" not in lines[0], lines[0]
+    assert re.search(r"note:.*600000.*200000", "\n".join(lines)), (
+        "the report quietly disagreed with its own argument: an attended session that "
+        "typed the wrong --ceiling has to be told, not ignored")
+
+
+def test_a_corpus_whose_verdict_rows_carry_no_ceiling_prints_unknown(tmp_path):
+    """Clause 3: rows recorded before the stamp print no number at all.
+
+    This is the live 132-row Oct-13 corpus's exact shape: verdict rows with
+    `chosen_cause`, `tokens` and `elapsed_s` and no ceiling anywhere, reported at
+    `--ceiling 600000`. Printing that argument over them is the defect; `unknown (rows
+    carry none)` is the answer that cannot be mistaken for a measurement.
+    """
+    cases = _cases(2)
+    rows = []
+    for i, case in enumerate(cases):
+        rows.append({"seq": 1, "run_id": "oct13", "case_key": case["key"],
+                     "arm": ARM_A, "kind": "verdict",
+                     "chosen_cause": "pre-existing at base 0: the marker",
+                     "tokens": 12_345 + i, "elapsed_s": 3.5})
+        rows.append({"seq": 2, "run_id": "oct13", "case_key": case["key"],
+                     "arm": ARM_B, "kind": "verdict",
+                     "chosen_cause": "pre-existing at base 0: the marker",
+                     "tokens": 23_456 + i, "elapsed_s": 9.5})
+    lines, _ = format_report(rows, cases, baseline=None, corpus="fp",
+                             model="primary", token_ceiling=600_000,
+                             citation_root=tmp_path)
+    text = "\n".join(lines)
+    assert "ceiling: unknown (rows carry none)" in lines[0], lines[0]
+    assert "600000" not in text, (
+        f"the argument leaked back into the artifact: {text}")
+
+
+def test_two_ceiling_stamps_in_one_corpus_print_a_disagreement(tmp_path):
+    """Clause 4: two stamped budgets in one corpus print neither as THE ceiling.
+
+    Merging a 200,000 pass and a 600,000 pass into one rows file is one `cat` away, and a
+    single printed number over the merged population is a third number that was never
+    measured. The line has to refuse to pick one.
+    """
+    cases = _cases(2)
+    rows = (_arms_at(tmp_path, [cases[0]], ceiling=200_000, run_id="early")
+            + _arms_at(tmp_path, [cases[1]], ceiling=600_000, run_id="late"))
+    lines, _ = format_report(rows, cases, baseline=None, corpus="fp",
+                             model="primary", token_ceiling=120_000,
+                             citation_root=tmp_path)
+    head = lines[0]
+    assert "DISAGREEMENT" in head, head
+    assert not re.search(r"ceiling:\s*\d", head), (
+        f"a merged two-budget corpus was given a single ceiling number: {head}")
+    assert "200000" in head and "600000" in head, (
+        f"the disagreement names neither of the ceilings actually stamped: {head}")
+    assert "120000" not in "\n".join(lines), (
+        "the argument is back in the artifact, where no arm ever ran under it")
+
+
+def test_a_retry_baseline_at_another_ceiling_than_the_rows_carry_is_a_problem(tmp_path):
+    """Clause 5: the baseline match is checked against the rows, not against its own argument.
+
+    `baseline_problem` already refused a baseline recorded at a different ceiling — from
+    the ceiling it was handed on the same call, which is `args.ceiling`, and
+    `cmd_baseline` had recorded the same `args.ceiling` into the file. So the two sides of
+    that comparison were the same number read twice and could never disagree. Here the
+    argument and the baseline agree with each other at 200,000 and the rows say the arms
+    ran at 600,000: compute was not matched, and only the rows know it.
+    """
+    cases = _cases(2)
+    rows = _arms_at(tmp_path, cases, ceiling=600_000)
+    baseline = {"kind": "retry_baseline", "corpus": "fp", "n": 2, "model": "primary",
+                "token_ceiling": 200_000, "token_spend": 9_000, "top1_hits": 2}
+    lines, evaluated = format_report(rows, cases, baseline=baseline, corpus="fp",
+                                     model="primary", token_ceiling=200_000,
+                                     citation_root=tmp_path)
+    text = "\n".join(lines)
+    assert evaluated is False, (
+        f"a baseline measured at 200,000 was accepted for rows measured at 600,000: "
+        f"{text}")
+    assert "HEADLINE: cannot evaluate" in text, text
+    assert re.search(r"baseline ceiling 200000 != 600000", text), text
+
+
+def test_a_baseline_cannot_be_matched_to_rows_that_disagree_on_the_ceiling(tmp_path):
+    """The clause-4 population also refuses the baseline: there is no ceiling to match.
+
+    Agreeing with one half of a two-budget corpus would print a HEADLINE whose compute
+    claim is true of whichever half the number was picked from, which is the same
+    presented-under-the-wrong-budget error one level up.
+    """
+    cases = _cases(2)
+    rows = (_arms_at(tmp_path, [cases[0]], ceiling=200_000, run_id="early")
+            + _arms_at(tmp_path, [cases[1]], ceiling=600_000, run_id="late"))
+    for ceil_arg in (200_000, 600_000):
+        baseline = {"kind": "retry_baseline", "corpus": "fp", "n": 2,
+                    "model": "primary", "token_ceiling": ceil_arg,
+                    "token_spend": 9_000, "top1_hits": 2}
+        lines, evaluated = format_report(rows, cases, baseline=baseline, corpus="fp",
+                                         model="primary", token_ceiling=ceil_arg,
+                                         citation_root=tmp_path)
+        text = "\n".join(lines)
+        assert evaluated is False, (
+            f"a baseline at {ceil_arg} matched a corpus carrying both 200000 and 600000")
+        assert "cannot evaluate" in text and "200000" in text and "600000" in text, text
+
+
 def test_report_of_the_real_paths_needs_no_engine(tmp_path):
     """`report` runs end to end against the shipped defaults on an empty row file.
 
@@ -1045,12 +1246,18 @@ def _non_leaky_keys(cases: list[dict]) -> list[str]:
     return [c["key"] for c in cases if c["family"] != "tests-blamed-then-refuted"]
 
 
-def _study_rows(cases: list[dict], only: list[str]) -> list[dict]:
+def _study_rows(cases: list[dict], only: list[str],
+                *, ceiling: int = 120_000) -> list[dict]:
     """A-retry/A/B rows for the graded subset, every case correct in every arm.
 
     Agreement is not what these rows are for — the spend columns and the N are — so all
     three arms record the true mechanism and the headline is `arm B does not win` at
     margin 0, which is an evaluation and not a refusal.
+
+    `ceiling` exists because since #3866 the printed ceiling comes from these rows rather
+    than from the caller's argument: a caller that reports them at a different budget from
+    the one they are stamped with is exactly the mismatch the instrument now refuses to
+    hide, so the fixture states the budget the arms ran under and each node picks one.
     """
     rows, seq = [], 0
     for case in cases:
@@ -1065,7 +1272,11 @@ def _study_rows(cases: list[dict], only: list[str]) -> list[dict]:
             seq += 1
             rows.append({"seq": seq, "run_id": "r2466", "case_key": case["key"],
                          "arm": arm, "kind": "verdict", "chosen_cause": cause,
-                         "tokens": spend})
+                         # Stamped because this fixture stands for rows `run` wrote, and
+                         # since #3866 every verdict row `run` writes carries the ceiling
+                         # its arm enforced — the number the caller passes on the same
+                         # call is no longer what the report prints.
+                         "token_ceiling": ceiling, "tokens": spend})
     return rows
 
 
@@ -1975,8 +2186,13 @@ def test_report_grading_the_real_sequence_end_to_end_needs_no_engine(tmp_path):
     cases_path.write_text("".join(json.dumps(c) + "\n" for c in cases),
                           encoding="utf-8")
     rows_path = tmp_path / "rows.jsonl"
-    rows_path.write_text("".join(json.dumps(r) + "\n"
-                                 for r in _study_rows(cases, only)), encoding="utf-8")
+    # Stamped at the default for the same reason the baseline below is: this CLI call
+    # passes no `--ceiling`, so the rows and the cached baseline have to carry the number
+    # `main` will assume, or the report is right to refuse the pair (#3866).
+    rows_path.write_text("".join(json.dumps(r) + "\n" for r in
+                                 _study_rows(cases, only,
+                                             ceiling=DEFAULT_TOKEN_CEILING)),
+                         encoding="utf-8")
     baseline_path = tmp_path / "retry_baseline.json"
     # The default ceiling, not a literal: this CLI call passes no `--ceiling`, so the
     # baseline has to be written at whatever `main` will assume. Hard-coding it here

@@ -80,7 +80,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, NamedTuple, Sequence
 # Run by path (`python …/eval/diagnosis_fanout_replay.py`), which puts this file's own directory on
 # `sys.path[0]` and not the checkout: without the insertion below, `app.data_root`
 # raises `ModuleNotFoundError` and the reader silently never runs. Same reason as
@@ -1171,6 +1171,14 @@ async def run_case_b(case: dict, *, generate: Callable[[dict], Awaitable[Sequenc
                    "arm": ARM_B, "ts": _now(), **ranking})
     verdict = {"seq": next_seq(), "run_id": run_id, "case_key": case_key,
                "arm": ARM_B, "kind": "verdict", "ts": _now(),
+               # The budget THIS arm enforced, on the row that carries the answer (#3866).
+               # Until now only the `kind: ceiling` row stamped a ceiling, and that row
+               # exists solely for a fan-out that got cut off: on a case that finished,
+               # the verdict left no record of what it cost to run, so `report` had
+               # nothing to print but the `--ceiling` argument it was handed. This is the
+               # row `score` reads, so it is the only place the figure can become
+               # evidence for the study that is reading it.
+               "token_ceiling": token_ceiling,
                "chosen_cause": ranking.get("chosen_cause") or "",
                "order": ranking.get("order") or [], "tokens": spent,
                # The whole arm: generation, every theory's dispatch, the refusals that
@@ -1260,7 +1268,14 @@ async def run_case_a(case: dict, *, investigate: Callable[[dict, str], Awaitable
                        "kind": "ceiling", "ts": _now(), "reason": "over-ceiling",
                        "tokens_spent": tokens, "token_ceiling": token_ceiling})
     verdict = {"seq": 3, "run_id": run_id, "case_key": case_key, "arm": arm,
-               "kind": "verdict", "ts": _now(), "chosen_cause": chosen,
+               "kind": "verdict", "ts": _now(),
+               # Arm A and arm A-retry share this site, so one stamp covers both single
+               # traces (#3866). The over-ceiling `kind: ceiling` row below is the only
+               # other place this arm recorded a budget, and a trace that stayed under it
+               # — every trace in the 2026-10-13 corpus — wrote no such row, which is how
+               # a corpus measured at 200,000 came to be quoted at 600,000.
+               "token_ceiling": token_ceiling,
+               "chosen_cause": chosen,
                "tokens": tokens,
                # Same contract as arm B's verdict row: the duration rides on the one
                # row `score` reads, and an arm that raised above never gets here, so
@@ -1477,12 +1492,21 @@ def write_baseline(path: Path, *, cases_path: Path, n: int, model: str,
 
 
 def baseline_problem(baseline: dict | None, *, corpus: str, n: int, model: str,
-                     token_ceiling: int) -> str | None:
+                     token_ceiling: int,
+                     row_ceiling: RowCeiling | None = None) -> str | None:
     """Why the cached baseline cannot stand in, or None when it can.
 
     Every mismatch is its own sentence, because "the corpus grew since the
     baseline was measured" and "the baseline used a different model" need
     different repairs, and none of them may be read as a pass.
+
+    The ceiling is compared against what the GRADED ROWS carry (`row_ceiling`, from
+    #3866) and only falls back to the `token_ceiling` argument for a corpus recorded
+    before verdict rows stamped one. That fallback is the whole reason the argument is
+    still a parameter: until now this line was `args.ceiling` versus `args.ceiling`,
+    because `write_baseline` recorded the argument it was handed and `report` passed the
+    argument it was handed, so the check was arithmetically incapable of noticing a
+    baseline computed under one budget being matched to arms run under another.
     """
     if not baseline:
         return "no cached retry baseline recorded for this corpus"
@@ -1497,9 +1521,25 @@ def baseline_problem(baseline: dict | None, *, corpus: str, n: int, model: str,
         problems.append(f"baseline N {baseline.get('n')!r} != graded N {n}")
     if baseline.get("model") != model:
         problems.append(f"baseline model {baseline.get('model')!r} != {model!r}")
-    if int(baseline.get("token_ceiling") or -1) != token_ceiling:
-        problems.append(f"baseline ceiling {baseline.get('token_ceiling')!r} "
-                        f"!= {token_ceiling}")
+    recorded = int(baseline.get("token_ceiling") or -1)
+    if row_ceiling is not None and row_ceiling.distinct and row_ceiling.ceiling is None:
+        # The rows carry stamps but no single one, so there is no ceiling to match
+        # against and agreeing with one half of the corpus would state a compute claim
+        # true of only that half (#3866 clause 4's consequence).
+        stamps = " and ".join(str(d) for d in row_ceiling.distinct)
+        problems.append(f"baseline ceiling {baseline.get('token_ceiling')!r} cannot be "
+                        f"matched: the graded verdict rows carry {stamps}"
+                        + (f" and {row_ceiling.unstamped} carry none"
+                           if row_ceiling.unstamped else ""))
+    else:
+        matched = (row_ceiling.ceiling if row_ceiling is not None
+                   and row_ceiling.ceiling is not None else token_ceiling)
+        if recorded != matched:
+            problems.append(f"baseline ceiling {baseline.get('token_ceiling')!r} "
+                            f"!= {matched}"
+                            + (" (the ceiling the graded verdict rows carry)"
+                               if row_ceiling is not None
+                               and row_ceiling.ceiling is not None else ""))
     return "; ".join(problems) or None
 
 
@@ -1525,6 +1565,54 @@ def latest_verdicts(rows: Sequence[dict]) -> dict[tuple[str, str], dict]:
         if row.get("kind") == "verdict":
             out[(str(row.get("case_key")), str(row.get("arm")))] = row
     return out
+
+
+#: What `report` prints for the ceiling when no verdict row in the corpus carries one.
+#: Digit-free by construction: the alternative is echoing `--ceiling`, which is how the
+#: 132-row 2026-10-13 corpus — whose arms ran at 200,000 — sat under a printed 600,000
+#: while a spend decision was being drafted around it (#3866).
+CEILING_UNKNOWN = "unknown (rows carry none)"
+
+
+class RowCeiling(NamedTuple):
+    """What the corpus's own verdict rows state about the budget they ran under."""
+
+    label: str               # what `report` prints after `ceiling: `
+    ceiling: int | None      # the one ceiling every verdict row states, else None
+    distinct: tuple[int, ...]  # the distinct ceilings stamped, ascending
+    unstamped: int           # verdict rows carrying no ceiling at all
+    verdicts: int            # verdict rows read
+
+
+def row_ceilings(rows: Sequence[dict]) -> RowCeiling:
+    """Derive the token ceiling from the rows that carry a verdict, never from an argument.
+
+    Three answers, and which one it is must be readable from the label alone:
+
+    * every verdict row stamped the same number — that number;
+    * no verdict row stamped one (a corpus recorded before #3866) — `CEILING_UNKNOWN`,
+      which states an absence rather than borrowing whatever the caller typed;
+    * the stamps disagree, or some rows carry none — a DISAGREEMENT label naming every
+      stamp, because the merged population has no single budget and presenting it under
+      one would invent a third number that no arm ever ran under. `cat`-ing two passes'
+      row files into one `rows.jsonl` is one keystroke away, which is why the label
+      refuses rather than taking the first row's stamp or the largest.
+    """
+    verdicts = [r for r in rows if r.get("kind") == "verdict"]
+    stamped = [int(r["token_ceiling"]) for r in verdicts
+               if isinstance(r.get("token_ceiling"), int)]
+    distinct = tuple(sorted(set(stamped)))
+    unstamped = len(verdicts) - len(stamped)
+    if not stamped:
+        return RowCeiling(CEILING_UNKNOWN, None, (), unstamped, len(verdicts))
+    if len(distinct) == 1 and not unstamped:
+        return RowCeiling(str(distinct[0]), distinct[0], distinct, 0, len(verdicts))
+    label = ("DISAGREEMENT — verdict rows carry "
+             + " and ".join(str(d) for d in distinct)
+             + (f", with {unstamped} of {len(verdicts)} verdict row(s) carrying none"
+                if unstamped else "")
+             + "; no single ceiling for the merged population")
+    return RowCeiling(label, None, distinct, unstamped, len(verdicts))
 
 
 def score(rows: Sequence[dict], cases: Sequence[dict], *,
@@ -1585,8 +1673,19 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
     # The ceiling is on the artifact because the whole comparison is conditional on it:
     # the arms are matched by token budget and by nothing else, and a reader who cannot
     # see the number cannot check that the spend line below it is a like-for-like.
+    # …and since #3866 the number printed there is the one the verdict ROWS carry, not the
+    # `--ceiling` argument. Echoing the argument meant the 2026-10-13 corpus — every one of
+    # its 36 verdict rows unstamped, its arms run at 200,000 — printed whatever a person
+    # typed at the prompt (they typed 600,000), and a reader could not tell the difference
+    # between a measured budget and a remembered one. A corpus whose rows carry none says
+    # so; a corpus whose rows disagree says which budgets it is holding.
+    rc = row_ceilings(rows)
     lines = [f"[2258] cases: {len(cases)}  recorded verdicts: "
-             f"A={a['n']} B={b['n']}  ceiling: {token_ceiling}"]
+             f"A={a['n']} B={b['n']}  ceiling: {rc.label}"]
+    if rc.ceiling is not None and rc.ceiling != token_ceiling:
+        lines.append(f"  note: the --ceiling argument ({token_ceiling}) is not the "
+                     f"ceiling the verdict rows carry ({rc.ceiling}); the line above "
+                     f"reports the rows")
     if scored["unscored"]:
         lines.append(f"  unscored case keys (no case row): {scored['unscored']}")
     # Which cases this artifact is NOT about, before any rate and on the `cannot
@@ -1617,7 +1716,7 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
                  f"{b['elapsed_n']} timed verdict(s)")
 
     problem = baseline_problem(baseline, corpus=corpus, n=len(cases), model=model,
-                              token_ceiling=token_ceiling)
+                              token_ceiling=token_ceiling, row_ceiling=rc)
     if problem:
         lines.append(f"  token spend  A-retry: not recorded ({problem})")
         lines.append(f"HEADLINE: cannot evaluate — {problem}")
