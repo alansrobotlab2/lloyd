@@ -1227,6 +1227,322 @@ def test_the_two_stub_names_the_live_root_carries_are_named_where_the_shadow_leg
         f"the leg that exists for these two names does not name them: {sorted(arrivals)}")
 
 
+# ── where an arriving name came from: the app/paths.py provenance clause (#3824) ──
+#
+# The alert could name a file and its date and nothing else, which is why #3822 cost a
+# person a ten-minute grep to learn that the name is a constant the code itself declares.
+# The fix is an ANNOTATION and never a mute, so every node below keeps the reporting alive
+# and asks only what the clause says and when it must say nothing.
+
+#: A fixture `app/paths.py` holding every shape the reader has to tell apart. Line numbers
+#: are never typed here: each node finds its line by searching this text, so an edit that
+#: reorders the fixture moves the assertion with it instead of silently passing.
+FIXTURE_PATHS = '''\
+"""The fixture repo's paths module (#3824)."""
+
+import os
+from pathlib import Path
+
+DATA_ROOT = Path(os.environ.get("FIXTURE_DATA", "/fixture/root"))
+FOO_STATE_PATH = DATA_ROOT / "foo-state.json"
+NESTED_FILE = DATA_ROOT / "nested" / "deep.json"
+LEGACY_LEAF = DATA_ROOT / LEAF_RELATIVE
+COMPARISON = DATA_ROOT == Path("/fixture/root")
+TERNARY_DB = Path(os.environ["FIXTURE_DB"]) if os.environ.get("FIXTURE_DB") \\
+    else DATA_ROOT / "fixture.db"
+# FOO_PROSE = DATA_ROOT / "prose-only.json" — a comment, not a declaration.
+'''
+
+
+def _decl_repo(tmp_path, text: str = FIXTURE_PATHS):
+    """A bare `<repo>/app/paths.py` holding `text`, for the reader to read as TEXT."""
+    (tmp_path / "app").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "app" / "paths.py").write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def _line_of(text: str, needle: str) -> int:
+    """The 1-based line `needle` sits on in `text`, or a failure naming what went missing."""
+    for i, ln in enumerate(text.splitlines(), 1):
+        if needle in ln:
+            return i
+    raise AssertionError(f"{needle!r} is not in the fixture text at all: {text!r}")
+
+
+def test_an_arrival_the_repo_declares_names_the_declaration_in_reason_and_evidence(
+        tmp_path):
+    """Clause 1: `declared at app/paths.py:<line> as <SYMBOL>`, in BOTH fields.
+
+    `reason` is what ALERT.md and the daily-note section carry and `evidence` is what the
+    board item's body gets, so a clause in only one of them is a clause half the reader
+    ever sees. The line number is the point of the whole exercise: the name and the symbol
+    tell a person which constant to read, the line is where `grep` lands them.
+    """
+    root = _root(tmp_path)
+    repo = _decl_repo(tmp_path / "repo")
+    want_line = _line_of(FIXTURE_PATHS, 'FOO_STATE_PATH = DATA_ROOT / "foo-state.json"')
+
+    previous = D.top_level_regular_files(str(root))
+    (root / "foo-state.json").write_text("{}\n", encoding="utf-8")
+    report = D.arrivals_alert(D.new_top_level_names(
+        D.top_level_regular_files(str(root)), previous), str(repo))
+
+    clause = f"declared at app/paths.py:{want_line} as FOO_STATE_PATH"
+    for field in ("reason", "evidence"):
+        assert clause in report[field], (
+            f"the {field} must carry the whole clause, file, line and symbol together: "
+            f"{report[field]}")
+    assert "foo-state.json" in report["reason"], (
+        f"the annotation is added to the name's line, never instead of it: {report}")
+
+    # The decoys: shapes the text holds that are NOT a declared top-level name. A nested
+    # chain names a file two levels down, so its basename is not this root's; an
+    # identifier leaf is spelled in another module; a comparison is not a path; and a
+    # comment that looks exactly like an assignment is prose.
+    for name, why in (("deep.json", "declared under `nested/`, not at the root"),
+                      ("prose-only.json", "named only in a comment"),
+                      ("unseen-name.json", "declared nowhere at all")):
+        r2 = D.arrivals_alert([{"name": name, "mtime": time.time()}], str(repo))
+        assert "app/paths.py" not in r2["reason"], (
+            f"{name!r} got a provenance clause but is {why}: {r2['reason']}")
+
+    # The real thing, through the one-positional-argument call the production site uses:
+    # `repo` defaults to `TREE`, so `guardian.py:2031` gets the clause with no edit. The
+    # symbol is asserted and not the line, because the line belongs to whichever checkout
+    # `TREE` names and the gate runs the suite from a worktree.
+    live = D.arrivals_alert([{"name": "mc-entity-graph-layout.json",
+                              "mtime": time.time()}])
+    assert "declared at app/paths.py" in live["reason"] and "ENTITY_GRAPH_LAYOUT_PATH" \
+        in live["reason"], (
+        "the acceptance check's own name must come annotated through the default repo: "
+        f"{live['reason']}")
+
+
+def test_an_unexplained_arrival_keeps_exactly_todays_reason(tmp_path):
+    """Clause 2: a name nothing declares is reported EXACTLY as it was before the clause.
+
+    Byte equality, not "contains the name": a provenance clause that leaked onto an
+    unexplained arrival would retire the one question this leg exists to ask, and a reader
+    who learned to distrust the clause would stop reading it — the silence wearing the
+    annotation's clothes. Every symbol the fixture declares is also asserted absent, so a
+    whole-dump of the declaration map cannot pass this node.
+    """
+    repo = _decl_repo(tmp_path / "repo")
+    stamp = time.time() - 7200
+    rendered = time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+
+    report = D.arrivals_alert([{"name": "mystery-stub", "mtime": stamp}])
+    today = (f"1 new name(s) at the data root's top level: mystery-stub — mtime {rendered}. "
+             "Report-only: the guardian moves nothing, and the decision is yours.")
+    assert report["reason"] == today, (
+        f"an undeclared name's reason must be today's shape byte for byte: {report['reason']}")
+    assert report["evidence"] == f"mystery-stub — mtime {rendered}", (
+        f"and its evidence too: {report['evidence']}")
+
+    both = report["reason"] + report["evidence"]
+    assert "app/paths.py" not in both and "declared at" not in both, (
+        f"a name nothing declares must not borrow a declaration: {both}")
+    for symbol in ("FOO_STATE_PATH", "NESTED_FILE", "LEGACY_LEAF", "TERNARY_DB",
+                   "FIXTURE_DB"):
+        assert symbol not in both, f"{symbol} is declared by the fixture, not by this name"
+
+    # Same again with the fixture repo passed explicitly, so the absence above cannot be
+    # blamed on the default repo having been read: the reader DID run, and said nothing.
+    scoped = D.arrivals_alert([{"name": "mystery-stub", "mtime": stamp}], str(repo))
+    assert scoped["reason"] == today, (
+        f"passing a repo that declares OTHER names must not change this one: "
+        f"{scoped['reason']}")
+
+
+def test_the_declaration_is_read_as_text_and_the_module_is_never_imported(tmp_path):
+    """Clause 3: the clause comes from the file's TEXT, under a module that cannot load.
+
+    Two reasons, both load-bearing. The guardian is stdlib-only (`policy.py:10`) and runs
+    from the pinned snapshot where the repo is not even on `sys.path`; and executing
+    `app/paths.py` would run its data-root resolution inside a watchdog whose loader
+    contract is "never propagate" (`policy._data_root_module`'s docstring says so, and
+    names `app.paths` as the module that stays out). So the fixture below RAISES while being
+    imported, and the annotation must arrive anyway — which an `import`-based reader could
+    not do even by accident. The `sys.modules` delta then pins the absence behaviourally,
+    because a source scan alone cannot see a dynamic import. It is a DELTA and not an
+    absence: this suite's own conftest imports `app.paths` for the test harness, so the
+    module is already loaded in the process before the guardian is even called, and only
+    what THIS call brings in is the guardian's doing.
+    """
+    raises_on_import = (
+        'raise RuntimeError("importing me runs data-root resolution")\n'
+        'FOO_STATE_PATH = DATA_ROOT / "foo-state.json"\n')
+    repo = _decl_repo(tmp_path / "repo", raises_on_import)
+    line = _line_of(raises_on_import, 'FOO_STATE_PATH = DATA_ROOT / "foo-state.json"')
+
+    before = set(sys.modules)
+    report = D.arrivals_alert([{"name": "foo-state.json", "mtime": time.time()}], str(repo))
+    gained = {k for k in set(sys.modules) - before if k == "app" or k.startswith("app.")}
+    assert not gained, (
+        f"the arrivals leg imported {sorted(gained)} out of the repo it is only allowed to "
+        f"read; policy.py:10 forbids importing from `app/` at all")
+    assert f"declared at app/paths.py:{line} as FOO_STATE_PATH" in report["reason"], (
+        f"a module that raises on import must still be READ, since text needs no import: "
+        f"{report['reason']}")
+
+    import inspect
+    leg = "".join(inspect.getsource(fn) for fn in (
+        D.declared_data_root_children, D._unquote, D._provenance_clause, D.arrivals_alert))
+    for route in ("import app.paths", "from app.paths", "from app import", "importlib",
+                  "exec_module", "spec_from_file_location", "__import__"):
+        assert route not in leg, (
+            f"{route!r} is an import route into the stdlib-only guardian; the clause must "
+            f"come from the file's text: {leg}")
+
+
+def test_an_absent_or_unreadable_declaration_file_costs_only_the_annotation(tmp_path):
+    """Clause 4: no repo, no module, or an unreadable one — the alert still goes out.
+
+    All three shapes are the SAME string as the undeclared case, because a watchdog that
+    lost the declaration file has lost a fact and not a verdict: the name still arrived, it
+    is still a person's decision, and swallowing the alert because the annotation could not
+    be built would be the loudest possible way to hide one fact. A directory stands in for
+    "cannot be read" — `read_text` raises `IsADirectoryError`, an `OSError`, and the shape
+    does not depend on the user the suite runs as.
+    """
+    stamp = time.time() - 60
+    rendered = time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+    today = (f"1 new name(s) at the data root's top level: mystery-stub — mtime {rendered}. "
+             "Report-only: the guardian moves nothing, and the decision is yours.")
+
+    missing_repo = str(tmp_path / "no-such-checkout")
+
+    empty_repo = tmp_path / "repo-a"
+    (empty_repo / "app").mkdir(parents=True)                # the dir, no paths.py
+
+    dir_repo = tmp_path / "repo-b"
+    (dir_repo / "app").mkdir(parents=True)
+    (dir_repo / "app" / "paths.py").mkdir()                 # a directory where text goes
+
+    for label, repo in (("no checkout", missing_repo),
+                        ("no app/paths.py", str(empty_repo)),
+                        ("paths.py is a directory", str(dir_repo))):
+        assert D.declared_data_root_children(repo) == {}, (
+            f"{label}: the reader must answer with no names, not raise")
+        report = D.arrivals_alert([{"name": "mystery-stub", "mtime": stamp}], repo)
+        assert report["needs_human"] is True, f"{label}: routing survived the loss"
+        assert report["reason"] == today, (
+            f"{label}: losing the declaration file must cost the clause and nothing else: "
+            f"{report['reason']}")
+        assert report["evidence"] == f"mystery-stub — mtime {rendered}", label
+
+
+def test_an_annotated_arrival_is_still_counted_routed_and_recorded(tmp_path):
+    """Clause 5: annotation, never a mute — and no new list of names anywhere in the leg.
+
+    A declared name is a REPORTED name. It stays in the findings, inside the `N new name(s)`
+    count, keeps `needs_human=True` with no `quarantine`/`remove` key for the resolve path to
+    consume, and still reaches the persisted baseline so the next hour is quiet for the right
+    reason. Then the structural half: `repo` stays defaulted, so `guardian.py:2031` and the
+    five call sites already in this file keep passing one positional argument, and no
+    constant in the leg holds
+    an arriving-looking name — the one legitimate such literal is the leg's OWN state file,
+    which is not a data-root arrival. That scan is why an allowlist cannot sneak back in as
+    a `KNOWN_GOOD_TOPLEVEL` for this class: `datawatch.py:127` restates the standing ruling
+    from #2160 that a hand-maintained allowlist cannot close a property over an open set,
+    and the set of names the repo declares is open by construction.
+    """
+    root = _root(tmp_path)
+    repo = _decl_repo(tmp_path / "repo")
+    previous = D.top_level_regular_files(str(root))
+    (root / "foo-state.json").write_text("{}\n", encoding="utf-8")
+    scan = D.top_level_regular_files(str(root))
+
+    found = D.new_top_level_names(scan, previous)
+    assert [f["name"] for f in found] == ["foo-state.json"], (
+        f"a declared name must survive the findings filter untouched: {found}")
+    report = D.arrivals_alert(found, str(repo))
+    assert "declared at app/paths.py" in report["reason"], (
+        f"and must also carry its clause: {report['reason']}")
+    assert "1 new name(s)" in report["reason"], (
+        f"the count must include the annotated name, not discount it: {report['reason']}")
+    assert report["needs_human"] is True, (
+        f"a declared name is still somebody's decision: {report}")
+    assert not report.get("quarantine") and not report.get("remove"), (
+        f"an annotation is not an action: {sorted(report)}")
+    assert set(report) == {"needs_human", "reason", "evidence"}, (
+        f"the report's keys are unchanged, so the resolve path gains nothing to consume: "
+        f"{sorted(report)}")
+
+    state = tmp_path / "state"
+    D.write_arrivals_baseline(state, scan, now=time.time(), data_root=str(root))
+    held = D.read_arrivals_baseline(state, str(root))
+    assert "foo-state.json" in (held or {}), (
+        f"an annotated name that never reached the baseline is an arrival every hour: "
+        f"{sorted(held or {})}")
+    assert D.new_top_level_names(D.top_level_regular_files(str(root)), held) == [], (
+        "and the next pass over that baseline must be quiet")
+
+    sig = __import__("inspect").signature(D.arrivals_alert)
+    assert list(sig.parameters) == ["arrivals", "repo"] and \
+        sig.parameters["repo"].default is None, (
+        "one positional argument must stay the whole call: "
+        f"{list(sig.parameters)}")
+
+    # The structural half. A mute would be a NAME LIST, and this leg's whole design rule is
+    # that it cannot have one, so the scan looks at what the leg's constants are ASSIGNED —
+    # bracket-balanced statements, not prose, because a docstring that mentions
+    # mc-entity-graph-layout.json to explain the defect is not an allowlist of it. The one
+    # legitimate literal is `ARRIVALS_TITLES_STATE_FILE`: the leg's own state file, which
+    # lives in `logs/locks`, never at the root, and so can never be an arrival.
+    lines = Path(D.__file__).read_text(encoding="utf-8").splitlines()
+    leg = lines[next(i for i, ln in enumerate(lines)
+                     if ln.startswith("def top_level_regular_files")):
+                next(i for i, ln in enumerate(lines) if ln.startswith("class DataWatch"))]
+    spelled: set = set()
+    for i, ln in enumerate(leg):
+        if not re.match(r"^_?[A-Z][A-Z0-9_]*\s*=", ln):
+            continue
+        depth, stmt = 0, ""
+        for j in range(i, min(i + 12, len(leg))):
+            stmt += " " + leg[j].split("#")[0] if depth == 0 else " " + leg[j]
+            depth += leg[j].count("(") + leg[j].count("[") + leg[j].count("{") \
+                - leg[j].count(")") - leg[j].count("]") - leg[j].count("}")
+            if depth <= 0:
+                break
+        spelled |= set(re.findall(r"[\"']([\w][\w.-]*\.(?:db|json|sqlite|sqlite3|jsonl))[\"']",
+                                  stmt))
+    assert spelled <= {"data-root-arrivals-titles.json"}, (
+        f"the leg holds an allowlist of arriving names — the mute this item forbids, and "
+        f"the rule at datawatch.py:127 (the standing ruling from #2160) says a hand-listed "
+        f"set cannot close a property over an open set: {spelled}")
+
+
+def test_the_declaration_clause_reaches_the_body_the_guardian_posts(tmp_path, monkeypatch):
+    """The seam the clause actually crosses: scan → datawatch → guardian → notifier.
+
+    A node that calls `arrivals_alert` proves the string builder; it does not prove the
+    clause survives the call at `guardian.py:2031`, which passes ONE positional argument and
+    so depends on the default `repo`, nor that `reason + "\\n\\n" + evidence` reaches the
+    alert body intact. `TREE` is patched rather than passed, because patching the module
+    global is what makes the unedited production call read the fixture repo.
+    """
+    G, g, data, alerts, cleared, quarantined = _watcher(tmp_path, monkeypatch)
+    repo = _decl_repo(tmp_path / "repo")
+    monkeypatch.setattr(D, "TREE", str(repo))
+
+    g._runtime_data_incident(_NOW)                          # arms, records the baseline
+    (data / "foo-state.json").write_text("{}\n", encoding="utf-8")
+    g._runtime_data_incident(_NOW + _DAY)
+
+    hits = _arrivals_alerts(alerts, G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE)
+    assert len(hits) == 1, f"the declared arrival never reached the notifier: {alerts}"
+    title, body, kw = hits[0]
+    assert "declared at app/paths.py" in body and "FOO_STATE_PATH" in body, (
+        f"the clause did not survive the production call site: {body}")
+    assert "foo-state.json" in body, f"and the name itself is gone: {body}"
+    assert kw.get("needs_human") is True, (
+        f"routing is untouched by the clause: {kw}")
+    assert title == f"{G.RUNTIME_DATA_ARRIVALS_ALERT_TITLE}: foo-state.json", (
+        f"the heading stays a function of the name SET alone (#3424's incident identity): "
+        f"{title}")
+
+
 # ── the hourly check itself, across the guardian → datawatch → notify seam ───
 #
 # Everything above this line calls `datawatch` functions directly, which is where the RULE

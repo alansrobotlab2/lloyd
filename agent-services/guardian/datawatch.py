@@ -39,6 +39,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import stat
 import struct
@@ -1735,7 +1736,133 @@ def new_top_level_names(files: "dict[str, float]", previous: "dict | None",
     return out
 
 
-def arrivals_alert(arrivals: list[dict]) -> "dict | None":
+#: A module-level assignment: an UPPER_SNAKE target in column 0 and one `=` (the `(?!=)`
+#: is what keeps `IS_PRODUCTION_DATA = DATA_ROOT == PRODUCTION_DATA_ROOT` out, because a
+#: comparison is not a declaration of a path). Column 0 is the whole of the module-level
+#: test: a `NAME =` inside a function or class body is indented, and `app/paths.py` keeps
+#: every constant at the top level.
+_PATHS_ASSIGN_RE = re.compile(r"^([A-Z][A-Z0-9_]*)[ \t]*=[ \t]*(?!=)(?P<rhs>.*)$")
+
+#: A `DATA_ROOT` token and the `/`-joined chain that follows it. The token is bounded on
+#: both sides, because `app/paths.py` imports `PRODUCTION_DATA_ROOT` and `DATA_ROOT_MARKER`
+#: from `app.data_root` (lines 34-35) and a substring of either is not the root this clause
+#: is about. A chain component is either a quoted literal — which is the only form this
+#: annotates, because it is the only form whose leaf the TEXT states — or an identifier,
+#: which covers the `DATA_ROOT / QUARANTINE_DIR_RELATIVE` shape so that the chain is
+#: consumed and then rejected rather than half-read.
+_DATA_ROOT_CHAIN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])DATA_ROOT(?![A-Za-z0-9_])"
+    r"(?P<chain>(?:[ \t]*/[ \t]*(?:\"[^\"\n]*\"|'[^'\n]*'|[A-Za-z_][A-Za-z0-9_]*))+)"
+)
+
+
+def _unquote(component: str):
+    """The inside of a quoted literal, or None when the component is an identifier.
+
+    None is a decision, not a gap: `DATA_ROOT / QUARANTINE_DIR_RELATIVE` really does not
+    say its leaf in this file (`app/data_root.py` does), and quoting a guess read out of a
+    second file would be the hand-maintained list this round exists not to write.
+    """
+    if len(component) >= 2 and component[0] == component[-1] and component[0] in "\"'":
+        return component[1:-1]
+    return None
+
+
+def declared_data_root_children(repo: str) -> "dict[str, tuple[str, int]]":
+    """`{leaf: (SYMBOL, line)}` for every top-level name `repo/app/paths.py` DECLARES.
+
+    A name is declared when a module-level constant assigns it as a DIRECT child of
+    `DATA_ROOT` — `ENTITY_GRAPH_LAYOUT_PATH = DATA_ROOT / "mc-entity-graph-layout.json"` at
+    `app/paths.py:464` is the case that started this (#3822, whose alert was structurally
+    incapable of saying where its own name came from). Nested chains are excluded on
+    purpose: `TOOL_OVERRIDES_PATH = DATA_ROOT / "data" / "tool_overrides.yaml"` declares a
+    name two levels down, and the arrivals leg reports only the root's TOP level, so its
+    basename could only ever attach a real constant's authority to an unexplained file —
+    dressing the cruft in provenance is the one failure mode worse than the silence this
+    fixes. A DIRECTORY constant is not excluded: `SESSIONS_DIR = DATA_ROOT / "sessions"`
+    does declare the name `sessions` at the root, so a regular file turning up there is
+    annotated, which is the more informative answer (a file where a directory is declared is
+    worth reading, and the clause says exactly which constant to read).
+
+    Read as TEXT, never imported. `agent-services/guardian/policy.py:10` is the contract —
+    "Nothing here may import from `app/`" — and the deployed process runs from the pinned
+    snapshot at `~/.local/state/lloyd-guardian/bin`, where the repo is not on `sys.path` at
+    all. `policy._data_root_module` exists to import the one stdlib-only module that can be
+    loaded that way and names `app.paths` as the one that stays out; executing it would also
+    run its data-root resolution inside a watchdog whose loader contract is "never
+    propagate". The consequence is that the three ways a module can fail to LOAD — a syntax
+    error, a missing dependency, an import that raises — cost THIS reader nothing at all,
+    since none of them is ever executed; the only thing that can cost the clause is the file
+    not being readable. `policy._data_root_module`'s answer to a failed load is None, and the
+    same discipline holds here: every unreadable shape returns `{}` and the alert goes out
+    without the clause rather than not at all.
+
+    What the text is allowed to say. One backslash continuation IS joined, because
+    `RESEARCH_DB` (`app/paths.py:342`) is spelled as a ternary over a continuation and
+    `#3227` was filed for its `-wal`, so `research.db` is a name this leg really alerts on;
+    a bracketed continuation is NOT, because a bracket inside a comment would open a
+    phantom depth and shift every line number after it — which reports a real symbol at a
+    line that does not hold it, the worse of the two directions. Where the text is ambiguous
+    the annotation is DROPPED: a statement holding two different direct children — a real
+    ternary with a literal on each side — says nothing about which one the name is. Where two
+    SEPARATE constants claim one leaf the earliest line wins, which is where `grep -n` of the
+    name lands first and the duplicate below it is the thing worth reading. The line reported
+    is always where the assignment STARTS, not where the leaf's literal sits, because that is
+    the line carrying the symbol the clause names.
+
+    This is an annotation and never a mute: nothing here removes a name from a finding, and
+    no constant names arriving names, for the reason `KNOWN_GOOD_TOPLEVEL`'s comment gives —
+    a hand-maintained allowlist cannot close a property over an open set.
+    """
+    path = Path(repo) / "app" / "paths.py"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:      # no repo, no module, unreadable: the alert loses the clause only
+        return {}
+
+    out: "dict[str, tuple[str, int]]" = {}
+    for start in range(len(lines)):
+        m = _PATHS_ASSIGN_RE.match(lines[start])
+        if not m:
+            continue
+        symbol, stmt = m.group(1), m.group("rhs")
+        # Join a backslash continuation: the statement is one logical line and its leaf may
+        # sit on the last physical one — `RESEARCH_DB` is spelled exactly that way.
+        no = start
+        while stmt.rstrip().endswith("\\") and no + 1 < len(lines):
+            stmt = stmt.rstrip()[:-1] + " " + lines[no + 1].strip()
+            no += 1
+        leaves: "set[str]" = set()
+        for cm in _DATA_ROOT_CHAIN_RE.finditer(stmt):
+            parts = [p.strip() for p in cm.group("chain").split("/") if p.strip()]
+            if len(parts) != 1:
+                continue                      # nested chain: no top-level name is declared
+            leaf = _unquote(parts[0])
+            if leaf and "/" not in leaf and "\\" not in leaf:
+                leaves.add(leaf)
+        if len(leaves) == 1:
+            # One direct child from this statement, so the symbol and the line are its own
+            # and unambiguous; two would be a ternary over two paths and say nothing.
+            # `setdefault` keeps the earliest declaring line if a later constant repeats it.
+            out.setdefault(next(iter(leaves)), (symbol, start + 1))
+    return out
+
+
+def _provenance_clause(name: str, declared: "dict[str, tuple[str, int]]") -> str:
+    """The ` (declared at app/paths.py:<line> as <SYMBOL>)` tail, or "" when unexplained.
+
+    Empty string for a name no constant holds — the shape an unexplained arrival must keep
+    exactly, because a provenance clause it did not earn would retire the very question the
+    alert exists to ask.
+    """
+    got = declared.get(name)
+    if not got:
+        return ""
+    symbol, line = got
+    return f" (declared at app/paths.py:{line} as {symbol})"
+
+
+def arrivals_alert(arrivals: list[dict], repo: "str | None" = None) -> "dict | None":
     """The `state["strays"]` dict for these findings, or None when there are none.
 
     `needs_human=True` is the #3109 routing and it is the whole alert: a name in a
@@ -1746,13 +1873,29 @@ def arrivals_alert(arrivals: list[dict]) -> "dict | None":
     standing for nine days and a file made this turn are different questions asked of
     different people; a bare "a new file appeared" about a ten-day-old `false` invites the
     correct answer, which is "then it is not news".
+
+    `repo` is the checkout whose `app/paths.py` the provenance clause is read from, and it
+    defaults to `TREE` — the checkout even when this file runs from the pinned snapshot — so
+    the one call site (`guardian.py:2031`, plus every existing node) passes one positional
+    argument and gets the annotation for free. The clause is added to `detail`, which is
+    BOTH what `reason` renders and what `evidence` is, and it never removes a name: the
+    count, the findings, `needs_human` and the baseline are untouched by it (#3824). An
+    arrival the repo declares and an arrival it does not are the same alert with the same
+    decision attached, which is what keeps this out of the mute class: #3210's clause 1
+    rejected a suffix filter for the WAL case and #3229 narrowed that mute to a pairing.
+
+    `departures_alert` gets no twin of this clause, and that asymmetry is the honest one:
+    this leg's fact — which constant names this path — is derivable from the source, while
+    two scans can never tell a deletion from a mount that moved.
     """
     if not arrivals:
         return None
+    declared = declared_data_root_children(TREE if repo is None else repo)
     detail = "; ".join(
         f"{f['name']} — mtime "
         f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(f['mtime']))}"
         + (f" ({f['age_days']} days ago)" if "age_days" in f else "")
+        + _provenance_clause(f["name"], declared)
         for f in arrivals)
     return {
         "needs_human": True,
