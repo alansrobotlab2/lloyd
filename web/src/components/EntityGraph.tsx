@@ -666,11 +666,24 @@ export default function EntityGraph({ selectedNode: selectedNodeId, onNodeClick,
   // One arrow cone per link — the library clones it for each particle and
   // orients them via lookAt() toward the direction of travel (three-forcegraph
   // applies lookAt for non-sphere geometries at updatePhotons).
+  //
+  // A link outside `highlightLinks` gets an EMPTY Object3D rather than
+  // `undefined`. `linkDirectionalParticleThreeObject` is typed
+  // `LinkAccessor<…, Object3D>`, so `undefined` is a type error at the prop
+  // (TS2322); and nothing is drawn either way, because three-forcegraph digests
+  // `visibleLinks.filter(particlesAccessor)` (three-forcegraph.mjs:1394) before it calls
+  // this accessor at all — the call is inside `onUpdateObj`, at :1341 — and
+  // `linkParticlesFn` above hands 0 particles to exactly the links excluded here, so the
+  // empty object is never even asked for. The library's other call site is `emitParticle`
+  // (:1020), an instance method nothing in web/src invokes.
+  // The one reader that must not change is the membership test below: an `Object3D` is
+  // truthy, so a link that got particles WITHOUT being in `highlightLinks` would take its
+  // geometry/material from the empty object and render `Mesh(undefined, undefined)`.
   const particleArrowFn = useCallback(
     (link: any) => {
       const src = typeof link.source === "string" ? link.source : link.source.id;
       const tgt = typeof link.target === "string" ? link.target : link.target.id;
-      if (!highlightLinks.has(`${src}\x00${tgt}`)) return undefined;
+      if (!highlightLinks.has(`${src}\x00${tgt}`)) return new THREE.Object3D();
       const geo = new THREE.ConeGeometry(0.7, 2.0, 6);
       // Tip points along +Y by default; rotate so it points along +Z so the
       // tip faces the particle's direction of travel (source → target).

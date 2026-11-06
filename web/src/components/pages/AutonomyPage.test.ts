@@ -149,3 +149,83 @@ describe("HealthStrip renders the evidence", () => {
     expect(code).toContain("{health.artifacts.unevaluable_reason}");
   });
 });
+
+// The Kanban drop's discarded third argument (`TS6133: 'insertIndex' is declared but
+// its value is never read`) is what made `npm run build` die before vite until #3816.
+// Two things had to stay true while it went away, and the one that is easy to get wrong
+// is the second: the handler's JOB is a status change, so the fix that must not happen
+// is deleting the drop path or starting to send the index to the server as if
+// reordering worked. Wiring the index up, or deleting the insertion indicator that
+// computes it, is a product decision this item deliberately did not take.
+describe("Kanban drop stays a status change with no unread parameter (#3816)", () => {
+  // Each cut is a pair of `indexOf` hits, and a miss returns -1 — which slices an
+  // EMPTY string, against which every `not.toContain` below would pass vacuously. Two
+  // of these markers therefore need the offset printed before the slice is used:
+  // `const handleSave = async (` occurs twice in the page (a no-argument one in the
+  // editor section and the record editor's below `handleDrop`), so the end marker names
+  // the parameter list; and `const handleDrop = ` occurs twice as well (the column's
+  // takes the DOM event, the page's takes the ids).
+  const cut = (from: string, to: string, atLeast: number) => {
+    const a = pageSource.indexOf(from);
+    const b = pageSource.indexOf(to, a + 1);
+    expect(a, `AutonomyPage.tsx no longer contains ${from}`).toBeGreaterThan(-1);
+    expect(b, `AutonomyPage.tsx has no ${to} after ${from}`).toBeGreaterThan(a);
+    const block = pageSource.slice(a, b);
+    expect(block.length, `${from} block looks gutted`).toBeGreaterThan(atLeast);
+    return block;
+  };
+
+  const dropHandler = cut(
+    "  const handleDrop = async (",
+    "  const handleSave = async (id: number",
+    300);
+  const columnDrop = cut(
+    "  const handleDrop = (e: DragEvent) => {",
+    "  const getIndicator = ",
+    300);
+
+  it("finds both drop handlers, so no assertion below runs on an empty slice", () => {
+    // The two handlers are different functions in different components and must stay
+    // distinguishable: the column's takes the DOM event, the page's takes the ids.
+    expect(dropHandler).toContain("_insertIndex: number");
+    expect(columnDrop).toContain("e.dataTransfer.getData");
+    expect(dropHandler).not.toContain("dataTransfer");
+  });
+
+  it("declares the third parameter with the underscore that means unread", () => {
+    expect(dropHandler).toMatch(
+      /const handleDrop = async \(taskId: number, newStatus: string, _insertIndex: number\)/);
+    // The old spelling, which is the TS6133 this item exists to clear.
+    expect(dropHandler).not.toMatch(/[(,] insertIndex: number/);
+    // And the value must not have started being used instead of renamed: nothing in
+    // the handler may read it, which is the same diagnostic one edit away.
+    expect(dropHandler).not.toMatch(/[^_]insertIndex/);
+  });
+
+  it("still sends exactly one autonomyWriteTask, with only id and status", () => {
+    expect(dropHandler).toContain("api.autonomyWriteTask({ id: taskId, status: newStatus })");
+    const calls = dropHandler.match(/api\.autonomyWriteTask\(/g) ?? [];
+    expect(calls).toHaveLength(1);
+    // The optimistic update that makes the card move before the server answers.
+    expect(dropHandler).toContain("status: newStatus");
+    expect(dropHandler).toContain("prev.map(");
+  });
+
+  it("keeps the column computing and passing the index, unchanged", () => {
+    // The seam is untouched: `KanbanColumn` still derives an insertion index from the
+    // indicator and passes three arguments up. Only the parent's parameter was renamed.
+    expect(columnDrop).toContain("onDrop(draggedId, status, insertIndex);");
+    expect(columnDrop).toContain("let insertIndex = tasks.length;");
+    expect(pageSource).toMatch(
+      /onDrop: \(taskId: number, newStatus: string, insertIndex: number\) => void;/);
+    expect(pageSource).toContain("const [insertAt, setInsertAt] = useState");
+    expect(pageSource).toContain("const getIndicator = (taskId: number)");
+  });
+
+  it("clears TS6133 with a rename, not with a suppression", () => {
+    for (const banned of ["@ts-ignore", "@ts-expect-error", "as any"]) {
+      expect(dropHandler, `handleDrop uses ${banned}`).not.toContain(banned);
+      expect(columnDrop, `KanbanColumn drop uses ${banned}`).not.toContain(banned);
+    }
+  });
+});

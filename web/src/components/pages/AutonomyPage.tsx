@@ -1126,7 +1126,14 @@ export default function AutonomyPage() {
     return () => clearInterval(interval);
   }, [loadHealth]);
 
-  const handleDrop = async (taskId: number, newStatus: string, insertIndex: number) => {
+  // `_insertIndex` is delivered by `KanbanColumn` and deliberately unused: this
+  // drop changes a task's status and nothing else (`api.autonomyWriteTask` below
+  // sends `id` + `status` only). The underscore is `noUnusedParameters`'s spelling
+  // for "the caller passes it, this handler does not read it", which is the
+  // honest description until someone decides whether drag-to-reorder should be
+  // wired to the index or the insertion indicator removed — a product call, not
+  // this fix. The plumbing stays in place either way.
+  const handleDrop = async (taskId: number, newStatus: string, _insertIndex: number) => {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
 
