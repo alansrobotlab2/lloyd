@@ -1115,3 +1115,66 @@ async def get_dashboard():
     payload: dict[str, Any] = dict(sections)
     payload["timestamp"] = time.time()
     return JSONResponse(payload)
+
+
+# ── Front-matter memo ────────────────────────────────────────────────────────
+#
+# `_backlog` and `_autonomy` re-read every item's front matter on every pass:
+# 3,760 backlog files every `_VAULT_SCAN_TTL_S`, ~3.4 s of YAML each time, in
+# threads that hold the GIL against the event loop. A py-spy profile on
+# 2026-11-05 put 62% of the backend's samples in `_backlog` and 14% in
+# `_autonomy`, while `/health` stalled for up to 5 s. Almost no file changes
+# between passes, so a parse is kept per (path, mtime_ns, size) and a pass
+# costs a stat per unchanged file. Rebound here, at the end, so the line
+# anchors other docs and tests cite into this module do not move; both call
+# sites look `_frontmatter` up at call time.
+
+_frontmatter_parse = _frontmatter
+_FM_MEMO: dict[str, tuple[tuple[int, int], dict]] = {}
+_FM_MEMO_MAX = 50_000
+
+
+def _frontmatter(path, limit: int = 65536) -> dict:  # noqa: F811 — the memoised binding
+    """`_frontmatter_parse`, memoised on the file's mtime and size. Returns a
+    shallow copy, so a caller that adds a key cannot change the next reader's."""
+    import os  # here, not at the top: see the block comment above
+    try:
+        st = os.stat(path)
+    except OSError:
+        return _frontmatter_parse(path, limit)
+    key, sig = f"{path}\0{limit}", (st.st_mtime_ns, st.st_size)
+    hit = _FM_MEMO.get(key)
+    if hit is not None and hit[0] == sig:
+        return dict(hit[1])
+    fm = _frontmatter_parse(path, limit)
+    if len(_FM_MEMO) >= _FM_MEMO_MAX:
+        _FM_MEMO.clear()
+    _FM_MEMO[key] = (sig, fm)
+    return dict(fm)
+
+
+# ── board_health off the event loop's GIL ───────────────────────────────────
+#
+# `_backlog_health` ran `board_health` (~10-13 s of Python) on a thread in this
+# process; 47% of the backend's samples on 2026-11-05. On production data it
+# now runs in a child process (`app.board_health_offload`), so the CPU is spent
+# on another core instead of against the event loop. Everywhere else — tests,
+# the gate, a worktree's own data root — the call stays in-process, where the
+# fixtures that patch `board_health`'s inputs can reach it. Rebound at the end
+# for the same reason as `_frontmatter` above.
+
+_backlog_health_inproc = _backlog_health
+
+
+def _backlog_health(backlog_dir) -> dict[str, Any] | None:  # noqa: F811
+    from app.paths import IS_PRODUCTION_DATA
+    if not IS_PRODUCTION_DATA:
+        return _backlog_health_inproc(backlog_dir)
+    try:
+        from scripts.automod import state as S
+        if not backlog_dir.exists():
+            return None
+        from app import board_health_offload
+        return board_health_offload.run(S.LEDGER_PATH, backlog_dir)
+    except Exception:
+        return None

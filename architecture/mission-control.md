@@ -137,6 +137,20 @@ Rules that keep the endpoint honest:
   `app/aggregator_config.py` (`route` / `auth_headers_for`) rather than from
   a hand-written origin (#1053).
 
+### What the dashboard costs the backend
+
+The sections run on threads inside the backend, and a thread there holds the
+GIL against the event loop that answers every request. On 2026-11-05 a py-spy
+profile put 62% of the backend's samples in `_backlog` (47% in `board_health`,
+~10-13 s a call; the rest re-parsing 3,760 items' front matter every 10 s) and
+14% in `_autonomy`, while `/health` stalled for up to 5 s. Two changes, both
+at the end of `app/routers/dashboard.py` so no cited line moved:
+`_frontmatter` is memoised per (path, mtime, size) (a pass went from 1.5 s to
+16 ms), and on production data `board_health` runs in a child process
+(`app/board_health_offload.py`), the same CPU on another core. Off production
+data (tests, the gate) it stays in-process, where fixtures can patch it. A new
+heavy section belongs in one of those two shapes, not on a thread of its own.
+
 ### The traps behind those rules
 
 Moved here from CLAUDE.md on 2026-09-25, when that file went back to being an
