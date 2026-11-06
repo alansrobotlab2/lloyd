@@ -107,11 +107,19 @@ being true and being almost true.
 One surface that answers the table's own question is out of this table **by axis**
 rather than missing from it: `app/harness/capabilities.py`'s `envelope_for`
 (`git grep -n "def envelope_for" -- app/harness/capabilities.py`) is an availability
-surface, not a content guard — it removes every tool name the source has not declared
-from the turn's catalog before dispatch and reads no content (no command string, no
-argument value, no result text), so there is nothing for the table's `Sees` column to
-hold and the exclusions in §1–§8 do not reach it; the mechanism is written up once, in
-the capability-ceiling row of `architecture/authority-surfaces.md` (#3611).
+surface, not a content guard — for the sources that declare a capability set it removes
+every tool name they have not declared from the turn's catalog before dispatch and reads
+no content (no command string, no argument value, no result text), so there is nothing
+for the table's `Sees` column to hold and the exclusions in §1–§8 do not reach it; the
+ceiling narrows declaring sources only, and a source that declares no set is left to the
+deny floor below and nothing more; the mechanism is written up once, in the
+capability-ceiling row of `architecture/authority-surfaces.md` (#3611).
+
+That floor is the page's other availability surface, and it leaves this table by the same
+axis: `app/tool_bans.py` is two tuples of tool names no unattended turn may call, folded
+in whatever else the turn was offered and read against no content either, so the `Sees`
+column has no cell for it and the entry that owns the mechanism is the **Unattended tool
+bans** row of `architecture/authority-surfaces.md` (#3828).
 
 ```
 git grep -n "install_default_safety_hook\|install_policy_hook\|install_outbound_content_gate\|_install_action_review" \

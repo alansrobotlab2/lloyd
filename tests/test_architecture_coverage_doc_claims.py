@@ -12338,6 +12338,17 @@ _CEILING_NOTE_FACTS: tuple[tuple[str, str], ...] = (
      "that survives the next row being inserted above it"),
     (CEILING_OWNER_DOC,
      "stopped sending the reader to the doc that owns the mechanism"),
+    # #3828: the two halves of the qualifier. "removes every tool name they have not
+    # declared" is only true of a source that declared something, and the page said it
+    # of every source; the six that declare nothing are not narrowed by this surface at
+    # all, they are left to the floor — which is the fact the sentence's whole
+    # "availability surface, not a guard" framing turns on.
+    ("sources that declare a capability set",
+     "stopped saying which sources the ceiling narrows at all, so 'every tool name they "
+     "have not declared' reads as a rule over every turn when six sources never enter it"),
+    ("left to the deny floor below",
+     "stopped saying what a source that declares no set is left with, which is the only "
+     "answer to 'what stops that turn calling X' — the floor, and nothing above it"),
 )
 
 #: The three docs that triage settled need no note of their own: `harness.md` carries
@@ -12637,6 +12648,250 @@ def test_the_ceiling_note_cost_no_other_page_and_no_new_command_block():
             f"{slug} now names {CEILING_FUNCTION}: #3611 ruled that page needs no "
             "availability note, so either that ruling changed and this list changed "
             "with it, or the line spread by copy instead of by decision")
+
+
+# --------------------------------------------------------------------------- #
+# guard-coverage.md — the other availability surface: the deny floor (#3828,
+# 2026-11-06). #3611 put the ceiling on the page and left the floor off it, so the
+# page answered "what stops an unattended turn calling X" with one filter of two.
+# Measured before this node existed: `git grep -c tool_bans --
+# architecture/guard-coverage.md` printed nothing, against five pages of
+# `architecture/` that do name the module.
+# --------------------------------------------------------------------------- #
+
+#: The floor's module, and the subject of the row that owns it. Subject, not number, for
+#: the reason `_authority_ceiling_row` spells out: #3560's row insert moved every number
+#: below it, and this item's own text calls the owner "row 6" while the file at this HEAD
+#: carries it as the sixth data row of a ladder that has grown since.
+BANS_MODULE = "app/tool_bans.py"
+BANS_ROW_SUBJECT = "Unattended tool bans"
+
+#: What the sentence has to say, in the same observables-not-adjectives form as
+#: `_CEILING_NOTE_FACTS`. Each is dropped one at a time by the control node below, so a
+#: phrase that is nowhere in the live sentence fails loudly there rather than passing here
+#: as a check that never had anything to check.
+_BANS_NOTE_FACTS: tuple[tuple[str, str], ...] = (
+    (BANS_MODULE,
+     "stopped naming the module the standing bans are compiled from, leaving a reader "
+     "pointed at a mechanism they cannot open"),
+    (BANS_ROW_SUBJECT,
+     "stopped pointing at the owning entry by its subject, the only spelling that "
+     "survives the next entry being inserted above it"),
+    ("no content",
+     "stopped saying why the floor is out of this table for the same reason the ceiling "
+     "is: a table keyed on what a guard sees has no cell for a surface that sees none"),
+    ("same axis",
+     "stopped tying the floor's exclusion to the ceiling's, which is the difference "
+     "between one rule excluding two surfaces and two unrelated hedges"),
+)
+
+
+def _bans_note(text: str) -> list[str]:
+    """Every sentence naming the deny-floor module."""
+    return [s for s in _prose_sentences(text) if BANS_MODULE in s]
+
+
+def _authority_bans_row() -> str:
+    """The `Unattended tool bans` row of `authority-surfaces.md`, located by module cell.
+
+    The same discipline as `_authority_ceiling_row`, mirrored: the ceiling row names
+    `app/tool_bans.py` inside its own prose ("Row 6 (`app/tool_bans.py`) is its **floor**"),
+    so a substring match would grade the ceiling's row as the floor's and then compare the
+    note against the wrong text for the copy rule.
+    """
+    want = f"`{BANS_MODULE}`"
+    rows = [ln for ln in _text(CEILING_OWNER_DOC).splitlines()
+            if ln.startswith("| ") and want in
+            [cell.strip() for cell in ln.split("|")]]
+    assert len(rows) == 1, (
+        f"{BANS_MODULE} is the module cell of {len(rows)} rows of "
+        f"{CEILING_OWNER_DOC}, so the sentence's pointer has no single target")
+    return rows[0]
+
+
+def _bans_note_gaps(text: str) -> list[str]:
+    """What is wrong with THIS text as the home of the deny-floor sentence."""
+    gaps: list[str] = []
+    bans_rows = [r for r in _guard_table_rows(text) if BANS_MODULE in r]
+    if bans_rows:
+        gaps.append(
+            "the guard table gained a row for the deny floor "
+            f"({bans_rows[0][:70]!r}) — it is prose for the reason the ceiling is: the "
+            "table's axis is what a guard sees and the floor sees no content")
+    notes = _bans_note(text)
+    if not notes:
+        gaps.append(
+            f"nothing on the page names {BANS_MODULE}, so the page answers 'what stops an "
+            "unattended turn calling X' with the ceiling alone — and a source that "
+            "declares no capability set is not under the ceiling at all")
+        return gaps
+    if len(notes) > 1:
+        gaps.append(f"{len(notes)} sentences name {BANS_MODULE}; the page asks for one")
+    s = notes[0]
+    flat = " ".join(s.split())
+    for phrase, why in _BANS_NOTE_FACTS:
+        if phrase not in flat:
+            gaps.append(f"the sentence {why} — {phrase!r} missing")
+    if CEILING_FUNCTION in s:
+        gaps.append(
+            f"the deny-floor sentence also names {CEILING_FUNCTION}, which makes it a "
+            "second sentence naming both ceiling symbols: #3611 asks the page for exactly "
+            "one, so the qualification has to ride the ceiling's own sentence")
+    if re.search(r":\d", s):
+        gaps.append("the sentence cites a line number, which is the spelling no rail "
+                    "reads and nothing here needs: the claim is about a module")
+    if re.search(r"\b(?:row|layer|entry)\s+\d+\b", s):
+        gaps.append("the sentence points at the owning entry by NUMBER: a number is a "
+                    "position, and #3560 inserting a row moved every number below it")
+    n, run = _shared_word_run(s, _authority_bans_row())
+    if n >= 6:
+        gaps.append(f"the sentence shares a {n}-word run with the row it points at "
+                    f"({run!r}) — it is meant to send the reader there, not to keep a "
+                    "second copy of the mechanism to rot")
+    return gaps
+
+
+def test_guard_coverage_names_the_deny_floor_beside_the_ceiling():
+    """source: architecture/guard-coverage.md, the prose block under the guard table.
+    claim: one sentence names `app/tool_bans.py` as the page's other availability surface,
+           says it reads no content and leaves the table by the same axis as the ceiling,
+           and reaches the `Unattended tool bans` entry of
+           `architecture/authority-surfaces.md` by that subject — with no row number, no
+           line citation, and no more sentence naming `envelope_for` than #3611 left; and
+           the ceiling's one sentence now limits itself to sources that declare a
+           capability set, leaving the others to that floor and nothing more.
+    verdict: #3828, from #3611's owed entry. Both halves were measured missing at HEAD
+             e5604c44: the page carried zero hits for `tool_bans` (its only ban sentence
+             is the `grant_create` one in §7, about a different surface), and the ceiling
+             sentence said it removes "every tool name the source has not declared",
+             which says nothing about a source that declared no set — the six that
+             declare nothing are left to `app/tool_bans.py` and nothing else, which is the
+             answer to the very question the note was written to answer.
+
+    The floor sentence is pinned separately from the ceiling note rather than folded into
+    `_ceiling_note_gaps` because the two must fail apart: a page that lost the floor has
+    to red here and stay green there, or a reader cannot tell which availability surface
+    the doc drifted on. `envelope_for` is banned from THIS sentence for that reason — the
+    item's own text proposes writing the qualifier as a new clause naming
+    `envelope_for`, and a second sentence naming both symbols would red #3611's
+    `len(_ceiling_note(text)) == 1`; the control below seeds exactly that.
+    """
+    text = _text("guard-coverage.md")
+    assert _bans_note_gaps(text) == [], _bans_note_gaps(text)
+    assert len(_bans_note(text)) == 1, (
+        "the live page stopped carrying exactly one sentence naming the floor")
+    assert BANS_ROW_SUBJECT in _authority_bans_row(), (
+        "the entry the sentence points at is no longer the unattended tool bans one, so "
+        "the pointer was verified against a row that has since changed subject")
+    assert (ROOT / BANS_MODULE).read_text(encoding="utf-8").count("WORKER_AUTOMOD_BAN") >= 1, (
+        f"{BANS_MODULE} no longer spells the automod tuple, so the sentence's 'two "
+        "tuples' is a claim about a file the tree does not have")
+
+    # Location: with the ceiling note, where a reader meets the table — nowhere else.
+    note = _bans_note(text)[0]
+    pos = text.index(note[:60])
+    assert text.index(GUARD_TABLE_HEADING) < pos < text.index("\n## 1. "), (
+        "the deny-floor sentence is no longer in the prose block under the guard table, "
+        "so it is not where the question it answers is asked")
+
+    # The two sentences stay one each, and neither became the other.
+    assert len(_ceiling_note(text)) == 1, (
+        "the page now carries more than one sentence naming both ceiling symbols")
+    assert BANS_MODULE not in _ceiling_note(text)[0], (
+        "the floor was folded into the ceiling's sentence: two surfaces, one sentence, "
+        "and the falsifier for each goes quiet when the other is edited")
+    assert _ceiling_note_gaps(text) == [], _ceiling_note_gaps(text)
+    assert len(_guard_table_rows(text)) == GUARD_TABLE_ROWS, (
+        "the guard table grew, and neither availability surface has a cell on its axis")
+
+
+def test_the_deny_floor_note_control_fails_when_it_is_deleted_rowed_or_merged():
+    """Controls for the node above (#3828 clauses 1, 4 and 5): every way this sentence can
+    stop doing its job is seeded in text this file writes, so a green live run cannot be an
+    extractor that found nothing to complain about.
+
+    The merge seed is the one this item's own text would have walked into: writing the
+    qualifier as a fresh clause naming `envelope_for` reads as a better sentence and reds
+    #3611's one-sentence node, so the page pays for a good edit with someone else's green.
+    """
+    text = _text("guard-coverage.md")
+    notes = _bans_note(text)
+    assert len(notes) == 1, "no live sentence to mutate, so no control below is real"
+    note = notes[0]
+    assert _bans_note_gaps(text) == [], "the live page already reports findings"
+    assert _shared_word_run(note, _authority_bans_row())[0] < 6, (
+        "the live sentence already shares a long run with the row it points at — the "
+        "copy control below would be grading a copy that already exists")
+
+    # Half one: the sentence deleted. Must red the floor and leave the ceiling alone.
+    deleted = text.replace(note + "\n", "", 1)
+    assert deleted != text, "the seed did not remove the sentence"
+    gaps = _bans_note_gaps(deleted)
+    assert any("nothing on the page names" in g for g in gaps), gaps
+    assert _ceiling_note_gaps(deleted) == [], (
+        "deleting the floor reds the ceiling node too, so the two sentences cannot be "
+        "told apart and a reader gets one finding for two possible edits")
+
+    # The wrong shape of fix: an eighth table row for a surface that sees no content.
+    sep = "|---|---|---|---|"
+    row = ("| `app/tool_bans.py` | may this turn call this tool at all | the tool name "
+           "| both tuples, folded into every scope |\n")
+    rowed = deleted.replace(sep + "\n", sep + "\n" + row, 1)
+    assert rowed != deleted, "the seed did not add the row"
+    assert any("gained a row for the deny floor" in g for g in _bans_note_gaps(rowed)), (
+        "a table row for the floor reds nothing")
+    assert len(_guard_table_rows(rowed)) == GUARD_TABLE_ROWS + 1, (
+        "the seeded row did not parse as a table row, so the control above passed on a "
+        "malformed line rather than on a real eighth row")
+
+    # Each observable, dropped one at a time — the same whitespace-flexible cut the
+    # ceiling's drop-one control uses, because the page wraps at ~80 columns.
+    for phrase, _why in _BANS_NOTE_FACTS:
+        pattern = re.compile(r"\s+".join(map(re.escape, phrase.split())))
+        cut, n = pattern.subn("", note, count=1)
+        assert n == 1, f"the phrase {phrase!r} is not in the live sentence to drop"
+        hedged = text.replace(note, cut, 1)
+        assert hedged != text, f"the seed could not drop {phrase!r} from the sentence"
+        gaps = _bans_note_gaps(hedged)
+        assert any(phrase in g for g in gaps), f"dropping {phrase!r} reds nothing: {gaps}"
+
+    # A line citation, and the owning entry cited by position. Both needles are matched
+    # across whitespace for the reason the drop-one loop above gives: the page wraps at
+    # ~80 columns, and a `str.replace` aimed at "by the same axis" would silently seed
+    # nothing on the line-wrapped spelling.
+    def reseed(needle: str, replacement: str) -> str:
+        pattern = re.compile(r"\s+".join(map(re.escape, needle.split())))
+        cut, n = pattern.subn(replacement, text, count=1)
+        assert n == 1, f"the seed needle {needle!r} is not on the page to replace"
+        return cut
+
+    numbered = reseed("by the same axis", "by the same axis (`app/tool_bans.py:23`)")
+    assert any("line number" in g for g in _bans_note_gaps(numbered)), (
+        "a line citation on the floor sentence reds nothing")
+    numbered_row = reseed(f"**{BANS_ROW_SUBJECT}** row", "row 6")
+    assert any("by NUMBER" in g for g in _bans_note_gaps(numbered_row)), (
+        "citing the owning entry by number reds nothing")
+
+    # Copying the owning row's mechanism onto the union page.
+    copied = text.replace(
+        note, note.rstrip(". ") + " — which is its floor and not the whole answer, and "
+        "the capability ceiling narrows the reachable set further.", 1)
+    assert copied != text, "the copy seed did not apply"
+    assert any("shares a" in g for g in _bans_note_gaps(copied)), (
+        f"copying the owning row's mechanism into the sentence reds nothing: "
+        f"{_bans_note_gaps(copied)}")
+
+    # The trap this item's own parenthetical sets: a second sentence naming both ceiling
+    # symbols, which spends #3611's green to buy #3828's prose.
+    merged = reseed("That floor is the page",
+                    "That floor, under `app/harness/capabilities.py`'s `envelope_for`, "
+                    "is the page")
+    assert any(f"names {CEILING_FUNCTION}" in g for g in _bans_note_gaps(merged)), (
+        f"a floor sentence that also names {CEILING_FUNCTION} reds nothing here")
+    assert len(_ceiling_note(merged)) == 2, (
+        "the seeded sentence did not become a second ceiling note, so the gap above is "
+        "grading a shape that cannot occur — and #3611's node is the one that would have "
+        "gone red instead")
 
 
 # --------------------------------------------------------------------------- #
