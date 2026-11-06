@@ -203,9 +203,11 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(handleNavigation, {
   ],
 })
 
-// Mints the tab's session and always fires its first-turn message, then
-// focuses the panel on it. Its one caller is handleManualCheck; the module
-// header says why that is the only entry point.
+// Mints the tab's session and always fires its first-turn message, then maps
+// the tab onto that session and focuses the panel on it — the mapping happens
+// only if the kickoff POST answered, so a refused one leaves the tab
+// unmapped. Its one caller is handleManualCheck, inside its tab lock; the
+// module header says why that is the only entry point.
 async function spawnSession(
   tabId: number,
   url: string,
@@ -220,16 +222,15 @@ async function spawnSession(
     return
   }
 
-  await setMapping(tabId, { sessionKey, url, title })
-  await setCanonical(tabId, canonical)
-
   // Best-effort metadata patch; title may still be hostname at this
   // point — the onUpdated listener will re-patch when the real title
-  // arrives.
+  // arrives. It patches the SESSION, so it is not the tab's committed
+  // state and it stays where it was: a refused kickoff still leaves an
+  // orphaned session in Lloyd's list, and this is what makes it findable.
   patchBrowserMetadata(sessionKey, { url, title }).catch(() => undefined)
 
-  // Awaited, deliberately, and before the panel is told which session to
-  // show. `/api/message/stream` enqueues the turn before it hands back the
+  // Awaited, deliberately, and now the gate on committing the tab at all.
+  // `/api/message/stream` enqueues the turn before it hands back the
   // StreamingResponse (`post_message_stream` in app/routers/messages.py
   // awaits `enqueue_turn`, then returns the StreamingResponse), so once this
   // POST has answered the backend already counts the session as active —
@@ -237,13 +238,40 @@ async function spawnSession(
   // lands inside the turn instead of racing it and losing. Fired
   // fire-and-forget, the panel reached a session whose turn did not exist
   // yet and then showed no in-progress state for the entire first turn.
-  await fireKickoff(
-    sessionKey,
-    buildKickoffMessage(url),
-    `ext_tab_${tabId}`,
-  ).catch((err) => console.error("[lloyd-sw] fireKickoff failed:", err))
+  //
+  // The await is also what the mint waits on now (#3645). Committing the tab
+  // BEFORE it was the defect: a POST that answers 503 from the self-mod drain
+  // window throws in `fireKickoff` and enqueues no turn, so the tab kept a
+  // mapping whose canonical matched, and the first guard in
+  // `handleManualCheck` re-focused that empty session on every later press
+  // while the tab stayed on that URL. Clearing in the rejection handler was
+  // the other route and is not taken: `clearTab` is the only helper that
+  // drops `lastCommitted` alongside the mapping (`clearMapping` keeps it by
+  // design and would strand the canonical, leaving the same silent no-op one
+  // press later), and committing nothing is strictly simpler than committing
+  // then undoing. The session this minted is now simply unreferenced, which is
+  // the same orphan state a closed tab already produces.
+  let kickoffAnswered = false
+  try {
+    await fireKickoff(
+      sessionKey,
+      buildKickoffMessage(url),
+      `ext_tab_${tabId}`,
+    )
+    kickoffAnswered = true
+  } catch (err) {
+    console.error("[lloyd-sw] fireKickoff failed:", err)
+  }
 
-  // Notify the panel (if open in the tab's window).
+  if (kickoffAnswered) {
+    await setMapping(tabId, { sessionKey, url, title })
+    await setCanonical(tabId, canonical)
+  }
+
+  // Notify the panel (if open in the tab's window). Runs on the refused path
+  // too, deliberately: with nothing mapped, `pushFocus` reports not-checked
+  // with `canCheck` true, which is the panel saying "press it again" rather
+  // than holding a session that has no turn.
   const tab = await chrome.tabs.get(tabId).catch(() => null)
   if (tab && typeof tab.windowId === "number") {
     await pushFocus(tab.windowId, tabId)

@@ -24,7 +24,7 @@ doc that exists, and no doc did.
 
 | Path | What it is |
 |---|---|
-| `chrome-extension/src/background/service-worker.ts` | 320 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
+| `chrome-extension/src/background/service-worker.ts` | 339 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
 | `chrome-extension/src/background/url.ts` | 68 lines: `canonicalize()`, the YouTube tests and `canCheckUrl` |
 | `chrome-extension/src/background/tab-session-map.ts` | 92 lines: the `chrome.storage.session` wrapper holding the tab→session mapping |
 | `chrome-extension/src/background/lloyd-client.ts` | 81 lines: three backend calls, used by the service worker only |
@@ -61,11 +61,23 @@ service worker is the guard (#1765, `tests/test_sidepanel_spawn_guard.py`).
    panel's first `GET /status` inside the turn instead of racing it — fired and
    forgotten, the panel reached a session whose turn did not exist yet and showed
    no in-progress state for the entire kickoff. `spawnSession` has no way to
-   skip this step: it takes no flag for it (#1767). What the await does not buy
-   is the mint — `setMapping` commits the tab before it and the rejection is
-   swallowed, so one refused POST (a 503 from the self-mod drain window) leaves a
-   mapped session with no turn, and the first guard below then refuses to retry
-   that URL for the rest of the browser session (#3569).
+   skip this step: it takes no flag for it (#1767). The await is also the gate on
+   the mint: `setMapping` and `setCanonical` run only once that POST has
+   answered, so a refused one — a 503 out of the self-mod drain window, which
+   `fireKickoff` throws on — commits nothing. The session it minted is left
+   unreferenced, the same orphan a closed tab produces, and the tab keeps
+   reporting not-checked with the button live, so the next press mints afresh and
+   fires its own kickoff instead of the first guard below re-focusing a session
+   with no turn (#3569, closed by #3645's contract, landed through #3854). The
+   guard below reads the mapping, so the mapped session was what closed the URL
+   to a retry, and `lastCommitted` was what made it stick: `handleNavigation`
+   clears the mapping only when the tab's canonical changes, so a reload of the
+   same page — its `getCanonical(tabId) === canonical` no-op — left both halves
+   standing, which is precisely the reload a person reaches for when a button
+   seems to do nothing. Committing only after the proof means a refusal writes
+   neither half, so there is nothing to clear; `clearTab` is the only helper that
+   drops both, and `clearMapping` keeps `lastCommitted` by design, which is why
+   it could not have been the cleanup.
 4. The panel switches to that session.
 
 Re-checking the **same canonical URL** re-focuses the existing session and does
@@ -111,9 +123,11 @@ extension's own two write-ups say the same thing: `chrome-extension/README.md`
 and the header of `chrome-extension/src/background/lloyd-client.ts` name
 `ApiPeerGate` → `_is_trusted_peer` and say no client certificate is required
 (#1722), and the header is in the corpus `tests/test_stale_mtls_comment_claims.py`
-greps beside `web/src/api.ts`. `chrome-extension/` stays outside automod's
-writable set — it has no JS/TS test runner a round could be graded on — so an
-edit there is hand-landed.
+greps beside `web/src/api.ts`. `chrome-extension/` is inside automod's writable
+set by name (#3646) — the service worker's TypeScript and the worker bundle it
+builds are both round-writable — because the runner objection that made it
+hand-landed is gone: `tests/test_sidepanel_focus_headless.py` drives the built
+bytes in a node child, and the gate byte-compares them to a fresh build.
 
 ## Build, and what is in git
 
@@ -299,3 +313,38 @@ on after the output directory had already been emptied.
   `web/src/sidepanel/SidePanelApp.tsx` are rendered by the side panel, and
   `web/vitest.config.ts` `include` reaches only `web/src/**`, so that leg is still a browser
   concern and still owed.
+- **2026-11-06 — a refused kickoff no longer maps the tab, so the button can retry the page
+  (#3854, fixing #3569 on #3645's contract).** `spawnSession` wrote `setMapping` +
+  `setCanonical` and only then awaited `POST /api/message/stream`, swallowing the rejection with
+  a `console.error`, so one refused POST — a 503 from the self-mod drain window, the case
+  `fireKickoff` throws on for exactly this reason — left the tab mapped to a session with no
+  turn, and `handleManualCheck`'s first guard matched its canonical and re-focused that empty
+  session on every later press: the button silently no-oped. §What one check does described that
+  as the design until this entry. The commit now happens after the proof, inside the same
+  `withTabLock` the check already holds, so a refusal writes neither half and there is nothing to
+  unwind — the alternative in #3645's contract was a `clearTab` in the rejection handler (the
+  only helper dropping `lastCommitted` as well as the mapping; `clearMapping` keeps it and would
+  have stranded the canonical, reproducing the no-op one press later), and neither route reaches
+  `clearMapping`. Two corrections to how this doc stated the blast radius: the strand lasted
+  while the tab stayed on that canonical URL, not "for the rest of the browser session", because
+  `handleNavigation` drops the mapping when the canonical changes — a **reload** is what did not
+  recover, which is precisely when a person presses again; and a refused POST still leaves an
+  orphan session in Lloyd's list, since the mint happens first and only the mapping waits. Not
+  measurable by importing the TypeScript, and not measurable by reading the bytes either: the leg
+  now drives `chrome-extension/dist/service-worker.js` under a stub `chrome` global with
+  `/message/stream` answering 503 and reads out what the panel was handed (`sessionKey: null`,
+  `canCheck` true), what `chrome.storage.session` holds (neither `tab:<id>` nor
+  `lastCommitted:<id>`, which is why the store in that drive is a fake that keeps writes rather
+  than the fixed answer the focus legs use), and that the second press attempted a second
+  kickoff at all — the same drive with the POST answered mints once, shows the panel the session
+  it minted without a second press, and logs nothing. Those legs are in
+  `tests/test_sidepanel_focus_headless.py` beside the #3772 focus drive, with the shape they
+  depend on pinned at source level by `tests/test_sidepanel_spawn_guard.py`, and the shipped
+  `chrome-extension/dist/service-worker.js` is rebuild-verified by the gate's
+  `chrome_bundle_provenance` rung rather than hand-authored. It is the second round to edit
+  through #3646's grant — round `SM_20261103_223217` promoted `service-worker.ts` and its
+  bundle on 2026-11-03, for #3741 — and the sentence in `## Getting to the backend` that said
+  an edit under `chrome-extension/` is hand-landed is corrected here rather than left standing,
+  because those two promotions are what refute it. What is still owed is the one thing a node
+  child cannot do: reload these bytes into a real Chrome and
+  press the button with the backend stopped, then again with it restored.

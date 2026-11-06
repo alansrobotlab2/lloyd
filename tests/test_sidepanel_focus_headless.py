@@ -20,7 +20,8 @@ captured `runtime.onConnect` listener, send `{type: "panel-ready", windowId, tab
 only THEN fire the captured `tabs.onActivated` listener — panel connected first is the repro
 condition. What comes back is what `port.postMessage` was handed, as data.
 
-Five things this measures, one per test below:
+Five things the FOCUS drive measures, one per test below (the three PRESS tests appended at the
+foot of the file press the button instead of activating a tab, and are introduced there):
 
   * the import. Seven listeners register at import time. A stub missing either
     `webNavigation` member throws a `TypeError` in the middle of `import()`, which is why the
@@ -86,8 +87,16 @@ SEED_KEY = "ext_seed"
 PANEL_PORT = "lloyd-sidepanel"
 DECOY_PORT = "some-other-panel"
 
+#: The tab the PRESS drive below checks, and what `chrome.tabs.get` answers for it. Not one of
+#: tabs 7-9: those are the tabs the focus legs activate, and a leg that mints has to start with
+#: no mapping and no canonical of its own, so the store assertions have one clean subject.
+PRESS_TAB = 11
+PRESS_URL = "https://example.com/press"
+PRESS_TITLE = "A Pressed Page"
+
 #: What `chrome.tabs.get` answers for each tab the drive activates. Tab 7 is checkable and
 #: mapped, tab 8 is Gmail, tab 9 is checkable but never mapped — the mapped/unmapped pair.
+#: Tab 11 is the press drive's subject: checkable, and never seeded with anything.
 TABS = {
     CHECKABLE_TAB: {"id": CHECKABLE_TAB, "windowId": WINDOW_ID,
                     "url": CHECKABLE_URL, "title": CHECKABLE_TITLE},
@@ -95,7 +104,21 @@ TABS = {
                 "url": GMAIL_URL, "title": GMAIL_TITLE},
     UNMAPPED_TAB: {"id": UNMAPPED_TAB, "windowId": WINDOW_ID,
                    "url": UNMAPPED_URL, "title": UNMAPPED_TITLE},
+    PRESS_TAB: {"id": PRESS_TAB, "windowId": WINDOW_ID,
+                "url": PRESS_URL, "title": PRESS_TITLE},
 }
+
+#: The session key the press drive's `POST /api/sessions/create` stub mints. Deliberately not
+#: `SEED_KEY`: "the push carries the key THIS press minted" must not be satisfiable by a mapping
+#: the harness hydrated out of the seed.
+MINTED_KEY = "sk_driven"
+
+#: What the press drive's `POST /api/message/stream` answers with. 503 is the self-mod drain
+#: window `chrome-extension/src/background/lloyd-client.ts` names, and `fireKickoff` THROWS on
+#: it (`if (!res.ok) throw …`) rather than resolving quietly — that throw is the event #3645 is
+#: about.
+STREAM_ANSWERED = 200
+STREAM_REFUSED = 503
 
 #: The names `pushFocus` writes into the object literal it hands `postMessage`, in the order it
 #: writes them. Measured on EVERY leg of the drive — including the legs where `url` and `title`
@@ -485,3 +508,296 @@ def test_every_assertion_above_runs_against_the_tracked_build_output(tmp_path):
     report = _drive(tmp_path, "identity", BUNDLE, _seed())
     assert report["IMPORT_SHA256"] == hashlib.sha256(BUNDLE.read_bytes()).hexdigest()
     assert report["IMPORT_SHA256"] != hashlib.sha256(TS_SOURCE.read_bytes()).hexdigest()
+
+
+# ── #3854 / #3645: press the button against a REFUSED kickoff ───────────────────────────
+#
+# Everything above activates tabs, which never mints: the focus legs read a store they were
+# handed. The three legs below press the button — they hand the captured `runtime.onConnect`
+# message listener a `{type: "request-session"}` and answer `POST /api/message/stream` with a
+# 503, the drain-window refusal `fireKickoff` throws on. What that used to leave behind is the
+# defect: `setMapping` and `setCanonical` ran BEFORE the awaited POST, so the tab ended up
+# mapped to a session with no turn, `handleManualCheck`'s first guard matched the canonical,
+# and every later press on that URL re-focused the empty session instead of retrying — while
+# the tab sat on that one page (`architecture/browser-side-panel.md` §What one check does).
+#
+# This drive therefore cannot share `_DRIVE` above. That harness answers
+# `chrome.storage.session.get` from a fixed seed and its `set` is a no-op, which is correct for
+# a leg that only reads: a leg that COMMITS needs a store that keeps what it is given, or
+# "no mapping and no canonical survived" is unfalsifiable — an empty fake answers that for a
+# bundle that mapped everything. So `store` here is a real fake, `STORE` is reported back, and
+# `console.error` is captured because the bundle reports a refused kickoff nowhere else.
+
+_PRESS_DRIVE = r'''
+// #3854: press "Check it out, Lloyd" against a bundle whose kickoff POST is refused or answered.
+// Reads BUNDLE and FIXTURE (window id, tab table, the tab to press, the port name, the seed
+// store, what /message/stream answers, the key /sessions/create mints, and whether the two
+// presses are fired one after the other or both before awaiting either) from the environment;
+// prints one `REPORT <json>` line and nothing else.
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const BUNDLE = process.env.BUNDLE;
+const FX = JSON.parse(process.env.FIXTURE);
+
+const listeners = {};
+const reg = (key) => (fn) => { (listeners[key] ||= []).push(fn); };
+const fetchCalls = [];
+const consoleErrors = [];
+
+// A store that KEEPS writes, unlike the focus drive's fixed answer: the claim under test is
+// what is NOT in here after a refused kickoff.
+const store = { ...FX.seed };
+
+globalThis.chrome = {
+  storage: {
+    session: {
+      get: async () => ({ ...store }),
+      set: async (obj) => { Object.assign(store, obj); },
+      remove: async (keys) => {
+        for (const k of (Array.isArray(keys) ? keys : [keys])) delete store[k];
+      },
+    },
+  },
+  tabs: {
+    get: async (tabId) => {
+      const t = FX.tabs[tabId];
+      if (!t) throw new Error(`no such tab ${tabId}`);
+      return { ...t };
+    },
+    onActivated: { addListener: reg("tabs.onActivated") },
+    onUpdated: { addListener: reg("tabs.onUpdated") },
+    onRemoved: { addListener: reg("tabs.onRemoved") },
+  },
+  runtime: {
+    onConnect: { addListener: reg("runtime.onConnect") },
+    onInstalled: { addListener: reg("runtime.onInstalled") },
+  },
+  webNavigation: {
+    onCommitted: { addListener: reg("webNavigation.onCommitted") },
+    onHistoryStateUpdated: { addListener: reg("webNavigation.onHistoryStateUpdated") },
+  },
+  sidePanel: { setPanelBehavior: async () => {} },
+};
+
+// `/message/stream` answers FX.streamStatus and everything else answers 200 with FX.mintedKey,
+// so the ONLY failing call in a refused drive is the kickoff — `createBrowserSession` succeeds
+// and the minted session exists, which is exactly the state the bug mapped the tab onto.
+globalThis.fetch = async (url) => {
+  const u = String(url);
+  fetchCalls.push(u);
+  const refused = u.includes("/message/stream") && FX.streamStatus !== 200;
+  return {
+    ok: !refused,
+    status: refused ? FX.streamStatus : 200,
+    json: async () => ({ session_key: FX.mintedKey }),
+    text: async () => (refused ? "self-mod drain" : ""),
+    body: { cancel: async () => {} },
+  };
+};
+
+// A refused kickoff reaches the user only as a service-worker console line, so capturing it is
+// what turns "the rejection branch ran" from an inference into a reported field.
+console.error = (...a) => { consoleErrors.push(a.map((x) => String(x)).join(" ")); };
+
+const report = { IMPORT_SHA256: createHash("sha256").update(readFileSync(BUNDLE)).digest("hex") };
+await import(pathToFileURL(BUNDLE).href);
+
+const encode = (m) => ({
+  keys: Object.keys(m),
+  values: Object.fromEntries(
+    Object.entries(m).map(([k, v]) => [k, v === undefined ? "__undefined__" : v])),
+});
+
+const makePort = (name) => {
+  const sent = [];
+  const port = {
+    name,
+    _msg: null,
+    _disc: null,
+    postMessage: (m) => { sent.push(m); },
+    onMessage: { addListener: (fn) => { port._msg = fn; } },
+    onDisconnect: { addListener: (fn) => { port._disc = fn; } },
+    drain: () => sent.splice(0, sent.length).map(encode),
+  };
+  return port;
+};
+
+const panel = makePort(FX.panelPort);
+await (listeners["runtime.onConnect"][0])(panel);
+await panel._msg({ type: "panel-ready", windowId: FX.windowId, tabId: FX.pressTab });
+report.PANEL_READY_PUSH = panel.drain();
+
+const press = () => panel._msg({ type: "request-session", windowId: FX.windowId,
+                                 tabId: FX.pressTab });
+
+if (FX.inFlight) {
+  // Both presses are dispatched before either is awaited, which is the only way to get the
+  // second one into the queue while the first kickoff POST is still outstanding.
+  const first = press();
+  const second = press();
+  await first;
+  await second;
+  report.INFLIGHT_PAIR = panel.drain();
+} else {
+  await press();
+  report.PRESS_ONE = panel.drain();
+  await press();
+  report.PRESS_TWO = panel.drain();
+}
+
+report.STORE = { ...store };
+report.FETCH_CALLS = fetchCalls;
+report.CONSOLE_ERRORS = consoleErrors;
+console.log(`REPORT ${JSON.stringify(report)}`);
+'''
+
+
+def _press_drive(tmp_path: Path, name: str, *, stream_status: int,
+                 in_flight: bool = False, bundle: Path = BUNDLE) -> dict:
+    """Run the PRESS drive over `bundle` in its own node child and return its report.
+
+    One node process per leg, as in `_drive`: the tab map, the canonical map and the module's
+    single-flight `hydrate()` are process state, so a refused leg and the answered leg it is
+    contrasted with must not share one.
+    """
+    work = tmp_path / name
+    work.mkdir(parents=True, exist_ok=True)
+    script = work / "press.mjs"
+    script.write_text(_PRESS_DRIVE, encoding="utf-8")
+    fixture = {
+        "windowId": WINDOW_ID,
+        "tabs": {str(tab_id): tab for tab_id, tab in TABS.items()},
+        "pressTab": PRESS_TAB,
+        "panelPort": PANEL_PORT,
+        "seed": {},
+        "streamStatus": stream_status,
+        "mintedKey": MINTED_KEY,
+        "inFlight": in_flight,
+    }
+    proc = subprocess.run(
+        [shutil.which("node"), str(script)],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "BUNDLE": str(bundle), "FIXTURE": json.dumps(fixture)},
+    )
+    assert proc.returncode == 0, f"the press drive exited {proc.returncode}: {proc.stderr}"
+    lines = [line for line in proc.stdout.splitlines() if line.startswith("REPORT ")]
+    assert len(lines) == 1, f"expected one report line, got: {proc.stdout!r}"
+    return json.loads(lines[0][len("REPORT "):])
+
+
+def _focus_pushes(report: dict, label: str) -> list[dict]:
+    """Every `focus-session` message the press drive reported under `label`.
+
+    A press answers the panel more than once — `spawnSession`'s own tail push, then
+    `handleManualCheck`'s push after the lock — and the claim is about all of them: a single
+    `sessionKey: null`-shaped push in the middle of an otherwise mapped press is the same user
+    symptom (the panel flickers back to not-checked), so this returns the list rather than the
+    last element.
+    """
+    leg = report[label]
+    assert leg, f"{label} delivered no message to the panel at all, so the press never ran"
+    pushes = [m for m in leg if m["values"].get("type") == "focus-session"]
+    assert pushes, f"{label} delivered no focus-session: {leg}"
+    return pushes
+
+
+def _n_calls(report: dict, needle: str) -> int:
+    """How many of the drive's recorded `fetch` calls were to a URL containing `needle`."""
+    return sum(1 for url in report["FETCH_CALLS"] if needle in url)
+
+
+def test_a_refused_kickoff_leaves_the_tab_unmapped_and_the_next_press_retries(tmp_path):
+    """#3645 clauses 1 and 3: a refused kickoff POST commits nothing, so the next press mints.
+
+    `POST /api/message/stream` answers 503 for both presses. Four things are read out of the
+    bytes Chrome loads: every `focus-session` the panel received carries `sessionKey: null`
+    (nothing was mapped, and the tail `pushFocus` still ran, so the panel is on not-checked with
+    `canCheck` true and the button live to retry); the storage fake holds neither `tab:11` nor
+    `lastCommitted:11`, which is the pair `clearTab` would have had to drop and the reorder
+    never writes — the canonical half is the one that strands a URL, because a lingering
+    `lastCommitted` is what `handleNavigation` compares a reload against; the kickoff POST was
+    attempted TWICE, one attempt per press, so the second press was a retry and not the silent
+    re-focus of an empty session that used to close the URL; and `fireKickoff failed` reached
+    the service-worker console, so the rejection branch is the branch that ran.
+
+    Red before the fix on three of those four: the two pushes of press one carried the minted
+    key, the store held both keys, and press two fired no POST at all.
+    """
+    report = _press_drive(tmp_path, "refused", stream_status=STREAM_REFUSED)
+    assert report["IMPORT_SHA256"] == hashlib.sha256(BUNDLE.read_bytes()).hexdigest(), (
+        "the press drive did not import the tracked bundle")
+
+    for label in ("PRESS_ONE", "PRESS_TWO"):
+        for msg in _focus_pushes(report, label):
+            assert msg["values"]["sessionKey"] is None, (
+                f"{label}: the panel was shown {msg['values']['sessionKey']} for a kickoff the "
+                "backend refused, so the tab is mapped to a session with no turn")
+            assert msg["values"]["canCheck"] is True, (
+                f"{label}: the refused press also took the button away, so the panel cannot "
+                "retry this page")
+
+    assert f"tab:{PRESS_TAB}" not in report["STORE"], report["STORE"]
+    assert f"lastCommitted:{PRESS_TAB}" not in report["STORE"], (
+        f"a canonical survived the refusal, so a reload of the same page is still 'already "
+        f"checked': {report['STORE']}")
+
+    assert _n_calls(report, "/sessions/create") == 2, report["FETCH_CALLS"]
+    assert _n_calls(report, "/message/stream") == 2, (
+        f"the second press did not attempt a kickoff, so it re-focused instead of retrying: "
+        f"{report['FETCH_CALLS']}")
+    assert any("fireKickoff failed" in line for line in report["CONSOLE_ERRORS"]), (
+        report["CONSOLE_ERRORS"])
+
+
+def test_an_answered_kickoff_commits_the_mapping_before_the_panel_is_told(tmp_path):
+    """#3645 clause 2 and 4: the success path is unchanged — one press, one session, no re-press.
+
+    The same drive with `/message/stream` answering 200. Press one's pushes all carry the key
+    that press minted, which is the ordering the awaited POST exists for: `spawnSession`'s tail
+    `pushFocus` is the first thing the panel is told and it already names the session, so
+    ChatPanel's first `GET /status` lands inside the turn rather than racing it. The store holds
+    both halves of the mapping — `tab:11` with that key and `lastCommitted:11` with the page's
+    canonical — and press two re-focuses the same session without minting: one
+    `/sessions/create` in the whole drive. `console.error` stayed silent, so the refused leg's
+    console line is attributable to the status code and not to the harness.
+    """
+    report = _press_drive(tmp_path, "answered", stream_status=STREAM_ANSWERED)
+
+    for label in ("PRESS_ONE", "PRESS_TWO"):
+        for msg in _focus_pushes(report, label):
+            assert msg["values"]["sessionKey"] == MINTED_KEY, (
+                f"{label}: the panel was not shown the session this press minted: "
+                f"{msg['values']}")
+
+    assert report["STORE"].get(f"tab:{PRESS_TAB}", {}).get("sessionKey") == MINTED_KEY, (
+        report["STORE"])
+    assert report["STORE"].get(f"lastCommitted:{PRESS_TAB}") == PRESS_URL, report["STORE"]
+    assert _n_calls(report, "/sessions/create") == 1, report["FETCH_CALLS"]
+    assert _n_calls(report, "/message/stream") == 1, report["FETCH_CALLS"]
+    assert report["CONSOLE_ERRORS"] == [], report["CONSOLE_ERRORS"]
+
+
+def test_two_presses_while_the_first_kickoff_is_in_flight_mint_one_session(tmp_path):
+    """#3645 clause 4: `spawnSession` needs no lock of its own — `withTabLock` still serialises it.
+
+    Both `request-session` messages are handed to the panel's message listener before either is
+    awaited, so the second is queued while the first kickoff POST is outstanding. One
+    `/sessions/create` and one `/message/stream` for the pair is the claim: the second press
+    enters `handleManualCheck`, waits on the lock the first already holds, and then reads a
+    mapping whose canonical matches, so it re-focuses. That only holds because the mint commits
+    inside the same locked region the check runs in — a `spawnSession` that grabbed its own lock
+    (or committed outside the caller's) would let press two mint a duplicate. Every push of the
+    pair carries the minted key, so the queued press still lands the panel on the session.
+    """
+    report = _press_drive(tmp_path, "in-flight", stream_status=STREAM_ANSWERED, in_flight=True)
+
+    assert _n_calls(report, "/sessions/create") == 1, report["FETCH_CALLS"]
+    assert _n_calls(report, "/message/stream") == 1, report["FETCH_CALLS"]
+    pushes = _focus_pushes(report, "INFLIGHT_PAIR")
+    assert len(pushes) >= 2, (
+        f"a queued press that delivered nothing is indistinguishable from one that was dropped: "
+        f"{pushes}")
+    for msg in pushes:
+        assert msg["values"]["sessionKey"] == MINTED_KEY, msg
