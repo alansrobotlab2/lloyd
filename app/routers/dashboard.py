@@ -295,7 +295,7 @@ def _scan_recent_sessions() -> list[dict[str, Any]]:
 
     try:
         paths = sorted(
-            SESSIONS_DIR.glob("*.json"),
+            sessions_io.session_head_files(SESSIONS_DIR),   # #3815: a sidecar is not a session
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )

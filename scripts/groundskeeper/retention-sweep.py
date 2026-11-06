@@ -910,6 +910,16 @@ def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
         try:
             if path.is_symlink():
                 continue
+            # #3815: a reduction sidecar is not a session. Its name carries its
+            # head's id plus `SIDECAR_SUFFIX`, so it reads as a chat-shaped file with
+            # no platform, ages on the 90-day CONVERSATION window while the 4-part
+            # autocode heads 105 of the 107 live ones belong to go at 30, and
+            # `with_suffix(".json.gz")` on it produces a file `_sidecar_payload`
+            # cannot resolve — that reader names the `.json`, so the reduction record
+            # would vanish with no error anywhere. It is archived only beside its own
+            # head, below.
+            if _is_reduction_sidecar(path.name):
+                continue
             if _session_age_days(path, now) < _archive_age_for(path):
                 continue
             gz_path = path.with_suffix(".json.gz")
@@ -923,6 +933,21 @@ def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
                     json.load(fh)
                 path.unlink()
                 saved += orig - gz_path.stat().st_size
+                # The head's sidecar rides with it, in this same pass (#3815): left
+                # behind it is a live file whose head is an archive, and it would then
+                # sit out the difference between its own 90-day window and the head's
+                # 30. Counted and measured like any other archive, so the printed
+                # number is the number of files that left the directory.
+                for side in _sidecar_beside(path, SESSIONS_DIR):
+                    side_orig = side.stat().st_size
+                    side_gz = side.with_suffix(".json.gz")
+                    with side.open("rb") as s_src, gzip.open(side_gz, "wb") as s_dst:
+                        shutil.copyfileobj(s_src, s_dst)
+                    with gzip.open(side_gz, "rt", encoding="utf-8") as s_fh:
+                        json.load(s_fh)
+                    side.unlink()
+                    saved += side_orig - side_gz.stat().st_size
+                    count += 1
             else:
                 saved += orig  # dry-run: report candidate size
             count += 1
@@ -4987,6 +5012,45 @@ def _safety_denials_line(p: dict) -> str:
                 f"{p['bytes']} B of it){tail}{arch}")
     return (f"{label}: {p['moved']} {verb} ({p['before']} -> {p['after']} bytes live, "
             f"{p['bytes']} B out){tail}{arch}")
+
+
+# ── #3815: the microcompact reduction sidecar ────────────────────────────────────
+# `app/harness/microcompact.reduction_sidecar_path` writes
+# `<session_id>.microcompact-reduced.json` into the SAME directory and the SAME
+# `*.json` glob this script walks. The predicate lives there; this script is stdlib-only
+# and runs from cron with no venv, so it restates the suffix — the same sanctioned copy
+# `NON_USER_PLATFORMS` above is, and pinned to the writer's constant by
+# tests/test_microcompact_sidecar_naming.py::test_the_groundskeeper_restatement_has_not_drifted.
+# Kept below every cited line in this file: `architecture/autonomy-jobs.md` cites line
+# 615 of it by number and tests/test_architecture_coverage_doc_claims.py reads it back.
+SIDECAR_SUFFIX = ".microcompact-reduced.json"
+
+
+def _is_reduction_sidecar(name: str) -> bool:
+    """True for a reduction sidecar's filename, False for a session head's.
+
+    The suffix test, and the only place in this script that spells the suffix. A
+    substring test would be a different rule and a wrong one: a transcript whose own
+    id contains the marker is still a transcript.
+    """
+    return str(name or "").endswith(SIDECAR_SUFFIX)
+
+
+def _sidecar_beside(head: Path, sessions_dir: Path) -> list[Path]:
+    """The live sidecar file(s) belonging to the head `head`, if any.
+
+    Globbed by stem rather than built by concatenation so a head whose sidecar was
+    written under either spelling of the pair is found, and filtered through
+    `_is_reduction_sidecar` so a head named like a sidecar can never return itself.
+    Returns paths that exist and are not already archived — a `.json.gz` is what this
+    function's caller produces, not what it consumes.
+    """
+    stem = head.stem
+    found = []
+    for cand in sorted(sessions_dir.glob(f"{stem}*{SIDECAR_SUFFIX}")):
+        if cand.exists() and _is_reduction_sidecar(cand.name):
+            found.append(cand)
+    return found
 
 
 def main() -> int:

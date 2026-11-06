@@ -2311,3 +2311,110 @@ def test_the_inner_voice_page_citation_is_left_at_the_line_that_resolves():
     line = (ROOT / "web" / "src" / "components" / "pages" / "InnerVoicePage.tsx"
             ).read_text(encoding="utf-8").splitlines()[144]
     assert line.strip() == "platform: 'mission-control',", line
+
+
+# ─────────────────────── #3815: the reduction sidecar ───────────────────────
+# `app/harness/microcompact.reduction_sidecar_path` writes
+# `sessions/<sid>.microcompact-reduced.json` into the same `*.json` glob as the
+# transcripts, and its payload is `{schema, cleared_call_ids, reduced_call_ids}` —
+# no `platform` key at all. The `or "mission-control"` default below therefore made
+# every sidecar look interactive: measured over the 107 sidecars on disk on
+# 2026-11-05, `is_conversation_session` returned True for exactly the 2 whose id is
+# chat-shaped (3-part), and the other 105 fell through to the Background listing.
+# These nodes pin the count at 0. The naming rule itself is
+# tests/test_microcompact_sidecar_naming.py; the denominators that consume this
+# answer are tests/test_session_sidecar_denominators.py.
+
+#: A payload of exactly the keys relief writes, and nothing else.
+SIDECAR_PAYLOAD = {"schema": "microcompact-reduced.v1",
+                   "cleared_call_ids": ["toolu_01A", "toolu_01B"],
+                   "reduced_call_ids": []}
+
+
+def test_a_reduction_sidecar_is_never_a_conversation_whatever_platform_it_carries():
+    """#3815 clause 2: `is_conversation_session` is False for a sidecar NAME
+    whatever platform the payload holds or defaults to, chat-shaped id included.
+
+    The name is asked first, before the platform half, which is the only order that
+    works: the payload relief writes has no `platform` key, so the platform half on
+    its own answers with the `or "mission-control"` default and says True. Both id
+    shapes are covered because both are on disk — 2 three-part
+    (`20261029_092125_iv1da3.microcompact-reduced.json` is the oldest) and 105
+    four-part — and a fix that leaned on the existing four-part shape rule would
+    leave those 2 counting as conversations.
+    """
+    from app.sessions_io import is_conversation_session
+
+    payloads = [
+        ("no platform key at all — what relief actually writes", SIDECAR_PAYLOAD),
+        ("the default the empty payload used to reach", {"platform": "mission-control"}),
+        ("a human platform stamped by hand", {"platform": "telegram"}),
+        ("a machine platform", {"platform": "autonomy"}),
+        ("the bench platform", {"platform": "bench"}),
+        ("an empty payload", {}),
+    ]
+    for label, payload in payloads:
+        # Chat-shaped (3-part) sidecar: the case that measured True, 2 of 107.
+        assert is_conversation_session(
+            "20261029_092125_iv1da3.microcompact-reduced.json", payload) is False, label
+        # Four-part sidecar: the case the old shape rule already hid in the
+        # Background listing, asserted here so it stays a name decision and not an
+        # accident of the shape half.
+        assert is_conversation_session(
+            "20261105_101010_autocode_76b7.microcompact-reduced.json",
+            payload) is False, label
+
+
+def test_the_sidecar_refusal_is_the_name_and_not_the_payload(tmp_path):
+    """The control that makes the node above mean something.
+
+    The SAME payload under the SAME name minus the suffix is a conversation — the
+    no-platform default still fires for a real head, which is what keeps a
+    pre-`platform`-field transcript from vanishing from the Chat tab (pinned by
+    `test_a_four_part_id_is_never_a_conversation_whatever_its_platform` above). So the
+    only thing separating True from False in the pair below is
+    `.microcompact-reduced.json` on the end: if the guard were reading the payload
+    instead of the name, both answers would be the same.
+    """
+    from app.sessions_io import is_conversation_session
+
+    head = "20261029_092125_iv1da3"
+    assert is_conversation_session(f"{head}.json", SIDECAR_PAYLOAD) is True
+    assert is_conversation_session(
+        f"{head}.microcompact-reduced.json", SIDECAR_PAYLOAD) is False
+
+
+def test_the_sidecar_name_rule_is_reached_from_its_definition_not_restated():
+    """`app/sessions_io.py` must not keep a third copy of the suffix.
+
+    This file already carries one sanctioned restatement —
+    `scripts/groundskeeper/retention-sweep.py`, stdlib-only, pinned to the writer by
+    tests/test_microcompact_sidecar_naming.py. A second one inside the module that
+    every router imports is the failure this item exists to prevent, and it is exactly
+    what a local `.endswith(".microcompact-reduced.json")` in here would be.
+    """
+    import ast
+
+    src = _DEFINITION.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    # Docstrings and comments may NAME the suffix — the prose is where the file
+    # explains what it defers to. A STRING VALUE may not: that would be a copy of
+    # the suffix, which is the thing with behaviour attached to it.
+    doc_nodes = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef,
+                             ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) \
+                    and isinstance(body[0].value, ast.Constant):
+                doc_nodes.add(id(body[0].value))
+    offenders = [c.value for c in ast.walk(tree)
+                 if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                 and "microcompact-reduced" in c.value
+                 and id(c) not in doc_nodes]
+    assert offenders == [], (
+        f"app/sessions_io.py holds the suffix as a value {offenders}; it must call "
+        "app.harness.microcompact.is_reduction_sidecar (through is_session_head)")
+    assert "from app.harness.microcompact import is_reduction_sidecar" in src, (
+        "is_session_head no longer reaches the writer's predicate at its definition")

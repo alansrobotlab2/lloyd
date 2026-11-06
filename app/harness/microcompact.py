@@ -1099,3 +1099,30 @@ __all__ = [
     "microcompact",
     "shrink_assistant_arguments",
 ]
+
+
+def is_reduction_sidecar(name: str) -> bool:
+    """True for a reduction sidecar's FILENAME, False for a session head's.
+
+    The one rule for telling the two files apart, and the reason it has to be one is
+    that everyone who counts sessions has to apply it. ``reduction_sidecar_path``
+    writes its record into the SAME ``sessions/*.json`` glob as the transcripts, as
+    exactly ``<session_id>`` + ``REDUCTION_SIDECAR_SUFFIX``, so a name ending in the
+    suffix is bookkeeping and a name not ending in it is a conversation. Before #3815
+    there were two spellings of that test and only one file honoured either:
+    ``app.behaviour_exhibit`` matched its own ``".microcompact-reduced"`` literal and
+    filtered the corpus figure, while every other ``SESSIONS_DIR.glob("*.json")`` —
+    Mission Control's published ``total_session_count``, the two session listers, the
+    dashboard and inner-voice scans, the active-session lookup, the tool-quality
+    window and the retention sweep — counted 109 live sidecars as sessions.
+
+    Takes a NAME rather than a Path because the callers that need it most are the
+    pre-read fast paths in those listers, whose whole purpose is to decide without
+    opening the file.
+
+    Defined here at the end of the module rather than beside ``reduction_sidecar_path``
+    because ``architecture/context-window.md`` cites lines 462 and 620 of this file by
+    number and ``tests/test_architecture_coverage_doc_claims.py`` reads them back; an
+    insertion at 307 would move both. The suffix it reads is defined there, above.
+    """
+    return str(name or "").endswith(REDUCTION_SIDECAR_SUFFIX)

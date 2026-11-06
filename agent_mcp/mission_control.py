@@ -15,6 +15,7 @@ from mcp.types import Tool
 
 from agent_mcp._shared import text_result
 
+from app.harness.microcompact import is_reduction_sidecar
 from app.paths import SESSIONS_DIR
 
 
@@ -24,7 +25,12 @@ def _list_sessions() -> str:
         return json.dumps({"success": True, "sessions": [], "count": 0})
 
     sessions = []
-    for sf in sorted(SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+    # #3815: the sidecar the reducer writes lives in this same glob, and its stem is
+    # `<session_id>.microcompact-reduced` — published as a session_id, it is an id no
+    # `session_get` can resolve. The count is the corpus, not the file count.
+    heads = [f for f in SESSIONS_DIR.glob("*.json")
+             if not is_reduction_sidecar(f.name)]
+    for sf in sorted(heads, key=lambda f: f.stat().st_mtime, reverse=True):
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
             sessions.append({

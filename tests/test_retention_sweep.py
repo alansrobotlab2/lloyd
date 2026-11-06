@@ -11288,3 +11288,210 @@ def test_the_safety_denials_store_states_a_live_bound_under_the_witness_cap(rs):
     assert f"~{witness_cap / bound:.2f}x" in block, (
         f"the comment's headroom does not match {witness_cap} / {bound} = "
         f"{witness_cap / bound:.2f}")
+
+
+# ─────────────── #3815: the microcompact reduction sidecar ───────────────
+# `app/harness/microcompact.reduction_sidecar_path` writes
+# `sessions/<sid>.microcompact-reduced.json` — a bookkeeping record of which tool
+# results relief reduced in that session — into the SAME directory and the SAME
+# `*.json` glob `sweep_sessions` walks. Read as a session head it aged on the 90-day
+# CONVERSATION window (its payload names no platform, so `_archive_age_for` fell to the
+# default) while the 4-part `*_autocode_*` heads 105 of the 107 live ones belong to go
+# at the 30-day background window, and `path.with_suffix(".json.gz")` on it produced
+# `<sid>.microcompact-reduced.json.gz` — a file `_sidecar_payload` cannot find, because
+# that reader resolves only through `reduction_sidecar_path`, which names the `.json`.
+# Per its own docstring the worst failure there is a re-clear, so the damage was silent:
+# the reduction record vanishes and the front-tier break comes back with no error.
+
+def _write_sidecar(dir: Path, head_stem: str, *, age_days: float) -> Path:
+    """A reduction sidecar for `head_stem`, with the payload relief actually writes."""
+    name = f"{head_stem}{_rs_reduction_suffix()}"
+    p = dir / name
+    p.write_text(json.dumps({
+        "cleared_call_ids": ["toolu_01A"],
+        "reduced_call_ids": ["toolu_01B"],
+        "schema": "microcompact-reduced.v1",
+    }))
+    _backdate(p, age_days)
+    return p
+
+
+def _rs_reduction_suffix() -> str:
+    """The sweep's own copy of the writer's suffix, read out of the loaded module."""
+    import app.harness.microcompact as mc
+    return mc.REDUCTION_SIDECAR_SUFFIX
+
+
+def _live_sidecars(dir: Path) -> list[str]:
+    """Live (un-gzipped) sidecar names in `dir` — the orphan census of clause 5."""
+    return sorted(p.name for p in dir.glob(f"*{_rs_reduction_suffix()}"))
+
+
+def test_the_restatement_agrees_with_the_writer_and_the_restatement_guard_holds(rs):
+    """The stdlib-only copy of the suffix agrees with the writer, and the sweep script
+    still imports nothing from `app.` at top level — which is what keeps the copy
+    necessary rather than merely present.
+
+    `NON_USER_PLATFORMS` above is this file's other sanctioned copy, pinned for the same
+    reason: the sweep runs from cron with no venv. The property is pinned HERE, by the
+    top-level-import scan below; `test_a_bare_interpreter_reports_the_root_it_resolved`
+    is its runtime half, exec'ing the script under `python3` and asserting exit 0. (The
+    citation this node carried until now named `test_no_new_app_or_yaml_import`, a node
+    that does not exist anywhere in the repo — measured
+    `grep -rn "def test_no_new_app_or_yaml_import" tests/` → no output on 2026-11-06.)
+
+    Why a copy rather than an import, measured on 2026-11-06 with the system `python3`
+    and this checkout on `sys.path`: `import app.harness.microcompact` dies in
+    `app/harness/loop.py:26` on `import httpx` with `ModuleNotFoundError`, because the
+    package `__init__` pulls the harness in. A bare `import app.paths` does succeed —
+    `app/data_root.py` is stdlib-only for the same reason — so the rule this copy answers
+    to is specifically "no app.harness.*", and the scan below is what refuses it.
+    """
+    import app.harness.microcompact as mc
+
+    assert rs.SIDECAR_SUFFIX == mc.REDUCTION_SIDECAR_SUFFIX
+    assert rs.SIDECAR_SUFFIX == ".microcompact-reduced.json"
+    assert rs._is_reduction_sidecar(
+        "20261029_092125_iv1da3" + mc.REDUCTION_SIDECAR_SUFFIX)
+    assert not rs._is_reduction_sidecar("20261029_092125_iv1da3.json")
+
+    src = _SCRIPT.read_text(encoding="utf-8")
+    top_level = [ln for ln in src.splitlines()
+                 if re.match(r"^(import|from)\s", ln)]
+    offenders = [ln for ln in top_level
+                 if re.match(r"^(import|from)\s+app(\.|\s)", ln)]
+    assert offenders == [], (
+        "the cron script now imports the app package at top level, so the stdlib-only "
+        f"copy of the suffix is no longer forced: {offenders}")
+
+
+def test_a_sidecar_is_never_selected_as_an_independent_archive_candidate(rs):
+    """Clause 5, first half: a directory holding one sidecar and its live head reports
+    ZERO candidates, in dry run and in apply.
+
+    Both windows are crossed here on purpose. The sidecar is 95 days old — past the
+    90-day conversation window it used to age on — and its head is a fresh chat, so
+    nothing else in the directory is eligible. A pre-fix sweep gzipped the sidecar and
+    printed `1 sessions archived`, deleting the only copy of the reduction record.
+    """
+    now = time.time()
+    head = _write_session(rs.SESSIONS_DIR, "20260801_100000_iv1aaa", 1.0,
+                          platform="mission-control")
+    side = _write_sidecar(rs.SESSIONS_DIR, head.stem, age_days=95)
+
+    count, _ = rs.sweep_sessions(apply=False, now=now)
+    assert count == 0, "dry run offered a sidecar as an archive candidate"
+
+    count, _ = rs.sweep_sessions(apply=True, now=now)
+    assert count == 0
+    assert side.exists(), "apply deleted or archived a sidecar"
+    assert head.exists()
+    assert not list(rs.SESSIONS_DIR.glob("*.gz")), \
+        "a sidecar was gzipped into a file its own reader cannot open"
+
+
+def test_an_orphan_sidecar_outlives_its_window_untouched_instead_of_becoming_an_archive(rs):
+    """The head is already gone (archived long ago, by an earlier sweep or by anything
+    else), so the sidecar has nothing to ride with and stays exactly where it is.
+
+    This is the `no live sidecar is left whose head is gone` half of clause 5 read
+    from the other side. The alternative — archiving it — is not a neutral choice:
+    `_sidecar_payload` resolves only through `reduction_sidecar_path`, which names
+    `<stem>.microcompact-reduced.json`, so the `.gz` is unreadable and the recorded
+    reductions are lost with no error anywhere. Deleting it outright is also refused:
+    the writer can recreate a sidecar but cannot recreate the decision history in it,
+    and deleting a record this sweep does not own is not a retention call to make.
+    """
+    now = time.time()
+    side = _write_sidecar(rs.SESSIONS_DIR, "20260801_100000_iv1bbb", age_days=120)
+
+    count, _ = rs.sweep_sessions(apply=True, now=now)
+    assert count == 0
+    assert side.exists(), "an orphan sidecar was deleted or archived"
+    assert not list(rs.SESSIONS_DIR.glob("*.gz"))
+
+
+def test_archiving_a_head_takes_its_sidecar_with_it(rs):
+    """Clause 5, second half: a background head past the 30-day window
+    is archived together with its sidecar, so the live orphan count stays 0.
+
+    This is the 60-day mismatch closed. 105 of the 107 live sidecars belong to
+    4-part `*_autocode_*` heads, which go at 30 days; the sidecar itself fell to the
+    90-day conversation default, so every one of them was scheduled to outlive its own
+    archived head by about 60 days. After the co-archive the sidecar's only copy is
+    `<stem>.microcompact-reduced.json.gz` beside `<stem>.json.gz` — still not readable
+    by `_sidecar_payload`, which is the point: a session whose head is archived cannot
+    be compacted anyway, so nothing asks it for the record.
+    """
+    now = time.time()
+    head = _write_session(rs.SESSIONS_DIR, "20260901_100000_autocode_ccc", 40.0,
+                          platform="worker")
+    side = _write_sidecar(rs.SESSIONS_DIR, head.stem, age_days=40)
+    before = head.stat().st_size + side.stat().st_size
+
+    count, saved = rs.sweep_sessions(apply=True, now=now)
+    assert count == 2, "the head and its sidecar are both counted as archived"
+    assert not head.exists() and not side.exists()
+    head_gz = rs.SESSIONS_DIR / (head.name + ".gz")
+    side_gz = rs.SESSIONS_DIR / (side.name + ".gz")
+    assert head_gz.exists() and side_gz.exists()
+    # Both files' bytes are in the line's arithmetic. The SIGN is not asserted: these
+    # payloads are ~150 bytes each, and gzip's header makes an archive of something that
+    # small bigger than the original, so `bytes_saved` is legitimately negative here.
+    assert saved == before - (head_gz.stat().st_size + side_gz.stat().st_size)
+    assert json.load(gzip.open(side_gz, "rt"))["reduced_call_ids"] == ["toolu_01B"]
+    assert _live_sidecars(rs.SESSIONS_DIR) == []
+
+
+def test_a_sidecar_whose_head_is_still_live_is_never_archived_underneath_it(rs):
+    """The control that makes the co-archive mean something: the head not being due is
+    what keeps the sidecar live, not its own age.
+
+    The head is 10 days old (inside both windows) and the sidecar 100 days old (past the
+    90-day window it used to age on). If the co-archive were really an age rule on the
+    pair, this sidecar would be gone.
+    """
+    now = time.time()
+    head = _write_session(rs.SESSIONS_DIR, "20260901_100000_autocode_ddd", 10.0,
+                          platform="worker")
+    side = _write_sidecar(rs.SESSIONS_DIR, head.stem, age_days=100)
+
+    count, _ = rs.sweep_sessions(apply=True, now=now)
+    assert count == 0
+    assert head.exists() and side.exists()
+    assert not list(rs.SESSIONS_DIR.glob("*.gz"))
+
+
+def test_a_head_with_two_shapes_of_sidecar_archives_both(rs):
+    """Both shapes the live store actually holds — a 3-part chat-shaped pair and a
+    4-part background pair — archived in ONE pass, each by its own window.
+
+    The 2 chat-shaped sidecars on the live box are the ones the listing rules also
+    mis-classified (#3815 clause 2), and the 105 four-part ones belong to heads that
+    expire at `BACKGROUND_SESSION_ARCHIVE_AGE_DAYS`. So the two pairs are deliberately
+    aged into DIFFERENT windows — 95 days against the 90-day conversation horizon, 40
+    days against the 30-day background one — which is what makes this one pass cross
+    both rules rather than one. The co-archive is reached by the name rule, never by
+    `is_background_session_name`: the chat-shaped pair proves a sidecar is taken with a
+    head that is not a background run at all.
+    """
+    now = time.time()
+    chat_head = _write_session(rs.SESSIONS_DIR, "20260701_100000_iv1eee", 95.0,
+                               platform="mission-control")
+    chat_side = _write_sidecar(rs.SESSIONS_DIR, chat_head.stem, age_days=95)
+    bg_head = _write_session(rs.SESSIONS_DIR, "20260926_100000_autocode_fff", 40.0,
+                             platform="worker")
+    bg_side = _write_sidecar(rs.SESSIONS_DIR, bg_head.stem, age_days=40)
+
+    count, _ = rs.sweep_sessions(apply=True, now=now)
+    # 4 = 2 heads + 2 sidecars: each shape's pair went, on its own window.
+    assert count == 4, (
+        f"archived {count} file(s); the pass should take 2 heads and both shapes' "
+        "sidecars with them")
+    assert _live_sidecars(rs.SESSIONS_DIR) == []
+    for head, side in ((chat_head, chat_side), (bg_head, bg_side)):
+        assert not head.exists() and not side.exists(), (
+            f"{head.name} / {side.name} did not go together")
+        for f in (head, side):
+            assert (rs.SESSIONS_DIR / (f.name + ".gz")).exists(), (
+                f"{f.name} has no archive beside it")

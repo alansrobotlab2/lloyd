@@ -497,13 +497,30 @@ def transcript_paths(sessions_dir: Path, *, days: "int | None" = None,
     understands) and shows up only in the report's `files_undated_in_dir`.
     `today` takes an ISO string
     or a `date`; unparseable or absent means the real today.
+
+    A microcompact reduction sidecar is never returned, windowed or not (#3815). The
+    date guard does not exclude it: `20261029_092125_iv1da3.microcompact-reduced.json`
+    begins with exactly the same `YYYYMMDD` prefix as its head, so `_FILE_DATE_RE`
+    accepts it and a `days=7` window pulled every sidecar of the week into the corpus
+    as a transcript with no tool calls in it — diluting every rate in the report with
+    rows that cannot contain a call. The named rule is
+    `app.harness.microcompact.is_reduction_sidecar`, imported inside this function the
+    way `app.sessions_io` imports it: this module's import surface stays stdlib plus
+    `atomic_io`, and the harness package is not pulled in by a report script that runs
+    once a day. The count of them in the directory is reported as
+    `files_sidecar_in_dir`, so the gap between "files in the directory" and
+    "files scanned" stays explained rather than moving here.
     """
+    from app.harness.microcompact import is_reduction_sidecar
+
     root = Path(sessions_dir)
     if not root.is_dir():
         return []
     anchor = _as_day(today) or datetime.now().date()
     paths: list[Path] = []
     for path in sorted(root.glob("*.json")):
+        if is_reduction_sidecar(path.name):
+            continue
         if days is None:
             paths.append(path)
             continue
@@ -636,6 +653,14 @@ def sweep(*, sessions_dir: "Path | str | None" = None,
     # later reader to explain.
     undated = sum(1 for path in root.glob("*.json")
                   if not _FILE_DATE_RE.match(path.name))
+    # #3815: a reduction sidecar carries the head's date prefix, so it is NOT in
+    # `undated`, and `transcript_paths` now leaves it out of the scan — naming the
+    # count here is what keeps this paragraph's promise true after that exclusion:
+    # `files_scanned + files_undated_in_dir + files_sidecar_in_dir + (dated heads
+    # outside the window)` reconstructs the directory instead of quietly shrinking.
+    from app.harness.microcompact import is_reduction_sidecar
+    sidecars = sum(1 for path in root.glob("*.json")
+                   if is_reduction_sidecar(path.name))
 
     total_calls = sum(row["calls"] for row in rows.values())
     total_empty = sum(row["empty"] for row in rows.values())
@@ -662,6 +687,7 @@ def sweep(*, sessions_dir: "Path | str | None" = None,
             "files_scanned": scanned,
             "files_unreadable": unreadable,
             "files_undated_in_dir": undated,
+            "files_sidecar_in_dir": sidecars,
             "total_calls": total_calls,
             "total_empty": total_empty,
             "total_degenerate_args": total_degenerate,

@@ -572,6 +572,12 @@ def test_the_emitted_row_set_states_the_corpus_it_measured(corpus):
     report = tq.sweep(sessions_dir=sessions, out_dir=store, days=7, today=DAY)
     assert report["corpus"] == {
         "files_scanned": 3, "files_unreadable": 1, "files_undated_in_dir": 0,
+        # #3815: this fixture's directory holds no reduction sidecar, so the line
+        # the sweep now publishes for them reads zero here; the row that holds a
+        # sidecar is
+        # `test_a_reduction_sidecar_is_never_in_the_dated_window_walk` in
+        # tests/test_session_sidecar_denominators.py.
+        "files_sidecar_in_dir": 0,
         "total_calls": 2, "total_empty": 1, "total_degenerate_args": 0,
         "total_degenerate_errored": 0}
     assert report["corpus_rates"]["empty"] == "1 / 2"

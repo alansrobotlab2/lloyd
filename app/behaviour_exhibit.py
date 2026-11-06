@@ -346,12 +346,25 @@ def population_of(doc: dict) -> str:
 #: glob, so the first committed run counted 84 of them as sessions in a 7-day window and
 #: printed `sessions: 6953` for a corpus of 6,869 transcripts. The clause is about the
 #: printed corpus total, so they are excluded and counted separately.
-SIDECAR_MARKER = ".microcompact-reduced"
+#:
+#: #3815: the marker is the WRITER's own suffix imported, not a literal of this module's
+#: making. A private spelling is what let this stay green as the only filtered site while
+#: 107 live sidecars were still counted as sessions by every other `sessions/*.json` glob,
+#: and `tests/test_microcompact_sidecar_naming.py` now refuses a re-hardcoded value.
+from app.harness.microcompact import (  # noqa: E402
+    REDUCTION_SIDECAR_SUFFIX as SIDECAR_MARKER,
+    is_reduction_sidecar,
+)
 
 
 def is_transcript_path(path: Path) -> bool:
-    """True for a recorded transcript, False for a bookkeeping sidecar wearing its name."""
-    return SIDECAR_MARKER not in path.name
+    """True for a recorded transcript, False for a bookkeeping sidecar wearing its name.
+
+    Delegates to `app.harness.microcompact.is_reduction_sidecar`, the one predicate
+    ``SIDECAR_MARKER`` is imported from, so the filter here and the naming rule in the
+    harness cannot drift apart (#3815).
+    """
+    return not is_reduction_sidecar(path.name)
 
 
 class Turn:

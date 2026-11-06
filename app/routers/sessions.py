@@ -100,7 +100,7 @@ def _collect_chat_sessions(dir_path, limit: int = 50) -> dict:
     """
     sessions = []
     loaded: list[tuple[float, dict, object]] = []
-    for sf in dir_path.glob("*.json"):
+    for sf in sessions_io.session_head_files(dir_path):   # #3815: a sidecar is not a session
         # The filename fast path. A background run's id has four
         # underscore-separated parts and a chat's has three, so nearly all of
         # this directory can be skipped without opening it — 10,083 of its
@@ -290,7 +290,7 @@ def _collect_background_sessions(dir_path, limit: int,
     if not dir_path.exists():
         return {"sessions": [], "count": 0}
     try:
-        paths = sorted(dir_path.glob("*.json"),
+        paths = sorted(sessions_io.session_head_files(dir_path),
                        key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError as e:
         return {"sessions": [], "count": 0, "error": str(e)}
@@ -1031,7 +1031,7 @@ def _find_active_claude_procs() -> list[dict]:
         return results
 
     sdk_to_session: dict[str, str] = {}
-    for sf in sorted(SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:200]:
+    for sf in sorted(sessions_io.session_head_files(SESSIONS_DIR), key=lambda f: f.stat().st_mtime, reverse=True)[:200]:
         try:
             data = json.loads(sf.read_text())
             sdk_id = data.get("sdk_session_id")

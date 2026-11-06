@@ -17,6 +17,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from app import usage_store
 from app import event_log
 from app.paths import SESSIONS_DIR
+from app.sessions_io import is_session_head
 
 logger = logging.getLogger("lloyd-server")
 
@@ -285,6 +286,12 @@ def _scan_inner_voice_sessions(limit: int) -> list[dict[str, Any]]:
     """
     entries = []
     for path in SESSIONS_DIR.glob("*.json"):
+        if not is_session_head(path.name):
+            # #3815: `<sid>.microcompact-reduced.json` sits in this glob and is stamped
+            # at the end of every turn that reduced, so it is among the newest files the
+            # mtime sort puts first — and it is not a session. Skipped before the stat so
+            # it never reaches the read below.
+            continue
         try:
             entries.append((path.stat(), path))
         except OSError:

@@ -23,7 +23,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import mc_state
 from app.paths import LLOYD_HOME, SESSIONS_DIR
-from app.sessions_io import is_background_session_name, is_conversation_session
+from app.sessions_io import (is_background_session_name, is_conversation_session,
+                             is_session_head)
 # The Memory tab's file count walks the same segment set the recall searches and
 # Mission Control's memory search asks qmd for. #3160: this router used to keep
 # its own tuple of seven names — `agents` among them, which no qmd index declares
@@ -279,6 +280,8 @@ def _summarize_inner_voice() -> dict:
     iv_sessions = 0
     total = 0
     for sf in SESSIONS_DIR.glob("*.json"):
+        if not is_session_head(sf.name):
+            continue              # #3815: a sidecar is not a session; see total_session_count
         total += 1
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
@@ -313,6 +316,13 @@ def _summarize_background() -> dict:
     for sf in paths:
         if opened >= 400:
             break
+        if not is_session_head(sf.name):
+            # #3815: a reduction sidecar holds no `source` and no `platform`, so the
+            # `unknown` bucket below was collecting one row per sidecar per turn that ran
+            # relief, and the Background tab's `sessions_total` was a count of
+            # bookkeeping files. Skipped before the read, so it also stops eating the
+            # 400-file read budget.
+            continue
         opened += 1
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
@@ -344,7 +354,10 @@ def _summarize_chat() -> dict:
 
     Skips a background-named file unread, as `_summarize_background` and
     `/api/sessions` do (#1228): `is_conversation_session` rejects every such
-    name anyway, so reading one first only cost the parse. The walk stops at
+    name anyway, so reading one first only cost the parse. A reduction sidecar is
+    skipped the same way for the same reason (#3815) — `is_conversation_session`
+    refuses its name too now, but the two chat-shaped sidecars on disk would
+    otherwise each cost a read out of the ceiling below. The walk stops at
     five rows or `_CHAT_SCAN_CEILING` files opened, so a directory with fewer
     than five chats does not read every file it holds.
     """
@@ -353,6 +366,8 @@ def _summarize_chat() -> dict:
     for sf in sorted(SESSIONS_DIR.glob("*.json"),
                       key=lambda f: f.stat().st_mtime, reverse=True):
         if is_background_session_name(sf.name):
+            continue
+        if not is_session_head(sf.name):
             continue
         if opened >= _CHAT_SCAN_CEILING:
             break
@@ -374,8 +389,14 @@ def _summarize_chat() -> dict:
         if len(sessions) >= 5:
             break
     return {
+        # #3815: this is THE session count Mission Control's Chat tab shows and the
+        # number `mc_navigate` puts in the model's context, and it was a raw `*.json`
+        # file count — 11,984 against 11,877 real transcripts on 2026-11-05, because
+        # every microcompact reduction sidecar sits in the same glob. The rule is
+        # `app.harness.microcompact.is_reduction_sidecar`, reached through
+        # `sessions_io.is_session_head`; the sidecars are not sessions and never count.
         "total_session_count": sum(
-            1 for sf in SESSIONS_DIR.glob("*.json")
+            1 for sf in SESSIONS_DIR.glob("*.json") if is_session_head(sf.name)
         ),
         "recent_sessions": sessions,
     }

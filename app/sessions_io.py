@@ -325,9 +325,9 @@ def is_conversation_session(name: str, data: dict) -> bool:
     "no four-part id is ever a conversation" a property of the definition
     rather than an agreement between five call sites.
     """
-    return (not is_background_session_name(name)
+    return (is_session_head(name) and not is_background_session_name(name)
             and (data.get("platform") or "mission-control")
-            in INTERACTIVE_PLATFORMS)
+            in INTERACTIVE_PLATFORMS)  # #3815: the name is asked BEFORE that default
 
 
 #: Sessions created while a worker-pool job is claimed. The pool binds an
@@ -516,7 +516,7 @@ def get_active_session_id(max_age_hours: float = 24.0) -> Optional[str]:
 
     cutoff = _time.time() - (max_age_hours * 3600)
     best: tuple[float, str] | None = None
-    for sf in SESSIONS_DIR.glob("*.json"):
+    for sf in session_head_files(SESSIONS_DIR):   # #3815: never a sidecar's fresher mtime
         try:
             mtime = sf.stat().st_mtime
             if mtime < cutoff:
@@ -1451,3 +1451,40 @@ def is_bench_session_id(session_id: object) -> bool:
     unsplit query did, and never inflates it.
     """
     return background_slug(session_id) in BENCH_SESSION_SLUGS
+
+
+def is_session_head(name: str) -> bool:
+    """True for a filename that is a session TRANSCRIPT, False for a sidecar's.
+
+    The name-only fast path the session listers and the counters need, and the only
+    place in this module that decides what a sidecar is. `microcompact` writes its
+    reduction record into the same ``sessions/*.json`` glob as the transcripts
+    (109 of them against 11,891 heads at #3815's measurement), so every
+    ``SESSIONS_DIR.glob("*.json")`` in the app was counting bookkeeping as a
+    conversation: Mission Control's published ``total_session_count`` read 12,000
+    where the corpus is 11,891, and `get_active_session_id` could return a sidecar
+    because the sidecar is written minutes AFTER the head it describes and so is
+    always the fresher file.
+
+    The rule itself lives in `app.harness.microcompact`, next to the suffix and the
+    path builder that write the file; importing it here is what keeps this module
+    from holding a second spelling. It is imported inside the body because this file
+    is on the backend's start-up path and `microcompact` imports the compactor's
+    own machinery — an eager import here would put that on every boot for a
+    string test.
+    """
+    from app.harness.microcompact import is_reduction_sidecar
+
+    return not is_reduction_sidecar(str(name or ""))
+
+
+def session_head_files(directory) -> list:
+    """The ``*.json`` files in `directory` that are session heads, sidecars excluded.
+
+    For the sites that enumerate a directory rather than ask about one name. Sorted
+    first so a caller that reads the list in order gets the same order the plain
+    glob's callers never had (glob order is arbitrary) — a lister that truncates to
+    its window now truncates deterministically. The 109 live sidecars are untouched
+    on disk: #3815 changes what is COUNTED, not what exists.
+    """
+    return [f for f in sorted(directory.glob("*.json")) if is_session_head(f.name)]
