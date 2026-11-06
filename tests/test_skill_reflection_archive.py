@@ -370,29 +370,94 @@ def test_archive_stamp_is_derived_from_a_utc_command(skills):
     assert problems == {}, f"archive stamps are not UTC-derived: {problems}"
 
 
-def _sentences_mentioning(text: str, token: str) -> list[str]:
-    """Sentences containing `token`, on text with blockquote markers stripped.
+#: The two shapes of sentence that name the field and a filename without prescribing
+#: anything. A **prohibition** is told from a rule by a negation word: the skills spend
+#: several lines explaining why the old wording was wrong, and those sentences name
+#: both the field and a filename. A **provenance citation** is told from a rule by
+#: quoting the field's own *value* right after the token — the tag
+#: `nightly-reflection-config`'s Config Application writer appends to record where a
+#: rule came from: `(added 2026-11-06 by Config Application #40, on Explicit #4 of
+#: `signals-latest.md`, `generated:` 2026-11-06T06:07:21Z)`. It carries no negation
+#: word, and 66 such tags sit across `~/obsidian/skills/*/SKILL.md` (27 `generated:`
+#: mentions across the 205 advertised skills, 7 of them value-quoted), so a
+#: negation-only test reads every future tag as an instruction and stays green only
+#: while some unrelated "not" happens to fall in its sentence window (#3848).
+_GENERATED_PROSE = re.compile(r"\b(?:never|not|no longer|isn't|cannot)\b", re.I)
 
-    Sentence boundaries are rough by design (`.md` contains a period), which is
-    safe here: the rule only ever applies to a sentence that also names a
-    filename, and a fragment that loses the negation loses the `.md` with it.
+#: `generated:` followed by the value the report actually prints — line 4 of
+#: `~/lloyd-data/_pipeline/reflection/signals-latest.md` is
+#: `generated: 2026-11-06T06:07:21Z`, a date **and a clock time**. The optional quote
+#: is what lets both citation spellings read: `` `generated:` 2026-… `` and
+#: `` `generated: 2026-…` ``. An instruction cannot quote this and stay standing,
+#: because the value is the instant one report was generated and changes every cycle;
+#: and the dated archive name this rule is about is `date -u +%Y-%m-%d-%H%M` —
+#: `2026-09-10-2230`, a date plus `-HHMM`, which never matches the `T`-joined
+#: `2026-11-06T06:07:21Z` form. So a quoted value is evidence of a citation, never of
+#: a rule. A rule that merely illustrated itself with someone's stale timestamp would
+#: read as a citation; writing a standing instruction that way is not how the skills
+#: phrase anything, and the date-only and dated-filename arms of
+#: `test_a_provenance_citation_of_the_field_value_is_not_an_instruction` and
+#: `test_a_dated_filename_is_no_more_a_citation_than_the_rule_is` are what keep the arm
+#: from widening into "any ISO date anywhere in the sentence".
+_GENERATED_VALUE = re.compile(r"generated:\s*[`']?\s*\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+_GENERATED_TOKEN = re.compile("generated:")
+
+
+def _prose_sentences_with_offsets(flat: str) -> list[tuple[int, int]]:
+    """`[start, end)` of every rough sentence in already-flattened prose.
+
+    The boundary is rough by design (`.md` contains a period), which is safe here: the
+    rule only ever applies to a sentence that also names a filename, and a fragment that
+    loses the negation loses the `.md` with it.
+
+    Offsets rather than fragments, because a fragment list cannot reach the text *after*
+    a boundary and `_generated_field_offenders` has to: the field prints as
+    `generated: 2026-11-02T06:00:49Z`, and the `: ` inside that very citation is itself a
+    rough boundary, so a fragment ending ``…`generated:`` holds the mention while its
+    value sits in the next fragment. Judging the mention against the flat text at its own
+    offset is what keeps a citation whole (#3848).
     """
+    spans: list[tuple[int, int]] = []
+    prev = 0
+    for m in re.finditer(r"(?<=[.!?:])\s+", flat):
+        if m.start() > prev:
+            spans.append((prev, m.start()))
+        prev = m.end()
+    if prev < len(flat):
+        spans.append((prev, len(flat)))
+    return spans
+
+
+def _flatten_prose(text: str) -> str:
+    """Prose with blockquote markers stripped and runs of whitespace collapsed.
+
+    One place, so the sentence spans `_generated_field_offenders` walks and the text it
+    matches a value against are the same text."""
     flat = re.sub(r"^\s*> ?", "", text, flags=re.MULTILINE)
-    flat = re.sub(r"\s+", " ", flat)
-    return [s for s in re.split(r"(?<=[.!?:])\s+", flat) if token in s]
+    return re.sub(r"\s+", " ", flat)
 
 
 def _generated_field_offenders(text: str) -> list[str]:
     """Sentences that instruct naming a file from a `generated:` header.
 
-    A negation is the difference between a rule and a prohibition on the rule: the
-    skills now spend several lines explaining why the old wording was wrong, and
-    those sentences name both the field and a filename.
+    A sentence naming both the field and a `.md` is an offender unless it is one of the
+    two shapes `_GENERATED_PROSE` and `_GENERATED_VALUE` recognise: a prohibition on the
+    rule (a negation word — the difference between a rule and a prohibition on it), or a
+    provenance citation (the field's value quoted at the mention, which no standing rule
+    can do because the value changes every cycle — see those two patterns). Each mention
+    in the sentence is judged, so a sentence that both cites a value and separately tells
+    the run to read the field is still caught.
     """
-    return [
-        s for s in _sentences_mentioning(text, "generated:")
-        if ".md" in s and not re.search(r"\b(?:never|not|no longer|isn't|cannot)\b", s, re.I)
-    ]
+    flat = _flatten_prose(text)
+    offenders: list[str] = []
+    for start, end in _prose_sentences_with_offsets(flat):
+        sentence = flat[start:end]
+        if ".md" not in sentence or _GENERATED_PROSE.search(sentence):
+            continue
+        if any(not _GENERATED_VALUE.match(flat, m.start())
+               for m in _GENERATED_TOKEN.finditer(flat, start, end)):
+            offenders.append(sentence)
+    return offenders
 
 
 @pytest.mark.live_vault
@@ -1279,6 +1344,131 @@ def test_the_generated_field_check_can_actually_fail():
     )
     flagged = _generated_field_offenders(allowed)
     assert flagged == [], f"a permitted, negated mention was flagged: {flagged}"
+
+
+# --- #3848: a provenance citation is not an instruction -------------------------
+# Sentences naming both a `.md` and the field, with NO negation word anywhere in
+# them, so only the quoted-value arm can clear them. Verbatim from the live vault:
+# the first is what made `test_no_skill_builds_an_archive_name_from_a_generated_field`
+# fail (#3848), appended to the skill by vault commit 0536770b4 at
+# `skills/nightly-reflection-signals/SKILL.md:389`; the second and third are the two
+# spellings of the same tag in `nightly-reflection-knowledge-analysis/SKILL.md`
+# (lines 229 and 204), and the second one is the shape that needs the offset-spanning
+# match: its `generated:` is followed by `: ` — itself a rough sentence boundary — so the
+# value falls past the boundary into the next fragment.
+_PROVENANCE_CITATIONS = (
+    "**A loaded box spends a block's ceiling on one grep, so the census is detached "
+    "or it is bounded (added 2026-11-06 by Config Application #40, on Explicit #4 of "
+    "`signals-latest.md`, `generated:` 2026-11-06T06:07:21Z).**",
+    "Sibling rule already landed for #38 at `skills/nightly-reflection-signals/SKILL.md` "
+    "\u00a7\"Every time bound carries an explicit `Z`\" (added 2026-11-02 by Config "
+    "Application #40, on Explicit #4 of `signals-latest.md`, "
+    "`generated: 2026-11-02T06:00:49Z`)",
+    "Tonight's canonical report was written at `05:08:33Z` (`date -u -r "
+    "signals-latest.md +%FT%TZ`, with `ctime` identical so nothing touched it "
+    "afterwards) while its front matter reads `generated: 2026-10-16T05:16:40Z`",
+)
+
+_NEGATION_WORDS = re.compile(r"\b(?:never|not|no longer|isn't|cannot)\b", re.I)
+
+
+def test_a_provenance_citation_of_the_field_value_is_not_an_instruction():
+    """Clause 2 of #3848. `nightly-reflection-config`'s Config Application writer tags
+    every rule it applies with `(added <date> by Config Application #40, on <Explicit|
+    Inferred #N> of <report>.md, generated: <that report's value>)`, and 66 such tags
+    sit across the live skills. The tag names the source report and quotes its stamp —
+    it prescribes nothing — yet it carries no negation word, so the negation test alone
+    read it as an instruction and the live-vault node failed on prose no round wrote.
+
+    What separates the two is the value: an instruction cannot quote it, because it is
+    the instant one report was generated and changes every cycle.
+    """
+    for citation in _PROVENANCE_CITATIONS:
+        assert ".md" in citation and "generated:" in citation, (
+            "the fixture stopped being a sentence that names a filename and the field"
+        )
+        assert not _NEGATION_WORDS.search(citation), (
+            "a negation word moved into this citation's text, so the test no longer "
+            "proves the quoted-value arm clears it — the arm under test is the only "
+            "one allowed to"
+        )
+        assert _generated_field_offenders(citation) == [], (
+            f"a provenance citation was reported as an instruction: {citation[:120]}"
+        )
+
+    # The discrimination, held on one sentence: swap the quoted value for the word
+    # "stamp" and it becomes exactly what the rule is about. Same filename, same
+    # absence of a negation, opposite verdict — so it is the value that tells them.
+    as_instruction = _PROVENANCE_CITATIONS[0].replace(
+        "`generated:` 2026-11-06T06:07:21Z", "`generated:` stamp"
+    )
+    assert _generated_field_offenders(as_instruction), (
+        "the citation arm swallowed an instruction that reads the field instead of "
+        "quoting it"
+    )
+
+    # And the arm stays narrow: the archive name this rule is about is
+    # `date -u +%Y-%m-%d-%H%M` — `2026-11-06-0607` — which is a date plus `-HHMM`, so
+    # naming a file from a date-only value must still be caught. Matching any ISO date
+    # in the sentence would have read that as a citation.
+    date_only = (
+        "Name the copy `signals-latest-2026-11-06.md` from the report's "
+        "`generated: 2026-11-06` value."
+    )
+    assert _generated_field_offenders(date_only), (
+        "a date-only value was read as a citation, so the arm has widened to any "
+        "ISO date in the sentence rather than the field's own value"
+    )
+
+
+@pytest.mark.live_vault
+def test_the_live_provenance_tags_are_cleared_without_editing_the_skill(skills):
+    """The same reading over the live vault, which is the point of #3848: the node is
+    green because the detector learned to tell the two shapes apart, not because
+    someone reworded the skill that tripped it.
+
+    The presence assert is what keeps this from going vacuous when the nightly writer
+    eventually rewords the tag: if the sentence this pins is gone from the live text,
+    say so and re-point the fixture, rather than passing on a citation nobody wrote.
+    """
+    signals = skills["nightly-reflection-signals"]
+    assert "A loaded box spends a block's ceiling on one grep" in signals, (
+        "the citation pinned by _PROVENANCE_CITATIONS is no longer in the live "
+        "nightly-reflection-signals — re-point the fixture at whatever the "
+        "Config Application writer appends now"
+    )
+    assert _generated_field_offenders(signals) == [], (
+        "nightly-reflection-signals still reports a generated: offender against the "
+        "live vault; #3848 asked for the detector to change, not the skill prose"
+    )
+
+
+def test_a_dated_filename_is_no_more_a_citation_than_the_rule_is():
+    """Clause 3 of #3848. Both words of it: the pre-#436 instruction verbatim, and a
+    case the citation arm is most at risk of missing — one whose cited filename is
+    itself dated. `signals-latest-2026-11-06-0607.md` carries an ISO-looking date
+    inside the name, and an implementation that looked for a timestamp anywhere near
+    the token would exempt the very wording this rule exists to catch.
+    """
+    pre_436 = (
+        "> **Archive before the skeleton write, every run.** `<cycle>` is the "
+        "previous report's own `generated:` stamp, so "
+        "`signals-latest-2026-09-10-2230.md`.\n"
+    )
+    dated_name = (
+        "Copy it to `signals-latest-2026-11-06-0607.md` using the report's "
+        "`generated:` stamp for the cycle.\n"
+    )
+    for wording in (pre_436, dated_name):
+        assert ".md" in wording, "the fixture stopped naming a filename"
+        assert not _NEGATION_WORDS.search(wording), (
+            "a negation word moved in, so this would test the negation arm and not "
+            "the one under test"
+        )
+        assert _generated_field_offenders(wording), (
+            f"an instruction to name the archive from the field went unreported: "
+            f"{wording.strip()[:110]}"
+        )
 
 
 def test_the_rule_survives_a_wrapped_shell_instruction():
