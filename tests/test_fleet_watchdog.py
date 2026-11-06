@@ -95,6 +95,26 @@ def write_task(board, task_id, **fm):
         f"---\n{yaml.dump(base)}---\n\nbody\n\n## Activity Log\n")
 
 
+def write_task_at(board, filename, **fm):
+    """One task file at an EXPLICIT filename, so its `id:` may disagree with it.
+
+    `write_task` derives the filename from the id, which is the healthy board; the
+    shape #3840 is about is the other one. On 2026-11-02 and 2026-11-03 the daily
+    note's stall alarm printed `#104 (scheduled-ceiling flip-gate daily record …)`
+    while `~/obsidian/autonomy/104-artcraft-repo-sync.md` was the file declaring
+    `name: ArtCraft Repo Sync` — the flip-gate file, renamed to 107, had carried a
+    hand-stamped `id: 104` (#3730). Naming the file and the id separately is the only
+    way a fixture reproduces that pair.
+    """
+    base = {"type": "autonomy", "status": "up_next", "frequency": "daily",
+            "priority": "medium", "skill_name": str(board.parent / "SKILL.md"),
+            "timeout_seconds": 2, "max_retries": 3, "failure_count": 0}
+    base.update(fm)
+    base = {k: v for k, v in base.items() if v is not None}
+    (board / filename).write_text(
+        f"---\n{yaml.dump(base)}---\n\nbody\n\n## Activity Log\n")
+
+
 def _ago(**delta) -> str:
     return (dt.datetime.now(dt.timezone.utc)
             - dt.timedelta(**delta)).isoformat()
@@ -1531,6 +1551,130 @@ async def test_unreadable_run_records_fall_back_and_the_alarm_still_fires(
         f"an unparsable record was read as a disagreement it cannot support: {msg!r}")
     assert "lost a completion" not in msg, (
         f"a front matter that does not parse cannot quote an instant: {msg!r}")
+
+
+def test_a_stalled_id_that_disagrees_with_its_file_prefix_prints_bare(board, tmp_path):
+    """Clause 1 (#3840): the unstamped shape may not print a name its id does not own.
+
+    The incident is the daily note of 2026-11-02 and 2026-11-03, which both rendered
+    `#104 (scheduled-ceiling flip-gate daily record (flip-gate-readings.jsonl))` while
+    id 104 was ArtCraft Repo Sync (`104-artcraft-repo-sync.md`, `name: ArtCraft Repo
+    Sync`, zero `flip-gate` matches) and the flip-gate subject belonged to
+    `107-scheduled-ceiling-flip-gate-daily-record.md`. Two files declared `id: 104` at
+    once (#3730), so id and name came out of ONE front matter and were self-consistent
+    with the wrong file — which is why the assertion is on the pair, not on either
+    half: the entry still carries the file's own `name:`, and only the printed line
+    changes. A reader of the destination-of-record page has nothing but the id and the
+    name, so a name this scan cannot vouch for is worse than no name at all.
+    """
+    write_task_at(board, "107-scheduled-ceiling-flip-gate-daily-record.md",
+                  id=104, name="scheduled-ceiling flip-gate daily record",
+                  frequency="daily", last_run=None, next_run=None)
+    rec_at = _stamp(days=2).isoformat()
+    _run_record(104, "run_104_20261101_162737", completed_at=rec_at)
+
+    flagged = {e["id"]: e
+               for e in fw._next_run_stalled(WorkQueue(tmp_path / "mismatch.db"))}
+    assert 104 in flagged, (
+        "a row with no next_run and a success record is exactly the shape #2342 "
+        f"admitted, mismatched prefix or not: {sorted(flagged)}")
+    entry = flagged[104]
+    assert entry["name"] == "scheduled-ceiling flip-gate daily record", (
+        "the scan is not being asked to correct the entry, only the alarm line: "
+        f"{entry['name']!r}")
+
+    msg = fw._nextrun_alert_message([entry])
+    assert re.search(r"#104 \(", msg) is None, (
+        f"the alarm still pairs the id with a name its own file does not carry: "
+        f"{msg!r}")
+    assert "#104 has no next_run" in msg, (
+        f"the degrade has to keep saying what is wrong with the row, not just be "
+        f"shorter: {msg!r}")
+    assert rec_at.split("+")[0] in msg, (
+        f"a bare id must not cost the reader the record the row is judged against: "
+        f"{msg!r}")
+
+
+def test_the_same_id_file_disagreement_degrades_the_other_two_stall_shapes(
+        board, tmp_path):
+    """Clause 2 (#3840): no shape may print a name the flagged id does not own.
+
+    `_stall_line` interpolates `#{entry['id']} ({entry['name']})` three times — the
+    unstamped line, the lost-completion line, and the plain-late line — so a check on
+    one of them is a check on a sentence the fleet happens to be printing today. This
+    node puts one mismatched file through each of the remaining two: #105's row lost a
+    completion (a success record between `last_run` and `next_run`, #79's shape), and
+    #106 is simply 25 h past a daily `next_run` with nothing holding it, which is the
+    dispatch sentence #421 was built for. Both rows are on one board and one message,
+    so a fix that only reached the first of the two shapes fails here.
+    """
+    write_task_at(board, "109-lost-completion.md", id=105, name="Retention Sweep",
+                  frequency="daily",
+                  last_run=_stamp(hours=26).isoformat(),
+                  next_run=_stamp(hours=25).isoformat())
+    _run_record(105, "run_105_20261006_051105",
+                completed_at=_stamp(hours=20).isoformat())
+    write_task_at(board, "110-plain-late.md", id=106, name="ArtCraft Repo Sync",
+                  frequency="daily",
+                  last_run=_stamp(hours=26).isoformat(),
+                  next_run=_stamp(hours=25).isoformat())
+
+    flagged = {e["id"]: e for e in fw._next_run_stalled(WorkQueue(tmp_path / "shapes.db"))}
+    assert {105, 106} <= set(flagged), (
+        f"both rows are past a daily next_run by more than the period: "
+        f"{sorted(flagged)}")
+    msg = fw._nextrun_alert_message([flagged[105], flagged[106]])
+
+    for tid, name in ((105, "Retention Sweep"), (106, "ArtCraft Repo Sync")):
+        assert re.search(rf"#{tid} \(", msg) is None, (
+            f"#{tid} still prints `{name}`, which its own file "
+            f"(109-/110-) does not declare: {msg!r}")
+    # And the degrade did not come from the shapes never being reached: each line has
+    # to still say the thing it exists to say, bare id and all.
+    assert "row bookkeeping lost a completion" in msg, (
+        f"the lost-completion shape is not reachable, so this node proves nothing "
+        f"about it: {msg!r}")
+    assert re.search(r"#106 is \d+\.\dh past its next_run", msg) is not None, (
+        f"the plain-late shape is not reachable either: {msg!r}")
+
+
+def test_an_id_that_matches_its_file_keeps_its_name_and_a_nameless_row_goes_bare(
+        board, tmp_path):
+    """Clause 3 (#3840): the healthy pair renders exactly as it does today.
+
+    The half that keeps clauses 1 and 2 honest — a degrade that also fired on an
+    id/name-agreeing entry would silence the one thing the alarm exists to say, and
+    the #96/#79 tests above already assert the parenthesised form for a real board.
+    #111 is the agreement: `111-task111.md` declares `id: 111, name: task111`, so the
+    line is asserted as a WHOLE string, byte for byte as the pre-#3840 code printed
+    it. #112 and #113 are the other half of the same rule: a row whose file declares
+    no `name:` key at all, and one whose `name:` is empty, print bare `#112`/`#113` —
+    today they print `#112 (None)`, which is a name the file does not declare in the
+    one shape no hand-stamped id is needed to reach.
+    """
+    stamps = {"last_run": _stamp(hours=26).isoformat(),
+              "next_run": _stamp(hours=25).isoformat()}
+    write_task(board, 111, frequency="daily", **stamps)
+    write_task(board, 112, frequency="daily", name=None, **stamps)
+    write_task(board, 113, frequency="daily", name="", **stamps)
+
+    flagged = {e["id"]: e for e in fw._next_run_stalled(WorkQueue(tmp_path / "agree.db"))}
+    assert {111, 112, 113} <= set(flagged), (
+        f"three rows are 25 h past a daily next_run: {sorted(flagged)}")
+
+    agree = flagged[111]
+    assert fw._stall_line(agree) == (
+        f"#111 (task111) is {agree['hours']:.1f}h past its next_run "
+        f"— nothing holds it; dispatch did not enqueue it"
+    ), f"the line an id/name-agreeing entry prints moved: {fw._stall_line(agree)!r}"
+
+    for tid in (112, 113):
+        entry = flagged[tid]
+        assert fw._stall_line(entry) == (
+            f"#{tid} is {entry['hours']:.1f}h past its next_run "
+            f"— nothing holds it; dispatch did not enqueue it"
+        ), (f"a row whose file declares no name must print the bare id and nothing "
+            f"else where the subject was: {fw._stall_line(entry)!r}")
 
 
 # ── The lost-occurrence ledger (#2552) ───────────────────────────────────────

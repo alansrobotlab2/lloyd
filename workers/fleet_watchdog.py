@@ -680,6 +680,17 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
         stalled.append({
             "id": t.get("id"),
             "name": t.get("name"),
+            # The file the pair above were read out of (#3840). `id` and `name` come
+            # from ONE front matter, so a hand-stamped `id:` makes them agree with
+            # each other and disagree with the id's owner: on 2026-11-02 and 11-03 the
+            # daily note printed `#104 (scheduled-ceiling flip-gate daily record …)`
+            # while `104-artcraft-repo-sync.md` was ArtCraft Repo Sync and the
+            # flip-gate subject belonged to `107-…-daily-record.md` (#3730). The
+            # filename's `NN-` prefix is the only half of the pair that is not
+            # hand-editable alongside the id, so `_stall_subject` needs it to be able
+            # to refuse the pairing. The entry keeps `name` uncorrected: this field
+            # exists for the alarm's cross-check, not to rewrite the scan's read.
+            "task_file": t.get("_path"),
             "status": str(t.get("status", "")).strip(),
             "hours": gap["hours_past_next_run"],
             "gap_ratio": gap["gap_ratio"],
@@ -901,6 +912,57 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     return f"{head}: {lines}{tail}" if lines else f"{head}{tail}"
 
 
+def _stall_subject(entry: dict) -> str:
+    """`#<id> (<name>)`, or bare `#<id>` when the name cannot be traced to that id.
+
+    The reader of this alarm has nothing but the id and the name, and `#3840` is about
+    a pair that was both self-consistent and false: `_next_run_stalled` reads `id` and
+    `name` out of ONE front matter, so a hand-stamped `id:` makes them agree with each
+    other and disagree with the id's owner. The daily note of 2026-11-02 and 11-03
+    printed `#104 (scheduled-ceiling flip-gate daily record …)` for two days while id
+    104 was `104-artcraft-repo-sync.md` (`name: ArtCraft Repo Sync`) and the flip-gate
+    subject belonged to `107-scheduled-ceiling-flip-gate-daily-record.md`; two files
+    declaring `id: 104` at once was the mechanism (#3730), and the line looked well
+    formed, so nothing on the page told the reader to go and look. A wrong name is
+    therefore worse than no name — the bare id is the one thing in the sentence that
+    cannot be lying.
+
+    The name is printed only when the file the entry was read from carries that id in
+    the position a `name:` edit cannot move: the `NN-` prefix `_all_board_tasks`
+    filters on and `app.autonomy._id_from_filename` derives an id from. Three shapes
+    refuse it and degrade to the bare id:
+
+    * the file's prefix is a different number than the id being printed — a file
+      declaring an id that is not its own, which the task linter only WARNS about
+      (`scripts/autonomy/validate_tasks.py`'s own docstring: "nothing arms itself from
+      here", and no production path runs it);
+    * the file declares no `name:` at all, or a blank one — the line used to print
+      `#96 (None)`, a subject no file declares, and the one shape reachable with no
+      mis-stamped id at all;
+    * the entry names no source file, so nothing vouches for the pair. The scan always
+      records one (`_parse_task_file` stamps `_path` on every task it parses), so this
+      branch is unreachable on the live path and is here because the promise is about
+      what a file declares.
+
+    An entry whose id is its file's prefix and whose file declares a name prints
+    byte-for-byte what it printed before #3840; that half is pinned by
+    `test_an_id_that_matches_its_file_keeps_its_name_and_a_nameless_row_goes_bare`."""
+    import re
+    from pathlib import Path
+
+    bare = f"#{entry.get('id')}"
+    name = str(entry.get("name") or "").strip()
+    if not name:
+        return bare
+    source = entry.get("task_file")
+    if not source:
+        return bare
+    declared = re.match(r"(\d+)-", Path(str(source)).name)
+    if declared is None or declared.group(1) != str(entry.get("id")):
+        return bare
+    return f"{bare} ({name})"
+
+
 def _stall_line(entry: dict) -> str:
     """One flagged task, in the sentence the alert actually shows.
 
@@ -921,7 +983,13 @@ def _stall_line(entry: dict) -> str:
     that the row's bookkeeping, not the chain, is what is wrong, and the unstamped
     one's is that the row carries no stamps at all. Naming a second cause beside
     either would put two explanations in one line where the evidence supports one,
-    and the reader would have to decide which the alarm meant."""
+    and the reader would have to decide which the alarm meant.
+
+    All three shapes open with `_stall_subject(entry)`, not with the raw pair (#3840).
+    Three interpolation sites are the reason the check is a function and not a guard on
+    one of them: a name the flagged id's own file does not declare has to be refused by
+    every sentence the alarm can print, or the degrade depends on which door the row
+    came through — and 2026-11-02's line came through the unstamped one."""
     if entry.get("hours") is None:
         missing = ("no next_run and no last_run" if not entry.get("row_last")
                    else "no next_run")
@@ -929,18 +997,18 @@ def _stall_line(entry: dict) -> str:
                 f"{entry['record_at']}" if entry.get("record_at")
                 else "its run records answer nothing")
         return (
-            f"#{entry['id']} ({entry['name']}) has {missing} on its row while {said} "
+            f"{_stall_subject(entry)} has {missing} on its row while {said} "
             f"— a row with no stamps can never satisfy the past_next_run predicate, "
             f"so no other alarm can see it")
     if entry.get("lost_completion"):
         return (
-            f"#{entry['id']} ({entry['name']}) row bookkeeping lost a completion: "
+            f"{_stall_subject(entry)} row bookkeeping lost a completion: "
             f"run record {entry.get('record_run') or '?'} succeeded at "
             f"{entry.get('record_at')}, after the row's last_run "
             f"{entry.get('row_last') or '(absent)'}, and the row is still "
             f"{entry['hours']:.1f}h past its next_run — that elapsed figure is "
             f"measured from a stamp the task's own records contradict")
-    return (f"#{entry['id']} ({entry['name']}) is {entry['hours']:.1f}h past its "
+    return (f"{_stall_subject(entry)} is {entry['hours']:.1f}h past its "
             f"next_run — {_hold_note(entry)}{_blocked_note(entry)}")
 
 
