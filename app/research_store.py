@@ -87,13 +87,19 @@ MIN_NOTE_BYTES = 400
 
 
 def artifact_on_disk(artifact_path: str) -> bool:
-    """Whether a `written` row's `artifact_path` still names a file that is there.
+    """Whether a row's `artifact_path` still names a file that is there.
 
     The read-side twin of `_require_real_note`, and deliberately the weaker test:
     that one demands at least `MIN_NOTE_BYTES` at the moment a topic settles, this
-    one only asks whether the bytes are present now. A `written` row whose note was
-    truncated in place afterwards is a different finding, and counting it as
-    "missing" would send the reader hunting for a file that is sitting right there.
+    one only asks whether the bytes are present now. A row whose note was truncated
+    in place afterwards is a different finding, and counting it as "missing" would
+    send the reader hunting for a file that is sitting right there.
+
+    Status-blind on purpose. `stats()` asks this of every row that names a path,
+    the `archived` legacy corpus included: most of its 314 rows record no note at
+    all, but the ones that do name a real file (20 of them on 2026-11-06) are rows
+    like any other, and a status filter here would leave the corpus unable to
+    report a note it had actually lost (architecture/research-pipeline.md §2).
 
     A path with no usable form — empty or None, a directory, unreadable, one no
     syscall accepts (an embedded NUL raises `ValueError`, not `False`) — is "not on
@@ -479,9 +485,14 @@ class ResearchStore:
         """
         raw = str(artifact_path or "")
         if status != "written":
-            # nothing_found, duplicate, rejected and archived claim no note, and
-            # the legacy import path stores an `archived` artifact that has been
-            # gone for months. None of them may start failing on a missing file.
+            # Only `written` claims a note, so only `written` can fail to have one.
+            # nothing_found, duplicate and rejected assert nothing about disk, and
+            # the `archived` legacy corpus mostly agrees: 294 of its 314 rows
+            # (measured 2026-11-06) store no `artifact_path` at all, and the 20
+            # that do name notes that are still on disk. Judging a stored path is
+            # the read side's job — `stats()` judges every row that names one, at
+            # any status — and none of these rows may start failing a write over a
+            # file they never claimed.
             return
         given = raw.strip()
         size: Optional[int]
@@ -634,13 +645,29 @@ class ResearchStore:
         `_require_real_note` — and never again, so a `written` row whose note was
         deleted or moved afterwards stayed believed forever: this same method
         reported it as `last_written`, `list()` reported it as settled work, and
-        the only missing-artifact counting on the box (`import_legacy`'s
-        `artifact_found`/`artifact_missing`) covers `archived` legacy rows, whose
-        artifacts are gone by design. #3190's card had no row at all, so nothing
-        ever looked; a card that DOES have a row and then loses its file now
-        shows up here, in the payload `research_stats` returns verbatim. The cost
-        is one `stat()` per `written` row (96 on 2026-10-23), which is why the
-        query names that status and not the table.
+        the only other missing-artifact counting on the box (`import_legacy`'s
+        `artifact_found`/`artifact_missing`) spoke only when someone ran the
+        import. #3190's card had no row at all, so nothing ever looked; a card
+        that DOES have a row and then loses its file now shows up here, in the
+        payload `research_stats` returns verbatim.
+
+        Which rows are judged is decided by the path a row carries, not by the
+        status it holds: every row whose `artifact_path` names something is
+        checked, plus every `written` row whether it names a path or not — a
+        `written` row with no path is the phantom #1276 refuses at write time, so
+        it is a finding rather than a quiet row. The old `WHERE status='written'`
+        was a per-status stand-in for "has a path", and the `archived` legacy
+        corpus is what disproves it: 294 of its 314 rows (measured 2026-11-06)
+        record no note at all, which is what made skipping the status read as
+        free, but the 20 that DO name a note were never judged, so a corpus note
+        that went missing stayed unreported. Widening by path keeps those 294
+        quiet — a row that names nothing claims nothing — and costs one `stat()`
+        per row that names a path (158 on 2026-11-06: 138 `written` and the 20
+        corpus rows). It adds no noise today for a structural reason, not a
+        snapshot: only `finish` and `import_legacy` write this column, so an
+        in-flight `queued` or `researching` row holds no path at all — the note
+        path a worker is handed travels in its queue payload, never in the topic
+        row — and there is no half-written artifact for this scan to flag.
         """
         now = datetime.now(timezone.utc)
         today = now.date().isoformat()
@@ -662,12 +689,18 @@ class ResearchStore:
             last_written = conn.execute(
                 "SELECT topic, artifact_path, finished_at FROM topics "
                 "WHERE status='written' ORDER BY finished_at DESC LIMIT 1").fetchone()
-            # EVERY `written` row's artifact, not only the newest one
+            # EVERY row that names an artifact, not only the newest `written` one
             # `last_written` names: a row that loses its file is a finding at any
             # age, and the newest note was simply the one row the old payload
-            # happened to look at (#3190).
-            written_artifacts = [r["artifact_path"] for r in conn.execute(
-                "SELECT artifact_path FROM topics WHERE status='written' "
+            # happened to look at (#3190). Judged by PATH, not by status: the
+            # `archived` corpus rows that do name a note are exactly what the old
+            # `WHERE status='written'` skipped. `written` rows come along whole —
+            # an empty path there is the phantom #1276 refuses at write time, not
+            # a path-free row — while a row that names nothing at any other status
+            # claims nothing and stays out of the count.
+            artifact_paths = [r["artifact_path"] for r in conn.execute(
+                "SELECT artifact_path FROM topics "
+                "WHERE status='written' OR COALESCE(artifact_path, '') <> '' "
                 "ORDER BY id").fetchall()]
             top_domains = {r["domain"] or "(none)": r["n"] for r in conn.execute(
                 "SELECT domain, COUNT(*) AS n FROM topics "
@@ -676,7 +709,7 @@ class ResearchStore:
         # Outside the connection on purpose: these are filesystem `stat()`s, and
         # holding a read connection across them would make every other writer wait
         # on the disk instead of on the lock.
-        missing_artifacts = [p for p in written_artifacts
+        missing_artifacts = [p for p in artifact_paths
                              if not artifact_on_disk(p)]
         queued = by_status.get("queued", 0)
         head_age_days = None

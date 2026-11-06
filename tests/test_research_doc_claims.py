@@ -1884,6 +1884,88 @@ def test_section_1_names_no_restore_owner_and_no_operator_machinery():
     assert research_store.DEDUP_CORPUS_STATUS == "archived" and "DEDUP_CORPUS_STATUS" in flat
 
 
+def test_section_2s_missing_artifact_passage_judges_rows_by_path_not_status():
+    """§2's missing-artifacts passage explained the `archived` skip as designed
+    absence: the artifacts were meant to be gone, and counting them would bury the
+    one real signal among a few hundred known absences. Measured against the store
+    it describes, that reading is wrong in both halves — 294 of the corpus rows
+    name no note at all, which is the fact that made the skip look free, and the 20
+    that DO name a path name notes that are on disk, so there was no population of
+    known absences to be buried by, and the rows that could have reported a lost
+    corpus note were precisely the ones the skip hid. `stats()` now asks every row
+    that names a path, so the passage has to carry that reading instead.
+
+    Pinned in both directions like §1's siblings. The two retired phrases may not
+    come back into the doc in any section; the passage must say what is judged
+    (every row naming an `artifact_path`) and why most corpus rows stay quiet
+    (they record no note, so they claim nothing); `314` stays, since it is the
+    number the passage reasons about and §1's nodes already require it. The
+    294-and-20 split itself is dated measurement that a back-fill of the path-free
+    rows could legitimately move, so this node holds the READING and not the pair
+    of counts — freezing 294 here would make an honest repair read as a regression.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    for retired in ("gone by design", "known absences"):
+        assert retired not in text, (
+            f"§2's retired claim came back into the doc ({retired!r}): the corpus's "
+            "path-bearing rows name notes that are present, so nothing here is a "
+            "designed absence")
+    body = text.split("## Review log", 1)[0]
+    # Bounded at `## 3.` and not left open to the end of the body: the paragraph
+    # lookup below is §2-scoped by the section's own bounds, not because no later
+    # section happens to name the key today.
+    section = body.split("## 2. ", 1)[1].split("## 3. ", 1)[0]
+    para = next((p for p in section.split("\n\n") if "missing_artifacts" in p), None)
+    assert para is not None, "§2 no longer carries a missing-artifacts paragraph"
+    flat = " ".join(para.split())
+    assert "314" in flat, "the passage stopped naming the corpus size it reasons about"
+    assert "record no note at all" in flat, (
+        "the passage must say why most corpus rows are quiet: they name no note, "
+        "which is the real fact the old status-based skip was standing in for")
+    assert "`artifact_path` is asked, whatever its status" in flat, (
+        "and it must say what is judged now — every row that names a path, "
+        "not the rows of one status")
+    assert "a row that names nothing claims nothing" in flat, (
+        "and the consequence for path-free rows, which is what keeps the count "
+        "honest after the widening")
+    assert "are excluded on purpose" not in flat, (
+        "the per-status exclusion may not be re-asserted: hiding the corpus is what "
+        "left a lost corpus note unreported")
+
+
+def test_research_store_prose_judges_by_path_not_by_status():
+    """The doc was not the only carrier — `app/research_store.py` said the same
+    thing three times, and every one of them became false the moment the read path
+    stopped skipping statuses: `artifact_on_disk` opened by describing itself as
+    serving `written` rows, `_require_real_note`'s non-`written` branch said the
+    legacy import stores an artifact "gone for months", and `stats()` justified its
+    narrow query with a per-`written`-row `stat()` cost. This node is the pin the
+    doc-claim suite was missing for that file's own prose: a comment that names the
+    wrong population is how a wrong query survives its review.
+
+    The retired phrases are banned, the measured split is stated in the words the
+    code now uses, and the cost sentence is pinned to the population the query
+    actually reads: per row that names a path. This file is the only place the
+    retired phrases may appear, because here they are the ban list itself.
+    """
+    src = (ROOT / "app" / "research_store.py").read_text(encoding="utf-8")
+    for retired in ("gone by design", "known absences", "gone for months"):
+        assert retired not in src, (
+            f"the module repeats the retired claim ({retired!r})")
+    flat = " ".join(src.split())
+    assert "`written` row's `artifact_path`" not in flat, (
+        "`artifact_on_disk` is no longer a `written`-only predicate: `stats()` "
+        "asks it of every row that names a path")
+    assert "294 of its 314 rows" in flat, (
+        "the module must state the split it now reasons about: most corpus rows "
+        "name no note, and the 20 that do are present on disk")
+    assert "`stat()` per row that names a path" in flat, (
+        "the cost is per row the query reads, not per `written` row — a stale cost "
+        "sentence is what justifies a stale query")
+    assert "per `written` row" not in flat, (
+        "the old per-status cost justification may not come back with it")
+
+
 def test_section_2s_archived_row_states_the_restored_reading():
     """§2's `archived` row read "zero rows since the 2026-09-22/23 reset (§1)" while §1
     carried the same zero. Re-tensing §1 alone would have left the table contradicting both

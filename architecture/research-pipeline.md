@@ -156,17 +156,24 @@ A `written` row is a claim about disk, and until #3190 it was checked exactly
 once — `_require_real_note` at `finish`, and nothing looked again. A note deleted
 afterwards left the row believed forever, and `stats()` itself served it up as
 `last_written`. `ResearchStore.stats()` now re-reads the disk on every read and
-reports `missing_artifacts` — the `written` rows whose `artifact_path` is not a
-file — as a `{count, paths}` mapping that `research_stats` returns verbatim, and
+reports `missing_artifacts` — the rows whose `artifact_path` names no file, plus
+any `written` row that names no path at all, since being `written` is itself the
+claim — as a `{count, paths}` mapping that `research_stats` returns verbatim, and
 `app/research_store.py::artifact_on_disk` is the one predicate it reads. It is
 deliberately the weaker test than `_require_real_note`: it asks only whether the
 bytes are there, not whether they still clear `MIN_NOTE_BYTES`, because a trimmed
 note is a different finding and reporting it as MISSING sends the reader hunting
-for a file that is sitting right there. `archived` rows are excluded on purpose —
-their artifacts are gone by design (§1), and counting them would bury the one real
-signal among 314 known absences — and the key is always present, so a clean
-registry is `count: 0` and never an absent field, which is #3085's rule applied to
-a count that could otherwise disappear.
+for a file that is sitting right there. What decides whether a row is judged is
+the path it carries, not the status it holds: every row that names an
+`artifact_path` is asked, whatever its status. The legacy corpus is what taught
+that distinction, because its two halves pulled in opposite directions — most of
+its 314 rows record no note at all (294 of them, measured 2026-11-06), which is
+what made skipping the status wholesale look free, while the 20 that DO name a
+note were never asked, so a corpus note that went missing stayed unreported.
+Judging by path keeps those 294 quiet, because a row that names nothing claims
+nothing, and it leaves the key always present, so a clean registry is `count: 0`
+and never an absent field, which is #3085's rule applied to a count that could
+otherwise disappear.
 
 The other half of #3190 is on the write side, and it is a rule about *where* a
 card may land rather than what is in it. `workers/sources/deep_research.py::note_path_for`

@@ -732,25 +732,55 @@ def test_missing_artifacts_survives_reopening_the_store(s, note):
     assert ResearchStore(s.path).stats()["missing_artifacts"]["count"] == 1
 
 
-def test_only_written_rows_are_judged_against_disk(s):
-    """`archived` and the path-free outcomes must not start alarming here.
+def test_a_path_bearing_archived_row_is_judged_against_disk(s):
+    """A row that names a note is judged whatever its status — `archived` included.
 
-    `import_legacy` archives 314 rows whose notes are gone by design —
-    `_require_real_note`'s own docstring says they "have been gone for months" —
-    and `nothing_found`/`duplicate`/`rejected` claim no note at all. If the read
-    path counted them, every store carrying a legacy import would open red and
-    the one real signal in the field would be buried in 314 known absences.
+    The read path used to skip the legacy corpus by status, on the belief that its
+    artifacts were meant to be absent. The corpus disproved that belief: most of
+    its 314 rows name no note, but 20 of them (measured 2026-11-06) name notes that
+    are sitting on disk, which makes them ordinary rows — and a corpus row that
+    lost its file is a finding, not a designed absence. So an `archived` row
+    pointing at a deleted note has to be counted here exactly as a `written` one is.
     """
     gone = "/nonexistent/knowledge/research/2024-01-01-legacy-note.md"
     archived = s.propose("a legacy-shaped topic")["id"]
     with s._connect() as conn:
         conn.execute("UPDATE topics SET status='archived', artifact_path=? WHERE id=?",
                      (gone, archived))
+    missing = s.stats()["missing_artifacts"]
+    assert missing == {"count": 1, "paths": [gone]}, (
+        "an archived row that names a path is judged like any other row: "
+        + repr(missing))
+
+
+def test_a_path_free_row_contributes_nothing_to_missing_artifacts(s):
+    """Naming no path is not the same as losing one — at every status but `written`.
+
+    This is what keeps the legacy corpus out of the report now that the scan reads
+    every status instead of one: 294 of its 314 rows store no `artifact_path` at
+    all, and the path-free terminal outcomes (`nothing_found` here, settled through
+    `finish` so the column is really NULL rather than merely unseeded) claim nothing
+    about disk either. Both spellings of "no path" are pinned, NULL as
+    `import_legacy` writes it and the empty string a hand edit leaves, because the
+    query excludes both and only one of them is what the import ever produces.
+
+    `written` is judged even when its path is empty, deliberately: the status IS the
+    claim that a note exists, so an empty path there is the phantom #1276 refuses at
+    write time. `test_a_written_row_with_an_empty_or_unusable_path_is_reported`
+    pins that side, and it is the asymmetry this node's quiet reading depends on.
+    """
+    archived_null = s.propose("a legacy topic that named no note")["id"]
+    archived_empty = s.propose("a hand-edited legacy topic with an empty path")["id"]
+    with s._connect() as conn:
+        conn.execute("UPDATE topics SET status='archived', artifact_path=NULL "
+                     "WHERE id=?", (archived_null,))
+        conn.execute("UPDATE topics SET status='archived', artifact_path='' "
+                     "WHERE id=?", (archived_empty,))
     quiet = s.propose("a topic answered with no note")["id"]
     s.claim(quiet, by="w")
     s.finish(quiet, "nothing_found", note="nothing out there")
     assert s.stats()["missing_artifacts"] == {"count": 0, "paths": []}, (
-        "a row that never claimed a note is not a missing artifact")
+        "a row that never named a note is not a missing artifact")
 
 
 def test_a_written_row_with_an_empty_or_unusable_path_is_reported(s, tmp_path):
