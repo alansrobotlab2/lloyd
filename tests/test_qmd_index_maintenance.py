@@ -53,6 +53,8 @@ sys.path.insert(0, str(ROOT))
 
 from app.paths import DATA_ROOT  # noqa: E402
 from scripts.maintenance import qmd_index_maintenance as m  # noqa: E402
+from app.data_root import ACCOUNT_HOME  # noqa: E402
+from tests._live_data import require_live_data  # noqa: E402
 
 # A template/live pair in the shape #1298 was filed about: `facts` kept only by
 # the template, `sessions` pointed at two different roots.
@@ -7715,3 +7717,166 @@ def test_a_dry_run_of_an_approaching_nightly_launches_no_build(monkeypatch, tmp_
     assert "dry-run" in out, out
     assert "APPROACHING" in out, f"the approaching verdict stopped printing: {out}"
 
+
+
+# --- #3851: the skill page a person reads before running the nightly command ---
+#
+# `skills/qmd-index-maintenance/SKILL.md` documents ONE command, and until this
+# section described it as a thing that "exits quickly when there is none — no
+# arguments required" and is "Safe to re-run at any time; idempotent". Both were
+# written for a person at a terminal, and for that person they hold:
+# `scheduled_side_copy_build` refuses to start a build when stdin is a tty
+# (`_stdin_is_interactive`, `scripts/maintenance/qmd_index_maintenance.py:2993`),
+# which `test_a_0501_start_proceeds_and_a_tty_run_leaves_the_build_to_the_person`
+# pins on both edges (a tty run launches nothing; a 05:01 pipe run does). For every
+# other invocation — the autonomy job, an agent, `bash -c`, anything on a pipe — the
+# same line is a different command: on a night whose report reads
+# `capacity_approaching` (`CAPACITY_OCCUPANCY_TRIGGER` 0.25 <= occupancy <
+# `CAPACITY_APPROACHING_OCCUPANCY` 0.50, :353 and :365) with no side copy waiting, it
+# also BUILDS that copy, and a build is a re-embed of the whole index. The witnesses
+# under `~/lloyd-data/_pipeline/reflection/qmd-side-copy-*.json` record `elapsed_s`
+# 2149.8 (rebuild-20261004), 2197.0 (rebuild-20261005) and 3877.9
+# (rebuild-20261030), against the job's `timeout_seconds: 3000`
+# (`~/obsidian/autonomy/81-qmd-index-maintenance.md:41`) and its pool cap of 3600 s /
+# effective 3570 s (that file's audit note :145, which also records that a run
+# cancelled past the cap "produced no run record at all").
+#
+# These are doc-preservation nodes of the kind this file's header allows (#2311):
+# what they protect is a sentence, and the sentence lives in the vault, so they read
+# it as text. The seam they cross is the tree boundary — this file ships in the
+# repository, the page ships in `~/obsidian` — and the node crosses it by opening the
+# page at the path the prompt actually loads, so a page edited back to the old
+# wording goes red here rather than staying a green diff that only looks shipped.
+
+#: The vault page, anchored on the passwd entry rather than on `$HOME`.
+#: `tests/conftest.py::_production_tree` states the general reason: `Path.home()`
+#: honours `$HOME`, and the gate's tests rung sets `$HOME` to the round's own home
+#: (`scripts/automod/gate.py::_child_env`, `isolate_home=True`), so a page read off
+#: `$HOME` depends on whether that home happens to carry an `obsidian` link — and on
+#: the night the link is absent this pin becomes a named skip, which is the failure
+#: mode `tests/_live_data.py` exists to make visible rather than hide. The passwd
+#: entry moves for nobody, so the node reads the page from the vault the prompt
+#: actually loads in every environment.
+SKILL_PAGE = (ACCOUNT_HOME / "obsidian" / "skills" / "qmd-index-maintenance"
+              / "SKILL.md")
+
+
+def _skill_page() -> str:
+    """The vault's `qmd-index-maintenance` page, as text.
+
+    A doc-preservation read, like the #2311 nodes above: what is pinned is a
+    sentence, so there is no fixture to build and no live index to touch. A machine
+    that holds no vault at all gets a named skip from `require_live_data`, never a
+    green.
+    """
+    require_live_data(SKILL_PAGE, "the qmd-index-maintenance skill page",
+                      kind="file")
+    return SKILL_PAGE.read_text(encoding="utf-8")
+
+
+def _skill_section(body: str, heading: str) -> str:
+    """One `## ` section of the page, from just after its heading to the next one."""
+    found = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", body,
+                      re.M | re.S)
+    assert found, f"the skill page has no `## {heading}` section:\n{body}"
+    return found.group(1)
+
+
+def _skill_bullet(body: str, startswith: str) -> str:
+    """One bullet from the `## Notes` section, whole-line through its continuations.
+
+    Bullets in that section run to several lines, so a node that asserted line by
+    line would pin a fragment and pass on a page that said the opposite in the next
+    sentence.
+    """
+    lines = _skill_section(body, "Notes").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"- {startswith}")),
+                 None)
+    assert start is not None, (
+        f"the Notes section has no bullet starting `- {startswith}`:\n"
+        + "\n".join(lines))
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("- ") or lines[i].startswith("## ")),
+               len(lines))
+    return "\n".join(lines[start:end])
+
+
+def test_the_skill_stops_promising_a_quick_exit_to_a_run_with_no_terminal():
+    """#3851 clause 1: the quick-exit promise is gone, and the real cost is stated.
+
+    The phrase the clause bans is not decoration: "no arguments required" is the
+    sentence that tells an agent the single documented command always comes back
+    quickly, and on an approaching night with no copy waiting a run with no terminal
+    sits through a re-embed of the whole index instead. The numbers the replacement
+    must carry are the measured ones, so they are asserted as strings here — the
+    ~2150 s planning figure (`SCHEDULED_BUILD_BUDGET_S = 2400`, :3115) and the two
+    conditions that make the run that long.
+    """
+    body = _skill_page()
+    assert "no arguments required" not in body, (
+        "`no arguments required` is back in the page: that is the promise #3851 "
+        "closed, because it reaches the agent running the job, not only the person "
+        "at the terminal the tty rail protects")
+
+    execution = _skill_section(body, "Execution")
+    assert "exits quickly when there is none" not in execution, (
+        "the unconditional quick-exit sentence returned")
+    for phrase in ("capacity_approaching", "no side copy waiting", "~2150 s",
+                   "re-embed", "terminal"):
+        assert phrase in execution, (
+            f"the Execution section no longer says {phrase!r}, so the command it "
+            f"documents is undocumented again:\n{execution}")
+
+
+def test_the_execution_section_names_the_bound_the_build_races():
+    """#3851 clause 2: the page states the bound, and the rule the bound produces.
+
+    A run that overruns is cancelled by the pool rather than finishing late, and that
+    cancellation is what makes the overrun costly: the audit note at
+    `~/obsidian/autonomy/81-qmd-index-maintenance.md:145` records that a cancelled run
+    produced no run record at all, so the night loses its prune, its verdict and its
+    witness together. The 2026-10-29 build's 3877.9 s is already past all three
+    figures (3000 s, 3570 s, 3600 s), which is why the page names the bound rather
+    than a comfort figure and why it forbids starting a second run over a running one.
+    """
+    execution = _skill_section(_skill_page(), "Execution")
+    assert "timeout_seconds: 3000" in execution, (
+        "the page stopped naming the bound the build races")
+    assert "81-qmd-index-maintenance.md" in execution, (
+        "the bound is quoted without where it comes from, so the next reader cannot "
+        "re-check it")
+    assert "3877.9" in execution, (
+        "the one witness already past the bound went missing, and with it the reason "
+        "the bound is not a rounding error")
+    assert "in flight" in execution and "re-run" in execution, (
+        f"the page no longer forbids re-running while a build is in flight:\n"
+        f"{execution}")
+
+
+def test_the_rerun_bullet_is_conditional_and_keeps_the_terminal_case_true():
+    """#3851 clause 3: `Safe to re-run at any time` is now a case split, not a promise.
+
+    The old bullet was true for exactly the invocation the tty rail protects, so the
+    replacement has to keep saying that — a page that swings to "never run this
+    without a person" would be wrong in the other direction and would stop a person
+    running the prune on a quiet night. What it may not do is offer a re-run with no
+    condition attached. The behaviour both halves describe is pinned executably by
+    `test_a_0501_start_proceeds_and_a_tty_run_leaves_the_build_to_the_person`, which
+    runs both stdin kinds through `scheduled_side_copy_build`.
+    """
+    body = _skill_page()
+    assert "Safe to re-run at any time" not in body, (
+        "the unconditional re-run promise is back, in the Notes section or anywhere "
+        "else on the page")
+
+    bullet = _skill_bullet(body, "Re-running")
+    assert "terminal" in bullet, (
+        f"the bullet stopped naming the terminal case, which is the half that stays "
+        f"quick:\n{bullet}")
+    assert "starts no side-copy build" in bullet, (
+        f"the bullet no longer says a plain invocation typed on a terminal starts "
+        f"no build — the tty rail's own answer, in the page's words:\n{bullet}")
+    for phrase in ("~2150 s", "in flight"):
+        assert phrase in bullet, (
+            f"the bullet lost {phrase!r}, so it no longer bounds what it invites:\n"
+            f"{bullet}")
