@@ -433,6 +433,30 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     The id list above is unchanged byte for byte, which is what makes that safe to
     re-pin: a residue that changed MEMBERSHIP is a different finding and needs its own
     argument, not a tuple edit.
+
+    2026-11-06 (#3844): the membership moved, so here is the argument. `nightly-cannot-tell`
+    ("why the nightly retrieval run always says it cannot tell whether anything
+    changed", gold `Nightly Retrieval Eval`) is no longer anchorless because the seed
+    extractor now emits `Retrieval` for its own text, and the live store carries an
+    entity by exactly that name — measured at HEAD: `extract_entities_from_query`
+    returns `["Retrieval"]` for that query and `store().resolve("Retrieval")` is
+    `Retrieval`. #1260's rule counts a seed that is a SUBSTRING of a gold name as an
+    anchor, and "retrieval" sits inside "nightly retrieval eval", so the query leaves
+    the residue: 24 of 81, ceiling (81−24)/81 = 0.704. Neither the corpus nor the
+    extractor moved — the gold is still `Nightly Retrieval Eval` in
+    `eval/vault_recall_queries.yaml`, `agent_mcp/retrieval.py` was last touched
+    2026-09-26 and this pin 2026-09-28 — so it is the nightly-re-extracted graph that
+    grew the name, the same mechanism that put `graph-quality` back on 2026-09-23.
+
+    Name that anchor rather than celebrate it: the seed is the generic word
+    `Retrieval`, reached from the query's own wording, and it is not a path to the
+    note the gold names. The ceiling therefore rose because the vocabulary gained a
+    one-word entity, not because retrieval got better, and every baseline artifact
+    carrying this denominator inherits the move. Whether a fragment seed should count
+    as an anchor at all is #1260's rule and not this round's to change;
+    `test_a_fragment_seed_anchors_only_a_gold_that_contains_it` pins the rule as it
+    stands in both directions, so a reader can see which word moved the number and
+    what still keeps a query in the residue.
     """
     out = _run_against_the_live_corpus(_CORPUS_SCRIPT)
     assert out["anchorless_first20"] == [
@@ -445,7 +469,7 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
         "robotics-projects", "gpu-model-naming-collision", "browser-tool-validation",
         "three-d-printing-calibration", "automod-to-entity-guard",
         "job-that-changes-its-own-code", "stop-auto-merging-entities",
-        "cheaper-model-every-turn", "nightly-cannot-tell", "facts-that-contradict",
+        "cheaper-model-every-turn", "facts-that-contradict",
         "browser-tool-falls-back", "gpu-ram-thin-should-not-reboot",
         "alarm-comes-back-after-fixed", "numbers-differ-after-rebuild",
         "djev-decision-engine-integration", "ambient-prefetch-ttl-reclaim",
@@ -453,8 +477,51 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     ], out["anchorless"]
     ceiling = (out["n_queries"] - len(out["anchorless"])) / out["n_queries"]
     assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
-        25, 81, 0.691
+        24, 81, 0.704
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
+
+
+def test_a_fragment_seed_anchors_only_a_gold_that_contains_it():
+    """#1260's anchor rule, pinned in both directions, because #3844's re-pin rests
+    on it: a seed counts as an anchor when it IS a gold name or is a SUBSTRING of one.
+
+    That substring arm is what let `nightly-cannot-tell` out of the residue — the
+    extractor's generic `Retrieval` is inside the gold `Nightly Retrieval Eval` — so
+    the first case pins the rule that moved the number. The second case is what keeps
+    the metric from having quietly become "did the extractor say anything at all": a
+    query whose only seed is that same `Retrieval` but whose gold is `Knowledge Graph`
+    has no lexical path to its answer and stays in the residue. The third is the
+    original meaning, an exact-name anchor.
+
+    Synthetic records, deliberately: this is the rule, not the corpus, and it must
+    still discriminate on a graph that has been rebuilt out from under the live pin
+    above. `_run_against_the_live_corpus` re-measures the residue; this node makes
+    the reason a residue change is admissible checkable without the store.
+    """
+    from eval.run_eval import anchorless_queries
+
+    recs = [
+        # #3844's case: fragment of the gold, reached from the query's own words.
+        {"id": "nightly-cannot-tell", "seeds_extracted": ["Retrieval"],
+         "expected": {"entities": ["Nightly Retrieval Eval"]}},
+        # Same seed, an unrelated gold: still nowhere to start.
+        {"id": "seeds-but-none-of-them-hers", "seeds_extracted": ["Retrieval"],
+         "expected": {"entities": ["Knowledge Graph"]}},
+        # The rule's original case: the seed is the gold.
+        {"id": "exact-anchor", "seeds_extracted": ["Knowledge Graph"],
+         "expected": {"entities": ["Knowledge Graph"]}},
+        # Nothing extracted at all, with gold to reach.
+        {"id": "no-seeds", "seeds_extracted": [],
+         "expected": {"entities": ["Knowledge Graph"]}},
+        # Gold-free: unscorable on this leg, so never in the residue (#1354).
+        {"id": "no-gold", "seeds_extracted": [], "expected": {"entities": []}},
+        # Field absent rather than empty — not an observation (#1260).
+        {"id": "unrecorded", "expected": {"entities": ["Knowledge Graph"]}},
+    ]
+    assert anchorless_queries(recs) == [
+        "seeds-but-none-of-them-hers", "no-seeds"], (
+        "the substring arm admitted a query it should not have, or the rule stopped "
+        "requiring any overlap at all")
 
 
 _SEEDING_SCRIPT = """
