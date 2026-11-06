@@ -355,7 +355,7 @@ def test_store_calls_are_hopped_off_the_event_loop():
 
 
 # ---------------------------------------------------------------------------
-# The read-side re-verification, over MCP (#3190 clause 2)
+# The read-side re-verification, over MCP (#3190 clause 2, #3837)
 # ---------------------------------------------------------------------------
 
 
@@ -382,6 +382,34 @@ async def test_stats_reports_a_missing_artifact_through_the_tool(registry, note)
     assert payload["missing_artifacts"]["count"] == 1, payload
     assert payload["missing_artifacts"]["paths"] == [str(art)], (
         "the caller must be handed the path, not just a number")
+
+
+async def test_a_path_bearing_archived_row_reports_through_the_tool(registry):
+    """The corpus population #3837 added has to cross this boundary too.
+
+    #3837 widened the scan from `status='written'` to every row that names an
+    `artifact_path`, so `missing_artifacts` can now carry a row whose status is
+    `archived` — a population no test had ever put through `research_stats`. The
+    node above only ever settles `written` rows, so a payload builder that
+    filtered the list back to `written`, or keyed off the status it was written
+    against, would leave this round's change looking green in the store suite and
+    silent where a human actually reads it. Planted the way `import_legacy` leaves
+    a corpus row — status `archived`, and a path in the row — alongside a
+    path-free one that must stay out of the payload.
+    """
+    gone = "/nonexistent/knowledge/research/2024-01-01-legacy-note.md"
+    lost = registry.propose("a corpus topic whose note was deleted")["id"]
+    silent = registry.propose("a corpus topic that named no note")["id"]
+    with registry._connect() as conn:
+        conn.execute("UPDATE topics SET status='archived', artifact_path=? "
+                     "WHERE id=?", (gone, lost))
+        conn.execute("UPDATE topics SET status='archived', artifact_path=NULL "
+                     "WHERE id=?", (silent,))
+
+    _, payload = await call("research_stats")
+    assert payload["missing_artifacts"] == {"count": 1, "paths": [gone]}, (
+        "a corpus row that names a missing note has to reach the caller, and a "
+        "corpus row that names nothing must not: " + repr(payload))
 
 
 async def test_the_missing_artifact_key_is_present_when_nothing_is_missing(registry):

@@ -480,9 +480,18 @@ def test_a_refused_written_does_not_suppress_the_topic(s: ResearchStore):
 
 
 @pytest.mark.parametrize("status", ["nothing_found", "duplicate", "rejected"])
-def test_only_written_needs_a_path(s: ResearchStore, status):
-    """The other terminal statuses claim no file. Making them check disk would
-    turn "searched, found nothing" into an error."""
+def test_only_written_needs_a_path_at_finish(s: ResearchStore, status):
+    """At SETTLE TIME, only `written` has to name a file.
+
+    The other terminal statuses claim no file, and making `finish` demand one
+    would turn "searched, found nothing" into an error. That rule is the WRITE
+    path's and nothing more: the read side went the other way in #3837, where
+    `stats()` judges every row that NAMES a path whatever its status — pinned by
+    `test_a_path_bearing_row_is_judged_whatever_its_status`. The two are only
+    consistent because of the second assertion below: a status that needs no
+    path leaves the column NULL, which is the one shape the read-side scan
+    reliably never reaches (`test_a_path_free_row_contributes_nothing_to_missing_artifacts`).
+    """
     tid = _researched(s, f"a topic settling as {status}")
     out = s.finish(tid, status, note="no artifact for this outcome")
     assert out["status"] == status
@@ -751,6 +760,37 @@ def test_a_path_bearing_archived_row_is_judged_against_disk(s):
     assert missing == {"count": 1, "paths": [gone]}, (
         "an archived row that names a path is judged like any other row: "
         + repr(missing))
+
+
+@pytest.mark.parametrize("status",
+                         ["archived", "duplicate", "rejected",
+                          "nothing_found", "researching"])
+def test_a_path_bearing_row_is_judged_whatever_its_status(s, status):
+    """The scan's "whatever its status", pinned one status at a time.
+
+    The node above pins the one status a real writer ever stores a legacy path
+    under, which is the population #3837 was filed for; this one pins that the
+    decision really is made by the PATH and not by a second list of statuses the
+    query happens to accept. Each arm plants a row that names a note which is not
+    there and has to be reported. The `researching` arm is the one worth arguing
+    for: an in-flight row never names a path by itself — the note path a worker is
+    handed travels in its queue payload, and only `finish` and `import_legacy`
+    write the column — so a `researching` row holding one was put there
+    deliberately, and is a row that lost a note like any other row that lost one.
+    Narrowing the scan back to `WHERE status='written'` reddens every arm here and
+    none of the path-free arms in the node below, so the two together are what
+    tell "judged by path" from "judged by status".
+    """
+    gone = f"/nonexistent/knowledge/research/{status}-note.md"
+    tid = s.propose(f"a row left holding a path at status {status}")["id"]
+    if status == "researching":
+        s.claim(tid, by="w")
+    with s._connect() as conn:
+        conn.execute("UPDATE topics SET status=?, artifact_path=? WHERE id=?",
+                     (status, gone, tid))
+    missing = s.stats()["missing_artifacts"]
+    assert missing == {"count": 1, "paths": [gone]}, (
+        f"a {status} row naming a path has to be judged: {missing}")
 
 
 def test_a_path_free_row_contributes_nothing_to_missing_artifacts(s):
