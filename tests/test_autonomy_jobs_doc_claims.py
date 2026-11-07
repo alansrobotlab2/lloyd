@@ -8215,3 +8215,60 @@ def test_validate_tasks_emits_no_doc_membership_warning_for_any_id():
     assert not offenders, (
         f"DOC_MEMBERSHIP still fires for {offenders} — a live task file is not named in "
         "both membership tables")
+
+
+# ── #3906: Step 3b reads the per-kind split off the payload, it does not derive one ──
+
+#: The shape of the derivation #3906 refuses: a SQL statement that joins the run history to
+#: the queue, or reads the history table at all, to recompute a per-kind rate. `runs` is the
+#: history and `queue` is the live pile; reaching across them is what a reader does who has
+#: not noticed that `/api/workers/health` already publishes the partition. Kept narrow on
+#: purpose — Step 3's own `SELECT ... FROM queue` (a different table, for rows that have not
+#: run yet) must not trip it.
+KIND_SPLIT_JOIN_RE = re.compile(r"\bJOIN\s+(?:runs|queue)\b|\bFROM\s+runs\b", re.I)
+
+
+def test_step_3b_prints_the_per_kind_split_by_reading_the_field_the_api_publishes():
+    """The watchdog gets the halves from the endpoint, or it does not get them at all.
+
+    #3526 shipped `by_kind` in the health payload and left the three readers alone, so
+    Step 3b — the step that already prints a source's blended `fail_rate` — was where a
+    multi-kind source's split was both needed and absent: `youtube-digest` carries video and
+    paper rows, and one rate for both says nothing about which half failed. The skill half is
+    checked across the boundary for the standing reason `board_presence.py` gives: a vault
+    edit moves this node's target with no deploy and no gate, so an unasserted skill is a
+    doc that can be wrong forever.
+
+    Three things, because the clause has three parts: the step names the field and the three
+    figures it carries, it obtains them from the payload (`.health.by_kind` inside a `curl`
+    of the health route), and it does not recompute them from `runs` — a hand-written
+    statement disagrees silently whenever the window is clamped, and the payload reports that
+    clamp while a join cannot see it.
+    """
+    step = _skill_step(_queue_skill(), "Step 3b")
+
+    assert "by_kind" in step, (
+        f"{QUEUE_SKILL_REL} Step 3b no longer reads `by_kind`, so a source whose runs carry "
+        "two kinds prints one blended rate and the half that failed stays invisible")
+    for figure in ("total", "failed", "fail_rate"):
+        assert f"`{figure}`" in step, (
+            f"Step 3b no longer names the per-kind `{figure}` it is written to print")
+    assert "`__none__`" in step, (
+        "Step 3b no longer names `__none__`, the key the endpoint files a run with no kind "
+        "under; a reader who never learns it counts that population as missing rows")
+
+    assert "/api/workers/health" in step, (
+        "Step 3b's per-kind read is no longer shown as a call to the route that publishes "
+        "the block, so the next reader has no cue that the field is already on the wire")
+    assert ".health.by_kind" in step, (
+        "Step 3b does not read the split as a FIELD (`.health.by_kind`); naming the key in "
+        "prose while obtaining it some other way is the gap #3526's owed entry named")
+
+    assert not KIND_SPLIT_JOIN_RE.search(step), (
+        f"{QUEUE_SKILL_REL} Step 3b is deriving the split from the run history again "
+        f"({KIND_SPLIT_JOIN_RE.findall(step)}). The endpoint's own figures are measured over "
+        "the window it clamps and reports as `window_clamped_to_hours`; a join written here "
+        "cannot see that clamp, so it returns different numbers under the same label.")
+    assert "`window_clamped_to_hours`" in step, (
+        "the reason a derived split disagrees is no longer stated in the step that forbids "
+        "deriving one, which is the sentence that stops the next reader re-adding the join")

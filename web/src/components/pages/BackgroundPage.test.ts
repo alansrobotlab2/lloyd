@@ -46,12 +46,14 @@ import { createElement } from 'react'
 import source from './BackgroundPage.tsx?raw'
 import panelSource from './runsPanelState.ts?raw'
 import toolbarSource from './RunsToolbar.tsx?raw'
+import rowSource from './SourceHealthRow.tsx?raw'
 import { api } from '../../api'
 import { RunsToolbar } from './RunsToolbar'
 import {
   ALARM_FAIL_RATE,
   SourceHealthRow,
   failureAgeText,
+  kindSplitText,
   rateIsAlarming,
   type SourceHealth,
 } from './SourceHealthRow'
@@ -461,6 +463,108 @@ describe('SourceHealthRow — the failure rate and the age of its failures', () 
     expect(html).toContain('0% failing')
     expect(html).not.toContain('last failure')
     expect(html).not.toContain('text-rose-400')
+  })
+
+  // ── #3906: the by_kind split, printed as context and never as a second alarm ───────
+  // Shaped off the live endpoint (`/api/workers/health?days=7`, 2026-11-07), where
+  // `youtube-digest` is the one source reporting two kinds: 57 runs blended with 1 failed,
+  // the video half 50 with 1 and the paper half 7 with 0. The blend is what gates; the
+  // halves are what a reader needs, because the row on its own says only "1 of 57", which
+  // is a different story from "the failure was a video" — and says nothing at all about a
+  // paper half of 7 that would fail on its own rate alone.
+  // The same 57 runs as the route sends them from a backend older than `64ff6c01`: every
+  // figure the newer one sends, and no `by_kind` key. `TWO_KINDS` is this object plus the
+  // partition, so the two seeds differ in exactly one field and the absence node below
+  // renders a payload that never had the key rather than one it was stripped of.
+  const NO_PARTITION: SourceHealth = {
+    ...CLOSED_BURST, total: 57, ok: 56, failed: 1, fail_rate: 1 / 57,
+    last_failure: '2026-11-06T09:00:00Z', consecutive_failures: 0,
+  }
+
+  const TWO_KINDS: SourceHealth = {
+    ...NO_PARTITION,
+    by_kind: {
+      video: { total: 50, failed: 1, fail_rate: 0.02 },
+      paper: { total: 7, failed: 0, fail_rate: 0.0 },
+    },
+  }
+
+  it('a two-kind source prints both halves, each with its own rate', () => {
+    // Both figures come out of the block itself, not off the blended row: a split that
+    // printed `1 of 57` twice would be the same number the row already shows.
+    expect(kindSplitText(TWO_KINDS)).toBe(
+      'paper: 7 runs, 0 failed, 0% failing · video: 50 runs, 1 failed, 2% failing')
+    const html = renderToStaticMarkup(createElement(SourceHealthRow, { h: TWO_KINDS }))
+    expect(html).toContain('paper: 7 runs, 0 failed, 0% failing')
+    expect(html).toContain('video: 50 runs, 1 failed, 2% failing')
+    // Name order, so two reads of one window are byte-identical: the payload's own key
+    // order is whatever `workers/queue.py` happened to see first.
+    expect(html.indexOf('paper:')).toBeLessThan(html.indexOf('video:'))
+  })
+
+  it('the split is muted ink, and a kind at 100% still does not sound the alarm', () => {
+    // Clause 4's other half, and the one that could be gotten wrong quietly: colouring
+    // the split by the kind's own rate, or alarming on a kind at all. A kind can be 1
+    // failed of 1 run — `__none__` alone in a window is exactly that — and the source is
+    // not on fire, so the source-level blend is the only number the decision may read.
+    const paperOnFire: SourceHealth = {
+      ...TWO_KINDS,
+      by_kind: {
+        video: { total: 50, failed: 1, fail_rate: 0.02 },
+        paper: { total: 1, failed: 1, fail_rate: 1.0 },
+      },
+    }
+    const line = 'paper: 1 run, 1 failed, 100% failing · video: 50 runs, 1 failed, 2% failing'
+    expect(kindSplitText(paperOnFire)).toBe(line)
+    expect(rateIsAlarming(paperOnFire)).toBe(false)
+    const html = renderToStaticMarkup(createElement(SourceHealthRow, { h: paperOnFire }))
+    // One span, muted, and the row's only rose is the run count's — the same reading the
+    // closed-burst node above pins for the source-level rate, now with a kind at 100 %.
+    expect(classOfSpanHolding(html, line)).toBe('text-zinc-500')
+    expect(classOfSpanHolding(html, '1 failed')).toContain('text-rose-400')
+    expect(html.match(/text-rose-400/g)).toHaveLength(1)
+    // The decision cannot see a kind's number even by accident: its body names the
+    // source's own field and no partition of it. Read off the component's own bytes,
+    // because an assert on a regex that did not match is an assert on `''`.
+    const deciding = rowSource.match(/export function rateIsAlarming[\s\S]*?\n}/)?.[0]
+    expect(deciding, 'no rateIsAlarming in the file this node reads').toBeTruthy()
+    expect(deciding).toContain('fail_rate')
+    expect(deciding).not.toContain('by_kind')
+  })
+
+  it('a payload with no split, or one that says nothing, prints no per-kind markup', () => {
+    // Three absences, one behaviour, and every one of them decided on the RENDERED bytes:
+    // no key at all is a backend older than `64ff6c01`; an empty block is the same claim
+    // from a newer one; a ONE-entry block is that source's own figures restated at it,
+    // since the per-kind totals sum to its total — every source but `youtube-digest` is
+    // that case, and printing it would put the same number on every row twice.
+    //
+    // `paper:` / `video:` / `__none__:` are what a per-kind entry looks like once it is in
+    // the markup — the kind's name and its colon, which no other span on this row prints —
+    // so their absence in the rendered HTML is the no-markup claim itself, not a proxy for
+    // a fixture that was built without the field. `__none__` is in the list because the
+    // emitter keys an unclassified run exactly that way (`NO_KIND` in `workers/queue.py`),
+    // and the component must not invent the group when the payload has none.
+    const KIND_MARKERS = ['paper:', 'video:', '__none__:']
+    const seeds: Array<[string, SourceHealth]> = [
+      ['no by_kind key at all', NO_PARTITION],
+      ['an empty by_kind block', { ...TWO_KINDS, by_kind: {} }],
+      ['one kind, which is the whole source', {
+        ...TWO_KINDS,
+        by_kind: { video: { total: 57, failed: 1, fail_rate: 1 / 57 } },
+      }],
+    ]
+    for (const [label, h] of seeds) {
+      expect(kindSplitText(h), label).toBe('')
+      const html = renderToStaticMarkup(createElement(SourceHealthRow, { h }))
+      for (const marker of KIND_MARKERS) {
+        expect(html, `${label} rendered ${marker}`).not.toContain(marker)
+      }
+      // The blended rate survives every one of them, and it is the ONLY rate the row
+      // prints when there is no split to print: 1 failed of 57 rounds to 2 %.
+      expect(html, label).toContain('2% failing')
+      expect(html.match(/% failing/g), label).toHaveLength(1)
+    }
   })
 
   it('SourceCard renders this component, so the decision above is the one on screen', () => {

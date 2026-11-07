@@ -1513,6 +1513,45 @@ def _health_type() -> str:
     return body
 
 
+#: A literal index signature, in the two shapes the scanner has to tell apart. The
+#: positive control below feeds them in rather than trusting the real file to be one
+#: way: a checker that never fires and a checker that is never needed look identical.
+IDX_ON_OBJECT = "  [key: string]: unknown\n"
+IDX_INSIDE_FIELD = ("  by_kind?: { [kind: string]: "
+                    "{ total: number; failed: number; fail_rate: number | null } }\n")
+
+
+def _index_signatures_at_object_level(body: str) -> list[str]:
+    """Each `[name: string]: …` index signature sitting in the object's OWN brace level.
+
+    Nesting is the whole difference and a line-based regex cannot see it: `by_kind?:
+    { [kind: string]: … }` carries an index signature that is correct precisely because it is
+    the VALUE of a declared field, one brace in. A signature at level zero is the other thing
+    — the retracted #3526 "fix", which makes every misspelled field name a legal `unknown`.
+
+    So the scan walks bytes and counts braces, and it does not care about indentation or about
+    what the value type is: the pattern it replaces (`^\\s{4}\\[\\w+:\\s*string]:\\s*{`)
+    passed a re-indented signature and passed `[key: string]: unknown` outright, which is half
+    of what clause 3 forbids.
+    """
+    found: list[str] = []
+    depth, i = 0, 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "[" and depth == 0:
+            m = re.match(r"\[[^\]]*\]\s*:", body[i:])
+            if m:
+                stop = body.find(",", i)
+                found.append(body[i:len(body) if stop == -1 else stop].strip())
+                i += m.end() - 1
+        i += 1
+    return found
+
+
 #: Where the per-source row's markup lives since #3640. The rose on a 50 %+ failure
 #: rate is a decision, and a decision written inline in a page's JSX can only be tested
 #: by mounting the page — which nothing in this repo can do (`web/vitest.config.ts`
@@ -1788,6 +1827,103 @@ def test_unfinished_matrix_is_rendered_nowhere():
             hits[str(path.relative_to(ROOT))] = n
     assert hits == {"web/src/api.ts": 1}, hits
     assert "unfinished_matrix?: number" in _code(_health_type())
+
+
+#: Keys `/api/workers/health` publishes in a source's `health` block that
+#: `WorkerSourceHealth['health']` does not declare — measured at `0bf6a859`, the base of
+#: #3906's round, by the node below. They are a debt of `by_kind`'s exact shape that
+#: #3906's five clauses do not reach: no component in `web/src` reads any of them, so an
+#: undeclared one costs nothing today, and declaring seven fields nobody renders is a bigger
+#: change than this item. The node asserts set EQUALITY, so the debt cannot grow in silence
+#: and each name that gets declared has to be deleted from here to keep the list honest.
+_STILL_UNDECLARED_HEALTH_KEYS = {
+    "claims_checked", "claims_insufficient", "claims_refuted", "claims_verified",
+    "runs_with_bundle", "runs_without_bundle", "silent",
+}
+
+
+def test_the_typed_health_block_declares_by_kind_and_names_its_remaining_gaps(tmp_path):
+    """`by_kind` is declared on the client type, and the diff lists what still is not.
+
+    #3526 shipped the key and left all three readers, and the API reader's half stayed
+    invisible because the health object is a CLOSED type — `grep -Fn '[key: string]'
+    web/src/api.ts` answers nothing for it — so a component reading `health.by_kind` was a
+    `Property 'by_kind' does not exist` compile error rather than a mis-typed number. That
+    is why the pin below is a key-set diff against the emitter and not a grep for a word:
+    what makes `by_kind`'s absence invisible is that it is a diff, so the node takes the
+    emitter's own key set and reports the gap in both directions.
+
+    The optional marker and the exact value shape are asserted too, for the two reasons
+    #3526's item names: a backend older than `64ff6c01` sends no such key, and the value is
+    one entry per kind carrying `total` / `failed` / `fail_rate` with a nullable rate.
+    """
+    health = _health_type()
+    assert "by_kind?" in health, (
+        "`by_kind` is not declared as an OPTIONAL field on WorkerSourceHealth.health; a "
+        "required field would make every pre-`64ff6c01` backend row a type error")
+    entry = re.search(
+        r"by_kind\?:\s*\{\s*\[(\w+):\s*string]\s*:\s*"
+        r"\{\s*total:\s*number;\s*failed:\s*number;\s*"
+        r"fail_rate:\s*number\s*\|\s*null\s*}\s*\}",
+        health)
+    assert entry, (
+        "`by_kind` is not the closed per-kind map the endpoint emits (keyed by kind name, "
+        "values total/failed/fail_rate with a nullable rate): "
+        + " / ".join(ln.strip() for ln in health.splitlines() if "by_kind" in ln))
+    assert entry.group(1) == "kind", (
+        f"the index key is named `{entry.group(1)}`; `kind` says what the key IS, and this "
+        "type names each key by its content (`staged_pending`, `gpu_hours`), not `key`")
+    # The scanner over the file's own bytes must find nothing, and it must find SOMETHING on
+    # the two shapes clause 3 forbids and nothing on the one it requires — otherwise "the
+    # checker says clean" is a statement about the checker.
+    assert _index_signatures_at_object_level(health) == [], (
+        "an index signature sits on the health object itself: "
+        f"{_index_signatures_at_object_level(health)} — that turns every typo in a field "
+        "name into a legal `unknown`, which is the retracted #3526 'fix' and not this "
+        "change. `by_kind`'s own `[kind: string]` is legal because it is the value of a "
+        "declared field, one brace in.")
+    assert _index_signatures_at_object_level(IDX_ON_OBJECT) == ["[key: string]: unknown"], (
+        "the scanner let an object-level `[key: string]: unknown` through, so the assert "
+        "above is measuring nothing")
+    assert _index_signatures_at_object_level(IDX_INSIDE_FIELD) == [], (
+        "the scanner flagged `by_kind`'s own nested map, which would make the assert above "
+        "unsatisfiable by any declaration that closes the value type")
+
+    declared = set(re.findall(r"^\s{4}(\w+)\??\s*:", health, re.M))
+    from datetime import datetime, timedelta, timezone
+
+    from workers.queue import WorkQueue
+    wq = WorkQueue(tmp_path / "typed-drift.db")
+    now = datetime.now(timezone.utc)
+    with wq._connect() as conn:                       # the population, not the job API
+        for i, (status, kind) in enumerate([("success", "video"), ("failed", "paper"),
+                                            ("success", None)]):
+            stamp = (now - timedelta(hours=i + 1)).isoformat()
+            conn.execute(
+                "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+                " duration_seconds, summary, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"run-3906-t{i}", "youtube-digest", status, stamp, stamp, 1.0, "s", kind))
+    health_block = wq.run_rollup_by_source((now - timedelta(days=7)).isoformat())["youtube-digest"]
+    # A control on the fixture, not on the emitter: that SELECT counts ok as
+    # `SUM(status = 'success')`, so a row stamped `succeeded` — a spelling no writer in
+    # `workers/` uses — is neither ok nor failed, and the key set taken below would be a
+    # reading of a population nobody produces.
+    assert health_block["ok"] == 2, (
+        f"the three seeded rows read as {health_block['ok']} ok, so at least one of their "
+        "statuses is not the `success` spelling the rollup counts")
+    published = set(health_block)
+    undeclared = published - declared
+    assert "by_kind" not in undeclared, (
+        "the emitter publishes `by_kind` and the client type does not declare it, which is "
+        "the exact hole #3906 was filed for: a component reading it is a compile error, so "
+        "the dashboard prints the blended rate and never learns which half failed")
+    assert undeclared == _STILL_UNDECLARED_HEALTH_KEYS, (
+        f"the client type leaves {sorted(undeclared)} undeclared while the rollup publishes "
+        f"them; this node expects exactly {sorted(_STILL_UNDECLARED_HEALTH_KEYS)} — the "
+        "holes #3526 left that #3906 did NOT take. A name NEW to this set is another "
+        "`by_kind`, and the fix is to declare it, not to widen the set. A name GONE from it "
+        "means someone declared it: drop it here so the set stays a debt, not a shrine — "
+        "the mistake #1693 left `last_failure` optional over.")
 
 
 def test_a_source_with_no_runs_still_reads_no_runs_and_neither_span():
@@ -3897,12 +4033,16 @@ def test_the_kind_key_is_present_whenever_a_health_block_is(monkeypatch, tmp_pat
     - A source with NO completed run in the window publishes `health: null`, as it
       did before this column existed, because `run_rollup_by_source` groups rows and
       a source with no rows produces no group to read. So `by_kind` is absent with
-      the whole block, never `{}`. What Mission Control does with it is owed and not
-      in this diff: `by_kind` is not declared anywhere in the `health` object type at
-      `web/src/api.ts:337`, so a component that reads `health.by_kind` is a type
-      error until that type gains the key — recorded under `## Findings` on item
-      #3526, whose other deferred lines are the `queue-health-check` reporting line
-      and the §Intake prose.
+      the whole block, never `{}`.
+
+    What each reader does with the key was owed here and is no longer: #3906 landed the
+    declaration on `WorkerSourceHealth['health']` in `web/src/api.ts` (optional, for exactly
+    the pre-`64ff6c01` reason this node's first bullet is about), the per-kind render in
+    `SourceHealthRow.tsx`, the §5 health-keys and paper-kind prose in
+    `architecture/workers-jobs.md`, and the `queue-health-check` reporting line. Those four
+    readers are pinned by `test_the_typed_health_block_declares_by_kind_and_names_its_remaining_gaps`
+    in this file, by the nodes in `tests/test_source_health_row_kind_split.py`, by
+    `tests/test_workers_doc_claims.py`, and by `tests/test_autonomy_jobs_doc_claims.py`.
     """
     client, _ = _kinded_health_client(
         monkeypatch, tmp_path,

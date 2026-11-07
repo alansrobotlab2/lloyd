@@ -366,6 +366,15 @@ export interface WorkerSourceHealth {
     unfinished_matrix?: number
     deadline_cut?: number
     matrix_shrunk?: number
+    // #3526: the same window partitioned by `runs.kind`, one entry per kind. Optional for
+    // `consecutive_failures`' reason exactly — a backend older than `64ff6c01` sends no
+    // such key, and the honest render of a payload that cannot say which half of a source
+    // failed is the blended rate alone, not an empty partition that reads as "no kinds".
+    // Each entry is that kind's OWN `total`/`failed`/`fail_rate`: the rate divides by the
+    // kind's total, never the source's, which is the blend this field exists to look
+    // through. `__none__` is the key for a run whose row carries no kind, and it is absent
+    // rather than zeroed for a source whose every run is classified.
+    by_kind?: { [kind: string]: { total: number; failed: number; fail_rate: number | null } }
   } | null
   recent: Array<{
     run_id: string

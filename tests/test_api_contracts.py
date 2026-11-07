@@ -173,10 +173,17 @@ PILE_BOUND_SOURCES = {"bench-mine", "session-distill"}
 #: wire: the rollup also emits `silent`, `runs_with_bundle`, `runs_without_bundle` and
 #: the four `claims_*` keys, which the panel has never read and this set therefore does
 #: not claim. A key joining it is fine — it has to be looked at here first.
+#: `by_kind` joined it in #3906, which is the reader that had been waiting for it: the
+#: rollup has partitioned the window by `runs.kind` since `64ff6c01` and the panel could
+#: not ask, so a two-kind source showed one blended rate and the half that failed stayed
+#: unnamed. The keys this set still leaves out are exactly the seven named as
+#: `_STILL_UNDECLARED_HEALTH_KEYS` in `tests/test_workers_router.py` — `silent`,
+#: `runs_with_bundle`, `runs_without_bundle` and the four `claims_*` — and the two lists
+#: are the same debt written twice, so a key declared for one reason has to join here too.
 WORKER_SOURCE_HEALTH_NESTED_KEYS = {
     "total", "ok", "failed", "skipped", "fail_rate", "gpu_hours",
     "last_completed", "last_failure", "consecutive_failures",
-    "unfinished_matrix", "deadline_cut", "matrix_shrunk",
+    "unfinished_matrix", "deadline_cut", "matrix_shrunk", "by_kind",
 }
 
 

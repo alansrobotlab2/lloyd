@@ -1050,8 +1050,21 @@ judgement half.
   by the read. The payload could not say that, so the number was read as a live
   defect and #3523 was filed at `high`; the per-source block now carries
   `last_failure` and `consecutive_failures` beside `last_completed` (#3527),
-  which is what dates a failure population without opening `workers.db`. Where
-  the 51 sit: 9 on 2026-10-21, 25 on 2026-10-22, 14 on 2026-10-23, 3 on
+  which is what dates a failure population without opening `workers.db`. The
+  same per-source block also carries `by_kind`, that window partitioned by
+  `runs.kind` (#3526), which `workers/queue.py` builds beside the blended
+  figures: one entry per kind, each carrying that kind's own `total`, `failed`
+  and `fail_rate` over the same window, and the per-kind totals sum to the
+  source's `total`. A
+  kind's rate divides by that kind's own total and never by the source's — over
+  the 7 days to 2026-11-07 `youtube-digest` reads 57 runs with 1 failed (1.8 %)
+  blended while the video half reads 50 with 1 (2.0 %) and the paper half 7 with
+  0 (0 %), so the split and the blended figure are different numbers and only
+  the blended one is ever the alarm. A run whose row carries no kind is counted
+  under `__none__` (`NO_KIND` in `workers/queue.py`), and that key is absent
+  rather than zeroed for a source whose every run is classified —
+  `youtube-digest` has no `__none__` entry in that window, because all 57 of its
+  rows carry a kind. Where the 51 sit: 9 on 2026-10-21, 25 on 2026-10-22, 14 on
   2026-10-26; 47 carry `meta_json.handoff_refusal` with a summary of
   `turn ended (stop, N iterations) without a note at <path>`, N between 3 and
   13, which is the two-stage `stage-a-reader`/`stage-b-writer` pilot's own
@@ -1080,7 +1093,13 @@ looked for arXiv ids in the transcript only and wrote an abstract stub per hit;
 counted over the 517 bundles on disk that day it had found none and written no
 note, because a link is written in the description and never spoken — 21
 descriptions held an id, and most of Discover AI's name the paper by title and
-authors with no id at all. Now:
+authors with no id at all. The two halves are one source for every health read:
+a paper row and a video row both land on `youtube-digest`, and nothing in the
+`runs` row tells them apart but `runs.kind` itself. `/api/workers/health`
+therefore carries one row for both halves, and the only thing that separates
+them is `runs.kind` and the `by_kind` block partitioned by it (the health keys
+above) — which is why a paper half failing inside a source whose blended rate
+looks clean stays invisible until someone reads that block. Now:
 
 - **Registration is the script's, twice.** `--fetch` scans the transcript
   *and* the description and registers each arXiv id it finds. After the video's

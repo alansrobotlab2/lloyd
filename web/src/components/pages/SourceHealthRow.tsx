@@ -41,6 +41,32 @@ export function failureTailIsLive(h: SourceHealth): boolean {
 
 /** Should the rate be printed in the alarm colour? Both halves are required: a rate
  * that is merely high is history, and a live tail under 50 % is ordinary noise. */
+/** The per-kind split as one line, `''` when there is nothing to split (#3906).
+ *
+ * `by_kind` is #3526's partition of the same window by `runs.kind`: one entry per kind,
+ * each with that kind's own `total`/`failed`/`fail_rate`, the totals summing to the
+ * source's `total`. It prints only where a source actually has halves: a backend older
+ * than `64ff6c01` sends no key, an empty `{}` says the same thing, and ONE entry is that
+ * source's own figures restated back at it — the sum is the total — so printing it would
+ * put the same number on every row twice. `youtube-digest` is the one source the endpoint
+ * reports with two kinds today; the rest print nothing. Kinds print in name order so two
+ * reads of one window print one line.
+ *
+ * Context beside the rate, never the alarm: the decision above reads the source's own
+ * blended `fail_rate`, and no kind's number is allowed to colour the row. A kind can be 1
+ * failed of 1 — 100 % — on a single row, and alarming on that would report one run as a
+ * source on fire, which is the reading the blend exists to prevent. */
+export function kindSplitText(h: SourceHealth): string {
+  const kinds = Object.entries(h.by_kind ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  if (kinds.length < 2) return ''
+  return kinds
+    .map(([kind, v]) => {
+      const rate = v.fail_rate === null ? 'n/a' : `${Math.round(v.fail_rate * 100)}% failing`
+      return `${kind}: ${v.total} run${v.total === 1 ? '' : 's'}, ${v.failed} failed, ${rate}`
+    })
+    .join(' · ')
+}
+
 export function rateIsAlarming(h: SourceHealth): boolean {
   return h.fail_rate !== null && h.fail_rate >= ALARM_FAIL_RATE && failureTailIsLive(h)
 }
@@ -59,6 +85,7 @@ export function failureAgeText(h: SourceHealth): string {
 export function SourceHealthRow({ h }: { h: SourceHealth }) {
   const alarming = rateIsAlarming(h)
   const age = failureAgeText(h)
+  const kindSplit = kindSplitText(h)
   return (
     <>
       <span>{h.total} run{h.total === 1 ? '' : 's'}</span>
@@ -84,6 +111,11 @@ export function SourceHealthRow({ h }: { h: SourceHealth }) {
       {age !== '' && (
         <span className={cn(alarming && 'text-rose-400')}>{age}</span>
       )}
+      {/* #3906: the by_kind split beside the blended rate it is a partition of, in muted
+          ink and never in the alarm colour — which half of a two-kind source failed is
+          context for the reader, not a second threshold. Absent when the payload has no
+          `by_kind`, when its one kind is the whole source, or when it is empty. */}
+      {kindSplit !== '' && <span className="text-zinc-500">{kindSplit}</span>}
       <span>{h.gpu_hours}h</span>
       {h.last_completed && <span>last {relative(h.last_completed)}</span>}
     </>

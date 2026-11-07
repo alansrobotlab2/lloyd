@@ -4641,9 +4641,14 @@ def test_every_workers_jobs_failure_rate_names_the_span_it_counts():
     """
     page = _JOBS_PAGE.read_text(encoding="utf-8")
     triggered = _rate_guard_candidates(page)
-    assert len(triggered) == 3, (
+    # 3 -> 4 for #3906, which added the fourth: the `by_kind` sentence in §5's health-keys
+    # block quotes `youtube-digest`'s blended 1.8 % beside both kinds behind it, and names
+    # its span (`over the 7 days to 2026-11-07`) with numerator and denominator on each
+    # figure — so it passes the rule below and enters the count, which is what this message
+    # asks a later round to check for instead of widening the trigger for.
+    assert len(triggered) == 4, (
         f"the rate guard's trigger matched {len(triggered)} sentences, not the "
-        f"three this node was written against: {[t[:110] for t in triggered]} — a "
+        f"four this node was written against: {[t[:110] for t in triggered]} — a "
         "count rather than a name-list so that honest prose ADDED to the page moves "
         "it in the open instead of letting the guard go quiet (#3134). Re-check each "
         "one and adjust the number here, in the assertion, not by widening the "
@@ -4713,3 +4718,231 @@ def test_the_retired_51_percent_bullet_is_gone_and_still_trips_the_guard():
         "the retired 51 % bullet was spliced back onto the page and the guard above "
         "found nothing to complain about, so the rule is a no-op and everything in "
         "this node is decoration")
+
+
+# ---------------------------------------------------------------------------
+# #3906: the health block's by_kind partition, and the three readers of it
+# ---------------------------------------------------------------------------
+
+#: The one source the doc passage is about, and the one the endpoint reports with two
+#: kinds today — which is why the passage and the field are named in the same breath.
+KINDED_SOURCE = "youtube-digest"
+
+#: One source's runs, in the shape the rollup splits them: two paper rows (one failed),
+#: four video rows (one failed) and one run whose row carries no kind. Chosen so every
+#: rate in the block is a different number — a blend of 2/7, a video half of 1/4 and a
+#: paper half of 1/2 — because a fixture where the three agree cannot tell a per-kind
+#: figure from the blended one, which is the confusion the doc has to survive.
+_KINDED_RUNS = [
+    ("success", "video"), ("failed", "video"), ("success", "video"),
+    ("success", "video"), ("success", "paper"), ("failed", "paper"),
+    ("success", None),
+]
+
+
+def _rollup_of_a_kinded_source(tmp_path, runs=_KINDED_RUNS, name="doc-claims.db"):
+    """The per-source rollup the endpoint serves over `runs`, straight from the emitter.
+
+    The rows go straight into `runs` because they are the POPULATION being read, not jobs to
+    run: `kind` is the column the rollup partitions on, and the run-complete path derives it
+    from a queue row that would have to exist for a reason these nodes have none of. The dict
+    comes from `WorkQueue.run_rollup_by_source` — the method `app/routers/workers.py` calls to
+    build the `health` key of every `/api/workers/health` source row — so the doc is graded
+    against the payload and not against another sentence, and the WHOLE dict is returned rather
+    than one source's block so a node can say what the row set is and not only what one row
+    holds.
+
+    The two asserts are a control on the FIXTURE, not on the emitter, and they are written so
+    they can fail. That SELECT counts ok as `SUM(status = 'success')`, so a row stamped
+    `succeeded` — a spelling no writer in `workers/` uses — is neither ok nor failed, and a
+    seeded population that quietly reads as neither is a population none of the doc's figures
+    are being read from. What that control must NOT be is `ok == <count of 'success' rows>`:
+    an expectation computed from the same list that produced the actual value is true by
+    construction, which is the defect the review rung sent round SM_20261107_205309 back for
+    (`tests/test_workers_doc_claims.py`, "the node's final assert is a disjunction the fixture
+    always satisfies"). So the control compares the rollup's own three counters against its own
+    `total`, and its `total` against the row count — arithmetic that a bogus status breaks and
+    that nothing else in the fixture can repair.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from workers.queue import WorkQueue
+
+    wq = WorkQueue(tmp_path / name)
+    now = datetime.now(timezone.utc)
+    with wq._connect() as conn:                       # the population, not the job API
+        for i, (status, kind) in enumerate(runs):
+            stamp = (now - timedelta(hours=i + 1)).isoformat()
+            conn.execute(
+                "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+                " duration_seconds, summary, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"run-3906-{i}", KINDED_SOURCE, status, stamp, stamp, 1.0, "s", kind))
+    rows = wq.run_rollup_by_source((now - timedelta(days=7)).isoformat())
+    block = rows[KINDED_SOURCE]
+    assert block["total"] == len(runs), (
+        f"the rollup returned a total of {block['total']} for {len(runs)} rows this fixture "
+        "wrote, so the window edge and the population do not agree and every figure below is "
+        "a rate over a denominator that is not the one being counted")
+    assert block["ok"] + block["failed"] + block["skipped"] == block["total"], (
+        f"of {block['total']} seeded rows the rollup counts {block['ok']} ok, "
+        f"{block['failed']} failed and {block['skipped']} skipped, so a status spelling in "
+        "_KINDED_RUNS is one no figure counts at all — the rows carrying it are invisible to "
+        "the totals, rates and per-kind sums this doc is quoted against")
+    return rows, block
+
+
+def _health_of_a_kinded_source(tmp_path, runs=_KINDED_RUNS, name="doc-claims.db"):
+    """One multi-kind source's health block, plus `NO_KIND` for the callers' key name."""
+    from workers.queue import NO_KIND
+
+    _, block = _rollup_of_a_kinded_source(tmp_path, runs=runs, name=name)
+    return block, NO_KIND
+
+
+def _health_keys_block():
+    """The §5 sentence introducing `by_kind` and its three worked figures.
+
+    Bounded by two phrases the passage itself owns: the clause that opens the `by_kind`
+    sentence after #3527's `last_failure`/`consecutive_failures` lines, and the failure-date
+    enumeration that follows the passage. Named phrases rather than line numbers, because a
+    doc line number here is a claim the next re-freeze moves.
+    """
+    doc = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    start = doc.find("same per-source block also carries `by_kind`")
+    end = doc.find("Where the 51 sit", start)
+    assert start != -1 and end > start, (
+        "the §5 health-keys passage is not findable between its two named landmarks, so "
+        "everything below reads a window chosen by nothing")
+    return doc[start:end]
+
+
+def test_the_health_keys_block_documents_the_by_kind_partition_the_rollup_emits(tmp_path):
+    """The doc names `by_kind` and the emitter proves every claim that sentence makes.
+
+    #3526 shipped the key and left its readers; #3906 is the doc reader, and a doc clause
+    pinned by grep alone says the file mentions a word. So each claim in the new passage —
+    that a kind carries its own `total`/`failed`/`fail_rate`, over the same window, that the
+    per-kind totals sum to the source's total, that `__none__` is the key for a run with no
+    kind and that the key is absent rather than zeroed when every run is classified, and
+    that each printed percentage is that kind's failures over that kind's own count — is
+    re-derived from `WorkQueue.health` in this node. The worked figures are arithmetic too:
+    the parenthesised percentages are parsed out of the prose and recomputed, so a re-frozen
+    window whose numbers stop dividing correctly goes red here.
+    """
+    block = _health_keys_block()
+    rollup, no_kind = _health_of_a_kinded_source(tmp_path)
+
+    for name in ("by_kind", no_kind, "NO_KIND", "`total`", "`failed`", "`fail_rate`"):
+        assert name in block, f"the health-keys block does not document {name}"
+    assert "sum to the" in block and "source's `total`" in block, (
+        "the block no longer says the per-kind totals sum to the source's total, which is "
+        "the property that makes the partition a reading of one window and not of two")
+    assert "same window" in block, (
+        "the block no longer says a kind's figures share the source's window — the whole "
+        "point of the field being beside `total` rather than a second query")
+
+    kinds = rollup["by_kind"]
+    assert set(kinds) == {"video", "paper", no_kind}, (
+        f"the rollup's kind keys are {sorted(kinds)}, so the doc's key list is a claim "
+        "about a payload this call did not produce")
+    for kind, v in kinds.items():
+        assert set(v) == {"total", "failed", "fail_rate"}, (
+            f"{kind}'s entry carries {sorted(v)}, not the triple the block documents")
+    assert sum(v["total"] for v in kinds.values()) == rollup["total"]
+    assert sum(v["failed"] for v in kinds.values()) == rollup["failed"]
+    assert kinds["paper"]["fail_rate"] == 0.5 and kinds["video"]["fail_rate"] == 0.25, (
+        f"a kind's rate is no longer its own failed over its own total: {kinds} — the doc "
+        "says so in words and would be a false claim")
+    assert kinds["paper"]["fail_rate"] != rollup["fail_rate"], (
+        "the blend and a kind's rate came out equal on a fixture built to separate them, "
+        "so this node can no longer tell the two figures apart")
+
+    # Absent, not zeroed: the block says so, and the emitter must keep saying it.
+    classified_block, no_kind2 = _health_of_a_kinded_source(
+        tmp_path, runs=[(s, k) for s, k in _KINDED_RUNS if k is not None],
+        name="classified.db")
+    assert no_kind2 not in classified_block["by_kind"], (
+        f"a source whose every run is classified now publishes {no_kind2} anyway, so the "
+        "block's 'absent rather than zeroed' is a lie and a reader counts a phantom kind")
+    assert classified_block["by_kind"] == {
+        k: v for k, v in rollup["by_kind"].items() if k != no_kind}, (
+        "dropping the one kindless run changed the other kinds' figures, which would make "
+        "the key's presence a re-basing of the whole partition")
+    assert "no `__none__` entry" in block, (
+        "the block no longer names the case where the key is absent — the reading that "
+        "stops a reader reporting a phantom 0 for a fully-classified source")
+
+    # The worked figures in the prose are arithmetic, not remembered numbers.
+    # `\\s+` throughout, because this doc wraps at ~80 columns and one of the three
+    # figures is split across a line break — a single-space pattern misses it and the
+    # node then reports two worked figures where the passage carries three.
+    shown = re.findall(r"(\d+)\s+(?:runs\s+)?with\s+(\d+)(?:\s+failed)?\s+\((\d+(?:\.\d+)?)\s%\)",
+                       block)
+    assert len(shown) == 3, (
+        f"the block shows {len(shown)} worked figures, not the three it is written to "
+        f"carry (blend, video half, paper half): {shown}")
+    for total, failed, pct in shown:
+        want = round(int(failed) / int(total) * 100, 1)
+        assert abs(want - float(pct)) < 0.05, (
+            f"{failed} of {total} is {want} %, but the block prints ({pct} %)")
+
+
+def test_the_paper_kind_passage_says_the_two_halves_are_one_health_row(tmp_path):
+    """The passage that introduces `kind="paper"` states what that costs a health read.
+
+    A paper row and a video row share the source name `youtube-digest`, so the endpoint
+    carries one row for both and the only things that separate them are `runs.kind` and the
+    `by_kind` block partitioned by it. The node pins those words in the passage and proves
+    the four things the emitter has to keep true for that sentence to be about the payload:
+    the rollup's row set holds exactly one row for the source (so there is no
+    `youtube-digest:paper` row for a reader to look for instead), that row's `by_kind` carries
+    both `paper` and `video`, its unclassified run is a group of its own carrying its own
+    figures, and the per-kind totals sum to the row's `total`. The §5 Intake location the
+    clause names is checked too, by the nearest heading above the passage rather than by a
+    line number.
+    """
+    doc = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    start = doc.find('**A cited paper is a second kind of row** (`kind="paper"`, keyed')
+    end = doc.find("- **Registration is the script's, twice.**", start)
+    assert start != -1 and end > start, (
+        "the passage introducing the paper kind is not findable between its two named "
+        "landmarks, so the claim below is checked against a window chosen by nothing")
+    passage = doc[start:end]
+
+    # Clause 2 says this is the §5 INTAKE passage, and it has to be read together with the
+    # health-keys block above — that block defines `by_kind`, this passage says what the
+    # partition is for. The landmarks below would still find the prose if it had drifted under
+    # another heading, so the section is measured rather than assumed.
+    heading_at = doc.rfind("\n## ", 0, start)
+    assert heading_at != -1, (
+        "there is no `## ` heading anywhere above the paper-kind passage, so the doc has no "
+        "section structure for clause 2's location claim to be about")
+    heading = doc[heading_at + 1:doc.index("\n", heading_at + 1)].strip()
+    assert heading.startswith("## 5. Intake"), (
+        f"the paper-kind passage sits under {heading!r}, not §5 Intake, which is where clause "
+        "2 puts it and where the health-keys block it points a reader at also lives")
+
+    for name in ('kind="paper"', "`runs.kind`", "by_kind", "one source", "blend"):
+        assert name in passage, (
+            f"the paper-kind passage no longer says {name!r}: the halves sharing one row "
+            "is the fact a reader needs before trusting a blended rate")
+
+    rows, rollup = _rollup_of_a_kinded_source(tmp_path, name="paper-passage.db")
+    from workers.queue import NO_KIND as no_kind
+
+    assert set(rows) == {KINDED_SOURCE}, (
+        f"the rollup publishes rows for {sorted(rows)}; the passage's whole claim is that a "
+        f"reader finds ONE row for both halves, so a second row — a `{KINDED_SOURCE}:paper` "
+        "row, or the halves split across two — is the passage being false at the payload")
+    assert {"paper", "video"} <= set(rollup["by_kind"]), (
+        f"the emitter's kind keys are {sorted(rollup['by_kind'])}, so the passage's two "
+        "halves are not the payload's two halves")
+    assert rollup["by_kind"].get(no_kind) == {"total": 1, "failed": 0, "fail_rate": 0.0}, (
+        f"the fixture's one unclassified run is {rollup['by_kind'].get(no_kind)!r} in the "
+        "partition; the passage says every run of both halves lands in this one row, which "
+        "means the row's partition covers it too, counted by itself and not folded into a "
+        "half it was never a member of")
+    assert sum(v["total"] for v in rollup["by_kind"].values()) == rollup["total"], (
+        "the groups do not add up to the row's own total, so 'one row for both halves' is a "
+        f"row of {rollup['total']} reading a partition of "
+        f"{sum(v['total'] for v in rollup['by_kind'].values())}")
