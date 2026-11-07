@@ -681,7 +681,7 @@ def task_body_contract_errors(paths: list[str], *, vault: Path | None = None) ->
     return errors
 
 
-def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+def validate(paths: list[str], session_id: "str | None" = None) -> tuple[list[str], dict[str, list[str]]]:  # noqa: E501  (#3870: `session_id` says WHO is landing — it picks the copy of `eval/autoresearch_assertions.yaml` a new bench card is checked against, and marks a real land as worth a journal row; a bare caller keeps today's verdict and writes nothing, which is what the CLI `validate` subcommand at the bottom of this file and `tests/test_okf_type_taxonomy.py`'s one-argument probes rely on; `vault_guards.py` never calls `validate` at all)
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
     if not ok:
@@ -727,7 +727,7 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     if not errors and SKILL_BODY_ENFORCE:
         errors.extend(f"skills/{r['skill']}/SKILL.md: skill body-line ceiling: {r['reason']}"
                       for r in skill_body_findings(paths))
-    return errors, buckets
+    return errors + _bench_card_assertion_errors(buckets['validated'], session_id), buckets
 
 
 # Imported here rather than in the header for the same reason the function-local
@@ -1755,7 +1755,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     if not (message or "").strip():
         raise VaultRoundError("a commit message is required")
 
-    errors, buckets = validate(norm)
+    errors, buckets = validate(norm, session_id=session_id or '')
     if errors:
         # The rail that refused a landing has to be named on the row that records
         # the refusal (#2148). Until now the activation gate ran only *after*
@@ -2462,6 +2462,103 @@ def run_citation_errors(paths: list[str]) -> list[str]:
                 f"Bind the claim to something that survives: the command or query that "
                 f"re-derives it, or a code sha.")
     return errs
+
+
+# ── #3870: the bench rail's landing door ────────────────────────────────────────────
+#
+# Four writer lanes refuse a numbered bench task whose key has no assertion set behind it
+# (`app/harness/bench_authoring.py`), and not one of them is THIS door: a card refused by
+# `vault_write` could always arrive by `automod_vault_land`, which commits bytes already in
+# the tree after twelve checks, none of them bench-shaped. That is how #3688's own landing
+# produced red-tree item #3740 — main sat at 28 assertion keys against 31 cards, and the
+# one judge node that says so is `live_vault`-marked, so the gate deselects it and the
+# census node caught the class four days later. Covering `validate()` closes the door that
+# incident used. It does NOT close `scripts/util/vault-commit.sh`, the second door onto the
+# vault's main, which is report-only by design and stays owed-check's scope ruling.
+#
+# Defined here rather than beside `validate` so that not one of the line numbers notes
+# cite (`vault_round.py:881`, `:1735`, `:1879`, `:1943`, `:1969`, `:2260`, `:2276`, `:2367`,
+# `:2412`) moves: `test_prompt_surface_budget.py` fails the round whose diff moves a cited
+# line, and this module has been bitten by that before.
+
+
+def _round_assertion_table(session_id: "str | None") -> "Path | None":
+    """Which copy of `eval/autoresearch_assertions.yaml` this landing must satisfy.
+
+    Thin delegation to `app.harness.bench_authoring.assertion_table_for_session`, so that
+    "is this session a round, and where is its worktree" is decided once for the rail and
+    this door alike — the rail already answers it to choose the WORDING of a refusal
+    (#2718), and a door that answered it separately could disagree about which tree it is
+    refusing. None means the live checkout's copy, which is also what a non-round land and
+    an unreadable session record get.
+    """
+    try:
+        from app.harness import bench_authoring as RAIL
+    except Exception:  # noqa: BLE001 — no rail module, so nothing to delegate to
+        return None
+    return RAIL.assertion_table_for_session(session_id)
+
+
+def _bench_card_assertion_errors(validated: list[str], session_id: "str | None") -> list[str]:
+    """Errors for a landing that ADDS a `lloyd/bench/bench_NN_*.md` with no assertion set.
+
+    Called by `validate` with the validated bucket and the landing session's id ("" for a
+    land that could not name one, None for a caller that is not landing — see `land`).
+
+    **One-way, and the rule lives here because HEAD is readable only here.** A path is an
+    ADD exactly when `git cat-file -e HEAD:<path>` fails; a card already committed is never
+    newly refused even with its key missing, because refusing an edit to an existing card
+    would make every card unfixable by precisely the landing that would fix it. A table key
+    with no card stays legal — the repo may carry an assertion set for a card no round has
+    landed yet — and no path outside `lloyd/bench/` is looked at at all.
+
+    One denial-journal row for the WHOLE refused land when this is a land, `guard=
+    bench_assertion_rail` like the four writer lanes' rows. One, not one-per-path, because
+    `land()` refuses a batch on its first error while `validate` has already named them all
+    — a per-path row would describe a refusal of only the first card and under-count the
+    round. The rail itself writes nothing: the surface that was asked is what journals.
+
+    Fails closed like `knowledge_type_error` above: a bench rail that cannot be imported
+    says so over a bench-touching land rather than reporting everything clean.
+    """
+    cards = [p for p in validated if p.startswith("lloyd/bench/") and p.endswith(".md")]
+    if not cards:
+        return []
+    try:
+        from app.harness import bench_authoring as RAIL
+    except Exception as exc:  # noqa: BLE001
+        return [f"lloyd/bench/: bench assertion check failed closed: bench_authoring is "
+                f"unimportable ({exc})"]
+    # The bench-shaped STEMS among them is `bench_card_landing_defect`'s test, through the
+    # rail's own `BENCH_TASK_FILE_RE` and not a second copy of it here: `lloyd/bench/`
+    # holds its sub-index `index.md` and its triage notes, and a stem rule cloned into
+    # this module is a rule that drifts from the one the writers apply.
+    cards = [p for p in cards if RAIL.BENCH_TASK_FILE_RE.match(p.rsplit("/", 1)[-1])]
+    table = _round_assertion_table(session_id)
+    errors: list[str] = []
+    refused: list[tuple[str, str]] = []
+    for p in cards:
+        exists_at_head = _git("cat-file", "-e", f"HEAD:{p}").returncode == 0
+        text = RAIL.bench_card_landing_defect(p, exists_at_head=exists_at_head,
+                                              table_path=table)
+        if text:
+            errors.append(text)
+            refused.append((p, text))
+    if refused and session_id is not None:
+        try:
+            from app.harness import denial_journal
+            denial_journal.record(
+                guard="bench_assertion_rail", where="tool",
+                session_id=(session_id or None), tool="automod_vault_land",
+                reason="bench card landed without its assertion rows: "
+                       + ", ".join(p.rsplit("/", 1)[-1][:-len(".md")] for p, _ in refused),
+                excerpt=" || ".join(f"{p} -> {p.rsplit('/', 1)[-1][:-len('.md')]}"
+                                    for p, _ in refused))
+        except Exception:  # noqa: BLE001 — the refusal stands without its row, as
+            # `bench_authoring.record_refusal` swallows: a journal that is down must not
+            # become a second verdict, and must not eat the first one either.
+            pass
+    return errors
 
 
 def main(argv=None) -> int:

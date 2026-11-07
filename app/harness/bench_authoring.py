@@ -77,6 +77,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,91 @@ def frontmatter_id(content: str | None) -> str:
     return match.group(1) if match else ""
 
 
-def assertion_key_defect(task_id: str, session_id: str | None = None) -> str:
+def _lookup(task_id: str, table_path: "str | os.PathLike | None" = None
+            ) -> tuple[str, str, object]:
+    """(state, table read, detail) — the ONE table read behind every verdict here.
+
+    `state` is `ok` / `missing` / `not_a_set` / `duplicate_rows` / `unreadable`; `detail`
+    is whatever that state's sentence interpolates (the shape of the entry, the list of
+    row ids, why the table could not be read) and is `""` for the two states that name
+    nothing. Splitting the read from the wording is what lets `vault_round` ask the same
+    question and answer it in the landing's own words (#3870) without becoming a second
+    source of truth about the table — the failure this module's whole design exists to
+    avoid.
+
+    `table_path` aims the read at a COPY of the file. Handed straight to
+    `judge.load_assertions(path=…)`, because that module owns the format. Omitted, the
+    call is the one this module made before the argument existed —
+    `judge.load_assertions()` with no argument, which reads `judge.ASSERTIONS_PATH` — so
+    the defaulted verdict is the live tree's answer and not a re-derivation of it.
+
+    Fails closed, and says which failure it saw. `judge.load_assertions` returns `{}`
+    for a missing or unreadable file — correct for a judge, which then routes everything
+    to the scalar path and still produces a score, and the wrong thing for a guard: an
+    empty table read as "no keys" would refuse every bench write with a reason that
+    blames the writer for the state of the repo. So the two states are separated, and
+    the one the writer did not cause says so and names the path rather than a key.
+    """
+    task_id = (task_id or "").strip()
+    if not task_id:
+        return ("ok", "", "")
+    try:
+        from scripts.autoresearch import judge
+    except Exception as exc:  # noqa: BLE001 — an unimportable table is not a table that passed
+        return ("unreadable", "", f"scripts.autoresearch.judge is unimportable ({exc})")
+    tbl = (os.fspath(table_path) if table_path is not None
+           else str(getattr(judge, "ASSERTIONS_PATH", TABLE_REL)))
+    try:
+        table = (judge.load_assertions(path=Path(os.fspath(tbl)))
+                 if table_path is not None else judge.load_assertions())
+    except Exception as exc:  # noqa: BLE001
+        return ("unreadable", tbl, f"{tbl} could not be read ({exc})")
+    if not isinstance(table, dict) or not table:
+        return ("unreadable", tbl,
+                f"{tbl} yielded no assertion keys at all"
+                + ("" if os.path.isfile(tbl) else " and is not present at that path"))
+    entry = table.get(task_id)
+    if entry is None:
+        return ("missing", tbl, "")
+    try:
+        rows = judge.assertions_for({"id": task_id}, table)
+    except Exception as exc:  # noqa: BLE001
+        return ("unreadable", tbl, f"assertions_for({task_id}) raised ({exc})")
+    if not rows:
+        return ("not_a_set", tbl, _shape(entry))
+    ids = [str(r.get("id")) for r in rows]
+    if len(ids) != len(set(ids)):
+        return ("duplicate_rows", tbl, ids)
+    return ("ok", tbl, "")
+
+
+def _state_reason(task_id: str, state: str, tbl: str, detail: object,
+                  *, can_land: bool) -> str:
+    """One sentence per non-`ok` state, in exactly the words every lane says.
+
+    Split from `_lookup` so the landing door can reuse the wording for the states whose
+    remedy is not "add the rows" — an entry that is not an assertion set, a repeated row
+    id, an unreadable table — rather than paraphrase them and become a second answer.
+    """
+    if state == "missing":
+        return _missing_key(task_id, can_land)
+    if state == "not_a_set":
+        return (
+            f"{task_id} has an entry in {tbl} but it is not an assertion set: "
+            f"{detail}. The judge scores that on the scalar rubric while every "
+            "task with real rows scores binary, which is the fallback this rail exists "
+            "to end — replace it with a list of `id:`/`text:` rows (one per rubric "
+            "criterion, `conciseness` excepted) rather than a `graded: true` marker.")
+    if state == "duplicate_rows":
+        return (f"{task_id}: its assertion rows in {tbl} repeat an id ({detail}), "
+                "so the binary judge would count one check twice")
+    if state == "unreadable":
+        return _unreadable(task_id, str(detail))
+    return ""
+
+
+def assertion_key_defect(task_id: str, session_id: str | None = None,
+                         table_path: "str | os.PathLike | None" = None) -> str:
     """"" when the table carries real assertion rows for `task_id`; else why not.
 
     `session_id` says who is being told, and only changes the WORDS of the missing-key
@@ -123,65 +208,51 @@ def assertion_key_defect(task_id: str, session_id: str | None = None) -> str:
     session. Left empty it resolves the calling session the same way `record_refusal`
     already does, so no lane has to thread it and no lane can forget it.
 
+    `table_path` is which COPY of the table the verdict is taken from (#3870,
+    `_lookup`). The invariant is the OMITTED half, not the identity of whoever asks: with
+    no argument the answer is the live checkout's, and every non-land caller omits it.
+    `bench_card_landing_defect` is the one function in this module that supplies it, and
+    it does so only because its caller hands it the copy a session resolver picked. With
+    it omitted every answer — accept, missing key, an entry that is not an assertion set,
+    a repeated row id, an unreadable table — is byte-identical to the live tree's, which
+    is what lets the four writer lanes and the land lane share one
+    predicate while reading different trees.
+
     The answer is the judge's own answer — `judge.load_assertions()` for the table and
     `judge.assertions_for()` for the resolution — so the rail cannot disagree with the
     thing it is protecting. A `graded: true` mapping resolves to `None` there, and is a
     defect here, for the reason in this module's docstring.
-
-    Fails closed. `judge.load_assertions` returns `{}` for a missing or unreadable file
-    — correct for a judge, which then routes everything to the scalar path and still
-    produces a score, and the wrong thing for a guard: an empty table read as "no keys"
-    would refuse every bench write with a reason that blames the writer for the state of
-    the repo. So the two states are separated, and the one the writer did not cause says
-    so and names the path rather than naming a missing key.
     """
-    task_id = (task_id or "").strip()
-    if not task_id:
+    state, tbl, detail = _lookup(task_id, table_path)
+    if state == "ok":
         return ""
-    try:
-        from scripts.autoresearch import judge
-    except Exception as exc:  # noqa: BLE001 — an unimportable table is not a table that passed
-        return _unreadable(task_id, f"scripts.autoresearch.judge is unimportable ({exc})")
-    table_path = str(getattr(judge, "ASSERTIONS_PATH", TABLE_REL))
-    try:
-        table = judge.load_assertions()
-    except Exception as exc:  # noqa: BLE001
-        return _unreadable(task_id, f"{table_path} could not be read ({exc})")
-    if not isinstance(table, dict) or not table:
-        return _unreadable(
-            task_id,
-            f"{table_path} yielded no assertion keys at all"
-            + ("" if os.path.isfile(table_path) else " and is not present at that path"))
-    entry = table.get(task_id)
-    if entry is None:
-        return _missing_key(task_id, can_land_table_edit(session_id))
-    try:
-        rows = judge.assertions_for({"id": task_id}, table)
-    except Exception as exc:  # noqa: BLE001
-        return _unreadable(task_id, f"assertions_for({task_id}) raised ({exc})")
-    if not rows:
-        return (
-            f"{task_id} has an entry in {table_path} but it is not an assertion set: "
-            f"{_shape(entry)}. The judge scores that on the scalar rubric while every "
-            "task with real rows scores binary, which is the fallback this rail exists "
-            "to end — replace it with a list of `id:`/`text:` rows (one per rubric "
-            "criterion, `conciseness` excepted) rather than a `graded: true` marker.")
-    ids = [str(r.get("id")) for r in rows]
-    if len(ids) != len(set(ids)):
-        return (f"{task_id}: its assertion rows in {table_path} repeat an id ({ids}), "
-                "so the binary judge would count one check twice")
-    return ""
+    return _state_reason(task_id, state, tbl, detail,
+                         can_land=can_land_table_edit(session_id))
 
 
 def bench_write_defect(path: str, cwd: str | None = None,
                        claimed_id: str = "", content: str | None = None,
-                       session_id: str | None = None) -> str:
+                       session_id: str | None = None,
+                       table_path: "str | os.PathLike | None" = None) -> str:
     """"" when writing `path` is allowed; the refusal reason when it is a keyless task.
 
     `session_id` reaches only the wording of a missing-key refusal; empty resolves the
     calling session. Every lane calls this with the first four arguments and nothing
     else, which is what keeps #2718's branch from being a rule each surface has to
     remember to pass.
+
+    `table_path` is threaded to BOTH key checks and nothing else (#3870): the filename's
+    stem and the id the content claims are answered by one predicate, and threading it to
+    the first alone would leave a card whose claimed key is judged against a different
+    table than its own name. No production caller asks that question: the four lanes reach
+    this through a lane-local wrapper (`test_every_lane_that_can_write_into_the_corpus_asks_the_rail`
+    enumerates them), and none of the four passes a `table_path` — which
+    `git grep -n "bench_write_defect(" -- agent_mcp app workers` answers in one line. The
+    argument is therefore omitted in every real call, which is the invariant clause 1 is
+    about, and its only supplied use today is a test redirecting the table
+    (`test_the_table_path_reaches_both_of_the_writers_key_checks`). The landing door takes a
+    different entry point, `bench_card_landing_defect`, the only function here that
+    supplies it, and only from the copy a session resolver picked.
 
     `path` may be vault-relative (`lloyd/bench/…`, as `vault_write` gets it), absolute,
     `~`-prefixed or relative to `cwd` — resolution is `bench_corpus.corpus_target`'s,
@@ -213,12 +284,12 @@ def bench_write_defect(path: str, cwd: str | None = None,
     if not BENCH_TASK_FILE_RE.match(name):
         return ""
     stem = name[:-len(".md")]
-    defect = assertion_key_defect(stem, session_id)
+    defect = assertion_key_defect(stem, session_id, table_path=table_path)
     if defect:
         return defect
     extra = (claimed_id or "").strip() or frontmatter_id(content)
     if extra and extra != stem:
-        return assertion_key_defect(extra, session_id)
+        return assertion_key_defect(extra, session_id, table_path=table_path)
     return ""
 
 
@@ -244,14 +315,48 @@ def _round_worktree_session(sid: str,
     checkout, so this predicate inherits both instead of re-implementing either;
     `sessions_dir` is its test seam.
     """
+    return _round_worktree_cwd(sid, sessions_dir) is not None
+
+
+def _round_worktree_cwd(sid: str,
+                        sessions_dir: "os.PathLike | str | None" = None) -> str | None:
+    """The round worktree this session started in, or None. The read behind
+    `_round_worktree_session`, split out because the landing door needs the DIRECTORY,
+    not the boolean: which copy of the assertion table a land is checked against is a
+    path question (#3870 clause 3), and the two answers must come from one read of one
+    record rather than from two readers that can disagree about what a round is."""
     if not sid or ":" in sid:
-        return False
+        return None
     try:
         from app import session_cwd
         cwd = session_cwd.read(sid, sessions_dir=sessions_dir)
     except Exception:  # noqa: BLE001 — an unreadable record is not proof of a round
-        return False
-    return bool(_ROUND_DIR_RE.search(cwd or ""))
+        return None
+    return cwd if _ROUND_DIR_RE.search(cwd or "") else None
+
+
+def assertion_table_for_session(
+        session_id: str | None, *,
+        sessions_dir: "os.PathLike | str | None" = None) -> "Path | None":
+    """Which copy of the assertion table a vault landing must satisfy, or None.
+
+    None means *the live tree's* — the answer `judge.load_assertions()` already gives
+    with no argument — so a caller threads the result straight into
+    `assertion_key_defect(table_path=…)` and the non-round case keeps the verdict it has
+    always had. A path means the landing session is an automod round, and the copy that
+    answers is the one in **its own worktree**: a round authors its assertion rows there
+    and then lands the card, so reading the live `eval/autoresearch_assertions.yaml`
+    would refuse the exact round this item exists to serve (rows-before-cards, the knot
+    behind #1724/#1968/#2174/#2228/#3740).
+
+    Three cases answer None, and the third is the fail-closed one: a session that is not
+    a round; a session with no record or an unparseable one; a `task:`-prefixed subagent.
+    A round cannot therefore read its own permissive copy by losing its own session
+    record — it falls back to the live table, which does not have the rows yet.
+    `sessions_dir` is `app.session_cwd`'s test seam, passed through unchanged.
+    """
+    cwd = _round_worktree_cwd(str(session_id or "").strip(), sessions_dir)
+    return None if cwd is None else Path(cwd) / TABLE_REL
 
 
 def can_land_table_edit(session_id: str | None = None) -> bool:
@@ -341,6 +446,79 @@ def _shape(entry: object) -> str:
     if isinstance(entry, dict):
         return f"a mapping with keys {sorted(entry)}"
     return f"a {type(entry).__name__}"
+
+
+def _card_missing_rows(path: str, task_id: str, table: str) -> str:
+    """The one sentence the landing door says for a card whose key is not in the table.
+
+    Worded for a reader with a commit in front of them, not for a session holding a tool
+    call. The table is named always, and `app.harness.policy`'s #3285 ban on the
+    repo-internal address in a *tool* denial does not reach it — this is a land refusal's
+    validation error, the same class as the `autonomy description file` and `skill
+    timezone` errors beside it, and the reader it serves is the round that must go author
+    those rows. The retry-shaped tail is gone rather than paraphrased: a land is not a
+    retry, and the instruction that replaces it is the ORDERING — the rows are committed
+    in the round that commits the card, and that round's gate runs over one tree carrying
+    both, which is what dissolves the rows-before-cards knot for good.
+
+    The remedy is in the MIDDLE and not at the end because `land()` prefixes this with
+    `validation failed; the change was reverted: ` (44 characters) and joins up to five
+    errors before `agent_mcp._shared._err` cuts the whole thing at 500: a batch refusing
+    two cards is 600-odd characters whatever the wording, so the one part of the sentence
+    that must survive the cut is the ordering, and putting the reason after it is what
+    makes the message survive badly-or-well in both cases. The table is named repo-relative
+    for the same arithmetic — the rooted `judge.ASSERTIONS_PATH` costs 18 more characters
+    to say the same thing to a reader whose working directory IS the tree that file is in.
+    """
+    return (f"{path}: {task_id} has no assertion set in {table} — land its assertion "
+            "rows in the SAME round as the card. An unkeyed card is scored on the "
+            "judge's scalar rubric while every keyed task scores binary.")
+
+
+def bench_card_landing_defect(path: str, *, exists_at_head: bool,
+                              table_path: "str | os.PathLike | None" = None) -> str:
+    """"" when landing `path` into the vault is allowed; the refusal when it is not.
+
+    The landing door's half of the same predicate the four writer lanes call: the same
+    `_lookup` read and the same `_state_reason` sentences as `assertion_key_defect`, and
+    no table read of its own — so the land cannot become a second source of truth about
+    the table (#3870). The one thing it changes is the missing-key wording, because
+    `_missing_key`'s remedy ("add it to the file, then retry") is addressed to a session
+    holding a tool call: a land has no table to edit and nothing to retry, and the thing
+    it must be told instead is that the rows and the card belong to one round.
+
+    **One-way, by construction.** The refusal exists only for a path that is *added* by
+    this landing (`exists_at_head=False`) and whose stem is bench-shaped; every other
+    input returns `""` before the table is opened. An edit to a card already in the tree
+    is not newly refused even if its key is missing — refusing it would make every
+    existing card unfixable by exactly the landing that would fix it — and a key with no
+    card stays legal, because the repo side may carry an assertion set for a card another
+    round has not landed yet. Both arms are pinned by nodes in
+    `tests/test_bench_assertion_rail.py` over fixture trees, where a passing node cannot
+    be read as "the live vault happens to be consistent".
+
+    `table_path` is which copy answers; None is the live tree's, and
+    `assertion_table_for_session` is what picks it for a landing.
+
+    Returns text and writes nothing, exactly like `bench_write_defect`: the surface that
+    was asked is what journals the refusal, because the surface is the thing that knows
+    whether one call is one refusal. `scripts/automod/vault_round` writes one row per
+    refused LAND, so it must not be handed a predicate that writes one per refused path.
+    """
+    p = (path or "").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    name = Path(p).name
+    # The same matcher the writers match, applied the same way — to the NAME WITH `.md`,
+    # which is what the pattern is anchored to, and then stripped for the key.
+    if exists_at_head or not BENCH_TASK_FILE_RE.match(name):
+        return ""
+    stem = name[:-len(".md")]
+    state, tbl, detail = _lookup(stem, table_path)
+    if state == "ok":
+        return ""
+    return (f"{p}: {_state_reason(stem, state, tbl, detail, can_land=False)}"
+            if state != "missing" else _card_missing_rows(p, stem, TABLE_REL))
 
 
 def record_refusal(where: str, tool: str, path: object, reason: str) -> None:

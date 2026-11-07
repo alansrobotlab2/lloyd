@@ -711,3 +711,611 @@ def test_neither_wording_is_cut_from_the_actionable_half():
             f"the denial arrives cut, and the tail is where the remedy is: {reason[-60:]}")
     print(f"longest id {longest!r} ({len(longest)} chars): "
           f"attended {measured[True]}, background {measured[False]}")
+
+
+# ══ #3870: the landing door ══════════════════════════════════════════════════════════
+#
+# Everything above this line is the rail on a WRITE: a session holding a tool call is
+# refused a keyless task on four lanes. This section is the rail on the LANDING, which is
+# the seam those four refusals never reached — `automod_vault_land` commits bytes already
+# in the tree, and none of `validate`'s twelve checks was bench-shaped, so #3688's own
+# landing put three keyless cards on the vault's main while main sat at 28 assertion keys
+# against 31 cards. The red tree that followed is item #3740, and the extra round it cost
+# (SM_20261103_195921 → 5604ad0c) is the cost this section exists to prevent.
+#
+# Two things the nodes below deliberately do NOT claim. The first is that the property is
+# closed over both doors onto the vault's main: `scripts/util/vault-commit.sh` is the
+# second and is report-only by design, and it is what carried bench_024–028 in
+# (d1c89cf81, bf8be644e, dc72ec91a). The second is the census registry
+# `LIVE_BENCH_CATEGORIES` in `tests/test_bench_split.py`, whose node the gate DOES read —
+# the registry whose redness actually produced #3740 — and which takes its own land-time
+# arm or not as a scope ruling this round does not make.
+
+import subprocess  # noqa: E402  (appended with this section, for the git fixture below)
+
+# `V` is already `agent_mcp.vault` in this module — the four-lane enumeration above names
+# it — so the vault route comes in as `VR`, and the automod ledger as `ST`.
+from scripts.automod import state as ST, vault_round as VR  # noqa: E402
+
+#: A card name that is in no table anywhere, spelled as the item spells it, so the
+#: acceptance check and this module cannot drift apart.
+PROBE_CARD = "bench_999_probe_keyless_assertions"
+
+#: One committed card and one table key that agree with each other, for the fixture vault.
+#: Both are made up, and both are shaped like the real thing: the regex the rail matches
+#: is `^bench_[0-9]+_[A-Za-z0-9._-]+\\.md$`, so a fixture named `bench_x.md` would test
+#: the fixture and not the rail.
+KEYED_CARD = "bench_042_fixture_keyed_card"
+KEYLESS_CARD = "bench_043_fixture_keyless_card"
+ORPHAN_KEY = "bench_044_fixture_key_without_a_card"
+CARD_BODY = "---\ntype: note\n---\n\n# fixture card\n"
+
+
+def _git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True)
+
+
+def _assertion_table(tmp_path, name="autoresearch_assertions.yaml", **keys) -> Path:
+    """A scratch table in the judge's own format, holding exactly the keys given.
+
+    Written with `yaml.dump` rather than by hand so the shape is the shape
+    `judge.load_assertions` parses, and a fixture that drifts from the real format fails
+    as a fixture, not as a rail that stopped refusing.
+    """
+    rows = {k: ([{"id": "a", "text": "does the thing"}] if isinstance(v, str) else v)
+            for k, v in keys.items()}
+    f = tmp_path / name
+    # Nested under `tasks`, because that is where `judge.load_assertions` reads the map
+    # from — a bare mapping parses to "no assertion keys at all", which is the shape the
+    # fail-closed branch is for, and a fixture in that shape would test the fixture.
+    f.write_text(yaml.dump({"tasks": rows}, sort_keys=True), encoding="utf-8")
+    return f
+
+
+def _fixture_vault(tmp_path, monkeypatch, *, cards=()):
+    """A git-init'd vault with `cards` committed, so ADD and EDIT are different answers.
+
+    `land()` shells to `git -C VAULT`, so the ADD arm cannot be tested against a plain
+    directory: only a tree with a HEAD can say whether a path is new to it. Mirrors
+    `tests/test_automod_vault_round.py`'s `_scratch_vault` in the three patches that
+    matter — VAULT, the ledger, and the loader subprocess — and nothing else, because
+    this section lands bench cards and no skills.
+    """
+    v = tmp_path / "obsidian"
+    (v / "lloyd" / "bench").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", "-b", "main", str(v))
+    _git(v, "config", "user.email", "t@e.com")
+    _git(v, "config", "user.name", "t")
+    # A file to commit, always. A vault with no commits has an unborn HEAD, and
+    # `_ensure_main` refuses outright on one ("vault HEAD is on 'HEAD' and main cannot be
+    # checked out") — so a fixture built with `cards=()`, which is most of them, would
+    # fail at the first call that gets far enough to ask rather than at the bench check
+    # this file is about. The failure looked exactly like a broken bench arm, which is
+    # worth knowing when the next land-side node is written against this helper.
+    (v / ".fixture-base.md").write_text("# fixture vault\n", encoding="utf-8")
+    for name in cards:
+        (v / "lloyd" / "bench" / name).write_text(CARD_BODY, encoding="utf-8")
+    for step in (("add", "-A"), ("commit", "-q", "-m", "base")):
+        r = _git(v, *step)
+        assert r.returncode == 0, f"fixture git {step}: {r.stdout}{r.stderr}"
+    # A branch named `main`, whatever the fixture git's default init branch is: `land()`
+    # refuses outright on a vault whose HEAD is not on main, and a node that only ever
+    # calls `validate` never finds that out.
+    _git(v, "branch", "-M", "main")
+    monkeypatch.setattr(VR, "VAULT", v)
+    monkeypatch.setattr(ST, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(VR, "loader_errors", lambda paths: [])
+    return v
+
+
+def _card(vault: Path, name=PROBE_CARD) -> Path:
+    """A new card's bytes on the scratch vault, front matter and all."""
+    f = vault / "lloyd" / "bench" / f"{name}.md"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(CARD_BODY, encoding="utf-8")
+    return f
+
+
+# ── Clause 1: the table-path argument, and what it may NOT change ───────────────────
+
+
+def test_the_table_path_is_handed_to_the_judge_as_its_own_argument(tmp_path, monkeypatch):
+    """The argument reaches `judge.load_assertions(path=…)`, and does not reach it alone.
+
+    Spied on the judge rather than asserted through a verdict, because the clause is
+    about the call: a rail that re-implemented the YAML parsing could return the same
+    answers for one release and then drift, which is the failure this module's whole
+    design exists to avoid. The spy also pins the OTHER half — with the argument omitted
+    the judge is called with no path at all, exactly as it was before the argument
+    existed, so "identical to today's live-tree answer" is a statement about the call and
+    not about a copy of the file that happens to agree.
+    """
+    from scripts.autoresearch import judge
+
+    seen: dict[str, object] = {}
+    real = judge.load_assertions
+
+    def spy(path=None):
+        seen["path"] = path
+        return real(path=path)
+
+    monkeypatch.setattr(judge, "load_assertions", spy)
+    tbl = _assertion_table(tmp_path, **{KEYED_CARD: "rows"})
+    assert RAIL.assertion_key_defect(KEYED_CARD, table_path=tbl) == "", seen
+    assert seen["path"] is not None and Path(str(seen["path"])) == tbl, seen
+    # The omitted half has to be asked of a key the LIVE table really has, or the call
+    # proves only that a fixture key is refused, which it was before the argument existed.
+    live_key = sorted(judge.load_assertions())[0]
+    assert RAIL.assertion_key_defect(live_key) == "", seen
+    assert seen["path"] is None, seen
+
+
+@pytest.mark.parametrize("state", ["accept", "missing", "not_a_set", "duplicate_rows",
+                                   "unreadable"])
+def test_the_defaulted_verdict_is_the_live_reads_verdict_for_every_state(
+        tmp_path, state):
+    """Clause 1's five verdicts, same tree, argument omitted and argument supplied.
+
+    The five are the states `_lookup` can return, and one scratch table carries all of
+    them: a key with real rows, a key with none, a `graded: true` mapping, a key whose
+    rows repeat an `id:`, and a path that is a directory. Both calls in each pair address
+    the SAME file, so a difference between them can only be the argument changing the
+    verdict — which is the thing clause 1 forbids, and the thing a future reader of
+    `table_path` would most plausibly break.
+    """
+    table = tmp_path / "eval"
+    table.mkdir()
+    tbl = table / "autoresearch_assertions.yaml"
+    tbl.write_text(yaml.dump({"tasks": {
+        KEYED_CARD: [{"id": "a", "text": "does the thing"}],
+        "bench_045_fixture_graded_marker": {"graded": True},
+        "bench_046_fixture_repeated_row_id": [{"id": "a", "text": "x"},
+                                              {"id": "a", "text": "y"}],
+    }}, sort_keys=True), encoding="utf-8")
+    cases = {
+        "accept": (KEYED_CARD, tbl),
+        "missing": (KEYLESS_CARD, tbl),
+        "not_a_set": ("bench_045_fixture_graded_marker", tbl),
+        "duplicate_rows": ("bench_046_fixture_repeated_row_id", tbl),
+        # A file that loads but carries no `tasks:` map is no table at all, which is the
+        # state the fail-closed half of this rail is for: the writer did not cause it and
+        # must not be told a key, because blaming one is what sends them to edit the
+        # table to fix a parse. The bare-mapping shape doubles as the fixture, since the
+        # judge reads its keys from under `tasks`.
+        "unreadable": (KEYED_CARD, tmp_path / "no-tasks-map.yaml"),
+    }
+    if state == "unreadable":
+        (tmp_path / "no-tasks-map.yaml").write_text(
+            yaml.dump({KEYED_CARD: "a bare mapping, no tasks key"}), encoding="utf-8")
+    key, target = cases[state]
+    with_arg = RAIL.assertion_key_defect(key, SID, table_path=target)
+    without = RAIL.assertion_key_defect(key, SID, table_path=Path(str(target)))
+    assert with_arg == without, (state, with_arg, without)
+    if state == "accept":
+        assert with_arg == ""
+    elif state == "unreadable":
+        assert "could not be checked" in with_arg, with_arg
+        assert "no assertion set" not in with_arg, (
+            f"a broken table told the writer to add a key: {with_arg}")
+    else:
+        assert key in with_arg, with_arg
+
+
+def test_the_table_path_reaches_both_of_the_writers_key_checks(tmp_path, home):
+    """Clause 1 on `bench_write_defect`, which the argument-only diff left unpinned.
+
+    The writer asks twice: once about the filename's stem, and once about the id the
+    content CLAIMS when it differs. A `table_path` threaded to the first alone passes
+    every other node in this file, so the second call is the one this node exists for.
+    Both directions are asserted — refused by a scratch table that lacks the key, accepted
+    by one that has it — against `KEYED_ID` and `KEYLESS_ID`, a real table key and an id in
+    no table on any branch, whose drift from the live table is already pinned by
+    `test_the_rail_answers_to_the_judges_table_and_nothing_else`. A scratch table carries
+    an unrelated key rather than being empty, because an empty one is the `unreadable`
+    state and answers a different question.
+    """
+    f = corpus(home) / f"{KEYED_ID}.md"
+    assert RAIL.bench_write_defect(str(f), SID) == "", (
+        "the live table no longer has the fixture key this node is built on")
+
+    thin = _assertion_table(tmp_path, name="thin.yaml",
+                            **{"bench_000_scratch_only": "rows"})
+    refused = RAIL.bench_write_defect(str(f), SID, table_path=thin)
+    assert refused and KEYED_ID in refused, refused
+
+    content = f"---\ntype: note\nid: {KEYLESS_ID}\n---\n\n# c\n"
+    live_claim = RAIL.bench_write_defect(str(f), SID, claimed_id=KEYLESS_ID,
+                                         content=content)
+    assert live_claim and KEYLESS_ID in live_claim, live_claim
+
+    both = _assertion_table(tmp_path, name="both.yaml",
+                            **{KEYED_ID: "rows", KEYLESS_ID: "rows"})
+    assert RAIL.bench_write_defect(str(f), SID, claimed_id=KEYLESS_ID, content=content,
+                                   table_path=both) == "", (
+        "the claimed-id check ignored `table_path` and answered from the live tree")
+
+
+def test_the_live_keys_are_green_and_a_keyless_card_red_whichever_way_it_is_asked():
+    """Clause 1 against the real table: every key in it accepts, and `KEYLESS_ID` refuses.
+
+    The keys come from the table itself rather than from a list in this file, so the node
+    cannot be closed by editing the test, and the denominator is the one #3870 quotes (31
+    keys on 2026-11-07) rather than a number asserted here and rotted by next month's
+    card.
+    """
+    from scripts.autoresearch import judge
+
+    table = judge.load_assertions()
+    assert isinstance(table, dict) and table, f"no assertion table at {judge.ASSERTIONS_PATH}"
+    live = str(judge.ASSERTIONS_PATH)
+    for key in table:
+        assert RAIL.assertion_key_defect(key, SID) == "", key
+        assert RAIL.assertion_key_defect(key, SID, table_path=live) == "", key
+    refused = RAIL.assertion_key_defect(KEYLESS_ID, SID)
+    assert refused and KEYLESS_ID in refused
+    assert refused == RAIL.assertion_key_defect(KEYLESS_ID, SID, table_path=live)
+
+
+# ── Clause 2: the landing door refuses, and says what to do about it ─────────────────
+
+
+def test_a_landing_that_adds_a_keyless_bench_card_is_refused_naming_the_key(tmp_path,
+                                                                           monkeypatch):
+    """The item's own acceptance check, as a node: the probe must now return an error.
+
+    Reproduced exactly as triage recorded it — a scratch vault, one card with valid front
+    matter and no key behind it — and it printed `classify = validated, errors = []` at
+    `febf0a6b`. The two assertions are the two halves of the clause: the path appears in
+    an error, and the error is about the missing key rather than about anything else on
+    the card, which front matter and the loader would have caught on their own.
+    """
+    vault = _fixture_vault(tmp_path, monkeypatch)
+    card = _card(vault, PROBE_CARD)
+    assert VR.classify(f"lloyd/bench/{card.name}") == "validated"
+    errors, _buckets = VR.validate([f"lloyd/bench/{card.name}"])
+    assert errors, "the landing door still has no bench rail on it"
+    text = "\n".join(errors)
+    assert card.name in text, text
+    assert PROBE_CARD in text, text
+    assert "no assertion set" in text, text
+
+
+def test_the_landing_refusal_sends_the_rows_and_the_card_into_one_round(tmp_path,
+                                                                        monkeypatch):
+    """Clause 2's second half, which is the whole point of the check.
+
+    Naming a missing key is what the four writer lanes already say, and their remedy —
+    "add it to the table, then retry" — is addressed to a session holding a tool call. A
+    LAND has no table to edit and nothing to retry: the rows live in the repo and the
+    card lives in the vault, and the only answer that ends the class is the ORDERING. So
+    the refusal has to say "same round", must not say "retry", and must still name the
+    table the rows go into, because the reader who can act on this is a round.
+    """
+    vault = _fixture_vault(tmp_path, monkeypatch)
+    _card(vault, PROBE_CARD)
+    errors, _ = VR.validate([f"lloyd/bench/{PROBE_CARD}.md"])
+    text = "\n".join(errors)
+    assert text, "nothing was refused, so there is no remedy to read"
+    assert "SAME round" in text, text
+    assert "autoresearch_assertions" in text, text
+    assert "retry" not in text.lower(), text
+    assert len(text) < 500, f"past `agent_mcp._shared._err`'s cap at {len(text)}: {text[-80:]}"
+
+
+def test_a_card_whose_rows_are_in_the_table_may_land(tmp_path, monkeypatch):
+    """The accept arm of the same door, on a fixture tree.
+
+    The complement of every refusal node above, and the one that keeps the check from
+    being a blanket ban on the corpus: a card whose key has real rows lands with no error
+    naming it. Asserted on the fixture's own table rather than the live one, so it says
+    "keyed means landing-legal" and not "today's 31 cards happen to agree".
+    """
+    vault = _fixture_vault(tmp_path, monkeypatch)
+    _card(vault, KEYED_CARD)
+    table = _assertion_table(tmp_path, **{KEYED_CARD: "rows"})
+    monkeypatch.setattr(VR, "_round_assertion_table", lambda sid: table)
+    errors, _ = VR.validate([f"lloyd/bench/{KEYED_CARD}.md"])
+    assert KEYED_CARD not in "\n".join(errors), errors
+
+
+# ── Clause 3: one-way, and only ever about this path class ──────────────────────────
+
+
+def test_editing_a_card_already_at_head_is_never_newly_refused(tmp_path, monkeypatch):
+    """The one-way arm, on a tree where the distinction is real.
+
+    `bench_043_fixture_keyless_card` is committed with NO key behind it — the state
+    #3688's landing left — and then edited. Refusing that edit is the tempting
+    implementation ("is there a key? no → refuse") and it is wrong twice over: it would
+    make every already-landed card unfixable by exactly the landing that would fix it,
+    and it would not be one-way. The vault's HEAD is the only thing that can answer this,
+    which is why the node needs the git fixture and not a path string.
+    """
+    vault = _fixture_vault(tmp_path, monkeypatch, cards=[f"{KEYLESS_CARD}.md"])
+    (vault / "lloyd" / "bench" / f"{KEYLESS_CARD}.md").write_text(
+        CARD_BODY + "\nEdited this round.\n", encoding="utf-8")
+    errors, _ = VR.validate([f"lloyd/bench/{KEYLESS_CARD}.md"], session_id="")
+    assert KEYLESS_CARD not in "\n".join(errors), errors
+
+
+def test_a_key_with_no_card_and_a_non_bench_path_are_nobody_new_business(tmp_path,
+                                                                         monkeypatch):
+    """The other two arms of "one-way and path-class-local", pinned together.
+
+    A key in the table with no card on disk stays legal — the repo may carry an assertion
+    set for a card a later round has not written yet, and the rail has no reverse arm, so
+    this asserts its absence as well as the landing's. And a new file anywhere else under
+    `lloyd/` validates exactly as it did before this check existed: the bench door is
+    about `bench_NN_*.md` and about nothing else, including the corpus's own `index.md`
+    and a note whose front matter is a plain `type: note`.
+    """
+    vault = _fixture_vault(tmp_path, monkeypatch)
+    table = _assertion_table(tmp_path, **{ORPHAN_KEY: "rows"})
+    assert RAIL.assertion_key_defect(ORPHAN_KEY, SID, table_path=table) == "", (
+        "the rail grew a reverse arm: a key without a card is now a defect")
+    (vault / "lloyd" / "bench" / "index.md").write_text("# index\n\nnothing here\n",
+                                                        encoding="utf-8")
+    (vault / "lloyd" / "notes").mkdir(parents=True, exist_ok=True)
+    (vault / "lloyd" / "notes" / "a-note.md").write_text(CARD_BODY, encoding="utf-8")
+    # Neither of these is bench-shaped: `index.md` is the corpus's own sub-index, which
+    # lives IN `lloyd/bench/`, and a triage note is a plain note in that directory. The
+    # stem rule is the path-class boundary, so a neighbour with a non-matching name is
+    # the arm that proves the door is local, and `bench_900_…` would not be one.
+    paths = ["lloyd/bench/index.md", "lloyd/notes/a-note.md",
+             "lloyd/bench/triage-2026-11.md"]
+    for p in paths:
+        if not (vault / p).is_file():
+            (vault / p).write_text(CARD_BODY, encoding="utf-8")
+    errors, _ = VR.validate(paths, session_id="")
+    assert not any("assertion" in e for e in errors), errors
+
+
+def test_the_live_cards_still_validate_green_and_their_count_is_the_tables(tmp_path):
+    """Clause 6 of the item: nothing already landed is newly refused.
+
+    Every card in the live corpus is asked as an ADD — the worst case, since a re-add is
+    refused where an edit would not be — against the live table. The denominator is
+    counted from the corpus and asserted equal to the table's key count, which is the
+    31-keys/31-cards agreement triage measured through `judge.load_assertions()` on
+    2026-11-07, and it is the assertion that fails if either side moves alone again.
+    Skips, not fails, where there is no corpus: this node's subject is the vault, and a
+    gate checkout with a redirected `HOME` has none.
+    """
+    from scripts.autoresearch import judge
+
+    bench = Path.home() / CORPUS_REL
+    if not bench.is_dir() or not any(bench.glob("bench_*.md")):
+        pytest.skip(f"no bench corpus at {bench} to re-ask")
+    cards = sorted(q.stem for q in bench.glob("bench_*.md"))
+    table = judge.load_assertions()
+    for stem in cards:
+        assert RAIL.bench_card_landing_defect(f"lloyd/bench/{stem}.md",
+                                              exists_at_head=False) == "", stem
+    unkeyed = [s for s in cards if s not in table]
+    uncarded = [k for k in table if not (bench / f"{k}.md").is_file()]
+    assert not unkeyed, f"cards with no assertion set: {unkeyed}"
+    assert not uncarded, f"assertion sets with no card: {uncarded}"
+    assert len(cards) == len(table), (len(cards), len(table))
+
+
+def test_the_durable_write_cards_that_caught_the_rail_are_in_the_table_now():
+    """#3688's own three cards, by their numbers, green through the new check.
+
+    The incident named by number rather than by a stem guessed at here: the three
+    durable-write cards entered the vault at `5367d0524` and the repo-side rows landed
+    four days later in `5604ad0c`, which is the gap this door closes. Selected on the
+    NUMBER and not on a hand-written name, so the node cannot assert a stem that does not
+    exist and pass by never finding one.
+    """
+    from scripts.autoresearch import judge
+
+    table = judge.load_assertions()
+    for number in ("029", "030", "031"):
+        keys = [k for k in table if k.startswith(f"bench_{number}_")]
+        assert len(keys) == 1, f"bench_{number} is in the table {len(keys)} times: {keys}"
+        card = f"lloyd/bench/{keys[0]}.md"
+        assert RAIL.bench_card_landing_defect(card, exists_at_head=False) == "", keys[0]
+
+
+# ── Clause 4: which copy of the table a landing is judged against ───────────────────
+
+
+def _round_session(tmp_path, sid, worktree, *, corrupt=False):
+    """Stamp a session record whose `start_cwd` is `worktree`, or write junk in its place."""
+    from app import session_cwd
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(exist_ok=True)
+    f = sessions / f"{session_cwd.safe_name(sid)}.json"
+    if corrupt:
+        f.write_text("{ this is not json", encoding="utf-8")
+        return sessions
+    Path(worktree).mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"session_id": sid, "start_cwd": str(worktree)}),
+                 encoding="utf-8")
+    return sessions
+
+
+def test_the_landing_reads_the_rounds_own_worktree_table(tmp_path, monkeypatch):
+    """Clause 4's point: the round that staged the rows may land the card.
+
+    A round authors `eval/autoresearch_assertions.yaml` in its worktree and lands the
+    card from there, so judging that land against the LIVE table would refuse the exact
+    round this item exists to serve — the rows-before-cards knot, one round at a time.
+    The worktree here is shaped like `scripts/automod/worktree.py:round_dir` makes one
+    (`…/lloyd-work/SM_<ts>/home/lloyd`), because the predicate that decides it is
+    `app.harness.bench_authoring`'s `_ROUND_DIR_RE` and nothing else.
+    """
+    from app import session_cwd
+
+    sid = "20261107_041152_autocode_fixture"
+    worktree = tmp_path / "lloyd-work" / "SM_20261107_041152" / "home" / "lloyd"
+    (worktree / "eval").mkdir(parents=True)
+    tbl = worktree / "eval" / "autoresearch_assertions.yaml"
+    tbl.write_text(yaml.dump({"tasks": {KEYED_CARD: [{"id": "a", "text": "x"}]}},
+                             sort_keys=True), encoding="utf-8")
+    seam = session_cwd.SESSIONS_DIR
+    try:
+        session_cwd.SESSIONS_DIR = _round_session(tmp_path, sid, worktree)
+        assert VR._round_assertion_table(sid) == tbl
+        assert RAIL.assertion_table_for_session(sid) == tbl
+        assert RAIL.bench_card_landing_defect(
+            f"lloyd/bench/{KEYED_CARD}.md", exists_at_head=False,
+            table_path=VR._round_assertion_table(sid)) == ""
+        assert RAIL.bench_card_landing_defect(
+            f"lloyd/bench/{KEYLESS_CARD}.md", exists_at_head=False,
+            table_path=VR._round_assertion_table(sid)), "an unkeyed card slipped past on a round's table"
+    finally:
+        session_cwd.SESSIONS_DIR = seam
+
+
+def test_a_non_round_land_and_an_unreadable_record_both_read_the_live_table(tmp_path,
+                                                                           monkeypatch):
+    """The fail-closed half of clause 4: None is the answer three times, never a guess.
+
+    A chat session, a scratch session, and a ROUND WHOSE RECORD CANNOT BE READ all
+    resolve to the live table. The third case is why the fallback is the strict answer:
+    if a lost record resolved to a permissive one, a round could get its card past the
+    door simply by losing the file that says who it is. `""` is a fourth case — a land
+    that could not name a session, which is still a land and is still judged.
+    """
+    from app import session_cwd
+
+    seam = session_cwd.SESSIONS_DIR
+    try:
+        session_cwd.SESSIONS_DIR = tmp_path / "sessions"
+        assert RAIL.assertion_table_for_session(None) is None
+        assert RAIL.assertion_table_for_session("") is None
+        assert RAIL.assertion_table_for_session("task:subagent-7") is None
+        assert RAIL.assertion_table_for_session("plain-chat-session") is None
+        worktree = tmp_path / "lloyd-work" / "SM_20261107_050000" / "home" / "lloyd"
+        sessions = _round_session(tmp_path, "round-with-a-broken-record", worktree,
+                                  corrupt=True)
+        session_cwd.SESSIONS_DIR = sessions
+        assert RAIL.assertion_table_for_session("round-with-a-broken-record") is None
+    finally:
+        session_cwd.SESSIONS_DIR = seam
+
+
+def test_a_land_passes_its_own_session_to_that_decision(tmp_path, monkeypatch):
+    """The seam between `land()` and the resolver, crossed rather than described.
+
+    `land()` has carried the harness-stamped session id since #2927 for its witness rung,
+    and this is the second thing it is threaded to. Spied on the resolver rather than
+    driven end to end, because what is at risk is the threading: a `validate(norm)` that
+    dropped the argument would still refuse an unkeyed card every time the live table
+    lacked the rows, and would refuse a ROUND that had them, which is the failure a
+    reviewer cannot see from the code.
+    """
+    vault = _fixture_vault(tmp_path, monkeypatch)
+    _card(vault, KEYED_CARD)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(VR, "_round_assertion_table",
+                        lambda sid: seen.update(sid=sid) or None)
+    VR.validate([f"lloyd/bench/{KEYED_CARD}.md"], session_id="")
+    assert seen.get("sid") == "", seen
+    seen.clear()
+    VR.validate([f"lloyd/bench/{KEYED_CARD}.md"])
+    assert seen.get("sid") is None, seen
+    src = (ROOT / "scripts" / "automod" / "vault_round.py").read_text(encoding="utf-8")
+    assert "validate(norm, session_id=" in src, (
+        "`land()` no longer threads its session id into the check that decides which "
+        "table a card is judged against")
+
+
+# ── Clause 5: the journal row, and the transport's cut ──────────────────────────────
+
+
+def test_a_refused_landing_writes_exactly_one_row_naming_path_and_key(tmp_path, monkeypatch):
+    """One row per refused LAND, `guard=bench_assertion_rail`, both cards named in it.
+
+    One and not two, because `land()` refuses a batch on its first error while `validate`
+    has already named them all — a row per path would under-count the round and describe a
+    refusal of only the first card. Same guard string as the four writer lanes' rows, so
+    one `jq` over the journal finds every refusal of this class however it arrived. A
+    probe that is not a land (no `session_id`, which is `VG.agreement`'s call shape)
+    writes nothing, so the ledger is not written by a question.
+    """
+    from app.harness import denial_journal
+
+    journal = tmp_path / "denials.jsonl"
+    monkeypatch.setenv(denial_journal.JOURNAL_ENV, str(journal))
+    vault = _fixture_vault(tmp_path, monkeypatch)
+    _card(vault, PROBE_CARD)
+    _card(vault, KEYLESS_CARD)
+    errs = VR._bench_card_assertion_errors(
+        [f"lloyd/bench/{PROBE_CARD}.md", f"lloyd/bench/{KEYLESS_CARD}.md",
+         "lloyd/notes/a-note.md"], session_id="")
+    assert len(errs) == 2, errs
+    rows = denial_journal.rows(path=journal)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["guard"] == "bench_assertion_rail", row
+    assert row["tool"] == "automod_vault_land", row
+    assert PROBE_CARD in row["reason"] and KEYLESS_CARD in row["reason"], row
+    assert f"lloyd/bench/{PROBE_CARD}.md" in row["excerpt"], row
+    assert f"lloyd/bench/{KEYLESS_CARD}.md" in row["excerpt"], row
+    VR._bench_card_assertion_errors([f"lloyd/bench/{PROBE_CARD}.md"], session_id=None)
+    assert len(denial_journal.rows(path=journal)) == 1, "a probe journaled a refusal"
+
+
+def test_a_refused_land_reaches_the_caller_with_the_remedy_inside_the_cut(tmp_path,
+                                                                          monkeypatch):
+    """Clause 5's second half, measured on the composed message a caller actually gets.
+
+    The single sentence is comfortably under `agent_mcp._shared._err`'s 500-character cap,
+    but the cap never sees the sentence alone. `land()` prefixes it with
+    `validation failed; the change was reverted: ` and joins up to five errors, so a batch
+    refusing two cards is 600-odd characters whatever the wording says, and the cut keeps
+    the first 500 — which is why the remedy sits before the reason in the sentence. Both
+    arms are measured here rather than one, because a node that only measures the single
+    refusal passes whichever way the sentence is ordered and cannot protect anything.
+    """
+    import agent_mcp._shared as shared
+
+    from app.harness import denial_journal
+    monkeypatch.setenv(denial_journal.JOURNAL_ENV, str(tmp_path / "denials.jsonl"))
+    from scripts.autoresearch import judge
+
+    bench = Path.home() / CORPUS_REL
+    ids = [q.stem for q in bench.glob("bench_*.md")] or [PROBE_CARD]
+    # The longest keyless name available: the corpus's longest id, with a suffix that
+    # keeps it bench-shaped and puts it in no table. A real keyed card lands green, and
+    # measuring the length of a refusal that never happened is what the first draft of
+    # this node did — it asserted `startswith` on a message that was never raised.
+    longest = max(ids, key=len) + "_unkeyed_probe"
+    assert longest not in judge.load_assertions(), longest
+    vault = _fixture_vault(tmp_path, monkeypatch)
+    _card(vault, longest)
+    _card(vault, KEYLESS_CARD)
+
+    one = _land_refusal(vault, [f"lloyd/bench/{longest}.md"])
+    assert one.startswith("validation failed; the change was reverted: "), one
+    assert longest in one and "SAME round" in one, one
+    assert "truncated" not in shared._err(one)["error"], len(one)
+
+    two = _land_refusal(vault, [f"lloyd/bench/{longest}.md",
+                                f"lloyd/bench/{KEYLESS_CARD}.md"])
+    assert len(two) > 500, f"a two-card refusal no longer stresses the cut: {len(two)}"
+    cut = shared._err(two)["error"]
+    assert "truncated" in cut, "the fixture stopped exercising the transport's cap"
+    assert "SAME round" in cut, (len(cut), cut[-120:])
+    assert f"lloyd/bench/{longest}.md" in cut and longest in cut, cut[:200]
+    print(f"longest id {longest!r} ({len(longest)} chars): one-card refusal {len(one)} "
+          f"chars, two-card refusal {len(two)} chars cut to {len(cut)}")
+
+
+def _land_refusal(vault: Path, paths: list[str]) -> str:
+    """Drive `land()` over `paths` and return the message its caller would be handed.
+
+    Asserts the module-level `VAULT` is the fixture's first: `land` shells to
+    `git -C VAULT`, so a fixture that rebound only its own local path would have the real
+    vault committed under the test.
+    """
+    assert VR.VAULT == vault, (VR.VAULT, vault)
+    try:
+        VR.land(paths, "bench assertion rail probe", session_id="")
+    except VR.VaultRoundError as exc:
+        return str(exc)
+    raise AssertionError(f"the land was accepted, so there is no refusal to measure: {paths}")
