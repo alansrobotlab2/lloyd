@@ -92,22 +92,31 @@ traversed — which is the point, since following links out of a tree would let 
 report a clean tree while a write landed through a symlink.
 
 Exit: `0` PASS · `1` FAIL (the diff, the copy witness or the tool results say the claim
-did not hold) · `3` refused (production state, an empty tree, or no aggregator to ask —
-no write attempted) · `2` argparse usage.
+did not hold) · `3` refused (production state, an empty tree, a fixture destination
+`build_fixture` will not build, or no aggregator to ask — no write attempted) · `2` argparse
+usage.
 
-    # boot the aggregator yourself, from a built fixture, and stop it on the way out:
+    # ONE command: build the copy, boot the aggregator on it, run the trial, stop it (#3915).
+    # `build_fixture` refuses a destination inside either PRODUCTION tree, and
+    # `bench_spawner.spawn` refuses to boot on one either, so on a box whose data root IS
+    # ~/lloyd-data the scratch root has to be named rather than defaulted:
+    LLOYD_DATA=/scratch/durable-write-proof \
+    .venvs/lloyd/bin/python -m scripts.autoresearch.bench_durable_write_proof \
+        --build-fixture durable-write-<ts> --out <record.json>
+    # boot the aggregator from a fixture that is already built, and stop it on the way out:
     scripts/autoresearch/bench_durable_write_proof.py \
-        --fixture-root /home/alansrobotlab/lloyd-data/eval/fixtures/<trial> --out <record.json>
+        --fixture-root <data-root>/eval/fixtures/<trial> --out <record.json>
     # or point it at one that is already running (nothing is booted on that path):
     scripts/autoresearch/bench_durable_write_proof.py --aggregator-url http://127.0.0.1:8819/mcp \
         --state-url http://127.0.0.1:8819/state \
-        --fixture-root /home/alansrobotlab/lloyd-data/eval/fixtures/<trial> --out <record.json>
+        --fixture-root <data-root>/eval/fixtures/<trial> --out <record.json>
 
 What is still owed after this lands (#3689's owed list) is the RUN itself, not the wiring: a
-built fixture on this box (`~/lloyd-data/eval/fixtures/` does not exist yet, so
-`build_fixture` has still never run here) and one trial against it. `--plan` prints what a
-trial WOULD check against the live trees without a server or a write, which is the mode a
-reader can run today.
+built fixture on this box (`ls ~/lloyd-data/eval/fixtures` answers `No such file or directory`
+as of 2026-11-07, so `build_fixture` has still never run here) and one trial against it, both
+of which `--build-fixture` now reaches in one command. `--plan` prints what a trial WOULD
+check against the live trees without a server or a write, which is the mode a reader can run
+today.
 """
 from __future__ import annotations
 
@@ -126,6 +135,8 @@ from typing import Any, Callable, Protocol
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import paths  # noqa: E402
+from scripts.autoresearch.bench_fixture import (  # noqa: E402
+    FixtureRefused, build_fixture)
 
 logger = logging.getLogger(__name__)
 
@@ -543,6 +554,51 @@ def auth_headers(url: str) -> dict[str, str]:
 #: scope word and outside the fixture vault's git repo, so it can never appear in
 #: `copy_side.landed_by_git_diff`. See `copy_side_witness`'s note on the same asymmetry.
 SPAWN_SCOPES: tuple[str, ...] = ("vault", "kg", "backlog")
+
+
+def build_trial_fixture(trial_id: str, *, resolved: Any = None) -> Path:
+    """Build the copy this trial runs on and return its directory (#3915).
+
+    The one route from an empty fixtures area to a running trial. Until now the CLI's own
+    refusal told a caller to invoke the builder as a module, and `bench_fixture.py` has no
+    `__main__` block and no argparse — that command imported the file, printed nothing and
+    exited 0 having copied nothing — so a box with no fixture had no way to get one and
+    every path through this instrument dead-ended at that sentence. The dead invocation is
+    not spelled out here: #3915 leaves behind a line-wise grep of this module for a
+    module-run command naming the builder, and a docstring that recites it would keep that
+    check red for the rest of its life.
+
+    Three things are deliberately NOT done here:
+
+    * **No destination rule of its own.** The destination is `build_fixture`'s:
+      `fixture_parent(data_root)/<trial_id>` = `<data_root>/eval/fixtures/<trial_id>`
+      (`bench_fixture.py:51,97-98,264`), and the refusal that guards it
+      (`:282-290`, plus the containment rails at `:288-299`) propagates as
+      `FixtureRefused` for `main` to exit 3 on. A second spelling of "is this inside the
+      fixtures area" is a second rail that can disagree with the first, which is exactly
+      what `bench_fixture._delete_refusal`'s docstring says the ONE guard is for.
+    * **No second scope list.** `writes` is `SPAWN_SCOPES`, the same tuple
+      `boot_fixture_aggregator` arms the child with. A fixture built with a wider or
+      narrower scope than the server it is booted on is a trial whose copy holds
+      directories its own aggregator will not let it write, or none of the ones it will —
+      and `copy_side_witness` would then read that mismatch as the trial's failure. The
+      `vault` leg (not `memory`, and not the item's `memory/facts/backlog` vocabulary) is
+      the reason given on `SPAWN_SCOPES` above: `memory` copies the dated-note directory the
+      writer never touches, and `facts` arms nothing at all.
+    * **No root literals.** `paths.VAULT_ROOT` and `paths.DATA_ROOT` are read per call off
+      the module, the way `durable_write_trees` reads them, so the copy is of the trees THIS
+      process resolves — and so a test can stand a small vault in for the real one without
+      patching a string.
+
+    `build_fixture`'s rule (2) refuses a destination inside either production tree, so on
+    this box the build needs `LLOYD_DATA` pointed at a scratch root outside
+    `~/lloyd-data`; the same rule is what `bench_spawner.spawn` refuses to boot on, so no
+    route exists that puts a fixture inside the house and uses it.
+    """
+    p = resolved if resolved is not None else paths
+    fixture = build_fixture(trial_id=trial_id, writes=list(SPAWN_SCOPES),
+                            vault=p.VAULT_ROOT, data_root=p.DATA_ROOT)
+    return Path(fixture.root)
 
 
 def boot_fixture_aggregator(fixture_root: Path, *,
@@ -1006,13 +1062,17 @@ def main(argv: list[str] | None = None) -> int:
     vacuous, without contacting a server or attempting a write. It prints no verdict, because
     a proof of nothing has no verdict to print.
 
-    Two ways to get a server. Pass `--aggregator-url` plus a state url to try one that is
+    Three ways to get a server. Pass `--aggregator-url` plus a state url to try one that is
     already running — nothing is booted on that path, before or after the guard. Pass
     NEITHER and the script boots its own from `--fixture-root` through
-    `boot_fixture_aggregator` and stops it on the way out (#3863 clause 3). What has not
-    changed is that no path reaches a write before `prewrite_guard` has read the SERVER's
-    flags: a production-reporting aggregator exits 3 with no trial, and a caller who supplied
-    its own urls exits 3 without the spawner being consulted at all.
+    `boot_fixture_aggregator` and stops it on the way out (#3863 clause 3). Pass
+    `--build-fixture <trial_id>` and it first BUILDS that fixture with
+    `bench_fixture.build_fixture`, then boots on the directory that build created — the step
+    the empty-`--fixture-root` refusal used only to describe, naming a module whose
+    invocation built nothing (#3915). What has not changed is that no path reaches a write
+    before `prewrite_guard` has read the SERVER's flags: a production-reporting aggregator
+    exits 3 with no trial, and a caller who supplied its own urls exits 3 without the
+    spawner being consulted at all.
     """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--aggregator-url", default="",
@@ -1024,6 +1084,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="the BUILT fixture directory (the one holding `lloyd-data/` and "
                              "`obsidian/`): the copy-side git diff reads it, and with no "
                              "aggregator urls it is also what the aggregator is booted on")
+    parser.add_argument("--build-fixture", default=None, metavar="TRIAL_ID",
+                        help="build the fixture for TRIAL_ID first, into "
+                             "<data-root>/eval/fixtures/<TRIAL_ID> with the scopes this "
+                             "script boots on, and run the trial against it. Pass it alone: "
+                             "--plan, --fixture-root and the aggregator urls each name a "
+                             "different copy (or none), so combining them is refused rather "
+                             "than guessed. Needs LLOYD_DATA outside the production data "
+                             "root, which `build_fixture` refuses to build inside")
     parser.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     parser.add_argument("--out", default="", help="write the record here as JSON")
     parser.add_argument("--plan", action="store_true",
@@ -1032,6 +1100,36 @@ def main(argv: list[str] | None = None) -> int:
                         help="the id written into every planted marker and into the record; "
                              "defaults to --out's stem, or 'proof'")
     args = parser.parse_args(argv)
+
+    # The url pair is read before anything branches, because `--build-fixture` has to refuse
+    # a caller who ALSO named a server to talk to: a freshly built copy is not the one that
+    # aggregator is routed on, and grading its git diff would be grading a directory no
+    # process was ever pointed at.
+    state_url = (args.state_url or os.environ.get(STATE_URL_ENV, "")).strip()
+    given_url = bool(args.aggregator_url.strip())
+    given_state = bool(state_url)
+    # `None` is the absent flag and `""` is a caller who typed one with no id, so the two are
+    # told apart by identity and not by truthiness — argparse's own default is the empty
+    # string's twin, and a check that read them alike would build nothing and say nothing.
+    build_id = (args.build_fixture or "").strip()
+    if args.build_fixture is not None:
+        # An empty trial id would resolve the destination to the fixtures AREA itself, where
+        # `_delete_refusal` (`bench_fixture.py:156`) will not delete — a copy that outlives its
+        # trial by construction. It is reported in the same breath as the conflicts because
+        # both are "this flag cannot mean what it was given with".
+        conflicts = ([] if build_id else ["an empty TRIAL_ID"]) + [
+            named for named, taken in (
+                ("--plan", args.plan),
+                ("--fixture-root", bool(args.fixture_root.strip())),
+                ("--aggregator-url", given_url),
+                (f"--state-url (or ${STATE_URL_ENV})", given_state)) if taken]
+        if conflicts:
+            print("refused: --build-fixture builds the copy this trial runs on, so it is "
+                  f"passed alone; it was given with: {', '.join(conflicts)}. Pass "
+                  "--build-fixture <trial_id> with nothing else to build and boot in one "
+                  "run, or --fixture-root <dir> for a fixture that is already built.",
+                  file=sys.stderr)
+            return 3
 
     trees = durable_write_trees()
     if args.plan:
@@ -1044,9 +1142,6 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         return 0
 
-    state_url = (args.state_url or os.environ.get(STATE_URL_ENV, "")).strip()
-    given_url = bool(args.aggregator_url.strip())
-    given_state = bool(state_url)
     # Three shapes, and they are all the shapes there are. BOTH urls given: use them, boot
     # nothing — this is the path a caller who already has a fixture-routed aggregator takes,
     # and it is the path that must still exit 3 without reaching for a spawner when the guard
@@ -1063,15 +1158,30 @@ def main(argv: list[str] | None = None) -> int:
 
     handle: Any = None
     credential: dict[str, str] = {}
+    # The copy this run grades: the flag's directory, and the build's directory once a build
+    # has happened. One variable on purpose — `run_proof`'s copy-side witness and the
+    # aggregator's roots must be the same directory, and the flag that could have named a
+    # second one was refused above.
+    fixture_root = args.fixture_root.strip()
     try:
+        if build_id:
+            # Build first, then boot on exactly what was built. The directory comes back from
+            # `build_trial_fixture` rather than being re-derived from the trial id, so the
+            # path the spawner is handed is the path the builder created — and if
+            # `build_fixture` ever moves the destination, this line moves with it instead of
+            # quietly booting on a directory that is no longer where copies go.
+            fixture_root = str(build_trial_fixture(build_id))
+            print(f"fixture built at {fixture_root}", file=sys.stderr)
         if not given_url:
-            if not args.fixture_root:
+            if not fixture_root:
                 print("refused: no aggregator urls given, so this script would boot one — "
                       "and --fixture-root is empty, so there is no built fixture to boot it "
-                      "on. Build one with `python -m scripts.autoresearch.bench_fixture` "
-                      "(#3688) and pass its directory.", file=sys.stderr)
+                      "on. Pass --build-fixture <trial_id> to build one with "
+                      "`bench_fixture.build_fixture` and boot on it in this same run, or "
+                      "--fixture-root <dir> for a fixture that is already built.",
+                      file=sys.stderr)
                 return 3
-            handle, urls, credential = boot_fixture_aggregator(Path(args.fixture_root))
+            handle, urls, credential = boot_fixture_aggregator(Path(fixture_root))
             mcp_url, state_url = urls["mcp"], urls["state"]
         else:
             mcp_url = args.aggregator_url
@@ -1080,10 +1190,17 @@ def main(argv: list[str] | None = None) -> int:
             call_tool=lambda name, arguments, session_id="": mcp_tool_call(
                 mcp_url, name, arguments, session_id=session_id,
                 headers=(credential or None)),
-            fixture_root=Path(args.fixture_root) if args.fixture_root else None,
+            fixture_root=Path(fixture_root) if fixture_root else None,
             window_seconds=args.window_seconds,
-            trial_id=args.trial_id or (Path(args.out).stem if args.out else "proof"))
-    except ProofRefused as exc:
+            trial_id=(args.trial_id or build_id
+                      or (Path(args.out).stem if args.out else "proof")))
+    except (ProofRefused, FixtureRefused) as exc:
+        # `FixtureRefused` is `build_fixture`'s own refusal class, caught BY NAME rather than
+        # re-derived into a `ProofRefused`: the builder has the only answer to "may this
+        # destination be built", and a destination it refuses is exit 3 with nothing copied
+        # (`bench_fixture.py:286` raises before any `mkdir`), not a traceback and not a FAIL
+        # row. Wrapping it here would put a second copy of that rule in this file, which is
+        # the duplication `_delete_refusal`'s docstring exists to warn against.
         print(f"refused: {exc}", file=sys.stderr)
         return 3
     finally:

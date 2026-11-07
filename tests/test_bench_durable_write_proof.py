@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoresearch.bench_fixture import build_fixture
+from scripts.autoresearch.bench_fixture import FIXTURE_ROOT_RELATIVE, build_fixture
 
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
@@ -263,21 +263,30 @@ def test_production_state_or_uncopied_flag_refuses_before_any_tool_call(tmp_path
 
 
 def test_the_cli_refuses_to_boot_a_fixture_that_was_never_built(capsys, monkeypatch):
-    """No urls AND an empty `--fixture-root`: refusal (3) naming the builder, spawner untouched.
+    """No urls AND an empty `--fixture-root`: refusal (3) naming the flag that BUILDS (#3915).
 
     Why this is a refusal changed when clause 3 landed, and the node has to say the new
     reason. It used to be "no urls means nowhere to write"; now no urls means THIS script
-    boots an aggregator, so the missing piece is a BUILT FIXTURE, and a message that only
-    named #3688 would tell a reader who to blame without telling them what to run. The three
-    strings asserted here are the three the caller acts on: the flag to pass
-    (`--fixture-root`), the module that builds what to pass it (`bench_fixture`), and the
-    item that owns the builder (#3688).
+    boots an aggregator, so the missing piece is a BUILT FIXTURE — and #3915 is the round that
+    made building it reachable.
 
-    Exit 3, not argparse's 2, because the trial is refusing rather than the parser
-    complaining — and the boot is spied, because a half-built invocation that reached
-    `bench_spawner` would be a process launch on a directory nobody copied. The
-    half-named-url case, which refuses for a different reason, is
-    `test_the_cli_refuses_a_half_named_aggregator_without_booting_anything`.
+    This node used to assert the tokens `("--fixture-root", "bench_fixture", "#3688")`. Two of
+    those three were the bug's shape and not its fix: the sentence they pinned told the caller
+    to run `python -m scripts.autoresearch.bench_fixture`, and that module has no `__main__`
+    block and no argparse (`grep -nE '__main__|argparse'
+    scripts/autoresearch/bench_fixture.py` → exit 1), so the command imported the module and
+    exited 0 having copied nothing. The strings a caller can ACT on are now the flag to pass
+    (`--fixture-root`), the flag that builds what to pass it (`--build-fixture`), the entry
+    point behind that flag (`build_fixture`) and the module that owns it
+    (`bench_fixture`) — and the old command is asserted ABSENT, because a refusal that prints
+    it again is this round's whole defect dressed up as its fix.
+
+    `#3688` is gone from the message on purpose: an item number is not a command, and every
+    token this refusal now prints is one the reader can paste. Exit 3, not argparse's 2,
+    because the trial is refusing rather than the parser complaining — and the boot is spied,
+    because a half-built invocation that reached `bench_spawner` would be a process launch on
+    a directory nobody copied. The half-named-url case, which refuses for a different reason,
+    is `test_the_cli_refuses_a_half_named_aggregator_without_booting_anything`.
     """
     def _no_boot(*args, **kwargs):
         raise AssertionError(
@@ -286,8 +295,223 @@ def test_the_cli_refuses_to_boot_a_fixture_that_was_never_built(capsys, monkeypa
     monkeypatch.setattr(proof, "boot_fixture_aggregator", _no_boot)
     assert proof.main([]) == 3
     err = capsys.readouterr().err
-    for want in ("--fixture-root", "bench_fixture", "#3688"):
+    for want in ("--fixture-root", "--build-fixture", "build_fixture", "bench_fixture"):
         assert want in err, f"{want!r} is missing from the refusal: {err}"
+    assert "python -m scripts.autoresearch.bench_fixture" not in err, (
+        f"the refusal still instructs a command that builds nothing: {err}")
+
+
+# ----------------------------------------------------------------- the CLI builds the copy
+# (#3915). Clause 1 asked for a reachable build step, clause 2 for the builder's OWN refusal
+# to reach the exit code, clause 4 for build and boot to compose in one invocation. No node
+# below restates `eval/fixtures/<id>` as a literal: `build_fixture` decides where a copy goes
+# (`fixture_parent` over `FIXTURE_ROOT_RELATIVE`), so every expected destination here is
+# computed from that constant, and a move of the layout moves these nodes with it instead of
+# leaving a green file that describes a directory nothing builds any more.
+
+def _cli_stub(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Small stand-ins for the trees a CLI build copies, plus the fixtures area it aims at.
+
+    `durable_write_trees` is stood in for by every node here because `main` sizes the live
+    trees before it reaches the build, and the live vault is Alan's actual memory: copying it
+    into a round's tmp directory to exercise a FLAG would be slow and rude. `_live_stub` is the
+    three-store shape the rest of this file builds its trials from, and the fixtures area comes
+    back computed from the builder's own constant rather than typed.
+    """
+    vault, data = _live_stub(tmp_path)
+    return vault, data, data / FIXTURE_ROOT_RELATIVE
+
+
+def test_build_fixture_flag_leaves_the_copy_the_next_run_boots_on(tmp_path, capsys):
+    """`--build-fixture <id>` exits 0 and leaves a directory the CONSUMER accepts (#3915 c1).
+
+    The clause is "the directory the following proof run consumes exists afterwards", so the
+    node asks that consumer: `bench_spawner.fixture_from_dir` is what the boot calls on a
+    `--fixture-root` string, and it is the same predicate that refused every GENUINE fixture
+    when it asked for `<root>/data` instead of `<root>/lloyd-data` (`bench_spawner.py:256-262`).
+    Listing the two expected directories by hand here would stay green on a copy the boot
+    still cannot read, which is the exact failure that bug was.
+
+    Everything right of the flag is real: `build_fixture` copies for real, a real subprocess
+    aggregator listens on the copy's roots, `run_proof` runs its two windows, and the
+    copy-side witness is a real `git diff`. The one thing stood in for is
+    `boot_fixture_aggregator`, and it is stood in for by handing back a server that is already
+    up — the alternative is this node booting the real `agent_mcp`, which is the run the item
+    owes and not the round.
+    """
+    from agent_mcp.aggregator_auth import AUTH_HEADER
+    from app.data_root import DATA_ROOT_MARKER
+    from scripts.autoresearch.bench_spawner import fixture_from_dir
+
+    vault, data, fixtures = _cli_stub(tmp_path)
+    dest = fixtures / "proof77"
+    trees = {"memory": vault / "lloyd", "backlog": vault / "backlog",
+             "facts": data / "_pipeline" / "vault-derived" / "facts", "data": data}
+    out = tmp_path / "record.json"
+    seen: list[str] = []
+    # The copy's layout is known before it exists — `<dest>/obsidian` and `<dest>/lloyd-data`
+    # are `build_fixture`'s own (`bench_fixture.py:325-329`), not a guess — so the child can be
+    # listening already: it resolves its stores as path expressions and touches them per
+    # request. `facts` is pulled inside the copied vault for the reason `_copy_roots` gives,
+    # that the copy's git repo is rooted at `<dest>/obsidian` and a facts tree under the
+    # copy's DATA root is outside every path `git diff --name-only` can name.
+    with _aggregator(tmp_path, {"vault": dest / "obsidian", "data": dest / "lloyd-data",
+                                "facts": dest / "obsidian" / "facts"}) as server:
+        def spy_boot(root, **_kw):
+            seen.append(str(root))
+            # The credential is the one THIS node's server started with. The real boot derives
+            # it from the child's env through `spawner.auth_headers`; this spy IS the boot, so
+            # what stays under test is what `main` does with the triple it is handed.
+            return (_FakeHandle(server.url,
+                                {"LLOYD_MCP_TOKEN_FILE": str(server.token_file)}),
+                    {"mcp": server.url + "/mcp", "state": server.url + "/state"},
+                    {AUTH_HEADER: PROBE_TOKEN})
+
+        with _patched(proof, boot_fixture_aggregator=spy_boot,
+                      durable_write_trees=lambda *a, **k: dict(trees),
+                      memories_root=lambda: vault / "lloyd"), \
+             _patched(proof.paths, VAULT_ROOT=vault, DATA_ROOT=data):
+            code = proof.main(["--build-fixture", "proof77", "--window-seconds", "0",
+                               "--out", str(out)])
+    err = capsys.readouterr().err
+    assert code == 0, f"exit {code}, expected 0. stderr: {err}"
+    assert seen == [str(dest)], (
+        f"the boot was handed {seen}, not the copy the flag built ({dest})")
+    assert (dest / "lloyd-data" / DATA_ROOT_MARKER).is_file(), (
+        "the copy must outlive the run that built it, or `--fixture-root` could never point "
+        "at it: the point of building is a directory still there for the next run")
+    assert (dest / "obsidian").is_dir()
+    assert fixture_from_dir(dest, proof.SPAWN_SCOPES).root == dest
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert record["verdict"] == "PASS", record["reason"]
+    assert record["copy_side"]["landed_by_git_diff"] == ["backlog_write_task", "fact_add",
+                                                        "memory_add"], record["copy_side"]
+
+
+def test_build_fixture_builds_first_with_the_boot_scopes_then_boots_on_it(tmp_path, capsys):
+    """Clause 4 and the scopes half of clause 1: build, THEN boot, on that exact directory.
+
+    Two spies on one list, so the ORDER is the assertion: a `main` that booted on a
+    pre-computed path and built afterwards would pass a path-only node and still be a script
+    that boots servers on directories nobody copied. The trial is not run here — the boot spy
+    refuses once it has recorded its argument, because a node about which directory crossed a
+    seam should not also pay for two windows.
+
+    `writes` is pinned against `proof.SPAWN_SCOPES` rather than a list this file chose: the
+    copy and the server armed on it are one trial, and a copy built with a wider or narrower
+    scope than the aggregator booted on it is one whose `copy_side_witness` reads a scope
+    mismatch as the thing under test. That is why the vocabulary here is
+    `vault`/`kg`/`backlog` and not the `memory`/`facts`/`backlog`/`data` the item names:
+    `memory` copies the dated daily notes the shipped writer never touches, `facts` arms
+    nothing, and `data` would be copied as a VAULT path
+    (`DATA_STORE_SCOPES = {"kg", "workers.db"}`, `bench_fixture.py:70`).
+    """
+    vault, data, fixtures = _cli_stub(tmp_path)
+    dest = fixtures / "proof9"
+    calls: list[tuple] = []
+    real_build = proof.build_fixture
+
+    def spy_build(*, trial_id, writes, vault, data_root, **kw):   # noqa: A002
+        calls.append(("build", trial_id, tuple(writes), Path(vault), Path(data_root)))
+        return real_build(trial_id=trial_id, writes=writes, vault=vault,
+                          data_root=data_root, **kw)
+
+    def spy_boot(root, **_kw):
+        calls.append(("boot", Path(root)))
+        raise proof.ProofRefused("stub boot: this node is about the directory it was handed")
+
+    with _patched(proof, build_fixture=spy_build, boot_fixture_aggregator=spy_boot,
+                  durable_write_trees=lambda *a, **k: {}), \
+         _patched(proof.paths, VAULT_ROOT=vault, DATA_ROOT=data):
+        code = proof.main(["--build-fixture", "proof9"])
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "stub boot: this node is about" in err, err
+    assert [row[0] for row in calls] == ["build", "boot"], (
+        f"the build must happen before the boot, in one invocation: {calls}")
+    assert calls[0][1] == "proof9", calls[0]
+    assert calls[0][2] == tuple(proof.SPAWN_SCOPES), (
+        f"the copy was built with writes={list(calls[0][2])}, not with the scopes this "
+        "instrument arms its aggregator with (list(proof.SPAWN_SCOPES))")
+    assert calls[0][3] == vault and calls[0][4] == data, calls[0]
+    assert calls[1][1] == dest, (
+        f"the boot was handed {calls[1][1]}, not the directory the build created ({dest})")
+    assert dest.is_dir(), "a boot that then refused must not take the copy with it"
+
+
+def test_build_fixture_propagates_the_builder_refusal_as_exit_three(tmp_path, capsys):
+    """A destination `build_fixture` will not build: exit 3, its words, nothing copied.
+
+    Clause 2, on the destination this box reaches with no override at all: with `LLOYD_DATA`
+    unset `paths.DATA_ROOT` IS `PRODUCTION_DATA_ROOT`, and rule (2)
+    (`bench_fixture.py:288-290`) is what the flag therefore needs a scratch root for. The root
+    is read from `app.data_root`, never typed.
+
+    The pinned witness is the token `PRODUCTION_DATA_ROOT`, which only `build_fixture` puts in
+    a message: a re-spelled destination test in this module could produce the same exit code
+    and could not produce that sentence. That is the difference the clause asks for — propagate
+    the builder's `FixtureRefused`, because the builder has the only answer to "may this
+    destination be built", and a second rail that can disagree with the first is a rail nobody
+    audits. `Traceback` is asserted absent so a `FixtureRefused` that escaped the handler
+    cannot pass as a refusal with a noisy exit.
+    """
+    from app.data_root import PRODUCTION_DATA_ROOT
+
+    vault, _data, _fixtures = _cli_stub(tmp_path)
+    with _patched(proof, durable_write_trees=lambda *a, **k: {}), \
+         _patched(proof.paths, VAULT_ROOT=vault, DATA_ROOT=PRODUCTION_DATA_ROOT):
+        code = proof.main(["--build-fixture", "proofx"])
+    captured = capsys.readouterr()
+    assert code == 3, captured.err
+    assert "refused:" in captured.err, captured.err
+    assert "PRODUCTION_DATA_ROOT" in captured.err, captured.err
+    assert "Traceback" not in captured.out + captured.err, captured.err
+    # The one directory this build could have created, asserted absent. The rest of the
+    # production root is not diffed because it is a live tree — another process writing a
+    # session file between two listings would read as the guard having leaked.
+    assert not (PRODUCTION_DATA_ROOT / FIXTURE_ROOT_RELATIVE).exists(), (
+        "the refused build created the fixtures area inside the production data root, which "
+        "is the rule this node exists to keep")
+
+
+@pytest.mark.parametrize("argv,token", [
+    (["--build-fixture", "proof7", "--plan"], "--plan"),
+    (["--build-fixture", "proof7", "--fixture-root", "/tmp/definitely-not-built"],
+     "--fixture-root"),
+    (["--build-fixture", "proof7", "--aggregator-url", "http://127.0.0.1:9/mcp",
+      "--state-url", "http://127.0.0.1:9/state"], "--aggregator-url"),
+    (["--build-fixture", ""], "empty TRIAL_ID"),
+])
+def test_build_fixture_is_refused_before_it_builds_anything(capsys, monkeypatch, argv,
+                                                            token):
+    """`--build-fixture` in company, or with no id: refused, and no copy was built.
+
+    Three conflicts and the empty id, and each is a real fork rather than tidiness. The flag
+    builds the copy THIS trial runs on, so pairing it with `--fixture-root`, an aggregator url
+    or `--plan` names two copies (or one copy and no server) and leaves `copy_side_witness`
+    grading a directory no process was pointed at. An empty TRIAL_ID is the same class of
+    mistake at the other end: it resolves the destination to the fixtures AREA itself, where
+    `bench_fixture._delete_refusal` (`:156`) will not delete — a copy that outlives its trial
+    by construction, which is the leak `ORPHAN_MAX_AGE_S` exists to age out.
+
+    Each conflicting row carries a real trial id before the conflict, because argparse will not
+    take an option-shaped token as a value (`argument --build-fixture: expected one argument`,
+    exit 2) — an id-less `--build-fixture --plan` tests the parser, not this refusal.
+
+    The builder is patched to record a call so "refused" cannot be a message printed on the
+    way past a `mkdir`: every one of these four paths must stop before a copy exists.
+    """
+    monkeypatch.delenv(proof.STATE_URL_ENV, raising=False)
+    monkeypatch.setattr(proof, "durable_write_trees", lambda *a, **k: {})
+    built: list[int] = []
+    monkeypatch.setattr(proof, "build_fixture", lambda *a, **k: built.append(1))
+    code = proof.main(argv)
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "refused:" in err, err
+    assert "--build-fixture" in err, err
+    assert token in err, f"{token!r} missing from {err}"
+    assert built == [], "a refused flag combination built a copy anyway"
 
 
 # ── clause 4: the verdict is ATTRIBUTED against an equal-length control ────
