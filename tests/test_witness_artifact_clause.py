@@ -3006,8 +3006,9 @@ def test_the_sibling_pointer_is_bought_within_the_note_budget_and_never_by_trunc
     alone is not the property: the fallback ("…rather than ordering the store") is
     what the ceiling exists to say, and it sits last. A pointer that pushed it past
     the cut would have made this fix the cause of the failure #2382 rules against. The
-    ladder therefore trades phrasing first (`is over … on what this rule may demand:`
-    gives way to the compact lead) and only then drops the pointer. `~/.cache/qmd/
+    ladder therefore trades phrasing first (the roomy lead, `is over … byte ceiling:
+    do not order it whole. What is owed is an extract of it — …`, gives way to the
+    compact lead) and only then drops the pointer. `~/.cache/qmd/
     index.sqlite` is the short case that must keep its roomy "committed to" wording.
     """
     limit = f"{B.WITNESS_MAX_BYTES:,}"
@@ -3035,7 +3036,9 @@ def test_the_sibling_pointer_is_bought_within_the_note_budget_and_never_by_trunc
             f"the ordered artifact stopped being named once the pointer arrived: {note}")
     # The roomy wording is a budget question, and the measured answer is that a store
     # WITH siblings cannot carry it: with `workers.db`'s family pattern interpolated the
-    # roomy form is 672 characters against the 600 bound, the compact lead is 555. So
+    # roomy form is 662 characters against the 600 bound, the compact lead is 558 (#3894
+    # moved both: the roomy lead lost 29 characters of scaffolding and gained the 19 of
+    # `as at the reading`, which is why the compact figure is 3 over its old 555). So
     # the trade is real and it is phrasing only — and it is bounded, because `~/.cache/
     # qmd/index.sqlite` with nothing committed keeps #2382's roomy sentence verbatim (the
     # empty-vault case the pre-existing node pins).
@@ -3806,3 +3809,206 @@ def test_the_under_bound_branch_never_rewrites_the_over_bound_note(tmp_path):
     # count is the probe's, so this also pins that the over-bound arm still consults it.
     assert "backlog/data/*-SM_X-metrics.jsonl" in text, text
     assert "1 committed extract" in text, text
+
+
+# --------------------------------------------------------------------------- #
+# #3894: the read-instant cap — "the subset that reproduces the figure the item
+# quotes" is only well-defined on a store that stopped moving.
+#
+# The exhibited store is the board-steward witness: `judgement_aggregate()` in
+# workers/dispatch_watch.py reads `runs` through `list_runs_joined()` in
+# workers/queue.py, which filters `r.completed_at >= ?` and has no upper bound anywhere
+# in it, while the caller builds `since` FROM the read instant over
+# `JUDGEMENT_WINDOW_DAYS` days. One command read at now / +3d / +7d over
+# `/home/alansrobotlab/lloyd-data/workers.db` returned 163 / 107 / 0 ticks and rates
+# 0.8414 / 0.8537 / None, and the same command at the default 30-day cut returns 1020
+# ticks, 446 judged, 0.7803 — which is #3602's third drift value (406 → 407 → 446).
+# So an uncapped cut re-run after a reading cannot reproduce that reading: it gains the
+# rows that landed since and loses the pruned tail. #3894 names the bound in the demand
+# itself: `as at the reading`.
+# --------------------------------------------------------------------------- #
+
+_CAP = "as at the reading"
+#: The roomy lead #3894 spent to pay for the cap, and the retired reading it replaces.
+_RETIRED_ROOMY_LEAD = "on what this rule may demand"
+#: The binding shape: the emitted `workers.db` note measured 595 of `CLAUSE_MAX_CHARS`
+#: before the cap and 598 after it. Both are re-derived below, not quoted.
+_BINDING_STORE = "/home/alansrobotlab/lloyd-data/workers.db"
+_BINDING_ITEM = 3894
+
+
+def _binding_shape(tmp_path: Path, siblings=29):
+    """The note that binds the budget: `workers.db` spelled the way a real demand
+    spells it, with the sibling count the live vault carried on 2026-11-07, in the
+    isolated temporary vault.
+
+    Not the live vault: `tests/test_witness_artifact_clause.py`'s `isolated` fixture
+    points `app.paths.VAULT_ROOT` at a temporary tree precisely so that an unrelated
+    commit into `backlog/data/` cannot move these expectations, and the count is the
+    only thing here that a live read would smuggle in. The store path stays absolute
+    because that is what makes the note long: the `~/lloyd-data` spelling is 16
+    characters shorter and stops binding.
+    """
+    _vault_witness(tmp_path, "workers.db", body="x")
+    for i in range(siblings):
+        _vault_witness(tmp_path, f"2026-09-{(i % 28) + 1:02d}.{3000 + i}"
+                                 f"-lloyd-data-workers.db", body="x")
+    assert B._committed_witness_siblings(_BINDING_STORE) == siblings, (
+        f"fixture: the sibling count the note is measured against is not {siblings}")
+    art = B._witness_artifact(_BINDING_STORE, item_id=_BINDING_ITEM)
+    assert art != "backlog/data/workers.db", (
+        "fixture: the free slot is open, so the artifact is 27 characters shorter than "
+        "the live demand and this shape stops binding — the live vault holds a free "
+        "`backlog/data/workers.db`, which is why the demand must name a dated sibling")
+    return B._over_bound_extract_demand(_BINDING_STORE, item_id=_BINDING_ITEM)
+
+
+def test_the_roomy_extract_demand_bounds_the_subset_at_the_reading():
+    """#3894 clause 1: the roomy note says the cut is bounded above at the instant the
+    quoted figure was measured, and keeps the two halves of its demand sentence.
+
+    `~/.cache/qmd/index.sqlite` with nothing committed is the roomy case every sibling
+    node already uses. The cap goes INSIDE the demand — after `reproduces the figure
+    the item quotes`, before the em-dash that closes it — because that is the clause
+    the bound governs: which subset. It cannot go at the end, where `clean_clauses`
+    would cut it first, and it cannot go near the command, which reads committed bytes
+    and is time-invariant.
+    """
+    note = B._over_bound_extract_demand("~/.cache/qmd/index.sqlite")
+    assert "subset" in note, note
+    assert "reproduces the figure the item quotes" in note, note
+    assert _CAP in note, f"the roomy demand still orders an uncapped cut: {note}"
+    assert (note.index("reproduces the figure the item quotes")
+            < note.index(_CAP) < note.index("committed to")), (
+        f"the cap is not inside the subset clause it bounds: {note}")
+
+
+def test_the_compact_extract_demand_carries_the_same_cap_and_no_roomy_clause():
+    """#3894 clause 2: the compact note carries the same bound and still never says
+    `committed to`, so which form is chosen is unchanged by the cap.
+
+    The form choice is a budget decision, and the cap had to be affordable in BOTH
+    forms: a cap that only the roomy sentence could carry would leave the exact paths
+    that need it most — the long, over-bound, sibling-heavy ones — uncapped. A store
+    name long enough to force the compact form with nothing committed is the cheapest
+    way to reach that form, and it is the same shape
+    `test_the_capped_over_bound_note_fits_every_form_and_the_cap_is_in_all_of_them`
+    walks.
+    """
+    note = B._over_bound_extract_demand(
+        "~/lloyd-data/_pipeline/reflection/"
+        "a-quite-long-live-store-name-that-keeps-going.sqlite")
+    assert "committed to" not in note, (
+        f"the compact form gained the roomy clause: {note}")
+    assert _CAP in note, f"the compact demand still orders an uncapped cut: {note}"
+    assert "reproducing the quoted figure" in note, note
+    assert note.index(_CAP) < note.index("proved by"), (
+        f"the cap moved past the command it must not be read as bounding: {note}")
+    assert "byte ceiling" in note and "do not order it whole" in note, note
+
+
+def test_the_cap_and_the_sibling_pointer_and_the_closing_all_survive_together(
+        tmp_path):
+    """#3894 clause 3: at the longest shape, where the compact form is chosen, one
+    note carries the cap, the #3175 pointer and #2382's closing sentence, none of them
+    cut.
+
+    This is the shape that binds: the emitted note is the store path, the ceiling, the
+    artifact, a 214-character re-derive command and a 184-character pointer tail. The
+    cap cannot be bought by shortening any of those four — each is a mandatory half —
+    so it was bought from the roomy lead, and this node is where that trade is checked
+    rather than assumed. Order matters as much as presence: the pointer's glob and the
+    closing words are the LAST thing in the note, so a cap that pushed anything past
+    the cut would take the fallback with it, which is the failure #2382 rules against.
+    """
+    note = _binding_shape(tmp_path)
+    assert "committed to" not in note, (
+        f"the binding shape stopped taking the compact form: {note}")
+    assert _CAP in note, f"no bound at the shape that needs it most: {note}"
+    assert "Measure the 29 committed extracts under" in note, note
+    assert "`backlog/data/*-lloyd-data-workers.db`" in note, note
+    assert note.endswith("else say so rather than ordering the store."), note
+    assert note.index(_CAP) < note.index("Measure the 29 committed extracts"), (
+        f"the cap is after the pointer, so it bounds the wrong clause: {note}")
+    assert B.clean_clauses([note]) == [note], (
+        f"the truncator cut something: {len(note)} chars")
+
+
+def test_the_cap_bought_from_the_roomy_lead_and_fits_every_probed_note(tmp_path):
+    """#3894 clause 4: every probed note stays inside `CLAUSE_MAX_CHARS` with the cap
+    in it, and the characters came from the roomy lead rather than from the tail.
+
+    Two measurements, both re-derived here rather than quoted from the item, and each
+    is an arithmetic question about the emitted note rather than a grep. (1) The cap
+    could not be APPENDED to the binding note: that note measures 598 now, the cap
+    costs 18 characters (` as at the reading`), and the note #3894 was filed against
+    measured 595 with 5 of headroom — so 598 + 18 is over by 16 and the emitter's own
+    ladder answers an over-budget note by DROPPING the sibling pointer, buying #3894
+    with #3175. (2) The roomy lead had to be the currency: restoring
+    `on what this rule may demand` to the 590-character roomy note is 619, over by 19,
+    so the lead and the cap cannot both be afforded at any shape. That is what
+    "displaces existing wording, never appended" means, and it is checkable from the
+    emitted strings alone.
+    """
+    binding = _binding_shape(tmp_path)
+    assert len(binding) <= B.CLAUSE_MAX_CHARS, (
+        f"the capped note is {len(binding)} chars over {B.CLAUSE_MAX_CHARS}")
+    assert len(binding) == 598, (
+        f"the binding note moved to {len(binding)} characters, so the arithmetic below "
+        "needs re-reading before it can be trusted")
+    assert len(binding) + len(f" {_CAP}") > B.CLAUSE_MAX_CHARS, (
+        f"the cap could have been appended ({len(binding)} + {len(_CAP) + 1} <= "
+        f"{B.CLAUSE_MAX_CHARS}), so the trade this node is about was not the only way "
+        "to pay for it")
+    roomy = B._over_bound_extract_demand("~/.cache/qmd/index.sqlite")
+    assert len(roomy) == 590, (
+        f"the roomy note moved to {len(roomy)} characters, so the arithmetic below "
+        "needs re-reading before it can be trusted")
+    assert len(roomy) + len(f" {_RETIRED_ROOMY_LEAD}") > B.CLAUSE_MAX_CHARS, (
+        f"the roomy lead and the cap could both be afforded "
+        f"({len(roomy)} + {len(_RETIRED_ROOMY_LEAD)} <= {B.CLAUSE_MAX_CHARS}), so the "
+        "lead was not spendable currency and dropping it was not the trade")
+    for shape in ("~/.cache/qmd/index.sqlite",
+                  "~/lloyd-data/workers.db",
+                  "~/lloyd-data/_pipeline/reflection/iv-metrics.jsonl",
+                  "~/lloyd-data/_pipeline/reflection/"
+                  "a-quite-long-live-store-name-that-keeps-going.sqlite",
+                  "~/.local/state/lloyd-request-manifests/manifests/"
+                  "2026-09-30-deeply-nested-request-manifest-export.ndjson"):
+        note = B._over_bound_extract_demand(shape)
+        assert len(note) <= B.CLAUSE_MAX_CHARS, f"{shape}: {len(note)} chars"
+        assert B.clean_clauses([note]) == [note], f"{shape} was truncated"
+        assert _CAP in note, f"{shape}: a form reached without the cap: {note}"
+    roomy = B._over_bound_extract_demand("~/.cache/qmd/index.sqlite")
+    assert _RETIRED_ROOMY_LEAD not in roomy, (
+        f"the cap was appended on top of the roomy lead, not traded for it: {roomy}")
+
+
+def test_capping_the_cut_left_the_fallback_last_and_the_roomy_discriminator_intact(
+        tmp_path):
+    """#3894 clause 5: #2382's fallback is still the LAST sentence of both forms, the
+    pointer tail included, and the roomy discriminator still appears where it does now.
+
+    `test_the_sibling_pointer_is_bought_within_the_note_budget_and_never_by_truncation`
+    walks this over four shapes with two committed extracts; this node walks the same
+    property over the shape the cap was bought for (29 extracts, dated artifact, the
+    `workers.db` spelling) so the two clauses are graded against the binding budget and
+    not only against a comfortable one. The roomy discriminator is re-checked because
+    the cap had to be paid for out of the same lead it sits in, and `committed to
+    `backlog/data/index.sqlite`` is the string the rest of this file reads as "this is
+    the roomy form".
+    """
+    roomy = B._over_bound_extract_demand("~/.cache/qmd/index.sqlite")
+    assert "committed to `backlog/data/index.sqlite`" in roomy, roomy
+    assert roomy.rstrip(".").endswith("rather than ordering the store"), roomy
+    pointed = _binding_shape(tmp_path)
+    assert pointed.endswith("else say so rather than ordering the store."), pointed
+    long_and_empty = B._over_bound_extract_demand(
+        "~/lloyd-data/_pipeline/reflection/"
+        "a-quite-long-live-store-name-that-keeps-going.sqlite")
+    assert long_and_empty.rstrip(".").endswith("rather than ordering the store"), (
+        long_and_empty)
+    for note in (roomy, pointed, long_and_empty):
+        assert note.count("rather than ordering the store") == 1, (
+            f"the closing sentence appears twice, so the last one is not the fallback: "
+            f"{note}")

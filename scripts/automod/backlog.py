@@ -2463,10 +2463,28 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     the fallback — the one instruction that stops a round ordering the store anyway.
     The roomy form is what a normal path gets; when it will not fit, the cheap
     characters go first (the artifact needs no separate mention once the deriving
-    command carries it, and the ceiling reads as well without its noun phrase) and the
-    mandatory halves — source path, ceiling by constant and by number, the subset, the
-    command, the fallback — are what survive. Both forms end on the same sentence, so
-    which one was chosen never changes what the item asks for.
+    command carries it, and `the subset` is the half the compact lead drops because the
+    roomy sentence has already said it) and the mandatory halves — source path, ceiling
+    by constant and by number, the subset, the read-instant cap, the command, the
+    fallback — are what survive. Both forms end on the same sentence, so which one was
+    chosen never changes what the item asks for.
+
+    Both forms also carry the cap, and #3894 is why it could not live in one of them.
+    The demand asks for "the subset that reproduces the figure the item quotes", and on
+    a live store that subset has an expiry date: the figure was READ at an instant, and
+    a cut taken later is a different set of rows. The board-steward witness is the
+    exhibited case — `judgement_aggregate()` in workers/dispatch_watch.py filters
+    `completed_at >= since` with no upper bound, because the function that reads it,
+    `list_runs_joined()` in workers/queue.py, stops at that predicate; and `since` is
+    built FROM the read instant, so one command read now / +3d / +7d on
+    `~/lloyd-data/workers.db` returns 163 / 107 / 0 ticks and rates 0.8414 / 0.8537 /
+    None, and #3602's figure drifted 406 → 407 → 446 rows while a round tried to satisfy
+    the uncapped wording. So the note names the instant: the extract is the store `as at
+    the reading`, which bounds the cut above as well as below. The bound is in the
+    DEMAND prose and not in `_rederive_command`, because that command recomputes over the
+    COMMITTED extract bytes and is time-invariant once the extract exists — the
+    time-dependence is entirely in choosing the subset from the live store, which
+    nothing but this note constrains.
 
     Deliberately absent from both: the store's own byte count. `~/lloyd-data`
     witnesses rotate and grow, so a size written into the item's front matter is a
@@ -2510,23 +2528,35 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     # survive the budget is the sentence the budget is for.
     fallback = ("Prefer an extract under it; if the figure cannot be reproduced "
                 "under it, say so rather than ordering the store.")
-    roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling on what "
-             f"this rule may demand: do not order it whole. What is owed is an extract "
-             f"of it — the subset that reproduces the figure the item quotes — "
-             f"committed to `{artifact}` and re-derived from it with `{cmd}`. "
-             f"{fallback}")
-    compact = (f"`{path}`: over the WITNESS_MAX_BYTES = {limit} byte ceiling, so do "
-               f"not order it whole. Publish an extract of the subset reproducing the "
-               f"figure the item quotes, proved by `{cmd}`. {fallback}")
+    # #3894: the extract is cut at an instant, not over a window's open end. The store
+    # this demand keeps firing on is `judgement_aggregate`, and its read has a lower
+    # bound and no upper one — `list_runs_joined()` in workers/queue.py filters
+    # `r.completed_at >= ?` with nothing above it, while
+    # `judgement_aggregate()` builds `since` FROM the read instant — so the same command
+    # run an hour after a
+    # reading counts ticks that landed since it and loses the oldest tail: the subset
+    # that "reproduces the figure the item quotes" stops existing the moment the store
+    # moves. #3602's figure went 406 → 407 → 446 rows while a round was told to
+    # reproduce it, and #3330 §1, #3546, #3680, #3685 and #3842 are five independent
+    # rediscoveries of the same dead end in thirteen days. `as at the reading` is the
+    # bound in three words — the state of the store AT the instant the quoted figure was
+    # read, which excludes later rows and earlier-pruned ones alike. Both forms spend
+    # it; the roomy form pays for it with `on what this rule may demand` (29 characters,
+    # scaffolding the ceiling already says) and the compact with `Publish`→`Owed:`, the
+    # dropped `so` and `the figure the item quotes`→`the quoted figure`, because the
+    # emitted `workers.db` note measured 595 of `CLAUSE_MAX_CHARS` and an APPENDED cap
+    # would have bought a pointer's truncation.
+    cap = "as at the reading"
 
-    # #3175: what to measure BEFORE publishing. A path list cannot live here — the note
-    # has 76 characters of headroom in its longest form and `workers.db` has ten
-    # committed siblings at 52 characters a path — so the pointer is the family PATTERN
-    # plus a count, and it rides INSIDE the fallback rather than beside it: the fallback
-    # is 111 characters ending in the words the ceiling exists to produce, and a reader
-    # who is told to publish a new extract is exactly the reader who needs "…if none can,
-    # say so rather than ordering the store" to stay attached to that instruction. The
-    # count is what makes the glob checkable — run it, get a different number, and you
+    # #3175: what to measure BEFORE publishing. A path list cannot live here — the
+    # longest form of this note has 2 characters of headroom under `CLAUSE_MAX_CHARS`
+    # at the `workers.db` spelling with 29 committed siblings, which
+    # `tests/test_witness_artifact_clause.py` re-measures, and `workers.db` carries 52
+    # characters a path per sibling — so the pointer is the family PATTERN plus a count, and it rides INSIDE the fallback
+    # rather than beside it: the fallback is 111 characters ending in the words the
+    # ceiling exists to produce, and a reader who is told to publish a new extract is
+    # exactly the reader who needs "…if none can, say so rather than ordering the
+    # store" to stay attached to that instruction. The count is what makes the glob checkable — run it, get a different number, and you
     # have a contradiction to report rather than advice to ignore.
     sibs = _committed_witness_siblings(path, artifact_dir)
     family = f"{artifact_dir}/{_witness_family_pattern(target)}"
@@ -2537,20 +2567,22 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
                 f"rather than ordering the store.")
     else:
         tail = fallback
-    roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling on what "
-             f"this rule may demand: do not order it whole. What is owed is an extract "
-             f"of it — the subset that reproduces the figure the item quotes — "
-             f"committed to `{artifact}` and re-derived from it with `{cmd}`. {tail}")
+    roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling: do not "
+             f"order it whole. What is owed is an extract of it — the subset that "
+             f"reproduces the figure the item quotes, {cap} — committed to "
+             f"`{artifact}` and re-derived from it with `{cmd}`. {tail}")
     if len(roomy) <= CLAUSE_MAX_CHARS:
         return roomy
-    # The compact lead drops `of the subset`, which the roomy sentence has already said
-    # — not information lost, but it is the 13 characters that decide whether a store
-    # with committed siblings keeps the pointer at all. Phrasing is what gets traded
-    # here; the ceiling, the artifact, the command, the pointer and the closing words
-    # all survive the trade.
-    compact = (f"`{path}`: over the WITNESS_MAX_BYTES = {limit} byte ceiling, so do "
-               f"not order it whole. Publish an extract reproducing the figure the "
-               f"item quotes, proved by `{cmd}`. {tail}")
+    # The compact lead trades phrasing, never a mandatory half: `on what this rule may
+    # demand` and `of the subset` are gone because the roomy sentence has said them,
+    # and #3894's `as at the reading` is bought with `Publish`→`Owed:`, the dropped `so`
+    # and `the figure the item quotes`→`the quoted figure`. What survives the trade is
+    # the ceiling, the artifact, the command, the cap, the pointer and the closing words
+    # — and the trade is bounded: the cap is in BOTH forms, so no path is left without
+    # the bound, which is the half that used to be missing.
+    compact = (f"`{path}` over the WITNESS_MAX_BYTES = {limit} byte ceiling: do not "
+               f"order it whole. Owed: an extract reproducing the quoted figure {cap}, "
+               f"proved by `{cmd}`. {tail}")
     if len(compact) <= CLAUSE_MAX_CHARS or not sibs:
         return compact
     # A store name long enough that even the compact note cannot carry a pointer keeps
