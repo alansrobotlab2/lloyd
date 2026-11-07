@@ -74,7 +74,9 @@ async def _to_thread(fn, *args) -> Any:
 
 
 # Sections that walk the vault are cached; live sections (engines, host,
-# running turns) are never cached — they are the whole point of the page.
+# running turns) are never cached — they are the whole point of the page. The
+# aggregator's subagent registry is the one cross-process read that IS cached,
+# at `_AGENT_STATE_TTL_S` below, because it is a registry and not a gauge.
 #
 # The TTL and the frontend's poll are a pairing and are named together on
 # purpose. `DashboardPage.tsx` polls at `POLL_MS` = 2000 ms; this is 10 s; so
@@ -197,6 +199,50 @@ async def _agent_state() -> dict[str, Any]:
                                 headers=auth_headers_for(_MCP_STATE_URL))
         resp.raise_for_status()
         return resp.json()
+
+
+#: How long the aggregator's subagent/background-task registry may be reused.
+#:
+#: This one round trip is now the whole cost of a warm cycle. Measured per
+#: section inside a pytest process on 2026-11-06, over the live 3,804-item
+#: board and a 30,770,490-byte promotions ledger: `_agent_state` 0.59-1.39 s,
+#: every other uncached section at or under 0.163 s (`host` at the end of its
+#: own TTL), and every TTL'd section 0.000 s. So on a 2 s poll the panel pays a
+#: cross-process read for a registry that changes when a subagent starts or
+#: stops, and that read is what the warm-vs-cold ratio is actually measuring:
+#: cold 16.305 s against warm 1.023 s here (15.9x), and only 8.7x under `-n 8`
+#: with the ledger stubbed — under the 10x that
+#: `tests/test_dashboard_cold_render.py::test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold`
+#: states, which is why that node reddens on a busy box. The baseline beside
+#: that clause is cold 1.69 s / warm 0.073 s / 23x, from 2026-09-17.
+#:
+#: The header above `_cached` refuses to cache engines, host and running turns;
+#: this is none of those — it is the list of which subagents and background
+#: tasks the aggregator holds, and the subagent detail lives on the task board
+#: anyway. It takes the same 10 s as `_VAULT_SCAN_TTL_S` and `_RECENT_TTL_S`, so
+#: a panel poll between two refreshes reports a registry at most 10 s old and
+#: the page's own 2000 ms poll still catches every start within five polls.
+#: The aggregator's `/state` endpoint stays live for anyone who asks it
+#: directly, including `_check_agent_mcp` and `automod_status`.
+_AGENT_STATE_TTL_S = 10.0
+
+
+async def _agent_states_cached() -> dict[str, Any]:
+    """`_agent_state()` behind `_AGENT_STATE_TTL_S`, sharing the `_cache` store.
+
+    Spelled out rather than routed through `_cached`, which takes a sync
+    callable — this fetch is an `await`, and wrapping it in a thread to satisfy
+    `_cached` would move the HTTP client onto a different loop than the one that
+    built it. Same rule as `_cached`, including the one that matters for a round
+    trip this slow: the stamp is taken AFTER the response arrives, so the entry
+    is never charged less age than it has.
+    """
+    entry = _cache.get("agents")
+    if entry is not None and time.monotonic() - entry[0] < _AGENT_STATE_TTL_S:
+        return entry[1]
+    states = await _agent_state()
+    _cache["agents"] = (time.monotonic(), states)
+    return states
 
 
 async def _primary_state() -> dict[str, Any]:
@@ -1104,7 +1150,7 @@ async def get_dashboard():
         _gather("vllm", _vllm()),
         _gather("primary", _primary_state()),
         _gather("recent", _to_thread(_recent_sessions)),
-        _gather("agents", _agent_state()),
+        _gather("agents", _agent_states_cached()),
         _gather("services", _to_thread(_services)),
         _gather("workers", _to_thread(_workers)),
         _gather("autonomy", _to_thread(_autonomy)),

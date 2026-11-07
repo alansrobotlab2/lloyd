@@ -60,9 +60,18 @@ from scripts.automod import backlog as B
 
 #: The board this calibration was walked over, in item files (`*.md` with a
 #: numeric name, which is how the dashboard counts them — the same rule
-#: `board_files_or_stop(numeric_names=True)` applies). Re-based 2026-10-24 from
-#: 66f62027, and all thirteen serial runs below printed exactly this count, so
-#: the denominator and the durations describe one board and not two.
+#: `board_files_or_stop(numeric_names=True)` applies). Re-based 2026-11-07 (item
+#: #3867) from 21411475, and all thirteen serial cycles below printed exactly this
+#: count, so the denominator and the durations describe one board and not two. The
+#: count this replaces (`RETIRED_BOARD_FILES` below) described a board 16.9% smaller
+#: than the one the cycle walks today: 10 files past that count's own +20% upper
+#: edge, which is this node's arithmetic rather than a census —
+#: `assert_board_within_calibration_drift` puts the edge at `int(RETIRED_BOARD_FILES
+#: * (1 + BOARD_DRIFT_FRACTION))` = 3,794 and its failure line printed this count
+#: against that ceiling. The drift node has no third state between "re-charged" and
+#: "re-base", and it was right to ask for one. The 10 and the 3,794 are re-derived
+#: by `test_the_re_base_prose_recomputes_from_the_two_calibrations`, because this
+#: sentence first shipped as "one file past", which understated its own node by nine.
 #:
 #: ONE copy of the number lives in this file. `cold_budget_for_board` divides
 #: the budget by it to get the per-file allowance the cycle is charged, and
@@ -73,7 +82,7 @@ from scripts.automod import backlog as B
 #: copy is the thing that goes stale, and this file's last two calibrations each
 #: left one behind (the 1,142-file board and the 1,450-file one, both of which
 #: the bound then walked past).
-CALIBRATED_BOARD_FILES = 3162
+CALIBRATED_BOARD_FILES = 3804
 
 #: Bytes of `promotions.jsonl` the calibrated cycle decoded, for the same
 #: reason. NOT part of the denominator — the budget scales with the board, not
@@ -84,6 +93,19 @@ CALIBRATED_BOARD_FILES = 3162
 #: inputs, since ledger growth can exhaust this budget with no code change and
 #: no drift-test warning.
 CALIBRATED_LEDGER_BYTES = 28_960_660
+
+#: The calibration this one replaces, as DATA rather than as a sentence, and that
+#: distinction is the point: every movement this file's prose quotes about a re-base
+#: (how far the tail moved, how far the board moved, how much dearer the walk went
+#: per item file, how many files past the retired band's edge the new count was) is
+#: arithmetic on these two numbers and the constants above, and
+#: `test_the_re_base_prose_recomputes_from_the_two_calibrations` re-runs that
+#: arithmetic against the prose. Both figures below are quoted in the record above
+#: `COLD_P90_S`: the 3,162-item board walked over 2026-10-24 from 66f62027, whose
+#: larger set came out at 10.53 s. They are also the numbers a reader needs to check
+#: the drift node's own demand: this count against a retired edge of 3,794.
+RETIRED_BOARD_FILES = 3162
+RETIRED_P90_S = 10.53
 
 #: The cold cycles `COLD_P90_S` is derived from: two serial sets measured over the
 #: board named by `CALIBRATED_BOARD_FILES`, each entry a pair of the 1-minute load
@@ -99,8 +121,8 @@ CALIBRATED_LEDGER_BYTES = 28_960_660
 #: figure the table below quotes from them too, so the prose, the cycles and the
 #: number the dashboard is charged are one measurement and not three claims.
 _CALIBRATION_CYCLES_S: tuple[tuple[str, tuple[float, ...]], ...] = (
-    ("3.45-5.92", (10.25, 10.07, 10.53, 10.28, 10.36, 10.20, 10.46, 10.15)),
-    ("4.95-5.10", (9.86, 10.10, 10.38, 10.14, 10.11)),
+    ("3.69-7.66", (16.11, 16.36, 16.38, 16.50, 16.69, 16.34, 14.51, 14.12)),
+    ("3.33-3.91", (15.01, 15.17, 14.71, 14.44, 14.68)),
 )
 
 
@@ -128,124 +150,92 @@ def _p90_nearest_rank(samples):
 
 #: The larger of the two measured tails, in seconds.
 #:
-#:     measured 2026-10-24 from 66f62027 in a round worktree, 32 cores
+#:     measured 2026-11-07 from d0857445 in a round worktree, 32 cores
 #:     board  = CALIBRATED_BOARD_FILES item files (the numeric-name subset);
 #:              all thirteen runs below printed that count
-#:     ledger = the live store. `tests/board_presence.py` repoints it only when
-#:              the configured state dir holds NO ledger, and the state dir this
-#:              round was launched into was new and held none, so every one of the
-#:              thirteen runs printed `REPOINTED: ... promotions.jsonl has no
-#:              ledger, so the cycle reads the live one instead` over a
-#:              29,038,631-byte store. That is NOT the shape a gate run decodes —
-#:              a gate's round state dir holds a ledger of its own, and those runs
-#:              read that small file instead. This live size is +0.3% on
-#:              `CALIBRATED_LEDGER_BYTES`, inside the drift band, and this re-base
-#:              again left the centre alone: that centre is pinned by equality in
-#:              `tests/test_retention_sweep.py` (where #2043's whole case is that
-#:              the fold lands the store inside the band around THAT number) and
-#:              #2071 ruled the centre is not the drift-drift lever. The durations
-#:              below are of the real store at its real size. The budget those
-#:              thirteen cycles ran against was still the old 8.65 s, and two of
-#:              them breached it on the first sample and were retired only by the
-#:              confirming cycle — 2 of 8 in the first set, 0 of 5 in the second,
-#:              which is the shape this file's own prose disclaims as evidence.
-#:     serial, 8 runs, load 3.45-5.92:  min 10.07  median 10.265  p90 10.53  max 10.53
-#:     serial, 5 runs, load 4.95-5.10:  min 9.86  median 10.11  p90 10.38  max 10.38
+#:     ledger = the live store. `timed_ledger_or_stop` repoints it only when the
+#:              configured state dir holds NO ledger, and this round's state dir was
+#:              new and held none, so all thirteen cycles printed `REPOINTED: ...
+#:              promotions.jsonl has no ledger, so the cycle reads the live one
+#:              instead` over a store of 30,770,490 B — +6.25% on
+#:              `CALIBRATED_LEDGER_BYTES`, inside the drift band, so no drift fault
+#:              was raised and this re-base left the centre alone too.
 #:
-#: p90 is nearest-rank, the convention every row of this table has reported it
-#: by, so with 8 samples it is the maximum and the 5-sample set's p90 is its
-#: maximum too. The constant is the LARGER of the two tails rather than the later
-#: one, which is what its predecessor was: this number is the floor a gate's
-#: `-n 8` ladder then lands on top of, so of two honest sets the higher p90 is
-#: the one that cannot redden the node on a window that happened to be quiet.
+#:              THAT IS NOT THE SHAPE A GATE RUN DECODES, and the gap between the
+#:              two is larger than the store's own growth: that helper takes the
+#:              configured dir whenever it holds ANY bytes, and a gate's round state
+#:              dir holds a ledger of its own that other tests in the same session
+#:              append rows to, so the graded cycle decodes a few kilobytes and not
+#:              these 30 MB. Read once on each side of this item: the review rung's
+#:              own cycle printed `ledger for this pair: ... (6,140 bytes) | the
+#:              configured state dir`, copied from the `review` rung's detail in
+#:              `~/.local/state/lloyd-automod/rounds/SM_20261106_233502/gate.json`,
+#:              and this round reproduced the substitution over a 6,000-byte scratch
+#:              ledger under `LLOYD_AUTOMOD_STATE`, which printed that configured
+#:              path beside a cold cycle of 10.848 s — against the 14.12-16.69 s of
+#:              the serial runs below. The table therefore prices the live store, and
+#:              a cycle inside a gate is cheaper than this table by most of what the
+#:              store's decode costs. `live_ledger_bytes()` below deliberately reads
+#:              the OPPOSITE precedence from `timed_ledger_or_stop`, for that reason.
+#:              The centre is left
+#:              alone because it is pinned by equality in
+#:              `tests/test_retention_sweep.py` (#2043's whole case is that the fold
+#:              lands the store inside the band around THAT number) and because #2071
+#:              ruled that the centre is not the drift-drift lever. The fold IS
+#:              running — two archived buckets sit beside the store, the older of
+#:              them 9,392,103 B written 2026-11-05 (`ls -la
+#:              ~/.local/state/lloyd-automod/promotions.jsonl*` re-checks it) — and the
+#:              live store is still 30,770,490 B, +6.25% over this centre. That is not
+#:              a contradiction, and it is not the store refilling: store 13 of the
+#:              sweep is an AGE rule (`LEDGER_ARCHIVE_AGE_DAYS = 14`), not a size rule,
+#:              so nothing in it bounds the file's growth at all. At the published
+#:              1,992,001 B/day the band's upper edge (`int(centre * 1.2)`) is about two
+#:              days off, so this drift node will be asked to re-base again well inside
+#:              one band's lifetime — which is #2071's other half, not this file's. The durations
+#:              below are of the real store at its real size, and the budget those
+#:              thirteen cycles ran against was still the previous 15.83 s: six of
+#:              them breached it on the first sample, all six in the first set, and
+#:              each was retired by its own confirming cycle, so no node failed. One
+#:              breach buying a second cold sample is what the rule is FOR, and the
+#:              sentence below is right that six retirements say nothing about the
+#:              centre on their own — but the six sit above the very tail that moved,
+#:              and the only reading of the two together is that the centre had moved
+#:              and not just the denominator.
+#:     serial, 8 runs, load 3.69-7.66:  min 14.12  median 16.35  p90 16.69  max 16.69
+#:     serial, 5 runs, load 3.33-3.91:  min 14.44  median 14.71  p90 15.17  max 15.17
 #:
-#: The net effect in the unit this check is really about: the allowance charged
-#: per item file moves from 3.3 ms to 4.2 ms, and that widening is not the
-#: board's doing alone. The board grew 20.3% since this table's last re-base and
-#: the measured tail grew 52.2%, so the cycle itself went from 2.63 ms per item
-#: file to 3.33 ms — a walk 27% dearer per file than the one that came out at
-#: 6.92 s. #1204 asks where the cold cost actually goes; this is a second
-#: independent sighting that it is not simply file count.
+#:     #3867, 2026-11-07, from d0857445, in a round worktree, 32 cores. What this
+#:     re-base is FOR is the board: the count it replaces described a board 16.9%
+#:     smaller than the one the cycle walks, 10 files past the retired band's upper
+#:     edge, and the drift node asked for exactly this. The measured tail moved
+#:     +58.5% while the board moved +20.3%, so the walk itself went from 3.33 ms to
+#:     4.39 ms per item file — 31.7% dearer per file than the cycle that came out at
+#:     the retired p90. Those five figures are arithmetic on `RETIRED_P90_S` and
+#:     `RETIRED_BOARD_FILES`, and this sentence shipped once as "52.2%" — the
+#:     PREVIOUS re-base's pair (6.92 to 10.53) pasted into the new record — which is
+#:     why `test_the_re_base_prose_recomputes_from_the_two_calibrations` now recomputes
+#:     each of them instead of trusting the prose. #1204 asks where the cold cost
+#:     goes; this is a third independent sighting that it is not file count, and the
+#:     per-file charge is kept rather than a flat number for that reason.
 #:
-#: What the re-base buys is now thin, and it belongs where the next re-base will
-#: read it: 13.16 s is 86% of the 15.22 s triage cost recorded below, a margin of
-#: 16% where the measurement this one replaced had 76%. The board grew by 534 item
-#: files in the ten days between the two dated measurements above (~53 a day;
-#: 941 of its files carry an mtime inside the last week, which counts rewrites as
-#: well as creations), so at that rate the upper edge of the drift band is a
-#: fortnight off and the triage cost is one or two re-bases off. When it arrives
-#: the answer is #1204's cheaper section, not a wider band and not a bigger
-#: margin.
+#:     The quieter set (load 3.33-3.91) sits 9.1% below the louder at the tail and
+#:     10.0% below it at the middle, which is the direction load points in. Against
+#:     that 1.52 s spread between the two sets' own tails, the 25%
+#:     margin is 4.17 s of slack over the p90. One `-n 8 --dist loadfile` pass over
+#:     this file surfaced a cold cycle at 12.19 s — 27% BELOW this serial p90, so
+#:     eight workers are not what pushes a cycle past a serial tail; what does, on
+#:     this box, is another agent's gate running alongside this one, and no sample
+#:     here models that. A parallel sample is a ceiling to check a budget against, not
+#:     a distribution to take a p90 from, and it is in that capacity it is recorded.
 #:
-#: What this table does not have is an `xdist -n 8 --dist loadfile` full-suite
-#: row, and it cannot be given one by a gate run. The calibration this one
-#: replaces advertised one and no artifact on this machine contains it; what its
-#: re-base recorded for it — "`-n 8 --dist loadfile` over the whole suite, twice
-#: on each of two shapes" — is now unrepeatable as described, because that rung
-#: runs `-n 8 --dist loadfile` WITHOUT `-s`, and pytest discards a PASSING test's
-#: captured stdout, so this node's `cold cycle:` line never reaches the log. The
-#: claim that retired that row was written here as inference ("almost certainly")
-#: and was tested against reality afterwards: three `-n 8 --dist loadfile -s`
-#: passes over this file printed nothing either, and `--durations=3` printed no
-#: durations table, because xdist forwards neither. What was checked this time is
-#: the bound itself: one `-n 8 --dist loadfile` pass over this file at the new
-#: budget went green, which by this node's own rule (one breach buys one more cold
-#: sample, two breaches fail) proves no more than that it did not breach twice in a
-#: row under eight workers, and leaves the margin itself unprinted. Nothing here
-#: claims to know how the retired row got its number.
+#:     To restore the value this one replaced, restore its inputs: the 3 162-item
+#:     board and the live ledger at the centre pinned above, walked over 2026-10-24
+#:     from 66f62027, which came out at 10.53 s.
 #:
-#: It is also why the assert below tells a re-baser to run "`-n 8` runs over the
-#: real board" while this table has no such row: under that shape the node's line
-#: surfaces only when it FAILS — a breach is exactly when pytest prints it, which
-#: is how the re-base that wrote the retired row read its parallel numbers at all
-#: — so a parallel sample a re-baser can actually read off a gate is a worst case
-#: rather than a typical one. A parallel set is therefore a ceiling to check the
-#: budget against, not a distribution to take a p90 from, and it is in that
-#: capacity that the pass named above was run. This round repeated the silent
-#: shape once more (`-n 8 --dist loadfile -s`, green, nothing printed), and the
-#: one parallel duration that did surface came from a node measuring a cycle for
-#: its own purposes: `-n 8 --dist load -s -r a`, which forwards every worker's
-#: output and so is heavier than the gate's rung, put a cold cycle at 10.077 s —
-#: 46% over the p90 the table carried when that sample was taken, and 4% under the
-#: one this table now carries, over a board 534 item files smaller than the one
-#: above. That is the size of the contention this constant does not
-#: claim to absorb, and the reason the 25% margin plus the retry in
-#: `enforce_cold_cycle_budget` are the whole protection rather than this table
-#: being a picture of a gate run.
-#:
-#: To restore the value this one replaced, restore its inputs: the board of 2,628
-#: item files and the 29,444,519-byte live ledger it was walked over, measured
-#: 2026-10-14 from 53a7fd11, which came out at 6.92 s.
-#:
-#: What none of those rows capture is contention, and this re-base's own margin
-#: sits inside a range rather than on a point: the load average at measurement was
-#: 3.45-5.92 across all thirteen cycles on 32 cores, while a gate's `tests` rung
-#: puts eight pytest workers on the same box. That is the real gap between these
-#: two sets and the gate — their medians were 10.265 and 10.11 and their p90s 10.53
-#: and 10.38, so this window measured no tail blowout between two sets taken five
-#: minutes apart (1.4% apart at the tail, 1.5% apart at the middle) — which is why
-#: the constant is still a p90 over eight runs and not the fastest cycle, and why
-#: `COLD_BUDGET_MARGIN` is not the only thing standing between a quiet serial
-#: measurement and a red gate. The window was also quieter than the one whose
-#: numbers this replaced (3.45-5.92 against 5.01-6.82), and it still came out 52%
-#: slower, so the load average does not explain the movement and the p90 here is
-#: if anything a mild reading of the machine this round ran on.
-#: The ledger rows that proved that are not decoration: at a 9.55 s budget the
-#: machine's own history records fourteen rows whose failure line carried the
-#: parallel-only marker and one whose measured duration was 9.68 s, and the same
-#: corpus carries 17 rows naming this node as a parallel-only failure up to
-#: 2026-09-29 (triage on #1858), with no code change behind any of them.
-#:
-#: The budget is deliberately NOT padded to absorb an arbitrary load spike. A
-#: number high enough for that would sit near the 15.22 s cost the check exists to
-#: catch and stop measuring the dashboard — and this re-base is where that
-#: conditional starts to bind, because 13.16 s already sits at 86% of that cost. It
-#: is still below it, still derived from a measured p90 rather than from a spike,
-#: and the run that produced 15.22 s walked 1,142 files, so a regression still
-#: trips this bound before it costs a triage. What absorbs the transient is the
-#: second sample in `enforce_cold_cycle_budget`, plus the load average and xdist
-#: worker id the node prints beside every duration, so a red that survives the
-#: retry says whether the machine was the problem or the code was.
+#:     What the next re-base will read: at the board's own recent rate the band's
+#:     upper edge is days off, not a fortnight. The answer to a third breach in a row
+#:     is #1204's cheaper section — one shared walk for the three sections that each
+#:     re-walk the board today — and not a wider band and not a bigger margin.
 #:
 #: Derived rather than typed: the larger of the two rows' p90s, computed from
 #: `_CALIBRATION_CYCLES_S` below the table's own numbers. A re-baser replaces the
@@ -256,13 +246,23 @@ COLD_P90_S = max(_p90_nearest_rank(cycles) for _, cycles in _CALIBRATION_CYCLES_
 
 #: Stated margin over that p90 (#1858 clause 1): 25%, arithmetic rather than the
 #: "~30% headroom" the 2026-09-25 re-base claimed in prose. It has to cover the
-#: worker contention the re-measurement does not absorb, and it has to stay far
-#: enough under the 15.22 s triage cost that a real regression still trips it —
-#: at 1.25 the budget is 13.16 s and the triage cost is 16% higher, so the check
-#: still means something — but 16% is the narrowest this clause has been since it
-#: was written, and the sentence above says what closes it. A re-baser changes the
-#: table and, if they must, this
-#: number; the budget itself follows arithmetically.
+#: worker contention the re-measurement does not absorb. It used also to have to
+#: stay under the cost this check was written against, and the re-base above put the
+#: enforced bound past it, so what follows is read rather than repeated, and one
+#: node re-derives it from the constants:
+#: The enforced bound is 20.86 s, 37.1% ABOVE the 15.22 s triage cost, so a cycle
+#: that regressed to the 2026-09-16 shape would now pass this node. That is a fact
+#: about the corpus and not a lever, and `TRIAGE_COLD_S` plus
+#: `test_the_enforced_bound_is_pinned_to_the_ceiling_it_outran` hold it: the same
+#: node keeps the half that did NOT move, which is that per item file the bound is
+#: 5.48 ms against the 13.33 ms/file that triage run recorded — 2.4x tighter — so a
+#: walk that regressed to the triage rate still breaches this budget by 2.4x. The
+#: way back under the absolute ceiling is a cheaper walk, not a thinner margin: the
+#: p90 that would put the bound under the triage cost at this margin is 12.18 s, 27%
+#: BELOW the tail measured on this board, so #1204's one shared board walk is the
+#: route and dropping this number would only redden the node it is meant to protect.
+#: A re-baser changes the table and, if they must, this number; the budget follows
+#: arithmetically, and so must the sentence above — or that node says so.
 COLD_BUDGET_MARGIN = 1.25
 
 #: Budget for one cold cycle over the board named by `CALIBRATED_BOARD_FILES`,
@@ -276,13 +276,42 @@ COLD_BUDGET_MARGIN = 1.25
 #: 8.0 s was the calibration on a 1,450-file board with a 6,286,192-byte ledger,
 #: where the node measured 6.02 s and 6.16 s (round SM_20260925_205059's review
 #: run, 2026-09-25, load average 11). Triage baseline: 15.22 s over 1,142 files,
-#: 2026-09-16 — the bound still fires short of it, by 16% rather than by the 76%
-#: the measurement this one replaced had.
+#: 2026-09-16 — and this is the first calibration whose bound does NOT fire short
+#: of it. The two before it did: the retired p90 put the bound at 13.16 s, 13.5%
+#: under the triage cost, and the one before that at 8.65 s, 43.2% under it. Where
+#: this bound actually stands, and the half of the comparison that survived, is the
+#: sentence above `COLD_BUDGET_MARGIN` — and that sentence is now re-derived by a
+#: node rather than trusted.
 COLD_BUDGET_S = COLD_P90_S * COLD_BUDGET_MARGIN
 
 #: How far the live board may move from the calibrated one before the budget
 #: stops describing it (#1858 clause 3).
 BOARD_DRIFT_FRACTION = 0.20
+
+#: The pain this file exists to prevent, in the unit the user felt it: one cold
+#: cycle timed at #1204's triage on 2026-09-16 over that day's board — the run whose
+#: 15.22 s the page sat showing "Loading dashboard…" for, and the reason a budget
+#: exists at all. It is a constant now rather than a sentence because the enforced
+#: bound has just moved ABOVE it, and a ceiling nothing can name is a ceiling nothing
+#: can pin: `test_the_enforced_bound_is_pinned_to_the_ceiling_it_outran` computes the
+#: relation from these two numbers plus `COLD_BUDGET_MARGIN`, and reddens when the
+#: prose above `COLD_BUDGET_MARGIN` disagrees about which side of the ceiling the
+#: bound is on, or by how much. The percentage is always relative to the triage cost
+#: — `(bound - 15.22) / 15.22` — because the file had two conventions for it and one
+#: of them is now retired.
+TRIAGE_COLD_S = 15.22
+TRIAGE_BOARD_FILES = 1142
+
+
+def ms_per_item_file(seconds: float, board_files: int) -> float:
+    """Milliseconds of cycle per item file: the unit the two corpora share.
+
+    The only unit in which a 1,142-file measurement of 2026-09-16 and a
+    board-three-times-that-size measurement of today can be compared at all. The
+    absolute seconds cannot be, and this file spent two calibrations saying the
+    ceiling they defined was intact while the corpus tripled underneath it.
+    """
+    return seconds / board_files * 1000.0
 
 
 def cold_budget_for_board(board_files: int) -> float:
@@ -1267,6 +1296,136 @@ def test_the_budget_is_the_measured_p90_times_the_stated_margin():
         f"{COLD_P90_S}")
 
 
+@pytest.mark.asyncio
+async def test_the_memo_wraps_the_real_state_request_and_counts_it(monkeypatch):
+    """The memo is tested across the process boundary it actually sits on.
+
+    The saving this diff made lives on `_agent_state`, an httpx GET of the MCP
+    aggregator's `/state` — the boundary the cold cycle crossed twice and the reason
+    the dashboard sat on "Loading…" for a minute. Round `SM_20261106_233502` proved it
+    in `test_a_warm_cycle_pays_the_aggregator_round_trip_once_per_ttl`, which replaces
+    `_agent_state` with a counting stub and drives `get_dashboard()`. That is a real
+    test of the memo, but with `_agent_state` itself stubbed it cannot tell you the
+    memo wraps THIS call and not some other one: a memo pasted onto `_primary_state`,
+    or a route that fetched the registry beside the memo, counts the same there. The
+    review rung named that gap on the diff that introduced the memo, so the diff now
+    crosses the boundary instead of describing it.
+
+    This node runs the product's own coroutine over the product's own
+    `httpx.AsyncClient`, with only the transport replaced — `httpx.MockTransport`, the
+    idiom `tests/test_mcp_transport.py` already uses against this same URL. The
+    response is parsed by the product's `resp.json()`, the URL and the timeout are the
+    product's, and the count is taken on the request as it leaves. A memo pinned onto
+    any other call site changes the count and this node says so. The credential leg is
+    pinned in `tests/test_mcp_transport.py` against a live loopback server; this node
+    makes no claim about it.
+    """
+    import httpx
+
+    from app.routers import dashboard as D
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"subagents": {}, "tasks": {}})
+
+    real_client = httpx.AsyncClient
+
+    def client_with_test_transport(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_with_test_transport)
+    monkeypatch.setattr(D, "_MCP_STATE_URL", "http://127.0.0.1:1/state")
+    monkeypatch.setattr(D, "_cache", {})
+
+    first = await D._agent_states_cached()
+    second = await D._agent_states_cached()
+    assert first == second == {"subagents": {}, "tasks": {}}, (
+        "the memo must hand back what the request returned, parsed by the product")
+    assert len(seen) == 1, (
+        f"two calls inside the TTL must be one request; the cycle paid {len(seen)}. "
+        f"This is the duplicate the cold cycle was, and the memo is only worth what "
+        f"it saves if it lands on this call site")
+    assert seen[0].url.path == "/state", (
+        f"the memo must sit on the STATE endpoint, not some other call: {seen[0].url}")
+
+    stamp, value = D._cache["agents"]
+    D._cache["agents"] = (stamp - D._AGENT_STATE_TTL_S - 1, value)
+    await D._agent_states_cached()
+    assert len(seen) == 2, (
+        "an entry older than _AGENT_STATE_TTL_S must go out again, or the memo is not "
+        "a TTL and the dashboard stops showing agents that just appeared")
+
+
+@pytest.mark.asyncio
+async def test_a_warm_cycle_pays_the_aggregator_round_trip_once_per_ttl(monkeypatch):
+    """The section the warm ratio measures is memoised, and the TTL still binds.
+
+    `test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold` states a
+    ratio and names the failure it exists to catch — "a section recomputing on
+    every poll regardless of TTL". The section that now does that is `agents`:
+    one HTTP GET of the aggregator's `/state` per cycle, measured here at
+    0.59-1.39 s per call while every other uncached section sat at or under
+    0.163 s, which is what took the ratio from 23x to 8.7x under `-n 8`. Its
+    ratio node passes or fails on that one call, so the call itself is pinned
+    here, counted rather than timed: two cycles with everything else already
+    warm fetch it ONCE, and pushing the memo's stamp one TTL into the past makes
+    the next cycle fetch again — the TTL is a bound on staleness, not a way to
+    stop asking.
+
+    The rest of the cycle is stubbed to `{}` for this node, the way
+    `test_dashboard_engine_metrics._build_client` stubs it, so the count is
+    about `agents` alone and the node costs milliseconds instead of the ~16 s a
+    real cold cycle over the live board takes.
+    """
+    for name in ("_network", "_recent_sessions", "_services", "_workers",
+                 "_autonomy", "_backlog", "_automod", "_usage"):
+        monkeypatch.setattr(dash, name, lambda: {})
+    monkeypatch.setattr(dash.host_metrics, "collect", _async_empty)
+    monkeypatch.setattr(dash, "_vllm", _async_empty)
+    monkeypatch.setattr(dash, "_primary_state", _async_empty)
+
+    fetches = []
+
+    async def _counted_state():
+        fetches.append(1)
+        return {"subagents": {}, "tasks": {}}
+
+    monkeypatch.setattr(dash, "_agent_state", _counted_state)
+    dash._cache.clear()
+    try:
+        await dash.get_dashboard()
+        assert len(fetches) == 1, (
+            "the first cycle must fetch the registry once; it fetched "
+            f"{len(fetches)}")
+        await dash.get_dashboard()
+        assert len(fetches) == 1, (
+            "a warm cycle re-fetched the aggregator registry — that round trip "
+            "is 0.59-1.39 s PER CALL measured here against the 0.019 s a "
+            "memo-hit cycle takes, and re-fetching it every poll is what "
+            f"puts the ratio under 10x; calls now: {len(fetches)}")
+        stamp, value = dash._cache["agents"]
+        assert value == {"subagents": {}, "tasks": {}}
+        assert 0.0 <= time.monotonic() - stamp < dash._AGENT_STATE_TTL_S, (
+            f"the memo is stamped {time.monotonic() - stamp:.3f}s ago; the entry "
+            "has to age from when the response arrived, the way `_cached` ages "
+            "a value that spent its own fetch time being produced")
+        dash._cache["agents"] = (stamp - dash._AGENT_STATE_TTL_S, value)
+        await dash.get_dashboard()
+        assert len(fetches) == 2, (
+            f"a memo aged past `_AGENT_STATE_TTL_S` ({dash._AGENT_STATE_TTL_S} s) "
+            f"was still served: fetches {len(fetches)}, so the panel would show "
+            "a registry nothing refreshed")
+    finally:
+        dash._cache.pop("agents", None)
+
+
+async def _async_empty():
+    return {}
+
+
 def test_the_calibration_table_and_the_cycles_it_records_agree():
     """The `COLD_P90_S` table and `_CALIBRATION_CYCLES_S` are one measurement.
 
@@ -1318,6 +1477,220 @@ def test_the_calibration_table_and_the_cycles_it_records_agree():
         f"COLD_P90_S is {COLD_P90_S} and the largest p90 this file's table quotes is "
         f"{max(quoted_p90)}: the constant is the larger of the two measured tails, so "
         f"one of the two was changed without the other")
+
+
+def _comment_prose() -> str:
+    """This file's comment prose as one searchable string, markers and wraps folded.
+
+    Every figure the two nodes below pin lives in a `#:` block that the file's own
+    line-wrapping breaks across three or four lines, so a sentence a human wrote as
+    one thought is not one string on disk. Stripping the `#:` markers and collapsing
+    whitespace first is what lets a regex ask about the sentence rather than about the
+    editor's line length.
+
+    The result covers docstrings and assert messages too, which is deliberate: a
+    figure quoted in a docstring is a claim on the same surface as one in a comment,
+    and the `== 1` arms below are loud about a second copy rather than silently
+    matching whichever one they find first.
+    """
+    raw = Path(__file__).read_text(encoding="utf-8")
+    return re.sub(r"\s+", " ", re.sub(r"^[ \t]*#:[ \t]?", " ", raw, flags=re.MULTILINE))
+
+
+def test_the_enforced_bound_is_pinned_to_the_ceiling_it_outran():
+    """The bound's relation to the triage cost is arithmetic here, not prose.
+
+    The review rung on round `SM_20261106_233502` refused that diff for a sentence
+    that had outlived its number: the re-base raised the enforced bound from 13.16 s
+    to 20.86 s, and the file went on claiming the bound stayed short of the triage
+    cost it exists to catch, quoting the retired figure. Nothing could notice, because
+    no assertion named the ceiling at all. So the ceiling is a constant now
+    (`TRIAGE_COLD_S`), and this node computes the relation and compares it with the
+    one sentence that states it.
+
+    Two directions make it fail, which is the whole point. Quote a number, a side, or
+    a percentage the constants do not give and it reddens — that catches the stale
+    sentence. And leave the sentence alone while a re-base moves the budget back under
+    the ceiling, so the disclosed breach stops being true, and it reddens too: a
+    disclosure is a claim with an expiry date, and this file's last four calibrations
+    each rewrote the number without rewriting the sentence beside it.
+
+    The second half is the part that still holds and had no rail either. Absolute
+    seconds cannot survive a corpus that triples; milliseconds per item file can, so
+    the surviving invariant — the enforced allowance must stay under the per-file rate
+    triage recorded — is asserted, and it is the terminal stop on the re-base ladder:
+    a re-baser cannot keep absorbing a dearer walk past it.
+    """
+    prose = _comment_prose()
+    bound = cold_budget_for_board(CALIBRATED_BOARD_FILES)
+    assert bound == pytest.approx(COLD_BUDGET_S), (
+        "a cycle over the calibrated board is charged the calibrated budget; the "
+        "ceiling comparison is meaningless if the two disagree")
+    pct = (bound - TRIAGE_COLD_S) / TRIAGE_COLD_S * 100.0
+
+    hits = re.findall(
+        r"[Tt]he enforced bound is (\d+\.\d+) s, (\d+\.\d)% (ABOVE|SHORT OF) the "
+        r"([\d.]+) s triage cost", prose)
+    assert len(hits) == 1, (
+        f"exactly one sentence states where the enforced bound stands against the "
+        f"triage cost, and this file states it {len(hits)} times: the node cannot "
+        f"arbitrate between two disclosures")
+    q_bound, q_pct, q_side, q_ceiling = hits[0]
+    assert float(q_ceiling) == TRIAGE_COLD_S, (
+        f"the sentence names a triage cost of {q_ceiling} s and the constant is "
+        f"{TRIAGE_COLD_S}: the ceiling was retyped rather than referenced")
+    assert abs(float(q_bound) - bound) <= 0.011, (
+        f"the sentence quotes a bound of {q_bound} s; the constants give "
+        f"{bound:.4f} s ({COLD_P90_S} x {COLD_BUDGET_MARGIN}). This is the arm that "
+        f"caught a retired 13.16 s left standing beside a 20.86 s budget")
+    assert abs(float(q_pct) - abs(pct)) <= 0.05, (
+        f"the sentence says {q_pct}% and the arithmetic gives {abs(pct):.2f}% of "
+        f"{TRIAGE_COLD_S} s")
+    assert (q_side == "SHORT OF") == (bound < TRIAGE_COLD_S), (
+        f"the sentence reads {q_side} while the bound is {bound:.2f} s against a "
+        f"ceiling of {TRIAGE_COLD_S} s: the disclosure outlived the fact, which is "
+        f"the exact failure this node was written for")
+
+    bound_ms = ms_per_item_file(bound, CALIBRATED_BOARD_FILES)
+    triage_ms = ms_per_item_file(TRIAGE_COLD_S, TRIAGE_BOARD_FILES)
+    assert bound_ms < triage_ms, (
+        f"the enforced allowance is {bound_ms:.2f} ms per item file and the triage "
+        f"run recorded {triage_ms:.2f}: the check can no longer catch a walk as dear "
+        f"as the one it was written against, in ANY unit. Absolute seconds already "
+        f"went past — this is the last comparison left, and reaching it means #1204's "
+        f"cheaper walk (one shared board walk), not a wider band, a thinner margin or "
+        f"a re-based p90.")
+    rates = re.findall(
+        r"per item file the bound is (\d+\.\d+) ms against the ([\d.]+) ms/file "
+        r"that triage run recorded — ([\d.]+)x tighter", prose)
+    assert len(rates) == 1, f"expected one per-file disclosure, found {len(rates)}"
+    q_bound_ms, q_triage_ms, q_headroom = rates[0]
+    assert abs(float(q_bound_ms) - bound_ms) <= 0.005, (
+        f"the prose says {q_bound_ms} ms/file, the constants give {bound_ms:.4f}")
+    assert abs(float(q_triage_ms) - triage_ms) <= 0.005, (
+        f"the prose says {q_triage_ms} ms/file at triage, the constants give "
+        f"{triage_ms:.4f} from {TRIAGE_COLD_S} s over {TRIAGE_BOARD_FILES} files")
+    assert abs(float(q_headroom) - triage_ms / bound_ms) <= 0.05, (
+        f"the prose claims {q_headroom}x of headroom; the two rates give "
+        f"{triage_ms / bound_ms:.2f}x")
+
+    restore_p90 = TRIAGE_COLD_S / COLD_BUDGET_MARGIN
+    back = re.search(
+        r"the p90 that would put the bound under the triage cost at this margin is "
+        r"(\d+\.\d+) s, (\d+)% BELOW the tail measured on this board", prose)
+    assert back, (
+        "the file must state what would actually put this bound back under the "
+        "ceiling, because 'lower the margin' is the wrong remedy and the number is "
+        "what says so")
+    assert abs(float(back.group(1)) - restore_p90) <= 0.005, (
+        f"the p90 that clears the ceiling at this margin is {back.group(1)} s; the "
+        f"arithmetic is {TRIAGE_COLD_S} / {COLD_BUDGET_MARGIN} = {restore_p90:.4f}")
+    below = (1 - restore_p90 / COLD_P90_S) * 100.0
+    assert abs(float(back.group(2)) - below) <= 0.5, (
+        f"the prose says the required p90 is {back.group(2)}% below the measured tail "
+        f"of {COLD_P90_S} s; it is {below:.1f}% below it")
+
+    retired = re.search(
+        r"the retired p90 put the bound at (\d+\.\d+) s, ([\d.]+)% under the "
+        r"triage cost", prose)
+    assert retired, "the history of the ceiling is stated once, in the budget comment"
+    assert abs(float(retired.group(1)) - RETIRED_P90_S * COLD_BUDGET_MARGIN) <= 0.011, (
+        f"the retired bound is quoted as {retired.group(1)} s against "
+        f"{RETIRED_P90_S} x {COLD_BUDGET_MARGIN} = "
+        f"{RETIRED_P90_S * COLD_BUDGET_MARGIN:.4f} s")
+    retired_short = (
+        (TRIAGE_COLD_S - RETIRED_P90_S * COLD_BUDGET_MARGIN) / TRIAGE_COLD_S * 100)
+    assert abs(float(retired.group(2)) - retired_short) <= 0.05, (
+        f"the retired shortfall is quoted as {retired.group(2)}%; on this file's "
+        f"convention (relative to the triage cost) it is {retired_short:.2f}%")
+
+
+def test_the_re_base_prose_recomputes_from_the_two_calibrations():
+    """Every movement the re-base record quotes is re-derived from both calibrations.
+
+    `test_the_calibration_table_and_the_cycles_it_records_agree` re-derives the
+    min/median/p90/max of each row, and the review rung pointed out that it stops
+    there: the comparative figures — how far the tail moved, how far the board moved,
+    how much dearer the walk went per file, how many files past the retired band the
+    new count sat — are the sentences a reader actually acts on, and none of them was
+    checked. One of them ("52.2%") was the previous re-base's pair pasted into this
+    record, and another ("one file past") understated the drift node's own arithmetic
+    by nine. Both shipped green.
+
+    So the pair the record compares itself against is data (`RETIRED_BOARD_FILES`,
+    `RETIRED_P90_S`), and each figure below is recomputed from it and matched against
+    the sentence. A re-baser who replaces the cycles and the count but leaves the
+    sentences now gets a red node naming each figure that no longer follows.
+    """
+    prose = _comment_prose()
+
+    def one(pattern: str) -> tuple:
+        hits = re.findall(pattern, prose)
+        assert len(hits) == 1, (
+            f"pattern {pattern!r} matched {len(hits)} passages; each pinned figure is "
+            f"stated exactly once, and a second copy is how one goes stale")
+        first = hits[0]
+        return first if isinstance(first, tuple) else (first,)
+
+    moved = one(r"[Tt]he measured tail moved \+([\d.]+)% while the board moved "
+                r"\+([\d.]+)%")
+    tail_pct = (COLD_P90_S / RETIRED_P90_S - 1) * 100
+    board_pct = (CALIBRATED_BOARD_FILES / RETIRED_BOARD_FILES - 1) * 100
+    assert round(tail_pct, 1) == float(moved[0]), (
+        f"the tail moved from {RETIRED_P90_S} s to {COLD_P90_S} s, which is "
+        f"{tail_pct:.2f}%, and the record says {moved[0]}% — the figure that shipped "
+        f"first here was the PREVIOUS re-base's pair (6.92 to 10.53), not this one's")
+    assert round(board_pct, 1) == float(moved[1]), (
+        f"the board moved from {RETIRED_BOARD_FILES} to {CALIBRATED_BOARD_FILES} item "
+        f"files, which is {board_pct:.2f}%, and the record says {moved[1]}%")
+
+    dearer = one(r"from (\d+\.\d+) ms to (\d+\.\d+) ms per item file — "
+                 r"([\d.]+)% dearer per file")
+    ms_then = ms_per_item_file(RETIRED_P90_S, RETIRED_BOARD_FILES)
+    ms_now = ms_per_item_file(COLD_P90_S, CALIBRATED_BOARD_FILES)
+    assert abs(float(dearer[0]) - ms_then) <= 0.005, (
+        f"the retired walk is quoted at {dearer[0]} ms/file and {RETIRED_P90_S} s "
+        f"over {RETIRED_BOARD_FILES} files is {ms_then:.4f}")
+    assert abs(float(dearer[1]) - ms_now) <= 0.005, (
+        f"this walk is quoted at {dearer[1]} ms/file and {COLD_P90_S} s over "
+        f"{CALIBRATED_BOARD_FILES} files is {ms_now:.4f}")
+    assert round((ms_now / ms_then - 1) * 100, 1) == float(dearer[2]), (
+        f"the per-file movement is quoted as {dearer[2]}% and the two rates give "
+        f"{(ms_now / ms_then - 1) * 100:.2f}%")
+
+    smaller = re.findall(r"described a board ([\d.]+)% smaller", prose)
+    assert smaller, "the record says how much smaller the retired count was"
+    smaller_pct = round((1 - RETIRED_BOARD_FILES / CALIBRATED_BOARD_FILES) * 100, 1)
+    assert all(smaller_pct == float(s) for s in smaller), (
+        f"'described a board X% smaller' reads {smaller}, but the two counts give "
+        f"{smaller_pct}%")
+
+    past = re.findall(r"(\d+) files past", prose)
+    edge = int(RETIRED_BOARD_FILES * (1.0 + BOARD_DRIFT_FRACTION))
+    over = CALIBRATED_BOARD_FILES - edge
+    assert past, "the record says how far past the retired band's edge this count sat"
+    assert f"{edge:,}" in prose, (
+        f"the record should name the retired edge it counted from ({edge:,}), so a "
+        f"reader can check the subtraction instead of trusting it")
+    assert all(int(p) == over for p in past), (
+        f"the record says {past} files past a retired edge of {edge}, and the drift "
+        f"node's own arithmetic (`int({RETIRED_BOARD_FILES} * "
+        f"(1 + {BOARD_DRIFT_FRACTION}))` = {edge}) puts this count {over} past it. "
+        f"The first version of that sentence understated its own node by nine, and "
+        f"the edge is derived from a constant rather than remembered.")
+
+    apart = one(r"sits ([\d.]+)% below the louder at the tail and ([\d.]+)% below "
+                r"it at the middle")
+    (loud_load, loud), (quiet_load, quiet) = _CALIBRATION_CYCLES_S
+    tail_gap = (1 - _p90_nearest_rank(quiet) / _p90_nearest_rank(loud)) * 100
+    mid_gap = (1 - _median_s(quiet) / _median_s(loud)) * 100
+    assert round(tail_gap, 1) == float(apart[0]), (
+        f"the {quiet_load} set's tail is {_p90_nearest_rank(quiet)} s against the "
+        f"{loud_load} set's {_p90_nearest_rank(loud)} s: {tail_gap:.2f}% below, and "
+        f"the record says {apart[0]}%")
+    assert round(mid_gap, 1) == float(apart[1]), (
+        f"the medians are {_median_s(quiet)} and {_median_s(loud)} s: "
+        f"{mid_gap:.2f}% apart, and the record says {apart[1]}%")
 
 
 def test_the_per_file_charge_reproduces_the_calibration_and_scales_from_it():
