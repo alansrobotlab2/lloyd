@@ -52,6 +52,9 @@ import pytest
 
 from app import memory_ceiling as ceiling
 from app import prompt_surface as ps
+# The scanner behind this file's ban on a hand-typed size (#3904), shared with
+# tests/test_vault_commit_witness_warning.py, which advises the writer of a re-freeze.
+from tests._typed_size_scan import named_typed_sizes, typed_size_statements
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -494,7 +497,7 @@ def _module_docstring(rel: str) -> str:
 #: `tests/fixtures/.gitignore`, whose reason is literally this one: the gate runs with
 #: HOME at the round home, "a node that opened it would skip, and a skipping node pins
 #: nothing". The whole file, not an extract: an extract of a prose ban is the exact
-#: shape that can hide the offending line, and the file is 82 lines.
+#: shape that can hide the offending line, and a whole copy costs nothing an extract saves.
 #:
 #: What the frozen corpus cannot do is notice the LIVE file drifting, so that is the
 #: `live_vault` node's whole job — the marker `pytest.ini` registers for "assertions
@@ -506,27 +509,140 @@ def _module_docstring(rel: str) -> str:
 SKILL_WITNESS = Path(__file__).parent / "fixtures" / "step_2a_ter_curation_witness_2212.md"
 
 
+# ---- the corpus's whole-file witness: string identity, never a size (#3904) ----------
+#
+# The byte pin this file carried from #2212 to #3904 — the corpus's length and its newline
+# count, each compared to a typed literal — existed for one reason, stated in the comment
+# that held it: a partial copy would turn the 0-hit absence greps into a coverage gap. It
+# bought that guarantee with a number, and a number in a test is a number someone must
+# re-measure. Ten vault commits in five weeks each moved it by hand — #3896 alone moved
+# sixteen digit-bearing lines of this file — and #3764 measured the resulting failure as
+# asymmetric: re-copying the fixture without moving the literals reddened the gate's nodes,
+# moving the literals without re-copying reddened one node whose message quoted a number its
+# own assert never checked.
+#
+# The three constants below buy the same guarantee from string identity. They are the
+# corpus's opening bytes and the two ends of its section spine: a copy that starts inside the
+# file loses the front matter and the first heading, a copy that stops partway loses the
+# last, and a copy whose sections are re-headed or re-ordered loses one of them too. None of
+# them moves when the skill's prose grows, which is the whole of what a re-freeze used to
+# have to hand-carry.
+# The ten re-freezes this witness has needed, each of which was a vault commit that could
+# not stage a `tests/` path, so the pairing fell to a code round: #2284 (`3c1c9515`,
+# 2026-10-06), #2415 (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`), #2628
+# (`a70fba1d`), #3282 (`6da288e1`), #3440 (`a47f9d22`, 2026-10-30), #3719 (`a4473fda`),
+# #3764 (`029f8321`, 2026-11-04) and #3896 (`9e9eec5e`, 2026-11-07, the day #3904 was
+# filed). What each vault commit changed is written in the commit and in the prose pins
+# below that name the strings a freeze carried in; what each commit MEASURED — the byte and
+# newline counts this file used to state — is this file's own history at HEAD, reachable
+# with `git log -p -- tests/test_memory_ledger_bound.py`. Those figures are deliberately
+# absent from this file now: #3282's triage records a freeze that carried a byte count
+# quoted from an item's prose instead of the new file's, and #3719 closed `done` on a
+# literal a later freeze then left stale, so a superseded size in prose here is not history
+# but the third stale receipt this file has repeatedly had to delete.
+WITNESS_FRONT_MATTER = "---\nsegment: skills\n"
+#: The corpus's section spine: every `^## ` heading of the skill, in the order the skill
+#: puts them. The WHOLE spine and its ORDER are the anchor, not just its two ends, because
+#: the ends cannot see the middle: a copy missing a MIDDLE section starts at the right
+#: front matter, opens with `## 0` and closes on the last heading, so it clears both and the
+#: 0-hit absence greps in the
+#: corpus node then certify a slice as the whole skill — the interior-omission gap the retired
+#: byte pin was written against, back in through a different door. A spine is still identity,
+#: not extent: a vault commit that adds, renames or reorders a section moves one line of this
+#: tuple and nothing else, so the re-freeze stays one file.
+WITNESS_SECTION_SPINE: tuple[str, ...] = (
+    "## 0. When it runs",
+    "## 1. The ledger",
+    "## 2. Tonight's work, bounded",
+    "## 3. Archive, never delete",
+    "## 4. Report",
+    "## 5. `MEMORY.md`, when its own marker opened the step",
+    "## The `null` is not a zero (#2230)",
+    "## The USER.md reason ledger (#1488)",
+)
+#: The two ends of the spine, named because each diagnoses a DIFFERENT mistake — a first
+#: heading that is not `## 0` means the copy starts inside the file, a last heading that is not
+#: the ledger section means it stops short — while the whole-spine equality below is what
+#: catches a copy that lost or reordered something in between.
+WITNESS_FIRST_HEADING = WITNESS_SECTION_SPINE[0]
+WITNESS_LAST_HEADING = WITNESS_SECTION_SPINE[-1]
+
+#: The banned §1 sentence, spelled with THIS corpus's own stem. It is the positive control
+#: that keeps the corpus node's 0-hit greps honest, and it lives here rather than inline in
+#: the node because #3904's other rule is that the node freezing the corpus types no size
+#: figure at all — and this sentence is the banned claim, which states one.
+CAP_CLAIM_SENTENCE = "`memory-md-ledger` is bounded by the 32,768 B topic-file ceiling"
+
+#: The negative control for the same ban: #2425's front-matter prose, which mentions a
+#: template without copying one, and which the ban must therefore be allowed to survive.
+#: #3904 moved it out of the node for the same reason as the control above.
+FRONT_MATTER_PROSE = (
+    "a file you create under `lloyd/reviews/` opens with the `---` front-matter block and "
+    "is scanned by the same gate as its fenced siblings"
+)
+
+
+def _witness_wholeness_failure(text: str) -> str:
+    """Why the frozen corpus is NOT a whole copy of the skill, or `""` when it is.
+
+    Identity anchors only — no number is consulted, so nothing here is re-measured when the
+    skill grows. This is a function rather than a literal for the same reason: taking the
+    spine equality — the whole spine, not just its two ends — is what makes a copy that lost a
+    MIDDLE section fail it as well, which is the property the byte pin used to be the node's
+    only witness of and a first-and-last check does not have.
+    `test_a_copy_that_is_not_the_whole_skill_reddens_the_corpus_node` proves it bites.
+    """
+    if not text.startswith(WITNESS_FRONT_MATTER):
+        return (f"its opening bytes are not the skill's front matter "
+                f"{WITNESS_FRONT_MATTER!r} — the copy starts inside the file")
+    headings = [ln for ln in text.splitlines() if ln.startswith("## ")]
+    if not headings:
+        return "it carries no `^## ` section heading at all, so it cannot be the whole file"
+    if headings[0] != WITNESS_FIRST_HEADING:
+        return (f"its first section heading is {headings[0]!r}, not "
+                f"{WITNESS_FIRST_HEADING!r} — the copy starts inside the file")
+    if headings[-1] != WITNESS_LAST_HEADING:
+        return (f"its last section heading is {headings[-1]!r}, not "
+                f"{WITNESS_LAST_HEADING!r} — the copy stops short of the end of the file")
+    if tuple(headings) != WITNESS_SECTION_SPINE:
+        missing = [h for h in WITNESS_SECTION_SPINE if h not in headings]
+        extra = [h for h in headings if h not in WITNESS_SECTION_SPINE]
+        why = ("; ".join(filter(None, (
+                    f"missing {missing[0]!r}" if missing else "",
+                    f"unexpected {extra[0]!r}" if extra else "")))
+                or "every section is present but they are not in the skill's order")
+        return f"its section spine is not the skill's: {why}"
+    return ""
+
+
 def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling():
     """Clause 5, the half that runs inside the gate.
 
-    §1 once told the curator a ledger "is bounded by the 32,768 B topic-file ceiling" and
-    to report `ledger: at ceiling (<bytes> / 32768 B) — split owed`; §5 repeated both for
-    `memory-md-ledger`. A nightly that followed that text stopped the audit at 32,768 B
+    §1 once told the curator a ledger "is bounded by the topic-file ceiling" and to report
+    the `ledger: at ceiling` note against that number; §5 repeated both for
+    `memory-md-ledger`. A nightly that followed that text stopped the audit at the ceiling
     and asked for a split that `LEDGERS` cannot read back — before the code ever refused
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (29,233 B / 82 lines, as
-        re-measured from the copy by the #3896 re-freeze), and it names
-        `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an empty
-        slice;
-      * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
-        carries its own positive and negative control, so the pattern is proven able to
-        fire and unable to fire on the correct ordinary-topic sentence;
-      * the predicate is called in-file on both sides of the line it must draw against
-        THIS corpus's own vocabulary, not only #2212's originals: the banned sentence
-        spelled with the drifted corpus's stem, and #2425's front-matter prose, which
-        names no cap and must stay silent;
+      * the corpus is the whole file, certified by string identity rather than by extent: it
+        opens with the skill's own front matter and its section spine equals
+        `WITNESS_SECTION_SPINE`, section for section and in order, and it names
+        `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path, an empty slice or
+        a copy that stopped partway. #3904 retired the byte pin that used to stand here
+        because a pin that must be re-measured is a receipt that goes stale on schedule: the
+        only size this node states is in its failure message, rendered from `len(raw)` and
+        `text.count(chr(10))` at the moment of the assert, so the figure a red run prints is a
+        measurement of these bytes and there is nothing here for the next re-freeze to forget;
+      * no LINE states a ledger's cap as the shared topic ceiling —
+        `_assert_no_ledger_ceiling_claim` carries its own positive and negative control, so the
+        pattern is proven able to fire and unable to fire on the correct ordinary-topic
+        sentence;
+      * the predicate is called in-file on both sides of the line it must draw against THIS
+        corpus's own vocabulary, not only #2212's originals: the banned sentence, spelled with
+        the drifted corpus's stem and held in `CAP_CLAIM_SENTENCE` because this node types no
+        size figure, and the negative control `FRONT_MATTER_PROSE` — #2425's front-matter
+        prose, which names no cap and must stay silent;
       * the phrase the false instruction ended with ("split owed") is gone, which is the
         behaviour §1 was sending a curator off to do;
       * the derivation that REPLACES every cap figure is present (`LEDGER_MULTIPLIER`,
@@ -542,8 +658,8 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         vault `e45a6b6c` added, both hunks vault `5c6793be` (#2425) added, and the two
         sentences vault `acede7e9` (#2626) added — §4's same-run orphan-ownership
         paragraph and §5's over-width-anchor ruling. #2284
-        re-froze this witness WITH that bullet rather than reverting the prose, and the size
-        pin above alone could be satisfied by any 22,287 B file — naming the text is what
+        re-froze this witness WITH that bullet rather than reverting the prose, and a corpus
+        of the right shape alone could be satisfied by other bytes — naming the text is what
         makes "the freeze kept the prose" a fact about these bytes. It also says which
         corpus is being read: the node that byte-compares this file to the live skill is a
         `live_vault` node the gate deselects, so inside a gate these literals are the only
@@ -558,109 +674,43 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "it clause 5's corpus is a vault file the gate cannot open")
     raw = SKILL_WITNESS.read_bytes()
     text = raw.decode("utf-8")
-    # Bytes, not characters: the file is full of em dashes, so `len(text)` reads 171 short
-    # of `wc -c` and a char count would fail on a file nobody truncated. Both figures were
-    # measured from the re-frozen fixture itself (`wc -c` and `tr -cd '\n' | wc -c`), which
-    # is what #2284 re-freezes it to — a copy of the live skill's text, not a truncation.
-    # Re-frozen 2026-10-09 by #2468, the third such pairing after #2284 (`3c1c9515`) and
-    # #2415 (`d13514fa`), because vault `5c6793be` (#2425) fenced a hand-created
-    # `lloyd/reviews/` archive against the vault-wide OKF gate and moved the §3 and §5 prose
-    # without touching this copy. Both figures below are that copy's own, re-measured the
-    # same way — never copied from the item that asked for the freeze, since the nightly
-    # appends to this skill and the file may have grown again by landing.
-    # 2026-10-11, #2540: §5's retire bullet was rewritten to state the #2415 rule as
-    # mechanical, which grew the skill by 1,136 B and 4 lines. This pin is the
-    # growth's receipt: it moves only when the skill moves, and then only by what the
-    # commit actually wrote.
-    # 2026-10-12, #2628: the fourth such pairing after #2284 (`3c1c9515`), #2415
-    # (`d13514fa`), #2468 (`42298875`) and #2540 (`72db44a1`). Vault `acede7e9` (#2626)
-    # grew the skill by 2 lines / 2,597 B and left this copy at the previous freeze, which
-    # is what reddened the `live_vault` byte-compare below — a vault commit cannot stage a
-    # `tests/` path, so the re-freeze is this round. What the vault commit wrote: §4 gained
-    # the paragraph making an `orphan rows:` after-figure THIS run caused its own work to
-    # finish before the `curation:` block is filed, and §5's hand-disposition paragraph
-    # gained the ruling that an `anchor:` field over 60 characters is a typo to re-point,
-    # not coverage owed. Both literals are this copy's own, re-measured from the new file
-    # after the copy — a `wc -c` of 22,287 and 82 newlines from `tr -cd '\n' | wc -c` — and
-    # not carried from #2628, whose 22,287 / 82 was a snapshot at `acede7e9` and would have
-    # been a false receipt if a nightly had appended to the skill before this landed.
-    # 2026-10-25, #3282: the fifth such pairing after #2284 (`3c1c9515`), #2415
-    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`) and #2628. Vault `90dd3f84`
-    # rewrote §1 and §5 so the cap is what `ledger_ceiling()` answers rather than the
-    # product the retired 3x multiple produced, and grew the skill by 501 B on the same
-    # 82 lines. Both literals below are this copy's own, re-measured from the copy after
-    # it was written — `wc -c` 22,788 and `tr -cd '\n' | wc -c` 82 — not carried from the
-    # item, which quoted the pre-fix 22,287 / 82 and would have been a false receipt.
-    # 2026-10-30, #3440: the sixth such pairing, after #2284 (`3c1c9515`), #2415
-    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`), #2628 and #3282. Vault
-    # `1ab109f4` bounded what one `checked:` re-stamp may write (§2 item 2: the date, at
-    # most one replacing note of at most 160 characters, at most one bare earlier-date) and
-    # scoped §1's shorter-rewrite ban to `to fit a row past a refusal`, growing the skill by
-    # 930 B on the same 82 lines. Both literals then were that copy's own, re-measured from
-    # the copy after it was written and not carried from the item, which quoted the pre-land
-    # 22,788 / 82 and would have been a false receipt had a nightly appended to the skill
-    # before it landed. That freeze's figure is this file's own history at HEAD
-    # (`git log -p` reaches it); the literal below is the current copy's, and one file
-    # carrying one receipt at a time is the point — two live numbers is one too many.
-    # 2026-11-03, #3719: the seventh such pairing, after #2284 (`3c1c9515`), #2415
-    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`), #2628, #3282 and #3440. Vault
-    # `c04c2241` (#3561) rewrote §5's retirement bullet: the 2026-09-25 `8a414797`
-    # instruction that a retired line's topic file "stays where it is … never touch the
-    # file" contradicted `validate_memory_index.py`'s unlinked arm, and a vault land
-    # cannot stage a `tests/` path, so the re-freeze has to be a code round. That item is
-    # this comment's rule rather than an exception to it: #3719 quoted 25,872 at triage and
-    # corrected itself to 26,031 in a figure correction on the same day, and the copy came in
-    # past both — which is why the superseded figure lives in no live statement here.
-    # 2026-11-04, #3764: the pairing after #2284 (`3c1c9515`), #2415 (`d13514fa`), #2468
-    # (`42298875`), #2540 (`72db44a1`), #2628, #3282, #3440 and #3719.
-    # Vault `e2e9cd833` (#3763) rewrote §0 and §5 to state MEMORY.md's room as
-    # `INDEX_ROOM_RESERVE_BYTES` and the CURATE trigger as 1 KiB under the file's own printed
-    # tight limit, deleting both hand-copied figures rather than updating them, and grew the
-    # skill by 2,187 B on the same 82 lines.
+    # The whole-file witness, with no number in it (#3904). What stood here was the corpus's
+    # length and its newline count, each compared to a typed literal, and the reason the node
+    # pinned anything at all is in the message below: a partial copy turns the 0-hit greps
+    # into a coverage gap. A number bought that guarantee at the price of being re-measured at
+    # every one of the ten re-freezes the ledger above names — and it was measured wrong often
+    # enough that #3282 and #3719 each record a freeze that carried the previous item's figure
+    # instead of the new file's. The identity anchors in `_witness_wholeness_failure` buy that
+    # property from the bytes themselves: the front matter and the first heading say the copy
+    # starts at the top, the last heading says it reaches the end, and the equality of the
+    # whole spine says nothing between them was cut or reordered — and
+    # `test_a_copy_that_is_not_the_whole_skill_reddens_the_corpus_node` proves all four bite.
     #
-    # 2026-11-07, #3896: the tenth such pairing, after #2284 (`3c1c9515`), #2415
-    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`), #2628, #3282, #3440, #3719 and
-    # #3764 — and the EIGHTH backlog item filed for this one file/witness pair, since #2284,
-    # #2468, #2542, #2626, #2628, #3719 and #3764 each closed `done` on a re-freeze and the
-    # drift came back anyway (the last one two days after #3764's own freeze). Vault
-    # `8b0c88ee1` (2026-11-06) corrected §5's #3561 retirement bullet in one line: the
-    # retired-topics grep it had published as answering nothing in `~/lloyd` answers exactly
-    # one file — `tests/fixtures/step_2a_ter_curation_witness_2212.md`, this witness — and the
-    # same line added that directory's #3855 disposition. A vault land cannot stage a `tests/`
-    # path, so the pairing falls to a code round again; the freeze below is the size that
-    # commit left, `git -C ~/obsidian show --stat 8b0c88ee1` reporting the one-line rewrite's
-    # +897 B, and `test_the_re_freeze_is_a_measurement_taken_off_the_file_it_freezes` re-takes
-    # it off the file with `wc -c` rather than trusting it.
-    #
-    # Both literals below are THIS copy's own bytes, re-measured after the copy and not
-    # carried from the item. `wc -c` answered 29,233 and `tr -cd '\n' | wc -c` answered 82.
-    # The live skill measured the identical figure when this copy was written — that equality
-    # is the thing the `live_vault` node below re-checks, so the receipt here and the drift
-    # check there can never quote two different numbers. What the previous freeze recorded is
-    # this file's own history at HEAD (`git log -p` reaches it) and is written in no live
-    # statement here: one file carries one receipt at a time, and a superseded figure kept in
-    # narrative is exactly how a red run comes to quote a number its own assert never checked.
-    # `test_the_witness_receipt_never_lies_about_the_corpus`, below this node, enforces that
-    # rather than remembering it. A skill the nightly and a live vault round are both editing
-    # is why the figure is taken from the copy and never from the handoff.
-    # The newline count is unchanged at 82: `8b0c88ee1` rewrote one bullet inside its own
-    # line, so the skill grew by 897 B and added nothing to wrap. Verified on the copy, not
-    # assumed from the 82 the previous freeze recorded.
-    assert len(raw) == 29_233 and text.count("\n") == 82, (
-        f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "29,233 B / 82 lines of the whole skill file — a partial copy would make the "
-        "0-hit below a coverage gap rather than a clean result")
+    # The size is not gone from the report, only from the source. Bytes and not characters:
+    # the file is full of em dashes, so a character count reads short of `wc -c`, and the
+    # failure message renders `len(raw)` and `text.count(chr(10))` at the moment the assert
+    # fires. A red run therefore still prints what the corpus measures and can print nothing
+    # else, which is the difference between a measurement and a quotation — the thing the ten
+    # entries in the ledger above kept getting wrong.
+    # `test_the_witness_receipt_never_lies_about_the_corpus` and
+    # `test_the_re_freeze_is_a_measurement_taken_off_the_file_it_freezes`, both below, are what
+    # keep this node's receipt rendered rather than retyped.
+    failure = _witness_wholeness_failure(text)
+    assert not failure, (
+        f"{SKILL_WITNESS.name} is {len(raw):,} B / {text.count(chr(10))} lines and is not the "
+        f"whole skill file: {failure} — a partial copy would make the 0-hit greps below a "
+        "coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
-    # The two figures above are a receipt for a rewrite, and a receipt cannot say what
-    # was written: a corpus of the same 22,287 B and the same 82 lines carrying the OLD
-    # §5 wording would satisfy them and still tell the nightly to remember the rule. So
-    # the corpus is named by the two strings #2540 put into §5 — the refusal line the
-    # script now prints, and the framing that replaced the remembered one — the way the
-    # assert above names it by `topics/memory-md-ledger` rather than by its length.
+    # Wholeness is a receipt for a copy, and a receipt cannot say what was written: a corpus
+    # of the right shape carrying the OLD §5 wording would satisfy the anchors above and
+    # still tell the nightly to remember the rule. So the corpus is named by the two strings
+    # #2540 put into §5 — the refusal line the script now prints, and the framing that
+    # replaced the remembered one — the way the assert above names it by
+    # `topics/memory-md-ledger` and by its section spine.
     assert "disposition first, or --force" in text, (
-        f"{SKILL_WITNESS.name} does not carry the #2415 refusal line §5 now quotes, so "
-        "the size above is not the post-#2540 corpus it claims to be")
+        f"{SKILL_WITNESS.name} does not carry the #2415 refusal line §5 now quotes, so the "
+        "corpus above is not the post-#2540 one it claims to be")
     assert "Disposition before retire is enforced by the script, not remembered by the " \
            "run (#2415, mechanical since #2540)" in text, (
         f"{SKILL_WITNESS.name} still frames disposition as something the run remembers")
@@ -675,13 +725,22 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # full of gate vocabulary and byte-0 talk, and if `THIRTY_TWO_K` or the ledger term were
     # ever widened it is the neighbour that would start firing. Both directions, because a
     # one-sided call would let a widened predicate through while the ban still read green.
-    assert _states_a_ledger_cap_at_32768(
-        "`memory-md-ledger` is bounded by the 32,768 B topic-file ceiling"), (
+    # The stem is taken OUT of the control sentence, never typed here: a literal
+    # written by hand would be a token the assert above already guarantees (it names
+    # `topics/memory-md-ledger`, which contains any bare stem), so the arm could not
+    # fail and the control below would read green on a sentence this corpus never
+    # contained — the vacuity #3561 clause 2's control was booked for.
+    _cap_stem = re.search(r"`([^`]+)`", CAP_CLAIM_SENTENCE)
+    assert _cap_stem, (
+        f"{CAP_CLAIM_SENTENCE!r} no longer spells its ledger stem in backticks, so the "
+        "control below has no stem to be checked against")
+    assert _cap_stem.group(1) in text, (
+        f"the stem {CAP_CLAIM_SENTENCE!r} is spelled with does not occur in this corpus, "
+        "so the control below fires on a sentence these bytes could never have contained")
+    assert _states_a_ledger_cap_at_32768(CAP_CLAIM_SENTENCE), (
         "the predicate no longer fires on the banned sentence spelled with this corpus's "
         "own stem, so the 0-hit above proves nothing about the drifted text")
-    assert not _states_a_ledger_cap_at_32768(
-        "a file you create under `lloyd/reviews/` opens with the `---` front-matter block "
-        "and is scanned by the same gate as its fenced siblings"), (
+    assert not _states_a_ledger_cap_at_32768(FRONT_MATTER_PROSE), (
         "the predicate fires on #2425's front-matter prose, which states no cap at all — "
         "the over-broad ban SM_20261006_015104 refused this file for, re-imported by the "
         "drift it now reads")
@@ -731,8 +790,8 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # The two sentences vault `acede7e9` (#2626) added and #2626's re-freeze carried in:
     # §4's rule that an `orphan rows:` after-figure THIS run caused is its own work to
     # finish, and §5's that an over-width `anchor:` is a typo to re-point. Pinned by name
-    # for the reason given above — the byte pin alone would also be satisfied by the old
-    # text padded to 22,287 B, and the node that could tell the two apart is the
+    # for the reason given above — the wholeness anchors alone would be satisfied by the old
+    # text at any length, and the node that could tell the two apart is the
     # `live_vault` one the gate deselects. Neither states a cap: the first is about who
     # owes a disposition, the second about a field the joining function can never emit, so
     # pinning them leaves the ban's corpus the same one it re-adjudicated over.
@@ -770,7 +829,7 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # retired-topics grep as answering nothing in `~/lloyd` when it answers one file. That
     # reason expired with the correction, so the pin now reaches the measurement itself, on
     # both halves of what `8b0c88ee1` wrote, and on the absence of the claim it replaced. The
-    # absence is the load-bearing one: a witness padded to 29,233 B carrying the old wording
+    # absence is the load-bearing one: a witness of the right shape carrying the old wording
     # would satisfy every byte and shape pin in this node and still teach the nightly a
     # measurement that was measured against a different tree — and the cheapest way to turn
     # the `live_vault` drift node green is to revert the vault line, which is the disposition
@@ -792,101 +851,164 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "stale measurement rides along is a green size pin over a corpus that lies")
 
 
+def test_a_copy_that_is_not_the_whole_skill_reddens_the_corpus_node(tmp_path, monkeypatch):
+    """#3904 clause 3: the number-free witness has to bite, or the ban lost its guard.
+
+    Retiring the byte pin is only safe if the anchors that replaced it fail on the same mistake
+    the pin failed on. A partial copy IS that mistake: the 0-hit greps that follow the wholeness
+    assert in the corpus node are satisfied by any copy that happens to omit the banned line, so
+    a witness that is not the whole file turns a clean result into a coverage gap — the exact
+    failure the retired pin's own message named.
+
+    Asserting on the helper's return value would prove only that a helper is strict, so this node
+    runs the GATE-RUN node itself: `SKILL_WITNESS` is redirected at a copy under `tmp_path` and
+    `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling` is called, which
+    is what `pytest -m 'not live_vault and not fault_injection'` does of it. The four cases are
+    the four ways a copy can be incomplete. The middle-deletion one is the case #3904's first
+    gate was refused over: a copy with §3 cut out still opens with `## 0` and still ends on the
+    ledger section, so the two ENDS of the spine clear it, and the assert after the loop pins
+    which anchor owns it — the spine's equality, because at the anchor level that copy is
+    otherwise indistinguishable from the whole skill. (The corpus node additionally reddens it on
+    §3's #2425 prose pin, an independent second catch; the point here is that the WHOLENESS assert
+    no longer needs a figure to reject it.) The first assert below is this node's negative
+    control — pointed at the real fixture, the corpus node must NOT raise — so no red case can be
+    vacuous by way of a corpus node that always raises. Nothing is written to the tracked fixture,
+    so the node stays green whatever the skill grows to.
+    """
+    corpus = SKILL_WITNESS.read_text(encoding="utf-8")
+    module = sys.modules[__name__]
+
+    def corpus_node_verdict(text: str) -> str:
+        """The corpus node's own report on `text`: its failure message, or `""` when the node
+        passes. The node reads one thing — `SKILL_WITNESS` — so redirecting that name at a
+        temporary file runs the real node, its anchors and greps and all, over a synthetic
+        corpus."""
+        copy = tmp_path / "synthetic-corpus.md"
+        copy.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(module, "SKILL_WITNESS", copy)
+        try:
+            test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
+        except AssertionError as exc:
+            return str(exc)
+        finally:
+            monkeypatch.undo()
+        return ""
+
+    assert corpus_node_verdict(corpus) == "", (
+        "the corpus node fails on the real frozen corpus, so every red case below would pass for "
+        "the wrong reason")
+
+    cases = {
+        # A copy that stopped partway: everything up to, but not including, the last section.
+        "truncated before its last section": corpus[: corpus.rindex(WITNESS_LAST_HEADING)],
+        # A copy taken from the middle: the body from its first heading down, front matter gone.
+        "started inside the file": corpus[corpus.index(WITNESS_FIRST_HEADING):],
+        # A copy that lost a section from between the spine's two ends: both ends intact.
+        "lost a middle section":
+            (corpus[: corpus.index("## 3. Archive, never delete")]
+             + corpus[corpus.index("## 4. Report"):]),
+        "a whole-file replacement of unrelated prose":
+            "---\nsegment: skills\n## 0. When it runs\n\nunrelated\n",
+    }
+    for label, partial in cases.items():
+        assert corpus_node_verdict(partial), (
+            f"a copy {label} passed the corpus node, so "
+            "test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling's 0-hit "
+            "greps are a coverage gap that reports itself as clean again — if a number has to "
+            "come back here, it is measured off the file, never typed")
+
+    # Which anchor owns the interior case. The corpus node has prose pins that a §3 deletion
+    # would trip anyway, so the MESSAGE is checked: the whole-file witness has to be what spoke,
+    # or the anchors are still ends-only and the gap this node exists to close is open.
+    interior = corpus_node_verdict(cases["lost a middle section"])
+    assert "section spine" in interior, (
+        f"the corpus node rejected the middle-deletion copy with {interior!r}, which does not "
+        "name the section spine — so the wholeness witness is not what caught it, and a copy "
+        "that lost a section from between the first and last headings is still passing")
+
+    # Which anchor owns an interior omission. The middle-deletion copy clears the front matter
+    # and both ENDS of the spine — that is exactly what makes it the hard case — so if the
+    # anchor-level verdict on it ever stops naming the section spine, the spine equality has been
+    # dropped and the gap #3904 closed is open again with no whole-file witness behind it.
+    interior = _witness_wholeness_failure(cases["lost a middle section"])
+    assert "section spine" in interior, (
+        f"the whole-file witness answered the middle-deletion copy with {interior!r}, which is "
+        "not the section-spine anchor, so nothing in the corpus node now rejects a copy that lost "
+        "a section from between its first and last headings")
+
+
 def test_the_witness_receipt_never_lies_about_the_corpus():
-    """#3719 clause 3: the byte count is written four times in one node, so a stale copy
-    of it is a message that lies about the corpus rather than a typo.
+    """#3719 clause 3, restated for the receipt #3904 left behind: a measured figure cannot
+    lie, so this node's job is to keep the figure measured.
 
-    `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling` states the
-    frozen copy's size in its docstring, in the measurement comment, as the assert literal,
-    and inside its own failure message — #3719's triage found the fourth site in an item
-    that named only three, and all eight re-freezes this file records before this one
-    (#2284, #2415, #2468, #2540, #2628, #3282, #3440, #3719) had to move every one of them
-    by hand. A red message
-    quoting a number the assert never checked leaves a reader unable to tell a bad corpus
-    from a bad test, which is the #3070 class this file keeps running into.
+    `test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling` used to
+    state the frozen copy's size in four places — its docstring bullet, the measurement
+    comment, the assert literal, and inside its own failure message. #3719's triage found
+    the fourth site in an item that named only three, and the ten re-freezes this file
+    records (#2284, #2415, #2468, #2540, #2628, #3282, #3440, #3719, #3764, #3896) each had
+    to move every one of them by hand. The failure that kept coming back was not a stale
+    value but a quoted one: #3282's triage found a freeze carrying a byte count copied out of
+    an item's prose, and #3719 closed `done` on a literal a later freeze then left stale. A
+    red message quoting a number the assert never checked leaves a reader unable to tell a
+    bad corpus from a bad test, which is the #3070 class this file keeps running into.
 
-    So the claim is about AGREEMENT, not about a value: it names no byte count, and it is
-    never edited at a re-freeze. That is what makes it the guard rather than a fifth site
-    that has to be remembered. Grepping `tests/` for the superseded figure is the
-    box-level half of the same claim, for one freeze only and once by hand; this is the
-    half that outlives the next six.
+    So the claim is still about AGREEMENT and still names no byte count, which is what keeps
+    it a guard rather than a fifth site a re-freeze has to remember. What it grades changed
+    with the receipt: the corpus node no longer has four figures to reconcile, it has one
+    rendering and no literals. Seed a typed size into that node — the retired assert, or a
+    size written into its prose — and this goes red. That is the half the four digit-requiring
+    anchors used to buy, and the reason they could be retired rather than merely deleted.
     """
     src = inspect.getsource(
         test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling)
-    real = len(SKILL_WITNESS.read_bytes())
-    # Each of the four sites is located by the words around it, not by its neighbourhood of
-    # digits: the same node's comments recite six earlier freezes' figures — 1,136 B, 2,597,
-    # 22,287, 22,788 and 32,768 among them — and every one of those is legitimate history.
-    # A site that cannot be found is a failure too — a receipt reworded out of the
-    # prose it belongs to is the same loss as a receipt left stale, and it is the failure
-    # mode a re-freeze under time pressure actually produces.
-    anchors = {
-        "the docstring's corpus bullet":
-            r"the corpus is the whole file at its exact bytes \((\d[\d,]*) B",
-        "the measurement comment":
-            r"`wc -c` answered (\d[\d,]*) and",
-        "the assert literal":
-            r"len\(raw\) == (\d[\d_]*)",
-        "the assertion's own failure message":
-            r'"(\d[\d,]*) B / \d+ lines of the whole skill file',
-    }
-    stated: dict[str, int] = {}
-    lost: list[str] = []
-    for site, pattern in anchors.items():
-        m = re.search(pattern, src)
-        if m is None:
-            lost.append(site)
-        else:
-            stated[site] = int(m.group(1).replace("_", "").replace(",", ""))
-    assert not lost, (
-        f"the byte-pin node no longer states the witness's size in {' and '.join(lost)}, "
-        f"so the receipt has {len(stated)} of its four statements: re-point this node at "
-        "the new wording, or put the figure back where the prose reports it")
-    assert set(stated.values()) == {real}, (
-        "; ".join(f"{site} says {value:,}" for site, value in sorted(stated.items()))
-        + f", but the frozen copy measures {real:,} B — a red run from that node would "
-        "quote a number its own assert never checked")
-
-
-#: Bytes vault `8b0c88ee1` added to the curation skill with its one-line rewrite of §5's
-#: retirement bullet — the `+897` of `git -C ~/obsidian show --stat 8b0c88ee1`. It is here so
-#: this file can NAME the figure its current freeze supersedes without WRITING it: a bar on a
-#: stale number that spells that number into the file it polices is self-defeating: the
-#: `git grep -c` a reviewer runs to check the bar would then answer this very line, and #3282
-#: had to delete two whole docstrings for exactly that crime. The prior size is
-#: arithmetic on the current one (`real - WITNESS_GROWTH_8B0C88EE1`), never a literal, and the
-#: history of every figure earlier freezes stated is reachable with `git log -p` on this file,
-#: which is where a freeze's predecessor belongs.
-WITNESS_GROWTH_8B0C88EE1 = 897
+    typed = typed_size_statements(src)
+    assert not typed, (
+        "the node that freezes the witness has a hand-typed size in it again ("
+        + named_typed_sizes(typed)
+        + f") — and {SKILL_WITNESS.name} is whatever the last copy left it, so that figure is "
+        "a receipt this file has to remember to re-measure, which is how #3282's and #3719's "
+        "freezes came to quote an item instead of the file")
+    assert "raw = SKILL_WITNESS.read_bytes()" in src, (
+        "the corpus node no longer reads the witness's own bytes into `raw`, so the size its "
+        "failure message prints cannot be a measurement of this file")
+    for rendering in ("{len(raw):,}", "{text.count(chr(10))}"):
+        assert rendering in src, (
+            f"the corpus node's failure message no longer renders {rendering!r} out of the "
+            "bytes it just read, so a red run is quoting a figure from somewhere else")
 
 
 def test_the_re_freeze_is_a_measurement_taken_off_the_file_it_freezes():
-    """#3896 clause 3: the receipt's figure must be the corpus's size, and no one else's.
+    """#3896 clause 3, restated for what #3904 left behind: the corpus's size may be
+    measured by two instruments, but it may be typed by none.
 
-    Every recurrence item on this witness — #2284, #2468, #2542, #2626, #2628, #3719, #3764 —
-    ends with the same instruction, "re-measure the byte pin in the same change", and every one
-    of them was written by a round that had just measured a number. The instruction was never
-    the missing thing; the missing thing was a check able to tell a MEASURED figure from a
-    QUOTED one. Written as a bare literal, `29_233` is the same token whether it came from
-    `wc -c` on the corpus or from the byte count in the item's prose, and #3719 closed `done`
-    on a literal that a later freeze then left stale. Now that the witness is byte-identical
-    to the live skill, `diff -q` cannot tell those two freezes apart either: both are green.
-
-    So three claims, each taken from the file by an instrument other than the one the frozen
-    node uses, so a single bad read cannot satisfy all of them:
+    Every recurrence item on this witness — #2284, #2468, #2542, #2626, #2628, #3719, #3764,
+    #3896 — ended with the same instruction, "re-measure the byte pin in the same change", and
+    every one of them was written by a round that had just measured a number. The instruction
+    was never the missing thing; the missing thing was a check able to tell a MEASURED figure
+    from a QUOTED one. No check can do that while the figure is a bare literal: the same token
+    came out of `wc -c` on the corpus and out of the byte count in an item's prose, which is
+    how #3719 closed `done` on a literal a later freeze left stale, and — once the witness was
+    byte-identical to the live skill — `diff -q` could not tell those two freezes apart
+    either, because both are green. #3904 retired the literal, which retires the ambiguity
+    with it. Three claims remain, each taken from the file by an instrument other than the one
+    the frozen node uses, so a single bad read cannot satisfy all of them:
 
       * `wc -c` on the witness equals `len(SKILL_WITNESS.read_bytes())` — one corpus counted
-        by two programs, which is what makes the figure below a measurement rather than a
-        restatement;
-      * that measured figure, in the comma form the prose uses, appears in this file — so the
-        docstring bullet, the measurement comment, the assert literal and the failure message
-        all report the size the corpus actually has, which is the four-site agreement
-        `test_the_witness_receipt_never_lies_about_the_corpus` grades, checked here against
-        bytes rather than against each other;
-      * the figure this freeze supersedes — `real - WITNESS_GROWTH_8B0C88EE1`, computed and
-        never spelled — appears NOWHERE in this file. Kept as narrative it becomes the third
-        stale-number site this file has had to remove, and it is the number a reader of a red
-        run would most plausibly re-quote.
+        by two programs, which is what makes the figure the corpus node prints in its failure
+        message a measurement of the file rather than a restatement of this one;
+      * the node that freezes the corpus types no size of any shape, in code or in prose.
+        `test_the_witness_receipt_never_lies_about_the_corpus` grades the same property from
+        the other side — that the receipt renders — and a byte literal seeded into the corpus
+        node reddens both, which is the guard this node used to buy with arithmetic on the
+        previous freeze's delta;
+      * no spelling of the corpus's current size — plain, comma-separated, or underscored —
+        appears anywhere in this file. That arm used to name the SUPERSEDED figure, computed
+        as the current size minus the delta of the previous freeze, because naming a stale
+        number outright would have put another receipt in the file it polices. With no
+        current figure typed anywhere there is no successor to chase either, and the
+        generalisation is what stops the next freeze typing one. If a future freeze's size
+        happens to collide with an unrelated number in this file, this arm goes red quoting
+        its own measurement — a clearer failure than a stale one.
 
     This is the portable half of the pairing. The `live_vault` node further down is the same
     byte comparison against the OTHER copy and is what no automod gate can run
@@ -902,16 +1024,23 @@ def test_the_re_freeze_is_a_measurement_taken_off_the_file_it_freezes():
         "`len(read_bytes())` — two instruments disagreeing about one corpus makes the receipt "
         "in this file a claim about neither of them")
 
-    src = (ROOT / "tests" / "test_memory_ledger_bound.py").read_text(encoding="utf-8")
-    assert f"{real:,}" in src, (
-        f"this file no longer states the witness's measured size ({real:,} B) in any prose "
-        "site, so the frozen node's literal and the corpus have parted without saying so — "
-        "the failure a reader sees would quote a number no node in this file takes")
-    superseded = f"{real - WITNESS_GROWTH_8B0C88EE1:,}"
-    assert superseded not in src, (
-        f"the size this freeze replaces ({superseded} B) is still written in this file, so a "
-        "red run has two candidate receipts and only one of them is the corpus's — the "
-        "superseded figure belongs to `git log -p` on this file, not to its prose")
+    corpus_src = inspect.getsource(
+        test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling)
+    typed = typed_size_statements(corpus_src)
+    assert not typed, (
+        "the node that freezes the witness has a hand-typed size in it again ("
+        + named_typed_sizes(typed)
+        + f"), and {SKILL_WITNESS.name} is whatever the last copy left — a figure written "
+        "into this file is a figure the next re-freeze has to remember, which is the defect "
+        "#3282 and #3719 each found a freeze had committed")
+
+    whole_file = (ROOT / "tests" / "test_memory_ledger_bound.py").read_text(encoding="utf-8")
+    for spelling in (str(real), f"{real:,}", f"{real:_}"):
+        assert re.search(rf"(?<![\d.,_]){re.escape(spelling)}(?![\d.,_])", whole_file) is None, (
+            f"{spelling!r} is typed somewhere in this file and it is {SKILL_WITNESS.name}'s own "
+            f"current size ({real:,} B), so this file holds a receipt it did not take: the only "
+            "size it may state is the one the corpus node renders when its assert fires, and a "
+            "freeze's figure belongs to `git log -p` on this file — this one's included")
 
 
 #: The shape of a completion-note at-ceiling template: `ledger: at ceiling (<bytes> /

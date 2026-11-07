@@ -7,7 +7,11 @@ committed copy of `skills/nightly-reflection-knowledge-write/step-2a-ter-curatio
 `tests/test_memory_ledger_bound.py::test_the_live_curation_skill_has_not_drifted_from_the_witness_the_ban_reads`
 byte-compares the two, and
 `::test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling`
-asserts that copy is 15,555 B / 74 newlines. Vault `e45a6b6c` appended one bullet to
+certifies that copy as a whole file by string identity — its front matter, then the
+first and last headings of its section spine — so a slice cannot pass for the whole
+skill. It states no size of its own: the receipt it prints is measured from the bytes
+it just read, which is what #3904 changed after ten re-freezes had to move a typed
+byte and newline count by hand. Vault `e45a6b6c` appended one bullet to
 §2a-ter on 2026-10-06, nobody re-froze the copy, and nothing said so until the next
 morning's #83 pre-flight ran the marked node and went red. The job that wrote the
 line had no way to know the file it appended to was frozen anywhere.
@@ -23,8 +27,9 @@ REPORT ONLY, exactly like `autonomy_status_findings.py` (#1127) and
 `skill_path_findings.py` (#1969) before it, for the same two reasons: this wrapper
 also commits other writers' state, so a refusal would let one job's drift block
 every later job's pre-flight snapshot; and the re-freeze is deliberately not this
-job's call to make — the byte pin exists to make a re-freeze a reviewed act, so the
-line tells the writer to file a draft, not to edit the fixture. Nothing prints when
+job's call to make — the whole-file witness in the pinning node is what makes a drift
+visible at all, and deciding to carry the live skill's bytes forward is a reviewed act, so
+the line tells the writer to file a draft, not to edit the fixture. Nothing prints when
 nothing matches, the case every ordinary commit takes.
 
 Output goes to STDOUT, never stderr. #1070 makes the `unattributed dirty state:`
@@ -73,13 +78,14 @@ _WITNESSED_SEGMENT_RE = re.compile(r"^(?:skills|knowledge)/.+")
 #: The committed-witness naming convention: `<stem>_witness_<item>.md`.
 _WITNESS_GLOB = "*_witness_*.md"
 
-ADVICE = ("re-freezing it is a reviewed act, not a nightly's — the byte pin in the "
-          "node that freezes it is what makes an append visible. File a one-line "
-          "backlog draft naming the fixture, both counts above, and the re-freeze "
-          "recipe (re-measure `wc -c` and `tr -cd '\\n' | wc -c` from the new file, "
-          "and move the byte/newline literals in the pinning node in the same "
-          "change). Do not edit the fixture from the committing job, and do not add "
-          "an automatic re-generation path. #2284")
+ADVICE = ("re-freezing it is a reviewed act, not a nightly's — the whole-file witness in "
+          "the pinning node is what makes an append visible. File a one-line backlog "
+          "draft naming the fixture and both counts above (the figures `wc -c` and "
+          "`tr -cd '\\n' | wc -c` answer), and the re-freeze recipe: copy the live file "
+          "over the fixture, and that is the whole of it — the pinning node has typed no "
+          "byte or newline count since #3904, so no literal moves with the copy and a "
+          "re-freeze is one file. Do not edit the fixture from the committing job, and do "
+          "not add an automatic re-generation path. #2284")
 
 
 def stem_of(rel: str) -> str:
@@ -157,7 +163,7 @@ def index_blobs(repo: Path) -> list[tuple[str, bytes]]:
 
 def worktree_blobs(repo: Path, paths: list[str]) -> list[tuple[str, bytes]]:
     """(path, bytes) read from `repo`'s worktree, for a `--path` dry run. A path the
-    worktree does not have is skipped rather than reported as 0 B."""
+    worktree does not have is skipped rather than reported as an empty blob."""
     rows: list[tuple[str, bytes]] = []
     for rel in paths:
         f = repo / rel

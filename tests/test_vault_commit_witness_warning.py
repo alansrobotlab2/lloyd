@@ -42,6 +42,9 @@ import pytest
 
 from scripts import skill_lint as SL
 from scripts.util import witness_fixture_findings as rung
+# The same shapes the pinning node's own ban is enforced with (#3904); one scanner, two
+# files, so the advice and the guard cannot drift to mean different things.
+from tests._typed_size_scan import named_typed_sizes, typed_size_statements
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "scripts" / "util" / "vault-commit.sh"
@@ -325,6 +328,47 @@ def test_the_rung_dry_run_over_an_explicit_path_list_warns_then_stays_silent(vau
     miss = _run_rung(vault, UNMATCHED)
     assert miss.returncode == 0, miss.stderr
     assert miss.stdout == "", f"an unmatched path printed: {miss.stdout!r}"
+
+
+def test_the_rungs_own_docstring_names_the_witness_and_types_no_size():
+    """#3904 clause 5: this rung explains the witness to the reader who has to act on
+    its warning, and until now it explained it with a number that had been wrong twice.
+
+    The module docstring said the pinning node "asserts that copy is 15,555 B / 74
+    newlines" — a figure from before #2628, left standing while the corpus it described
+    grew twice more, and then grew again to #3896's freeze. A rung whose advice carries
+    a stale measurement teaches the next writer to distrust the whole line, and its
+    `ADVICE` went one further by ordering the writer to "move the byte/newline literals
+    in the pinning node", the instruction #3904 exists to retire.
+
+    So the claim is that the docstring names the mechanism — the node certifies the copy
+    as a whole file by identity, and a separate `live_vault` node byte-compares it — and
+    types no size of its own anywhere in the module, comment, constant or advice string.
+    The fixture's NAME is part of the same claim: the matcher resolves the witnessed path
+    to it, so a rename here would silently stop the rung firing.
+    """
+    doc = rung.__doc__ or ""
+    assert "string identity" in doc, (
+        "the docstring no longer says how the pinning node certifies the copy, so a reader "
+        "of this file has nothing to check the warning against")
+    assert "byte-compares" in doc, (
+        "the docstring no longer names the live_vault node that byte-compares the pair")
+    assert "15,555" not in doc and "74 newlines" not in doc, (
+        "a superseded size is back in the docstring — the figure a reader of this file "
+        "would quote into a draft, and the reason no size belongs here")
+    typed = typed_size_statements(RUNG.read_text(encoding="utf-8"))
+    assert not typed, (
+        "the rung states a size in its own source (" + named_typed_sizes(typed)
+        + ") — the warning line renders both sides' counts at run time off the bytes it "
+        "read, which is the only place a figure about a mutable file belongs")
+    assert "pinning node" in rung.ADVICE and "backlog draft" in rung.ADVICE, (
+        "the advice stopped naming either the pinning node or the filing duty, so a job "
+        "reading only its own commit output can no longer act on the warning")
+    assert "move the byte/newline literals" not in rung.ADVICE, (
+        "the advice is telling writers to move literals the pinning node no longer has")
+    assert rung.witness_fixtures(rung.stem_of(WITNESSED)) == [FIXTURE], (
+        "the fixture is no longer reachable under the name this file and the matcher both "
+        "expect, which turns the rung's silence into a coverage gap")
 
 
 # ---------------------------------------------------------------------------
