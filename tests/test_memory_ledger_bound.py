@@ -516,8 +516,8 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (28,336 B / 82 lines, as
-        re-measured from the copy by the #3764 re-freeze), and it names
+      * the corpus is the whole file at its exact bytes (29,233 B / 82 lines, as
+        re-measured from the copy by the #3896 re-freeze), and it names
         `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an empty
         slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
@@ -618,23 +618,37 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # tight limit, deleting both hand-copied figures rather than updating them, and grew the
     # skill by 2,187 B on the same 82 lines.
     #
+    # 2026-11-07, #3896: the tenth such pairing, after #2284 (`3c1c9515`), #2415
+    # (`d13514fa`), #2468 (`42298875`), #2540 (`72db44a1`), #2628, #3282, #3440, #3719 and
+    # #3764 — and the EIGHTH backlog item filed for this one file/witness pair, since #2284,
+    # #2468, #2542, #2626, #2628, #3719 and #3764 each closed `done` on a re-freeze and the
+    # drift came back anyway (the last one two days after #3764's own freeze). Vault
+    # `8b0c88ee1` (2026-11-06) corrected §5's #3561 retirement bullet in one line: the
+    # retired-topics grep it had published as answering nothing in `~/lloyd` answers exactly
+    # one file — `tests/fixtures/step_2a_ter_curation_witness_2212.md`, this witness — and the
+    # same line added that directory's #3855 disposition. A vault land cannot stage a `tests/`
+    # path, so the pairing falls to a code round again; the freeze below is the size that
+    # commit left, `git -C ~/obsidian show --stat 8b0c88ee1` reporting the one-line rewrite's
+    # +897 B, and `test_the_re_freeze_is_a_measurement_taken_off_the_file_it_freezes` re-takes
+    # it off the file with `wc -c` rather than trusting it.
+    #
     # Both literals below are THIS copy's own bytes, re-measured after the copy and not
-    # carried from the item. `wc -c` answered 28,336 and `tr -cd '\n' | wc -c` answered 82.
-    # The live skill measured the same 28,336 when this copy was written, and that equality
+    # carried from the item. `wc -c` answered 29,233 and `tr -cd '\n' | wc -c` answered 82.
+    # The live skill measured the identical figure when this copy was written — that equality
     # is the thing the `live_vault` node below re-checks, so the receipt here and the drift
-    # check there can never quote two different figures. #3764 measured 28,336 at triage and
-    # still forbade writing it as a target, and the ban is the rule rather than this freeze's
-    # answer: the number above is what the copy measured, which is the only question a
-    # receipt answers. A skill the nightly and a live vault round are both editing is exactly
-    # why it is taken from the copy and never from the handoff —
-    # `test_the_witness_receipt_never_lies_about_the_corpus`, below this node, is what
-    # keeps all four statements of it from parting company at the next re-freeze.
-    # The newline count is unchanged at 82: #3763's two edits were rewrites in place, so the
-    # skill grew in BYTES and added no line. Verified on the copy, not assumed from the 82 the
-    # previous freeze recorded.
-    assert len(raw) == 28_336 and text.count("\n") == 82, (
+    # check there can never quote two different numbers. What the previous freeze recorded is
+    # this file's own history at HEAD (`git log -p` reaches it) and is written in no live
+    # statement here: one file carries one receipt at a time, and a superseded figure kept in
+    # narrative is exactly how a red run comes to quote a number its own assert never checked.
+    # `test_the_witness_receipt_never_lies_about_the_corpus`, below this node, enforces that
+    # rather than remembering it. A skill the nightly and a live vault round are both editing
+    # is why the figure is taken from the copy and never from the handoff.
+    # The newline count is unchanged at 82: `8b0c88ee1` rewrote one bullet inside its own
+    # line, so the skill grew by 897 B and added nothing to wrap. Verified on the copy, not
+    # assumed from the 82 the previous freeze recorded.
+    assert len(raw) == 29_233 and text.count("\n") == 82, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "28,336 B / 82 lines of the whole skill file — a partial copy would make the "
+        "29,233 B / 82 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
@@ -749,6 +763,34 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "curator to retire a line while leaving its topic file under `lloyd/memory/` "
         "unlinked — the instruction that reddened `validate_memory_index.py` twice")
 
+    # The same bullet's MEASUREMENT, as vault `8b0c88ee1` corrected it (#3561's follow-up,
+    # #3896 clause 1). The two asserts above deliberately stopped short of the bullet's grep
+    # sentences: #3719 clause 4 ruled "a pin on prose another round is still correcting is a
+    # freeze that cannot land", and at that moment the sentence was wrong — it published the
+    # retired-topics grep as answering nothing in `~/lloyd` when it answers one file. That
+    # reason expired with the correction, so the pin now reaches the measurement itself, on
+    # both halves of what `8b0c88ee1` wrote, and on the absence of the claim it replaced. The
+    # absence is the load-bearing one: a witness padded to 29,233 B carrying the old wording
+    # would satisfy every byte and shape pin in this node and still teach the nightly a
+    # measurement that was measured against a different tree — and the cheapest way to turn
+    # the `live_vault` drift node green is to revert the vault line, which is the disposition
+    # #3896 refuses because #3855 falsified it.
+    assert "answers exactly one file" in text and (
+            "`tests/fixtures/step_2a_ter_curation_witness_2212.md`" in text), (
+        "section 5's retirement bullet no longer states that the retired-topics grep answers "
+        "exactly one file and names it as this witness, so the corpus is the pre-`8b0c88ee1` "
+        "text — the one that published the grep as empty and made this very fixture the "
+        "reason it was not")
+    assert ("**Its disposition is settled (#3855):" in text
+            and "is not to be emptied, moved or trashed**" in text), (
+        "section 5's retirement bullet never gained its #3855 disposition sentence, so this "
+        "corpus still leaves a run reading the retired-topics directory as something its "
+        "retirement has to clean up")
+    assert "is empty in `~/lloyd`" not in text, (
+        f"{SKILL_WITNESS.name} still carries the falsified retired-topics claim, which is "
+        "the sentence vault `8b0c88ee1` exists to remove — re-freezing to bytes while the "
+        "stale measurement rides along is a green size pin over a corpus that lies")
+
 
 def test_the_witness_receipt_never_lies_about_the_corpus():
     """#3719 clause 3: the byte count is written four times in one node, so a stale copy
@@ -804,6 +846,72 @@ def test_the_witness_receipt_never_lies_about_the_corpus():
         "; ".join(f"{site} says {value:,}" for site, value in sorted(stated.items()))
         + f", but the frozen copy measures {real:,} B — a red run from that node would "
         "quote a number its own assert never checked")
+
+
+#: Bytes vault `8b0c88ee1` added to the curation skill with its one-line rewrite of §5's
+#: retirement bullet — the `+897` of `git -C ~/obsidian show --stat 8b0c88ee1`. It is here so
+#: this file can NAME the figure its current freeze supersedes without WRITING it: a bar on a
+#: stale number that spells that number into the file it polices is self-defeating: the
+#: `git grep -c` a reviewer runs to check the bar would then answer this very line, and #3282
+#: had to delete two whole docstrings for exactly that crime. The prior size is
+#: arithmetic on the current one (`real - WITNESS_GROWTH_8B0C88EE1`), never a literal, and the
+#: history of every figure earlier freezes stated is reachable with `git log -p` on this file,
+#: which is where a freeze's predecessor belongs.
+WITNESS_GROWTH_8B0C88EE1 = 897
+
+
+def test_the_re_freeze_is_a_measurement_taken_off_the_file_it_freezes():
+    """#3896 clause 3: the receipt's figure must be the corpus's size, and no one else's.
+
+    Every recurrence item on this witness — #2284, #2468, #2542, #2626, #2628, #3719, #3764 —
+    ends with the same instruction, "re-measure the byte pin in the same change", and every one
+    of them was written by a round that had just measured a number. The instruction was never
+    the missing thing; the missing thing was a check able to tell a MEASURED figure from a
+    QUOTED one. Written as a bare literal, `29_233` is the same token whether it came from
+    `wc -c` on the corpus or from the byte count in the item's prose, and #3719 closed `done`
+    on a literal that a later freeze then left stale. Now that the witness is byte-identical
+    to the live skill, `diff -q` cannot tell those two freezes apart either: both are green.
+
+    So three claims, each taken from the file by an instrument other than the one the frozen
+    node uses, so a single bad read cannot satisfy all of them:
+
+      * `wc -c` on the witness equals `len(SKILL_WITNESS.read_bytes())` — one corpus counted
+        by two programs, which is what makes the figure below a measurement rather than a
+        restatement;
+      * that measured figure, in the comma form the prose uses, appears in this file — so the
+        docstring bullet, the measurement comment, the assert literal and the failure message
+        all report the size the corpus actually has, which is the four-site agreement
+        `test_the_witness_receipt_never_lies_about_the_corpus` grades, checked here against
+        bytes rather than against each other;
+      * the figure this freeze supersedes — `real - WITNESS_GROWTH_8B0C88EE1`, computed and
+        never spelled — appears NOWHERE in this file. Kept as narrative it becomes the third
+        stale-number site this file has had to remove, and it is the number a reader of a red
+        run would most plausibly re-quote.
+
+    This is the portable half of the pairing. The `live_vault` node further down is the same
+    byte comparison against the OTHER copy and is what no automod gate can run
+    (`scripts/automod/gate.py::TESTS_MARK_EXPR` deselects the marker, as that node's own
+    docstring records), which is the reason an eighth drift of this file reached a nightly
+    pre-flight instead of a promotion gate.
+    """
+    real = len(SKILL_WITNESS.read_bytes())
+    counted = subprocess.run(["wc", "-c", str(SKILL_WITNESS)],
+                             capture_output=True, text=True, check=True).stdout.split()[0]
+    assert int(counted) == real, (
+        f"{SKILL_WITNESS.name} measures {counted} B under `wc -c` and {real} B under "
+        "`len(read_bytes())` — two instruments disagreeing about one corpus makes the receipt "
+        "in this file a claim about neither of them")
+
+    src = (ROOT / "tests" / "test_memory_ledger_bound.py").read_text(encoding="utf-8")
+    assert f"{real:,}" in src, (
+        f"this file no longer states the witness's measured size ({real:,} B) in any prose "
+        "site, so the frozen node's literal and the corpus have parted without saying so — "
+        "the failure a reader sees would quote a number no node in this file takes")
+    superseded = f"{real - WITNESS_GROWTH_8B0C88EE1:,}"
+    assert superseded not in src, (
+        f"the size this freeze replaces ({superseded} B) is still written in this file, so a "
+        "red run has two candidate receipts and only one of them is the corpus's — the "
+        "superseded figure belongs to `git log -p` on this file, not to its prose")
 
 
 #: The shape of a completion-note at-ceiling template: `ledger: at ceiling (<bytes> /
