@@ -39,8 +39,12 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 108 or beyond, with gaps where tasks were retired
-(2026-11-03). #108, the SolidCraft repo sync, is the newest in these tables — its task file
+ordered: ids run 24 through 109 or beyond, with gaps where tasks were retired
+(2026-11-07). #109, the behaviour-exhibit daily sweep, is the newest in these tables — its
+task file entered the directory at 11:30Z on 2026-11-07, written by backlog item #3886
+through an agent `Write` rather than the `autonomy_write_task` route, so no commit named it
+as it was filed and the two `DOC_MEMBERSHIP` warnings it owed stayed open until this commit
+paid them; #108, the SolidCraft repo sync, was the newest before it — its task file
 entered the directory at 19:53 on 2026-11-03 through an agent `Write` rather than the
 `autonomy_write_task` route, so no commit named it as it was filed and the two
 `DOC_MEMBERSHIP` warnings it owed stayed open until #3746 paid them the same day;
@@ -89,7 +93,7 @@ promised.** The seven task files #91 nightly
 thinking-fidelity prevalence series, #92 vLLM prefix-miss daily, #93
 step-conformance replay, #94 referential-integrity ledger, #95 mitigation drill,
 #96 djev name-prior probe and #97 landed-outcomes daily record have their
-entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105-106-107).
+entries, in [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105-106-107-109).
 #99 supply-chain inventory regen has one in that same group — a watcher whose
 subject is the evidence the self-modification loop is judged on, and one that can
 file a backlog item, which is why it sits beside #92–#94 rather than with the six
@@ -132,7 +136,7 @@ other direction, for three.
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90-104-108) | #79 #81 #78 #80 · #90 · #104 · #108 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
-| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105-106-107) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 #106 #107 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index, the retrieval arms run, the shipped code rules, the published paired-check maxima, the flip gate's own ceiling reading — and report what it looks like |
+| [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105-106-107-109) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 #106 #107 #109 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index, the retrieval arms run, the shipped code rules, the published paired-check maxima, the flip gate's own ceiling reading, the exhibit rate swept from the session corpus — and report what it looks like |
 
 ### Write authority is the fault line
 
@@ -188,7 +192,7 @@ run reads what it wrote. The five rows, each with the count beside it:
 | Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #48 #98 · #92 #93 #94 #99 #103 | 27 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
-| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 · #104 #105 #106 #107 · #108 | 20 |
+| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 · #104 #105 #106 #107 · #108 · #109 | 21 |
 | Acts on the fleet itself | #76 | 1 |
 
 The rows answer "may it write while nobody is watching", not "how much may it
@@ -1455,14 +1459,15 @@ name, and being one generation retired is not the same as being gone.
 
 ---
 
-## Watch the machinery: #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 #106 #107
+## Watch the machinery: #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 #106 #107 #109
 
-Measure asks whether the fleet is working. These fifteen ask a different question —
+Measure asks whether the fleet is working. These sixteen ask a different question —
 whether the *machinery the fleet runs on* still looks like what its own
 documentation says — and they read it from outside: the engine's reasoning traces,
 the serving process's cache and KV window, other jobs' run records, the memory
 surface a prompt is assembled from, the mitigations that stop a run, the decision
-engine on GPU 2, and the self-modification loop's own landings. None of them is
+engine on GPU 2, the self-modification loop's own landings, and the exhibit rate swept out
+of the session corpus. None of them is
 about a job's output, which is why they are not scattered through the six groups
 above and why they arrived as a block: seven of them were created between
 2026-09-29 and 2026-10-11 and none of those seven had an entry here until #2630;
@@ -1519,6 +1524,7 @@ tier. #3012 is where that reading was taken and where both rows were written.
 | #105 | weekly | Check-health census weekly record (`check-health-census-weekly`, #3633) — the one row in this table whose Freq cell is the cadence its MODULE ships (`check_health_census.CADENCE`) rather than its task file's `frequency:`, which still reads `daily`; moving that field is a #724 dispatch-affecting write no unattended round may make, so the one line is owed as #3782, and the task is `draft` so the field arms nothing either way | the `--record` command its own `command:` names — no window flag, because the window is the module's own `WINDOW_DAYS` of 90 and no flag sets it — driving the `check_health_census` module over the automod ledger, its two monthly archives and the named eval arms, plus a caller census of the eval scripts naming their orphans | appends one dated row a week to `check_health_census.jsonl` outside the repo — a passes/fails-over-n and a mean/median rung duration per gate rung and per eval arm, and a vacuity verdict (alive / vacuous / not injectable) for every zero-fail check at or above its floor; report-only — it never retires, disables or weakens a check, which is the bound its own description states |
 | #106 | daily | Published-maxima probe daily record (`published-maxima-probe-daily-record`, #3456) | the ONE unflagged call `scripts/maintenance/published_maxima_probe.py` (#3037's recorder, shipped in `621192c4`, carried by `bc171709`, with no caller until now), which re-derives the era-D paired-check population from `promotions.jsonl` **and every `promotions-archive-*.jsonl.gz` beside it** and compares each arm's ledger max against the paired-check constant published in the repo | appends one dated row a day to `published-maxima.jsonl` outside the repo — `ts`, `n`, both medians, both maxima, `over_bound_count` and the two published constants — and its alarm is strict upward equality with **no margin**, because the 25 % #3304 asked for is the bug being refused: at publication `905.3` sat 21.97 % under the ledger's 1,035.3 and `401.3` 16.02 % under 477.9, so a 25 % rule reads GREEN across 283 ms of real drift; report-only — it never re-publishes a constant, never touches the promotion gate (the live guard stays `over_budget()` in `workers/sources/automod_regression.py`) and takes no action on a red row, because the row is appended before the alarm is evaluated so a non-zero exit *is* a landed row |
 | #107 | daily | scheduled-ceiling flip-gate daily record (`scheduled-ceiling-flip-gate-daily-record`, #3416 from #3195's owed entry): run the gate once and append the reading | the one command the skill gives — `python -m scripts.maintenance.scheduled_ceiling_flip_gate --record` — which reads the scheduler's own ceiling ledger and answers the single licensed question #2670 set: may the declared 33-name `scheduled-task` ceiling be flipped from SHADOW to `enforce`. Which ledger it reads is resolved by `readings_path()` following `LLOYD_SCHEDULED_CEILING_LEDGER`, **not** by the `--ledger` flag, and the per-name would-strip rates are over the row total — a denominator that moves with every turn and with the flip itself, which is why a PASS is not recomputable once `enforce` rows start landing; the script makes no model call | exactly one dated JSON row appended to `~/lloyd-data/scheduling/flip-gate-readings.jsonl` by `--record` — both verdicts, the row total and the `failures` table verbatim — appended *before* `main()` decides the exit code, so a FAIL is recorded exactly as a PASS is, and that file is the artefact the enforce-flip round is expected to read; `--record` is the only flag this cadence may pass, and until it existed the file held one hand-run row from 2026-10-23 | never add `--ledger`, which redirects the ledger the gate *reads* but not the destination the reading is written to, so a reading taken from a `/tmp` copy is filed beside that copy and deleted with it; never re-run a red reading, because exit 1 is the day's measurement and the row is already on disk — a retry is a second row for one day, and the literal `failed because` belongs to an append that did not happen and to nothing else; never edit the ledger or the readings file, file a backlog item, open a round, or license the flip, which is Alan's call and not this cadence's |
+| #109 | daily | Behaviour-exhibit daily sweep (`behaviour-exhibit-daily`, #3886 from #3749's owed measurement; filed `status: draft`, arming is a one-line human flip): run `python -m app.behaviour_exhibit --days 7` exactly once and report the movement block verbatim | session transcripts under `~/lloyd-data/sessions`, windowed on `st_mtime >= cutoff` over the worker population only, with the store's own earlier dated artifact as the comparison base | one dated `behaviour-exhibit-YYYY-MM-DD.jsonl` in `app.paths.BEHAVIOUR_EXHIBIT_DIR`, and nothing else — it prunes its own artifacts past `RETENTION_DAYS = 30` as it writes, and #100's instrument index scores the `behaviour_exhibit` arm from that store at `cadence_days: 1` with no `hand_run_by_ruling` exception, so a day with no artifact prints `missing or stale: behaviour_exhibit` in the index headline — the read-back #91's scan artifact also has, which is why both sit in the report-only row rather than beside #92 and #93 | never add `--out`, `--sessions-dir`, `--registry`, `--max-files`: the first writes an artifact the index cannot resolve through the constant, the other three change what is measured while the report still reads as the corpus; never substitute the tracked witness under `eval/measurements/behaviour-exhibit/` as the baseline, whose `measured_at` is a different run of the same night, 346 situations apart in the caption denominator |
 
 #105 check-health census weekly record joined on 2026-10-31, and unlike every row above it
 it arrived because the two tables were *read* rather than because a job was filed: its
@@ -1548,25 +1554,31 @@ The fourth is still open: `frequency: daily`, which contradicts the skill slug, 
 rail refuses the write unattended (#3782). While the task is `draft` none of it
 dispatches, which is the only reason the last three sat unnoticed since 2026-10-31.
 
-Nine of the thirteen carry an `acceptance.objective_checks` block naming `Write` and
+Twelve of the sixteen carry an `acceptance.objective_checks` block naming `Write` and
 `Edit` in its `tool_not_called` list, so their read-only bound is checked by the
-runner and not by the prose. #91, #92 and #102 carry no such block: for those three the
+runner and not by the prose. #91, #92, #102 and #105 carry no such block: for those four the
 prohibition lives only in the `description` field a run is handed, which is why
 `preserve_thinking_iterations`, the staging rule and the launch-then-return rule are
 spelled out there in full.
 
-**Five of the thirteen are not report-only, whatever the report looks like.** The
+**Five of the sixteen are not report-only, whatever the report looks like.** The
 write-authority table asks one question — may it write while nobody is watching —
 and #92 files a backlog item, #93 files a backlog draft and #94 overwrites a
 latest-path ledger in the vault plus a dated copy beside it, and #99 files a
 backlog item when the missed-advisory count moves, and #103's census script files a
 backlog item whenever the census has hits. Those are files another
 job or a person will act on, so the five sit in the unattended-writer
-tier beside #30 and #53. #91, #95, #96, #97, #100, #101 and #102 are the report-only seven: one dated
+tier beside #30 and #53. #91, #95, #96, #97, #100, #101, #102 and #109 are the
+report-only eight: one dated
 artefact each under the data root, the automod state dir or `eval/measurements/` —
 #95 leaves not even that, since it reads a state file another process owns, and
 #102 is the one in this set whose artefact sits inside the checkout rather than
-under a data root — and none of the seven files anything in the vault or the queue.
+under a data root — and none of the eight files anything in the vault or the queue.
+#109 lands in that row with its instrument family rather than beside #92 and #93: it
+files no backlog item, opens no round and touches neither the vault nor the queue, and
+its artifact is read back by #100's index exactly the way #91's scan artifact
+is — the two of them are placed together or not at all, and a tier that moved one would
+have to move the other.
 #2630's triage read all seven of its own arrivals as report-only from the artefact
 paths; the three of those that file are where reading the artefact path alone was
 wrong, and the tier is where that difference has to be visible.

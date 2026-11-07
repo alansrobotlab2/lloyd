@@ -247,6 +247,16 @@ WATCH_JOBS = {
     # reads as permitted.
     107: ("daily", "scheduled_ceiling_flip_gate", "flip-gate-readings.jsonl",
           "never add `--ledger`"),
+    # #3895: the four reads taken from
+    # ~/obsidian/autonomy/109-behaviour-exhibit-daily.md on 2026-11-07, the day its file
+    # entered the directory. `frequency: daily` and `status: draft` — neither is a bar, for
+    # the standing reason above. The sweep is #3749's owed measurement made a cadence: the
+    # artifact it appends is the store #100's index scores the `behaviour_exhibit` arm from
+    # at `cadence_days: 1`, so the instrument stops being two snapshots, and the
+    # prohibition is the flag list the task file forbids verbatim — every one of them
+    # changes what is measured or where the artifact lands, which is what #100 resolves.
+    109: ("daily", "behaviour_exhibit", "behaviour-exhibit-YYYY-MM-DD.jsonl",
+          "never add `--out`"),
 }
 
 #: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
@@ -8042,3 +8052,166 @@ def test_the_retag_skill_and_job_date_every_tree_size_they_quote():
         assert not _retag_vault_size_defects(surfaces), (
             f"the live vault already trips the {name!r} seed's defect, so a failure here "
             "would say nothing about the seed")
+
+
+#: #3895 — the rostering half, in one node.
+#:
+#: A live task file missing from the membership tables has been filed and closed one
+#: id at a time since #2630: #2895, #3012, #3592 (#104), #3633 (#105), #3738 (#107),
+#: #3746 (#108) and now #109, `behaviour-exhibit-daily`, whose task file reached
+#: `~/obsidian/autonomy` on 2026-11-07 through an agent `Write` rather than the
+#: `autonomy_write_task` route — the same bypass §The functions records for #108. Every
+#: earlier round appended the two rows and left a derived value behind, so each left
+#: this suite red somewhere else: the numbering note's ceiling, the present-tense
+#: newest-job claim, a tier's count column, or the group heading a row joined. The
+#: clauses are graded separately, so they are pinned separately here.
+#:
+#: No `@pytest.mark.live_vault` on purpose. The three nodes that reconcile the tables
+#: against the live `~/obsidian/autonomy` directory carry that mark and the gate's
+#: TESTS_MARK_EXPR deselects it, so without a node like this the gate would promote a
+#: rostering that nothing in the promoted tree can prove — which is why #109's absence
+#: was only ever caught by a nightly run.
+_NEWEST_T = re.compile(r"#(\d+)[^.]*\bis the newest\b")
+
+
+def _membership_id_lists() -> dict[str, list[str]]:
+    """Each membership surface that names job ids, mapped to the ids it names.
+
+    The two tables the clauses name, plus §Watch the machinery's own heading: the
+    functions table's ids cell, the write-authority tier table's ids cells, and the
+    group heading #109 joins. Surfaced as one map so a missing roster is reported as
+    the surface that lacks it rather than as a count that does not add up.
+    """
+    text = _text()
+    out: dict[str, list[str]] = {}
+    m = re.search(r"^\| \[Watch the machinery\]\([^)]*\) \| ([^|]*) \|", text, re.M)
+    assert m, "§The functions table has no Watch the machinery row to read ids from"
+    out["functions ids cell"] = _ids(m.group(1))
+    i = text.find("### Write authority")
+    assert i >= 0, "the write-authority table is not in the document"
+    section = text[i:text.find("\n## ", i)]
+    tier_rows = list(re.finditer(r"^\| ([^|]+) \| ([^|]*) \| (\d+) \|$", section, re.M))
+    assert tier_rows, "the write-authority table parsed no rows"
+    out["write-authority tier table"] = [
+        i for r in tier_rows for i in _ids(r.group(2))
+    ]
+    h = re.search(r"^## Watch the machinery: (.+)$", _text(), re.M)
+    assert h, "§Watch the machinery has no heading to name its members"
+    out["group heading"] = _ids(h.group(1))
+    return out
+
+
+def test_task_109_is_rostered_once_in_every_membership_surface():
+    """Clause 1: #109 named once in each of the two tables and in its group's heading.
+
+    Once, not merely present — a second spelling is the same drift in the other
+    direction, and the section's own prose says a group's membership is spelled twice
+    (its heading and its slug), so a row added to the table without the heading reads
+    as a member the section does not know.
+    """
+    lists = _membership_id_lists()
+    missing = [k for k, v in lists.items() if v.count("#109") != 1]
+    assert not missing, (
+        "#109's rostering is not exactly-once in: "
+        + "; ".join(f"{k} names it {lists[k].count('#109')}x" for k in missing)
+        + " — clause 1 wants once in the functions ids cell, once in one write-authority "
+        "tier row, and once in the §Watch the machinery heading")
+
+
+def test_the_live_anchors_into_the_group_carry_the_newest_member():
+    """Clause 1's anchor half: every live link to the group ends on its newest id.
+
+    The slug is generated from the heading by GitHub's rule, so a heading that gains
+    #109 while the two live links keep the old slug sends a reader to a target that
+    does not exist — the failure #604's whole test family exists to catch, and the one
+    a row-append commits without touching.
+    """
+    text = _text()
+    heading = re.search(r"^## Watch the machinery: (.+)$", text, re.M).group(1)
+    want = "#watch-the-machinery" + "".join(
+        f"-{t}" for t in re.findall(r"#(\d+)", heading))
+    links = re.findall(r"\]\(#watch-the-machinery[-0-9]*\)", _live_prose())
+    assert links, "no live link into §Watch the machinery to check"
+    stale = [lnk for lnk in links if lnk != f"]({want})"]
+    assert not stale, (
+        f"the live links {stale} do not match the heading's slug {want!r}, so the "
+        "rostering moved the group and left its readers behind")
+
+
+def test_every_membership_table_still_names_its_ids_exactly_once_and_counts_agree():
+    """Clauses 3, 4 and 5 together, over the two tables rather than one row.
+
+    The general form, so the next id to arrive is caught by the same node instead of
+    by a #109-shaped one: no id appears twice within a surface, every tier row's typed
+    count equals the ids listed beside it, the numbering note's ceiling reaches the
+    highest id the tables name while still saying `or beyond`, and no live present-tense
+    sentence calls a superseded id the newest.
+    """
+    lists = _membership_id_lists()
+    dupes = {k: sorted({i for i in v if v.count(i) > 1}) for k, v in lists.items()
+             if len(v) != len(set(v))}
+    assert not dupes, f"ids spelled twice inside one membership surface: {dupes}"
+
+    text = _text()
+    i = text.find("### Write authority")
+    counts = {r.group(1).strip(): (len(_ids(r.group(2))), r.group(3))
+              for r in re.finditer(r"^\| ([^|]+) \| ([^|]*) \| (\d+) \|$",
+                                   text[i:text.find("\n## ", i)], re.M)}
+    wrong = {k: v for k, v in counts.items() if v[0] != _num(v[1])}
+    assert not wrong, f"tier rows whose count column disagrees with their ids: {wrong}"
+
+    listed = {i for v in lists.values() for i in v}
+    highest = max(_num(i.lstrip("#")) for i in listed)
+    note = _numbering_note()
+    ceiling = re.search(r"ids run (\d+) through (\d+) or beyond", note)
+    assert ceiling, f"the numbering note lost its range: {note[:120]!r}"
+    assert _num(ceiling.group(2)) >= highest, (
+        f"the numbering note tops out at {ceiling.group(2)} while the membership tables "
+        f"list #{highest}")
+    assert "or beyond" in note, "the numbering note dropped the `or beyond` clause"
+
+    stale = [mm.group(0)[:70] for mm in _NEWEST_T.finditer(_live_prose())
+             if int(mm.group(1)) != highest]
+    assert not stale, (
+        f"{len(stale)} live present-tense sentence(s) call a superseded id the newest; "
+        f"the highest id the membership tables name is #{highest}")
+
+
+def test_validate_tasks_emits_no_doc_membership_warning_for_any_id():
+    """Clause 2: the checker's own report over the live board is clean of the class.
+
+    Run against `~/obsidian/autonomy` — the directory `validate_tasks.py` reads, and the
+    reason this class is only ever caught by a nightly. When that directory is not on
+    the box (a CI checkout with no vault), the node skips with the reason rather than
+    passing on an empty board: a green here must always mean files were counted.
+    """
+    import subprocess
+    import sys
+
+    from app.data_root import vault_root  # validate_tasks.py: DEFAULT_DIR = vault_root() / "autonomy"
+
+    board = vault_root() / "autonomy"
+    if not board.is_dir():
+        pytest.skip(f"{board} is not on this box, so the board cannot be read")
+    proc = subprocess.run(
+        [sys.executable, "scripts/autonomy/validate_tasks.py"],
+        cwd=ROOT, capture_output=True, text=True, timeout=180)
+    out = proc.stdout + proc.stderr
+    m = re.search(r"Scanned (\d+) task files? in (\S+)", out)
+    assert m, f"the report is unreadable:\n{out[-800:]}"
+    scanned, named_dir = int(m.group(1)), m.group(2)
+    assert scanned > 0, "the checker scanned no task file, so it proved nothing"
+    assert Path(named_dir) == board, f"the checker read {named_dir}, not the live board {board}"
+    fleet = sorted(f.name for f in board.iterdir()
+                   if f.suffix == ".md" and re.match(r"\d+-", f.name))
+    assert scanned == len(fleet), (
+        f"the checker reported {scanned} of the {len(fleet)} id-prefixed task files on the "
+        f"board (the rest, like {sorted(f.name for f in board.iterdir() if f.suffix == '.md')[:1]},"
+        " are not task files), so a task went uncounted and its membership unchecked")
+    assert proc.returncode == 0 or "structural warning" not in out, (
+        f"the checker exited {proc.returncode} over the live board:\n{out[-800:]}")
+    offenders = sorted({ln.split(":")[0].strip() for ln in out.splitlines()
+                        if "DOC_MEMBERSHIP" in ln})
+    assert not offenders, (
+        f"DOC_MEMBERSHIP still fires for {offenders} — a live task file is not named in "
+        "both membership tables")
