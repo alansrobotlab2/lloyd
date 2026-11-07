@@ -1849,3 +1849,253 @@ def test_the_runtime_data_check_hands_its_clearance_the_root_it_measured(tmp_pat
     assert _marker_paths(line) == {str(round_data), DATA_LIVE}, (
         f"the marker names the root this check measured and the root the section "
         f"measured, whatever the two happen to be:\n{line}")
+
+
+# ── #3882: the vault-snapshot alarm's own seal ────────────────────────────────
+#
+# `Guardian._vault_snapshot_stream` measured its subject every 15 minutes and re-paged
+# it, and had no way to stop saying it: the publish carried no `coalesce`, and no fresh
+# reading ever handed the title to `resolve`. The page that shows is
+# `~/obsidian/memory/2026-11-04.md` — three sections of `VAULT_SNAPSHOT_ALERT_TITLE` at
+# filing (`:26`, `:39`, `:52`), none carrying a `cleared:` line, each still ordering a
+# reader to run `restore-vault.sh`, over a backup stream that delivered 276 commits in
+# the three days they stood.
+#
+# The nodes below drive the REAL method over a `Notifier` rooted in a tmp vault, so what
+# is asserted is the marker the writer emits and the seal the resolver writes, not a
+# stand-in's record of intending to. Only the reading of the backup repository is
+# injected, which is the seam this leg's own sibling file already uses:
+# `tests/test_guardian_vaultwatch.py:608` replaces `vaultwatch.snapshot_age_state` with an
+# `unreadable` stand-in, and where that file needs a STALE reading instead it plants a real
+# repository with a back-dated HEAD (`_owner_backup_repo`), which a fixture can do but a
+# gate cannot steer to a chosen age on the machine it runs on. A FRESH reading has no such
+# plant — the repository would have to have committed in the last three minutes — so the
+# reading is handed in, and every byte the clauses are about still comes from the real
+# writer and the real resolver.
+
+import datetime                    # noqa: E402  (the dated daily note is named by today)
+import guardian as gmod            # noqa: E402  (Guardian, VAULT_SNAPSHOT_ALERT_TITLE)
+
+SNAPSHOT = gmod.VAULT_SNAPSHOT_ALERT_TITLE
+
+#: Shaped like the producer's dict key for key (`vaultwatch.snapshot_age_state`'s return),
+#: because the leg reads `fresh`, `owned`, `max_age` and `text` out of it and a fixture
+#: with a typo in a key would pass a leg that crashes on the real reading.
+SNAPSHOT_REPO = "/home/alansrobotlab/.local/state/lloyd-vault-backup/vault.git"
+SNAPSHOT_SHA = "14f47bfd" + "0" * 32
+
+#: The body the leg publishes, reduced to the two lines that matter here: the measurement,
+#: and the directive a reader obeys. That directive is why an unsealed block is a defect
+#: and not a formatting slip.
+SNAPSHOT_BODY = (
+    "vault.git commit 00000000 is 4 h 12 m old, past the 3 h limit.\n\n"
+    "Restore into a side directory with "
+    "`~/lloyd/scripts/backup/restore-vault.sh <rev> <dest>` — verify the copy.")
+
+
+def _snapshot_state(*, fresh: bool = True, owned: bool = True) -> dict:
+    """One reading of the backup repository, in the producer's own shape."""
+    age = 180.0 if fresh else 15_120.0
+    return {"repo": SNAPSHOT_REPO, "sha": SNAPSHOT_SHA, "committed_at": 1_762_500_000,
+            "age": age, "max_age": 3 * 3600.0, "fresh": fresh, "owned": owned,
+            "beat_age": age,
+            "text": (f"{SNAPSHOT_REPO} commit {SNAPSHOT_SHA[:8]} is 3 m old" if fresh
+                     else f"{SNAPSHOT_REPO} commit {SNAPSHOT_SHA[:8]} is 4 h 12 m old, "
+                          "past the 3 h limit")}
+
+
+def _snapshot_guardian(tmp_path, monkeypatch, state):
+    """A `Guardian` on a tmp vault whose snapshot reading is exactly `state`.
+
+    `state` may be an exception, which is the shape of a read that did not happen:
+    `snapshot_age_state` shells out to `git`, and the leg's own contract is that a backup
+    reading may not raise into the tick that stops sync within one tick of a wipe.
+    """
+    import types
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    # A `Path`, not a str: the alert body this leg publishes builds its published-command
+    # line through `policy.published_watchdog_script`, which does
+    # `Path(policy.REPO).expanduser()`, and a str REPO raises `AttributeError` inside the
+    # publish — the failure lands in the daily note of exactly the family this node is
+    # about, so the node would report a missing marker where the real fault is a fixture.
+    monkeypatch.setattr(gmod.policy, "REPO", tmp_path / "repo")
+    monkeypatch.setattr(gmod.policy, "VAULT_ROOT", str(tmp_path / "vault"))
+    monkeypatch.setattr(gmod.policy, "DATA_ROOT", str(tmp_path / "data"))
+    # A `Path` for the same reason as `REPO`: `published_watchdog_script` calls
+    # `GUARDIAN_STATE.expanduser()`, and the alert body this leg publishes runs through it
+    # (#3795). A str here fails inside the publish rather than in the fixture.
+    monkeypatch.setattr(gmod.policy, "GUARDIAN_STATE", tmp_path / "guardian-state")
+
+    def _state(*_a, **_k):
+        if isinstance(state, Exception):
+            raise state
+        return state
+
+    monkeypatch.setattr(gmod.vaultwatch, "snapshot_age_state", _state)
+    args = types.SimpleNamespace(
+        repo=str(tmp_path / "repo"), state=str(tmp_path / "state.json"),
+        guardian_state=str(tmp_path / "guardian-state"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0)
+    (home / "obsidian" / "memory").mkdir(parents=True, exist_ok=True)
+    guard = gmod.Guardian(args)
+    guard.notifier.vault_root = home / "obsidian"
+    guard.notifier._last_key = None        # one firing per node, not the 15-min throttle
+    guard.alert_file_incident = lambda: (home / "ALERT.md", False)
+    guard._vault_snapshots_checked_at = -1e9   # the leg's own throttle, opened once
+    return guard
+
+
+def _snapshot_note(guard) -> str:
+    return (guard.notifier.vault_root / "memory"
+            / f"{datetime.date.today()}.md").read_text(encoding="utf-8")
+
+
+def _tick(guard, now: float) -> None:
+    """One tick of the leg, with the notifier's own repeat throttle opened for it.
+
+    Three gates stand between a tick and the daily note, and only the first is on the
+    clock this node controls: the leg's own `SNAPSHOT_CHECK_SECONDS` gate reads the `now`
+    passed in, while `Guardian.alert`'s `_alert_seen` window and `Notifier`'s `_last_key`
+    both read `time.time()`. Two ticks a simulated 15 minutes apart are 40 milliseconds
+    apart in real time, so the second fan-out would be logged as "(suppressed repeat)"
+    and the fold asserted below would never be reached. Clearing the other two is what
+    the tripwire nodes beside this one do for the same reason.
+    """
+    guard._alert_seen.clear()
+    guard.notifier._last_key = None
+    guard._vault_snapshot_stream(now)
+
+
+def test_a_stale_snapshot_publish_writes_a_section_the_resolver_can_seal(tmp_path,
+                                                                        monkeypatch):
+    """Clause 1: a fan-out of this alarm appends ONE section that carries the open marker.
+
+    `memory/2026-11-04.md` is the falsifier this node inverts: three sections, three
+    bodies, zero markers, because the uncoalesced append branch of `_vault_note` never
+    writes `notify.DAILY_STILL_OPEN` and that marker is the only thing
+    `Notifier._daily_open_at` calls a section open. So the assertion that matters is not
+    "the note got the alarm" — it always did — but "the note got one section, and it is
+    open in the sense the resolver understands".
+    """
+    guard = _snapshot_guardian(tmp_path, monkeypatch, _snapshot_state(fresh=False))
+    _tick(guard, 10_000.0)
+    _tick(guard, 10_900.0)                     # the next tick, same stalled condition
+
+    note = _snapshot_note(guard)
+    assert note.count(f"## Self-mod guardian: {SNAPSHOT}") == 1, (
+        "two ticks of one stalled stream wrote two bodies into the page a person reads; "
+        f"that is 2026-11-04 again:\n{note}")
+    assert note.count(notify.DAILY_STILL_OPEN) == 1, (
+        "the section carries no standing open marker, which is the state that makes "
+        f"`resolve` unable to seal it:\n{note}")
+    assert guard.notifier._daily_open_at(note, SNAPSHOT) is not None, (
+        "`Notifier._daily_open_at` does not call this section open, so clause 2's seal "
+        "would have nothing to seal")
+    assert note.count("Restore into a side directory") == 1, (
+        "the second firing pasted the body again rather than refreshing the open section "
+        "in place — `memory/2026-11-04.md` is three copies of this one directive:\n{note}")
+
+
+def test_a_fresh_owned_snapshot_pass_seals_that_section_on_the_same_pass(tmp_path,
+                                                                        monkeypatch):
+    """Clause 2: a fresh, owned reading seals the open section on the pass that reads it.
+
+    The seal is the whole point of #3882 and it is the half #3132 declined to build ("the
+    next fresh reading is simply quiet"). Quiet is what left a restore directive standing
+    on a daily note for three days over a stream that delivered 276 commits in that time.
+    The reading here is the leg's own — one injected `snapshot_age_state`, no notifier
+    stubbed — so the seal's numbers are the ones the fresh reading printed.
+    """
+    guard = _snapshot_guardian(tmp_path, monkeypatch, _snapshot_state(fresh=False))
+    _tick(guard, 10_000.0)
+    monkeypatch.setattr(gmod.vaultwatch, "snapshot_age_state",
+                        lambda *_a, **_k: _snapshot_state(fresh=True))
+
+    _tick(guard, 10_900.0)
+
+    note = _snapshot_note(guard)
+    assert notify.DAILY_CLEARED_PREFIX in note, (
+        "the stream came back and the daily note still says snapshots are not arriving:\n"
+        f"{note}")
+    assert guard.notifier._daily_open_at(note, SNAPSHOT) is None, (
+        "the open marker survived the seal, so the next publish would fold into a "
+        "cleared incident")
+    assert SNAPSHOT_SHA[:8] in note and "3 m" in note, (
+        "the seal does not name the commit and age the fresh reading measured, so a "
+        f"reader cannot check it: {note}")
+    assert "restore" in note.lower() and "restores nothing" in note, (
+        "the seal must repeat the half-truth the alarm could not carry — a snapshot "
+        f"repo restores no running tree:\n{note}")
+
+
+def test_a_snapshot_seal_is_never_written_from_a_reading_that_is_not_the_vault_s(
+        tmp_path, monkeypatch):
+    """Clause 3: no seal from a repository this check may not speak for, and none from a
+    read that did not happen.
+
+    At the base commit this node passed vacuously: the leg had no retracting branch at
+    all, so nothing could write a seal from anywhere. It is the branch added by clause 2
+    that makes a refusal something this check can be wrong about, which is why it stays.
+
+    Two refusals, one assertion each on the note's bytes. An unowned repository is the
+    #3149 case — `memory/2026-10-21.md` carries three sections that raised this title
+    about somebody's fixture repo — and an unreadable one is the case the leg already
+    refuses to page about. Freshness is irrelevant to both: the reading must first be
+    *of the vault* before it can retire an alarm about the vault, and on this box the
+    raising side is silent while the retracting side would still be writing.
+    """
+    for label, state in (("unowned", _snapshot_state(fresh=True, owned=False)),
+                         ("unreadable", OSError("git: blocked by the sandbox"))):
+        guard = _snapshot_guardian(tmp_path / label, monkeypatch,
+                                   _snapshot_state(fresh=False))
+        _tick(guard, 10_000.0)
+        before = _snapshot_note(guard)
+        assert notify.DAILY_STILL_OPEN in before, (
+            "the publish left no open marker for a seal to consume, so the byte-identity "
+            f"below would be claimed over a note that never held an open section:\n{before}")
+        assert notify.DAILY_CLEARED_PREFIX not in before, (
+            "the publish itself sealed its own section, so the refusal below would be "
+            "asserted over an empty note")
+
+        def _reading(*_a, _s=state, **_k):
+            if isinstance(_s, Exception):
+                raise _s
+            return _s
+
+        monkeypatch.setattr(gmod.vaultwatch, "snapshot_age_state", _reading)
+
+        _tick(guard, 10_900.0)                  # must not raise into the tick
+
+        after = _snapshot_note(guard)
+        assert after == before, (
+            f"the {label} reading sealed a snapshot section: a retraction nobody "
+            f"measured ({label})")
+        assert after.count(notify.DAILY_CLEARED_PREFIX) == 0, (
+            f"a `cleared:` line reached the note through the {label} branch")
+
+
+def test_an_uncoalesced_snapshot_section_is_the_one_resolve_could_never_seal(tmp_path,
+                                                                            monkeypatch):
+    """The deeper of #3882's two causes, pinned so a future round cannot re-ship it.
+
+    A `resolve` call alone would not have fixed `memory/2026-11-04.md`, and a round that
+    reads the item's title and adds only the call would land that. `resolve` seals only
+    what `_daily_open_at` calls open, and an uncoalesced section carries no marker — so
+    the pre-fix leg's answer to a healthy stream was a return value of True and a note
+    that did not change. This node is the pre-fix state, written against the current
+    notifier, and it is why `coalesce=True` is load-bearing rather than tidy.
+    """
+    guard = _snapshot_guardian(tmp_path, monkeypatch, _snapshot_state(fresh=False))
+    guard.notifier.alert("error", SNAPSHOT, SNAPSHOT_BODY)   # the OLD call: no coalesce
+    before = _snapshot_note(guard)
+    assert before.count(notify.DAILY_STILL_OPEN) == 0, (
+        "this node's premise is the uncoalesced append; if the writer changed, the "
+        "falsifier below is proving nothing")
+
+    assert guard.notifier.resolve(SNAPSHOT, "the stream is fresh again") is True
+    assert _snapshot_note(guard) == before, (
+        "`resolve` reported a seal and wrote nothing: exactly the dead end an "
+        "uncoalesced section is")

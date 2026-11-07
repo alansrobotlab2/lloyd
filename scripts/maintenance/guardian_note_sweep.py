@@ -6,7 +6,7 @@ Why a script and not the guardian
 The go-forward half of #2221 is in `agent-services/guardian/guardian.py`: the two families
 that actually fire now write a coalesced section and seal it with a `cleared:` line when the
 condition stops. That half cannot reach the blocks already in the vault, because
-`Notifier.resolve` scans `DAILY_SCAN_DAYS = 3` notes (`notify.py:78`) — an alarm older than
+`Notifier.resolve` scans `DAILY_SCAN_DAYS = 3` notes (`notify.py:103`) — an alarm older than
 three days is reported, never rewritten. So the uncleared blocks that assert a non-RUNNING
 supervisor state for a program `supervisorctl status` reports RUNNING today — measured
 2026-10-05: 15 of them, `memory/2026-09-06.md` through `memory/2026-09-29.md`, all naming
@@ -70,10 +70,11 @@ nothing. It never touches a block whose subject no tool can answer for: a `Rolle
 notice and a self-test notice have no live witness at all, and a disk figure with no probe
 behind it is not refuted by a probe measuring a different filesystem — each refuter is bound
 to the family that owns its reading, and a block whose family no witness speaks for comes back
-byte-identical. Three families are spoken for: a supervisor-state block by the live RUNNING
-set, an inode block by `tmpwatch.measure`'s own fraction, and a tripwire block by the
-guardian's `tripwire_is_clear` over the watch that raised it — and the third answers only the
-question that condition asks, so it dates a tripwire block and never clears one.
+byte-identical. Four families are spoken for: a supervisor-state block by the live RUNNING
+set, an inode block by `tmpwatch.measure`'s own fraction, a tripwire block by the
+guardian's `tripwire_is_clear` over the watch that raised it, and a vault-snapshot block by
+`vaultwatch.snapshot_age_state` — and each answers only the question its own reading asks,
+so the third and fourth date a block and never clear one.
 And it does not delete or reword the body: a note that recorded a real outage keeps the
 record; what stops is the standing instruction below it.
 """
@@ -298,6 +299,123 @@ def tripwire_refutes(title: str, readings: "dict[str, TripwireReading] | None") 
     return bool(reading and reading.clear)
 
 
+# ── the fourth witness: the vault snapshot's own age reading (#3882) ─────────
+
+#: The one title this witness speaks for, bound for the reason all three earlier
+#: bindings exist: `snapshot_age_state` measures the vault's off-vault backup
+#: repository, and a block whose subject is a file count, an inode figure or a
+#: supervisor state is not refuted by a commit that happens to be recent.
+SNAPSHOT_ALERT_TITLE = G.VAULT_SNAPSHOT_ALERT_TITLE
+
+#: The reading's OWN sentence is quoted rather than re-rendered, and that is the
+#: whole reason `SnapshotReading` carries `text`: `snapshot_age_state` already names
+#: the repository, the commit and its age in the unit a person reads, and is the same
+#: function `Guardian._vault_snapshot_stream` raises the alarm from, so a stamp that
+#: built its own age string would be a second definition of an age that can drift
+#: from the one the alarm and the guardian's own `cleared:` line print. It is checked
+#: for the two marker words before it is written, because it is a rendered string
+#: rather than this file's own prose and #1988's instrument is `grep -c 'cleared:'`
+#: over these very notes.
+SNAPSHOT_REFUTED_LINE = (
+    "{prefix} {day}: `vaultwatch.snapshot_age_state` reads {quoted} with `fresh=True, "
+    "owned=True` — the same reading `Guardian._vault_snapshot_stream` raises this alarm "
+    "from, and the reading that leg now hands `Notifier.resolve` on a healthy pass — so "
+    "the restore instructions above are stale. The alarm above records what was true "
+    "when it fired and is not a standing instruction; this block sits outside the "
+    "`notify.DAILY_SCAN_DAYS = {scan}` daily notes `Notifier.resolve` scans back, and "
+    "until #3882 the leg that raised it had no now-healthy branch to seal it with at "
+    "all, which is why a dating is the only retraction that can reach it here. That "
+    "observed recovery is the one thing the guardian's retraction marker asserts, and "
+    "the weaker claim is the true one. If this line is wrong the stream has stopped "
+    "again as of now: re-run `python3 agent-services/guardian/vaultwatch.py status` "
+    "before acting on the text above.")
+
+
+class SnapshotReading(NamedTuple):
+    """The vault's off-vault backup repository, as the alarm's own probe read it."""
+    repo: str
+    sha: "str | None"        # HEAD's commit, as `git log -1` answered it
+    fresh: bool              # HEAD or the producer's beat inside the bound
+    owned: bool              # the repo sits under `vaultwatch.snapshot_owner_dir()`
+    max_age: float           # the bound those ages were weighed against, in seconds
+    text: str                # the probe's own sentence, quoted into the stamp
+
+
+def read_snapshot(*, age_reader=vaultwatch.snapshot_age_state) -> SnapshotReading:
+    """Ask the probe that raises this alarm what the backup repository is at now.
+
+    `age_reader` is a parameter for the reason `runner=`, `measurer=` and
+    `tripwire_reader=` are, and the lesson is the same each time: the gate runs where a
+    test cannot steer a real `git log` of the live off-vault repository to a chosen age,
+    so a node that reached for it could observe the refusals only on some boxes. The
+    default is the live probe, so a hand-run has no seam to get wrong.
+
+    Two refusals, both a `RuntimeError` for `main` to turn into an exit code rather
+    than a traceback. An exception out of the probe is a read that did not happen —
+    `snapshot_age_state` shells out to `git`, and a sandbox that refuses a subprocess
+    is the ordinary gate case. A response that is not the documented dict is the same
+    thing with a friendlier face, and is refused rather than defaulted: a missing
+    `fresh` key read as False would be correct by accident, and read as True would
+    date every snapshot block in the vault off a value nobody measured.
+
+    `fresh` and `owned` are carried separately and NOT folded, exactly as the producer
+    folds them: an unowned repository's freshness is a fact about somebody's fixture,
+    and it refutes nothing (#3149).
+    """
+    try:
+        state = age_reader()
+    except Exception as exc:                        # noqa: BLE001 — see read_running
+        raise RuntimeError(f"cannot read the vault snapshot repository: "
+                           f"{type(exc).__name__}: {exc}") from exc
+    if not isinstance(state, dict) or "fresh" not in state or "owned" not in state:
+        raise RuntimeError(f"`vaultwatch.snapshot_age_state` gave {state!r}, which is not "
+                           "the reading this witness needs; nothing can be dated from it")
+    return SnapshotReading(repo=str(state.get("repo")), sha=state.get("sha"),
+                           fresh=bool(state["fresh"]), owned=bool(state["owned"]),
+                           max_age=float(state.get("max_age") or 0.0),
+                           text=str(state.get("text") or ""))
+
+
+def snapshot_refutes(title: str, reading: "SnapshotReading | None") -> bool:
+    """Whether a snapshot reading refutes this block — the criterion, without the stamp.
+
+    Three ways this is False, each answering a different way the sweep could lie:
+
+    * `reading is None` — no witness, so nothing is known. `main` passes None when the
+      probe refused; defaulting it to a fresh reading would date every snapshot block
+      in the corpus from an absent probe.
+    * `SNAPSHOT_ALERT_TITLE not in title` — the reading is of the vault's backup
+      repository, so it refutes only the family that measured it. Without the binding
+      this becomes a general "some repository is recent today" pass over the vault.
+    * `not (reading.fresh and reading.owned)` — a stale HEAD is the ALARM, not its
+      refutation, and an unowned repository is not the vault's copy whatever it holds.
+      A block whose own alarm is still true must come back byte-identical.
+    """
+    return bool(reading and reading.fresh and reading.owned
+                and SNAPSHOT_ALERT_TITLE in title)
+
+
+def snapshot_stamp(reading: "SnapshotReading | None", day: str) -> "str | None":
+    """The stamp a refuted snapshot block earns, or None when the criterion does not hold.
+
+    The CLI reports the same reading this line quotes, so the printed pass and the
+    written note cannot disagree about what was measured — the rule `fraction_stamp`
+    follows. The quoted sentence is re-checked here rather than trusted: it arrives
+    from a rendered string, and a probe whose wording changed must not be able to put
+    the word `cleared:` onto a historical block and have #2221's own instrument count
+    that as a retraction that never happened.
+    """
+    if not reading or not reading.text:
+        return None
+    quoted = reading.text.strip().rstrip(".")
+    if (notify.DAILY_CLEARED_PREFIX in quoted or notify.DAILY_DATED_PREFIX in quoted
+            or "`" in quoted):
+        return None
+    return SNAPSHOT_REFUTED_LINE.format(prefix=notify.DAILY_DATED_PREFIX, day=day,
+                                        quoted=f"`{quoted}`",
+                                        scan=notify.DAILY_SCAN_DAYS)
+
+
 def already_sealed(body: str) -> bool:
     """Whether a retraction or a dating is already in the block.
 
@@ -379,37 +497,41 @@ def trip_stamp(reading: TripwireReading, day: str) -> str:
 
 def block_is_refuted(title: str, body: str, *, running: set[str],
                      fraction: float | None = None,
-                     tripwire: "dict[str, TripwireReading] | None" = None) -> bool:
+                     tripwire: "dict[str, TripwireReading] | None" = None,
+                     snapshot: "SnapshotReading | None" = None) -> bool:
     """Whether any witness refutes this block. The one criterion the count and the write
     both consult: `count_refutations` is the CLI's "how many blocks does this pass change",
     and two definitions of "refuted" is how a report starts counting blocks that the writer
     then leaves alone — or the other way round, which is worse.
 
-    The three witnesses are disjoint by TITLE, which is what lets them OR together without
-    one block collecting three stamps: the first answers only a `name: STATE` line, the
+    The four witnesses are disjoint by TITLE, which is what lets them OR together without
+    one block collecting four stamps: the first answers only a `name: STATE` line, the
     second only `tmpwatch.ALERT_TITLE`, the third only the two titles in
-    `TRIP_ALERT_TITLES`. `tripwire` defaults to None for the same reason `fraction` does — a
-    pass that did not read the tripwires is not a pass that read them clear.
+    `TRIP_ALERT_TITLES`, the fourth only `SNAPSHOT_ALERT_TITLE`. Each of the optional
+    readings defaults to None for the same reason — a pass that did not take a reading is
+    not a pass that read it healthy.
     """
     if already_sealed(body):
         return False
     return (bool(refutations(body, running)) or fraction_refutes(title, fraction)
-            or tripwire_refutes(title, tripwire))
+            or tripwire_refutes(title, tripwire) or snapshot_refutes(title, snapshot))
 
 
 def count_refutations(text: str, running: set[str], fraction: float | None = None,
-                      tripwire: "dict[str, TripwireReading] | None" = None) -> int:
+                      tripwire: "dict[str, TripwireReading] | None" = None,
+                      snapshot: "SnapshotReading | None" = None) -> int:
     """How many unsealed guardian blocks in `text` a live read refutes.
 
     The sweep's own metric, exposed so the CLI's "0 hits" and the test's "0 hits" are one
     measurement and not two definitions that can drift apart: it asks the same question
     `date_note` asks, over the same body slices. `fraction` defaults to None — a caller that
     has not read `/tmp` is not a caller that read it as clean, so the second refuter
-    contributes nothing until a reading is handed to it.
+    contributes nothing until a reading is handed to it. Same for `tripwire` and `snapshot`.
     """
     return sum(1 for title, start, end in _guardian_sections(text)
                if block_is_refuted(title, text[start:end], running=running,
-                                   fraction=fraction, tripwire=tripwire))
+                                   fraction=fraction, tripwire=tripwire,
+                                   snapshot=snapshot))
 
 
 def _guardian_sections(text: str):
@@ -427,7 +549,8 @@ def _guardian_sections(text: str):
 
 
 def date_note(text: str, running: set[str], day: str, fraction: float | None = None,
-              tripwire: "dict[str, TripwireReading] | None" = None) -> "tuple[str, int, list[str]]":
+              tripwire: "dict[str, TripwireReading] | None" = None,
+              snapshot: "SnapshotReading | None" = None) -> "tuple[str, int, list[str]]":
     """Append a `dated:` line to every refuted, unsealed guardian block: (text, n, notes).
 
     Appended at the END of the block, after the body, because the standing instruction these
@@ -436,18 +559,18 @@ def date_note(text: str, running: set[str], day: str, fraction: float | None = N
     rather than sealed in place because a block written before #2221 carries no open marker
     to replace, which is the same reason `resolve` cannot reach it.
 
-    A block earns one stamp per witness that refutes it, which today means at most two, and
-    only when the block asserts both a supervisor state and a `/tmp` figure — no family
-    raises both. The count `n` is BLOCKS, not stamps: a block naming two programs already
-    got two lines out of one pass before #3277, and the CLI's total is the number of notes
-    a reader has to re-read, not the number of lines they land on.
+    A block earns one stamp per witness that refutes it. The four are bound to disjoint
+    titles, so in practice a block earns one, and the count `n` is BLOCKS either way, not
+    stamps: a block naming two programs already got two lines out of one pass before #3277,
+    and the CLI's total is the number of notes a reader has to re-read, not the number of
+    lines they land on.
     """
     inserts: list[tuple[int, str]] = []
     notes: list[str] = []
     for title, start, end in _guardian_sections(text):
         body = text[start:end]
         if not block_is_refuted(title, body, running=running, fraction=fraction,
-                                tripwire=tripwire):
+                                tripwire=tripwire, snapshot=snapshot):
             continue
         stamps: list[str] = []
         reasons: list[str] = []
@@ -464,6 +587,11 @@ def date_note(text: str, running: set[str], day: str, fraction: float | None = N
             stamps.append(trip_stamp(reading, day))
             count = ("" if reading.total is None else f" ({reading.total:,} files)")
             reasons.append(f"{reading.family} tripwire clear over {reading.root}{count}")
+        snap_stamp = snapshot_stamp(snapshot, day) if snapshot_refutes(title, snapshot) else None
+        if snap_stamp:
+            stamps.append(snap_stamp)
+            reasons.append(f"snapshot repo {snapshot.repo} fresh at commit "
+                           f"{(snapshot.sha or 'unknown')[:8]}")
         inserts.append((end, separator(body) + "\n\n".join(stamps) + "\n"))
         notes.append(f"{title}: " + "; ".join(reasons))
     if not inserts:
@@ -561,17 +689,20 @@ def read_fraction(path: str = tw.PATH, *, measurer=tw.measure) -> float:
 
 def main(argv: list[str] | None = None, *, running_reader=read_running,
          fraction_reader=read_fraction,
-         tripwire_reader=read_tripwire) -> int:
-    """The CLI. All three witnesses are read here and nowhere else, and 2 means a partial pass.
+         tripwire_reader=read_tripwire,
+         snapshot_reader=read_snapshot) -> int:
+    """The CLI. All four witnesses are read here and nowhere else, and 2 means a partial pass.
 
-    `running_reader`, `fraction_reader` and `tripwire_reader` exist so a test can put numbers
-    under this function without steering the box — the `runner=` reason one level up, applied to
-    the boundary where the counts a human acts on are printed. The defaults are the live reads,
-    so a hand-run reaches `supervisorctl`, `statvfs` and the two tripwire watches with no seam to
-    get wrong, and a refused read still stops the thing loudly: exit 2 with one line on stderr.
+    `running_reader`, `fraction_reader`, `tripwire_reader` and `snapshot_reader` exist so a
+    test can put numbers under this function without steering the box — the `runner=` reason
+    one level up, applied to the boundary where the counts a human acts on are printed. The
+    defaults are the live reads, so a hand-run reaches `supervisorctl`, `statvfs`, the two
+    tripwire watches and `vaultwatch.snapshot_age_state` with no seam to get wrong, and a
+    refused read still stops the thing loudly: exit 2 with one line on stderr.
     `tripwire_reader` is called exactly once per pass, before any file is opened, because its
-    default walks `~/lloyd-data` — over 700,000 files — and a per-note call would multiply that
-    walk by the size of the corpus.
+    default walks `~/lloyd-data` — over 700,000 files — and a per-note call would multiply
+    that walk by the size of the corpus; `snapshot_reader` is likewise once per pass, since
+    its default shells out to `git log` of the backup repository.
 
     A failed read exits 2 even when the other witness did write, and the reason is the
     report's own ambiguity. Seven stranded blocks and zero blocks both print "blocks: 0";
@@ -616,12 +747,33 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
             print(f"{reading.family} tripwire over {reading.root} is un-dateable this "
                   f"pass: {reading.why}", file=sys.stderr)
 
+    # Read ONCE, before the walk, for the same reason `tripwire_reader` is read once: the
+    # default shells out to `git log` of the vault's off-vault backup repository, and a
+    # per-note call would pay a subprocess for every dated daily note in the corpus to
+    # ask a question the corpus answers with one number.
+    snapshot: "SnapshotReading | None" = None
+    try:
+        snapshot = snapshot_reader()
+    except Exception as exc:                        # noqa: BLE001 — a read, not a bug
+        partial = True
+        print(f"{SNAPSHOT_ALERT_TITLE}: the `vaultwatch.snapshot_age_state` witness is "
+              f"unavailable, so no snapshot block can be dated this pass: {exc}",
+              file=sys.stderr)
+    if snapshot is not None and not (snapshot.fresh and snapshot.owned):
+        # A stale HEAD is the alarm this witness exists to refute, not its refutation, and
+        # an unowned repository is not the vault's copy whatever its age — both leave the
+        # block standing, and both are reported rather than passed over in silence, the way
+        # an un-clear tripwire is.
+        partial = True
+        print(f"{SNAPSHOT_ALERT_TITLE} witness does NOT refute: {snapshot.text}",
+              file=sys.stderr)
+
     total = 0
     for path in sorted(Path(args.notes).glob("20*.md")):
         text = path.read_text(encoding="utf-8")
-        if not count_refutations(text, running, fraction, tripwire):
+        if not count_refutations(text, running, fraction, tripwire, snapshot):
             continue
-        new, n, notes = date_note(text, running, args.day, fraction, tripwire)
+        new, n, notes = date_note(text, running, args.day, fraction, tripwire, snapshot)
         total += n
         for s in notes:
             print(f"{path.name}: {s}")
@@ -640,6 +792,13 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
                 f"; {r.family} tripwire {'clear' if r.clear else 'NOT clear'} over {r.root}"
                 + ("" if r.total is None else f" ({r.total:,} files)")
                 + ("" if r.clear else f" — {r.why}"))
+    if snapshot is None:
+        witness += "; snapshot unread; no snapshot block dateable"
+    else:
+        witness += (f"; snapshot {'fresh' if (snapshot.fresh and snapshot.owned) else 'NOT fresh'}"
+                    + ("" if snapshot.sha else " (no HEAD)")
+                    + ("" if snapshot.sha is None else f" at {snapshot.sha[:8]}")
+                    + ("" if snapshot.owned else f" — repo {snapshot.repo} is NOT the vault's"))
     print(f"{'dated' if args.apply else 'refutable'} blocks: {total} "
           f"(RUNNING: {', '.join(sorted(running))}; {witness})")
     return 2 if partial else 0

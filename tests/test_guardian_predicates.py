@@ -3819,6 +3819,19 @@ def _note_watching(tmp_path, monkeypatch, *, states, liveness):
     # the one probe that was missed. `check_tmp` itself still runs, for real, on the
     # reading below.
     monkeypatch.setattr(g.tmp, "statvfs", _statvfs(10_000))
+    # The same reason, the second probe, added by #3882: the vault half of the tick reads
+    # the vault's off-vault backup repository (`vaultwatch.snapshot_age_state`) and, since
+    # that item, RETRACTS its title on a fresh reading and raises on a stale one. A fixture
+    # that never planted a repository leaves that reading stale, and a stale reading is a
+    # COALESCED section — a second `DAILY_STILL_OPEN` in the note, and a `cleared:` line
+    # whenever the host's own stream happens to go fresh again. The whole-note counts below
+    # are the supervisor family's, so the tick is handed a healthy stream, which is what
+    # this box is: the nodes see the note one family wrote, and the snapshot leg still
+    # runs, for real, on the reading below.
+    monkeypatch.setattr(G.vaultwatch, "snapshot_age_state", lambda *_a, **_k: {
+        "repo": "/fixture/vault.git", "sha": "0" * 40, "committed_at": 1, "age": 60.0,
+        "max_age": 10_800.0, "fresh": True, "owned": True, "beat_age": 60.0,
+        "text": "/fixture/vault.git commit 00000000 is 1 m old"})
     # The `systemctl --user restart` the unreachable branch performs, and every other
     # subprocess the tick makes — the stray check reads `.stdout`, so the stand-in carries
     # the fields those readers touch, or an unrelated check logs a failure per tick.

@@ -363,14 +363,17 @@ def _clean_tripwire() -> dict:
 
 def _run_cli(note_dir: Path, *argv: str, fraction: object = BELOW,
              frac_raises: bool = False, tripwire: object = "clean",
-             trip_raises: bool = False) -> int:
+             trip_raises: bool = False, snapshot: object = None,
+             snap_raises: bool = False) -> int:
     """`main` with all three witnesses injected, so a test never steers the box.
 
     `running_reader` answers the supervisor the same way the module's docstring records for
     `runner=`: the gate may run where no supervisor answers, and a node that shelled out
     could only assert its refusal on some environments. It reports one RUNNING program,
     which refutes nothing in this fixture, so any block the CLI counts here can only have
-    come from the fraction witness.
+    come from the fraction, tripwire or snapshot witness. `snapshot_reader` defaults to
+    None — no reading — so the nodes written before #3882 see exactly the pass they saw
+    before: an absent witness dates nothing and is reported as absent.
     """
     def _fraction(path):
         if frac_raises:
@@ -382,9 +385,15 @@ def _run_cli(note_dir: Path, *argv: str, fraction: object = BELOW,
             raise RuntimeError("tripwire: cannot read the watch state")
         return _clean_tripwire() if tripwire == "clean" else tripwire
 
+    def _snapshot():
+        if snap_raises:
+            raise OSError("git: blocked by the sandbox")
+        return snapshot
+
     return SWEEP.main(["--notes", str(note_dir), *argv],
                       running_reader=lambda conf: {"lloyd-mc:lloyd-backend"},
-                      fraction_reader=_fraction, tripwire_reader=_tripwire)
+                      fraction_reader=_fraction, tripwire_reader=_tripwire,
+                      snapshot_reader=_snapshot)
 
 
 def test_the_cli_dates_a_fixture_copy_once_and_writes_it_once(tmp_path, capsys):
@@ -1067,3 +1076,242 @@ def test_every_line_citation_into_guardian_py_lands_inside_a_definition():
         f"only {checked} citations checked (52 existed on 2026-11-03) — a scan that found "
         "almost nothing is a coverage gap reading itself as a clean result, which is the "
         "failure mode this file exists to refuse")
+
+
+# ── the FOURTH refuter: the vault snapshot's own age reading (#3882) ──────────
+#
+# The three sections at `~/obsidian/memory/2026-11-04.md:26,:39,:52` are the fourth
+# family and the one no witness reached: `vaultwatch.snapshot_age_state` is both the
+# reading `Guardian._vault_snapshot_stream` raises "Vault snapshots are not arriving"
+# from and the only thing in the tree that can say whether a snapshot alarm still holds.
+# Two things made those blocks unreachable, and the second is why a live `resolve`
+# branch could not have done this alone: `notify.DAILY_SCAN_DAYS = 3` puts 11-04 outside
+# every scan on the day the item was filed, and the leg had no now-healthy branch at all
+# — so a dating, whose witness is a fresh reading, is the only retraction that can reach
+# a block this old. Like the tripwire refuter, it DATES rather than clears: an observed
+# fresh commit today says the alarm is no longer true, not that a human verified the
+# three days between.
+#
+# The reading is injected for the standing reason in this file's docstring: the gate
+# cannot steer a real `git log` of the live off-vault repository to a chosen HEAD age.
+
+SNAP_TITLE = f"{SWEEP.GUARDIAN_TITLE} {Gmod.VAULT_SNAPSHOT_ALERT_TITLE}"
+
+#: The body as `memory/2026-11-04.md` carries it, reduced to the two sentences that
+#: matter: the measurement the alarm was built from, and the directive a reader obeys.
+SNAP_BODY = (
+    "/home/alansrobotlab/.local/state/lloyd-vault-backup/vault.git commit a4521e90 is "
+    "17 h 40 m old, past the 3 h limit.\n\n"
+    "Restore into a side directory with "
+    "`~/lloyd/scripts/backup/restore-vault.sh <rev> <dest>` — never over the live vault.\n")
+
+SNAP_REPO = "/home/alansrobotlab/.local/state/lloyd-vault-backup/vault.git"
+SNAP_SHA = "14f47bfd" + "0" * 32
+
+
+def _snap_reading(fresh=True, owned=True, sha=SNAP_SHA) -> SWEEP.SnapshotReading:
+    """A snapshot reading, in the shape `read_snapshot` maps `snapshot_age_state` into."""
+    return SWEEP.SnapshotReading(
+        repo=SNAP_REPO, sha=sha, fresh=fresh, owned=owned, max_age=3 * 3600.0,
+        text=(f"{SNAP_REPO} commit {sha[:8]} is 3 m old" if fresh else
+              f"{SNAP_REPO} commit {sha[:8]} is 17 h 40 m old, past the 3 h limit"))
+
+
+def _snap_note(with_state: bool = True) -> str:
+    """One unsealed snapshot block, beside blocks of the three families it must not touch.
+
+    The `name: STATE` block is in the string fixture because the direct-`date_note` nodes
+    hand the pass no supervisor at all, so nothing refutes it and it earns no stamp. A CLI
+    node asks for the note WITHOUT it (`with_state=False`): `_run_cli` injects a standing
+    RUNNING set — the gate may run where no supervisor answers, and a node that shelled out
+    could only assert its refusal on some machines — and that set refutes a `name: STATE`
+    block on every pass by design, which would make a one-stamp count a count of the helper
+    rather than of the witness under test.
+    """
+    blocks = [(SNAP_TITLE, SNAP_BODY),
+              (VAULT_TRIP_TITLE, VAULT_TRIP_BODY),
+              (TMP_TITLE, TMP_BODY),
+              (ROLLBACK_TITLE, ROLLBACK_BODY)]
+    if with_state:
+        blocks.insert(3, (STATE_TITLE, STATE_BODY))
+    return _trip_note(*blocks)
+
+
+def test_a_fresh_snapshot_reading_dates_the_block_and_no_other_title():
+    """Clause 4, first half: fresh AND owned refutes, and only this title is refuted.
+
+    The title binding is the clause. `snapshot_age_state` measures the vault's off-vault
+    backup repository, so a fresh commit there is an answer about
+    `VAULT_SNAPSHOT_ALERT_TITLE` and about nothing else; without the binding the sweep
+    would date a disk alarm because a git repository somewhere is current.
+    """
+    text = _snap_note()
+    reading = _snap_reading()
+    out, n, notes = SWEEP.date_note(text, NO_PROGRAMS, DAY, snapshot=reading)
+    assert n == 1, notes
+    assert len(_stamp_lines(out)) == 1, out
+    assert out.index(notify.DAILY_DATED_PREFIX) < out.index(VAULT_TRIP_TITLE), (
+        "the one stamp landed somewhere other than in the snapshot block")
+    for other in (VAULT_TRIP_TITLE, TMP_TITLE, STATE_TITLE, ROLLBACK_TITLE):
+        start = out.index(other)
+        assert out[start:out.index("\n\n", start)].count(notify.DAILY_DATED_PREFIX) == 0, (
+            f"the snapshot witness dated a block of another family: {other}")
+    assert SWEEP.count_refutations(text, NO_PROGRAMS, snapshot=reading) == 1
+    assert SWEEP.count_refutations(text, NO_PROGRAMS) == 0, (
+        "the witness must contribute nothing when no reading was handed to the pass")
+    for flag in ("fresh", "owned"):
+        held = getattr(reading, flag)
+        assert held is True, f"the fixture itself must be a refuting reading: {flag}"
+    assert SWEEP.snapshot_stamp(reading, DAY) is not None
+
+
+def test_a_snapshot_stamp_names_the_commit_and_age_and_is_never_a_clearance():
+    """Clause 4, second half: exactly one stamp carrying the commit and age it read.
+
+    A block earns ONE `dated:` line — not one per field of the reading, and never a
+    `cleared:` line, which is #2221's rule: an observed recovery today does not
+    disprove the three days before it.
+    """
+    text = _snap_note()
+    reading = _snap_reading()
+    out, n, _notes = SWEEP.date_note(text, NO_PROGRAMS, DAY, snapshot=reading)
+    stamps = _stamp_lines(out)
+    assert n == 1 and len(stamps) == 1, stamps
+    stamp = stamps[0]
+    assert stamp.startswith(notify.DAILY_DATED_PREFIX), stamp
+    assert SNAP_SHA[:8] in stamp and "3 m" in stamp, (
+        f"the stamp must name the commit and age the reading carries: {stamp}")
+    assert "snapshot_age_state" in stamp, (
+        f"a dating is only checkable if it names its reading: {stamp}")
+    assert "vaultwatch.snapshot_age_state" in stamp, (
+        f"the re-pointable command is the published watchdog path, not a bare name: {stamp}")
+    assert notify.DAILY_CLEARED_PREFIX not in stamp and "clear" not in stamp.lower(), (
+        f"an observed recovery is a dating, never a clearance: {stamp}")
+    body_end = text.index(SNAP_BODY) + len(SNAP_BODY)
+    assert out[:body_end] == text[:body_end], "the alarm's own words were rewritten"
+    assert out.endswith(text[text.index(ROLLBACK_TITLE):]), "the blocks below were disturbed"
+
+
+def test_a_stale_unowned_or_unread_snapshot_reading_dates_nothing():
+    """Clause 5: every refusal leaves the note byte-identical, and no `cleared:` appears.
+
+    Four refusals. A stale HEAD is the ALARM this witness exists to refute, not its
+    refutation. An unowned repository is somebody's fixture, and #3149's three sections
+    on `memory/2026-10-21.md` are what it looks like when that distinction is missing. A
+    probe that raises, and a probe that answers with something that is not the documented
+    dict, are the two shapes of "the read did not happen" — and a missing `fresh` key
+    defaulted to truthy would date every snapshot block in the vault off nothing.
+    """
+    text = _snap_note()
+    for label, reading in (("stale", _snap_reading(fresh=False)),
+                           ("unowned", _snap_reading(owned=False))):
+        out, n, notes = SWEEP.date_note(text, NO_PROGRAMS, DAY, snapshot=reading)
+        assert out == text and n == 0, f"the {label} reading dated a block: {notes}"
+        assert notify.DAILY_CLEARED_PREFIX not in out
+
+    for label, gave in (("raised", OSError("git: blocked")),
+                        ("not a reading", "fresh"),
+                        ("no axes", {"repo": SNAP_REPO}),
+                        ("empty", {})):
+        def _reader(_gave=gave):
+            if isinstance(_gave, Exception):
+                raise _gave
+            return _gave
+        try:
+            got = SWEEP.read_snapshot(age_reader=_reader)
+        except RuntimeError as exc:
+            got = exc
+        assert isinstance(got, RuntimeError), f"{label} was accepted: {got!r}"
+        assert label in str(got) or "snapshot" in str(got).lower(), str(got)
+        assert SWEEP.snapshot_refutes(SNAP_TITLE, None) is False, (
+            "no reading can never refute, whatever the title says")
+        assert SWEEP.snapshot_stamp(None, DAY) is None, (
+            "no witness is never a stamp, not even an empty one")
+        assert SWEEP.snapshot_stamp(reading=None, day=DAY) is None
+    assert SWEEP.snapshot_refutes(TMP_TITLE, _snap_reading()) is False, (
+        "a fresh snapshot reading must never speak for another family")
+
+
+def test_the_cli_dates_a_snapshot_block_once_and_refuses_with_exit_2(tmp_path, capsys):
+    """The CLI across the boundary: one reading per pass, one write, exit 2 on no reading.
+
+    Drives `main` over a real note file rather than a string, because the clause that
+    matters for the page Alan reads is the file's bytes: one stamp per block after
+    `--apply`, and a pass that could not read the probe must not print "0 blocks" and
+    exit 0 — that is the shape of a clean corpus, and this pass measured nothing.
+    """
+    def label_for(r, raises):
+        return ("raise" if raises else
+                "fresh" if (r and r.fresh and r.owned) else
+                "stale" if r and not r.fresh else "unowned")
+
+    def _cli(reading, raises=False):
+        def _snap():
+            if raises:
+                raise OSError("git log refused by the sandbox")
+            return reading
+        notes = tmp_path / f"notes-{label_for(reading, raises)}"
+        notes.mkdir(exist_ok=True)
+        note = notes / "2026-11-04.md"
+        note.write_text(_snap_note(with_state=False), encoding="utf-8")
+        # The other two witnesses are handed NOTHING, not a healthy reading: an absent
+        # reading refutes nothing, so the one stamp this node counts can only have come
+        # from the snapshot one. Passing their defaults would date three blocks and the
+        # count below would be a count of the fixture.
+        rc = _run_cli(notes, "--apply", "--day", DAY, fraction=None, tripwire={},
+                      snapshot=reading, snap_raises=raises)
+        return rc, note, capsys.readouterr()
+
+    rc, note, cap = _cli(_snap_reading())
+    assert rc == 0, cap.err
+    text = note.read_text(encoding="utf-8")
+    assert len(_stamp_lines(text)) == 1, text
+    assert SNAP_SHA[:8] in text and notify.DAILY_CLEARED_PREFIX not in text
+    assert "snapshot" in cap.out.lower() and SNAP_SHA[:8] in cap.out, cap.out
+
+    rc2, note2, cap2 = _cli(_snap_reading(), raises=True)
+    assert rc2 == 2, (rc2, cap2.err)
+    assert note2.read_text(encoding="utf-8") == _snap_note(with_state=False), \
+        "a failed read wrote bytes"
+    assert "snapshot" in cap2.err.lower(), cap2.err
+
+    rc3, note3, cap3 = _cli(_snap_reading(fresh=False))
+    assert rc3 == 2, (rc3, cap3.err)
+    assert note3.read_text(encoding="utf-8") == _snap_note(with_state=False), \
+        "a stale reading wrote bytes"
+
+    rc4, note4, _cap4 = _cli(_snap_reading(owned=False))
+    assert rc4 == 2, rc4
+    assert note4.read_text(encoding="utf-8") == _snap_note(with_state=False), \
+        "an unowned reading wrote"
+
+
+def test_read_snapshot_maps_the_producer_s_own_reading_without_re_rendering_it():
+    """The seam itself: the stamp quotes the probe's sentence rather than a second one.
+
+    `snapshot_age_state` already prints repository, commit and age in the unit a person
+    reads, and is the same function the alarm and the guardian's own `cleared:` line are
+    built from. A stamp that recomputed an age string would be a second definition of an
+    age able to drift from the first, so the reading carries `text` and the stamp quotes
+    it. The one exception the node pins is a probe whose wording grew a marker word:
+    that is refused, because #2221's corpus instrument is `grep -c 'cleared:'` and a
+    rendered string must not be able to forge one.
+    """
+    reading = SWEEP.read_snapshot(age_reader=lambda: {
+        "repo": SNAP_REPO, "sha": SNAP_SHA, "committed_at": 1, "age": 180.0,
+        "max_age": 10800.0, "fresh": True, "owned": True, "beat_age": 180.0,
+        "text": f"{SNAP_REPO} commit {SNAP_SHA[:8]} is 3 m old"})
+    assert (reading.fresh, reading.owned, reading.sha) == (True, True, SNAP_SHA)
+    stamp = SWEEP.snapshot_stamp(reading, DAY)
+    assert stamp is not None and f"{SNAP_REPO} commit {SNAP_SHA[:8]} is 3 m old" in stamp, stamp
+
+    forged = SWEEP.read_snapshot(age_reader=lambda: {
+        "repo": SNAP_REPO, "sha": SNAP_SHA, "fresh": True, "owned": True,
+        "max_age": 10800.0, "text": "the alarm is cleared: everything is fine"})
+    assert SWEEP.snapshot_stamp(forged, DAY) is None, (
+        "a probe's wording must not be able to forge a retraction marker")
+    blank = SWEEP.read_snapshot(age_reader=lambda: {
+        "repo": SNAP_REPO, "sha": None, "fresh": True, "owned": True, "max_age": 10800.0,
+        "text": ""})
+    assert SWEEP.snapshot_stamp(blank, DAY) is None, (
+        "a reading with no sentence in it has nothing to quote, so it dates nothing")

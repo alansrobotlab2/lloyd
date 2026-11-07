@@ -3121,8 +3121,20 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # grep '^@@'` answers those three hunks and nothing else, and
     # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
     # prints 1021 with 3315 below it.
-    assert heads[guardian]["main"] == 3315, (
-        f"`main` moved off :3315 ({heads[guardian]['main']}) — if it is gone "
+    # 3315 → 3362 is #3882: FOUR hunks, net +47 (54 added, 7 removed), and the first of
+    # them — `@@ -110,12 +110,12 @@`, the constant's comment rewritten to reverse #3132's
+    # "the next fresh reading is simply quiet" — is the only one ABOVE `evaluate_liveness`
+    # and it is 12 lines replacing 12, which is why `evaluate_liveness` keeps :1021 and
+    # `architecture/threat-model.md`'s T-26 row does not move. The other three
+    # (`@@ -1801,6 +1801,10 @@` +4, `@@ -1835,6 +1839,42 @@` +36, `@@ -1864,7 +1904,14 @@` +7)
+    # are the docstring line, the fresh-reading `resolve` branch and the `coalesce=True`
+    # keyword, all inside `_vault_snapshot_stream` — the window between the two anchors — so
+    # `main` takes the whole +47. Re-check: `git diff <base> <head> -- agent-services/guardian/guardian.py |
+    # grep '^@@'` answers those four hunks and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1021 with 3362 below it.
+    assert heads[guardian]["main"] == 3362, (
+        f"`main` moved off :3362 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1021, (
         f"`evaluate_liveness` moved off :1021 "

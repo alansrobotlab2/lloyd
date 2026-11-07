@@ -110,12 +110,12 @@ SERVICE_DOWN_ALERT_TITLE = "Service down, but no promotion to revert"
 # closing the alarm are two operations only `resolve` performs.
 VAULT_TRIP_ALERT_TITLE = "Vault mass deletion — sync stopped"
 DATA_TRIP_ALERT_TITLE = "Lloyd data root damaged — promotions halted"
-#: Not one of the retractable pair above, and deliberately not coalesced either:
-#: this one raises per throttled check with no `resolve`, exactly as the data
-#: root's twin does (raised inline in `check_data`). #3106 gave a measured clear
-#: condition to the two critical tripwires and only those two, so a snapshot
-#: alarm crossing back to fresh closes nothing — the next fresh reading is simply
-#: quiet. #3132.
+#: Coalesced, and with a measured clear condition — both of them #3882, both of
+#: them reversing #3132's reading of #3106 ("a measured clear condition to the two
+#: critical tripwires, and only those two", which #3132 took to mean a snapshot
+#: alarm crossing back to fresh closes nothing). The page refuted that: three
+#: uncleared sections of this title stood in `memory/2026-11-04.md` at filing, each
+#: still ordering a restore. `_vault_snapshot_stream` carries the two causes.
 VAULT_SNAPSHOT_ALERT_TITLE = "Vault snapshots are not arriving"
 
 
@@ -1801,6 +1801,10 @@ class Guardian:
         writes the marker, and the mute above is what keeps such a box from a second
         page for the same absence.
 
+        A fresh reading also RETRACTS this title — see the `resolve` below, which is
+        what turns the section this method appends from a standing instruction to
+        restore a healthy tree into a record of an outage that ended (#3882).
+
         Never raises. The vault half of the tick exists to stop sync within one
         tick of a wipe, and a backup reading may not cost that.
         """
@@ -1835,6 +1839,42 @@ class Guardian:
                 "no alert raised")
             return
         if state["fresh"]:
+            # The now-healthy branch this leg never had (#3882 clause 2). #3132
+            # deliberately omitted one — "a snapshot alarm crossing back to fresh
+            # closes nothing, the next fresh reading is simply quiet" — reading
+            # #3106's rule as an exclusion. Quiet is not closed: at filing, three
+            # sections of this title still stood uncleared in
+            # `~/obsidian/memory/2026-11-04.md`, each one still ordering a reader to
+            # run `restore-vault.sh`, over a stream that delivered 276 commits in the
+            # three days they had been standing.
+            #
+            # Two stacked causes, and clause 1 is the deeper one. An uncoalesced
+            # section is written WITHOUT `notify.DAILY_STILL_OPEN`, `_daily_open_at`
+            # calls a section open only while that marker stands, and `resolve` seals
+            # only what it finds open — so a `resolve` call alone would have answered
+            # True over those three blocks and changed nothing (#2221 clause 3's
+            # finding, arriving in a different family). Both halves are pinned by
+            # `tests/test_guardian_alert_retraction.py`.
+            #
+            # The reading is the alert's own — same repo, same bound, same process —
+            # which is what makes this #3106's rule satisfied rather than evaded: a
+            # measured clear condition, measured by the guard that owns the title. It
+            # is reachable only from a reading that is BOTH fresh and owned, because
+            # the two returns above refuse a repository outside
+            # `snapshot_owner_dir()` and one that would not answer before this line is
+            # ever reached, so no seal here can speak for a tree this check did not
+            # measure (#3149's rule, applied now to the retracting side as well as the
+            # raising one). The title is NOT added to `reconcile_stranded_alert`'s
+            # map: that map is for a cause a restarted process cannot otherwise
+            # recover, and this leg measures its subject every
+            # `policy.SNAPSHOT_CHECK_SECONDS` whether or not it raised the page.
+            self.notifier.resolve(
+                VAULT_SNAPSHOT_ALERT_TITLE,
+                f"{state['text']}, inside the "
+                f"{state['max_age'] / 3600.0:g} h limit — the same reading this alarm "
+                "is raised from, so the restore instructions above are stale. This "
+                "check restores nothing and rewrites no backup; it only retires the "
+                "page the reading that follows an outage always produces.")
             return
         self.alert(
             "error", VAULT_SNAPSHOT_ALERT_TITLE,
@@ -1864,7 +1904,14 @@ class Guardian:
             "`~/lloyd/scripts/backup/restore-vault.sh <rev> <dest>` — never over the "
             "live vault — and check the tripwire marker before believing a stall: "
             "this alarm is muted while it is set, because the script refuses to "
-            "snapshot during an incident.")
+            "snapshot during an incident.",
+            # Not decoration, and not the fold's reason (though #3793's one-body-a-day
+            # property comes with it): the marker `notify.DAILY_STILL_OPEN` is what
+            # `_daily_open_at` calls an open section, so without this keyword the
+            # `resolve` above has nothing to seal and answers True over the block —
+            # the exact state `memory/2026-11-04.md` was found in, three sections of
+            # a restore directive no retraction could reach (#3882 clause 1).
+            coalesce=True)
 
     # ── data-root tripwire ─────────────────────────────────────────────
     def _runtime_data_incident(self, now: float) -> None:

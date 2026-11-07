@@ -15,9 +15,10 @@ alerting defect rather than a formatting one.
 Two doors reach the same append branch of `Notifier._vault_note`, and both are pinned
 here:
 
-* **The alarm that never asks to coalesce.** `guardian.py:1836` raises
-  `VAULT_SNAPSHOT_ALERT_TITLE` with no `coalesce=True`, so `_vault_note` never looks
-  for an open section and appends a whole body per fan-out. That is 2026-11-04.
+* **The alarm that never asked to coalesce.** `_vault_note`'s append branch runs for any
+  alert published without `coalesce=True`, and appends a whole body per fan-out. That is
+  2026-11-04, whose alarm was raised that way until #3882 gave that call site the keyword;
+  the branch is driven here directly, so this fold stays pinned for every title still on it.
 * **The coalesced alarm whose section was sealed from another root.** A `cleared:`
   line written by a process that measured a different data root removes the open
   marker, so the next hourly tick finds nothing open and re-pastes. That is
@@ -65,8 +66,9 @@ import notify  # noqa: E402
 
 DAY = date(2026, 11, 5)
 
-#: The alarm that wrote `memory/2026-11-04.md`. It is raised WITHOUT `coalesce=True`
-#: (`guardian.py:1836-1860`), which is the whole of door 1.
+#: The alarm that wrote `memory/2026-11-04.md`, because it was raised WITHOUT
+#: `coalesce=True` — the whole of door 1. #3882 has since given that call site the keyword,
+#: so the door is driven through `_vault_note`/`alert` here rather than through the leg.
 SNAPSHOT = gmod.VAULT_SNAPSHOT_ALERT_TITLE
 #: The alarm that wrote `memory/2026-10-29.md`. It coalesces and hands over the root it
 #: measured, which is what makes a foreign seal visible to it (door 2).
@@ -177,12 +179,12 @@ def _clearance(root: str) -> str:
 
 
 def test_a_re_fired_non_coalesced_alarm_leaves_one_section_and_one_fold(tmp_path):
-    """Clause 1: two firings of `guardian.py:1836`'s alarm, only the stamp moved, leave
-    ONE `## Self-mod guardian: <title>` section where today's tree leaves two.
+    """Clause 1: two firings of an alarm that does not ask to coalesce, only the stamp
+    moved, leave ONE `## Self-mod guardian: <title>` section where the append branch leaves two.
 
     Run through `alert()`, not `_vault_note`, because the seam the item names is the one
-    a production tick takes: `alert()` decides `coalesce=False` for this title and
-    `_vault_note` then has to notice the day already carried it. The first body's words
+    a production tick takes: `alert()` decides `coalesce=False` for a title that does not
+    ask, and `_vault_note` then has to notice the day already carried it. The first body's words
     are asserted as still standing so a "fix" that muted the alarm outright cannot pass
     this node — the collapse has to be visible, and the one thing it collapses is a
     ~2 KB body.
