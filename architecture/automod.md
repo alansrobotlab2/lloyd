@@ -2142,7 +2142,7 @@ the worktree that `gate.py` and `promote.py` refuse when dirty.
 
 ## 4. The gate
 
-Thirteen rungs, cheapest first, short-circuiting. **Every rung fails closed** —
+Fourteen rungs, cheapest first, short-circuiting. **Every rung fails closed** —
 `_rung` catches exceptions and records them as failures, because with no human
 review tier a rung that errors and reads as "didn't fail" silently removes a
 check.
@@ -2157,6 +2157,7 @@ candidate that weakens the gate is judged by the old gate.
 | code_rules | ~2s | **observe-only (#2574)**: a code shape `scripts/automod/code_rules.toml` declares forbidden, run as stdlib `ast` matchers over the round's changed `.py` files — five rules, each citing the incident or doc claim it encodes, an uncited rule refused by the loader. Hits ride `gate.json` and the landing event; blocks nothing during the soak, and flipping one is a human ruling |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
 | pyright | ~1-30s | **observe-only (#2450)**: a new pyright finding in the round's changed `.py` files *or in an unchanged file that calls what they changed* — the caller a signature break breaks that the diff never touched. Same run at HEAD and at the round's base, reported as the multiset difference (rule+symbol+file, never line), vendored fork excluded. Records to `gate.json` and the ledger; blocks nothing during the soak |
+| prose_consumers | ~2-20s | **observe-only (#3538)**: a durable file outside the code tree still naming a name this round RETIRES — the module-level symbols its diff deletes, plus the paths and roots its removed string literals name. `grep -F` over the vault, then matched with the retired token INCLUDING its root, so a retired path is never found in the tail of a live one; `skills/**/SKILL.md` and `autonomy/<id>-<slug>.md` are the instruction corpus and listed as hits, `backlog`/`knowledge`/`memory`/`lloyd` are the record corpus and counted only, because a note citing a dead path is a documentation defect and not a failed build. The candidate list is recorded verbatim before anything is matched. Records to `gate.json` and the ledger; blocks nothing — the corpus's precision for this class measured ~11% (#882), and the label pass over 20 landed rounds comes before anyone may act on a hit |
 | frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |
 | tests | ~70s on 8 workers (~10m serial) | the full suite, plus floors on collected AND passed — §4.2f |
 | prompt_surface | conditional | a scored regression in what the model is told (only when the prompt surface moved) |

@@ -381,7 +381,12 @@ def _touched_symbols(pre_text: str, post_text: str) -> list[str]:
 #: pair that this module asks of one edit's pre/post image, and it imports these
 #: rather than carrying a second copy of the fingerprinting — two copies drift,
 #: and then the rail and the gate disagree about which symbols a change touched.
+#: `interface_symbols` is the same answer one level further back: the names a
+#: source defines at module level, which is what #3538's retired-name set needs —
+#: "gone at HEAD" is a difference of these key sets, and a second AST walk over
+#: the same question would be the drift this block exists to prevent.
 changed_symbols = _touched_symbols
+interface_symbols = _interface_symbols
 
 
 def _code_graph() -> Any:

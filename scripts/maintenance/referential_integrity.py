@@ -97,6 +97,14 @@ _ABSENCE_PROSE = re.compile(
     re.IGNORECASE,
 )
 
+#: Public spelling of the guard. `scripts/automod/prose_consumers.py` (#3538) asks
+#: the inverse question — a retired name, the durable files still naming it — and
+#: needs the same ruling on when a line is a MENTION rather than a consumer. It
+#: imports this rather than carrying its own copy, which is #3309's whole point: two
+#: copies of a rule drift until the nightly sweep and the gate disagree about the
+#: same sentence in the same note, and both read as green.
+ABSENCE_PROSE = _ABSENCE_PROSE
+
 _BACKTICK = re.compile(r"`([^`\n]+)`")
 _LINE_SUFFIX = re.compile(r":(\d+)(?:[-–]\d+)?$")
 _EXTENSIONS = (".md", ".py", ".json", ".jsonl", ".yaml", ".yml", ".sh", ".ts",

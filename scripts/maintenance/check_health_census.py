@@ -744,6 +744,10 @@ NOT_INJECTABLE: dict[str, str] = {
     "prompt_surface": "needs a seeded prompt-surface edit",
     "venv": "needs a requirements change to decide the skip; every archived row is seconds 0.0",
     "preflight": "needs an empty round or a non-descendant candidate",
+    # #3538: observe-only, and it records a list of files rather than a
+    # verdict, so an injected failure here would only re-prove `_rung`
+    # reports one — which tests/test_automod_gate.py pins directly.
+    "prose_consumers": "observe-only: a hit list, never a verdict",
     # These four fail in every window the ledger holds, so they carry no zero-fail flag to
     # prove. The reasons are stated without counts on purpose: the ledger grows daily and a
     # figure baked into this dict would be a claim the report keeps printing after it stops

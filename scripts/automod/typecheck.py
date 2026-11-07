@@ -73,6 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_mcp._edit_diagnostics import changed_symbols as _changed_symbols
+from agent_mcp._edit_diagnostics import interface_symbols
 from app import lint_findings
 from scripts.automod import worktree as W
 
@@ -219,6 +220,53 @@ def changed_module_symbols(head_tree: Path, base_tree: Path,
             top = name.split(".")[0]
             if top:
                 out.setdefault(module_of(rel), set()).add(top)
+    return out
+
+
+def retired_module_symbols(head_tree: Path, base_tree: Path | None,
+                           changed_py: list[str]) -> dict[str, set[str]]:
+    """`{module: module-level names this round DELETED}` — the retired interface.
+
+    The sibling of :func:`changed_module_symbols`, asked with the same
+    fingerprinting of the same base/head pair and keeping only the half that is
+    absent at HEAD. The restriction is what makes it a different question: a name
+    whose body changed but which still exists is a caller-break candidate for
+    `pyright`, while prose that still names it is fine. So this is exactly the
+    touched set minus the survivors.
+
+    Two deliberate differences from its sibling:
+
+      * `Class.method` keys stay whole instead of being reduced to the class.
+        :func:`changed_module_symbols` reduces with `name.split(".")[0]` because
+        that is what an import binds, and a caller of a deleted method is broken
+        either way. Here the class name surviving while its method is gone is the
+        interesting case: prose naming the class is fine, prose naming the deleted
+        method is a consumer, so reducing would report the wrong name and miss the
+        right one.
+      * A file the round DELETED is the whole of its base interface.
+        :func:`changed_module_symbols` reports nothing there — it needs a HEAD
+        image to compare against — and deleting a module is the largest retirement
+        a round can make, so leaving its names out would hide the class this rung
+        exists for (#3538).
+
+    An unparseable image contributes nothing, at either end: "could not tell" is
+    not evidence that a name is gone.
+    """
+    out: dict[str, set[str]] = {}
+    for rel in changed_py:
+        if in_fork(rel):
+            continue
+        base_src = _read(base_tree / rel) if base_tree is not None else ""
+        base_syms = interface_symbols(base_src)
+        if base_syms is None:
+            continue
+        head_src = _read(head_tree / rel)
+        head_syms = interface_symbols(head_src) if head_src else {}
+        if head_src and head_syms is None:
+            continue
+        gone = {n for n in base_syms if n not in head_syms}
+        if gone:
+            out.setdefault(module_of(rel), set()).update(gone)
     return out
 
 

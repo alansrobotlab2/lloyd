@@ -1,4 +1,4 @@
-"""The promotion gate: thirteen rungs, cheapest first, every one fails closed.
+"""The promotion gate: fourteen rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -41,10 +41,20 @@ without the prose being renumbered.
                           touched, which is what pyflakes cannot and #528
                           explicitly does not do. Recorded; blocks nothing until
                           a soak of real rounds says it may.
-  5 frontend       ~5s    CONDITIONAL rung: the tsc delta and a vite
+  5 prose_consumers ~2-20s OBSERVE-ONLY durable consumers of the names this round
+                          retires (scripts/automod/prose_consumers.py): the
+                          module-level symbols the diff deletes plus the paths and
+                          roots its removed literals name, grepped over the vault —
+                          `skills/**/SKILL.md` and `autonomy/<id>-<slug>.md` as the
+                          instruction corpus, `backlog`/`knowledge`/`memory`/`lloyd`
+                          as the record corpus, counted and not listed. Root-anchored
+                          so a retired path is never found in the tail of a live one.
+                          Records into report + ledger; blocks nothing, and is the
+                          only rung that looks outside the code tree at all.
+  6 frontend       ~5s    CONDITIONAL rung: the tsc delta and a vite
                           build over the round's `web/` paths, recorded
                           as SKIPPED when no `web/` path changed.
-  6 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
+  7 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
                           workers (~600 s serial) + a collected-count floor.
                           A failure under load is re-run serially before it
                           is believed; a real one re-probes the failing files
@@ -52,31 +62,31 @@ without the prose being renumbered.
                           a failure that is not the round's (pre-existing or
                           flaky, in a file the diff did not touch) PASSES the
                           rung, recorded and filed as a `red-tree` item
-  7 prompt_surface cond.  CONDITIONAL rung: the scored behavioural
+  8 prompt_surface cond.  CONDITIONAL rung: the scored behavioural
                           check on what the model is told, run only for
                           a prompt-surface diff.
-  8 review      60-180s   a second reader: a fresh session on the LIVE
+  9 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
                           Refuses with findings; the premise verdict decides
                           whether the item is retried or handed to a human.
                           Skipped (recorded) only when no item is bound.
-  9 venv        0-300s    only when requirements changed (reflink + uv)
- 10 canary_boot  ~30s    both /health green, tool floor, config-follows-code
- 11 canary_smoke ~30s    one real turn, sentinel through a real Bash call
+ 10 venv        0-300s    only when requirements changed (reflink + uv)
+ 11 canary_boot  ~30s    both /health green, tool floor, config-follows-code
+ 12 canary_smoke ~30s    one real turn, sentinel through a real Bash call
                           (recorded as SKIPPED when the engine is unreachable;
                            `skip_smoke` is refused while it answers)
- 12 drill        ~90s    only when the diff touches the rollback path
+ 13 drill        ~90s    only when the diff touches the rollback path
 
-`frontend` (5) and `prompt_surface` (7) are numbered where they run rather than
+`frontend` (6) and `prompt_surface` (8) are numbered where they run rather than
 listed beside the ladder, because a rung that is unnumbered is a rung a citation
-cannot point at. `vet`, `code_rules` and `pyright` are the three rungs that read
-the change set itself rather than the behaviour it produces, and the three
-deliberately written not to block: each records into the round event and waits
-for a soak of real landings before any of them is allowed to refuse one. A type checker is in this ladder because
-the analyser is cheap, deterministic and cannot be argued with, which is exactly
-what a loop with no human review tier needs; it is observe-only because nobody
-has yet measured how often it is right.
+cannot point at. `vet`, `code_rules`, `pyright` and `prose_consumers` are the four
+rungs that read the change set itself rather than the behaviour it produces, and the
+four deliberately written not to block: each records into the round event and waits
+for a soak of real landings before any of them is allowed to refuse one. A type
+checker is in this ladder because the analyser is cheap, deterministic and cannot be
+argued with, which is exactly what a loop with no human review tier needs; it is
+observe-only because nobody has yet measured how often it is right.
 
 `review` sits after `tests` so the grader can trust a green tree and is
 handed the counts, and before `venv` so a refusal saves the venv build, the
@@ -105,6 +115,7 @@ from scripts.automod import code_rules as CR
 from scripts.automod import frontend_layout as _fe_layout
 from scripts.automod import frontend_probe as _fe_probe
 from scripts.automod import layout_fixture as _layout_fixture
+from scripts.automod import prose_consumers as PC
 from scripts.automod import spec, state as S, testpaths as TP, typecheck as TC, \
     vet as V, worktree as W
 
@@ -2534,10 +2545,22 @@ class Gate:
         # both cost seconds, both are observe-only judgements of the change set
         # itself rather than of the behaviour it produces — so both report before
         # anything in the ladder executes the candidate.
+        # `prose_consumers` rides immediately behind `pyright` because it asks
+        # the same question of the same two trees and gets the other answer:
+        # `pyright` resolves the INBOUND CALLERS pyright can see, and stops at the
+        # code boundary by construction (`cwd=str(tree)` in typecheck). The
+        # durable consumers of a retired name are prose — SKILL.md files, task
+        # files that store commands verbatim, notes — which no rung reads and the
+        # `tests` rung deliberately excludes. One grep and one base image, so it
+        # costs seconds and belongs before anything in the suite runs. Observe-only
+        # like the three rungs beside it (#3538): #882 measured 11% precision on a
+        # prose-cite extractor, and the item labels hits over 20 landed rounds
+        # before anyone is allowed to act on one.
         ladder = [("preflight", self.rung_preflight), ("vet", self.rung_vet),
                   ("code_rules", self.rung_code_rules),
                   ("static", self.rung_static),
                   ("pyright", self.rung_pyright),
+                  ("prose_consumers", self.rung_prose_consumers),
                   ("frontend", self.rung_frontend),
                   ("tests", self.rung_tests),
                   ("prompt_surface", self.rung_prompt_surface),
@@ -3042,6 +3065,48 @@ class Gate:
         return True, (f"observe-only: {len(res.new)} new type finding(s) over "
                       f"{res.totals.get('files', 0)} file(s) in "
                       f"{res.totals.get('seconds', 0)}s — {listed}{more}"), data
+
+    def rung_prose_consumers(self) -> tuple[bool, str, dict]:
+        """5. OBSERVE-ONLY durable consumers of the names this round retires.
+
+        `pyright` above resolves the inbound callers of the round's changed
+        module-level symbols and stops at the code boundary by construction —
+        `typecheck._run_pyright` runs pyright with `cwd=str(tree)` — and the
+        `tests` rung deliberately excludes anything that reads the vault
+        (`TESTS_MARK_EXPR`). So a rename whose consumers are prose passes every
+        rung green: those consumers live in SKILL.md files, in `autonomy/` task
+        files that store the command VERBATIM, in backlog items and notes. Three
+        times this box has paid for exactly that after landing — #3538 names all
+        three: the moved data roots, `CLAUDE.md`'s venv interpreter path where 697
+        files named the spelling against a code comment claiming 247, and #407's
+        under-reported caller list. This rung greps the durable corpus for what the
+        round retired and records the file:line list the graph cannot see.
+
+        Returns True on every path. This is a lookup over a corpus whose class
+        measured 11% precision (#882's triage of a prose-cite extractor), so the
+        only honest first verdict is a record: hits go into the detail and the
+        round event, and the pass that has labelled 20 landed rounds of them
+        decides whether anything may ever be refused. A failure of its own
+        machinery is a `UNEVALUATED` detail, never a red round — an exception here
+        would be `_rung`'s failure path, and a good round must not be refused
+        because a report could not be written.
+        """
+        # Same resolution the `pyright` rung uses — preflight's list when it has
+        # one, the worktree's own diff when the rung is driven outside a round.
+        # Handing the matcher a different file set than its neighbour had is how a
+        # rung starts measuring a different round.
+        changed = list(self.report.changed_paths or []) or sorted(
+            set(W.changed_paths(self.worktree, self.base)))
+        try:
+            found = PC.scan_round(worktree=self.worktree, base=self.base,
+                                  changed=changed, checkout=LIVE_ROOT)
+        except Exception as exc:                                    # noqa: BLE001
+            found = PC.ProseConsumerResult(
+                status=PC.UNEVALUATED,
+                reason=f"scan raised {type(exc).__name__}: {exc}")
+        data = found.to_dict()
+        data["observe_only"] = True
+        return True, PC.detail(found), data
 
     def rung_frontend(self):
         """Type-check and build the frontend when the diff touches it.

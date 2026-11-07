@@ -294,7 +294,7 @@ rung of `scripts/automod/gate.py` and nothing else.
   `eval/compare_tool_choice.py --measure-floor` is what measures the spread from
   them. No automated label can ever produce a pair: the rung above labels the
   run `item<id>` or `gate-<round_id>` in `rung_prompt_surface`
-  (`scripts/automod/gate.py:3287`), so its arm residue is never `-a`/`-b`, and
+  (`scripts/automod/gate.py:3352`), so its arm residue is never `-a`/`-b`, and
   nothing calls `--measure-floor` on a schedule either. A person does it, or the record ages. Since #1888 that
   command refuses to write when no pair survived into the record — no pair on
   disk, or every pair dropped for an errored run — and exits 2 on the bytes it

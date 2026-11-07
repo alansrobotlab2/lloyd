@@ -91,7 +91,12 @@ class _StubGate(G.Gate):
 # about as much, and is the only rung that judges the change set itself instead
 # of the behaviour it produces — so it runs before anything executes the
 # candidate. It is observe-only (#679): it records, it never fails.
-RUNGS = ("preflight", "vet", "code_rules", "static", "pyright", "frontend", "tests", "prompt_surface",
+# `prose_consumers` sits immediately behind `pyright` (#3538): it asks the same
+# two trees the same question — what did this round retire — and gets the answer
+# pyright cannot, because the consumers it looks for are prose outside the code
+# tree. It is observe-only like the three rungs beside it.
+RUNGS = ("preflight", "vet", "code_rules", "static", "pyright", "prose_consumers",
+         "frontend", "tests", "prompt_surface",
          "review", "venv", "canary_boot", "canary_smoke", "drill")
 ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
@@ -4669,3 +4674,177 @@ def test_a_red_chrome_verdict_refuses_the_rung_whose_build_passed(
     # reported success, tsc found nothing new, and only the byte compare refused the round.
     assert data["chrome_produced_bytes"] == 21, data          # flat, as a refusal returns it
     assert data["chrome_tracked_bytes"] == len(TRACKED_WORKER_BYTES), data
+# ---------------------------------------------------------------------------
+# The `prose_consumers` rung (#3538) — clause 1
+# ---------------------------------------------------------------------------
+#
+# The matcher's own behaviour is pinned in `tests/test_automod_prose_consumers.py`.
+# What is under test here is the seam between the gate and that matcher: what the
+# rung hands it, what it records, and what it does with the two answers that are
+# not "here are the hits" — "there are none" and "I could not run". The clause
+# these exist for is that the rung blocks NOTHING: an observe-only rung that can
+# refuse a round is a new failure mode dressed as a report, and `Gate._rung` turns
+# any exception into a FAILED rung, so refusing is the default this must avoid.
+
+def _prose_rung(monkeypatch, tmp_path, *, result=None, raises=None,
+                changed=("app/m.py",)):
+    """A Gate with the matcher's answer scripted, plus what it was handed."""
+    captured: dict = {}
+
+    def fake_scan_round(**kw):
+        captured.update(kw)
+        if raises is not None:
+            raise raises
+        return result
+
+    monkeypatch.setattr(G.PC, "scan_round", fake_scan_round)
+    monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
+    g = G.Gate("SM_PROSE_ROUND", tmp_path, "HEAD~1", live_root=tmp_path)
+    g.report.changed_paths = list(changed)
+    return g, captured
+
+
+def _prose_result(**over):
+    """A result with two instruction hits and five record hits, unless overridden.
+
+    Built field by field rather than by calling the matcher: the rung's contract is
+    about the SHAPE it records, and a matcher that changed its own output would then
+    silently change what these tests assert.
+    """
+    hits = over.pop("hits", None)
+    if hits is None:
+        hits = [{"name": "~/lloyd/.venvs/lloyd/bin/python", "kind": "path",
+                 "file": f"autonomy/7{i}-task.md", "line": i,
+                 "matched": "~/lloyd/.venvs/lloyd/bin/python",
+                 "text": f"  ~/lloyd/.venvs/lloyd/bin/python scripts/x{i}.py"}
+                for i in (1, 2)]
+    counts = {"candidates": 3, "searched": 3, "not_searched": 0,
+              "instruction_hits": len(hits), "instruction_exempt": 0,
+              "record_hits": 5, "out_of_corpus_hits": 1,
+              "instruction_files": 2, "record_files": 5, "grep_lines": 40,
+              "corpus_truncated": False, "hits_listed": len(hits),
+              "literals_refused": 0}
+    return G.PC.ProseConsumerResult(
+        status=over.pop("status", G.PC.EVALUATED),
+        reason=over.pop("reason", ""),
+        candidates=over.pop("candidates", [
+            {"name": "retired_worker_entrypoint", "kind": "symbol", "origin": "app.m",
+             "forms": ["retired_worker_entrypoint"]},
+            {"name": "~/lloyd/_pipeline/", "kind": "path", "origin": "diff",
+             # Both root-resolved spellings, which is what the matcher searches:
+             # the vault's `~` form and the absolute form a task file may store.
+             "forms": ["~/lloyd/_pipeline/",
+                       "/home/alansrobotlab/lloyd/_pipeline/"]}]),
+        hits=hits, counts=counts,
+        top_record=over.pop("top_record", ["backlog/882-prose-cites.md (3)"]))
+
+
+def test_the_prose_consumer_rung_is_the_rung_directly_behind_pyright():
+    """#3538 clause 1, the position half. `RUNGS` is checked against the ladder the
+    gate actually builds by `test_the_stub_ladder_is_the_real_ladder`, so this is
+    the same claim read one way round: the rung exists, and it is where #3538 put
+    it — behind the rung that asks the same question of the code tree."""
+    assert RUNGS.index("prose_consumers") == RUNGS.index("pyright") + 1, RUNGS
+    assert callable(G.Gate.rung_prose_consumers)
+
+
+def test_the_prose_consumer_rung_records_hits_and_never_blocks(monkeypatch, tmp_path):
+    """#3538 clause 1, the verdict half: hits are data, not a refusal."""
+    g, _captured = _prose_rung(monkeypatch, tmp_path, result=_prose_result())
+    ok, detail, data = g.rung_prose_consumers()
+    assert ok is True, "an observe-only rung never refuses a round, whatever it finds"
+    assert data["observe_only"] is True
+    assert data["status"] == "evaluated"
+    assert data["counts"]["instruction_hits"] == 2, data["counts"]
+    assert data["counts"]["record_hits"] == 5, data["counts"]
+    assert detail.startswith("observe-only:"), detail
+    # Both numbers reach the human-facing line, because the two corpora mean
+    # different things and a single total would be read as the actionable one.
+    assert "2" in detail and "5" in detail, detail
+    assert data["top_record_files"], "the record corpus is counted, its files named"
+
+
+def test_the_prose_consumer_rung_records_the_candidates_it_searched(
+        monkeypatch, tmp_path):
+    """Clause 2 reaching the round event: the candidate list survives into the
+    rung's data verbatim, so a wrong or empty list is legible in the ledger rather
+    than inferred from the absence of hits."""
+    g, _captured = _prose_rung(monkeypatch, tmp_path, result=_prose_result())
+    _ok, _detail, data = g.rung_prose_consumers()
+    names = [c["name"] for c in data["candidates"]]
+    assert names == ["retired_worker_entrypoint", "~/lloyd/_pipeline/"], names
+    assert data["candidates"][1]["forms"] == [
+        "~/lloyd/_pipeline/",
+        "/home/alansrobotlab/lloyd/_pipeline/"], (
+        "the emitted forms are the ones the matcher will search, spelling for spelling")
+
+
+def test_the_prose_consumer_rung_hands_the_matcher_this_rounds_files(
+        monkeypatch, tmp_path):
+    """The seam itself. A rung that resolved its own file set differently from its
+    neighbour's would quietly be judging a different round, so the list it forwards
+    is preflight's when preflight filled it in."""
+    g, captured = _prose_rung(monkeypatch, tmp_path, result=_prose_result(),
+                              changed=("app/m.py", "scripts/other.py"))
+    g.rung_prose_consumers()
+    assert captured["changed"] == ["app/m.py", "scripts/other.py"], captured
+    assert captured["worktree"] == tmp_path and captured["base"] == "HEAD~1", captured
+
+
+def test_the_prose_consumer_rung_reports_unevaluated_rather_than_no_consumers(
+        monkeypatch, tmp_path):
+    """The failure mode that would make this rung worse than nothing: a vault it
+    could not read coming back as a clean report. The detail has to carry the
+    difference, because `ok` is True either way by design."""
+    g, _captured = _prose_rung(
+        monkeypatch, tmp_path,
+        result=_prose_result(status=G.PC.UNEVALUATED, reason="vault missing"))
+    ok, detail, data = g.rung_prose_consumers()
+    assert ok is True
+    assert data["status"] == "unevaluated", data
+    assert "unevaluated" in detail.lower() and "vault missing" in detail, detail
+    assert "0 consumer" not in detail, detail
+
+
+def test_the_prose_consumer_rung_survives_its_matcher_raising(monkeypatch, tmp_path):
+    """`Gate._rung` records an exception as a FAILED rung, which is right for the
+    rungs that decide and wrong for one that reports. So the rung catches its own
+    machinery failing: a report that could not be written must not refuse a good
+    round, and it must still say it did not run."""
+    g, _captured = _prose_rung(monkeypatch, tmp_path,
+                               raises=RuntimeError("grep exploded"))
+    ok, detail, data = g.rung_prose_consumers()
+    assert ok is True, "the rung's own failure is not the round's failure"
+    assert data["status"] == "unevaluated", data
+    assert "grep exploded" in detail, detail
+
+
+def test_the_prose_consumer_detail_is_clipped_to_the_rung_detail_cap(
+        monkeypatch, tmp_path):
+    """#3538 clause 1, the cap half. One retired name with two thousand hits is a
+    plausible round (a moved root), and the detail rides in `gate.json`, the round
+    event and the ledger — so it is `_clip_detail`'s existing cap, not a new one."""
+    # Both halves oversized: the matcher's own `detail()` lists at most
+    # `MAX_CANDIDATES_LISTED` names and three hits, so the only way to hand the rung
+    # a detail over the cap — which is what the clause is about — is to retire a lot
+    # of long names AT ONCE and have each of them cited in four hundred files.
+    flood = [{"name": "~/lloyd/_pipeline/" + ("n%d_" % i) + ("x" * 120),
+              "kind": "path", "origin": "diff",
+              "forms": ["~/lloyd/_pipeline/" + ("n%d_" % i) + ("x" * 120)]}
+             for i in range(G.PC.MAX_CANDIDATES_LISTED + 10)]
+    flood_hits = [{"name": "~/lloyd/_pipeline/", "kind": "path",
+                   "file": f"skills/s{i}/SKILL.md", "line": i,
+                   "matched": "~/lloyd/_pipeline/vault-derived/kg.sqlite",
+                   "text": "x" * 160} for i in range(400)]
+    g, _captured = _prose_rung(
+        monkeypatch, tmp_path,
+        result=_prose_result(hits=flood_hits, candidates=flood))
+    assert g._rung("prose_consumers", g.rung_prose_consumers) is True
+    rec = g.report.rungs[-1]
+    assert rec.ok is True
+    assert len(rec.detail) <= G.DETAIL_MAX_CHARS, len(rec.detail)
+    assert rec.detail.endswith(G.DETAIL_CLIP_NOTE), rec.detail[-80:]
+    # The cap is on the prose only. The structured list is the matcher's own
+    # bounded shape (MAX_HITS_LISTED, pinned in test_automod_prose_consumers.py),
+    # so clipping the sentence never hides a hit from the fixer reading `data`.
+    assert G.PC.MAX_HITS_LISTED > 0
