@@ -524,7 +524,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         if why:
             logger.warning("tool_sandbox: refused %s for read-only session %s: %s",
                            name, sid, why)
-            return _refused_call(name, f"read-only session: {why}", guard="tool_sandbox", session_id=sid)
+            return _refused_call(name, f"read-only session: {why}", guard="tool_sandbox", session_id=sid, arguments=arguments)
     # 2. The destructive-command check, for every session. The harness hook
     #    runs the same function, but only where a caller installed it; this is
     #    where the command actually executes, so nothing reaches a shell
@@ -540,7 +540,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             logger.warning("safety: refused Bash for session %s: %s — %r",
                            sid, label, (arguments.get("command") or "")[:500])
             return _refused_call(name, f"harness safety: blocked {label!r} on {excerpt!r}",
-                                 guard="safety", session_id=sid)
+                                 guard="safety", session_id=sid, arguments=arguments)
 
     # 2b. Desktop computer use is for a person's chat only. The screen is Alan's
     #     private desktop and the input lands under Alan's hands, so a worker, an
@@ -766,7 +766,7 @@ async def _rpc_call(name: str, arguments: dict, meta: dict):
 
 
 def _refused_call(name: str, reason: str, *, guard: str = "dispatch",
-                  session_id: str | None = None) -> CallToolResult:
+                  session_id: str | None = None, arguments: "dict | None" = None) -> CallToolResult:
     """A call refused before dispatch. Worded like the harness's own hook
     deny ("Tool call denied: …") so a bench trace files it under
     `denied_calls` — the model tried, and the attempt is the measurement.
@@ -774,11 +774,11 @@ def _refused_call(name: str, reason: str, *, guard: str = "dispatch",
     Every refusal made here is also one row in the denial journal
     (`app/harness/denial_journal.py`), under `guard`, so a guard added to
     this function's callers is counted without knowing the journal exists.
-    The journal never raises and is not consulted by any decision."""
+    The journal never raises and is not consulted by any decision. `arguments` is handed to `command_of`, which reads the `command` key and nothing else, so a refused command's TARGET — the `--git-dir=` or path at its tail, already cut out of the `blocked '<label>' on '<excerpt>'` reason reaching here — survives in the row (#3874)."""
     try:
         from app.harness import denial_journal
         denial_journal.record(guard=guard, where="dispatch", session_id=session_id,
-                              tool=name, reason=reason, parent_of=_safety_parent_of)
+                              tool=name, reason=reason, parent_of=_safety_parent_of, command=denial_journal.command_of(arguments))
     except Exception:  # noqa: BLE001 — bookkeeping about a decision already made
         pass
     return CallToolResult(

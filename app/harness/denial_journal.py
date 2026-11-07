@@ -198,10 +198,10 @@ def _commit() -> str:
 
 
 def record(*, guard: str, where: str, session_id: str | None, tool: str,
-           reason: str, excerpt: str = "", label: str = "",
+           reason: str, excerpt: str = "", label: str = "", command: Any = None,
            parent_of: Callable[[str], str | None] | None = None,
            path: Path | None = None) -> bool:
-    """Append one row. Returns True when the row was written. Never raises."""
+    """Append one row. Returns True when the row was written. Never raises. `command`, when given, is what #3874's `full_command` is written from — see `_full_command_field`."""
     try:
         target = path if path is not None else journal_path()
         reason_text = str(reason or "")
@@ -215,7 +215,7 @@ def record(*, guard: str, where: str, session_id: str | None, tool: str,
             "label": str(label or label_of(reason_text))[:LABEL_CHARS],
             "reason": reason_text[:400],
             "excerpt": str(excerpt or "")[:EXCERPT_CHARS],
-            "commit": _commit(),
+            "commit": _commit(), **_full_command_field(command, str(excerpt or "")[:EXCERPT_CHARS]),
         }
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as handle:
@@ -243,6 +243,8 @@ def record_hook_deny(callback: Any, *, session_id: str | None, tool: str,
     record (#2801 clause 5). Optional, so a caller that has no input still writes a
     row — the refusal stands either way, and a journal that cannot name the command is
     a worse journal, not a lost refusal.
+    #3874: `tool_input` is also what `command_of` reads, so a command long enough for
+    the 200-char cut to drop its flags keeps them in the row (see `FULL_CMD_CHARS`).
     """
     try:
         hso = (deny or {}).get("hookSpecificOutput") or {}
@@ -251,7 +253,7 @@ def record_hook_deny(callback: Any, *, session_id: str | None, tool: str,
         reason = ""
     return record(guard=guard_for_hook(callback), where="hook", session_id=session_id,
                   tool=tool, reason=reason,
-                  excerpt=excerpt_of(tool, tool_input))
+                  excerpt=excerpt_of(tool, tool_input), command=command_of(tool_input))
 
 
 def rows(path: Path | None = None, *, since: float | None = None) -> list[dict[str, Any]]:
@@ -301,3 +303,93 @@ def summarize(entries: list[dict[str, Any]]) -> dict[str, Any]:
         cross.setdefault(g, {})[c] = cross.setdefault(g, {}).get(c, 0) + 1
     return {"total": len(entries), "by_guard": by_guard, "by_class": by_class,
             "by_where": by_where, "guard_by_class": cross}
+
+
+# ---- #3874: the refused command, whole up to a bound --------------------------------
+#
+# This section sits at the END of the module deliberately. Architecture docs cite source
+# by line number and their witness blocks print those numbers — which is the failure mode
+# #3870 exists to catch — and `tests/test_retention_sweep.py` cites
+# `app/harness/denial_journal.py:220`'s own `json.dumps(row, sort_keys=True)`. So every
+# edit above this point added no lines, and putting the new constant and its two helpers
+# here instead of beside `EXCERPT_CHARS` is what keeps those citations aimed where they
+# were measured.
+
+#: How much of the refused COMMAND the row keeps (#3874). `EXCERPT_CHARS` classes a
+#: refusal by its head, and for the refusals the target-recognition lanes produce that is
+#: exactly what it cannot do: the flags that name WHICH tree or file are the ones that got
+#: the call refused, and they sit at the tail. Measured on 2026-11-07 over the live
+#: journal, `grep -c -- '--git-dir'` answered 0 across all 981 rows (586,937 B from
+#: 2026-10-07, mean row 598.3 B), with 326 of those rows sitting at exactly the
+#: `EXCERPT_CHARS` cap — every one of them a `Bash` row. A denial-window claim therefore
+#: had to be hand-recovered from the session JSON the retention sweep gzips on a 30-day
+#: clock: the recovery that produced #3429, #3245, #2988, #3442 and #3484.
+#:
+#: 1200 and not the 4000 the item suggested. This file is store 26 of the retention sweep,
+#: whose fold (#3789, `scripts/groundskeeper/retention-sweep.py`) copies it whole under
+#: `WITNESS_MAX_BYTES = 1_048_576` (`scripts/automod/backlog.py:1450`). Worst case over
+#: that same real window — all 326 at-cap rows also carrying a field of the maximum — the
+#: window is 984,657 B at a 1200 ceiling (93.9 % of the bound) and 1,897,457 B at 4000
+#: (181.0 %), so 4000 crosses the ceiling the fold exists to stay under and 1200 does not.
+#: And the largest flag offset ever measured in a refused command on this box is 1020
+#: (#3874's triage), so 1200 covers every case seen and 4000 buys nothing.
+#:
+#: The population rule is in `command_of`, not here: only a `command` key is ever written
+#: into this field, and only when the 200-char excerpt could not hold it whole.
+FULL_CMD_CHARS = 1200
+
+
+def command_of(tool_input: Any) -> str:
+    """The refused call's `command` string, or '' — the scope rule behind #3874.
+
+    Deliberately narrower than `excerpt_of`. The whole-command field exists because a
+    COMMAND's target sits at its tail, and every other key `excerpt_of` reads
+    (`file_path`, `path`, `url`, `to`, `pattern`, `query`, `text`, `prompt`) is a
+    content-, path- or URL-bearing payload whose body a durable file must not start
+    holding for longer than it does today: the outbound-content lane runs its excerpt
+    through `redact()` (`app/harness/outbound_content.py:604`) and this module redacts
+    nothing, so the exposure is bounded by scope, not by redaction parity. Because
+    `excerpt_of` tries `"command"` first, a call that answers here is exactly a call
+    whose excerpt is the first `EXCERPT_CHARS` of this same string's fold — which is why
+    the two fields can be compared byte for byte.
+
+    A `command` that is not a string is not read, because `excerpt_of` skips that shape
+    too and falls back to the folded JSON of the whole arguments dict; joining it here
+    would invent a second rendering of a call no live row has (0 of the 981 rows in
+    `~/lloyd-data/safety/denials.jsonl` on 2026-11-07 have an excerpt beginning with the
+    folded-JSON form of a `command` key). `app.harness.policy.bash_command_of` is a hair
+    wider — it also answers for a bare command string a caller already holds, a shape the
+    journal never sees — so the rule that decides what this field may contain lives here,
+    beside the field.
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    value = tool_input.get("command")
+    return value if isinstance(value, str) and value.strip() else ""
+
+
+def _full_command_field(command: Any, excerpt_kept: str) -> dict[str, str]:
+    """The `full_command` entry for `row`, or `{}` when the row needs none.
+
+    Returns a dict so `record` can spread it into the row literal and a row without the
+    field is left byte-identical to a row written before #3874 — the shape
+    `scripts/automod/scorecard.py::_denials`, `rows()` and `summarize()` read today, and
+    the shape ~68 % of live rows have (326 of 981 at the cap, on 2026-11-07).
+
+    Folded by the same `" ".join(value.split())` as `excerpt_of`, so an offset quoted from
+    the excerpt is the same offset here, then cut at `FULL_CMD_CHARS`: the field exists to
+    survive a grep, not to archive a heredoc. Absent unless the fold is longer than
+    `EXCERPT_CHARS` AND longer than what the row kept. Both halves are needed because the
+    two write surfaces hand this helper different things: `record` passes the excerpt after
+    its own cut, so the second comparison is against the exact bytes on the line, while
+    `agent_mcp/main.py::_refused_call` passes a `command` and no excerpt at all — without
+    the `EXCERPT_CHARS` half, every short command refused at dispatch would gain an
+    eleventh key holding text the row already carries.
+    """
+    cmd = command_of({"command": command})
+    if not cmd:
+        return {}
+    folded = " ".join(cmd.split())
+    if len(folded) <= EXCERPT_CHARS or len(folded) <= len(excerpt_kept or ""):
+        return {}
+    return {"full_command": folded[:FULL_CMD_CHARS]}

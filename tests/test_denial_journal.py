@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -402,3 +403,362 @@ def test_the_witness_count_check_rolls_over_on_a_quiet_truncation(tmp_path):
         victim = tmp_path / name
         victim.write_bytes(bad)
         assert victim.read_bytes() == bad, "the scratch fixture did not persist"
+
+
+# ---------- #3874: a refused command survives the cut that dropped its target -----
+
+#: The row shape `record()` wrote before #3874, asserted verbatim by the two nodes
+#: that pin what must NOT change. Live rows carry exactly these ten keys:
+#: `tail -1 ~/lloyd-data/safety/denials.jsonl | jq 'keys | sort'`.
+_TODAYS_KEYS = ["at", "commit", "excerpt", "guard", "label", "reason",
+                "session", "session_class", "tool", "where"]
+
+
+def _live_checkout_commit_command() -> str:
+    """A refused `git commit` in the live checkout long enough that its target flags
+    fall past `EXCERPT_CHARS`.
+
+    The padding is the point: the flags are what identifies WHICH checkout, and the
+    live journal proves the cut is where they are lost — `grep -c -- '--git-dir'` over
+    `~/lloyd-data/safety/denials.jsonl` is 0 across its 981 rows (measured 2026-11-07,
+    the whole file, spanning 2026-10-08 to 2026-11-07), and 326 of those rows sit
+    exactly at the 200-char cap, every one of them a `Bash` row. Whitespace-folded on
+    purpose: a heredoc is what the real refusals look like (`app.harness.safety._fold`
+    is why the excerpt of a multi-line command fits in 200 characters at all), and the
+    offsets this returns are the offsets `excerpt_of` will fold to.
+    """
+    from app.paths import LIVE_CHECKOUT
+    pad = "explain the why " + ("x" * 300)
+    return ('git -C %s commit -m "%s" \\\n'
+            '  --git-dir=%s/.git --work-tree=%s -- architecture/foo.md'
+            % (LIVE_CHECKOUT, pad, LIVE_CHECKOUT, LIVE_CHECKOUT))
+
+
+def _refused_by_the_real_lane(command: str, session: str = "20261103_000000_chat") -> dict:
+    """Refuse `command` through `app.harness.safety`'s own PreToolUse callback — the
+    gate, not a stub — and return its deny decision."""
+    from app.harness import safety
+
+    async def _deny_cb(input_data, _id, _ctx):
+        return await safety._safety_pretool_cb(input_data, _id, _ctx)
+
+    hooks = HookRegistry()
+    hooks.add_pre_tool_use(None, _deny_cb, fail_closed=True)
+    out = asyncio.new_event_loop().run_until_complete(
+        hooks.fire_pre_tool_use(session_id=session, tool_name="Bash",
+                                tool_input={"command": command}))
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny", (
+        "the fixture command is no longer refused by the safety lane, so these nodes "
+        "would be measuring a refusal that cannot happen")
+    return out
+
+
+def test_a_refused_command_past_the_cut_keeps_the_target_it_was_refused_for(journal):
+    """#3874 clause 1: the command is carried whole up to `FULL_CMD_CHARS`, so a
+    `--git-dir=` / `--work-tree=` flag sitting past character 200 is in the row.
+
+    Refused by `app.harness.safety` itself through the registry, not by a stub, so the
+    row is one the writer will really write.
+
+    A test fixture, deliberately: the flag offset is what the clause pins, and the
+    #3874 triage found no refused `git --git-dir=` invocation in the newest 1,155
+    session files (9 commands name those flags at all, 4 with the flag past the cut, at
+    offsets 372 / 603 / 799 / 1020, all of them heredocs mentioning them). So the live
+    journal's 0 cannot be made non-zero by any change to the writer, and >= 1 is a
+    fixture measurement — which is what clause 2 says to read it as.
+    """
+    cmd = _live_checkout_commit_command()
+    folded = " ".join(cmd.split())
+    offset = folded.index("--git-dir=")
+    assert offset > DJ.EXCERPT_CHARS, (
+        f"the fixture's flag sits at {offset}, inside the cut — it could never show "
+        f"what #3874 is about")
+    assert "--git-dir" not in folded[:DJ.EXCERPT_CHARS], "the flag is not past the cut"
+
+    _refused_by_the_real_lane(cmd)
+
+    row = _rows(journal)[0]
+    assert row["full_command"], "the long refused command was not carried at all"
+    assert "--git-dir=" in row["full_command"] and "--work-tree=" in row["full_command"], (
+        "the refused command lost the flags that name which checkout it targeted")
+    assert row["full_command"].index("--git-dir=") == offset, (
+        "the carried command is not the folded command, so its offsets are not the "
+        "ones a reader would quote")
+    assert len(row["full_command"]) <= DJ.FULL_CMD_CHARS == 1200, (
+        f"the field ran to {len(row['full_command'])} chars against the "
+        f"{DJ.FULL_CMD_CHARS}-char bound")
+
+
+def test_the_journal_answers_the_git_dir_grep_a_window_claim_needs(journal):
+    """#3874 clause 2: `grep -c -- '--git-dir'` over the rows this writes is >= 1 —
+    the measurement that is 0 over the live journal today — while `excerpt` is still
+    exactly what `excerpt_of` produces, byte for byte.
+
+    The grep is run by the same tool the claim is quoted with, over the same file,
+    because the whole point of the item is that window claims are made with grep.
+    """
+    cmd = _live_checkout_commit_command()
+    _refused_by_the_real_lane(cmd, session="20261103_000001_chat")
+
+    counted = subprocess.run(["grep", "-c", "--", "--git-dir", journal],
+                             capture_output=True, text=True)
+    assert int(counted.stdout.strip() or 0) >= 1, (
+        "grep -c -- '--git-dir' still finds nothing in the journal the fix writes, "
+        "which is the 0 the item was filed over")
+
+    row = _rows(journal)[0]
+    assert row["excerpt"] == DJ.excerpt_of("Bash", {"command": cmd})[:DJ.EXCERPT_CHARS]
+    assert len(row["excerpt"]) == DJ.EXCERPT_CHARS, (
+        f"excerpt is {len(row['excerpt'])} chars, not today's {DJ.EXCERPT_CHARS}-char cut")
+    assert "--git-dir" not in row["excerpt"], (
+        "the excerpt grew, so the row no longer shows what a row written before #3874 "
+        "looks like — the size that clause 3 bounds is this one")
+
+
+async def _denies_whatever_it_is_asked_about(input_data, _id, _ctx):
+    """A gate that refuses anything, for the nodes that are about the ROW and not about
+    which pattern matched. Clause 3's 20 KB command is not a shape `app.harness.safety`
+    has a lane for, so pinning the bound needs a refusal that does not depend on one."""
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "permissionDecision": "deny",
+                                   "permissionDecisionReason": "guard: blocked x on x"}}
+
+
+def test_a_twenty_kilobyte_command_is_capped_and_the_row_stays_one_line(journal):
+    """#3874 clause 3: at 20 KB the field contributes at most `FULL_CMD_CHARS`, is
+    whitespace-folded like the excerpt, and the row is still a single line whose total
+    length is the field plus the row's own overhead and nothing else.
+
+    The overhead is measured, not assumed: the same guard refusing a short command
+    writes no field at all, so the difference between the two lines IS the cost.
+    """
+    huge = "echo start " + ("a\n\t b " * 5000)          # ~20 KB of foldable filler
+    assert len(huge) > 20_000, f"the fixture is {len(huge)} chars, not 20 KB"
+    hooks = HookRegistry()
+    hooks.add_pre_tool_use(None, _denies_whatever_it_is_asked_about, fail_closed=True)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(hooks.fire_pre_tool_use(
+        session_id="20261103_000002_chat", tool_name="Bash",
+        tool_input={"command": huge}))
+    loop.run_until_complete(hooks.fire_pre_tool_use(
+        session_id="20261103_000003_chat", tool_name="Bash",
+        tool_input={"command": "git status"}))
+
+    lines = [ln for ln in journal.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 2, f"{len(lines)} rows for 2 refusals: the row is not one line"
+    long_row, short_row = (json.loads(ln) for ln in lines)
+    field = long_row["full_command"]
+    assert len(field) == DJ.FULL_CMD_CHARS, (
+        f"a 20 KB command wrote {len(field)} chars, not the {DJ.FULL_CMD_CHARS}-char cap")
+    assert field == " ".join(field.split()), "the field is not whitespace-folded"
+    assert "\n" not in field and "\t" not in field and "\\" not in field, (
+        "the field carries a character that could break the one-row-per-line shape")
+
+    # The overhead is this same row without its field, re-serialised the way `record()`
+    # writes it — NOT a different refusal's line, whose `excerpt` and `reason` are their
+    # own lengths and would be counted as if they were the field's cost.
+    baseline = json.dumps({k: v for k, v in long_row.items() if k != "full_command"},
+                          sort_keys=True)
+    escapes = len(json.dumps(field)) - len(field)   # bytes the JSON encoding adds
+    cost = len(lines[0]) - len(baseline)
+    assert cost <= DJ.FULL_CMD_CHARS + escapes + len(',"full_command":""'), (
+        f"the field costs {cost} B on the line against a {DJ.FULL_CMD_CHARS}-char bound "
+        f"(+{escapes} B of encoding), so the bound is not what is stored")
+    assert len(lines[0]) < len(huge), "the row kept a 20 KB command whole"
+    assert sorted(short_row) == _TODAYS_KEYS, (
+        f"a short command now writes {sorted(short_row)} — a row <=EXCERPT_CHARS is "
+        "supposed to keep exactly today's key set, which is the baseline clause 5 pins")
+
+
+def test_a_content_lane_refusal_carries_no_more_of_its_payload_than_today(journal):
+    """#3874 clause 4: the field is populated ONLY from a request's `command` key.
+
+    The write and outbound-content lanes hand the journal a `redact()`-ed excerpt
+    (`app/harness/outbound_content.py:604`), and `excerpt_of` already pulls their
+    `content` / `text` / `prompt` / `url` bodies into the row unredacted up to 200
+    chars. A whole-request field on THOSE lanes would widen how much of a
+    secret-bearing payload lands in a file that outlives the payload, so the
+    exposure is bounded by scope, not by redaction parity: a 20 KB `Write` body and
+    a 20 KB `http_request` body must leave the row exactly as long as it is today.
+
+    Both seams that can reach the writer are exercised, because they are different
+    processes' code: the PreToolUse hook seam (`app/harness/hooks.py`) and the
+    dispatch seam (`agent_mcp/main.py::_refused_call`). Measured over the live journal
+    on 2026-11-07 the two routes carry 452 `safety`/`hook`/`Bash` rows and 406
+    `tool_sandbox`/`dispatch`/`Write` rows between them, so both are load-bearing and
+    neither may grow a payload body."""
+    secret = "hunter2-never-journal-this " * 1000        # ~23 KB of body
+    assert len(secret) > 20_000, f"the payload is {len(secret)} chars, not 20 KB"
+
+    # Seam 1: the PreToolUse hook route, which is where the 452 live `safety`/Bash rows
+    # come from and where `tool_input` is available in full.
+    hooks = HookRegistry()
+    hooks.add_pre_tool_use(None, _denies_whatever_it_is_asked_about, fail_closed=True)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(hooks.fire_pre_tool_use(
+        session_id="20261103_000004_chat", tool_name="Write",
+        tool_input={"file_path": "/home/alansrobotlab/obsidian/x.md", "content": secret}))
+    loop.run_until_complete(hooks.fire_pre_tool_use(
+        session_id="20261103_000005_chat", tool_name="http_request",
+        tool_input={"url": "https://example.invalid/tok/" + secret, "method": "POST",
+                    "body": secret}))
+    # Seam 2: the aggregator's dispatch route, across the same boundary the fix had to
+    # cross — a Bash refusal there MUST carry the command, a Write refusal there must
+    # not carry the body.
+    from agent_mcp.main import _refused_call
+
+    _refused_call("Bash", "harness safety: blocked 'sudo' on 'sudo rm -rf /var…'",
+                  guard="safety", session_id="20261103_000006_chat",
+                  arguments={"command": "sudo rm -rf /var/lib " + ("y" * 4000),
+                             "timeout": 120})
+    _refused_call("Write", "read-only session: this session may not write",
+                  guard="tool_sandbox", session_id="20261103_000007_chat",
+                  arguments={"file_path": "/home/alansrobotlab/obsidian/y.md",
+                             "content": secret})
+    # Seam 3: `outbound_content.py:604`'s own shape — an excerpt and nothing else.
+    DJ.record(guard="outbound_content", where="dispatch",
+              session_id="20261103_000008_chat", tool="email_send",
+              excerpt="outbound content: blocked 'secret-read' on " + secret,
+              reason="outbound content: blocked 'secret-read' on a 20 KB body")
+
+    rows = _rows(journal)
+    assert len(rows) == 5, f"{len(rows)} rows for 5 refusals"
+    bash = [r for r in rows if r["tool"] == "Bash"]
+    assert len(bash) == 1 and "--git-dir" not in bash[0].get("full_command", "x")
+    assert bash[0]["full_command"].startswith("sudo rm -rf /var/lib")
+    assert len(bash[0]["full_command"]) == DJ.FULL_CMD_CHARS, (
+        "the dispatch seam did not apply the cap")
+    for row in rows:
+        if row["tool"] == "Bash":
+            continue
+        assert "full_command" not in row, (
+            f"the {row['tool']} lane grew a whole-payload field: this item is scoped to "
+            "the `command` key precisely so a secret stays 200 characters deep")
+        assert len(row["excerpt"]) <= DJ.EXCERPT_CHARS, (
+            f"a content-lane excerpt is {len(row['excerpt'])} chars, past today's "
+            f"{DJ.EXCERPT_CHARS}-char cut")
+        assert secret not in json.dumps(row), (
+            f"a {len(secret)}-char payload body reached the durable row whole on the "
+            f"{row['tool']} lane")
+
+
+def test_a_command_within_the_cut_writes_exactly_todays_key_set(journal):
+    """#3874 clause 5: a refusal whose folded command is <= `EXCERPT_CHARS` is written
+    with today's ten keys and no eleventh, so every existing reader of the journal —
+    `scripts/automod/scorecard.py::_denials`, `rows()` and `summarize()`, and the
+    committed-witness nodes in this file — keeps reading rows it never heard of.
+
+    The short/long boundary is where a naive implementation leaks cost: writing the
+    field whenever a `command` exists would put it on the majority of live rows (most
+    refusals in the journal are one-line destructive-verb shapes, not long heredocs)
+    and re-base store 26's fold sizing for nothing.
+    """
+    _refused_by_the_real_lane("git -C /home/alansrobotlab/lloyd commit -m x",
+                              session="20261103_000007_chat")
+
+    rows = _rows(journal)
+    assert len(rows) == 1, "the short live-checkout commit was not journalled once"
+    assert sorted(rows[0]) == _TODAYS_KEYS, (
+        f"a <=EXCERPT_CHARS refusal now writes {sorted(rows[0])} — scorecard row 16 and "
+        "the witness nodes read this key set")
+    assert rows[0]["excerpt"] == "git -C /home/alansrobotlab/lloyd commit -m x"
+    assert json.loads(json.dumps(rows[0])) == rows[0], "the row is not round-trippable JSON"
+
+
+def test_the_dispatch_surface_keeps_todays_keys_short_and_the_tail_long(journal):
+    """#3874 clause 5, the SECOND write surface: `agent_mcp/main.py::_refused_call` hands
+    the writer a `command` and no `excerpt` at all, so the shape rule cannot rest on a
+    comparison against the row's own excerpt — on that surface every non-empty command
+    would look "longer than what the row kept" and a 15-char refusal would gain an
+    eleventh key carrying text the row already had.
+
+    Both directions are pinned through the aggregator's own function, not the hook lane: a
+    short command refused by the bench durable-write rail keeps exactly today's ten keys
+    with the `excerpt` that lane has always left empty, and a long one refused by the
+    dispatch safety lane carries `full_command` with the flag that lane refuses on. That
+    lane is not a corner: the live journal holds 36 `safety`/`dispatch`/`Bash` rows.
+    """
+    from agent_mcp.main import _refused_call
+
+    _refused_call("Bash", "write outside the workspace is refused for this session",
+                  guard="bench_durable_write", session_id="bench_short_3874",
+                  arguments={"command": "rm -rf ./build", "summary": "delete build"})
+    _refused_call("Bash", "harness safety: blocked 'live-checkout-git' on 'git --git-dir=…'",
+                  guard="safety", session_id="20261103_000008_chat",
+                  arguments={"command": _live_checkout_commit_command()})
+
+    short, long_row = _rows(journal)
+    assert sorted(short) == _TODAYS_KEYS, (
+        f"a 15-char command refused at dispatch now writes {sorted(short)} — scorecard row "
+        "16 and the witness nodes read this key set")
+    assert short["excerpt"] == "", "the dispatch lane wrote no excerpt before #3874, and none now"
+    assert long_row["full_command"].startswith("git ") and "--git-dir=" in long_row["full_command"], (
+        "the dispatch safety lane still loses the target its own refusal named")
+    assert long_row["excerpt"] == "", "wiring `arguments` must not start writing this lane's excerpt"
+
+
+def test_the_full_command_constant_is_1200_and_is_what_the_writer_uses():
+    """#3874's sizing decision, pinned as a number: `FULL_CMD_CHARS = 1200`, not the 4000
+    the item suggested.
+
+    Store 26 of the retention sweep (#3789, `scripts/groundskeeper/retention-sweep.py`)
+    copies this file whole into `backlog/data/` up to `WITNESS_MAX_BYTES = 1_048_576`
+    (`scripts/automod/backlog.py:1450`), and its comment sizes the headroom on the
+    largest rolling 30-day volume observed at landing. Re-measured on 2026-11-07 over a
+    copy of the live journal's rows from 2026-10-07 on — the same window that comment
+    names — that volume is 586,937 B across 981 rows (mean 598.3 B), of which 326 rows
+    sit exactly at the 200-char cap and every one of those is a `Bash` row. Worst case,
+    if every at-cap row also carried a full field, the same window is 984,657 B at a
+    1200-char ceiling (93.9 % of the bound) and 1,897,457 B at 4000 (181.0 %) — so 4000
+    crosses the ceiling the fold exists to stay under, and 1200 does not. 1200 also
+    covers the largest flag offset ever seen in a refused command on this box (1020,
+    #3874 triage), which is where the number comes from.
+
+    Asserting the constant is not decoration: it is the number the store-26 comment gets
+    re-based against, so a future widening has to fail here first.
+    """
+    assert DJ.FULL_CMD_CHARS == 1200, f"FULL_CMD_CHARS is {DJ.FULL_CMD_CHARS}"
+    assert DJ.FULL_CMD_CHARS > DJ.EXCERPT_CHARS == 200, (
+        "the whole-command field must be strictly wider than the cut it replaces")
+    import inspect
+
+    # The bound has to be applied by the code that WRITES the row, not just named by a
+    # constant: `record` spreads `_full_command_field`, and that helper is what cuts.
+    assert "_full_command_field" in inspect.getsource(DJ.record), (
+        "record() no longer spreads `_full_command_field`, so nothing applies the bound")
+    assert "FULL_CMD_CHARS" in inspect.getsource(DJ._full_command_field), (
+        "`_full_command_field` no longer cuts at FULL_CMD_CHARS, so the bound is only in "
+        "the constant")
+
+
+def test_a_list_shaped_command_writes_no_field_and_keeps_todays_excerpt(journal):
+    """The scope rule is the `command` KEY, and a `command` that is not a string is not
+    a command this module ever read: `excerpt_of` skips a LIST-valued `command` (it only
+    accepts `isinstance(value, str)`) and falls through to the folded JSON of the whole
+    arguments dict, so a field that joined the list would be a second rendering of the
+    same call with no live row to compare it to — `~/lloyd-data/safety/denials.jsonl`
+    held 0 rows whose excerpt begins with that folded-JSON form across its 981 rows on
+    2026-11-07.
+
+    Pinned both ways: the row is unchanged from today's shape, AND the excerpt really is
+    the JSON fallback, so this node cannot quietly keep passing if `excerpt_of` one day
+    starts joining lists — at which point the field has to be taught the shape too.
+    """
+    parts = ["rm", "-rf"] + [f"/home/alansrobotlab/lloyd-data/part{i:04d}" for i in range(40)]
+    hooks = HookRegistry()
+    hooks.add_pre_tool_use(None, _denies_whatever_it_is_asked_about, fail_closed=True)
+    _run(hooks.fire_pre_tool_use(session_id="20261103_000008_chat", tool_name="Bash",
+                                 tool_input={"command": parts}))
+
+    rows = _rows(journal)
+    assert len(rows) == 1, f"{len(rows)} rows for one refusal"
+    assert rows[0]["excerpt"] == DJ.excerpt_of("Bash", {"command": parts})[:DJ.EXCERPT_CHARS]
+    assert rows[0]["excerpt"].startswith('{"command"'), (
+        "excerpt_of stopped folding a list command to JSON, so the scope rule below is "
+        "the wrong rule any more — teach `command_of` the shape in the same commit")
+    assert len(rows[0]["excerpt"]) == DJ.EXCERPT_CHARS, (
+        "that fallback excerpt is not cut at today's cap, so this row's shape is not "
+        "today's either")
+    assert sorted(rows[0]) == _TODAYS_KEYS, (
+        f"a list-valued command wrote {sorted(rows[0])}: the field is scoped to a string "
+        "`command` key, and inventing a rendering for another shape is scope creep")
