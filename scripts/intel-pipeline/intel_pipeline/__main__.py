@@ -82,6 +82,11 @@ def main():
 
     # Run scanners
     youtube_coverage = None  # None until the YouTube scanner reports its feeds
+    # Both halves of the #3873 series row: coverage is the scanner's, delivery is this
+    # run's. `items_written` stays 0 for a `--scan`-only invocation that never reaches the
+    # writer, which the series records as a zero rather than omitting the key — a row that
+    # omits it cannot be averaged against a row that wrote six items.
+    items_written = 0
     if run_all or args.scan:
         print("\n--- Running Scanners ---\n")
         
@@ -161,7 +166,23 @@ def main():
         
         from .vault_writer import write_all_to_vault
         count = write_all_to_vault(date_str)
+        items_written = count
         print(f"Vault writer: {count} items written")
+
+    # One dated row per scan, appended BEFORE the degraded exit below: the run that could
+    # not reach its feeds is the run whose row the series exists to hold, so booking it
+    # after the `sys.exit(1)` would record every blackout as a gap — the shape of the
+    # evidence this item is filed against (#3873).
+    if youtube_coverage is not None:
+        state.append_scan_series({
+            "date": date_str,
+            "scanned_at": datetime.now().isoformat(timespec="seconds"),
+            "youtube_feeds_fetched": youtube_coverage.fetched,
+            "youtube_feeds_attempted": youtube_coverage.attempted,
+            "youtube_degraded": bool(youtube_coverage.degraded),
+            "youtube_raw_rows": state.count_raw_rows(date_str, "youtube"),
+            "items_written": items_written,
+        })
     
     # A run that could not reach most of the configured YouTube feeds must not
     # finish saying `Pipeline Complete` at exit 0: on 2026-09-10 the scanner lost

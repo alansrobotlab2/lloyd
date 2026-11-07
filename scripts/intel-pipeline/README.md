@@ -220,3 +220,32 @@ Run tests (they live in the repo's suite, not in this directory):
 ```bash
 cd ~/lloyd && .venvs/lloyd/bin/python -m pytest tests/test_intel_pipeline_*.py
 ```
+
+## Scan coverage series
+
+Every scan that runs the YouTube stage appends **one** row to `scan-series.jsonl`, beside the day files in the feeds
+directory (`~/lloyd-data/_pipeline/vault-derived/memory/feeds/scan-series.jsonl`). The file
+is append-only and never rewritten, so the YouTube half's delivery is a curve with a start
+date instead of a line in a transcript. `scanner-state.json`'s `youtube_coverage` is one
+dict slot that each scan overwrites — it answers what the *last* scan reached and is still
+what `--scan` prints; only this file answers when delivery stopped. #739 made a degraded run
+reportable; this is what makes one accumulable, and a run that exits 1 on
+`YouTube stage DEGRADED` books its row **before** that exit, because a blackout is exactly
+the scan whose row matters.
+
+Each row is one JSON object per scan, holding the scan `date` and `scanned_at` with:
+
+| key | what it counts |
+|---|---|
+| `youtube_feeds_fetched` / `youtube_feeds_attempted` | the `FeedCoverage` the scanner returned |
+| `youtube_degraded` | coverage below `COVERAGE_FLOOR`, i.e. the run exited 1 |
+| `youtube_raw_rows` | rows this scan's source appended to `raw/<date>.jsonl` |
+| `items_written` | items the vault writer wrote, `0` for a run that never ran it |
+
+Read the curve with:
+
+```
+tail -n 14 ~/lloyd-data/_pipeline/vault-derived/memory/feeds/scan-series.jsonl
+```
+
+— one scan per line, oldest first, so eight degraded scans in a row is eight lines.

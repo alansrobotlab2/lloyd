@@ -29,3 +29,14 @@ VAULT_WRITTEN_STATE = FEEDS_DIR / "vault-written.json"
 # on every `--score` (`__main__.py:150`), so they cannot be the memory; this file
 # is never rewritten, only appended to.
 GRADE_STORE = FEEDS_DIR / "grades.jsonl"
+# Append-only, one row per SCAN, of what the YouTube half could reach and what the run
+# delivered (backlog #3873). `scanner-state.json`'s `youtube_coverage` is ONE dict slot
+# each scan overwrites, so the eight-scan blackout that had run since 2026-10-31 existed
+# nowhere a human or a later run reads: the fraction went to stdout and was re-demanded by
+# the task's own `objective_checks` regexes in wording that changed run to run ("fetched 5
+# feeds of 63 attempted" on 11-05 against "coverage 3 feeds fetched of 63 attempted" on
+# 11-03), so the series could not even be grepped back out of the transcripts. #739 made a
+# degraded run reportable; this file is what makes one accumulable. Appended by
+# `state.append_scan_series`, never rewritten — the same reason it is a sibling of
+# GRADE_STORE and not a field of the state dict.
+SCAN_SERIES_FILE = FEEDS_DIR / "scan-series.jsonl"

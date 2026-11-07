@@ -43,3 +43,36 @@ def test_readme_points_at_the_live_invocation_not_the_deleted_vault_tree():
     assert "obsidian/memory/feeds" not in text
     assert "cd ~/lloyd/scripts/intel-pipeline" in text
     assert "python -m intel_pipeline" in text
+
+
+# ── #3873: the scan coverage series is documented where the code writes it ───────────
+
+#: Every key the writer emits, so the table cannot keep its prose while a field is renamed
+#: out of it — which is what a README that only names the FILE would fail to catch.
+SERIES_KEYS = ("youtube_feeds_fetched", "youtube_feeds_attempted", "youtube_degraded",
+               "youtube_raw_rows", "items_written")
+
+
+def test_the_readme_documents_the_scan_series_file_its_counts_and_the_command():
+    """Clause 5: the file, the counts, and the ONE command are all named.
+
+    Asserted against the writer's own constant rather than a spelled-out filename, so the
+    README cannot pass by naming a file the code no longer writes. The command is checked
+    as a substring of a fenced block because "look at the file" is the half of this the
+    next reader of a blackout actually needs — #3873 was filed because the fraction existed
+    only in eight transcripts whose wording differed run to run.
+    """
+    import sys
+    text = README.read_text()
+    pkg = PKG_DIR / "intel_pipeline"
+    sys.path.insert(0, str(pkg.parent))
+    from intel_pipeline import _paths
+
+    name = _paths.SCAN_SERIES_FILE.name
+    assert f"`{name}`" in text, f"the README never names {name}"
+    for key in SERIES_KEYS:
+        assert f"`{key}`" in text, f"the README omits the {key} count"
+    assert "scan-series.jsonl" in text
+    assert f"tail -n 14 ~/lloyd-data/_pipeline/vault-derived/memory/feeds/{name}" in text, (
+        "no single command reads the curve")
+    assert "append-only" in text.lower(), "the file's one property is undocumented"

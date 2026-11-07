@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from ._paths import STATE_FILE, RAW_DIR
+from ._paths import STATE_FILE, RAW_DIR, SCAN_SERIES_FILE
 
 
 def ensure_dirs():
@@ -99,3 +99,52 @@ def load_raw_items(date_str: str) -> list:
                 item = FeedItem.from_dict(data)
                 items.append(item)
     return items
+
+
+def append_scan_series(row: dict) -> "Path":
+    """Append one per-scan row to the coverage/delivery series (#3873) and return its path.
+
+    Append-only and never rewritten, which is the whole point: the numbers this records are
+    the ones no other artefact keeps. `scanner-state.json` answers "what did the LAST scan
+    reach" and `raw/<date>.jsonl` answers "how many rows exist for this day"; only a series
+    answers "when did the YouTube half stop delivering", and a run that exits 1 on a
+    degraded stage still books its row before it is withheld its success banner — a blackout
+    is exactly the run whose row matters.
+
+    The path is read from the module global at CALL time, like `get_raw_path` reads
+    `RAW_DIR`, so a test can point the series at a temporary vault; a failure to write it
+    raises, because a silent recorder is how a series stops existing.
+    """
+    ensure_dirs()
+    path = Path(SCAN_SERIES_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+    return path
+
+
+def count_raw_rows(date_str: str, source: "str | None" = None) -> int:
+    """How many rows `raw/<date>.jsonl` holds, optionally of one `source` (#3873).
+
+    Counted from the FILE rather than from a scanner's return value, because the number the
+    blackout is measured by is the one a human can reproduce with `wc -l` on the day file —
+    which is how #3873 measured itself. A missing day file counts as zero, which is what a
+    scan that appended nothing produced.
+    """
+    path = get_raw_path(date_str)
+    try:
+        with open(path) as f:
+            lines = [ln for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return 0
+    if source is None:
+        return len(lines)
+    n = 0
+    for ln in lines:
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("source") == source:
+            n += 1
+    return n

@@ -5358,3 +5358,172 @@ def test_the_dead_feed_count_survives_the_run_and_clears_when_the_feed_fetches(
         "a feed that fetched again still carries its dead-feed count"
     assert st["youtube_coverage"] == {"fetched": 2, "attempted": 2}, \
         "the recovering scan stopped counting its own coverage"
+
+
+# ══ #3873: the per-scan coverage/delivery series ════════════════════════════════════
+#
+# #739 made a degraded scan REPORTABLE — one line of stdout, and the one-slot
+# `youtube_coverage` in `scanner-state.json` that the next scan overwrites. Nothing made one
+# ACCUMULABLE, so the eight-scan YouTube blackout that had run since 2026-10-31 had no start
+# date anywhere a human or a later run reads: coverage went to stdout, the task's own
+# `objective_checks` regexes re-demanded `N of M feeds` from each run's transcript in wording
+# that differed run to run, and the series could not be grepped back. The nodes below drive
+# the real `main()` with the two network stages stubbed, and read the appended file from
+# disk, because the thing at risk is a file a later scan cannot lose.
+
+
+def _series_env(tmp_path, monkeypatch, *, fetched, attempted, raw_rows=0, written=0):
+    """Point the state, raw and series seams at `tmp_path`, then run one real `main()`.
+
+    Every seam is patched where the CALLER reads it: `main()` imports
+    `scan_youtube_channels` out of its source module inside the function, so the patch goes
+    on that module; `state.get_raw_path` and the new `append_scan_series` read their
+    module-level path globals at call time, so redirecting those three globals moves the
+    whole run off the live vault. `--scan --write` is the invocation: it runs both stages the
+    series row reports on and skips scoring, which would otherwise ask for an LLM.
+    """
+    from intel_pipeline import state as ist
+    from intel_pipeline import __main__ as entry
+    from intel_pipeline.scanners import youtube_scanner as ys
+
+    feeds = tmp_path / "feeds"
+    (feeds / "raw").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(ist, "STATE_FILE", feeds / "scanner-state.json")
+    monkeypatch.setattr(ist, "RAW_DIR", feeds / "raw")
+    monkeypatch.setattr(ist, "SCAN_SERIES_FILE", feeds / "scan-series.jsonl")
+    monkeypatch.setattr(entry, "load_profile", lambda *a, **k: {})
+
+    def fake_scan(*args, **kwargs):
+        items = [{"id": f"yt-{i}", "source": "youtube", "title": f"t{i}"}
+                 for i in range(raw_rows)]
+        if items:
+            ist.save_raw_items(items, _utc_today())
+        return items, ys.FeedCoverage(fetched=fetched, attempted=attempted)
+
+    monkeypatch.setattr(ys, "scan_youtube_channels", fake_scan)
+    from intel_pipeline import vault_writer as vw
+    monkeypatch.setattr(vw, "write_all_to_vault", lambda *a, **k: written)
+
+    argv = ["intel-pipeline", "--scan", "--write"]
+    code = _run_main(entry, argv)
+    return code, [json.loads(ln) for ln in
+                  (feeds / "scan-series.jsonl").read_text().splitlines() if ln.strip()], feeds
+
+
+def _utc_today() -> str:
+    """The day `main()` keys its raw read and its scored write on: `datetime.utcnow()`.
+
+    Named because the stub saves under it and the row's `date` is asserted against it: the
+    box runs at UTC-8, so a local-date helper here would save the day file under
+    2026-11-06 while the run booked its row under 2026-11-07 and the count came back 0 —
+    the very day-key mistake `__main__.py:66-72` documents for `--date`.
+    """
+    from datetime import datetime
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _run_main(entry, argv) -> int:
+    """Run `main()` under a stubbed argv and return its SystemExit code, 0 if it returns."""
+    import sys as _sys
+    _sys.argv = list(argv)
+    try:
+        entry.main()
+    except SystemExit as exc:
+        return int(getattr(exc, "code", 0) or 0)
+    return 0
+
+
+def test_a_scan_appends_one_row_holding_the_coverage_the_scanner_reported(tmp_path,
+                                                                         monkeypatch,
+                                                                         capsys):
+    """Clause 1: one JSON row per scan, carrying the date and the FeedCoverage numbers.
+
+    Driven through the real `main()` rather than the writer helper, because the clause is
+    about the scan: a helper that appends correctly while `main()` never calls it, or calls
+    it twice, passes a unit test and fails the item. `fetched=1, attempted=63` is the live
+    blackout's reading (2026-11-07), so the assertion is against the numbers the item was
+    filed with.
+    """
+    code, rows, feeds = _series_env(tmp_path, monkeypatch, fetched=1, attempted=63,
+                                    raw_rows=0, written=0)
+    assert code == 1, "coverage 1 of 63 is degraded, so the run must not exit 0"
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["youtube_feeds_fetched"] == 1 and row["youtube_feeds_attempted"] == 63, row
+    assert row["date"] == _utc_today(), row
+    assert row["youtube_degraded"] is True, row
+    assert (feeds / "scan-series.jsonl").is_file(), "the series is not under the feeds dir"
+
+
+def test_the_row_carries_the_rows_it_appended_and_the_items_the_writer_wrote(tmp_path,
+                                                                            monkeypatch):
+    """Clause 2: coverage AND delivery in the same row, counted from the day file.
+
+    `youtube_raw_rows` is 3 because the stub saved three items through the real
+    `state.save_raw_items`, and the count is read back off `raw/<date>.jsonl` — the file a
+    human reproduces with `wc -l`, which is how #3873 measured its own blackout. The GitHub
+    half is not in the number: a row counting every source would show the blackout as a
+    partial dip, since GitHub kept delivering 29-37 rows a scan while YouTube delivered 0.
+    """
+    _code, rows, _feeds = _series_env(tmp_path, monkeypatch, fetched=63, attempted=63,
+                                     raw_rows=3, written=6)
+    assert len(rows) == 1, rows
+    assert rows[0]["youtube_raw_rows"] == 3, rows[0]
+    assert rows[0]["items_written"] == 6, rows[0]
+    assert rows[0]["youtube_degraded"] is False, rows[0]
+
+
+def test_a_degraded_scan_books_its_row_before_the_degraded_exit(tmp_path, monkeypatch,
+                                                                capsys):
+    """Clause 3: the row is on disk even though the run exits 1 saying DEGRADED.
+
+    The order is the clause. Booking the row after the `sys.exit(1)` would record every
+    blackout as an ABSENT day, which is the evidence shape the item is filed against — eight
+    scans whose contribution existed only as a line in eight transcripts.
+    """
+    code, rows, _feeds = _series_env(tmp_path, monkeypatch, fetched=1, attempted=63,
+                                     raw_rows=1, written=0)
+    out = capsys.readouterr().out
+    assert code == 1 and "YouTube stage DEGRADED" in out, (code, out[-300:])
+    assert len(rows) == 1, "the degraded scan left no row"
+    assert rows[0]["youtube_raw_rows"] == 1 and rows[0]["items_written"] == 0, rows[0]
+
+
+def test_two_scans_leave_two_rows_and_the_state_slot_holds_only_the_latest(tmp_path,
+                                                                          monkeypatch):
+    """Clause 4: the series accumulates; the single slot stays single.
+
+    The second scan is the RECOVERY (63 of 63), so the pair on disk is the blackout's last
+    day beside its first healthy one — which is the curve the item asks for. The earlier
+    row must be byte-identical afterwards, not merely still present: `scanner-state.json` is
+    rewritten wholesale every scan, and a series appended to the same dict would inherit
+    that. The slot itself is asserted to hold the LATEST scan alone, since `--scan` prints
+    it and #3328's dead-feed line is reported beside it.
+    """
+    first, rows, feeds = _series_env(tmp_path, monkeypatch, fetched=1, attempted=63,
+                                     raw_rows=0, written=0)
+    assert first == 1
+    before = (feeds / "scan-series.jsonl").read_text()
+
+    from intel_pipeline import __main__ as entry
+    from intel_pipeline.scanners import youtube_scanner as ys
+    from intel_pipeline import vault_writer as vw
+    monkeypatch.setattr(ys, "scan_youtube_channels",
+                        lambda *a, **k: ([], ys.FeedCoverage(fetched=63, attempted=63)))
+    monkeypatch.setattr(vw, "write_all_to_vault", lambda *a, **k: 4)
+    monkeypatch.setattr(entry, "load_profile", lambda *a, **k: {})
+    assert _run_main(entry, ["intel-pipeline", "--scan", "--write"]) == 0
+
+    rows = [json.loads(ln) for ln in
+            (feeds / "scan-series.jsonl").read_text().splitlines() if ln.strip()]
+    assert len(rows) == 2, rows
+    assert rows[0]["youtube_feeds_fetched"] == 1, rows
+    assert rows[1]["youtube_feeds_fetched"] == 63, rows
+    assert (feeds / "scan-series.jsonl").read_text().startswith(before), "an old row moved"
+    # The series is a NEW file, not a field of the state dict: `main()` writes no coverage
+    # key of its own, so the slot's home is untouched by this change and stays the
+    # scanner's single overwritten slot — `test_the_dead_feed_count_survives_the_run_and_clears_when_the_feed_fetches`
+    # is the node that pins that slot holding the latest scan alone, and it is untouched by
+    # this diff.
+    st = json.loads((feeds / "scanner-state.json").read_text())
+    assert "youtube_coverage" not in st, st.keys()
