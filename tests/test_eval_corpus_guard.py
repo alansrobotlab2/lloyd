@@ -4522,6 +4522,15 @@ EVAL_3076_PROVENANCE_NEEDLES = (
     "endswith",                                              # the failed predicate
     "UNTRACKED",                                             # what the runner is
 )
+#: And the one thing this section must never say. #3736 found the block claiming the live §3
+#: node re-derives its tallies unconditionally, every single time the suite runs, when the node
+#: in fact skips by name — false from `e9e707d4` to `6782277b` (2026-11-03) with nothing in the
+#: tree to catch it, which is why the reword alone is not the fix. Spelled as TWO ADJACENT
+#: LITERALS, which Python joins at compile time: the value IS the phrase, while this file keeps
+#: no copy of the string it forbids — a ban written as one literal would land inside the span it
+#: bans, and would add a sixth hit to the repo-wide grep this item keeps at five. If you reach
+#: this constant because the assert below fired, reword the comment; do not edit the constant.
+EVAL_3076_ALWAYS_RUNS_PHRASE = "on every gate" " run"
 
 
 def _3076_provenance_span(src: str) -> str:
@@ -4539,6 +4548,18 @@ def _3076_provenance_span(src: str) -> str:
 def _3076_provenance_missing(span: str) -> tuple[str, ...]:
     """Which provenance needles the given source says fewer than twice."""
     return tuple(n for n in EVAL_3076_PROVENANCE_NEEDLES if span.count(n) < 2)
+
+
+def _3076_always_runs_claimed(span: str) -> bool:
+    """Whether the given source text reclaims the unconditional-runs claim #3736 deleted.
+
+    A helper rather than a bare `not in` at the assert site, the way `_3076_provenance_missing`
+    is one, so the node can run it against a planted positive control: a reader that cannot see
+    the phrase — a constant whose literals stopped spelling one string — would report a clean
+    block for a block that has taken the falsified claim back, and an inert ban is worse than no
+    ban because it reads as coverage.
+    """
+    return EVAL_3076_ALWAYS_RUNS_PHRASE in span
 
 
 def _3076_guarded_reads(tree) -> set[str]:
@@ -4795,6 +4816,27 @@ def test_the_committed_3076_upper_bound_witness_is_the_bytes_its_provenance_reco
     assert _3076_provenance_missing(mangled) == (EVAL_3076_SOURCE_MTIME,), (
         _3076_provenance_missing(mangled), "the needle reader does not notice a provenance "
         "figure being deleted, so it pins none of them")
+
+    planted = span.replace(EVAL_3076_FIXTURE_MD5, EVAL_3076_ALWAYS_RUNS_PHRASE, 1)
+    assert planted != span and _3076_always_runs_claimed(planted), (
+        "the control cannot plant the banned phrase into the span, so the absence assert below "
+        "could never fire and pins nothing: `EVAL_3076_ALWAYS_RUNS_PHRASE` no longer spells one "
+        "string, or the span stops before the text it would have to match")
+
+    assert not _3076_always_runs_claimed(span), (
+        EVAL_3076_ALWAYS_RUNS_PHRASE,
+        "#3736: an unconditional-runs phrase is back inside this section's provenance, and it "
+        "reads as false here because the live node the block describes is not a reading the "
+        "gate is guaranteed to get — it calls "
+        "`require_live_data(TRIAL_UPPER, ..., kind='file')` and the same for "
+        "`TRIAL_NOTE`, so BOTH skip by name whenever the scratch `upper.json` is absent, which "
+        "is what the meta-node "
+        "`test_the_3076_witness_guard_skips_for_nothing_but_the_note` exists to pin. A fresh "
+        "checkout, another machine, or one swept scratch and the live reading stays silent: "
+        "#3736 deleted this wording on 2026-11-03 (`6782277b`) and this ban is what keeps the "
+        "reword from rotting back. Say it skips by name. The ban is span-scoped, not repo-wide: "
+        "the five legitimate uses elsewhere in `tests/` and `architecture/`, two of them this "
+        "same prefix in the sense of a gate rung, are not this failure.")
 
 
 # ── #3166: the #1599 block in `eval/run_eval.py` stated a drift that ended ─────
