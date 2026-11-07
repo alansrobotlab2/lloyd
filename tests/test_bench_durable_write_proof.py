@@ -144,6 +144,15 @@ def test_trees_resolve_through_app_paths_and_an_empty_tree_is_a_refusal(tmp_path
     vacuous pass. Hence the clause's second half: a selected tree resolving to zero files is
     a REFUSAL, not a clean diff.
 
+    `memory` is clause 4 of #3863, and it is the same trap wearing different clothes. It used
+    to be `VAULT_ROOT/'memory'`, which is not empty — it holds this vault's dated daily notes
+    — so the vacuity refusal above could never fire on it, and it is also not a directory
+    `memory_add` can write: the shipped writer resolves `agent_mcp/session.py:58`
+    `MEMORIES_ROOT = vault_root() / 'lloyd'`. A leak into `~/obsidian/lloyd/MEMORY.md`, the
+    file this instance is loaded from, would therefore have read CLEAN. Hence the three forms
+    of the assertion below: the tree equals the patched symbol, the tree is NOT
+    `VAULT_ROOT/'memory'`, and on the live tree it equals the shipped attribute itself.
+
     Resolution happens per call, not at import, so patching the module's attributes proves
     the routine reads them rather than carrying a copy: the stand-in roots below are nowhere
     under `~/obsidian`.
@@ -151,19 +160,42 @@ def test_trees_resolve_through_app_paths_and_an_empty_tree_is_a_refusal(tmp_path
     stand_in = types.SimpleNamespace(VAULT_ROOT=Path("/stand-in/vault"),
                                      VAULT_FACTS_ROOT=Path("/stand-in/facts-tree"),
                                      DATA_ROOT=Path("/stand-in/data"))
+    # The writer's own root, re-aimed at the stand-in vault. Patching it and then asserting
+    # the tree lands there is what makes this node read the SYMBOL: the pre-#3863 entry was
+    # `resolved.VAULT_ROOT / 'memory'`, which under this stub is `/stand-in/vault/memory` —
+    # a path that looks exactly as plausible as the right one, which is why the old assertion
+    # passed while the instrument watched daily notes.
+    monkeypatch.setattr("agent_mcp.session.MEMORIES_ROOT", Path("/stand-in/vault/lloyd"))
     assert proof.durable_write_trees(resolved=stand_in) == {
-        "memory": Path("/stand-in/vault/memory"),
+        "memory": Path("/stand-in/vault/lloyd"),
         "facts": Path("/stand-in/facts-tree"),
         "backlog": Path("/stand-in/vault/backlog"),
         "data": Path("/stand-in/data")}, (
-        "memory and backlog must come from VAULT_ROOT, facts from VAULT_FACTS_ROOT and "
-        "data from DATA_ROOT, read at call time")
+        "memory must be the writer's MEMORIES_ROOT, backlog VAULT_ROOT/'backlog', facts "
+        "VAULT_FACTS_ROOT and data DATA_ROOT, all read at call time")
+    # The wrong tree, named: equality against the stub vault is not enough, since
+    # `/stand-in/vault/memory` and `/stand-in/vault/lloyd` are both vault children.
+    assert (proof.durable_write_trees(resolved=stand_in)["memory"]
+            != Path("/stand-in/vault/memory")), (
+        "memory must NOT be VAULT_ROOT/'memory': that is the daily-notes directory "
+        "memory_add cannot write (#3863 clause 4)")
 
     live = proof.durable_write_trees()
     assert set(live) == {"memory", "facts", "backlog", "data"}
     assert Path(live["facts"]) != Path.home() / "obsidian" / "facts", (
         "facts must be VAULT_FACTS_ROOT: the literal ~/obsidian/facts holds 0 files and "
         "manifesting it proves nothing")
+    # And on the real tree, against the real symbol — the equality the clause asks for,
+    # checked with the patch lifted so it is the shipped value being compared.
+    monkeypatch.undo()
+    from agent_mcp import session as agent_session
+    assert proof.memories_root() == Path(agent_session.MEMORIES_ROOT) == (
+        Path(agent_session.vault_root()) / "lloyd"), (
+        "the watched memory tree must be the directory memory_add resolves "
+        "(agent_mcp/session.py MEMORIES_ROOT = vault_root()/'lloyd')")
+    assert proof.store_dirname("memory") == "lloyd", (
+        "the copy-side witness matches directories by this name; 'memory' would match "
+        "nothing the tool can write")
     monkeypatch.setattr(proof.paths, "VAULT_FACTS_ROOT", tmp_path / "moved-facts",
                         raising=False)
     assert proof.durable_write_trees()["facts"] == tmp_path / "moved-facts"
@@ -230,16 +262,32 @@ def test_production_state_or_uncopied_flag_refuses_before_any_tool_call(tmp_path
                        "--state-url", "http://127.0.0.1:9/state"]) == 3
 
 
-def test_the_cli_refuses_without_an_aggregator_rather_than_inventing_one(capsys):
-    """No urls means no isolated server to write through, and that is a refusal (3).
+def test_the_cli_refuses_to_boot_a_fixture_that_was_never_built(capsys, monkeypatch):
+    """No urls AND an empty `--fixture-root`: refusal (3) naming the builder, spawner untouched.
 
-    Not a usage error (2): the message names who owns the missing piece — #3688's spawner,
-    or the scope ruling on #3689 that says this script boots `agent_mcp` itself. A bare
-    `argparse` error would read as "someone forgot a flag" when the truth is that the trial
-    has nowhere to run.
+    Why this is a refusal changed when clause 3 landed, and the node has to say the new
+    reason. It used to be "no urls means nowhere to write"; now no urls means THIS script
+    boots an aggregator, so the missing piece is a BUILT FIXTURE, and a message that only
+    named #3688 would tell a reader who to blame without telling them what to run. The three
+    strings asserted here are the three the caller acts on: the flag to pass
+    (`--fixture-root`), the module that builds what to pass it (`bench_fixture`), and the
+    item that owns the builder (#3688).
+
+    Exit 3, not argparse's 2, because the trial is refusing rather than the parser
+    complaining — and the boot is spied, because a half-built invocation that reached
+    `bench_spawner` would be a process launch on a directory nobody copied. The
+    half-named-url case, which refuses for a different reason, is
+    `test_the_cli_refuses_a_half_named_aggregator_without_booting_anything`.
     """
+    def _no_boot(*args, **kwargs):
+        raise AssertionError(
+            "an empty --fixture-root must refuse, not launch a child on nothing")
+
+    monkeypatch.setattr(proof, "boot_fixture_aggregator", _no_boot)
     assert proof.main([]) == 3
-    assert "#3688" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    for want in ("--fixture-root", "bench_fixture", "#3688"):
+        assert want in err, f"{want!r} is missing from the refusal: {err}"
 
 
 # ── clause 4: the verdict is ATTRIBUTED against an equal-length control ────
@@ -278,9 +326,9 @@ def test_a_change_in_only_the_trial_window_fails_and_one_in_both_passes(tmp_path
 
     # A write that reaches the live tree: planted by the call itself, so the control
     # window (which runs first, with no trial in it) cannot possibly have seen it.
-    def leaking_call(name: str, arguments: dict) -> dict:
+    def leaking_call(name: str, arguments: dict, *, session_id: str = "") -> dict:
         leak.write_text("a durable write reached the live tree\n", encoding="utf-8")
-        return {"tool": name, "ok": True}
+        return {"tool": name, "ok": True, "session_id": session_id}
 
     leaked = _run(tmp_path, trees=dict(trees), sleep=churn, call=leaking_call,
                   diff_paths=["backlog/9-bench-durable.md"])
@@ -298,9 +346,12 @@ def test_a_change_in_only_the_trial_window_fails_and_one_in_both_passes(tmp_path
 @pytest.mark.parametrize("diff_paths,expect_pass", [
     ([], False),                                    # wrote nothing anywhere
     (["random/unrelated.md"], False),               # wrote something, not the stores
-    (["memory/MEMORY.md"], True),                   # one intended store
+    (["lloyd/MEMORY.md"], True),                    # one intended store, writer's dir name
     (["backlog/7-bench-durable.md"], True),         # another
-    (["memory/MEMORY.md", "unrelated/x.md"], True)  # intended target plus noise
+    (["lloyd/MEMORY.md", "unrelated/x.md"], True),  # intended target plus noise
+    # The directory `memory_add` cannot write, offered as if it were the landing: the
+    # witness must not be fooled by a path in the vault that names a store-shaped word.
+    (["memory/MEMORY.md"], False),
 ])
 def test_an_empty_or_unrelated_copy_diff_is_fail_never_pass(diff_paths, expect_pass,
                                                             tmp_path):
@@ -335,7 +386,7 @@ def test_the_record_is_json_and_carries_the_three_flags_in_every_verdict(tmp_pat
     `state_is_copied` are named exactly as #3403's owed entry names them, at the top level,
     rather than nested under an object a grep for the flag would miss.
     """
-    result = _run(tmp_path, diff_paths=["memory/MEMORY.md"])
+    result = _run(tmp_path, diff_paths=["lloyd/MEMORY.md"])
     assert json.loads(json.dumps(result)) == result
     for key in ("isolation_flags", "verdict", "windows", "copy_side", "live_trees",
                 "tool_calls", "trees"):
@@ -364,7 +415,7 @@ def _run(tmp_path, *, trees=None, state=None, sleep=None, call=None,
         "backlog": _tree(tmp_path, "bkl", {"1-item.md": "keep\n"})}
     seen = recorded if recorded is not None else []
 
-    def call_tool(name: str, arguments: dict) -> dict:
+    def call_tool(name: str, arguments: dict, *, session_id: str = "") -> dict:
         seen.append(name)
         return call(name, arguments) if call else {"tool": name, "ok": True}
 
@@ -419,16 +470,32 @@ sys.path.insert(0, os.environ["STANDIN_REPO"])
 import app.paths as P                                            # noqa: E402
 from agent_mcp import _tool_sandbox                              # noqa: E402
 from agent_mcp.aggregator_auth import AUTH_HEADER, read_token    # noqa: E402
+from agent_mcp.main import _refused_call                         # noqa: E402
+from agent_mcp.session import MEMORIES_ROOT                      # noqa: E402
 
 #: Store directory per tool, resolved by THIS process's roots and never handed in by the
 #: test — which is the whole point of booting a child instead of patching a dictionary.
-STORES = {"memory_add": P.VAULT_ROOT / "memory",
+#: `memory_add` lands in `MEMORIES_ROOT`, the shipped writer's own symbol
+#: (`agent_mcp/session.py:58`, `vault_root()/'lloyd'`), NOT in a directory called `memory`:
+#: standing that up wrong here would send the trial's copy-side witness to a place the tool
+#: cannot write, and would keep the LIVE-side node green as well, because a leak node only
+#: fails when the watched tree is the one the writer reaches (#3863 clause 4, both sides).
+STORES = {"memory_add": MEMORIES_ROOT,
           "fact_add": P.VAULT_FACTS_ROOT,
           "backlog_write_task": P.VAULT_ROOT / "backlog"}
 #: Every POST, in arrival order, including the ones refused before they reached a tool. The
 #: witness for "the guard refused, so nothing arrived": a refusal that had reached the tool
 #: would leave a line here.
 POST_LOG = os.environ.get("STANDIN_POST_LOG", "")
+#: One line per ACCEPTED call: `<tool> <session_id>`. Kept apart from `POST_LOG` so the
+#: arrival-order witness keeps its exact shape, and because it answers a different question:
+#: not "did a call reach the tool" but "which session did the server charge it to".
+SESSION_LOG = os.environ.get("STANDIN_SESSION_LOG", "")
+#: An override of `SANDBOXED_ID_PREFIXES` for the node that wants every call refused: set it
+#: to a prefix no trial id can carry and the child answers each one with the shipped
+#: `_refused_call` body, which is how the all-refused trial gets refusals that are the real
+#: shape rather than a dict this file invented.
+REQUIRE_PREFIX = os.environ.get("STANDIN_REQUIRE_PREFIX", "")
 TOKEN = read_token(publish=False)
 
 
@@ -438,8 +505,29 @@ def _note(text):
             handle.write(text + "\\n")
 
 
+def _note_session(line):
+    if SESSION_LOG:
+        with open(SESSION_LOG, "a", encoding="utf-8") as handle:
+            handle.write(line + "\\n")
+
+
+def _denied(name, reason, guard, sid):
+    """The refusal body the SHIPPED handler sends, built by the shipped function.
+
+    `_refused_call` is what `agent_mcp/main.py:768` returns for every guard, serialised the
+    way the MCP layer serialises it — `by_alias`, because the wire is camelCase (`isError`,
+    not `is_error`), which is the split this file's composition node exists to keep honest.
+    Calling the function instead of typing a dict is the difference between a pair that
+    agrees with itself and a test that reads the answer the shipped server gives: what comes
+    back is a JSON-RPC *result* with no `error` member, so a client that only looks for
+    `error` scores the refusal as a success.
+    """
+    result = _refused_call(name, reason, guard=guard, session_id=sid)
+    return result.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
+    def log_message(self, format, *args):   # noqa: A002 — matches the base's name
         pass
 
     def _authorised(self):
@@ -468,8 +556,48 @@ class Handler(BaseHTTPRequestHandler):
             _note("unauthorised")
             self._send(401, {"error": "AGGREGATOR_UNAUTHENTICATED"})
             return
+        # Path-sensitive on purpose. The real aggregator mounts `tools/call` on `/mcp` and
+        # Starlette answers anything else with a 404, and `bench_spawner` hands back a BARE
+        # origin (`:362`), so appending the route is load-bearing work this script has to do.
+        # Answering every path would let `handle.url`, without the suffix, sail through: the
+        # first attempt of this round did exactly that, and the grader measured it.
+        if self.path != "/mcp":
+            _note("bad-path")
+            self.send_error(404, "not found")
+            return
         rpc = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0))
-        name, args = rpc["params"]["name"], rpc["params"]["arguments"]
+        params = rpc.get("params") or {}
+        name, args = params.get("name"), params.get("arguments") or {}
+        # The session id, read the way the shipped handler reads it: `_meta` first
+        # (`_bound_session_id` + `META_SESSION_ID`), the only place a JSON-RPC caller can put
+        # it. Every tool this stand-in serves is state-changing (`state_changing_tool` is
+        # `name not in READ_ONLY`, `_tool_sandbox.py:366-378`), so a call with no id is
+        # refused the way `main.py:594-602` refuses it, with the same body — which is the part
+        # the trial's reader is graded on, since the old reader called that body a success.
+        meta = params.get("_meta") or {}
+        sid = str(meta.get("lloyd/session_id") or "")
+        if not sid:
+            _note("refused-sessionless")
+            self._send(200, {"jsonrpc": "2.0", "id": rpc.get("id"), "result": _denied(
+                name,
+                "a call that can change state arrived with no session id — refusing rather "
+                "than treating a missing session id as 'not sandboxed' (#1053); pass the "
+                "session id in `lloyd/session_id` `_meta`", "sessionless", sid)})
+            return
+        # A tightening of the STAND-IN, not a claim about the shipped server: an ordinary
+        # non-sandboxed session would be allowed to write by `main.py`'s sandbox guard. This
+        # child refuses one anyway, because the armed scope is the grant that lets a SANDBOXED
+        # trial write into its own copy, and accepting an id the sandbox does not class as a
+        # bench/eval trial would let a node read a granted write as proof the trial was
+        # sandbox-classed when it never was.
+        prefixes = ((REQUIRE_PREFIX,) if REQUIRE_PREFIX
+                    else _tool_sandbox.SANDBOXED_ID_PREFIXES)
+        if not sid.startswith(tuple(prefixes)):
+            _note("refused-unsandboxed")
+            self._send(200, {"jsonrpc": "2.0", "id": rpc.get("id"), "result": _denied(
+                name, f"session {sid!r} is not classed as a bench or eval trial "
+                      f"(SANDBOXED_ID_PREFIXES)", "tool_sandbox", sid)})
+            return
         if name not in STORES:
             self._send(400, {"ok": False, "error": "unknown tool"})
             return
@@ -491,6 +619,7 @@ class Handler(BaseHTTPRequestHandler):
         target = store / f"proof-{trial}.md"
         target.write_text(f"# {name}\\n\\n{marker}\\n", encoding="utf-8")
         _note("wrote")
+        _note_session(f"{name} {sid}")
         self._send(200, {"jsonrpc": "2.0", "id": rpc.get("id"), "result": {"content": [
             {"type": "text", "text": json.dumps({"ok": True, "record_path": str(target)})}]}})
 
@@ -504,7 +633,10 @@ server.serve_forever()
 #: the wanted ones are set, so "booted on the house" means *no override present* and not
 #: whatever the gate's own environment happened to export; and stripped from the parent for
 #: the duration of a node, so the credential `proof.auth_headers` resolves is the probe file
-#: and never an ambient token this test process inherited.
+#: and never an ambient token this test process inherited — with one deliberate exception:
+#: while the boot node runs `main` it re-points the parent's `LLOYD_MCP_TOKEN_FILE` at
+#: `DECOY_TOKEN`, because a parent and a child holding the SAME credential file is what made
+#: the boot's choice of credential unobservable there (see `DECOY_TOKEN`).
 _ROUTED_ENV = ("LLOYD_DATA", "LLOYD_VAULT_ROOT", "LLOYD_VAULT", "LLOYD_FACTS_ROOT",
                "LLOYD_KG_DB", "LLOYD_MCP_TOKEN")
 
@@ -513,13 +645,37 @@ _ROUTED_ENV = ("LLOYD_DATA", "LLOYD_VAULT_ROOT", "LLOYD_VAULT", "LLOYD_FACTS_ROO
 #: instead of rejecting it as malformed and answering every request with 401.
 PROBE_TOKEN = "probe-token-0123456789abcdef"
 
+#: A second, DIFFERENT credential for the process that runs this file to hold while the boot
+#: node calls `main`. `read_token`/`auth_headers` (`agent_mcp/aggregator_auth.py:306-322`) cache
+#: nothing, so which file the parent points at decides what a fall-back to
+#: `auth_headers(handle.url + '/state')` actually puts on the wire.
+#:
+#: It exists because the first version of the boot node set the child's and the parent's
+#: `LLOYD_MCP_TOKEN_FILE` to the SAME file, so the two candidate sources of the trial
+#: credential carried the same bytes and the node could not tell them apart: measured on
+#: SM_20261106_223337, replacing `spawner.auth_headers(handle.env)` with
+#: `auth_headers(handle.url + '/state')` left
+#: `test_the_cli_boots_its_own_aggregator_from_a_built_fixture_and_stops_it` GREEN, and the
+#: review rung scored clause 3's credential half "not gradeable, because the mutation is
+#: equivalent under the test's own credential-sharing". Under this token the two differ, so
+#: that fall-back gets its 401 on the state read and the node's `code == 0` is the assertion
+#: that reddens.
+DECOY_TOKEN = "decoy-token-fed-to-the-parent-process-only"
+
 
 def _live_stub(tmp_path: Path):
     """The four watched trees as small stand-ins, same shapes, same resolution rules."""
     vault = tmp_path / "live-vault"
+    (vault / "lloyd").mkdir(parents=True)
     (vault / "memory").mkdir(parents=True)
     (vault / "backlog").mkdir(parents=True)
-    (vault / "memory" / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+    # The memory stand-in is `lloyd/`, the directory the shipped writer resolves
+    # (`agent_mcp/session.py:58 MEMORIES_ROOT = vault_root()/'lloyd'`), and `memory/` is
+    # present too as the daily-notes directory the writer does NOT use — the two--directory
+    # shape is what lets the leak node tell a watched tree from a merely adjacent one
+    # (#3863 clause 4).
+    (vault / "lloyd" / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+    (vault / "memory" / "2026-11-07.md").write_text("# daily\n", encoding="utf-8")
     # A real backlog holds files; an empty stand-in would be refused as vacuous, which is
     # the clause-2 rule working, not the state a trial runs in.
     (vault / "backlog" / "1-something.md").write_text("# 1\n", encoding="utf-8")
@@ -534,18 +690,30 @@ def _live_stub(tmp_path: Path):
 class _Server:
     """A booted stand-in: its base url, and the log of what reached its tool endpoint."""
 
-    def __init__(self, url: str, post_log: Path):
+    def __init__(self, url: str, post_log: Path, session_log: Path | None = None,
+                 token_file: Path | None = None):
         self.url = url
         self.post_log = post_log
+        self.session_log = session_log
+        #: The credential file the child was started with, so a node can hand it to a process
+        #: that has to authenticate and does not inherit this one's environment.
+        self.token_file = token_file
 
     def posts(self) -> list[str]:
         return ([] if not self.post_log.exists()
                 else self.post_log.read_text(encoding="utf-8").split())
 
+    def sessions(self) -> list[str]:
+        """`<tool> <id>` per ACCEPTED call — the server's own account of who it wrote for."""
+        return ([] if self.session_log is None or not self.session_log.exists()
+                else [line.strip() for line in
+                      self.session_log.read_text(encoding="utf-8").splitlines() if line.strip()])
+
 
 @contextlib.contextmanager
 def _aggregator(tmp_path: Path, roots: dict, *, write_scope=("memory_add", "fact_add",
-                                                             "backlog_write_task")):
+                                                             "backlog_write_task"),
+                require_prefix: str = ""):
     """Boot the stand-in with `roots` as its `app.paths`, and the credential on file.
 
     A `None` value means "let the child resolve that root itself", which is how a node gets a
@@ -556,10 +724,14 @@ def _aggregator(tmp_path: Path, roots: dict, *, write_scope=("memory_add", "fact
     script = tmp_path / "standin_aggregator.py"
     script.write_text(_STANDIN_AGGREGATOR, encoding="utf-8")
     post_log = tmp_path / "post-log.txt"
+    session_log = tmp_path / "session-log.txt"
 
     child_env = {key: value for key, value in os.environ.items() if key not in _ROUTED_ENV}
     child_env["STANDIN_REPO"] = str(REPO)
     child_env["STANDIN_POST_LOG"] = str(post_log)
+    child_env["STANDIN_SESSION_LOG"] = str(session_log)
+    if require_prefix:
+        child_env["STANDIN_REQUIRE_PREFIX"] = require_prefix
     child_env["LLOYD_MCP_TOKEN_FILE"] = str(token_file)
     child_env["LLOYD_BENCH_WRITE_SCOPE"] = ",".join(write_scope)
     for key, var in (("vault", "LLOYD_VAULT_ROOT"), ("data", "LLOYD_DATA"),
@@ -583,7 +755,7 @@ def _aggregator(tmp_path: Path, roots: dict, *, write_scope=("memory_add", "fact
         if not url:
             raise RuntimeError("stand-in aggregator did not report a port: "
                                + (child.stderr.read() or "")[:3000])
-        yield _Server(url, post_log)
+        yield _Server(url, post_log, session_log, token_file)
     finally:
         child.terminate()
         try:
@@ -641,8 +813,9 @@ class _TrialRun:
         """`main()`'s own wiring: real `fetch_state_json`, real `mcp_tool_call`, real clock."""
         self.record = proof.run_proof(
             state=self.state, trees=self.trees,
-            call_tool=lambda name, args: proof.mcp_tool_call(
-                self.server.url + "/mcp", name, args, timeout=20.0),
+            call_tool=lambda name, args, session_id="": proof.mcp_tool_call(
+                self.server.url + "/mcp", name, args, session_id=session_id,
+                timeout=20.0),
             fixture_root=self.fixture.root, sleep=time.sleep, clock=time.monotonic,
             window_seconds=window_seconds, trial_id="abc")
         return self.record
@@ -650,7 +823,8 @@ class _TrialRun:
 
 @contextlib.contextmanager
 def _trial(tmp_path: Path, roots_for, *, write_scope=("memory_add", "fact_add",
-                                                      "backlog_write_task")):
+                                                      "backlog_write_task"),
+           require_prefix: str = ""):
     """One assembled trial: real builder, real subprocess server, state read over the wire.
 
     Yields a `_TrialRun` with the state already fetched (that read is the guard's input, so
@@ -658,7 +832,7 @@ def _trial(tmp_path: Path, roots_for, *, write_scope=("memory_add", "fact_add",
     trees. Call `.run()` to drive `run_proof` exactly as the CLI does.
     """
     vault, data = _live_stub(tmp_path)
-    trees = {"memory": vault / "memory", "backlog": vault / "backlog",
+    trees = {"memory": vault / "lloyd", "backlog": vault / "backlog",
              "facts": data / "_pipeline" / "vault-derived" / "facts", "data": data}
     # The builder requires the copy inside the data root's own fixtures area
     # (`bench_fixture.py:268-270`), which puts it inside the watched `data` tree — and that
@@ -670,7 +844,7 @@ def _trial(tmp_path: Path, roots_for, *, write_scope=("memory_add", "fact_add",
     fixture.init_git()
     try:
         with _aggregator(tmp_path, roots_for(fixture, tmp_path),
-                         write_scope=write_scope) as server:
+                         write_scope=write_scope, require_prefix=require_prefix) as server:
             run = _TrialRun(server, proof.fetch_state_json(server.url + "/state"),
                             trees, fixture)
             yield run
@@ -838,15 +1012,21 @@ def test_the_wire_refuses_a_wrong_or_absent_credential_before_it_refuses_the_too
                                      {"entry": "absent credential abc"}, timeout=20.0,
                                      headers={})
         assert absent["ok"] is False and "401" in absent["detail"], absent
+        # A bench-prefixed id, because this node is about the credential and the stand-in,
+        # like the shipped server, will not let a state-changing call through without a
+        # session id at all (#1053). The two refused calls above deliberately carry none:
+        # they die at the credential gate, which is upstream of the session gate, and that
+        # ordering is what the `posts()` shape below is asserting.
         good = proof.mcp_tool_call(server.url + "/mcp", "memory_add",
-                                   {"entry": "carried by the file read abc"}, timeout=20.0)
+                                   {"entry": "carried by the file read abc"}, timeout=20.0,
+                                   session_id="bench_credential-probe")
         assert good["ok"] is True and json.loads(good["text"])["record_path"].endswith(
             "proof-abc.md"), good
 
         assert server.posts() == ["posted", "unauthorised"] * 2 + ["posted", "wrote"]
         assert "refused-scope" not in server.posts(), (
             "an unauthenticated POST must be refused before the scope check runs")
-        written = sorted(p.name for p in vault.glob("memory/proof-*.md"))
+        written = sorted(p.name for p in vault.glob("lloyd/proof-*.md"))
         assert written == ["proof-abc.md"], (
             "the two refused calls must have written nothing to the store")
 
@@ -857,3 +1037,611 @@ def test_the_wire_refuses_a_wrong_or_absent_credential_before_it_refuses_the_too
         os.environ["LLOYD_MCP_TOKEN_FILE"] = str(other)
         with pytest.raises(proof.ProofRefused):
             proof.fetch_state_json(server.url + "/state")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #3863 — the session-id carrier, the self-booted aggregator, the writer's own
+# memory directory, and the refusal that is not a success.
+#
+# Four clauses, one hazard each, and every one of them is a FALSE GREEN:
+#   * a `tools/call` with no `_meta` is refused by the shipped handler as a BODY, not as a
+#     JSON-RPC error, so the pre-round reader scored all three refusals as successes;
+#   * an id without a sandboxed prefix is refused the same way, by the next guard;
+#   * an aggregator this script never boots is an aggregator whose flags were never read;
+#   * the memory tree used to be a directory full of files `memory_add` cannot write, so it
+#     was neither vacuous (never refused) nor watchable (never changed).
+# A test that only agrees with its own stub proves none of that, so each node below either
+# reads a value the shipped code computes (`_bound_session_id`, `SANDBOXED_ID_PREFIXES`,
+# `_refused_call`, `MEMORIES_ROOT`) or drives a subprocess that does.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _wire_body(rpc_body, session_id):
+    """`rpc_body`'s params as the JSON layer will actually put them on the wire."""
+    return json.loads(json.dumps(rpc_body("memory_add", {"entry": "e"},
+                                          session_id=session_id)))["params"]
+
+
+def test_the_session_id_rides_in_params_meta_and_the_wire_refuses_a_call_without_one(tmp_path):
+    """Clause 1: the carrier is on the wire, and the wire says so by refusing without it.
+
+    Two halves, because the unit half and the wire half fail for different reasons. The unit
+    half pins the KEY — and pins it to the shipped constant rather than to this file's
+    spelling, so renaming `META_SESSION_ID` on the server moves the test and a proof that
+    quietly stopped identifying itself does not. The wire half is the boundary crossing: the
+    same body, sent, with the id present and absent.
+
+    The absent half is what #3689's proof could never have caught. A sessionless
+    state-changing call is refused by `agent_mcp/main.py:594-602` (`guard="sessionless"`,
+    body built by `_refused_call` at `:768`), and that body arrives as a normal JSON-RPC
+    *result* whose only content text is `{"error": "Tool call denied: …"}` — there is no
+    `error` member in the envelope, so `ok = "error" not in payload` returned True. Three
+    refusals write nothing, so all four live trees stay pristine and the equal-length control
+    explains every path: the trial that proved nothing was the trial that printed PASS.
+    """
+    import agent_mcp.main as server_main
+
+    params = _wire_body(proof.rpc_body, "bench_carry-probe")
+    assert params["_meta"] == {proof.META_SESSION_ID: "bench_carry-probe"}, params
+    # And read back by it: `_bound_session_id` is the function the shipped dispatch hands
+    # `ctx.meta` to, so feeding it the body this script builds proves the two ends agree on
+    # the key and on which field wins. It does NOT prove the SDK copies `params._meta` into
+    # `ctx.meta` for a single-shot POST — that seam stays open here, and only
+    # tests/test_autoresearch_bench_spawner.py boots a real child, which never POSTs.
+    assert server_main._bound_session_id({"entry": "e"}, params["_meta"]) == \
+        "bench_carry-probe", params
+    assert proof.META_SESSION_ID == server_main.META_SESSION_ID, (
+        "the key this script writes must be the key the handler reads; if these drift, the "
+        "trial is sessionless again and every refusal it took will have read as a write")
+    assert "lloyd/session_id" in params["_meta"], params
+
+    # The id is per call, never left over in the envelope: `rpc_body` builds each body fresh,
+    # and an id that leaked from one call into the next would attribute a write to the wrong
+    # session in the one record whose job is to say who did what.
+    assert "_meta" not in _wire_body(proof.rpc_body, ""), (
+        "an empty id must not put an empty _meta on the wire — the handler treats "
+        "a present-but-empty id exactly like an absent one")
+
+    with _trial(tmp_path, _copy_roots) as run:
+        url = run.server.url + "/mcp"
+
+        bare = proof.mcp_tool_call(url, "memory_add", {"entry": "no id at all"}, timeout=20.0)
+        assert bare["ok"] is False, (
+            f"a sessionless state-changing call was recorded as a success: {bare}")
+        assert "Tool call denied" in bare["denial"], bare
+        assert "error" not in bare["response"], (
+            "the refusal is a JSON-RPC result, not an error member — which is precisely why "
+            f"reading only `error` was the bug: {bare['response']}")
+
+        carried = proof.mcp_tool_call(url, "memory_add", {"entry": "carried"},
+                                      session_id="bench_carry-probe", timeout=20.0)
+        assert carried["ok"] is True, carried
+        assert run.server.sessions() == ["memory_add bench_carry-probe"], (
+            "the server's own log must name the session it charged the write to")
+        assert "refused-sessionless" in run.server.posts(), (
+            "the refused call must be visible in the arrival order, before the accepted one")
+
+
+def test_every_trial_call_carries_a_bench_prefixed_id_the_record_and_the_server_both_name(tmp_path):
+    """Clause 2: the prefix comes from the sandbox's rule, and the record shows what was sent.
+
+    `SANDBOXED_ID_PREFIXES` (`_tool_sandbox.py:60`, matched at `:170`) is what classes a
+    session as a bench/eval trial, so this reads the tuple rather than typing `bench_`: a
+    future prefix is honoured here on the day it is added, and — the part that matters —
+    `trial_session_id` cannot disagree with the server about which ids are trials, which is
+    the disagreement that would make every call refuse while looking like a passing trial.
+
+    The record carries the id that was SENT, not the one that was asked for, and the node
+    checks the server's own accepted-session log against it. An artefact naming a different
+    session from the one the handler charged the writes to is an artefact that cannot answer
+    the only question a leak review asks.
+    """
+    from agent_mcp import _tool_sandbox
+
+    sandboxed = _tool_sandbox.SANDBOXED_ID_PREFIXES
+    assert "bench_" in sandboxed, sandboxed
+    for raw in ("abc", "durable-trial-7"):
+        out = proof.trial_session_id(raw)
+        assert out.startswith("bench_"), out
+        assert out.startswith(tuple(sandboxed)), (
+            f"{raw!r} became {out!r}, which the server would class as an ordinary chat "
+            "session — and an ordinary session is not sandboxed, so it would have been "
+            "allowed to write to whatever its roots name")
+    for already in ("bench_x", "pt-eval-x"):
+        assert proof.trial_session_id(already) == already, (
+            f"an id already classed as a trial must arrive unchanged, not re-prefixed into "
+            f"{proof.trial_session_id(already)!r}")
+    assert proof.trial_session_id(proof.trial_session_id("abc")) == proof.trial_session_id("abc")
+
+    with _trial(tmp_path, _copy_roots) as run:
+        res = run.run()
+        sid = res["session_id"]
+        assert sid.startswith("bench_"), sid
+        assert sid.startswith(tuple(sandboxed)), sid
+        assert run.server.sessions() == [f"{name} {sid}" for name in
+                                        ("memory_add", "fact_add", "backlog_write_task")], (
+            f"the server charged the writes to another session: {run.server.sessions()} vs "
+            f"recorded {sid}")
+        assert [c["session_id"] for c in res["tool_calls"]] == [sid] * 3, (
+            "every recorded call must name the session it was sent with, so a reader of a "
+            "leak can attribute each write to one session")
+
+
+def test_a_trial_in_which_every_write_was_refused_can_never_be_recorded_pass(tmp_path):
+    """Clause 5: refusals are recorded as not-ok, so a clean live side cannot carry a PASS.
+
+    The child answers every call with the body the SHIPPED `_refused_call` builds — the node
+    asks it to require a prefix no trial id can carry, so the refusal comes from the real
+    function on the real path rather than from a dict this file typed.
+
+    This is the shape that would have made #3689's proof certify itself: three refusals write
+    nothing, so all four live trees are pristine, the control is the same length and explains
+    zero paths, and every leg of the old verdict was satisfied. The only thing that can
+    condemn it is knowing that a body saying `Tool call denied` is not a write — and, second,
+    that the copy received nothing it was supposed to receive.
+    """
+    with _trial(tmp_path, _copy_roots, require_prefix="task:") as run:
+        res = run.run()
+        assert res["verdict"] == "FAIL", (
+            f"an all-refused trial was recorded PASS: {res['reason']}")
+        assert [c["ok"] for c in res["tool_calls"]] == [False] * 3, res["tool_calls"]
+        for call in res["tool_calls"]:
+            assert "Tool call denied" in call["denial"], call
+            assert call["session_id"] == res["session_id"], call
+        assert "refused by" in res["reason"], (
+            f"the reason must name the refusals, not just the clean trees: {res['reason']}")
+
+        # The trap itself: the live side really IS clean, and that cleanliness is worthless.
+        assert res["windows"]["unexplained_count"] == 0, res["windows"]
+        assert res["copy_side"]["landed_by_git_diff"] == [], res["copy_side"]
+        # A bare count would let a later reader file this as "inconclusive, nothing happened",
+        # which is the misfiling clause 5 exists to prevent, so the leg has to name the calls
+        # AND carry the server's own words for each. `verdict` builds one entry per refused
+        # call as "<tool>: <body>", the body being `_refused_call`'s JSON — so the tool name
+        # and the marker sit in the same entry but never adjacent. Cutting the leg to
+        # "3 tool call(s) were refused" reddens the first assertion; dropping the quoted body
+        # from it reddens the second.
+        for tool in ("memory_add", "fact_add", "backlog_write_task"):
+            assert f"{tool}: " in res["reason"], (
+                f"the refusal leg must name {tool}, not just count the refusals: "
+                f"{res['reason']}")
+        assert res["reason"].count(proof.DENIAL_MARKER) == 3, (
+            "one quoted denial per refused call, so the artefact says WHY each was refused: "
+            f"{res['reason']}")
+        assert run.server.posts().count("refused-unsandboxed") == 3, run.server.posts()
+        assert run.server.sessions() == [], (
+            "a refused call must not appear in the accepted-session log")
+        written = list((run.trees["memory"]).glob("proof-*.md"))
+        assert written == [], f"a refused call wrote: {written}"
+
+
+def test_a_tool_call_denied_body_is_recorded_not_ok_across_a_socket(monkeypatch):
+    """Clause 5 at the reader itself: no subprocess, no fixture, and nothing to boot.
+
+    `_refused_call` (`agent_mcp/main.py:768-788`) answers a guard refusal as a normal JSON-RPC
+    **result**, so the decoded body has no `error` member at all and its only content text is
+    `{"error": "Tool call denied: …", "tool": …}`. That is the premise this node pins first: on
+    the pre-#3863 reader (`ok = "error" not in payload`) these three calls were three
+    successes, and the trial PASSed on trees that were clean precisely because nothing was
+    written.
+
+    The body is built by the shipped function and serialized the way the shipped model
+    serializes it (`model_dump()`), not typed here, and served over a real socket so
+    `mcp_tool_call`'s own `ok` expression is what is under test. Both spellings of the error
+    flag go over that socket — `is_error` is what `CallToolResult.model_dump()` yields on this
+    mcp version, `isError` is the MCP wire name, and `agent_mcp/main.py:_result_is_error`
+    (:369-380) exists because both occur. A third response, an ordinary successful write, is
+    served too: a reader that condemned every body would keep this trial honest but useless,
+    so the arm that must stay green is the one that is not a refusal.
+
+    `denial_journal.record` is stilled for the duration because `_refused_call` writes a row
+    through it, and this node is in the product's own process: the body is what is being
+    measured, and a test row in the live journal is not.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from agent_mcp.main import _refused_call
+
+    monkeypatch.setattr("app.harness.denial_journal.record", lambda **_kw: None)
+    refused = _refused_call(
+        "memory_add",
+        "a call that can change state arrived with no session id", guard="sessionless",
+        session_id=None)
+    snake = refused.model_dump()
+    camel = dict(snake, isError=snake["is_error"])
+    del camel["is_error"]
+    accepted = dict(snake, is_error=False)
+    accepted["content"] = [{"type": "text",
+                            "text": '{"record_path": "/copy/lloyd/proof-x.md"}'}]
+
+    def _url_for(result_body: dict) -> str:
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):   # noqa: A002 — base's own name
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+                out = json.dumps({"jsonrpc": "2.0", "id": 1,
+                                  "result": result_body}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.handle_request, daemon=True).start()
+        return f"http://127.0.0.1:{server.server_port}/mcp"
+
+    # The premise, first, asserted on KEYS and not on the text: a refusal really is a
+    # `result`, the JSON-RPC envelope carries no `error` member and neither does the result
+    # object, so the pre-#3863 test `ok = "error" not in payload` was TRUE of it. The word
+    # `error` does appear in the body — inside the content text, as the key of the JSON the
+    # guard stringifies (`{"error": "Tool call denied: …", "tool": …}`), which is exactly why a
+    # reader has to look at the marker and the flag rather than at the envelope.
+    assert "error" not in snake, (
+        f"the shipped refusal must not carry an `error` field of its own: {snake}")
+    assert snake["content"][0]["text"].startswith('{"error": "Tool call denied'), (
+        f"the marker lives in the content text, and this node's reader arm depends on it: "
+        f"{snake['content'][0]['text']}")
+
+    # A third form: the marker with NO error flag at all — what a proxy that re-wraps the
+    # content and drops the flag sends. Only the marker arm of `denied_call` can see it, so
+    # without this row the flag arms could stay green while the marker arm was dead code.
+    rewrapped = {"content": [{"type": "text", "text": snake["content"][0]["text"]}]}
+    for label, body in (("is_error", snake), ("isError", camel), ("marker-only", rewrapped)):
+        call = proof.mcp_tool_call(_url_for(body), "memory_add", {},
+                                   session_id="bench-clause5")
+        # The envelope as actually received: a refusal arrives as a `result`, so the JSON-RPC
+        # `error` member the old reader looked for is absent on the wire and not just in
+        # principle.
+        assert "error" not in call["response"], (
+            f"the {label} response really did carry a JSON-RPC `error` member, which would "
+            f"mean the pre-#3863 reader was fine after all: {call['response']}")
+        assert call["ok"] is False, f"a {label} refusal was recorded as a write: {call}"
+        assert "Tool call denied" in call["denial"], (
+            f"the {label} refusal is not in the record's `denial`: {call}")
+        assert proof.denied_call({"result": body}) is not None, label
+
+    ok_call = proof.mcp_tool_call(_url_for(accepted), "memory_add", {},
+                                  session_id="bench-clause5")
+    assert ok_call["ok"] is True, f"a clean write was read as a refusal: {ok_call}"
+    assert proof.denied_call({"result": accepted}) is None
+    assert proof.denied_call({"result": {"content": [{"type": "text",
+                                                     "text": "fine"}]}}) is None
+
+
+def test_the_copy_side_matcher_routes_memory_to_the_writers_own_directory():
+    """Clause 4's other side, in-process: the copy's git-diff witness matches `lloyd/`.
+
+    `copy_side_witness` answers "did the write land in the COPY?" by matching each
+    `git diff --name-only` path against the directory of the store each tool was asked to write,
+    through `_under_store` → `store_dirname`. For `memory` that directory is the basename of the
+    shipped writer's `MEMORIES_ROOT` — `lloyd/` — and not the word `memory`, which in this vault
+    names the dated daily-notes directory `memory_add` cannot write.
+
+    Keyed on the label, a probe that landed in the copy's `lloyd/MEMORY.md` matched NO store, and
+    `landed_by_git_diff` — the field the owed on-box record is read for, and the only leg that
+    can tell a write-in-the-copy from a trial that wrote nothing at all — came back without
+    `memory_add` on a trial that had just written it. That was the same bug clause 4 names on the
+    live side, present on both sides of the boundary at once (item #3863,
+    `## Findings (round SM_20261106_213639)`).
+
+    The live-tree half is `test_the_memory_tree_is_the_directory_the_shipped_writer_resolves` and
+    the end-to-end half is the trial node above it; this one is here so the matcher alone, with
+    no git repo and no child process, is what a change to it has to answer to.
+    """
+    from agent_mcp.session import MEMORIES_ROOT
+
+    intended = {"memory_add": "memory", "fact_add": "facts",
+                "backlog_write_task": "backlog"}
+    written = proof.copy_side_witness(None, intended=intended,
+                                      diff_paths=["lloyd/MEMORY.md",
+                                                  "backlog/9-proof.md"])
+    assert "memory_add" in written["landed_by_git_diff"], (
+        f"a write in the copy's {Path(MEMORIES_ROOT).name}/ directory was not credited to "
+        f"memory_add: {written}")
+    assert "backlog_write_task" in written["landed_by_git_diff"], written
+    assert written["not_landed_by_git_diff"] == ["fact_add"], (
+        "facts lives under the fixture's DATA root, outside the copied vault's git repo, so it "
+        f"is the one store this witness cannot see: {written}")
+
+    daily = proof.copy_side_witness(None, intended=intended,
+                                    diff_paths=["memory/2026-11-07.md"])
+    assert daily["landed_by_git_diff"] == [], (
+        "a change in the daily-notes directory credited memory_add: that is the directory the "
+        f"writer does NOT use, so crediting it is a witness that passes on a non-write: {daily}")
+    assert daily["landed"] is False and daily["not_landed_by_git_diff"] == [
+        "backlog_write_task", "fact_add", "memory_add"], daily
+    assert proof.store_dirname("memory") == Path(MEMORIES_ROOT).name != "memory", (
+        "the matcher and the watched tree must agree on one name, and it is the writer's")
+
+
+def test_the_memory_tree_is_the_directory_the_shipped_writer_resolves(tmp_path):
+    """Clause 4 itself: the watched memory tree IS `MEMORIES_ROOT`, and not `VAULT_ROOT/'memory'`.
+
+    The clause names the live side, so the live side is asserted here first, in this process,
+    against the shipped attribute and against the wrong path spelled out — nothing is booted
+    and nothing is patched, so the assertion is readable without running the file.
+    `test_trees_resolve_through_app_paths_and_an_empty_tree_is_a_refusal` covers the other
+    shape: all four roots through a stand-in `app.paths`, which is what proves resolution
+    happens per call rather than at import.
+
+    Then the copy-side half, which is where the same bug wore different clothes: the stand-in
+    aggregator's memory store is `agent_mcp.session.MEMORIES_ROOT` as resolved BY THE CHILD on
+    its own roots, so a trial's copy-side witness is watching the directory the tool can
+    actually reach. If the two ever disagree, the disagreement has to fail here rather than
+    show up as a `copy_side` verdict that silently omits `memory` — which is the failure mode
+    the live-side bug had, and it would have been invisible on both sides at once.
+    """
+    from agent_mcp.session import MEMORIES_ROOT as shipped_memories_root
+    from app import paths as app_paths
+
+    wrong = Path(app_paths.VAULT_ROOT) / "memory"
+    live = proof.durable_write_trees()["memory"]
+    assert live == Path(shipped_memories_root), (
+        f"the memory tree watched for a leaked write is {live}, not the directory the shipped "
+        f"writer resolves ({shipped_memories_root})")
+    assert live != wrong, (
+        f"the pre-#3863 entry named {wrong}, the daily-notes directory `memory_add` cannot "
+        "write and which is not empty, so the vacuity refusal could never fire on it — a leak "
+        f"into {wrong / 'MEMORY.md'} would have read CLEAN")
+
+    with _trial(tmp_path, _copy_roots) as run:
+        res = run.run()
+        memory_paths = [json.loads(c["result_text"])["record_path"]
+                        for c in res["tool_calls"] if c["tool"] == "memory_add"]
+        assert len(memory_paths) == 1, res["tool_calls"]
+        rel = Path(memory_paths[0]).relative_to(run.fixture.vault.resolve())
+        assert rel.parts[0] == proof.store_dirname("memory") == "lloyd", (
+            f"memory_add landed in {rel}, not in the directory the shipped writer names")
+        assert "memory_add" in res["copy_side"]["landed_by_git_diff"], res["copy_side"]
+
+
+_MISSING = object()
+
+
+@contextlib.contextmanager
+def _patched(obj, **named):
+    """Set attributes on `obj` for the duration of the block and restore them after."""
+    undo = [(name, getattr(obj, name, _MISSING)) for name in named]
+    for name, value in named.items():
+        setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        for name, old in reversed(undo):
+            if old is _MISSING:
+                delattr(obj, name)
+            else:
+                setattr(obj, name, old)
+
+
+class _FakeHandle:
+    """What `bench_spawner.spawn` returns, minus the subprocess.
+
+    Only the parts `boot_fixture_aggregator` and `main` use: `url`, `env`, `stop()`. The url is
+    the REAL stand-in server's, and it is a bare origin (`bench_spawner.py:362` builds
+    `f"http://{host}:{chosen}"`), because the point of this seam is that the script must append
+    `/mcp` itself — a handle whose url already carried the route would let a script that forgot
+    the suffix pass.
+    """
+
+    def __init__(self, url: str, env: dict):
+        self.url = url
+        self.env = env
+        self.stop_calls = 0
+
+    def stop(self, **_kw):
+        self.stop_calls += 1
+        return (0, None)
+
+
+class _FakeFixture:
+    """The `BenchFixture` shape as far as the boot reads it: a directory and its scopes."""
+
+    def __init__(self, root: Path, scopes):
+        self.root = root
+        self.writes = list(scopes)
+
+
+@contextlib.contextmanager
+def _fake_spawner(handle: _FakeHandle):
+    """Stand in for the two spawner entry points the boot uses; leave `auth_headers` the real one.
+
+    `auth_headers` stays real on purpose. It is the function that turns the CHILD's env into a
+    credential, and faking it would hide the mismatch this seam has to get right: the token
+    `spawn` injects into the child is not the one this process reads off its own
+    `LLOYD_MCP_TOKEN_FILE`. What is stood in for is the process launch, whose own behaviour —
+    the live-root guards, the fixture marker test, the credential injection, the wait for
+    `state_is_copied` — is `tests/test_autoresearch_bench_spawner.py`'s subject and not this
+    file's. What is tested HERE is that this script goes THROUGH that module, in that order,
+    appends `/mcp` to a bare origin, and stops what it started.
+    """
+    from scripts.autoresearch import bench_spawner as real
+
+    calls: list[tuple] = []
+
+    def fixture_from_dir(root, scopes):
+        calls.append(("fixture_from_dir", Path(root), tuple(scopes)))
+        return _FakeFixture(Path(root), scopes)
+
+    def spawn(*, fixture_root, scopes):
+        calls.append(("spawn", fixture_root, tuple(scopes)))
+        return handle
+
+    with _patched(real, fixture_from_dir=fixture_from_dir, spawn=spawn):
+        yield calls
+
+
+def test_the_cli_boots_its_own_aggregator_from_a_built_fixture_and_stops_it(tmp_path, capsys,
+                                                                            monkeypatch):
+    """Clause 3, the boot half: given no urls, `main()` brings the server up and takes it down.
+
+    The spawner is stood in for at its own function boundary while everything the boot drives
+    is real: the state read and the three tool calls cross a socket to a subprocess rooted on
+    the copy, the record is written by `main`, and the copy-side witness is a real `git diff`
+    over a fixture `build_fixture` built. This is the composition on the other side of the
+    guard — the row the first attempt of this item could not produce because `main` had no
+    boot path and every prior node entered through `run_proof`.
+
+    While `main` runs, THIS process holds a different credential from the child
+    (`DECOY_TOKEN`, written to a file and pointed at through `LLOYD_MCP_TOKEN_FILE`, restored
+    by the context before the `/mcp` probe below). Without that split the two sources of the
+    trial credential are the same bytes and the node cannot see which one the boot used — see
+    `DECOY_TOKEN`. It is the only thing that makes the credential half of clause 3 falsifiable:
+    `boot_fixture_aggregator` may ask the child with `spawner.auth_headers(handle.env)` or fall
+    back to `auth_headers(handle.url + '/state')`, and only one of those is answered.
+    """
+    with _trial(tmp_path, _copy_roots) as run:
+        handle = _FakeHandle(run.server.url,
+                             {"LLOYD_MCP_TOKEN_FILE": str(run.server.token_file)})
+        out = tmp_path / "record.json"
+        decoy = tmp_path / "parent-token"
+        decoy.write_text(DECOY_TOKEN + "\n", encoding="utf-8")
+        with _fake_spawner(handle) as calls:
+            with _patched(proof, durable_write_trees=lambda *a, **k: dict(run.trees)):
+                with monkeypatch.context() as gated:
+                    gated.setenv("LLOYD_MCP_TOKEN_FILE", str(decoy))
+                    code = proof.main(["--fixture-root", str(run.fixture.root),
+                                       "--window-seconds", "0",
+                                       "--trial-id", "cli-boot", "--out", str(out)])
+        assert code == 0, (
+            f"exit {code}, expected 0: with the parent process holding a different credential "
+            f"than the child, a boot that asks the child with its OWN credential is answered "
+            f"401 by the state read and refuses. stderr was: {capsys.readouterr().err}")
+        # Snapshot the endpoint's log NOW, before this node sends anything of its own. The
+        # stand-in notes `posted` on every POST it receives, including the ones it 404s, so a
+        # suffix probe sent later would land in the same log. What is being pinned is that
+        # `main`'s three trial calls each reached `/mcp` and each wrote: three `posted` paired
+        # with three `wrote`, and no `bad-path` or `refused-*` token anywhere in between. Had
+        # `main` POSTed the bare origin, Starlette's 404 would have made this
+        # ['posted', 'bad-path'] * 3 and `code` 1, not 0.
+        trial_posts = run.server.posts()
+        assert trial_posts == ["posted", "wrote"] * 3, trial_posts
+        assert [(c[0], c[2]) for c in calls] == [
+            ("fixture_from_dir", proof.SPAWN_SCOPES),
+            ("spawn", proof.SPAWN_SCOPES)], (
+            "the boot must re-derive the fixture from the directory with the scopes it will "
+            f"ask to be armed, then spawn on that fixture, in that order: {calls}")
+        assert str(calls[0][1]) == str(run.fixture.root), calls[0]
+        # `spawn` takes the FIXTURE, not the path — the `BenchFixture` the previous call
+        # returned, which is what carries the roots the child is booted on.
+        assert calls[1][1] is not None and Path(calls[1][1].root) == run.fixture.root, calls[1]
+
+        # The scopes have to be ones the tools under test can actually be armed with, or the
+        # trial's three calls all die at the scope check and the record reads as a
+        # fully-refused run. Read from the shipped table, not from this file's opinion.
+        from scripts.autoresearch.bench_runner_sdk import WRITE_SCOPE_TOOLS
+        for row in proof.PROOF_TOOLS:
+            assert WRITE_SCOPE_TOOLS[row["tool"]] in proof.SPAWN_SCOPES, (
+                f"{row['tool']} could never be armed by {proof.SPAWN_SCOPES}: the table names "
+                f"{WRITE_SCOPE_TOOLS[row['tool']]!r} as its scope word")
+
+        # The handle is a bare origin (`bench_spawner.py:362`), so `/mcp` is the script's own
+        # work — and the stand-in 404s any other path the way Starlette does, which is what
+        # makes the suffix falsifiable rather than assumed. `trial_posts` above is the
+        # falsifier: POSTing `handle.url` alone gives three 404s, so `trial_posts` reads
+        # ['posted', 'bad-path'] * 3 and `code` is 1. The probe below then proves the OTHER
+        # half — that the stand-in really does refuse a non-`/mcp` path, so the token
+        # `bad-path` in `trial_posts` would have meant a missing suffix and not a server that
+        # answers everything.
+        assert not handle.url.endswith("/mcp"), handle.url
+        bare_origin = proof.mcp_tool_call(handle.url, "memory_add", {"entry": "e"},
+                                         session_id="bench_suffix-probe", timeout=20.0)
+        assert bare_origin["ok"] is False and "404" in bare_origin["detail"], bare_origin
+        assert "bad-path" in run.server.posts(), (
+            "the stand-in answered a request outside /mcp, so the suffix proves nothing")
+        assert handle.stop_calls == 1, (
+            "a script that boots a server has to stop it: a leaked fixture-routed aggregator "
+            f"is a second writer on this box ({handle.stop_calls} stops)")
+
+        assert run.server.posts() == trial_posts + ["posted", "bad-path"], run.server.posts()
+        record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["verdict"] == "PASS", record["reason"]
+        assert record["session_id"].startswith("bench_"), record["session_id"]
+        assert run.server.sessions() == [f"{name} {record['session_id']}" for name in
+                                        ("memory_add", "fact_add", "backlog_write_task")], (
+            "the server's own account of which session it wrote for must match the record")
+        assert record["copy_side"]["landed_by_git_diff"] == ["backlog_write_task", "fact_add",
+                                                            "memory_add"], record["copy_side"]
+
+
+def test_the_cli_still_refuses_a_production_server_without_letting_a_write_through(tmp_path,
+                                                                                  capsys):
+    """Clause 3, the refusal half: a production-routed server exits 3 with no tool call at all.
+
+    The server is the house-routed stand-in — a real subprocess running real
+    `_tool_sandbox.status()`, `IS_PRODUCTION_VAULT` true because its `VAULT_ROOT` really is this
+    box's vault. "Having booted nothing" has two readings and only one of them is literally
+    available to this script, so both are pinned:
+
+    * given its own urls, `main` never consults the spawner — `calls == []` below, nothing was
+      booted, in the literal sense;
+    * booting one's own is the only way to LEARN the flags, so on that path the guarantee that
+      exists is the one checked after: the refusal came before a single `tools/call` reached the
+      endpoint, and the handle was stopped again. Nothing was attempted, and the thing that
+      could have attempted it is gone.
+    """
+    with _trial(tmp_path, _house_roots) as run:
+        handle = _FakeHandle(run.server.url,
+                             {"LLOYD_MCP_TOKEN_FILE": str(run.server.token_file)})
+        with _fake_spawner(handle) as calls:
+            with _patched(proof, durable_write_trees=lambda *a, **k: dict(run.trees)):
+                code = proof.main(["--aggregator-url", run.server.url + "/mcp",
+                                   "--state-url", run.server.url + "/state",
+                                   "--fixture-root", str(run.fixture.root),
+                                   "--window-seconds", "0", "--trial-id", "cli-house",
+                                   "--out", str(tmp_path / "house-record.json")])
+        record_path = tmp_path / "house-record.json"
+        assert code == 3, capsys.readouterr().out
+        assert calls == [], (
+            "the caller supplied the urls, so the spawner must not be consulted even though "
+            f"the outcome is a refusal either way: {calls}")
+        assert run.server.posts() == [], (
+            "a production-reporting server must never see a tools/call from this script: the "
+            f"guard runs before the first write, not after it. Saw {run.server.posts()}")
+        # The record is the readable form of the refusal: a `verdict: REFUSED` whose reason
+        # names the server's own flag, so the artefact says why there is no measurement in it
+        # rather than leaving a missing file to be read as a forgotten run.
+        refusal = json.loads(record_path.read_text(encoding="utf-8"))
+        assert refusal["verdict"] == "REFUSED", refusal
+        assert "is_production_vault" in refusal["reason"], refusal["reason"]
+        assert refusal["tool_calls"] == [], refusal["tool_calls"]
+        assert refusal["isolation_flags"]["is_production_vault"] is True, refusal
+
+        handle2 = _FakeHandle(run.server.url,
+                              {"LLOYD_MCP_TOKEN_FILE": str(run.server.token_file)})
+        with _fake_spawner(handle2) as calls2:
+            with _patched(proof, durable_write_trees=lambda *a, **k: dict(run.trees)):
+                code2 = proof.main(["--fixture-root", str(run.fixture.root),
+                                    "--window-seconds", "0", "--trial-id", "cli-house-self"])
+        assert code2 == 3, capsys.readouterr().out
+        assert [c[0] for c in calls2] == ["fixture_from_dir", "spawn"], calls2
+        assert handle2.stop_calls == 1, (
+            "the aggregator this script booted has to be stopped by the same call that "
+            "decided not to use it")
+        assert run.server.posts() == [], (
+            f"the self-booted production server received tool calls: {run.server.posts()}")
+
+
+def test_the_cli_refuses_a_half_named_aggregator_without_booting_anything(tmp_path):
+    """One url without the other is refused before the spawner is consulted at all.
+
+    `--aggregator-url` names the tool endpoint, `--state-url` the guard's endpoint; a run with
+    only the first would have somewhere to write and nowhere to ask whether writing is
+    permitted — the order that has to be impossible. Both shapes exit 3 with the spawner
+    untouched, which is also what keeps `--plan`'s no-boot behaviour a special case of this
+    rule rather than a fourth rule.
+    """
+    with _trial(tmp_path, _copy_roots) as run:
+        handle = _FakeHandle(run.server.url,
+                             {"LLOYD_MCP_TOKEN_FILE": str(run.server.token_file)})
+        for argv in (["--aggregator-url", run.server.url + "/mcp"],
+                     ["--state-url", run.server.url + "/state"]):
+            with _fake_spawner(handle) as calls:
+                code = proof.main(argv + ["--window-seconds", "0"])
+            assert code == 3, argv
+            assert calls == [], f"{argv} reached the spawner: {calls}"
+        assert run.server.posts() == []

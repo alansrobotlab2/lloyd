@@ -26,6 +26,14 @@ files is therefore a REFUSAL (`TREE_EMPTY`), not a clean diff, for the same reas
 refused read is not an empty result anywhere else in this repo: the pass and the
 vacuity look identical otherwise.
 
+The `memory` tree is the same trap wearing different clothes, and #3863 clause 4 closed it: it
+used to be `VAULT_ROOT/'memory'`, which is not nothing — it is full of dated daily notes, so it
+is never refused as vacuous — but it is a directory `memory_add` cannot write. The shipped
+writer resolves `agent_mcp/session.py:58` `MEMORIES_ROOT = vault_root() / 'lloyd'`, so
+`~/obsidian/lloyd/MEMORY.md`, the file this instance is loaded from, was the one leak the
+instrument was built to catch and was not being watched. `memories_root()` reads that symbol
+instead of re-spelling a path, and `store_dirname()` is the same fact on the copy side.
+
 **A zero-diff verdict is unreachable, so the verdict is ATTRIBUTED.** Measured on
 2026-11-01 over one 120 s window with no trial running at all: 42 files under
 `~/lloyd-data` changed (logs, sessions, event logs, `_pipeline`, the `workers.db` and
@@ -55,6 +63,23 @@ a test that passed against such a probe would be proving a request the real serv
 The header comes from `agent_mcp.aggregator_auth.headers_for_url`, the one definition of the
 header name and of where the token lives, shared with the process that checks it.
 
+**Every call names the session it belongs to, and a refusal is not an answer that passed.**
+Two more seams had to be wired before a call could land anywhere (`#3863`, this round). This
+server is stateless (`agent_mcp/main.py:9-13`), so a `tools/call` with no session id has no
+session; all three trial tools are state-changing
+(`_tool_sandbox.state_changing_tool` is `name not in READ_ONLY`, `:366-378`), so the handler
+refused them all (`main.py:595-602`) before this script put an id at
+`params._meta['lloyd/session_id']` — the key `META_SESSION_ID` (`main.py:225`) reads, and
+`SANDBOXED_ID_PREFIXES` (`_tool_sandbox.py:60`, matched at `:170`) decides which ids are
+bench/eval trials, so the prefix is READ from it rather than typed. The refusal that used to
+be the whole story arrives as an ordinary JSON-RPC *result* whose text is
+`{"error": "Tool call denied: …"}` (`main.py:_refused_call`, `:784-790`), which the old
+`ok = "error" not in payload` line scored as success. That pairing is the reason this
+instrument would have printed PASS on a fully-refused trial: three refusals write nothing, so
+the four live trees stay pristine, the equal-length control explains every path, and the only
+leg left standing was the one that could not tell a refusal from a write. `denied_call` is now
+the reader, and `copy_side_witness` still forces FAIL when the copy received nothing.
+
 **The manifest keys on `(size, mtime_ns)` and walks with `lstat`.** `~/lloyd-data` holds
 about 710,000 files — `find` returned 709,991, 709,992 and 710,103 within one session on
 2026-11-03, so the figure is an order of magnitude because the tree is being written under
@@ -70,13 +95,19 @@ Exit: `0` PASS · `1` FAIL (the diff, the copy witness or the tool results say t
 did not hold) · `3` refused (production state, an empty tree, or no aggregator to ask —
 no write attempted) · `2` argparse usage.
 
+    # boot the aggregator yourself, from a built fixture, and stop it on the way out:
+    scripts/autoresearch/bench_durable_write_proof.py \
+        --fixture-root /home/alansrobotlab/lloyd-data/eval/fixtures/<trial> --out <record.json>
+    # or point it at one that is already running (nothing is booted on that path):
     scripts/autoresearch/bench_durable_write_proof.py --aggregator-url http://127.0.0.1:8819/mcp \
+        --state-url http://127.0.0.1:8819/state \
         --fixture-root /home/alansrobotlab/lloyd-data/eval/fixtures/<trial> --out <record.json>
 
-The real on-box run is owed after this lands (#3689's owed list): it needs an aggregator
-booted under the fixture's roots, which is #3688's spawner or a boot this script does not
-own. `--plan` prints what a trial WOULD check against the live trees without a server or a
-write, which is the mode a reader can run today.
+What is still owed after this lands (#3689's owed list) is the RUN itself, not the wiring: a
+built fixture on this box (`~/lloyd-data/eval/fixtures/` does not exist yet, so
+`build_fixture` has still never run here) and one trial against it. `--plan` prints what a
+trial WOULD check against the live trees without a server or a write, which is the mode a
+reader can run today.
 """
 from __future__ import annotations
 
@@ -90,7 +121,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -136,15 +167,143 @@ RPC_METHOD = "tools/call"
 SERVER_ISOLATION_KEYS: tuple[str, ...] = ("is_production_data", "is_production_vault",
                                           "state_is_copied", "allowed_writes")
 
+#: The `_meta` key carrying the caller's session id — the literal
+#: `agent_mcp/main.py:225` (`META_SESSION_ID`) matches on, restated here rather than
+#: imported because reading it means importing the whole MCP-SDK aggregator for one
+#: string. The test asserts the two spellings are still the same string. This server is
+#: STATELESS (`main.py:9-13`: no initialize, no `Mcp-Session-Id`, "every request carries
+#: its own context in `_meta`"), so `_meta` is not a nicety — it is the only carrier a
+#: single-shot POST has for the session the server keys its gates on.
+META_SESSION_ID = "lloyd/session_id"
 
-def rpc_body(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """One `tools/call` envelope, built fresh so no call can see another's arguments."""
-    return {"jsonrpc": "2.0", "id": 1, "method": RPC_METHOD,
-            "params": {"name": tool, "arguments": arguments}}
+#: The marker every pre-dispatch refusal carries. `agent_mcp/main.py:_refused_call`
+#: (:784-790) answers a guard refusal with a `CallToolResult` whose one content text is
+#: `{"error": "Tool call denied: <reason>", "tool": <name>}` — a 200 response with a
+#: JSON-RPC `result`, no `error` member. `"error" not in payload` is therefore TRUE for a
+#: refused write, which is the false green #3863 clause 5 exists to close. The test feeds
+#: this reader the REAL `_refused_call` object's own wire form rather than a paraphrase.
+DENIAL_MARKER = "Tool call denied"
+
+
+def rpc_body(tool: str, arguments: dict[str, Any], *,
+             session_id: str = "") -> dict[str, Any]:
+    """One `tools/call` envelope, built fresh so no call can see another's arguments.
+
+    `session_id` goes at `params._meta['lloyd/session_id']`, which is where
+    `_bound_session_id` (`agent_mcp/main.py:362`) reads it and where the sessionless
+    refusal says to put it (`main.py:595-602`). Omitting it is not a neutral choice:
+    all three trial tools are state-changing (`_tool_sandbox.state_changing_tool` is
+    `name not in READ_ONLY`, `:366-378`), so a call that arrives with no session id is
+    refused before dispatch — and, until clause 5 landed, refused in a shell this script
+    read as success. An empty id is left off the wire entirely rather than sent as `""`,
+    because `main.py:595` tests falsiness: sending an empty string and sending nothing are
+    the same request to that guard, and a record that claimed a session id it never sent
+    would be the same lie in a different column.
+    """
+    params: dict[str, Any] = {"name": tool, "arguments": arguments}
+    if session_id:
+        params["_meta"] = {META_SESSION_ID: session_id}
+    return {"jsonrpc": "2.0", "id": 1, "method": RPC_METHOD, "params": params}
+
+
+def trial_session_id(trial_id: str) -> str:
+    """The session id every trial call carries: the trial id under the bench prefix.
+
+    The prefix is READ from `_tool_sandbox.SANDBOXED_ID_PREFIXES` (`:60`, matched at
+    `:170`) instead of typed, for the reason the item gives: the sandbox, not taste,
+    decides which ids are bench/eval trials. `is_sandboxed_session` is what turns the
+    write surface on or off for the session the handler resolves, so an id that merely
+    *looks* like a bench id but is not in that tuple gets the read-only refusal — and an
+    un-prefixed id gets the sessionless one. A non-importable `agent_mcp` is a
+    `ProofRefused`, never a bare trial id: the closed direction, same as `auth_headers`.
+
+    Idempotent on an id that already carries a prefix, so a caller that supplies its own
+    bench id gets it back unchanged rather than `bench_bench_…`.
+    """
+    try:
+        from agent_mcp._tool_sandbox import SANDBOXED_ID_PREFIXES
+    except Exception as exc:  # noqa: BLE001 — closed: no prefix, no permission to write
+        raise ProofRefused(
+            f"cannot read `_tool_sandbox.SANDBOXED_ID_PREFIXES` ({exc.__class__.__name__}: "
+            f"{exc}); refusing to guess a session id prefix, because a trial that guesses "
+            "wrong gets a refusal on every write and would read it as one that worked"
+        ) from exc
+    sid = (trial_id or "").strip()
+    if sid.startswith(tuple(SANDBOXED_ID_PREFIXES)):
+        return sid
+    return f"{SANDBOXED_ID_PREFIXES[0]}{sid or 'proof'}"
+
+
+def denied_call(payload: dict[str, Any]) -> str | None:
+    """The refusal a `tools/call` response hides inside an ok-shaped body, else None.
+
+    Two arms, because the two halves of `_refused_call`'s output live at different depths
+    and a reader that checked only one would go wrong the day the server moved the other:
+
+    * the result's error flag, read under BOTH spellings — `isError` is the wire name and
+      `is_error` is the Python attribute name in mcp 2.x, the same split
+      `agent_mcp/main.py:_result_is_error` (:369-380) exists for. Reading only the camel
+      form is a check that silently stops firing on a serialization change.
+    * the marker inside the content text, which is the part a human reads and the part a
+      proxy that re-wraps the body preserves.
+
+    Returns the refusal text (truncated) so the RECORD carries why a call did not happen;
+    returns None for a body that reports success.
+    """
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    errored = any(bool(result.get(key)) for key in ("isError", "is_error"))
+    text = "".join(str(part.get("text", "")) for part in (result.get("content") or [])
+                   if isinstance(part, dict))
+    if errored and text:
+        return text[:400]
+    if DENIAL_MARKER in text:
+        return text[:400]
+    return None
 
 
 class ProofRefused(RuntimeError):
     """The trial must not proceed, and nothing was written. Exit 3, never a FAIL row."""
+
+
+def memories_root() -> Path:
+    """Where the shipped `memory_add` writer lands, read from the writer itself.
+
+    Clause 4 of #3863. `durable_write_trees()` used to name `VAULT_ROOT/'memory'`, which on
+    this box is the directory of DATED DAILY NOTES (`~/obsidian/memory/2026-02-22.md`,
+    `~/obsidian/memory/2026/`) — a tree `memory_add` cannot write. The tool resolves its
+    destination through `agent_mcp/session.py:58` `MEMORIES_ROOT = vault_root() / "lloyd"`
+    (`_resolve_file` at `:269,271,275` all go through it), so until now the one tree that
+    was supposed to catch a leaked memory write was watching a directory the trial's own
+    tool never touches, and a leak into `~/obsidian/lloyd/MEMORY.md` — the file this
+    instance is LOADED from — would have read CLEAN and counted as proof of isolation.
+
+    Read as the symbol, not re-spelled as `VAULT_ROOT/'lloyd'`: a move of the memory root
+    then moves the watched tree with it, and the test pins the equality against the shipped
+    attribute rather than against a second guess of the same path.
+    """
+    try:
+        from agent_mcp.session import MEMORIES_ROOT
+    except Exception as exc:  # noqa: BLE001 — closed: an unreadable root is not a clean tree
+        raise ProofRefused(
+            f"cannot read `agent_mcp.session.MEMORIES_ROOT` ({exc.__class__.__name__}: "
+            f"{exc}); refusing to fall back to `VAULT_ROOT/'memory'`, which is the "
+            "directory the writer does NOT use and the vacuous tree this instrument was "
+            "reading until #3863"
+        ) from exc
+    return Path(MEMORIES_ROOT)
+
+
+def store_dirname(store: str) -> str:
+    """The one directory a store label names inside a vault root.
+
+    `memory` is not a directory called `memory`: the shipped writer lands in `lloyd/`
+    (`memories_root`), so a copy-side match on the label would send the git-diff witness to
+    the same wrong place clause 4 just moved the live tree from. `facts` and `backlog` keep
+    their label names (`VAULT_FACTS_ROOT`'s own directory, and `backlog/`).
+    """
+    return Path(memories_root()).name if store == "memory" else store
 
 
 def durable_write_trees(resolved: Any = None) -> dict[str, Path]:
@@ -156,11 +315,19 @@ def durable_write_trees(resolved: Any = None) -> dict[str, Path]:
     `VAULT_FACTS_ROOT` and NOT the empty `~/obsidian/facts` the item names — see the
     module docstring. `data` is the whole data root, which subsumes the facts root; the
     overlap is deliberate (a changed file appears under both names, and `paths` are
-    absolute so the two key spaces never collide).
+    absolute so the two key spaces never collide.
+
+    `memory` is the one entry NOT derived from `resolved`: a watched tree has to be the
+    directory the tool under test can actually reach, and that is a fact about
+    `agent_mcp/session.py`, not about this module's root table. It comes from
+    `memories_root()` — the shipped writer's own `MEMORIES_ROOT` — for the reason given
+    there: `VAULT_ROOT/'memory'` is daily notes, so the entry that clause 2 of #3689
+    built the vacuous-tree rule to protect was vacuous in a way no file count would show,
+    since `~/obsidian/memory` is full of files `memory_add` never writes.
     """
     p = resolved if resolved is not None else paths
     return {
-        "memory": Path(p.VAULT_ROOT) / "memory",
+        "memory": memories_root(),
         "facts": Path(p.VAULT_FACTS_ROOT),
         "backlog": Path(p.VAULT_ROOT) / "backlog",
         "data": Path(p.DATA_ROOT),
@@ -359,15 +526,102 @@ def auth_headers(url: str) -> dict[str, str]:
     return headers_for_url(url)
 
 
-def fetch_state_json(url: str, *, timeout: float = 10.0) -> dict[str, Any]:
+#: The scopes a booted aggregator is armed with for this trial (#3863 clause 3).
+#:
+#: `vault`, not `memory`, for the memory leg — the same reason
+#: `tests/test_autoresearch_bench_spawner.py:24-27` gives: `build_fixture` copies a `memory`
+#: scope from `<vault>/memory` (`bench_fixture.py:360-364`), which is where the DATED DAILY
+#: NOTES live and what `memory_add` never touches, so a card scoped `memory` alone boots a
+#: server whose copy of the memory store is a copy of the wrong directory. `vault` is the
+#: whole slice, so `<fixture>/obsidian/lloyd/` — the directory `MEMORIES_ROOT` names — is
+#: present whatever the memory root is later renamed to. `kg` is the KG database the
+#: `fact_add` row goes into, `backlog` the card.
+#:
+#: One store this cannot arm, and it is recorded rather than hidden: `fact_add`'s MARKDOWN
+#: lands under `VAULT_FACTS_ROOT`, which is `DATA_ROOT/_pipeline/vault-derived/facts`
+#: (`app/paths.py:307-311`) — inside the fixture's copy, so still isolated, but copied by no
+#: scope word and outside the fixture vault's git repo, so it can never appear in
+#: `copy_side.landed_by_git_diff`. See `copy_side_witness`'s note on the same asymmetry.
+SPAWN_SCOPES: tuple[str, ...] = ("vault", "kg", "backlog")
+
+
+def boot_fixture_aggregator(fixture_root: Path, *,
+                            scopes: tuple[str, ...] | None = None) -> tuple[Any,
+                                                                            dict[str, str],
+                                                                            dict[str, str]]:
+    """Boot a fixture-rooted aggregator and return `(handle, urls, credential)`.
+
+    The caller is responsible for `handle.stop()`; `main` does it in its `finally`, because a
+    scope-armed server outliving the trial is a server some later process finds listening.
+
+    Two spawner calls, in the order the spawner requires them (clause 3 of #3863):
+    `fixture_from_dir` re-derives the `BenchFixture` from the directory's own layout, which is
+    the step that refuses a hand-made directory, and `spawn` then runs the live-root guards
+    and blocks until the child's `GET /state` reports `state_is_copied` true. This script
+    never copies a slice of the house itself: building the fixture is `bench_fixture`'s job
+    (#3688 is `done`), and a second builder here would be a second answer to "what got
+    copied".
+
+    `urls` carries BOTH endpoints built off `handle.url`, and the `/mcp` suffix is not
+    optional: `bench_spawner.py:362` constructs `url=f"http://{host}:{chosen}"`, a bare
+    origin, so a POST to it is answered by Starlette's 404 — which `mcp_tool_call` then wraps
+    as `ok: False` and the trial reads as three failed writes rather than as a missing route.
+
+    `credential` is the CHILD's (`bench_spawner.auth_headers(handle.env)`), and it is returned
+    because the token the child demands is the one `spawn` injected into its env
+    (`bench_spawner.py:349`), which is not the token this process would read off its own
+    `LLOYD_MCP_TOKEN_FILE`. `fetch_state_json`'s `headers` and `mcp_tool_call`'s take it.
+    """
+    try:
+        from scripts.autoresearch import bench_spawner as spawner
+    except Exception as exc:  # noqa: BLE001 — closed: no spawner, no sandboxed server
+        raise ProofRefused(
+            f"cannot import `scripts.autoresearch.bench_spawner` ({exc.__class__.__name__}: "
+            f"{exc}); refusing to boot an aggregator by hand, because the guards that refuse "
+            "a fixture inside a live root live in that module") from exc
+
+    chosen = tuple(scopes) if scopes else SPAWN_SCOPES
+    root = Path(fixture_root)
+    try:
+        fixture = spawner.fixture_from_dir(root, chosen)
+    except Exception as exc:  # FixtureError/RuntimeError: the marker test refuses for us
+        raise ProofRefused(f"{root} is not a bootable fixture: {exc}") from exc
+    try:
+        handle = spawner.spawn(fixture_root=fixture, scopes=chosen)
+    except Exception as exc:  # noqa: BLE001 — a boot that failed is a refusal, not a traceback
+        raise ProofRefused(
+            f"the spawner refused to boot an aggregator on {root}: "
+            f"{exc.__class__.__name__}: {exc}") from exc
+    try:
+        credential = spawner.auth_headers(handle.env)
+    except Exception as exc:  # noqa: BLE001 — no credential, so every request would 401
+        handle.stop()
+        raise ProofRefused(
+            f"the booted aggregator's environment carries no usable credential "
+            f"({exc.__class__.__name__}: {exc}); asking it for its isolation state without "
+            "one is a 401, which this script can only read as an unknown state") from exc
+    return handle, {"mcp": handle.url + "/mcp", "state": handle.url + "/state"}, credential
+
+
+def fetch_state_json(url: str, *, timeout: float = 10.0,
+                     headers: dict[str, str] | None = None) -> dict[str, Any]:
     """GET the aggregator's state endpoint. Raises `ProofRefused` if it will not answer.
 
     A server that cannot be asked is a refusal and not a FAIL: the claim under test is
     about where writes land, and no evidence either way was gathered. A 401 lands in the
     same branch, which is the correct reading — an unreadable state is an unknown state.
+
+    `headers` overrides the credential set wholesale, which exists for one reason: the
+    spawner's `auth_headers` (`bench_spawner.py:151-164`) reads `LLOYD_MCP_TOKEN_FILE` out of
+    the CHILD's env, and if that names a path, the token the child will demand is in that
+    file and not in this process's. Asking the child for its isolation state with the
+    wrong credential is a 401, which this function — correctly — turns into a refusal; so a
+    boot passes the child's own pair in. On the default path (`headers=None`) the reader is
+    the same one the server uses, unchanged.
     """
     request = urllib.request.Request(url, headers={"Accept": "application/json",
-                                                   **auth_headers(url)})
+                                                   **(auth_headers(url) if headers is None
+                                                      else headers)})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8", "replace"))
@@ -378,6 +632,7 @@ def fetch_state_json(url: str, *, timeout: float = 10.0) -> dict[str, Any]:
 
 def mcp_tool_call(url: str, tool: str, arguments: dict[str, Any], *,
                   headers: dict[str, str] | None = None,
+                  session_id: str = "",
                   timeout: float = 120.0) -> dict[str, Any]:
     """POST one JSON-RPC `tools/call` and return the decoded body.
 
@@ -387,14 +642,30 @@ def mcp_tool_call(url: str, tool: str, arguments: dict[str, Any], *,
     default path every trial takes; `headers` overrides the whole set so a test can post a
     wrong one or none.
 
+    `session_id` rides at `params._meta['lloyd/session_id']` (see `rpc_body`). It is not
+    decoration: this server is stateless, so a call that arrives with no session id has no
+    session at all, and all three trial tools are state-changing, so the handler refuses
+    them all before dispatch (`agent_mcp/main.py:595-602`).
+
+    A refusal is reported as `ok: False` — clause 5 of #3863, and the reason this function
+    cannot simply ask `"error" not in payload`. `_refused_call` answers a guard refusal as a
+    normal JSON-RPC **result** whose payload therefore has no `error` member, so the old test
+    was true for a refused write; the four live trees stay pristine precisely BECAUSE nothing
+    was written, and the trial would have printed PASS on the strength of the cleanest
+    evidence it never had. `denied_call` is what tells the two apart, and whatever it returns
+    rides out in `denial` so the record names the guard rather than the reader having to
+    infer it from `result_text`.
+
     The wire IS exercised, in both directions: `tests/test_bench_durable_write_proof.py`
     POSTs through this function to a real subprocess server that resolves its stores through
-    `app.paths`, reports the real `tool_sandbox` block, and answers a wrong or absent
-    credential with the same 401 the aggregator's own guard answers (`aggregator_auth.py`).
-    That server stands in for the TOOL body, not for `agent_mcp/main.py`'s handler — the real
-    on-box trial (#3689's owed list) is what pins the handler side.
+    `app.paths`, reports the real `tool_sandbox` block, answers a wrong or absent credential
+    with the same 401 the aggregator's own guard answers (`aggregator_auth.py`), and — since
+    #3863 — refuses a sessionless state-changing call with the REAL `_refused_call` body built
+    by the shipped handler code, then re-sent in the aggregator's own wire form. That stands
+    in for `agent_mcp/main.py`'s dispatch shape; the real on-box trial (#3689's owed list) is
+    what pins its behaviour.
     """
-    body = rpc_body(tool, arguments)
+    body = rpc_body(tool, arguments, session_id=session_id)
     request = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json",
@@ -408,7 +679,12 @@ def mcp_tool_call(url: str, tool: str, arguments: dict[str, Any], *,
                 "detail": f"{exc.__class__.__name__}: {exc}"}
     text = "".join(str(part.get("text", "")) for part in
                    (payload.get("result") or {}).get("content", []) if isinstance(part, dict))
-    return {"tool": tool, "ok": "error" not in payload, "text": text, "response": payload}
+    denial = denied_call(payload)
+    out: dict[str, Any] = {"tool": tool, "ok": ("error" not in payload) and denial is None,
+                           "text": text, "response": payload}
+    if denial is not None:
+        out["denial"] = denial
+    return out
 
 
 def trial_arguments(store: str, trial_id: str) -> dict[str, Any]:
@@ -488,8 +764,16 @@ def copy_side_witness(fixture_root: Path | None, *, intended: dict[str, str],
 
 
 def _under_store(rel_path: str, store: str) -> bool:
-    """Is a copy-side path inside the store that a named tool was asked to write?"""
-    return rel_path.startswith(f"{store}/") or f"/{store}/" in f"/{rel_path}"
+    """Is a copy-side path inside the store that a named tool was asked to write?
+
+    Matched on `store_dirname(store)`, not on the label: `memory_add` lands in the copy's
+    `lloyd/` directory (`agent_mcp/session.py:58` via `memories_root`), so a matcher keyed to
+    the literal word `memory` could only ever name a path the tool cannot produce — and
+    `landed_by_git_diff`, the field the owed run is read for, would come back missing
+    `memory` on a trial that had just written it.
+    """
+    name = store_dirname(store)
+    return rel_path.startswith(f"{name}/") or f"/{name}/" in f"/{rel_path}"
 
 
 def verdict(*, guard: dict[str, Any], windows: dict[str, Any],
@@ -521,6 +805,16 @@ def verdict(*, guard: dict[str, Any], windows: dict[str, Any],
     failed = sorted(str(c.get("tool")) for c in calls if not c.get("ok"))
     if failed:
         reasons.append(f"tool call(s) did not return success: {failed}")
+    # Named separately from `failed`, because the two readings of the same trial are not
+    # interchangeable: "the live trees are pristine and nothing landed" sounds to a later
+    # reader like a boring no-op, while "the server refused every write before dispatch" is
+    # the wiring fault it actually is. This is the sentence that stops an all-refused trial
+    # being filed as inconclusive (#3863 clause 5).
+    denied = sorted(str(c.get("tool")) + ": " + str(c.get("denial", "")).strip()
+                    for c in calls if str(c.get("denial", "")).strip())
+    if denied:
+        reasons.append(f"{len(denied)} tool call(s) were refused by a guard before "
+                       f"dispatch, so nothing was written anywhere: {denied}")
     if not witness["landed"]:
         reasons.append("copy-side witness empty or naming none of the intended stores: "
                        f"git diff listed {len(witness['diff_paths'])} path(s), none under "
@@ -562,13 +856,31 @@ def _measure_window(trees: dict[str, Path], *, sleep: Callable[[float], None],
     return after, changed
 
 
+class CallTool(Protocol):
+    """The write seam: a tool name, its arguments, and the session id that must ride with them.
+
+    The id is in the TYPE because it is in the call: `run_proof` invokes this as
+    `call_tool(tool, arguments, session_id=…)`, and the annotation this replaces —
+    `Callable[[str, dict], dict]` — declared a seam with no id in it while the line calling it
+    passed one. pyright caught the contradiction as a new error in the gated run
+    (`bench_durable_write_proof.py:942: No parameter named "session_id"`), and it is the
+    contradiction that matters, not the diagnostic: an annotation that omits the carrier is a
+    contract that lets a new caller pass `(tool, arguments)` alone and silently drop the id,
+    which is the failure #3863 clause 1 exists to prevent.
+    """
+
+    def __call__(self, tool: str, arguments: dict[str, Any], /, *,
+                 session_id: str = "") -> dict[str, Any]: ...
+
+
 def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
-              call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
+              call_tool: CallTool,
               fixture_root: Path | None = None, diff_paths: list[str] | None = None,
               window_seconds: float = DEFAULT_WINDOW_SECONDS,
               sleep: Callable[[float], None] = time.sleep,
               clock: Callable[[], float] = time.monotonic,
-              trial_id: str = "proof") -> dict[str, Any]:
+              trial_id: str = "proof",
+              session_id: str = "") -> dict[str, Any]:
     """One trial: guard, control window, live snapshots, the three calls, the verdict.
 
     `call_tool`, `sleep` and `clock` are injected because the two things this routine must
@@ -577,17 +889,37 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
     aggregator and a wall clock. The order below is the contract: guard → live baseline
     check → control window → calls padded to the same length → live after → verdict.
 
+    `call_tool` is called as `call_tool(tool, arguments, session_id=…)`: the id is part of the
+    call seam rather than something the injected closure happens to have captured, so a stub
+    can assert what went out and a caller cannot forget to thread it. Every caller in this
+    file and its test passes the keyword.
+
     Both windows are `window_seconds` long BY CONSTRUCTION, not approximately: after the
     calls the trial waits out the remainder of the window. A shorter trial window than the
     control would be a control that saw more background than the trial could have, which
     forgives a real durable write — the one error direction this instrument must not have.
     Three writes over the box's own 42-changes-per-120-seconds rate is a boundary the
     padding is there to close rather than to reason about after the fact.
+
+    `session_id` is the caller's preferred id, and it is not taken as-is: it goes through
+    `trial_session_id`, which is the sandbox's own rule (`_tool_sandbox.SANDBOXED_ID_PREFIXES`),
+    so a bare `abc` reaches the wire as `bench_abc` and a `bench_x`/`pt-eval-x` arrives
+    unchanged. There is deliberately no input to this function that puts an un-prefixed id on
+    the wire, because an un-prefixed id is a session the sandbox does not class as a trial and
+    the refusal for that is indistinguishable, at the old `ok` line, from a write that worked.
+    The id that was actually sent is recorded, not the one that was asked for: the owed run
+    has to be able to prove from the artefact which session the handler charged the writes to.
     """
     guard = prewrite_guard(state)
+    sid = trial_session_id(session_id or trial_id)
     intended = {row["tool"]: row["store"] for row in PROOF_TOOLS}
     record: dict[str, Any] = {
         "kind": "durable_write_proof", "trial_id": trial_id,
+        # The id on the wire, in `params._meta['lloyd/session_id']` of every call below. A
+        # record that named a different id from the one it sent would leave the artefact
+        # unable to say which session the server charged the writes to, which is the fact a
+        # reader of a leak needs.
+        "session_id": sid,
         "tools": [row["tool"] for row in PROOF_TOOLS],
         "isolation_flags": guard["flags"], "window_seconds": window_seconds,
         # Kept even on an allowed guard: the record is the artifact, and "the aggregator
@@ -623,14 +955,25 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
     live_before = baseline
     start = clock()
     for row in PROOF_TOOLS:
-        call = call_tool(row["tool"], trial_arguments(row["store"], trial_id))
+        call = call_tool(row["tool"], trial_arguments(row["store"], trial_id),
+                         session_id=sid)
         # `result_text` is kept because the artifact must show WHERE the server says it
         # wrote: a row that records only `ok: true` cannot be checked against the live trees
         # by a later reader, and the record_path is the one field that can be.
         record["tool_calls"].append({"tool": row["tool"], "store": row["store"],
                                      "ok": bool(call.get("ok")),
+                                     # Per call, because the artefact has to survive one call
+                                     # being refused and the next not: a single record-level
+                                     # id would attribute a write to the wrong session in the
+                                     # one record whose job is to say who did what.
+                                     "session_id": sid,
                                      "result_text": str(call.get("text", ""))[:600],
-                                     "detail": str(call.get("detail", ""))[:400]})
+                                     "detail": str(call.get("detail", ""))[:400],
+                                     # The guard's own words. `verdict` reads them to name the
+                                     # refusals in the FAIL reason, and an artefact carrying
+                                     # only `ok: false` could not tell a refusal — a wiring
+                                     # fault — from a transport failure.
+                                     "denial": str(call.get("denial", ""))[:400]})
     calls_seconds = clock() - start
     sleep(max(0.0, window_seconds - calls_seconds))   # pad: windows are equal length
     trial_seconds = clock() - start
@@ -659,17 +1002,28 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
 def main(argv: list[str] | None = None) -> int:
     """CLI. Exit `0` PASS · `1` FAIL · `3` refused · `2` argparse usage.
 
-    `--plan` is the mode that runs today: it resolves the four trees, reports their file
-    counts and refuses if any is vacuous, without contacting a server or attempting a
-    write. It prints no verdict, because a proof of nothing has no verdict to print.
+    `--plan` resolves the four trees, reports their file counts and refuses if any is
+    vacuous, without contacting a server or attempting a write. It prints no verdict, because
+    a proof of nothing has no verdict to print.
+
+    Two ways to get a server. Pass `--aggregator-url` plus a state url to try one that is
+    already running — nothing is booted on that path, before or after the guard. Pass
+    NEITHER and the script boots its own from `--fixture-root` through
+    `boot_fixture_aggregator` and stops it on the way out (#3863 clause 3). What has not
+    changed is that no path reaches a write before `prewrite_guard` has read the SERVER's
+    flags: a production-reporting aggregator exits 3 with no trial, and a caller who supplied
+    its own urls exits 3 without the spawner being consulted at all.
     """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--aggregator-url", default="",
-                        help="the fixture-routed aggregator's /mcp (JSON-RPC tools/call)")
+                        help="an already-running fixture-routed aggregator's /mcp "
+                             "(JSON-RPC tools/call); omit WITH --state-url to boot one")
     parser.add_argument("--state-url", default="",
                         help="its state endpoint; defaults to $LLOYD_BENCH_STATE_URL")
     parser.add_argument("--fixture-root", default="",
-                        help="the built fixture's vault, for the copy-side git diff")
+                        help="the BUILT fixture directory (the one holding `lloyd-data/` and "
+                             "`obsidian/`): the copy-side git diff reads it, and with no "
+                             "aggregator urls it is also what the aggregator is booted on")
     parser.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
     parser.add_argument("--out", default="", help="write the record here as JSON")
     parser.add_argument("--plan", action="store_true",
@@ -691,24 +1045,55 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     state_url = (args.state_url or os.environ.get(STATE_URL_ENV, "")).strip()
-    if not args.aggregator_url or not state_url:
-        print("refused: --aggregator-url and a state url (flag or $"
-              + STATE_URL_ENV + ") are both required: this script does not boot an "
-              "aggregator under the fixture's roots (that is #3688's spawner, or the "
-              "scope ruling on #3689 that says this script owns it)", file=sys.stderr)
+    given_url = bool(args.aggregator_url.strip())
+    given_state = bool(state_url)
+    # Three shapes, and they are all the shapes there are. BOTH urls given: use them, boot
+    # nothing — this is the path a caller who already has a fixture-routed aggregator takes,
+    # and it is the path that must still exit 3 without reaching for a spawner when the guard
+    # reports production. NEITHER given: boot one here (#3863 clause 3), which needs a built
+    # fixture to boot from. Exactly ONE given: a half-named pair is a typo, not an
+    # instruction to boot, and guessing which half the caller meant is how a trial ends up
+    # POSTing to a stranger's port.
+    if given_url != given_state:
+        print("refused: --aggregator-url and a state url (flag or $" + STATE_URL_ENV
+              + ") go together; got only one of them. Pass both to use an aggregator that is "
+                "already running, or neither to have this script boot one from "
+                "--fixture-root.", file=sys.stderr)
         return 3
 
+    handle: Any = None
+    credential: dict[str, str] = {}
     try:
+        if not given_url:
+            if not args.fixture_root:
+                print("refused: no aggregator urls given, so this script would boot one — "
+                      "and --fixture-root is empty, so there is no built fixture to boot it "
+                      "on. Build one with `python -m scripts.autoresearch.bench_fixture` "
+                      "(#3688) and pass its directory.", file=sys.stderr)
+                return 3
+            handle, urls, credential = boot_fixture_aggregator(Path(args.fixture_root))
+            mcp_url, state_url = urls["mcp"], urls["state"]
+        else:
+            mcp_url = args.aggregator_url
         record = run_proof(
-            state=fetch_state_json(state_url), trees=trees,
-            call_tool=lambda name, arguments: mcp_tool_call(
-                args.aggregator_url, name, arguments),
+            state=fetch_state_json(state_url, headers=credential or None), trees=trees,
+            call_tool=lambda name, arguments, session_id="": mcp_tool_call(
+                mcp_url, name, arguments, session_id=session_id,
+                headers=(credential or None)),
             fixture_root=Path(args.fixture_root) if args.fixture_root else None,
             window_seconds=args.window_seconds,
             trial_id=args.trial_id or (Path(args.out).stem if args.out else "proof"))
     except ProofRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 3
+    finally:
+        # The child is stopped whether the trial passed, failed or refused. A scope-armed
+        # aggregator on the account's own loopback outliving the process that booted it is a
+        # server nobody owns, and `stop()` is terminate-before-kill precisely so it does not
+        # die holding a SQLite lock. `stop()` is already idempotent (`self.stopped` is
+        # cached), so this is safe even if the boot itself raised after Popen.
+        if handle is not None:
+            handle.stop()
 
     payload = json.dumps(record, indent=2)
     print(payload)
