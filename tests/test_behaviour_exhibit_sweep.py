@@ -45,14 +45,23 @@ def _msg(text="", calls=()):
 
 
 def write_session(dir_, sid, messages, *, gzipped=False, source=None, platform=None,
-                  age_days=0):
+                  age_days=0, msg_ts=None, mtime=None):
     """One transcript on disk, gzipped or not, stamped inside the window unless aged.
 
     `platform` is written only when given: whether a record carries the field at all is one of
     the signals `population_of` reads, so a helper that always wrote `platform: null` would
     make "unstampable" and "stamped null" the same fixture and the residual population
     untestable.
+
+    `msg_ts` stamps EVERY message with an ISO timestamp — the field `turns_of` turns into
+    `Turn.ts` and the field `content_date` reads FIRST. It is deliberately opt-in: a fixture
+    with no message timestamp can only be dated from its filename, which is precisely the
+    fallback #3885 names, so both shapes must be buildable or one half of that ordering is
+    untestable. `mtime` overrides the file's date directly, which is how a session whose
+    ARCHIVE is dated one thing and whose TRAFFIC another is put on disk at all.
     """
+    if msg_ts is not None:
+        messages = [{**m, "timestamp": msg_ts} for m in messages]
     doc = {"session_id": sid, "id": sid, "source": source, "messages": messages,
            "created_at": "2026-11-01T00:00:00+00:00"}
     if platform is not None:
@@ -71,10 +80,24 @@ def write_session(dir_, sid, messages, *, gzipped=False, source=None, platform=N
             fh.write(body)
     else:
         p.write_text(body, encoding="utf-8")
-    stamp = (NOW - timedelta(days=age_days)).timestamp()
+    stamp = (mtime if mtime is not None else NOW - timedelta(days=age_days)).timestamp()
     import os
     os.utime(p, (stamp, stamp))
     return p
+
+
+def fully_captioned_turn():
+    """A turn where EVERY call carries its `summary` — the caption rate at 1.000.
+
+    `captioned_turn` deliberately sits at 0.500 so a detector cannot confuse "counted the
+    calls" with "counted the captions"; the paired before/after nodes need a second,
+    DIFFERENT rate on the same shape, and the delta between these two (+50.00pp per call) is
+    the seeded rate change across the split that clause 5 is written in terms of.
+    """
+    return [{"role": "user", "content": "go"},
+            _msg("", [_tc("Bash", {"summary": "listing", "command": "ls"}),
+                       _tc("Read", {"summary": "reading a", "file_path": "/tmp/a"})]),
+            _msg("done")]
 
 
 def captioned_turn(calls=2):
@@ -737,3 +760,392 @@ def test_a_named_directory_is_a_store_and_a_named_file_is_that_file(tmp_path):
     named = tmp_path / "given-name.jsonl"
     art2 = BE.sweep(tmp_path, days=7, now=NOW, registry=registry_path(tmp_path), out=named)
     assert Path(art2["artifact_path"]) == named, "an explicit .jsonl path was rewritten"
+
+
+# ── #3885: the window is a session's CONTENT date, and two windows are a test ──
+#
+# `--days N` asked a file when it was WRITTEN, and for the archived half of this corpus the
+# answer is the retention sweep's schedule: all 9,814 `.json.gz` transcripts here sit a median
+# 30.52 days between their mtime and their own filename date, so `--days 7` admitted 7,191
+# files of which 4,546 (63%) were content-dated outside its seven days. Every node below
+# therefore puts a file's two dates in OPPOSITE places and asserts which one the code obeyed.
+
+def _iso(year, month, day, hour=10):
+    return datetime(year, month, day, hour, 0, tzinfo=timezone.utc).isoformat()
+
+
+def _split_row(artifact, behaviour_id, population):
+    rows = [r for r in artifact["split"]["rows"]
+            if r["id"] == behaviour_id and r["population"] == population]
+    assert len(rows) == 1, f"{behaviour_id}/{population}: {len(rows)} paired rows, want 1"
+    return rows[0]
+
+
+def _write_pair(tmp_path, prefix, *, sessions, turn, content_day, content_month=10):
+    """`sessions` transcripts on consecutive CONTENT dates, each running `turn`.
+
+    `msg_ts` is what puts an arm on a date: the filename would do it too, but a paired test
+    that only ever exercised the fallback could not tell a turn-timestamp window from a
+    filename window, and clause 1 names the turn timestamp first.
+    """
+    # Three days, not nine: the first draft spread a 30-session arm over nine days and ran
+    # past the window's exclusive `--until`, so the after arm silently kept 6 of its 30
+    # sessions and the paired test measured unequal denominators while asserting 60 and 60.
+    # An arm whose tail is clipped by the window is exactly the bug the window is for, so the
+    # spread has to stay inside it for the node to be a control of anything.
+    for i in range(sessions):
+        day = content_day + (i % 3)
+        write_session(tmp_path, f"2026{content_month:02d}{day:02d}_10{i:04d}_{prefix}_aaaa",
+                      turn(), msg_ts=_iso(2026, content_month, day, 10 + (i % 9)))
+
+
+def test_content_date_reads_the_turn_timestamp_before_the_filename_stamp(tmp_path):
+    """Clause 1: content date is the record's turn timestamp FIRST, the filename's stamp SECOND.
+
+    Two fixtures whose name and contents DISAGREE by ten days, so which source won is a
+    measurement and not a reading of the code: a session named Oct 20 whose traffic is stamped
+    Oct 30 is dated Oct 30, and the same traffic with no message timestamps at all — the shape
+    every archived transcript takes if the fallback is load-bearing — is dated from its name.
+    """
+    named = write_session(tmp_path, "20261020_100000_late_ts", captioned_turn(),
+                          msg_ts=_iso(2026, 10, 30))
+    assert BE.content_date(named) == datetime(2026, 10, 30, 10, 0, tzinfo=timezone.utc), \
+        "a turn timestamp inside the record must beat the filename stamp"
+
+    fallback = write_session(tmp_path, "20261020_100000_name_only", captioned_turn())
+    assert BE.content_date(fallback) == datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc), \
+        "with no readable timestamp the filename stamp has to place the session"
+
+    assert BE.filename_date("20261020_100000_x.json") == \
+        datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
+    assert BE.filename_date("no_stamp_here.json") is None
+    assert BE.content_date(Path(str(tmp_path)) / "20261020_100000_absent.json") == \
+        datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc), \
+        "a file that cannot be opened is still placeable from its name — dropping it silently " \
+        "is how a window shrinks and the run still prints as a clean corpus"
+
+
+def test_a_session_gzipped_after_the_split_but_dated_before_lands_in_the_before_arm(tmp_path):
+    """Clause 1 in its own words, end to end: archive dated after, traffic dated before.
+
+    This is the shape the retention sweep produces — a `.gz` mtime IS the compression date,
+    here today, over traffic eleven days older. A paired exhibit that windowed on mtime would
+    put this session in the AFTER arm and charge the compression job with changing behaviour.
+    """
+    packed_today = write_session(tmp_path, "20261024_090000_old_pack", captioned_turn(),
+                                 gzipped=True, mtime=NOW)
+    assert BE.content_date(packed_today) == datetime(2026, 10, 24, 9, 0, tzinfo=timezone.utc)
+    art = BE.sweep(tmp_path, since="2026-10-01", until="2026-11-05", split_on="2026-11-01",
+                   now=NOW, write=False)
+    assert art["corpus"]["turns_before"] == 1 and art["corpus"]["turns_after"] == 0, \
+        "the traffic is Oct 24 and the split is Nov 1: it belongs to the before arm"
+    assert art["split"]["turns_before"] == 1 and art["split"]["turns_undated"] == 0
+    r = _split_row(art, "tool-call-caption-present", "unattributed")
+    assert r["before"]["situations_encountered"] == 2 and r["after"]["situations_encountered"] == 0
+    # One empty arm is not a comparison, and it must not be dressed as one.
+    assert r["discriminated"] is None
+    assert r["status"] == "instrument failure: N=0 in one arm"
+
+
+def test_since_and_until_select_on_content_date_over_both_suffixes(tmp_path):
+    """Clause 2: [since, until) over `.json` and `.json.gz`, with mtime given no vote."""
+    inside_plain = write_session(tmp_path, "20261020_100000_in_plain", captioned_turn(),
+                                 msg_ts=_iso(2026, 10, 20))
+    # The gzipped half, dated from inside the archive and stamped on disk TODAY — the mtime a
+    # `--days` reader would place in November and an absolute reader must not.
+    inside_gz = write_session(tmp_path, "20261005_100000_in_gz", captioned_turn(),
+                              gzipped=True, msg_ts=_iso(2026, 10, 5), mtime=NOW)
+    at_start = write_session(tmp_path, "20261001_000000_edge_in", captioned_turn(),
+                             msg_ts="2026-10-01T00:00:00+00:00")
+    at_end = write_session(tmp_path, "20261101_000000_edge_out", captioned_turn(),
+                           msg_ts="2026-11-01T00:00:00+00:00")
+    before_all = write_session(tmp_path, "20260915_100000_too_early", captioned_turn(),
+                               msg_ts=_iso(2026, 9, 15))
+
+    got = {p.name for p in BE.iter_transcripts(tmp_path, since="2026-10-01",
+                                               until="2026-11-01", now=NOW)}
+    assert got == {inside_plain.name, inside_gz.name, at_start.name}
+    assert before_all.name not in got
+    assert at_end.name not in got, "`--until` is EXCLUSIVE: an endpoint shared with the next " \
+        "window must not be counted twice, which is what makes the two halves of --split-on a " \
+        "partition rather than an overlap"
+    assert inside_gz.name in got, "the `.gz` half has to answer to an absolute window too, or " \
+        "the archived corpus is selectable only by the retention schedule's dates"
+
+
+def test_days_alone_still_admits_the_mtime_set_it_admitted_before(tmp_path):
+    """Clause 3: the scheduled sweep must not silently change corpus under this change.
+
+    The expected set is recomputed here from the pre-#3885 rule — `st_mtime >= now − days·86400`
+    — rather than asserted as a literal, so the node fails the day `--days` starts meaning
+    something else. The fixtures are chosen so the two readings DISAGREE on two of the three
+    files: an old session touched today and a recent session left alone for twenty days. A node
+    whose corpus happened to make both readings agree would pass without pinning anything.
+    """
+    old_everywhere = write_session(tmp_path, "20260901_100000_old_aaaa", captioned_turn(),
+                                   age_days=40)
+    stale_name = write_session(tmp_path, "20260901_100000_touched_bbbb", captioned_turn(),
+                               age_days=2)
+    recent_name = write_session(tmp_path, "20261103_100000_left_alone_cccc", captioned_turn(),
+                                age_days=20)
+    days = 7
+    cutoff = NOW.timestamp() - days * 86400
+    expected = {p.name for p in Path(tmp_path).glob("*.json*")
+                if p.stat().st_mtime >= cutoff}
+    got = {p.name for p in BE.iter_transcripts(tmp_path, days=days, now=NOW)}
+    assert got == expected == {stale_name.name}, \
+        f"`--days` alone must keep the mtime cutoff: {sorted(got)} vs {sorted(expected)}"
+    assert recent_name.name not in got, "a file named today but untouched for twenty days is " \
+        "outside a `--days` window and inside a content window — the two modes differ here on " \
+        "purpose, so this node cannot pass by both agreeing"
+    assert old_everywhere.name not in got
+
+
+def test_the_artifact_records_the_window_and_counts_mtime_content_disagreements(tmp_path):
+    """Clause 4: both endpoints in the record, and the count of files the two clocks split.
+
+    Seeded so the answer is known by hand: A is October traffic in an October file (agrees), B
+    is October traffic in a file dated today (disagrees, admitted), C is September traffic in
+    an October file (disagrees, refused), D is November traffic in a November file (agrees,
+    refused). Two disagreements, two admissions.
+    """
+    win = dict(since="2026-10-01", until="2026-11-01", now=NOW)
+    a = write_session(tmp_path, "20261020_100000_agree_a", captioned_turn(),
+                      msg_ts=_iso(2026, 10, 20),
+                      mtime=datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc))
+    b = write_session(tmp_path, "20261020_110000_late_pack_b", captioned_turn(),
+                      msg_ts=_iso(2026, 10, 20, 11), mtime=NOW)
+    c = write_session(tmp_path, "20260915_100000_repacked_c", captioned_turn(),
+                      msg_ts=_iso(2026, 9, 15),
+                      mtime=datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc))
+    d = write_session(tmp_path, "20261103_100000_recent_d", captioned_turn(),
+                      msg_ts=_iso(2026, 11, 3),
+                      mtime=datetime(2026, 11, 3, 10, 0, tzinfo=timezone.utc))
+    art = BE.sweep(tmp_path, **win, write=False)
+    assert art["window_mode"] == "content"
+    assert art["window_start"] == "2026-10-01T00:00:00+00:00"
+    assert art["window_end"] == "2026-11-01T00:00:00+00:00"
+    assert art["window_days"] is None, \
+        "`window_days` is the caller's flag, not the window: under an absolute window it is " \
+        "still the default 7, and publishing 7 beside a one-month window is the artifact " \
+        "asserting a span it did not measure"
+    assert "window: mode=content" in BE.render_rows(art)
+    corpus = art["corpus"]
+    assert corpus["candidates_considered"] == 4 and corpus["content_undated_files"] == 0
+    assert corpus["mtime_content_disagreements"] == 2, \
+        "B (October traffic in a November file) and C (September traffic in an October file) " \
+        "are the two disagreements; A and D's two dates put them the same way"
+    admitted = {p.name for p in BE.iter_transcripts(tmp_path, **win)}
+    assert admitted == {a.name, b.name}, \
+        "the content window admits B in and D out, which is the whole point of the clause"
+    assert c.name not in admitted, "September traffic in an October file is October traffic's " \
+        "neighbour by mtime only — admitting it is the exact failure mode on the live corpus"
+    assert d.name not in admitted, "D is November traffic whose mtime AND content date are " \
+        "both outside the window — the case that must stay refused, so the disagreement count " \
+        "measures the two files the clocks split and not every file the window excludes"
+
+    # A `--days` run records WHICH CLOCK it used, so an old-style artifact is never mistaken
+    # for a content-dated one by whoever reads it next, and its endpoints are still published.
+    plain = write_session(tmp_path, "20261020_120000_days_e", captioned_turn(), age_days=2)
+    day_art = BE.sweep(tmp_path, days=7, now=NOW, write=False)
+    assert day_art["window_mode"] == "mtime"
+    assert day_art["window_start"] == (NOW - timedelta(days=7)).isoformat(timespec="seconds")
+    assert day_art["window_end"] is None
+    assert day_art["window_days"] == 7, "a `--days` run still publishes its look-back"
+    assert "(7 days)" in BE.render_rows(day_art)
+    assert plain.name in {p.name for p in BE.iter_transcripts(tmp_path, days=7, now=NOW)}
+    assert "file mtime" in day_art["corpus"]["window_filter"]
+
+
+def test_split_on_marks_a_seeded_rate_change_as_discriminated(tmp_path):
+    """Clause 5's positive control: a real rate step across the split says `true`.
+
+    Thirty sessions each side — `captioned_turn` before (0.500), `fully_captioned_turn` after
+    (1.000): Δ = +50.00pp against a 60-per-arm floor of 24.55pp. Every figure on the row is
+    re-derivable from the denominators beside it, and the CI is asserted equal to the module's
+    own `wilson_interval`, so a paired mode that grew a second interval function fails here.
+    """
+    _write_pair(tmp_path, "paired", sessions=30, turn=captioned_turn, content_day=20)
+    _write_pair(tmp_path, "paired", sessions=30, turn=fully_captioned_turn,
+                content_day=2, content_month=11)
+    art = BE.sweep(tmp_path, since="2026-10-01", until="2026-11-05", split_on="2026-11-01",
+                   now=NOW, write=False)
+    r = _split_row(art, "tool-call-caption-present", "unattributed")
+    assert r["before"]["situations_encountered"] == 60 and r["before"]["exhibited"] == 30
+    assert r["before"]["rate"] == 0.5
+    assert r["after"]["situations_encountered"] == 60 and r["after"]["exhibited"] == 60
+    assert r["after"]["rate"] == 1.0
+    assert r["delta"] == 0.5 and r["delta_pp"] == 50.0
+    assert r["minimum_detectable_delta"] == pytest.approx(0.245494, abs=1e-5)
+    assert r["discriminated"] is True
+    lo, hi = BE.wilson_interval(30, 60)
+    assert r["before"]["wilson95"] == [round(lo, 4), round(hi, 4)], \
+        "the paired arms must publish the SAME Wilson interval the single-window rows use"
+    assert art["split"]["alpha"] == 0.05 and art["split"]["power"] == 0.80
+    assert "DISCRIMINATED" in BE.render_split(art)
+
+
+def test_split_on_marks_identical_seeded_rates_as_not_discriminated(tmp_path):
+    """Clause 5's negative control: identical seeded rates must say `false`, and say why.
+
+    Same shape, same denominators, same split as the positive control — only the rate is the
+    same on both sides. Asserting the denominators and a non-zero floor beside the verdict is
+    what keeps this from passing because an arm came out empty or the floor came out infinite,
+    either of which would make `false` a tautology rather than a measurement.
+    """
+    _write_pair(tmp_path, "same", sessions=30, turn=captioned_turn, content_day=20)
+    _write_pair(tmp_path, "same", sessions=30, turn=captioned_turn,
+                content_day=2, content_month=11)
+    art = BE.sweep(tmp_path, since="2026-10-01", until="2026-11-05", split_on="2026-11-01",
+                   now=NOW, write=False)
+    r = _split_row(art, "tool-call-caption-present", "unattributed")
+    assert r["before"]["situations_encountered"] == 60 == r["after"]["situations_encountered"], \
+        "both arms have to hold the whole seeded corpus: an arm clipped by the window turns " \
+        "the pair into 60-versus-12 and the floor into a number about the fixture"
+    assert r["before"]["rate"] == 0.5 and r["after"]["rate"] == 0.5
+    assert r["delta"] == 0.0
+    assert r["minimum_detectable_delta"] == pytest.approx(0.245494, abs=1e-5)
+    assert r["discriminated"] is False
+    assert "not discriminated" in BE.render_split(art)
+
+
+def test_split_on_reports_not_instrumentable_rather_than_a_zero_rate(tmp_path):
+    """A behaviour whose trigger never fires gets a reason, not a delta of 0.0.
+
+    0.0-vs-0.0 reads as "no effect found", which is a claim about the traffic; the honest
+    statement is that nothing exercised the behaviour on either side and the corpus alone
+    cannot tell a blind detector from an absent behaviour. This is the fall-back the item's
+    clause 6 asks for — and it is what several registered behaviours will report on the human
+    population, which carries 29 user turns a week against 14,516 worker.
+    """
+    _write_pair(tmp_path, "noinstr", sessions=4, turn=captioned_turn, content_day=20)
+    _write_pair(tmp_path, "noinstr", sessions=4, turn=captioned_turn,
+                content_day=2, content_month=11)
+    art = BE.sweep(tmp_path, since="2026-10-01", until="2026-11-05", split_on="2026-11-01",
+                   now=NOW, write=False)
+    r = _split_row(art, "no-raw-write-to-protected-path", "unattributed")
+    assert r["before"]["rate"] is None and r["after"]["rate"] is None
+    assert r["delta"] is None and r["minimum_detectable_delta"] is None
+    assert r["discriminated"] is None
+    assert r["status"].startswith("not_instrumentable")
+    assert "cannot tell apart" in r["reason"]
+    assert "NOT_INSTRUMENTABLE" in BE.render_split(art)
+
+
+def test_minimum_detectable_delta_is_the_spread_it_claims_to_be():
+    """The floor checked against the definition it is quoted from, by exact enumeration.
+
+    `minimum_detectable_delta` solves the pooled two-proportion z-test's own power equation, so
+    the independent instrument is the sampling distribution itself: every pair of counts the two
+    arms could produce, weighted by its binomial probability, counted where the test rejects. At
+    the published floor the rejection rate has to BE the nominal power; at ninety percent of it
+    it has to be clearly below. A solver that forgot the alternative hypothesis's standard error
+    — the usual off-by-one, `delta > z·SE0`, which returns a floor roughly 40% too small here —
+    clears the first check at about half power and fails the second. scipy is deliberately not
+    used: the suite runs where only the declared dependencies do.
+    """
+    from math import comb
+
+    def exact_power(n1, n2, p1, p2):
+        z = BE._inv_normal_cdf(0.975)
+        pa = [comb(n1, x) * p1 ** x * (1 - p1) ** (n1 - x) for x in range(n1 + 1)]
+        pb = [comb(n2, y) * p2 ** y * (1 - p2) ** (n2 - y) for y in range(n2 + 1)]
+        tot = 0.0
+        for x in range(n1 + 1):
+            for y in range(n2 + 1):
+                pbar = (x + y) / (n1 + n2)
+                se = ((pbar * (1 - pbar)) ** 0.5) * ((1 / n1 + 1 / n2) ** 0.5)
+                if abs(y / n2 - x / n1) > z * se:
+                    tot += pa[x] * pb[y]
+        return tot
+
+    n, p = 20, 0.5
+    mdd = BE.minimum_detectable_delta(n, n, p)
+    assert mdd == pytest.approx(0.395056, abs=1e-5)
+    assert abs(exact_power(n, n, p, min(1.0, p + mdd)) - 0.80) < 0.05, \
+        "at the published floor the test must reject at the nominal 80% power"
+    assert exact_power(n, n, p, min(1.0, p + 0.9 * mdd)) < 0.75, \
+        "a smaller move must be under-powered, or the number is not a floor"
+    assert BE.minimum_detectable_delta(0, 20, 0.5) is None
+    assert BE.minimum_detectable_delta(20, 20, 1.5) is None, \
+        "a rate outside [0,1] is not a proportion and no floor is defined for it"
+
+
+def test_an_unparseable_window_date_is_refused_rather_than_ignored(tmp_path):
+    """A silently dropped `--since` is a run that measures the whole corpus under a label.
+
+    Both surfaces are checked: `sweep` raises, and the CLI converts that into exit 2 with a
+    message — an operator's typo in a date must not be the quiet kind, because it is the kind
+    that still prints `window_start` and reads like a real window.
+    """
+    with pytest.raises(ValueError):
+        BE.sweep(tmp_path, since="last tuesday", now=NOW, write=False)
+    with pytest.raises(ValueError):
+        BE.sweep(tmp_path, split_on="nonsense", now=NOW, write=False)
+    with pytest.raises(ValueError):
+        BE.sweep(tmp_path, since="2026-11-01", until="2026-10-01", now=NOW, write=False)
+    out = str(Path(tmp_path) / "rows.jsonl")
+    assert BE.main(["--sessions-dir", str(tmp_path), "--since", "not-a-date",
+                    "--out", out]) == 2
+    assert BE.main(["--sessions-dir", str(tmp_path), "--split-on", "not-a-date",
+                    "--out", out]) == 2
+
+
+def test_a_session_whose_timestamp_is_past_the_head_read_falls_back_to_its_name(tmp_path):
+    """The bounded head read is a real bound, so the fallback has to survive it.
+
+    `content_date` reads 256 KiB and stops — the alternative is a full parse of every candidate
+    twice, minutes against seconds. A transcript whose first timestamp sits beyond that must be
+    placed by its filename, not dropped: 384 of this box's 21,441 transcripts yield no timestamp
+    in the head, and a window that lost them would be wrong in the same direction as the mtime
+    bug it replaces, only more quietly.
+    """
+    msgs = json.dumps([{"role": "user", "content": "go",
+                        "timestamp": "2026-10-20T10:00:00+00:00"}])
+    body = ('{"session_id": "20261011_100000_deep_ts", "id": "20261011_100000_deep_ts", '
+            '"source": null, "pad": "' + "x" * 300_000 + '", "messages": ' + msgs + "}")
+    p = Path(tmp_path) / "20261011_100000_deep_ts.json"
+    p.write_text(body, encoding="utf-8")
+    assert BE._FIRST_TS_RE.search(p.read_text(encoding="utf-8")[:BE._HEAD_BYTES]) is None, \
+        "the fixture must actually put the timestamp beyond the head read, or this node is " \
+        "testing the primary source wearing the fallback's name"
+    assert BE.content_date(p) == datetime(2026, 10, 11, 10, 0, tzinfo=timezone.utc)
+    assert {q.name for q in BE.iter_transcripts(tmp_path, since="2026-10-01",
+                                                until="2026-11-01", now=NOW)} == {p.name}
+
+
+def test_paired_rows_reads_a_non_proportion_rate_at_the_widest_variance():
+    """A rate above 1.0 gets the p=0.5 floor, because p(1−p) is negative up there.
+
+    Direct on `paired_rows` rather than through `sweep`, because no registered spec can reach
+    the branch: each of the four counts one situation per event of its own trigger, so k ≤ n.
+    The shape is the one this instrument SHIPPED — the caption behaviour's first published rate
+    was 2.000, per-turn denominator under a per-call detector — and `sweep` validates nothing
+    about a spec's `situation_unit`, so a future registry line can bring it back. Asserting the
+    published baseline and its note is what stops the floor being read off p=2.0, where the
+    variance term is negative and any delta beats the "floor".
+    """
+    spec = [{"id": "per-call-over-per-turn", "source": "app/harness/loop.py:2341",
+             "population": "both", "trigger": "t", "exhibit": "e", "denominator": "both",
+             "detector": "d", "situation_unit": "turns with calls", "status": "active"}]
+
+    def arms(nk_b, nk_a):
+        return {"per-call-over-per-turn": {
+            "before": {"user": [0, 0], "worker": [0, 0], "unattributed": nk_b},
+            "after": {"user": [0, 0], "worker": [0, 0], "unattributed": nk_a}}}
+
+    rows = {r["population"]: r for r in BE.paired_rows(spec, arms([30, 60], [30, 60]))}
+    row = rows["combined"]
+    assert row["before"]["rate"] == 2.0 and row["delta"] == 0.0
+    assert row["mdd_baseline_rate"] == 0.5, \
+        "the floor has to be read off p=0.5, the widest variance; off p=2.0 the variance term " \
+        "is negative and the reported floor is a fiction that any movement beats"
+    assert "not a proportion" in row["mdd_baseline_note"], \
+        "the row that quietly widens its own floor has to say it did, or a reader compares it " \
+        "against a floor from a different design"
+    assert row["discriminated"] is False
+    # The proportion path is unchanged by the guard, so the guard cannot be a blanket dodge.
+    prop = {r["population"]: r for r in BE.paired_rows(spec, arms([60, 30], [60, 60]))}["combined"]
+    assert prop["mdd_baseline_rate"] == 0.5 and prop["mdd_baseline_note"] is None
+    assert prop["minimum_detectable_delta"] == pytest.approx(0.245494, abs=1e-5)
+    assert prop["discriminated"] is True
