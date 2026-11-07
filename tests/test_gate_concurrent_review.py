@@ -207,7 +207,22 @@ def test_pre_existing_failures_discard_the_prefetch_and_grade_again_told(armed):
     grader = _Grader()
     armed["monkeypatch"].setattr(RV, "grade", grader)
     red = ["tests/test_old.py::test_red"]
-    report = _Gate(armed["tmp"], lambda g: _green(g, pre_existing_failures=red)).run()
+
+    def tests(g):
+        # Both grades append to `grader.calls` from different threads — the
+        # prefetch's from the review thread, the serial re-grade from this one —
+        # and `_Grader` sets `started` only after it has recorded its own kwargs,
+        # so waiting here fixes the order rather than leaving it to the scheduler.
+        # Without the wait, `calls[1]` below is whichever of the two landed first,
+        # and the prefetch's kwargs are `pre_existing_failures=[]` by construction —
+        # the prefetched `_review_call` is made before any tests rung has run — which
+        # is the assertion losing half of all runs.
+        # Same synchronisation `test_the_grade_starts_before_the_tests_rung_finishes_and_a_pass_joins_it`
+        # and `test_a_head_that_moved_during_the_suite_is_graded_again` already use.
+        grader.started.wait(10)
+        return _green(g, pre_existing_failures=red)
+
+    report = _Gate(armed["tmp"], tests).run()
     assert report.ok
     assert len(grader.calls) == 2
     serial = grader.calls[1]
