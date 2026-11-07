@@ -5692,10 +5692,9 @@ def test_the_exemption_needs_the_disposal_frame_and_nothing_wider(tmp_path):
     assert "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1" in out, out
 
 
-# ── #2569: the reopen leg a disposal advertises has to be able to fire ────────────
+# ── #2569: the witness a disposal records has to be able to count ─────────────────
 #
-# Every disposal's reason text promises that "a nonzero count falsifies this disposal and
-# reopens the decision", and the count was `ls -1 '<pin>' | wc -l` — the path spliced inside
+# The count in a disposal's appended check was `ls -1 '<pin>' | wc -l` — the path spliced inside
 # single quotes, so no shell ever expanded it and `ls` was asked for a file with a literal
 # `[0-9]{8}` in its name. Measured 2026-10-11 over the live candidates directory, which holds
 # 11 `candidate-bash-logic-*` snapshots that its pin names: the shipped form printed
@@ -5704,6 +5703,14 @@ def test_the_exemption_needs_the_disposal_frame_and_nothing_wider(tmp_path):
 # on the 31 rows already stored (#2433's exit-0 result), and no existing test can tell an
 # absent corpus from a broken glob because `_cand_dir_2433` deliberately holds nothing the
 # pin could match.
+#
+# What this block does NOT pin any more is a reopen. Until #3891 the reason text spliced
+# onto every disposal promised that "a nonzero count falsifies this disposal and reopens
+# the decision", and this header took that promise as its own premise — but nothing ever
+# evaluated the count: `reopen_reason` has a date leg and a growth leg, and no code reads
+# `dated_corpus_files` at all. #3891 corrected the text to the leg that exists, and
+# `test_disposal_note_agrees_with_the_legs_reopen_reason_has` below is the pin that keeps
+# the two from drifting apart again.
 
 def _minted_tombstone_2569(store: Path, tmp_path: Path,
                            dir_name: str = "candidates") -> tuple[Path, str]:
@@ -5916,6 +5923,168 @@ def test_both_tombstone_frames_are_derived_from_their_templates():
     assert sv._DISPOSAL_TOMBSTONE_RE.fullmatch(
         sv.LEGACY_TOMBSTONE_TEMPLATE.format(input=probe)) is None, (
         "one frame cannot cover both shapes, so the legacy twin is load-bearing")
+
+
+# ── #3891: the reason text a disposal carries has to describe the leg that exists ───
+#
+# `DISPOSAL_NOTE` is spliced onto every `repair --dispose-unverifiable` row, and since
+# #1588 shipped it has promised that "a nonzero count falsifies this disposal and reopens
+# the decision". No code evaluates that count. The three nodes below are the note pinned
+# against the code it describes: the text itself, the one predicate that can lift a
+# disposal, and the two templates whose bytes #2433's exemption is read off.
+
+#: The phrasings the note is not allowed to make, as fragments rather than the whole
+#: sentence so a rewording cannot keep the promise by rehyphenating it. Each one says a
+#: count of the counted corpus ends the disposal — which is a claim about `reopen_reason`,
+#: and `reopen_reason` has a date leg and a growth leg and reads no stdout.
+_COUNT_TRIGGER_CLAIMS_3891 = (
+    "falsifies this disposal",
+    "reopens the decision",
+    "reopens the verdict",
+    "falsifies the disposal",
+)
+
+
+def test_disposal_note_describes_the_leg_that_exists_and_not_a_count_trigger(tmp_path):
+    """Clause 1: the rendered note drops the count promise and states the date leg.
+
+    Both halves are needed. Dropping the promise without naming a mechanism would leave a
+    disposal whose reopen schedule is nowhere in its own reason text — the note is the
+    only place a reader of a ledger line meets the mechanism, because the row's
+    `reopen_expiry` is printed by `report`, not stored beside the reason. And stating the
+    day count from `REOPEN_AFTER_DAYS` rather than typing it is why this node can assert
+    the number without freezing it: change the constant and the sentence moves with it.
+    """
+    rendered = sv.DISPOSAL_NOTE.format(
+        input="/x/candidates/candidate-a-b-[0-9]{8}\\.md",
+        # The same string the one splice site feeds the field, so this node renders what a
+        # ledger row carries rather than a guess at it.
+        kept=sv.disposal_verdict({"verdict": sv.UNVERIFIABLE_VERDICT})[1])
+    promised = [c for c in _COUNT_TRIGGER_CLAIMS_3891 if c in rendered]
+    assert not promised, (
+        f"the note still advertises a count as a reopen trigger ({promised}); the leg that "
+        f"exists is the date leg in `reopen_reason`, aged on `date_leg_anchor`")
+
+    assert str(sv.REOPEN_AFTER_DAYS) in rendered, (
+        f"the note states no day count, so it does not name the leg either: {rendered}")
+    assert "first decision" in rendered.lower(), (
+        f"the note does not say what the leg is aged on: {rendered}")
+    # The leg's own anchor and expiry functions are what the sentence describes, so the
+    # note and the code have to agree on the number, not merely each state one.
+    assert sv.REOPEN_AFTER_DAYS == 60, (
+        "REOPEN_AFTER_DAYS moved off the 60 #2746 settled; the note interpolates it, so "
+        "update this pin deliberately rather than letting the sentence drift")
+
+    # And the promise is gone from the source, not just from this rendering: the module
+    # text is where a second copy of it would hide.
+    src = Path(sv.__file__).read_text(encoding="utf-8")
+    still = [c for c in _COUNT_TRIGGER_CLAIMS_3891 if c in src]
+    assert not still, (
+        f"{still} survives in scripts/skill_verdicts.py, where nothing evaluates it")
+
+
+def test_a_restored_corpus_still_reopens_only_on_the_date_leg(store, tmp_path):
+    """#3891 clause 2: the note a row carries and `reopen_reason` agree on the ONE leg.
+
+    The disposal is minted through `repair --dispose-unverifiable` over an absent corpus, the
+    corpus is then put back so the stored check prints `dated_corpus_files=2`, and the same
+    row is handed to `reopen_reason` in both corpus states at day 59 and past anchor+60d. The
+    answers must be identical between the states — a count-driven leg would differ — and the
+    only reason that ever arrives is the 60-day expiry the corrected note names.
+
+    The prior is terminal because that is what a disposal is: `disposal_verdict` relabels
+    terminal to terminal, and a row whose prior was not terminal keeps that prior, so it has
+    no terminal verdict to lift and the reopen asserts below would be vacuous.
+    """
+    cand = _cand_dir_2433(tmp_path)
+    prior = input_lost_row(store, input_lost_cmd_2433(cand),
+                           verdict=sv.UNVERIFIABLE_VERDICT)
+    _, out = run_repair_2433(store, tmp_path, "--dispose-unverifiable")
+    assert repair_tally_2433(out)["disposed"] == 1, out
+
+    row = dict(sv.load_verdicts(store)[INPUT_LOST_KEY_2433])
+    assert row["verdict"] in sv.TERMINAL_VERDICTS, row
+    # The reason the row carries, rebuilt the way `cmd_repair` composes it: the prior's own
+    # reason, then the note spliced with the pin it resolved and the blocking sentence
+    # `disposal_verdict` returns. So the corrected wording is proven to be what a ledger row
+    # actually stores, not merely what the constant says.
+    pinned = re.search(r"pinned_input='([^']*)'", row["evidence_cmd"]).group(1)
+    verdict, kept = sv.disposal_verdict(prior)
+    assert row["reason"] == (f"{prior['reason']} "
+                             f"{sv.DISPOSAL_NOTE.format(input=pinned, kept=kept)}"), row
+    assert f"{sv.REOPEN_AFTER_DAYS} days after the key's FIRST decision" in row["reason"]
+
+    p_ran = subprocess.run(["bash", "-c", row["evidence_cmd"]], capture_output=True,
+                           text=True, timeout=60)
+    _restore_2569(cand, "20261011", "20261012")
+    p_back = subprocess.run(["bash", "-c", row["evidence_cmd"]], capture_output=True,
+                            text=True, timeout=60)
+    assert "dated_corpus_files=0 " in p_ran.stdout, p_ran.stdout
+    assert p_back.returncode == 0 and "dated_corpus_files=2 " in p_back.stdout, (
+        f"the corpus was not really put back: rc={p_back.returncode} out={p_back.stdout!r} "
+        f"err={p_back.stderr!r}")
+
+    anchor = sv.date_leg_anchor(row)
+    assert anchor is not None, row
+    assert sv.reopen_expiry(row) == anchor + timedelta(days=sv.REOPEN_AFTER_DAYS)
+    day_59 = anchor + timedelta(days=sv.REOPEN_AFTER_DAYS - 1)
+    day_61 = anchor + timedelta(days=sv.REOPEN_AFTER_DAYS + 1)
+    # The two corpus states, one field apart: the row as stored carries the count the disposal
+    # recorded (0, the corpus absent), and `row_present` carries the count the same command
+    # prints now the snapshots are back. `reopen_reason` reads neither — it reads the anchor
+    # and `occurrences_at_decision` — which is what the loop below proves.
+    assert "dated_corpus_files=0" in (row.get("evidence_observed") or ""), (
+        f"the stored witness is not the absent-corpus count: "
+        f"{row.get('evidence_observed')!r}")
+    row_present = dict(row, evidence_observed=p_back.stdout)
+
+    for at in (day_59, day_61):
+        assert sv.reopen_reason(row, now=at) == sv.reopen_reason(row_present, now=at), (
+            f"the count changed the predicate's answer at {at:%Y-%m-%d}: "
+            f"{sv.reopen_reason(row, now=at)!r} with the absent count stored vs "
+            f"{sv.reopen_reason(row_present, now=at)!r} with a corpus on disk — the number is "
+            "an input to a reopen leg, which is what the note no longer promises")
+
+    assert sv.reopen_reason(row, now=day_59) is None, (
+        "a disposal whose corpus is back reopened before its 60-day expiry, so the count is "
+        "a trigger after all")
+    assert sv.terminal_verdict(INPUT_LOST_KEY_2433, verdicts={INPUT_LOST_KEY_2433: row},
+                               now=day_59) is not None, (
+        "the disposal stopped being terminal at day 59, so nothing was left to lift")
+
+    reason = sv.reopen_reason(row, now=day_61)
+    assert reason is not None, (
+        "the date leg did not lift the disposal past anchor + 60d, so the corrected note "
+        "names a mechanism that does not fire either")
+    assert f"after {sv.REOPEN_AFTER_DAYS}d" in reason, (
+        f"the reason does not name the expiry the note promises: {reason!r}")
+    assert sv.terminal_verdict(INPUT_LOST_KEY_2433, verdicts={INPUT_LOST_KEY_2433: row},
+                               now=day_61) is None, (
+        "reopen_reason lifted the row but terminal_verdict still returned a verdict")
+
+
+
+def test_the_two_tombstone_templates_are_frozen_and_still_exempt(tmp_path):
+    """Clause 3: the templates are untouched, so #2433's exemption still covers the ledger.
+
+    The matchers are derived from these two constants, so editing a template silently
+    re-decides which of the ~32 stored rows are exempt — the failure mode is a nightly
+    reporting findings on its own bookkeeping, which is why this is a byte pin and not a
+    structural one. The audit half is the consequence, measured: a store holding one row
+    minted by the live code today is exit 0 with `input_lost 0`.
+    """
+    assert sv.TOMBSTONE_TEMPLATE == (
+        'echo "dated_corpus_files=$(p=\'{input}\'; ls -1 "$(dirname "$p")" 2>/dev/null '
+        '| grep -cE "^$(basename "$p")\\$") pinned_input=\'{input}\'"'), sv.TOMBSTONE_TEMPLATE
+    assert sv.LEGACY_TOMBSTONE_TEMPLATE == (
+        'echo "dated_corpus_files=$(ls -1 \'{input}\' 2>/dev/null | wc -l) '
+        'pinned_input=\'{input}\'"'), sv.LEGACY_TOMBSTONE_TEMPLATE
+
+    store = tmp_path / "verdicts.jsonl"
+    _minted_tombstone_2569(store, tmp_path)
+    rc, out = run_audit(store)
+    assert rc == 0, out
+    assert "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0" in out, out
 
 
 def test_a_key_whose_corpus_is_on_the_disk_is_never_disposed_as_blind(tmp_path):

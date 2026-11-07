@@ -2447,8 +2447,9 @@ _MISSING_INPUT_RE = re.compile(
 #: the ledger already reads pins in. Measured 2026-10-11 over the live candidates directory:
 #: the shipped form printed `dated_corpus_files=0` against 11 snapshots its pin named, the
 #: unquoted glob printed 0 against the same 11, this form printed 11. A count that can only
-#: ever be 0 is a disposal whose advertised reopen leg can never fire, which is what
-#: `DISPOSAL_NOTE` below promises it can.
+#: ever be 0 is a witness that proves nothing in either direction, which is the reason
+#: #2569 fixed the arithmetic; it was never a reopen trigger either — #3891 took that
+#: promise out of `DISPOSAL_NOTE`, which had been advertising a leg no code evaluates.
 TOMBSTONE_TEMPLATE = ('echo "dated_corpus_files=$(p=\'{input}\'; ls -1 "$(dirname "$p")"'
                       ' 2>/dev/null | grep -cE "^$(basename "$p")\\$")'
                       ' pinned_input=\'{input}\'"')
@@ -2461,11 +2462,35 @@ TOMBSTONE_TEMPLATE = ('echo "dated_corpus_files=$(p=\'{input}\'; ls -1 "$(dirnam
 LEGACY_TOMBSTONE_TEMPLATE = ('echo "dated_corpus_files=$(ls -1 \'{input}\' 2>/dev/null | wc -l)'
                              ' pinned_input=\'{input}\'"')
 
+#: The reason text `repair --dispose-unverifiable` splices onto every disposal, and it
+#: describes the ONE leg that lifts a disposal: `reopen_reason`'s date leg, aged on
+#: `date_leg_anchor` (the key's first decision, #2746), which expires the verdict
+#: `REOPEN_AFTER_DAYS` days later and is the only thing `terminal_verdict` consults
+#: besides occurrence growth.
+#:
+#: Until #3891 this text promised instead that a nonzero value of the counted corpus would
+#: itself falsify the disposal and reopen the decision. Nothing evaluates that count. `reopen_reason` has exactly
+#: two legs — the date leg and growth — and `terminal_verdict` lifts a row through no
+#: other predicate; the tombstone is an `echo`, so it exits 0 whatever number it prints;
+#: and `declared_denominator` answers None rather than 0 for a `dated_corpus_files=` line
+#: because the field it reads is `input_rows=`, which is also why the #2048 EMPTY_INPUT
+#: rail can never fire on a disposal. So the count is a witness taken at dispose time —
+#: evidence the corpus was already gone when the disposal was written, which a later
+#: reader can re-run and compare — and not a trigger. Wiring it as one was rejected: it
+#: would make a ledger row's stdout a third reopen trigger beside the two settled ones
+#: (#2746's date anchor and #3632's verdict audit), and the date leg lifts every disposal
+#: on its own schedule regardless of what the count says.
+#:
+#: The day count is interpolated from `REOPEN_AFTER_DAYS` rather than typed, so this
+#: sentence cannot fall behind the code it describes; the doubled braces are the fields
+#: the single splice site below fills in.
 DISPOSAL_NOTE = (
-    "#1588 disposal: the check above was pinned to {input}, which retention has pruned, so "
-    "those grounds can no longer be re-executed by anyone; the appended check counts that "
-    "corpus absent instead, and a nonzero count falsifies this disposal and reopens the "
-    "decision. Verdict {kept}.")
+    f"#1588 disposal: the check above was pinned to {{input}}, which retention has pruned, "
+    f"so those grounds can no longer be re-executed by anyone; the appended check counts "
+    f"that corpus absent and records the number as a witness of this moment — nothing "
+    f"re-executes it, and no count of it reopens anything. What lifts this verdict is the "
+    f"date leg in `reopen_reason`: it expires {REOPEN_AFTER_DAYS} days after the key's "
+    f"FIRST decision, the `reopen_expiry` printed on the row. Verdict {{kept}}.")
 
 #: A command that IS `TOMBSTONE_TEMPLATE`, recognised from the template's own frame so the two
 #: cannot drift apart, with a backreference pinning the counted path and the published
