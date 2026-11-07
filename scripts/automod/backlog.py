@@ -1952,13 +1952,29 @@ def _committed_witness_siblings(path, artifact_dir: str = WITNESS_ARTIFACT_DIR) 
     `2026-10-14.2471-lloyd-data-workers-witness.md` is a note ABOUT an extract, ending
     `-workers-witness.md`, so it cannot be counted as one either.
     """
+    return len(_committed_witness_sibling_names(path, artifact_dir))
+
+
+def _committed_witness_sibling_names(path,
+                                     artifact_dir: str = WITNESS_ARTIFACT_DIR) -> list[str]:
+    """The NAMES of the extracts of `path` the vault holds, sorted, oldest first.
+
+    #3872 factored the walk out of `_committed_witness_siblings` because a count is no
+    longer the only thing asked of it: the over-bound note asks `if siblings:` (#3175),
+    which a count answers, while the whole-file demand has to NAME the copy it is
+    re-aiming the reader at. Two call sites, one walk — and above all one definition of
+    "an extract of this source". A second walk is exactly where a second, subtly
+    different answer to that question comes from, which is the class this module keeps
+    re-meeting. The count keeps its own entry point so both existing callers and their
+    nodes keep reading a number.
+    """
     tail = _witness_family_tail(_witness_target(path))
     try:
         vdir = _vault_witness_dir(artifact_dir)
-        return sum(1 for p in vdir.iterdir()
-                   if p.name.endswith(tail) and p.is_file())
+        return sorted(p.name for p in vdir.iterdir()
+                      if p.name.endswith(tail) and p.is_file())
     except OSError:
-        return 0
+        return []
 
 
 # ── the loop does the cp itself (#3218) ───────────────────────────────────────
@@ -2789,6 +2805,27 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         # the commit did not land. Fall through to the demand so the witness is still
         # witnessed, with the failure named beside it rather than swallowed.
         sink.append(res["note"])
+    # The vault may already hold an extract of THESE bytes. #3175 taught the over-bound
+    # note above to ask; this is the whole-file demand every witness UNDER the ceiling
+    # reaches, and it never asked — it ordered a copy whatever the vault held. The
+    # asymmetry is the whole of #3872: one round's `gate.json` is ONE file, while every
+    # item quoting it gets a demand carrying ITS OWN item number, so two item ids naming
+    # one report are two free slots to `_artifact_taken` and the vault gains identical
+    # bytes under two names — the #3161/#3396 near-miss, which no later reader
+    # distinguishes. Aimed at the committed copy instead, the demand keeps a new file
+    # available as a CONDITIONAL in #3175's shape: a sibling's tail says it came from this
+    # source, not that its figures answer the one this item quotes, so re-deriving from it
+    # is the cheap check that decides. Unlike the copy demand it replaces, it names no
+    # source path and books no fresh slot — that is what stops the second copy.
+    sibs = _committed_witness_sibling_names(witness, artifact_dir)
+    if sibs:
+        first = f"{artifact_dir}/{sibs[0]}"
+        (owed if route_to_owed else every).append(
+            f"The witness bytes have no history: `{artifact_dir}` already commits a copy "
+            f"of them — re-derive the quoted report from `{first}`, and publish your own "
+            f"extract only if that output does not reproduce the figure the item quotes: "
+            f"`{_rederive_command(first, ext)}`")
+        return _answer()
     # Past the `MAX_CLAUSES` check above, which is where both destinations are
     # gated. #2289 clause 4 pinned that gate for the copy demand; #2382 clause 5
     # pins it for the note.

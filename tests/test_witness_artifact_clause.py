@@ -3604,3 +3604,205 @@ def test_check_ignore_goes_silent_on_a_tracked_sidecar_without_no_index(tmp_path
     named = _git_ok(repo, "check-ignore", "--no-index", "-v", shm)
     assert named.split("\t")[0].rsplit(":", 1)[-1] == "backlog/data/*.db-shm", (
         f"`--no-index` did not resolve a tracked, ignored path to its rule: {named!r}")
+
+
+# ══ #3872: the committed-sibling check on the UNDER-bound whole-file demand ══════════
+#
+# #3175 taught the OVER-bound note — what triage emits for a witness past the 1 MiB
+# ceiling, where a copy is refused on size — to ask the vault whether it already holds an
+# extract of the cited source before ordering a new file. The under-bound demand, the one
+# emitted for every witness that fits, never got that question: it orders
+# `copy <src> to <day>.<item>-<src dir>-<name>` unconditionally. Because one round's
+# `gate.json` is ONE file while every item quoting it gets a demand carrying ITS OWN item
+# number, two item ids naming one report read as two free slots to `_artifact_taken`, and
+# the vault ends holding identical bytes under two names — the #3161/#3396 near-miss.
+# These nodes pin both sides of the new branch, its budget, its degradation, and the
+# ceiling boundary that keeps it out of #3175's note.
+
+
+def _unarchived_report(tmp_path: Path, body: str, *, round_dir: str = "SM_X",
+                       name: str = "gate.json", under_ceiling: bool = True) -> Path:
+    """A round's artifact where triage finds one: outside every repository, under size.
+
+    Both properties are asserted because both select the branch. A file inside a git tree
+    is answered by the "already covered by history" rule and gets no clause at all, and a
+    file over `WITNESS_MAX_BYTES` takes #3175's note instead of the demand this section is
+    about.
+    """
+    d = tmp_path / "rounds" / round_dir
+    d.mkdir(parents=True, exist_ok=True)
+    src = d / name
+    src.write_text(body, encoding="utf-8")
+    assert B.in_git_tree(src) is False, "fixture must sit outside every tree"
+    if under_ceiling:
+        assert src.stat().st_size <= B.WITNESS_MAX_BYTES, "fixture must be under the ceiling"
+    return src
+
+
+def _quoted_text(src: Path) -> str:
+    """Item text that quotes a figure and names that witness — the clause's trigger."""
+    return f"20 rungs in `{src}` and one of them is red."
+
+
+def _sibling_demand(src: Path, *, item_id: int = 3872, clauses=None):
+    """The whole-file demand for `src`, on the isolated fixture vault as left by the node."""
+    out = B.add_witness_artifact_clause(list(clauses if clauses is not None else []),
+                                        _quoted_text(src), item_id=item_id,
+                                        route_to_owed=True)
+    return out[1] if isinstance(out, tuple) else out
+
+
+def _plain_demand(artifact: str, src: Path) -> str:
+    """Today's whole-file demand, byte-for-byte, for `src` copied to `artifact`.
+
+    Assembled from `_demand_sentence`, this file's own record of the wording
+    #2289/#2382/#2513 left; the one substitution is the witness path, which that builder
+    spells `X` because the fixtures it was written for all use `_witness`'s file.
+    """
+    return _demand_sentence(artifact).replace("`X`", f"`{src}`", 1)
+
+
+def test_a_witness_the_vault_holds_an_extract_of_is_answered_from_that_copy(tmp_path):
+    """Clause 1, on the fixture the item spells: the committed copy IS the demand.
+
+    The vault holds `backlog/data/2026-10-22.3162-SM_X-gate.json`, byte-identical to the
+    cited `…/rounds/SM_X/gate.json`, published under item #3162's number. The bare
+    `backlog/data/gate.json` slot is in the fixture too and is load-bearing:
+    `_witness_name_must_be_dated` answers False for a basename as ordinary as `gate.json`,
+    so with no taken slot the demand would name the BARE path and this node would be
+    pinning a branch no real `gate.json` demand takes — production reaches the dated form
+    only because the live vault holds #1883's pinned witness. What changes is the demand
+    and nothing else: it points at the bytes already committed, asks for the figure from
+    them, and orders no fresh `<day>.3872-SM_X-gate.json`.
+    """
+    src = _unarchived_report(tmp_path, json.dumps(
+        {"rungs": [{"name": "tests", "ok": True} for _ in range(20)]}) + "\n")
+    _vault_witness(tmp_path, "gate.json", '{"pinned_by": 1883}\n')
+    _vault_witness(tmp_path, "2026-10-22.3162-SM_X-gate.json",
+                   src.read_text(encoding="utf-8"))
+    assert B._committed_witness_siblings(str(src)) == 1, (
+        "fixture: the vault does not hold an extract of the cited source")
+
+    owed = _sibling_demand(src)
+    assert len(owed) == 1, owed
+    text = owed[0]
+    assert text.startswith("The witness bytes have no history:"), text
+    assert "already commits a copy" in text, text
+    assert "`backlog/data/2026-10-22.3162-SM_X-gate.json`" in text, text
+    assert "only if" in text, text
+    assert f"`{src}`" not in text, f"a copy of the source is still ordered: {text}"
+    dated = B._witness_artifact(src, B.WITNESS_ARTIFACT_DIR, item_id=3872)
+    assert dated not in text, f"a second copy under this item's number is booked: {text}"
+
+
+def test_a_witness_with_no_committed_extract_still_gets_exactly_todays_demand(tmp_path):
+    """Clause 2: the no-sibling branch is byte-for-byte the sentence on record.
+
+    The same item, the same witness, one difference — the vault holds the bare `gate.json`
+    slot and no extract of THIS source. The demand must equal the string `_demand_sentence`
+    records, not a paraphrase of it: #3218's family node counts exactly three demands
+    STARTING with that sentence and the file's first node compares against it verbatim, so
+    a wording drift here would fail two nodes that have nothing to do with #3872. What this
+    node is really guarding is the subtler failure — a never-archived witness losing its
+    demand to a probe added for the other case.
+    """
+    src = _unarchived_report(tmp_path, json.dumps(
+        {"rungs": [{"name": "tests", "ok": True} for _ in range(20)]}) + "\n")
+    _vault_witness(tmp_path, "gate.json", '{"pinned_by": 1883}\n')
+    assert B._committed_witness_siblings(str(src)) == 0, "fixture: no extract exists"
+    artifact = B._witness_artifact(src, B.WITNESS_ARTIFACT_DIR, item_id=3872)
+
+    owed = _sibling_demand(src)
+    assert owed[0] == _plain_demand(artifact, src), owed[0]
+
+
+def test_the_re_aimed_demand_ends_on_the_committed_copy_inside_the_clause_budget(
+        tmp_path):
+    """Clause 3: the command at the end runs against the committed bytes, and the whole
+    sentence still fits `CLAUSE_MAX_CHARS`.
+
+    Stressed at the real system's longest spelling rather than the short fixture's: round
+    dir `SM_20261103_111612`, sibling published under #3731, and a pytest tmp path longer
+    than `~/.local/state/lloyd-automod` — so the source absolute path, which this clause
+    no longer prints, is the length the 410-character real-vault measurement had room for.
+    `clean_clauses` truncates at 600 and the cut lands on the tail, which is where the
+    conditional permitting a NEW file lives: a truncated clause would read as an
+    unconditional "re-derive and stop", the one instruction that cannot be satisfied.
+    """
+    src = _unarchived_report(tmp_path, json.dumps(
+        {"rungs": [{"name": n, "ok": True} for n in
+                   ["preflight", "vet", "static", "tests", "review"] * 4]}) + "\n",
+        round_dir="SM_20261103_111612")
+    committed = "backlog/data/2026-11-03.3731-SM_20261103_111612-gate.json"
+    _vault_witness(tmp_path, "gate.json", '{"pinned_by": 1883}\n')
+    _vault_witness(tmp_path, "2026-11-03.3731-SM_20261103_111612-gate.json",
+                   src.read_text(encoding="utf-8"))
+    assert B._committed_witness_siblings(str(src)) == 1, "fixture: no extract"
+
+    owed = _sibling_demand(src, item_id=3731)
+    text = owed[0]
+    assert text.endswith(f"`wc -l -c < {committed}`"), text[-120:]
+    assert len(text) <= B.CLAUSE_MAX_CHARS, (len(text), text)
+    assert B.clean_clauses([text]) == [text], "clean_clauses altered the demand"
+
+
+def test_a_vault_root_that_is_not_a_directory_yields_the_ordinary_demand(tmp_path,
+                                                                        monkeypatch):
+    """Clause 4: the probe degrades and the demand does not (#2513/#3175's shape).
+
+    `app.paths.VAULT_ROOT` aimed at a plain FILE is the degradation case: walking a path
+    that is not a directory must answer "the vault holds nothing" rather than raise,
+    because the clause builder is called unguarded and an exception there would take the
+    whole triage pass down, not this clause with it. The surviving demand is the one an
+    EMPTY vault produces, so the failure shows up as a missing pointer and never as a
+    missing witness.
+    """
+    src = _unarchived_report(tmp_path, json.dumps(
+        {"rungs": [{"name": "tests", "ok": True} for _ in range(20)]}) + "\n")
+    _vault_witness(tmp_path, "gate.json", '{"pinned_by": 1883}\n')
+    _vault_witness(tmp_path, "2026-10-22.3162-SM_X-gate.json",
+                   src.read_text(encoding="utf-8"))
+    assert "only if" in _sibling_demand(src)[0], "fixture: the pointer is not emitted"
+
+    not_a_dir = tmp_path / "not-a-directory"
+    not_a_dir.write_text("a file where a vault should be\n", encoding="utf-8")
+    monkeypatch.setattr("app.paths.VAULT_ROOT", not_a_dir)
+    assert B._committed_witness_siblings(str(src)) == 0, "the probe must answer 0"
+    # The expectation is computed UNDER the degraded root, not carried over from the
+    # healthy one: `_artifact_taken` reads the same vault the probe does, so with the root
+    # unreadable the bare `gate.json` slot it took into account above is invisible too and
+    # the name falls back to the plain basename — which is exactly what an EMPTY vault
+    # yields, and the point of the node is that both probes degrade together. A demand
+    # still naming the dated slot would mean one of the two read a vault the other could
+    # not see, which is a torn read, not a degradation.
+    artifact = B._witness_artifact(src, B.WITNESS_ARTIFACT_DIR, item_id=3872)
+    assert artifact == "backlog/data/gate.json", artifact
+    owed = _sibling_demand(src)
+    assert owed[0] == _plain_demand(artifact, src), owed[0]
+
+
+def test_the_under_bound_branch_never_rewrites_the_over_bound_note(tmp_path):
+    """Clause 5's boundary, pinned where the two branches could be confused: the ceiling.
+
+    The three #3175 nodes the item names cover that note's WORDING; this one covers the
+    dispatch. The size guard at the head of the whole-file branch runs first, and a
+    sibling check added below it must not pull an over-ceiling witness into a copy demand
+    its own note forbids — a copy of those bytes is refused on size, so a clause ordering
+    one would be a demand the round cannot satisfy. `WITNESS_MAX_BYTES + 1` is the
+    boundary that guard states, so the fixture sits one byte past it.
+    """
+    src = _unarchived_report(tmp_path, "x" * (B.WITNESS_MAX_BYTES + 1),
+                             name="metrics.jsonl", under_ceiling=False)
+    _vault_witness(tmp_path, "metrics.jsonl", '{"pinned_by": 1883}\n')
+    _vault_witness(tmp_path, "2026-10-22.3162-SM_X-metrics.jsonl", '{"extract": 1}\n')
+    assert B._committed_witness_siblings(str(src)) == 1, "fixture: no extract"
+
+    owed = _sibling_demand(src)
+    text = owed[0]
+    assert not text.startswith("The witness bytes have no history"), text
+    assert "over the WITNESS_MAX_BYTES" in text, text
+    # #3175's note names the FAMILY GLOB and the count it found, not one committed name:
+    # `Measure the 1 committed extract under `backlog/data/*-SM_X-metrics.jsonl``. That
+    # count is the probe's, so this also pins that the over-bound arm still consults it.
+    assert "backlog/data/*-SM_X-metrics.jsonl" in text, text
+    assert "1 committed extract" in text, text
