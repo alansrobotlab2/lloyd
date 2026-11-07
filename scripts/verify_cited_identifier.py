@@ -37,6 +37,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import unicodedata
 import urllib.error
@@ -119,13 +121,80 @@ def title_matches_claim(title: str, claim: str,
     return (matched / len(claim_tokens)) >= threshold, unmatched
 
 
+#: Where to look for the `gh` CLI. The gate's tests rung runs candidate code with
+#: ``PATH=/usr/bin:/bin`` (``gate._child_env``), which carries no mise shim, so
+#: ``shutil.which`` alone finds nothing on this box — and the rung also moves
+#: ``HOME`` to the round home, which symlinks every real-home entry but ``lloyd``
+#: and ``lloyd-data``, so the mise shim *is* reachable under ``$HOME``. Hence one
+#: PATH lookup and one home-relative absolute candidate.
+GH_CLI_HOME_PATH = ".local/share/mise/shims/gh"
+
+
+def gh_cli(home: str | None = None) -> str:
+    """An executable ``gh``, or ``""``. Never raises: no CLI is the ordinary
+    state on a box that is not Lloyd's, and a discovery failure must not turn
+    into a fetch failure."""
+    found = shutil.which("gh")
+    if found:
+        return found
+    home = (os.environ.get("HOME") or os.path.expanduser("~")) if home is None else home
+    shim = os.path.join(home, GH_CLI_HOME_PATH)
+    return shim if os.access(shim, os.X_OK) else ""
+
+
+def _gh_token(cli: str) -> str:
+    """The token ``gh auth token`` prints, or ``""``.
+
+    This box's only GitHub credential is the one `gh` holds: `config.yaml`'s
+    top-level ``token:`` is empty and no ``GITHUB_TOKEN`` is exported, so the
+    intel pipeline and this resolver have both been spending the 60-requests-per-hour
+    ANONYMOUS budget — the ceiling `github_scanner.py` names for exactly this box
+    ("leaves no headroom for anything else"). Anonymous exhaustion is what made
+    the fixture probe in `tests/test_cited_identifier_verification.py` red on
+    2026-11-07 while its fixtures were correct.
+    """
+    try:
+        r = subprocess.run([cli, "auth", "token"], capture_output=True,
+                           text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def github_token(env: dict | None = None) -> str:
+    """A token to authenticate with: the environment first, then `gh`.
+
+    Ordered so an explicitly exported token always beats whatever CLI happens to
+    be installed. Both arms are guarded — no credential means an anonymous
+    request, which is a real state and not an error."""
     env = os.environ if env is None else env
-    return env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or ""
+    tok = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or ""
+    if tok.strip():
+        return tok.strip()
+    cli = gh_cli(home=env.get("HOME"))
+    return _gh_token(cli) if cli else ""
+
+
+def answered(record: dict) -> bool:
+    """Did the API actually answer, as opposed to refusing or not being reached?
+
+    The one measurement of that question, read by the CLI, by callers, and by the
+    fixture-drift probe, so no consumer has to re-derive it from the prose in
+    ``error`` — which is how a rate limit got read as fixture drift on 2026-11-07
+    (the probe string-matched ``"could not reach"`` and so could only ever notice
+    a socket failure, never an HTTP 403). A 404 IS an answer: it says there is no
+    such record. A quota refusal or a transport failure says nothing."""
+    if "answered" in record:
+        return bool(record["answered"])
+    return bool(record.get("found"))
 
 
 def fetch_record(owner_repo: str, number: int, token: str = "") -> dict:
-    """GET the PR record. Returns a dict with ``found`` set, or ``error``."""
+    """GET the PR record. Returns a dict with ``found`` set, or ``error``.
+
+    Every return also carries ``answered`` — see `answered()` — because ``found``
+    alone cannot tell a refusal from an answer, and every consumer that had to
+    guess ended up guessing wrong in the unsafe direction."""
     url = f"{API}/repos/{owner_repo}/pulls/{number}"
     headers = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
     tok = token or github_token()
@@ -137,15 +206,18 @@ def fetch_record(owner_repo: str, number: int, token: str = "") -> dict:
             body = json.load(resp)
     except urllib.error.HTTPError as exc:
         # 404 is an answer (no such PR); 403 is usually a rate limit and is not.
-        return {"found": False, "number": number, "repo": owner_repo,
+        return {"found": False, "answered": exc.code == 404,
+                "number": number, "repo": owner_repo,
                 "status": exc.code,
                 "error": ("no such PR in that repo" if exc.code == 404
                           else f"HTTP {exc.code} from the API")}
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-        return {"found": False, "number": number, "repo": owner_repo,
+        return {"found": False, "answered": False,
+                "number": number, "repo": owner_repo,
                 "error": f"could not reach the API: {exc}"}
     return {
         "found": True,
+        "answered": True,
         "repo": owner_repo,
         "number": body.get("number", number),
         "title": body.get("title", ""),

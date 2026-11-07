@@ -11,13 +11,18 @@ the pickaxe names ``bbe5689``.
 
 The rule already existed as ``cited-identifier-verification``, but nothing outside
 its own file pointed at it, so it fired only if keyword prefetch happened to match,
-and no test asserted the research passes used it. Two halves are pinned here:
+and no test asserted the research passes used it. Three halves are pinned here:
 
   * the passes resolve citations **before** they synthesize, as a pointer to that
     skill rather than a second copy of its recipes (two copies re-fragment — that
-    is what the 2026-09-04 tool-name cleanup cost), and
+    is what the 2026-09-04 tool-name cleanup cost),
   * the resolver behind the step actually catches a wrong number, including
-    through the command line the skills advertise.
+    through the command line the skills advertise, and
+  * the step's own truth probe and the CLI read ONE field for whether GitHub
+    answered at all. On 2026-11-07 the box's 60-per-hour anonymous budget for
+    ``api.github.com`` was spent, both of the probe's fetches came back HTTP 403,
+    and the probe reported fixtures that were correct as wrong — because it could
+    only notice a socket failure, having string-matched ``"could not reach"``.
 
 Assertions about the skills go through ``agent_mcp.skills._load_skill`` rather than
 ``read_text``: a skill whose frontmatter breaks, or whose ``status`` turns to
@@ -29,9 +34,13 @@ the test has to be able to see.
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import re
 import shlex
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -88,11 +97,35 @@ def _load_resolver():
     return mod
 
 
+class _FakeResponse(io.BytesIO):
+    """The file-like object ``urlopen`` hands to ``json.load``, usable as a
+    context manager like the real thing, so a fetch can be exercised with no
+    network and no credential in sight."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+#: One real record, as the API returns it, for the nodes that drive a whole
+#: fetch through a stubbed ``urlopen``.
+_OK_BODY = json.dumps({
+    "number": 34223,
+    "title": "[Kernels] Make GGUF linear method allow 3d inputs",
+    "state": "closed", "merged": False, "merged_at": None,
+    "html_url": "https://github.com/vllm-project/vllm/pull/34223",
+}).encode()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures: records frozen from api.github.com on 2026-09-09.
-# test_the_frozen_fixtures_still_match_github re-checks them against the live
-# API and skips if the network is down — a frozen fixture that has quietly
-# drifted would otherwise assert something untrue.
+# test_the_frozen_fixtures_still_match_the_records_on_github re-checks them
+# against the live API: it fails if the API ANSWERED and a record has drifted,
+# and skips only when nothing was answered (no route, or a quota refusal) — a
+# frozen fixture that has quietly drifted would otherwise assert something untrue,
+# and a refusal says nothing about drift either way.
 # ---------------------------------------------------------------------------
 
 #: The citation that fooled a research card. Deliberately wrong on purpose.
@@ -302,20 +335,129 @@ def test_a_claim_with_no_content_words_cannot_be_verified():
 
 def test_the_frozen_fixtures_still_match_the_records_on_github():
     """These assertions are only honest while the PRs say what is written above.
-    Skips rather than fails when there is no network — but does not skip the
-    claim away silently if the record has actually changed.
+    Skips rather than fails when GitHub gave this run no ANSWER — no route, or a
+    quota refusal — and never skips the claim away when the record actually
+    changed.
 
     Both directions matter: it is this probe, run before the round opened, that
     caught an earlier note describing #50233 as deferring ``finish_group`` when
     its title is about overlapping GDN decode and prefill kernels.
+
+    The arm that skips is deliberately the one keyed on ``vci.answered()`` rather
+    than on ``found`` or on the error's wording. On 2026-11-07 the anonymous
+    hourly budget for ``api.github.com`` on this box was exhausted, both fetches
+    returned HTTP 403, and this node failed the suite claiming the fixtures were
+    wrong when an authenticated request the same hour confirmed both titles and
+    both merge states exactly as frozen. A refusal is not evidence about a record.
     """
     vci = _load_resolver()
     live = {n: vci.fetch_record("vllm-project/vllm", n) for n in (34223, 50233)}
-    if any(not r.get("found") for r in live.values()):
-        errs = [r.get("error") for r in live.values() if not r.get("found")]
-        if any("could not reach" in str(e) for e in errs):
-            pytest.skip(f"no route to api.github.com from this test run: {errs}")
-        pytest.fail(f"the API answered and the frozen fixtures are wrong: {live}")
+    no_answer = {n: r.get("error") for n, r in live.items() if not vci.answered(r)}
+    if no_answer:
+        pytest.skip(f"api.github.com answered nothing to this run "
+                    f"(no route or quota spent): {no_answer}")
+    answered_wrong = {n: r for n, r in live.items() if not r.get("found")}
+    assert not answered_wrong, (
+        f"the API answered and the frozen fixtures are wrong: {answered_wrong}")
     assert live[34223]["title"] == WRONG_PR["title"]
     assert live[34223]["merged"] is False, "the false-citation fixture must stay unmerged"
     assert live[50233]["title"] == RIGHT_PR["title"]
+
+
+def test_a_refusal_is_never_readable_as_an_answer(tmp_path, monkeypatch):
+    """The fetch has to say WHICH kind of ``found: False`` it is returning, or
+    every consumer guesses — and the one consumer that guessed read a rate limit
+    as fixture drift on 2026-11-07. A 404 is an answer (there is no such PR); a
+    403/429/5xx and a dead socket are not.
+
+    ``urlopen`` is replaced rather than the network being trusted, so this node
+    fails on a regression in the mapping and not on the weather outside.
+    """
+    vci = _load_resolver()
+
+    def refuse(code):
+        def _open(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, code, "refused", {}, None)
+        return _open
+
+    for code, is_answer in ((403, False), (429, False), (500, False), (404, True)):
+        monkeypatch.setattr(urllib.request, "urlopen", refuse(code))
+        rec = vci.fetch_record("vllm-project/vllm", 34223)
+        assert rec["found"] is False, f"HTTP {code} reported as a record"
+        assert vci.answered(rec) is is_answer, (
+            f"HTTP {code}: answered() said {vci.answered(rec)}; a quota refusal "
+            f"must not be an answer and a 404 must be one")
+
+    def die(req, timeout=None):
+        raise urllib.error.URLError("no route")
+
+    monkeypatch.setattr(urllib.request, "urlopen", die)
+    rec = vci.fetch_record("vllm-project/vllm", 34223)
+    assert vci.answered(rec) is False, "a socket failure reported as an answer"
+    # The frozen fixture dicts the other nodes hand in carry no `answered` key;
+    # the predicate has to read them as answers, or the drift probe would skip
+    # its own assertions on the way past a hand-built record.
+    assert vci.answered(dict(WRONG_PR)) is True
+
+
+def test_the_probe_finds_the_token_across_the_gate_child_env(tmp_path, monkeypatch):
+    """The seam this whole fix crosses: the gate runs candidate tests with
+    ``PATH=/usr/bin:/bin`` and ``HOME`` moved to the round home
+    (``scripts/automod/gate.py::_child_env``, whose home farm symlinks every real
+    entry but ``lloyd`` and ``lloyd-data``). So the only credential this box has —
+    the token ``gh`` holds, since ``config.yaml``'s ``token:`` is empty and no
+    ``GITHUB_TOKEN`` is exported — is reachable through ``$HOME`` and not through
+    ``PATH``. That environment is pinned here, not assumed from a shell.
+
+    ``shutil.which`` is stubbed to find nothing, which is what the gate child's
+    PATH does on this box; the stub keeps the node about the fallback rather than
+    about which directories happen to hold a ``gh``.
+    """
+    vci = _load_resolver()
+    shim = tmp_path / ".local" / "share" / "mise" / "shims" / "gh"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\necho gho_faketoken\n", encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setattr(vci.shutil, "which", lambda name: None)
+    assert vci.gh_cli(home=str(tmp_path)) == str(shim)
+    assert vci.github_token({"HOME": str(tmp_path)}) == "gho_faketoken", (
+        "the credential behind the gate child env's PATH was not found, so the "
+        "fixture probe above would be spending the anonymous budget again")
+
+
+def test_an_exported_token_beats_the_cli_and_no_token_is_not_an_error(
+        tmp_path, monkeypatch):
+    """Order and the empty case. An explicitly exported token is the caller's
+    stated intent and wins over an installed CLI; and a box with neither gets an
+    anonymous request rather than a crash — discovery runs inside every fetch, so
+    a missing ``gh`` must not become a fetch failure on a fresh machine."""
+    vci = _load_resolver()
+    shim = tmp_path / ".local" / "share" / "mise" / "shims" / "gh"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\necho gho_from_cli\n", encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setattr(vci.shutil, "which", lambda name: None)
+    assert vci.github_token({"HOME": str(tmp_path), "GITHUB_TOKEN": "gho_exported"}) \
+        == "gho_exported"
+
+    empty_home = tmp_path / "no-credential-here"
+    assert vci.github_token({"HOME": str(empty_home)}) == ""
+
+    # The unguarded arm: `fetch_record` calls `github_token()` with no dict, so
+    # what it finds is whatever os.environ and the real home hold. Both are put
+    # into the no-credential state here, and the fetch that follows must still
+    # report the record it was given — anonymously, with no header invented.
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    seen: list[urllib.request.Request] = []
+
+    def capture(req, timeout=None):
+        seen.append(req)
+        return _FakeResponse(_OK_BODY)
+
+    monkeypatch.setattr(urllib.request, "urlopen", capture)
+    rec = vci.fetch_record("vllm-project/vllm", 34223)
+    assert rec["found"] is True and vci.answered(rec) is True, rec
+    assert seen[-1].get_header("Authorization") is None, (
+        "a box with no credential sent an Authorization header anyway")
