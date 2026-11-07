@@ -3184,6 +3184,45 @@ class Item:
             return 0
 
 
+def _parse_block(block: str) -> dict:
+    """A front-matter block as a dict — {} if it is broken or not a mapping.
+
+    The one place this module builds a YAML document, which is why
+    `_split_frontmatter` below parses through it rather than holding its own
+    `yaml.load` line: `tests/test_dashboard_yaml_loader.py` (#1204) proves the
+    loader by counting constructions under a monkeypatch of THIS module's
+    `_YamlLoader`, and a second call site would be a second thing to prove.
+
+    Public enough to be the parse every reader that shares
+    `app.frontmatter`'s memo hands it, so the shared store never changes which
+    scanner a module parses with.
+    """
+    try:
+        return yaml.load(block, Loader=_YamlLoader) or {}
+    except yaml.YAMLError:
+        return {}
+
+
+def front_matter_of(path) -> dict:
+    """A file's front matter, parsed at most once per process per file version.
+
+    `app.frontmatter`'s chunked prefix read (the same fence rule
+    `split_frontmatter` gives the writers) plus the one parse memo, and this
+    module's `_parse_block`. The board readers that need only the front matter
+    — `owed.owing_items`, `owed.outside_list`, the dashboard's scan — go through
+    here instead of `read_text` + `_split_frontmatter`, which was a second and
+    third full walk of the board per cycle: measured 2026-11-06, one
+    `board_health` call built 11,887 YAML documents for 3,915 files, 7,578 of
+    them by `owed` re-reading files `load_item` had already parsed.
+
+    A file with no front matter yields {} exactly as `_split_frontmatter`
+    yields an empty dict, and an unreadable file yields {} rather than raising —
+    the difference a caller must know about is in the body, which this does not
+    return.
+    """
+    return FM.front_matter_of(path, _parse_block)
+
+
 def _split_frontmatter(text: str) -> tuple[dict, str]:
     """Split a markdown file into (front matter, body).
 
@@ -3217,10 +3256,7 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     block = FM.split_frontmatter(text)
     if block is None:
         return {}, text
-    try:
-        fm = yaml.load(block[0], Loader=_YamlLoader) or {}
-    except yaml.YAMLError:
-        fm = {}
+    fm = _parse_block(block[0])
     return (fm if isinstance(fm, dict) else {}), block[1]
 
 

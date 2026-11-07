@@ -428,10 +428,13 @@ def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None =
     now = now or _now()
     out: list[Owing] = []
     for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS):
-        try:
-            fm, _ = B._split_frontmatter(item.path.read_text(encoding="utf-8"))
-        except OSError:
-            continue
+        # Front matter only, through the shared parse memo. This loop used to
+        # `read_text` every item on the board — all 83 MB of it — and parse it
+        # again, a second full walk after `all_items`/`load_item` had already
+        # done exactly that; `outside_list` below did it a third time. The memo
+        # returns {} for a file it cannot read, which falls out at `if not
+        # entries` just as the `except OSError: continue` used to.
+        fm = B.front_matter_of(item.path)
         entries = entries_of(fm)
         if not entries:
             continue
@@ -1124,10 +1127,8 @@ def outside_list(boards: tuple[str, ...] | None = None) -> list[dict]:
     from scripts.automod import backlog as B
     out: list[dict] = []
     for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS):
-        try:
-            fm, _ = B._split_frontmatter(item.path.read_text(encoding="utf-8"))
-        except OSError:
-            continue
+        # Third full board walk per cycle before #3860 — see `owing_items`.
+        fm = B.front_matter_of(item.path)
         for o in (fm.get(OUTSIDE_KEY) or []):
             if isinstance(o, dict) and not o.get("done"):
                 out.append({"item_id": item.id, "name": item.name,

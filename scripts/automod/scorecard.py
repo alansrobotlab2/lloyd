@@ -64,6 +64,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 from app.data_root import vault_root  # noqa: E402
+from app import frontmatter as _fm  # noqa: E402 — stdlib-only leaf, see below
 
 # `app/kg_store.py:48` shape, for the reason in `app/routers/dashboard.py`:
 # `compute` parses the front matter of every board file twice per call
@@ -236,30 +237,44 @@ def _self_spawned_gauge(all_events: list[dict], backlog_dir: Path, now: float) -
             "bound_days": bound_days, "over_bound": over}
 
 
-def _frontmatter(path: Path) -> dict:
-    """First YAML block of a markdown file, or {} if there isn't one.
+#: path+limit -> ((mtime_ns, size), parsed dict) — `app.frontmatter`'s one store,
+#: shared with the dashboard's own board walk. See `front_matter_of`.
+_FM_MEMO = _fm.FM_MEMO
+_FM_MEMO_MAX = _fm.FM_MEMO_MAX
+
+
+def _frontmatter_from_block(block: str) -> dict:
+    """The block `app.frontmatter` cut, as a dict — {} if it is not one.
 
     Parses through `_YamlLoader` (libyaml's `CSafeLoader` where available), not
     `yaml.safe_load` — see the import above. The `import yaml` that used to sit
     inside this function is the trap: a reader that "fixed" the loader by
     editing the module attribute would have left this line on the pure-Python
     scanner, and every check that only inspects an attribute would agree that
-    it was fixed.
+    it was fixed. It stays in THIS module for that reason even though the read
+    and the fence rule moved to `app.frontmatter` (#3860): the shared reader is
+    handed this function as its `parse_block`, so the `yaml.load` call site the
+    #1204 guard counts constructions of is still here.
     """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return {}
-    if not text.startswith("---"):
-        return {}
-    m = re.search(r"^---[ \t]*$", text[3:], re.M)
-    if not m:
-        return {}
-    try:
-        fm = yaml.load(text[3:3 + m.start()], Loader=_YamlLoader)
+        fm = yaml.load(block, Loader=_YamlLoader)
     except Exception:
         return {}
     return fm if isinstance(fm, dict) else {}
+
+
+def _frontmatter(path: Path) -> dict:
+    """First YAML block of a markdown file, or {} if there isn't one.
+
+    `app.frontmatter.front_matter_of` with this module's parse: the fence rule is
+    the one every writer of these files uses (`split_frontmatter`), and the parse
+    cache is the one the dashboard's board walk fills. This function used to glob
+    the whole board on its own — `compute` reached 11,875 YAML documents for the
+    4,754 files it walks, ~6.8 s of a ~15 s cold dashboard cycle — and each of
+    its sections re-read files another section had already parsed. A changed file
+    is a different key, so a re-run of the scorecard sees today's edits.
+    """
+    return _fm.front_matter_of(path, _frontmatter_from_block)
 
 
 def _ts(e: dict) -> float:

@@ -30,6 +30,7 @@ from app.sessions_io import is_background_session_name, is_conversation_session
 from app.aggregator_config import route as aggregator_route
 from app.backlog_status import CLOSED_STATUSES
 from app.data_root import vault_root
+from app import frontmatter as _fm
 
 # One cold cycle parses the front matter of every file on the backlog board
 # (1,141 item files at the board census of 2026-09-16), and on exactly those
@@ -153,27 +154,28 @@ def _frontmatter(path, limit: int = 65536) -> dict:
     `scripts/automod/backlog.py`; `tests/test_dashboard_yaml_loader.py` proves
     the loader by construction count rather than by attribute.
     """
+    # The read and the fence rule are `app.frontmatter`'s — the same rule
+    # `split_frontmatter` states for the writers, and now the rule
+    # `scripts.automod.scorecard` reads under, so a parse one walker cached is
+    # the parse the other would have made. Everything below is this reader's
+    # own: how the block becomes a dict.
+    block = _fm.front_matter_text(path, limit)
+    if block is None:
+        return {}
+    return _frontmatter_from_block(block)
+
+
+def _frontmatter_from_block(block: str) -> dict:
+    """The block `_fm.front_matter_text` cut, as a dict — {} if it is not one.
+
+    Separate from the read because the memo hands a *block* to its caller's
+    parse (`app.frontmatter.memo_front_matter`), and because the loader rule
+    belongs to this module: `tests/test_dashboard_yaml_loader.py` proves the
+    loader by counting constructions under a monkeypatch of THIS module's
+    `_YamlLoader`, which only works if the `yaml.load` line lives here.
+    """
     try:
-        with open(path, encoding="utf-8") as f:
-            head = f.read(_FM_CHUNK)
-            if not head.startswith("---"):
-                return {}
-            while (m := _FM_END_RE.search(head, 3)) is None and len(head) < limit:
-                chunk = f.read(_FM_CHUNK)
-                if not chunk:
-                    break
-                head += chunk
-    # A file that will not decode is not front matter either, and it must not
-    # take the whole section down with it.
-    except (OSError, UnicodeError):
-        return {}
-    if m is None:
-        return {}
-    opening = head.find("\n")
-    if opening < 0 or opening > m.start():
-        return {}
-    try:
-        fm = yaml.load(head[opening + 1:m.start()], Loader=_YamlLoader)
+        fm = yaml.load(block, Loader=_YamlLoader)
     except Exception:
         return {}
     # A block that parses to a list or a bare string is not front matter;
@@ -1176,27 +1178,23 @@ async def get_dashboard():
 # sites look `_frontmatter` up at call time.
 
 _frontmatter_parse = _frontmatter
-_FM_MEMO: dict[str, tuple[tuple[int, int], dict]] = {}
-_FM_MEMO_MAX = 50_000
+# The store is `app.frontmatter`'s, shared with `scripts.automod.scorecard`,
+# which globs the same board from several of its sections: measured 2026-11-06,
+# one `compute()` parsed 11,875 front matters for 4,754 files. Two walkers over
+# one store means whichever goes second stats the files the first already parsed
+# instead of parsing them again — a memo-cold walk of this board's front matter
+# costs ~1.8 s of CPU, and `compute` was paying it two or three times in a call.
+# `_FM_MEMO` stays the name this module's prose and tests cite; it IS the shared
+# dict, so clearing it from here forgets the scorecard's entries too, which is
+# what `tests/test_dashboard_cold_render.py::empty_both_caches` now relies on.
+_FM_MEMO = _fm.FM_MEMO
+_FM_MEMO_MAX = _fm.FM_MEMO_MAX
 
 
 def _frontmatter(path, limit: int = 65536) -> dict:  # noqa: F811 — the memoised binding
     """`_frontmatter_parse`, memoised on the file's mtime and size. Returns a
     shallow copy, so a caller that adds a key cannot change the next reader's."""
-    import os  # here, not at the top: see the block comment above
-    try:
-        st = os.stat(path)
-    except OSError:
-        return _frontmatter_parse(path, limit)
-    key, sig = f"{path}\0{limit}", (st.st_mtime_ns, st.st_size)
-    hit = _FM_MEMO.get(key)
-    if hit is not None and hit[0] == sig:
-        return dict(hit[1])
-    fm = _frontmatter_parse(path, limit)
-    if len(_FM_MEMO) >= _FM_MEMO_MAX:
-        _FM_MEMO.clear()
-    _FM_MEMO[key] = (sig, fm)
-    return dict(fm)
+    return _fm.front_matter_of(path, _frontmatter_from_block, limit)
 
 
 # ── board_health off the event loop's GIL ───────────────────────────────────

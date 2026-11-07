@@ -95,6 +95,27 @@ def _readers():
     ]
 
 
+def _forget_parses() -> None:
+    """Empty `app.frontmatter`'s parse memo, so the next read really parses.
+
+    Required since #3860, which made the front-matter store ONE dict shared by
+    `dashboard._frontmatter` and `scorecard._frontmatter` (each had its own
+    before). Every proof in this file is that a YAML document was BUILT, and by
+    WHICH loader; a shared store hands the second reader a cache hit, which is
+    correct behaviour and structurally unobservable to a construction counter.
+
+    The equivalence node is the dangerous one rather than the counting ones: with
+    one store, its `under_c` arm fills the memo and its `under_py` arm answers
+    from that memo, so the test would compare a real parse with a copy of itself
+    and report that the two loaders agree without ever running the Python
+    scanner. Clearing between the arms is what keeps "every file agrees" meaning
+    what the name says.
+    """
+    from app import frontmatter as _leaf
+
+    _leaf.memo_clear()
+
+
 def _recording_loader(base):
     """A `base` subclass that counts how many times yaml.load() built one.
 
@@ -166,6 +187,7 @@ def test_each_named_reader_parses_through_its_module_loader_attribute(tmp_path, 
     """
     sample = _one_real_item(tmp_path)
     for label, call, module in _readers():
+        _forget_parses()
         assert hasattr(module, "_YamlLoader"), (
             f"{label}: no module-level _YamlLoader to dispatch through, so the "
             f"call site cannot be proven — the shape to copy is "
@@ -389,8 +411,10 @@ def test_each_reader_returns_the_same_dict_under_either_loader(tmp_path):
         try:
             for path in files:
                 try:
+                    _forget_parses()
                     module._YamlLoader = c_loader
                     under_c = call(path)
+                    _forget_parses()
                     module._YamlLoader = yaml.SafeLoader
                     under_py = call(path)
                 finally:
@@ -485,6 +509,7 @@ def test_a_fresh_interpreter_binds_the_loader_and_reload_keeps_dispatching(tmp_p
     sample = _one_real_item(tmp_path)
     for label, call, module in _readers():
         reloaded = importlib.reload(module)
+        _forget_parses()
         recorder = _recording_loader(reloaded._YamlLoader)
         monkeypatch.setattr(reloaded, "_YamlLoader", recorder)
         before = recorder.seen

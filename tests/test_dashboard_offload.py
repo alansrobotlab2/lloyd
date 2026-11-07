@@ -25,8 +25,17 @@ def _item(d: Path, name: str, status: str) -> Path:
 def test_the_memo_rereads_a_changed_file_and_reuses_an_unchanged_one(tmp_path, monkeypatch):
     p = _item(tmp_path, "one", "draft")
     calls = []
-    real = dash._frontmatter_parse
-    monkeypatch.setattr(dash, "_frontmatter_parse", lambda *a: calls.append(1) or real(*a))
+    # The seam is `_frontmatter_from_block`: the parse the memoised
+    # `_frontmatter` hands to `app.frontmatter.front_matter_of`. It was
+    # `_frontmatter_parse` until #3860 moved the read and the fence rule into that
+    # shared leaf. `_frontmatter_parse` still exists (the offload worker
+    # re-exports it, and the loader guard's label cites it), but counting it here
+    # would count a symbol the route no longer calls — the shape
+    # test_dashboard_yaml_loader.py warns about: "an attribute that still has to
+    # exist for the seam test to pass but is no longer what the reader calls".
+    real = dash._frontmatter_from_block
+    monkeypatch.setattr(dash, "_frontmatter_from_block",
+                        lambda *a: calls.append(1) or real(*a))
     assert dash._frontmatter(p)["status"] == "draft"
     assert dash._frontmatter(p)["status"] == "draft"
     assert len(calls) == 1, "an unchanged file is not parsed twice"

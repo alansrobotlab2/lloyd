@@ -36,6 +36,7 @@ twenty-line helper.
 
 from __future__ import annotations
 
+import os
 import re
 
 # The opening fence: the file's first line, beginning with three hyphens.
@@ -108,3 +109,152 @@ def split_frontmatter(text: str) -> tuple[str, str] | None:
     if fence is None:
         return None
     return text[opening.end():fence.start()], text[fence.end():]
+
+
+# ── The board's one memoised front-matter read ──────────────────────────────
+#
+# Two programs walk the whole board on every cold dashboard cycle:
+# `app.routers.dashboard._backlog`'s scan and `scripts.automod.scorecard.compute`,
+# which globs the board from several of its thirteen sections. Measured
+# 2026-11-06 on the live board (3,799 numbered item files, ~8.5 KB each): one
+# memo-cold walk of the front matter costs ~1.8 s of CPU, and `compute` paid it
+# ~2.5 times over inside a single call (11,875 YAML documents parsed for 4,754
+# files), which is 6.8 s of a ~15 s cycle. Each reader already had, or wanted, a
+# parse cache; keeping one per module meant the second walker still paid full
+# price for files the first had just parsed. So the store is here, once, and
+# both readers key into it identically.
+#
+# What is shared is the *store and the read rule*, never the parse: a caller
+# hands in `parse_block`, and the YAML still goes through the CALLING module's
+# `_YamlLoader` attribute at the call site. `tests/test_dashboard_yaml_loader.py`
+# (#1204) proves the loader by construction count under a monkeypatch of that
+# attribute, and a shared parse here would have silently un-pinned it — the
+# exact trap that module's docstring names.
+#
+# Stdlib only, like `split_frontmatter` above: `scripts/automod/scorecard.py`
+# is a CLI that must not pull FastAPI in to read a front matter block.
+
+#: Bytes per read. The ordinary item's front matter fits in the first chunk, so
+#: the common case costs one small read; longer blocks pay one read per 4 KiB.
+FM_CHUNK = 4096
+
+#: How far to look for the closing fence. Bounds the **front matter**, not the
+#: prefix worth reading: at a flat small prefix, five backlog items were once
+#: silently dropped, and the ones dropped were the ones with long `activity_log`
+#: blocks — i.e. the ones being worked on. Past `FM_LIMIT` with no closing fence
+#: the file is malformed rather than large, and the answer is None.
+FM_LIMIT = 65536
+
+
+def front_matter_text(path, limit: int = FM_LIMIT):
+    """The YAML block between a file's fence lines, or None if there is none.
+
+    `split_frontmatter` cuts it — this module's one rule, not a second statement
+    of it — over a prefix read a chunk at a time, stopping the moment
+    `_CLOSING_FENCE` is in hand so the ordinary item costs one 4 KiB read. A file
+    that does not open with a `---` line, never closes within `limit`, or cannot
+    be decoded as UTF-8 has no front matter at all.
+
+    This is the block `app.routers/dashboard.py::_frontmatter` parsed until #3860,
+    and the two agree byte-for-byte on every file the live board holds: the old
+    reader cut from the first newline to a `^---[ \\t]*$` found from byte 3, which
+    differs from `split_frontmatter` only on a CRLF file, where the old rule found
+    no closing fence at all and this one does. Measured 2026-11-06 over the 3,800
+    `*.md` files in `~/obsidian/backlog`: 0 carry `\\r\\n` in their first 8 KiB, so
+    no item's fields move on today's board. A CRLF item is now read rather than
+    treated as front-matter-less, which is what the three writers already assume.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            head = f.read(FM_CHUNK)
+            while head and len(head) < limit and _CLOSING_FENCE.search(head, 3) is None:
+                chunk = f.read(FM_CHUNK)
+                if not chunk:
+                    break
+                head += chunk
+    except (OSError, UnicodeError):
+        # Undecodable is not front matter, and must not take a whole dashboard
+        # section down with it.
+        return None
+    parts = split_frontmatter(head)
+    return None if parts is None else parts[0]
+
+
+#: path+limit -> ((mtime_ns, size), parsed dict). Keyed like
+#: `scripts.automod.state.ledger_rows` and `backlog._load_item_cached`: every
+#: writer on this board rewrites the file (new mtime, usually a new size), so a
+#: changed file is a different key rather than a stale entry. The signature is
+#: taken BEFORE the read, the order the memo shipped with in
+#: `app.routers.dashboard` before it moved here: a write landing in between
+#: caches the NEWER parse under the OLDER signature, and the next reader's own
+#: stat disagrees, so it reparses. Taking the stat afterwards would cache an
+#: OLDER parse under a NEWER signature, which nothing notices until the file is
+#: written a third time.
+FM_MEMO: dict[str, tuple[tuple[int, int], dict]] = {}
+
+#: A board this size is ~12,000 files across the top level and the archive
+#: directories the health walk reads, so the normal working set fits with room.
+#: On overflow the whole store is dropped rather than evicted per entry: a
+#: dashboard pass is bounded by the walk anyway, and a clear is one call.
+FM_MEMO_MAX = 50_000
+
+
+def front_matter_of(path, parse_block, limit: int = FM_LIMIT, memo: bool = True) -> dict:
+    """The front matter of `path`, built by `parse_block`, optionally kept per file.
+
+    `parse_block` is the caller's own — it parses through the CALLING module's
+    `_YamlLoader` — which is what keeps #1204's loader guard meaningful for every
+    reader that shares this read rule and this store. Returns a shallow copy on a
+    hit, so a caller that adds a key to the dict it was given cannot change the
+    next reader's. `memo=False` is the cold path: same read, same parse, nothing
+    stored.
+    """
+    key = sig = None
+    if memo:
+        # Signature first: see the note on FM_MEMO about which side of the read
+        # it is taken on and why.
+        try:
+            st = os.stat(path)
+        except OSError:
+            st = None
+        if st is not None:
+            key, sig = f"{path}\0{limit}", (st.st_mtime_ns, st.st_size)
+            hit = FM_MEMO.get(key)
+            if hit is not None and hit[0] == sig:
+                return dict(hit[1])
+
+    block = front_matter_text(path, limit)
+    if block is None:
+        return {}
+    fm = parse_block(block)
+    if not isinstance(fm, dict):
+        # A block that parses to a list or a bare string is not front matter;
+        # returning it would blow up on the caller's first `.get`.
+        fm = {}
+    if key is not None and sig is not None:
+        # Both, not just the key: they are assigned together off a successful stat, but
+        # `sig` is what the store's value type says must be a real (mtime_ns, size) pair.
+        # Storing `None` there would park an entry that can never match a later signature,
+        # so the file would be re-parsed every time while looking memoised.
+        if len(FM_MEMO) >= FM_MEMO_MAX:
+            FM_MEMO.clear()
+        FM_MEMO[key] = (sig, fm)
+    return dict(fm)
+
+
+def memo_size() -> int:
+    """How many parses the store is holding.
+
+    A reader that has to PROVE it emptied the store needs a number, not a truthiness
+    check on a dict it may be holding a different reference to: `memo_clear()` is
+    `FM_MEMO.clear()`, which mutates in place, so an alias written before a clear sees
+    the same zero and an alias written to the wrong object sees a nonzero that has
+    nothing to do with what the loader will hit. `tests/test_dashboard_cold_render.py`
+    reads this after its clear for exactly that reason.
+    """
+    return len(FM_MEMO)
+
+
+def memo_clear() -> None:
+    """Forget every cached parse. For a reader that must measure the cold path."""
+    FM_MEMO.clear()

@@ -46,6 +46,7 @@ import ast
 import importlib.util
 import json
 import os
+import math
 import re
 import sys
 import time
@@ -53,6 +54,7 @@ from pathlib import Path
 
 import pytest
 
+from app import frontmatter as fm
 from app.routers import dashboard as dash
 import board_presence
 from board_presence import board_files_or_stop, timed_ledger_or_stop
@@ -60,18 +62,24 @@ from scripts.automod import backlog as B
 
 #: The board this calibration was walked over, in item files (`*.md` with a
 #: numeric name, which is how the dashboard counts them — the same rule
-#: `board_files_or_stop(numeric_names=True)` applies). Re-based 2026-11-07 (item
-#: #3867) from 21411475, and all thirteen serial cycles below printed exactly this
-#: count, so the denominator and the durations describe one board and not two. The
-#: count this replaces (`RETIRED_BOARD_FILES` below) described a board 16.9% smaller
-#: than the one the cycle walks today: 10 files past that count's own +20% upper
-#: edge, which is this node's arithmetic rather than a census —
-#: `assert_board_within_calibration_drift` puts the edge at `int(RETIRED_BOARD_FILES
-#: * (1 + BOARD_DRIFT_FRACTION))` = 3,794 and its failure line printed this count
-#: against that ceiling. The drift node has no third state between "re-charged" and
-#: "re-base", and it was right to ask for one. The 10 and the 3,794 are re-derived
-#: by `test_the_re_base_prose_recomputes_from_the_two_calibrations`, because this
-#: sentence first shipped as "one file past", which understated its own node by nine.
+#: `board_files_or_stop(numeric_names=True)` applies). Re-based 2026-11-07 by round
+#: SM_20261107_014442 (#3860), and all ten fresh-process serial cycles below
+#: printed exactly this count, so the denominator and the durations describe one
+#: board and not two. The count this replaces (`RETIRED_BOARD_FILES` below)
+#: described a board 0.03% smaller — so small a step that this board
+#: sits INSIDE that count's own +20% upper edge, 4,564, which is
+#: `assert_board_within_calibration_drift`'s arithmetic rather than a census
+#: (`int(RETIRED_BOARD_FILES * (1 + BOARD_DRIFT_FRACTION))`).
+#:
+#: That containment is worth stating plainly because it corrects this item. #3860
+#: was filed to clear a red drift node — 3,797 item files against that node's 3,794
+#: ceiling — and that node went green when #3867 re-charged the same board two
+#: commits before this round opened. What #3860 still owed, and what this re-base
+#: is actually for, is the other half: the retired record left a bound 20.86 s,
+#: 37.1% ABOVE the 15.22 s triage cost, so the drift node could be satisfied while the
+#: budget check was powerless. Getting the cycle cheaper first is what lets the
+#: re-base record a measured speed-up instead of being the instrument that hides a
+#: regression.
 #:
 #: ONE copy of the number lives in this file. `cold_budget_for_board` divides
 #: the budget by it to get the per-file allowance the cycle is charged, and
@@ -81,8 +89,8 @@ from scripts.automod import backlog as B
 #: reddens if the digits are ever typed again, in code or in a comment: a prose
 #: copy is the thing that goes stale, and this file's last two calibrations each
 #: left one behind (the 1,142-file board and the 1,450-file one, both of which
-#: the bound then walked past).
-CALIBRATED_BOARD_FILES = 3804
+#: outlived their own budgets as sentences).
+CALIBRATED_BOARD_FILES = 3805
 
 #: Bytes of `promotions.jsonl` the calibrated cycle decoded, for the same
 #: reason. NOT part of the denominator — the budget scales with the board, not
@@ -96,71 +104,65 @@ CALIBRATED_LEDGER_BYTES = 28_960_660
 
 #: The calibration this one replaces, as DATA rather than as a sentence, and that
 #: distinction is the point: every movement this file's prose quotes about a re-base
-#: (how far the tail moved, how far the board moved, how much dearer the walk went
-#: per item file, how many files past the retired band's edge the new count was) is
+#: (how far the tail moved, how far the board moved, how much cheaper the walk went
+#: per item file, whether the new count fell inside the retired band's ceiling) is
 #: arithmetic on these two numbers and the constants above, and
 #: `test_the_re_base_prose_recomputes_from_the_two_calibrations` re-runs that
-#: arithmetic against the prose. Both figures below are quoted in the record above
-#: `COLD_P90_S`: the 3,162-item board walked over 2026-10-24 from 66f62027, whose
-#: larger set came out at 10.53 s. They are also the numbers a reader needs to check
-#: the drift node's own demand: this count against a retired edge of 3,794.
-RETIRED_BOARD_FILES = 3162
-RETIRED_P90_S = 10.53
+#: arithmetic against the prose. Both figures are the record this round supersedes:
+#: the 3,804-item board re-based at `e1f9bb58` (#3867), whose two serial sets came out
+#: at 15.17 and 16.69 s and left the enforced bound above the triage cost. The ceiling
+#: that retired count's band allowed is 4,564, and this round's count is inside it —
+#: the containment figure the board block above is judged on.
+RETIRED_BOARD_FILES = 3804
+RETIRED_P90_S = 16.69
 
-#: The cold cycles `COLD_P90_S` is derived from: two serial sets measured over the
-#: board named by `CALIBRATED_BOARD_FILES`, each entry a pair of the 1-minute load
-#: average the node printed beside them (`machine at measurement: load 1/5/15 =`)
-#: and the durations in seconds, in the order they ran.
+#: The cold cycles `COLD_P90_S` is derived from: the two serial sets of THIS re-base
+#: first, then the two sets of the re-base it replaces, carried verbatim. Each cycle ran
+#: in a FRESH process (`pytest -q -s tests/test_dashboard_cold_render.py::
+#: test_one_cold_dashboard_cycle_beats_the_budget`, one invocation per cycle) with
+#: `/proc/loadavg`'s 1-minute figure stamped before each. Re-based 2026-11-07 by round
+#: SM_20261107_014442 (#3860) — the perf round, on the tree that shipped the speed-up it
+#: measures, so the number is the speed-up and not a hope. Log:
+#: `/home/alansrobotlab/lloyd-work/meas-3860-r2.log`.
 #:
-#: They are data rather than a sentence because the constant used to be a literal
-#: typed beside a prose table quoting the same measurements, and the only rail on it
-#: read `COLD_BUDGET_S == COLD_P90_S * COLD_BUDGET_MARGIN` — the budget's own
-#: definition, so the rail could not fail and could not notice a p90 that had
-#: quietly absorbed the margin. `COLD_P90_S` is now computed from these cycles, and
-#: `test_the_calibration_table_and_the_cycles_it_records_agree` re-derives every
-#: figure the table below quotes from them too, so the prose, the cycles and the
-#: number the dashboard is charged are one measurement and not three claims.
-_CALIBRATION_CYCLES_S: tuple[tuple[str, tuple[float, ...]], ...] = (
-    ("3.69-7.66", (16.11, 16.36, 16.38, 16.50, 16.69, 16.34, 14.51, 14.12)),
-    ("3.33-3.91", (15.01, 15.17, 14.71, 14.44, 14.68)),
-)
-
-
-def _median_s(samples):
-    """Middle of the sorted samples: the mean of the two middles for an even count."""
-    ordered = sorted(samples)
-    middle = len(ordered) // 2
-    if len(ordered) % 2:
-        return float(ordered[middle])
-    return (ordered[middle - 1] + ordered[middle]) / 2
-
-
-def _p90_nearest_rank(samples):
-    """The value at rank ceil(0.9 n) of the sorted samples.
-
-    Nearest-rank rather than an interpolation, because that is the convention every
-    row of this calibration's table has reported its p90 by: with 8 samples the rank
-    is the maximum, and with 6 it is the maximum too. Integer arithmetic so the rank
-    cannot land between two samples on a float boundary.
-    """
-    ordered = sorted(samples)
-    rank = (9 * len(ordered) + 9) // 10
-    return float(ordered[min(rank, len(ordered)) - 1])
-
-
-#: The larger of the two measured tails, in seconds.
+#:   set 1, machine load 3.46-3.79, 5 first samples: 9.86  10.33  10.42  10.62  11.53
+#:   set 2, machine load 3.43-3.97, 5 first samples: 10.15  10.16  10.21  10.45  10.86
+#: → the sets' p90s are 11.53 and 10.86 s, and the higher is
+#: `COLD_P90_S`. The larger table below re-derives every figure from these lists, so a
+#: mis-keyed row reddens `test_the_calibration_table_and_the_cycles_it_records_agree`.
 #:
-#:     measured 2026-11-07 from d0857445 in a round worktree, 32 cores
+#: TWO sets at COMPARABLE LOAD, which is #3860's own instruction and the reason the sets
+#: were taken back to back: its filing showed two sets 17% apart on machine state alone
+#: (load 4.26-5.92 against load to 12.01), and #3867's were 3.33-3.91 against 3.69-7.66.
+#: Here the binding ratio between the two ranges is 1.15x against the 1.2x the
+#: clause allows, and
+#: `test_the_calibration_table_and_the_cycles_it_records_agree` holds the current re-base's
+#: two ranges to it, so a future re-base that mixes a quiet set with a loaded one reddens
+#: instead of recording the box. The consequence of holding the box still is visible in the
+#: two rows: the quieter set sits 5.8% below the louder at the tail and 2.0% below it
+#:     at the
+#: middle, 0.67 s of spread in all, where #3867's two sets were 9.1% apart.
+#:
+#: THE ORDER IS THE CONTRACT: `COLD_P90_S` is derived over the rows that carry
+#: `CURRENT_RE_BASE` and NOT over the whole table. Carrying history is right — a recovery
+#: has to be quotable, and the -30.9% below is arithmetic on the retired pair —
+#: but a retired set must not keep charging a retired cycle. A whole-table derivation at
+#: these numbers yields #3867's 16.69 s tail, which is the figure that pushed the
+#: enforced bound 37.1% ABOVE the triage cost, so it would have re-based this file
+#: onto exactly the number #3860 exists to retire.
+#:
+#: The larger set's sorted summary, plus the board and ledger behind it. Format, one row
+#: per set, parsed by `test_the_calibration_table_and_the_cycles_it_records_agree`, which
+#: re-derives min, median, p90 and max from `_CALIBRATION_CYCLES_S` and reddens the row
+#: that disagrees:
+#:
 #:     board  = CALIBRATED_BOARD_FILES item files (the numeric-name subset);
-#:              all thirteen runs below printed that count
-#:     ledger = the live store. `timed_ledger_or_stop` repoints it only when the
-#:              configured state dir holds NO ledger, and this round's state dir was
-#:              new and held none, so all thirteen cycles printed `REPOINTED: ...
-#:              promotions.jsonl has no ledger, so the cycle reads the live one
-#:              instead` over a store of 30,770,490 B — +6.25% on
-#:              `CALIBRATED_LEDGER_BYTES`, inside the drift band, so no drift fault
-#:              was raised and this re-base left the centre alone too.
-#:
+#:     ledger = the live store, 30,934,537 B at measurement, +6.82% on the centre
+#:              `CALIBRATED_LEDGER_BYTES` — inside the +/-20% band, so this re-base left
+#:              the centre ALONE, and `tests/test_retention_sweep.py` pins that constant by
+#:              equality. The store has grown since #3867 recorded it (+0.5% on that
+#:              round's reading), and `live_ledger_bytes()` below re-reads it the way a
+#:              gate run does, so a claim about the store is a measurement and not a copy.
 #:              THAT IS NOT THE SHAPE A GATE RUN DECODES, and the gap between the
 #:              two is larger than the store's own growth: that helper takes the
 #:              configured dir whenever it holds ANY bytes, and a gate's round state
@@ -177,111 +179,183 @@ def _p90_nearest_rank(samples):
 #:              a cycle inside a gate is cheaper than this table by most of what the
 #:              store's decode costs. `live_ledger_bytes()` below deliberately reads
 #:              the OPPOSITE precedence from `timed_ledger_or_stop`, for that reason.
-#:              The centre is left
-#:              alone because it is pinned by equality in
-#:              `tests/test_retention_sweep.py` (#2043's whole case is that the fold
-#:              lands the store inside the band around THAT number) and because #2071
-#:              ruled that the centre is not the drift-drift lever. The fold IS
-#:              running — two archived buckets sit beside the store, the older of
-#:              them 9,392,103 B written 2026-11-05 (`ls -la
-#:              ~/.local/state/lloyd-automod/promotions.jsonl*` re-checks it) — and the
-#:              live store is still 30,770,490 B, +6.25% over this centre. That is not
-#:              a contradiction, and it is not the store refilling: store 13 of the
-#:              sweep is an AGE rule (`LEDGER_ARCHIVE_AGE_DAYS = 14`), not a size rule,
-#:              so nothing in it bounds the file's growth at all. At the published
-#:              1,992,001 B/day the band's upper edge (`int(centre * 1.2)`) is about two
-#:              days off, so this drift node will be asked to re-base again well inside
-#:              one band's lifetime — which is #2071's other half, not this file's. The durations
-#:              below are of the real store at its real size, and the budget those
-#:              thirteen cycles ran against was still the previous 15.83 s: six of
-#:              them breached it on the first sample, all six in the first set, and
-#:              each was retired by its own confirming cycle, so no node failed. One
-#:              breach buying a second cold sample is what the rule is FOR, and the
-#:              sentence below is right that six retirements say nothing about the
-#:              centre on their own — but the six sit above the very tail that moved,
-#:              and the only reading of the two together is that the centre had moved
-#:              and not just the denominator.
+#:              The centre stays alone for the same reason it did at #3867: the equality
+#:              pin named above holds it, and #3860's clause 4 says to leave it.
+#:     machine = 32 cores; load1 3.46-3.79 across set 1 and 3.43-3.97 across set 2,
+#:              read out of the notes rather than retyped, and held to 1.2x for the
+#:              current re-base by the node named above.
+#:
+#:     date   commit    files  min     median   p90     max
+#:     serial, 5 runs, load 3.46-3.79:  min 9.86  median 10.42  p90 11.53  max 11.53
+#:     serial, 5 runs, load 3.43-3.97:  min 10.15  median 10.21  p90 10.86  max 10.86
 #:     serial, 8 runs, load 3.69-7.66:  min 14.12  median 16.35  p90 16.69  max 16.69
 #:     serial, 5 runs, load 3.33-3.91:  min 14.44  median 14.71  p90 15.17  max 15.17
 #:
-#:     #3867, 2026-11-07, from d0857445, in a round worktree, 32 cores. What this
-#:     re-base is FOR is the board: the count it replaces described a board 16.9%
-#:     smaller than the one the cycle walks, 10 files past the retired band's upper
-#:     edge, and the drift node asked for exactly this. The measured tail moved
-#:     +58.5% while the board moved +20.3%, so the walk itself went from 3.33 ms to
-#:     4.39 ms per item file — 31.7% dearer per file than the cycle that came out at
-#:     the retired p90. Those five figures are arithmetic on `RETIRED_P90_S` and
-#:     `RETIRED_BOARD_FILES`, and this sentence shipped once as "52.2%" — the
-#:     PREVIOUS re-base's pair (6.92 to 10.53) pasted into the new record — which is
-#:     why `test_the_re_base_prose_recomputes_from_the_two_calibrations` now recomputes
-#:     each of them instead of trusting the prose. #1204 asks where the cold cost
-#:     goes; this is a third independent sighting that it is not file count, and the
-#:     per-file charge is kept rather than a flat number for that reason.
+#:     (p90 = nearest rank, so with n=5 it is the max and with n=8 the 8th sample: every
+#:     row here is really a maximum, and a re-baser who shortens a set raises the constant
+#:     without changing a measurement.)
 #:
-#:     The quieter set (load 3.33-3.91) sits 9.1% below the louder at the tail and
-#:     10.0% below it at the middle, which is the direction load points in. Against
-#:     that 1.52 s spread between the two sets' own tails, the 25%
-#:     margin is 4.17 s of slack over the p90. One `-n 8 --dist loadfile` pass over
-#:     this file surfaced a cold cycle at 12.19 s — 27% BELOW this serial p90, so
-#:     eight workers are not what pushes a cycle past a serial tail; what does, on
-#:     this box, is another agent's gate running alongside this one, and no sample
-#:     here models that. A parallel sample is a ceiling to check a budget against, not
-#:     a distribution to take a p90 from, and it is in that capacity it is recorded.
+#:     #3860, 2026-11-07, from b37e189b plus the shared board read, in a round worktree, 32
+#:     cores. WHAT THIS RE-BASE IS FOR is the CYCLE, and #3867's is the pair it is quoted
+#:     against: the measured tail moved -30.9% while the board moved +0.03% — 16.69 s
+#:     to 11.53 s — so the walk went from 4.39 ms to 3.03 ms per
+#:     item file — -30.9% per file, that is, 30.9% cheaper. The board count moved only because
+#:     the board grows while perf work lands: the drift node would have passed on the
+#:     retired count too: 759 files past would have been a breach, and the count sits
+#:     759 files INSIDE the retired edge of 4,564, which is why the count and
+#:     the durations changed together here and not because the band was breached again.
+#:     `test_the_re_base_prose_recomputes_from_the_two_calibrations` recomputes every one of
+#:     those five figures from `RETIRED_BOARD_FILES`/`RETIRED_P90_S`, because this kind of
+#:     sentence has already shipped once with the previous re-base's pair pasted into it.
 #:
-#:     To restore the value this one replaced, restore its inputs: the 3 162-item
-#:     board and the live ledger at the centre pinned above, walked over 2026-10-24
-#:     from 66f62027, which came out at 10.53 s.
-#:
-#:     What the next re-base will read: at the board's own recent rate the band's
-#:     upper edge is days off, not a fortnight. The answer to a third breach in a row
-#:     is #1204's cheaper section — one shared walk for the three sections that each
-#:     re-walk the board today — and not a wider band and not a bigger margin.
-#:
-#: Derived rather than typed: the larger of the two rows' p90s, computed from
-#: `_CALIBRATION_CYCLES_S` below the table's own numbers. A re-baser replaces the
-#: cycles, and the constant, the budget and the per-file charge all follow; the node
-#: that reads the table against those cycles is what says so if the prose was left
-#: behind.
-COLD_P90_S = max(_p90_nearest_rank(cycles) for _, cycles in _CALIBRATION_CYCLES_S)
+#:     Where the remaining cost is, measured rather than argued: #3860's triage sized the
+#:     two candidates at ~3.4 s of memo-cold front matter and ~4 s of ledger re-decode out
+#:     of a 15 s cycle. This round took the parse to one read per file per process, which is
+#:     the front-matter half, and got 5.16 s of the tail back
+#:     — 11.53 s against the 12.18 s the ceiling allows. The ledger's ~4 s is still in
+#:     there, and it is the reason the margin is not raised to spend it: the slack to the
+#:     triage cost is 0.81 s, and the next board-growth re-base will want
+#:     it. #1204's one shared walk remains the answer to a fourth sighting, and neither a
+#:     wider band nor a bigger margin is.
+
+#: The current re-base's own cycles, and the retired ones, in ONE table with the re-base
+#: named in each note. Retired sets are kept because the per-file charge and the recovery
+#: figure above are arithmetic on them, and because a calibration with no history cannot
+#: show that its own remedy was ever used; they are excluded from `COLD_P90_S` by
+#: `_current_cycle_sets`, which is the ordering contract stated in code.
+def _median_s(samples):
+    """Middle of the sorted samples: the mean of the two middles for an even count."""
+    ordered = sorted(samples)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _p90_nearest_rank(samples: tuple[float, ...]) -> float:
+    """Nearest-rank p90: the sample at ceil(0.9 * n), 1-based.
+
+    Stated once so the calibration, the budget and the node that reads the table cannot
+    each re-derive it differently. n=5 lands on the 5th sample (the max) and n=8 on the
+    8th, which is why every row above is really a maximum — and why shortening a set
+    raises the constant without changing a measurement.
+    """
+    ordered = sorted(samples)
+    rank = max(1, math.ceil(0.9 * len(ordered)))
+    return ordered[rank - 1]
+
+
+def _calibration_load1(note: str) -> tuple[float, float]:
+    """The 1-minute load average range a set's note says it was printed at.
+
+    Every note carries "load A-B" because a duration without a machine state records the
+    box and not the code — but until this round nothing read it back, so a note could
+    misreport its own machine state and the agreement node would still pass. Parsing it is
+    what turns "measure both sets at comparable load" from an instruction into an
+    assertion.
+    """
+    m = re.search(r"load ([\d.]+)-([\d.]+)", note)
+    if not m:
+        raise AssertionError(
+            "a calibration note must carry its 1-minute load range as 'load A-B', so a "
+            f"reader can tell a fast cycle from a quiet machine: {note!r}")
+    return float(m.group(1)), float(m.group(2))
+
+
+#: The commit family the CURRENT calibration was walked from. A set's note names the commit
+#: it ran at, which is what makes "the sets of this re-base" answerable instead of
+#: "whatever the last two rows happen to be": a re-baser who appends history above the
+#: current rows — as #3867's were appended — does not silently change what the budget is
+#: charged from.
+CURRENT_RE_BASE = "b37e189b"
+
+_CALIBRATION_CYCLES_S: tuple[tuple[str, tuple[float, ...]], ...] = (
+    ("set 1 2026-11-07 from b37e189b + the shared board read, load 3.46-3.79",
+     (10.62, 10.42, 11.53, 9.86, 10.33)),
+    ("set 2 2026-11-07 from b37e189b + the shared board read, load 3.43-3.97",
+     (10.21, 10.86, 10.16, 10.45, 10.15)),
+    ("set 1 2026-11-07 from e1f9bb58, load 3.69-7.66",
+     (16.11, 16.36, 16.38, 16.5, 16.69, 16.34, 14.51, 14.12)),
+    ("set 2 2026-11-07 from e1f9bb58, load 3.33-3.91",
+     (15.01, 15.17, 14.71, 14.44, 14.68)),
+)
+
+
+def _load_of(note: str) -> str:
+    """The 'A-B' load range a set's note records, as text, for row/set pairing."""
+    lo, hi = _calibration_load1(note)
+    return f"{lo}-{hi}"
+
+
+#: The most that may separate the two sets of one re-base, as a ratio of their 1-minute load
+#: averages. Set from #3860's own filing: its two sets differed 17% on machine state alone,
+#: which is larger than the effect any of these re-bases is measuring.
+CURRENT_LOAD_RATIO_CEILING = 1.2
+
+
+def _current_cycle_sets() -> list[tuple[str, tuple[float, ...]]]:
+    """The sets of the re-base this calibration is on, and nothing older.
+
+    `COLD_BUDGET_S` prices the code as it runs now, so it is derived from the current
+    re-base's own cycles. The history below it in `_CALIBRATION_CYCLES_S` is kept because a
+    recovery has to be quotable — the -30.9% above is arithmetic on the retired
+    pair — but a retired set must not keep charging a retired cycle. Deriving over the whole
+    table did exactly that: at these numbers the max over every row is #3867's 16.69 s,
+    the tail that pushed the bound 37.1% ABOVE the triage cost, so a whole-table
+    derivation would re-base this file onto the figure #3860 exists to retire.
+    """
+    sets = [(n, c) for n, c in _CALIBRATION_CYCLES_S if CURRENT_RE_BASE in n]
+    if len(sets) < 2:
+        raise AssertionError(
+            f"the calibration must record at least two sets for its own re-base "
+            f"({CURRENT_RE_BASE!r}); one set records a moment, not a distribution")
+    return sets
+
+
+COLD_P90_S = max(_p90_nearest_rank(cycles) for _, cycles in _current_cycle_sets())
 
 #: Stated margin over that p90 (#1858 clause 1): 25%, arithmetic rather than the
 #: "~30% headroom" the 2026-09-25 re-base claimed in prose. It has to cover the
-#: worker contention the re-measurement does not absorb. It used also to have to
-#: stay under the cost this check was written against, and the re-base above put the
-#: enforced bound past it, so what follows is read rather than repeated, and one
-#: node re-derives it from the constants:
-#: The enforced bound is 20.86 s, 37.1% ABOVE the 15.22 s triage cost, so a cycle
-#: that regressed to the 2026-09-16 shape would now pass this node. That is a fact
-#: about the corpus and not a lever, and `TRIAGE_COLD_S` plus
-#: `test_the_enforced_bound_is_pinned_to_the_ceiling_it_outran` hold it: the same
-#: node keeps the half that did NOT move, which is that per item file the bound is
-#: 5.48 ms against the 13.33 ms/file that triage run recorded — 2.4x tighter — so a
-#: walk that regressed to the triage rate still breaches this budget by 2.4x. The
-#: way back under the absolute ceiling is a cheaper walk, not a thinner margin: the
-#: p90 that would put the bound under the triage cost at this margin is 12.18 s, 27%
-#: BELOW the tail measured on this board, so #1204's one shared board walk is the
-#: route and dropping this number would only redden the node it is meant to protect.
-#: A re-baser changes the table and, if they must, this number; the budget follows
-#: arithmetically, and so must the sentence above — or that node says so.
+#: worker contention the re-measurement does not absorb — the two sets in the table
+#: above are 0.67 s apart at their tails, 6.2% of the quieter
+#: one, and that is what the 25% is bought with.
+#:
+#: The enforced bound is 14.41 s, 5.3% SHORT OF the 15.22 s triage cost.
+#: That sentence is derived, not asserted-by-hand: `test_the_enforced_bound_is_pinned_
+#: to_the_ceiling_it_outran` recomputes the number, the side and the percentage from
+#: `COLD_P90_S`, this constant and `TRIAGE_COLD_S`, and reddens if the prose disagrees
+#: about which side of the ceiling the bound is on. The previous record's bound sat
+#: ABOVE it — 37.1% ABOVE, disclosed at the time as the price of a board the corpus grew
+#: past — and this is the first re-base since then that moves it back under without
+#: retiring the check: the budget now stops a cycle 5.3% dearer than the p90 it was
+#: measured at, where the retired record stopped one 25% dearer than a p90 that had
+#: already left the triage cost behind.
+#:
+#: The per-file half, which is the unit in which a 1,142-file 2026-09-16 run and a
+#: today's run can be compared at all: per item file the bound is 3.79 ms against the
+#: 13.33 ms/file that triage run recorded — 3.52x tighter, so a walk that regressed to
+#: the triage rate still breaches this budget by 3.52x. The
+#: ceiling's own headroom is the number to watch on the next re-base, because it is
+#: small: the p90 that would put the bound back at the triage cost at this margin is
+#: 12.18 s, and the table's is 11.53 s, so 5.3% of
+#: board growth or load is all that stands between this calibration and the disclosure
+#: the last one carried. A re-baser changes the table and, if they must, this number;
+#: the budget follows arithmetically, and so must the sentence above — or that node
+#: says so.
 COLD_BUDGET_MARGIN = 1.25
 
-#: Budget for one cold cycle over the board named by `CALIBRATED_BOARD_FILES`,
-#: charged per file by `cold_budget_for_board`. The value this re-base replaced
-#: was 8.65 s, on the 2,628-file board walked over a live ledger of 29,444,519
-#: bytes, measured 2026-10-14 from 53a7fd11; to restore it, restore those two
-#: inputs and the p90 they sat on. Before that, 9.74 s was the budget on a board of
-#: 2,180 item files walked over a live ledger of 29,188,189 bytes, measured
-#: 2026-10-05 from 19acea6c. Before that, 9.55 s was the budget on
-#: a board of 1,804 item files with the old ledger centre. Before that,
-#: 8.0 s was the calibration on a 1,450-file board with a 6,286,192-byte ledger,
-#: where the node measured 6.02 s and 6.16 s (round SM_20260925_205059's review
-#: run, 2026-09-25, load average 11). Triage baseline: 15.22 s over 1,142 files,
-#: 2026-09-16 — and this is the first calibration whose bound does NOT fire short
-#: of it. The two before it did: the retired p90 put the bound at 13.16 s, 13.5%
-#: under the triage cost, and the one before that at 8.65 s, 43.2% under it. Where
-#: this bound actually stands, and the half of the comparison that survived, is the
-#: sentence above `COLD_BUDGET_MARGIN` — and that sentence is now re-derived by a
-#: node rather than trusted.
+#: Budget for one cold cycle over the board named by `CALIBRATED_BOARD_FILES`, charged
+#: per file by `cold_budget_for_board`. The value this replaced: the retired p90 put the
+#: bound at 20.86 s, 37.1% ABOVE the triage cost — the one calibration on this ladder
+#: that fired past the cost the check exists to catch. Before it: 13.16 s
+#: on the 3,162-file board walked over 2026-10-24, 15.80 s on a 3,162-file board with a
+#: 12.64 s calibration, 9.74 s on a 2,180-file board and a 29,188,189-byte ledger, 9.55
+#: s on a 1,804-file board, and 8.0 s on a 1,450-file board with a 6,286,192-byte
+#: ledger. Triage baseline: 15.22 s over 1,142 files, 2026-09-16. Every calibration in
+#: that ladder but the one this replaces fired SHORT of the triage cost — 8.65 s was
+#: 43.2% under it and 13.16 s was 13.5% under it — and the one that did not is the
+#: reason #3860 exists. Where this bound stands now is the derived sentence above
+#: `COLD_BUDGET_MARGIN`, not a restatement here.
 COLD_BUDGET_S = COLD_P90_S * COLD_BUDGET_MARGIN
 
 #: How far the live board may move from the calibrated one before the budget
@@ -1013,17 +1087,73 @@ def test_no_node_of_this_file_is_marked_or_deleted_to_get_it_green():
         f"a corpus truncated to noise); one case is a node that can no longer fail")
 
 
-def empty_both_caches() -> None:
-    """Forget every cache a cold cycle is supposed to miss.
+def empty_all_caches() -> None:
+    """Forget every store a cold cycle is supposed to miss. All three of them.
 
-    Both layers, always: the response cache in `app.routers.dashboard` and the
-    decoded-ledger cache in `scripts.automod.state`. A cycle that hits either one
-    costs milliseconds, so "cold" is a property of two stores and clearing one of
-    them is how a warm cycle gets timed while reading as a cold one.
+    The response cache in `app.routers.dashboard`, the decoded-ledger cache in
+    `scripts.automod.state`, and the front-matter parse store in
+    `app.frontmatter` (`dash._FM_MEMO` is that same dict, re-exported). A cycle that
+    hits any one of them costs milliseconds, so "cold" is a property of three stores
+    and clearing two of them is how a warm cycle gets timed while reading as a cold
+    one — which is what this function did until #3860.
+
+    The third layer is worth 3.4 s of a ~11 s cycle on this board, measured in one
+    process with the caches cleared between cycles (10.29 s with the parse store empty
+    against 6.86 s with it warm at 3,847 entries), which is four times the 0.80 s a
+    cycle used to have above its bound. So the name stayed `empty_both_caches` while
+    the body grew a third clear: `enforce_cold_cycle_budget`'s docstring promised "Both
+    caches are emptied before the second attempt, so the confirming cycle is as cold as
+    the first", and on a tree with the parse store that promise was false — a first
+    breach got a second sample that was 3.4 s cheaper for free. The node that fails the
+    clause is `test_emptying_the_caches_forgets_the_front_matter_store_not_just_two`;
+    this docstring is not the evidence.
     """
     dash._cache.clear()
     B._ledger_cache_clear()
+    fm.memo_clear()
 
+
+# The name the rest of this file and its callers use. It is kept because four nodes and
+# the autouse fixture call it, and a rename would read as the fix being about the name.
+empty_both_caches = empty_all_caches
+
+
+
+def test_emptying_the_caches_forgets_the_front_matter_store_not_just_two():
+    """Clause 3: all three cold-path stores are emptied, and this proves the third one is.
+
+    #3860's re-base is only honest if a confirming cycle costs what a first cycle costs.
+    `enforce_cold_cycle_budget` re-times a breaching cycle after clearing "both" caches,
+    and until this round the front-matter parse store survived that clear: a first-cycle
+    breach was corroborated by a sample 3.4 s cheaper for free, on a file whose margin
+    over the old bound was 0.80 s.
+
+    The entry count is asserted, not the function's name or its line count. A clear that
+    called something unrelated, or cleared a dict that is not the one the loader reads,
+    would leave a warm memo in place while looking like a fix — so the cycle here puts
+    REAL entries in through the loader the dashboard uses, checks they are there, clears,
+    and requires the count to have gone to zero on the very object the loader writes.
+    """
+    files = board_files_or_stop(what="the memo clear", numeric_names=True)
+    assert files, "the board has no item files to parse"
+
+    sample = files[0]
+    parsed = dash._frontmatter(sample)
+    assert isinstance(parsed, dict) and dash._FM_MEMO, (
+        f"the loader did not populate the store it is supposed to populate: "
+        f"{len(dash._FM_MEMO)} entries after parsing {sample.name}")
+    warmed = len(dash._FM_MEMO)
+    assert warmed > 0, "a parse must leave at least one entry to forget"
+    assert dash._FM_MEMO is fm.FM_MEMO, (
+        "the dashboard's store and the loader's store are different objects, so clearing "
+        "one cannot forget the other's entries")
+
+    empty_all_caches()
+    assert fm.memo_size() == 0, (
+        f"{warmed} parsed board files survived the cold-cache clear, so the confirming "
+        f"cycle of enforce_cold_cycle_budget is being timed with the board's front matter "
+        f"already parsed: {fm.memo_size()} entries left")
+    assert dash._cache == {}, "the response cache survived the same clear"
 
 @pytest.fixture(autouse=True)
 def _cold():
@@ -1444,18 +1574,34 @@ def test_the_calibration_table_and_the_cycles_it_records_agree():
     boundary: the 6-cycle set's median is 6.665 s, which prints as 6.66 or 6.67
     depending on the float, and the row quotes 6.67.
     """
+    text = Path(__file__).read_text(encoding="utf-8")
     rows = re.findall(
         r"^#: {5}serial, (\d+) runs, load (\d+\.\d+-\d+\.\d+):"
         r" +min (\d+\.\d+) +median (\d+\.\d+) +p90 (\d+\.\d+) +max (\d+\.\d+)$",
-        Path(__file__).read_text(encoding="utf-8"), re.MULTILINE)
-    assert len(rows) == len(_CALIBRATION_CYCLES_S), (
-        f"the table quotes {len(rows)} serial rows and `_CALIBRATION_CYCLES_S` holds "
-        f"{len(_CALIBRATION_CYCLES_S)} sets of cycles: the two halves are compared "
-        f"row against set, so they have to be the same size to mean anything")
+        text, re.MULTILINE)
+    # Row-for-set pairing is over the CURRENT re-base's rows only: the table now carries
+    # retired sets too, and a retired row whose prose was never re-typed must not be held to
+    # arithmetic the current budget does not use. Every row still has to exist and parse —
+    # `len(rows) >= 2` — and the current rows are asserted to be the FIRST rows, which is
+    # what makes the pairing order meaningful rather than assumed.
+    current = _current_cycle_sets()
+    assert len(rows) >= len(current), (
+        f"the table quotes {len(rows)} serial rows for {len(current)} current sets: every "
+        f"current set must have a row, or the constant is checked against nothing")
+    assert len(current) == 2, (
+        f"the current re-base holds {len(current)} sets; the ceiling and comparability "
+        "checks below are a pair's arithmetic")
+    rows = rows[:len(current)]
+    assert [(r[0], r[1]) for r in
+            re.findall(r"^#: {5}serial, (\d+) runs, load (\d+\.\d+-\d+\.\d+):",
+                       text, re.MULTILINE)][:len(current)] == \
+           [(str(len(c)), _load_of(nm)) for nm, c in current], (
+        "the current re-base's rows are not the first rows of the table, so pairing them "
+        "positionally would compare a current budget against a retired set's numbers")
 
     quoted_p90 = []
-    for (n, load, q_min, q_med, q_p90, q_max), (row_load, cycles) in zip(
-            rows, _CALIBRATION_CYCLES_S):
+    for (n, load, q_min, q_med, q_p90, q_max), (note, cycles) in zip(rows, current):
+        row_load = _load_of(note)
         where = f"the load {row_load} row"
         assert int(n) == len(cycles), (
             f"{where}: it says {n} runs and the recorded set is {len(cycles)} "
@@ -1474,9 +1620,22 @@ def test_the_calibration_table_and_the_cycles_it_records_agree():
         quoted_p90.append(float(q_p90))
 
     assert COLD_P90_S == pytest.approx(max(quoted_p90), abs=0.011), (
-        f"COLD_P90_S is {COLD_P90_S} and the largest p90 this file's table quotes is "
-        f"{max(quoted_p90)}: the constant is the larger of the two measured tails, so "
+        f"COLD_P90_S is {COLD_P90_S} and the largest p90 the current re-base's rows quote "
+        f"is {max(quoted_p90)}: the constant is the larger of the two measured tails, so "
         f"one of the two was changed without the other")
+
+    # Clause 2: the two sets of the CURRENT re-base must be measured at comparable machine
+    # state, because #3860 was filed on two sets 17% apart on load alone and the calibration
+    # would then have recorded the box. Retired rows are exempt: #3867's pair really was
+    # 3.33-3.91 against 3.69-7.66, and that is history, not a fresh mistake.
+    (a_lo, a_hi), (b_lo, b_hi) = (_calibration_load1(nm) for nm, _ in current)
+    worst = max(a_hi / b_lo, b_hi / a_lo)
+    assert worst <= CURRENT_LOAD_RATIO_CEILING, (
+        f"the current re-base's two sets were printed at load {a_lo}-{a_hi} and "
+        f"{b_lo}-{b_hi}: a ratio of {worst:.2f}x against the "
+        f"{CURRENT_LOAD_RATIO_CEILING}x ceiling means the two tails are not comparable, and "
+        "the higher one is a machine state rather than a measurement. Re-measure the quieter "
+        "set, or the p90 is a coin flip on what else was running.")
 
 
 def _comment_prose() -> str:
@@ -1575,34 +1734,55 @@ def test_the_enforced_bound_is_pinned_to_the_ceiling_it_outran():
         f"{triage_ms / bound_ms:.2f}x")
 
     restore_p90 = TRIAGE_COLD_S / COLD_BUDGET_MARGIN
+    # The constant is always TRIAGE / MARGIN; what flips is which side of the measured tail
+    # it sits on. While the bound was OVER the ceiling it was a cut to make (BELOW the tail);
+    # once the bound is under, the same number is the crossing point the tail has room to
+    # grow to (ABOVE the tail) — which is why #3860's record states 12.18 s as headroom
+    # rather than as an owed cut. Either way the figure is recomputed, so a stale one or a
+    # flipped word reddens this.
+    # The constant is always TRIAGE / MARGIN; what flipped with #3860 is which SIDE of the
+    # measured tail it sits on. While the bound was over the ceiling the number was a cut to
+    # make (BELOW the tail); with the bound under it the same figure is the crossing point the
+    # tail may still grow to (ABOVE the tail), which is what the margin's headroom IS. The
+    # prose states it either way and this recomputes it, so a stale figure reddens.
     back = re.search(
-        r"the p90 that would put the bound under the triage cost at this margin is "
-        r"(\d+\.\d+) s, (\d+)% BELOW the tail measured on this board", prose)
+        r"the p90 that would put the bound (?:under|back at|at) the triage cost at this "
+        r"margin is (\d+\.\d+) s", prose)
     assert back, (
-        "the file must state what would actually put this bound back under the "
-        "ceiling, because 'lower the margin' is the wrong remedy and the number is "
+        "the file must state where the p90 that reaches the ceiling sits against the tail it "
+        "was measured on, because 'lower the margin' is the wrong remedy and that number is "
         "what says so")
     assert abs(float(back.group(1)) - restore_p90) <= 0.005, (
-        f"the p90 that clears the ceiling at this margin is {back.group(1)} s; the "
-        f"arithmetic is {TRIAGE_COLD_S} / {COLD_BUDGET_MARGIN} = {restore_p90:.4f}")
-    below = (1 - restore_p90 / COLD_P90_S) * 100.0
-    assert abs(float(back.group(2)) - below) <= 0.5, (
-        f"the prose says the required p90 is {back.group(2)}% below the measured tail "
-        f"of {COLD_P90_S} s; it is {below:.1f}% below it")
+        f"the p90 that reaches the ceiling at this margin is {back.group(1)} s; the arithmetic "
+        f"is {TRIAGE_COLD_S} / {COLD_BUDGET_MARGIN} = {restore_p90:.4f}")
+    room = (restore_p90 / COLD_P90_S - 1) * 100
+    assert (room > 0) == ("the table's is" in prose), (
+        f"the record must say which side of the ceiling the measured tail is on: the ceiling "
+        f"p90 is {restore_p90:.2f} s against the table's {COLD_P90_S} s, i.e. "
+        f"{abs(room):.2f}% of room to grow before the bound crosses the cost this check "
+        "exists to catch")
+
 
     retired = re.search(
-        r"the retired p90 put the bound at (\d+\.\d+) s, ([\d.]+)% under the "
-        r"triage cost", prose)
-    assert retired, "the history of the ceiling is stated once, in the budget comment"
-    assert abs(float(retired.group(1)) - RETIRED_P90_S * COLD_BUDGET_MARGIN) <= 0.011, (
+        r"the retired p90 put the bound at (\d+\.\d+) s, ([\d.]+)% "
+        r"(ABOVE|SHORT OF|under) the triage cost", prose)
+    assert retired, (
+        "the history of the ceiling is stated once, in the budget comment, and it has to "
+        "carry its DIRECTION: for four calibrations the retired bound sat under the triage "
+        "cost and the sentence said 'under', and #3867's sat above it — a check that matched "
+        "only 'under' would have to be edited at exactly the moment the disclosure matters")
+    retired_bound = RETIRED_P90_S * COLD_BUDGET_MARGIN
+    assert abs(float(retired.group(1)) - retired_bound) <= 0.011, (
         f"the retired bound is quoted as {retired.group(1)} s against "
-        f"{RETIRED_P90_S} x {COLD_BUDGET_MARGIN} = "
-        f"{RETIRED_P90_S * COLD_BUDGET_MARGIN:.4f} s")
-    retired_short = (
-        (TRIAGE_COLD_S - RETIRED_P90_S * COLD_BUDGET_MARGIN) / TRIAGE_COLD_S * 100)
-    assert abs(float(retired.group(2)) - retired_short) <= 0.05, (
-        f"the retired shortfall is quoted as {retired.group(2)}%; on this file's "
-        f"convention (relative to the triage cost) it is {retired_short:.2f}%")
+        f"{RETIRED_P90_S} x {COLD_BUDGET_MARGIN} = {retired_bound:.4f} s")
+    retired_pct = (retired_bound - TRIAGE_COLD_S) / TRIAGE_COLD_S * 100
+    assert abs(float(retired.group(2)) - abs(retired_pct)) <= 0.05, (
+        f"the retired bound's distance from the ceiling is quoted as {retired.group(2)}%; on "
+        f"this file's convention (relative to the triage cost) it is {abs(retired_pct):.2f}%")
+    assert (retired_pct > 0) == (retired.group(3) == "ABOVE"), (
+        f"the record says the retired bound was {retired.group(3)} the ceiling; the arithmetic "
+        f"says {retired_bound:.2f} s against {TRIAGE_COLD_S} s, i.e. "
+        f"{'ABOVE' if retired_pct > 0 else 'SHORT OF'} it")
 
 
 def test_the_re_base_prose_recomputes_from_the_two_calibrations():
@@ -1632,20 +1812,33 @@ def test_the_re_base_prose_recomputes_from_the_two_calibrations():
         first = hits[0]
         return first if isinstance(first, tuple) else (first,)
 
-    moved = one(r"[Tt]he measured tail moved \+([\d.]+)% while the board moved "
-                r"\+([\d.]+)%")
+    # Signed on purpose. Every re-base on record until #3860 was a board outgrowing its
+    # band, so this sentence was pinned as two '+' figures; #3860 is the first whose WHOLE
+    # POINT is that the tail went DOWN, and a node that matches only '+%' would have to be
+    # edited regardless. What is asserted is that the stated figure EQUALS the computed one
+    # in the direction the arithmetic points, so an inverted or stale number — including the
+    # previous re-base's pair, the mistake this node exists to catch — reddens it either way.
+    moved = one(r"[Tt]he measured tail moved ([+-][\d.]+)% while the board moved "
+                r"([+-][\d.]+)%")
     tail_pct = (COLD_P90_S / RETIRED_P90_S - 1) * 100
     board_pct = (CALIBRATED_BOARD_FILES / RETIRED_BOARD_FILES - 1) * 100
-    assert round(tail_pct, 1) == float(moved[0]), (
+    assert abs(float(moved[0]) - tail_pct) <= 0.06, (
         f"the tail moved from {RETIRED_P90_S} s to {COLD_P90_S} s, which is "
-        f"{tail_pct:.2f}%, and the record says {moved[0]}% — the figure that shipped "
+        f"{tail_pct:+.2f}%, and the record says {moved[0]}% — the figure that shipped "
         f"first here was the PREVIOUS re-base's pair (6.92 to 10.53), not this one's")
-    assert round(board_pct, 1) == float(moved[1]), (
+    assert abs(float(moved[1]) - board_pct) <= 0.06, (
         f"the board moved from {RETIRED_BOARD_FILES} to {CALIBRATED_BOARD_FILES} item "
-        f"files, which is {board_pct:.2f}%, and the record says {moved[1]}%")
+        f"files, which is {board_pct:+.2f}%, and the record says {moved[1]}%")
+    assert (float(moved[0]) > 0) == (tail_pct > 0), (
+        "the record must carry the sign the arithmetic gives: a recovery stated as a "
+        f"regression reads as the file getting slower ({tail_pct:+.2f}% stated {moved[0]}%)")
 
+    # Signed, for the same reason as the tail figure above: the movement's direction is a
+    # fact about the re-base. #3867's was '+32% dearer'; #3860's is '-30.9% per file', which
+    # the prose spells out as 30.9% CHEAPER. The assertion below compares the signed number,
+    # so a recovery written as a regression reddens it.
     dearer = one(r"from (\d+\.\d+) ms to (\d+\.\d+) ms per item file — "
-                 r"([\d.]+)% dearer per file")
+                 r"([+-][\d.]+)% per file")
     ms_then = ms_per_item_file(RETIRED_P90_S, RETIRED_BOARD_FILES)
     ms_now = ms_per_item_file(COLD_P90_S, CALIBRATED_BOARD_FILES)
     assert abs(float(dearer[0]) - ms_then) <= 0.005, (
@@ -1660,28 +1853,52 @@ def test_the_re_base_prose_recomputes_from_the_two_calibrations():
 
     smaller = re.findall(r"described a board ([\d.]+)% smaller", prose)
     assert smaller, "the record says how much smaller the retired count was"
-    smaller_pct = round((1 - RETIRED_BOARD_FILES / CALIBRATED_BOARD_FILES) * 100, 1)
-    assert all(smaller_pct == float(s) for s in smaller), (
+    smaller_pct = (1 - RETIRED_BOARD_FILES / CALIBRATED_BOARD_FILES) * 100
+    assert all(abs(float(s) - smaller_pct) <= 0.06 for s in smaller), (
         f"'described a board X% smaller' reads {smaller}, but the two counts give "
         f"{smaller_pct}%")
 
+    # Two shapes, because whether the count is PAST the retired band's upper edge or INSIDE
+    # it is a fact about the re-base and not a stylistic choice: #3867's count was past it
+    # (that is what forced that re-base), #3860's sits inside it (its re-base was forced by
+    # the CYCLE, and the drift node would have passed on the retired count). Whichever word
+    # the prose uses, the distance is the same subtraction, so a wrong number reddens this.
     past = re.findall(r"(\d+) files past", prose)
+    inside = re.findall(r"(\d+) files INSIDE the retired edge", prose)
     edge = int(RETIRED_BOARD_FILES * (1.0 + BOARD_DRIFT_FRACTION))
     over = CALIBRATED_BOARD_FILES - edge
-    assert past, "the record says how far past the retired band's edge this count sat"
+    stated = past or inside
+    assert stated, (
+        "the record must say how far the count sits from the retired band's upper edge — "
+        "that distance is the drift node's own arithmetic, and it is the figure a reader "
+        "checks a re-base's justification against")
     assert f"{edge:,}" in prose, (
         f"the record should name the retired edge it counted from ({edge:,}), so a "
         f"reader can check the subtraction instead of trusting it")
-    assert all(int(p) == over for p in past), (
-        f"the record says {past} files past a retired edge of {edge}, and the drift "
-        f"node's own arithmetic (`int({RETIRED_BOARD_FILES} * "
-        f"(1 + {BOARD_DRIFT_FRACTION}))` = {edge}) puts this count {over} past it. "
-        f"The first version of that sentence understated its own node by nine, and "
-        f"the edge is derived from a constant rather than remembered.")
+    assert all(int(p) == abs(over) for p in stated), (
+        f"the record states {stated} files from a retired edge of {edge} against "
+        f"{CALIBRATED_BOARD_FILES} files, and the drift node's own arithmetic "
+        f"(`int({RETIRED_BOARD_FILES} * (1 + {BOARD_DRIFT_FRACTION}))` = {edge}) puts the "
+        f"distance at {abs(over)}. The first version of that sentence understated its own "
+        f"node by nine, and the edge is derived from a constant rather than remembered.")
+    if over > 0:
+        assert past, (
+            f"{CALIBRATED_BOARD_FILES} is {over} past the edge {edge}, so the prose must "
+            "say 'files past'")
+    else:
+        assert inside, (
+            f"{CALIBRATED_BOARD_FILES} is {-over} INSIDE the edge {edge}, so the prose must "
+            "say 'INSIDE the retired edge': calling a containment a breach is how a re-base "
+            "gets justified by a drift node that never demanded it")
 
     apart = one(r"sits ([\d.]+)% below the louder at the tail and ([\d.]+)% below "
                 r"it at the middle")
-    (loud_load, loud), (quiet_load, quiet) = _CALIBRATION_CYCLES_S
+    # "quieter"/"louder" is which set came out FASTER, not which row prints first, so it is
+    # chosen by the p90 rather than by position — the table's order is set 1 then set 2, and
+    # #3860's set 1 is the slower of its pair.
+    (quiet_note, quiet), (loud_note, loud) = sorted(
+        _current_cycle_sets(), key=lambda nc: _p90_nearest_rank(nc[1]))
+    quiet_load, loud_load = _calibration_load1(quiet_note), _calibration_load1(loud_note)
     tail_gap = (1 - _p90_nearest_rank(quiet) / _p90_nearest_rank(loud)) * 100
     mid_gap = (1 - _median_s(quiet) / _median_s(loud)) * 100
     assert round(tail_gap, 1) == float(apart[0]), (
@@ -2253,6 +2470,17 @@ async def test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold(monkeyp
     One warm sample is what #3844 found red at base 173d522c with this file's diff
     absent: cold 5.548 s against warm 0.840 s, 6.6x, on a box running the rest of
     the suite beside the node. Both figures were inflated by that load — the cold
+    #3860 re-states both halves against the RE-BASED cold, because a ratio quoted against a
+    retired 1.69 s is a ratio nobody can check: this node's memo-cold cycle on the re-based
+    calibration measured cold 9.524 s against a warm floor of 0.018 s, 518.1x, over the same
+    this calibration's item files, and its own tail is 11.53 s. Against that re-based cold
+    the 10x bar is a warm cycle of 1.153 s or less and the absolute half is `warm < 1.0`, so
+    the absolute floor is now the TIGHTER of the two — which is the direction the pair has
+    always had and is why both are asserted rather than one. The load-bearing half remains
+    the ratio: a dead cache shows up as warm ≈ cold, and at an 11.53 s tail that is a 518x
+    collapse the ratio sees at once, while `warm < 1.0` alone would still pass on a box where
+    both cycles are slow. Both figures here are this node's own printed line, not the table's.
+
     one 3.3x the 1.69 s baseline, the warm one 11x its 0.073 s — and the ratio is
     the collateral, because a 73 ms cycle absorbs a scheduler stall as a large
     fraction of itself while a 5 s cycle barely notices it. This is the same
