@@ -373,6 +373,68 @@ else
     fi
 fi
 
+# #3881: a line THIS commit writes puts a wrong-zone clock into a skill template.
+# `scripts/skill_timezone.py` defines the class once, and the land rail
+# (`scripts/automod/vault_round.py::skill_timezone_errors`) has refused it at
+# `automod_vault_land` since #1189/#2454 — but that door's selector is
+# `skills/*/SKILL.md`, and the violation the vault actually carries today is in a DETAIL
+# file: `skills/nightly-reflection-knowledge-write/step-1-and-commit-detail.md` line 110
+# interpolates `$(date +%Y-%m-%d)` into a `vault-commit.sh` subject, which is the very
+# command this wrapper runs. So the class entered this door unrefused, and the file that
+# teaches the nightly writer how to commit is the file carrying the defect: land time
+# cannot see a detail file, and this door is the one that writes one.
+#
+# HARD-REFUSED, like the two rungs below and for their shared reason: printing is proved
+# insufficient — #3589's `status` printed `orphan rows: 7` for three weeks before the
+# fold, and #1112 found THIS class's check gate-passed on two branches and never merged.
+# What makes a refusal satisfiable rather than a nightly-wide red is that the check is
+# DIFF-RELATIVE: only lines inside a `+` range of this commit's own staged diff are
+# judged, so the pre-existing line above and the 14 violations across 8 archived
+# SKILL.md files never freeze a batch they are not in. A whole-body check over touched
+# files would wedge the nightly writer, which touches that detail file every cycle and
+# commits a batch spanning `memory/ lloyd/ people/ projects/ knowledge/ skills/
+# backlog/ autonomy/`.
+#
+# The matcher is `skill_timezone_findings.py` beside this script. It reads the INDEX and
+# the staged blob, never the working tree, because a scoped commit (#1867, #2245) can
+# leave a fix dirty and unstaged — and the commit that ships the bad line anyway is the
+# commit this rung exists to catch. Refused paths come back on stdout one per line and
+# are pulled out of the index below for the #3545 reason: a refused path left staged
+# becomes the NEXT commit's path, and the next job's snapshot is then refused for prose it
+# never wrote. The bytes stay on disk, so editing the line and re-staging is the whole
+# remedy. Exit 1 is the refusal; past 1 is the rung failing, said out loud because a check
+# that goes blind looks exactly like a tree with no violations. The land rail is NOT
+# widened to detail files in this change: its check is whole-body, so widening it would
+# refuse every round that touches the file above. That asymmetry is a standing ruling.
+TIMEZONE_RUNG="$SCRIPT_DIR/skill_timezone_findings.py"
+if [ ! -f "$TIMEZONE_RUNG" ]; then
+    echo "vault-commit.sh: skill timezone-literal CHECK SKIPPED (missing $TIMEZONE_RUNG)" >&2
+elif [ -z "$PY" ]; then
+    echo "vault-commit.sh: skill timezone-literal CHECK SKIPPED (no python interpreter)" >&2
+else
+    set +e
+    TIMEZONE_PATHS="$("$PY" "$TIMEZONE_RUNG" --vault "$VAULT")"
+    TIMEZONE_RC=$?
+    set -e
+    if [ "$TIMEZONE_RC" -eq 1 ]; then
+        while IFS= read -r TIMEZONE_PATH; do
+            [ -n "$TIMEZONE_PATH" ] || continue
+            # `|| true`, the reason stated in the orphan rung: a vault whose first commit
+            # is the one being refused has no HEAD entry for `reset` to consult.
+            git -C "$VAULT" reset -q -- "$TIMEZONE_PATH" || true
+        done <<< "$TIMEZONE_PATHS"
+        # Column 0 and before the index readback below, for the #1070 reason that governs
+        # the no-change block. Single-quoted because the remedy names a command
+        # substitution: in double quotes bash would run `date` and print today's digits
+        # where the fix is spelled. The per-line refusal — path, line number, and the
+        # rule's own reason — came out of the rung on this same stderr.
+        echo 'vault-commit.sh: SKILL TIMEZONE-LITERAL CHECK REFUSED the commit above: nothing is committed, and the files named are pulled out of the index (their bytes are untouched, so re-staging an edited line is the whole fix). Change each line named to read the clock in UTC: a commit subject takes `$(date -u +%F)`, not `$(date +%F)`, and a displayed time takes a `date -u +%Y-%m-%dT%H:%M:%SZ` stamp or one derived from a clock (#3881).' >&2
+        exit 1
+    elif [ "$TIMEZONE_RC" -gt 1 ]; then
+        echo "vault-commit.sh: skill timezone-literal CHECK FAILED (exit $TIMEZONE_RC); committing whatever the index holds" >&2
+    fi
+fi
+
 # #3589: a commit that removes a loaded index line and leaves its ledger row live.
 # `lloyd/MEMORY.md` and `lloyd/USER.md` are the prompt's own index, and
 # `lloyd/memory/memory-md-ledger.md` / `user-md-ledger.md` carry one row per line —
