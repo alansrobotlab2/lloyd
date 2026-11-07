@@ -409,7 +409,7 @@ def test_the_grader_reads_a_detached_checkout_of_the_commit_not_the_working_tree
     monkeypatch.setattr(G.S, "read_events", lambda limit=100: [])
     monkeypatch.setattr(G.W, "round_dir", lambda rid: tmp_path / "round")
     monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
-        "id": iid, "title": "t", "body": "b", "clauses": ["c"], "path": "",
+        "id": iid, "title": "t", "body": "b", "clauses": ["the flag defaults to off"], "path": "",
         "amendments": [], "human_clauses": []})
     monkeypatch.setattr(RV, "grade", grade)
     monkeypatch.setattr(RV, "honesty_prechecks", lambda *a, **k: [])
@@ -428,7 +428,7 @@ def test_the_grader_reads_a_detached_checkout_of_the_commit_not_the_working_tree
 # ── the backlog: a duplicate pair is not a disagreement ───────────────────
 
 def test_two_refusals_of_one_commit_are_not_a_disagreement(isolated):
-    write_item(isolated, 578, clauses=["a", "b"])
+    write_item(isolated, 578, clauses=["clause a", "clause b"])
     for rid in ("SM_1",):
         S.append_event({"event": "backlog_implement", "item_id": 578, "phase": "finished",
                         "round_id": rid, "stop_reason": "stop", "num_turns": 5}, path=S.LEDGER_PATH)
@@ -438,7 +438,7 @@ def test_two_refusals_of_one_commit_are_not_a_disagreement(isolated):
     _review("SM_1", 578, head="i" * 40, clauses={1: "met", 2: "unmet"}, attempt=2)
     assert B.review_disagreement(S.LEDGER_PATH, 578) == 2
     # Rows without a head — every review before 2026-09-11 — keep the old reading.
-    write_item(isolated, 579, clauses=["a"])
+    write_item(isolated, 579, clauses=["clause a"])
     S.append_event({"event": "backlog_implement", "item_id": 579, "phase": "finished",
                     "round_id": "SM_2", "stop_reason": "stop", "num_turns": 5}, path=S.LEDGER_PATH)
     _review("SM_2", 579, head="", clauses={1: "unmet"})
@@ -453,13 +453,13 @@ def _unsat_review(rid, item_id, clause):
 
 
 def test_amend_refuses_a_clause_the_reviewer_did_not_call_unsatisfiable(isolated):
-    path = write_item(isolated, 600, clauses=["a", "b"])
+    path = write_item(isolated, 600, clauses=["clause a", "clause b"])
     with pytest.raises(ValueError, match="not judged clause 1 unsatisfiable"):
         B.amend_clause(600, 1, "a, narrowed", "because", round_id="SM_a")
     _unsat_review("SM_a", 600, 2)
     with pytest.raises(ValueError, match="not judged clause 1"):
         B.amend_clause(600, 1, "a, narrowed", "because", round_id="SM_a")
-    assert _fm(path)["acceptance_clauses"] == ["a", "b"]
+    assert _fm(path)["acceptance_clauses"] == ["clause a", "clause b"]
 
 
 def _confirm(item_id, surface):
@@ -471,7 +471,7 @@ def test_amend_on_a_vault_surface_item_names_the_surface_and_the_route_that_work
     """#1987: no vault row carries a round_id, so the old answer — "the review rung
     has not judged clause N unsatisfiable" — was a claim about a review this lookup
     cannot see."""
-    path = write_item(isolated, 1987, clauses=["a", "b"])
+    path = write_item(isolated, 1987, clauses=["clause a", "clause b"])
     _confirm(1987, "vault")
     assert B.last_graded_review(S.LEDGER_PATH, "SM_other") is None, "#860: nothing item-wide"
     with pytest.raises(ValueError) as exc:
@@ -480,49 +480,49 @@ def test_amend_on_a_vault_surface_item_names_the_surface_and_the_route_that_work
     assert "vault surface" in msg and B.VAULT_NO_AMENDMENT_ROUTE in msg
     assert "edit the clause on the backlog item" in msg and "file a blocker" in msg
     assert "not judged" not in msg and "unsatisfiable" not in msg
-    assert _fm(path)["acceptance_clauses"] == ["a", "b"]
+    assert _fm(path)["acceptance_clauses"] == ["clause a", "clause b"]
 
 
 def test_amend_on_a_code_surface_item_is_unchanged_by_the_vault_refusal(isolated):
-    path = write_item(isolated, 1988, clauses=["a", "b"])
+    path = write_item(isolated, 1988, clauses=["clause a", "clause b"])
     _confirm(1988, "code")
     with pytest.raises(ValueError, match="not judged clause 2 unsatisfiable"):
         B.amend_clause(1988, 2, "b, narrowed", "why", round_id="SM_c")
     _unsat_review("SM_c", 1988, 2)
     rec = B.amend_clause(1988, 2, "b, narrowed", "why", round_id="SM_c")
     assert rec["state"] == "pending" and rec["round_id"] == "SM_c"
-    assert _fm(path)["acceptance_clauses"] == ["a", "b, narrowed"]
+    assert _fm(path)["acceptance_clauses"] == ["clause a", "b, narrowed"]
     assert [a["state"] for a in B.pending_amendments(_fm(path))] == ["pending"]
     # A vault-surface item that DOES have a graded code review for the round is
     # judged on that review, like any other.
-    write_item(isolated, 1989, clauses=["a"])
+    write_item(isolated, 1989, clauses=["clause a"])
     _confirm(1989, "vault")
     _unsat_review("SM_d", 1989, 1)
     assert B.amend_clause(1989, 1, "a2", "why", round_id="SM_d")["state"] == "pending"
 
 
 def test_amend_writes_pending_and_the_next_review_ratifies_or_restores(isolated):
-    path = write_item(isolated, 601, clauses=["a", "b"])
+    path = write_item(isolated, 601, clauses=["clause a", "clause b"])
     _unsat_review("SM_a", 601, 2)
     rec = B.amend_clause(601, 2, "b, satisfiable", "the held-out half is in USER.md", round_id="SM_a")
     fm = _fm(path)
-    assert fm["acceptance_clauses"] == ["a", "b, satisfiable"]
-    assert B.pending_amendments(fm) == [rec] and rec["state"] == "pending" and rec["was"] == "b"
+    assert fm["acceptance_clauses"] == ["clause a", "b, satisfiable"]
+    assert B.pending_amendments(fm) == [rec] and rec["state"] == "pending" and rec["was"] == "clause b"
     assert "amended clause 2" in fm["activity_log"][-1]
     with pytest.raises(ValueError, match="already amended"):
         B.amend_clause(601, 2, "again", "x", round_id="SM_a")
     # the contract the grader and implementer read is the amended one
-    assert B.acceptance_clauses_of({}, fm) == ["a", "b, satisfiable"]
+    assert B.acceptance_clauses_of({}, fm) == ["clause a", "b, satisfiable"]
     assert B.settle_amendments(601, "SM_a", ratified=False, note="weaker") == [2]
     fm = _fm(path)
-    assert fm["acceptance_clauses"] == ["a", "b"] and fm["clause_amendments"][0]["state"] == "refused"
+    assert fm["acceptance_clauses"] == ["clause a", "clause b"] and fm["clause_amendments"][0]["state"] == "refused"
     assert B.pending_amendments(fm) == []
     # …and a ratification keeps the text
     _unsat_review("SM_b", 601, 2)
     B.amend_clause(601, 2, "b, take two", "still", round_id="SM_b")
     assert B.settle_amendments(601, "SM_b", ratified=True) == [2]
     fm = _fm(path)
-    assert fm["acceptance_clauses"] == ["a", "b, take two"]
+    assert fm["acceptance_clauses"] == ["clause a", "b, take two"]
     assert fm["clause_amendments"][-1]["state"] == "ratified"
     assert B.settle_amendments(601, "SM_b", ratified=True) == [], "settled once"
 
@@ -690,7 +690,7 @@ def test_the_rung_settles_amendments_with_the_verdict(monkeypatch, tmp_path):
     monkeypatch.setattr(B, "settle_amendments",
                         lambda iid, rid, *, ratified, note="": settled.append((iid, rid, ratified)) or [1])
     obj = dict(UNMET, amendments_ok=False, amendments_note="weaker")
-    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["c"], "path": "",
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["the flag defaults to off"], "path": "",
                 "amendments": [{"clause": 1, "was": "c0", "now": "c", "reason": "r", "round_id": "SM_REV"}],
                 "human_clauses": []}
     _arm(monkeypatch, tmp_path, grade=_grader(obj), head="", contract=contract)
@@ -699,7 +699,7 @@ def test_the_rung_settles_amendments_with_the_verdict(monkeypatch, tmp_path):
 
 
 def test_the_prompt_shows_amendments_and_human_clauses(tmp_path):
-    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["c1", "c2"], "path": "",
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["the first flag defaults to off", "the second flag defaults to off"], "path": "",
                 "amendments": [{"clause": 2, "was": "old", "now": "new", "reason": "why", "round_id": "SM_x"}],
                 "human_clauses": ["Alan audits ten items"]}
     text = RV.build_prompt(contract=contract, diff="", diff_truncated=False, changed_tests=[],
@@ -731,7 +731,7 @@ def test_amend_tool_binds_the_item_from_the_run_spec(isolated, tmp_path):
     (S.ROUNDS_DIR / "SM_a").mkdir(parents=True)
     (S.ROUNDS_DIR / "SM_a" / "run_spec.yaml").write_text(yaml.safe_dump(
         {"code": {"base_commit": "b" * 40}, "item": {"id": 602}}))
-    write_item(isolated, 602, clauses=["a"])
+    write_item(isolated, 602, clauses=["clause a"])
     out = T._amend_clause("SM_a", 1, "a'", "r")
     assert "not judged clause 1 unsatisfiable" in out["error"]
     _unsat_review("SM_a", 602, 1)
@@ -751,9 +751,9 @@ def test_triage_parses_human_clauses_from_both_paths():
     assert parsed["human_clauses"] == ["Alan audits ten items"]
     structured = AT._from_structured({"verdict": "confirmed", "surface": "code", "check": "x",
                                       "evidence": "y", "acceptance": "z",
-                                      "acceptance_clauses": ["a"], "human_clauses": ["h"],
+                                      "acceptance_clauses": ["a runner exists"], "human_clauses": ["h ruling pending"],
                                       "spawned": []}, B.VERDICTS, B.SURFACES)
-    assert structured["human_clauses"] == ["h"]
+    assert structured["human_clauses"] == ["h ruling pending"]
     assert "human_clauses" in B.TRIAGE_VERDICT_SCHEMA["required"]
     assert "HUMAN_CLAUSES:" in AT.PROMPT and "not an acceptance clause" in AT.PROMPT
     assert "can only run after landing" in AT.PROMPT
@@ -763,13 +763,13 @@ def test_record_verdict_writes_human_clauses_beside_the_contract(isolated):
     path = write_item(isolated, 610, status="draft")
     item = B.load_item(path)
     B.record_verdict(item, "confirmed", "ev", check="c", close=False, acceptance="acc",
-                     acceptance_clauses=["a"], human_clauses=["Alan signs off"])
+                     acceptance_clauses=["clause a"], human_clauses=["Alan signs off"])
     fm = _fm(path)
-    assert fm["acceptance_clauses"] == ["a"] and fm["human_clauses"] == ["Alan signs off"]
+    assert fm["acceptance_clauses"] == ["clause a"] and fm["human_clauses"] == ["Alan signs off"]
     assert "Owed after landing" in path.read_text()
     assert B.human_clauses_of({}, fm) == ["Alan signs off"]
     assert B.human_clauses_for_item(path, {}) == ["Alan signs off"]
-    assert B.human_clauses_for_item(None, {"human_clauses": ["x"]}) == ["x"]
+    assert B.human_clauses_for_item(None, {"human_clauses": ["x sign-off"]}) == ["x sign-off"]
 
 
 def test_a_met_landing_with_human_clauses_closes_and_owes_them(isolated):
@@ -778,7 +778,7 @@ def test_a_met_landing_with_human_clauses_closes_and_owes_them(isolated):
     meant `draft` — the pool single-item triage reads. The loop's half of a
     `met` landing is done, so it closes; what survives the closure is the
     named debt — on the `owed` list since 2026-09-27, the tag before."""
-    path = write_item(isolated, 611, status="in_progress", clauses=["a"], human=["Alan audits"])
+    path = write_item(isolated, 611, status="in_progress", clauses=["clause a"], human=["Alan audits"])
     S.append_event({"event": "backlog_implement", "item_id": 611, "phase": "finished",
                     "round_id": "SM_h", "stop_reason": "stop", "num_turns": 5,
                     "outcome": {"landed": True, "acceptance": "met", "clause_outcomes": []}},
@@ -796,7 +796,7 @@ def test_a_met_landing_with_human_clauses_closes_and_owes_them(isolated):
     assert fm[B.LANDED_MARKER] == "d" * 40
     # …and without human clauses the same landing closes too, untagged: the tag
     # is now the only thing that distinguishes the two
-    path2 = write_item(isolated, 612, status="in_progress", clauses=["a"])
+    path2 = write_item(isolated, 612, status="in_progress", clauses=["clause a"])
     S.append_event({"event": "backlog_implement", "item_id": 612, "phase": "finished",
                     "round_id": "SM_i", "stop_reason": "stop", "num_turns": 5,
                     "outcome": {"landed": True, "acceptance": "met", "clause_outcomes": []}},
@@ -860,7 +860,7 @@ def test_the_hard_ceiling_ends_a_round_that_keeps_getting_free_reviews(monkeypat
 def test_a_downgraded_partial_is_not_a_disagreement(isolated):
     """The grader said `met` twice and Python downgraded it twice for missing
     evidence; that is agreement without receipts, not the author refusing."""
-    write_item(isolated, 860, clauses=["a", "b"])
+    write_item(isolated, 860, clauses=["clause a", "clause b"])
     S.append_event({"event": "backlog_implement", "item_id": 860, "phase": "finished",
                     "round_id": "SM_d", "stop_reason": "stop", "num_turns": 5}, path=S.LEDGER_PATH)
     def review(head, clauses):
@@ -910,7 +910,7 @@ def test_only_a_blocking_honesty_finding_refuses_the_round(tmp_path):
     kind, _ = RV.decide(parsed([]), [{"file": "tests/test_x.py", "line": 1, "problem": "`or True`"}])
     assert kind == "retry"
     assert "severity" in RV.REVIEW_SCHEMA["properties"]["test_honesty"]["items"]["required"]
-    text = RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["c"], "path": ""},
+    text = RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["the flag defaults to off"], "path": ""},
                            diff="", diff_truncated=False, changed_tests=[], test_counts={},
                            worktree=tmp_path, run_tests=tmp_path / "rt")
     assert "Only \\\n`blocking` entries refuse the round" in text or "`blocking` entries refuse the round" in text
@@ -1008,7 +1008,7 @@ def test_only_a_seam_a_test_could_cross_before_landing_refuses(tmp_path):
     assert RV.decide(legacy, [])[0] == "retry"
     items = RV.REVIEW_SCHEMA["properties"]["seams_unverified"]["items"]
     assert "testable_before_landing" in items["required"]
-    text = RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["c"], "path": ""},
+    text = RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["the flag defaults to off"], "path": ""},
                            diff="", diff_truncated=False, changed_tests=[], test_counts={},
                            worktree=tmp_path, run_tests=tmp_path / "rt")
     assert "recorded on the item as a post-landing check" in " ".join(text.split())
@@ -1021,7 +1021,7 @@ def test_the_review_event_records_seams_as_text_and_names_the_untestable_ones(mo
         {"seam": "loopback POST", "testable_before_landing": True}])
     contract = {"id": 7, "title": "t", "body": "b", "clauses": [], "path": "",
                 "amendments": [], "human_clauses": []}
-    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), head="", contract={**contract, "clauses": ["c"]})
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), head="", contract={**contract, "clauses": ["the flag defaults to off"]})
     _Gate(7, ["app/x.py"], tmp_path).rung_review()
     ev = events[-1]
     assert ev["seams_unverified"] == ["live pool tick", "loopback POST"]
@@ -1035,9 +1035,9 @@ def test_a_re_offer_with_every_clause_met_runs_before_a_fresh_confirmation(isola
         created = (datetime.now(timezone.utc) - timedelta(days=created_days_ago)).isoformat()
         path = isolated / f"{iid}-x.md"
         path.write_text(f"---\nstatus: up_next\npriority: medium\ncreated: '{created}'\n"
-                        f"board: lloyd\ntags: []\nacceptance_clauses:\n- a\n---\n\n# x\n\nbody\n")
+                        f"board: lloyd\ntags: []\nacceptance_clauses:\n- clause a\n---\n\n# x\n\nbody\n")
         S.append_event({"event": "backlog_triage", "item_id": iid, "verdict": "confirmed",
-                        "acceptance": "the check passes", "acceptance_clauses": ["a"]},
+                        "acceptance": "the check passes", "acceptance_clauses": ["clause a"]},
                        path=S.LEDGER_PATH)
     confirm(901, 3)   # fresh, oldest
     confirm(902, 1)   # re-offered, refused on a seam with every clause met
@@ -1102,7 +1102,7 @@ def test_a_stale_amendment_from_another_round_does_not_buy_a_third_attempt(
 
 def test_the_round_filter_holds_even_when_orphaning_cannot_write(monkeypatch, tmp_path):
     grade = _grader(UNMET)
-    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["c"], "path": "", "human_clauses": [],
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["the flag defaults to off"], "path": "", "human_clauses": [],
                 "amendments": [{"clause": 1, "was": "c0", "now": "c", "reason": "r",
                                 "round_id": "SM_OLD"}]}
     _arm(monkeypatch, tmp_path, grade=grade, head="c" * 40, contract=contract,
@@ -1116,7 +1116,7 @@ def test_the_round_filter_holds_even_when_orphaning_cannot_write(monkeypatch, tm
 
 def test_this_rounds_own_amendment_still_reopens_the_question(monkeypatch, tmp_path):
     grade = _grader(UNMET)
-    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["c"], "path": "", "human_clauses": [],
+    contract = {"id": 7, "title": "t", "body": "b", "clauses": ["the flag defaults to off"], "path": "", "human_clauses": [],
                 "amendments": [{"clause": 1, "was": "c0", "now": "c", "reason": "r",
                                 "round_id": "SM_REV"}]}
     _arm(monkeypatch, tmp_path, grade=grade, head="b" * 40, contract=contract,

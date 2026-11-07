@@ -1295,11 +1295,11 @@ CLAUSE_MAX_CHARS = 600
 
 def clean_clauses(values, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
     """Clauses as a bounded list of non-placeholder strings, `MAX_CLAUSES` on a
-    write; a verdict trailer (`trailer_placeholder_row`) is a placeholder too."""
+    write; a verdict trailer or a row naming no demand (`names_a_demand`) is none."""
     out: list[str] = []
     for v in (values or []):
         s = "" if trailer_placeholder_row(str(v)) else acceptance_text(v)
-        if s and s not in out:
+        if s and names_a_demand(s) and s not in out:
             out.append(s[:CLAUSE_MAX_CHARS])
         if len(out) >= limit:
             break
@@ -3766,6 +3766,82 @@ def trailer_placeholder_row(row: str) -> bool:
         return False
     value = " ".join(m.group(2).split()).strip(" -<>()[].:'\"").lower()
     return value in _ACCEPTANCE_PLACEHOLDERS
+
+
+# ── #3897: an owed entry has to name a demand ───────────────────────────────────
+#
+# A triage verdict's own payload reaches a contract as clause rows. #3504's
+# `acceptance_clauses` is six: its two real clauses plus `human_clauses:[`,
+# `spawned`, `findings_filed_to` and `item_id`, and its `human_clauses` are
+# `1.` and `1]}],` — each of which `owed.add_owed` booked, so the closed item
+# carried two phantom owed entries that cost an owed-check turn apiece to
+# re-discharge, out of the per-tick capacity #2055 bounded. #2687, #2474, #2933,
+# #3616 and #3654 carry the same shape, and the fragments arrive as separate
+# array items from the model/JSON-salvage, BEFORE any backlog code sees them —
+# which is why this sits in `clean_clauses`, the one funnel both the writer and
+# every reader pass through, and not in `split_clause_lines` or the YAML writer.
+# `trailer_placeholder_row` above cannot catch any of it: its regex needs a
+# `HUMAN_CLAUSES`/`SPAWNED` label with a PLACEHOLDER VALUE, and the value `[`
+# strips to `""`, which is not in `_ACCEPTANCE_PLACEHOLDERS`. That filter's
+# scope limit (the value must BE a placeholder) is deliberate and stays; this is
+# the other half — a row that names no requirement at all.
+#
+# SHAPE, never length, because a false positive here silently deletes a real
+# requirement from grading: #3504's clause 2 ends mid-sentence on a bare backtick
+# (`…, all carrying `) where the JSON salvage cut it, and any length floor would
+# eat that clause along with the junk. Two arms reject; a path-like token rescues
+# from both, because a clause naming a file is about something. The rescue reuses
+# `_PATH_TOKEN` (line 351), the tokeniser the write rail already uses to decide
+# what counts as a path, so the two guards cannot disagree about the shape.
+#
+# Lives beside `trailer_placeholder_row`, below `WITNESS_MAX_BYTES`, for the
+# line-cite reason that comment recites — do not move it above that constant.
+_ALNUM_RUN_RX = re.compile(r"[A-Za-z0-9]{4,}")
+# `spawned`, `item_id`, `entity:`, `human_clauses:[`, and #3616's
+# `human_clauses_<64-hex>…` cache key are all ONE lowercase identifier wearing
+# whatever colon, bracket or comma the salvage left on it. Case-sensitive on
+# purpose: a bare UPPERCASE `SPAWNED` row is a header the contract keeps
+# byte-for-byte (`test_a_clause_that_only_names_a_trailer_label_survives_byte_for_byte`),
+# and the rows that leaked are every one of them lowercase.
+_BARE_KEY_FRAGMENT_RX = re.compile(r"[a-z_][a-z0-9_]*\Z")
+_LEADING_ENUMERATOR_RX = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+")
+_KEY_PUNCT = ":=,.;[]{}()<>`\"'|*!?"
+
+
+def _bare_key_fragment(text: str) -> bool:
+    """True when `text` is one lowercase identifier and nothing else.
+
+    Stripped first: the `1.` / `-` enumerator a clause row carries, then the
+    punctuation a spliced key arrives wearing (`human_clauses:[`, `entity:`,
+    `spawned,`). A candidate with a space in it can never match, so no sentence
+    is ever called a key.
+    """
+    s = _LEADING_ENUMERATOR_RX.sub("", text, count=1).strip()
+    return bool(_BARE_KEY_FRAGMENT_RX.match(s.strip(_KEY_PUNCT)))
+
+
+def names_a_demand(value) -> bool:
+    """True when `value` could be a requirement, False for a spliced payload key.
+
+    Rejects a candidate with NO path-like token AND no alphanumeric run of four
+    or more (`1.`, `1]}],`, `--rep`, `or`, the punctuation orphan #3205 carries),
+    or one that is a bare lowercase payload-key fragment (`spawned`, `item_id`,
+    `entity:`, `human_clauses:[`, a `<label>_<hex>` cache key). A candidate
+    naming a path is kept whatever else it looks like, and so is everything else
+    — the guard is shape-based, so a truncated clause like #3504's
+    `…, all carrying ` survives byte-for-byte.
+
+    Both readers of a contract call this, and so does the writer of an owed
+    entry (`owed.add_owed`, `owed.derived_entries`), which is the point: a string
+    refused as a clause cannot be booked as owed either. One measurement, both
+    sides read it.
+    """
+    s = " ".join(str(value or "").split())
+    if _PATH_TOKEN.search(s):
+        return True
+    if not _ALNUM_RUN_RX.search(s):
+        return False
+    return not _bare_key_fragment(s)
 
 
 _ID_RE = re.compile(r"#?(\d{1,6})\b")

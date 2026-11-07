@@ -643,7 +643,7 @@ def test_the_node_and_honesty_rails_read_a_leading_dot_the_same_way(tmp_path):
 
 def _prompt_text() -> str:
     return RV.build_prompt(
-        contract={"clauses": ["c1"], "amendments": [], "human_clauses": [],
+        contract={"clauses": ["the flag defaults to off"], "amendments": [], "human_clauses": [],
                   "id": 1, "title": "t", "body": "b"},
         diff="diff", diff_truncated=False, changed_tests=["tests/t.py"],
         test_counts={"passed": 1}, worktree=Path("/wt"),

@@ -32,7 +32,7 @@ def world(tmp_path, monkeypatch):
 
     backlog = tmp_path / "backlog"; backlog.mkdir()
     (backlog / "9-thing.md").write_text(
-        "---\nstatus: in_progress\nboard: lloyd\nacceptance_clauses:\n- V is 2\n- a test pins it\n---\n# Thing\n\nbody\n")
+        "---\nstatus: in_progress\nboard: lloyd\nacceptance_clauses:\n- The bumped version is 2\n- a test pins it\n---\n# Thing\n\nbody\n")
     monkeypatch.setattr(B, "BACKLOG_DIR", backlog)
     ledger = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(S, "LEDGER_PATH", ledger)
@@ -77,7 +77,7 @@ def test_grade_commit_checks_out_the_commit_and_runs_the_prechecks(world):
                           changed_paths=["app/m.py", "tests/test_m.py"], label="t1", grader=grade)
     kw = grade.calls[0]
     assert Path(kw["worktree"]).name == "lloyd" and kw["_tree_present"]
-    assert kw["base"] == world["parent"] and kw["contract"]["clauses"] == ["V is 2", "a test pins it"]
+    assert kw["base"] == world["parent"] and kw["contract"]["clauses"] == ["The bumped version is 2", "a test pins it"]
     assert kw["child_env"]["LLOYD_VOICE_ALERTS"] == "0" and "gate-state" in kw["child_env"]["LLOYD_AUTOMOD_STATE"]
     # The stubbed grader said met everywhere, but the deterministic precheck
     # saw `or True` in the added test — and that is a retry regardless.

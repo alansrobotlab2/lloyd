@@ -621,7 +621,7 @@ def test_a_skipped_vault_review_records_which_abstention_it_was(vault, items, mo
     monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": True, "structured": {"premise": "?"}})
     reasons.append(RV.grade_vault(item_id=90, paths=["a.md"], diff="+x", vault=vault)[1])
     S.append_event({"event": "backlog_triage", "item_id": 90, "verdict": "confirmed",
-                    "surface": "code", "acceptance": "a", "acceptance_clauses": ["a"]},
+                    "surface": "code", "acceptance": "a", "acceptance_clauses": ["the skill version is bumped"]},
                    path=S.LEDGER_PATH)
     reasons.append(RV.grade_vault(item_id=90, paths=["a.md"], diff="+x", vault=vault)[1])
     reasons.append(RV.grade_vault(item_id=91, paths=["a.md"], diff="+x", vault=vault)[1])
@@ -1951,7 +1951,7 @@ def test_a_mixed_surface_items_vault_land_is_checked_too(vault, guard_tree, prob
         "review.py no longer abstains in these words; this node's expect is stale"
     S.append_event({"event": "backlog_triage", "item_id": 42, "verdict": "confirmed",
                     "surface": surface, "acceptance": "a",
-                    "acceptance_clauses": ["a"]}, path=S.LEDGER_PATH)
+                    "acceptance_clauses": ["the skill version is bumped"]}, path=S.LEDGER_PATH)
     monkeypatch.setattr(V, "GRADER", RV.grade_vault)
     _prose(vault, SKILL_AT_FOUR, commit=True)
     probed(guard_tree, vault)
@@ -2003,7 +2003,7 @@ def test_the_code_agreement_call_carries_no_surface_and_no_item(vault, monkeypat
     monkeypatch.setattr(V.VG, "agreement", fake)
     monkeypatch.setattr(V, "GRADER", lambda *a, **k: ("skipped", "not consulted here", []))
     row = {"event": "backlog_triage", "item_id": 42, "verdict": "confirmed",
-           "acceptance": "a", "acceptance_clauses": ["a"]}
+           "acceptance": "a", "acceptance_clauses": ["the skill version is bumped"]}
     if surface is not None:
         row["surface"] = surface
     S.append_event(row, path=S.LEDGER_PATH)
@@ -2224,8 +2224,8 @@ def test_a_vault_surface_items_land_is_checked_by_the_same_call(vault, guard_tre
     import scripts.automod.review as RV
     S.append_event({"event": "backlog_triage", "item_id": 43, "verdict": "confirmed",
                     "surface": "vault", "acceptance": "a",
-                    "acceptance_clauses": ["a"]}, path=S.LEDGER_PATH)
-    write_item(items, 43, ["a"])
+                    "acceptance_clauses": ["the skill version is bumped"]}, path=S.LEDGER_PATH)
+    write_item(items, 43, ["the skill version is bumped"])
     monkeypatch.setattr(RV, "run_grader",
                         lambda **kw: {"ok": False, "error": "backend 503"})
     monkeypatch.setattr(V, "GRADER", RV.grade_vault)
@@ -8248,7 +8248,13 @@ def test_a_row_scored_from_recovered_turn_text_is_distinguishable_from_one_the_d
     same five `met` clauses, both letting the landing through — which is precisely why the
     findings text has to be the thing that tells them apart.
     """
-    write_item(items, 1, ["c1", "c2", "c3", "c4", "c5"])
+    write_item(items, 1, [
+        "the staged skill file is written",
+        "the ledger row carries the provenance tag",
+        "the shrink note is kept beside it",
+        "the 800-character clip spares the tag",
+        "the second landing re-reads the same item",
+    ])
     clauses = [{"clause": i, "verdict": "met"} for i in range(1, 6)]
     # `GRADER` answers with the `(kind, findings, clauses)` tuple `grade_vault` returns.
     rescued = ("pass", _rescued_findings([1, 2, 3]), clauses)
@@ -8284,7 +8290,13 @@ def test_the_recovery_tag_survives_the_shrink_note_and_the_800_char_clip(vault, 
     marker clipped off a row is a row that claims to be an ordinary grading, which is the
     failure #2720's ledger is evidence of.
     """
-    write_item(items, 1, ["c1", "c2", "c3", "c4", "c5"])
+    write_item(items, 1, [
+        "the staged skill file is written",
+        "the ledger row carries the provenance tag",
+        "the shrink note is kept beside it",
+        "the 800-character clip spares the tag",
+        "the second landing re-reads the same item",
+    ])
     # The real composition order: `grade_vault` puts the shrink note in FRONT of the
     # failure text and the recovery tag in front of that (pinned in
     # tests/test_automod_review_turn_text_recovery.py), so this is one string, as it is there.

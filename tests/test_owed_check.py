@@ -1589,3 +1589,47 @@ def test_the_live_3320_item_carries_the_carrier_block():
     assert block, f"{p} carries no hand_run block — the #3320 premise has returned"
     assert block["cmd"] == CARRIER_CMD and block["receipt"] == CARRIER_RECEIPT, \
         f"{p}'s block diverged from the shape tests/test_owed_check.py pins"
+
+
+# ── #3897 clause 3: a string refused as a clause cannot be booked as owed ───────
+#
+# `clean_clauses` heals a contract on READ, but an owed entry is written by a
+# different door: `add_owed` (the landing writers at `backlog.py:6785`, `:7217`
+# and `:8307`) filtered only on `_text(w)` truthiness, so #3504's `human_clauses`
+# fragments were booked exactly as its activity log records them — `still owed
+# 1.; 1]}],` — and each cost an owed-check turn to re-discharge, out of the
+# per-tick capacity #2055 bounded. Both doors now read `B.names_a_demand`, the
+# one shape measurement `clean_clauses` applies.
+
+def test_add_owed_refuses_a_what_that_names_no_demand(isolated):
+    """The writer: a payload-key fragment is never booked, and a real clause is.
+
+    The positive control is what makes the refusal measurable — without it a
+    guard that wrote nothing to any item would pass this node.
+    """
+    p = write_item(isolated, 66150)
+    assert not O.add_owed(p, ["1.", "1]}],", "spawned", "findings_filed_to"])
+    assert not fm_of(p).get(O.OWED_KEY), fm_of(p).get(O.OWED_KEY)
+
+    assert O.add_owed(p, ["rule on whether the mined rows still carry the token"])
+    assert [e["what"] for e in O.entries_of(fm_of(p), derived=False)] == \
+        ["rule on whether the mined rows still carry the token"]
+
+
+def test_a_closed_item_whose_human_clauses_are_payload_keys_derives_nothing(isolated):
+    """The reader: `derived_entries` (#2055) asks the same predicate itself.
+
+    It gets its clauses through `human_clauses_of`, which already filters them, so
+    a node that only asserted the empty answer would pass on the upstream fix
+    alone. The second half of this node hands the same function a closed item with
+    one real clause among the fragments and expects exactly that one entry back —
+    which is also #3504's real shape: two fragments that must not reach the job,
+    and the demand behind them that must.
+    """
+    fm = {"status": "done", "completed": "2026-11-04T08:45:09.581111",
+          "human_clauses": ["1.", "1]}],"]}
+    assert O.derived_entries(fm) == [], O.derived_entries(fm)
+
+    fm["human_clauses"] = ["1.", "1]}],", "rule on whether the mining pass still carries the"]
+    assert [e["what"] for e in O.derived_entries(fm)] == \
+        ["rule on whether the mining pass still carries the"]

@@ -14,6 +14,13 @@ the reconciler would leave it, and a refused promotion does the thing that can
 actually advance the item.
 """
 
+# Fixture rule since #3897: a clause a test hands to `clean_clauses`,
+# `record_verdict`, `write_item(clauses=…)` or `split_clause_lines` has to NAME a
+# demand, because `B.names_a_demand` now refuses a row that does not. A lone
+# lowercase word (`a`, `one`, `decide`, `spawned`) is exactly the shape a spliced
+# triage payload key has, so such a fixture reaches the grader as a zero-clause
+# item and the node measures nothing. Hence `clause one` where this file used to
+# say `a`.
 from __future__ import annotations
 
 import json
@@ -193,7 +200,7 @@ def test_a_broken_ruling_is_the_old_write(board, monkeypatch):
 
 def _owing(d: Path, item_id: int) -> tuple[Path, list[dict]]:
     p = write_item(d, item_id)
-    O.add_owed(p, ["decide"], kind="decide")
+    O.add_owed(p, ["decide whether to re-offer the round"], kind="decide")
     return p, O.entries_of(fm_of(p))
 
 

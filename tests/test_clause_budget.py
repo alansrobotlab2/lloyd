@@ -16,7 +16,9 @@ old bound, or a round would be graded — and an item closed — on half of it.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -781,3 +783,379 @@ def test_writer_and_reader_agree_on_what_a_trailer_row_is(isolated):
         f"written into as a VALUE — `none` is not one: {stored['human_clauses']}")
     # One answer from either end, bypassing the file entirely:
     assert B.acceptance_clauses_of({"acceptance_clauses": REAL3 + ["SPAWNED: none"]}) == REAL3
+
+REAL_3504 = [
+    (
+        "1. `~/obsidian/backlog/data/2026-10-22.3120-lloyd-automod-promotions.jsonl` "
+        "exists and `wc -l -c <` it returns 9 lines and 16,246 bytes, with every line "
+        "one JSON object (no header or comment line) — "
+        "backlog/data/2026-10-22.3120-lloyd-automod-promotions.jsonl"
+    ),
+    (
+        "2. Composition is exactly 1 row with title `Lloyd data root damaged — "
+        "promotions halted` and 8 rows with `Runtime data is being written into the "
+        "code tree`, all carrying `"
+    ),
+]
+
+# The four payload-key rows #3504's contract actually carries, in the order the
+# stored file holds them, and #3616's cache key: a label, an underscore, and two
+# 32-hex halves. All of them are one lowercase identifier, which is the shape.
+PAYLOAD_KEYS = ["human_clauses:[", "spawned", "findings_filed_to", "item_id"]
+HEX_CACHE_KEY = ("human_clauses_" + "5200331d648a5761878a246168183852_"
+                 + "5200331d648a5761878a246168183852_" + "5200331d648a5761878a246168183852")
+JUNK_ROWS = PAYLOAD_KEYS + ["1.", "1]}],", "or", "entity:", "contaminated_dirs",
+                            "spawned:[", "human_clauses", "--rep",
+                            "` `) ` ` ` ` ` _ ` ` ` ` ` , a .", HEX_CACHE_KEY]
+# #3504's contract AS STORED: two `N. ` rows and four payload keys, six items.
+SIX_ROWS_TWO_CLAUSES = list(REAL_3504) + PAYLOAD_KEYS
+# The two real clauses exactly as the reader answers them: #3504's list is fully
+# numbered once the junk is gone, so `_strip_self_numbering` takes the `N. `.
+REAL_3504_UNNUMBERED = [c[3:] for c in REAL_3504]
+
+
+def test_a_spliced_payload_key_row_stops_being_a_clause():
+    """#3897 clause 1: one exported predicate, and #3504's six rows are its two.
+
+    The reproduction the item was triaged on was `clean_clauses` answering 6 of 6
+    on the stored list; the figure it has to answer now is 2 of 6. The predicate
+    is module-level in `scripts/automod/backlog.py` (`names_a_demand`) because
+    clause 3's other reader — the owed writer — has to give the same answer.
+    """
+    assert len(SIX_ROWS_TWO_CLAUSES) == 6, "the fixture is #3504's stored list"
+    out = B.clean_clauses(SIX_ROWS_TWO_CLAUSES)
+    assert out == REAL_3504_UNNUMBERED, [c[:70] for c in out]
+    assert len(out) == 2, f"the reproduction figure is 2 of 6, got {len(out)}"
+
+    # Every junk row, refused. `1.` and `1]}],` are the two #3504's
+    # `human_clauses` held and `add_owed` booked; `or`, `entity:` and
+    # `contaminated_dirs` are #2933's and #2474's; `spawned:[` is #2687's; the
+    # punctuation orphan is one of #3205's; the cache key is #3616's.
+    for row in JUNK_ROWS:
+        assert B.names_a_demand(row) is False, row
+
+    # Both arms on their own, so a guard that only ever fires one cannot pass.
+    # Arm one is the conjunction — no path-like token AND no run of four
+    # alphanumerics: `1]}],` fails it, and `a/b` is kept on the token alone even
+    # though it has no run of four at all.
+    assert B.names_a_demand("1]}],") is False
+    assert B.names_a_demand("a/b") is True
+    # Arm two is the bare lowercase key, and it is the only thing standing between
+    # a spliced `spawned` and a graded clause: that row carries a run of seven.
+    assert B.names_a_demand("spawned") is False
+    assert B.names_a_demand("spawned and or are ordinary words in this clause") is True
+
+
+def test_a_contract_read_from_an_item_already_on_disk_drops_the_payload_rows(isolated):
+    """#3897 clause 2: the READ side heals a contract already committed to main.
+
+    #3504's six rows are in its front matter now, so a writer-only fix would leave
+    every item triaged before this landing graded against four rows nobody can
+    satisfy. The item below is written the way the spliced verdict left it and read
+    back with no rewrite in between; then the same payload is handed to the writer,
+    which has to refuse it too — one answer from both ends of the file.
+    """
+    p = write_item(isolated, 66140, extra={
+        "acceptance_clauses": list(SIX_ROWS_TWO_CLAUSES),
+        "human_clauses": ["1.", "1]}],"]})
+    raw = _fm(p)
+    assert len(raw["acceptance_clauses"]) == 6, (
+        "the fixture stopped being a stored malformed contract")
+    assert raw["human_clauses"] == ["1.", "1]}],"], raw["human_clauses"]
+    survivors = B.acceptance_clauses_of(None, raw)
+    assert survivors == REAL_3504_UNNUMBERED
+    # Anchored in literal text as well, so the equality above cannot be satisfied by
+    # a pair of rows the same constant both supplies and expects: the two survivors
+    # are #3504's extract-path demand and its composition count, and the four
+    # payload rows are gone.
+    assert survivors[0].startswith("`~/obsidian/backlog/data/2026-10-22.3120"), survivors[0][:40]
+    assert survivors[1].startswith("Composition is exactly 1 row"), survivors[1][:40]
+    assert B.human_clauses_of(None, raw) == [], (
+        f"the payload rows are still human clauses: {raw['human_clauses']}")
+    assert "spawned" in p.read_text(), "the guard reads; it does not rewrite the file"
+
+    q = write_item(isolated, 66141)
+    target = B.item_by_id(66141)
+    assert target is not None, "the fixture item is not in the isolated board"
+    B.record_verdict(target, "confirmed", "re-measured, unchanged",
+                     acceptance="the extract is published and its figures match",
+                     acceptance_clauses=list(SIX_ROWS_TWO_CLAUSES),
+                     human_clauses=["1.", "1]}],"])
+    stored = _fm(q)
+    assert stored["acceptance_clauses"] == REAL_3504_UNNUMBERED, stored["acceptance_clauses"]
+    assert stored.get("human_clauses") in (None, []), stored.get("human_clauses")
+
+
+def test_the_guard_is_shape_based_and_never_length_based():
+    """#3897 clause 4: the false positive this guard must never commit.
+
+    A clause that stops mid-sentence is still a requirement, and the shortest
+    survivor here is shorter than the longest rejected row — which is what says
+    there is no length floor anywhere in it. #3504's clause 2 ends on a bare
+    backtick because the JSON salvage cut it, and every candidate below is kept
+    byte-for-byte, not repaired and not shaved.
+    """
+    survivors = [
+        REAL_3504_UNNUMBERED[1],                       # … all carrying `
+        REAL_3504_UNNUMBERED[0],                       # names two file paths
+        "the new node names the file it edits — tests/test_clause_budget.py",
+        "the clause mentions spawned and or as words mid-sentence",
+        "facts — tests/test_kg_hygiene.py",
+        "or.py",
+        "a/b",
+    ]
+    for s in survivors:
+        assert B.names_a_demand(s) is True, s
+        assert B.clean_clauses([s]) == [s], s
+
+    kept_shortest = min(survivors, key=len)
+    refused_longest = max(JUNK_ROWS, key=len)
+    assert len(kept_shortest) < len(refused_longest), (kept_shortest, refused_longest)
+
+
+def test_the_predicate_is_case_sensitive_so_an_uppercase_header_row_survives():
+    """#3897 clause 4: the lowercase keys go, the UPPERCASE label stays.
+
+    `test_a_clause_that_only_names_a_trailer_label_survives_byte_for_byte` pins
+    `clean_clauses(["SPAWNED"]) == ["SPAWNED"]`: a bare uppercase label is a header
+    row, and guessing which field it meant is not this filter's call. A
+    case-insensitive key rule would red that node by keeping `spawned` with it, so
+    the arm is lowercase-only — which is also the shape of every row #3504 and
+    #3654 leaked, and why the two answers coexist in one call.
+    """
+    assert B.clean_clauses(["SPAWNED"]) == ["SPAWNED"]
+    assert B.names_a_demand("SPAWNED") is True
+    assert B.names_a_demand("HUMAN_CLAUSES") is True
+    assert B.names_a_demand("spawned") is False
+    assert B.names_a_demand("human_clauses") is False
+    # #3654's contract as stored: one real clause and the two labels that spliced in.
+    assert B.clean_clauses(["1. The stage-list line", "human_clauses", "spawned"]) == \
+        ["The stage-list line"]
+    # The trailer filter is untouched and still answers only for a placeholder VALUE.
+    assert B.trailer_placeholder_row("SPAWNED: none") is True
+    assert B.trailer_placeholder_row("spawned") is False
+
+# ── #3897 clause 5: a clause fixture cannot pass vacuously ──────────────────
+
+# The field names a fixture writes a CONTRACT under. `clauses` is the review
+# grader's own key and the ledger's `acceptance_clauses` its stored one, so all
+# three reach a round: a junk-filled literal under any of them makes the node
+# that holds it assert about nothing (see the vacuous pair
+# `tests/test_automod_review_tools.py:35` / `tests/test_review_transport.py:1037`).
+CLAUSE_FIXTURE_FIELDS = {"clauses", "acceptance_clauses", "human_clauses"}
+
+CLAUSE_YAML_RX = re.compile(
+    r"(?:acceptance_clauses|human_clauses|clauses)\s*:?\s*\n((?:[ \t]*-[ \t]+.*\n?)+)")
+
+#: Clause-shaped rows a fixture may still hold although `names_a_demand` refuses
+#: them — keyed by the TEST NODE that holds the row, never by the row text alone,
+#: because a global text exemption would silently excuse the same text in any
+#: future fixture. Each entry names the node whose assertion has the junk as its
+#: SUBJECT: migrating those rows would delete the test rather than fix it.
+#: `test_the_fixture_sweep_is_not_neutered` re-checks both halves of every entry —
+#: the row is still refused, and it is still a row of THAT node — so an exemption
+#: that stops being earned fails instead of rotting.
+CLAUSE_FIXTURE_ROWS_UNDER_TEST = {
+    ("test_a_contract_read_from_an_item_already_on_disk_drops_the_payload_rows", "1."):
+        "#3504's first phantom owed row, written to prove the reader drops it",
+    ("test_a_contract_read_from_an_item_already_on_disk_drops_the_payload_rows", "1]}],"):
+        "#3504's second phantom, same node, same proof",
+    ("test_a_closed_item_whose_human_clauses_are_payload_keys_derives_nothing", "1."):
+        "the same two phantoms on the owed side, tests/test_owed_check.py",
+    ("test_a_closed_item_whose_human_clauses_are_payload_keys_derives_nothing", "1]}],"):
+        "the same two phantoms on the owed side, tests/test_owed_check.py",
+    ("test_the_structured_path_carries_clauses_too", "none"):
+        "the placeholder clause row that node asks `parse_review` to drop",
+    ("test_clause_entries_that_are_not_objects_are_still_unreadable", "met"):
+        "a grader VERDICT used as a clause row; that node asserts exactly that such a row "
+        "grades nothing",
+    ("test_a_turn_that_died_without_a_finalizer_closes_on_the_reviews_all_met", "met"):
+        "the same shape on the finalizer side: five verdicts and no demand, which is the "
+        "state the finalizer must still close on",
+    ("test_the_fixture_sweep_is_not_neutered", "item_id"):
+        "the planted collector probe's own inline-YAML row — this node plants junk to "
+        "prove the collector sees it, so the junk is legitimately its subject",
+    ("test_the_fixture_sweep_is_not_neutered", "or"):
+        "the second planted inline-YAML row, same probe (#2933's two-letter shape)",
+}
+
+
+def _clause_elements(node, rows, depth=0):
+    """Direct string elements of a list/tuple literal, into `rows` as (lineno, row).
+
+    Direct only: recursing into dicts would sweep a grader ANSWER's own keys
+    (`verdict`, `evidence_path`), which are not clauses and never reach
+    `clean_clauses`. f-strings are skipped — their literal parts are fragments by
+    construction.
+    """
+    if not isinstance(node, (ast.List, ast.Tuple)) or depth > 2:
+        return
+    for el in node.elts:
+        if isinstance(el, ast.Constant) and isinstance(el.value, str):
+            rows.append((node.lineno, el.value))
+        elif isinstance(el, (ast.List, ast.Tuple)):
+            _clause_elements(el, rows, depth + 1)
+
+
+def _clause_rows_in_scope(nodes, local_params, rows):
+    """Collect clause rows from the AST nodes of one scope (a test node, or module level).
+
+    `local_params` maps a locally-defined helper's name to its positional parameter
+    names, which is how a positional clause argument is recognised: the vacuous pair
+    the sweep exists for wrote its clauses positionally (`write_item(items, 1, [c1..c5])`
+    in `tests/test_automod_vault_round.py`), so a collector that read only keyword
+    arguments and dict values would walk past them.
+    """
+    for n in nodes:
+        if isinstance(n, ast.keyword) and n.arg in CLAUSE_FIXTURE_FIELDS:
+            _clause_elements(n.value, rows)
+        elif isinstance(n, ast.Dict):
+            for k, v in zip(n.keys, n.values):
+                if isinstance(k, ast.Constant) and k.value in CLAUSE_FIXTURE_FIELDS:
+                    _clause_elements(v, rows)
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            for t in targets:
+                named = ((isinstance(t, ast.Name) and t.id in CLAUSE_FIXTURE_FIELDS)
+                         or (isinstance(t, ast.Subscript)
+                             and isinstance(t.slice, ast.Constant)
+                             and t.slice.value in CLAUSE_FIXTURE_FIELDS))
+                if named:
+                    _clause_elements(n.value, rows)
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+            params = local_params.get(n.func.id)
+            if params:
+                for i, arg in enumerate(n.args):
+                    if i < len(params) and params[i] in CLAUSE_FIXTURE_FIELDS:
+                        _clause_elements(arg, rows)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            for m in CLAUSE_YAML_RX.finditer(n.value):
+                for line in m.group(1).splitlines():
+                    row = line.strip()[1:].strip()
+                    if row:
+                        rows.append((n.lineno, row))
+
+
+def _clause_rows_from_source(src: str):
+    """Every `(node_name, lineno, row)` this source attributes to a clause field.
+
+    Scoped, so an exemption can name the node that earned it rather than the row
+    text: rows found inside a function are credited to it, everything else to
+    `<module>`. Nested helpers are skipped by the scope walk, which is deliberate —
+    their bodies are their own scope and are walked separately.
+    """
+    tree = ast.parse(src)
+    local_params = {}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local_params[n.name] = [a.arg for a in n.args.args
+                                    if a.arg not in ("self", "cls")]
+
+    out = []
+    for n in (tree.body):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            rows = []
+            inner = [c for c in ast.walk(n)
+                     if c is not n and not isinstance(c, (ast.FunctionDef,
+                                                          ast.AsyncFunctionDef))]
+            _clause_rows_in_scope(inner, local_params, rows)
+            out += [(n.name, ln, row) for ln, row in rows]
+        else:
+            rows = []
+            _clause_rows_in_scope(list(ast.walk(n)), local_params, rows)
+            out += [("<module>", ln, row) for ln, row in rows]
+    return out
+
+
+def _all_clause_fixture_rows():
+    """`(relpath, node_name, lineno, row)` for every clause fixture under tests/."""
+    root = Path(__file__).resolve().parent
+    out = []
+    for f in sorted(root.rglob("*.py")):
+        try:
+            src = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            for node_name, lineno, row in _clause_rows_from_source(src):
+                out.append((str(f.relative_to(root)), node_name, lineno, row))
+        except SyntaxError:
+            continue
+    return out
+
+
+def test_no_clause_fixture_in_the_suite_is_a_row_the_reader_would_drop():
+    """#3897 clause 5: every clause-shaped fixture row must name a demand.
+
+    A fixture row the predicate refuses is worse than a missing fixture: the reader
+    drops it silently, the contract the node then builds has fewer clauses than the
+    test believes, and the assertions still pass — the shape that made
+    `tests/test_review_transport.py:1037` pass vacuously behind
+    `tests/test_automod_review_tools.py:35`, and the shape
+    `tests/test_automod_vault_round.py`'s `write_item(items, 1, [c1..c5])` fixtures
+    fell into at the previous attempt, where all five rows were refused so the item
+    those nodes graded had no contract at all. So the whole `tests/` tree is swept
+    and every row a fixture writes under `clauses`/`acceptance_clauses`/`human_clauses`
+    — as a keyword argument, a dict value, an assignment, a POSITIONAL argument to a
+    helper whose parameter carries that name, or an inline-YAML `- ` row — has to be a
+    demand. Offenders were migrated to rows that say what they check (`["c"]` ->
+    `["the flag defaults to off"]`, `["a"]` -> `["the skill version is bumped"]`,
+    `[c1..c5]` -> five named demands); the rows still refused are the ones keyed by
+    their node in `CLAUSE_FIXTURE_ROWS_UNDER_TEST`, whose junk IS that node's subject.
+    """
+    rows = _all_clause_fixture_rows()
+    # An empty walk proves nothing, so the sweep carries its own floor. The number
+    # in the message is the same measurement the assertion makes — deliberately not
+    # a second figure in prose, so a fixture added later cannot make this node red
+    # for having a stale count in a docstring.
+    files = len({r[0] for r in rows})
+    assert len(rows) >= 80, (
+        f"the sweep collected {len(rows)} rows over {files} file(s) — it is not walking")
+    assert files >= 8, f"the sweep reached {files} files — too few to mean anything"
+    offenders = sorted({(f, node, row) for f, node, _, row in rows
+                        if not B.names_a_demand(row)
+                        and (node, row) not in CLAUSE_FIXTURE_ROWS_UNDER_TEST})
+    assert not offenders, (
+        f"{len(offenders)} clause fixture row(s) name no demand and would be dropped "
+        f"by the reader: {offenders[:8]}")
+
+
+def test_the_fixture_sweep_is_not_neutered():
+    """#3897 clause 5, both directions: the sweep sees what it claims, and every
+    exemption is still earned by the node that holds it.
+
+    The first arm feeds the collector fixtures written the three ways real ones are
+    written — a dict value, an inline-YAML block, and a POSITIONAL argument to a
+    helper whose parameter is named `clauses` — and insists it found a junk row from
+    each, so a collector that silently stopped matching any one of them cannot turn
+    the sweep back on. The second arm reads the exemption table per node: a row may
+    only sit there while it is BOTH refused by the predicate AND a row of the node
+    the table names, so an exemption cannot leak to a new fixture that happens to
+    reuse the text.
+    """
+    planted = _clause_rows_from_source(
+        'def write_item(d, item_id, clauses):\n'
+        '    return clauses\n'
+        'write_item("/tmp", 1, ["- human_clauses:["])\n'
+        'ev({"event": "backlog_triage", "acceptance_clauses": ["spawned"]})\n'
+        'SRC = """\n'
+        'status: draft\n'
+        'acceptance_clauses:\n'
+        '- item_id\n'
+        '- or\n'
+        '"""\n')
+    planted_rows = [row for _, _, row in planted]
+    for shape, want in (("positional", "- human_clauses:["),
+                        ("dict value", "spawned"),
+                        ("inline-YAML", "item_id"),
+                        ("inline-YAML short word", "or")):
+        assert want in planted_rows, f"the {shape} arm missed {want!r}: {planted_rows}"
+    assert all(not B.names_a_demand(r) for r in planted_rows), planted_rows
+    assert [node for node, _, _ in planted if node == "write_item"] == [], \
+        "a helper's own body is not a fixture scope; it is walked as its own node"
+
+    corpus = {(node, row) for _, node, _, row in _all_clause_fixture_rows()}
+    for (node, row), why in CLAUSE_FIXTURE_ROWS_UNDER_TEST.items():
+        assert not B.names_a_demand(row), f"{row!r} is exempt but no longer refused: {why}"
+        assert (node, row) in corpus, (
+            f"{row!r} is no longer a fixture row of {node}; drop its exemption: {why}")

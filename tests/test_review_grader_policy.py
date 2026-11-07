@@ -305,7 +305,7 @@ def test_no_prior_reviews_means_no_block():
 
 def test_the_prompt_leads_with_the_prior_reviews():
     text = RV.build_prompt(
-        contract={"clauses": ["c1"], "amendments": [], "human_clauses": [], "id": 1,
+        contract={"clauses": ["the flag defaults to off"], "amendments": [], "human_clauses": [], "id": 1,
                   "title": "t", "body": "b"},
         diff="d", diff_truncated=False, changed_tests=[], test_counts={},
         worktree=Path("/wt"), run_tests=Path("/wt/run"),

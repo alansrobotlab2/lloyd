@@ -322,7 +322,12 @@ def derived_entries(fm: dict) -> list[dict]:
     out: list[dict] = []
     for clause in clauses:
         what = _text(clause)
-        if not what or _clause_key(what) in seen:
+        # The same shape measurement `clean_clauses` applies (#3897), asked here
+        # and not merely inherited from `human_clauses_of`: this function is the
+        # other door an owed entry comes through, and a `what` nobody can rule on
+        # must not reach the job through either.
+        if (not what or not B.names_a_demand(what)
+                or _clause_key(what) in seen):
             continue
         seen.add(_clause_key(what))
         out.append({"what": what, "kind": "check", "since": since,
@@ -345,7 +350,14 @@ def entries_of(fm: dict, *, derived: bool = True) -> list[dict]:
 
 
 def add_owed(path: Path, whats: list[str], *, kind: str = "check", activity: str = "") -> bool:
-    """Append entries (deduped by text) to the item's `owed` list."""
+    """Append entries (deduped by text) to the item's `owed` list.
+
+    #3897: an entry is debt somebody has to settle, so a `what` that is not a
+    demand is refused here as well as by the clause readers — `_text` alone let
+    #3504's `human_clauses` fragments `1.` and `1]}],` be booked, and each cost
+    an owed-check turn to re-discharge. `B.names_a_demand` is the ONE shape
+    measurement; `clean_clauses` and `derived_entries` read the same one.
+    """
     from scripts.automod import backlog as B
     fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
     # The writer's view: a read-time derivation must never be materialised into
@@ -356,7 +368,7 @@ def add_owed(path: Path, whats: list[str], *, kind: str = "check", activity: str
     new: list[dict] = []
     for w in whats:
         what = _text(w)
-        if what and what not in seen:
+        if what and B.names_a_demand(what) and what not in seen:
             seen.add(what)
             new.append({"what": what, "kind": kind if kind in KINDS else "check", "since": stamp})
     if not new:

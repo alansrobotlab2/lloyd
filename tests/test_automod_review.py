@@ -7,6 +7,13 @@ nothing and parked its item forever. What follows pins the mechanism that
 would have caught it, and the loop that gives a sound-premise round another
 go without letting author and grader disagree indefinitely.
 """
+# Fixture rule since #3897: a clause a test hands to `clean_clauses`,
+# `record_verdict`, `write_item(clauses=…)` or `split_clause_lines` has to NAME a
+# demand, because `B.names_a_demand` now refuses a row that does not. A lone
+# lowercase word (`a`, `one`, `decide`, `spawned`) is exactly the shape a spliced
+# triage payload key has, so such a fixture reaches the grader as a zero-clause
+# item and the node measures nothing. Hence `clause one` where this file used to
+# say `a`.
 from __future__ import annotations
 
 import gzip
@@ -446,7 +453,7 @@ def test_a_clause_downgraded_for_its_own_evidence_is_not_excused_by_the_red_set(
 
 
 def test_the_grader_is_told_which_failures_predate_the_round(tmp_path):
-    contract = {"id": 1, "title": "t", "body": "b", "clauses": ["c"]}
+    contract = {"id": 1, "title": "t", "body": "b", "clauses": ["the flag defaults to off"]}
     kw = dict(contract=contract, diff="", diff_truncated=False, changed_tests=[],
               test_counts={"passed": 5}, worktree=tmp_path, run_tests=tmp_path / "rt")
     plain = RV.build_prompt(**kw)
@@ -2623,7 +2630,7 @@ def test_review_sits_after_tests_and_before_venv(monkeypatch):
 # ── the backlog: retry, cap, disagreement, partial ─────────────────────────
 
 def test_a_review_refusal_re_offers_the_item_with_the_findings_and_the_branch(isolated):
-    write_item(isolated, 544, clauses=["a", "b"]); _confirm(544, clauses=["a", "b"])
+    write_item(isolated, 544, clauses=["clause a", "clause b"]); _confirm(544, clauses=["clause a", "clause b"])
     _round(544, "SM_1"); _review_refused("SM_1", 544, findings="clause 2 unmet: no loopback test")
     verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[544]
     assert verdict == "review_retry"
@@ -2637,7 +2644,7 @@ def test_the_review_re_offer_is_capped(isolated):
     """`REVIEW_RETRY_CAP` re-offers: the first round plus two more, each
     refused on a DIFFERENT clause (the same clause twice escalates earlier —
     see the next test). The fourth finished round is spent."""
-    write_item(isolated, 545, clauses=["a", "b", "c", "d"]); _confirm(545, clauses=["a", "b", "c", "d"])
+    write_item(isolated, 545, clauses=["clause a", "clause b", "clause c", "clause d"]); _confirm(545, clauses=["clause a", "clause b", "clause c", "clause d"])
     for n, rid in enumerate(("SM_a", "SM_b", "SM_c"), 1):
         _round(545, rid); _review_refused(rid, 545, clauses_unmet=(n,), findings=f"f{n}")
         assert B.implement_outcomes(S.LEDGER_PATH)[545][0] == "review_retry", n
@@ -2650,7 +2657,7 @@ def test_the_review_re_offer_is_capped(isolated):
 def test_the_same_clause_twice_is_a_disagreement_and_escalates_early(isolated):
     """Author says met, grader says unmet, twice, on clause 1. A third round
     re-runs the argument; a human resolves it."""
-    write_item(isolated, 546, clauses=["a", "b"]); _confirm(546, clauses=["a", "b"])
+    write_item(isolated, 546, clauses=["clause a", "clause b"]); _confirm(546, clauses=["clause a", "clause b"])
     _round(546, "SM_x"); _review_refused("SM_x", 546, clauses_unmet=(1,))
     assert B.review_disagreement(S.LEDGER_PATH, 546) is None
     _round(546, "SM_y"); _review_refused("SM_y", 546, clauses_unmet=(1, 2))
@@ -2658,14 +2665,14 @@ def test_the_same_clause_twice_is_a_disagreement_and_escalates_early(isolated):
     verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[546]
     assert verdict == "spent" and detail.startswith("review disagreement") and "clause 1" in detail
     # ...while different clauses on successive reviews are still a retry.
-    write_item(isolated, 547, clauses=["a", "b"]); _confirm(547, clauses=["a", "b"])
+    write_item(isolated, 547, clauses=["clause a", "clause b"]); _confirm(547, clauses=["clause a", "clause b"])
     _round(547, "SM_p"); _review_refused("SM_p", 547, clauses_unmet=(1,))
     _round(547, "SM_q"); _review_refused("SM_q", 547, clauses_unmet=(2,))
     assert B.implement_outcomes(S.LEDGER_PATH)[547][0] == "review_retry"
 
 
 def test_review_retry_yields_to_incomplete_and_supersedes_external(isolated):
-    write_item(isolated, 548, clauses=["a"]); _confirm(548, clauses=["a"])
+    write_item(isolated, 548, clauses=["clause a"]); _confirm(548, clauses=["clause a"])
     _round(548, "SM_i", stop_reason="max_turns"); _review_refused("SM_i", 548)
     assert B.implement_outcomes(S.LEDGER_PATH)[548][0] == "incomplete"
     # A later passing gate on the same round supersedes the refusal.
@@ -2674,7 +2681,7 @@ def test_review_retry_yields_to_incomplete_and_supersedes_external(isolated):
 
 
 def test_an_unsound_premise_spends_the_attempt(isolated):
-    write_item(isolated, 549, clauses=["a"]); _confirm(549, clauses=["a"])
+    write_item(isolated, 549, clauses=["clause a"]); _confirm(549, clauses=["clause a"])
     _round(549, "SM_u")
     S.append_event({"event": "gate", "round_id": "SM_u", "rung": "review", "ok": False,
                     "detail": "review: premise unsound", "review_premise_unsound": True,
@@ -2689,9 +2696,9 @@ def test_an_unsound_premise_spends_the_attempt(isolated):
 
 def test_fresh_confirmations_are_picked_before_re_offers(isolated):
     """Oldest-first alone let a sent-back item monopolise the loop."""
-    write_item(isolated, 550, clauses=["a"]); _confirm(550, clauses=["a"])     # older, sent back
+    write_item(isolated, 550, clauses=["clause a"]); _confirm(550, clauses=["clause a"])     # older, sent back
     _round(550, "SM_o"); _review_refused("SM_o", 550)
-    p = write_item(isolated, 551, clauses=["a"]); _confirm(551, clauses=["a"])  # newer, fresh
+    p = write_item(isolated, 551, clauses=["clause a"]); _confirm(551, clauses=["clause a"])  # newer, fresh
     fm, body = B._split_frontmatter(p.read_text())
     fm["created"] = datetime.now(timezone.utc).isoformat()
     p.write_text(f"---\n{yaml.dump(fm)}---\n{body}")
@@ -2735,7 +2742,7 @@ def test_a_deferral_that_names_nothing_is_not_met():
 
 
 def test_a_landed_round_with_an_unmet_clause_is_offered_once_more_for_it(isolated):
-    p = write_item(isolated, 552, clauses=["a", "b"]); _confirm(552, clauses=["a", "b"])
+    p = write_item(isolated, 552, clauses=["clause a", "clause b"]); _confirm(552, clauses=["clause a", "clause b"])
     S.append_event({"event": "backlog_implement", "item_id": 552, "phase": "started"}, path=S.LEDGER_PATH)
     S.append_event({"event": "backlog_implement", "item_id": 552, "phase": "finished",
                     "round_id": "SM_l", "stop_reason": "stop", "num_turns": 30,
@@ -2777,8 +2784,8 @@ def test_the_text_path_splits_numbered_clauses_and_keeps_the_placeholder_rule():
 
 def test_the_structured_path_carries_clauses_too():
     obj = {"verdict": "confirmed", "surface": "code", "check": "c", "evidence": "e",
-           "acceptance": "x", "acceptance_clauses": ["one", "two", "none"], "spawned": []}
-    assert T.parse_verdict("", obj)["acceptance_clauses"] == ["one", "two"]
+           "acceptance": "x", "acceptance_clauses": ["clause one", "clause two", "none"], "spawned": []}
+    assert T.parse_verdict("", obj)["acceptance_clauses"] == ["clause one", "clause two"]
     assert "acceptance_clauses" in B.TRIAGE_VERDICT_SCHEMA["required"]
     assert "ACCEPTANCE_CLAUSES:" in T.PROMPT
 
@@ -2786,10 +2793,10 @@ def test_the_structured_path_carries_clauses_too():
 def test_record_verdict_writes_the_clauses_onto_the_item(isolated):
     p = write_item(isolated, 560, status="draft")
     item = next(i for i in B.open_items(None) if i.id == 560)
-    B.record_verdict(item, "confirmed", "real", acceptance="x", acceptance_clauses=["one", "two"])
+    B.record_verdict(item, "confirmed", "real", acceptance="x", acceptance_clauses=["clause one", "clause two"])
     fm = _fm(p)
-    assert fm["acceptance_clauses"] == ["one", "two"] and fm["status"] == "up_next"
-    assert "1. one" in p.read_text() and "graded one by one" in p.read_text()
+    assert fm["acceptance_clauses"] == ["clause one", "clause two"] and fm["status"] == "up_next"
+    assert "1. clause one" in p.read_text() and "graded one by one" in p.read_text()
 
 
 def test_acceptance_clauses_fall_back_to_the_prose_for_old_items(isolated):
@@ -2797,7 +2804,7 @@ def test_acceptance_clauses_fall_back_to_the_prose_for_old_items(isolated):
     contract = RV.item_contract(561)
     assert contract["clauses"] == ["the check passes"] and contract["title"] == "A thing"
     assert B.acceptance_clauses_of({"acceptance": "-"}) == []
-    assert B.split_clause_lines("1. a\n2) b\n") == ["a", "b"]
+    assert B.split_clause_lines("1. clause a\n2) clause b\n") == ["clause a", "clause b"]
     assert B.split_clause_lines("just prose") == ["just prose"]
 
 
@@ -2834,7 +2841,7 @@ def test_a_wrapped_numbered_line_joins_onto_its_clause_and_loses_no_text():
     assert not [w for w in _words_of(four_in) if w not in " ".join(four)], four
     # Prose BEFORE the first numbered line is the field's own lead-in
     # (`ACCEPTANCE_CLAUSES: as follows`), not a clause's tail, and stays out.
-    assert B.split_clause_lines("as follows\n1. a\n2. b") == ["a", "b"]
+    assert B.split_clause_lines("as follows\n1. clause a\n2. clause b") == ["clause a", "clause b"]
     # Nothing is numbered, so the whole block is the one clause it always was.
     assert B.split_clause_lines("just prose\nwrapped over two lines") == \
         ["just prose wrapped over two lines"]
@@ -2842,9 +2849,9 @@ def test_a_wrapped_numbered_line_joins_onto_its_clause_and_loses_no_text():
     # continuation that carries its OWN number is indistinguishable from a new
     # clause by line shape alone, so it stays a clause of its own. No text is
     # lost out of it — which is the half this splitter can promise.
-    numbered_cont = "1. a\n2. x head\n2. x continuation tail\n3. c\n"
+    numbered_cont = "1. x first\n2. x head\n2. x continuation tail\n3. x last\n"
     numbered = B.split_clause_lines(numbered_cont)
-    assert numbered == ["a", "x head", "x continuation tail", "c"], numbered
+    assert numbered == ["x first", "x head", "x continuation tail", "x last"], numbered
     assert not [w for w in _words_of(numbered_cont) if w not in " ".join(numbered)]
 
 
@@ -3182,16 +3189,16 @@ def test_the_vault_grader_only_judges_a_vault_items_clauses(isolated, monkeypatc
     the code it had not written yet — and would have every time. Only a
     `vault` surface's clauses can be met by vault paths; the rest are the code
     gate's. No network: the skip is decided before any grader runs."""
-    write_item(isolated, 570, clauses=["a"])
+    write_item(isolated, 570, clauses=["clause a"])
     S.append_event({"event": "backlog_triage", "item_id": 570, "verdict": "confirmed",
-                    "surface": "code", "acceptance": "a", "acceptance_clauses": ["a"]},
+                    "surface": "code", "acceptance": "a", "acceptance_clauses": ["the skill version is bumped"]},
                    path=S.LEDGER_PATH)
     monkeypatch.setattr(RV, "run_grader", lambda **kw: pytest.fail("grader must not run"))
     kind, why, clauses = RV.grade_vault(item_id=570, paths=["skills/x/SKILL.md"], diff="+x",
                                         vault=isolated)
     assert kind == "skipped" and "surface is code" in why and clauses == []
     S.append_event({"event": "backlog_triage", "item_id": 570, "verdict": "confirmed",
-                    "surface": "vault", "acceptance": "a", "acceptance_clauses": ["a"]},
+                    "surface": "vault", "acceptance": "a", "acceptance_clauses": ["the skill version is bumped"]},
                    path=S.LEDGER_PATH)
     monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": True, "structured": {
         "premise": "sound", "summary": "ok", "test_honesty": [], "seams_unverified": [],
@@ -3245,7 +3252,7 @@ def test_the_vault_prompt_tells_the_reviewer_the_commit_is_pending(isolated):
     """#425 attempt 1: "Nothing landed … No new sha" — the reviewer ran `git log`
     in the vault and refused a round for the state it was standing in. The prompt
     has to say the commit is the CONSEQUENCE of a pass."""
-    p = RV.build_vault_prompt(contract=_vault_contract(["content", LANDING_CLAUSE_972]),
+    p = RV.build_vault_prompt(contract=_vault_contract(["the skill content is corrected", LANDING_CLAUSE_972]),
                               paths=["skills/x/SKILL.md"], diff="+x", vault=isolated,
                               landing_clauses=[2])
     assert "The commit does not exist while you grade." in p
@@ -3313,7 +3320,7 @@ def test_the_vault_grader_names_the_way_it_abstains(isolated, monkeypatch):
     """Six causes, six wordings. #955's merged finding: 34 of 54 item-bound
     successful landings recorded one unlabelled `skipped`, so a refusal a later
     attempt ignored was indistinguishable from a grader outage."""
-    write_item(isolated, 575, clauses=["a"])
+    write_item(isolated, 575, clauses=["clause a"])
     monkeypatch.setattr(RV, "run_grader",
                         lambda **kw: {"ok": False, "error": "backend 503 after 420s"})
     assert RV.grade_vault(item_id=575, paths=["a.md"], diff="+x", vault=isolated)[1] == (
@@ -4577,7 +4584,7 @@ def test_the_vault_prompt_offers_the_reviewer_a_marker_the_rails_accept(isolated
     — in either direction, wording or vocabulary — goes red here rather than in a round's
     last attempt.
     """
-    p = RV.build_vault_prompt(contract=_vault_contract(["content"]),
+    p = RV.build_vault_prompt(contract=_vault_contract(["the skill content is corrected"]),
                               paths=["skills/x/SKILL.md"], diff="+x", vault=isolated)
     marker = next(m for m in RV._ABSENCE_MARKERS if m in p)
     anchor = p.index("`met` needs an evidence_path under the vault")
@@ -5231,8 +5238,8 @@ def test_a_single_clause_chunk_that_diverges_is_the_end_of_shrinking(
     # A clause the plan already sizes at one is not re-asked: three clauses are one
     # planned call, and after the split the first failing single ends the grading.
     asked.clear()
-    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
-    detect3 = _asked_from(["one", "two", "three"])
+    _five_clause_item(isolated, 610, tmp_path, clauses=["clause one", "clause two", "clause three"])
+    detect3 = _asked_from(["clause one", "clause two", "clause three"])
     monkeypatch.setattr(RV, "run_grader", lambda **kw: (asked.append(detect3(kw["prompt"])),
                                                         {"ok": False, "error":
                                                          "finalizer failed: generation "
@@ -5333,7 +5340,7 @@ def test_a_diverged_grading_hands_the_caller_the_failing_generations_counts(
     error text is in `why` — and not 8503, which is what summing the two would say
     about a budget the model was never given.
     """
-    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
+    _five_clause_item(isolated, 610, tmp_path, clauses=["clause one", "clause two", "clause three"])
     monkeypatch.setattr(RV, "run_grader",
                         _diverging_grader([(8192, 6117), (311, 44)]))
     usage: dict = {}
@@ -5354,7 +5361,7 @@ def test_a_grading_that_answers_every_clause_leaves_the_usage_out_param_empty(
     and writing it on every landing would change 392 existing rows' shape for a
     question nobody is asking.
     """
-    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
+    _five_clause_item(isolated, 610, tmp_path, clauses=["clause one", "clause two", "clause three"])
     # Every clause in every answer: the shrink may ask any subset, and a `pass` is
     # only reachable when nothing is left ungraded.
     monkeypatch.setattr(RV, "run_grader", lambda **kw: _met_answer([1, 2, 3]))
@@ -5376,7 +5383,7 @@ def test_grade_vault_without_an_out_param_still_returns_the_verdicts(
     `vault_round.GRADER` directly. This is the shape check for that: a call with no
     `usage_out` returns the same 3-tuple it always did, on the failing path too.
     """
-    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
+    _five_clause_item(isolated, 610, tmp_path, clauses=["clause one", "clause two", "clause three"])
     monkeypatch.setattr(RV, "run_grader", _diverging_grader([(8192, 6117)]))
     out = RV.grade_vault(item_id=610, paths=["skills/x/SKILL.md"], diff="+x",
                          vault=isolated)
@@ -5529,7 +5536,7 @@ REPO = Path(__file__).resolve().parents[1]
 def _grader_prompt(tmp_path) -> str:
     """The grader system prompt for a plain one-clause round, folded onto one
     line — a claim about what the prose says must not depend on where it wraps."""
-    contract = {"id": 1, "title": "t", "body": "b", "clauses": ["c"]}
+    contract = {"id": 1, "title": "t", "body": "b", "clauses": ["the flag defaults to off"]}
     prompt = RV.build_prompt(contract=contract, diff="", diff_truncated=False,
                              changed_tests=[], test_counts={"passed": 5},
                              worktree=tmp_path, run_tests=tmp_path / "rt")

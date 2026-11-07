@@ -134,7 +134,7 @@ def test_only_a_vault_items_round_can_land_on_the_vault_review(isolated, surface
 def test_the_surface_falls_back_to_the_triage_verdict(isolated):
     write_item(isolated, 579)
     _ev(event="backlog_triage", item_id=579, verdict="confirmed", surface="vault",
-        acceptance="a", acceptance_clauses=["a"])
+        acceptance="a", acceptance_clauses=["clause a"])
     _vault_turn(579, surface="", graded=[{"clause": 1, "verdict": "met"}])
     assert B.close_settled_items(S.LEDGER_PATH)[0]["closed"] is True
 
@@ -319,9 +319,9 @@ def test_only_the_newest_landing_decides(isolated):
 def test_a_vault_landing_then_the_wall_clock_still_closes(isolated, monkeypatch):
     """The `TurnTimeout` exit wrote its `finished` row with no `vault_commits`
     and no `surface`, so the same landing was invisible by that exit."""
-    p = write_item(isolated, 598, clauses=["a"])
+    p = write_item(isolated, 598, clauses=["clause a"])
     _ev(event="backlog_triage", item_id=598, verdict="confirmed", surface="vault",
-        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["clause a"])
     monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
 
     async def fake(prompt, **kw):
@@ -409,9 +409,9 @@ def test_grade_vault_returns_one_row_per_contract_clause(isolated, monkeypatch, 
     `tests/test_automod_review.py::test_a_merged_grading_that_leaves_a_clause_unanswered_is_no_verdict`
     pins that — and what this node keeps pinning is that the grader's own `met`
     does not survive a file that is not there."""
-    write_item(isolated, 590, clauses=["a", "b", "c"])
+    write_item(isolated, 590, clauses=["clause a", "clause b", "clause c"])
     _ev(event="backlog_triage", item_id=590, verdict="confirmed", surface="vault",
-        acceptance="a", acceptance_clauses=["a", "b", "c"])
+        acceptance="a", acceptance_clauses=["clause a", "clause b", "clause c"])
     (tmp_path / "skills" / "x").mkdir(parents=True)
     (tmp_path / "skills" / "x" / "SKILL.md").write_text("x")
     monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": True, "structured": {
@@ -432,7 +432,7 @@ def test_grade_vault_returns_one_row_per_contract_clause(isolated, monkeypatch, 
 
 def test_grade_vault_skips_carry_no_verdicts(isolated, monkeypatch):
     _ev(event="backlog_triage", item_id=591, verdict="confirmed", surface="code",
-        acceptance="a", acceptance_clauses=["a"])
+        acceptance="a", acceptance_clauses=["clause a"])
     monkeypatch.setattr(RV, "run_grader", lambda **kw: pytest.fail("grader must not run"))
     assert RV.grade_vault(item_id=591, paths=["skills/x/SKILL.md"], diff="+x")[2] == []
 
@@ -469,9 +469,9 @@ def test_the_turn_end_closes_a_vault_landing_before_the_reconcile(isolated, monk
     round, lands the vault fix with a passing review, and dies at its budget.
     Without the sweep in `execute`'s `finally`, the reconcile moved the item
     to `up_next` and `select_confirmed` handed it to the next round."""
-    p = write_item(isolated, 575, clauses=["a", "b"])
+    p = write_item(isolated, 575, clauses=["clause a", "clause b"])
     _ev(event="backlog_triage", item_id=575, verdict="confirmed", surface="vault",
-        check="ls", evidence="e", acceptance="a; b", acceptance_clauses=["a", "b"])
+        check="ls", evidence="e", acceptance="a; b", acceptance_clauses=["clause a", "clause b"])
     monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
 
     async def fake(prompt, **kw):
@@ -492,9 +492,9 @@ def test_a_turn_with_no_vault_landing_does_not_pay_for_the_sweep(isolated, monke
     """The sweep walks the whole board on the event loop (~2.3 s measured).
     A code landing waits out the guardian's window, which housekeeping covers,
     so only a turn that landed in the vault needs it at its end."""
-    write_item(isolated, 595, clauses=["a"])
+    write_item(isolated, 595, clauses=["clause a"])
     _ev(event="backlog_triage", item_id=595, verdict="confirmed", surface="code",
-        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["clause a"])
     # A vault landing for ANOTHER item during this turn does not count either.
     monkeypatch.setattr(I, "_loop_is_free", lambda: (True, "free"))
     monkeypatch.setattr(B, "close_settled_items",
@@ -629,9 +629,9 @@ def test_a_grader_that_answered_per_clause_still_closes_the_vault_item(isolated)
     """The boundary, from the other side: the same item with a `pass` review
     carrying a row per clause, matched by commit, is a graded `met` and closes.
     Without this the check above would just be a refusal to land vault items."""
-    write_item(isolated, 902, clauses=["a", "b", "c"])
+    write_item(isolated, 902, clauses=["clause a", "clause b", "clause c"])
     _ev(event="backlog_triage", item_id=902, verdict="confirmed", surface="vault",
-        acceptance="a;b;c", acceptance_clauses=["a", "b", "c"])
+        acceptance="a;b;c", acceptance_clauses=["clause a", "clause b", "clause c"])
     _ev(event="vault_review", item_id=902, kind="pass", blocking=False,
         clauses=[{"clause": i, "verdict": "met"} for i in range(1, 4)])
     _ev(event="vault_land", ok=True, commit="bbb2", item_id=902,
@@ -919,9 +919,9 @@ def test_another_items_refusal_is_never_borrowed(isolated):
     item must not be matched by session — that would buy a close for content this
     item never wrote — while a row naming no item is still matched by session, as
     `_vault_commits_since` has always done."""
-    write_item(isolated, 2693, clauses=["a"])
+    write_item(isolated, 2693, clauses=["clause a"])
     _ev(event="backlog_triage", item_id=2693, verdict="confirmed", surface="vault",
-        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["clause a"])
     _held_by_head_turn(999)
     rows = _events("vault_land") + _events("vault_review")
     assert B.held_by_head_landing(rows, 2693, session_id="s") is None, \
@@ -1191,7 +1191,7 @@ def _foreign_landing_turn(item_id: int):
     finisher actually persists — produced by the same call `_run_and_record`
     makes at autocode.py:2149, not a hand-typed list."""
     _ev(event="backlog_triage", item_id=item_id, verdict="confirmed", surface="vault",
-        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["clause a"])
     _ev(event="vault_land", **{k: v for k, v in _land_row(2027, commit="a1a1a1a1").items()
                                if k != "event"})
     _ev(event="vault_land", **{k: v for k, v in _land_row(2036, commit="b2b2b2b2").items()
@@ -1215,7 +1215,7 @@ def test_an_item_whose_session_landed_only_other_items_is_never_closed_on_their_
     `item_landed` row carrying the item's OWN id and the foreign sha
     (backlog.py:3837-3841), so #2039 went to `done` on #2027's commit.
     """
-    p = write_item(isolated, 2039, clauses=["a"])
+    p = write_item(isolated, 2039, clauses=["clause a"])
     vault_commits = _foreign_landing_turn(2039)
     assert vault_commits == [], (
         "the finisher persisted another item's vault shas as this item's landing")
@@ -1231,7 +1231,7 @@ def test_an_item_whose_session_landed_only_other_items_is_never_closed_on_their_
     # the machinery still settles and closes it. What stopped #2039 above is the
     # attribution, not a blanket refusal to close a vault item.
     _ev(event="backlog_triage", item_id=2040, verdict="confirmed", surface="vault",
-        check="ls", evidence="e", acceptance="a", acceptance_clauses=["a"])
+        check="ls", evidence="e", acceptance="a", acceptance_clauses=["clause a"])
     own_row = _land_row(2040, commit="f6f6f6f6")
     own_row.pop("event")
     own_row["ts"] = (_events("vault_land")[-1]["ts"] or 0) + 1

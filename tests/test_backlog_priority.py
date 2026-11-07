@@ -203,9 +203,9 @@ def test_a_re_offered_high_is_not_queued_behind_every_fresh_high(isolated):
     behind 26 never-attempted highs. Within `high`, recency decides."""
     def confirmed(i, *, priority, days_old, **fm):
         write_item(isolated, i, status="up_next", days_old=days_old, priority=priority,
-                   acceptance_clauses=["a"], **fm)
+                   acceptance_clauses=["clause a"], **fm)
         _ev(event="backlog_triage", item_id=i, verdict="confirmed", acceptance="x",
-            acceptance_clauses=["a"])
+            acceptance_clauses=["clause a"])
     for i in (1, 2, 3):
         confirmed(i, priority="high", days_old=10 + i)                        # fresh, older
     confirmed(9, priority="high", days_old=1)                                 # newest, re-offered

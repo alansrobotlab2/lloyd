@@ -2057,14 +2057,14 @@ def test_a_deferral_to_itself_or_to_a_closed_item_holds_nothing(isolated):
 def test_a_retriaged_item_is_untriaged_and_unattempted_again(isolated):
     p = write_item(isolated, 901)
     _spent_after_review(901, tags=("spawned-by-triage",))
-    B.update_frontmatter(p, {"acceptance_clauses": ["the refused one", "another"],
+    B.update_frontmatter(p, {"acceptance_clauses": ["the refused one", "a second refused demand"],
                              "human_clauses": ["Alan audits it"]})
     B.retriage_spent_items(S.LEDGER_PATH)
     fm = yaml.safe_load(p.read_text().split("---")[1])
     assert "acceptance_clauses" not in fm and "human_clauses" not in fm, (
         "front matter wins in acceptance_clauses_of, so a prose-only re-confirmation "
         "would inherit the contract that was just refused")
-    assert S.read_events(path=S.LEDGER_PATH)[-1]["previous_clauses"] == ["the refused one", "another"]
+    assert S.read_events(path=S.LEDGER_PATH)[-1]["previous_clauses"] == ["the refused one", "a second refused demand"]
     assert 901 not in B.triaged_ids(S.LEDGER_PATH)
     assert 901 not in B.confirmed_verdicts(S.LEDGER_PATH)
     assert 901 not in B.implement_outcomes(S.LEDGER_PATH), "the attempt count starts over"
@@ -5674,7 +5674,7 @@ def test_a_held_by_head_close_records_the_taking_sha_as_its_landing(isolated):
     p = write_item(isolated, 2684, status="in_progress")
     S.append_event({"event": "backlog_triage", "item_id": 2684, "verdict": "confirmed",
                     "surface": "vault", "check": "ls", "evidence": "e", "acceptance": "a; b",
-                    "acceptance_clauses": ["a", "b"]}, path=S.LEDGER_PATH)
+                    "acceptance_clauses": ["the stage-list line is updated", "the digest names its source"]}, path=S.LEDGER_PATH)
     S.append_event({"event": "vault_review", "item_id": 2684, "kind": "pass",
                     "blocking": False, "verdict_shortfall": "", "paths": [path],
                     "clauses": [{"clause": 1, "verdict": "met"},

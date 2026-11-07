@@ -304,7 +304,7 @@ def test_switched_off_the_ladder_is_serial_and_the_event_says_so(armed):
 # ── the prompt tells the grader the truth ────────────────────────────────
 
 def _prompt(counts):
-    return RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["c"]},
+    return RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["the flag defaults to off"]},
                            diff="", diff_truncated=False, changed_tests=[],
                            test_counts=counts, worktree=Path("/wt"), run_tests=Path("/rt.sh"))
 
