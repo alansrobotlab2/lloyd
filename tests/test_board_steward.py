@@ -2948,22 +2948,37 @@ def test_the_architecture_page_says_the_ruling_can_be_answered_from_the_store():
         "of the 1,123 board-steward runs rows on this box carry a non-empty one")
 
 
-async def test_the_reader_never_consults_the_machine_at_filing_time(board, tmp_path,
-                                                                   monkeypatch):
-    """The reader is a REPORTER, and now provably cannot consult the machine at all.
+async def test_the_reader_never_consults_the_machine_for_a_rows_half_only_its_removal(
+        board, tmp_path, monkeypatch):
+    """The reader is a REPORTER: it may consult the machine's live table to REMOVE a row and
+    never to build one.
 
-    `desired_statuses` computes the machine's moves; applying them is what a round does.
-    This node used to prove the READER only CALLS `desired_statuses` and never
-    `apply_moves`, and stubbed it to observe the call (#3602). #3677 retired that read:
-    `desired_statuses` is the board's LIVE state at filing time, and answering "what does
-    the machine want" about a disagreement scored up to seven days earlier produced 12
-    rows on that item printing `(the machine abstains)` — a sentence `agreement()` makes
-    impossible for an id it filed as `disagree` — plus 2 printing the machine agreeing
-    with the steward. A row's machine half now comes from the disagreeing tick's own
-    record, so the live table is not an input to this reader at all: the stub RAISES, and
-    a re-introduced read fails here naming itself instead of being silently obeyed. The
-    rest of the rail is unchanged — no `apply_moves`, no item status written, and the
-    widened read taken from the INJECTED ledger only.
+    #3914 changed what "at all" means here, so read this node as a direction and not an
+    absence. An id whose ruling has already landed is not an open question, and only a read
+    of the board and of what the machine answers NOW can know that — the four ids #3433,
+    #3537, #3656 and #3704 are exactly that case, since commit `6119589c` settled them by
+    changing what `desired_statuses` answers (`draft`: its hand_run is still unexecuted)
+    rather than by moving the board to the `up_next` their rows recorded. So the live read is
+    back at this seam with one permission: subtract a row, never supply either half of one.
+    `boom` still raises on ANY call, which now proves two things: the abstention guard
+    reaches the seam at all (an absence assertion alone would be satisfied by a guard that
+    never ran), and a consultation that FAILS prints every window row rather than losing one
+    — a guard that cannot decide degrades to the old behaviour, never to silence. The byte
+    half of the direction — that a row which SURVIVES the read is the bytes this build
+    already printed — is
+    `test_rows_that_survive_the_abstention_are_the_bytes_this_build_already_printed`.
+
+    The retired half is unchanged: `desired_statuses` computes the machine's moves; applying
+    them is what a round does. This node used to prove the READER only CALLS
+    `desired_statuses` and never `apply_moves`, and stubbed it to observe the call (#3602).
+    #3677 retired that read for a row's machine half: `desired_statuses` is the board's LIVE
+    state at filing time, and answering "what does the machine want" about a disagreement
+    scored up to seven days earlier produced 12 rows on that item printing `(the machine
+    abstains)` — a sentence `agreement()` makes impossible for an id it filed as `disagree` —
+    plus 2 printing the machine agreeing with the steward. A row's machine half still comes
+    from the disagreeing tick's own record. The rest of the rail is unchanged — no
+    `apply_moves`, no item status written, and the widened read taken from the INJECTED
+    ledger only.
     """
     from workers import board_disagreement as D
     import scripts.automod.backlog as BL
@@ -3010,16 +3025,20 @@ async def test_the_reader_never_consults_the_machine_at_filing_time(board, tmp_p
                            want, window=_window7(disagree_ids=[3]), backlog_dir=board,
                            ledger=led)
     assert out is not None, "the reader filed nothing"
-    assert not fake_calls, (
-        "the reader read the machine's live table; #3677's rows come from the ticks")
+    assert fake_calls, (
+        "#3914's abstention guard never reached the machine's live table, so a filing whose "
+        "window contains an id whose ruling has landed would still name it as an open "
+        "question — the phantom #3858 and #3913 re-filed. (#3677's prohibition is below: "
+        "ONE call site, and it is the removal guard.)")
     src = (Path(__file__).resolve().parents[1] / "workers" / "board_disagreement.py") \
         .read_text(encoding="utf-8")
     assert "apply_moves" not in src and "apply(" not in src, (
         "the reporter grew a call into the machine's writer")
-    assert "desired_statuses(" not in src, (
-        "the disagreement reader calls `desired_statuses` again, which is the "
-        "filing-time read #3677 removed: it answers about the instant of the read, and "
-        "a row is about a tick")
+    assert src.count("desired_statuses(") == 1, (
+        f"`desired_statuses` is called {src.count('desired_statuses(')} times from the "
+        f"reporter; #3914 permits exactly ONE live consultation, inside `ruled_ids`, whose "
+        f"only effect is to remove a row. Any second call site is #3677's filing-time "
+        f"recompute coming back under #3914's name")
     ids = out["ids"]
     assert ids[:2] == [7, 3], f"current tick first, then the window: {ids}"
     after = {it.id: it.status for it in B.all_items(("lloyd",), backlog_dir=board)}
@@ -3033,6 +3052,15 @@ async def test_the_reader_never_consults_the_machine_at_filing_time(board, tmp_p
     row3 = [ln for ln in body.splitlines() if ln.startswith("- #3")][0]
     assert "the state machine wants `up_next` — in the offered set, not started" in row3, (
         f"the widened row did not print the side its own tick recorded: {row3}")
+
+    # The fail-safe, from `boom` raising above: a consultation that cannot be made is NOT a
+    # licence to drop rows. Every window row printed, and Coverage reports the abstention it
+    # actually made — zero — rather than a number it could not establish.
+    assert ids == [7, 3], f"a consultation that raised still removed a row: {ids}"
+    assert "- 0 of the window's ids were abstained as already ruled." in \
+        body[body.index("## Coverage"):], (
+        "the body claims an abstention the guard could not have made: "
+        f"{body[body.index('## Coverage'):]}")
 
 
 # ── #3677: a row must name the machine's side as the disagreeing tick recorded it ──
@@ -3338,6 +3366,327 @@ def test_a_merged_coverage_counts_the_rows_the_body_will_actually_hold(board, tm
     assert "every row here can be ruled from the item alone" not in cov, (
         "two of the six rows have no machine half, so the merge may not claim "
         "full ruleability")
+
+
+# ── #3914: a ruling that has landed must stop being printed as an open question ──
+#
+# The widening takes its ids from the window's per-tick history and asked nobody whether the
+# item still disagreed, so six consecutive filings (#3752, #3766, #3784, #3791, #3858,
+# #3913) re-named the same ids after commit `6119589c` had resolved four of them on
+# 2026-11-05T11:47:50Z: `backlog/3858-*.md:152-155` and `backlog/3913-*.md:62-65` both
+# still print `- #3433: steward proposed draft; the state machine wants up_next`, which by
+# then was false. Measured 2026-11-07T21:13Z, 0 of the window's 11 distinct disagreeing ids
+# still disagreed, and `below_floor` was still True on a trailing-7d `judged=151
+# rate=0.8344` while the trailing 2d (0.9464) and 1d (0.9474) legs were above the floor —
+# the sub-floor week being the Nov 1/4/5 ticks, every one of which has since been ruled.
+#
+# The five nodes below are the five clauses, and each is a SEEDED BODY: the 7-day window is
+# only sub-floor because of ticks that age out by ~2026-11-12, after which `below_floor`
+# reads False with no fix applied at all. A live trigger re-run proves nothing either way;
+# the row-building path is the durable evidence.
+
+#: The four ids `6119589c` (#3791) resolved. Each is on disk as `draft` while the row it
+#: printed said the machine wanted `up_next` — and that commit settled them by changing
+#: what the MACHINE answers (`draft`: its hand_run is still unexecuted), NOT by moving the
+#: board to the recorded `up_next`. Which is why clause 2 cannot be folded into clause 1:
+#: an abstention that only compares the row against the board would leave all four here.
+RULED_FOUR = [3433, 3537, 3656, 3704]
+
+#: What those four ticks scored as the machine's side, from the filed rows themselves.
+RULED_SIDES = {i: ("up_next", "has a confirmed triage with acceptance text")
+               for i in RULED_FOUR}
+
+#: A live id: on disk `draft`, and the state machine still wants `up_next` for it, so it is
+#: a disagreement after the fix as well as before it. The control in every node here.
+LIVE_ID = 3310
+
+
+def _ruled_tick(led: Path, ids, *, proposed: str = "draft",
+                sides: dict | None = None) -> None:
+    """One `board_steward` tick whose proposals and recorded sides the rows will render.
+
+    Both halves have to be in the ledger row: `moves` is the steward's half, and
+    `agreement.disagree_sides` is the machine's (#3680) — a window id with no side renders
+    **not recorded**, which would let a node pass on a row nobody could rule.
+    """
+    sides = sides if sides is not None else {}
+    _led(led, event="board_steward", apply=False, created_at=DIS_OLDER_STAMP,
+         moves=[{"item_id": i, "status": proposed,
+                 "note": "unspent, offered again"} for i in ids],
+         agreement={"disagree": list(ids), "judged": len(ids), "agree": [],
+                    "disagree_sides": [{"item_id": i, "status": s, "why": w}
+                                       for i, (s, w) in sides.items()]})
+
+
+def _rule_filing(board, monkeypatch, led, *, win_ids, on_disk, machine,
+                 tick_ids=DIS_AGREE):
+    """File one disagreement item over `win_ids`, then hand back its body.
+
+    `on_disk` writes each item at the status the board holds NOW (the live half of the
+    abstention), and `machine` is this test's stand-in for what `desired_statuses` answers
+    NOW — stubbed rather than derived, because the state machine's live answer is an input
+    to the guard, not the thing under test, and #3677 forbids a test that computes a row's
+    half from a later instant.
+    """
+    from workers.board_disagreement import file_or_update
+
+    Path(board).mkdir(parents=True, exist_ok=True)
+    for iid, status in on_disk.items():
+        _write(board, iid, status)
+        assert (Path(board) / f"{iid}-item-{iid}.md").exists(), (
+            f"#{iid} never reached the board, so the live read would find nothing to "
+            f"abstain and the node would pass on an empty fixture")
+    sides = {i: RULED_SIDES.get(i, ("up_next", "has a confirmed triage with acceptance text"))
+             for i in win_ids}
+    _ruled_tick(led, list(win_ids), sides=sides)
+    monkeypatch.setattr(B, "desired_statuses", lambda ledger: dict(machine))
+    out = file_or_update(_agree(*tick_ids), DIS_MOVES, DIS_EXPECTED,
+                         window=_window7(disagree_ids=list(tick_ids) + list(win_ids)),
+                         backlog_dir=board, ledger=led)
+    assert out is not None and out["action"] == "filed", out
+    return _filed(board)[0].body
+
+
+def _rows(body: str) -> list[str]:
+    """Every row line the body prints, in file order."""
+    return [ln for ln in body.splitlines() if D._ROW_RE.match(ln)]
+
+
+def test_a_closed_item_prints_no_row_while_a_live_disagreement_still_prints(
+        board, tmp_path, monkeypatch):
+    """Clause 1. An id whose item is off the board is not an open question: #3418, #3456,
+    #3508, #3570 and #3852 are `done`, so the machine has no opinion about them at all, and
+    naming one as a disagreement spends a sweep and a triage pass on an item nobody can
+    move. The live id in the same window must still print — a guard that removes everything
+    would pass a test that only looks for the removed one."""
+    led = tmp_path / "ledger.jsonl"
+    body = _rule_filing(
+        board, monkeypatch, led, win_ids=[RULED_FOUR[0], LIVE_ID],
+        # #3433 closed, and the machine is stubbed to want `up_next` for it anyway, so the
+        # only thing that can abstain it is the board fact — not a status comparison.
+        on_disk={RULED_FOUR[0]: "done", LIVE_ID: "draft"},
+        machine={RULED_FOUR[0]: ("up_next", "has a confirmed triage with acceptance text"),
+                 LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")})
+
+    assert not [ln for ln in _rows(body) if ln.startswith(f"- #{RULED_FOUR[0]}")], (
+        "a `done` item is still printing a disagreement row; the ruling landed and the "
+        "filing is re-asking a question about an item nobody can move")
+    live = [ln for ln in _rows(body) if ln.startswith(f"- #{LIVE_ID}")]
+    assert len(live) == 1 and "the state machine wants `up_next`" in live[0], (
+        f"the id that genuinely still disagrees must print with both halves: {live}")
+    for i in DIS_AGREE:
+        assert any(ln.startswith(f"- #{i}") for ln in _rows(body)), (
+            f"tick id #{i} disappeared; only window ids are candidates for abstention")
+    assert _row_count(body) == len(DIS_AGREE) + 1, (
+        f"expected the five tick rows plus the one live id: {_rows(body)}")
+    cov = body[body.index("## Coverage"):]
+    assert f"#{RULED_FOUR[0]}" in cov, "the abstention has to name the id it removed"
+    assert f"#{LIVE_ID}" not in cov, "the live id is not abstained and may not be listed"
+
+
+def test_a_window_id_whose_status_now_matches_the_machine_is_abstained(
+        board, tmp_path, monkeypatch):
+    """Clause 2, and the case clause 1 cannot reach. All four ids of `RULED_FOUR` are on
+    disk as `draft` while their rows record the machine wanting `up_next`, so the row and
+    the board still disagree by the LETTER — and an abstention that compares the row's
+    recorded side against the board leaves all four printing. `6119589c` settled them from
+    the other side: it changed what `desired_statuses` answers (`draft`, its hand_run is
+    still unexecuted), so only a read of the LIVE machine answer sees them.
+    """
+    led = tmp_path / "ledger.jsonl"
+    on_disk = {i: "draft" for i in RULED_FOUR}
+    on_disk[LIVE_ID] = "draft"
+    machine = {i: ("draft", "its hand_run is still unexecuted") for i in RULED_FOUR}
+    machine[LIVE_ID] = ("up_next", "has a confirmed triage with acceptance text")
+    body = _rule_filing(board, monkeypatch, led, win_ids=RULED_FOUR + [LIVE_ID],
+                        on_disk=on_disk, machine=machine)
+
+    # The fixture has to stay the case, or this node quietly becomes clause 1 again: read
+    # the two states back and confirm the row's recorded half still differs from the board.
+    disk = {it.id: it.status for it in B.all_items(("lloyd",), backlog_dir=board)}
+    rec = {r["item_id"]: r["status"]
+           for e in S.read_events(S.LEDGER_PATH)
+           if e.get("event") == "board_steward"
+           for r in (e.get("agreement") or {}).get("disagree_sides") or []}
+    assert all(disk[i] == "draft" and rec[i] == "up_next" for i in RULED_FOUR), (
+        f"the board must hold `draft` while the recorded machine side is `up_next`; if "
+        f"both say `draft` this node is testing clause 1's equality and clause 2 is "
+        f"unpinned: {[(i, disk[i], rec[i]) for i in RULED_FOUR]}")
+    assert all(f"- #{i}" not in body for i in RULED_FOUR), (
+        "the four ids whose ruling landed are still named: the guard compared the row "
+        "against its recorded side instead of asking the live table what the machine "
+        "answers now")
+    live = [ln for ln in _rows(body) if ln.startswith(f"- #{LIVE_ID}")]
+    assert len(live) == 1, (
+        f"#{LIVE_ID} is on disk at `draft` and the machine wants `up_next`: it still "
+        f"disagrees and its row must print: {_rows(body)}")
+    assert _row_count(body) == len(DIS_AGREE) + 1, _rows(body)
+    cov = body[body.index("## Coverage"):]
+    assert f"{len(RULED_FOUR)} of the window's ids were **abstained, not dropped**" in cov, cov
+    assert cov.count("its status on disk (`draft`) is what the state machine answers "
+                     "for it now") == len(RULED_FOUR), (
+        f"all four must say which arm abstained them: {cov}")
+
+
+def test_coverage_states_the_abstention_figure_and_names_each_abstained_id(
+        board, tmp_path, monkeypatch):
+    """Clause 3. Removing a row is a claim about the window, and the Coverage section is
+    where this filing already states what its rows do not cover. An id that vanished with
+    no figure beside it is indistinguishable from a read that failed, which is the
+    difference between abstaining and losing rows."""
+    led = tmp_path / "ledger.jsonl"
+    body = _rule_filing(
+        board, monkeypatch, led, win_ids=[RULED_FOUR[0], RULED_FOUR[1], LIVE_ID],
+        on_disk={RULED_FOUR[0]: "done",          # off the board
+                 RULED_FOUR[1]: "draft",         # equals the live machine answer
+                 LIVE_ID: "draft"},
+        machine={RULED_FOUR[1]: ("draft", "its hand_run is still unexecuted"),
+                 LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")})
+    cov = body[body.index("## Coverage"):]
+
+    assert "- 2 of the window's ids were **abstained, not dropped**" in cov, cov
+    assert f"#{RULED_FOUR[0]} (its item is off the board (`done`))" in cov, cov
+    assert f"#{RULED_FOUR[1]} (its status on disk (`draft`) is what the state machine " \
+           "answers for it now)" in cov, cov
+    assert f"#{LIVE_ID}" not in cov, "a live id may not appear in the abstention list"
+    # Beside the existing figures, not after them: the count above moves the `un` in the
+    # "not represented here" bullet, so the two have to be read together.
+    assert (cov.index("not represented here") < cov.index("abstained, not dropped")
+            < cov.index("distinct items")), (
+        f"the abstention bullet moved away from the figures it subtracts from:\n{cov}")
+
+    # A filing with nothing to abstain says so, in the same slot, rather than going quiet:
+    # the figure is what tells a reader the guard ran and found nothing.
+    quiet = _rule_filing(
+        tmp_path / "b2" / "backlog", monkeypatch, tmp_path / "b2-ledger.jsonl",
+        win_ids=[LIVE_ID], on_disk={LIVE_ID: "draft"},
+        machine={LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")})
+    assert "- 0 of the window's ids were abstained as already ruled." in quiet, quiet
+    assert "abstained, not dropped" not in quiet, quiet
+
+
+def test_the_live_read_only_removes_rows_and_never_supplies_one(board, tmp_path,
+                                                                monkeypatch):
+    """Clause 4. The live read is allowed to subtract and nothing else: an id THIS tick
+    scored as a disagreement stays (dropping it would be the filer overruling its own
+    measurement, which is #3752's job inside a tick), and every row that survives has to be
+    the bytes this build already printed — no re-derived machine half, no `(the machine
+    abstains)`, no reason string from the live table reaching the body."""
+    led = tmp_path / "ledger.jsonl"
+    sentinel = "LIVE-TABLE-WHY-3914-must-never-be-printed"
+    on_disk = {i: "draft" for i in RULED_FOUR}
+    on_disk.update({LIVE_ID: "draft", DIS_AGREE[0]: "up_next"})
+    machine = {i: ("draft", sentinel) for i in RULED_FOUR}
+    machine.update({LIVE_ID: ("up_next", sentinel),
+                    DIS_AGREE[0]: ("up_next", sentinel)})
+    # `DIS_AGREE[0]` is at the status the live table answers for it, so the guard itself
+    # calls it ruled — and it is STILL printed, because this tick scored it.
+    assert D.ruled_ids([DIS_AGREE[0]], backlog_dir=board,
+                       ledger=led) == {}          # before the files exist
+    body = _rule_filing(board, monkeypatch, led, win_ids=RULED_FOUR + [LIVE_ID],
+                        on_disk=on_disk, machine=machine)
+    assert DIS_AGREE[0] in D.ruled_ids([DIS_AGREE[0]], backlog_dir=board,
+                                       ledger=led), (
+        "the fixture is not the case: the live read has to consider this tick's id ruled, "
+        "or printing it proves nothing about the guard's scope")
+
+    rows = _rows(body)
+    assert any(ln.startswith(f"- #{DIS_AGREE[0]}") for ln in rows), (
+        "an id this tick scored in its own `disagree` was dropped by the live read")
+    assert all(sentinel not in ln for ln in rows), (
+        "a reason string from the live table reached a row: the read may only remove")
+    assert sentinel not in body, "the live table's wording reached the body at all"
+    assert "(the machine abstains)" not in body, (
+        "#3677's sentence is back; it is only ever produced by a filing-time recompute")
+    assert "**not recorded**" not in body, (
+        "a row that survived the read lost the machine half its tick recorded")
+
+
+def test_rows_that_survive_the_abstention_are_the_bytes_this_build_already_printed(
+        tmp_path, monkeypatch):
+    """Clause 4's byte half, run as a pair of filings rather than one.
+
+    Two boards, the same tick, the same window, the same ledger rows — differing only in
+    whether the board has moved under one id's ruling. Every row the abstaining filing
+    prints must appear in the other filing's output byte for byte, and the difference must
+    be exactly the one removed row: a re-derived machine half would show up as a surviving
+    row that is not identical.
+    """
+    from workers.board_disagreement import file_or_update
+
+    # Only #3433 and the live id are on the board at all; the rest of the window's ids have
+    # no file either way, so the single difference between the two copies is whether the
+    # board moved under #3433's ruling.
+    win = [RULED_FOUR[0], LIVE_ID]
+    machine = {RULED_FOUR[0]: ("draft", "its hand_run is still unexecuted"),
+               LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")}
+    bodies = {}
+    for tag, disk in (("ruled", "draft"), ("live", "up_next")):
+        d = tmp_path / tag
+        d.mkdir()
+        led = tmp_path / f"{tag}-ledger.jsonl"
+        monkeypatch.setattr(B, "BACKLOG_DIR", d)
+        monkeypatch.setattr(S, "LEDGER_PATH", led)
+        _write(d, RULED_FOUR[0], disk)
+        _write(d, LIVE_ID, "draft")
+        _ruled_tick(led, win, sides={RULED_FOUR[0]: RULED_SIDES[RULED_FOUR[0]],
+                                     LIVE_ID: ("up_next", "has a confirmed triage")})
+        monkeypatch.setattr(B, "desired_statuses", lambda ledger: dict(machine))
+        out = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=_window7(disagree_ids=list(DIS_AGREE) + list(win)),
+                             backlog_dir=d, ledger=led)
+        assert out is not None and out["action"] == "filed", (tag, out)
+        bodies[tag] = _filed(d)[0].body
+
+    cut, kept = _rows(bodies["ruled"]), _rows(bodies["live"])
+    assert len(cut) == len(kept) - 1, (
+        f"the live read removed {len(kept) - len(cut)} rows and exactly one was abstained:"
+        f"\ncut={cut}\nkept={kept}")
+    removed = [ln for ln in kept if ln not in cut]
+    assert len(removed) == 1 and removed[0].startswith(f"- #{RULED_FOUR[0]}"), (
+        f"the row that disappeared is not the ruled one: {removed}")
+    assert all(ln in kept for ln in cut), (
+        "a surviving row changed its bytes, which is a half being re-derived: "
+        f"{[ln for ln in cut if ln not in kept]}")
+    assert f"- #{LIVE_ID}" in bodies["live"] and f"- #{LIVE_ID}" in bodies["ruled"]
+    assert "- 1 of the window's ids were **abstained, not dropped**" in bodies["ruled"]
+    assert "- 0 of the window's ids were abstained as already ruled." in bodies["live"]
+
+
+def test_the_abstention_moves_no_aggregate_and_no_below_floor_verdict(
+        board, tmp_path, monkeypatch):
+    """Clause 5. Whether the aggregate should also stop counting ticks whose disagreement
+    was ruled is owed-check's to rule (#3089 asked, #3329 set the bar), so this change may
+    not touch a single figure in it: `below_floor`'s verdict on a given window dict is the
+    same with five rows abstained as with none, and `judged`, `rate` and the window's own
+    row and item counts are the same numbers the body printed before.
+    """
+    import copy as _copy
+
+    win = _window7(disagree_ids=list(DIS_AGREE) + RULED_FOUR + [LIVE_ID])
+    held = _copy.deepcopy(win)
+    assert D.below_floor(win)[0] is True, "the fixture window has to trip the trigger"
+
+    body = _rule_filing(
+        board, monkeypatch, tmp_path / "ledger.jsonl",
+        win_ids=RULED_FOUR + [LIVE_ID],
+        on_disk={**{i: "draft" for i in RULED_FOUR}, LIVE_ID: "draft"},
+        machine={**{i: ("draft", "its hand_run is still unexecuted") for i in RULED_FOUR},
+                 LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")})
+
+    assert len([ln for ln in _rows(body) if "**abstained" in ln]) == 0
+    assert "4 of the window's ids were **abstained, not dropped**" in body, body
+    assert win == held, "the abstention mutated the window dict it was handed"
+    assert D.below_floor(win) == D.below_floor(held), (
+        "the same window dict reads a different verdict after a filing")
+    assert D.below_floor(_window7())[0] is True
+    assert (f"{win['judged']} judged, `rate={win['rate']}`" in body
+            or f"{win['judged']} judged" in body and f"rate={win['rate']}" in body), (
+        f"Coverage stopped citing the window it was handed: {body[body.index('## Coverage'):]}")
+    distinct = len(set(win["disagree_ids"]))
+    assert f"are {distinct} distinct items" in body, (
+        f"the window's distinct-item figure moved with the abstention (it counts the "
+        f"window, not the rows this filing wrote): expected {distinct}")
 
 
 def test_a_merge_counts_the_rows_an_earlier_filing_recorded(board, tmp_path):

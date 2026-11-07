@@ -304,6 +304,92 @@ def _window_sides(window: dict, ledger: Path) -> dict[int, tuple[str, str]]:
             for iid, pair in _window_pairs(window, ledger).items() if pair["side"]}
 
 
+#: The on-disk status that is terminal in intent but off-vocabulary in
+#: `app/backlog_status.py`, where every non-terminal word maps to `draft`. A file
+#: a person put out of reach for good is therefore invisible to `open_items`, so
+#: a disagreement about it is one nobody can act on — and `CLOSED_STATUSES` alone
+#: would not see it. Added here rather than to the host's vocabulary: that
+#: mapping is deliberately lopsided the other way (#287).
+ARCHIVED_STATUS = "archived"
+
+
+def ruled_ids(ids: list[int], *, backlog_dir: Path | None = None,
+              ledger: Path | None = None) -> dict[int, str]:
+    """Which of these WINDOW ids the board has already answered, and why.
+
+    #3914. The widening takes its ids from the window's per-tick history
+    (`_window_pairs`) and nothing on that path asks whether the item still
+    disagrees, so a filing keeps printing rows whose ruling landed days ago:
+    item #3858 (filed 2026-11-06T17:03:51Z) and #3913 (2026-11-07T20:45:17Z) both
+    still printed `- #3433: steward proposed draft; the state machine wants
+    up_next` more than a day after commit `6119589c` resolved those four ids, and
+    every re-filing spends a sweep and a triage pass on a question nobody is
+    asking. `below_floor` cannot see this either: it reads only `judged`/`rate`,
+    which the aggregate sums out of `runs.meta_json` with no board read at all, so
+    the trigger stays armed until the sub-floor ticks age out by the clock.
+
+    An id is ruled when EITHER live fact holds about it:
+
+    * its item is off the board — `done`, the host's other terminal statuses, or
+      `archived`. Deliberately NOT "anything outside `OPEN_STATUSES`": #287 has
+      sat on disk as `review` since April, and a stranded item is a stuck one, not
+      a ruled one. Keeping a stale row is the cheaper error, which is the same
+      lopsided reading `app/backlog_status.py` documents for the machine's side.
+    * its live on-disk status is what `desired_statuses` answers for it NOW. This
+      is the arm that catches the four ids above: `6119589c` settled them by
+      changing what the MACHINE answers (`draft` — its hand_run is still
+      unexecuted), not by moving the board to the `up_next` the row recorded, so
+      an equality against the RECORDED side leaves all four printing. Only the
+      live table sees them.
+
+    **This read may only ever REMOVE an id.** It answers nothing about a row's
+    content: both halves of every surviving row still come from the tick that
+    scored them, exactly as #3677 left them, and no status or reason from the live
+    table reaches the body — which is why the result is ids with a reason phrase
+    and not a table of sides. That is the whole difference from the filing-time
+    recompute #3677 removed: that one SUPPLIED halves about an instant that had not
+    scored the id; this one only asks a yes/no of the same instant and can lose a
+    row, never invent one.
+
+    Fails OPEN — a board or ledger that cannot be read returns `{}` and every row
+    prints, which is this file's behaviour before #3914: a filing that silently
+    loses rows is worse than one that re-names a settled id. Same stance as
+    `moved_item_ids` (`workers/sources/board_steward.py:1242`), which #3752 shipped
+    for a board that moved MID-tick; this is the between-ticks half of the same
+    fact, and it is unreachable from there because that guard runs inside a tick's
+    own scoring and never sees the window.
+    """
+    if not ids:
+        return {}
+    from app.backlog_status import CLOSED_STATUSES
+    from scripts.automod import state as S
+    B = _backlog()
+    try:
+        on_disk = {int(i.id): str(i.status or "")
+                   for i in B.all_items((BOARD,), backlog_dir=backlog_dir)}
+        want = B.desired_statuses(Path(ledger) if ledger else S.LEDGER_PATH) or {}
+    except Exception as exc:                       # fail OPEN, per the docstring
+        logger.warning("disagreement abstention read failed (%s: %s); printing every "
+                       "window row", type(exc).__name__, str(exc)[:200])
+        return {}
+    closed = CLOSED_STATUSES | {ARCHIVED_STATUS}
+    out: dict[int, str] = {}
+    for iid in {int(i) for i in ids}:
+        status = on_disk.get(iid)
+        if status is None:
+            # No board file at all: the live read proves nothing in either
+            # direction, and an id with nothing to remove cannot be a phantom.
+            continue
+        if status in closed:
+            out[iid] = f"its item is off the board (`{status}`)"
+            continue
+        entry = want.get(iid)
+        if entry and str(entry[0]) == status:
+            out[iid] = (f"its status on disk (`{status}`) is what the state machine "
+                        f"answers for it now")
+    return out
+
+
 def _widen(agree: dict, moves: list[dict], expected: dict[int, tuple],
            window: dict, ledger: Path) -> tuple[list[int], list[dict], dict]:
     """The rows a ruling can actually be made on: the window's, not the tick's.
@@ -442,10 +528,24 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     # and a row about a tick cannot be answered from a later instant (#3677).
     # This reads; it does not write, so widening cannot settle a disagreement by moving it.
     from scripts.automod import state as S
-    ids, wide_moves, wide_expected = _widen(
-        agree, moves, expected, window, Path(ledger) if ledger else S.LEDGER_PATH)
+    led = Path(ledger) if ledger else S.LEDGER_PATH
+    ids, wide_moves, wide_expected = _widen(agree, moves, expected, window, led)
     if not ids:
         return None
+
+    # An id the WINDOW remembers that the board has already answered is not an open
+    # question, and printing it as one is what re-files the same eight ids across six
+    # consecutive items (#3752 … #3913). See `ruled_ids`: the live read may only REMOVE,
+    # so it is applied to the widened ids ALONE — `tick_ids` are the ids THIS tick
+    # scored as disagreeing, and dropping one of those would be the filer disagreeing
+    # with its own measurement, which is #3752's job inside the tick and nobody's here.
+    # What it removes is reported in Coverage, never subtracted in silence.
+    abstained = ruled_ids([i for i in ids if i not in set(tick_ids)],
+                          backlog_dir=backlog_dir, ledger=led)
+    if abstained:
+        # Never empties `ids`: `tick_ids` is non-empty past its own leg above and is
+        # never a candidate, so at least this tick's disagreement survives.
+        ids = [i for i in ids if i not in abstained]
     stats = row_stats(ids, wide_moves, window)
     # Of the rows this filing actually WRITES, how many carry the machine's side as the
     # disagreeing tick recorded it. Ruleability needs both halves of a disagreement, and
@@ -454,6 +554,10 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     # while 12 of its 22 rows had no machine side to rule against.
     stats["recorded"] = sum(1 for i in ids[:min(len(ids), ROWS_MAX)]
                             if i in wide_expected)
+    # Carried as the ids + reasons themselves, not a count: Coverage names them, and a
+    # figure without the names is exactly the silent subtraction this filing swears
+    # against — a reader cannot tell "the ruling landed" from "the read failed".
+    stats["abstained"] = abstained
 
     B = _backlog()
     openers = [it for it in B.open_items((BOARD,), backlog_dir=backlog_dir)
@@ -484,7 +588,8 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
 
 def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: int = 0,
               dropped: int = 0, distinct: int | None = None, unruled: int = 0,
-              recorded: int | None = None) -> str:
+              recorded: int | None = None,
+              abstained: dict[int, str] | None = None) -> str:
     """What these rows do NOT cover, in numbers.
 
     Before #3651 the ids were the CURRENT tick's (`file_or_update` took them from
@@ -500,6 +605,11 @@ def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: 
     * **unrecoverable** — ids whose proposed side is in no ledger move, so no row can say
       what the steward asked for and no ruling can be made from the item alone.
     * **dropped** — ids past `ROWS_MAX`, named nowhere in the body at all.
+    * **abstained** (#3914) — ids the window still remembers whose ruling has already
+      landed, so no row is written for them. Named individually, because this figure
+      moves `un` in the line above: without the names a reader cannot tell a question
+      that stopped being open from a read that failed, which is the difference between
+      a filing that abstains and one that silently loses rows.
 
     State the zero for each. An item that covers its window has to say so, or a reader
     cannot tell a genuinely small case from an unstated large one — and a merge moves both
@@ -517,7 +627,20 @@ def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: 
     else:
         first = (f"- all {named} of the window's {total} disagreement rows are "
                  f"represented here; nothing in the window is unruled by omission.")
-    extra = ""
+    # First of the extras: this figure moves the `un` in `first`, so the reader has to be
+    # told which part of that gap is a row nobody could recover and which is a question
+    # that stopped being open (#3914). Zero is stated, like every other figure here.
+    ab = {int(k): str(v) for k, v in (abstained or {}).items()}
+    if ab:
+        extra = ("- " + str(len(ab)) + " of the window's ids were **abstained, not "
+                 "dropped**: their ruling has already landed — "
+                 + "; ".join(f"#{i} ({ab[i]})" for i in sorted(ab))
+                 + ". A live board read removed these rows; it supplied neither half of "
+                   "any row above. `judged` and `rate` still count the ticks these ids "
+                   "were scored on, and whether they should is owed-check's to rule "
+                   "(#3089 asked, #3329 set the bar), not this filing's.\n")
+    else:
+        extra = "- 0 of the window's ids were abstained as already ruled.\n"
     if distinct is not None:
         extra += (f"- the window's {total} disagreement rows are {distinct} distinct "
                   f"items, and this item names {int(named)} of them: a row is a tick's "
@@ -563,7 +686,8 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
             window: dict, stamp: str, *, backlog_dir: Path | None,
             ledger: Path | None, unrecoverable: int = 0, dropped: int = 0,
             distinct: int | None = None, unruled: int = 0,
-            recorded: int | None = None) -> dict:
+            recorded: int | None = None,
+            abstained: dict[int, str] | None = None) -> dict:
     rows = disagreement_rows(ids, moves, expected)
     body = (
         f"# {NAME}\n\n"
@@ -587,7 +711,7 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"## Rows\n\n" + "\n".join(rows) + "\n\n"
         + _coverage(min(len(ids), ROWS_MAX), window, unrecoverable=unrecoverable,
                     dropped=dropped, distinct=distinct, unruled=unruled,
-                    recorded=recorded) +
+                    recorded=recorded, abstained=abstained) +
         f"## What to decide\n\n"
         f"Per item, rule which side is wrong:\n\n"
         f"- the **steward's** prompt/grounding (`workers/sources/board_steward.py`) — then "
@@ -638,7 +762,7 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
            expected: dict[int, tuple], window: dict, stamp: str, *,
            backlog_dir: Path | None, ledger: Path | None, unrecoverable: int = 0,
            dropped: int = 0, distinct: int | None = None,
-           unruled: int = 0) -> dict | None:
+           unruled: int = 0, abstained: dict[int, str] | None = None) -> dict | None:
     """Add the ids this item does not name yet, into the same file.
 
     `recorded` is deliberately NOT a parameter: the caller's figure counts the ids THIS
@@ -688,7 +812,8 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
                 f"`rate={window.get('rate')}`)\n\n" + "\n".join(rows) + "\n\n"
                 + _coverage(named, window, merged=True,
                             unrecoverable=unrecoverable, dropped=dropped,
-                            distinct=distinct, unruled=unruled, recorded=recorded))
+                            distinct=distinct, unruled=unruled, recorded=recorded,
+                            abstained=abstained))
     _write_body(Path(item.path), fm, appended, B,
                 activity=f"board-steward disagreement: {len(fresh)} row(s) added")
     _event(ledger, item_id=item.id, action="merged", ids=ids, window=window,
