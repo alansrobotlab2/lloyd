@@ -188,6 +188,14 @@ def _tool_quality_dir() -> Path:
     return p.TOOL_QUALITY_DIR
 
 
+def _behaviour_exhibit_dir() -> Path:
+    """The exhibit sweep's store, resolved through the constant the writer now returns
+    (#3886 clause 1) rather than a path re-spelled here — the rule every directory arm in
+    this table honours."""
+    from app import paths as p
+    return p.BEHAVIOUR_EXHIBIT_DIR
+
+
 def _funnel_dir() -> Path:
     from app import paths as p
     from scripts import funnel_census as fc
@@ -226,9 +234,15 @@ def _gate_to_land_lag_series() -> Path:
     return gtll.record_path()
 
 
-#: The table. Eight instruments, the seven weighted arms summing to 1.0 and the
-#: eighth (`gate_to_land_lag`, #3541) carrying weight 0.0 because it is a latency
-#: in seconds and seconds cannot enter a percentage, every path resolved
+#: The table. Nine instruments, the seven weighted arms summing to 1.0 and the
+#: two reported-only arms carrying weight 0.0: `gate_to_land_lag` (#3541) because
+#: it is a latency in seconds and seconds cannot enter a percentage, and
+#: `behaviour_exhibit` (#3886) because its one scalar is a share pooled over four
+#: behaviours with denominators six orders of magnitude apart, so the caption arm
+#: would decide a weighted total it has no business deciding. Both are in the
+#: table because being here is what makes a dead store a printed line rather than
+#: an absent file — `test_the_lag_arm_is_carried_in_the_table_and_excluded_from_both_totals`
+#: is the precedent for what that costs the composite (nothing). Every path is resolved
 #: through the writer's own constant — which is how the two stores the item calls
 #: out end up IN the table instead of being skipped for living where the data root
 #: does not reach: the automod state dir holds `scorecard.jsonl`,
@@ -416,6 +430,43 @@ INSTRUMENTS: tuple[Instrument, ...] = (
                           compares_rows=False),
         date_key="generated_at",
         n_path="n",
+    ),
+    # The store is `app.paths.BEHAVIOUR_EXHIBIT_DIR`, resolved at call time through
+    # `_behaviour_exhibit_dir` — the same constant `app.behaviour_exhibit.out_dir()`
+    # returns since #3886, so the index and the sweep cannot end up pointing at two
+    # directories, which is what this test's citation rule is for.
+    Instrument(
+        key="behaviour_exhibit",
+        title="Behaviour exhibit rates, pooled over the scored behaviours (worker)",
+        artifact=_behaviour_exhibit_dir,
+        pattern="behaviour-exhibit-*.jsonl",
+        value_path="worker_pooled",
+        unit="share",
+        polarity="up",
+        weight=0.0,
+        weight_why="RULING (#3886): reported, never averaged. The artifact's one scalar is "
+                   "k and n SUMMED across the four declared behaviours, so it is "
+                   "denominator-weighted and `tool-call-caption-present` (≈150k situations "
+                   "a week) decides it while `read-back-before-success-claim` (≈800) is "
+                   "invisible in it — a share that cannot be attributed to a behaviour has "
+                   "no business moving a weighted composite. #3749 clause 6 says the same "
+                   "thing about these numbers from the other end: report-only, nothing is "
+                   "gated on them. What the arm earns by being here is the one thing the "
+                   "store has never had: a day with no dated artifact prints "
+                   "`missing or stale: behaviour_exhibit` in the index headline, which is "
+                   "the only reason #2275's tool-quality store — which landed, ran once "
+                   "and has never had an artifact directory on this box since — is visible "
+                   "as dead instead of merely absent",
+        cadence_days=1,
+        hand_run_by_ruling=False,
+        scheduled_by="autonomy/109-behaviour-exhibit-daily.md",
+        averageable=False,
+        consumer=Consumer("app/behaviour_exhibit.py",
+                          "`render_movement` loads the newest dated artifact strictly older "
+                          "than the run and says in words whether each behaviour moved "
+                          "beyond its own Wilson half-width or is noise — the comparing "
+                          "reader this store did not have on 2026-11-04, when it landed",
+                          compares_rows=True),
     ),
 )
 

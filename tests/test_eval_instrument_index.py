@@ -33,9 +33,23 @@ row twice over the same fixtures, once with the arm and once without, and requir
 both composites to come out identical — so a future edit that let seconds into the
 percentage total fails there whatever the entry's own flags say.
 
+It grew to nine with #3886, which registered `behaviour_exhibit` — the daily
+exhibit-rate sweep `app/behaviour_exhibit.py` writes to the store now named by
+`app.paths.BEHAVIOUR_EXHIBIT_DIR`. It is reported and not averaged for a different
+reason than the lag arm: its one scalar is a share POOLED over four behaviours whose
+denominators differ by six orders of magnitude, so the caption arm would decide the
+composite. What it is here for is the headline: an unregistered store cannot be
+called missing, which is how the exhibit sweep ran once on 2026-11-04 and nobody
+noticed for three days — the identical failure #2275's tool_quality is only visible
+at all because it IS a row here.
+`test_a_day_with_no_exhibit_artifact_prints_behaviour_exhibit_missing_or_stale` pins
+that line, and `test_the_exhibit_store_is_named_by_app_paths_and_shared_with_its_writer`
+pins the one-path half, including the `Path.home() / "lloyd-data"` fallback that used
+to sit behind `out_dir()`.
+
 The five clause tests are numbered to match the item's acceptance clauses:
 
-1  `test_run_appends_one_dated_row_covering_eight_components_with_every_declared_field`
+1  `test_run_appends_one_dated_row_covering_nine_components_with_every_declared_field`
 2  `test_an_absent_instrument_is_recorded_missing_and_enters_neither_numerator_nor_denominator`
    + `test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_reading_100_percent`
 3  `test_the_declared_weight_and_equal_weight_totals_differ_under_non_uniform_weights`
@@ -52,6 +66,7 @@ from __future__ import annotations
 
 import ast
 import json
+import textwrap
 import os
 import subprocess
 import sys
@@ -74,7 +89,7 @@ FRESH = "2026-10-12"
 
 ALL_KEYS = ("retrieval_nightly", "iv_metrics", "automod_scorecard",
             "landed_outcomes", "tool_quality", "uptake_probe", "funnel_census",
-            "gate_to_land_lag")
+            "gate_to_land_lag", "behaviour_exhibit")
 
 
 def _instr(key: str):
@@ -170,6 +185,28 @@ def _seed(store: Path, key: str, day: str, value) -> Path:
             "gate_pass_rows": 24899, "promoted_rows": 1509,
             "rounds_only_in_archives": 1093, "gate_without_promoted": 7,
             "ledger_files": 3, "state_dir": str(GTL.record_path().parent)}])
+    if key == "behaviour_exhibit":
+        # `app/behaviour_exhibit.py` writes ONE record per run into
+        # `behaviour-exhibit-<YYYY-MM-DD>.jsonl`: the per-behaviour `rows`, and beside
+        # them `worker_pooled` — the single pooled worker scalar this arm reads, as
+        # `{k, n, rate, ci_low, ci_high}` (the `landed_outcomes` pair shape, for the same
+        # reason: the interval comes from the writer, not from a re-derivation here). The
+        # denominator is the live 2026-11-04 artifact's own worker N for
+        # `tool-call-caption-present`, 156,286, and the ±0.00145 half-width is that N's
+        # own Wilson half-width — a fixture missing a field the writer always emits is
+        # where a drifted pointer hides.
+        n = 156286
+        k = int(round(value * n))
+        return _seed_series(store, f"behaviour-exhibit-{day}.jsonl", [{
+            "schema": 1, "measured_at": f"{day}T02:24:50+00:00",
+            "rows": [{"id": "tool-call-caption-present", "status": "measured",
+                      "by_population": {"worker": {
+                          "situations_encountered": n, "exhibited": k,
+                          "status": "measured"}}}],
+            "worker_pooled": {"population": "worker", "k": k, "n": n,
+                              "rate": round(k / n, 6),
+                              "ci_low": round(max(0.0, value - 0.00145), 6),
+                              "ci_high": round(min(1.0, value + 0.00145), 6)}}])
     if key == "funnel_census":
         return _seed_json(store, f"funnel-{day}.json", {
             "artifact": "funnel-census", "version": 1, "item": "#2507",
@@ -240,21 +277,31 @@ GOOD_VALUES = {
     "uptake_probe": 1.0,             # up
     "funnel_census": 0.6,            # share, reported not averaged
     "gate_to_land_lag": 17.687,      # SECONDS, reported not averaged (#3541)
+    # The live store's own caption-arm worker rate on 2026-11-04 (141,558 / 156,286).
+    # A share pooled over the worker population, reported and never averaged (#3886).
+    "behaviour_exhibit": 0.9058,
 }
 
 
-#: The one arm published with weight 0.0: `gate_to_land_lag` is carried in the
+#: The two arms published with weight 0.0: `gate_to_land_lag` and `behaviour_exhibit`
+#: are carried in the
 #: table and excluded from the composite (#3541), so the "every weight is
 #: positive" sweep below has to name it rather than silently pass it.
-ZERO_WEIGHT_KEYS = ("gate_to_land_lag",)
+ZERO_WEIGHT_KEYS = ("gate_to_land_lag", "behaviour_exhibit")
 
 
 # ── clause 1: one dated row, >=6 components, every declared field ─────────────
 
-def test_run_appends_one_dated_row_covering_eight_components_with_every_declared_field(tmp_path):
-    """Clause 1 (#2597, grown to eight arms by #3541): running the publisher appends
-    ONE dated row under the data root covering >=6 components, each carrying its
-    instrument path, newest-artifact date, tier, weight, unit and latest value."""
+def test_run_appends_one_dated_row_covering_nine_components_with_every_declared_field(tmp_path):
+    """Clause 1 (#2597, grown to eight arms by #3541 and nine by #3886): running the
+    publisher appends ONE dated row under the data root covering >=6 components, each
+    carrying its instrument path, newest-artifact date, tier, weight, unit and latest
+    value.
+
+    The count is asserted rather than sampled because an instrument that is absent from
+    the published row is invisible: `behaviour_exhibit` earned its place in the table
+    precisely because the sweep's store was not in it, so its death could not be
+    reported. A table that quietly dropped an arm would keep printing a composite."""
     row, path, out = _row(tmp_path, GOOD_VALUES)
 
     assert path == out / "instrument-index.jsonl"
@@ -264,7 +311,7 @@ def test_run_appends_one_dated_row_covering_eight_components_with_every_declared
     assert row["item"] == "#2597"
 
     components = row["components"]
-    assert len(components) == 8, "the table covers eight instruments, not seven"
+    assert len(components) == 9, "the table covers nine instruments, not eight"
     assert len(components) >= 6
     assert sorted(c["key"] for c in components) == sorted(ALL_KEYS)
     for c in components:
@@ -353,9 +400,13 @@ def test_the_lag_arm_is_carried_in_the_table_and_excluded_from_both_totals(tmp_p
 
     The precedent is `funnel_census`, and the mechanism is the one it already uses
     — `weight=0.0` plus `averageable=False` — not a second exclusion. The check is
-    a difference, not a reading of the flags: the same seven fixtures are published
-    twice, once through the whole eight-arm table and once with the lag arm taken
-    out of it, and the two composites must be equal to the digit. A `seconds` value
+    a difference, not a reading of the flags: the same fixtures are published
+    twice, once through the whole table and once with the lag arm taken
+    out of it, and the two composites must be equal to the digit. (#3886 grew the
+    table to nine arms underneath this test; the comparison is a difference, so it
+    still says what it said — and `behaviour_exhibit` is excluded the same way, for
+    which `test_the_exhibit_arm_is_excluded_from_both_totals_and_still_printed` is the
+    direct form.) A `seconds` value
     that ever reached a weighted total would move that number by roughly 4 points
     (17.687 x 0.05 of weight against a ~0.6 composite), which is why equality here
     is the proof rather than the entry's own `weight=0.0`."""
@@ -376,7 +427,7 @@ def test_the_lag_arm_is_carried_in_the_table_and_excluded_from_both_totals(tmp_p
 
     keys = [c["key"] for c in with_lag["components"]]
     assert "gate_to_land_lag" in keys, "the published table still carries the row"
-    assert len(keys) == 8
+    assert len(keys) == 9
     lag = _component(with_lag, "gate_to_land_lag")
     assert lag["weight"] == 0.0
     assert lag["averageable"] is False
@@ -512,12 +563,12 @@ def test_an_absent_instrument_cannot_contribute_a_pass_even_at_a_perfect_score(t
 def test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_reading_100_percent(tmp_path):
     """Clause 2's fixture: all but one instrument missing, and the one that
     survives scores 100% — the total must refuse, not publish that as a composite.
-    Seven of the eight are omitted (#3541 grew the table), the surviving one being
-    `retrieval_nightly`."""
+    Eight of the nine are omitted (#3541 grew the table to eight arms, #3886 to nine),
+    the surviving one being `retrieval_nightly`."""
     row, _, _ = _row(tmp_path, {"retrieval_nightly": 1.0},
                      omit=("iv_metrics", "automod_scorecard", "landed_outcomes",
                            "tool_quality", "uptake_probe", "funnel_census",
-                           "gate_to_land_lag"))
+                           "gate_to_land_lag", "behaviour_exhibit"))
 
     totals = row["totals"]
     assert totals["status"] == "refused"
@@ -527,7 +578,7 @@ def test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_readi
     assert totals["min_scored"] == EII.MIN_SCORED_COMPONENTS
     assert "refuses" in row["headline"]
     assert "1.0" not in json.dumps({"declared": totals["declared_weights"]})
-    assert len(row["dead_or_stale"]) == 7
+    assert len(row["dead_or_stale"]) == 8
     assert {d["status"] for d in row["dead_or_stale"]} == {"missing"}
 
 
@@ -620,7 +671,8 @@ def test_the_declared_weight_and_equal_weight_totals_differ_under_non_uniform_we
               "tool_quality": 0.9,         # quality 0.10, weight 0.10
               "uptake_probe": 1.0,         # quality 1.00, weight 0.05
               "funnel_census": 0.6,
-              "gate_to_land_lag": 17.687}  # weight 0.0, reported not averaged
+              "gate_to_land_lag": 17.687,  # weight 0.0, reported not averaged
+              "behaviour_exhibit": 0.9058}  # weight 0.0 too (#3886): in neither total
     row, _, _ = _row(tmp_path, values, omit=("tool_quality",))
     totals = row["totals"]
 
@@ -642,7 +694,8 @@ def test_a_sign_disagreement_between_the_two_totals_publishes_the_weights_decide
               "automod_scorecard": 0.1, "landed_outcomes": 0.9,  # quality .1, .1
               "tool_quality": 0.9, "uptake_probe": 0.9,           # quality .1, .9
               "funnel_census": 0.6,
-              "gate_to_land_lag": 17.687}   # weight 0.0, in neither total
+              "gate_to_land_lag": 17.687,   # weight 0.0, in neither total
+              "behaviour_exhibit": 0.9058}  # weight 0.0 as well (#3886)
     row, _, _ = _row(tmp_path, values, extra_rows=[prior], prior_rows=1)
     deltas = row["delta_vs_prior"]
 
@@ -661,7 +714,14 @@ def test_agreeing_totals_publish_the_number_rather_than_the_disagreement_headlin
     row, _, _ = _row(tmp_path, GOOD_VALUES, extra_rows=[prior], prior_rows=1)
 
     assert "the weights decide the answer" not in row["headline"]
-    assert row["headline"].startswith("6 of 8 instruments measured")
+    # `scored` is the count of arms that entered a total, not of arms that measured:
+    # seven components report `measured` here and six are scored, because the two
+    # shares carried by ruling — `funnel_census` and `behaviour_exhibit` — are published
+    # and excluded. The exclusion of the new one is asserted arithmetically in
+    # `test_the_exhibit_arm_is_excluded_from_both_totals_and_still_printed`; what the
+    # headline proves is that the DENOMINATOR grew with the table, which is the number a
+    # store cannot hide from.
+    assert row["headline"].startswith("6 of 9 instruments measured")
     assert row["weight_agreement"]["prior_rows_compared"] == 1
     assert row["weight_agreement"]["sign_disagreements"] == 0
     assert row["weight_agreement"]["decorative"] is True
@@ -771,6 +831,10 @@ def test_each_component_path_is_the_path_its_own_writer_declares():
         "landed_outcomes": landed_outcomes.landed_outcomes_path(),
         "uptake_probe": uptake.UPTAKE_ARTIFACT_DIR,
         "gate_to_land_lag": GTL.record_path(),
+        # #3886: the exhibit store's ONLY name, which since this round is also the one
+        # `app.behaviour_exhibit.out_dir()` returns. Before it, no entry could go here —
+        # there was no constant to name, and the arm could not have existed either.
+        "behaviour_exhibit": paths.BEHAVIOUR_EXHIBIT_DIR,
     }
     assert set(expected) == set(ALL_KEYS) == {i.key for i in EII.INSTRUMENTS}
     for key, want in expected.items():
@@ -783,8 +847,13 @@ def test_each_component_path_is_the_path_its_own_writer_declares():
     assert scorecard.scorecard_path().parent == state.STATE_DIR
     assert paths.DATA_ROOT not in state.STATE_DIR.parents, (
         "the automod ledger dir is outside the data root")
-    # And the four that ARE under the data root, so the table spans both worlds.
-    for key in ("retrieval_nightly", "tool_quality", "funnel_census", "iv_metrics"):
+    # And the five that ARE under the data root, so the table spans both worlds.
+    # `behaviour_exhibit` joined them in #3886, and it is the one whose whole purpose is
+    # living outside the tree: an artifact the sweep wrote into the repo would be a
+    # tracked-file stray that `app/live_strays.py` counts, which
+    # `tests/test_behaviour_exhibit_sweep.py` pins from the writer's side.
+    for key in ("retrieval_nightly", "tool_quality", "funnel_census", "iv_metrics",
+                "behaviour_exhibit"):
         assert paths.DATA_ROOT in expected[key].parents, key
 
     # #3541: the lag journal joins BOTH names the recorder owns — the state dir and
@@ -1166,25 +1235,29 @@ def test_the_module_cli_appends_one_row_and_exits_zero_on_the_ok_branch(tmp_path
         "this fixture is the ok branch — the exit-1 test below is the other one, so "
         "the pair pins a mapping rather than self-consistency")
     assert rows[0]["date"] == "2026-10-13", "`--now` is what stamps the row"
-    assert len(rows[0]["components"]) == 8
+    assert len(rows[0]["components"]) == 9, (
+        "the subprocess publishes the whole table, arms carried by ruling included — "
+        "#3886 added the ninth")
 
 
 def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(tmp_path):
-    """The other exit branch on the same seam: seven of the eight instruments
+    """The other exit branch on the same seam: eight of the nine instruments
     missing, so the totals refuse, the refusal is still published as the day's
     record, and the exit code is 1 — because `main()` returning 0 whatever the
     totals said is how a scheduler ends up reading an index that measured nothing
-    as a green run. Seven, not six, because #3541 grew the table to eight arms and
-    `gate_to_land_lag` is one of the omitted ones: it is seeded nowhere here, and
-    a fixture that left it reading the live journal would make this run depend on
-    a real artifact instead of a snapshot."""
+    as a green run. Eight, not seven, because #3541 grew the table to eight arms,
+    #3886 to nine, and `gate_to_land_lag` and `behaviour_exhibit` are both among the
+    omitted ones: neither is seeded here, and a fixture that left either reading its
+    live store would make this run depend on a real artifact instead of a snapshot —
+    for the exhibit arm that would mean reading a store whose only artifact is dated
+    2026-11-04 and silently deciding the fixture's staleness from it."""
     out = tmp_path / "cli-refused"
     proc = _run_publisher(
         "--roots", str(_roots_file(
             tmp_path, {"retrieval_nightly": 1.0},
             omit=("iv_metrics", "automod_scorecard", "landed_outcomes",
                   "tool_quality", "uptake_probe", "funnel_census",
-                  "gate_to_land_lag"))),
+                  "gate_to_land_lag", "behaviour_exhibit"))),
         "--out-dir", str(out), "--now", "2026-10-13T03:40:00+00:00", "--print")
     assert proc.returncode == 1, (
         f"an index that refused exited {proc.returncode}: a caller that ignores the "
@@ -1194,7 +1267,7 @@ def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(
     rows = EII.read_series(out)
     assert len(rows) == 1, "a refused run publishes one row, not zero"
     assert rows[0]["totals"]["status"] == "refused"
-    assert len(rows[0]["dead_or_stale"]) == 7
+    assert len(rows[0]["dead_or_stale"]) == 8
 
 
 def test_no_record_prints_and_creates_nothing_even_on_the_refused_branch(tmp_path):
@@ -1251,3 +1324,205 @@ def test_the_default_out_dir_is_the_declared_store_constant(tmp_path, monkeypatc
     assert rc == 0
     assert len(EII.read_series(target)) == 1, (
         "the default resolved somewhere other than the patched constant")
+
+
+# ── #3886: the exhibit store gets ONE name, and a missed day gets ONE line ─────
+#
+# The sweep landed 2026-11-04, wrote one artifact, and was never run again. Nothing
+# could have noticed: the store was named by no constant in `app.paths` — the writer
+# recomputed `DATA_ROOT / "eval" / "behaviour-exhibit"` inside `out_dir()`, behind an
+# `except Exception` that fell back to `Path.home() / "lloyd-data"` — and it was keyed
+# in no table, so no reader could call it missing. That is #2275's tool-quality fate
+# arm for arm, and the only difference is that tool_quality IS a row here, which is the
+# sole reason its death is visible (`ls ~/lloyd-data/eval/tool-quality/` says `No such
+# file or directory` and the index says `missing or stale: tool_quality`). These four
+# tests are the two halves of the fix: one path (clause 1) and one printed line (clause
+# 2). The comparison the arm's artifact carries is `app.behaviour_exhibit`'s own job —
+# clauses 4 and 5 are pinned in tests/test_behaviour_exhibit_sweep.py.
+
+#: The live store's only artifact, worker cells for `tool-call-caption-present`:
+#: 141,558 exhibited of 156,286 situations = 0.9058, Wilson [0.9043, 0.9072].
+_EXH_N = 156286
+_EXH_K = 141558
+
+
+def _exhibit_row(bid: str, k: int, n: int) -> dict:
+    """One per-behaviour row, in the shape `app.behaviour_exhibit.sweep` emits it — the
+    worker cells carry `exhibited` and `situations_encountered`, which is what
+    `worker_pooled` sums. A fixture that renamed either would silently pool to zero."""
+    return {"id": bid, "status": "measured",
+            "by_population": {"worker": {
+                "situations_encountered": n, "exhibited": k, "status": "measured"}}}
+
+
+def _exhibit_artifact(rows: list[dict], *, measured_at: str) -> dict:
+    """An artifact built with the WRITER's own pooling, not a hand-typed imitation.
+
+    The reason to call into `app.behaviour_exhibit` here rather than write the dict: the
+    index reads `worker_pooled`, so if the writer ever renames that field or changes how
+    `k`/`n` are summed, this file fails on the seam instead of publishing a `no-value`
+    row that looks like a missed day.
+    """
+    import app.behaviour_exhibit as bx
+    return {"schema": 1, "item": "#3749", "measured_at": measured_at,
+            "window_days": 7, "rows": rows, "worker_pooled": bx.worker_pooled(rows)}
+
+
+def _plant_exhibit(store: Path, doc: dict, *, day: str) -> Path:
+    store.mkdir(parents=True, exist_ok=True)
+    path = store / f"behaviour-exhibit-{day}.jsonl"
+    path.write_text(json.dumps(doc) + "\n", encoding="utf-8")
+    return path
+
+
+def test_the_exhibit_store_has_one_name_shared_by_its_writer_and_its_readers():
+    """Clause 1 as a shared name, checked in the one file that can see all three parties.
+
+    `app.paths` declares the store, `app.behaviour_exhibit.out_dir()` returns exactly that
+    object, and this index's directory accessor resolves to it too. Before #3886 the
+    middle and third legs could not hold: there was no constant, and `out_dir()` derived
+    the path itself — so the index and the sweep each had to spell `eval/behaviour-exhibit`
+    and could drift apart with nothing to notice.
+
+    The removed fallback is asserted textually, because a behavioural test cannot reach it:
+    on a box where `app.paths` imports cleanly the old `except Exception: base =
+    Path.home() / "lloyd-data"` never fires, so the suite was green over a branch that
+    would have written the daily artifact into a layout this machine does not use.
+    """
+    import app.paths as p
+    import app.behaviour_exhibit as bx
+
+    want = p.DATA_ROOT / "eval" / "behaviour-exhibit"
+    assert p.BEHAVIOUR_EXHIBIT_DIR == want, (
+        "the store is named under DATA_ROOT or it is not the store the rest of the "
+        f"system can name; found {p.BEHAVIOUR_EXHIBIT_DIR}")
+    assert bx.out_dir() == want
+    assert bx.out_dir(None) == want, "the no-flag case is the scheduled run's case"
+    assert bx.out_dir(Path("/tmp/planted/elsewhere.jsonl")) == Path(
+        "/tmp/planted/elsewhere.jsonl"), "an explicit --out still wins"
+    assert _instr("behaviour_exhibit").artifact() == want
+    assert want not in Path.home().parents and str(want).startswith(str(p.DATA_ROOT))
+
+    # The removed fallback, checked on the CODE and not the prose: `out_dir`'s own
+    # docstring names `Path.home() / "lloyd-data"` to explain what used to be there, so a
+    # plain substring scan of the function text would trip on its own history. The AST's
+    # statements after the docstring are the behaviour.
+    import ast
+    import inspect
+
+    src = inspect.getsource(bx.out_dir)
+    fn = ast.parse(textwrap.dedent(src)).body[0]
+    code = "\n".join(ast.get_source_segment(textwrap.dedent(src), st) or ""
+                     for st in fn.body[1:])
+    assert "home" not in code and "except" not in code, (
+        "`out_dir()` grew back a fallback: an instrument that cannot name its own store "
+        f"must raise, not quietly write somewhere else. Code was:\n{code}")
+    assert "BEHAVIOUR_EXHIBIT_DIR" in code, (
+        "out_dir() must RETURN the constant, not rejoin the path from DATA_ROOT — the "
+        "second spelling is the bug this clause removes")
+    assert code.strip().endswith("return Path(BEHAVIOUR_EXHIBIT_DIR)"), code
+
+
+def test_a_day_with_no_exhibit_artifact_prints_it_in_headline_and_table(tmp_path):
+    """Clause 2's observable, in both places a reader could look. See the sibling docstring."""
+    others = {k: v for k, v in GOOD_VALUES.items() if k != "behaviour_exhibit"}
+    row, _, _ = _row(tmp_path, others, omit=("behaviour_exhibit",))
+    assert [d["key"] for d in row["dead_or_stale"]] == ["behaviour_exhibit"], (
+        "the exhibit store is the one arm with no artifact, which is what the item "
+        "measured on 2026-11-07: `ls ~/lloyd-data/eval/behaviour-exhibit/` -> one file, "
+        "dated 2026-11-04")
+    assert row["headline"].endswith("missing or stale: behaviour_exhibit"), row["headline"]
+    rendered = EII.render(row)
+    assert any(line.startswith("behaviour_exhibit") for line in rendered.splitlines()), (
+        "the key must appear as a row of the printed table, not only inside the headline")
+
+    # Two days old against a 1-day cadence: present, and still a missed run.
+    stale = tmp_path / "stale-store"
+    _plant_exhibit(stale, _exhibit_artifact(
+        [_exhibit_row("tool-call-caption-present", _EXH_K, _EXH_N)],
+        measured_at="2026-10-11T02:24:50+00:00"), day="2026-10-11")
+    reading = EII.read_instrument(_instr("behaviour_exhibit"),
+                                  today=NOW.date(), root_override=stale)
+    assert reading.status == "stale" and reading.age_days == 2, vars(reading)
+    assert "cadence of 1 d" in reading.detail, reading.detail
+    assert "109-behaviour-exhibit-daily" in reading.detail, (
+        "the line that reports a missed day must also name who was supposed to run it — "
+        "that pairing is what makes `stale` actionable instead of a warning")
+
+
+def test_the_exhibit_arm_reads_the_pair_its_writer_publishes(tmp_path):
+    """The arm's pointers, proved against the writer's own `worker_pooled`.
+
+    Values are the live 2026-11-04 artifact's worker cells: pooled alone over the caption
+    arm the rate is 141,558 / 156,286 = 0.9058 and the interval is the writer's own
+    [0.9043, 0.9072], so the index cannot disagree with the file it reports. The pair
+    shape (`{value, ci_low, ci_high}`) is `landed_outcomes`' rule for the same reason: a
+    re-derived interval silently re-scales to whatever N the reader assumed. The empty
+    case is asserted too — a week with no scored situation is NOT a rate of zero, which
+    is also why the user population (29 turns against 13,903 on the 11-04 witness, per
+    #3749's owed-check ruling of 2026-11-07T10:34) is not pooled here at all.
+    """
+    import app.behaviour_exhibit as bx
+
+    store = tmp_path / "exhibit-store"
+    doc = _exhibit_artifact(
+        [_exhibit_row("tool-call-caption-present", _EXH_K, _EXH_N)],
+        measured_at="2026-10-12T02:24:50+00:00")
+    assert doc["worker_pooled"]["k"] == _EXH_K and doc["worker_pooled"]["n"] == _EXH_N
+    assert doc["worker_pooled"]["behaviours_scored"] == 1
+    _plant_exhibit(store, doc, day=FRESH)
+    reading = EII.read_instrument(_instr("behaviour_exhibit"),
+                                  today=NOW.date(), root_override=store)
+    assert reading.status == "measured", vars(reading)
+    assert reading.value == pytest.approx(_EXH_K / _EXH_N, abs=1e-6), vars(reading)
+    assert reading.denominator == _EXH_N
+    assert reading.ci95 == pytest.approx(
+        [doc["worker_pooled"][k] for k in ("ci_low", "ci_high")], abs=2e-6)
+    lo, hi = bx.wilson_interval(_EXH_K, _EXH_N)
+    assert reading.ci95[0] == pytest.approx(lo, abs=2e-6), (
+        "the published interval IS wilson_interval's, not a rounded rate plus a constant")
+    assert (hi - lo) / 2 * 100 == pytest.approx(0.1449, abs=0.005), (
+        "the caption arm's own half-width at N=156,286, in pp — the figure #3886 "
+        "correction 7 puts at ±0.15pp where the item text said ±1.5pp")
+
+    empty = _exhibit_artifact(
+        [{"id": "x", "status": "not scored: detector cannot read the transcript",
+          "by_population": {"worker": {"situations_encountered": 0, "exhibited": 0,
+                                       "status": "not scored: detector cannot read"}}}],
+        measured_at="2026-10-12T02:24:50+00:00")
+    assert empty["worker_pooled"]["rate"] is None, "an empty denominator is not a zero"
+    _plant_exhibit(store, empty, day=FRESH)
+    reading = EII.read_instrument(_instr("behaviour_exhibit"),
+                                  today=NOW.date(), root_override=store)
+    assert reading.status == "no-value", vars(reading)
+    assert reading.value is None, (
+        "an empty denominator reads as NO VALUE, never as a rate of 0.0 — a zero would "
+        "enter the arm's history as a collapse in exhibit behaviour that did not happen")
+    assert reading.status in ("missing", "stale", "no-value"), (
+        "and that status is one `build_row` lists as dead or stale, so the day is named")
+
+
+def test_the_exhibit_arm_is_carried_in_the_table_and_excluded_from_both_totals(tmp_path):
+    """Reported, never averaged — proven by arithmetic, per the #3541 precedent.
+
+    Same fixtures, published twice: once over the whole table and once with
+    `behaviour_exhibit` removed from it. The two composites must be equal to the digit,
+    which is the only thing that makes "reported, not averaged" a property instead of a
+    comment. The arm is nevertheless present in the table with its own unit — being
+    present is what makes a dead store a printed line.
+    """
+    with_arm, _, _ = _row(tmp_path / "with", GOOD_VALUES)
+    without = [i for i in EII.INSTRUMENTS if i.key != "behaviour_exhibit"]
+    assert sum(i.weight for i in without) == pytest.approx(1.0), (
+        "the seven weighted arms still sum to 1.0 — the new one adds no weight")
+    without_arm, _, _ = _row(tmp_path / "without", GOOD_VALUES, instruments=without)
+    assert (with_arm["totals"]["declared_weights"]
+            == without_arm["totals"]["declared_weights"]), (
+        "a share pooled over denominators six orders of magnitude apart may not move "
+        "the composite")
+    assert (with_arm["totals"]["equal_weights"]
+            == without_arm["totals"]["equal_weights"])
+    assert len(without_arm["components"]) == 8 and len(with_arm["components"]) == 9
+    assert _component(with_arm, "behaviour_exhibit")["contributes"] is False
+    assert any(x["key"] == "behaviour_exhibit" for x in with_arm["totals"]["excluded"])
+    assert with_arm["totals"]["status"] == without_arm["totals"]["status"] == "ok"

@@ -462,3 +462,38 @@ if IS_WORKTREE:
 # whenever its own copy no longer matches the node set. A cache: losing it costs
 # one re-layout, never data.
 ENTITY_GRAPH_LAYOUT_PATH = DATA_ROOT / "mc-entity-graph-layout.json"
+
+
+# One dated artifact per sweep of behaviour exhibit rates (#3749's measurement, scheduled
+# by #3886): `app/behaviour_exhibit.py` owns the schema, writes exactly one
+# `behaviour-exhibit-<YYYY-MM-DD>.jsonl` per run, and prunes its own files past
+# `behaviour_exhibit.RETENTION_DAYS` — the same self-bounding shape as
+# `EVAL_SUBSTRATE_FUZZ_DIR` and `EVAL_DJEV_REPORTS_DIR` above, for the same reason: a
+# store that waits for the retention sweep's table to notice it is unbounded until
+# someone writes that row.
+#
+# This line is the store's ONLY name (#3886 clause 1). Before it the constant did not
+# exist and the writer computed `DATA_ROOT / "eval" / "behaviour-exhibit"` itself inside
+# `behaviour_exhibit.out_dir()`, under an `except Exception` that fell back to
+# `Path.home() / "lloyd-data"`: two definitions of one path, and the second pointed the
+# daily artifact at a layout this box does not use whenever `app.paths` failed to import.
+# Naming it here is also what lets a reader that is not the writer — the eval instrument
+# index's `behaviour_exhibit` arm — ask where the store is without re-spelling it, the
+# rule `tests/test_eval_instrument_index.py::test_each_component_path_is_the_path_its_own_writer_declares`
+# enforces for every other directory in this module.
+#
+# WHY IT IS AT THE BOTTOM AND NOT BESIDE ITS TWO EVAL SIBLINGS. This file is cited by
+# line number from the architecture docs — `architecture/tools.md`,
+# `architecture/subliminal.md`, `architecture/ambient-context-injection.md`,
+# `architecture/measurement.md` and `architecture/autonomy-jobs.md` anchor into it — and
+# `tests/test_architecture_coverage_doc_claims.py::test_every_line_anchor_in_an_architecture_doc_lands_inside_a_definition`
+# requires each of those numbers to fall inside the definition its own sentence names.
+# The first attempt at this constant was inserted at line 165, between `EVAL_DJEV_REPORTS_DIR`
+# and `VOICE_PROFILES_DIR`, and sixteen lines below the top of the file is exactly where
+# two of those anchors live: the gate run in round SM_20261107_111015 reported seven
+# failures from that one insertion, among them `app/paths.py:310 is '    """', not the
+# binding` and the fallback-anchor ratchet moving 192→194, because the two cited lines had
+# slid down onto other definitions. A new constant here is therefore appended below every
+# cited line, which is also where `ENTITY_GRAPH_LAYOUT_PATH` above already sits: the tail
+# of this module is the append-only end.
+BEHAVIOUR_EXHIBIT_DIR = DATA_ROOT / "eval" / "behaviour-exhibit"

@@ -19,6 +19,7 @@ depend on production traffic:
 """
 from __future__ import annotations
 
+import argparse
 import gzip
 import json
 import sys
@@ -31,6 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import app.behaviour_exhibit as BE  # noqa: E402
+
+import ast  # noqa: E402  # clause 5: the no-hard-coded-bar check reads the module's AST
 
 NOW = datetime(2026, 11, 4, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -1149,3 +1152,512 @@ def test_paired_rows_reads_a_non_proportion_rate_at_the_widest_variance():
     assert prop["mdd_baseline_rate"] == 0.5 and prop["mdd_baseline_note"] is None
     assert prop["minimum_detectable_delta"] == pytest.approx(0.245494, abs=1e-5)
     assert prop["discriminated"] is True
+
+# ── #3886 clauses 4 and 5: the report must SAY whether a rate moved ───────────
+#
+# The sweep has printed four Wilson intervals since it landed and never once said whether
+# any of them MOVED. #3749's owed entry asks for one sentence — did the rate change by
+# more than that arm's own interval allows, or is this what a quiet week looks like — and
+# the 2026-11-04 run measured a caption move of 0.6pp with non-overlapping intervals
+# [0.9041, 0.9070] against [0.897, 0.900] that nothing in the report said a word about.
+# These tests pin the sentence, the population it is measured on, and where its bar comes
+# from.
+#
+# The fixtures carry the live artifact's own worker cells (caption 141,558/156,286;
+# read-back 285/759; dangling 853/1,226; protected-write 1,863/2,233) so the numbers
+# asserted below are the numbers the store holds, not numbers tuned to the code.
+
+
+def _cell(k: int, n: int) -> dict:
+    """One population cell as `sweep` emits it, including the N=0 case, which gets
+    `rate: None` and no interval rather than 0.0."""
+    return {"situations_encountered": n, "exhibited": k,
+            "status": "measured" if n else "not scored: no situation in the window",
+            "rate": (round(k / n, 6) if n else None),
+            "wilson95": (list(BE.wilson_interval(k, n)) if n else None)}
+
+
+def _mrow(bid: str, k: int, n: int, *, user: "tuple[int, int] | None" = None) -> dict:
+    return {"id": bid, "status": "measured" if n else "not scored",
+            "situations_encountered": n, "exhibited": k,
+            "rate": (round(k / n, 6) if n else None),
+            "wilson95": (list(BE.wilson_interval(k, n)) if n else None),
+            "by_population": dict(
+                {"worker": _cell(k, n)},
+                **({"user": _cell(*user)} if user else {}))}
+
+
+#: The live 2026-11-04 artifact's four worker cells, verbatim, as a prior reading.
+LIVE_PRIOR_ROWS = [
+    _mrow("tool-call-caption-present", 141558, 156286),
+    _mrow("read-back-before-success-claim", 285, 759),
+    _mrow("no-dangling-announcement", 853, 1226),
+    _mrow("no-raw-write-to-protected-path", 1863, 2233),
+]
+
+
+def _mart(rows: "list[dict]", measured_at: str, *, corpus: dict | None = None) -> dict:
+    return {"schema": 1, "measured_at": measured_at, "window_days": 7, "rows": rows,
+            "worker_pooled": BE.worker_pooled(rows),
+            "corpus": corpus or {"files_read": 6953, "plain": 2457, "gzipped": 4496,
+                                 "window_filter": "file mtime inside the window, "
+                                                  "both suffixes read"}}
+
+
+def _write_artifact(store: Path, doc: dict, *, day: str) -> Path:
+    store.mkdir(parents=True, exist_ok=True)
+    path = store / f"behaviour-exhibit-{day}.jsonl"
+    path.write_text(json.dumps(doc) + "\n", encoding="utf-8")
+    return path
+
+
+def _movement(current: dict, store: Path) -> str:
+    """The block as `main` prints it: the prior is found by date in the store, not passed
+    in — the path a scheduled run actually takes."""
+    return BE.render_movement(current, store=store)
+
+
+def _line(text: str, bid: str) -> str:
+    return next(l for l in text.splitlines() if l.strip().startswith(bid + " worker"))
+
+
+def _half_pp(k: int, n: int) -> str:
+    """The bar the sentence on THAT arm must print, computed here independently of the
+    code under test so the assertion is an outside check on `wilson_interval`."""
+    lo, hi = BE.wilson_interval(k, n)
+    return f"±{(hi - lo) / 2 * 100:.2f}pp"
+
+
+def test_an_earlier_dated_artifact_makes_the_report_say_which_moves_are_real(tmp_path):
+    """Clause 4. Every comparison line carries the exhibit rate with its Wilson interval
+    AND a verdict in words about the change from that artifact.
+
+    The two runs are built to DISAGREE, which is the only construction that proves the bar
+    is per-arm rather than one threshold applied to everything:
+
+      * caption 141,558/156,286 unchanged against itself → change +0.00pp against its own
+        ±0.14pp → noise;
+      * read-back 285/759 → 0/759 → change −37.55pp against ±0.25pp → a real move;
+      * the pooled arm moves −0.18pp against ±0.15pp → real, because the small arm moved
+        and the 156k arm did not.
+
+    A single hard-coded threshold anywhere in the path calls at least one of those three
+    wrong, and the three half-widths printed are three different numbers.
+    """
+    store = tmp_path / "store"
+    _write_artifact(store, _mart(LIVE_PRIOR_ROWS, "2026-11-04T02:24:50+00:00"),
+                    day="2026-11-04")
+    current = _mart([LIVE_PRIOR_ROWS[0],
+                     _mrow("read-back-before-success-claim", 0, 759),
+                     LIVE_PRIOR_ROWS[2], LIVE_PRIOR_ROWS[3]],
+                    "2026-11-07T06:00:00+00:00")
+    text = _movement(current, store)
+
+    assert "movement vs behaviour-exhibit-2026-11-04.jsonl" in text, text
+    assert "measured_at 2026-11-04T02:24:50+00:00" in text, (
+        "the sentence must name what it compared against, or a reader cannot tell a "
+        "second reading from a first one")
+
+    caption = _line(text, "tool-call-caption-present")
+    assert caption.strip() == (
+        "tool-call-caption-present worker 141558/156286 = 0.9058 [0.9043, 0.9072]; "
+        "baseline 141558/156286 = 0.9058; change +0.00pp against this arm's own "
+        "±0.14pp Wilson half-width at worker N=156286 — inside it: noise, not a move"), caption
+    assert _half_pp(141558, 156286) in caption, caption
+    assert "inside it: noise, not a move" in caption, caption
+
+    readback = _line(text, "read-back-before-success-claim")
+    assert "0/759 = 0.0000 [0.0000, 0.0050]" in readback, readback
+    assert "baseline 285/759 = 0.3755" in readback, readback
+    assert "change -37.55pp" in readback, readback
+    assert _half_pp(0, 759) in readback, readback
+    assert "beyond it: a real move, not noise" in readback, readback
+
+    pooled = next(l for l in text.splitlines() if "ALL SCORED" in l)
+    assert "ALL SCORED (4 behaviours, pooled) 144274/160504 = 0.8989 [0.8974, 0.9003]" in pooled, pooled
+    assert "baseline 144559/160504 = 0.9007" in pooled, pooled
+    assert "change -0.18pp" in pooled and _half_pp(144274, 160504) in pooled, pooled
+    assert "beyond it" in pooled, (
+        "the pooled arm moved because the small arm did; a pooled figure that only "
+        "followed the 156k-situation arm would report a still day\n" + pooled)
+
+    halves = {_half_pp(141558, 156286), _half_pp(0, 759), _half_pp(144274, 160504)}
+    assert len(halves) == 3, f"three arms printed one shared bar: {halves}"
+
+
+def test_the_first_reading_says_so_and_compares_nothing(tmp_path):
+    """Clause 4's other half: with no earlier dated artifact the report refuses the
+    comparison out loud, because a first run's intervals printed beside nothing else are
+    exactly the condition under which a reader invents a baseline."""
+    store = tmp_path / "empty-store"
+    store.mkdir()
+    text = _movement(_mart(LIVE_PRIOR_ROWS, "2026-11-04T02:24:50+00:00"), store)
+    assert "first reading" in text, text
+    assert "compares nothing" in text, text
+    assert "±" not in text and "half-width" not in text, (
+        "no bar may be printed when there is nothing to compare against: the first run's "
+        f"job is to BE the baseline\n{text}")
+    assert "noise, not a move" not in text and "a real move" not in text, text
+
+
+def test_a_baseline_dated_the_same_day_as_the_run_is_not_compared_against(tmp_path):
+    """The artifact this run wrote must never become its own baseline.
+
+    Both 2026-11-04 runs of that night are live evidence of the trap: the store's artifact
+    (measured_at 02:24:50Z, caption 141,983/156,755) and the tracked witness (03:37:58Z,
+    142,262/157,101) differ, so a comparison that read a same-day file would report the
+    gap between two runs of one night as a behaviour change. `prior_artifact` therefore
+    takes files dated STRICTLY before the run's own day.
+    """
+    store = tmp_path / "store"
+    same_day = _mart([_mrow("tool-call-caption-present", 142262, 157101)],
+                     "2026-11-04T03:37:58+00:00")
+    _write_artifact(store, same_day, day="2026-11-04")
+    text = _movement(_mart([_mrow("tool-call-caption-present", 141983, 156755)],
+                           "2026-11-04T02:24:50+00:00"), store)
+    assert "first reading" in text, text
+    assert "157101" not in text, (
+        "a same-day artifact was used as a baseline; the two 2026-11-04 runs differ by "
+        f"346 situations and would read as a behaviour change\n{text}")
+
+
+def test_a_comparison_uses_nothing_but_the_worker_population(tmp_path):
+    """Clause 4's population, which is #3749's owed-check ruling of 2026-11-07T10:34 (run
+    20261107_023154_owedcheck_2421) barring the `user` population from trending.
+
+    The fixture makes that ruling the whole test: the worker cells are identical between
+    the two runs while the user cells go 40/40 → 0/40. A report that pooled both
+    populations, or compared the user one, would print a collapse here. It must print
+    noise, and it must never name the user arm.
+    """
+    prior_rows = [dict(r, by_population=dict(r["by_population"],
+                                             user=_cell(*u)))
+                  for r, u in zip(LIVE_PRIOR_ROWS, [(40, 40), (20, 20), (15, 15), (9, 9)])]
+    current_rows = [dict(r, by_population=dict(r["by_population"],
+                                               user=_cell(0, u[1])))
+                    for r, u in zip(LIVE_PRIOR_ROWS, [(40, 40), (20, 20), (15, 15), (9, 9)])]
+    store = tmp_path / "store"
+    _write_artifact(store, _mart(prior_rows, "2026-11-04T02:24:50+00:00"), day="2026-11-04")
+    text = _movement(_mart(current_rows, "2026-11-07T06:00:00+00:00"), store)
+
+    assert "worker" in text
+    assert "user" not in text.replace("worker", ""), text
+    assert BE.MOVEMENT_POPULATION == "worker"
+    for line in text.splitlines():
+        if line.startswith("  ") and " worker " in line:
+            assert "inside it: noise, not a move" in line, (
+                "the worker rates did not move by a hundredth of a point; the user "
+                f"population went from 100% to 0% and is not evidence\n{line}")
+    assert "0/40" not in text and "40/40" not in text, text
+
+
+def test_the_movement_bar_comes_from_wilson_interval_and_nowhere_else(tmp_path):
+    """Clause 5: the ± in the sentence is that arm's own interval at that run's N.
+
+    #3886's own triage measured the caption arm at ±0.1449pp (±0.15pp) where the item text
+    said ±1.5pp — a factor of ten. A threshold copied from that list would have called the
+    0.6pp caption move #3749 measured on 2026-11-04 (CIs [0.9041, 0.9070] against
+    [0.897, 0.900], non-overlapping, i.e. real) noise, every day, silently. So the check is
+    structural: the comparison functions may hold no rate-shaped float literal, and no name
+    containing 'half' may be bound to a literal anywhere in the module.
+    """
+    src = Path(BE.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    def floats_in(fn_name: str) -> list:
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == fn_name)
+        return [c.value for c in ast.walk(fn)
+                if isinstance(c, ast.Constant) and isinstance(c.value, float)]
+
+    for fn_name in ("movement_lines", "worker_pooled", "render_movement"):
+        got = floats_in(fn_name)
+        assert not [f for f in got if 0.0 < f < 1.0], (
+            f"{fn_name}() holds a rate-shaped literal {got}; the comparison bar must come "
+            "from wilson_interval at run time, never from a baked-in constant")
+    body = src.split("def movement_lines(")[1].split("\ndef ")[0]
+    assert "wilson_interval" in body, (
+        "the comparison no longer calls wilson_interval, so its ± is somebody's guess")
+
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            named, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign):
+            named, value = [node.target], node.value
+        else:
+            continue
+        for t in named:
+            if "half" in getattr(t, "id", "").lower() and isinstance(value, ast.Constant):
+                offenders.append(f"{t.id} = {value.value!r}")
+    assert offenders == [], (
+        f"half-width(s) bound to a literal: {offenders} — each must be (hi − lo) / 2 of a "
+        "wilson_interval result")
+
+
+def test_no_comparison_or_trend_is_made_over_the_gzipped_file_split(tmp_path):
+    """Clause 5's second half, with the reason measured: the window is `st_mtime >=
+    cutoff`, and 4,496 of the 6,953 files in the live corpus were gzipped, so a series of
+    those counts graphs the retention sweep's gzip night, not behaviour (#3885 measured
+    4,457 of 7,051 the same way and owns the mtime→content-date fix).
+
+    The assertion is not a comment: the file split is made WILDLY different (plain
+    2,457→180, gzipped 4,496→6,800) while the rates are identical, and the movement block
+    must come out byte-for-byte the same. Anywhere a comparison read the split, the
+    verdicts would move with the sweep.
+    """
+    rows = LIVE_PRIOR_ROWS
+    wild_prior = _write_artifact(
+        tmp_path / "wild",
+        _mart(rows, "2026-11-04T02:24:50+00:00",
+              corpus={"files_read": 6953, "plain": 2457, "gzipped": 4496,
+                      "window_filter": "file mtime inside the window, both suffixes read"}),
+        day="2026-11-04").parent
+    calm_prior = _write_artifact(
+        tmp_path / "calm",
+        _mart(rows, "2026-11-04T02:24:50+00:00",
+              corpus={"files_read": 6953, "plain": 6953, "gzipped": 0,
+                      "window_filter": "file mtime inside the window, both suffixes read"}),
+        day="2026-11-04").parent
+    current = _mart(rows, "2026-11-07T06:00:00+00:00",
+                    corpus={"files_read": 6980, "plain": 180, "gzipped": 6800,
+                            "window_filter": "file mtime inside the window, both suffixes read"})
+
+    wild = _movement(current, wild_prior)
+    calm = _movement(current, calm_prior)
+    assert wild == calm, (
+        "the movement block changed when only the plain/gzipped counts moved, so a "
+        f"comparison is reading the file split\n--- wild ---\n{wild}\n--- calm ---\n{calm}")
+    for needle in ("6800", "2457", "4496", "6953", "6980", "180"):
+        assert needle not in wild, f"the corpus count {needle} leaked into the comparison"
+
+    # The structural form of the same rule: the comparison functions may not READ the
+    # corpus block at all. Prose in the head line says the split is not compared, so the
+    # check is on the keys actually looked up, not on the words appearing nearby.
+    tree = ast.parse(Path(BE.__file__).read_text(encoding="utf-8"))
+    for fn_name in ("movement_lines", "worker_pooled", "prior_artifact", "render_movement"):
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == fn_name)
+        keys = {c.value for c in ast.walk(fn) if isinstance(c, ast.Constant)
+                and isinstance(c.value, str)}
+        touched = keys & {"corpus", "plain", "gzipped", "files_read"}
+        assert touched == set(), (
+            f"{fn_name}() looks up the corpus keys {touched}: the plain/gzipped split is "
+            "mtime-shaped and cannot carry a comparison or a trend until #3885 makes the "
+            "window content-dated")
+
+
+def test_a_run_with_no_out_flag_writes_the_named_store_and_reports_movement(tmp_path,
+                                                                           monkeypatch,
+                                                                           capsys):
+    """The two surfaces joined as one real invocation: no `--out`, so the artifact lands at
+    the path `app.paths` names, and the previous day's artifact is what gets compared.
+
+    This is the process boundary the item is about. The scheduled command is
+    `.venvs/lloyd/bin/python -m app.behaviour_exhibit --days 7` — it carries no output
+    path, so the instrument's whole existence as an arm of the eval index rests on
+    `out_dir()` returning the constant the index reads (clause 1, in service of clause 2).
+    The second invocation then has to find yesterday's file as its baseline, and must not
+    find today's own.
+    """
+    import app.paths as p
+
+    store = tmp_path / "registered-store"
+    monkeypatch.setattr(p, "BEHAVIOUR_EXHIBIT_DIR", store)
+    # Stamped as a harness run on purpose: an unstamped record is `unattributed`,
+    # which would leave the worker denominator empty and the report with the
+    # "no rate" branch instead of a comparison line.
+    write_session(tmp_path, "20261106_100000_main_aaaa", captioned_turn(),
+                  source="autonomy-task:24")
+    assert BE.out_dir() == store, "out_dir() must resolve the constant at call time"
+
+    assert BE.main(["--sessions-dir", str(tmp_path), "--days", "7"]) == 0
+    first_run = capsys.readouterr().out
+    written = sorted(q.name for q in store.iterdir())
+    assert len(written) == 1 and written[0].startswith("behaviour-exhibit-"), written
+    assert f"wrote {store / written[0]}" in first_run, first_run
+    assert "first reading" in first_run, (
+        "an empty store is a first reading and the report must say so\n" + first_run)
+
+    _write_artifact(store, _mart(LIVE_PRIOR_ROWS, "2026-11-06T06:00:00+00:00"),
+                    day="2026-11-06")
+    assert BE.main(["--sessions-dir", str(tmp_path), "--days", "7"]) == 0
+    second_run = capsys.readouterr().out
+    assert "movement vs behaviour-exhibit-2026-11-06.jsonl" in second_run, second_run
+    assert "Wilson half-width" in second_run, second_run
+    mv = second_run.split("movement vs ")[1].split("wrote ")[0]
+    assert written[0] not in mv, (
+        "the run compared itself against the artifact it had just written, which is how "
+        f"two runs of one night read as a behaviour change: {mv}")
+    assert mv.startswith("behaviour-exhibit-2026-11-06.jsonl"), mv
+    assert (store / "behaviour-exhibit-2026-11-06.jsonl").exists(), (
+        "retention must not have eaten the 1-day-old baseline: without it the next run "
+        "has nothing to compare against either")
+
+
+# ── #3886 clause 3: the sweep is scheduled ────────────────────────────────────
+#
+# Clause 1 and 2 give the store a name and a reader; clause 3 is what makes it run. This
+# test is the seam between the two trees: the code lives in the checkout, the schedule
+# lives in ~/obsidian/autonomy/, and the only thing that ties them is a `description`
+# string that quotes the command. Read from the live vault through `app.paths.VAULT_ROOT`
+# — the same root `app/autonomy.py` lists tasks from, so this asserts on the directory the
+# scheduler will actually read.
+#
+# `status: draft` is asserted, not excused. An unattended round cannot arm a recurring job
+# (`app/harness/policy.py::create_arms_a_task` refuses it on a task that has never run), so
+# the file lands fully authored and one flip from firing — the #2858 precedent, which
+# landed 101-gate-to-land-lag-daily-record.md the same way. The clause is "a daily task
+# exists, on the right cadence, after the retention sweep, running that command"; the
+# flip is what the first published reading waits on, and it is named in the notes.
+
+TASK_FILE = "109-behaviour-exhibit-daily.md"
+RETENTION_TASK_FILE = "79-retention-sweep.md"
+
+
+def _task_fields(name: str) -> dict:
+    """A task file's front matter, loaded exactly as `app.autonomy` loads it (yaml)."""
+    import yaml
+
+    from app.paths import VAULT_ROOT
+    f = VAULT_ROOT / "autonomy" / name
+    if not f.exists():
+        pytest.skip(f"{f} is not in the vault: the autonomy file is landed through "
+                    "automod_vault_land, which commits the vault separately from this "
+                    "tree — running the suite against a vault without it is a missing "
+                    "witness, not a passing clause")
+    text = f.read_text(encoding="utf-8")
+    fm = text.split("---", 2)[1]
+    fields = yaml.safe_load(fm)
+    assert isinstance(fields, dict), f"{f}: front matter did not parse"
+    return fields
+
+
+def test_the_sweep_is_scheduled_as_a_daily_task_running_the_documented_command():
+    """Clause 3, read out of the task file the scheduler will load.
+
+    Four things the item names, each checked rather than assumed: a fresh id (the store
+    grew from #108, so 109 and nothing lower, which would overwrite a live task),
+    `frequency: daily`, the command exactly as the clause states it with nothing added, and
+    an hour after the retention sweep. The command assertion is the cross-tree seam: it is
+    a string inside a `description` field, and the only reason a daily job runs the real
+    sweep instead of paraphrasing it is that the string says so — so the string is
+    compared to the module's own parser as well as to the clause text.
+    """
+    fm = _task_fields(TASK_FILE)
+    assert fm["id"] == 109, fm["id"]
+    assert fm["frequency"] == "daily", fm["frequency"]
+    assert fm["skill_name"] == "behaviour-exhibit-daily", fm["skill_name"]
+    from app.paths import VAULT_ROOT
+    assert (VAULT_ROOT / "skills" / fm["skill_name"] / "SKILL.md").exists(), (
+        "a task whose skill_name resolves to nothing skips at dispatch and looks like a "
+        "day the sweep was simply not run")
+
+    cmd = ".venvs/lloyd/bin/python -m app.behaviour_exhibit --days 7"
+    assert cmd in fm["description"], (
+        "the description must carry the command verbatim; it is the only text the worker "
+        "is actually delivered")
+    # Every mention of the module in the delivered text is checked, because the flags the
+    # description forbids are also mentioned BY name there — scanning for `--out` anywhere
+    # would trip on the prohibition that forbids it. What matters is that no occurrence of
+    # the command carries an extra flag: each must close right after `--days 7`.
+    mentions = [i for i in range(len(fm["description"]))
+                if fm["description"].startswith("-m app.behaviour_exhibit", i)]
+    assert mentions, fm["description"][:200]
+    for i in mentions:
+        tail = fm["description"][i + len("-m app.behaviour_exhibit"):][:40]
+        assert tail.startswith(" --days 7") and "--days 7 " not in tail, (
+            f"a delivered mention of the command is not the clause-3 command: {tail!r}")
+
+    # The scheduled arguments, resolved the way the scheduler will resolve them: fed
+    # through the module's own parser, so a `--days 7` that the code cannot read (a renamed
+    # flag, a flag that now requires a value) fails here instead of on the first run.
+    argv = cmd.split("-m app.behaviour_exhibit ")[1].split()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--sessions-dir", default=None)
+    parser.add_argument("--out", default=None)
+    parser.add_argument("--max-files", type=int, default=0)
+    parser.add_argument("--registry", default=None)
+    ns = parser.parse_args(argv)
+    assert ns.days == 7 and ns.out is None and ns.sessions_dir is None, vars(ns)
+
+    assert fm["status"] == "draft", (
+        "an unattended round may not arm a recurring job (policy.create_arms_a_task); a "
+        "file claiming up_next from inside a round would be a schedule nobody turned on. "
+        "The flip is the human step the notes name.")
+    assert "draft" in str(fm.get("notes", "")), (
+        "the reason has to be in the file, or the next reader 'fixes' the status and the "
+        "rail refuses them")
+
+
+def test_the_sweep_is_ordered_after_the_retention_sweep_it_must_not_race():
+    """Clause 3's ordering, checked against the other task's own file.
+
+    The item anchored the new task to "after the 05:00Z retention sweep". Measured on
+    2026-11-07 that anchor is false — #79's own front matter says `next_run:
+    2026-11-08T06:00:00+00:00` — and a task at 05:00Z would have run BEFORE the sweep it
+    was ordered behind. The test therefore compares against the retention task's declared
+    hour rather than any hard-coded constant, so if #79 ever moves this test moves with it
+    instead of certifying a stale hour. The race is real, not ceremonial: #79 gzips
+    transcripts and the exhibit window is `st_mtime >= cutoff`, so reading the corpus
+    mid-sweep changes what the rates mean.
+    """
+    mine = _task_fields(TASK_FILE)
+    theirs = _task_fields(RETENTION_TASK_FILE)
+
+    # `preferred_hours` are MACHINE-LOCAL hours (app/autonomy.py) and `next_run` is UTC, so
+    # the two only agree if the hour was converted. #79 is the worked example on the same
+    # shelf: window [22, 23, 0, 1, 2] against a 06:00Z next_run — 22 local is 06:00Z on a
+    # box set to America/Los_Angeles. Checking the pair against each other is what catches
+    # the trap #3886's text would have walked into: `preferred_hours: [7]` reads as 07:00Z
+    # and fires at 15:00Z.
+    def utc_hour(fm: dict) -> int:
+        return datetime.fromisoformat(str(fm["next_run"])).astimezone(timezone.utc).hour
+
+    def window_hours(fm: dict) -> list:
+        return [int(h) for h in (fm.get("preferred_hours") or [])]
+
+    def local_hour_of_next_run(fm: dict) -> int:
+        return datetime.fromisoformat(str(fm["next_run"])).astimezone().hour
+
+    assert local_hour_of_next_run(theirs) in window_hours(theirs), (
+        "the convention check first proves itself on the precedent: #79's declared window "
+        "must contain the local hour of its own next_run")
+    assert local_hour_of_next_run(mine) in window_hours(mine), (
+        f"#109's window {window_hours(mine)} does not contain the local hour "
+        f"{local_hour_of_next_run(mine)} of its next_run {mine['next_run']}: "
+        "`preferred_hours` is local and `next_run` is UTC, so an unconverted hour fires "
+        "eight hours off")
+
+    assert utc_hour(theirs) == 6, (
+        f"#79 fires at {utc_hour(theirs)}Z, not the 05:00Z #3886's item text assumed")
+    assert utc_hour(mine) > utc_hour(theirs), (
+        f"the exhibit sweep's next_run {mine['next_run']} is not after the retention "
+        f"sweep's {theirs['next_run']}: it would read the store mid-gzip")
+    assert utc_hour(mine) == 7, utc_hour(mine)
+
+
+def test_the_skill_that_runs_the_sweep_quotes_the_command_it_must_not_extend():
+    """The other side of the same seam: the SKILL.md the dispatcher actually injects.
+
+    `_load_skill_content` returns `skills/<skill_name>/SKILL.md`, so the worker's step 1 is
+    whatever that file's fenced command says, and a flag added there is a flag added to
+    every scheduled run. The check is that the command line in the skill parses to the
+    no-flag sweep, and that the file exists at the name the task's `skill_name` gives.
+    """
+    from app.paths import VAULT_ROOT
+
+    fm = _task_fields(TASK_FILE)
+    skill = VAULT_ROOT / "skills" / fm["skill_name"] / "SKILL.md"
+    assert skill.exists(), skill
+    text = skill.read_text(encoding="utf-8")
+    assert f"name: {fm['skill_name']}" in text, "the skill's own name must match the slug"
+
+    fenced = [ln.strip() for ln in text.splitlines()
+              if "app.behaviour_exhibit" in ln and ln.strip().startswith("cd ~/lloyd")]
+    assert fenced, "the skill has no step-1 command line to run"
+    assert all(ln.endswith("--days 7") for ln in fenced), fenced
+    for ln in fenced:
+        for bad in ("--out", "--sessions-dir", "--registry", "--max-files", "--check"):
+            assert bad not in ln, f"{bad} is in the skill's step-1 command: {ln}"

@@ -83,7 +83,7 @@ import math
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -954,15 +954,23 @@ def run_controls(registry: "Path | None" = None) -> "list[dict[str, Any]]":
 
 
 def out_dir(explicit: "Path | None" = None) -> Path:
-    """Where dated artifacts go. A store under DATA_ROOT, never inside the checkout."""
+    """Where dated artifacts go: the store `app.paths` names, never a path computed here.
+
+    #3886 clause 1. The function used to join `DATA_ROOT / "eval" / "behaviour-exhibit"`
+    itself under an `except Exception` that fell back to `Path.home() / "lloyd-data"`.
+    That was a second definition of the store, and the loud half of the bug is the
+    fallback: on a box where `app.paths` cannot resolve a data root it did not fail, it
+    quietly wrote the daily artifact somewhere else, so the store the instrument index
+    points at and the store the sweep writes could disagree with nobody noticing. There
+    is no fallback here now on purpose — an instrument that cannot name its own store
+    must say so at the call that would have written into the wrong tree, and
+    `app.paths.BEHAVIOUR_EXHIBIT_DIR` is the one name the rest of the system (the index,
+    the retention rules, a person) can ask about.
+    """
     if explicit:
         return Path(explicit)
-    try:
-        from app.paths import DATA_ROOT
-        base = Path(DATA_ROOT)
-    except Exception:  # noqa: BLE001
-        base = Path.home() / "lloyd-data"
-    return base / "eval" / "behaviour-exhibit"
+    from app.paths import BEHAVIOUR_EXHIBIT_DIR
+    return Path(BEHAVIOUR_EXHIBIT_DIR)
 
 
 def sweep(sessions_dir: "Path | None" = None, *, days: int = 7,
@@ -1113,6 +1121,9 @@ def sweep(sessions_dir: "Path | None" = None, *, days: int = 7,
             "turns_undated": counts["turns_undated"],
             "rows": paired_rows(specs, arm_tallies),
         } if split_dt is not None else None),
+        # The one scalar this run has, so the eval instrument index can carry an arm here
+        # at all (#3886 clause 2). Pooled and denominator-weighted — see `worker_pooled`.
+        "worker_pooled": worker_pooled(rows),
         "controls": controls,
         "controls_ok": all(c["ok"] for c in controls) and bool(controls),
         "gated_on": None,
@@ -1428,6 +1439,244 @@ def _control_ok(artifact: dict, bid: str) -> bool:
     return bool(next((c["ok"] for c in artifact["controls"] if c["id"] == bid), False))
 
 
+# ── day over day: did anything move, in the arm's own units ─────────────────
+#
+# #3886 clauses 4 and 5. The sweep has always printed one run's rates; printing a run
+# tells nobody whether the number changed, and an instrument that never answers "did it
+# move" is a pile of dated files, which is how #3749's owed entry ended up owing a written
+# investigation of a 0.6pp caption move nobody could re-derive. This block answers it in
+# words, on the population that answer is admissible on, and against the one bound that
+# belongs to the arm being read.
+#
+# TWO THINGS THIS DELIBERATELY DOES NOT DO, both pinned by tests:
+#   * it does not compare the `user` population. RULING (#3749 owed-check,
+#     2026-11-07T10:34, run 20261107_023154_owedcheck_2421): the user population is barred
+#     from trending or gating permanently — the 2026-11-04 witness measured 29 user turns
+#     against 13,903 worker, the live artifact 54 against 13,854 — because a user-side N=0
+#     prints `instrument failure` on a quiet week and would be read as evidence.
+#     `unattributed` is neither a person's turn nor a job's, so it is in the per-row table
+#     and in no comparison either.
+#   * it does not compare or trend the plain/gzipped FILE COUNTS. The corpus window is
+#     `p.stat().st_mtime >= cutoff` (`iter_transcripts`), recorded in the artifact as
+#     `window_filter: "file mtime inside the window"`, and the retention sweep rewrites
+#     that population nightly: the 2026-11-04 artifact counts 4,496 gzipped of 6,953
+#     files, so a gzipped-count delta graphs the sweep's gzip night, not the traffic
+#     (#3885 measured 4,457 of 7,051 the same way and owns the mtime→content-date fix).
+#     The current run's split is still printed by `render_rows` — that is a reading, not a
+#     comparison — and no number from a prior run's `corpus` block is ever rendered here.
+
+#: The only population a comparison is computed over. See the ruling above.
+MOVEMENT_POPULATION = "worker"
+
+#: What the report prints when the store holds nothing to compare against. The clause
+#: requires the word `first` and the fact that nothing was compared.
+FIRST_READING_LINE = ("movement: first reading — no earlier dated artifact in the store "
+                      "to compare against, so this run compares nothing")
+
+
+def worker_pooled(rows: "list[dict]") -> dict:
+    """The pooled worker-population exhibit rate over every scored behaviour.
+
+    One scalar per run, because `scripts/eval_instrument_index.py` needs one to have an
+    arm at all (#3886 clause 2) and this artifact's per-behaviour rows are a list it has
+    no key for. It is a POOLED rate — k and n summed across the behaviours whose worker
+    cell was scored — so it is denominator-weighted, not a mean of the four rates:
+    `tool-call-caption-present`, with six orders more situations than
+    `read-back-before-success-claim`, dominates it. That is why the per-behaviour lines of
+    `render_movement` are the reading and this number is the arm that notices when the
+    store stops being written.
+
+    The keys are `k`/`n`/`rate`/`ci_low`/`ci_high`, the shape
+    `eval_instrument_index._coerce_value` already reads for `landed_outcomes`, so the
+    index takes the interval from here rather than re-deriving one from a rounded share.
+    An empty denominator publishes `rate: null` and no interval, never 0.0 — the same rule
+    `row_for` states for a row.
+    """
+    k = n = 0
+    scored: "list[str]" = []
+    for r in rows:
+        cell = (r.get("by_population") or {}).get(MOVEMENT_POPULATION) or {}
+        if str(cell.get("status", "")).startswith("not scored"):
+            continue
+        nn = int(cell.get("situations_encountered") or 0)
+        if nn <= 0:
+            continue
+        scored.append(r["id"])
+        n += nn
+        k += int(cell.get("exhibited") or 0)
+    lo, hi = wilson_interval(k, n)
+    return {"population": MOVEMENT_POPULATION,
+            "unit": f"{MOVEMENT_POPULATION}-population situations pooled over the "
+                    f"scored behaviours (denominator-weighted, not a mean of rates)",
+            "behaviours_scored": len(scored),
+            "behaviours": scored,
+            "k": k, "n": n,
+            "rate": (round(k / n, 6) if n else None),
+            "ci_low": (round(lo, 6) if n else None),
+            "ci_high": (round(hi, 6) if n else None)}
+
+
+def load_artifact_file(path: Path) -> "dict | None":
+    """One artifact file — one JSON record on one line — or None if it is not one."""
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            doc = json.loads(line)
+            return doc if isinstance(doc, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def prior_artifact(store: "Path | None", *, before_day: str) -> "dict | None":
+    """The newest readable dated artifact in `store` dated strictly before `before_day`.
+
+    Returns `{"path", "day", "artifact"}`, or None when the store holds nothing usable —
+    which is what makes the first-reading branch reachable rather than theoretical.
+
+    Three rules, each of which has already bitten this instrument once:
+      * **strictly before today**, never "the newest file". `main` renders this AFTER the
+        run's own artifact is written, so a `max()` over the directory would pick this
+        run's own file on every day after the first and report a run against itself as a
+        change of zero.
+      * **readable, not merely dated**: a candidate must parse and carry a non-empty
+        `rows` list, because the 2026-09-25 fixture-shaped `{}` file is dated, is a file,
+        and is not a reading.
+      * **named in the report**: the 2026-11-04 store holds TWO artifacts from that night —
+        the live one (`measured_at 02:24:50Z`) and the tracked witness in the checkout
+        (`03:37:58Z`) — and their four rates differ slightly. A comparison that silently
+        picked one would report the gap between two runs of the same night as a behaviour
+        change, so every line prints the baseline's own filename and `measured_at`.
+    """
+    if store is None:
+        return None
+    d = Path(store)
+    if not d.is_dir():
+        return None
+    try:
+        today = date.fromisoformat(str(before_day)[:10])
+    except ValueError:
+        return None
+    candidates: "list[tuple[date, Path]]" = []
+    for p in sorted(d.glob("behaviour-exhibit-*.jsonl")):
+        m = _DAY_FILE_RE.match(p.name)
+        if not m:
+            continue
+        try:
+            day = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+        if day < today:
+            candidates.append((day, p))
+    for day, p in sorted(candidates, key=lambda t: (t[0], t[1].name), reverse=True):
+        art = load_artifact_file(p)
+        if isinstance(art, dict) and isinstance(art.get("rows"), list) and art["rows"]:
+            return {"path": p, "day": day.isoformat(), "artifact": art}
+    return None
+
+
+def _pp(x: float) -> str:
+    """A proportion as signed percentage points — the unit the arms are read in."""
+    return f"{x * 100:+.2f}pp"
+
+
+def _cell_of(art: dict, bid: str) -> "dict | None":
+    """One behaviour's cell for `MOVEMENT_POPULATION` in this artifact, or None."""
+    for r in (art.get("rows") or []):
+        if r.get("id") == bid:
+            return (r.get("by_population") or {}).get(MOVEMENT_POPULATION)
+    return None
+
+
+def movement_lines(current: dict, prior: "dict | None", *,
+                   store: "Path | None" = None) -> "list[str]":
+    """The printed day-over-day block: every behaviour, moved or noise, in words.
+
+    For each behaviour scored on the worker population in BOTH artifacts, one line naming
+    the rate with its Wilson interval, the baseline's rate, and the change against
+    **that arm's own half-width in this run** — `(hi − lo) / 2` of the `wilson_interval`
+    computed from this run's own k and N, so the ± in the sentence is the ± of the
+    interval printed on the same line and no constant copied from an item is anywhere in
+    the path. #3886 clause 5 names the reason: the caption arm's half-width at
+    N=156,755 is ±0.15pp, and the ±1.5pp the item quoted — six times wider — would have
+    called the real 0.6pp caption move noise, which is the finding #3749 still owes.
+
+    A change WIDER than the half-width is called a real move; one inside it is called
+    noise. That bound is this arm's own 95% interval half-width, not a two-sample test of
+    the difference: two overlapping intervals can still differ, so a "real move" here is a
+    claim sized to one arm's precision, and the line says whose bound it is rather than
+    presenting a significance test it did not run.
+    """
+    if prior is None:
+        return [FIRST_READING_LINE + (f" (store: {store})" if store else "")]
+    part = prior["artifact"]
+    head = (f"movement vs {Path(prior['path']).name} (measured_at "
+            f"{part.get('measured_at', 'unknown')}) — {MOVEMENT_POPULATION} population "
+            f"only; the corpus window is file mtime, so the plain/gzipped file counts are "
+            f"NOT compared or trended (#3885 owns the mtime→content-date fix)")
+    lines = [head]
+    for r in current.get("rows") or []:
+        bid = r.get("id", "?")
+        cur = (r.get("by_population") or {}).get(MOVEMENT_POPULATION) or {}
+        if str(cur.get("status", "")).startswith("not scored"):
+            continue
+        n = int(cur.get("situations_encountered") or 0)
+        k = int(cur.get("exhibited") or 0)
+        prev = _cell_of(part, bid)
+        if prev is None:
+            lines.append(f"  {bid}: no {MOVEMENT_POPULATION} cell in the baseline — "
+                         f"nothing to compare")
+            continue
+        pn = int(prev.get("situations_encountered") or 0)
+        if n <= 0 or pn <= 0:
+            lines.append(f"  {bid}: worker N={n} now against N={pn} in the baseline — "
+                         f"an empty denominator has no rate, so nothing is compared")
+            continue
+        lo, hi = wilson_interval(k, n)
+        half = (hi - lo) / 2.0
+        change = (k / n) - (int(prev.get("exhibited") or 0) / pn)
+        verdict = ("beyond it: a real move, not noise" if abs(change) > half
+                   else "inside it: noise, not a move")
+        lines.append(f"  {bid} {MOVEMENT_POPULATION} {k}/{n} = {k / n:.4f} "
+                     f"[{lo:.4f}, {hi:.4f}]; baseline "
+                     f"{int(prev.get('exhibited') or 0)}/{pn} = "
+                     f"{int(prev.get('exhibited') or 0) / pn:.4f}; change {_pp(change)} "
+                     f"against this arm's own ±{half * 100:.2f}pp Wilson half-width at "
+                     f"{MOVEMENT_POPULATION} N={n} — {verdict}")
+    pooled_now = worker_pooled(current.get("rows") or [])
+    pooled_prev = worker_pooled(part.get("rows") or [])
+    if pooled_now["n"] and pooled_prev["n"]:
+        lo, hi = wilson_interval(pooled_now["k"], pooled_now["n"])
+        half = (hi - lo) / 2.0
+        change = (pooled_now["k"] / pooled_now["n"]
+                  - pooled_prev["k"] / pooled_prev["n"])
+        verdict = ("beyond it: a real move, not noise" if abs(change) > half
+                   else "inside it: noise, not a move")
+        lines.append(
+            f"  ALL SCORED ({pooled_now['behaviours_scored']} behaviours, pooled) "
+            f"{pooled_now['k']}/{pooled_now['n']} = "
+            f"{pooled_now['k'] / pooled_now['n']:.4f} [{lo:.4f}, {hi:.4f}]; baseline "
+            f"{pooled_prev['k']}/{pooled_prev['n']} = "
+            f"{pooled_prev['k'] / pooled_prev['n']:.4f}; change {_pp(change)} against "
+            f"this pooled arm's own ±{half * 100:.2f}pp Wilson half-width at "
+            f"{MOVEMENT_POPULATION} N={pooled_now['n']} — {verdict}")
+    return lines
+
+
+def render_movement(artifact: dict, *, store: "Path | None" = None) -> str:
+    """The day-over-day block as printed text. Renders nothing about a run's own counts.
+
+    `store` defaults to the registered store, which is the one place an earlier reading
+    can exist; pass it explicitly when the run was pointed at a fixture directory.
+    """
+    d = Path(store) if store is not None else out_dir()
+    day = (artifact.get("measured_at") or "")[:10]
+    return "\n".join(movement_lines(artifact, prior_artifact(d, before_day=day),
+                                    store=d))
+
+
 #: Dated artifacts older than this are deleted by the writer. Bounded at authoring on
 #: purpose: an instrument with no retention is a disk incident with a date on it, and this
 #: store is registered in the same sentence it is created in rather than left to a follow-up
@@ -1513,9 +1762,12 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # Bound once: the artifact's destination and the directory the movement block reads for
+    # its baseline are the same store, so this cannot disagree with the write.
+    out = Path(args.out) if args.out else out_dir()
     art = sweep(args.sessions_dir, days=args.days, since=args.since, until=args.until,
                 split_on=args.split_on,
-                out=Path(args.out) if args.out else out_dir(),
+                out=out,
                 registry=Path(args.registry) if args.registry else None,
                 max_files=args.max_files, write=True,
                 command=" ".join([".venvs/lloyd/bin/python", "-m", "app.behaviour_exhibit",
@@ -1524,6 +1776,11 @@ def main(argv: "list[str] | None" = None) -> int:
     split_text = render_split(art)
     if split_text:
         print(split_text)
+    # Rendered AFTER the write, and `prior_artifact` only accepts a file dated strictly
+    # before this run's own day, so the artifact just written can never become its own
+    # baseline. A named --out FILE is one artifact, so its directory is the store to look
+    # in for the previous reading.
+    print(render_movement(art, store=(out.parent if out.suffix == ".jsonl" else out)))
     if art.get("artifact_path"):
         print(f"wrote {art['artifact_path']}")
     return 0
