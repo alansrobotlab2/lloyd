@@ -47,6 +47,19 @@ def _meta(tmp_path: Path, *, existing: str | None = None) -> dict:
     (bdir / "transcript.txt").write_text(f"{BUNDLE_PROBE}\n" + "words\n" * 50)
     (bdir / "meta.json").write_text(f'{{"probe": "{BUNDLE_PROBE}"}}')
     (bdir / "measurements.json").write_text(f'{{"probe": "{BUNDLE_PROBE}"}}')
+    # #3905: `build_prompt` brackets an enrichment entry only when the note its
+    # `note_path` names is actually on disk, so the fixture is a PAIR and every
+    # prompt rendered from `_meta` crosses both sides of that branch. The file
+    # below is real under tmp_path; `ghost-widget.md` is deliberately never
+    # created. That mirrors the way a bundle comes to name a note that does not
+    # exist: `register_paper` (`scripts/youtube_channel_monitor.py:1803-1808`)
+    # writes the stub only for a row that already carries a summary, yet passes
+    # the path through on a `pending` row, and `--fetch` reuses an on-disk bundle
+    # (`:2667`), so a note removed after the fetch is still listed next time.
+    notes_dir = tmp_path / "vault" / "github"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    (notes_dir / "acme-harness.md").write_text(
+        "---\nsegment: knowledge\n---\n# acme-harness\n")
     target = existing or str(tmp_path / "vault" / "20260904-second-harness.md")
     return {
         "channel_key": "discover-ai", "channel_handle": "code4AI", "channel_name": "Discover AI",
@@ -55,7 +68,9 @@ def _meta(tmp_path: Path, *, existing: str | None = None) -> dict:
         "bundle_dir": str(bdir), "meta_path": str(bdir / "meta.json"),
         "transcript_path": str(bdir / "transcript.txt"), "transcript_words": 6000,
         "transcript_lines": 420, "entities": {}, "existing_note": existing, "target_note": target,
-        "enrichment": {"github": [{"note_path": "/v/github/acme-harness.md"}], "papers": []},
+        "enrichment": {"github": [{"note_path": str(notes_dir / "acme-harness.md")},
+                                  {"note_path": str(notes_dir / "ghost-widget.md")}],
+                       "papers": []},
         "measurements_path": str(bdir / "measurements.json"),
         "measurements_summary": "prefix-cache hit rate since boot 68.7%; KV cache 79% used",
     }
@@ -190,7 +205,12 @@ def test_prompt_carries_the_paths_the_rules_and_the_tracked_items(tmp_path):
     assert meta["target_note"] in prompt and str(Y.PROFILE_PATH) in prompt
     assert "channel: code4AI" in prompt and "video_id: abc123" in prompt
     assert "#500 Adopt WIKISKILL" in prompt
+    # Bracketed because the fixture CREATED `acme-harness.md` on disk (#3905);
+    # the same render leaves `ghost-widget`, whose file does not exist, bare.
+    # So this line pins the link half of the pair rule, not unconditional
+    # bracketing — see the node below for the other half.
     assert "[[acme-harness]]" in prompt
+    assert "ghost-widget" in prompt and "[[ghost-widget]]" not in prompt
     assert "No note exists" in prompt
     # Alan's rule: open source may be adopted, commercial is recreated.
     assert "open-source" in prompt and "direct adoption" in prompt
@@ -203,6 +223,44 @@ def test_prompt_carries_the_paths_the_rules_and_the_tracked_items(tmp_path):
     assert "cannot reach loopback" in prompt
     assert prompt.rstrip().endswith("say why in one line before the block.")
     assert "RESULT: <written|kept|failed>" in prompt
+
+
+def test_an_enrichment_entry_is_bracketed_only_when_its_note_is_on_disk(tmp_path):
+    """#3905: a wikilink is emitted only where the vault file exists.
+
+    This one render is the emission surface for every wikilink a digest note
+    can carry, and a bracket around a name that has no note behind it is an
+    orphan the referential-integrity pass has to explain afterwards —
+    `enrichment=` in `workers/sources/youtube_digest.py` used to bracket every
+    stem unconditionally.
+
+    The fixture is the pair, so this node IS the branch: restore unconditional
+    bracketing and `[[ghost-widget]]` appears and the second assert fails;
+    make the renderer skip an off-disk entry instead of naming it plainly and
+    the third assert fails.
+    """
+    prompt = Y.build_prompt(_meta(tmp_path), [])
+    assert "[[acme-harness]]" in prompt, "the on-disk note keeps its wikilink"
+    assert "[[ghost-widget]]" not in prompt, (
+        "an entry with no note at its note_path was rendered as a link")
+    assert "ghost-widget" in prompt, (
+        "the name still has to reach the session; only the brackets were wrong")
+
+
+def test_the_task_block_says_a_plainly_named_entry_is_a_name_not_a_link():
+    """#3905: the session copies the brackets it is given, so the block labels them.
+
+    A digest turn reproduces the enrichment list verbatim into the note's
+    `## Related Resources` section: line 68 of the Discover AI note for
+    "Post-Train Your Local AI" under knowledge/youtube/Discover_AI/ reads
+    `- https://github.com/siyan-zhao/OPSD — [[siyan-zhao-OPSD]]`, brackets and
+    all. A bare name in the prompt only stays bare in the note if the protocol
+    says what a bare name means.
+    """
+    line = next(ln for ln in Y.TASK_BLOCK.splitlines() if "None detected" in ln)
+    assert "not a link" in line and "bracket" in line, (
+        "the Related Resources line must state that an enrichment entry printed "
+        "without brackets is a name, so brackets are copied only where given")
 
 
 def test_prompt_tells_the_session_about_an_existing_note(tmp_path):
@@ -1534,6 +1592,15 @@ async def test_the_video_path_dispatches_one_turn_that_writes_its_own_note(tmp_p
     assert len(target.read_bytes()) >= Y._MIN_NOTE_BYTES
     assert "handoff" not in json.dumps(result["meta"], default=str).lower(), result["meta"]
     assert "note landed by the writer stage" not in result["summary"], result["summary"]
+
+    # ── the #3905 bracketing rule survives the trip into the session ─────────────
+    # `build_prompt` is only worth having if what `execute()` hands the digest turn
+    # carries the same rule: this is the dispatched prompt, the bytes the session
+    # reads, so the note the session copies its Related Resources list from is the
+    # one where `acme-harness` is a link and `ghost-widget` is a name.
+    assert "[[acme-harness]]" in prompts[0], "the on-disk note reached the turn unlinked"
+    assert "[[ghost-widget]]" not in prompts[0], "an orphan link was dispatched"
+    assert "ghost-widget" in prompts[0], "the name itself was dropped, not unbracketed"
 
     # ── the seam: the deny the turn CARRIED is the deny the census measures ──────
     # Every fake in this file takes `**kwargs`, so a kwarg the real runner does not

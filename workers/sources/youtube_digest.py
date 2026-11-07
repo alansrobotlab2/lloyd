@@ -319,7 +319,7 @@ The meat: architectures, methods, algorithms, measured results, the exact terms 
 ### GitHub
 ### Papers
 ### Links
-Real URLs from the transcript or description; [[wiki links]] to the enrichment notes listed above; "None detected" when empty.
+Real URLs from the transcript or description; [[wiki links]] to the enrichment notes listed above; "None detected" when empty. An entry listed without brackets is a name, not a link — its note does not exist — so copy the brackets only around the entries that already have them and never add them to a bare name.
 
 ## Open Questions
 Unresolved questions the video raises.
@@ -413,7 +413,17 @@ def build_prompt(meta: dict, tracked: list[dict], *, skill_text: Optional[str] =
     for r in list(enrichment.get("github") or []) + list(enrichment.get("papers") or []):
         p = (r or {}).get("note_path")
         if p:
-            notes.append(Path(p).stem)
+            # #3905: a wikilink is emitted only where the note is on disk. A
+            # bundle can name a note that does not exist — `register_paper`
+            # (`scripts/youtube_channel_monitor.py:1803-1808`) writes the stub
+            # only for a row that already has a summary yet passes the path
+            # through on a `pending` row, and `--fetch` reuses an on-disk bundle
+            # (`:2667`), so a note removed after the fetch is still listed — and
+            # every bracket put here is copied verbatim into the note the session
+            # writes, becoming an orphan link. A plain name is the honest form:
+            # the repo or paper is real, its vault note is not.
+            path = Path(p)
+            notes.append((path.stem, path.is_file()))
     tracked_lines = [f"   - #{t['id']} {t['title']}" for t in tracked] or ["   - none yet"]
     target = str(meta.get("target_note") or "")
     task_block = TASK_BLOCK.format(
@@ -429,7 +439,8 @@ def build_prompt(meta: dict, tracked: list[dict], *, skill_text: Optional[str] =
         transcript_lines=meta.get("transcript_lines", "?"),
         meta_path=meta.get("meta_path", ""),
         existing_note=meta.get("existing_note") or "none",
-        enrichment=", ".join(f"[[{n}]]" for n in notes) or "none",
+        enrichment=", ".join(f"[[{stem}]]" if on_disk else stem
+                             for stem, on_disk in notes) or "none",
         target_note=target,
         note_stem=Path(target).stem if target else "",
         existing_note_instruction=_EXISTING if meta.get("existing_note") else _FRESH,
