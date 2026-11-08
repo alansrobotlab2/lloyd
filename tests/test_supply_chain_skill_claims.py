@@ -19,6 +19,7 @@ simply has the vault mounted at a different path would let exactly the wrong ski
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -204,33 +205,167 @@ def _artifact() -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_the_reference_tables_newest_row_is_the_number_that_is_true_today():
-    """The table is what a run with no previous report compares against; 150 was a floor.
+#: The committed witness the dated-snapshot row quotes. `backlog/data/inventory-2026-10-31.json`
+#: is a byte-identical copy of the live-store report that autonomy task #99 regenerates weekly,
+#: which is what makes it a witness: the row's two count cells, its reading stamp and the
+#: `wc -l -c` pair it invites a reader to run all have ONE source, checked here from that file's
+#: bytes. #3938 replaced this node's literals `358` and `906` with the derivation below — the
+#: same copy-nobody-re-measures that #3613 removed from the artifact row two nodes further down.
+#: The live directory's newest report is deliberately NOT cited by anything here: a report the
+#: weekly job regenerates is not a witness (#3544's owed entry 3 owns re-pointing to it).
+WITNESS = Path("backlog") / "data" / "inventory-2026-10-31.json"
 
-    Read as a row, not as a substring: `358` must be on the newest-dated-report row, and
-    the stale `150` must be gone from it. A `assert "150" not in table` test would pass on
-    the wrong table and fail on the right one, which is the opposite of helpful.
+#: Where a run gets today's figure. A snapshot row is honest only while it also names the live
+#: directory it has fallen behind, so the route is part of the row's framing, not an aside under
+#: the table — the old row named a dated file and called it "newest", which by 2026-11-08 was
+#: five days false.
+LIVE_ROUTE = re.compile(r"~/lloyd-data/supply-chain/inventory-\*\.json")
 
-    This node used to pin the other row against the literal `150` as well, because that is
-    what `eval/supply-chain/baseline.yaml` held. #3613 regenerates the artifact, so the
-    artifact row is now derived from the artifact itself —
-    `test_the_reference_tables_artifact_row_copies_the_committed_artifact` — and a literal
-    in this file would be a second witness nobody re-measures.
+
+def _snapshot_framed(cell: str, stamp: str, name_date: str) -> bool:
+    """Could a reader tell, from this cell alone, that its numbers are a past reading?
+
+    Three arms, all required:
+
+    * the sentence holding the reading stamp carries the date the file's own name carries.
+      `HISTORY_FRAMING`/`PRESENT_FRAMING`/`_sentence_containing` are the ones this file
+      already uses for the 7-day-rail section, including the bounded window: #3613's review
+      found a citation whose own sentence had stopped saying when it was true while a
+      "this is history" survived two paragraphs away, and the only window narrow enough for
+      that is the sentence itself;
+    * that sentence marks the numbers as past with a `HISTORY_FRAMING` marker and never in
+      `PRESENT_FRAMING`'s voice, which in this file is the vocabulary for the state of the
+      committed file now;
+    * the cell names the live-directory route, so a reader who needs today's figure is
+      pointed somewhere that holds it.
+    """
+    hits = [m.start() for m in re.finditer(re.escape(stamp), cell)]
+    if not hits:
+        return False
+    sentence = _sentence_containing(cell, hits[0])
+    return (name_date in sentence
+            and bool(HISTORY_FRAMING.search(sentence))
+            and not PRESENT_FRAMING.search(sentence)
+            and bool(LIVE_ROUTE.search(cell)))
+
+
+def test_the_reference_tables_dated_row_is_a_dated_snapshot():
+    """#3938: the row quoting a dated report dates itself and stops claiming to be today.
+
+    This is the node the item names
+    `test_the_reference_tables_newest_row_is_the_number_that_is_true_today`; the name goes
+    with the claim it tested, and the claim is what is false. The row cannot be the number
+    that is true today: task #99 writes a fresh `inventory-<date>.json` into
+    `~/lloyd-data/supply-chain/` every week and nothing edits this row, so by 2026-11-08 the
+    live directory held a report five days newer than the reading the row quoted, and the
+    word "newest" in its source cell was false rather than loose.
+
+    Four things are asked of the row, every expected value derived from the witness's bytes
+    rather than repeated from the page:
+
+    1. both count cells come from the witness's top-level `component_count` and
+       `advisories_in_observed_set_that_declared_lockfiles_missed`; the literals `358` and
+       `906` this node pinned are gone, and the superseded floor `150` stays prohibited;
+    2. the reading the row names is the witness's `generated_at` down to the second, and the
+       `wc -l -c` pair it quotes is the pair its bytes answer — newline count for `-l`, byte
+       length for `-c`, so the two agree with `wc` by construction;
+    3. the row frames its own numbers as that past reading, by `_snapshot_framed`;
+    4. the row cites the committed witness, lets `newest` qualify only the run-time glob and
+       never its named file, and neither cites nor witnesses `inventory-2026-11-05.json` —
+       that report is the weekly run's own and #3544's owed entry 3, not a witness.
+
+    Read as a row, not as a substring, exactly as before: a `assert "358" in table` test
+    would pass on the wrong table and fail on the right one, which is the opposite of
+    helpful.
     """
     text = _skill()
     rows = _table_rows(_section(text, "## Reporting contract"))
     assert len(rows) >= 3, f"expected a header plus two reference rows, got {len(rows)}"
 
-    newest = [r for r in rows if "inventory-<date>.json" in " ".join(r)]
-    assert len(newest) == 1, f"the newest-dated row must be unique, got {len(newest)}"
-    missed = newest[-1][-1]
-    assert re.search(r"\b358\b", missed), (
-        f"the newest dated report's missed-advisory cell reads {missed!r}, not 358 — the "
-        "figure 358 is the whole reason this item exists")
-    assert "150" not in missed, (
-        f"the stale 150 is still the newest-dated row's cell: {missed!r}")
-    assert re.search(r"\b906\b", newest[-1][1]), (
-        "the component_count cell moved off 906, or the row is not the row this node reads")
+    witness = vault_root() / WITNESS
+    assert witness.is_file(), (
+        f"{witness} is unreadable, so every value below would have to be a figure this node "
+        "was told rather than one it measured")
+    raw = witness.read_bytes()
+    doc = json.loads(raw.decode("utf-8"))
+    components = doc["component_count"]
+    missed = doc["advisories_in_observed_set_that_declared_lockfiles_missed"]
+    stamp_full = str(doc["generated_at"])
+    stamp = stamp_full.split(".")[0]                 # …T23:50:54.538842Z -> …T23:50:54
+    name_match = re.search(r"inventory-(\d{4}-\d{2}-\d{2})\.json", witness.name)
+    assert name_match, (
+        f"{witness.name} is not a dated report name, so there is no date for the row to carry")
+    name_date = name_match.group(1)
+    named = f"inventory-{name_date}.json"
+    wc = f"{raw.count(chr(10).encode())} {len(raw)}"
+
+    snapshot = [r for r in rows if named in " ".join(r)]
+    assert len(snapshot) == 1, (
+        f"the table must carry exactly one row naming the dated report {named}, got "
+        f"{len(snapshot)} of {len(rows)} rows")
+    row = snapshot[-1]
+    cell = row[0]
+
+    assert row[1].strip() == str(components), (
+        f"the dated row's component_count cell reads {row[1]!r} while the committed witness "
+        f"{WITNESS.as_posix()} records component_count {components}. The row is a "
+        "transcription of bytes on disk, not a remembered figure.")
+    assert re.fullmatch(rf"\**{missed}\**", row[-1].strip()), (
+        f"the dated row's missed-advisory cell reads {row[-1]!r} while the committed witness "
+        f"{WITNESS.as_posix()} records "
+        f"advisories_in_observed_set_that_declared_lockfiles_missed {missed}")
+    assert "150" not in " ".join(row[1:]), (
+        f"the superseded floor is back in the dated row's cells: {row[1:]!r}")
+
+    assert stamp in cell, (
+        f"the row names no reading a reader can check: its source cell is {cell!r} while the "
+        f"witness records generated_at {stamp_full!r}. {stamp!r} has to appear in it for the "
+        "row to be about that run rather than about a day — a bare date is the half of this "
+        "row that went stale once already")
+    assert wc in cell, (
+        f"the row quotes a `wc -l -c` pair the witness does not answer: the cell says "
+        f"{cell!r} while {witness} answers {wc!r}")
+    assert WITNESS.as_posix() in cell, (
+        f"the row does not cite the committed witness {WITNESS.as_posix()}, so the figures in "
+        "it can only be checked against the live store, which the weekly job overwrites")
+    assert "inventory-2026-11-05.json" not in " ".join(row), (
+        "the row cites the 2026-11-05 report, which no committed witness holds — a run "
+        "following it would compare against bytes nobody can re-measure")
+    assert LIVE_ROUTE.search(cell) and re.search(r"(?i)run time", cell), (
+        "the row gives a stale figure without routing a run to the live directory for "
+        "today's, which is the difference between a snapshot and an obstacle")
+    assert "newest" not in cell[:cell.index(named)].lower(), (
+        f"`newest` still qualifies the dated file the row names: {cell!r} — the live "
+        "directory's newest report has been newer than this reading since the run after it")
+
+    assert _snapshot_framed(cell, stamp, name_date), (
+        f"the row quotes a dated reading without framing it as one: {cell!r}")
+
+    # A framing rule that matches anything is a rule that passes anything (#3613's idiom), so
+    # each arm is shown to bite. The controls are built by mutating THIS row's own text rather
+    # than hand-written, so re-dating the witness cannot quietly make one of them vacuous.
+    sentence = _sentence_containing(cell, cell.index(stamp))
+    assert not _snapshot_framed(sentence, stamp, name_date), (
+        "the stamp's sentence passes the check by itself, so the live-directory route is not "
+        "being read — and a row that dates its figure while sending nobody to today's is the "
+        "row that went stale")
+    assert not _snapshot_framed(cell.replace(name_date, "<date>"), stamp, name_date), (
+        "a row with every date in its source cell blanked still passes the framing check, so "
+        "the check cannot tell a snapshot from a current figure")
+    present_voice = cell.replace("superseded", "regenerated now")
+    assert present_voice != cell, (
+        "the row's history marker has left the cell, so the PRESENT_FRAMING arm below is "
+        "checking nothing and its control passes by accident")
+    assert not _snapshot_framed(present_voice, stamp, name_date), (
+        "a cell dated and routed but spoken in the present voice passes the check, so the "
+        "check cannot tell 'the file says this now' from 'this run recorded this'")
+    # The wording this item deleted, verbatim from the row as it stood on 2026-11-08. It is
+    # dated, and it still calls its file the newest report: it must not pass.
+    old_wording = (f"newest dated `~/lloyd-data/supply-chain/inventory-<date>.json` — "
+                   f"`{named}`, generated {stamp_full}")
+    assert not _snapshot_framed(old_wording, stamp, name_date), (
+        f"the wording this item removed — {old_wording!r} — passes the framing check, so the "
+        "check does not catch a snapshot presenting itself as the present")
 
     assert "database_freshness" in text, (
         "the skill never names the key that lets two dated reports be compared, which is the "
