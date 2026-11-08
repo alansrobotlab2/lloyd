@@ -4396,11 +4396,13 @@ def test_the_node_reds_on_a_hand_edited_bundle_naming_both_byte_counts(
 
     The edit is the one every existing test lets through — a pinned literal added straight to
     the minified file, which keeps the harvested literals and the API base and so passes all
-    ten nodes in tests/test_chrome_extension_manifest_tracked.py. The verdict has to name
+    twelve nodes in tests/test_chrome_extension_manifest_tracked.py. The verdict has to name
     both byte counts, because "the bytes differ" tells a reader nothing about whether they
     were 2 bytes off or the file is a different document. And it compares ONLY the worker:
-    the panel half of `dist/` re-hashes on every build until #3769 lands its rebuild, so a
-    whole-`dist/` comparison would sit permanently red.
+    the panel half of `dist/` re-hashes on every build — #3769's owed rebuild has since been
+    landed (#3963) and running it re-named every chunk under `dist/assets/` again — so a
+    whole-`dist/` comparison would sit permanently red, and this node says nothing about
+    whether the panel half is byte-correct.
     """
     _chrome_repo(live_repo)
     calls = []
@@ -4454,11 +4456,15 @@ def test_a_rehashed_panel_asset_cannot_redden_the_worker_node(
     The green legs above already show it structurally — the fake build writes the worker and
     nothing else, so a widened comparison would red them all on a missing file — but the clause
     is about the files that DO exist, so this node hands the build a panel half that disagrees
-    with the tracked one and requires the rung to stay green. It disagrees the way the real
-    build's does: `#3769`'s own triage printed these renames, `sidepanel-BaMPpFsS.js →
-    sidepanel-B1WTfEMd.js`, `sidepanel-C_mryqSb.css → sidepanel-Y7m5TRdo.css`, and rewrote the
-    two asset lines in `dist/sidepanel.html`. Comparing them would sit every chrome round red
-    until that rebuild lands, which is the permanent-red the item rules out and #3769 owns.
+    with the tracked one and requires the rung to stay green. It disagrees the way a real
+    rebuild's does: one re-hashed `assets/sidepanel-*.js`, one re-hashed `assets/sidepanel-*.css`,
+    and the `dist/sidepanel.html` naming both — which is exactly what #3769's owed rebuild
+    produced when it finally ran (#3963): every name under `dist/assets/` changed while
+    `service-worker.js` came out byte-identical. Comparing those names would sit every chrome
+    round red on the next build, which is the permanent-red the item rules out. The hashes
+    spelled into the fixture below are that fake repo's own bytes, not the tracked tree's —
+    the real names move on every build, which is the whole reason this comparison stops at the
+    hashless worker.
     """
     import types
 

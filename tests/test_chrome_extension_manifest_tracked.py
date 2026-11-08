@@ -174,8 +174,8 @@ def _html_assets() -> list[str]:
     """The asset paths `dist/sidepanel.html` references, repo-`dist`-relative.
 
     One direction only on purpose: the html names what Chrome will load, and
-    `dist/assets/` legitimately holds `highlighted-body-OFNGDK62-CMSQYtf0.js`
-    too, a chunk the panel imports dynamically and the html never names.
+    `dist/assets/` legitimately holds a `highlighted-body-OFNGDK62-*.js` chunk
+    too, which the panel imports dynamically and the html never names.
     """
     return re.findall(r'(?:src|href)="/((?:assets|icons)/[^"]+)"', _text(PANEL_HTML))
 
@@ -202,9 +202,10 @@ def test_every_asset_the_built_sidepanel_html_names_exists_on_disk():
     """#3571 clause 2: every asset `dist/sidepanel.html` names is a file under
     `chrome-extension/dist/`.
 
-    Vite content-hashes the panel's chunks (`assets/sidepanel-BaMPpFsS.js`,
-    `assets/sidepanel-C_mryqSb.css` today) and rewrites `sidepanel.html` to
-    match, so a rebuild whose renamed html was not committed — or whose new
+    Vite content-hashes the panel's chunks (one `assets/sidepanel-*.js` and one
+    `assets/sidepanel-*.css`, both named by the build that produced them) and
+    rewrites `sidepanel.html` to match, so a rebuild whose renamed html was not
+    committed — or whose new
     chunk was not — leaves Chrome loading a path that is not in the directory.
     The two `manifest.json`/`icons` copies above pin what is tracked; this pins
     that the built html and the built chunks agree.

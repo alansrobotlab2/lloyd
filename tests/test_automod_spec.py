@@ -3412,8 +3412,9 @@ def test_the_chrome_extension_grant_is_three_verbatim_paths_and_one_build_glob()
     that stays out — and that is measured in
     `test_the_directory_spellings_of_the_grant_price_at_the_paths_they_admit`, not asserted
     here. The admitted glob is exempt because its members are named by content hash: a
-    verbatim list of `sidepanel-BaMPpFsS.js` and its two siblings is a grant that is false the
-    first time anyone runs the build it was written for.
+    verbatim list of the `assets/sidepanel-*.js` / `assets/sidepanel-*.css` pair and the
+    `highlighted-body-*.js` chunk is a grant that is false the first time anyone runs the
+    build it was written for.
     """
     shipped = tuple(spec.ALLOWED_GLOBS)
     mine = tuple(g for g in shipped if g.startswith("chrome-extension/"))

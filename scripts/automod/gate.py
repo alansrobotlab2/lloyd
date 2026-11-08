@@ -651,8 +651,8 @@ def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "",
     while the panel chunks are content-hashed.
 
     That is also why the comparison is this one file and no other path under `dist/`: the
-    hashed panel half legitimately re-hashes on every build until #3769's follow-on lands its
-    rebuild, so widening the comparison would sit permanently red and say nothing new.
+    hashed panel half re-hashes on every build — #3769's owed rebuild (#3963) re-named all of
+    it when it landed — so byte-comparing a content-hashed half here would sit permanently red.
 
     `build` and `porcelain` are injectable because the red leg and the dirty-tree leg need a
     build that produces bytes the tracked file does not, and a node that shells out to vite
@@ -717,7 +717,7 @@ def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "",
             f"{CHROME_VITE_CONFIG} && git add {CHROME_WORKER_BUNDLE} && git commit. "
             "The literals tests/test_chrome_extension_manifest_tracked.py harvest are "
             "satisfiable by hand; these bytes are not — and the panel half of dist/ is "
-            "deliberately NOT compared (hashed names, owned by #3769)."), data
+            "deliberately NOT compared, because its names are content hashes."), data
 
     dirty = porcelain(worktree, "chrome-extension/")
     _drop_scratch(out_dir, round_id)
