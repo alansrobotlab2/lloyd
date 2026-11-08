@@ -6,7 +6,7 @@ writes findings to
 `~/lloyd-data/_pipeline/vault-derived/pending-research/session-distill/{yyyy-mm-dd}/`
 — the leaf is this module's own `NAME`, one dated directory per run.
 
-**A session is distilled once, after it goes quiet.** The three gates below
+**A session is distilled once, after it goes quiet.** The four gates below
 each exist because the original selection had none of them, and the cost was
 not subtle: one chat was distilled 44 times, another 22, and the eight worst
 account for 138 of this source's runs.
@@ -24,6 +24,13 @@ account for 138 of this source's runs.
     this system talking to itself. Distilling them fed Lloyd's own triage
     transcripts back in as observations about the user, and 12 of them had
     already been mined that way.
+  * *A transcript, not a sidecar.* A reduction sidecar shares this directory and
+    this `*.json` glob with the sessions it records, and it is not a conversation:
+    its whole payload is the call ids the reducer dropped. It walks through the
+    other three gates untouched, because it names no platform and
+    `is_user_session` is a deny-list that reads a missing platform as the web UI.
+    `app.harness.microcompact.is_reduction_sidecar`, imported rather than
+    restated, is the one rule that tells the two files apart (#3815, #3934).
 """
 
 from __future__ import annotations
@@ -47,6 +54,7 @@ logger = logging.getLogger("lloyd-workers.session_distill")
 NAME = "session-distill"
 DEFAULT_PRIORITY = 70
 from app import kg_store  # read here to count this run's own writes (#1743)
+from app.harness.microcompact import is_reduction_sidecar  # #3815's one naming rule
 from app.paths import SESSIONS_DIR  # anchored to DATA_ROOT, not $HOME/lloyd
 
 _MAX_ENQUEUE_PER_TICK = 3
@@ -136,9 +144,26 @@ def _full_platform(path: Path) -> str:
 
 
 def _eligible(path: Path, mtime: float, now: float) -> tuple[bool, str]:
-    """Whether this session file is worth distilling, and why not if it isn't."""
+    """Whether this session file is worth distilling, and why not if it isn't.
+
+    The name test comes first and is not redundant with the three gates below it, which
+    a sidecar walks straight through: `reduction_sidecar_path` writes its record with no
+    `platform` key, and `is_user_session` is a deny-list that reads a missing platform as
+    the web UI. Measured on the live store 2026-11-08: of 147 sidecar files, `_eligible`
+    answered `(True, "")` for 145 — the other 2 were written inside `_QUIET_SECONDS` and
+    failed the quiet gate, not this one — and `_scan` returned 156 candidates of which 145
+    were sidecars, oldest-first, so one sat third in `_MAX_ENQUEUE_PER_TICK = 3`.
+    `is_session_active(path.stem)` does not catch one either: the stem carries the
+    suffix, so no live session matches it.
+
+    One site, not one in `_scan` as well: `_scan` is `_eligible`'s only caller and calls
+    it per candidate, so a second test would be a second place to be wrong. The naming
+    rule is #3815's, imported — the suffix is spelled in exactly one module.
+    """
     from app.sessions_io import is_session_active, is_user_session
 
+    if is_reduction_sidecar(path.name):
+        return False, "a reduction sidecar, not a transcript"
     if now - mtime < _QUIET_SECONDS:
         return False, "still active"
     if is_session_active(path.stem):
@@ -180,6 +205,14 @@ def _migrate_legacy_cursor(queue: WorkQueue) -> int:
     cursor only ever advanced over items that were. The key is deleted after,
     so the markers are the sole authority from here on and no cursor is left
     for a session to be stranded behind.
+
+    A sidecar is skipped, and not because it was ever enqueued: this walk does not
+    consult `_eligible` — its question is "was this considered", not "is this worth
+    distilling now" — so without the test it would file a permanent `done:` marker for a
+    record that was never a session, which is what a marker here means. Dead code on the
+    live box in one sense (`last_mtime` was deleted by the first run that found it, so
+    this returns 0 today and no marker count moves when it lands), correct code in every
+    sense, and pinned by a seeded cursor.
     """
     cursor = queue.wm_get(NAME, _LEGACY_CURSOR)
     if cursor is None:
@@ -190,6 +223,8 @@ def _migrate_legacy_cursor(queue: WorkQueue) -> int:
         cutoff = 0.0
     seeded = 0
     for p in SESSIONS_DIR.glob("*.json"):
+        if is_reduction_sidecar(p.name):
+            continue
         try:
             if p.stat().st_mtime > cutoff:
                 continue

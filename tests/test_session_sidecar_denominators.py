@@ -302,3 +302,173 @@ def test_the_tool_quality_window_walk_reports_n_heads_not_n_plus_m(store):
                       days=7, today="2026-11-05")
     assert report["corpus"]["files_scanned"] == len(HEADS)
     assert report["corpus"]["files_sidecar_in_dir"] == len(SIDECARS)
+
+
+# ── #3934: the session-distill producer is a denominator too ──────────────────
+#
+# `workers/sources/session_distill.py` decides what to distil with three gates of its
+# own (quiet, not mid-turn, a user platform) and globbed the directory raw, so a
+# sidecar became a conversation queued for the primary model to write notes about. It
+# passes every gate the source asks: the payload has no `platform`, and
+# `is_user_session` reads a missing platform as the web UI — its own docstring,
+# "Missing platform means the web UI, on both lists". Measured on the live store on
+# 2026-11-08: `_eligible` answered `(True, "")` for 145 of 145 files carrying the
+# suffix, and `_scan` over the same tree with the 105 live `done:` markers returned 156
+# candidates, 145 of them sidecars, oldest-first, with a sidecar sitting third in
+# `_MAX_ENQUEUE_PER_TICK = 3`. `is_session_active(path.stem)` is False for a sidecar
+# too, precisely because the stem carries the suffix.
+#
+# So the filter can only be the NAME, and it belongs in `_eligible` — `_scan` calls it
+# per candidate and is its only caller, so one site covers the scan and anything added
+# beside it, and the two cannot disagree about what a sidecar is.
+
+
+def _distill_source(store, monkeypatch):
+    """The session-distill source, pointed at the fixture directory.
+
+    It binds `SESSIONS_DIR` at import (`from app.paths import SESSIONS_DIR`), so the
+    fixture's patch of `app.paths` cannot reach it. Patched where it binds, exactly as
+    the Mission Control node above patches `agent_mcp`.
+    """
+    from workers.sources import session_distill
+
+    monkeypatch.setattr(session_distill, "SESSIONS_DIR", store)
+    return session_distill
+
+
+def test_the_distill_source_refuses_a_sidecar_by_name_and_by_the_shared_predicate(
+        store, monkeypatch):
+    """Clause 1: `_eligible` answers False, with a reason, for every name #3815's
+    predicate accepts — and it reaches that predicate instead of spelling its suffix.
+
+    The reason is part of the clause and not decoration, even though `_scan` discards it
+    today (`ok, _why`): `""` is exactly what `_eligible` returns for a file it ACCEPTED,
+    so a refusal that arrives blank is indistinguishable from a non-refusal to any reader
+    of the tuple — which is the only reader this function has, and the one a caller that
+    ever logs the reason would read.
+
+    The second half is why this node reads the module's own source. A copy of the
+    suffix here would work today and rot the day the writer changes it — the tree
+    already carries a second spelling in
+    `scripts/groundskeeper/retention-sweep.py::_is_reduction_sidecar`, which is
+    #3815's own leftover, so "one rule" is a rule about new sites.
+    """
+    from pathlib import Path
+
+    from app.harness import microcompact
+
+    sd = _distill_source(store, monkeypatch)
+    now = time.time() + sd._QUIET_SECONDS + 60
+
+    for name in SIDECARS:
+        ok, why = sd._eligible(store / name, (store / name).stat().st_mtime, now)
+        assert ok is False, f"{name} is a reducer's bookkeeping record, not a transcript"
+        assert why, f"a refusal whose reason is empty reads as no opinion: {name}"
+
+    assert sd.is_reduction_sidecar is microcompact.is_reduction_sidecar, (
+        "the source must call #3815's one naming rule, not keep a local copy of it")
+    src = Path(sd.__file__).read_text(encoding="utf-8")
+    assert "microcompact-reduced" not in src, (
+        "the suffix is spelled once, in app.harness.microcompact — a second literal "
+        "here is the second naming rule #3815 removed")
+
+
+def test_the_distill_scan_offers_only_the_chat_heads_when_sidecars_share_the_directory(
+        store, monkeypatch):
+    """Clause 2: `_scan(now, set())` returns the 2 chat-platform heads — no sidecar,
+    and no machine head.
+
+    `set()` for `already_done` so the answer is the gates' alone and nothing is hidden
+    by a marker. The directory holds 6 files and the expected answer is 2, not 4 and
+    not 6: of the 4 heads, the `autonomy` and `worker` ones fail `is_user_session` on
+    their own merits, which is why the item's "returns only the N heads" has to read
+    N=2 of 4 — a node that asserted 4 would fail on a correct change.
+
+    Both halves matter together. Removing the sidecars by removing every unreadable
+    file would also remove a conversation, which is the failure #3815's denominators
+    pinned from the other side.
+    """
+    sd = _distill_source(store, monkeypatch)
+    now = time.time() + sd._QUIET_SECONDS + 60
+
+    out = sd._scan(now, set())
+    names = sorted(p.name for _, p in out)
+    assert names == sorted(f"{h}.json" for h in CHAT_HEADS), names
+    assert not [n for n in names if n.endswith(REDUCTION_SIDECAR_SUFFIX)], names
+
+
+def test_the_distill_source_keeps_all_three_original_gates_biting(store, monkeypatch):
+    """Clause 3: the sidecar gate is added to the source's three original gates, not
+    swapped in place of any of them.
+
+    Each was written against a measured loss and is re-pinned here on a HEAD, so a
+    change that stopped calling them cannot pass clause 2 and fail nothing:
+
+      * *quiet* — a chat still being typed into is not a transcript to learn from;
+      * *not mid-turn* — one chat was distilled 44 times before the `done:` markers;
+      * *a user session* — `platform: worker` turns go through the chat path, and 12
+        machine transcripts were mined as observations about the user.
+
+    The active-session gate is forced because `_session_queues` is in-process state no
+    fixture file can populate: `_eligible` imports it at call time from
+    `app.sessions_io`, so patching that attribute is what the call actually reads.
+    """
+    import app.sessions_io as sessions_io
+
+    sd = _distill_source(store, monkeypatch)
+    now = time.time() + sd._QUIET_SECONDS + 60
+
+    quiet_head = store / f"{CHAT_HEADS[0]}.json"
+    mtime = quiet_head.stat().st_mtime
+
+    ok, why = sd._eligible(quiet_head, mtime, mtime + sd._QUIET_SECONDS - 1)
+    assert ok is False and "still active" in why, (quiet_head, why)
+
+    monkeypatch.setattr(sessions_io, "is_session_active", lambda sid: True)
+    ok, why = sd._eligible(quiet_head, mtime, now)
+    assert ok is False and "a turn is running" in why, (quiet_head, why)
+    monkeypatch.setattr(sessions_io, "is_session_active", lambda sid: False)
+
+    machine_head = store / f"{BACKGROUND_HEADS[1]}.json"   # platform: worker
+    ok, why = sd._eligible(machine_head, machine_head.stat().st_mtime, now)
+    assert ok is False and "not a user session" in why, (machine_head, why)
+
+    ok, why = sd._eligible(quiet_head, mtime, now)
+    assert ok is True and why == "", ("a quiet chat head must still be distillable", why)
+
+
+def test_the_legacy_cursor_migration_seeds_no_marker_for_a_sidecar(
+        store, monkeypatch, tmp_path):
+    """Clause 4: `last_mtime` -> `done:` markers, for the head names only.
+
+    The migration is a second, independent walk of the same glob: it does not consult
+    `_eligible`, because its question is "was this ever enqueued", not "is this worth
+    distilling now". A sidecar seeded here would be marked done forever while nothing
+    had ever offered it, and the 105-row marker set would stop being a record of
+    sessions.
+
+    Dead in production, and pinned anyway: the live `watermarks` table holds
+    `last_enqueue_check`, `last_enqueue_ok` and the 105 `done:` rows, because the
+    cursor is deleted at the end of the first run that finds it, so this path returns 0
+    on the live box today. It is testable only by seeding the cursor, which is what
+    happens here. Expect no live marker count to move when this lands.
+    """
+    from workers.queue import WorkQueue
+
+    sd = _distill_source(store, monkeypatch)
+    queue = WorkQueue(tmp_path / "workers.db")
+
+    newest = max((store / n).stat().st_mtime
+                 for n in [f"{h}.json" for h in HEADS] + list(SIDECARS))
+    queue.wm_set(sd.NAME, sd._LEGACY_CURSOR, str(newest + 10))
+
+    seeded = sd._migrate_legacy_cursor(queue)
+
+    assert seeded == len(HEADS), (seeded, [n for n in HEADS])
+    for head in HEADS:
+        assert queue.wm_get(sd.NAME, sd._done_key(f"{head}.json")) is not None, head
+    for sidecar in SIDECARS:
+        assert queue.wm_get(sd.NAME, sd._done_key(sidecar)) is None, (
+            f"a sidecar was filed as a distilled session: {sidecar}")
+    assert queue.wm_get(sd.NAME, sd._LEGACY_CURSOR) is None, (
+        "the cursor is deleted once converted, so no session can be stranded behind it")
