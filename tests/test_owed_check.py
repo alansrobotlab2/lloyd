@@ -1332,16 +1332,31 @@ def test_done_on_the_row_clears_it_from_the_queue_and_from_the_list(isolated):
     """#3809 clause 2: ONE field, `done`, governs both edges of the transition —
     the queue slot and Mission Control's list. #3782 is the case that shows the
     two must agree: its row is listed today, and a one-field hand move used to be
-    able to make the debt vanish from the list while the queue never saw it at all."""
+    able to make the debt vanish from the list while the queue never saw it at all.
+
+    #3931 amends the QUEUE half of this pin. It used to read `5001 not in
+    _owed_ids(), "off the queue"` — true only because nothing could ever read a
+    discharged row again, which is the hole #3931 closes (measured
+    2026-11-08T08:47Z: 5 open items sat `draft` with every row discharged and no
+    pass able to close or re-rule them). `done` still takes the row off the
+    UNDISCHARGED queue and off Mission Control's list; what is new is that the
+    item comes back as one weekly `check` revisit that only the row's own recheck
+    date holds off. The other two assertions stand untouched: the list stays
+    empty, and a discharge is still not a close."""
     p = _ruled_outside(isolated, 5001)
     assert 5001 in _owed_ids() and [r["item_id"] for r in O.outside_list()] == [5001]
     fm = fm_of(p)
     B.update_frontmatter(p, {"owed_outside": [dict(fm["owed_outside"][0],
                                                    done="2026-11-05T18:00:00Z")]})
-    assert 5001 not in _owed_ids(), "off the queue"
     assert O.outside_list() == [], "and off the one list Alan reads"
     assert fm_of(p)["status"] == "draft", \
         "a discharge is not a close: whether owed-check may close on one is its own ruling"
+    (owing,) = [o for o in O.owing_items() if o.item.id == 5001]
+    assert len(owing.entries) == 1 and owing.entries[0]["kind"] == "check", \
+        "the undischarged debt is gone; what is left is a weekly verification"
+    assert not O._holds_a_slot(owing), "verifying a discharge holds no board slot"
+    assert O.defer(p, owing.entries, owing.due, why="no structured answer this pass")
+    assert 5001 not in _owed_ids(), "off the queue until the recheck date it just stamped"
 
 
 def test_one_outside_row_is_not_ruled_on_twice_in_a_day(isolated):
@@ -1456,6 +1471,215 @@ def test_re_ruling_a_discharged_outside_row_restates_it_not_appends(isolated):
     assert rows[0]["discharged_before"] == "2026-11-05T18:00:00Z", \
         "a retraction is written where humans read it, not overwritten silently"
     assert [r["item_id"] for r in O.outside_list()] == [5005], "one row listed"
+
+
+# ── Revisiting a DISCHARGED `owed_outside` row (#3931) ──────────────────────
+#
+# `done` on a row clears the debt from both surfaces, and until now it also cleared
+# the item from owed-check's sight for good: `outside_entries` skips a row carrying
+# `done` (owed.py:264) and `owing_items` then drops the item on an empty entry list
+# (owed.py:451-452). Measured 2026-11-08T08:47Z at HEAD 1202adc5 over 3858 items:
+# exactly 5 OPEN items — #3119, #3359, #3446, #3466, #3477, all `status: draft` —
+# had `entries_of(fm) == []` with every row discharged, four of them by hand at
+# 2026-10-30T03:01:07Z. Four are satisfied on disk today (autonomy task 30 carries
+# `preferred_hours: [20, 21]`, 48 `[8, 9]`, 74 `[11, 12]`, 82 `depends_on: 81` +
+# `stale_bypass_hours: 36`, 103 `status: up_next`); #3119's demand RETURNED — its
+# row records a 664,788,992 B `~/.cache/qmd/index.sqlite` at the 2026-10-30T04:18:50Z
+# swap and `ls -l` on 2026-11-08 reads 1,073,299,456 B, +408 MB in 9 days, with the
+# hand action live again. A discharge was the end of the record, so nothing could
+# verify one, close on one, or notice one had been retracted. These pin the bounded
+# revisit: one read-time `check` entry per such item, re-read no more than every
+# `DISCHARGE_RECHECK_DAYS` (7) days, invisible to Mission Control's list, and a
+# status move only over rows the writer re-reads as still discharged.
+
+#: A discharge as the 2026-10-30 hand sweep left it. All 5 live rows are exactly
+#: `what/needs/since/done` — none carries `recheck_after`, `rechecks` or
+#: `discharged_before`, so the first read of this arm cannot require the field.
+_DISCHARGE_STAMP = "2026-10-30T03:01:07Z"
+
+
+def _discharged_outside(isolated, item_id, *, status="draft", done=_DISCHARGE_STAMP,
+                        name="An outside debt discharged") -> Path:
+    """An item whose ONLY debt is one `owed_outside` row carrying `done`."""
+    return write_item(isolated, item_id, status=status, name=name, extra={
+        "owed_outside": [{"what": _OUTSIDE_ASK, "needs": "an edit in Alan's editor",
+                          "since": "2026-10-19T09:06:29", "done": done}]})
+
+
+def test_an_item_whose_rows_are_all_discharged_is_revisited_as_one_check_entry(isolated):
+    """#3931 clause 1: an OPEN item whose only debt is `owed_outside` rows that all
+    carry `done` is selected as exactly one due `check` entry, origin
+    `owed_outside`, whose text is the row's own."""
+    p = _discharged_outside(isolated, 5010)
+    fm = fm_of(p)
+    assert "owed" not in fm and not fm.get("owed_settled"), \
+        "the fixture is the census shape: no recorded debt but the discharged row"
+    assert O._recorded(fm) == [], "and the writer's view still records nothing"
+    owing = [o for o in O.owing_items() if o.item.id == 5010]
+    assert len(owing) == 1, "a discharged row is still a debt somebody has to verify"
+    (owing,) = owing
+    assert len(owing.entries) == 1 and owing.due == [0], "exactly one entry, due on the first read"
+    (entry,) = owing.entries
+    assert entry["kind"] == "check", "verifying a discharge is a measurement, not a held slot"
+    assert entry["origin"] == O.OUTSIDE_ORIGIN, "it is the row, not a recorded entry"
+    assert entry["what"] == _OUTSIDE_ASK, "the entry is the row's own text, not a paraphrase"
+    assert entry["since"] == "2026-10-19T09:06:29", "it has waited since the ruling"
+    assert not O._holds_a_slot(owing), "a revisit leaves the item triageable"
+
+    # The other side of the seam: the session has to be told it is re-measuring a
+    # discharge. Telling it the #3809 line — "never discharged" — would be false.
+    prompt = " ".join(OC.build_prompt(owing).split())
+    assert _OUTSIDE_ASK in prompt and "discharged" in prompt, \
+        "the prompt names the row as a discharge to verify"
+    assert "never discharged" not in prompt, "the row HAS been discharged"
+
+
+def test_the_discharge_revisit_is_due_at_most_once_every_seven_days(isolated):
+    """#3931 clause 2: the bound is a week — not a tick, and not the #538 day. None
+    of the 5 live rows carries `recheck_after`, so the first read is due; after a
+    pass stamps it the item is not re-read at 6 days and is again at 8."""
+    now = datetime.now(timezone.utc)
+    assert O.DISCHARGE_RECHECK_DAYS == 7
+    assert O.OUTSIDE_RECHECK_HOURS == 24, "the #538 floor is a separate constant"
+    p = _discharged_outside(isolated, 5011)
+    assert 5011 in _owed_ids(now), "a row with no `recheck_after` is due on the first read"
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 5011]
+    assert O.defer(p, owing.entries, owing.due, why="no structured answer this pass")
+    assert 5011 not in _owed_ids(now + timedelta(days=6)), "six days on, it is not re-read"
+    assert 5011 in _owed_ids(now + timedelta(days=8)), "eight days on, it is"
+    stamped = datetime.fromisoformat(
+        fm_of(p)["owed_outside"][0]["recheck_after"].replace("Z", "+00:00"))
+    assert abs((stamped - now).total_seconds() - 7 * 86400) < 60, \
+        "the date is the 7-day floor, not `defer`'s 24 hours"
+    # The floor is a parameter of the ONE recheck-date function, defaulted from
+    # `DISCHARGE_RECHECK_DAYS` — not a second function with its own clamp.
+    assert (O.outside_recheck_date("", now, floor_hours=O.DISCHARGE_RECHECK_DAYS * 24)
+            == (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert (O.outside_recheck_date("", now)
+            == (now + timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")), \
+        "the default floor an UNDISCHARGED row gets is untouched"
+
+
+def test_the_revisit_leaves_the_undischarged_and_closed_boundaries_as_they_were(isolated):
+    """#3931 clause 3: the two existing boundaries are unchanged. An OPEN item with
+    ANY undischarged row is still ruled on as one `decide` entry and is due again 25
+    hours after a defer; a CLOSED item carrying a discharged row still yields
+    nothing, which is the #538 pin `derived_entries`' dedupe rests on."""
+    now = datetime.now(timezone.utc)
+    p = _ruled_outside(isolated, 5012)
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 5012]
+    assert len(owing.entries) == 1 and owing.entries[0]["kind"] == "decide", \
+        "an undischarged row is ruled on, not revisited"
+    assert O.defer(p, owing.entries, owing.due, why="no structured answer this pass")
+    assert 5012 not in _owed_ids(now)
+    assert 5012 in _owed_ids(now + timedelta(hours=25)), "due again at 25 hours, not 7 days"
+
+    closed = write_item(isolated, 5013, status="done", name="A closed outside ruling", extra={
+        "completed": "2026-11-01T00:00:00",
+        "owed_outside": [{"what": _OUTSIDE_ASK, "needs": "an edit in Alan's editor",
+                          "since": "2026-10-19T09:06:29", "done": _DISCHARGE_STAMP}]})
+    assert O.entries_of(fm_of(closed)) == [], "a CLOSED item's discharged row is a settled ruling"
+    assert 5013 not in _owed_ids()
+
+    write_item(isolated, 5014, name="One row open one discharged", extra={
+        "owed_outside": [
+            {"what": "swap `~/.cache/qmd/index.sqlite` before it fills the disk",
+             "needs": "a swap with the daemon stopped", "since": "2026-10-19T09:06:29"},
+            {"what": _OUTSIDE_ASK, "needs": "an edit in Alan's editor",
+             "since": "2026-10-19T09:06:29", "done": _DISCHARGE_STAMP}]})
+    (owing_m,) = [o for o in O.owing_items(now=now) if o.item.id == 5014]
+    assert len(owing_m.entries) == 1, "any undischarged row is the debt; the revisit waits"
+    assert owing_m.entries[0]["kind"] == "decide"
+    assert owing_m.entries[0]["what"] == "swap `~/.cache/qmd/index.sqlite` before it fills the disk"
+
+
+def test_the_revisit_writes_only_a_date_on_its_own_row(isolated):
+    """#3931 clause 4: the revisit is a read. A pass that defers it must not
+    materialise it into `owed` (#2055), must not re-stamp the discharge, and must
+    not put an action Alan has already done back on Mission Control's list. A
+    `recheck` answer naming a shorter wait is raised to the week, which is what
+    makes the 7-day bound hold on the answer path and not only on `defer`."""
+    now = datetime.now(timezone.utc)
+    p = _discharged_outside(isolated, 5015)
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 5015]
+    assert O.defer(p, owing.entries, owing.due, why="no structured answer this pass")
+    fm = fm_of(p)
+    assert "owed" not in fm, "deferring the revisit wrote it into `owed`"
+    assert fm["owed_outside"][0]["done"] == _DISCHARGE_STAMP, \
+        "a read does not re-discharge: the row's `done` is byte for byte what it was"
+    assert fm["owed_outside"][0]["recheck_after"], "only the date went on the row"
+    assert O.outside_list() == [], "still invisible to the one list Alan reads"
+
+    later = now + timedelta(days=8)
+    (owing2,) = [o for o in O.owing_items(now=later) if o.item.id == 5015]
+    out = O.apply_verdict(p, owing2.entries,
+                          [{"n": 1, "outcome": "recheck",
+                            "recheck_after": (later + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "evidence": "cannot verify the task file from here today"}],
+                          item_id=5015, now=later)
+    fm2 = fm_of(p)
+    assert "owed" not in fm2, "a recheck moved the row's date, not the row into `owed`"
+    assert fm2["owed_outside"][0]["done"] == _DISCHARGE_STAMP, "the discharge still stands"
+    assert out["moved"] == "", "a recheck is not a close"
+    assert 5015 not in _owed_ids(later + timedelta(days=1)), \
+        "the named 2-hour wait was raised to the 7-day floor"
+    assert 5015 in _owed_ids(later + timedelta(days=8)), "the next read is a week on"
+
+
+def test_the_revisit_closes_only_on_rows_the_writer_re_reads_as_discharged(isolated):
+    """#3931 clause 5: `close` is the one outcome that moves the status, and it may
+    fire only over rows that STILL carry `done` in the front matter the writer
+    re-reads — the same re-read `close_item` already performs before its hand-run
+    refusal (owed.py:650-660). A discharge taken back between the read and the
+    write is not a close; a re-ruling keeps #3809's existing shape, including the
+    row's own `since`, which no code here re-stamps."""
+    now = datetime.now(timezone.utc)
+
+    p = _discharged_outside(isolated, 5020)
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 5020]
+    out = O.apply_verdict(p, owing.entries,
+                          [{"n": 1, "outcome": "close",
+                            "evidence": "task 30's file carries `preferred_hours: [20, 21]`",
+                            "ruling": "the action is on disk; the item is done"}],
+                          item_id=5020)
+    assert out["moved"] == "closed", "every row still discharged: the close lands"
+    fm = fm_of(p)
+    assert fm["status"] == "done" and fm["closed_by"] == "owed-check"
+    assert fm["owed_outside"][0]["done"] == _DISCHARGE_STAMP, "the row keeps its discharge"
+    assert 5020 not in [r["item_id"] for r in O.outside_list()]
+
+    p2 = _discharged_outside(isolated, 5021)
+    (owing2,) = [o for o in O.owing_items(now=now) if o.item.id == 5021]
+    B.update_frontmatter(p2, {"owed_outside": [
+        {k: v for k, v in fm_of(p2)["owed_outside"][0].items() if k != "done"}]})
+    out2 = O.apply_verdict(p2, owing2.entries,
+                           [{"n": 1, "outcome": "close",
+                             "evidence": "measured discharged at the read",
+                             "ruling": "closing on the discharge"}], item_id=5021)
+    assert out2["moved"] == "", "the write re-read the row and it no longer carried `done`"
+    assert fm_of(p2)["status"] == "draft", "so the item stays open"
+    assert "close refused" in str((fm_of(p2).get("activity_log") or [])[-1]), \
+        "the refusal is written to the item naming why"
+
+    p3 = _discharged_outside(isolated, 5022)
+    (owing3,) = [o for o in O.owing_items(now=now) if o.item.id == 5022]
+    O.apply_verdict(p3, owing3.entries,
+                    [{"n": 1, "outcome": "outside",
+                      "evidence": "the index is 1,073,299,456 B again, 9 days after the swap",
+                      "outside": "swap the qmd index with the daemon stopped"}],
+                    item_id=5022)
+    rows = fm_of(p3)["owed_outside"]
+    assert len(rows) == 1, f"one row per clause, restated: {rows}"
+    assert not rows[0].get("done"), "the re-ruling took the discharge back"
+    assert rows[0]["discharged_before"] == _DISCHARGE_STAMP, \
+        "a retraction is written where humans read it, not overwritten silently"
+    assert rows[0]["since"] == "2026-10-19T09:06:29", "and it keeps the row's own `since`"
+    assert fm_of(p3)["status"] == "draft"
+    # 5021 is on the list too: its row is the one this test simulated as retracted.
+    listed = [r for r in O.outside_list() if r["item_id"] == 5022]
+    assert len(listed) == 1, f"back on the human list, one row: {listed}"
+    assert listed[0]["needs"] == "swap the qmd index with the daemon stopped", \
+        "with the restated ask, not the discharged one"
 
 
 # ── The pending hand-run (#3017) ────────────────────────────────────────────

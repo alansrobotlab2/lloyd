@@ -71,6 +71,16 @@ OUTSIDE_ORIGIN = "owed_outside"
 # by dfe056f6 ("a clause ruled outside is one entry, not one per tick").
 OUTSIDE_RECHECK_HOURS = 24
 
+# How far out a row that HAS been discharged is re-read (#3931). A separate floor
+# from the one above, because the two read different things: an UNDISCHARGED row is
+# a live ask a person may act on between sittings, so a day is the #538 bound; a
+# DISCHARGED row is a claim that the action happened, and the only thing that can
+# falsify it is time — #3119's swap held for 9 days (664,788,992 B on
+# 2026-10-30T04:18:50Z, 1,073,299,456 B on 2026-11-08) before its hand action was
+# live again. Weekly, then, and never per tick: 5 items entered this queue the day
+# it landed, and a pass over each of them every hour would be #538 in new dress.
+DISCHARGE_RECHECK_DAYS = 7
+
 # How many items whose ONLY entries are derived one owed-check run may claim.
 # The scan on 2026-10-02 found 454 `status: done` items in #1999's state — 72 of
 # them closed on or after 2026-09-27, when the "nothing parks on Alan" route
@@ -200,7 +210,8 @@ def _outside_row(rows: list, what: Any) -> dict | None:
     return None
 
 
-def outside_recheck_date(after: Any = "", now: datetime | None = None) -> str:
+def outside_recheck_date(after: Any = "", now: datetime | None = None,
+                         *, floor_hours: float | None = None) -> str:
     """The date an `owed_outside` row is next measured at, floored at
     `OUTSIDE_RECHECK_HOURS` and still clamped to `MAX_RECHECK_DAYS`.
 
@@ -208,10 +219,18 @@ def outside_recheck_date(after: Any = "", now: datetime | None = None) -> str:
     synthesised entry cannot be bounded by `derived_entries`' dedupe against
     `owed_outside`, because the entry IS the row that dedupe would compare against.
     A session naming a shorter wait is raised to the floor; none of the 6 rows on
-    the board on 2026-11-05 carried a recheck field at all."""
+    the board on 2026-11-05 carried a recheck field at all.
+
+    `floor_hours` is how a caller raises that bound for a DIFFERENT read without
+    moving it for anyone else: a discharged row being re-verified (#3931) passes
+    `DISCHARGE_RECHECK_DAYS * 24`, because what is being re-read there is a claim
+    that a human action happened, not an ask waiting on one. Every existing call
+    site leaves it None and gets the 24-hour floor unchanged.
+    """
     from datetime import timedelta
     now = now or _now()
-    floor = now + timedelta(hours=OUTSIDE_RECHECK_HOURS)
+    floor = now + timedelta(hours=(OUTSIDE_RECHECK_HOURS
+                                   if floor_hours is None else floor_hours))
     at = floor
     value = str(after or "").strip()
     if value:
@@ -276,6 +295,74 @@ def outside_entries(fm: dict) -> list[dict]:
     return out
 
 
+def discharge_revisit_entries(fm: dict) -> list[dict]:
+    """One `check` entry for an OPEN item whose ONLY debt is discharged rows (#3931).
+
+    The hole: `done` on an `owed_outside` row is the one field that clears the debt
+    from `owing_items` and `outside_list` together, and it also cleared the item from
+    every reader's sight for good — `outside_entries` skips a row carrying `done`
+    and `owing_items` then drops the item on an empty entry list. Measured
+    2026-11-08T08:47Z at HEAD 1202adc5 over 3858 items: exactly 5 OPEN items
+    (#3119, #3359, #3446, #3466, #3477, all `status: draft`) had `entries_of(fm) ==
+    []` with every row discharged, four by hand at 2026-10-30T03:01:07Z. A discharge
+    was the end of the record, so nothing could verify one, close the item on one,
+    or notice one had been retracted — and #3119's demand had genuinely returned 9
+    days after its own discharge was written.
+
+    Bounded three ways, because this is a queue that must not become a loop:
+
+    * **only when the rows are the whole debt** — no recorded `owed` entry, no
+      undischarged row (`outside_entries` answers that), no `hand_run` block. An
+      item with another debt is already selected for it; a second entry beside
+      a `decide` would be the same clause ruled twice in one pass.
+    * **one entry per item**, from the first row: `defer` and `apply_verdict` date
+      the row an entry names, so the entry's bound and the row's bound are the same
+      object. A second discharged row waits its turn behind the first.
+    * **at most every `DISCHARGE_RECHECK_DAYS` days**, on the row's own
+      `recheck_after` — which none of the 5 live rows has, so the first read is due
+      (`_due` on an empty date is True, the behaviour #3809 pinned).
+
+    `kind: check`, not `decide`: `_holds_a_slot` holds an OPEN item out of every
+    pool only while a `decide` entry is due, and a verification is not a held slot —
+    these 5 items are `draft` and triage still reads them.
+
+    OPEN items only, for the same reason and with the same pin as `outside_entries`:
+    a CLOSED item's discharged row is a settled ruling, and deriving from it is the
+    #538 re-ruling loop.
+    """
+    if not _open_item(fm) or fm.get(HAND_RUN_KEY) or _recorded(fm):
+        return []
+    if outside_entries(fm):
+        return []
+    rows = [r for r in (fm.get(OUTSIDE_KEY) or []) if isinstance(r, dict)]
+    if not rows or not all(r.get("done") for r in rows):
+        return []
+    what = _text(rows[0].get("what"))
+    if not what:
+        return []
+    return [{"what": what, "kind": "check",
+             "since": str(rows[0].get("since") or _since(fm)),
+             "recheck_after": str(rows[0].get("recheck_after") or ""),
+             "rechecks": int(rows[0].get("rechecks") or 0),
+             "origin": OUTSIDE_ORIGIN}]
+
+
+def _is_discharge_revisit(entry: dict) -> bool:
+    """Whether an entry was synthesised from a DISCHARGED row (#3931).
+
+    Both derivations from a row carry `origin == OUTSIDE_ORIGIN`, so the kind is
+    what tells them apart: `decide` rules on a live ask on the 24-hour #538 floor,
+    `check` re-verifies a discharge on the 7-day one. Every writer that dates a row
+    reads this, which is why the two floors cannot drift onto each other's rows."""
+    return (entry.get("origin") == OUTSIDE_ORIGIN
+            and entry.get("kind") == "check")
+
+
+def _outside_floor_hours(entry: dict) -> float | None:
+    """The recheck floor that bounds one synthesised entry's next read."""
+    return DISCHARGE_RECHECK_DAYS * 24 if _is_discharge_revisit(entry) else None
+
+
 def derived_entries(fm: dict) -> list[dict]:
     """`human_clauses` strings that appear in none of `owed`, `owed_settled` and
     `owed_outside`.
@@ -336,16 +423,19 @@ def derived_entries(fm: dict) -> list[dict]:
 
 
 def entries_of(fm: dict, *, derived: bool = True) -> list[dict]:
-    """The item's owed entries: what `owed` records, plus two read-time
+    """The item's owed entries: what `owed` records, plus three read-time
     derivations — since #2055 one due `check` entry per `human_clauses` string
-    recorded in neither `owed` nor `owed_settled` (CLOSED items), and since #3809
-    one due `decide` entry per `owed_outside` row an OPEN item has not discharged.
-    `derived=False` is the writer's view (`_recorded` only), which is what keeps
-    either derivation from becoming front matter as a side effect."""
+    recorded in neither `owed` nor `owed_settled` (CLOSED items), since #3809
+    one due `decide` entry per `owed_outside` row an OPEN item has not discharged,
+    and since #3931 one due `check` entry for an OPEN item whose ONLY debt is rows
+    it HAS discharged. `derived=False` is the writer's view (`_recorded` only), which
+    is what keeps any of the three from becoming front matter as a side effect."""
     out = _recorded(fm)
     if derived:
         out.extend(derived_entries(fm))
         out.extend(outside_entries(fm))
+        if not out:
+            out.extend(discharge_revisit_entries(fm))
     return out
 
 
@@ -630,10 +720,19 @@ def _hold_note(block: dict, why: str) -> str:
         f"'{_text(block['receipt'], 400)}' {why}", 650)
 
 
-def close_item(path: Path, why: str) -> bool:
+def close_item(path: Path, why: str, *, require_rows_discharged: bool = False) -> bool:
     """Close an open item on Lloyd's own ruling. The status move goes through
     the shared recorder, so `completed` and the activity line are the ones
     every other closer writes.
+
+    `require_rows_discharged` is #3931's write-time guard, set only by a close
+    ruled over a discharge-revisit entry: every `owed_outside` row must STILL carry
+    `done` in the front matter re-read here, or the close is refused. The read that
+    offered the entry and this write are not the same instant — a discharge can be
+    taken back between them (a hand re-rule, or #3119's demand simply returning) —
+    and closing on a discharge that no longer stands is a false `done`, the one
+    failure mode this module refuses in every direction. Rows gone entirely fail the
+    same way: no row, no discharge to close on.
 
     A pending hand-run (#3017) refuses the close: the receipt command exits
     non-zero, the status is left exactly as it was, and the refusal is written to
@@ -657,6 +756,16 @@ def close_item(path: Path, why: str) -> bool:
     if block:
         B.update_frontmatter(path, {}, activity=_hold_note(block, receipt_why))
         return False
+    if require_rows_discharged:
+        rows = [r for r in (fm.get(OUTSIDE_KEY) or []) if isinstance(r, dict)]
+        lost = [_text(r.get("what"), 200) for r in rows if not r.get("done")]
+        if lost or not rows:
+            B.update_frontmatter(
+                path, {},
+                activity=("owed-check close refused: an owed_outside row lost its "
+                          "discharge since the read"
+                          + (f": {lost[0]}" if lost else " — the rows are gone"))[:600])
+            return False
     if not record_status_move(fm, "done", f"closed by owed-check: {why}"[:600],
                               remove_tags=(B.NEEDS_HUMAN_TAG,)):
         return False
@@ -935,6 +1044,9 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
     amended: list[int] = []
     item_move = ""
     move_why = ""
+    # Set only when the close being ruled rides on a discharge (#3931): the write
+    # then re-reads the rows and refuses if any has lost its `done` since the read.
+    close_needs_rows = False
     stamp = _stamp()
     is_open = str(fm.get("status") or "") != "done"
     # One receipt read for the whole pass, on the item as it stands now: an
@@ -955,7 +1067,8 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         if entry.get("origin") == OUTSIDE_ORIGIN:
             row = _outside_row(outside, entry.get("what"))
             if row is not None:
-                row["recheck_after"] = outside_recheck_date(kw.get("recheck_after"), now)
+                row["recheck_after"] = outside_recheck_date(
+                    kw.get("recheck_after"), now, floor_hours=_outside_floor_hours(entry))
                 if kw.get("note"):
                     row["note"] = _text(kw["note"], 300)
             return
@@ -1091,9 +1204,18 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                 row["done"] = stamp
                 row["discharge"] = (evidence or _text(a.get("ruling"), 300)
                                     or "no evidence given")
+                # A discharge verified NOW is next worth verifying a week then
+                # (#3931) — the discharge floor, whatever kind of entry carried the
+                # answer, because from this write on the row IS a discharged row.
+                # Without the stamp at all `recheck_after` stays empty, the revisit
+                # arm reads it as due at once, and a settled discharge is measured
+                # every tick — #538's shape again, one field over.
+                row["recheck_after"] = outside_recheck_date(
+                    "", now, floor_hours=DISCHARGE_RECHECK_DAYS * 24)
                 notes.append(f"#{n} outside debt discharged: {_text(row['discharge'], 160)}")
                 continue
-            row["recheck_after"] = outside_recheck_date("", now)
+            row["recheck_after"] = outside_recheck_date(
+                "", now, floor_hours=_outside_floor_hours(e))
         record = {"what": e["what"], "outcome": out, "at": stamp}
         if evidence:
             record["evidence"] = evidence
@@ -1125,6 +1247,8 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             item_move, move_why = "reopen", record.get("ruling") or evidence
         elif out == "close" and item_move != "reopen":
             item_move, move_why = "close", record.get("ruling") or evidence
+            if _is_discharge_revisit(e):
+                close_needs_rows = True
         settled.append(record)
         notes.append(f"#{n} {out}: " + (record.get("ruling") or evidence)[:200]
                      + (f" -> #{record['follow_up']}" if record.get("follow_up") else ""))
@@ -1147,7 +1271,8 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             moved = "up_next" if B.set_status(item_id, "up_next", f"owed-check: {move_why}"[:300]) \
                 else f"reopen refused: {exc}"[:200]
     elif item_move == "close" and is_open:
-        moved = "closed" if close_item(path, move_why) else ""
+        moved = "closed" if close_item(path, move_why,
+                                      require_rows_discharged=close_needs_rows) else ""
     elif is_open and settled and not keep and not outside:
         # #1909: the sweep that empties the list is the sweep that closes. An open
         # item with nothing owed was a hole, not a neutral state — #1751 sat in it
@@ -1232,7 +1357,8 @@ def defer(path: Path, entries: list[dict], due: list[int], *, hours: float = 24,
     than `entries_of`. Its date goes on the ROW instead, floored at
     `OUTSIDE_RECHECK_HOURS` whatever `hours` says — the #538 bound is not a caller's
     knob to turn, and a sub-hour hold is the tick-per-ruling shape that produced six
-    filings in 28 minutes."""
+    filings in 28 minutes. An entry synthesised from a DISCHARGED row (#3931) is held
+    to `DISCHARGE_RECHECK_DAYS` by the same route: neither bound is a caller's."""
     from datetime import timedelta
     from scripts.automod import backlog as B
     now = _now()
@@ -1251,7 +1377,10 @@ def defer(path: Path, entries: list[dict], due: list[int], *, hours: float = 24,
     for e in synth:
         row = _outside_row(rows, e.get("what"))
         if row is not None:
-            row["recheck_after"] = outside_recheck_date(when, now)
+            # A revisit entry is held to the discharge floor (#3931), an undischarge
+            # row to the #538 day; `hours` is never either one's knob.
+            row["recheck_after"] = outside_recheck_date(
+                when, now, floor_hours=_outside_floor_hours(e))
     return B.update_frontmatter(
         path, {OWED_KEY: kept or None, OUTSIDE_KEY: rows},
         activity=(f"owed-check deferred {len(due)} entr(ies) to {when[:16]}: {why}"

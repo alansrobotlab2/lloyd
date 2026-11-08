@@ -194,6 +194,7 @@ def _entries_block(entries: list[dict], due: list[int]) -> str:
     from scripts.automod import owed as O
     rows = []
     ruled_outside = False
+    revisit = False
     for i, e in enumerate(entries):
         if i not in due:
             continue
@@ -208,6 +209,13 @@ def _entries_block(entries: list[dict], due: list[int]) -> str:
         # item ever heard — nothing read the row again, so the human half of the
         # ruling could never be verified. It is back in the queue, and what it is
         # measured against is a human action, not a diff.
+        # #3931: the same row AFTER it carries `done`. Checked before the branch
+        # below because both derivations share `origin` and the kind is what tells
+        # them apart — and telling a discharged row "never discharged" would be the
+        # one sentence that makes a session rule on it as if it were still owed.
+        elif O._is_discharge_revisit(e):
+            revisit = True
+            extra += ", discharged already: verify it still holds"
         elif e.get("origin") == O.OUTSIDE_ORIGIN:
             ruled_outside = True
             extra += ", ruled outside and never discharged: Alan's half"
@@ -224,6 +232,18 @@ def _entries_block(entries: list[dict], due: list[int]) -> str:
             " this queue and off Mission Control's outside list together. A prose"
             " line on the item discharges nothing. If it has not been done, `outside`"
             " restates the ask in place rather than adding a second row.")
+    if revisit:
+        rows.append(
+            "\n> An entry marked `discharged already` is an `owed_outside` row whose"
+            " human half is RECORDED AS DONE (#3931). A discharge is a claim, not a"
+            " fact: #3119's index swap stood for 9 days before the file was 408 MB"
+            " bigger and the same action was owed again. Measure whether it STILL"
+            " holds. `close` is the answer that ends the item, and the writer"
+            " re-reads every row before it moves the status — one that has lost its"
+            " `done` since this read makes the close refuse and the item stays open."
+            " `settled` re-dates the row for the next weekly read; `outside` takes"
+            " the discharge back into `discharged_before` and puts the ask on"
+            " Mission Control's outside list again.")
     return "\n".join(rows)
 
 
