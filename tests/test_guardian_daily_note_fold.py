@@ -51,8 +51,9 @@ touches `~/obsidian`.
 
 from __future__ import annotations
 
+import re
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -644,3 +645,114 @@ def test_a_fold_leaves_another_writer_s_line_and_the_note_header_alone(tmp_path)
     assert _snapshot_body("2026-11-05T01:00:00Z").splitlines()[0] in updated, (
         "the update dropped the first firing's body, which is the only body this day "
         "gets")
+
+
+# ── #3932: the stamp on a fold line has to name the clock it is on ───────────
+#
+# `_newest_stamp_in` has two branches and they were on different clocks: a body that
+# names an instant contributes a genuine UTC reading (`guardian.py:476` builds its
+# `checked <ISO>` with `time.gmtime`), while the fallback printed `_stamp()` — a naive
+# local `datetime.now()` — with a typed-literal `Z` glued on (notify.py:1148). One field,
+# `newest check`, therefore meant two things eight hours apart depending on whether the
+# body happened to carry an instant. The two nodes below pin the fallback to the same
+# instant-a-decoder-honours rule the writer's own `ALERT.md` stamps already obey
+# (`tests/test_guardian_alert_stamp.py`, #1912), and pin the comparison to instants
+# rather than to digit strings.
+
+#: The stamp clause of a fold line, located by its own clause name so a node cannot pass
+#: on a `checked` reading sitting somewhere else in the line.
+_NEWEST_CHECK = re.compile(r"newest check "
+                           r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?)")
+
+
+def _snapshot_body_without_instant(commits: int = 1183) -> str:
+    """The vault-snapshot alarm's body with NO instant anywhere in it.
+
+    `_newest_stamp_in`'s fallback branch is the ordinary route for any alert whose body
+    does not carry a `checked <ISO>` clause, and it is the branch notify.py:1148 lives
+    on. The fixture has to be free of anything the pattern reads, or the node would
+    exercise the other branch and pass for the wrong reason.
+    """
+    return (f"{SNAPSHOT}: the vault's off-vault copy has no HEAD commit inside the "
+            f"bound (last commit seen {commits}).\n\n" + RESTORE * 12)
+
+
+def test_a_fold_from_a_body_that_names_no_instant_carries_a_true_designant(tmp_path):
+    """#3932 clause 2: the fallback stamp decodes to within 5 s of its own write.
+
+    Two firings of the non-coalesced title, neither body naming an instant, so the fold
+    line's `newest check` can only come from notify.py:1148. The stamp is decoded with
+    `datetime.fromisoformat`, which honours whatever designator is on it, and has to land
+    inside the ±5 s window bracketing the shipped `_vault_note` call that wrote the line.
+
+    Before #3932 this failed by 8 hours, not by a margin: the site printed
+    `datetime.now()`'s local digits with a literal `Z`, so on this `-0800` box the line
+    claimed a moment eight hours before the tick that wrote it — and the assertion below
+    is the same 8-hour claim `~/obsidian/memory/2026-11-07.md:25` makes about a
+    cross-root seal, which is the sibling site's artefact witness.
+    """
+    n = _notifier(tmp_path)
+    assert n._vault_note(SNAPSHOT, _snapshot_body_without_instant()) is True
+
+    before = datetime.now(timezone.utc)
+    assert n._vault_note(SNAPSHOT, _snapshot_body_without_instant(commits=1184)) is True
+    after = datetime.now(timezone.utc)
+
+    folds = _fold_lines(_note(n).read_text(encoding="utf-8"), SNAPSHOT)
+    assert len(folds) == 1, f"the second firing wrote no fold line:\n{_note(n)}"
+    hit = _NEWEST_CHECK.search(folds[0])
+    assert hit, f"the fold line names no `newest check` instant:\n{folds[0]!r}"
+    stamp = hit.group(1)
+    parsed = datetime.fromisoformat(stamp)
+    assert parsed.tzinfo is not None, (
+        f"{stamp!r} carries no designator a reader can honour — the clause has to say "
+        f"which clock it is on:\n{folds[0]!r}")
+    tolerance = timedelta(seconds=5)
+    assert before - tolerance <= parsed <= after + tolerance, (
+        f"{stamp!r} is not within 5 seconds of the write that produced it (that call ran "
+        f"between {before.isoformat()} and {after.isoformat()} UTC) — local digits wearing "
+        "a UTC designator are the 8-hour claim #3932 removes")
+
+
+def test_the_fold_picks_the_newest_instant_not_the_newest_digits(tmp_path):
+    """#3932 clause 3: one body, two clocks, and the fold has to read the instants.
+
+    `ISO_STAMP_IN_TEXT` was `…T\\d{2}:\\d{2}:\\d{2}Z?`: an optional, uncaptured
+    designator, so an offset-bearing stamp was truncated to its LOCAL digits before
+    `max()` compared it against a genuine `Z` string — and `max()` on those strings is a
+    digit comparison, not a comparison of instants. A body holding `2026-11-05T01:00:00-08:00`
+    (which IS `2026-11-05T09:00:00Z`, four and a half hours LATER than the other reading)
+    and `2026-11-05T04:30:00Z` therefore folded under the earlier one.
+
+    Three things are pinned, because the fix has three parts: the pattern captures the
+    offset whole rather than stopping at the seconds, `_newest_stamp_in` orders by
+    instant, and the line a reader gets names the offset-bearing stamp. A fix that only
+    changed the emit sites would re-create the truncation here, which is why this node
+    puts an offset INSIDE the body.
+    """
+    body_with_two_clocks = (
+        f"{SNAPSHOT}: the vault's off-vault copy has no HEAD commit inside the bound "
+        "(last commit seen 1183, checked 2026-11-05T04:30:00Z), and the same reading "
+        "re-printed at 2026-11-05T01:00:00-08:00.\n\n" + RESTORE * 12)
+
+    # The pattern has to hand `_newest_stamp_in` a token that still says which zone it
+    # is in: a match that stopped at `:00` would leave the offset behind in the text.
+    assert notify.ISO_STAMP_IN_TEXT.findall(body_with_two_clocks) == [
+        "2026-11-05T04:30:00Z", "2026-11-05T01:00:00-08:00"], (
+        "the stamp pattern is not reading an offset as part of the instant, so the "
+        "comparison below is being handed local digits and a UTC string")
+
+    n = _notifier(tmp_path)
+    assert n._newest_stamp_in(body_with_two_clocks) == "2026-11-05T01:00:00-08:00", (
+        "`_newest_stamp_in` ordered by digit string: 01:00-08:00 is 09:00Z, which is "
+        "later than 04:30Z")
+
+    assert n._vault_note(SNAPSHOT, _snapshot_body("2026-11-05T00:00:00Z")) is True
+    assert n._vault_note(SNAPSHOT, body_with_two_clocks) is True
+
+    folds = _fold_lines(_note(n).read_text(encoding="utf-8"), SNAPSHOT)
+    assert len(folds) == 1, f"no single fold line for the second firing:\n{_note(n)}"
+    assert "newest check 2026-11-05T01:00:00-08:00" in folds[0], (
+        f"the fold did not fold under the chronologically newest stamp:\n{folds[0]!r}")
+    assert "2026-11-05T04:30:00Z" not in folds[0], (
+        f"the line still names the earlier instant:\n{folds[0]!r}")

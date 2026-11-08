@@ -2280,16 +2280,148 @@ def test_a_clearance_from_a_foreign_root_labels_the_next_section(tmp_path, monke
     assert seals[0].startswith(f"{notify.DAILY_CROSS_ROOT_PREFIX} "), seals[0]
     assert foreign in seals[0], f"the sealing root is not named: {seals[0]}"
     assert measured in seals[0], f"the measured root is not named: {seals[0]}"
-    # The label is dated with this tick's own stamp, in the shape every other note
-    # timestamp uses: without it a reader cannot tell a fresh cross-root seal from an
-    # old one.
+    # The label is dated with this tick's own stamp: without it a reader cannot tell a
+    # fresh cross-root seal from an old one. The designator it requires is any TRUE one
+    # — `Z` or a numeric offset — because #3932 replaced this line's typed-literal `Z`
+    # (a `-0800` wall clock wearing a UTC designator, 8 h ahead of itself) with the
+    # machine's real offset, and a node that demanded a literal `Z` would pin the bug
+    # back into the suite. `test_both_cross_root_lines_are_stamped_within_five_seconds`
+    # below is the node that grades which instant the designator names.
     assert re.search(rf"{re.escape(notify.DAILY_CROSS_ROOT_PREFIX)} "
-                     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", seals[0]), seals[0]
+                     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})",
+                     seals[0]), seals[0]
     # The sealed section is left exactly as the foreign seal wrote it: no label, and its
     # marker stays replaced.
     assert notify.DAILY_CROSS_ROOT_PREFIX not in secs[0], secs[0]
     assert notify.DAILY_STILL_OPEN not in secs[0], "a sealed section reopened"
     assert text.count(f"{notify.DAILY_CLEARED_PREFIX} ") == 1, text
+
+
+# ── #3932: a cross-root line's designator has to name the clock it is on ─────
+
+#: One automod round's data root and code tree — the shape the five `cleared:` lines on
+#: `memory/2026-10-29.md` name — beside the live data root the section they closed
+#: measured. Both absolute, because `notify._absolute_roots` keeps only tokens that
+#: start with `/`.
+_MEASURED_ROOT = "/home/alansrobotlab/lloyd-data"
+_FOREIGN_ROUND = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd-data"
+_FOREIGN_TREE = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd"
+
+#: A date, a time to the second, and then whatever designator the line carries: `Z` or a
+#: numeric UTC offset. Used only to LOCATE the stamp on the line; the claim under test is
+#: made by `datetime.fromisoformat` on what it finds, which is the call a downstream
+#: reader makes.
+_ANY_ISO_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})")
+
+
+def _stamped_pair_note(tmp_path):
+    """One daily note carrying BOTH of #3932's lines, with the write window of each.
+
+    Returns `(text, marker_window, label_window)`, each window a `(start, end)` pair of
+    aware UTC instants measured around the shipped call that wrote that line — the only
+    way "within 5 seconds of the instant the line was written" can be checked without
+    trusting the line's own digits for its own age.
+
+    Both lines come out of one note because the two sites are one incident's two halves:
+    `resolve()` stamps a `cross-root clearance:` marker onto the `cleared:` line it
+    writes, and the next firing's `_vault_note` stamps a `cross-root seal:` label for
+    that very clearance. The path is the shipped one end to end — `alert` fans out,
+    `resolve` seals with a root it did not measure, `_vault_note` re-prints — and only
+    the backend URL is synthetic (a closed port, so no board POST can reach the live one).
+    """
+    import notify
+    from datetime import datetime, timezone
+
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(vault),
+                        backend_url="http://127.0.0.1:1")   # nothing listens
+    title = "Runtime data is being written into the code tree"
+    finding = ("These exist inside the tree again:\n"
+               "  /home/alansrobotlab/lloyd/.t")
+    assert n.alert("error", title, finding, coalesce=True)["vault"] is True
+
+    clearance = (f"no runtime stores inside the code tree of {_FOREIGN_TREE}, and no "
+                 f"database with zero data rows shadowing a populated store under "
+                 f"{_FOREIGN_ROUND} — absent with no move recorded by the guardian, so "
+                 "the instructions above are stale and nothing here accounts for a path "
+                 "that was named and is now gone")
+    before_seal = datetime.now(timezone.utc)
+    assert n.resolve(title, clearance, measured_root=_FOREIGN_ROUND) is True
+    after_seal = datetime.now(timezone.utc)
+    assert n._vault_note(title, finding + "\n  (still there)", coalesce=True,
+                         measured_root=_MEASURED_ROOT) is True
+    after_label = datetime.now(timezone.utc)
+
+    note = next((vault / "memory").glob("*.md"))
+    return (note.read_text(encoding="utf-8"),
+            (before_seal, after_seal),
+            (after_seal, after_label))
+
+
+def _line_stamp(line: str, prefix: str) -> str:
+    """The first ISO stamp on `line`, which must open with `prefix`.
+
+    Located from the prefix forward, because the clearance's own prose names a root
+    before the marker does and a whole-line search could land on the wrong token.
+    """
+    assert line.startswith(prefix), f"{line!r} does not open with {prefix!r}"
+    hit = _ANY_ISO_STAMP.search(line, len(prefix))
+    assert hit, f"no ISO stamp after that prefix: {line!r}"
+    return hit.group(0)
+
+
+def test_both_cross_root_lines_are_stamped_within_five_seconds(tmp_path):
+    """#3932 clause 1: each line's designator names the instant it was written.
+
+    The defect is a typed literal, not a wrong clock: `notify._stamp()` answers a naive
+    local `datetime.now()`, and both sites appended a literal `Z` to its `strftime`
+    digits. The live witness is `~/obsidian/memory/2026-11-07.md:25`, which prints
+    `cross-root clearance: 2026-11-07T08:09:06Z` for a write whose own `stat` says
+    `2026-11-07 08:09:06.006400946 -0800` — the digits are the `-0800` wall clock, so
+    the real instant was `16:09:06Z` and the line claimed to be 8 hours in the future.
+
+    Each assertion decodes the stamp with `datetime.fromisoformat`, which honours the
+    designator on the line itself, and requires it to fall inside the ±5 s window that
+    brackets the shipped call which wrote it. Before #3932 both stamps land 8 h outside
+    their own window while every byte around them is unchanged, which is the whole point:
+    nothing but the designator is being corrected.
+    """
+    import notify
+    from datetime import datetime, timedelta
+
+    text, seal_window, label_window = _stamped_pair_note(tmp_path)
+
+    cleared = [ln for ln in text.splitlines()
+               if ln.startswith(f"{notify.DAILY_CLEARED_PREFIX} ")
+               and notify.DAILY_CROSS_ROOT_CLEAR_PREFIX in ln]
+    assert len(cleared) == 1, (
+        f"expected one marked clearance line (notify.py:1042):\n{text}")
+    cut = cleared[0].find(notify.DAILY_CROSS_ROOT_CLEAR_PREFIX)
+    marker = cleared[0][cut:]
+
+    labels = [ln for ln in text.splitlines()
+              if ln.startswith(f"{notify.DAILY_CROSS_ROOT_PREFIX} ")]
+    assert len(labels) == 1, (
+        f"expected one cross-root seal label (notify.py:1626):\n{text}")
+
+    for line, prefix, (start, end), site in (
+            (marker, notify.DAILY_CROSS_ROOT_CLEAR_PREFIX, seal_window,
+             "the `cross-root clearance:` marker at notify.py:1042"),
+            (labels[0], notify.DAILY_CROSS_ROOT_PREFIX, label_window,
+             "the `cross-root seal:` label at notify.py:1626")):
+        raw = _line_stamp(line, prefix)
+        parsed = datetime.fromisoformat(raw)
+        assert parsed.tzinfo is not None, (
+            f"{raw!r} on {site} carries no designator a reader can honour, so its "
+            "age is a guess")
+        tolerance = timedelta(seconds=5)
+        assert start - tolerance <= parsed <= end + tolerance, (
+            f"{raw!r} on {site} is not within 5 seconds of the write that produced it "
+            f"(that call ran between {start.isoformat()} and {end.isoformat()} UTC) — a "
+            "designator that names the wrong clock is the 8-hour claim "
+            "`~/obsidian/memory/2026-11-07.md:25` still makes")
 
 
 def test_a_clearance_from_the_measured_root_leaves_the_next_section_untouched(

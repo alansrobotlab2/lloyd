@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import re
 import subprocess
 import sys
 from datetime import date, datetime
@@ -292,3 +293,80 @@ def test_no_writer_holds_a_copy_of_the_header_literal():
         f"more than one module emits the daily-note header literal: {producers}. The "
         "positive control for a 0-hit grep is the assertion above, which runs first: "
         "if the grep is empty the writers would already have failed it")
+
+
+# ── #3932 clause 4: the offset stays out of the key the three writers share ───
+
+#: The data root this check measures, and an automod round's, which is what makes a
+#: `cleared:` line foreign and so puts #3932's two emit sites on the page.
+_MEASURED_ROOT = "/home/alansrobotlab/lloyd-data"
+_FOREIGN_ROUND = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd-data"
+_FOREIGN_TREE = "/home/alansrobotlab/lloyd-work/SM_FAKE0000_000000/home/lloyd"
+
+#: A zone designator as #3932 makes the guardian write it: a numeric UTC offset. Checked
+#: line by line, because the point is WHICH line in the file gained one.
+_OFFSET = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}")
+#: And the shape the front-matter key must keep: `daily_note._stamp` renders with
+#  `strftime("%Y-%m-%dT%H:%M:%S")`, which drops any zone the datetime carries.
+_NAIVE_KEY = re.compile(r"^timestamp: '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'$",
+                        re.MULTILINE)
+
+
+def test_a_zone_bearing_note_line_never_reaches_the_shared_front_matter(
+        tmp_path, monkeypatch):
+    """#3932 clause 4: fixing the note's lines must not move the note's KEY.
+
+    `_stamp()` answers naive local on purpose. Three writers put that reading into
+    `timestamp:` — `agent-services/guardian/daily_note.py:45-55` renders it, and
+    `app/post_capture.py:518` and `app/autonomy.py:4001` hand it the same naive local
+    instant — so an aware `_stamp()` would shift every guardian-created note by the box's
+    offset with no error anywhere, and `test_the_guardian_writes_the_same_block_as_both_
+    backend_writers` above is what catches that. This node adds the other half of the
+    claim: the same note #3932 gives offset-bearing cross-root lines keeps the byte-for-byte
+    naive-local header, so the fix is provably at the emit sites and not in the shared key.
+
+    Both halves are needed. A round that "fixed" this by making `_stamp()` aware would
+    keep the two line assertions below green and break the front matter, and a round that
+    wrote the offset into nothing at all would keep this node's front-matter half green
+    and leave #3932 unfixed — which is why the line assertions run first and assert one
+    occurrence of each prefix.
+    """
+    vault = tmp_path / "gd" / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+    n = notify.Notifier(ledger=tmp_path / "gd" / "l.jsonl",
+                        state_dir=tmp_path / "gd", vault_root=str(vault),
+                        backend_url="http://127.0.0.1:1",   # nothing listens
+                        external=True)
+    n._today = lambda: DAY        # the filename
+    n._stamp = lambda: STAMP      # and the `timestamp:` key, as #1887 requires
+
+    finding = ("These exist inside the tree again:\n"
+               "  /home/alansrobotlab/lloyd/.t")
+    clearance = (f"no runtime stores inside the code tree of {_FOREIGN_TREE}, and no "
+                 f"database with zero data rows shadowing a populated store under "
+                 f"{_FOREIGN_ROUND} — absent with no move recorded by the guardian")
+    assert n._vault_note(TITLE, finding, coalesce=True) is True
+    assert n.resolve(TITLE, clearance, measured_root=_FOREIGN_ROUND) is True
+    assert n._vault_note(TITLE, finding + "\n  (still there)", coalesce=True,
+                         measured_root=_MEASURED_ROOT) is True
+
+    text = (vault / "memory" / f"{DAY}.md").read_text(encoding="utf-8")
+
+    # The two lines #3932 changes, each exactly once, each stamped with an offset.
+    for prefix in (notify.DAILY_CROSS_ROOT_CLEAR_PREFIX, notify.DAILY_CROSS_ROOT_PREFIX):
+        lines = [ln for ln in text.splitlines() if prefix in ln]
+        assert len(lines) == 1, (
+            f"expected exactly one {prefix!r} line to grade, got {lines!r}:\n{text}")
+        assert _OFFSET.search(lines[0]), (
+            f"{prefix} lost its zone designator, so #3932 is unfixed on that line:\n"
+            f"{lines[0]!r}")
+
+    # And the header it shares with the other two writers is the bytes they write.
+    assert _NAIVE_KEY.search(text), (
+        f"the `timestamp:` key is no longer the naive-local reading "
+        f"`app/post_capture.py:518` and `app/autonomy.py:4001` put there:\n"
+        f"{_block(text)!r}")
+    assert _block(text) == _capture_block(tmp_path / "cap", monkeypatch), (
+        "the guardian's fresh header moved; only its dated LINES were allowed to")
+    assert yaml.safe_load(_block(text))["timestamp"] == "2026-09-30T08:32:00", (
+        "the shared key gained or shifted digits")

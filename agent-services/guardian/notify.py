@@ -35,7 +35,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # Sibling module — stdlib only, and staged alongside this file by
@@ -132,13 +132,41 @@ DAILY_FOLD_TAIL = ("further firings of this alarm today fold into this line; the
 #: automod-round worktree per hourly tick — and state that dies with the writer resets
 #: a counter a reader can still see on the page.
 DAILY_FOLD_FIRES = re.compile(r"(\d+) earlier fires? today folded into this line")
-#: The newest ISO-8601 instant inside an incoming alert body. The bodies the fold
-#: collapses are stamped with the check's own instant — `guardian.py:474-475` puts
-#: `checked %Y-%m-%dT%H:%M:%SZ` in the shadow alert's first sentence, and the vault
-#: snapshot alarm's `state["text"]` carries the same shape — and that stamp is exactly
-#: the line a fold throws away, so the fold has to carry it forward or the note loses
-#: the one fact that says the alarm is still live and when it last spoke.
-ISO_STAMP_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?")
+#: The newest ISO-8601 instant inside an incoming alert body. A body can be stamped with
+#: the check's own instant — `agent-services/guardian/guardian.py:475-476` puts a
+#: `checked <instant>` in the data-root shadow alarm's first sentence, built with
+#: `time.strftime(…, time.gmtime(now))`, so a body's reading is a genuine UTC instant —
+#: and that stamp is exactly the line a fold throws away, so the fold has to carry it
+#: forward or the note loses the one fact that says the alarm is still live and when it
+#: last spoke. A body need not carry one at all, which is the other arm below.
+#:
+#: The designator is part of the match, not an optional suffix that gets dropped. This
+#: pattern used to end in `Z?`, which truncated an offset-bearing stamp
+#: (`2026-11-05T01:00:00-08:00`) to its LOCAL digits and handed `_newest_stamp_in` a
+#: local reading to weigh against a genuine UTC one (#3932). The group is non-capturing
+#: on purpose: `findall` returns groups where a group exists and whole matches otherwise,
+#: and every caller here wants the whole token.
+ISO_STAMP_IN_TEXT = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?")
+
+
+def _instant_of_stamp(stamp: str) -> datetime:
+    """The instant one `ISO_STAMP_IN_TEXT` match names — so candidates sort by time.
+
+    `max()` over these strings was a digit comparison, which coincides with a comparison
+    of instants only while every candidate shares one clock — the assumption #3932
+    removes, now that one body can carry `…-08:00` beside a genuine `…Z`.
+
+    A match with no designator is read as UTC. That is not a claim about the clock its
+    writer stood on, it is the statement that nothing changes for that population:
+    comparing `%Y-%m-%dT%H:%M:%S` text digit by digit IS comparing as if every stamp were
+    UTC, so this arm keeps the ordering every note has always had, and the offset arm is
+    the only one that moves.
+    """
+    parsed = datetime.fromisoformat(stamp)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 #: The punctuation a clearance's prose puts after a path: the sentence carries on past
@@ -1039,7 +1067,7 @@ class Notifier:
             return ""
         return (
             f" [{DAILY_CROSS_ROOT_CLEAR_PREFIX} "
-            f"{self._stamp().strftime('%Y-%m-%dT%H:%M:%SZ')} this all-clear measured "
+            f"{self._stamp_marked()} this all-clear measured "
             f"{' or '.join(seal_roots)}; the section it is closing was measured against "
             f"{' or '.join(section_roots)}. The section is closed, but this line is not a "
             "statement about that second root: the process that wrote it stands in the "
@@ -1138,14 +1166,17 @@ class Notifier:
         stamp or the note loses the only thing that says the alarm is still live. The
         body's own reading wins over the writer's clock: a check that re-printed a
         finding measured an hour ago should fold under that hour, not under the tick
-        that got around to writing it. A body that names no instant at all falls back
-        to `_stamp()`, which is what every other dated line on this note is stamped
-        with.
+        that got around to writing it. "Wins" is therefore a question about instants,
+        not about which token is the bigger string — the two branches used to hand
+        `max()` a genuine UTC reading and a local one and let lexicographic order decide
+        (#3932), so the candidates are ordered by `_instant_of_stamp`. A body that names
+        no instant at all falls back to `_stamp_marked()`: the writer's own instant, with
+        its zone named the way the two cross-root lines name theirs.
         """
         found = ISO_STAMP_IN_TEXT.findall(text)
         if found:
-            return max(found)
-        return self._stamp().strftime("%Y-%m-%dT%H:%M:%SZ")
+            return max(found, key=_instant_of_stamp)
+        return self._stamp_marked()
 
     def _fold_line(self, title: str, fires: int, stamp: str, foreign: str) -> str:
         """The one line that stands in for `fires` folded firings of `title`.
@@ -1478,6 +1509,29 @@ class Notifier:
         """
         return datetime.now()
 
+    def _stamp_marked(self) -> str:
+        """A dated LINE on the note: `_stamp()`'s reading with its zone NAMED.
+
+        `_stamp()` stays naive and local because `timestamp:` is a key THREE writers
+        share — `daily_note.fresh_header` renders it with `strftime("%Y-%m-%dT%H:%M:%S")`,
+        which drops any zone, and `app/post_capture.py:518` and `app/autonomy.py:4001`
+        hand that same renderer a naive-local instant — so an aware `_stamp()` would move
+        every guardian-created note by the box's offset with nothing anywhere raising.
+        This is the render for the lines that are NOT front matter (#3932).
+
+        Marking the zone is not converting to UTC: `astimezone()` on a naive reading
+        assumes local time, attaches this machine's offset and leaves every digit alone, so
+        the line still reads the wall clock a person at the keyboard recognises — the rule
+        `tests/test_guardian_alert_stamp.py` (#1912) already pins for ALERT.md. What it can
+        no longer do is be mistaken for the instant it is not: the witness is
+        `~/obsidian/memory/2026-11-07.md:25`, which printed `2026-11-07T08:09:06Z` for a
+        write whose own `stat` says `2026-11-07 08:09:06.006400946 -0800` — one set of
+        digits, two readings eight hours apart. Seconds rather than microseconds, because
+        every other dated line on this note is second-granular and `ISO_STAMP_IN_TEXT`
+        reads stamps at that width.
+        """
+        return self._stamp().astimezone().isoformat(timespec="seconds")
+
     def _scan_days(self) -> list[date]:
         """The days whose daily notes `resolve` retracts across, newest first."""
         newest = self._today()
@@ -1613,8 +1667,9 @@ class Notifier:
           that demanded one path would label every honest seal on the box.
 
         Otherwise the line names the roots that clearance carries and this check does not
-        share, plus this check's own, and is stamped with `_stamp()` like every other
-        timestamp that reaches the note. Detection only: the ruling on whether a
+        share, plus this check's own, and is stamped with `_stamp_marked()` — the local
+        reading with its zone named, which is what every dated LINE on this note owes a
+        reader (#3932). Detection only: the ruling on whether a
         cross-root process may seal at all is owed elsewhere, and if it comes back
         root-keyed this line becomes a backstop rather than the fix.
         """
@@ -1623,7 +1678,7 @@ class Notifier:
             return None
         return (
             f"{DAILY_CROSS_ROOT_PREFIX} "
-            f"{self._stamp().strftime('%Y-%m-%dT%H:%M:%SZ')} the most recent "
+            f"{self._stamp_marked()} the most recent "
             f"`{DAILY_CLEARED_PREFIX}` line for this title names "
             f"{' or '.join(foreign)}, which this check did not measure; this check "
             f"measured {measured_root}. A process on that other root closed the section "
