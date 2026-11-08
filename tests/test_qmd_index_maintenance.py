@@ -7958,16 +7958,70 @@ def _skill_bullet(body: str, startswith: str) -> str:
     return "\n".join(lines[start:end])
 
 
+#: The cost figure a page about this command has to clear to be telling the truth:
+#: the smallest fresh build its own witnesses measured, **2149.8 s** on 2026-10-04 at
+#: 41,536 live vectors (`~/lloyd-data/_pipeline/reflection/qmd-side-copy-*.json`).
+#: Rounded down to 2000 so the pin sits on the ORDER of the cost and not on one number.
+MIN_STATED_BUILD_S = 2000.0
+
+#: A duration the page states in seconds — `2149.8 s`, `3877.9 s`, and the upper half
+#: of a range written `2150-4272 s`, which is how a growing corpus headlines a cost.
+_STATED_SECONDS = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*s\b")
+
+#: A sentence break: a period/`!`/`?` with whitespace after it. Deliberately naive —
+#: it does not split `2149.8 s` or `qmd-side-copy-*.json` because neither is followed
+#: by a space, and the pages it splits are hand-written prose, not parsed input.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+def _sentences_about(text: str, subject: str) -> list[str]:
+    """The sentences of a stretch of page that name `subject`.
+
+    A figure has to be read where it is claimed. The Execution section also carries the
+    pool's own ceilings — `timeout_seconds: 3000`, a 3600 s cap, effective 3570 s — and
+    any of those clears a magnitude check run over the whole section without saying
+    anything about what the build costs. Scoping to the sentence that names the
+    re-embed is what makes the bound mean "this run costs that much" rather than "some
+    number this big appears near it".
+    """
+    return [sentence for sentence in _SENTENCE_END.split(text) if subject in sentence]
+
+
+def _stated_build_seconds(text: str) -> list[float]:
+    """Every seconds-figure a stretch of the page states, so a cost can be bounded.
+
+    #3964 turned the two nodes below from a string match into a bound, and the reason
+    is the red tree itself: they asserted the literal `~2150 s`, which was the figure
+    the page carried when #3851 wrote them, and vault commit `071e5b293` (#3955,
+    2026-11-08) amended the page's build-cost numbers to the newest witness —
+    **4272.0 s** at 78,980 live vectors — taking that literal with it. The page now
+    states the class of problem in as many words: "expect the next one to be larger:
+    the growth is what makes any single figure here go stale". A pin on one figure is
+    red by construction the day the measurement it quotes is superseded, which is what
+    happened here with no repository diff behind it.
+
+    Bounding the figure instead keeps the claim the nodes were written for — a run with
+    no terminal on such a night costs thousands of seconds, not the quick exit the page
+    used to promise — and outlives the next witness. It is not a weakening of the
+    banned-wording half: `no arguments required`, `exits quickly when there is none`
+    and `Safe to re-run at any time` are still refused, and the four condition words are
+    still matched as strings.
+    """
+    return [float(found.replace(",", "")) for found in _STATED_SECONDS.findall(text)]
+
+
 def test_the_skill_stops_promising_a_quick_exit_to_a_run_with_no_terminal():
     """#3851 clause 1: the quick-exit promise is gone, and the real cost is stated.
 
     The phrase the clause bans is not decoration: "no arguments required" is the
     sentence that tells an agent the single documented command always comes back
     quickly, and on an approaching night with no copy waiting a run with no terminal
-    sits through a re-embed of the whole index instead. The numbers the replacement
-    must carry are the measured ones, so they are asserted as strings here — the
-    ~2150 s planning figure (`SCHEDULED_BUILD_BUDGET_S = 2400`, :3115) and the two
-    conditions that make the run that long.
+    sits through a re-embed of the whole index instead. What the replacement must
+    carry is the measured cost and the two conditions that make the run that long;
+    since #3964 the cost is asserted as a magnitude in the sentence that names the
+    re-embed (see `_sentences_about` and `_stated_build_seconds`) rather than as the
+    one figure the page happened to carry in #3851's wording, and the conditions stay
+    matched as strings.
     """
     body = _skill_page()
     assert "no arguments required" not in body, (
@@ -7978,11 +8032,20 @@ def test_the_skill_stops_promising_a_quick_exit_to_a_run_with_no_terminal():
     execution = _skill_section(body, "Execution")
     assert "exits quickly when there is none" not in execution, (
         "the unconditional quick-exit sentence returned")
-    for phrase in ("capacity_approaching", "no side copy waiting", "~2150 s",
-                   "re-embed", "terminal"):
+    for phrase in ("capacity_approaching", "no side copy waiting", "re-embed",
+                   "terminal"):
         assert phrase in execution, (
             f"the Execution section no longer says {phrase!r}, so the command it "
             f"documents is undocumented again:\n{execution}")
+    priced = _sentences_about(execution, "re-embed")
+    assert any(secs >= MIN_STATED_BUILD_S for sentence in priced
+               for secs in _stated_build_seconds(sentence)), (
+        f"the Execution section no longer prices the re-embed: the sentence(s) naming "
+        f"a re-embed state {[_stated_build_seconds(s) for s in priced]}, and the "
+        f"smallest fresh build the witnesses measured is 2149.8 s (2026-10-04, 41,536 "
+        f"live vectors), so a run with no terminal is being called quick again — the "
+        f"pool's own ceilings (3000 s / 3570 s) do not count, they are what a build "
+        f"races, not what it costs:\n{execution}")
 
 
 def test_the_execution_section_names_the_bound_the_build_races():
@@ -8020,6 +8083,12 @@ def test_the_rerun_bullet_is_conditional_and_keeps_the_terminal_case_true():
     condition attached. The behaviour both halves describe is pinned executably by
     `test_a_0501_start_proceeds_and_a_tty_run_leaves_the_build_to_the_person`, which
     runs both stdin kinds through `scheduled_side_copy_build`.
+
+    What #3964 changed here is the cost half: this bullet used to be checked for the
+    string `~2150 s`, and it is now checked to state some build cost of at least
+    `MIN_STATED_BUILD_S` seconds, because vault commit `071e5b293` rewrote the page's
+    figures to the 2026-11-08 witness and a pin on one figure goes red whenever the corpus outgrows the figure
+    it quotes.
     """
     body = _skill_page()
     assert "Safe to re-run at any time" not in body, (
@@ -8033,7 +8102,52 @@ def test_the_rerun_bullet_is_conditional_and_keeps_the_terminal_case_true():
     assert "starts no side-copy build" in bullet, (
         f"the bullet no longer says a plain invocation typed on a terminal starts "
         f"no build — the tty rail's own answer, in the page's words:\n{bullet}")
-    for phrase in ("~2150 s", "in flight"):
-        assert phrase in bullet, (
-            f"the bullet lost {phrase!r}, so it no longer bounds what it invites:\n"
-            f"{bullet}")
+    assert "in flight" in bullet, (
+        f"the bullet lost 'in flight', so it no longer forbids starting a second run "
+        f"while the first one is writing its copy:\n{bullet}")
+    stated = _stated_build_seconds(bullet)
+    assert any(secs >= MIN_STATED_BUILD_S for secs in stated), (
+        f"the bullet lost its bound — it invites a re-run and no longer says the build "
+        f"it may launch costs at least {MIN_STATED_BUILD_S:.0f} s, the smallest fresh "
+        f"build measured (2149.8 s, 2026-10-04); it states {stated}:\n{bullet}")
+
+
+def test_these_nodes_reach_the_gate_unmarked_rather_than_by_exclusion():
+    """#3964 clause 2: the two red nodes go green by passing, not by leaving.
+
+    `pytest.ini` declares `live_vault` for precisely this kind of node — an assertion
+    about a page a nightly or an autoresearch promotion rewrites between rounds — and
+    marking these two would have made the red line vanish by removing the check. The
+    item forbids that, and so does the subject matter: the page is the thing that
+    moved, and a pin that does not run notices nothing. So the exclusion half is
+    pinned executably: under the gate's own selection string no node in this file is
+    deselected, both named nodes are collected, and neither carries a
+    skip/xfail/selection marker.
+
+    What this does not claim is that the file never skips. `_skill_page` still routes a
+    machine with no vault through `require_live_data`, which raises a *named* skip
+    rather than handing back a green, which is what `tests/_live_data.py` is for.
+    """
+    this_file = str(Path(__file__).resolve())
+
+    def _collect(extra: list[str]) -> list[str]:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q",
+             "-p", "no:cacheprovider", *extra, this_file],
+            cwd=ROOT, capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, proc.stdout + proc.stderr[-3000:]
+        return [ln for ln in proc.stdout.splitlines() if "::" in ln]
+
+    selected = _collect(["-m", "not live_vault and not fault_injection"])
+    unfiltered = _collect([])
+    assert len(selected) == len(unfiltered), (
+        f"the gate's selection string drops {len(unfiltered) - len(selected)} node(s) "
+        f"from this file: {sorted(set(unfiltered) - set(selected))}")
+    for name in ("test_the_skill_stops_promising_a_quick_exit_to_a_run_with_no_terminal",
+                 "test_the_rerun_bullet_is_conditional_and_keeps_the_terminal_case_true"):
+        assert any(node.endswith(f"::{name}") for node in selected), (
+            f"{name} is not collected under the gate's selection")
+        marks = [mark.name for mark in getattr(globals()[name], "pytestmark", [])]
+        assert not set(marks) & {"skip", "skipif", "xfail", "live_vault",
+                                 "fault_injection"}, (
+            f"{name} carries {marks}: #3964's green may not be bought that way")
