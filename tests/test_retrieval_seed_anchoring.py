@@ -715,3 +715,168 @@ def test_a_zero_row_live_store_is_not_skipped_by_this_gate(monkeypatch, tmp_path
     except pytest.skip.Exception as exc:
         pytest.fail(f"a 0-row store must not skip: {exc}")
     assert out == {"ran": True}, out
+
+
+# ── #3907 clause 2: the loader reports what it is reading, and changes nothing ──
+
+#: Row count AND embedding dimension: the fixture writes `np.eye(_VEC_ROWS)` and an
+#: _VEC_ROWS-long query vector, so the two must stay equal or `semantic_candidates` fails
+#: its `q.shape[0] != mat.shape[1]` check and returns []. There is NO production row floor —
+#: `app/entity_linker.py` bounds nothing about how many rows an index holds (grep it for a
+#: row count and the only comparison is `len(names) != mat.shape[0]`), so this is not the
+#: leg's minimum, only a fixture size that comfortably exceeds k=3. The first version of
+#: this comment claimed a `rows < 200` floor that does not exist in the code, which is the
+#: same defect this item is fixing: a number attributed to a rule its writer never wrote.
+_VEC_ROWS = 200
+_VEC_NAMES = ["Alpha", "Bravo"] + [f"E{i}" for i in range(_VEC_ROWS - 2)]
+#: The leg matches `name.lower()` against `allowed`, which is why the call sites pass a
+#: lowercased set: passing the display names would seed nothing and read as a broken
+#: fixture rather than as the case-mismatch it actually is.
+_VEC_ALLOWED = {n.lower() for n in _VEC_NAMES}
+
+
+class _StubLiveStore:
+    """An `entities` table holding the given names and nothing else.
+
+    `artifact_status` issues exactly one query — `SELECT name FROM entities` — so this
+    stands in for the coverage half only. The artifact itself stays real bytes on disk,
+    because rows and age are the facts under test.
+    """
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def _query(self, sql):
+        # `_live_entity_names` calls `_query` on the STORE, not on a table accessor, so
+        # the method lives here; a stub that put it one level deeper made coverage read
+        # "store unreadable" and the test would have passed on the wrong branch.
+        assert "entities" in sql, sql
+        return [{"name": n} for n in self._names]
+
+
+def _entity_vector_artifact(root: Path, monkeypatch, *, age_days: float,
+                            live_extra=()):
+    """A 200-row index of basis vectors on disk, pointed at, with the store stubbed.
+
+    Basis vectors make the seed set exact rather than a ranking: a query embedded as
+    [1,0,…] can only score onto `Alpha`, so a change to seeds or scores surfaces as a
+    different tuple instead of a nudge. `live_extra` names live entities the index does
+    NOT carry — the unseedable half of the coverage figure.
+    """
+    import os
+    import time as _t
+
+    import numpy as np
+
+    from app import entity_linker as EL
+    from app import paths
+
+    d = Path(root) / "entity-vectors"
+    d.mkdir(parents=True)
+    (d / "names.json").write_text(json.dumps(_VEC_NAMES))
+    np.save(d / "vectors.npy", np.eye(_VEC_ROWS, dtype=np.float32))
+    old = _t.time() - age_days * 86400.0
+    os.utime(d / "vectors.npy", (old, old))
+    monkeypatch.setattr(paths, "ENTITY_VECTORS_DIR", d)
+    EL.set_embedder(lambda text: np.array([1.0] + [0.0] * (_VEC_ROWS - 1),
+                                          dtype=np.float32))
+    EL.reset_cache()
+    monkeypatch.setattr(ks, "store",
+                        lambda: _StubLiveStore(list(_VEC_NAMES) + list(live_extra)))
+    return d
+
+
+def test_a_cold_load_reports_the_index_age_and_coverage_exactly_once(
+        tmp_path, monkeypatch, caplog):
+    """`_load_index` read the mtime for ONE reason — cache invalidation — and said
+    nothing else, so an artifact 42 days old and 71.2% deep served every `vault_recall`
+    with no trace of either fact anywhere in the process. The load now reports both.
+
+    The COUNT is pinned, not merely the presence: "once per load" is what keeps a log
+    line out of the per-query recall path, and one line per query would itself be the
+    behaviour change this item promised the reporting would not be.
+    """
+    import logging
+
+    from app import entity_linker as EL
+
+    _entity_vector_artifact(tmp_path, monkeypatch,
+                            age_days=EL.MAX_INDEX_AGE_DAYS + 5,
+                            live_extra=("Ghost1", "Ghost2"))
+    with caplog.at_level(logging.INFO, logger="app.entity_linker"):
+        seeds = EL.semantic_candidates("what is Alpha", 3, allowed=_VEC_ALLOWED)
+    hit = [r for r in caplog.records if r.name == "app.entity_linker"]
+    st = EL.index_status()
+    assert st is not None, "the accessor reports nothing after a cold load"
+    # 200 index rows against 202 live entities: the two Ghosts are live but unvectorised.
+    assert st["rows"] == _VEC_ROWS and st["live_entities"] == _VEC_ROWS + 2, st
+    assert st["coverage_pct"] == round(100 * _VEC_ROWS / (_VEC_ROWS + 2), 1), st
+    assert st["stale"] is True and st["age_days"] > EL.MAX_INDEX_AGE_DAYS, st
+    # The fixture must have seeded SOMETHING or the one-line count above is vacuous. The
+    # earlier form was `== ["Alpha"] or seeds`, which is unconditionally true — `seeds` is
+    # the very list being tested — and so asserted nothing. Pinned instead on what is
+    # actually determinable here: the exact match anchors the top seed at cosine 1.0, and
+    # the leg returns k entries. Which zero-score ties fill the remaining slots is
+    # numpy's argsort order over an identity matrix and is NOT a claim this file makes —
+    # measured on 2026-11-07 as [('Alpha',1.0),('Bravo',0.0),('E0',0.0)], stable across
+    # five cold loads, but stable-by-accident rather than by contract.
+    assert seeds, "the fixture seeded nothing, so the once-per-load count is vacuous"
+    assert len(seeds) == 3, f"asked for k=3, got {seeds}"
+    assert seeds[0][0] == "Alpha" and seeds[0][1] == pytest.approx(1.0), seeds
+    assert len(hit) == 1, f"one cold load printed {len(hit)} lines, not one"
+    msg = hit[0].getMessage()
+    for frag in (f"{_VEC_ROWS} rows", f"{st['age_days']} days old",
+                 f"coverage {st['coverage_pct']}%", "STALE", "build.json ABSENT"):
+        assert frag in msg, f"{frag!r} missing from the load line: {msg}"
+
+    # Warm cache: no second line, and the same seeds.
+    again = EL.semantic_candidates("what is Alpha", 3, allowed=_VEC_ALLOWED)
+    later = [r for r in caplog.records if r.name == "app.entity_linker"]
+    assert len(later) == 1, f"a warm query logged {len(later) - 1} more time(s)"
+    assert again == seeds, f"a warm call seeded differently: {again} vs {seeds}"
+
+
+def test_the_new_report_changes_no_seed_and_no_score_even_past_the_bound(
+        tmp_path, monkeypatch):
+    """The same artifact seeded twice: with the reporting live, and with it suppressed at
+    its single call site. Identical output is the whole claim of clause 2 — a status that
+    moved a seed would be a behaviour change smuggled in as observability.
+
+    The bound is crossed on purpose, in the age pair: `MAX_INDEX_AGE_DAYS` must never
+    enter the resolution path, so a 400-day artifact and a one-day artifact answer
+    identically. Failing closed on age is the OTHER decision — whether the leg is on at
+    all — which is a human's to make in config.yaml, not a loader's to make silently.
+    """
+    from app import entity_linker as EL
+
+    _entity_vector_artifact(tmp_path, monkeypatch,
+                            age_days=EL.MAX_INDEX_AGE_DAYS + 5)
+    EL.reset_cache()
+    stale_seeds = EL.semantic_candidates("what is Alpha", 3, allowed=_VEC_ALLOWED)
+    assert stale_seeds, "the fixture seeds nothing; the pair would prove nothing"
+    assert EL.index_status() is not None, "no report was taken, so nothing is compared"
+
+    # Age pair: a stale index and a fresh one resolve the same query identically.
+    young = None
+    for days in (1.0, 400.0):
+        _entity_vector_artifact(tmp_path / f"root-{days}", monkeypatch, age_days=days)
+        got = EL.semantic_candidates("what is Alpha", 3, allowed=_VEC_ALLOWED)
+        st = EL.index_status()
+        if days == 1.0:
+            young = got
+            assert st["stale"] is False, f"a 1-day index read as stale: {st}"
+        else:
+            assert got == young, f"a {days}-day index seeds differently: {got} vs {young}"
+            assert got == stale_seeds, (
+                f"age is not the only difference and yet the stale fixture disagreed: "
+                f"{got} vs {stale_seeds}")
+            assert st["stale"] is True, f"the {days}-day index is not stale: {st}"
+
+    # Suppression pair, last: `_report_index` is the one call site the loader makes, and
+    # with it gone the bytes on disk answer exactly as they did with it.
+    monkeypatch.setattr(EL, "_report_index", lambda *a, **k: {})
+    EL.reset_cache()
+    without_report = EL.semantic_candidates("what is Alpha", 3, allowed=_VEC_ALLOWED)
+    assert without_report == stale_seeds, (
+        f"taking the status changed the seeds: {stale_seeds} vs {without_report}")
+    assert not EL.index_status(), "the suppressed arm still reported"

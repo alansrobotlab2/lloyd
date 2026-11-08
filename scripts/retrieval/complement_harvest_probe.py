@@ -263,15 +263,27 @@ def cos(vectors: dict[str, np.ndarray], a: str, b: str):
 def shared_notes(resolved: dict, a: str, b: str) -> list[str]:
     """Note paths BOTH entities resolve to; empty means the pair is admissible.
 
-    #3642 measured 894 complement pairs whose two endpoints resolve to the same
-    note: one document wearing two entity names. Such a pair is not evidence of a
-    relation at all — the two vectors are means over the same chunks, so their
-    cosine is a consequence of that identity and sits at or near 1.0 no matter what
-    the edge claims, and a probe scored on one is asking which chunk is nearest to
-    itself and always finds it. So the pair is dropped where it is COUNTED, not
-    after a rate is computed: an identity cosine left in the sweep also pollutes
-    the distribution the cosine band is cut on, which is how a same-note pair could
-    move the band as well as the count.
+    The count this exclusion produces, stated with the predicate that produces it:
+    **17,674 of the 20,230 complement-class edges whose two endpoints are both
+    vectorised — 87.4%** (the substitute class loses 1,743 of its 1,886 the same way),
+    measured on the live store 2026-11-07 by this probe and recorded in its own
+    artifact under `complement_pairs_endpoints_shared_note_excluded` against
+    `complement_edges_both_endpoints_vectorised`. The figure #3642 first published for
+    this predicate was a three-digit count taken inside its own far narrower sweep, and
+    carried onto this population it understates the collapse by about twenty times —
+    which is why #3907 struck it from both places this file asserted it rather than
+    annotate it in place: a number that survives as a footnote is re-quoted by the next
+    reader who greps for a digit string and finds no denominator beside it. The counter
+    below is the only place this figure lives now, so it cannot go stale again.
+
+    The mechanism the count is about: one document wearing two entity names. The two
+    vectors are means over the same chunks, so such a pair's cosine is a consequence
+    of that identity and sits at or near 1.0 no matter what the edge claims, and a
+    probe scored on one is asking which chunk is nearest to itself and always finds
+    it. So the pair is dropped where it is COUNTED, not after a rate is computed and
+    not inside the band: an identity cosine left in the sweep also pollutes the
+    distribution the cosine band is cut on, which is how a same-note pair could move
+    the band as well as the count.
     """
     return sorted(set(resolved.get(a, ())) & set(resolved.get(b, ())))
 
@@ -395,8 +407,13 @@ def main(argv=None) -> int:
 
     # `resolved` goes into the sweep so a pair whose endpoints are the SAME note is
     # excluded from the usable count rather than reported as one (#3642 clause 1:
-    # usable is defined over disjoint note-path endpoints, and live that is 894 of
-    # the pairs the raw cosine band would otherwise hand over).
+    # usable is defined over disjoint note-path endpoints). Live, that is 17,674 of the
+    # 20,230 complement-class edges with both endpoints vectorised — 87.4% — and it is
+    # counted BEFORE the cosine band, which is why `comp_same_note` prints against
+    # `comp_seen` above and never against the usable figure below. #3907 rewrote this
+    # line, which used to attach #3642's sweep-local count to the wrong stage as well
+    # as the wrong population; `shared_notes` holds the figure, the predicate and the
+    # retirement.
     comp, comp_seen, comp_same_note = pair_sweep(
         store, vectors, COMPLEMENT_TYPES,
         args.min_complement_cos, args.max_complement_cos, resolved=resolved)

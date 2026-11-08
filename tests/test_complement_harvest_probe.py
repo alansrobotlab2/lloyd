@@ -430,3 +430,135 @@ def test_the_probe_never_writes_the_production_data_root_from_a_fixture_run(tmp_
     after = sorted(p.name for p in baselines.glob("complement-harvest-*.json")) \
         if baselines.is_dir() else []
     assert after == before, f"the fixture run wrote into the live data root: {set(after) - set(before)}"
+
+
+# ── #3907 clause 4: the same-note exclusion is quoted at the figure it reproduces ──
+
+def test_the_shipped_prose_quotes_the_reproduced_collapse_not_the_retired_figure():
+    """The prose around the counter is a shipped figure, and it was 20x wrong.
+
+    Two places in this probe described the same-note exclusion as a three-figure count
+    "#3642 measured", while the same committed probe prints 17,674 for that predicate on the population it
+    counts — 17,674 of the 20,230 complement-class edges with both endpoints vectorised,
+    87.4%, measured 2026-11-07 and recorded in the run's own artifact under
+    `complement_pairs_endpoints_shared_note_excluded`. Anyone quoting the docstring was
+    understating the collapse by roughly twenty times, which is what #3907 fixed.
+
+    The assertion is written as an absence plus the two halves of the real figure because
+    the failure mode is a NUMBER OUTLIVING ITS POPULATION, not a missing sentence: a node
+    that only checked the retired figure was gone would pass on prose that dropped it and
+    named nothing, and a node that only checked the new number would pass on a quote
+    attached to the wrong denominator again.
+
+    The scan covers every file that can carry this claim, not just the probe. The review
+    rung caught exactly that gap twice: first the retirement prose in
+    `build_entity_vectors.py` re-inscribed the retired figure while this file's own test
+    looked only at `SCRIPT`, then the widened list stopped at the five non-test files and
+    passed a tree whose own test docstring still printed the digits. A per-file absence
+    check protects one file and silently licenses the next, which is how the figure
+    reached this item's headline in the first place. So the surface is a PATTERN, not a
+    hand-list: the code and prose that discuss the probe or the entity-vector builder,
+    plus every test named for them — a new `test_entity_vectors_*.py` is inside the scope
+    the day it is written, rather than after someone remembers to add it.
+
+    It is deliberately NOT the whole tree, and the predicate is a BOUNDED NUMBER, not a
+    substring, because the digit string occurs for honest reasons elsewhere: as the tail
+    of an unrelated item id, as a latency decimal, as a thousands-grouped size, and as one
+    side of a token-count fraction in the voice measurements. The first three are inside
+    the scanned files or their siblings and are excluded by the leading character class;
+    the fraction is NOT excluded by the predicate — nothing bounds a number a space
+    precedes — and stays out only because the scan is scoped to the probe and the builder's
+    files rather than every architecture doc. That is the honest reason, and a comment
+    claiming the regex handled it would be this item's own defect one file further on.
+    This node's docstring quotes none of them by digit, because this file is inside its own
+    scan: a file that polices a number cannot be the file that reprints it.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    # The retired figure standing on its own — an IDENTIFIER boundary on both sides, which
+    # is the shape prose puts a count in. Each side is doing work that the other cannot:
+    # the head excludes a `#` or `.` prefix (an item id's tail, a latency decimal) and a
+    # preceding digit, and the tail excludes a following digit or `_`. The comma is NOT in
+    # the class: `5,894` has to stay out, and `\b` cannot do that alone because a comma is
+    # already a word boundary — hence the explicit `(?<![\d.#,])`. The `,` case is not
+    # hypothetical; this scan found a retention-sweep size comment spelled that way on its
+    # first run, which is the evidence that a plain substring ban was never the predicate.
+    retired = re.compile(r"(?<![\d.#,])" + "8" + "94" + r"(?![\w])")
+    # Non-vacuity, before the scan. A ban that matches nothing is indistinguishable from a
+    # clean tree, so the predicate is pinned in BOTH directions: the retired figure in
+    # natural prose MUST match, and every honest spelling that shares its digits MUST NOT.
+    # Without this a botched lookbehind silently turns 259 real assertions into 259 free
+    # passes, which is exactly the vacuously-green failure the review rung exists to catch.
+    # Every case below is ASSEMBLED, never spelled: this file is inside the scan below, so
+    # a literal of the figure here would be caught by its own assertion (and was, on the
+    # first run of this node) — which is the control working, but makes the file red for
+    # carrying the number it exists to retire.
+    fig = "8" + "94"
+    assert retired.search(f"measured {fig} complement pairs"), "the guard matches nothing"
+    assert retired.search(f"was {fig}.") and retired.search(f"({fig})"), "tail boundary broken"
+    for honest in (f"#{fig}", f"1{fig}", f"0.{fig}", f"5,{fig}", f"2{fig}",
+                   f"{fig}0", f"{fig}_2"):
+        assert retired.search(honest) is None, f"the guard flags {honest!r}, which is not this claim"
+    shipped = [
+        SCRIPT, ROOT / "app" / "entity_linker.py", ROOT / "config.yaml",
+        ROOT / "architecture" / "retrieval.md",
+        *sorted((ROOT / "scripts").rglob("*.py")),
+        *sorted(ROOT.glob("tests/test_complement*.py")),
+        *sorted(ROOT.glob("tests/test_entity_vectors*.py")),
+        *[ROOT / "tests" / "test_retrieval_seed_anchoring.py"],
+        *sorted((ROOT / "eval" / "measurements").glob("entity-anchoring*.md")),
+        *sorted((ROOT / "architecture").glob("*retrieval*.md"))]
+    shipped = [f for f in shipped if f.is_file()]
+    # Non-vacuity: the scope has to actually contain the files this round wrote, or the
+    # absence check below is a loop over nothing and the review's finding is unanswered
+    # for the third time.
+    named = {f.relative_to(ROOT).as_posix() for f in shipped}
+    for expect in ("scripts/memory/build_entity_vectors.py", "app/entity_linker.py",
+                   "config.yaml", "architecture/retrieval.md",
+                   "tests/test_entity_vectors_status.py",
+                   "tests/test_retrieval_seed_anchoring.py",
+                     "tests/test_complement_harvest_probe.py"):
+        assert expect in named, f"the scan lost {expect}: {sorted(named)}"
+    for f in shipped:
+        hit = retired.search(f.read_text(encoding="utf-8"))
+        assert hit is None, (
+            f"the retired #3642 figure stands alone as a number in "
+            f"{f.relative_to(ROOT)} at offset {hit.start()}; it was measured inside a "
+            f"far narrower sweep and reads as this population's count to anyone who "
+            f"greps for it")
+    assert "17,674" in src and "20,230" in src, (
+        "the reproduced figure and its denominator must appear TOGETHER: 17,674 alone is "
+        "the same defect one revision on")
+    assert "complement_pairs_endpoints_shared_note_excluded" in src, (
+        "the prose must name the artifact key a reader can re-check the figure against")
+    # Both places, not one: the second site is inside `main`, next to the print, and is
+    # the one a reader editing the sweep actually reads.
+    assert src.count("17,674") >= 2, (
+        "only one of the two sites was corrected; the other still misleads")
+    # Counted BEFORE the cosine band — the stage was as wrong as the number.
+    assert "BEFORE the cosine band" in src or "before the cosine band" in src, (
+        "the exclusion must say it precedes the band, since an identity cosine left in "
+        "the sweep also pollutes the distribution the band is cut on")
+
+
+def test_the_prose_fix_touched_no_sweep_geometry():
+    """Clause 4's other half: correcting a number is not an excuse to move the guard.
+
+    `tests/test_complement_warp.py` pins that the weak set is an edge type plus a MEASURED
+    band and never a percentile; a percentile tuned into `pair_sweep` would silently
+    redefine what "complement" means while looking like a documentation change. This node
+    keeps the geometry honest by asserting the functions that implement it are still
+    source-identical in their controlling logic, and leaves the real teeth where they
+    already live.
+    """
+    import ast
+
+    src = SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    for name in ("pair_sweep", "shared_notes", "resolve_to_index"):
+        assert name in fns, f"{name} disappeared; the exclusion is no longer a guard"
+    body = ast.dump(fns["pair_sweep"])
+    assert "shared_notes" in body, (
+        "pair_sweep stopped consulting shared_notes, so the exclusion is now only prose")
+    for banned in ("percentile", "quantile", "np.percentile", "np.quantile"):
+        assert banned not in body, f"{banned} entered pair_sweep: the band must stay measured"

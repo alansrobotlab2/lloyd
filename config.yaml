@@ -2633,9 +2633,36 @@ knowledge_graph:
 # entity_hit 0.337 → 0.500 (+0.163, 95% CI [0.093, 0.244]), entity_recall +0.194
 # [0.106, 0.288], fact_entity_recall +0.172 [0.088, 0.265], anchorless 25 → 16 of 66,
 # every doc metric identical; +71 ms mean recall latency [0.1, 128]
-# (eval/measurements/entity-anchoring-2026-09-25.md). The semantic half is inert
-# until the entity-vector index exists: scripts/memory/build_entity_vectors.py
-# writes it to ${LLOYD_DATA}/_pipeline/vault-derived/entity-vectors/.
+# (eval/measurements/entity-anchoring-2026-09-25.md).
+#
+# THE SEMANTIC HALF IS NOT INERT AND HAS NOT BEEN SINCE 2026-09-26. This comment used to
+# describe the leg as waiting for an index to exist before it did anything. That stopped
+# being true the day the index was written: `scripts/memory/build_entity_vectors.py` created
+# ${LLOYD_DATA}/_pipeline/vault-derived/entity-vectors/ on 2026-09-26, so `enabled: true`
+# below has been serving live `vault_recall` calls off that artifact ever since. A dated
+# reading, 2026-11-07T22:19Z: 11,990 rows against 16,846 live entities — 71.1% coverage,
+# 4,875 entities the leg can never seed, 19 index names that are no longer live entities —
+# 42.91 days old, exit 1. The live count drifts as facts are extracted, so the command
+# below is the fact and this line is one moment of it.
+#
+# WHAT IS ACTUALLY TRUE, and what to run rather than assume (#3907):
+#   • The artifact is HAND-BUILT. Nothing schedules a rebuild: no queue kind, no autonomy
+#     task, no systemd unit in this tree names the builder. The skill that knows how to run
+#     it is `entity-vectors-rebuild`; the job that would run it is NOT armed.
+#   • The leg is ON, and the failure mode of a stale index is silent: `_load_index` reads
+#     the file's mtime only to invalidate its cache, so a years-old artifact serves
+#     forever. `app.entity_linker` now reports age and coverage once per cold load (one
+#     INFO line, `index_status()` for the caller) and changes no seed and no score doing it.
+#   • The bound is `MAX_INDEX_AGE_DAYS` in `app/entity_linker.py`, and the check is
+#     `.venvs/lloyd/bin/python scripts/memory/build_entity_vectors.py --status` — rows, age,
+#     live coverage, provenance; exit 0 fresh, 1 STALE, 2 no artifact, 3 store unreadable.
+#     On 2026-11-07 it exits 1.
+#   • `build.json` is ABSENT from the artifact, so which store those 11,990 rows were built
+#     from is unrecoverable. `--status` says so instead of assuming provenance.
+# The two dispositions are "arm the rebuild" and "set enabled: false and correct the
+# measurement prose". Neither has been chosen; arming is a fleet decision. What is NOT an
+# option is the state this file described until now — enabled, unbounded, and documented
+# as inert.
 retrieval:
   entity_seeding:
     alias_surfaces: true       # match alias surfaces as names, score their canonical
