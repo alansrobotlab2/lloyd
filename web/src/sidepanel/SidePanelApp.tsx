@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import ChatPanel from "@/components/ChatPanel"
 
-interface FocusMessage {
+export interface FocusMessage {
   type: "focus-session"
   windowId: number
   tabId: number
@@ -11,7 +11,7 @@ interface FocusMessage {
   canCheck?: boolean
 }
 
-interface PanelState {
+export interface PanelState {
   sessionKey: string | null
   url: string | null
   title: string | null
@@ -26,6 +26,21 @@ const INITIAL: PanelState = {
 }
 
 const CHECK_LABEL = "Check it out, Lloyd"
+
+// The one place a `focus-session` push becomes panel state, and the reason the
+// panel renders what it renders: an absent `canCheck` reads as false, which is
+// exactly the #3568 shape — the tab-switch push omitted the field, so a
+// checkable page got a dead button and the refusal copy. Exported so the
+// rendered half is testable without a browser (`SidePanelView.test.tsx`); the
+// behaviour itself is unchanged by taking it out of the listener.
+export function focusStateFromMessage(msg: FocusMessage): PanelState {
+  return {
+    sessionKey: msg.sessionKey,
+    url: msg.url ?? null,
+    title: msg.title ?? null,
+    canCheck: Boolean(msg.canCheck),
+  }
+}
 
 export default function SidePanelApp() {
   const [state, setState] = useState<PanelState>(INITIAL)
@@ -62,12 +77,7 @@ export default function SidePanelApp() {
         const msg = raw as FocusMessage
         if (msg.type !== "focus-session") return
         if (msg.windowId !== windowIdRef.current) return
-        setState({
-          sessionKey: msg.sessionKey,
-          url: msg.url ?? null,
-          title: msg.title ?? null,
-          canCheck: Boolean(msg.canCheck),
-        })
+        setState(focusStateFromMessage(msg))
         // Any focus push from the SW settles a pending check request.
         settlePending()
       })
@@ -148,7 +158,7 @@ export default function SidePanelApp() {
   )
 }
 
-function CheckButton({
+export function CheckButton({
   canCheck,
   pending,
   onRequest,
@@ -169,7 +179,7 @@ function CheckButton({
   )
 }
 
-function EmptyState({ canCheck }: { canCheck: boolean }) {
+export function EmptyState({ canCheck }: { canCheck: boolean }) {
   return (
     <div className="flex flex-1 items-center justify-center p-6 text-center">
       <div className="space-y-1">

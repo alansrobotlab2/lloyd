@@ -308,11 +308,15 @@ on after the output directory had already been emptied.
   store is empty, and zero `fetch` calls. A positive control drives a temporary copy whose one
   `canCheck:` send site was removed by shape and asserts the key is absent from both pushes —
   the leg that makes the two flag assertions evidence rather than a green-by-construction read,
-  since #3568 is precisely an incident a text pin passed through. Its ceiling is the panel's
-  own DOM: the button's enabled state and the empty-state copy in
-  `web/src/sidepanel/SidePanelApp.tsx` are rendered by the side panel, and
-  `web/vitest.config.ts` `include` reaches only `web/src/**`, so that leg is still a browser
-  concern and still owed.
+  since #3568 is precisely an incident a text pin passed through. The ceiling this entry claimed
+  there was false as written, and #3918 refutes it: `web/vitest.config.ts` `include` is
+  `src/**/*.test.{ts,tsx}` with `web/` as its root, so it reaches `web/src/sidepanel/**` exactly
+  as it reaches `web/src/components/**` — the include was never what kept the button's enabled
+  state and the empty-state copy out of a test. `web/src/sidepanel/SidePanelView.test.tsx` now
+  pins both under `environment: "node"` with `renderToStaticMarkup`, every render driven by
+  `focusStateFromMessage`. What stays a browser concern, retired by nothing there, is what no
+  vitest config reaches: reloading the shipped bytes into a real Chrome and pressing the button
+  (#3854's leg, restated at the foot of the entry below).
 - **2026-11-06 — a refused kickoff no longer maps the tab, so the button can retry the page
   (#3854, fixing #3569 on #3645's contract).** `spawnSession` wrote `setMapping` +
   `setCanonical` and only then awaited `POST /api/message/stream`, swallowing the rejection with
@@ -348,3 +352,41 @@ on after the output directory had already been emptied.
   because those two promotions are what refute it. What is still owed is the one thing a node
   child cannot do: reload these bytes into a real Chrome and
   press the button with the backend stopped, then again with it restored.
+- **2026-11-08 — the panel's own render is now spec'd in vitest; the real-Chrome leg is the one
+  left (#3918).** `web/src/sidepanel/SidePanelApp.tsx` exports `focusStateFromMessage`, the
+  focus-push→state mapping lifted verbatim out of the `port.onMessage` listener (which now calls
+  `setState(focusStateFromMessage(msg))`), and exports `CheckButton` / `EmptyState`. It is an
+  export-only refactor: the `disabled` expression, the copy strings and the render tree are
+  byte-identical, so the panel-bundle string pin in
+  `tests/test_chrome_extension_manifest_tracked.py`, which harvests its literals from this source
+  and looks them up in the shipped chunk, needed no rebuild — `chrome-extension/dist/**` is
+  untouched by the commit and that file stays green with the rest. What the exports buy is
+  `web/src/sidepanel/SidePanelView.test.tsx`: 7 tests in vitest's `node` environment rendering
+  with `renderToStaticMarkup`, no DOM package and no config change (`web/vitest.config.ts` is
+  neither in `ALLOWED_GLOBS` nor `DENIED_GLOBS` — `spec.classify` answers `unlisted` — so the
+  unchanged-config half of the clause is enforced by the scope rail, not promised). The point of
+  driving the render from the mapping instead of a hand-written prop is that the mapping is what
+  broke: a `canCheck: true` push renders an enabled `Check it out, Lloyd` and `Ready when you
+  are`, and the same push with the key absent — #3568's exact field — renders `disabled` and `No
+  checkable page here`. Both halves are mutation-checked. Dropping `!canCheck` from
+  `disabled={pending || !canCheck}` reddens exactly the omitted-canCheck render assertion (1 of 7)
+  and nothing else, because with `pending` false only that one call has an argument for
+  `disabled` to honour; a mapping that ignores `msg.canCheck` reddens the enabled-button and
+  ready-copy assertions when it hardcodes `false` (2 of 7) and the omitted-canCheck assertions
+  when it hardcodes `true` (3 of 7). The anchor matters for the second one: `canCheck: false,` is
+  also `INITIAL`'s value, so an unanchored edit takes both, the module stops collecting, and
+  vitest prints `Tests  no tests` — which is a compile error wearing a caught-mutation costume.
+  What is still owed is unchanged by any of this: reload these bytes into a real Chrome, put the
+  backend in the stopped/drain state, and press the button (#3854's leg). Clauses 1–4 pin the
+  shipped mapping and the shipped copy, not Chrome's painting of them, and nothing in this repo
+  retires that person-only leg.
+  One thing the round learned the hard way: `tests/test_sidepanel_panel_view_contract.py` mirrors
+  clauses 1–4 in Python over the same bytes, because the review rung's node rail reads a
+  `test_node_id` only in a `.py` under a `pytest.ini` testpath
+  (`scripts/automod/testpaths.py::is_test_file`), so a clause pinned only in a `.test.tsx` is
+  recorded as untested — `tests/test_dashboard_label_contract.py` (#2202) and
+  `tests/test_background_runs_panel_contract.py` (#2648) already carry that ruling, and this
+  round spent a review attempt rediscovering it. The mirror is not a translation: it checks the
+  mapping for purity, which a render cannot see, and it requires the copy the vitest file asserts
+  with `toContain` to still be copy the panel ships, which is the only check that outlives this
+  round.
