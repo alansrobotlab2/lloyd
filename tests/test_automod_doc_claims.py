@@ -1123,9 +1123,10 @@ def test_architecture_states_the_loop_axis_and_stops_naming_the_check_behavioura
 #: the count itself comes from `Gate.run`, so adding a rung means adding the word
 #: for the new total and nothing else.
 RUNG_NUMBERS = {**NUMBER_WORDS, "eleven": 11, "twelve": 12, "thirteen": 13,
-# Extended with the fourteenth rung (#3538), which is what the comment above
-# instructs; `_ORDINALS` below already carried "fourteenth".
-                "fourteen": 14}
+# Extended with the fourteenth rung (#3538) and the fifteenth (#3930's
+# `recovery`), which is what the comment above instructs; `_ORDINALS` below
+# already carried both words.
+                "fourteen": 14, "fifteen": 15}
 
 
 def _real_ladder(monkeypatch) -> list[str]:

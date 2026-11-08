@@ -3323,7 +3323,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 
     The doc must then carry no fallback-decided anchor at all. All six of its
     graded spans are re-typed to satisfy that — the five the item names
-    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3352`,
+    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3414`,
     and the stale pair) plus `eval/run_tool_choice_eval.py:498`, which the item's
     count missed because it appears twice and named nothing either time.
     `EVAL_BASELINES_DIR`, `main` and `rung_prompt_surface` now stand beside their
@@ -3333,10 +3333,11 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     already makes for such cites with its `historical` kind (the four admitted
     kinds are generated, historical, other-tree, stale).
 
-    The `gate.py` anchor is 3352, and it has moved twice since this rail was
+    The `gate.py` anchor is 3414, and it has moved three times since this rail was
     written: 3043→3287 when #3770 inserted the chrome-bundle provenance node into
-    `gate.py` above this rung, and 3287→3352 when #3868 inserted the
-    `prose_consumers` rung directly behind `rung_pyright`. Each move is the rail
+    `gate.py` above this rung, 3287→3352 when #3868 inserted the
+    `prose_consumers` rung directly behind `rung_pyright`, and 3352→3414 when #3930
+    inserted the `recovery` rung directly behind `rung_code_rules`. Each move is the rail
     doing its job rather than a correction to it — the
     `label = f"item{…}" or f"gate-{…}"` assignment slid down by the inserted
     length, and the stale citation landed inside a rung the sentence does not name
@@ -3376,7 +3377,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
     seeded = text.replace("eval/run_eval.py:2716", "eval/run_eval.py:2055")
-    seeded = seeded.replace("scripts/automod/gate.py:3352", "scripts/automod/gate.py:1590")
+    seeded = seeded.replace("scripts/automod/gate.py:3414", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2055", "scripts/automod/gate.py:1590"], (
@@ -3405,7 +3406,7 @@ def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
     by any line inside `rung_prompt_surface`, and at 76 lines that rung has 75 other
     lines to land on. This node reads the bytes at the cited line and requires them
     to be the `label = f"item{…}" … f"gate-{…}"` assignment the doc is talking about,
-    which is the only property that makes `scripts/automod/gate.py:3352` the right
+    which is the only property that makes `scripts/automod/gate.py:3414` the right
     number rather than a defensible one.
 
     Then the failure this round would have shipped. #3770 inserts the chrome-bundle

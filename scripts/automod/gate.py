@@ -1,4 +1,4 @@
-"""The promotion gate: fourteen rungs, cheapest first, every one fails closed.
+"""The promotion gate: fifteen rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -30,8 +30,21 @@ without the prose being renumbered.
                           stdlib `ast` — one module's tree at a time, so no
                           cross-file flow and no taint. Records into report +
                           ledger; blocks nothing, and no round in #2574 flips one.
-  3 static         ~8s    compileall, import smoke, pyflakes delta
-  4 pyright       ~1-30s  OBSERVE-ONLY type-check delta (scripts/automod/
+  3 recovery       ~1s    OBSERVE-ONLY recoverability of the state OUTSIDE the
+                          diff (scripts/automod/recovery.py): the round's changed
+                          paths are mapped through a checked-in table to the
+                          non-git state that APPLYING the change mutates —
+                          supervisor's loaded program set, the user manager's unit
+                          set, the guardian's pinned snapshot, the KG store, the
+                          job queue, the running config — and a read-only witness
+                          is captured per surface. Recovery is credited only when
+                          every captured field comes back byte-equal; a surface
+                          that cannot be read, or that has no inverse, is
+                          `unevaluated` / `unrecoverable`, never clean. Records
+                          into report + ledger; blocks nothing, and no candidate is
+                          applied-and-unwound yet (#3930 step 3 deferred).
+  4 static         ~8s    compileall, import smoke, pyflakes delta
+  5 pyright       ~1-30s  OBSERVE-ONLY type-check delta (scripts/automod/
                           typecheck.py): pyright over the round's changed .py
                           files plus the inbound callers of its changed
                           module-level symbols — the same run at HEAD and at the
@@ -41,7 +54,7 @@ without the prose being renumbered.
                           touched, which is what pyflakes cannot and #528
                           explicitly does not do. Recorded; blocks nothing until
                           a soak of real rounds says it may.
-  5 prose_consumers ~2-20s OBSERVE-ONLY durable consumers of the names this round
+  6 prose_consumers ~2-20s OBSERVE-ONLY durable consumers of the names this round
                           retires (scripts/automod/prose_consumers.py): the
                           module-level symbols the diff deletes plus the paths and
                           roots its removed literals name, grepped over the vault —
@@ -51,10 +64,10 @@ without the prose being renumbered.
                           so a retired path is never found in the tail of a live one.
                           Records into report + ledger; blocks nothing, and is the
                           only rung that looks outside the code tree at all.
-  6 frontend       ~5s    CONDITIONAL rung: the tsc delta and a vite
+  7 frontend       ~5s    CONDITIONAL rung: the tsc delta and a vite
                           build over the round's `web/` paths, recorded
                           as SKIPPED when no `web/` path changed.
-  7 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
+  8 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
                           workers (~600 s serial) + a collected-count floor.
                           A failure under load is re-run serially before it
                           is believed; a real one re-probes the failing files
@@ -62,27 +75,28 @@ without the prose being renumbered.
                           a failure that is not the round's (pre-existing or
                           flaky, in a file the diff did not touch) PASSES the
                           rung, recorded and filed as a `red-tree` item
-  8 prompt_surface cond.  CONDITIONAL rung: the scored behavioural
+  9 prompt_surface cond.  CONDITIONAL rung: the scored behavioural
                           check on what the model is told, run only for
                           a prompt-surface diff.
-  9 review      60-180s   a second reader: a fresh session on the LIVE
+ 10 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
                           Refuses with findings; the premise verdict decides
                           whether the item is retried or handed to a human.
                           Skipped (recorded) only when no item is bound.
- 10 venv        0-300s    only when requirements changed (reflink + uv)
- 11 canary_boot  ~30s    both /health green, tool floor, config-follows-code
- 12 canary_smoke ~30s    one real turn, sentinel through a real Bash call
+ 11 venv        0-300s    only when requirements changed (reflink + uv)
+ 12 canary_boot  ~30s    both /health green, tool floor, config-follows-code
+ 13 canary_smoke ~30s    one real turn, sentinel through a real Bash call
                           (recorded as SKIPPED when the engine is unreachable;
                            `skip_smoke` is refused while it answers)
- 13 drill        ~90s    only when the diff touches the rollback path
+ 14 drill        ~90s    only when the diff touches the rollback path
 
-`frontend` (6) and `prompt_surface` (8) are numbered where they run rather than
+`frontend` (7) and `prompt_surface` (9) are numbered where they run rather than
 listed beside the ladder, because a rung that is unnumbered is a rung a citation
-cannot point at. `vet`, `code_rules`, `pyright` and `prose_consumers` are the four
-rungs that read the change set itself rather than the behaviour it produces, and the
-four deliberately written not to block: each records into the round event and waits
+cannot point at. `vet`, `code_rules`, `recovery`, `pyright` and `prose_consumers` are the five
+rungs that read the change set itself rather than the behaviour it produces (only
+`recovery` also reads the live state the diff reaches, because that is the
+thing it is measuring), and the five deliberately written not to block: each records into the round event and waits
 for a soak of real landings before any of them is allowed to refuse one. A type
 checker is in this ladder because the analyser is cheap, deterministic and cannot be
 argued with, which is exactly what a loop with no human review tier needs; it is
@@ -116,6 +130,7 @@ from scripts.automod import frontend_layout as _fe_layout
 from scripts.automod import frontend_probe as _fe_probe
 from scripts.automod import layout_fixture as _layout_fixture
 from scripts.automod import prose_consumers as PC
+from scripts.automod import recovery as REC
 from scripts.automod import spec, state as S, testpaths as TP, typecheck as TC, \
     vet as V, worktree as W
 
@@ -2400,6 +2415,16 @@ class Gate:
         # worktree, so a non-blocking observation preserved only there has no
         # denominator. Compact by construction — status, counts, labels, the
         # totals — so an always-present rung does not bloat the ledger.
+        # #3930's recovery record rides the same event for the same reason
+        # `vet`'s does, and it is `REC.to_event`'s shape: the contract (empty vs
+        # declared), the declared surface names, whether each witness was read,
+        # the verifier's three-state verdict, and the `unrecoverable` list. The
+        # split #3930's acceptance publishes — verified restore / unrecoverable /
+        # empty contract over 30+ rounds — is a count over landings, and
+        # `gate.json` is deleted with the worktree, so without this the
+        # denominator is itself unrecoverable.
+        if (res.data or {}).get("recovery"):
+            event["recovery"] = REC.to_event(res.data["recovery"])
         if (res.data or {}).get("vet"):
             v = res.data["vet"]
             event["vet"] = {"status": v.get("status"),
@@ -2558,6 +2583,7 @@ class Gate:
         # before anyone is allowed to act on one.
         ladder = [("preflight", self.rung_preflight), ("vet", self.rung_vet),
                   ("code_rules", self.rung_code_rules),
+                  ("recovery", self.rung_recovery),
                   ("static", self.rung_static),
                   ("pyright", self.rung_pyright),
                   ("prose_consumers", self.rung_prose_consumers),
@@ -2929,6 +2955,42 @@ class Gate:
         allowed = len(res.get("allowed") or [])
         allow = f"; {allowed} in the rule file's allowlist" if allowed else ""
         return True, (f"observe-only: {len(hits)} hit(s) — {listed}{more}{allow}"), data
+
+    def rung_recovery(self):
+        """OBSERVE-ONLY recoverability of the state OUTSIDE the diff (#3930).
+
+        Every other rung asks whether the candidate still WORKS. This one asks
+        whether the round could be UNDONE. `git revert` covers the tree, and the
+        `drill` rehearses the guardian's rescue on a scratch clone of the tree
+        plus a 200 from a health endpoint — but a round also mutates state no
+        revert reaches, because that state changes as a CONSEQUENCE of applying
+        the change (`promote._apply_service_changes` runs `supervisorctl
+        reread`/`update`, links units into `~/.config/systemd/user`, restarts the
+        guardian) and so is never a path in the diff. The backups of that state
+        exist (hourly btrfs snapshot of the data root, daily `kg.sqlite` tarball,
+        sha-guarded per-turn pre-images); nothing at the landing decision asks
+        whether a restore of the state THIS round changed would work.
+
+        Deterministic, stdlib, read-only, and it blocks nothing — on #679's
+        precedent and for #679's reason: the honest verdict today is almost
+        always `unevaluated`, because no rung applies the candidate and unwinds
+        it (#3930 step 3 is deferred), and a check that cannot fail yet must not
+        dress up as one that passed. The record rides the ledger event through
+        `REC.to_event`, the way `vet`'s and `pyright`'s do, because a verdict
+        that only survives in `gate.json` has no denominator.
+
+        The cost is bounded to the contract: a round that declares no surface
+        performs no witness read at all, which is what keeps an ordinary code
+        round paying ~0 for it on a box whose RAM gates are already tight.
+        """
+        rec = REC.build_recovery_record(list(self.report.changed_paths or []),
+                                        live_root=self.live)
+        detail = REC.record_summary(rec)
+        if rec["verdict"] == REC.FAILED:
+            # Still `True`: observe-only. The word has to be in the detail
+            # because a person reading a ladder line at 3am scans for it.
+            detail = f"RECOVERY MISMATCH — {detail}"
+        return True, detail, {"recovery": rec}
 
     def rung_static(self):
         r = _run([str(self.python), "-m", "compileall", "-q", str(self.worktree)], timeout=300)

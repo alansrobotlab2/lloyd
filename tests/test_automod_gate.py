@@ -95,8 +95,14 @@ class _StubGate(G.Gate):
 # two trees the same question — what did this round retire — and gets the answer
 # pyright cannot, because the consumers it looks for are prose outside the code
 # tree. It is observe-only like the three rungs beside it.
-RUNGS = ("preflight", "vet", "code_rules", "static", "pyright", "prose_consumers",
-         "frontend", "tests", "prompt_surface",
+# `recovery` sits immediately behind `code_rules` (#3930) for the reason `vet` is
+# there: it reads what preflight resolved (the changed-path list) plus a read-only
+# witness of the live state that list reaches, costs about as much, and is the
+# fifth observe-only rung — it records whether the round is undoable and refuses
+# nothing, because its honest verdict until the apply-and-unwind rehearsal exists
+# is `unevaluated`.
+RUNGS = ("preflight", "vet", "code_rules", "recovery", "static", "pyright",
+         "prose_consumers", "frontend", "tests", "prompt_surface",
          "review", "venv", "canary_boot", "canary_smoke", "drill")
 ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
@@ -124,7 +130,9 @@ def test_a_failing_rung_short_circuits_the_expensive_ones(monkeypatch):
     `vet` is in the called list because #679's clause 5 puts it on every round
     immediately behind `preflight`, which is before anything executes the
     candidate: an emptied file or a stray blob is reported even on a tree that
-    then fails `static`.
+    then fails `static`. `recovery` is there for the same reason (#3930): a round
+    that cannot be undone is worth knowing about even when its build is broken,
+    and it reads nothing the failing `static` rung had to run first.
     """
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     outcomes = dict(ALL_PASS)
@@ -132,7 +140,7 @@ def test_a_failing_rung_short_circuits_the_expensive_ones(monkeypatch):
     g = _StubGate(outcomes)
     report = g.run()
     assert not report.ok
-    assert g.called == ["preflight", "vet", "code_rules", "static"]
+    assert g.called == ["preflight", "vet", "code_rules", "recovery", "static"]
     assert "canary_boot" not in g.called
 
 
