@@ -151,20 +151,28 @@ describe("HealthStrip renders the evidence", () => {
 });
 
 // The Kanban drop's discarded third argument (`TS6133: 'insertIndex' is declared but
-// its value is never read`) is what made `npm run build` die before vite until #3816.
-// Two things had to stay true while it went away, and the one that is easy to get wrong
-// is the second: the handler's JOB is a status change, so the fix that must not happen
-// is deleting the drop path or starting to send the index to the server as if
-// reordering worked. Wiring the index up, or deleting the insertion indicator that
-// computes it, is a product decision this item deliberately did not take.
-describe("Kanban drop stays a status change with no unread parameter (#3816)", () => {
+// its value is never read`) is what made `npm run build` die before vite until #3816,
+// which paid it off by UNDERSCORING the parameter and leaving the insertion indicator
+// that computed the index in place, on the grounds that wiring it up or deleting the
+// indicator was a product decision. #3929 took the second option, because the first is
+// not available: `AutonomyTask` declares no position field (`web/src/api.ts`) and the
+// board's order is a derived sort by priority then created, so the index had no
+// server-side slot to land in and the above/below bar promised a reorder that never
+// happened. Two things had to stay true while it went away, and the one that is easy to
+// get wrong is the second: the handler's JOB is a status change, so the fix that must
+// not happen is deleting the drop path or inventing a second write.
+describe("Kanban drop stays a status change with no insertion index (#3816, #3929)", () => {
   // Each cut is a pair of `indexOf` hits, and a miss returns -1 — which slices an
   // EMPTY string, against which every `not.toContain` below would pass vacuously. Two
   // of these markers therefore need the offset printed before the slice is used:
   // `const handleSave = async (` occurs twice in the page (a no-argument one in the
   // editor section and the record editor's below `handleDrop`), so the end marker names
   // the parameter list; and `const handleDrop = ` occurs twice as well (the column's
-  // takes the DOM event, the page's takes the ids).
+  // takes the DOM event, the page's takes the ids). The column's END marker used to be
+  // `const getIndicator = `; the indicator is deleted, so it ends on the column's own
+  // `onDragOver={handleDragOverColumn}` — the wiring clause 4 asks to keep, and the
+  // handler's 255 measured bytes sit above the 150 bound below with room to notice a
+  // gutted one.
   const cut = (from: string, to: string, atLeast: number) => {
     const a = pageSource.indexOf(from);
     const b = pageSource.indexOf(to, a + 1);
@@ -181,25 +189,26 @@ describe("Kanban drop stays a status change with no unread parameter (#3816)", (
     300);
   const columnDrop = cut(
     "  const handleDrop = (e: DragEvent) => {",
-    "  const getIndicator = ",
-    300);
+    "      onDragOver={handleDragOverColumn}",
+    150);
 
   it("finds both drop handlers, so no assertion below runs on an empty slice", () => {
     // The two handlers are different functions in different components and must stay
-    // distinguishable: the column's takes the DOM event, the page's takes the ids.
-    expect(dropHandler).toContain("_insertIndex: number");
+    // distinguishable: the column's takes the DOM event, the page's takes the ids and
+    // looks the task up by id before touching anything.
+    expect(dropHandler).toContain("const task = tasks.find(");
     expect(columnDrop).toContain("e.dataTransfer.getData");
     expect(dropHandler).not.toContain("dataTransfer");
   });
 
-  it("declares the third parameter with the underscore that means unread", () => {
-    expect(dropHandler).toMatch(
-      /const handleDrop = async \(taskId: number, newStatus: string, _insertIndex: number\)/);
-    // The old spelling, which is the TS6133 this item exists to clear.
-    expect(dropHandler).not.toMatch(/[(,] insertIndex: number/);
-    // And the value must not have started being used instead of renamed: nothing in
-    // the handler may read it, which is the same diagnostic one edit away.
-    expect(dropHandler).not.toMatch(/[^_]insertIndex/);
+  it("takes exactly two parameters, because there is no index left to deliver", () => {
+    // Byte-exact rather than a `toMatch` on a fragment: the whole point is the ABSENCE
+    // of a third parameter, and a loose pattern passes on a handler that grew one back.
+    expect(dropHandler.split("\n", 1)[0]).toBe(
+      "  const handleDrop = async (taskId: number, newStatus: string) => {");
+    // Neither spelling may reappear: the plain one is the TS6133 #3816 cleared, and the
+    // underscored one is the placeholder #3929 deleted.
+    expect(dropHandler).not.toMatch(/[_a-zA-Z]*insertIndex/i);
   });
 
   it("still sends exactly one autonomyWriteTask, with only id and status", () => {
@@ -211,18 +220,32 @@ describe("Kanban drop stays a status change with no unread parameter (#3816)", (
     expect(dropHandler).toContain("prev.map(");
   });
 
-  it("keeps the column computing and passing the index, unchanged", () => {
-    // The seam is untouched: `KanbanColumn` still derives an insertion index from the
-    // indicator and passes three arguments up. Only the parent's parameter was renamed.
-    expect(columnDrop).toContain("onDrop(draggedId, status, insertIndex);");
-    expect(columnDrop).toContain("let insertIndex = tasks.length;");
-    expect(pageSource).toMatch(
-      /onDrop: \(taskId: number, newStatus: string, insertIndex: number\) => void;/);
-    expect(pageSource).toContain("const [insertAt, setInsertAt] = useState");
-    expect(pageSource).toContain("const getIndicator = (taskId: number)");
+  it("keeps the column's drag wiring and drops the argument, changing nothing else", () => {
+    // Clause 4: drag-to-change-status has to stay wired, and this is the source shape
+    // that carries it — the column still preventDefaults and rings, still handles the
+    // drop, still receives the page's handler. What changed is one fewer argument.
+    expect(columnDrop).toContain("onDrop(draggedId, status);");
+    expect(pageSource).toMatch(/onDrop: \(taskId: number, newStatus: string\) => void;/);
+    expect(pageSource).toContain("      onDragOver={handleDragOverColumn}");
+    expect(pageSource).toContain("      onDrop={handleDrop}");
+    expect(pageSource).toContain('dragOver ? "bg-primary/5 ring-1 ring-primary/30"');
+    expect(pageSource).toMatch(/<KanbanColumn[\s\S]{0,200}onDrop=\{handleDrop\}/);
   });
 
-  it("clears TS6133 with a rename, not with a suppression", () => {
+  it("leaves no trace of the insertion indicator, and the card no longer eats dragover", () => {
+    // The bar, the state behind it and the half-detection that fed it are all gone, and
+    // with them the card's `e.stopPropagation()` — which is what lets a dragover over a
+    // CARD reach the column handler above it, so the ring now covers the card area too.
+    // That is the one consequence no node here can watch happen (no jsdom: see the note
+    // at the top of this file), so it is written into the owed visual check.
+    const card = cut("function TaskCard({", "// ── Kanban Column", 3000);
+    expect(card).not.toContain("onDragOver");
+    expect(card).not.toContain("-top-1.5");
+    expect(card).not.toContain("-bottom-1.5");
+    expect(pageSource).not.toMatch(/[_a-zA-Z]*(insertAt|insertIndicator|insertIndex|getIndicator)/i);
+  });
+
+  it("reaches green by deleting the argument, not with a suppression", () => {
     for (const banned of ["@ts-ignore", "@ts-expect-error", "as any"]) {
       expect(dropHandler, `handleDrop uses ${banned}`).not.toContain(banned);
       expect(columnDrop, `KanbanColumn drop uses ${banned}`).not.toContain(banned);

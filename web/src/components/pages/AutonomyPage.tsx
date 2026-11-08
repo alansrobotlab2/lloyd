@@ -786,13 +786,9 @@ function TaskModal({
 function TaskCard({
   task,
   onClick,
-  onDragOverCard,
-  insertIndicator,
 }: {
   task: AutonomyTask;
   onClick: (task: AutonomyTask) => void;
-  onDragOverCard: (taskId: number, half: "top" | "bottom") => void;
-  insertIndicator: "above" | "below" | null;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -815,24 +811,11 @@ function TaskCard({
     e.dataTransfer.effectAllowed = "move";
   };
 
-  const handleDragOver = (e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = "move";
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const midY = rect.top + rect.height / 2;
-    onDragOverCard(task.id, e.clientY < midY ? "top" : "bottom");
-  };
-
   return (
     <div className="relative">
-      {insertIndicator === "above" && (
-        <div className="absolute -top-1.5 left-0 right-0 h-0.5 bg-primary rounded-full z-10" />
-      )}
       <div
         draggable
         onDragStart={handleDragStart}
-        onDragOver={handleDragOver}
         onClick={() => onClick(task)}
         className="bg-secondary rounded-lg p-3 border border-border/50 hover:border-primary/30 transition-colors cursor-pointer active:opacity-70"
       >
@@ -944,9 +927,6 @@ function TaskCard({
           })()}
         </div>
       </div>
-      {insertIndicator === "below" && (
-        <div className="absolute -bottom-1.5 left-0 right-0 h-0.5 bg-primary rounded-full z-10" />
-      )}
     </div>
   );
 }
@@ -961,11 +941,10 @@ function KanbanColumn({
 }: {
   status: string;
   tasks: AutonomyTask[];
-  onDrop: (taskId: number, newStatus: string, insertIndex: number) => void;
+  onDrop: (taskId: number, newStatus: string) => void;
   onClickTask: (task: AutonomyTask) => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
-  const [insertAt, setInsertAt] = useState<{ taskId: number; half: "top" | "bottom" } | null>(null);
 
   const handleDragOverColumn = (e: DragEvent) => {
     e.preventDefault();
@@ -976,13 +955,7 @@ function KanbanColumn({
   const handleDragLeave = (e: DragEvent) => {
     if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
       setDragOver(false);
-      setInsertAt(null);
     }
-  };
-
-  const handleDragOverCard = (taskId: number, half: "top" | "bottom") => {
-    setDragOver(true);
-    setInsertAt({ taskId, half });
   };
 
   const handleDrop = (e: DragEvent) => {
@@ -991,23 +964,7 @@ function KanbanColumn({
     const draggedId = parseInt(e.dataTransfer.getData("text/plain"), 10);
     if (isNaN(draggedId)) return;
 
-    let insertIndex = tasks.length;
-    if (insertAt) {
-      const targetIdx = tasks.findIndex((t) => t.id === insertAt.taskId);
-      if (targetIdx !== -1) {
-        insertIndex = insertAt.half === "top" ? targetIdx : targetIdx + 1;
-      }
-    }
-
-    setInsertAt(null);
-    onDrop(draggedId, status, insertIndex);
-  };
-
-  const getIndicator = (taskId: number): "above" | "below" | null => {
-    if (!insertAt) return null;
-    if (insertAt.half === "top" && insertAt.taskId === taskId) return "above";
-    if (insertAt.half === "bottom" && insertAt.taskId === taskId) return "below";
-    return null;
+    onDrop(draggedId, status);
   };
 
   return (
@@ -1034,8 +991,6 @@ function KanbanColumn({
             key={task.id}
             task={task}
             onClick={onClickTask}
-            onDragOverCard={handleDragOverCard}
-            insertIndicator={getIndicator(task.id)}
           />
         ))}
         {tasks.length === 0 && (
@@ -1126,14 +1081,14 @@ export default function AutonomyPage() {
     return () => clearInterval(interval);
   }, [loadHealth]);
 
-  // `_insertIndex` is delivered by `KanbanColumn` and deliberately unused: this
-  // drop changes a task's status and nothing else (`api.autonomyWriteTask` below
-  // sends `id` + `status` only). The underscore is `noUnusedParameters`'s spelling
-  // for "the caller passes it, this handler does not read it", which is the
-  // honest description until someone decides whether drag-to-reorder should be
-  // wired to the index or the insertion indicator removed — a product call, not
-  // this fix. The plumbing stays in place either way.
-  const handleDrop = async (taskId: number, newStatus: string, _insertIndex: number) => {
+  // A drop changes a task's status and nothing else: `api.autonomyWriteTask` below
+  // sends `id` + `status` only. There is no insertion-position parameter here because
+  // there is nothing for one to do — `AutonomyTask` (`web/src/api.ts`) declares no
+  // position field and the board's order is a derived sort by priority then created
+  // (`tasksByStatus` below), so the index the insertion indicator used to compute had
+  // no server-side slot to land in. (#3816 left that call open and paid for it with an
+  // underscore; #3929 deleted the affordance instead of wiring it up.)
+  const handleDrop = async (taskId: number, newStatus: string) => {
     const task = tasks.find((t) => t.id === taskId);
     if (!task) return;
 

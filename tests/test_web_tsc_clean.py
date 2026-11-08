@@ -11,13 +11,15 @@ as written — an absolute bar there would have been switched off within the hou
 is what its own docstring says — so the absolute bar belongs here, where every suite run
 pays it, on every tree, whether or not the diff touched `web/`.
 
-Both fixes are in Lloyd's own source and neither hides anything: `particleArrowFn` now
+All three fixes are in Lloyd's own source and none hides anything: `particleArrowFn` now
 returns an empty `THREE.Object3D()` for a link outside `highlightLinks` (which
 `linkParticlesFn` already gives 0 particles, so nothing is drawn), `handleDrop`'s third
-parameter is `_insertIndex`, and `lights` — a real prop the package's `.d.ts` omits —
-is declared in `web/src/three-force-graph-lights.d.ts`. The third was masked until the
-first was fixed: TypeScript reports one failed JSX attributes check per element, so
-`EntityGraph.tsx` carried two errors and only ever printed one.
+parameter is GONE — #3816 underscored it as `_insertIndex` and #3929 deleted it along with
+the insertion indicator that computed it, because `AutonomyTask` has no position field for
+the index to reach — and `lights`, a real prop the package's `.d.ts` omits, is declared in
+`web/src/three-force-graph-lights.d.ts`. The third was masked until the first was fixed:
+TypeScript reports one failed JSX attributes check per element, so `EntityGraph.tsx`
+carried two errors and only ever printed one.
 
 Cost, from the runs taken while writing this: the triage reading of the same command on
 an idle box was 6.8 s (`28a31b1f`, 2026-11-05), and 11.8 s twice in a row on a box with a
@@ -31,6 +33,7 @@ dirties the tree it checks.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -103,8 +106,10 @@ def test_web_project_type_checks_with_zero_diagnostics() -> None:
 
     This is `web/package.json`'s `build` script's first half — the half whose failure
     `&&` hides from anyone who only ever runs the gate. Neither of #3816's two errors
-    may come back (`TS2322` at `EntityGraph.tsx`'s particle-object prop, `TS6133` for
-    `handleDrop`'s third parameter), and no file under `web/src` may gain one.
+    may come back (`TS2322` at `EntityGraph.tsx`'s particle-object prop, and the `TS6133`
+    unread-name family — the parameter #3816 underscored and #3929 deleted is one member
+    of it, and `TaskCard`'s `handleDragOver` is another the deletion exposes), and no
+    file under `web/src` may gain one.
     """
     _skip_if_no_tsc()
     r = _run_tsc(WEB, "--noEmit", "-p", "tsconfig.json")
@@ -220,10 +225,11 @@ def test_tsconfig_still_forbids_unused_things() -> None:
 
     It is a denied path for the automod loop (`scripts/automod/spec.py`), so a round
     cannot edit it — but the flags are the actual precondition for `TS6133` existing at
-    all, and this item's own fix (`_insertIndex`) is only meaningful while
-    `noUnusedParameters` is on. Read from the file, so a loosened flag is caught even in
-    a tree that edited it by hand and committed it; `test_tsconfig_json_is_byte_identical_to_what_git_holds`
-    is the other arm, which asks the same question of git.
+    all: #3816's underscored parameter and #3929's deletion of it are both only
+    meaningful while `noUnusedParameters` and `noUnusedLocals` are on. Read from the
+    file, so a loosened flag is caught even in a tree that edited it by hand and
+    committed it; `test_tsconfig_json_is_byte_identical_to_what_git_holds` is the other
+    arm, which asks the same question of git.
     """
     options = json.loads((WEB / "tsconfig.json").read_text())["compilerOptions"]
     for flag in ("strict", "noUnusedLocals", "noUnusedParameters"):
@@ -387,39 +393,149 @@ def test_the_arrow_cone_stays_confined_to_highlighted_links() -> None:
 
 
 def test_the_drop_handler_still_writes_only_status() -> None:
-    """Clause 4 from the Python side: one write, same arguments, no unread parameter.
+    """Clause 3 from the Python side: one write, same arguments, no third parameter.
 
     `handleDrop`'s third parameter is what made `tsc` exit 2 (`TS6133` under
-    `noUnusedParameters`). The fix is the underscore: the caller still passes an index and
-    this handler still does not read it, because the one write it makes changes a task's
-    status and nothing else. Deleting the parameter instead would have meant editing
-    `KanbanColumn`'s computation and the prop type, and the drag-to-reorder decision
-    #3816 deliberately leaves to a human would have been made by removing its UI.
+    `noUnusedParameters`). #3816 answered that with an underscore and left the seam in
+    place, because deleting it would have decided the drag-to-reorder question by
+    removing its UI. #3929 decided the question: `AutonomyTask` (`web/src/api.ts`)
+    declares no position field and the board's order is a derived sort by priority then
+    created, so the index had no server-side slot to arrive in and the above/below bar
+    promised a reorder that never happened. The parameter, the computation and the prop
+    type all went. What may not change either way is the handler's JOB: exactly one
+    write, `id` + `status`, with nothing added to the drag path.
     """
     text = (WEB / "src" / "components" / "pages" / "AutonomyPage.tsx").read_text()
     head = text[text.index("  const handleDrop = async ("):]
     signature = head.split("\n", 1)[0]
-    assert "_insertIndex: number" in signature, (
-        "the third parameter is neither `_insertIndex` nor gone, so `noUnusedParameters`\n"
-        "is back to reporting TS6133 and `npm run build` dies before vite."
+    assert signature == "  const handleDrop = async (taskId: number, newStatus: string) => {", (
+        f"handleDrop's signature is {signature!r}, not the two-parameter one #3929 left.\n"
+        "A third parameter — underscored or not — is `noUnusedParameters`'s TS6133 back\n"
+        "and `npm run build` dying before vite; a first or second one moving is the\n"
+        "drag-to-change-status contract moving, which no clause of this item authorises."
     )
-    assert "(taskId: number, newStatus: string," in signature, (
-        f"handleDrop's first two parameters changed: {signature!r} — this item clears a\n"
-        "type error and is not allowed to move the drag-to-change-status contract.")
     body = head[:head.index("  const handleSave = async (id: number")]
     assert "api.autonomyWriteTask({ id: taskId, status: newStatus })" in body, (
-        "the drop no longer sends exactly that call: clause 4 requires the same write, on\n"
+        "the drop no longer sends exactly that call: clause 3 requires the same write, on\n"
         "the same arguments, and nothing else added to the drag path."
     )
     assert body.count("await api.autonomyWriteTask(") == 1, (
         "handleDrop now issues more than one write per drop — a status change plus\n"
-        "whatever the index became is a behaviour change #3816 does not authorise.")
-    # The caller side is untouched, which is what makes the underscore honest rather than
-    # a rename that hides a broken seam: the index is still computed and still delivered.
-    assert "onDrop(draggedId, status, insertIndex);" in text, (
-        "KanbanColumn stopped passing the computed index, so `_insertIndex` is a lie\n"
-        "about the seam — delete the computation and the prop too, or leave both."
+        "whatever the index became is a behaviour change #3929 does not authorise.")
+    # The caller side came down to two arguments with it. Left at three, the call site
+    # would be passing an argument no parameter receives — a new type error, not a fixed
+    # one; left at two but still computing an index, that index would be an unread local
+    # and TS6133 would be back through `noUnusedLocals` instead of the parameter.
+    assert "onDrop(draggedId, status);" in text, (
+        "KanbanColumn.handleDrop is not calling its prop with exactly these two\n"
+        "arguments, so either the deleted index is being passed still or the drop path\n"
+        "itself has been rewired — clause 3 keeps the write, clause 4 keeps the wiring."
     )
-    assert "insertIndex: number) => void;" in text, (
-        "the prop type's third parameter is gone while the call site still passes three\n"
-        "arguments, which is a new type error rather than a fixed one.")
+    assert "onDrop: (taskId: number, newStatus: string) => void;" in text, (
+        "the onDrop prop type no longer declares exactly the two parameters the page\n"
+        "passes it, which is the seam between the column and the page drifting open.")
+
+
+#: Every identifier the autonomy board's insertion-position affordance was made of,
+#: spelled as whole tokens. `_insertIndex` is in here on purpose: a token-boundary match
+#: on `insertIndex` does NOT see the underscored spelling #3816 left behind (an
+#: underscore is a word character), and that spelling coming back is exactly the
+#: regression this node and TS6133 both exist to catch.
+_AFFORDANCE_TOKENS = frozenset({
+    "insertAt", "setInsertAt", "getIndicator", "insertIndicator", "insertIndex",
+    "_insertIndex", "handleDragOverCard", "onDragOverCard",
+})
+
+
+def _affordance_tokens(text: str) -> dict[str, int]:
+    """Count `text`'s affordance identifiers, matched as whole tokens.
+
+    `re.findall(r"[A-Za-z_$][\\w$]*")` then set membership, not `in`: a substring test
+    cannot answer "is this name gone" without also answering it for every longer name
+    that contains it (`insertAt` inside `setInsertAt`, `insertIndex` inside
+    `_insertIndex`), so a substring absence claim is either over-strict or blind.
+    """
+    found: dict[str, int] = {}
+    for tok in re.findall(r"[A-Za-z_$][\w$]*", text):
+        if tok in _AFFORDANCE_TOKENS:
+            found[tok] = found.get(tok, 0) + 1
+    return found
+
+
+def test_the_insertion_indicator_is_gone_from_the_autonomy_board() -> None:
+    """Clause 2: the affordance is deleted, and this node can tell that from being blind.
+
+    The above/below bar promised a position the server has no field for, so it is gone:
+    the `insertAt` state and its three writers, `handleDragOverCard`, `getIndicator`, the
+    `insertIndicator` prop and both of its absolutely-positioned bars, the
+    `insertIndex` computation, and — the site #3816's own diagnostic predicts — TaskCard's
+    `handleDragOver`, whose only reader was the `onDragOverCard` call and which
+    `noUnusedLocals` would report as TS6133 the moment the prop went.
+
+    Two things keep an empty result from meaning nothing. The positive control below
+    runs the same detector over the copy in `BacklogPage.tsx` that is still LIVE (its
+    `handleDrop` computes a real `position`), so a broken detector fails there instead of
+    passing here; and the indicator's class strings are checked separately, because the
+    bars are the half a user saw and a rename of the variables would empty the token
+    check while leaving them rendered.
+    """
+    page = (WEB / "src" / "components" / "pages" / "AutonomyPage.tsx").read_text()
+    hits = _affordance_tokens(page)
+    assert not hits, (
+        f"AutonomyPage.tsx still carries {hits} — #3929 deletes the insertion-position\n"
+        "affordance rather than leaving any of its plumbing, because an index with no\n"
+        "`position` field on `AutonomyTask` to reach is a bar that lies about a reorder."
+    )
+    control = _affordance_tokens(
+        (WEB / "src" / "components" / "pages" / "BacklogPage.tsx").read_text())
+    assert set(control) == _AFFORDANCE_TOKENS - {"_insertIndex"}, (
+        f"the detector found {sorted(control)} in the live copy in BacklogPage.tsx, which\n"
+        "is not all seven of its tokens — the detector itself is broken, so the empty\n"
+        "answer above proves nothing. BacklogPage's indicator is live (it computes a real\n"
+        "`position`) and is not #3929's to delete; if it ever becomes someone else's,\n"
+        "re-point this control at another live copy rather than dropping it."
+    )
+    for bar in ("absolute -top-1.5", "absolute -bottom-1.5"):
+        assert bar not in page, (
+            f"the indicator bar `{bar}` is still rendered in AutonomyPage.tsx: the tokens\n"
+            "are gone but the line the user saw is not, which is the same misleading\n"
+            "affordance with less readable source behind it."
+        )
+    card = page[page.index("function TaskCard({"):page.index("// ── Kanban Column")]
+    assert len(card) > 3000, "the TaskCard region reads as gutted, not edited"
+    assert "onDragOver" not in card, (
+        "TaskCard carries an onDragOver again. Its handler existed only to record which\n"
+        "half of the card the pointer was over and to `stopPropagation()`; with the bar\n"
+        "gone it has no reader, `noUnusedLocals` would report TS6133, and removing the\n"
+        "stopPropagation is what lets a dragover over a card reach the column handler —\n"
+        "clause 1's requirement and the ring's improvement in one deletion."
+    )
+
+
+def test_the_autonomy_drag_path_is_still_wired_after_the_deletion() -> None:
+    """Clause 4's Python witness: what stays wired, since no node here can drag anything.
+
+    `web/vitest.config.ts` sets `environment: "node"` and adding jsdom would mean editing
+    the denied `web/package.json`, so neither this file nor `AutonomyPage.test.ts` can
+    dispatch a real drag event — see the note at the top of that file. The contract is
+    therefore pinned as source shape here and in that file, and the visual half of the
+    check is left owed to a human.
+    """
+    page = (WEB / "src" / "components" / "pages" / "AutonomyPage.tsx").read_text()
+    column = page[page.index("function KanbanColumn({"):page.index("// ── Main Page")]
+    assert len(column) > 1000, "the KanbanColumn region reads as gutted, not edited"
+    for wiring in (
+        "onDragOver={handleDragOverColumn}",
+        "onDrop={handleDrop}",
+        'dragOver ? "bg-primary/5 ring-1 ring-primary/30"',
+        "e.preventDefault();",
+        'e.dataTransfer.dropEffect = "move";',
+    ):
+        assert wiring in column, (
+            f"KanbanColumn no longer contains `{wiring}` — that is the drag-to-change-\n"
+            "status path itself (clause 4), not part of the affordance #3929 deletes."
+        )
+    assert re.search(r"<KanbanColumn[\s\S]{0,200}onDrop=\{handleDrop\}", page), (
+        "AutonomyPage no longer passes its handler to KanbanColumn within the first 200\n"
+        "characters of the element, so the board's columns are no longer drop targets."
+    )
