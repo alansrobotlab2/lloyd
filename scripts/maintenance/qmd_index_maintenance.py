@@ -1591,12 +1591,14 @@ CAPACITY_WHAT_TO_DO = (
     "seconds. Ask for `--swap` with no copy present and it builds first, paying the 36 "
     "minutes again. Since #2458 the script refuses `--swap` outright unless stdin is an "
     "interactive terminal; no scheduled run passes it. The BUILD is scheduled as of "
-    "#3460: the nightly run that reports `capacity_approaching` and finds no copy on "
-    "disk launches its own `--rebuild-side-copy rebuild-YYYYMMDD`, refuses to start one "
-    "whose 2400-second budget would end inside the 22:00-04:00 nightly hours, and when a "
-    "copy is already waiting prints the `--swap` command for a terminal instead of "
-    "running it. What is owed here is therefore the seconds-scale swap, not the "
-    "36-minute sitting.")
+    "#3460: the nightly run that reports `capacity_approaching` and finds no copy of this "
+    "route's on disk launches its own `--rebuild-side-copy rebuild-YYYYMMDD`, refuses to "
+    "start one whose 2400-second budget would end inside the 22:00-04:00 nightly hours, "
+    "and when a copy of this route's is already waiting prints the `--swap` command for a "
+    "terminal instead of running it. What is owed here is therefore the seconds-scale swap, not the "
+    "36-minute sitting, and since #3954 one full rebuild per capacity cycle rather than "
+    "per in-band night: a later in-band night that finds an earlier night's copy on disk "
+    "tops that copy up under its own name in seconds instead of minting a new dated one.")
 
 
 def capacity_owed(vec0: dict | None, footprint: dict | None) -> dict:
@@ -3141,6 +3143,53 @@ def scheduled_side_copy_name(at: datetime) -> str:
     return f"rebuild-{at:%Y%m%d}"
 
 
+#: The date-shaped half of the two names this route's copies answer to, captured so a
+#: copy's date can be read off its FILENAME. The marker beside it is deliberately not
+#: parsed: `rebuild_side_copy` writes `started` as a naive local stamp
+#: (`datetime.now().isoformat()`, live today as `"started": "2026-11-08T05:00:33.563930"`),
+#: while the marker the test helper and the older builds write carries `built_utc` and no
+#: `started` at all — a selector reading marker contents would therefore take one branch
+#: under test and another in production, which is the class of naive-stamp bug `1c34bb38`
+#: already had to close once for #2119.
+HELD_SIDE_COPY_NAME_RE = re.compile(r"^rebuild-(\d{8})$")
+
+
+def newest_held_side_copy(before_name: str | None = None) -> str | None:
+    """The newest `rebuild-YYYYMMDD` copy this route owns, chosen by the date in its NAME.
+
+    "Owns" is `side_copy_exists` and nothing more: a database with this route's marker
+    beside it. A markerless database is somebody else's (the eval side indexes share
+    `~/.cache/qmd/`), so it is skipped here exactly as `rebuild_side_copy` refuses it, and
+    a name that is not date-shaped is skipped because its date cannot be read and the
+    caller's question is a date.
+
+    `before_name`, when given, is a name whose date a candidate must be STRICTLY EARLIER
+    than. The scheduled caller passes its own run-date name, which keeps the copy that
+    name already holds the "skip, build nothing" case it is today and offers only an
+    EARLIER-dated copy for a top-up — the two together being the only reading of "one
+    rebuild per capacity cycle" that leaves the same-date skip standing.
+
+    Returns the name, or None when the disk holds no candidate. Globs the index directory
+    and opens nothing, so asking costs no WAL sidecar and writes no byte.
+    """
+    cutoff = None
+    if before_name is not None:
+        before_m = HELD_SIDE_COPY_NAME_RE.match(before_name)
+        cutoff = before_m.group(1) if before_m else None
+    best_date: str | None = None
+    best_name: str | None = None
+    for p in sorted(INDEX.parent.glob("rebuild-*.sqlite")):
+        mt = HELD_SIDE_COPY_NAME_RE.match(p.stem)
+        if mt is None or not side_copy_exists(p.stem):
+            continue
+        date = mt.group(1)
+        if cutoff is not None and date >= cutoff:
+            continue
+        if best_date is None or date > best_date:
+            best_date, best_name = date, p.stem
+    return best_name
+
+
 def scheduled_build_window(at: datetime) -> dict:
     """Whether a build begun at `at` may start: one arithmetic check, on its END.
 
@@ -3191,9 +3240,25 @@ def scheduled_side_copy_build(started: datetime) -> dict:
         nightly for a bonus build would be the boy-who-cried-wolf that #1897's red
         verdict exists to be and this one must not.
 
-    A copy this route already built is not rebuilt: the run prints the exact `--swap`
-    command instead and does nothing else, which is the payoff the split was for — the
-    hand step then takes seconds, not 36 minutes.
+    A copy this route already built under THIS NIGHT's name is not rebuilt: the run prints
+    the exact `--swap` command instead and does nothing else, which is the payoff the split
+    was for — the hand step then takes seconds, not 36 minutes.
+
+    One full rebuild per capacity cycle, not per in-band night (#3954). A dwell in the
+    `capacity_approaching` band is measured at nine consecutive nights (2026-10-21 →
+    10-29), and it ends when a person swaps, not when occupancy climbs back out of the
+    band, so minting a fresh `rebuild-<date>` every in-band night would pay the whole
+    re-embed about nine times and leave about nine copies behind — the 2026-11-08 witness
+    is one night's `elapsed_s: 4272.0`. So after the same-date skip, the run looks for the
+    newest marker-bearing `rebuild-YYYYMMDD` copy dated EARLIER than tonight
+    (`newest_held_side_copy`) and, finding one, re-runs the route under THAT name with
+    `swap=False`: the route's own unattended half, which tops an existing copy up over the
+    hashes it is missing — 35.5 s and 11.5 s against 4272.0 s for a fresh one, with its
+    floor rewritten — and is the same call a person makes by hand. The block records which
+    of the two happened as `reused` or `built`. An untouched held copy is not an option:
+    `verify_side_copy` refuses one as stale the next morning, so a bound that merely
+    declined while a copy stood would print a `--swap` command its own verify step
+    rejects.
     """
     name = scheduled_side_copy_name(started)
     out: dict = {"name": name, "build_launched": False}
@@ -3214,11 +3279,25 @@ def scheduled_side_copy_build(started: datetime) -> dict:
     window = scheduled_build_window(run_started())
     out["window"] = window
     if not window["allowed"]:
+        # Decides before either half (#3460 clause 2, unchanged by #3954): a top-up holds
+        # the same per-directory embed lock and loads the same model on the same GPU as a
+        # fresh build, so it is refused on the same arithmetic.
         out["refused"] = window["reason"]
         print(f"  side copy build REFUSED  {window['reason']}")
         return out
-    print(f"  side copy BUILD     {window['reason']}; building {name} (about 36 "
-          f"minutes, no service stopped, exit code unmoved)")
+    # The cycle bound (#3954): tonight's own name is excluded, so a copy found here is one
+    # an earlier in-band night built and a person has not swapped yet.
+    held = newest_held_side_copy(before_name=name)
+    if held:
+        name = held
+        out["name"] = name
+        out["reused"] = name
+        print(f"  side copy TOP-UP    {name}: a copy this route built earlier in this "
+              f"capacity cycle is on disk, so that name is topped up under the route "
+              f"rather than a fresh rebuild minted ({window['reason']})")
+    else:
+        print(f"  side copy BUILD     {window['reason']}; building {name} (about 36 "
+              f"minutes, no service stopped, exit code unmoved)")
     # `build_launched` means "this run asked the route to build", so it is set before
     # the call. `route_rc` is the route's own exit code, recorded and dropped: the route
     # turns a `SideCopyRefused` into its own `refused:` line on stderr and exit 2, so the
@@ -3240,6 +3319,15 @@ def scheduled_side_copy_build(started: datetime) -> dict:
     elif rc != 0:
         out["failed"] = f"the side-copy route exited {rc}"
         print(f"  side copy build FAILED   {out['failed']}")
+    elif held:
+        # The reused copy is the one now waiting on a terminal, so the hand step names it.
+        # `built` is recorded only for a fresh build that actually verified: on a refused
+        # or failed run the name it would carry is not on disk.
+        out["hand_step"] = HAND_SWAP_COMMAND.format(name=name)
+        print(f"  side copy {name} topped up: no new name was minted. The swap is the "
+              f"hand step: {out['hand_step']}")
+    else:
+        out["built"] = name
     return out
 
 

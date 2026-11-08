@@ -7601,14 +7601,17 @@ def test_the_build_moves_the_exit_code_on_no_outcome_of_four(monkeypatch, tmp_pa
 
 def test_a_nightly_that_finds_a_copy_built_prints_the_swap_and_builds_nothing(
         monkeypatch, tmp_path, capsys):
-    """Clause 4: the payoff of the split is a copy waiting and a seconds-scale hand step.
+    """Clause 4, and #3954's boundary case: the skip is keyed on THIS NIGHT's name.
 
     With a marker-bearing copy of the name this run would have chosen already on disk,
     the nightly launches nothing — rebuilding a verified copy would pay the 36 minutes
-    #3071 ruled out of the sitting — and prints the exact command for a terminal. The
-    command is asserted against `m.HAND_SWAP_COMMAND` rather than a literal so the two
-    cannot drift apart, and it is checked in its assembled form: name and `--swap`
-    present, `--dry-run` absent, because the line a person pastes is the finding.
+    #3071 ruled out of the sitting — and prints the exact command for a terminal. A copy
+    dated EARLIER than tonight is the other half of the cycle and does not come here: it
+    is topped up under its own name (#3954), which is what bounds a capacity dwell to one
+    full rebuild instead of one per in-band night. The command is asserted against
+    `m.HAND_SWAP_COMMAND` rather than a literal so the two cannot drift apart, and it is
+    checked in its assembled form: name and `--swap` present, `--dry-run` absent, because
+    the line a person pastes is the finding.
     """
     at = _local_wallclock(5, 1)
     name = f"rebuild-{at:%Y%m%d}"
@@ -7625,6 +7628,153 @@ def test_a_nightly_that_finds_a_copy_built_prints_the_swap_and_builds_nothing(
     assert ("--rebuild-side-copy" in expected and f"{name} --swap" in expected
             and "--dry-run" not in expected), expected
     assert name in out and "--swap" in out and "--dry-run" not in out, out
+
+
+# --- #3954: one full rebuild per capacity cycle, later in-band nights top it up --------
+#
+# The skip above is keyed on the run-date name and nothing else, so every in-band night of
+# a dwell minted a fresh `rebuild-<date>` and paid the whole re-embed for it. The dwell
+# length is measured, not guessed: `capacity_approaching: true` on nine consecutive
+# nightly reports from 2026-10-21 to 10-29, ended only by the 10-29 build plus a hand swap
+# (occupancy 0.9475 on 10-30) — and one night of the fresh-build half is on disk as
+# `qmd-side-copy-rebuild-20261108-2026-11-08T050033.json` at `elapsed_s: 4272.0`, against
+# the top-up half's 35.5 s (33 hashes) and 11.5 s (3 hashes) in the 10-29 witnesses, both
+# with the floor rewritten. So the bound is a TOP-UP of the copy the cycle already holds,
+# never a decline: `verify_side_copy` refuses an untouched held copy as stale the next
+# morning while the live index grows ~900-1100 vectors a night, and a decline would print
+# a `--swap` command its own verify step rejects.
+
+
+def test_an_in_band_nightly_with_an_earlier_copy_tops_it_up_under_that_name(
+        monkeypatch, tmp_path, capsys):
+    """#3954 clauses 1-3: reuse the held name, record the reuse, print its hand step.
+
+    The disk holds `rebuild-<eight nights ago>` with this route's marker beside it — the
+    state of night two of a dwell, and the state the 2026-11-08 report was one day from
+    reaching (`rebuild-20261108` on disk, occupancy 0.4889 inside the band). The run must
+    hand `rebuild_side_copy` exactly one name and it must be the one already on disk:
+    minting `rebuild-<tonight>` is the ~71-minute re-embed this item exists to stop, and a
+    second dated name is a second 739 MB copy per dwell. `swap_side_copy` raises on
+    contact, so the run completing is clause 1's never-swaps evidence, and an empty `_sh`
+    transcript is the same count the #3460 nodes use for stops-no-service. The block names
+    the reused copy and says `reused`, never `built`, and neither the run-date name nor any
+    other name absent from disk may appear in the block or on stdout: the hand step a
+    person pastes has to be a copy that is really there.
+    """
+    at = _local_wallclock(5, 1)
+    run_name = f"rebuild-{at:%Y%m%d}"
+    held = f"rebuild-{(at - timedelta(days=8)):%Y%m%d}"
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, copy_present=held)
+
+    assert builds == [held], (f"expected exactly one route call under the held name "
+                              f"{held!r}, got {builds}")
+    assert run_name not in builds, f"minted a new dated name beside the held copy: {builds}"
+    assert rc == 0, f"a topped-up held copy moved the exit code: {rc}"
+    assert shell == [], f"the top-up ran subprocesses: {shell}"
+    block = report["side_copy_build"]
+    assert block["name"] == held and block["reused"] == held, block
+    assert "built" not in block, f"a reuse recorded itself as a build: {block}"
+    assert block["build_launched"] is True, block
+    assert "refused" not in block and "failed" not in block and "skipped" not in block, block
+    assert run_name not in json.dumps(block), block
+    assert run_name not in out, f"stdout named a copy that is not on disk: {out}"
+    expected = m.HAND_SWAP_COMMAND.format(name=held)
+    assert "--swap" in expected and "--dry-run" not in expected, expected
+    assert block["hand_step"] == expected, block
+    assert expected in out, out
+    # The route's own dated witness is where the owed `elapsed_s` is read from, and it can
+    # only be read for the copy the run actually pointed the route at.
+    assert list(m.REPORT_DIR.glob(f"qmd-side-copy-{held}-*.json")), (
+        f"no side-copy witness for {held} beside "
+        f"{sorted(p.name for p in m.REPORT_DIR.iterdir())}")
+    assert not list(m.REPORT_DIR.glob(f"qmd-side-copy-{run_name}-*.json")), (
+        "a witness exists for a name this run never built")
+
+
+def test_the_window_guard_refuses_a_top_up_of_an_earlier_copy_too(monkeypatch, tmp_path,
+                                                                  capsys):
+    """#3954 clause 4: the guard decides before a top-up exactly as it decides before a build.
+
+    A held copy from eight nights ago plus a pinned 23:00 start, whose 2400 s budget ends
+    23:40 inside the nightly hours. A top-up is `qmd update` and `qmd embed`: it takes the
+    per-directory embed lock and loads the embedding model on the GPU the 22:00-04:00
+    cluster shares, which is the whole reason the guard exists, so reusing a name may not
+    slip past it. Nothing may be built, the refusal is both printed and recorded, and the
+    exit code stays 0 as it does for a refused fresh build.
+    """
+    at = _local_wallclock(23, 0)
+    held = f"rebuild-{(at - timedelta(days=8)):%Y%m%d}"
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, copy_present=held)
+
+    assert builds == [], f"a top-up started inside the nightly hours: {builds}"
+    assert rc == 0, f"a refused top-up moved the exit code: {rc}"
+    assert shell == [], f"the refused run still ran subprocesses: {shell}"
+    block = report["side_copy_build"]
+    assert block["build_launched"] is False, block
+    assert block["window"]["allowed"] is False, block
+    assert "23:00" in block["refused"] and "23:40" in block["refused"], block
+    assert "reused" not in block and "built" not in block, block
+    assert held not in json.dumps(block), (
+        f"a refused run named the held copy as if it had touched it: {block}")
+    assert "side copy build REFUSED" in out and "23:40" in out, out
+
+
+def test_the_held_copy_is_chosen_by_the_date_in_its_name_and_never_by_its_marker(
+        tmp_path, monkeypatch):
+    """#3954's selector, pinned directly: the NAME is the date, the marker is only proof.
+
+    `rebuild_side_copy` writes its marker's `started` as a naive local stamp
+    (`datetime.now().isoformat()`, and the live marker today reads
+    `"started": "2026-11-08T05:00:33.563930"`), while the marker this suite's helper and
+    the older builds write carries `built_utc` and no `started` at all. A selector that
+    parsed marker contents would therefore answer a different question in here than out
+    there — the naive-stamp class `1c34bb38` already closed once for #2119 — so the date
+    comes from the filename and the marker is consulted for existence only. The four cases
+    below are all read off one directory: the newest date-shaped name with a marker wins;
+    a database with no marker is somebody else's and is never offered (the same ownership
+    proof `rebuild_side_copy` applies when it refuses "pick another name"); a name that is
+    not date-shaped has no date to read; and a marker that is not even parseable JSON does
+    not change the answer, which is what "existence only" has to mean to be true.
+    """
+    d = tmp_path / "qmd"
+    d.mkdir()
+    monkeypatch.setattr(m, "INDEX", d / "index.sqlite")
+
+    def seed(name: str, *, marker: str | None = "production"):
+        (d / f"{name}.sqlite").write_bytes(b"\0" * 8)
+        if marker == "production":        # what `rebuild_side_copy` writes today
+            m.side_marker_path(name).write_text(json.dumps(
+                {"name": name, "started": "2026-11-08T05:00:33.563930",
+                 "floor_vectors_live": 41_536}), encoding="utf-8")
+        elif marker == "helper":          # what this suite's helper writes
+            m.side_marker_path(name).write_text(json.dumps(
+                {"built_utc": "2026-11-01T04:11:39+00:00",
+                 "verification": SCHEDULED_VERIFIED}), encoding="utf-8")
+        elif marker == "garbage":
+            m.side_marker_path(name).write_text("{not json at all", encoding="utf-8")
+
+    seed("rebuild-20261031", marker="helper")
+    seed("rebuild-20261102")
+    seed("rebuild-20261105", marker=None)     # a database this route did not create
+    seed("rebuild-subctx")                    # glob-shaped but no date to read: the eval
+    # side indexes (`eval/embed_side_index.py` builds `subctx.sqlite`) share this
+    # directory, and a hand name like this one is legal under `SIDE_NAME_RE`
+
+    assert m.newest_held_side_copy() == "rebuild-20261102"
+    # Two marker shapes, one answer: the file contents are never read for the date.
+    seed("rebuild-20261104", marker="garbage")
+    assert m.newest_held_side_copy() == "rebuild-20261104"
+    assert m.newest_held_side_copy(before_name="rebuild-20261108") == "rebuild-20261104"
+    assert m.newest_held_side_copy(before_name="rebuild-20261104") == "rebuild-20261102"
+    # Strictly earlier: tonight's own name is never the top-up candidate, because a copy
+    # standing under it is the skip case the node above pins.
+    assert m.newest_held_side_copy(before_name="rebuild-20261102") == "rebuild-20261031"
+    assert m.newest_held_side_copy(before_name="rebuild-20261031") is None
+    assert m.newest_held_side_copy(before_name="rebuild-20261030") is None
+    assert m.newest_held_side_copy() == "rebuild-20261104", (
+        "the bare database or the eval index was treated as this route's copy")
 
 
 def test_the_scheduled_name_is_derived_from_the_run_date_so_a_hand_copy_cannot_collide(
@@ -7655,9 +7805,16 @@ def test_the_scheduled_name_is_derived_from_the_run_date_so_a_hand_copy_cannot_c
     assert rc == 0, f"a collision with a hand copy changed the exit code: {rc}"
     assert shell == [], f"the refused build still ran subprocesses: {shell}"
     assert "side copy build REFUSED" in out, out
-    # The other half of the convention: the next night's name is a different name, so
-    # one person's copy can block at most the one night it was built on.
+    # The other half of the convention, and #3954 keeps it: the next in-band night mints a
+    # different name, so a bare database standing under one date costs at most the one
+    # night that tries to build under it, not the rest of the capacity cycle. It is never
+    # picked up as a top-up target either — `newest_held_side_copy` requires this route's
+    # marker, the same ownership proof that produces the refusal asserted above — so
+    # somebody else's database in this directory can cost the nightly a refused build,
+    # never a build ON it.
     assert m.scheduled_side_copy_name(at + timedelta(days=1)) != name
+    assert m.newest_held_side_copy(before_name=name) is None, (
+        f"{name} has no marker of this route's and must not be offered for a top-up")
 
 
 def test_a_nightly_that_is_not_approaching_launches_no_build(monkeypatch, tmp_path,
