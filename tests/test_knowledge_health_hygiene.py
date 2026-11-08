@@ -1425,3 +1425,173 @@ def test_the_ghost_alarm_fires_only_above_the_named_floor():
     assert khr._alarms(store, _hygiene(), 0, 53416, None) == []
     # And the four-argument call every existing test uses is unaffected.
     assert khr._alarms(store, _hygiene(), 0, 53416) == []
+
+
+# ── #3952: the reader that cut the block at the first `---` at ANY column ──────────
+#
+# `count_index_ghosts` counts `under_parsed_rows` — index rows for a file the walk
+# DID open but parsed short — and the live cause of all 4 such rows was this
+# report's own `parse_frontmatter`, which cut at `text.find("---", 3)`. A fact
+# whose own text holds `---` therefore truncated the block inside the record list:
+# `yaml.safe_load` accepted the truncation, the trailing record came back with no
+# `id`, and every record after it left the walk, the Hygiene totals and every
+# metric that denominates over it. Both live triggers are prose ABOUT
+# fence-truncation bugs, which is how a fence got into a value: `False Absence
+# Guard Pattern-state.md` (6 records on disk, parsed 4) and `Zero-width assertion
+# regex bug-skill.md` (4 on disk, parsed 2). The index side never had the fault —
+# `kg_store.parse_fact_file` cuts at `"\n---"` — which is exactly why the surplus
+# was countable at all.
+#
+# The rule now is the one every other reader shares through `app.frontmatter`: the
+# block ends at the first LINE that is exactly `---`.
+
+#: Verbatim the live fact text that carried the fence, so the fixture is the shape
+#: the store holds rather than an invented one: a plain scalar whose own text has a
+#: quoted `---` in the middle of it.
+FENCED_FACT_TEXT = ("The head-window defect where a flat 2048-byte read skipped "
+                    "parsing for items with closing '---' past the limit has been "
+                    "fixed.")
+
+FENCED_IDS = ["st-001", "st-002", "st-003", "st-004", "st-005", "st-006"]
+
+
+def _fenced_facts(root: Path, entity: str, category: str, ids: list[str],
+                  fence_at: int) -> Path:
+    """A fact file of `len(ids)` records, record `fence_at` holding a `---` MID-LINE.
+
+    The field order is the live one — `id:` LAST, after `fact:` — because that is
+    what makes the old cut leave a fragment: slicing inside the fact text drops the
+    id line of the record it was cut in, which is the `id: None` the live files
+    carry. The only line in the file that IS exactly `---`, besides the opener, is
+    the closing fence.
+    """
+    d = root / entity
+    d.mkdir(parents=True, exist_ok=True)
+    body = ""
+    for k, i in enumerate(ids):
+        text = FENCED_FACT_TEXT if k == fence_at else f"fact {i}"
+        body += (f"- entity: \"{entity}\"\n  fact: {text}\n"
+                 f"  created_at: '2026-10-01T00:00:00Z'\n"
+                 f"  source_doc: 'knowledge/x-{i}.md'\n  id: {i}\n")
+    p = d / f"{entity}-{category}.md"
+    p.write_text("---\ntype: facts\n"
+                 f'entity: "{entity}"\ncategory: {category}\n'
+                 "source_doc: 'knowledge/x.md'\n"
+                 f"facts:\n{body}---\n", encoding="utf-8")
+    return p
+
+
+def _naive_slice(src: str) -> str:
+    """What the pre-#3952 reader handed to `yaml.safe_load`: `text[3:text.find(
+    '---', 3)]`, the first `---` at any column."""
+    return src[3:src.find("---", 3)]
+
+
+def test_a_record_whose_own_text_holds_a_fence_no_longer_cuts_the_block(tmp_path):
+    """Clause 1: a block with N records and one mid-line fence parses to all N, and
+    no parsed record carries `id: None`.
+
+    The two controls come first, because a fixture that quietly lost its interior
+    fence would pass this node forever: the first pins that the first `---` in the
+    file sits BEFORE the closing fence line, the second that the slice the old cut
+    took parses to FOUR records whose last has no `id` — the live fault, reproduced
+    here rather than asserted about.
+    """
+    p = _fenced_facts(tmp_path / "facts", "False Absence Guard Pattern", "state",
+                      FENCED_IDS, fence_at=3)
+    src = p.read_text()
+    assert src.find("---", 3) < src.index("\n---\n", 3), (
+        "the fixture lost its interior fence: the unanchored cut and the closing "
+        "fence are the same offset, so this file pins nothing")
+    truncated = yaml.safe_load(_naive_slice(src))
+    assert len(truncated["facts"]) == 4 and truncated["facts"][-1].get("id") is None, (
+        "the naive slice no longer reproduces the fault this node is about: the live "
+        f"files parsed 4 of 6 with a trailing id-less fragment, got {truncated['facts']}")
+
+    fm = khr.parse_frontmatter(p)
+    assert fm is not None, "a block with an opening and a closing fence is front matter"
+    parsed = [f.get("id") for f in fm["facts"]]
+    assert parsed == FENCED_IDS, (
+        f"all 6 records must survive the anchored cut, got {parsed}")
+    assert fm["facts"][3]["fact"] == FENCED_FACT_TEXT, (
+        "the record the old cut sliced in half must come back whole, not up to its "
+        f"fence: {fm['facts'][3]['fact']!r}")
+
+
+def test_front_matter_needing_a_closing_fence_still_reports_none_both_ways(tmp_path):
+    """Clause 2: no opening `---` -> None, and an opening with no line that is
+    exactly `---` -> None.
+
+    The second case is the one that could regress into silence: a file whose block
+    never closed used to look parseable, because the unanchored cut found a
+    `---segment:` inside the last record's value and returned the text before it as
+    front matter. So the control asserts that naive slice PARSES — this file is
+    exactly the shape the old reader accepted — before the None is believed.
+    """
+    root = tmp_path / "facts" / "No Close"
+    root.mkdir(parents=True)
+    no_opener = root / "no-opener.md"
+    no_opener.write_text("# Just a body\n\nA fence here: '---' mid-line\n",
+                         encoding="utf-8")
+    assert khr.parse_frontmatter(no_opener) is None, "the file never opened a block"
+
+    never_closes = root / "never-closes.md"
+    never_closes.write_text(
+        "---\ntype: facts\nentity: \"No Close\"\ncategory: state\nfacts:\n"
+        "- entity: \"No Close\"\n  fact: a rule written as ---segment: inline\n"
+        "  id: st-001\n", encoding="utf-8")
+    assert "---" in never_closes.read_text()[3:], "the fixture needs its interior fence"
+    assert isinstance(yaml.safe_load(_naive_slice(never_closes.read_text())), dict), (
+        "the naive slice must still PARSE here: the old reader's fault on this file "
+        "was returning a truncated dict, not None")
+    assert khr.parse_frontmatter(never_closes) is None, (
+        "a block that never closes is not front matter, however much of it loads")
+
+
+def test_the_walk_returns_every_record_so_the_reconciliation_prints_zero_short(tmp_path):
+    """Clause 3: the walk's record count for such a file equals the records written,
+    so the reconciliation's parsed-short half is 0 and the fact total excludes it.
+
+    The index side is built by `facts_idx.update_file` over the same file, so the
+    two surfaces are measured the way the nightly job measures them — and the index
+    has always read all 6 rows, because `kg_store.parse_fact_file` cuts at a
+    newline-anchored `---`. One genuinely ghosted row (an indexed file deleted from
+    disk) rides along so the printed row still has a non-zero fact total to
+    decompose: `1 in files the walk never opened over 1 path(s), 0 in files the walk
+    parsed short over 0 path(s)` is the live Hygiene row's shape with this fault
+    removed, and `facts == 1` says the recovered records are not counted as ghosts.
+    """
+    from app.kg_store import KGStore
+
+    root = tmp_path / "facts"
+    p = _fenced_facts(root, "False Absence Guard Pattern", "state", FENCED_IDS,
+                      fence_at=3)
+    db = KGStore(tmp_path / "kg.sqlite")
+    try:
+        n_index = db.facts_idx.update_file(p, root=root)
+        db.entities.register("False Absence Guard Pattern")
+        gone = _indexed_facts(root, "Gamma", "state", ["st-001"])
+        db.facts_idx.update_file(gone, root=root)
+        db.entities.register("Gamma")
+        gone.unlink()
+
+        assert n_index == 6, "the index never had this fault; it is the walk's"
+        walked = _walked(root)
+        assert walked[p] == 6, (
+            f"the walk must return the 6 records written, got {walked[p]}")
+
+        recon = khr.count_index_ghosts(walked, root, store=db)
+        assert recon.get("error") is None, recon
+        assert (recon["under_parsed_rows"], recon["under_parsed_paths"]) == (0, 0), recon
+        assert (recon["unopened_rows"], recon["unopened_paths"]) == (1, 1), recon
+        assert recon["facts"] == 1, (
+            "the 6 records of the fenced file are in the walk, so they are not "
+            f"ghosts: the whole surplus must be the deleted file, got {recon}")
+
+        row = _report_line(_report(_hygiene(), index_ghosts=recon),
+                           "Index rows with no file")
+        assert "**1 fact rows / 0 entity rows**" in row, row
+        assert "0 in files the walk parsed short over 0 path(s)" in row, row
+        assert "1 in files the walk never opened over 1 path(s)" in row, row
+    finally:
+        db.close()

@@ -25,6 +25,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from app.frontmatter import split_frontmatter
 from app.paths import (PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB,
                        VAULT_ROOT)
 from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
@@ -298,7 +299,16 @@ def thin_entity_rank(item) -> tuple:
 def parse_frontmatter(file_path: Path) -> dict | None:
     """Parse YAML frontmatter from a markdown file.
 
-    Returns the parsed dict or None if no valid frontmatter is found.
+    The block runs from its opening fence line to the first LINE that is exactly
+    `---`, which is `app.frontmatter.split_frontmatter`'s rule (#1146) and the
+    anchored cut this file's own `count_index_ghosts` needs: cutting instead at the
+    first `---` at any column let a record whose own text holds `---` mid-line
+    truncate the block inside the record list, so the walk returned the leading
+    records plus one fragment with `id: None` and every fact after it silently
+    disappeared from the report (#3952, the `under_parsed_rows` half of #3849).
+
+    Returns the parsed dict or None if no valid frontmatter is found: no opening
+    `---`, no line that closes the block, or YAML that will not load.
     """
     try:
         text = file_path.read_text(encoding="utf-8")
@@ -308,11 +318,11 @@ def parse_frontmatter(file_path: Path) -> dict | None:
     if not text.startswith("---"):
         return None
 
-    end = text.find("---", 3)
-    if end == -1:
+    split = split_frontmatter(text)
+    if split is None:
         return None
 
-    frontmatter_text = text[3:end]
+    frontmatter_text = split[0]
     try:
         return yaml.safe_load(frontmatter_text)
     except yaml.YAMLError:
@@ -1246,16 +1256,19 @@ def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
       `d.glob("*.md")` — so those files are invisible to the monitor AND to a full
       rebuild. Two such files, 2 rows, on the live tree.
     - `under_parsed_rows` — the index holds more rows for a file the walk DID open
-      than the walk parsed out of it. That is `parse_frontmatter()`'s
-      `text.find("---", 3)`: a fact whose own text contains `---` cuts the front
-      matter inside the record list, `yaml.safe_load` still succeeds, and everything
-      after the interior fence is dropped (measured 2026-11-06: one file with 6 index
-      rows parsed as 4, another 4 as 2, each leaving an `id: None` fragment).
+      than the walk parsed out of it. This half WAS, up to #3952, `parse_frontmatter()`'s
+      `text.find("---", 3)`: a fact whose own text contains `---` cut the front
+      matter inside the record list, `yaml.safe_load` still succeeded, and everything
+      after the interior fence was dropped (measured 2026-11-06: one file with 6 index
+      rows parsed as 4, another 4 as 2, each leaving an `id: None` fragment). The
+      reader now cuts at the closing fence LINE, through
+      `app.frontmatter.split_frontmatter`, so those 4 rows are back in the walk and
+      the fact side reads 8 rather than 12 — which means a NON-ZERO count from here
+      on is some other reader losing records, not that truncation.
 
     Counting the second half is what stops this row reading as "the files are gone"
-    when the real story is that the reader loses records. Fixing that truncation
-    should move the fact side from 12 to 8 — that is how the two halves are told
-    apart in the field.
+    when the real story is that the reader loses records. Which of the two halves
+    moved is how they are told apart in the field.
 
     What is deliberately NOT counted
     --------------------------------
