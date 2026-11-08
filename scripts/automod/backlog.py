@@ -2509,20 +2509,62 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     now says what is already there — the family pattern and how many committed
     extracts match it — and asks for the figure to be measured over those before a new
     file is published, which is the only reuse #2769's measurements support: it found
-    zero byte-identical pairs among 83 committed artifacts, so the emitted NAME stays
-    keyed as it is (`_witness_artifact` and `_artifact_taken` are untouched) and the
-    pointing happens in the text.
+    zero byte-identical pairs among 83 committed artifacts, so `_witness_artifact` and
+    `_artifact_taken` stay as they were and the pointing happens in the text.
+
+    #3942 moved that pointing the rest of the way, for the half of it that was a
+    contradiction and not a convenience. The text said "measure those first; publish a new
+    file only if none reproduces the figure" while the destination it ordered was a fresh
+    date-today name — the day of TRIAGE, since `now_stamp()[:10]` is what stamps it and no
+    `day=` reaches this builder — and the bytes a round later cuts land on whatever day
+    THAT round runs. #3547's demand asked for `backlog/data/2026-10-29.3547-lloyd-data-
+    workers.db` and the vault holds only `2026-11-06.3547-…`; a scan of the vault's demand
+    sentences on 2026-11-08 counted 170 demanded paths that never existed across 151
+    items, 17 of them the SAME item's artifact under another day (#3280, #3308, #3365,
+    #3375, #3418, #3447, #3461, #3518, #3547, #3549, #3607, #3619, #3643, #3684, #3726). A
+    round that obeyed the pointer half reused a committed sibling and left the demanded
+    path absent forever, which is exactly how a published witness reads as missing. So when
+    the vault already commits a family for this source the destination IS one of those
+    bytes — the newest committed sibling, named identically in the sentence and in the
+    `proved by` command, so the note can no longer order a file nobody was told to write.
+    Newest rather than oldest because #3894's "as at the reading" is closest to the
+    snapshot nearest now; the under-bound whole-file demand keeps `sibs[0]` (#3872) and its
+    own node pins that, so the two branches are left un-harmonised on purpose. With no
+    family the fresh dated destination stands, because the round that obeys writes its
+    bytes to exactly that path — which is also why "resolve the command through the glob"
+    was rejected for that branch: with no family the glob matches zero files, so it could
+    only teach the command to glob a hole. The swap is in place, never appended, and it is
+    length-neutral (day and item id are fixed width): the emitted `workers.db` note carries
+    2 characters of headroom at 29 committed siblings, and `clean_clauses` truncates FROM
+    THE END, which is where #3175's pointer and #2382's fallback live. ONE case is not
+    neutral, and the last rung below settles it: where the free-name slot is open the fresh
+    destination is the bare basename, so a dated sibling is ~15 characters dearer, and at
+    the longest store names that overshoots the cap — there the fresh name stands, because
+    the sentence a truncation takes is the one that stops a round ordering the store
+    anyway. Nothing committed is renamed — the harm being undone is a MISSING witness, so a
+    demand that made its path true by MOVING bytes would be a worse bug than the one it
+    fixes.
     """
     target = _witness_target(path)
+    # #3942: ONE listing of `backlog/data`, taken before the destination is chosen, so the
+    # count the reader is told to check and the name the demand orders cannot come from two
+    # answers. Names only: the bytes are never touched.
+    sib_names = _committed_witness_sibling_names(path, artifact_dir)
     # #2513: the same name rule as the under-bound clause, because the over-bound
     # note orders a vault write to exactly the same directory and would clobber a
     # pinned witness just as deadeningly. A 30.7 MB store is the shape that reaches
     # this branch, and the extract it asks for lands in `backlog/data/`, among the
     # witnesses already delivered there — so the destination needs the same test for
     # a name somebody else holds.
-    artifact = _witness_artifact(path, artifact_dir, item_id=item_id)
+    # #3942: and when that test finds the vault ALREADY commits an extract of this source,
+    # the destination is those bytes rather than a fresh date-today name the vault will
+    # never hold. The names are date-prefixed, so their lexicographic order IS chronological
+    # and `[-1]` is the most recent — the closest snapshot to the reading the figure came
+    # from. No family, no re-aim: `_witness_artifact`'s dated name is the right answer then,
+    # because the round that obeys writes its bytes to exactly that path.
+    sibling = f"{artifact_dir}/{sib_names[-1]}" if sib_names else ""
+    fresh = _witness_artifact(path, artifact_dir, item_id=item_id)
     ext = target.suffix.lower().lstrip(".")
-    cmd = _rederive_command(artifact, ext)
     limit = f"{WITNESS_MAX_BYTES:,}"
     # Identical tail in both forms, and it is last in both: the sentence that must
     # survive the budget is the sentence the budget is for.
@@ -2558,7 +2600,13 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
     # exactly the reader who needs "…if none can, say so rather than ordering the
     # store" to stay attached to that instruction. The count is what makes the glob checkable — run it, get a different number, and you
     # have a contradiction to report rather than advice to ignore.
-    sibs = _committed_witness_siblings(path, artifact_dir)
+    # #3942: the count is the same listing the destination was chosen from, so a reader who
+    # runs the glob either gets this number or has a contradiction to report — it cannot be
+    # a number that agreed with a name the note no longer orders.
+    # `_committed_witness_siblings` stays as the standalone count probe (this file's fixtures
+    # read it as a second instrument on the directory); it is no longer called from here
+    # because calling both is asking the vault twice for one answer.
+    sibs = len(sib_names)
     family = f"{artifact_dir}/{_witness_family_pattern(target)}"
     if sibs:
         plural = "extract" if sibs == 1 else "extracts"
@@ -2567,28 +2615,59 @@ def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR,
                 f"rather than ordering the store.")
     else:
         tail = fallback
-    roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling: do not "
-             f"order it whole. What is owed is an extract of it — the subset that "
-             f"reproduces the figure the item quotes, {cap} — committed to "
-             f"`{artifact}` and re-derived from it with `{cmd}`. {tail}")
-    if len(roomy) <= CLAUSE_MAX_CHARS:
-        return roomy
-    # The compact lead trades phrasing, never a mandatory half: `on what this rule may
-    # demand` and `of the subset` are gone because the roomy sentence has said them,
-    # and #3894's `as at the reading` is bought with `Publish`→`Owed:`, the dropped `so`
-    # and `the figure the item quotes`→`the quoted figure`. What survives the trade is
-    # the ceiling, the artifact, the command, the cap, the pointer and the closing words
-    # — and the trade is bounded: the cap is in BOTH forms, so no path is left without
-    # the bound, which is the half that used to be missing.
-    compact = (f"`{path}` over the WITNESS_MAX_BYTES = {limit} byte ceiling: do not "
-               f"order it whole. Owed: an extract reproducing the quoted figure {cap}, "
-               f"proved by `{cmd}`. {tail}")
-    if len(compact) <= CLAUSE_MAX_CHARS or not sibs:
-        return compact
-    # A store name long enough that even the compact note cannot carry a pointer keeps
-    # #2382's text verbatim: an unspoken convenience, never a truncated fallback,
-    # because `clean_clauses` cuts from the END and the end is the bound's purpose.
-    return compact.replace(tail, fallback)
+    def demand(artifact: str) -> str:
+        """Both wordings of the demand for ONE destination — #2382's ladder.
+
+        Hoisted into a closure by #3942 because the destination is now a choice with two
+        candidates (the committed extract, the fresh dated name), and the ladder has to run
+        over each to know which of them the note can afford. The two forms and their order
+        are unchanged: roomy first, then the compact lead, then dropping the pointer.
+        """
+        cmd = _rederive_command(artifact, ext)
+        roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling: do not "
+                 f"order it whole. What is owed is an extract of it — the subset that "
+                 f"reproduces the figure the item quotes, {cap} — committed to "
+                 f"`{artifact}` and re-derived from it with `{cmd}`. {tail}")
+        if len(roomy) <= CLAUSE_MAX_CHARS:
+            return roomy
+        # The compact lead trades phrasing, never a mandatory half: `on what this rule may
+        # demand` and `of the subset` are gone because the roomy sentence has said them,
+        # and #3894's `as at the reading` is bought with `Publish`→`Owed:`, the dropped `so`
+        # and `the figure the item quotes`→`the quoted figure`. What survives the trade is
+        # the ceiling, the artifact, the command, the cap, the pointer and the closing words
+        # — and the trade is bounded: the cap is in BOTH forms, so no path is left without
+        # the bound, which is the half that used to be missing.
+        compact = (f"`{path}` over the WITNESS_MAX_BYTES = {limit} byte ceiling: do not "
+                   f"order it whole. Owed: an extract reproducing the quoted figure {cap}, "
+                   f"proved by `{cmd}`. {tail}")
+        if len(compact) <= CLAUSE_MAX_CHARS or not sibs:
+            return compact
+        # A store name long enough that even the compact note cannot carry a pointer keeps
+        # #2382's text verbatim: an unspoken convenience, never a truncated fallback,
+        # because `clean_clauses` cuts from the END and the end is the bound's purpose.
+        return compact.replace(tail, fallback)
+
+    # #3942's own last rung, and it is a trade, not a preference. Re-aiming at a committed
+    # extract costs characters exactly when the source's free-name slot is OPEN, because
+    # then `_witness_artifact`'s fresh destination is the bare basename and a dated sibling
+    # carries 26 characters more (`2026-10-02.222-reflection-` before the store's own name) —
+    # the longest such name (`a-quite-long-live-store-name-that-keeps-going.sqlite`, the one
+    # `_rederive_command`'s 233-character budget is stated against) lands at 611 of 600 with
+    # the pointer already dropped. A destination is not
+    # worth #2382's fallback: `clean_clauses` cuts from the END, so the thing that
+    # disappears is "…say so rather than ordering the store", the one sentence that stops a
+    # round committing a 30 MB store into a vault that already holds 108 MB. So when naming
+    # the committed extract does not fit and the fresh name does, the fresh name is taken —
+    # and #3175's "measure those first" is what still points at the existing bytes. For the
+    # stores this demand actually fires on (`workers.db`, whose basename
+    # `_witness_name_must_be_dated` answers yes for) both candidates are dated and the swap
+    # is length-neutral, 598 → 598 at this file's binding shape.
+    note = demand(sibling or fresh)
+    if sibs and len(note) > CLAUSE_MAX_CHARS and fresh != sibling:
+        affordable = demand(fresh)
+        if len(affordable) <= CLAUSE_MAX_CHARS:
+            return affordable
+    return note
 
 
 

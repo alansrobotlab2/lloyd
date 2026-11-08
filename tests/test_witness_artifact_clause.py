@@ -3032,7 +3032,19 @@ def test_the_sibling_pointer_is_bought_within_the_note_budget_and_never_by_trunc
         assert B.clean_clauses([note]) == [note], (
             f"the truncator the note has to survive cut it: {note}")
         assert w in note and "WITNESS_MAX_BYTES" in note and limit in note, note
-        assert f"{B.WITNESS_ARTIFACT_DIR}/{B._witness_target(w).name}" in note, (
+        # #3942 changed WHICH concrete artifact is ordered — the newest committed extract of
+        # the source, or the fresh dated name where no extract exists and where an extract's
+        # longer name cannot be afforded inside the note budget (this shape, the longest
+        # store name in the file, is that second case) — but not the property this line
+        # carries: a demand always names ONE concrete destination, never only the pointer's
+        # glob. Which of the two names, and why, is graded by
+        # `test_an_over_bound_demand_names_the_extract_the_vault_already_commits` and
+        # `test_the_re_aim_is_untaken_rather_than_cost_the_fallback_its_own_sentence`; this
+        # node is the budget walk, and a budget walk that hard-codes one destination stops
+        # being able to see a destination change.
+        dests = set(_demanded_paths(note))
+        assert len(dests) == 1 and next(iter(dests)).endswith(
+            B._witness_target(w).name), (
             f"the ordered artifact stopped being named once the pointer arrived: {note}")
     # The roomy wording is a budget question, and the measured answer is that a store
     # WITH siblings cannot carry it: with `workers.db`'s family pattern interpolated the
@@ -4012,3 +4024,281 @@ def test_capping_the_cut_left_the_fallback_last_and_the_roomy_discriminator_inta
         assert note.count("rather than ordering the store") == 1, (
             f"the closing sentence appears twice, so the last one is not the fallback: "
             f"{note}")
+
+
+# --------------------------------------------------------------------------- #
+# #3942: a demanded witness path has to survive the demand-to-publish drift.  #
+# --------------------------------------------------------------------------- #
+#
+# `_over_bound_extract_demand` stamped its destination with `now_stamp()[:10]` — the
+# DAY OF TRIAGE — while the bytes a round later cuts land on whatever day that round
+# runs. #3547's triage demanded `backlog/data/2026-10-29.3547-lloyd-data-workers.db` and
+# the vault holds only `2026-11-06.3547-lloyd-data-workers.db`; a vault scan at triage
+# counted 170 demanded paths that never existed across 151 items, 17 of them the same
+# item's artifact under a different day (#3280, #3308, #3365, #3375, #3418, #3447,
+# #3461, #3518, #3547, #3549, #3607, #3619, #3643, #3684, #3726). The note was
+# self-contradicting at the same time: it ordered a date-today file while 30 extracts of
+# that store sat in `backlog/data/`, in the same breath as "Measure the 30 committed
+# extracts … first; publish a new file only if none reproduces the figure". A round that
+# obeyed the second half left the demanded path absent forever — which is how a published
+# witness reads as missing. The fix re-aims the destination at the newest committed
+# sibling of the same source; the under-bound whole-file demand was given this by #3872
+# and is not touched here, including its `sibs[0]` (oldest) choice.
+
+#: The day the emitter is pinned to in this section, so "a date-today name" is literal
+#: and its absence is checkable rather than rhetorical.
+_STAMP_3942 = "2026-11-08T09:00:00"
+
+
+def _family_store(tmp_path: Path, rel: str = "lloyd-data/workers.db",
+                  family: tuple[str, ...] = ("2026-10-29.3547",
+                                             "2026-11-06.3607")):
+    """An over-ceiling store plus the extracts the vault already commits of it.
+
+    The family is the drift itself, taken from the exhibited case: a demand dated
+    `2026-10-29.3547-…` whose bytes were published on a later day. The store is laid at
+    `~/state/<rel>` and its siblings named for `lloyd-data` — the parent-directory tag
+    `_witness_tag` reads off the REAL layout — so the family the emitter finds is the one
+    written here and not a fixture artefact. The bare `workers.db` slot is seeded as
+    taken exactly as the live vault has it, because that is what pushes the fresh name
+    into the dated form this item is about: with the slot free, `_witness_artifact`
+    returns `backlog/data/workers.db` and the phantom this fixture must reproduce would
+    never appear. Returns the store path and the FAMILY basenames in date order (the day
+    prefix makes lexicographic order chronological), the bare slot excluded — it is not
+    an extract of a day and `_committed_witness_sibling_names` does not count it.
+    """
+    d = tmp_path / "state" / Path(rel).parent
+    d.mkdir(parents=True, exist_ok=True)
+    store = d / Path(rel).name
+    store.write_bytes(b'{"row": 1}\n' * (B.WITNESS_MAX_BYTES // 10 + 1))
+    assert store.stat().st_size > B.WITNESS_MAX_BYTES, "the fixture is over the bound"
+    assert not B.in_git_tree(store), "only the temp vault holds the family here"
+    _vault_witness(tmp_path, Path(rel).name, body="x")
+    names = [f"{stem}-{Path(rel).parent.name}-{Path(rel).name}" for stem in family]
+    for name in names:
+        _vault_witness(tmp_path, name, body="x")
+    art = B._witness_artifact(store, item_id=3942)
+    assert art != f"backlog/data/{Path(rel).name}", (
+        f"fixture: the free slot is open, so the fresh name is {art} and no date-today "
+        "phantom can be emitted here")
+    return store, sorted(names)
+
+
+def _demanded_paths(text: str) -> "list[str]":
+    """Every concrete `backlog/data/…` path a note points at, globs and counts excluded.
+
+    Both places the destination is written are read. The roomy form quotes it in the
+    sentence ("… committed to `backlog/data/…`"); the compact form puts it ONLY inside the
+    re-derive command's `a='…'`, which is why a backtick-delimited scan would report the
+    compact note as naming nothing and a node that asserted on that scan would be
+    measuring its own regex rather than the demand.
+    """
+    return [m for m in re.findall(r"backlog/data/[^\s`'\",;]+", text) if "*" not in m]
+
+
+def test_an_over_bound_demand_names_the_extract_the_vault_already_commits(tmp_path,
+                                                                         isolated,
+                                                                         monkeypatch):
+    """#3942 clause 1: with a committed family the demand points at bytes that exist.
+
+    Before the change the same call named `backlog/data/2026-11-08.3942-lloyd-data-
+    workers.db` — a name the vault would hold only if a round published on the triage day
+    — while both extracts of that store sat under their own days. The demanded path is
+    now one of those committed basenames, the `proved by` command reads that same path,
+    no date-today `<today>.<item_id>-…` string survives anywhere in the note, and nothing
+    already committed was renamed (the harm being avoided is a MISSING witness, so a
+    demand that re-aims by MOVING bytes would be a worse bug than the one it fixes).
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_3942)
+    store, family = _family_store(tmp_path)
+    newest = family[-1]
+    vdir = tmp_path / "vault" / "backlog" / "data"
+    before = {p.name: p.read_bytes() for p in vdir.iterdir()}
+
+    note = B._over_bound_extract_demand(store, item_id=3942)
+    assert set(_demanded_paths(note)) == {f"{B.WITNESS_ARTIFACT_DIR}/{newest}"}, (
+        f"the demand does not point at the newest committed extract {newest}: {note}")
+    assert all((vdir / Path(p).name).is_file() for p in _demanded_paths(note)), (
+        f"the demanded path is not on disk: {note}")
+    assert f"{_STAMP_3942[:10]}.3942-" not in note, (
+        f"a date-today phantom name is still in the note: {note}")
+    assert f"a='{B.WITNESS_ARTIFACT_DIR}/{newest}'" in note, (
+        f"the re-derive command does not read the committed bytes: {note}")
+    assert {p.name: p.read_bytes() for p in vdir.iterdir()} == before, (
+        "a committed extract was renamed or rewritten to make the demand true")
+
+
+def test_the_sibling_named_is_the_newest_one_and_the_note_is_byte_stable(tmp_path,
+                                                                        isolated,
+                                                                        monkeypatch):
+    """#3942 clause 2: of the committed extracts the note names the most recent, and
+    asking the same question twice gives the same bytes.
+
+    Newest, not oldest: the note asks for the figure "as at the reading" (#3894), and the
+    snapshot closest to now is the one whose rows a quoted figure most likely reproduces.
+    The family is written in age order, so a fixture that only checked "a committed name
+    appears" would pass on first-written or oldest too — this node adds a LATER extract
+    and requires the destination to move, which is what separates the two. #3872's
+    under-bound demand deliberately keeps `sibs[0]`; the two branches are not harmonised.
+    Byte-stability is the other half: a re-triage that re-emitted a different destination
+    each run could never be satisfied by publishing anything.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_3942)
+    store, family = _family_store(tmp_path)
+    assert family == ["2026-10-29.3547-lloyd-data-workers.db",
+                      "2026-11-06.3607-lloyd-data-workers.db"], family
+
+    note = B._over_bound_extract_demand(store, item_id=3942)
+    assert set(_demanded_paths(note)) == {"backlog/data/2026-11-06.3607-lloyd-data-workers.db"}, (
+        f"the demand did not name the newest of {family}: {note}")
+
+    later = _vault_witness(tmp_path, "2026-11-07.3701-lloyd-data-workers.db", body="x")
+    assert B._committed_witness_sibling_names(store)[-1] == later.name, (
+        "the probe's newest sibling is not the name this node calls newest")
+    again = B._over_bound_extract_demand(store, item_id=3942)
+    assert set(_demanded_paths(again)) == {"backlog/data/2026-11-07.3701-lloyd-data-workers.db"}, (
+        f"adding a later extract did not move the destination: {again}")
+    assert B._over_bound_extract_demand(store, item_id=3942) == again, (
+        "two calls for one item and one store returned different bytes")
+
+
+def test_an_over_bound_demand_with_no_committed_extract_names_a_fresh_day(tmp_path,
+                                                                         isolated,
+                                                                         monkeypatch):
+    """#3942 clause 3: with nothing committed the branch is untouched — a fresh dated
+    destination, and the `proved by` command reads that same fresh path.
+
+    With no family the fresh dated name is the CORRECT answer, because the round that
+    obeys writes its bytes to exactly that path; this is also why the item's second
+    proposal — resolve the command's path "through that glob" when no family exists — was
+    dropped rather than built: with no family the glob matches zero files, so it could
+    only teach the command to glob a hole. The name comes from `_witness_artifact`, the
+    emitter's own no-sibling rule, so this node pins behaviour that is unchanged rather
+    than pinning a string this round happens to like.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_3942)
+    store, family = _family_store(tmp_path)
+    vdir = tmp_path / "vault" / "backlog" / "data"
+    for name in family:
+        (vdir / name).unlink()
+    assert B._committed_witness_sibling_names(store) == [], (
+        "the fixture still holds a committed family")
+    art = B._witness_artifact(store, item_id=3942)
+    assert art == "backlog/data/2026-11-08.3942-lloyd-data-workers.db", art
+
+    note = B._over_bound_extract_demand(store, item_id=3942)
+    assert set(_demanded_paths(note)) == {art}, (
+        f"the no-family demand stopped naming a fresh dated destination: {note}")
+    assert f"a='{art}'" in note, f"the command reads another path: {note}"
+    assert "Measure the" not in note and "`backlog/data/*" not in note, (
+        f"the no-family note grew a sibling pointer: {note}")
+
+
+def test_the_sibling_swap_is_in_place_and_costs_the_note_no_characters(tmp_path,
+                                                                       isolated):
+    """#3942 clause 4: at the spelling that binds the budget, re-aiming buys nothing and
+    costs nothing — the pointer tail, the glob and the closing sentence survive at the
+    same 598 characters.
+
+    `_binding_shape` is this file's longest emitted note (the absolute
+    `/home/alansrobotlab/lloyd-data/workers.db` spelling, 29 committed extracts, a
+    214-character re-derive command): 598 of `CLAUSE_MAX_CHARS = 600`, so the destination
+    swap has TWO characters of room and cannot afford a sentence appended about the
+    reuse — `clean_clauses` truncates from the END, which is where #3175's pointer and
+    #2382's fallback live. Day and item id are fixed-width in both spellings, and the node
+    asserts that equality instead of trusting it: a five-digit item id in the committed
+    family would make the swap cost a character, and this note would then be the one that
+    truncates its own fallback.
+    """
+    note = _binding_shape(tmp_path)
+    family = sorted(p.name for p in (tmp_path / "vault" / "backlog" / "data").iterdir()
+                    if p.name.endswith("-lloyd-data-workers.db"))
+    assert len(family) == 29, family
+    assert set(_demanded_paths(note)) == {f"{B.WITNESS_ARTIFACT_DIR}/{family[-1]}"}, (
+        f"the binding note names something other than its newest extract: {note}")
+    assert "`backlog/data/*-lloyd-data-workers.db`" in note, note
+    assert f"Measure the {len(family)} committed extracts under" in note, note
+    assert "publish a new file only if none reproduces the figure" in note, note
+    assert note.endswith("else say so rather than ordering the store."), note
+    fresh = B._witness_artifact(_BINDING_STORE, item_id=_BINDING_ITEM)
+    assert len(f"{B.WITNESS_ARTIFACT_DIR}/{family[-1]}") == len(fresh), (
+        f"the swap changed the destination's length ({fresh} → {family[-1]}), so the "
+        "note pays for it out of its 2 characters of headroom")
+    assert len(note) == 598, (
+        f"the binding note moved from 598 to {len(note)} characters")
+    assert len(note) <= B.CLAUSE_MAX_CHARS, note
+    assert B.clean_clauses([note]) == [note], (
+        f"the truncator cut something: {len(note)} chars")
+
+
+def test_the_owed_entry_a_triage_publishes_demands_a_path_that_exists(tmp_path,
+                                                                     isolated,
+                                                                     monkeypatch):
+    """#3942's seam: the string that matters is the one `record_verdict` writes into an
+    item's owed list and a LATER round obeys, in another process, days later.
+
+    So this drives the real producer — `add_witness_artifact_clause` on the owed route
+    over body text citing an over-ceiling store — and checks the published entry against
+    the vault directory the bytes were actually committed to: every concrete destination
+    it names is a file that is on disk right now. A builder-level node cannot show this,
+    because the builder's text only becomes a demand once the producer has routed it, and
+    the producer is also where a second emitter could re-introduce the date-today name
+    without touching the builder at all.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_3942)
+    store, family = _family_store(tmp_path)
+    newest = family[-1]
+    clauses, owed = B.add_witness_artifact_clause(
+        list(_AUTHORED), _BODY_1869.format(witness=store), route_to_owed=True,
+        item_id=3942)
+    assert clauses == list(_AUTHORED), f"the authored clauses were edited: {clauses}"
+    assert len(owed) == 1, f"the over-bound store emitted {len(owed)} demands: {owed}"
+    demanded = _demanded_paths(owed[0])
+    assert demanded, f"the demand names no concrete destination: {owed[0]}"
+    missing = [p for p in demanded if not (tmp_path / "vault" / p).is_file()]
+    assert not missing, (
+        f"the owed entry demands bytes nobody was told to write: {missing}")
+    assert set(demanded) == {f"{B.WITNESS_ARTIFACT_DIR}/{newest}"}, owed
+    assert f"{_STAMP_3942[:10]}.3942-" not in owed[0], owed[0]
+
+
+def test_the_re_aim_is_untaken_rather_than_cost_the_fallback_its_own_sentence(tmp_path,
+                                                                             isolated):
+    """#3942's budget exception: where naming the committed extract cannot be afforded,
+    the fresh name stands and #2382's fallback is what stays whole.
+
+    The re-aim costs characters exactly where the source's free-name slot is OPEN: there
+    `_witness_artifact` answers with the bare basename, and a dated sibling is 26 characters
+    dearer, inside a note whose command already eats the 233-character budget
+    `_rederive_command`'s docstring states against this very store name. This shape measured
+    611 of 600 with the pointer already dropped by #3175's own ladder — which is why the
+    trade is made against a value re-derived from the emitted note (the same note with the
+    sibling substituted into the command) and not against a quoted number. The sentence a
+    truncation would take is "…say so rather than ordering the store", the one instruction
+    that stops a round committing a 30 MB store into a vault already holding 108 MB, so it
+    keeps its destination: this demand goes back to ordering a slot to write into, and the
+    pointer's "measure those first" is left pointing at the bytes that exist. It is a real
+    loss, which is why it is pinned here rather than mentioned in passing: on this one shape
+    the demanded path still does not exist on disk.
+    """
+    long_store = ("~/lloyd-data/_pipeline/reflection/"
+                  "a-quite-long-live-store-name-that-keeps-going.sqlite")
+    tail = B._witness_family_tail(B._witness_target(long_store))
+    _vault_witness(tmp_path, f"2026-10-01.111{tail}", body="x")
+    _vault_witness(tmp_path, f"2026-10-02.222{tail}", body="x")
+    sib = B._committed_witness_sibling_names(long_store)[-1]
+    art = B._witness_artifact(long_store, item_id=3942)
+    assert sib.endswith(tail) and len(sib) > len(art), (
+        f"fixture: {sib} is not the dearer spelling of {art}")
+
+    note = B._over_bound_extract_demand(long_store, item_id=3942)
+    assert "committed to" not in note, f"the affordable form is the roomy one: {note}"
+    unaffordable = note.replace(f"a='{art}'", f"a='backlog/data/{sib}'")
+    assert len(unaffordable) > B.CLAUSE_MAX_CHARS, (
+        f"the re-aim was affordable at {len(unaffordable)} chars, so this rung should not "
+        f"have fired: {note}")
+    assert len(note) <= B.CLAUSE_MAX_CHARS, f"{len(note)} chars over the cap: {note}"
+    assert B.clean_clauses([note]) == [note], "the emitted note was the truncated one"
+    assert note.endswith("say so rather than ordering the store."), note
+    assert set(_demanded_paths(note)) == {art}, (
+        f"the affordable note did not fall back to the fresh name {art}: {note}")
