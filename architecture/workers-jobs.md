@@ -1627,7 +1627,8 @@ queue row 17658, enqueued 2026-10-30T05:38:31Z by the sweep that found the burst
 run `run_failure-ledger_20261030_072516_ab105f` was claimed 1 h 47 m later at
 2026-10-30T07:25:16Z and completed status `success` at 2026-10-30T07:29:24Z after
 247.57 s — 1 h 51 m from the sweep's enqueue to a finished diagnosis — both stamps read
-2026-11-03T06:02:16Z. The 1 h 47 m of that is the pool's claim-to-run latency, and it
+2026-11-03T06:02:16Z. The 1 h 47 m of that is the queue's enqueue-to-claim wait — the
+row sitting in the queue before the pool claimed it — and it
 belongs to neither the sweep nor the diagnosis; it is the same distinction #3607 renamed a
 watermark key to stop blurring, because a run's own stamps and the moment the pool picked
 its queue row up are two facts, and a paragraph that prints one for both cannot be

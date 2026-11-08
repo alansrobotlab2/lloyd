@@ -2725,6 +2725,26 @@ def test_section6_dates_the_failure_ledger_counts_it_just_read():
         "`1 h 47 m` is not pinned to the run's start stamp 2026-10-30T07:25:16Z, so it "
         f"floats free of both stamps and a later editor can re-attach it to the "
         f"completion: {latency[0][:170]!r}")
+
+    # #3936: the SPAN'S NAME. Two sentences carry `1 h 47 m` and one of them used to call
+    # it "the pool's claim-to-run latency". The committed witness says otherwise, to the
+    # microsecond — queue row 17658's enqueued_at 2026-10-30T05:38:31.437999Z to
+    # claimed_at 2026-10-30T07:25:16.838753Z is 6405.400754 s (1 h 46 m 45 s), and its
+    # run's started_at is 0.006426 s after the claim. So claim-to-run is six milliseconds
+    # and the 1 h 47 m is residency in the queue BEFORE the claim: a sentence naming it
+    # the other way states a 6 ms edge as a 1 h 47 m one, which is the same blur #3607
+    # renamed a watermark key to stop, printed inside the paragraph that warns about it.
+    named = [s for s in latency if "enqueue-to-claim" in s]
+    assert named, (
+        "a sentence carrying `1 h 47 m` no longer names which edge the span is. It is the "
+        "queue's enqueue-to-claim wait — the time row 17658 sat in the queue before the "
+        f"pool claimed it: {[s[:120] for s in latency]!r}")
+    assert "claim-to-run" not in (ARCH / "workers-jobs.md").read_text(encoding="utf-8"), (
+        "`claim-to-run` is back in architecture/workers-jobs.md. The pool starts a run "
+        "0.006426 s after claiming it (backlog/data/2026-11-06.3607-lloyd-data-workers.db, "
+        "runs.started_at minus queue.claimed_at), so the phrase describes an edge of a few "
+        "milliseconds and cannot be the name for 1 h 47 m (#3936)")
+
     # Clause 1's watermark name: #3607 renamed the sweep's key, and a paragraph that
     # still prints the retired name teaches the reader the confusion it fixed.
     assert "last_sweep" in flat, (
@@ -3018,6 +3038,81 @@ def _affirmed_pass(sentence: str) -> bool:
     if not m:
         return False
     return not _PASS_NEGATORS.search(sentence[max(0, m.start() - 45):m.start()])
+
+
+#: §6's dated readings as of #3936, frozen, at BOTH precisions the section writes: six
+#: full-second stamps and four minute-precision ones. Both shapes end in `Z` and both are a
+#: `Measured <ISO>Z` reading, so a rail matching only the first lets an editor drop the
+#: seconds off a date and call it free — the set below is what §6's stamps actually are,
+#: measured 2026-11-08 with `_STAMP_SHAPE`. Bare `2026-11-03` dates are NOT frozen: 22 of
+#: them are prose (item dates, "on 2026-10-24"), and clause 3 names `<ISO>Z` stamps.
+#: Not a courtesy list: owed-check's ruling on #3827's owed entry is that §6's stamps are
+#: re-derived by a later pass that has the store in front of it, never re-pinned by an edit
+#: that does not, so a stamp appearing here is a claim nobody re-ran. Superset checks only,
+#: so deleting a stamp stays legal and adding or re-dating one names itself in the failure.
+_SEC6_STAMPS_AT_3936 = frozenset({
+    "2026-09-06T18:34Z", "2026-10-17T14:46Z", "2026-10-27T03:03Z", "2026-10-30T00:28Z",
+    "2026-10-30T05:38:31Z", "2026-10-30T07:25:16Z", "2026-10-30T07:29:24Z",
+    "2026-11-02T06:19:02Z", "2026-11-03T05:33:11Z", "2026-11-03T06:02:16Z",
+})
+
+#: One scan, used by the assert AND by the splice below, so the splice grades the same code
+#: the green depends on. The seconds are the optional group, which reports each stamp once
+#: whichever precision it is written at.
+_STAMP_SHAPE = re.compile(r"20\d\d-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z")
+
+#: The distinction sentences verbatim, flattened (markdown wraps them across five lines).
+#: This is §6's reason for naming the queue's wait at all: #3607 renamed a watermark key to
+#: stop exactly this blur, so a rename that reached past the phrase it was fixing and reworded
+#: these would be re-opening the defect the paragraph exists to close. Matched as one
+#: contiguous span, so reordering or re-punctuating them cannot pass either.
+_SEC6_DISTINCTION = (
+    "belongs to neither the sweep nor the diagnosis; it is the same distinction #3607 "
+    "renamed a watermark key to stop blurring, because a run's own stamps and the moment "
+    "the pool picked its queue row up are two facts, and a paragraph that prints one for "
+    "both cannot be re-derived by a reader who did not see the store."
+)
+
+
+def test_section6_gains_no_new_dated_reading_and_keeps_its_distinction_verbatim():
+    """Clause 3 of #3936: the rename is a rename, and nothing besides.
+
+    Two ways a one-sentence doc fix still goes wrong. It can leave a fresh
+    `Measured <ISO>Z` behind — the ruling above forbids it, and the item's own contract
+    says so: the `Measured 2026-11-03T06:02:16Z` reads that are already there stay as they
+    are. Or it can reach past the phrase being fixed: the span below is the paragraph's
+    whole argument, and it is what a later editor trimming words tends to hit first.
+    """
+    sec6 = _section(SEC6)
+    stamps = set(_STAMP_SHAPE.findall(sec6))
+    assert stamps == _SEC6_STAMPS_AT_3936 or stamps < _SEC6_STAMPS_AT_3936, (
+        f"§6 gained a dated reading it did not carry at #3936's base: "
+        f"{sorted(stamps - _SEC6_STAMPS_AT_3936)}. A date in this section is a measurement "
+        "someone re-ran; an edit that renames a latency edge is not one (#3827's owed "
+        "ruling, #3936 clause 3)")
+
+    flat = " ".join(sec6.split())
+    assert _SEC6_DISTINCTION in flat, (
+        "the distinction sentences were reworded. That span is the paragraph's argument — "
+        "the queue's wait belongs to neither the sweep nor the diagnosis, because a run's "
+        "own stamps and the moment the pool picked its queue row up are two facts — and "
+        "#3936 changed the NAME of the wait, not this: "
+        f"{flat[flat.find('belongs to neither'):][:220]!r}")
+
+    # Both halves proved to bite, over the SAME scans the asserts above run — this file's
+    # convention, and the review rung asked for it by name at the first gate.
+    welded = (flat + " Measured 2026-12-25T06:00:00Z and 2026-12-26T07:00Z a reading "
+              "nobody re-ran.")
+    found = _STAMP_SHAPE.findall(welded)
+    assert {"2026-12-25T06:00:00Z", "2026-12-26T07:00Z"} <= set(found) - stamps, (
+        f"the stamp scan is blind to at least one of the two precisions (§6's own scan "
+        f"found {sorted(stamps)[:2]}…), so the assert above could not report a fresh "
+        "reading written either way")
+    reworded = flat.replace("belongs to neither the sweep nor the diagnosis",
+                            "belongs to neither of them")
+    assert _SEC6_DISTINCTION not in reworded, (
+        "the span matches text that has been reworded, so the preservation assert above "
+        "cannot report the sentence it exists to protect")
 
 
 def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
