@@ -166,13 +166,21 @@ def test_trees_resolve_through_app_paths_and_an_empty_tree_is_a_refusal(tmp_path
     # a path that looks exactly as plausible as the right one, which is why the old assertion
     # passed while the instrument watched daily notes.
     monkeypatch.setattr("agent_mcp.session.MEMORIES_ROOT", Path("/stand-in/vault/lloyd"))
+    monkeypatch.delenv(proof.FACTS_ROOT_ENV, raising=False)
     assert proof.durable_write_trees(resolved=stand_in) == {
         "memory": Path("/stand-in/vault/lloyd"),
-        "facts": Path("/stand-in/facts-tree"),
+        # NOT `stand_in.VAULT_FACTS_ROOT` (#3970 clause 1): the facts leg is the house's facts
+        # tree, so a stand-in whose data root — and therefore whose DERIVED facts root — has
+        # moved to a scratch copy does not move it. `LLOYD_FACTS_ROOT` does, and that arm is
+        # pinned at the end of this node and in both arms of
+        # `test_a_missing_or_empty_facts_leg_still_refuses_naming_facts`.
+        "facts": proof.PRODUCTION_DATA_ROOT / proof.FACTS_RELATIVE,
         "backlog": Path("/stand-in/vault/backlog"),
         "data": Path("/stand-in/data")}, (
-        "memory must be the writer's MEMORIES_ROOT, backlog VAULT_ROOT/'backlog', facts "
-        "VAULT_FACTS_ROOT and data DATA_ROOT, all read at call time")
+        "memory must be the writer's MEMORIES_ROOT, backlog VAULT_ROOT/'backlog', facts the "
+        "HOUSE's facts tree `PRODUCTION_DATA_ROOT/_pipeline/vault-derived/facts` — which a "
+        "moved DATA_ROOT does NOT move and an explicit LLOYD_FACTS_ROOT does (#3970) — and "
+        "data DATA_ROOT, all read at call time")
     # The wrong tree, named: equality against the stub vault is not enough, since
     # `/stand-in/vault/memory` and `/stand-in/vault/lloyd` are both vault children.
     assert (proof.durable_write_trees(resolved=stand_in)["memory"]
@@ -196,9 +204,22 @@ def test_trees_resolve_through_app_paths_and_an_empty_tree_is_a_refusal(tmp_path
     assert proof.store_dirname("memory") == "lloyd", (
         "the copy-side witness matches directories by this name; 'memory' would match "
         "nothing the tool can write")
-    monkeypatch.setattr(proof.paths, "VAULT_FACTS_ROOT", tmp_path / "moved-facts",
-                        raising=False)
-    assert proof.durable_write_trees()["facts"] == tmp_path / "moved-facts"
+    # The override that DOES move the leg (#3970): `LLOYD_FACTS_ROOT` is a statement about
+    # where THIS process's facts store is, so the watch follows it — while a patched
+    # `VAULT_FACTS_ROOT` with no pin in the environment does not. Both halves matter: the
+    # first is why a redirected trial's writes are still watched, the second is the
+    # derived-root leak this round closed, and `monkeypatch.undo()` above means the
+    # environment has to be set and cleared explicitly rather than assumed.
+    pinned = tmp_path / "moved-facts"
+    monkeypatch.setattr(proof.paths, "VAULT_FACTS_ROOT", pinned, raising=False)
+    monkeypatch.delenv(proof.FACTS_ROOT_ENV, raising=False)
+    assert proof.durable_write_trees()["facts"] != pinned, (
+        "a patched VAULT_FACTS_ROOT with no `LLOYD_FACTS_ROOT` in the environment must not "
+        "move the leg: that derivation is exactly how the scratch data root used to reach it")
+    monkeypatch.setenv(proof.FACTS_ROOT_ENV, str(pinned))
+    assert proof.durable_write_trees()["facts"] == pinned, (
+        "an explicit facts pin must move the leg, or the watch is on a tree the trial "
+        "cannot write to")
 
     vacuous = proof.snapshot_tree("facts", _tree(tmp_path, "vacuous", {}))
     assert vacuous["refused"] and "zero files" in vacuous["refused"], (
@@ -1869,3 +1890,277 @@ def test_the_cli_refuses_a_half_named_aggregator_without_booting_anything(tmp_pa
             assert code == 3, argv
             assert calls == [], f"{argv} reached the spawner: {calls}"
         assert run.server.posts() == []
+
+
+# ── #3970: which root each watched leg resolves to, and whether it is the house ──
+#
+# The clause-1 defect was a resolution rule, not a crash: `VAULT_FACTS_ROOT` is DERIVED from
+# `DATA_ROOT` (`app/paths.py:309-311`), so the ONE command the item sanctions —
+# `LLOYD_DATA=/scratch/... … --plan` — moved the facts leg into the scratch root, the vacuity
+# rule fired there, and the instrument exited 3 before the write stage it exists to reach.
+# Every node below therefore pins a ROOT, not a message, and pins it against fake production
+# anchors (`_house`) so the expected value is computed inside the test rather than read off
+# the shape of this box.
+
+def _house(tmp_path: Path) -> tuple[Path, Path]:
+    """Fake production anchors: a vault and a data root, each holding the legs it owns.
+
+    `PRODUCTION_VAULT` and `PRODUCTION_DATA_ROOT` get patched to these two, so a node can ask
+    "does the record know which legs it watched in the house" against a number computed HERE
+    rather than against the real `~/obsidian` — which is the only way a leg-count assertion
+    can fail at all. The layout is the shipped one: `MEMORIES_ROOT = vault_root()/'lloyd'`,
+    `<vault>/backlog`, and facts at `<data-root>/_pipeline/vault-derived/facts`
+    (`proof.FACTS_RELATIVE`, derived from `app.data_root.KG_DB_RELATIVE`).
+    """
+    vault = tmp_path / "house-vault"
+    (vault / "lloyd").mkdir(parents=True)
+    (vault / "lloyd" / "MEMORY.md").write_text("# index\n", encoding="utf-8")
+    (vault / "backlog").mkdir(parents=True)
+    (vault / "backlog" / "1-something.md").write_text("# 1\n", encoding="utf-8")
+    data = tmp_path / "house-data"
+    facts = data / proof.FACTS_RELATIVE
+    facts.mkdir(parents=True)
+    (facts / "entity.md").write_text("# e\n", encoding="utf-8")
+    return vault, data
+
+
+def _scratch(tmp_path: Path, name: str = "scratch-data") -> Path:
+    """A scratch data root of the kind `--build-fixture` leaves behind: exists, and has files."""
+    scratch = tmp_path / name
+    (scratch / "eval" / "fixtures").mkdir(parents=True)
+    (scratch / "seed.txt").write_text("a built fixture area\n", encoding="utf-8")
+    return scratch
+
+
+def test_the_scratch_data_root_leaves_the_facts_leg_on_the_house(tmp_path, monkeypatch, capsys):
+    """Clause 1: `LLOYD_DATA=/scratch/...` alone must not drag the facts leg into the scratch.
+
+    The failing state is the item's own premise, measured on this tree 2026-11-08:
+    `LLOYD_DATA=/home/alansrobotlab/lloyd-work/dwproof-triageplan … --plan` printed
+    `refused: vacuous tree(s) ['data', 'facts']` and exited 3 — because the derived facts root
+    under that override is `<scratch>/_pipeline/vault-derived/facts`, a directory that has
+    never existed. The one sanctioned command could not reach the prewrite guard, let alone a
+    write, so no amount of wiring behind it had ever been runnable.
+
+    Two assertions make the fix mean something rather than merely print. First the ROOT: the
+    leg resolves to `PRODUCTION_DATA_ROOT/_pipeline/vault-derived/facts` and NOT to the
+    scratch path, and the row that walks it comes back unrefused with a file in it — a leg that
+    resolves to a name nobody can walk is the same bug wearing a better message. Then the
+    SEAM an operator crosses: `main(["--plan"])` on a scratch root, with no other override,
+    exits 0. The exit code is the contract; a correctly-resolved leg behind an exit 3 is still
+    an instrument that cannot run.
+    """
+    monkeypatch.delenv(proof.FACTS_ROOT_ENV, raising=False)
+    vault, house_data = _house(tmp_path)
+    scratch = _scratch(tmp_path)
+    scratch_facts = scratch / proof.FACTS_RELATIVE
+    stand_in = types.SimpleNamespace(VAULT_ROOT=vault, VAULT_FACTS_ROOT=scratch_facts,
+                                     DATA_ROOT=scratch)
+    assert not scratch_facts.exists(), (
+        "the stand-in has to model the leg that is not there, or the refusal this node "
+        "is about cannot happen")
+
+    with _patched(proof, PRODUCTION_VAULT=vault, PRODUCTION_DATA_ROOT=house_data):
+        assert proof.facts_watch_root(resolved=stand_in) == house_data / proof.FACTS_RELATIVE
+        assert proof.facts_watch_root(resolved=stand_in) != scratch_facts, (
+            "the facts leg must not follow a data-root override: `LLOYD_DATA` means the data "
+            "root and has never meant the facts store (#3970 clause 1)")
+        trees = proof.durable_write_trees(resolved=stand_in)
+        assert trees["facts"] == house_data / proof.FACTS_RELATIVE
+        row = proof.snapshot_tree("facts", trees["facts"])
+        assert row["refused"] is None and row["files"] == 1, (
+            f"the leg has to be WALKED: {row['refused']!r} with {row['files']} files is the "
+            "vacuity the refusal exists for, renamed")
+
+        with _patched(proof.paths, VAULT_ROOT=vault, DATA_ROOT=scratch), \
+                _patched(proof, memories_root=lambda: vault / "lloyd"):
+            code = proof.main(["--plan"])
+    captured = capsys.readouterr()
+    assert code == 0, f"--plan exited {code} on the sanctioned scratch root. stderr: {captured.err}"
+    rows = json.loads(captured.out)
+    assert rows["facts"]["root"] == str(house_data / proof.FACTS_RELATIVE), rows
+    assert rows["data"]["root"] == str(scratch), rows
+    assert "vacuous tree(s)" not in captured.err, captured.err
+    assert "3 of 4 watched leg(s) are the production house" in captured.err, captured.err
+
+
+def test_the_usage_block_prints_the_command_the_operator_can_paste(capsys):
+    """Clause 3: the usage block must carry the whole sanctioned command, roots and all.
+
+    This is the artefact the owed operator run is executed from, and it is the reason the run
+    never happened: the block showed `LLOYD_DATA=/scratch/...` and named no other root, while
+    the resolution rule behind it silently moved a second root (`VAULT_FACTS_ROOT`, derived
+    from `DATA_ROOT`) into the scratch. A usage block is only complete if it says both what to
+    pin and what to leave alone, so this node pins three things about it:
+
+    * the ONE command's lines — the env pin, the module, `--build-fixture` and `--out` — are
+      all present and all real flags, checked by handing them to the module's own parser;
+    * the two roots that must NOT be pinned (`LLOYD_FACTS_ROOT`, `LLOYD_VAULT_ROOT`) are named
+      with the instruction to leave them unset, so a reader who reaches for an override is
+      told what it would cost;
+    * the leg labels the block quotes are computed from `proof.FACTS_RELATIVE`, not typed, so
+      the prose cannot survive a move of the layout it describes.
+
+    It also repeats #3915's line-wise rule (`test_the_cli_refuses_to_boot_a_fixture_that_was_
+    never_built`) for the block it just edited: no line may tell the reader to run
+    `python -m scripts.autoresearch.bench_fixture`, which has no `__main__` and exits 0 having
+    copied nothing.
+    """
+    doc = proof.__doc__ or ""
+    lines = doc.splitlines()
+    env_line = next((i for i, line in enumerate(lines)
+                     if line.strip().startswith("LLOYD_DATA=")), None)
+    assert env_line is not None, "the usage block no longer pins a scratch data root at all"
+    command: list[str] = []
+    for line in lines[env_line:]:
+        command.append(line.strip())
+        if not line.rstrip().endswith("\\"):
+            break
+    joined = " ".join(command)
+    assert joined.count("LLOYD_DATA=") == 1, joined
+    for want in ("-m scripts.autoresearch.bench_durable_write_proof",
+                 "--build-fixture", "--out"):
+        assert want in joined, f"{want!r} is missing from the sanctioned command: {joined}"
+    assert "python -m scripts.autoresearch.bench_fixture" not in doc, (
+        "the usage block still tells the reader to boot a module that builds nothing (#3915)")
+
+    # Every flag the block prints is a flag the CLI really takes. Asked through `--help`,
+    # because the parser is built inside `main` and a flag that exists only in prose is the
+    # #3915 defect again: a command the operator pastes and argparse rejects.
+    flags = [tok for tok in joined.replace("\\", " ").split() if tok.startswith("--")]
+    assert {"--build-fixture", "--out"} <= set(flags), flags
+    with pytest.raises(SystemExit) as help_exit:
+        proof.main(["--help"])
+    assert help_exit.value.code == 0, "the CLI's own usage print stopped working"
+    helptext = capsys.readouterr().out
+    for flag in flags:
+        assert f"{flag} " in helptext, (
+            f"{flag} is in the sanctioned command but not in `--help`: {helptext}")
+
+    # Searched in the usage block, not the whole docstring: `LLOYD_FACTS_ROOT` is also named
+    # early on, where the docstring explains the derivation it used to follow, and "named"
+    # there is not "the operator is told what to do with it".
+    usage_start = next((i for i, line in enumerate(lines) if "# ONE command" in line), None)
+    assert usage_start is not None, "the usage block no longer has its ONE-command heading"
+    usage = "\n".join(lines[usage_start:])
+    for root in (proof.FACTS_ROOT_ENV, "LLOYD_VAULT_ROOT"):
+        assert root in usage, f"{root} is not named in the usage block at all"
+        window = usage[usage.index(root):usage.index(root) + 220]
+        assert "leave unset" in window, (
+            f"{root} is named without saying to leave it unset: {window!r}")
+    assert str(proof.FACTS_RELATIVE) in usage, (
+        "the block does not state where the facts leg resolves — a reader cannot tell a "
+        "production leg from a scratch one, and the prose has drifted from FACTS_RELATIVE")
+
+
+def test_the_record_says_which_watched_legs_are_the_house(tmp_path):
+    """Clause 2: every watched-tree row carries `production`, and the record counts the legs.
+
+    Why a boolean on every row and not one flag on the verdict: under the sanctioned command
+    three legs are watched in the house and the `data` leg is watched in the scratch root the
+    build went into, and a PASS that reports only `verdict: PASS` reads as though the live
+    `~/lloyd-data` had been diffed. It was not. The rows are where a reader finds that out, so
+    the flag has to be on the row and the count on the record — and both have to survive into
+    a REFUSED record, because the leg a trial refused on is the one a reader has to locate.
+
+    The expected shape is written out rather than re-derived from the helper: `["backlog",
+    "facts", "memory"]` production and `["data"]` not is the exact reading of the command in
+    the module's usage block, and `production` is asserted `is False` / `is True` so the flag
+    is a boolean and not a stringified path that a JSON reader would trust.
+    """
+    vault, house_data = _house(tmp_path)
+    scratch = _scratch(tmp_path, "scratch-rows")
+    trees = {"memory": vault / "lloyd", "backlog": vault / "backlog",
+             "facts": house_data / proof.FACTS_RELATIVE, "data": scratch}
+
+    with _patched(proof, PRODUCTION_VAULT=vault, PRODUCTION_DATA_ROOT=house_data):
+        record = _run(tmp_path, trees=trees, diff_paths=["lloyd/MEMORY.md"])
+        assert record["watched_trees"] == {
+            "watched": 4, "production": 3,
+            "production_legs": ["backlog", "facts", "memory"],
+            "non_production_legs": ["data"]}, record["watched_trees"]
+        for name, row in record["live_trees"].items():
+            assert isinstance(row["production"], bool), (name, row)
+            assert row["production"] is (name != "data"), (
+                f"the {name} row says {row['production']}: the scratch data leg is the only "
+                "leg of this four that is not the house")
+        for name, row in record["trees"].items():
+            assert row["production"] is (name != "data"), (name, row)
+
+        # A refused record is read as readily as a passed one, so the count travels with it.
+        # The empty facts stand-in is put INSIDE the fake house on purpose: the refusal this
+        # round is meant to produce happens on a leg that is the house, and a stand-in parked
+        # outside it would make `production: false` look like the cause.
+        on_house = house_data / "facts-now-empty"
+        on_house.mkdir(parents=True)
+        refused_record = _run(tmp_path, trees=dict(trees, facts=on_house))
+    assert refused_record["verdict"] == "REFUSED", refused_record.get("reason")
+    assert "facts" in refused_record["reason"], refused_record["reason"]
+    assert refused_record["watched_trees"]["production"] == 3, refused_record["watched_trees"]
+    assert refused_record["watched_trees"]["non_production_legs"] == ["data"]
+    assert refused_record["watched_trees"]["production_legs"] == ["backlog", "facts", "memory"]
+    assert all(row["production"] is (name != "data")
+               for name, row in refused_record["trees"].items()), refused_record["trees"]
+    # And the flag is not the string `True`: nothing is production when nothing is anchored.
+    bare = _run(tmp_path, trees=dict(trees, memory=_tree(tmp_path, "bare-mem",
+                                                         {"MEMORY.md": "x\n"})),
+                diff_paths=["lloyd/MEMORY.md"])
+    assert bare["watched_trees"] == {
+        "watched": 4, "production": 0, "production_legs": [],
+        "non_production_legs": ["backlog", "data", "facts", "memory"]}, bare["watched_trees"]
+
+
+@pytest.mark.parametrize("arm", ["missing", "zero-file"])
+def test_a_missing_or_empty_facts_leg_still_refuses_naming_facts(tmp_path, monkeypatch,
+                                                                 capsys, arm):
+    """Clause 4: the vacuity refusal survives the fix, on the leg the fix moved.
+
+    The cheap version of clause 1 is a facts leg that quietly stops being checked — a fallback
+    to "if the resolved root is not there, watch something else" would make `--plan` exit 0 and
+    prove less than nothing. So the override that DOES move the leg (`LLOYD_FACTS_ROOT`, the
+    explicit pin) is the one under test here: aimed at a scratch directory that either does not
+    exist or holds no files, it must produce a refusal that NAMES `facts`, exit 3, no PASS.
+    Every other leg is non-vacuous in both arms, so the named tree is the one that caused it.
+
+    `missing` and `zero-file` are separate refusals in `snapshot_tree` ("is not a directory"
+    versus "resolves to zero files") and both are the same clause: the pass and the vacuity
+    look identical unless the rule fires, which is why a zero-file tree is refused even though
+    the directory plainly exists.
+    """
+    monkeypatch.delenv(proof.FACTS_ROOT_ENV, raising=False)
+    vault, house_data = _house(tmp_path)
+    scratch = _scratch(tmp_path, f"scratch-{arm}")
+    scratch_facts = scratch / proof.FACTS_RELATIVE
+    if arm == "zero-file":
+        scratch_facts.mkdir(parents=True)
+    monkeypatch.setenv(proof.FACTS_ROOT_ENV, str(scratch_facts))
+    monkeypatch.setattr(proof.paths, "VAULT_FACTS_ROOT", scratch_facts, raising=False)
+
+    with _patched(proof, PRODUCTION_VAULT=vault, PRODUCTION_DATA_ROOT=house_data), \
+            _patched(proof.paths, VAULT_ROOT=vault, DATA_ROOT=scratch), \
+            _patched(proof, memories_root=lambda: vault / "lloyd"):
+        assert proof.durable_write_trees()["facts"] == scratch_facts, (
+            "an explicit facts pin has to move the leg, or this node is testing a root no "
+            "trial would ever watch")
+        code = proof.main(["--plan"])
+    err = capsys.readouterr().err
+    assert code == 3, f"exit {code}, expected 3. stderr: {err}"
+    # Scoped to the refusal line: the leg-count line `--plan` also prints names `['data']` on
+    # purpose (#3970 clause 2), and reading THAT as a vacuous-tree report would make this node
+    # fail for the reason the fix exists.
+    refusals = [line for line in err.splitlines() if "vacuous tree(s)" in line]
+    assert len(refusals) == 1, err
+    assert "'facts'" in refusals[0], f"the refusal did not name the facts leg: {refusals}"
+    assert "'data'" not in refusals[0] and "'backlog'" not in refusals[0] \
+        and "'memory'" not in refusals[0], (
+        f"a leg that holds files was reported vacuous: {refusals[0]}")
+
+    # And through the trial itself: a vacuous facts leg cannot be scored PASS, only REFUSED.
+    with _patched(proof, PRODUCTION_VAULT=vault, PRODUCTION_DATA_ROOT=house_data):
+        result = _run(tmp_path, trees={
+            "memory": vault / "lloyd", "backlog": vault / "backlog",
+            "facts": scratch_facts, "data": scratch},
+            diff_paths=["lloyd/MEMORY.md"])
+    assert result["verdict"] == "REFUSED", result.get("reason")
+    assert "facts" in result["reason"], result["reason"]
+    assert ("zero files" in result["reason"]) is (arm == "zero-file"), result["reason"]

@@ -26,6 +26,22 @@ files is therefore a REFUSAL (`TREE_EMPTY`), not a clean diff, for the same reas
 refused read is not an empty result anywhere else in this repo: the pass and the
 vacuity look identical otherwise.
 
+**A scratch data root moves the `data` leg; it must not move the `facts` leg** (#3970). The
+one sanctioned command names `LLOYD_DATA=/scratch/...` because `build_fixture` will not copy
+into the house — and `VAULT_FACTS_ROOT` is DERIVED from `DATA_ROOT` (`app/paths.py:309-311`),
+so that single variable moved the facts leg into a scratch directory holding no facts, the
+vacuity rule above fired on it, and `--plan` exited 3 before a write was ever attempted: the
+one command the item sanctions could not reach the stage it exists to reach. `facts_watch_root`
+follows an explicit `LLOYD_FACTS_ROOT` — that override says "this process's facts store is
+elsewhere", and a watch left on the house would then miss the tree the trial can reach — but
+not `LLOYD_DATA`, which has never meant the facts store, so the facts leg stays on the house.
+The `data` leg does move, because `LLOYD_DATA` is exactly that override, and that is a fact a
+reader must not have to infer: every watched-tree row now carries `production` (true only when
+the root is under `PRODUCTION_VAULT` or `PRODUCTION_DATA_ROOT`, the same env-immune anchors
+`bench_fixture`'s destination rails use) and the record carries `watched_trees` with the count,
+so a PASS says out loud that it watched 3 legs on the house and the `data` leg on a scratch
+copy.
+
 The `memory` tree is the same trap wearing different clothes, and #3863 clause 4 closed it: it
 used to be `VAULT_ROOT/'memory'`, which is not nothing — it is full of dated daily notes, so it
 is never refused as vacuous — but it is a directory `memory_add` cannot write. The shipped
@@ -99,10 +115,23 @@ usage.
     # ONE command: build the copy, boot the aggregator on it, run the trial, stop it (#3915).
     # `build_fixture` refuses a destination inside either PRODUCTION tree, and
     # `bench_spawner.spawn` refuses to boot on one either, so on a box whose data root IS
-    # ~/lloyd-data the scratch root has to be named rather than defaulted:
+    # ~/lloyd-data the scratch root has to be named rather than defaulted. It is the ONLY root
+    # the trial pins (#3970), and these are the roots it must NOT pin, because each moves a
+    # watched leg off the house — the record would then list that leg under
+    # `watched_trees.non_production_legs`, which is honest but is not a proof about the house:
+    #   LLOYD_DATA          pinned below, and it moves the `data` leg with it BY DESIGN — that
+    #                       variable means the data root, so a scratch `data` leg is the truth
+    #                       as long as the record says `production: false`, which it now does.
+    #   LLOYD_FACTS_ROOT    would move the `facts` leg (see `FACTS_ROOT_ENV`): leave unset.
+    #   LLOYD_VAULT_ROOT    would move `memory` and `backlog`: leave unset.
     LLOYD_DATA=/scratch/durable-write-proof \
     .venvs/lloyd/bin/python -m scripts.autoresearch.bench_durable_write_proof \
         --build-fixture durable-write-<ts> --out <record.json>
+    # The four legs that command then watches, and how the record labels them: `memory` =
+    # MEMORIES_ROOT and `backlog` = <vault>/backlog, both under PRODUCTION_VAULT; `facts` =
+    # PRODUCTION_DATA_ROOT/_pipeline/vault-derived/facts (`FACTS_RELATIVE`), the house; `data`
+    # = the scratch root above. So `watched_trees` reads
+    # {"watched": 4, "production": 3, "non_production_legs": ["data"]}.
     # boot the aggregator from a fixture that is already built, and stop it on the way out:
     scripts/autoresearch/bench_durable_write_proof.py \
         --fixture-root <data-root>/eval/fixtures/<trial> --out <record.json>
@@ -135,6 +164,8 @@ from typing import Any, Callable, Protocol
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app import paths  # noqa: E402
+from app.data_root import (  # noqa: E402 — the env-IMMUNE house anchors (#3970)
+    KG_DB_RELATIVE, PRODUCTION_DATA_ROOT, PRODUCTION_VAULT)
 from scripts.autoresearch.bench_fixture import (  # noqa: E402
     FixtureRefused, build_fixture)
 
@@ -317,14 +348,93 @@ def store_dirname(store: str) -> str:
     return Path(memories_root()).name if store == "memory" else store
 
 
+#: The one environment variable that may re-aim the watched `facts` leg. `LLOYD_DATA` is
+#: deliberately NOT one of them (#3970 clause 1): `VAULT_FACTS_ROOT` is DERIVED from
+#: `DATA_ROOT` (`app/paths.py:309-311`), so the sanctioned command's
+#: `LLOYD_DATA=/scratch/...` — which is there because `build_fixture` will not copy into the
+#: house — moved the facts leg to a scratch directory holding no facts, the vacuity rule fired
+#: on it, and `--plan` exited 3 before any write. The ONE sanctioned command could not reach
+#: the stage it exists to reach. An explicit `LLOYD_FACTS_ROOT` is a different act: it says
+#: THIS process's facts store lives elsewhere, and a watch left on the house would then be
+#: staring at a tree the trial cannot reach — so that override wins, and the row says
+#: `production: false` rather than quietly certifying a leg nobody wrote to.
+FACTS_ROOT_ENV = "LLOYD_FACTS_ROOT"
+
+#: Where the facts store sits inside any data root, read off the ONE layout constant the
+#: guardian's read-only opener shares (`app/data_root.py:64`, #1525) instead of re-spelled:
+#: `<data-root>/_pipeline/vault-derived/facts`.
+FACTS_RELATIVE = KG_DB_RELATIVE.parent / "facts"
+
+
+def _is_within(root: Path, base: Path) -> bool:
+    """Whether `root` IS `base` or sits under it, compared on resolved paths.
+
+    Resolved on both sides: a watched root that arrives through a symlink is still in the
+    house, and a `..`-spelling that escapes it is still not. An `OSError` from resolution
+    answers False, which is the closed direction — "not the house" refuses a trial.
+    """
+    try:
+        here, there = Path(root).resolve(), Path(base).resolve()
+    except OSError:
+        return False
+    return here == there or there in here.parents
+
+
+def is_production_tree(root: Path) -> bool:
+    """Whether a watched root is the house, or a copy of it the trial was pointed at.
+
+    Read against `app.data_root`'s env-IMMUNE anchors, not against `paths.VAULT_ROOT` /
+    `paths.DATA_ROOT`: those are the env-overridable ones, so a flag derived from them would
+    answer "production" about the scratch root it was itself pointed at — which is exactly how
+    a copy certifies itself as the house (`app/paths.py:300-308` says the same about
+    `VAULT_FACTS_ROOT`). The two anchors are what `bench_fixture`'s own destination rails use
+    (`bench_fixture.py:288-291`), so the watch and the builder agree on what "inside the
+    house" means.
+    """
+    return _is_within(root, PRODUCTION_VAULT) or _is_within(root, PRODUCTION_DATA_ROOT)
+
+
+def facts_watch_root(resolved: Any = None) -> Path:
+    """The facts leg's watched root: the house's facts tree unless facts moved on purpose.
+
+    `LLOYD_FACTS_ROOT` set → `paths.VAULT_FACTS_ROOT`, the explicit pin, for the reason on
+    `FACTS_ROOT_ENV`. Not set → the facts tree of `PRODUCTION_DATA_ROOT`, which is the tree a
+    leaked `fact_add` would land in and the tree the vacuity rule is supposed to size. It is
+    built from the shared layout constant rather than from `paths.VAULT_FACTS_ROOT_DEFAULT`
+    because that DEFAULT is derived from `DATA_ROOT` too (`app/paths.py:309-311`) and so moves
+    with the scratch override, which is the thing being fixed here.
+    """
+    p = resolved if resolved is not None else paths
+    if os.environ.get(FACTS_ROOT_ENV):
+        return Path(p.VAULT_FACTS_ROOT)
+    return Path(PRODUCTION_DATA_ROOT) / FACTS_RELATIVE
+
+
+def production_summary(trees: dict[str, Path]) -> dict[str, Any]:
+    """How many of the watched legs are the house, and which ones are not (#3970 clause 2).
+
+    A trial that passes while three of its four legs were watched on a scratch copy has
+    proved less than its verdict says, and the JSON is the only thing that survives the run to
+    say so. The count goes in beside the rows because a reader who sees four rows and no
+    summary has to open each `root` string and compare it to a home directory to find out.
+    """
+    production = sorted(name for name, root in trees.items()
+                        if is_production_tree(Path(root)))
+    return {"watched": len(trees), "production": len(production),
+            "production_legs": production,
+            "non_production_legs": sorted(set(trees) - set(production))}
+
+
 def durable_write_trees(resolved: Any = None) -> dict[str, Path]:
     """The four live trees a durable write could reach, resolved at call time.
 
     Read from `app.paths` per call, not at import: the roots are env-overridable
     (`LLOYD_DATA`, `LLOYD_VAULT_ROOT`, `LLOYD_FACTS_ROOT`), and a proof that bound them at
-    import would report the machine it was imported on. `facts` is
-    `VAULT_FACTS_ROOT` and NOT the empty `~/obsidian/facts` the item names — see the
-    module docstring. `data` is the whole data root, which subsumes the facts root; the
+    import would report the machine it was imported on. `facts` is the HOUSE's facts tree —
+    `facts_watch_root()`, which follows an explicit `LLOYD_FACTS_ROOT` but NOT `LLOYD_DATA`,
+    and is therefore neither the empty `~/obsidian/facts` the item names nor the scratch
+    directory a data-root override drags it through; see `FACTS_ROOT_ENV`. `data`
+    is the whole data root, which subsumes the facts root; the
     overlap is deliberate (a changed file appears under both names, and `paths` are
     absolute so the two key spaces never collide.
 
@@ -339,7 +449,7 @@ def durable_write_trees(resolved: Any = None) -> dict[str, Path]:
     p = resolved if resolved is not None else paths
     return {
         "memory": memories_root(),
-        "facts": Path(p.VAULT_FACTS_ROOT),
+        "facts": facts_watch_root(p),
         "backlog": Path(p.VAULT_ROOT) / "backlog",
         "data": Path(p.DATA_ROOT),
     }
@@ -355,8 +465,14 @@ def snapshot_tree(tree: str, root: Path, *, exclude: tuple[Path, ...] = ()) -> d
     `unreadable` lists directories the walk could not open: a tree with an unreadable
     corner is not a clean tree, and naming it is the difference between a witness and an
     accident.
+
+    `production` says whether this row watched the house or a scratch copy of it (#3970
+    clause 2), and is set on the REFUSED rows as well as the walked ones — the leg a trial
+    refused on, or passed on while sitting in a scratch root, is precisely the leg a reader of
+    the artifact has to be able to locate.
     """
     row: dict[str, Any] = {"tree": tree, "root": str(root), "exists": False,
+                           "production": is_production_tree(root),
                            "files": 0, "refused": None, "unreadable": [],
                            "excluded": [str(p) for p in exclude], "manifest": {}}
     if not root.is_dir():
@@ -983,7 +1099,12 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
         # re-derive from a server that has since restarted.
         "write_scope_gap": guard["write_scope_gap"],
         "missing_isolation_keys": guard["missing_keys"],
-        "trees": {n: {"root": str(r)} for n, r in trees.items()},
+        # Which legs are the house, recorded before anything else is known: a REFUSED record
+        # gets read as readily as a PASS, and the leg that refused may well be the scratch one
+        # (`production_summary` says which). #3970 clause 2.
+        "watched_trees": production_summary(trees),
+        "trees": {n: {"root": str(r), "production": is_production_tree(Path(r))}
+                  for n, r in trees.items()},
         "tool_calls": [], "verdict": "REFUSED",
     }
     if not guard["allowed"]:
@@ -1059,8 +1180,9 @@ def main(argv: list[str] | None = None) -> int:
     """CLI. Exit `0` PASS · `1` FAIL · `3` refused · `2` argparse usage.
 
     `--plan` resolves the four trees, reports their file counts and refuses if any is
-    vacuous, without contacting a server or attempting a write. It prints no verdict, because
-    a proof of nothing has no verdict to print.
+    vacuous, without contacting a server or attempting a write, and prints on either exit how
+    many of the four legs were resolved on the production house (#3970 clause 2). It prints no
+    verdict, because a proof of nothing has no verdict to print.
 
     Three ways to get a server. Pass `--aggregator-url` plus a state url to try one that is
     already running — nothing is booted on that path, before or after the guard. Pass
@@ -1136,6 +1258,13 @@ def main(argv: list[str] | None = None) -> int:
         rows = {n: snapshot_tree(n, root) for n, root in trees.items()}
         print(json.dumps({k: {kk: vv for kk, vv in v.items() if kk != "manifest"}
                           for k, v in rows.items()}, indent=2))
+        # On BOTH exits, because "3 of your 4 legs are the house" changes how a CLEAN plan
+        # reads just as much as how a refused one does: a plan that walks a scratch data root
+        # and says nothing about it is the misreading #3970 clause 2 exists to close.
+        summary = production_summary(trees)
+        print(f"{summary['production']} of {summary['watched']} watched leg(s) are the "
+              f"production house; not production: "
+              f"{summary['non_production_legs'] or 'none'}", file=sys.stderr)
         refused = sorted(n for n, row in rows.items() if row.get("refused"))
         if refused:
             print(f"refused: vacuous tree(s) {refused}", file=sys.stderr)
