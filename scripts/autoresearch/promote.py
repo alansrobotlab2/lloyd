@@ -181,6 +181,24 @@ SHRUNK_HEAD = "shrunk"
 MATRIX_DROPPED_KEY = "matrix_dropped_tasks"
 SAFETY_CRITICAL_KEY = "safety_critical_tasks"
 
+#: The fourth head (#3959): a member the shrink dropped that could not have been scored
+#: this round whatever the window said. A bench task declaring a `writes:` scope has its
+#: trial refused by `require_copied_state` unless the aggregator that will execute the
+#: writes reports `state_is_copied: true`, and no fixture-rooted aggregator is booted for
+#: a round (`run_round.fixture_rooted_aggregator`), so the drop is not coverage the budget
+#: cost — the trial could not have produced a mark at all. It is a sub-label of `shrunk`,
+#: never a fifth reason competing with it: the ids here are always a subset of
+#: `matrix_dropped_tasks`, which is why an id the round did not drop cannot be shelved by
+#: this list, and why the ordinary shrink label is untouched for every other member.
+#:
+#: The reason for the distinction is what the two readings send a reader to. `shrunk:` says
+#: raise the budget; `unscorable:` says boot a fixture-rooted server, and a round that
+#: printed the first for `bench_029_durable_write_vault_note` is the reason #3688's owed
+#: "5 real model trials per card" sat unmeasured for five days while the card reappeared
+#: in every split.
+UNSCORABLE_WRITES_KEY = "unscorable_writes_tasks"
+UNSCORABLE_HEAD = "unscorable"
+
 #: The third list, and the one that can only ever REMOVE an exemption: the ids this round's
 #: deadline sweep recorded in `tasks_not_reached`. An id there was never run by any arm, so
 #: from the two summaries alone it is indistinguishable from a task no arm could mark — and
@@ -276,6 +294,7 @@ def coverage_record(baseline_summary: dict[str, Any],
     dropped = {str(t) for t in (record.get(MATRIX_DROPPED_KEY) or [])}
     safety = {str(t) for t in (record.get(SAFETY_CRITICAL_KEY) or [])}
     never_ran = {str(t) for t in (record.get(NOT_REACHED_KEY) or [])}
+    unscorable_ids = {str(t) for t in (record.get(UNSCORABLE_WRITES_KEY) or [])}
     out: dict[str, Any] = {}
     for key in ("targeted", "heldout"):
         declared = [str(t) for t in (split.get(key) or [])]
@@ -299,12 +318,22 @@ def coverage_record(baseline_summary: dict[str, Any],
         # is a list the round wrote about itself while the marks are the trials.
         shrunk = [t for t in absent if t not in set(unrankable) and t in dropped
                   and t not in base_per and t not in safety and t not in never_ran]
-        shelved = set(unrankable) | set(shrunk)
+        # #3959: of the members the shrink dropped, the ones that could not have been
+        # tried at all are labelled apart. `t in shrunk` and not `t in dropped` is the
+        # whole safety of this: an id can only be called unscorable if it already passed
+        # every bar the shrink label has to pass (dropped, unmarked by the baseline, not
+        # safety-critical, not deadline-omitted), so this key can move a member between
+        # two shelved heads and can never move one out of `unscored` — it cannot exempt
+        # anything #549 would have refused on.
+        unscorable = [t for t in shrunk if t in unscorable_ids]
+        shrunk = [t for t in shrunk if t not in set(unscorable)]
+        shelved = set(unrankable) | set(shrunk) | set(unscorable)
         out[key] = {
             "declared": declared,
             "evaluated": evaluated,
             UNRANKABLE_HEAD: unrankable,
             SHRUNK_HEAD: shrunk,
+            UNSCORABLE_HEAD: unscorable,
             UNSCORED_HEAD: [t for t in absent if t not in shelved],
         }
     return out
@@ -334,7 +363,7 @@ def _coverage_refusal(pool_label: str, pool_key: str, pool: dict[str, Any]) -> s
              f"scored",
              f"{UNSCORED_HEAD}: {', '.join(pool[UNSCORED_HEAD])}"]
 
-    for head in (UNRANKABLE_HEAD, SHRUNK_HEAD):
+    for head in (UNRANKABLE_HEAD, SHRUNK_HEAD, UNSCORABLE_HEAD):
         if pool[head]:
             parts.append(f"{head}: {', '.join(pool[head])}")
     return f"partial_{cls}_coverage ({'; '.join(parts)})"
@@ -358,7 +387,7 @@ def coverage_report_lines(baseline_summary: dict[str, Any],
     """
     cov = coverage_record(baseline_summary, variant_summary, split, round_record)
     if all(not cov[k][reason] for k in ("targeted", "heldout")
-           for reason in (UNRANKABLE_HEAD, SHRUNK_HEAD, UNSCORED_HEAD)):
+           for reason in (UNRANKABLE_HEAD, SHRUNK_HEAD, UNSCORABLE_HEAD, UNSCORED_HEAD)):
         return []
     lines = [f"- coverage decided on: "
              f"{len(cov['targeted']['evaluated'])} of {len(cov['targeted']['declared'])} "
@@ -366,7 +395,17 @@ def coverage_report_lines(baseline_summary: dict[str, Any],
              f"{len(cov['heldout']['evaluated'])} of {len(cov['heldout']['declared'])} "
              f"declared held-out tasks"]
     parts = []
-    for head in (UNRANKABLE_HEAD, SHRUNK_HEAD, UNSCORED_HEAD):
+    # `UNSCORABLE_HEAD` is printed only when some pool actually carries it, which keeps a
+    # round with no writes-scoped drop rendering byte-identical to the round before this
+    # head existed — the label is the news, and a line that grew a permanent
+    # `unscorable: none` segment would spend a reader's attention on the absence of a
+    # thing most rounds never had. The empty-case guard above counts it either way, so a
+    # round whose ONLY shelved members are unscorable still gets a line.
+    heads = [UNRANKABLE_HEAD, SHRUNK_HEAD]
+    if any(cov[k][UNSCORABLE_HEAD] for k in ("targeted", "heldout")):
+        heads.append(UNSCORABLE_HEAD)
+    heads.append(UNSCORED_HEAD)
+    for head in heads:
         ids = sorted({i for k in ("targeted", "heldout") for i in cov[k][head]})
         parts.append(f"{head}: {', '.join(ids) if ids else 'none'}")
     lines.append("- declared members not evaluated — " + "; ".join(parts))

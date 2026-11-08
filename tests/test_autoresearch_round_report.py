@@ -752,3 +752,205 @@ def test_the_coverage_section_states_the_safety_critical_population_it_governs(t
     assert "unknown" in degraded[0] and "not zero" in degraded[0], degraded[0]
     assert " 0 of " not in degraded[0], \
         f"an unreadable bench must not print a count that reads as an empty class: {degraded[0]}"
+
+
+# ── #3959: a shrink that drops a writes-scoped card says so, and says both why ────
+#
+# `bench_029_durable_write_vault_note`, `bench_030_durable_write_kg_row` and
+# `bench_031_durable_write_backlog_card` have been in every split since #3688 landed and
+# have never had one trial row: the pre-flight matrix shrink gives them up before a trial
+# starts (`R_20261108_185536.md` names all three in its drop line and prints "no scored
+# history on this box" for each), and the drop reaches only the round's `.md`. A reader of
+# the ledger sees a `split` row naming the card and nothing else, which reads as coverage
+# the budget cost. For a card declaring `writes:` that reading is wrong in a way the
+# window has nothing to do with: `require_copied_state` refuses such a trial unless the
+# aggregator that will execute the writes reports `state_is_copied: true`, and no
+# fixture-rooted aggregator is booted for a round — measured live at triage, the only
+# server `resolve_state_url` finds answered `is_production_data=True
+# is_production_vault=True state_is_copied=False`. These three nodes pin that the round
+# now says that out loud, in both artifacts, and that saying it fabricates no trial.
+
+WRITES_CARD = "bench_writes_card"
+
+
+def _writes_bench(cfg, specs) -> None:
+    """(task_id, category, requires_runtime, writes) — this file's bench shape plus the
+    one frontmatter key this section is about, the `writes:` list that makes a card's
+    trial need copied state. The bench dir is emptied first so the projection costs
+    exactly these tasks and not the fixture's own three."""
+    for stale in cfg.paths.bench_dir.glob("*.md"):
+        stale.unlink()
+    for task_id, category, runtime, writes in specs:
+        lines = ["---",
+                 f"id: {task_id}",
+                 f"category: {category}",
+                 "safety_critical: false",
+                 "prompt: do the thing",
+                 "objective_checks:",
+                 "  - type: contains",
+                 "    value: done"]
+        if runtime:
+            lines.append("requires_runtime: true")
+        if writes:
+            lines.append("writes:")
+            lines.extend(f"- {scope}" for scope in writes)
+        lines.extend(["---", "", "Prose body.", ""])
+        (cfg.paths.bench_dir / f"{task_id}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _shrink_that_drops(round_env, monkeypatch, specs, budget_minutes: int,
+                       state_url: str | None = None):
+    """Drive a real round whose pre-flight shrink gives up one of `specs`.
+
+    Returns `run_round.run`'s payload. `LLOYD_BENCH_STATE_URL` is cleared rather than
+    left alone: it is the signal `fixture_rooted_aggregator` reads, and a value inherited
+    from a developer's shell would silence the record these nodes assert on. A node that
+    wants that signal SET passes `state_url=` and gets it set here, after the clear — the
+    env is the driver's to normalise, so a node cannot leave one behind by forgetting.
+    """
+    _writes_bench(round_env, specs)
+    monkeypatch.delenv(run_round.STATE_URL_ENV, raising=False)
+    if state_url is not None:
+        monkeypatch.setenv(run_round.STATE_URL_ENV, state_url)
+    monkeypatch.setattr(run_round, "_lint_valid_ids",
+                        lambda bench_dir: {s[0] for s in specs})
+    return asyncio.run(run_round.run(targets=["prompts"], budget_minutes=budget_minutes))
+
+
+def _shrink_fixture(round_env, monkeypatch, *, with_writes: bool, budget_minutes: int,
+                    state_url: str | None = None):
+    """Four targeted tasks the window cannot hold, one of them the card under test.
+
+    `budget_minutes=2` is a 90-second window, and the shrink it forces is arithmetic
+    rather than a fudge: a round with no ledger history falls back to 5 s per direct
+    trial and `SDK_MIN_TRIAL_SECONDS` = 90 s per agent-loop trial, so the four direct
+    tasks project 5-10 s and the one runtime task projects 90-190 s depending on the arm
+    count. It is the widest saving the shrink reaches first — the same reason the real
+    round named in #3959 gave up all three durable-write cards before it touched a
+    cheaper task.
+
+    `with_writes=False` swaps the writes declaration off the same card, so the negative
+    node differs from the positive one by that one frontmatter key and by nothing else —
+    the same task, the same cost, the same drop, the same category."""
+    specs = [("bench_plain_one", "replay", False, None),
+             ("bench_plain_two", "replay", False, None),
+             ("bench_plain_three", "replay", False, None),
+             # `synthetic` and `requires_runtime: true` are what the three cards this was
+             # filed on declare, so the drop here is the same arm and the same slice.
+             (WRITES_CARD, "synthetic", True, ["vault"] if with_writes else None),
+             ("bench_s1", "safety", False, None)]   # the split needs a veto half
+    return _shrink_that_drops(round_env, monkeypatch, specs, budget_minutes,
+                          state_url=state_url)
+
+
+def _unscorable_rows(cfg, round_id: str) -> list[dict]:
+    return [r for r in (json.loads(line) for line in
+                        cfg.paths.ledger_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip())
+            if r.get("round_id") == round_id
+            and r.get("event") == run_round.UNSCORABLE_EVENT]
+
+
+def test_a_shrink_that_drops_a_writes_card_appends_an_unscorable_record(round_env, monkeypatch):
+    """Clause 1, read off disk: the drop of a `writes:` card is a ledger row of its own.
+
+    The row is the artifact #3688's owed "5 real model trials per card" was undetectable
+    against: a `grep` for the card over `ledger.jsonl` used to return its `split` row and
+    nothing else, so "in every split, never once scored" and "scored recently" were the
+    same query. Grep it now and the row that answers names the round, the card and both
+    causes.
+    """
+    result = _shrink_fixture(round_env, monkeypatch, with_writes=True, budget_minutes=2)
+    assert result["matrix_dropped_tasks"] == [WRITES_CARD], (
+        "the precondition: the shrink gave up exactly the card under test, so what follows "
+        "is about a drop and not about a round that never shrank")
+
+    rows = _unscorable_rows(round_env, result["round_id"])
+    assert len(rows) == 1, f"one record per dropped card, got {rows}"
+    row = rows[0]
+    assert row["event"] != "split", "the split row is the round-level one this replaces"
+    assert row["round_id"] == result["round_id"], row
+    assert row["task_id"] == WRITES_CARD, row
+    assert row["declared_writes"] == ["vault"], row
+    for fact in ("matrix shrink", "fixture-rooted aggregator", "require_copied_state"):
+        assert fact in row["reason"], f"the reason must carry {fact!r}: {row['reason']}"
+    assert " s window" in row["reason"], (
+        "the reason carries the window in the same unit the report states it, so the two "
+        f"artifacts cannot disagree about how tight the round was: {row['reason']}")
+
+    # The fabricated-row hazard, which is the reason this record could not just be a
+    # trial row with a zero in it: `derive_trial_priors` skips a row whose `variant_id`
+    # is None, so a 0-second entry here would cost every future round more window than
+    # the one that dropped this card — shrinking the matrix harder because a card was
+    # unmeasurable. Same key keeps it out of `last_scored_round_by_task`.
+    assert row["variant_id"] is None, row
+    assert "duration_seconds" not in row, row
+    assert WRITES_CARD not in {r["task_id"] for r in _rows(round_env, result["round_id"])}, (
+        "the card must have no trial row: this record describes an absent trial, it is not one")
+
+
+def test_the_report_line_for_such_a_drop_names_the_other_cause_and_the_word_unscorable(
+        round_env, monkeypatch):
+    """Clause 3, on the report: both causes in one sentence, and the card is unscorable.
+
+    The line this replaces is the shrink's own, which is true as far as it goes — "would
+    not fit the window" — and reads as lost coverage a bigger budget would return. What a
+    reader has to be able to rule out from the report alone is exactly that inference, so
+    the line says the word `unscorable`, keeps the window as one cause rather than
+    deleting it, and names the check that would have refused the trial anyway.
+    """
+    result = _shrink_fixture(round_env, monkeypatch, with_writes=True, budget_minutes=2)
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(
+        encoding="utf-8")
+    lines = [ln for ln in report.splitlines() if "unscorable" in ln]
+    assert len(lines) == 1, f"one line naming the unscorable drops, got {lines}"
+    line = lines[0]
+    for fact in (WRITES_CARD, "writes: vault", "fixture-rooted aggregator",
+                 "require_copied_state", "not merely not-run", run_round.UNSCORABLE_EVENT):
+        assert fact in line, f"the line must carry {fact!r}: {line}"
+    assert "- matrix reduced before trials:" in report, (
+        "the window is still reported as one cause; the new line supplements it, it does "
+        "not rewrite the shrink's own sentence")
+    assert f"{run_round.UNSCORABLE_EVENT} in {round_env.paths.ledger_path}" in line, (
+        "the line says which ledger it wrote, so a reader does not have to guess which "
+        "store to grep")
+
+
+def test_a_dropped_card_declaring_no_writes_earns_no_such_record_and_no_line(
+        round_env, monkeypatch):
+    """The record is about a card that could not run, not about every drop.
+
+    Same bench, same task, same cost, same drop — one frontmatter key removed. Without
+    this leg the change would add a row per drop to the store every round shrinks, which
+    is a second channel for a fact the drop list already carries, and it would print
+    `require_copied_state` about a card that never declares a write.
+    """
+    result = _shrink_fixture(round_env, monkeypatch, with_writes=False, budget_minutes=2)
+    assert result["matrix_dropped_tasks"] == [WRITES_CARD], (
+        "the same card, the same drop, minus the `writes:` declaration")
+    assert _unscorable_rows(round_env, result["round_id"]) == []
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(
+        encoding="utf-8")
+    assert not [ln for ln in report.splitlines() if "unscorable" in ln], report
+
+
+def test_a_round_told_about_a_fixture_rooted_aggregator_stays_silent(round_env, monkeypatch):
+    """The gate's other half: the claim is only made about a box the round can see.
+
+    `LLOYD_BENCH_STATE_URL` is what whoever boots a fixture-rooted child sets, and nothing
+    here can prove that server's state is a copy without asking it. A round that called a
+    card unscorable while one was running would be publishing a false cause — and on the
+    box that fixes the boot wiring, the record would then be the thing that misleads. So
+    the record and the line both go quiet, and the ordinary shrink line stays, because
+    the window really did drop the card.
+    """
+    result = _shrink_fixture(round_env, monkeypatch, with_writes=True, budget_minutes=2,
+                             state_url="http://127.0.0.1:8599/state")
+    assert result["matrix_dropped_tasks"] == [WRITES_CARD], "the drop still happened"
+    assert _unscorable_rows(round_env, result["round_id"]) == [], (
+        "no unscorable claim while an aggregator this round did not boot may be serving "
+        "the trial")
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(
+        encoding="utf-8")
+    assert not [ln for ln in report.splitlines() if "unscorable" in ln], report
+    assert "- matrix reduced before trials:" in report

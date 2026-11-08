@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -25,6 +26,11 @@ from . import auto_restore, post_promotion
 from .bench_runner import HARNESS as DIRECT_HARNESS
 from .bench_runner import run_bench, token_ledger_fields
 from .bench_runner_sdk import DEFAULT_PER_TASK_TIMEOUT as SDK_PER_TASK_TIMEOUT
+# #3959: the env var that points the runner at a fixture-rooted aggregator, and the
+# only signal this round has that one was booted for it. Same constant the runner and the
+# proof script read, so "no fixture-rooted aggregator" here and "the state URL the trial
+# would use" there are one fact.
+from .bench_runner_sdk import STATE_URL_ENV
 from .bench_runner_sdk import run_bench_sdk
 from .common import (
     HARNESSES,
@@ -64,6 +70,7 @@ from . import cost as trial_cost
 # test that stubbed the decision loop could get that far.
 from .promote import (BASELINE_SAFETY_FIELD, MATRIX_DROPPED_KEY, NOT_REACHED_KEY,
                       REFUSAL_CLASS_FIELD, SAFETY_CRITICAL_KEY, SAFETY_REGRESSION,
+                      UNSCORABLE_HEAD, UNSCORABLE_WRITES_KEY,
                       baseline_safety_flags, coverage_report_lines, evaluate_promotion,
                       not_reached_for_record, promote, refusal_head,
                       slice_metrics, validity_report, validity_report_lines)
@@ -1111,6 +1118,132 @@ def _coverage_text(cov: dict[str, Any]) -> list[str]:
     ]
 
 
+#: #3959: the second reason a `writes:`-scoped card cannot be tried, which no bigger
+#: window removes. A card whose frontmatter declares `writes:` — `bench_029`,
+#: `bench_030`, `bench_031` today — has its trial refused by `require_copied_state`
+#: unless the aggregator that will EXECUTE the writes answers `GET /state` with
+#: `state_is_copied: true`. Nothing in this repo boots such a server: `bench_spawner.spawn`
+#: is imported only by `bench_durable_write_proof.py` and its own test, and
+#: `git grep -cE "fixture|spawn" scripts/autoresearch/run_round.py` was 0 when #3959 was
+#: triaged. So the only aggregator a round can point at is the supervised production one,
+#: measured live at triage against `http://127.0.0.1:8500/state`: `TrialRefused …
+#: is_production_data=True is_production_vault=True state_is_copied=False`.
+#:
+#: That is why a shrink drop of such a card is not the same fact as "the window was too
+#: small": the card would have been refused had it stayed in the matrix, and a round that
+#: records only the window leaves the card looking like coverage the budget cost, which is
+#: what sends it reappearing in every split with no evidence behind it (#3688's owed
+#: "5 real model trials per card" is unmeasurable while nobody says why).
+UNSCORABLE_EVENT = "unscorable_writes_trial"
+UNSCORABLE_CAUSE = ("no fixture-rooted aggregator is booted, so require_copied_state "
+                    "would refuse the trial even if it fit the window")
+
+
+def fixture_rooted_aggregator() -> bool:
+    """Whether this process was told about an aggregator that is not the supervised one.
+
+    `LLOYD_BENCH_STATE_URL` is set by whoever boots a fixture-rooted child (it is the
+    only route `resolve_state_url` takes off `mcp_servers.lloyd-mcp.url`), so an unset
+    value is the round's own evidence that no such server was booted for it. The claim is
+    deliberately weak in the other direction: a SET value says someone pointed the runner
+    somewhere else and nothing here can prove that server's state is a copy without
+    asking it, so the round stays silent rather than calling a card unscorable on a
+    guess — silence is what keeps this out of the report of a box that fixed the cause.
+    """
+    return bool(str(os.environ.get(STATE_URL_ENV) or "").strip())
+
+
+def writes_declared(task: dict) -> list[str]:
+    """The scopes one bench task's `writes:` frontmatter declares, [] for most tasks.
+
+    `bench_fixture.declared_scopes` is the same reader `write_scope_of` uses to decide
+    what a running trial's tool sandbox admits, so "this card declares writes" here and
+    "this trial needs copied state" there cannot fall out of agreement about which cards
+    they mean. Imported locally for the reason `write_scope_of` gives: `bench_fixture`
+    pulls in the fixture machinery, and a round must not acquire that dependency just to
+    describe a drop.
+    """
+    from .bench_fixture import declared_scopes
+    return list(declared_scopes(task))
+
+
+def unscorable_writes_drops(pre_fit_tasks: list[dict[str, Any]],
+                            dropped_ids: Iterable[str]) -> list[dict[str, Any]]:
+    """The dropped tasks that could not have run this round whatever the window did.
+
+    Reads the shrink's own victim list against the task dicts it was cut from, so the
+    card is identified by the drop and not by a second copy of the bench frontmatter: a
+    card that stayed in the matrix is not here, whatever it declares. Sorted by id,
+    because these entries become one ledger row and one report list each, and a reader
+    greps for an id.
+    """
+    if fixture_rooted_aggregator():
+        return []
+    dropped = {str(t) for t in dropped_ids}
+    if not dropped:
+        return []
+    if fixture_rooted_aggregator():
+        # The one box-side signal that the second cause is no longer true. `UNSCORABLE_CAUSE`
+        # is a claim about this box, and a round whose environment names a fixture-rooted
+        # aggregator would be publishing a false cause into the durable record — where a
+        # later reader cannot tell it from a measured one. Checked here rather than in the
+        # report writer so the ledger row, the report line and the promotion key all come
+        # from one decision and cannot disagree about which box they were describing.
+        return []
+    rows = [{"task_id": str(t.get("id")), "writes": writes_declared(t)}
+            for t in pre_fit_tasks
+            if str(t.get("id")) in dropped and writes_declared(t)]
+    return sorted(rows, key=lambda r: r["task_id"])
+
+
+def unscorable_writes_ledger_row(round_id: str, drop: dict[str, Any],
+                                 window_seconds: float | None) -> dict[str, Any]:
+    """The `unscorable_writes_trial` row for one card the shrink dropped.
+
+    `variant_id: None` is the load-bearing key, not decoration: `derive_trial_priors`
+    and `last_scored_round_by_task` both skip a row whose `variant_id` is None, which is
+    how this record stays out of the arm p90s it must not enter (a 0-second "trial"
+    there would shrink every future matrix harder than the window that caused this one)
+    and out of the card's "last scored round", while still being a row the card's own id
+    finds with a grep. No `duration_seconds` key at all: a null duration on a row with no
+    variant is the same fabricated-trial shape one key away.
+    """
+    return {
+        "round_id": round_id,
+        "event": UNSCORABLE_EVENT,
+        "variant_id": None,
+        "task_id": drop["task_id"],
+        "declared_writes": list(drop["writes"]),
+        "reason": (
+            f"unscorable this round: dropped by the pre-trial matrix shrink "
+            f"({'no budget' if window_seconds is None else f'{window_seconds:.0f} s window'}), "
+            f"and {UNSCORABLE_CAUSE}"),
+        "created_at": now_iso(),
+    }
+
+
+def _unscorable_writes_text(rows: list[dict[str, Any]], ledger_path: Path) -> list[str]:
+    """The report line for such a drop: both causes, and the word unscorable.
+
+    One line per round, not one per card, because the two causes are the same for every
+    card on the box; the ids are what differ. Says "unscorable", not "not run", and
+    names the non-budget cause in the same breath as the window, because the sentence
+    that mentions only the window is the sentence that reads as lost coverage — which is
+    the exact misreading this item was filed on.
+    """
+    if not rows:
+        return []
+    # The word is `promote.UNSCORABLE_HEAD`, the same token the coverage line and the
+    # refusal print: the report, the ledger row and the promotion text describe one class
+    # with one spelling, so a reader who greps the word finds all three.
+    return [
+        f"- {UNSCORABLE_HEAD} this round (writes-scoped, dropped by the matrix shrink): "
+        + ", ".join(f"{r['task_id']} (writes: {', '.join(r['writes'])})" for r in rows)
+        + f" — not merely not-run: the window is one cause, and {UNSCORABLE_CAUSE}"
+        + f"; recorded per card as event={UNSCORABLE_EVENT} in {ledger_path}"
+    ]
+
+
 # ── ledger rows, as functions ────────────────────────────────────────────────────
 # Both row shapes are contracts read by other programs — `promotion_fp_rate.py` and
 # #428's published false-positive denominator parse `decision` rows, and
@@ -1469,6 +1602,20 @@ async def run(
                        "no budget" if window is None else f"{window:.0f}",
                        f"{projection['projected_seconds']:.0f} s",
                        ", ".join(matrix_dropped))
+    # #3959: a `writes:` card the shrink dropped could not have run this round even
+    # with an infinite window, so it gets a record of its own rather than hiding in the
+    # drop list as "coverage the budget cost". Written per card, before any trial starts,
+    # with `variant_id: None` — see `unscorable_writes_ledger_row` for why that key is
+    # what keeps it out of the arm priors it must not enter.
+    unscorable_writes = unscorable_writes_drops(pre_fit_tasks, matrix_dropped)
+    for _drop in unscorable_writes:
+        ledger_append(cfg.paths.ledger_path,
+                      unscorable_writes_ledger_row(rid, _drop, window))
+    if unscorable_writes:
+        logger.warning(
+            "unscorable this round: %d writes-scoped task(s) dropped by the matrix shrink "
+            "(%s) — %s", len(unscorable_writes),
+            ", ".join(d["task_id"] for d in unscorable_writes), UNSCORABLE_CAUSE)
     shrink_stopped = projection.get("shrink_stopped_early") or {}
     if shrink_stopped:
         # Loud on purpose. This is the state where the round WILL be cut at the
@@ -1572,6 +1719,11 @@ async def run(
     declared_ids = set(split["targeted"]) | set(split["heldout"])
     round_record = {
         MATRIX_DROPPED_KEY: list(matrix_dropped),
+        # #3959: the subset of that drop list which was never runnable here, so the
+        # coverage line and the refusal say `unscorable:` for these and keep `shrunk:`
+        # for the members a bigger window would have kept. An id absent here is labelled
+        # exactly as it was before this key existed.
+        UNSCORABLE_WRITES_KEY: [d["task_id"] for d in unscorable_writes],
         NOT_REACHED_KEY: not_reached_for_record(tasks_not_reached),
         SAFETY_CRITICAL_KEY: sorted(tk["id"] for tk in all_tasks
                                     if tk["id"] in declared_ids and tk.get("safety_critical")),
@@ -1709,6 +1861,11 @@ async def run(
         # round that dropped nothing has no coverage to have given up, and a `0`
         # there would be the same unreadable number as an unreadable lint.
         *(_coverage_text(matrix_coverage_report) if matrix_dropped else []),
+        # #3959: the drop that was never runnable. Directly under the coverage lines,
+        # because the misreading this item was filed on is exactly "the shrink cost us
+        # that card" — and for a writes-scoped card the shrink removed something that
+        # could not have been scored here at all.
+        *(_unscorable_writes_text(unscorable_writes, cfg.paths.ledger_path)),
         # #1715: the case #1605's loop had no words for. The matrix is over window,
         # shrinking has stopped, and the reason is not that it ran out of tasks — it
         # is that every step left frees less than the margin already holds back, so
@@ -1907,6 +2064,12 @@ async def run(
         "matrix_projection": projection,
         "matrix_planned": planned,
         "matrix_dropped_tasks": matrix_dropped,
+        # #3959: the ids among them that were never runnable here at all, so the coverage
+        # summary (`promote.UNSCORABLE_WRITES_KEY`, read out of this same record) can say
+        # "unscorable" instead of "the shrink cost us that card". Names, not dicts: the
+        # other three keys of this record are lists of ids, and `coverage_record` reads
+        # all four the same way.
+        UNSCORABLE_WRITES_KEY: [d["task_id"] for d in unscorable_writes],
         # #1716: the same figures the report states, so the owed-check that measures
         # the re-open condition does not have to parse them back out of markdown.
         # Present on every round, shrunk or not (`shrunk` says which), because a

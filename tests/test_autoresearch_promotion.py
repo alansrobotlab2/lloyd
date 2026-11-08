@@ -3123,20 +3123,24 @@ def test_the_coverage_refusal_names_which_case_it_is(cfg, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 def _heads_in_the_refusal(reason: str) -> dict[str, list[str]]:
-    """All three named id lists of a coverage refusal, keyed by head and not by position.
+    """Every named id list of a coverage refusal, keyed by head and not by position.
 
     `_lists_in_the_refusal` above reads the two heads that existed before this change; a
     node that parsed the third by position could read the count segment ("4 of 5 held-out
     tasks scored") as an id list, or miss `shrunk:` entirely and still see a refusal that
     names it — which is how a three-way distinction gets pinned by a test that only ever
-    looks at two of the three.
+    looks at two of the three. The same argument reaches the fourth head #3959 adds: a
+    parser that could not see `unscorable:` would let a node read a four-way distinction
+    as a three-way one and still see a reason that names it, so this tuple is the tests'
+    knowledge of how many causes the text can carry, and a fifth head has to be listed
+    here before a node can ask about it.
     """
     body = reason[reason.index("(") + 1:reason.rindex(")")]
     found: dict[str, list[str]] = {}
     for part in body.split("; "):
         head, sep, tail = part.partition(": ")
         if sep and head.strip() in (promote.UNSCORED_HEAD, promote.UNRANKABLE_HEAD,
-                                    promote.SHRUNK_HEAD):
+                                    promote.SHRUNK_HEAD, promote.UNSCORABLE_HEAD):
             found[head.strip()] = tail.split(", ")
     return found
 
@@ -3361,3 +3365,103 @@ def test_an_absent_round_record_fails_rather_than_defaulting(monkeypatch,
     with pytest.raises(FileNotFoundError) as exc:
         _frozen_record()
     assert f"{FROZEN_ROUND}-round.json" in str(exc.value), str(exc.value)
+
+
+# ── #3959: a writes-scoped card the round could never try is labelled apart ────────
+def test_a_card_the_round_could_never_try_is_labelled_unscorable_not_shrunk(cfg) -> None:
+    """Clause 4: `unscorable` names a different fact than `shrunk`, and nothing else moves.
+
+    The frozen real round, its real four-id drop list, its real marks — then the one key
+    #3959 adds, saying which dropped member the round could not have tried at all. The id
+    named under the new head is one the frozen round really dropped
+    (`bench_016_audit_skill_dead_paths`): `coverage_record` reads a list of ids and not a
+    bench file, so which id the round would put there is the round's claim, and the run
+    that derives it from a card's `writes:` frontmatter is pinned in
+    tests/test_autoresearch_round_report.py against the real card,
+    `bench_029_durable_write_vault_note`.
+
+    What the split pins is the sentence a reader would otherwise act on wrongly.
+    `shrunk:` says raise the budget. For a writes-scoped card that reading buys nothing:
+    `require_copied_state` refuses its trial on a box with no fixture-rooted aggregator,
+    whatever the window says, which is why #3688's owed "5 real trials per card" sat
+    unmeasured for five days while the card reappeared in every split.
+
+    The safety-critical declaration is the same one
+    `test_a_safety_critical_member_is_never_set_aside` uses, and it is here for one reason:
+    to keep the targeted bar refusing so the three remaining heads are visible in one
+    reason at once.
+    """
+    base, variants, split = _frozen_round()
+    vs = variants[sorted(variants)[0]]
+    never_ran, safety_floor = "bench_016_audit_skill_dead_paths", \
+        "bench_015_audit_cross_entity_fact_copies"
+    still_shrunk = ["bench_017_audit_unresolved_task_skills",
+                    "bench_026_contradiction_supersede_chain"]
+
+    def _record() -> dict:
+        rec = _frozen_record()
+        rec[promote.SAFETY_CRITICAL_KEY] = sorted(
+            rec[promote.SAFETY_CRITICAL_KEY] + [safety_floor])
+        return rec
+
+    plain = _record()
+    _, plain_reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                 round_record=plain)
+    assert plain_reason.startswith("partial_targeted_coverage"), plain_reason
+    assert _heads_in_the_refusal(plain_reason)[promote.SHRUNK_HEAD] == \
+        [never_ran] + still_shrunk, plain_reason
+    assert promote.UNSCORABLE_HEAD not in plain_reason, (
+        "a round whose record carries no new key must render exactly as it did before "
+        f"this head existed: {plain_reason}")
+
+    record = _record()
+    record[promote.UNSCORABLE_WRITES_KEY] = [never_ran]
+    _, reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                           round_record=record)
+    heads = _heads_in_the_refusal(reason)
+    assert heads[promote.UNSCORABLE_HEAD] == [never_ran], reason
+    assert heads[promote.SHRUNK_HEAD] == still_shrunk, (
+        "only the named member changed heads; the two a bigger window would have kept "
+        f"stay `shrunk`: {heads}")
+    assert heads[promote.UNSCORED_HEAD] == [safety_floor], reason
+    assert never_ran not in heads[promote.UNSCORED_HEAD], reason
+    assert never_ran not in heads[promote.SHRUNK_HEAD], (
+        f"one member the round shelved, one label for it: {heads}")
+
+    lines = promote.coverage_report_lines(base, vs, split=split, round_record=record)
+    head_line = next(ln for ln in lines if "declared members not evaluated" in ln)
+    assert f"{promote.UNSCORABLE_HEAD}: {never_ran}" in head_line, head_line
+    assert f"{promote.SHRUNK_HEAD}: {', '.join(still_shrunk)}" in head_line, head_line
+    plain_head = next(ln for ln in promote.coverage_report_lines(
+        base, vs, split=split, round_record=plain)
+        if "declared members not evaluated" in ln)
+    assert promote.UNSCORABLE_HEAD not in plain_head, plain_head
+
+    # The key cannot exempt. A member the round did not drop is untouched by it, and a
+    # member the safety floor holds is held anyway — `unrankable_on_both`-style precedence
+    # survives, because the only thing this key may do is move an id between two heads
+    # that are BOTH already shelved. Naming the safety-critical member is the sharpest
+    # form of the test: it is dropped by the real round, and the floor above it refuses on
+    # it either way.
+    shifty = _record()
+    shifty[promote.UNSCORABLE_WRITES_KEY] = [safety_floor, never_ran]
+    _, shifty_reason = promote.evaluate_promotion(cfg, base, vs, split=split,
+                                                  round_record=shifty)
+    shifty_heads = _heads_in_the_refusal(shifty_reason)
+    assert shifty_heads[promote.UNSCORED_HEAD] == [safety_floor], shifty_heads
+    assert shifty_heads[promote.UNSCORABLE_HEAD] == [never_ran], shifty_heads
+
+
+def test_the_round_and_the_promoter_agree_on_the_unscorable_key() -> None:
+    """The seam #3959 crosses: one key name, imported and not re-typed.
+
+    The round computes the list from a card's `writes:` frontmatter and writes it into its
+    payload and its round record; the promoter reads it out of that record and turns it
+    into the word in the promotion text. Those are two modules and one string, and a
+    second literal spelling on either side would silently disable the label with both
+    suites green — the failure mode is a card that goes back to being called `shrunk`,
+    which is the exact misreading the item was filed on.
+    """
+    from scripts.autoresearch import run_round
+    assert run_round.UNSCORABLE_WRITES_KEY == promote.UNSCORABLE_WRITES_KEY
+    assert run_round.UNSCORABLE_HEAD == promote.UNSCORABLE_HEAD

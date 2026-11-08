@@ -1686,3 +1686,86 @@ def test_no_count_of_rounds_was_added_to_either_file():
         == {"7": 1, "35": 1}
     bs = (_RUN_ROUND_SRC.parent / "bench_split.py").read_text(encoding="utf-8")
     assert not re.search(r"over \d+ rounds", bs), "a round count appeared in bench_split.py"
+
+
+# ── #3959: an unscorable-writes record must not reach the arm priors ──────────────
+def test_the_unscorable_writes_record_is_invisible_to_the_arm_priors(tmp_path):
+    """Clause 2: the record names a card the round gave up, and changes no cost.
+
+    #3959's own hazard: an attributable row for a trial that never ran is one
+    `duration_seconds` field away from a 0-second trial. The shrink reads these priors,
+    so a row that entered them would make the next round's projection smaller, shrink
+    harder, and drop more cards — the instrument feeding on the incident.
+    `derive_trial_priors` skips a row whose `variant_id` is null and one whose
+    `duration_seconds` is not a positive number, and those two conditions are the whole
+    of this record's quarantine — the node below pins they are the reason, and pins that
+    a row which satisfied them would have been counted.
+
+    Same ledger, same file, one extra line: the only difference between the two
+    derivations is that line, so a moved number cannot be blamed on ordering or on the
+    percentile's rounding.
+    """
+    ledger = _prior_ledger(tmp_path / "ledger.jsonl", direct_secs=27.9, sdk_secs=200.6)
+    before = run_round.derive_trial_priors(ledger)
+    assert (before.direct.measured, before.sdk.measured) == (True, True), (
+        "the precondition: both priors are measured, so a contamination would have "
+        "somewhere measurable to move")
+
+    drop = {"task_id": "bench_029_durable_write_vault_note", "writes": ["vault"]}
+    row = run_round.unscorable_writes_ledger_row("R_20261108_185536", drop, 1429.0)
+    assert row["variant_id"] is None, (
+        "a row with a variant_id is a trial to `derive_trial_priors`, and this is not one")
+    assert row["event"] == run_round.UNSCORABLE_EVENT, (
+        "`event` is what tells a reader grepping the ledger that this is a round-level "
+        "record and not a trial, the way `split` and `decision` do")
+    assert "duration_seconds" not in row, (
+        "the row carries no duration key at all, so there is no 0 for a later arm "
+        f"percentile to average: {sorted(row)}")
+
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    after = run_round.derive_trial_priors(ledger)
+
+    for arm in ("direct", "sdk"):
+        assert getattr(after, arm) == getattr(before, arm), (
+            f"the {arm} prior moved on a row that records no trial: "
+            f"{getattr(before, arm)!r} -> {getattr(after, arm)!r}")
+
+    # Same equality on the row counts, because a p90 over 25 identical durations cannot
+    # move at all — it would pass on a derivation that read nothing. `n` is the field
+    # that says how many rows were admitted, so it is the one that tells an ignored row
+    # from a counted one. The fixture writes 30 direct and 25 agent-loop rows.
+    assert (before.direct.n, before.sdk.n) == (30, 25), "the fixture's own counts"
+    assert (after.direct.n, after.sdk.n) == (30, 25), (
+        f"the record was admitted as a trial: {after.direct.n}/{after.sdk.n}")
+
+    # The negative half: what WOULD be counted, so the equality above is a fact about
+    # this record's keys and not about a derivation that reads no rows. `derive_trial_priors`
+    # admits a row on two conditions — a `variant_id`, and a positive `duration_seconds` —
+    # and this record fails both, which is why the item's hazard ("no 0-second trial is
+    # counted") is closed twice over. The row below is the same record with a variant, a
+    # `harness` and a positive duration: the shape a round would have written if it had
+    # wanted a number to exist for a trial it never ran. It is counted — n goes to 26 —
+    # and 26 rows including a made-up one is exactly how the next round gets projected
+    # cheaper and shrinks harder, which is the loop #3959 names.
+    fabricated = dict(row, variant_id="V_FABRICATED", harness="sdk",
+                      duration_seconds=139.0, trace_status="matrix_shrink")
+    fabricated.pop("event")
+    poisoned = tmp_path / "poisoned.jsonl"
+    poisoned.write_text(ledger.read_text(encoding="utf-8") + json.dumps(fabricated) + "\n",
+                        encoding="utf-8")
+    moved = run_round.derive_trial_priors(poisoned)
+    assert moved.sdk.n == after.sdk.n + 1 == 26, (
+        "a trial-shaped row IS counted, so `n` is a live witness and the equality above "
+        f"means this record was skipped: n={moved.sdk.n}")
+
+    # …and the literal 0 the item names is dropped by the second guard even WITH a
+    # variant: the derivation floors non-positive durations because the runner floors a
+    # real trial at `SDK_MIN_TRIAL_SECONDS`, so a zero can only be a row that never ran.
+    zeroed = dict(fabricated, duration_seconds=0.0)
+    zeros = tmp_path / "zeros.jsonl"
+    zeros.write_text(ledger.read_text(encoding="utf-8") + json.dumps(zeroed) + "\n",
+                     encoding="utf-8")
+    assert run_round.derive_trial_priors(zeros).sdk.n == 25, (
+        "a fabricated 0-second trial must not enter the priors even by accident — the "
+        "guard is the duration, not only the intent")
