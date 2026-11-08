@@ -407,6 +407,170 @@ def test_an_amendment_that_cannot_be_applied_leaves_the_decision_owed(isolated, 
         assert out["moved"] == "reopened"
 
 
+# ── 2026-11-08: two answers naming one entry are ambiguous, not last-wins ───
+
+#: #3908's own clause 1 shape: a human-only delete no round diff can carry.
+_PLANTED_CLAUSE = "delete the five fixture baselines under ~/lloyd-data/eval/baselines — human-only"
+
+#: One owed-check answer set naming entry 1 twice, read from the row
+#: `promotions.jsonl` carries at 2026-11-08T00:09:39Z for #3908: the answer
+#: carrying the amendment, then a filler, both keyed `n: 1`.
+_COLLIDING = [{"n": 1, "outcome": "reopen", "evidence": "no diff can be graded against clause 1",
+               "ruling": "clause 1 is rewritten so the next round has something to grade",
+               "amend_clause": {"clause": 1,
+                                "text": "the sweep gains a store arm for a fixture baseline "
+                                        "— scripts/groundskeeper/retention-sweep.py"}},
+              {"n": 1, "outcome": "reopen", "evidence": "e", "ruling": "No further entry."}]
+
+#: What the hold says, on the entry and in the returned notes (#3917 clause 4).
+_COLLISION_NOTE = "answers collide on n=1, still owed"
+
+
+def _colliding(isolated, item_id, clauses=(_PLANTED_CLAUSE,)):
+    """One owed decision plus a graded clause list, so an amendment COULD be
+    applied — the only way to prove it was not."""
+    p = _contract(isolated, item_id, list(clauses))
+    return p, O.entries_of(fm_of(p), derived=False)
+
+
+def _events(event: str) -> list[dict]:
+    return [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == event]
+
+
+def test_two_answers_naming_one_entry_leave_it_owed_rather_than_choosing_last(isolated):
+    """#3917: `by_n = {int(a["n"]): a for a in answers}` collapsed #3908's two
+    answers last-wins, so the amendment was dropped in silence, the row's
+    `outcomes` still listed both, and the item reopened on the strength of a
+    ruling that never reached it — which is what sent SM_20261108_001921 into the
+    refusal the ruling had been written to avoid. An ambiguous answer set applies
+    to neither answer."""
+    p, entries = _colliding(isolated, 900)
+    out = O.apply_verdict(p, entries, _COLLIDING, item_id=900, session_id="sess_collide")
+    fm = fm_of(p)
+    assert out["remaining"] == 1, "an ambiguous answer set settles nothing"
+    assert O.entries_of(fm, derived=False), "the entry stays owed for the next pass"
+    assert not fm.get("owed_settled"), "neither answer is recorded as settled"
+    assert out["moved"] == "" and fm["status"] == "draft", "no reopen on a dropped ruling"
+    assert out["amended"] == [] and not _events("clause_amended")
+    assert out["notes"] == [f"#1 {_COLLISION_NOTE}"]
+    assert fm["acceptance_clauses"] == [_PLANTED_CLAUSE], "the clause is not reworded"
+    (entry,) = O.entries_of(fm, derived=False)
+    assert entry["note"] == _COLLISION_NOTE
+    assert entry["recheck_after"], "a date bounds the re-fire (#538), not the next tick"
+    assert entry.get("rechecks", 0) == 0, (
+        "a collision is a fault in the answer format, not a stubborn entry: "
+        "MAX_RECHECKS must never close a debt over it")
+
+
+def test_the_colliding_answer_that_arrives_last_is_dropped_too(isolated):
+    """Choosing the FIRST answer would be the same bug mirrored, so the order of a
+    colliding set must not be observable: both orderings leave one record."""
+    a, ea = _colliding(isolated, 901)
+    b, eb = _colliding(isolated, 902)
+    first = O.apply_verdict(a, ea, _COLLIDING, item_id=901)
+    second = O.apply_verdict(b, eb, list(reversed(_COLLIDING)), item_id=902)
+    assert first["moved"] == second["moved"] == ""
+    assert first["notes"] == second["notes"] == [f"#1 {_COLLISION_NOTE}"]
+    assert ([e["note"] for e in O.entries_of(fm_of(a), derived=False)]
+            == [e["note"] for e in O.entries_of(fm_of(b), derived=False)]
+            == [_COLLISION_NOTE])
+    assert (fm_of(a)["acceptance_clauses"] == fm_of(b)["acceptance_clauses"]
+            == [_PLANTED_CLAUSE])
+    assert not _events("clause_amended")
+
+
+def test_only_the_entry_two_answers_named_is_held(isolated):
+    """A collision is about the entry that was answered twice, not about the pass:
+    every other entry is ruled on exactly as it was before, so one ambiguous
+    answer cannot freeze an item with five debts."""
+    p = write_item(isolated, 906, extra={"owed": [
+        {"what": "collided", "kind": "check", "since": "2026-11-08T00:00:00"},
+        {"what": "answered once", "kind": "check", "since": "2026-11-08T00:00:00"}]})
+    out = O.apply_verdict(p, O.entries_of(fm_of(p)), [
+        {"n": 1, "outcome": "settled", "evidence": "run_1 shows it"},
+        {"n": 1, "outcome": "ruling", "evidence": "e", "ruling": "closed as unobservable"},
+        {"n": 2, "outcome": "settled", "evidence": "the nightly shows it"}], item_id=906)
+    fm = fm_of(p)
+    assert [e["what"] for e in O.entries_of(fm)] == ["collided"]
+    assert out["remaining"] == 1 and out["moved"] == ""
+    assert [r["evidence"] for r in fm["owed_settled"]] == ["the nightly shows it"], \
+        "the single answer to entry 2 is applied"
+    assert out["notes"] == ["#1 answers collide on n=1, still owed",
+                            "#2 settled: the nightly shows it"]
+
+
+def test_a_colliding_answer_set_writes_no_acceptance_clauses_key_on_an_item_without_one(isolated):
+    """#3908's front matter still carries no `acceptance_clauses` key — the one
+    `amend_item_clause` writes — which is how the dropped amendment stayed
+    invisible on the item a human reads. An item with no clause list to amend ends
+    the pass as it started, and is not reopened either."""
+    p = write_item(isolated, 903, extra={"owed": [
+        {"what": "its unattended attempts are spent; owed-check decides",
+         "kind": "decide", "since": "2026-11-08T00:00:00"}]})
+    S.append_event({"event": "backlog_implement", "item_id": 903, "phase": "finished"},
+                   path=S.LEDGER_PATH)
+    out = O.apply_verdict(p, O.entries_of(fm_of(p), derived=False), _COLLIDING, item_id=903)
+    fm = fm_of(p)
+    assert "acceptance_clauses" not in fm
+    assert out["moved"] == "" and out["amended"] == []
+    assert O.entries_of(fm, derived=False) and not _events("clause_amended")
+
+
+def test_the_owed_check_row_carries_amended_empty_so_a_summary_is_checkable(isolated, monkeypatch):
+    """The #3908 row's `summary` said clause 1 was rewritten while the same ledger
+    held no `clause_amended` event, because the row kept only `remaining`, `filed`
+    and `moved`. `result.amended` is what that sentence gets checked against, and
+    the job says the collision out loud — a dry run first, before an apply run
+    consumes the pass."""
+    from workers.sources import _common as C
+    p, _ = _colliding(isolated, 904)
+    monkeypatch.setattr(C, "run_prompt_in_session", _fake_session(
+        {"entries": list(_COLLIDING), "summary": "Entry 1 is reopened, not closed: clause 1 is rewritten"}))
+    out = asyncio.run(OC.execute(_Job({"apply": True})))
+    assert out["status"] == "success" and "answers collide on #1" in out["summary"]
+    row = _events("owed_check")[-1]
+    assert row["result"] == {"remaining": 1, "filed": [], "moved": "", "amended": []}
+    assert row["collided"] == [1], "the row itself names the collision, beside `remaining: 0`"
+    assert row["ok"] is True
+    assert not _events("clause_amended")
+    assert O.entries_of(fm_of(p), derived=False)
+
+
+def test_the_owed_check_row_names_the_clause_an_amendment_rewrote(isolated, monkeypatch):
+    """The other half of the same clause: when `amend_item_clause` runs its clause
+    number is in the row, so the row and the `clause_amended` event agree instead
+    of one of them being prose."""
+    from workers.sources import _common as C
+    p, _ = _colliding(isolated, 905, clauses=("a — tests/a.py", "b — tests/b.py"))
+    monkeypatch.setattr(C, "run_prompt_in_session", _fake_session(
+        {"entries": [{"n": 1, "outcome": "reopen", "evidence": "both reviews refused b as written",
+                      "ruling": "reopened on the reworded clause",
+                      "amend_clause": {"clause": 2, "text": "b — tests/b2.py"}}],
+         "summary": "clause 2 rewritten"}))
+    out = asyncio.run(OC.execute(_Job({"apply": True})))
+    assert "answers collide" not in out["summary"], "one answer for one entry is not a collision"
+    row = _events("owed_check")[-1]
+    assert row["result"]["amended"] == [2] and row["result"]["moved"] == "reopened"
+    assert row["collided"] == []
+    assert _events("clause_amended")[-1]["clause"] == 2
+    assert fm_of(p)["acceptance_clauses"] == ["a — tests/a.py", "b — tests/b2.py"]
+
+
+def test_a_dry_run_says_the_answers_collide_before_an_apply_run_is_spent(isolated, monkeypatch):
+    """The collision is a property of the ANSWER SET, not of the write, so the dry
+    run says it out loud: that is the pass a reader has before an apply run spends
+    the item on a ruling that will be held."""
+    from workers.sources import _common as C
+    p, _ = _colliding(isolated, 907)
+    before = p.read_text()
+    monkeypatch.setattr(C, "run_prompt_in_session", _fake_session(
+        {"entries": list(_COLLIDING), "summary": "clause 1 is rewritten"}))
+    out = asyncio.run(OC.execute(_Job({"apply": False})))
+    assert out["status"] == "success" and "answers collide on #1" in out["summary"]
+    assert p.read_text() == before, "a dry run still writes nothing"
+    assert _events("owed_check")[-1]["collided"] == [1]
+
+
 def test_parse_answer_carries_an_amendment_only_on_a_reopen():
     raw = {"entries": [
         {"n": 1, "outcome": "reopen", "evidence": "e", "amend_clause": {"clause": 2, "text": " new  text "}},

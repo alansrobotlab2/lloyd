@@ -891,6 +891,20 @@ def _reopen_refusal(item_id: int) -> str:
             "measure or run it in this session and rule, or file it as `work`")
 
 
+def answer_collisions(answers: list[dict]) -> set[int]:
+    """Every entry number that more than one answer names.
+
+    The numbers a pass may name at all (`parse_answer` drops anything that is not
+    a due entry's number), so this is a set of `n`s and not a re-validation.
+    `apply_verdict` refuses to rule on any of them (#3917)."""
+    seen: dict[int, int] = {}
+    for a in answers:
+        if str(a.get("n", "")).isdigit():
+            n = int(a["n"])
+            seen[n] = seen.get(n, 0) + 1
+    return {n for n, count in seen.items() if count > 1}
+
+
 def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_id: int,
                   session_id: str = "", spawn_cap: int = 3, now: datetime | None = None,
                   revision: str | None = None) -> dict:
@@ -898,18 +912,27 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
 
     `answers` is the parsed list: {"n", "outcome", "evidence", "ruling",
     "recheck_after", "follow_up": {"name", "body"}, "outside"}. An entry with
-    no answer stays owed. Item-level moves (`reopen`, `close`) run after the
-    entries are recorded, at most one of them, `reopen` winning.
+    no answer stays owed, and so does one TWO answers name: neither is applied and
+    the entry gets a note saying which `n` collided (#3917 — a dict comprehension
+    keyed on `n` used to keep the last one silently, which is how #3908 was
+    reopened on the strength of a ruling whose `amend_clause` never reached the
+    item). Item-level moves (`reopen`, `close`) run after the entries are recorded,
+    at most one of them, `reopen` winning. `amended` in the result is the clauses
+    `amend_item_clause` actually rewrote: the ledger's `summary` prose is checkable
+    against it and against the `clause_amended` event, never against itself.
     """
     from scripts.automod import backlog as B
     now = now or _now()
-    by_n = {int(a["n"]): a for a in answers if str(a.get("n", "")).isdigit()}
+    collide = answer_collisions(answers)
+    by_n = {int(a["n"]): a for a in answers
+            if str(a.get("n", "")).isdigit() and int(a["n"]) not in collide}
     fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
     settled = list(fm.get(SETTLED_KEY) or [])
     outside = list(fm.get(OUTSIDE_KEY) or [])
     keep: list[dict] = []
     notes: list[str] = []
     filed: list[int] = []
+    amended: list[int] = []
     item_move = ""
     move_why = ""
     stamp = _stamp()
@@ -939,6 +962,19 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         keep.append(_compact({**entry, **kw}))
 
     for n, e in enumerate(entries, 1):
+        if n in collide:
+            # An ambiguous answer: this pass cannot say which of its two answers
+            # for entry `n` it meant, and either reading is a coin flip written
+            # onto the board. #3908's reopen at 2026-11-08T00:09:39Z was that coin
+            # flip — the amend-bearing answer lost to a filler, and the item was
+            # re-offered to a second round on the strength of a ruling its own
+            # clause says cannot be graded. Counted as NO recheck: `MAX_RECHECKS`
+            # bounds a stubborn entry, and this is a fault in the answer format,
+            # not in the entry. The date only bounds the re-fire (#538).
+            _still_owed(e, recheck_after=recheck_date("", now),
+                        note=f"answers collide on n={n}, still owed")
+            notes.append(f"#{n} answers collide on n={n}, still owed")
+            continue
         a = by_n.get(n)
         if a is None:
             _still_owed(e)
@@ -979,6 +1015,7 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                 amend_item_clause(path, amend.get("clause"), amend.get("text"),
                                   a.get("ruling") or evidence, item_id=item_id,
                                   session_id=session_id)
+                amended.append(int(amend.get("clause")))
                 notes.append(f"#{n} clause {amend.get('clause')} amended")
             except ValueError as exc:
                 _still_owed(e, recheck_after=recheck_date("", now),
@@ -1131,7 +1168,7 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                   f"{last.get('evidence') or last.get('ruling') or 'no detail given'}"[:400],
         ) else ""
     return {"remaining": len(keep), "settled": len(settled), "outside": len(outside),
-            "filed": filed, "moved": moved, "notes": notes}
+            "filed": filed, "moved": moved, "notes": notes, "amended": amended}
 
 
 def outside_list(boards: tuple[str, ...] | None = None) -> list[dict]:

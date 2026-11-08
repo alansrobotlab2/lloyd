@@ -415,9 +415,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                            "; ".join(a["outside"] or a["evidence"] for a in outside)[:400])
             except Exception:  # noqa: BLE001 — an announcement never fails the job
                 pass
+    # Two answers naming one entry: `apply_verdict` holds that entry rather than
+    # picking (#3917). The collision is in the ANSWER SET, so it is knowable here
+    # and goes on the row itself — a row showing `remaining: 0` beside two
+    # identical `n`s in `outcomes` is the #3908 signature, and the reader who
+    # greps for it should not have to open the item to tell it from a real settle.
+    # It is sayable on a dry run too, before an apply pass is spent on it.
+    collided = sorted(O.answer_collisions(parsed["entries"]))
+    # `amended` is in the row for one reason (#3917): this same row's `summary`
+    # said #3908's clause 1 was rewritten while the ledger held no `clause_amended`
+    # event, because the row kept only `remaining`, `filed` and `moved`. A rewrite
+    # claim is now checked against the clause numbers the writer actually applied,
+    # not against the prose that made it.
     S.append_event({"event": "owed_check", "item_id": owing.item.id, "apply": apply, "ok": True,
                     "outcomes": [{"n": a["n"], "outcome": a["outcome"]} for a in parsed["entries"]],
-                    "result": {k: result.get(k) for k in ("remaining", "filed", "moved")},
+                    "result": {k: result.get(k) for k in ("remaining", "filed", "moved", "amended")},
+                    "collided": collided,
                     "session_id": run.get("session_id"), "summary": parsed["summary"]})
     counts: dict[str, int] = {}
     for a in parsed["entries"]:
@@ -428,5 +441,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                         + ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
                         + (f"; filed {result.get('filed')}" if result.get("filed") else "")
                         + (f"; item {result['moved']}" if result.get("moved") else "")
+                        + (f"; answers collide on {', '.join(f'#{n}' for n in collided)}, "
+                           f"held owed" if collided else "")
                         + f" — {parsed['summary']}"),
             "meta": {"session_id": run.get("session_id"), "item_id": owing.item.id}}
