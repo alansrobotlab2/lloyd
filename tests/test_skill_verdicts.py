@@ -6644,6 +6644,262 @@ def test_check_prints_the_expiry_the_row_is_actually_measured_on(store, tmp_path
         f"is evaluated against: {bound_line}")
 
 
+# ── #3940: a crossed date leg must be liftable by a deliberate re-decision ────
+#
+# #2746's carry-forward made the 60-day leg age on the key's FIRST decision, and the
+# consequence nobody measured is that crossing it is then one-way: `record_verdict` writes
+# `first_decided_at` from `carried_forward_first_decided_at`, which takes the earliest stamp the
+# ledger holds, so every append after the crossing inherits the same stale anchor,
+# `reopen_reason` answers `expired after 60d` on every later night, and `terminal_verdict`
+# returns None for that key forever. The verdict stops suppressing the pattern permanently with
+# nothing deciding it, and the miner re-proposes work the ledger already adjudicated — #530's
+# defect, re-opened by a calendar. Measured on the live ledger at triage 2026-11-08: 0 of its
+# 209 keys crossed at 2026-11-08T11:00Z against 11 at 2026-11-09T11:00Z, the whole 2026-09-10
+# cohort, whose `first_decided_at` 2026-09-10T08:13:46Z plus 60 days puts the crossing at
+# 2026-11-09T08:13:46Z.
+#
+# The five nodes below pin the distinction the fix rests on, which a timestamp cannot express:
+# the MANDATORY nightly re-confirmation must stay one-way (clause 2, the two #2746 nodes below
+# the one at `test_the_cli_cannot_push_the_60_day_reopen_out` stay green unchanged), a
+# DELIBERATE re-decision must lift (clauses 1, 4, 5), and the CLI must refuse to let the two be
+# mistaken for each other (clause 3).
+
+def _crossed_key(store: Path, key: str = "Edit/logic", decided_by: str = "triage") -> str:
+    """Mint `key` 75 days ago — past its 60-day leg — and return the anchor it is weighed on.
+
+    75 rather than 61 because the shape this section is about is a key that has been released
+    for a while, not one arriving at the boundary, and 14 occurrences is a baseline high enough
+    that the growth leg stays quiet at the counts these nodes pass: the date leg is the only
+    thing moving.
+    """
+    first = _days_ago(75)
+    sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="installed skill owns this signature",
+                      evidence_cmd=PRINTING_CMD, occurrences=14, decided_at=first,
+                      decided_by=decided_by)
+    return first
+
+
+def test_a_deliberate_re_anchor_restarts_the_date_leg_on_its_own_stamp(store):
+    """Clause 1: `reanchor_date_leg=True` appends a row whose anchor is its own decided_at.
+
+    The lift is what the module could not express before: on a key 15 days past its expiry, an
+    ordinary append lands `first_decided_at = 2026-09-10`-equivalent again (triage measured
+    exactly that on a scratch copy: `record_verdict` appended a row with the stale anchor,
+    expiry still the day after, and `terminal_verdict` returned None at 2026-11-09, 2026-12-01
+    and 2027-06-01), so the release could not be reversed by any writer. A lift supplies the
+    carry nothing, so the row's own stamp becomes the anchor and `reopen_expiry` moves out by
+    `REOPEN_AFTER_DAYS` from the re-anchor date.
+
+    It also pins the two halves that make the lift *deliberate* rather than a flag: the row
+    names who decided, and an ambient `decided_by` — the value an un-named caller leaves — is
+    refused. And it pins the half that a single-node reading would miss: the mandatory
+    re-confirmation the same night must not undo the lift, which is why
+    `carried_forward_first_decided_at` restarts its minimum at the lift line rather than
+    reading the whole file.
+    """
+    key = "Edit/logic"
+    first = _crossed_key(store, key)
+    assert sv.date_leg_crossed(sv.load_verdicts(store)[key]) is True
+    assert sv.terminal_verdict(key, store=store, occurrences=14) is None, (
+        "the key is released before the lift — the state the lift has to reverse")
+
+    lifted = sv.record_verdict(store, pattern_key=key, verdict="reviewed_no_skill",
+                              reason="re-decided against tonight's corpus by hand",
+                              evidence_cmd=PRINTING_CMD, occurrences=14,
+                              decided_by="alan", reanchor_date_leg=True)
+    assert lifted["first_decided_at"] == lifted["decided_at"], (
+        f"a lift anchors on its own decision, not the earliest prior line "
+        f"({first}): got {lifted['first_decided_at']}")
+    assert lifted["decided_by"] == "alan", "a re-decision names its decider on the row"
+    want = (datetime.strptime(lifted["decided_at"], "%Y-%m-%dT%H:%M:%SZ")
+            .replace(tzinfo=timezone.utc)
+            + timedelta(days=sv.REOPEN_AFTER_DAYS)).strftime("%Y-%m-%d")
+    assert sv.reopen_expiry_iso(lifted) == want, (
+        f"the expiry is the re-anchor date + {sv.REOPEN_AFTER_DAYS}d, not the stale one")
+    assert sv.reopen_reason(lifted, occurrences=14) is None
+    assert sv.terminal_verdict(key, store=store, occurrences=14) is not None, (
+        "the whole point: suppression comes back for a released pattern")
+
+    # A lift cannot be anonymous. `agent` is `record_verdict`'s own default and `record`'s
+    # argparse default, so a rail keyed on anything else would be walked past by omitting the
+    # argument rather than by writing it.
+    for ambient in ("", "agent"):
+        with pytest.raises(ValueError, match="decided_by"):
+            sv.record_verdict(store, pattern_key=key, verdict="reviewed_no_skill",
+                              reason="a lift with no name on it", evidence_cmd=PRINTING_CMD,
+                              decided_by=ambient, reanchor_date_leg=True)
+    assert len(_lines(store)) == 2, "a refused lift appended nothing to the ledger"
+
+    # And the lift outlives the append that follows it: the mandatory step-3.5 write-back has
+    # no lift flag, so it carries — and what it carries is now the lift, not the 2026-09-10
+    # line. Without that floor the lift would last exactly one night.
+    sv.record_verdict(store, pattern_key=key, verdict="reviewed_no_skill",
+                      reason="tonight's mandatory re-confirmation",
+                      evidence_cmd=PRINTING_CMD, occurrences=14)
+    after = sv.load_verdicts(store)[key]
+    assert after["first_decided_at"] == lifted["decided_at"], (
+        "a plain re-confirmation after a lift must carry the LIFT forward; carrying the "
+        f"pre-crossing line ({first}) would release the key again the next morning")
+    assert sv.terminal_verdict(key, store=store, occurrences=14) is not None
+
+
+def test_the_default_append_path_still_carries_the_earliest_anchor(store):
+    """Clause 2: the lift is unreachable by default, so #2746's rule still binds the nightly.
+
+    Same crossed key, no `reanchor_date_leg` anywhere: the appended row must still inherit the
+    75-day-old anchor, `reopen_reason` must still answer `expired after 60d`, and the CLI's
+    default `record` — the shape the step-3.5 write-back actually uses — must still exit 0
+    rather than start erroring on every crossed key it re-confirms.
+
+    This is the clause the two existing nodes already hold from the other side:
+    `test_the_date_leg_ages_on_first_decided_at_not_on_the_latest_append` and
+    `test_record_stamps_first_decided_at_with_the_earliest_line_for_the_key` are unchanged by
+    this diff and are the pin that a lift cannot become the default.
+    """
+    key = "Bash/logic"
+    first = _crossed_key(store, key)
+
+    plain = sv.record_verdict(store, pattern_key=key, verdict="reviewed_no_skill",
+                              reason="routine re-confirmation, no lift asked for",
+                              evidence_cmd=PRINTING_CMD, occurrences=14)
+    assert plain["first_decided_at"] == first, (
+        "#2746's carry-forward is untouched on the default path")
+    assert plain["decided_at"] != first, "the line still records when it was written"
+    assert sv.reopen_reason(plain, occurrences=14) == f"expired after {sv.REOPEN_AFTER_DAYS}d"
+    assert sv.terminal_verdict(key, store=store, occurrences=14) is None
+
+    assert sv.main(["record", "--pattern", key, "--verdict", "reviewed_no_skill",
+                    "--reason", "step 3.5 re-confirmed it again", "--evidence-cmd",
+                    PRINTING_CMD, "--store", str(store), "--occurrences", "14"]) == 0, (
+        "a nightly re-confirmation on a crossed key must keep succeeding: refusing it would "
+        "turn eleven released keys into eleven nightly failures without deciding anything")
+    assert sv.load_verdicts(store)[key]["first_decided_at"] == first
+
+
+def test_the_cli_refuses_to_re_anchor_a_crossed_key_without_the_flag(store, mirror,
+                                                                      capsys):
+    """Clause 3: `reanchor` without `--re-anchor-leg` exits nonzero and appends nothing.
+
+    The trap this closes is in the name. `reanchor` has always re-anchored the *falsifier*, and
+    triage measured what it does to a crossed key: it appends a row, prints `re-anchored`,
+    exits 0, and the key stays released — `terminal_verdict` answers None at 2026-11-09,
+    2026-12-01 and 2027-06-01 with the row in place. So on a crossed key the command now refuses
+    and names the flag, over BOTH trees, and the deliberate form that follows is the same
+    command doing something a reader can tell apart from a repair.
+    """
+    key = "http_fetch/logic"
+    _crossed_key(store, key)
+    live_before, durable_before = len(_lines(store)), len(_lines(mirror))
+    argv = ["reanchor", "--pattern", key, "--evidence-cmd", PRINTING_CMD,
+            "--store", str(store)]
+
+    assert sv.main(argv) == 2, "a crossed key's falsifier re-anchor must not report success"
+    err = capsys.readouterr().err
+    assert any(ln.startswith("refused:") for ln in err.splitlines()), err
+    assert "--re-anchor-leg" in err, f"the refusal has to name the flag: {err}"
+    assert len(_lines(store)) == live_before, "the live ledger gained a line anyway"
+    assert len(_lines(mirror)) == durable_before, "the durable copy gained a line anyway"
+
+    # The flag, plus a named decider: the same command, and suppression comes back.
+    assert sv.main(argv + ["--re-anchor-leg", "--decided-by", "alan"]) == 0
+    out = capsys.readouterr().out
+    assert "date leg re-armed" in out, (
+        f"the status line must say which kind of re-anchor this was: {out}")
+    row = sv.load_verdicts(store)[key]
+    assert row["first_decided_at"] == row["decided_at"]
+    assert row["decided_by"] == "alan"
+    assert sv.terminal_verdict(key, store=store, occurrences=14) is not None
+    assert len(_lines(store)) == live_before + 1
+    assert len(_lines(mirror)) == durable_before + 1
+
+    # And the flag alone is not enough: a lift with no decider is refused, appending nothing.
+    assert sv.main(argv + ["--re-anchor-leg"]) == 2
+    err = capsys.readouterr().err
+    assert "--decided-by" in err, err
+    assert len(_lines(store)) == live_before + 1, "the refused lift appended nothing"
+
+
+def test_a_re_armed_leg_still_expires_on_its_own_schedule(store):
+    """Clause 4: a lift restarts the clock, it does not stop it.
+
+    Without this the fix would be a permanent veto wearing a flag: the whole reason the leg
+    exists is that a verdict which cannot lapse is inherited forever. `now=` carries the
+    arithmetic rather than waiting for the calendar, because the day this node must see released
+    is, by construction, `REOPEN_AFTER_DAYS` after the lift it just made.
+    """
+    key = "Glob/logic"
+    _crossed_key(store, key)
+    assert sv.terminal_verdict(key, store=store, occurrences=14) is None
+
+    stamp = sv.now_iso()
+    lifted = sv.record_verdict(store, pattern_key=key, verdict="reviewed_no_skill",
+                              reason="re-decided today by hand", evidence_cmd=PRINTING_CMD,
+                              occurrences=14, decided_at=stamp, decided_by="alan",
+                              reanchor_date_leg=True)
+    assert lifted["first_decided_at"] == stamp
+
+    inside = (datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+              + timedelta(days=sv.REOPEN_AFTER_DAYS - 1))
+    outside = (datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+               + timedelta(days=sv.REOPEN_AFTER_DAYS + 1))
+    assert sv.terminal_verdict(key, store=store, occurrences=14, now=inside) is not None, (
+        f"the re-armed leg binds until day {sv.REOPEN_AFTER_DAYS - 1}")
+    assert sv.terminal_verdict(key, store=store, occurrences=14, now=outside) is None, (
+        f"day {sv.REOPEN_AFTER_DAYS + 1} releases it again: a lift is a restart, not a "
+        "permanent veto")
+    assert sv.reopen_reason(lifted, occurrences=14, now=outside) == (
+        f"expired after {sv.REOPEN_AFTER_DAYS}d")
+    assert sv.reopen_expiry_iso(lifted) == (
+        datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        + timedelta(days=sv.REOPEN_AFTER_DAYS)).strftime("%Y-%m-%d")
+    # The next night's ordinary append still cannot push that date out (#2746 on the new leg).
+    assert sv.load_verdicts(store)[key]["first_decided_at"] == stamp
+
+
+def test_a_re_anchor_honours_the_mirror_rule_on_both_sides(store, mirror, tmp_path,
+                                                           monkeypatch, capsys):
+    """Clause 5: the lift is an ordinary append, so the two-tree rule applies unchanged.
+
+    #772's copy exists for the reasons and falsifiers that live nowhere else, and #1717's
+    notice exists because a repair pass once wrote 79 rows into one tree in silence. A lift is
+    the loudest kind of write this module has, so it must satisfy both halves: the byte-identical
+    line in both trees, and `MIRROR_NOT_WRITTEN` naming the copy it could not reach when an
+    off-default `--store` has no copy of its own.
+    """
+    key = "Write/logic"
+    _crossed_key(store, key)
+    assert len(_lines(store)) == len(_lines(mirror)) == 1
+
+    assert sv.main(["record", "--pattern", key, "--verdict", "reviewed_no_skill",
+                    "--reason", "re-decided by hand", "--evidence-cmd", PRINTING_CMD,
+                    "--re-anchor-leg", "--decided-by", "alan", "--store", str(store),
+                    "--occurrences", "14"]) == 0
+    live, durable = _lines(store), _lines(mirror)
+    assert len(live) == len(durable) == 2, "the lift reached both trees"
+    assert durable[-1] == live[-1], "the mirror is a copy, not a re-serialisation"
+    landed = json.loads(durable[-1])
+    assert landed["first_decided_at"] == landed["decided_at"], (
+        "the re-armed anchor crossed with the row, so a restore carries the lift and not the "
+        "stale date")
+    assert "date leg re-armed" in capsys.readouterr().out
+
+    # The other half: an off-default store with no durable copy records anyway and SAYS SO.
+    monkeypatch.delenv("SKILL_VERDICTS_MIRROR", raising=False)
+    solo = tmp_path / "solo" / "verdicts.jsonl"
+    _crossed_key(solo, "Grep/not_found")
+    capsys.readouterr()
+    assert sv.main(["record", "--pattern", "Grep/not_found", "--verdict",
+                    "reviewed_no_skill", "--reason", "re-decided by hand",
+                    "--evidence-cmd", PRINTING_CMD, "--re-anchor-leg", "--decided-by", "alan",
+                    "--store", str(solo), "--occurrences", "14"]) == 0
+    err = capsys.readouterr().err
+    assert sv.MIRROR_NOT_WRITTEN in err, (
+        f"a lift that writes one tree must name the copy it skipped: {err}")
+    assert str(sv.DEFAULT_MIRROR) in err, err
+    assert len(_lines(solo)) == 2, "the live row was still recorded, lifted"
+
+
 # ── #2828: naming the fileless reopens ───────────────────────────────────────
 #
 # `ledger_only_keys` excludes a key its verdict's reopen has just released, and a released

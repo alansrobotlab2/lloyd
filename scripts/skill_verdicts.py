@@ -212,6 +212,13 @@ TERMINAL_VERDICTS = frozenset({
 REOPEN_AFTER_DAYS = 60
 REOPEN_OCCURRENCE_GROWTH = 10.0
 
+#: The `decided_by` an un-named caller leaves: `record_verdict`'s own default and `record`'s
+#: argparse default, so it is the value that states nothing about who decided. One name for
+#: both sides, because the deliberate re-anchor refuses exactly this value (#3940 clause 1)
+#: and a second spelling of it would be a rail a caller could walk past by *omitting* the
+#: argument rather than writing it — which is the only shape the omission takes.
+AMBIENT_DECIDED_BY = "agent"
+
 # The status the miner writes instead of `pending_review` when a key is terminal.
 SUPERSEDED_STATUS = "superseded_by_verdict"
 
@@ -687,17 +694,45 @@ def reopen_expiry_iso(row: dict) -> str:
     return "" if expiry is None else expiry.strftime("%Y-%m-%d")
 
 
+def date_leg_crossed(row: dict, now: datetime | None = None) -> bool:
+    """Has this row's 60-day date leg already been crossed?
+
+    ONE predicate for that question, because two callers must agree on its answer:
+    `reopen_reason` below, which releases the key, and `cmd_reanchor`, which refuses a
+    falsifier re-anchor on a crossed key precisely because the release has already happened
+    (#3940). A second arithmetic would let the two disagree about *which* keys are crossed —
+    two readings of one measurement, which is the defect #2052 names for a denominator. The
+    comparison is the one `reopen_reason` already made, unchanged: strictly more than
+    `REOPEN_AFTER_DAYS` past `date_leg_anchor`, so a row is still binding at the expiry
+    instant and releases one second after it, and a row whose date cannot be read is not
+    crossed, exactly as it was never released.
+
+    Crossing is what makes the leg one-way on the default path:
+    `carried_forward_first_decided_at` takes the EARLIEST stamp the ledger holds for the key,
+    so every later append inherits the same stale anchor and no ordinary `record` restores
+    suppression. Measured on the live ledger at triage 2026-11-08: 0 of its 209 keys crossed
+    at 2026-11-08T11:00Z against 11 at 2026-11-09T11:00Z — the whole 2026-09-10 cohort, whose
+    `first_decided_at` 2026-09-10T08:13:46Z plus 60 days puts the crossing at
+    2026-11-09T08:13:46Z. `reanchor_date_leg` is the deliberate answer to it.
+    """
+    anchor = date_leg_anchor(row)
+    if anchor is None:
+        return False
+    now = now or datetime.now(tz=timezone.utc)
+    return now - anchor > timedelta(days=REOPEN_AFTER_DAYS)
+
+
 def reopen_reason(row: dict, occurrences: int = 0, now: datetime | None = None) -> str | None:
     """Why a terminal verdict no longer binds, or None while it still does.
 
     The date leg ages on `date_leg_anchor` — the key's first decision, not the latest
-    append — so re-confirming a verdict cannot disarm it (#2746).
+    append — so re-confirming a verdict cannot disarm it (#2746). Once crossed, the leg is
+    lifted by one thing only: a deliberate re-anchor through
+    `record_verdict(reanchor_date_leg=True)`, which appends a row anchored on its own stamp
+    and restarts the clock (#3940).
     """
     now = now or datetime.now(tz=timezone.utc)
-    decided = date_leg_anchor(row)
-    if decided is None:
-        return None
-    if now - decided > timedelta(days=REOPEN_AFTER_DAYS):
+    if date_leg_crossed(row, now=now):
         return f"expired after {REOPEN_AFTER_DAYS}d"
     baseline = row.get("occurrences_at_decision") or 0
     try:
@@ -754,12 +789,24 @@ def carried_forward_first_decided_at(store: Path | str | None, pattern_key: str)
     append is refused for. No line for the key returns '', which is the one honest case for
     `record_verdict` to stamp the key's own date — a genuinely new pattern has nothing to
     disarm.
+
+    **The minimum is taken from the last line that restarted the clock onward, not from the
+    whole file** (#3940). A line restarts it when its `first_decided_at` is its own
+    `decided_at`: that is what `record_verdict(reanchor_date_leg=True)` writes, and it is also
+    what the key's very first line is, where the two readings coincide because there is
+    nothing earlier to carry. Without that floor a deliberate re-anchor would last exactly
+    one night: the mandatory step-3.5 re-confirmation that follows it would fold the
+    pre-crossing line back into the minimum, hand the key its 2026-09-10 anchor again, and
+    `reopen_reason` would answer `expired after 60d` the next morning — a lift that survives
+    one append is not a lift, it is the same one-way defect pointing the other way. The carry
+    forward is otherwise untouched: for a key with no re-anchor line the earliest stamp over
+    every line is still what lands, which is what #2746's two nodes pin.
     """
     path = Path(resolve_verdict_source(store)[0])
     key = pattern_key.strip()
     if not path.is_file():
         return ""
-    best: tuple[datetime, str] | None = None
+    rows: list[dict] = []
     # A quiet reader, unlike `load_verdicts`: it has already warned about any malformed
     # line on this path, and this pass runs on every append.
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -770,8 +817,16 @@ def carried_forward_first_decided_at(store: Path | str | None, pattern_key: str)
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if (row.get("pattern_key") or "").strip() != key:
-            continue
+        if (row.get("pattern_key") or "").strip() == key:
+            rows.append(row)
+    start = 0
+    for i, row in enumerate(rows):
+        stamps = [row.get("first_decided_at"), row.get("decided_at")]
+        texts = [s.strip() if isinstance(s, str) else "" for s in stamps]
+        if texts[0] and texts[0] == texts[1]:
+            start = i
+    best: tuple[datetime, str] | None = None
+    for row in rows[start:]:
         for stamp in (row.get("first_decided_at"), row.get("decided_at")):
             stamp_text = (stamp or "").strip() if isinstance(stamp, str) else ""
             ts = _parse_ts(stamp_text)
@@ -837,13 +892,14 @@ def record_verdict(
     reason: str = "",
     evidence_cmd: str = "",
     occurrences: int | None = None,
-    decided_by: str = "agent",
+    decided_by: str = AMBIENT_DECIDED_BY,
     source_candidate: str = "",
     decided_at: str | None = None,
     *,
     require_input_rows: bool = True,
     require_body_scope: bool = True,
     candidates_dir: Path | str | None = None,
+    reanchor_date_leg: bool = False,
 ) -> dict:
     """Append one decision. Never mutates an earlier line.
 
@@ -875,6 +931,26 @@ def record_verdict(
     carry-forward from #736, the date reopen had none, and a fileless key — no candidate
     file, therefore no current count, and `reopen_reason` requires a baseline above 0 — has
     only the date leg to reopen on at all.
+
+    `reanchor_date_leg=True` is the one deliberate exception to that carry, and it exists
+    because the carry is one-way (#3940). Once `now - first_decided_at` passes
+    `REOPEN_AFTER_DAYS`, every later append inherits the same stale anchor by construction, so
+    `reopen_reason` answers `expired after 60d` on every subsequent night and
+    `terminal_verdict` returns None for that key forever: the verdict stops suppressing the
+    pattern permanently, with nothing deciding it, and the loop re-mines and hand-re-adjudicates
+    it each night — #530's defect, re-opened by the calendar. Eleven keys cross at
+    2026-11-09T08:13:46Z (the 2026-09-10 cohort, `first_decided_at` 2026-09-10T08:13:46Z plus
+    60 days); a scan of the live ledger's 209 keys at triage returned 0 crossed at
+    2026-11-08T11:00Z and 11 at 2026-11-09T11:00Z. A lift appends a row anchored on its own
+    stamp, so `reopen_expiry` moves to the re-anchor date plus `REOPEN_AFTER_DAYS` and
+    suppression comes back — and because `carried_forward_first_decided_at` now restarts its
+    minimum at that line, the mandatory re-confirmation that follows it cannot undo it. The
+    default path is unchanged: an append that does not ask is still #2746's carry, which is the
+    distinction this rests on — the *mandatory nightly re-confirmation* must stay one-way and
+    the *deliberate re-decision* must lift; the timestamp alone cannot tell them apart. It is
+    keyword-only, unreachable except through `record --re-anchor-leg` /
+    `reanchor --re-anchor-leg`, and it refuses a `decided_by` of `agent` or nothing, because a
+    write that un-releases a pattern has to name who released it back.
 
     The third refusal is the undeclared denominator (#2052): a command that ran, exited 0,
     and printed no `input_rows=<N>` is refused too, because 0 of the live ledger's 109
@@ -939,6 +1015,23 @@ def record_verdict(
         raise ValueError(
             "evidence_cmd is required — a verdict with no re-executable check cannot "
             "be falsified by a later run, only inherited (#525)"
+        )
+    if reanchor_date_leg and (decided_by or "").strip() in ("", AMBIENT_DECIDED_BY):
+        # The lift is the one write to this ledger that reverses a release: it takes a key
+        # the miner is proposing again and puts it back under suppression. #2746 made the
+        # default path unable to do that with a timestamp, and a keyword alone would hand it
+        # back to anything that passes `True` — so a lift also has to say who decided, and
+        # `agent` is not an answer because it is what an un-named caller leaves behind, which
+        # is exactly the anonymous nightly re-confirmation #2746 was written to disarm. Keyed
+        # on the value rather than on a length or a pattern: the mandate is that the row names
+        # a decider a reader can go and ask.
+        raise ValueError(
+            "reanchor_date_leg names a deliberate re-decision, so it must name who made one: "
+            f"`decided_by` arrived as {decided_by!r}, the value an un-named caller leaves. "
+            "Re-arming a crossed key's 60-day date leg puts a released pattern back under "
+            "suppression, which is a decision with an owner — pass the person or the run that "
+            "made it (`--decided-by \"<who>\"`), or record an ordinary verdict and leave the "
+            "key released (#3940)"
         )
     # The provenance refusal, before the falsifier runs: a verdict whose cited snapshot is
     # gone has already lost the thing its `reason` says it read, and executing a command
@@ -1137,8 +1230,13 @@ def record_verdict(
         )
     # Read before anything is written, from the same superseded state the occurrences carry
     # reads from: the earliest decision this ledger holds for the key, or '' when there is
-    # none and this line is itself the first (#2746 clause 2).
-    first_decided = carried_forward_first_decided_at(store, pattern_key)
+    # none and this line is itself the first (#2746 clause 2). A deliberate re-anchor skips
+    # the read rather than post-editing the result, so the one expression `first_decided or
+    # stamp` below stays the single writer of the field on both paths: the lift supplies the
+    # same '' a genuinely new key supplies, and cannot drift from the carry on a later edit
+    # (#3940 clause 1).
+    first_decided = ("" if reanchor_date_leg
+                     else carried_forward_first_decided_at(store, pattern_key))
     stamp = decided_at or now_iso()
     row = {
         "pattern_key": pattern_key,
@@ -2735,7 +2833,8 @@ def rerecord_shape(detail: str, *, rewrites: list[tuple[str, str]] | None = None
 
 def reanchor_verdict(store: str | Path | None = None, *, pattern_key: str,
                      evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS,
-                     dry_run: bool = False) -> dict:
+                     dry_run: bool = False, reanchor_date_leg: bool = False,
+                     decided_by: str = "") -> dict:
     """Append a hand-authored falsifier for `pattern_key`, keeping its decision intact.
 
     The lane for the two `REANCHORABLE` classes, which a substitution cannot reach: the
@@ -2754,6 +2853,16 @@ def reanchor_verdict(store: str | Path | None = None, *, pattern_key: str,
     * the row is tagged `REANCHOR_DECIDED_BY`, which is what tells a reader that the
       command was authored by hand against a surviving artifact rather than substituted.
 
+    `reanchor_date_leg=True` additionally re-arms the key's 60-day date leg, and it is here
+    because this is the subcommand an operator reaches for with the word "re-anchor" already on
+    the tip of their tongue — while what it has always re-anchored is the *falsifier*. On a key
+    whose leg has crossed it used to append a row that suppressed nothing and printed
+    `re-anchored`, which is the confusion #3940's triage names as the thing a round must not
+    assume; `cmd_reanchor` now refuses that call and points here. A lift still keeps the
+    decision, the reason and the growth baseline — it restarts the clock and nothing else — but
+    it cannot travel under `REANCHOR_DECIDED_BY`, which names a repair pass rather than the
+    person who re-decided, so a lift requires `decided_by` and the tag is that name.
+
     Raises `ValueError` with the reason; the caller prints it.
     """
     table = load_verdicts(store_path(store))
@@ -2761,6 +2870,14 @@ def reanchor_verdict(store: str | Path | None = None, *, pattern_key: str,
     if not prior:
         raise ValueError(f"no verdict recorded for {pattern_key!r}; a re-anchor keeps an "
                          "existing decision, so there is nothing to keep — use `record`")
+    named = (decided_by or "").strip()
+    if reanchor_date_leg and not named:
+        raise ValueError(
+            "refused: reanchor_date_leg re-arms a crossed date leg, which puts a released "
+            "pattern back under suppression — that is a re-decision, not a falsifier repair, "
+            "so it cannot travel under the repair tag; name who decided "
+            "(`--decided-by \"<who>\"`) (#3940)")
+    tag = named or REANCHOR_DECIDED_BY
     cmd = (evidence_cmd or "").strip()
     if not cmd:
         raise ValueError("refused: evidence_cmd is empty")
@@ -2771,11 +2888,12 @@ def reanchor_verdict(store: str | Path | None = None, *, pattern_key: str,
             f"refused: the new falsifier is itself unrunnable ({status[1]}); a re-anchor "
             "must re-execute, or this pass mints a verdict that is born dead (#1586)")
     if dry_run:
-        return {**prior, "evidence_cmd": cmd, "decided_by": REANCHOR_DECIDED_BY}
+        return {**prior, "evidence_cmd": cmd, "decided_by": tag}
     return record_verdict(store, pattern_key=pattern_key, verdict=prior.get("verdict") or "",
                           reason=prior.get("reason") or "", evidence_cmd=cmd,
-                          occurrences=None, decided_by=REANCHOR_DECIDED_BY,
-                          source_candidate=prior.get("source_candidate") or "")
+                          occurrences=None, decided_by=tag,
+                          source_candidate=prior.get("source_candidate") or "",
+                          reanchor_date_leg=reanchor_date_leg)
 
 
 def disposal_verdict(prior: dict) -> tuple[str, str]:
@@ -3559,11 +3677,40 @@ def cmd_reanchor(args: argparse.Namespace) -> int:
     pass — `reanchor_verdict` runs the command through `evidence_cmd_status` first and
     refuses it if the classifier calls it dead — so the answer to "did you re-anchor this
     against something that exists?" is the exit code, not a claim.
+
+    What it will NOT do is re-anchor a key whose 60-day date leg has already crossed, unless
+    `--re-anchor-leg` says that is the decision being made (#3940). On such a key the falsifier
+    this command appends grounds nothing: `terminal_verdict` releases the key on the date leg
+    whatever the row says, so the command would append a line, print `re-anchored`, exit 0, and
+    leave the pattern released — the ledger reading as repaired while the miner keeps proposing
+    it. That is a decision about suppression wearing the name of a repair, so the exit code is
+    2, the message names `--re-anchor-leg`, and no line is appended to either tree. Pass the
+    flag with `--decided-by` to make the re-decision explicitly; to fix only a dead falsifier
+    on a released key, `repair --reanchor-file` is the mechanical route that never touches the
+    leg.
     """
+    if args.reanchor_date_leg and not (args.decided_by or "").strip():
+        print("refused: --re-anchor-leg puts a released pattern back under suppression, which "
+              "is a deliberate re-decision, so it must name who made one — pass --decided-by "
+              '"<who>" (#3940)', file=sys.stderr)
+        return 2
+    if not args.reanchor_date_leg:
+        prior = load_verdicts(store_path(args.store)).get(args.pattern.strip())
+        if prior is not None and date_leg_crossed(prior):
+            print(f"refused: {args.pattern}'s 60-day date leg crossed on "
+                  f"{reopen_expiry_iso(prior)}, so a falsifier re-anchor would append a row "
+                  "that suppresses nothing while printing `re-anchored` — the key stays "
+                  "released either way. Pass --re-anchor-leg with --decided-by \"<who>\" to "
+                  "re-decide the key deliberately and restart the clock, or fix the falsifier "
+                  "alone with `repair --reanchor-file`, which never touches the leg (#3940)",
+                  file=sys.stderr)
+            return 2
     try:
         row = reanchor_verdict(args.store, pattern_key=args.pattern,
                                evidence_cmd=args.evidence_cmd, timeout=args.timeout,
-                               dry_run=args.dry_run)
+                               dry_run=args.dry_run,
+                               reanchor_date_leg=args.reanchor_date_leg,
+                               decided_by=args.decided_by)
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
@@ -3572,9 +3719,15 @@ def cmd_reanchor(args: argparse.Namespace) -> int:
     # keeps each leg visible rather than dropping every line after the first.
     tail = (f"observed: {collapse_observed(row.get('evidence_observed') or 'nothing')}"
             if not args.dry_run else "nothing written")
+    # The status has to say which kind of re-anchor this was, since the word now covers both:
+    # a falsifier re-anchor and a leg re-anchor print differently, and a nightly reading this
+    # line by eye cannot otherwise tell a repair from a re-decision (#3940).
+    leg = (f"date leg {'would restart' if args.dry_run else 're-armed'} at "
+           f"{row.get('decided_at')}, expires in {REOPEN_AFTER_DAYS}d"
+           if args.reanchor_date_leg else "date leg kept as recorded")
     print(f"{'would re-anchor' if args.dry_run else 're-anchored'} {row['pattern_key']}"
           f" -> {row.get('verdict')} (decision kept, occurrences "
-          f"{row.get('occurrences_at_decision')}) {tail}")
+          f"{row.get('occurrences_at_decision')}, {leg}) {tail}")
     return 0
 
 
@@ -3706,6 +3859,7 @@ def cmd_record(args: argparse.Namespace) -> int:
             decided_by=args.decided_by,
             source_candidate=args.source_candidate,
             candidates_dir=args.candidates,
+            reanchor_date_leg=args.reanchor_date_leg,
         )
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -3714,8 +3868,13 @@ def cmd_record(args: argparse.Namespace) -> int:
     # the old print would have split the confirmation across the file (#3362 clause 4). The
     # truncated case needs no special wording — a prefix is a prefix, and the row's
     # `evidence_truncated` is what tells a reader the quotation was cut.
+    # The expiry is printed only for a lift: on the default path the row's own stamp is not
+    # the date the leg is weighed on, and a `recorded … at <now>` line that looked like a fresh
+    # expiry is exactly the misreading #2746 removed (#3940).
+    leg = (f", date leg re-armed, expires {reopen_expiry_iso(row)}"
+           if args.reanchor_date_leg else "")
     print(f"recorded {row['pattern_key']} -> {row['verdict']} at {row['decided_at']} "
-          f"(occurrences {row['occurrences_at_decision']}, "
+          f"(occurrences {row['occurrences_at_decision']}{leg}, "
           f"observed: {collapse_observed(row['evidence_observed'])})")
     return 0
 
@@ -3832,7 +3991,15 @@ def main(argv: list[str] | None = None) -> int:
         help="pattern count at the decision, the baseline for the >10x growth reopen. "
              "Omit it on a correction: the count is carried forward from the row this "
              "line supersedes, so fixing a phrase cannot disarm that reopen (#736).")
-    p_record.add_argument("--decided-by", dest="decided_by", default="agent")
+    p_record.add_argument("--decided-by", dest="decided_by", default=AMBIENT_DECIDED_BY)
+    p_record.add_argument(
+        "--re-anchor-leg", dest="reanchor_date_leg", action="store_true",
+        help="re-decide this key deliberately and restart its 60-day date leg on this line, "
+             "instead of carrying the earliest decision forward (#2746's rule, which stays "
+             "the default). Once a key is past its expiry nothing else can restore "
+             "suppression, because every later append inherits the stale anchor (#3940) — so "
+             "this refuses an ambient --decided-by: name who re-decided. Omit it on a nightly "
+             "re-confirmation: an ordinary record must not be able to disarm the leg.")
     p_record.add_argument("--source-candidate", dest="source_candidate", default="")
     p_record.add_argument(
         "--candidates", default=str(DEFAULT_CANDIDATES),
@@ -3910,6 +4077,15 @@ def main(argv: list[str] | None = None) -> int:
     p_reanchor.add_argument("--timeout", type=int, default=EVIDENCE_TIMEOUT_SECONDS)
     p_reanchor.add_argument("--dry-run", dest="dry_run", action="store_true",
                             help="execute the command and report, append nothing")
+    p_reanchor.add_argument("--decided-by", dest="decided_by", default="",
+                            help="who made this call; required with --re-anchor-leg, and "
+                                 "otherwise the row carries the repair tag")
+    p_reanchor.add_argument(
+        "--re-anchor-leg", dest="reanchor_date_leg", action="store_true",
+        help="re-arms the key's 60-day date leg as well as its falsifier. Required on a key "
+             "whose leg has already crossed: without it this command refuses rather than "
+             "append a row that suppresses nothing while reporting success (#3940). Must be "
+             'paired with --decided-by "<who>".')
     p_reanchor.set_defaults(func=cmd_reanchor)
 
     args = parser.parse_args(argv)
