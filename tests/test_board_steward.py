@@ -5327,3 +5327,199 @@ def test_a_non_guard_human_only_confirmation_stays_pickable_and_unparked(board):
         "re-keying became a widening")
     assert v32[0] in forbidden, (
         "the pick rule does not forbid the value the real guard's line renders")
+
+
+# ── #3962: a confirmed line's verdict disagreement is a note, never a move ─────
+#
+# #3766 put the verdict on every line, #3784 gave it its fourth value and #3858
+# re-keyed `next_pick` onto the rendered value — and the sentence that defines what a
+# disagreement MEANS was never touched. It ended "that is worth a proposal with a
+# `reason` saying so", and the steward obeyed it against a correct line:
+# `~/lloyd-data/sessions/20261107_155534_boardsteward_de38.json` records the model
+# writing "**Per instruction**, that's worth a proposal with a reason saying so"
+# while proposing `draft` for #3908, whose bare `triage=confirmed` line was right
+# (`NON_GUARD_MARKER` is #3908's shape — a `human-only:` acceptance naming only
+# runtime-data paths, so `is_human_only` is False and `desired_statuses` wants
+# `up_next`). Triage measured three `disagree_sides` rows naming #3908 with the
+# machine side `up_next` in the trailing 7-day window (2026-11-07T20:45:17,
+# 21:56:56 and 22:01:57 UTC) inside judged=171 / rate=0.8596, under the
+# `judged >= 50 AND rate >= 0.90` flip bar the steward is still dry-run on.
+#
+# The wording cannot be hidden instead: `_item_line` prints `BODY_CHARS` = 280
+# characters of body and no acceptance at all (workers/sources/board_steward.py),
+# so the model derived "human-only" from the visible first sentence of the body. A
+# rule that keys on an excerpt the machine never read is the defect; the binding has
+# to forbid the MOVE, and it has to sit in the same field-doc bullet, because that
+# bullet's own sentence is the one the session quoted.
+
+
+def _triage_field_sentence(prompt: str, anchor: str) -> str:
+    """The one sentence of the `triage=` field doc that holds `anchor`.
+
+    Scoped to the field-doc bullet (`- **`triage=`` to the next bullet) and to the
+    sentence holding the anchor, which is the only scope that grades "the same
+    sentence must also say X". #3784's review refused a character window for exactly
+    this: a window wide enough to reach the rule is wide enough to contain the
+    bullet's header, so a deleted rule still passes. A sentence is delimited here by
+    `". "` — the bullet's only terminator — and the result is asserted to hold no
+    second one, so a rule split across two sentences reddens the caller instead of
+    silently satisfying a per-sentence assertion from the wrong half.
+    """
+    assert "- **`triage=`" in prompt, "the field is never named to the steward"
+    doc = prompt[prompt.index("- **`triage=`"):]
+    doc = doc[:doc.index("\n- ")]
+    k = doc.find(anchor)
+    assert k >= 0, (
+        f"{anchor!r} is gone from the `triage=` field doc, so the rule that grounds a "
+        f"verdict disagreement has no home there at all: {doc}")
+    start = doc.rfind(". ", 0, k) + 2
+    end = doc.find(". ", k)
+    assert end > k, f"the sentence holding {anchor!r} is unterminated: {doc[k:k+200]!r}"
+    sentence = doc[start:end]
+    assert anchor in sentence and ". " not in sentence, (
+        f"sentence extraction failed for {anchor!r}: {sentence!r}")
+    return sentence
+
+
+def test_a_suspected_mis_rendered_confirmed_verdict_is_a_note_and_never_a_move():
+    """Clause 1-2. The disagreement sentence forbids the move and names a real field.
+
+    The old ending — "that is worth a proposal with a `reason` saying so" — is an
+    invitation to do the one thing that cost three disagreement rows, and it named a
+    field (`reason`) that the reply schema does not have: `STEWARD_SCHEMA` requires
+    `["moves","next_pick","next_pick_reason","summary"]` at the top level and
+    `["item_id","status","tags_add","tags_remove","note"]` per move, so there is no
+    move-less note channel except `summary` and `next_pick_reason`. A binding that
+    said "record it as a note" without naming one of those is unsatisfiable, and a
+    model that cannot record an observation except as a move will keep making the
+    move — which is what #3908's session shows. Hence three assertions on ONE
+    sentence: it still says a disagreement means one side is broken, it forbids a
+    status move for that item, and it names a reply field that exists. The
+    schema membership check is the seam: prompt prose that points at a field the
+    grammar will not accept is the bug that produced this item.
+    """
+    prompt = W.build_prompt(events=[], items=[], n_open=0, since_ts=0.0)
+    sentence = _triage_field_sentence(prompt, "one of them is broken")
+
+    assert re.search(r"never[^.]{0,60}\bmove\b", sentence), (
+        "the disagreement sentence does not forbid a move — with the negation absent "
+        "the field is an invitation again, which is the sentence the steward quoted: "
+        f"{sentence!r}")
+    named = [f for f in ("summary", "next_pick_reason") if f"`{f}`" in sentence]
+    assert named, (
+        "the rule sends a suspected mis-rendering nowhere: with no reply field named "
+        "there is no way to record it that is not a move, so the note loses to the "
+        f"move: {sentence!r}")
+    for field in named:
+        assert field in W.STEWARD_SCHEMA["properties"], (
+            f"the rule names `{field}`, which the reply grammar does not accept — an "
+            "instruction the steward cannot render is the one #3908 worked around")
+
+    # The invitation itself has to be gone from the whole bullet, not merely
+    # outweighed by a later clause: the model cited this exact phrasing.
+    doc = prompt[prompt.index("- **`triage=`"):]
+    doc = doc[:doc.index("\n- ")]
+    assert "worth a proposal" not in doc, (
+        "the bullet still ends its disagreement sentence on an offer to propose, "
+        f"which is what the 2026-11-07 ticks followed: {doc}")
+
+
+def test_the_confirmed_line_binding_names_its_verdict_as_a_whole_token(board):
+    """Clause 3. The binding is keyed on the value, whole — never on a prefix.
+
+    #3858's whole-token lesson, applied to the new sentence: `triage=confirmed` is a
+    prefix of `triage=confirmed-human-only`, so a substring test cannot tell "the
+    rule binds the bare confirmation" from "the rule binds the fourth value" — and
+    binding the wrong one is what #3784 exists to prevent, since a
+    `confirmed-human-only` line's proposal IS `draft`. So the sentence's named values
+    are taken with `re.findall(r"triage=([a-z][a-z-]*)", …)` as a SET and compared to
+    the whole token, and the set is then cross-checked against the two board lines
+    that actually print those values: the non-guard `human-only:` item, whose line
+    renders `confirmed` and which the rule must therefore bind, and the real guard,
+    whose line renders `confirmed-human-only` and which it must not.
+    """
+    prompt = W.build_prompt(events=[], items=[], n_open=0, since_ts=0.0)
+    sentence = _triage_field_sentence(prompt, "one of them is broken")
+
+    named = set(re.findall(r"triage=([a-z][a-z-]*)", sentence))
+    assert named == {"confirmed"}, (
+        f"the binding names {sorted(named)}; it has to name exactly the bare "
+        "`confirmed` — naming the human-only value would tell the steward to park "
+        "the item the machine wants implemented, which is the #3784 defect in "
+        f"reverse, and naming nothing leaves the rule unkeyed: {sentence!r}")
+    assert "confirmed" in W.TRIAGE_VALUES and len(W.TRIAGE_VALUES) == 4, (
+        f"`confirmed` is not one of the field's values any more: {W.TRIAGE_VALUES}")
+
+    _triage_item(board, 41, "up_next", acceptance=NON_GUARD_MARKER)
+    _triage_item(board, 42, "up_next", acceptance=GUARD_MARKER)
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    assert len(items) == 2, (
+        "both sides of the guard pair have to be on the board for the cross-check to "
+        "be a comparison and not a guess")
+    board_prompt = W.build_prompt(events=[], items=items, n_open=2, since_ts=0.0)
+    non_guard = re.findall(r"\btriage=(\S+)", _line(board_prompt, 41))[0]
+    guard = re.findall(r"\btriage=(\S+)", _line(board_prompt, 42))[0]
+    assert non_guard == "confirmed" and guard == "confirmed-human-only", (
+        f"the guard pair drifted ({non_guard!r} / {guard!r}), so the cross-check "
+        "below is comparing the rule against values no line prints")
+    assert non_guard in named, (
+        f"the rule does not bind the value a non-guard human-only line prints "
+        f"({non_guard!r}) — which is #3908's shape and the row this item is about")
+    assert guard not in named, (
+        f"the rule names {guard!r}, the value whose proposal IS `draft`: a confirmed-"
+        "human-only line moved to `draft` is the machine's own answer, and a sentence "
+        "forbidding a move on it contradicts the bullet above it")
+
+
+def test_the_binding_does_not_stop_scoring_a_draft_proposal_for_a_non_guard_line(board,
+                                                                                  monkeypatch):
+    """Clause 4, the half that could only be broken by this change.
+
+    Telling the steward "never propose `draft` for a confirmed line" is only safe if
+    a wrong `draft` proposal still costs: the flip gate is `judged >= 50 AND rate >=
+    0.90`, so a rail that quietly dropped these proposals from the denominator would
+    lift the rate by deleting its own evidence — the same reason #3766's clause 4
+    insisted its disagreement survive end-to-end. #41 is that case in #3908's shape:
+    confirmed, `NON_GUARD_MARKER` acceptance, machine side `up_next`, line rendering
+    bare `confirmed`, and a steward answer of `draft` for the reason the session gave
+    out loud. It runs the real `desired_statuses` (not a stub) and the real scoring,
+    so the assertion crosses the whole seam: board line → model reply → ledger row.
+    A node that only re-read the prompt could not catch a fix that silenced the score.
+    """
+    from scripts.automod import state as S, state as ST
+    from workers.sources import _common as C
+
+    _triage_item(board, 41, "up_next", acceptance=NON_GUARD_MARKER)
+    want = B.desired_statuses(S.LEDGER_PATH)
+    assert want[41][0] == "up_next", (
+        f"the machine stopped wanting to implement a non-guard human-only item, so "
+        f"this fixture is no longer #3908: {want.get(41)}")
+
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    prompt = W.build_prompt(events=[], items=items, n_open=1, since_ts=0.0)
+    assert re.findall(r"\btriage=(\S+)", _line(prompt, 41)) == ["confirmed"], (
+        "the line stopped rendering the bare confirmation, so the steward is no "
+        "longer being tested on the shape that produced the item")
+
+    raw = [{"item_id": 41, "status": "draft",
+            "note": "acceptance names a human-only path"}]
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": raw, "next_pick": 0, "next_pick_reason": "",
+                               "summary": "one parked"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": True})))
+    assert out["status"] == "success", out
+
+    row = [e for e in ST.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "board_steward"][-1]
+    assert 41 in row["agreement"]["disagree"], (
+        f"the new binding deleted a wrong proposal from the score: {row['agreement']}")
+    sides = [r for r in row["agreement"]["disagree_sides"] if r["item_id"] == 41]
+    assert len(sides) == 1 and sides[0]["status"] == "up_next", (
+        f"disagree_sides lost the machine's half of the row this item was filed "
+        f"from: {sides}")
+    assert row["moves"][0]["item_id"] == 41 and row["moves"][0]["status"] == "draft", \
+        row["moves"]

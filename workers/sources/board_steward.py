@@ -243,7 +243,11 @@ is the one case where a confirmation and a possible next move coexist, and the f
 that used to call it `confirmed` was telling you to propose the move that was \
 already refused. It is derived from the same ledger rows the \
 machine reads, so a line and a machine that disagree about a VERDICT mean one of \
-them is broken — that is worth a proposal with a `reason` saying so. The verdict is \
+them is broken, and on a `triage=confirmed` line a suspected mis-rendering earns a \
+note in `summary` or `next_pick_reason` and never a status move: for such a line the \
+proposal is `up_next` or nothing, whatever its acceptance or its body says — the \
+line shows a truncated body and no acceptance, and a verdict the machine read from \
+the full ledger outranks what the excerpt suggests. The verdict is \
 an OBSERVATION and not an instruction: `triage=confirmed` does not make an item your \
 next pick, and no line ever names the status the machine wants, because this tick is \
 scored against that table and printing it would be handing you the answer sheet.
