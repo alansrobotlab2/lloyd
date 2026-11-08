@@ -1112,6 +1112,32 @@ def record_verdict(
             "owner_literal_phrase=…`, no `body_*` field. Either consume the stripped copy "
             "(`body_<field>=$(printf '%s\\n' \"$b\" | grep -ci '<pattern>')`) or drop the strip "
             "and stop claiming the scoping.")
+    # Decided on the command text alone, so it is refused before the command is executed:
+    # unlike the two born-uncheckable states, which need the run to know they are
+    # uncheckable, this one is a fact about a token, and executing it first would print the
+    # fabricated zero into `evidence_observed` of a row that never gets written.
+    dialect_hit = _regex_in_glob_position(evidence_cmd)
+    if dialect_hit is not None:
+        # The vacuous falsifier no instrument sees, because it is the only one that PRINTS A
+        # NUMBER while being vacuous: quote removal runs before pathname expansion, so `ls`
+        # is handed the literal `[0-9]{8}` bytes, reports no such file to a swallowed stderr,
+        # and `wc -l` prints 0 AT EXIT 0. UNRUNNABLE cannot see it (the command ran), the
+        # empty-denominator rail cannot (the row declares `input_rows=1`, honestly — it read
+        # one file, the pattern, and counted it as zero candidates), and `check` cannot
+        # because re-executing the same literal re-prints the same 0 forever. Four
+        # latest-wins keys rest a `rejected_unverifiable` on exactly this shape (#3941).
+        raise ValueError(
+            "evidence_cmd puts a REGEX where the shell needs a GLOB: "
+            f"{dialect_hit[1]!r} is the {dialect_hit[0]} argument, and quote removal "
+            "suppresses pathname expansion, so the builtin receives those bytes literally, "
+            "finds no such file, and the count the pipeline prints is 0 whatever the "
+            "directory holds — a falsifier that cannot be non-zero grounds no verdict. For "
+            "dated snapshots write a glob (`candidate-<key>-*.md`), or count in the dialect "
+            "the pattern is written in: `ls -1 \"$(dirname \"$p\")\" | grep -cE "
+            "\"^$(basename \"$p\")$\"`, which is what `TOMBSTONE_TEMPLATE` has done since "
+            "#2569. A regex in a `grep -E` pattern position is correct and is not refused "
+            f"— {evidence_cmd!r} (#3941)"
+        )
     rc, observed, truncated = run_evidence(evidence_cmd)
     if not observed:
         raise ValueError(
@@ -1945,6 +1971,204 @@ def _unquote(token: str) -> str:
     if len(token) >= 2 and token[0] in "'\"" and token[-1] == token[0]:
         return token[1:-1]
     return token
+
+
+#: The commands whose non-flag argument is a PATH the shell expands before the program
+#: ever sees it. `wc` is deliberately absent: `wc -l` counts its stdin, and the ledger's
+#: falsifiers pipe into it, so its operand position is not a filename question here.
+_GLOB_OPERAND_COMMANDS = frozenset({"ls", "cat", "test", "["})
+
+#: A token is regex-dialect only when it carries something GLOB has no spelling for: a brace
+#: quantifier, or a backslash escape. `[0-9]` marks nothing on its own — it is a legal glob
+#: character class AND a legal regex one, so refusing it would refuse the honest globs, and
+#: no `ls` operand on the live ledger uses it without a brace alongside (measured: 0 of 209
+#: latest-wins rows put a `*` in an `ls -1` operand at all, and the 4 regex ones all carry
+#: `{8}`). The class is listed anyway because the item named it: a `{n}` and a bare class
+#: arriving together is the shape, and the class is what a reader spots first.
+_REGEX_ONLY_MARKERS = ("{", "}", "\\.", "\\d", "\\w", "\\s", "(|")
+
+
+#: A bracket expression as BRE/ERE writes one. The same bytes are a glob character class,
+#: which is why this arm is joined to the no-wildcard test below rather than standing alone.
+_BRACKET_CLASS_RE = re.compile(r"\[[^\]]*\]")
+
+
+def _regex_dialect_only(token: str) -> bool:
+    """True when `token` cannot be the GLOB its operand position needs.
+
+    Two arms, and the clause this implements names one marker per arm:
+
+    * a brace quantifier or backslash escape (`{8}`, `\\.`, `\\d`): glob has no spelling for
+      these, so their presence is not a judgement about intent — the token cannot expand;
+    * a bracket class (`[0-9]`) with NO `*` or `?` anywhere in the token. `[0-9]` alone is
+      legal in BOTH dialects, so on its own it refuses nothing; joined to "and nothing to
+      expand", it catches the class-only spelling of the same mistake — and the cost is
+      stated: `ls 'x-[0-9].md'` is a working glob for a one-character name, which no
+      candidate snapshot on this ledger is (measured: every one of the 209 latest-wins rows
+      names either a dated 8-digit snapshot or a literal, and 0 put a `*` in an `ls -1`
+      operand). A caller that genuinely means a single-character class must write
+      `ls 'x-[0-9]*.md'`, which is refused by nothing here.
+    """
+    if any(m in token for m in _REGEX_ONLY_MARKERS):
+        return True
+    return bool(_BRACKET_CLASS_RE.search(token)) and "*" not in token and "?" not in token
+
+
+def _regex_in_glob_position(cmd: str) -> tuple[str, str] | None:
+    """`(builtin, operand)` for the first token that is a REGEX where a GLOB was needed.
+
+    Quote removal happens before pathname expansion, so a quoted operand reaches `ls` as the
+    literal text `[0-9]{8}`; `ls` reports `No such file or directory` on stderr, the shipped
+    commands send that stderr to `/dev/null`, and the trailing `wc -l` prints `0` **at exit
+    0**. Four live latest-wins keys (`seq-2-bash-fs-edit` and its three siblings, all
+    `rejected_unverifiable`, all minted by `root-move-repair-disposal` on 2026-10-11) store
+    exactly that falsifier. Measured against a directory holding
+    `candidate-seq-2-bash-fs-edit-20261101.md`: the quoted-regex operand printed `0`, the
+    same path as a glob printed `1`. It is invisible to every existing rail because the
+    command runs, prints a number and exits 0, and to `candidate_input_lost` because that
+    function reads the same token as a REGEX (`_pattern_names_any`, which `fullmatch`es a
+    pattern with no `*`/`?`) and concludes the input resolves.
+
+    Keyed on POSITION — the operand of a filename-taking builtin — and on nothing else, per
+    the precedent at `case_insensitive_reread` ("Keyed on nothing else — not
+    `require_input_rows`"). Two shapes this must not refuse, both live:
+
+    * `ls "$C" | grep -cE '^candidate-x-[0-9]{8}[.]md$'` (key
+      `seq-3-bash-explore-bash-fs-bash-other`): a `grep -E` pattern IS a regex, and the
+      count it prints is real. `grep` is not in `_GLOB_OPERAND_COMMANDS`, so the token is
+      never asked the glob question;
+    * `TOMBSTONE_TEMPLATE`, which binds its pin in `p='…'` and lists the DIRECTORY: its `ls`
+      operand is `"$(dirname "$p")"`, whose text is computed, and an operand carrying a `$`
+      is skipped because no static reading can say what the shell will hand over.
+
+    Quoting is not part of the test, and deliberately so: an UNQUOTED `ls -1 x[0-9]{8}.md`
+    fails the same way — the glob matches nothing, so the shell passes the literal through
+    and `ls` still finds no such file. Both spellings are vacuous, so refusing only the
+    quoted one would leave the hole open.
+    """
+    found: list[tuple[str, str]] = []
+    _collect_regex_glob_operands(cmd, found)
+    return found[0] if found else None
+
+
+def vacuous_pin_keys(table: dict[str, dict]) -> list[str]:
+    """Latest-wins keys whose STORED falsifier can never print a non-zero count (#3941).
+
+    The read-side half of the fix, and the only half that reaches the ledger the defect is
+    already in: the four cohort rows were minted before any rail existed, and a mint-time
+    refusal changes nothing about them. Decided on the stored text alone, for the same reason
+    #2166's and #2339's tallies are — no execution can report this, because the command runs,
+    prints its fabricated zero and exits 0, which is precisely why `unrunnable: 0` was true of
+    this ledger tonight.
+
+    Run-bookkeeping rows are excluded: their `evidence_cmd` counts a session log, not a
+    candidate corpus, and the figure a repair pass needs is the pattern-decision count.
+    Disposal tombstones ARE included — #2569 rewrote the template precisely because of this
+    defect, so a tombstone minted before it is a tombstone whose count was never real — while
+    staying out of `input_lost`, which is about a file retention deleted and is a different
+    claim about a different thing.
+    """
+    return sorted(key for key, row in table.items()
+                  if not is_run_bookkeeping_key(key)
+                  and _regex_in_glob_position(row.get("evidence_cmd") or "") is not None)
+
+
+def _match_paren(text: str, open_at: int) -> int:
+    """Index of the `)` closing the `(` at `open_at`, quotes skipped; end of string if unclosed.
+
+    `_shell_boundaries` counts `$(` as an opening paren and reports every closing paren with
+    its depth, which is what a section splitter needs and not what a descent needs: the SPAN
+    of one substitution is the only thing that can be re-read as a command of its own, and no
+    shipped helper hands a span back.
+    """
+    depth, i, n = 0, open_at, len(text)
+    while i < n:
+        if text[i] in "'\"":
+            i = _skip_quoted(text, i)
+            continue
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return n
+
+
+def _substitutions(word: str) -> list[str]:
+    """The text inside each `$( … )` of one shell word, in order, single quotes skipped.
+
+    Single-quoted bytes are never expanded, so a `$( … )` inside them is prose: a scan that
+    descended into one would report what the shell never runs.
+    """
+    out: list[str] = []
+    i, n = 0, len(word)
+    while i < n:
+        if word[i] == "'":
+            i = _skip_quoted(word, i)
+            continue
+        if word.startswith("$(", i):
+            end = _match_paren(word, i + 1)
+            out.append(word[i + 2:end])
+            i = end + 1
+            continue
+        i += 1
+    return out
+
+
+#: How far the substitution descent goes. The ledger's falsifiers nest two (`$(ls -1
+#: "$(dirname "$p")" | wc -l)`); the cap is there so a malformed command cannot spin.
+_SCAN_MAX_DEPTH = 6
+
+
+def _collect_regex_glob_operands(text: str, sink: list[tuple[str, str]],
+                                 _depth: int = 0) -> None:
+    """Every regex-shaped operand of a filename-taking builtin in `text`, appended to `sink`.
+
+    Sections come from `_shell_boundaries`, the module's own splitter, kept at depth 0: an
+    inner `|` belongs to the substitution that contains it, and reaching it is the descent's
+    job, not the splitter's. Words come from `_shell_tokens` (which holds a `$()` run together
+    as one word) and are unquoted with `_unquote`, since the shell removes those quotes before
+    either expansion. The word before an operand is taken as its command whatever it says:
+    `echo`, `wc` and `grep` are not in `_GLOB_OPERAND_COMMANDS`, so a loose pick can only ever
+    under-report, never invent a refusal.
+
+    A token that contains a substitution is never itself an operand — its text is not knowable
+    statically, and refusing one would refuse `ls -1 "$(dirname "$p")"`, which is precisely the
+    form #2569 shipped as the fix for this defect. What the descent asks instead is the same
+    question of the command INSIDE it, where every real operand on the ledger is written.
+    """
+    if _depth > _SCAN_MAX_DEPTH:
+        return None
+    cut = [(pos, kind) for pos, kind, depth in _shell_boundaries(text)
+           if depth == 0 and kind != ")"]
+    starts = [0] + [pos + len(kind) for pos, kind in cut]
+    ends = [pos for pos, _kind in cut] + [len(text)]
+    for lo, hi in zip(starts, ends):
+        words = [word for word, _start, _end in _shell_tokens(text[lo:hi])]
+        # The section's FIRST word is its command — not the word sitting before an operand.
+        # `ls -1 'PATTERN'` has a flag between the two, and a predicate that bound the operand
+        # to `-1` would refuse nothing on the ledger's own shape, which is every row in it.
+        # A leading `NAME=` assignment is a binding rather than a command, so the command is
+        # the word after it (`p='x'; ls -1 "$p"` splits at the `;` anyway, but
+        # `C=/dir ls "$C"` does not).
+        index = 0
+        if index < len(words) and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", _unquote(words[index])):
+            index += 1
+        command = _unquote(words[index]) if index < len(words) else ""
+        for word in words[index + 1:]:
+            token = _unquote(word)
+            if not token:
+                continue
+            if "$(" in word:
+                for inner in _substitutions(word):
+                    _collect_regex_glob_operands(inner, sink, _depth + 1)
+                continue
+            if token[0].isdigit() and token[1:2] in (">", "<"):
+                continue                       # `2>` / `2&>`: a redirection, not a filename
+            if command in _GLOB_OPERAND_COMMANDS and _regex_dialect_only(token):
+                sink.append((command, token))
 
 
 def _targets_front_matter(pattern: str) -> bool:
@@ -3626,6 +3850,20 @@ def cmd_audit(args: argparse.Namespace) -> int:
     # at -5 exactly where every nightly and test already reads them, and the new line arrives at
     # -6. It prints its zero form for the same reason the other tallies do: a figure that only
     # appears when run rows exist cannot tell a ledger with none from an audit nobody ran.
+    # The line ABOVE `run_rows:` — the top-of-block slot #2343 and #3591 both claim for a new
+    # figure — so no published line below it changes index, and the one node that pinned
+    # `run_rows:` at -6 moves to -7 with this commit and names itself. It is NOT part of
+    # `exit_terms`: four such rows are already on the live ledger, so making this figure red
+    # would fail every consumer reading the exit code before any repair pass had a chance to
+    # re-mint them, and the count exists to make the cohort visible, not to gate.
+    vacuous = vacuous_pin_keys(table)
+    vacuous_tombstoned = sum(
+        1 for key in vacuous
+        if _DISPOSAL_TOMBSTONE_RE.fullmatch(table[key].get("evidence_cmd") or "")
+        or _LEGACY_DISPOSAL_TOMBSTONE_RE.fullmatch(
+            table[key].get("evidence_cmd") or ""))
+    print(f"vacuous_pins: latest_wins {len(vacuous)} of_them_tombstoned "
+          f"{vacuous_tombstoned}")
     print(f"run_rows: {len(run_keys)} undeclared {undeclared_run}")
     print(f"exit_drivers: {drivers or 'none'}")
     # ABOVE `stranded:`, not below it: #2103's test pins `splitlines()[-3]` to that line, and

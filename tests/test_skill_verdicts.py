@@ -2362,14 +2362,22 @@ def test_audit_tally_is_its_final_line(tmp_path):
     # to hold their figures, and an insertion anywhere BELOW `-3` would displace them. The count
     # here moves by one and nothing indexed moves at all; `keys:` still reads 7 because none of this
     # ledger's keys is a `run:` row, and the new line prints its zero form at the new index -6.
-    assert len(out.splitlines()) == len(AUDIT_DEAD) + 6, (
-        f"tally must be the {len(AUDIT_DEAD) + 6}th and last line of its own output: {out}")
+    #
+    # #3941 takes the slot one ABOVE this one for its `vacuous_pins:` figure, and the only thing in
+    # this node that moves is the line count: a line inserted above `run_rows:` cannot change any
+    # negative index at or below it, so `-1` through `-6` all hold the figures above while the new
+    # line arrives at -7. That is the shipped shape being pinned, not a break — the rule #2343 and
+    # #3591 both state is that a new tally enters at the TOP so the figures below it never move, and
+    # this node is now the proof the rule survives a second insertion, not just the first.
+    assert len(out.splitlines()) == len(AUDIT_DEAD) + 7, (
+        f"tally must be the {len(AUDIT_DEAD) + 7}th and last line of its own output: {out}")
     assert out.splitlines()[-2] == "denominators: empty_input 0 undeclared 7", out
     assert out.splitlines()[-3] == "stranded: case_sensitive_grep 0", out
     assert out.splitlines()[-4] == ("candidate_body_scoping: whole_file 0 dead_strip 0 "
                                     "input_lost 0"), out
     assert out.splitlines()[-5] == "exit_drivers: unrunnable 4", out
     assert out.splitlines()[-6] == "run_rows: 0 undeclared 0", out
+    assert out.splitlines()[-7] == "vacuous_pins: latest_wins 0 of_them_tombstoned 0", out
     assert out.count("UNRUNNABLE ") == len(AUDIT_DEAD), out
 
 
@@ -7420,7 +7428,15 @@ def test_the_run_row_tally_line_enters_above_stranded_and_moves_no_pinned_index(
 
     rc, out = run_audit(store)
     lines = out.splitlines()
-    assert len(lines) == 6, out
+    # 7 lines, not 6, and nothing else moves. #3941's `vacuous_pins:` figure takes the slot
+    # immediately above this one — the top-of-block slot this node's own docstring argues a new
+    # tally must use — and because negative indices count from the END, a line inserted ABOVE
+    # `run_rows:` leaves it at -6 and adds its newcomer at -7. That is the whole point of the
+    # rule, demonstrated against a second insertion this time: the only assertion that changes
+    # in this node is the total, and `keys:`/`denominators:`/`stranded:`/`candidate_body_scoping:`
+    # /`exit_drivers:` hold the figures they had before it existed.
+    assert len(lines) == 7, out
+    assert lines[-7] == "vacuous_pins: latest_wins 0 of_them_tombstoned 0", out
     assert lines[-6] == "run_rows: 2 undeclared 1", out
     assert lines[-5] == "exit_drivers: none", out
     assert lines[-4] == "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0", out
@@ -7592,3 +7608,229 @@ def test_the_shipped_cli_agrees_between_list_and_audit_on_the_pattern_population
     assert audited[-1].startswith("keys: "), audit.stdout
     assert audited[-1].split()[1] == listed[-1].split()[1], (audited[-1], listed[-1])
     assert "run_rows: 2 undeclared 1" in audited, audit.stdout
+
+
+
+# ── #3941: a regex in a glob position counts nothing, and does it at exit 0 ───
+#
+# Four live latest-wins keys (`seq-2-bash-fs-edit`, `seq-3-bash-explore-bash-fs-read`,
+# `seq-3-bash-fs-backlog-write-task-bash-fs`, `seq-3-read-edit-bash-fs`) store a disposal
+# falsifier shaped `ls -1 'CANDIDATE[0-9]{8}\.md' 2>/dev/null | wc -l`. Quote removal
+# suppresses the glob, so `ls` receives the literal bracket expression, `2>/dev/null`
+# swallows its complaint, and `wc -l` prints `0` AT EXIT 0 — the corpus count a
+# `rejected_unverifiable` rests on, fabricated by a dialect error instead of measured.
+# Reproduced verbatim before the fix: in a directory holding
+# `candidate-seq-2-bash-fs-edit-20261101.md`, the quoted-regex operand printed `0` and the
+# same path written as a glob printed `1`.
+#
+# No instrument saw it. Over the live ledger `audit` publishes `unrunnable: 0`,
+# `empty_input 0`, `input_lost 0`, `exit_drivers: none` at exit 0, because the command
+# runs and prints a number; and `candidate_input_lost` returns None for a disposal
+# tombstone before it lists a directory, which is correct for those rows and is why
+# clause 5 below exists — the read-side tally must not turn that exemption back into a
+# permanently-red term (#2433).
+
+CANDIDATE_DIR_3941 = "/home/alansrobotlab/lloyd-data/_pipeline/skills/candidates"
+
+
+def _vacuous_pin_cmd_3941(key: str = "seq-2-bash-fs-edit") -> str:
+    """The stored falsifier shape, as `seq-2-bash-fs-edit` keeps it on the live ledger."""
+    pin = f"{CANDIDATE_DIR_3941}/candidate-{key}-[0-9]{{8}}\\.md"
+    return (f"echo \"dated_corpus_files=$(ls -1 '{pin}' 2>/dev/null | wc -l) "
+            f"pinned_input='{pin}'\"")
+
+
+def test_record_verdict_refuses_a_regex_where_the_shell_needs_a_glob(tmp_path):
+    """Clause 1: the ledger's own falsifier shape cannot be minted at all.
+
+    The refusal is about the operand's DIALECT, not its exit code. The command prints
+    `dated_corpus_files=0` and exits 0, and it is given a legitimate `input_rows=`
+    declaration, so every shipped rail walks past it — `status_rc == UNRUNNABLE` (:1171)
+    sees a command that ran, `status_rc == EMPTY_INPUT` (:1183) sees a declared denominator
+    of 1, the missing-declaration rail (`require_input_rows and …`, :1198) sees the field,
+    and neither the body-scoping nor the case-sensitive-grep rail is about a filename
+    operand. Measured before the fix on this exact string: `evidence_cmd_status` ->
+    `(0, '')` — healthy — and `declared_denominator` -> `1`.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    cmd = declares(_vacuous_pin_cmd_3941())
+    with pytest.raises(ValueError) as excinfo:
+        sv.record_verdict(store=store, pattern_key="Edit/tool_error",
+                          verdict="rejected_unverifiable",
+                          reason="a corpus count that cannot be non-zero",
+                          occurrences=2, evidence_cmd=cmd)
+    message = str(excinfo.value)
+    assert "glob" in message.lower(), message
+    assert "[0-9]" in message and "{8}" in message, (
+        "the refusal has to name the token the shell cannot expand, not just the class: "
+        + message)
+    assert not store.exists(), "a refusal writes no row"
+
+    # The same dialect error behind the other filename-taking builtins a falsifier uses.
+    # `[` is the shell's own test, whose three-argument form takes the bracket as the
+    # operand and returns a status that has nothing to do with the corpus.
+    for builtin in ("cat", "test -f", "[ -f"):
+        shaped = declares(f"echo \"n=$({builtin} "
+                          f"'{CANDIDATE_DIR_3941}/candidate-seq-3-read-edit-bash-fs-[0-9]"
+                          "{8}\\.md' 2>/dev/null | wc -l)\"")
+        with pytest.raises(ValueError):
+            sv.record_verdict(store=store, pattern_key="Edit/tool_error",
+                              verdict="rejected_unverifiable",
+                              reason="the same defect behind another builtin",
+                              occurrences=2, evidence_cmd=shaped)
+    assert not store.exists(), "no refusal writes a row"
+
+
+def test_the_regex_glob_refusal_is_not_keyed_on_the_declaration_flags(tmp_path):
+    """Clause 2: it fires on the paths that mint with BOTH flags False.
+
+    The four live rows came from `root-move-repair-disposal`, which passes
+    `require_input_rows=False` and `require_body_scope=False` because a tombstone declares
+    its pin rather than a denominator. A rail gated on either flag would have refused
+    nothing on the way in, which is how those four rows got there, so this node mints the
+    identical shape with both flags False and no `input_rows=` in the command at all — the
+    call the repair pass actually makes.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    legacy = _vacuous_pin_cmd_3941("seq-3-bash-fs-backlog-write-task-bash-fs")
+    assert "input_rows" not in legacy, "the tombstone declares a pin, not a denominator"
+    with pytest.raises(ValueError):
+        sv.record_verdict(store=store, pattern_key="Bash-FS/backlog_write",
+                          verdict="rejected_unverifiable",
+                          reason="the call root-move-repair-disposal actually makes",
+                          evidence_cmd=legacy, decided_by="root-move-repair-disposal",
+                          require_input_rows=False, require_body_scope=False)
+    assert not store.exists()
+
+
+def test_a_grep_pattern_and_the_disposal_template_are_not_refused(tmp_path):
+    """Clause 3: keyed on POSITION, or the rail refuses this module's own output.
+
+    Two shapes must keep recording, and a predicate that simply scanned every quoted
+    token for `[0-9]` or `{8}` refused both:
+
+    * the live key `seq-3-bash-explore-bash-fs-bash-other`, whose falsifier counts with
+      `ls "$C" | grep -cE '^candidate-…[0-9]{8}[.]md$'` — ERE is the right dialect in a
+      `grep -E` pattern position, and that count is a real measurement;
+    * `TOMBSTONE_TEMPLATE` itself, which embeds its pin in `p='…'` and lists the DIRECTORY
+      (rewritten by #2569 for exactly this defect), and whose pins are EREs.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    grep_shaped = declares(
+        f"C={CANDIDATE_DIR_3941}; echo \"dated_corpus_files=$(ls \"$C\" | grep -cE "
+        "'^candidate-seq-3-bash-explore-bash-fs-bash-other-[0-9]{8}[.]md$' || echo 0)\"")
+    assert sv.record_verdict(
+        store=store, pattern_key="Bash-FS/explore", verdict="rejected_unverifiable",
+        reason="a count taken in the dialect its operand is read as", occurrences=3,
+        evidence_cmd=grep_shaped)
+    assert "grep -cE" in store.read_text(), "the real measurement is the stored row"
+
+    templated = sv.TOMBSTONE_TEMPLATE.format(
+        key="seq-9-read-write-bash-fs",
+        input=f"{CANDIDATE_DIR_3941}/candidate-seq-9-read-write-bash-fs-[0-9]{8}\\.md")
+    assert sv.record_verdict(
+        store=store, pattern_key="Bash-FS/read_write", verdict="rejected_unverifiable",
+        reason="the shipped disposal wording, whose own pin is an ERE",
+        evidence_cmd=templated, decided_by="root-move-repair-disposal",
+        require_input_rows=False, require_body_scope=False)
+    assert len(store.read_text().splitlines()) == 2, "both mints landed"
+
+
+def _row_3941(pattern: str, cmd: str, decided_by: str,
+               verdict: str = "rejected_unverifiable") -> str:
+    """One hand-written ledger line, for the reason `write_ledger` gives at :2281.
+
+    `record` executes what it stores, which would put a fixture's own exit code in front
+    of the tally under test. `pattern_key` is the join column `load_verdicts` reads
+    (:484): a row without it is skipped with a warning, not counted.
+    """
+    return json.dumps({"logged_at": "2026-11-08T09:00:00+00:00", "pattern_key": pattern,
+                       "candidate": pattern, "verdict": verdict,
+                       "reason": "measured, not remembered", "evidence_cmd": cmd,
+                       "evidence_observed": "dated_corpus_files=0",
+                       "occurrences_at_decision": 1, "decided_by": decided_by})
+
+
+def test_audit_publishes_the_stored_falsifiers_whose_pin_cannot_glob(tmp_path):
+    """Clause 4: the read-side half, and it does not move the exit status.
+
+    One vacuous latest-wins key and one real grep-pattern key share the ledger, so the
+    tally is 1 and not 2: that pair is the positive control on the predicate, since
+    `'{8}' in evidence_cmd` — the count the item itself carried — would say 2 here.
+
+    The line enters at the TOP of the published block, where an inserted line cannot move
+    a later line's index, the same discipline #3591 recorded for `run_rows:`. And exit
+    status stays the exit-driver verdict's alone: four such rows are already on the live
+    ledger, and a red audit before any repair pass could re-mint them would stop every
+    consumer that reads the exit code.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    # The grep row counts a directory that EXISTS and holds the snapshot its ERE names, so
+    # audit executes it clean: a nonexistent directory would make it UNRUNNABLE, which is a
+    # different term, and this node's claim is that a real ERE count and a vacuous glob
+    # differ in the new figure alone.
+    (tmp_path / "candidate-x-20261101.md").write_text("body\n", encoding="utf-8")
+    store.write_text("\n".join([
+        _row_3941("Edit/tool_error", _vacuous_pin_cmd_3941(), "root-move-repair-disposal"),
+        _row_3941("Bash-FS/explore",
+                  f'echo "dated_corpus_files=$(ls "{tmp_path}" | '
+                  "grep -cE '^candidate-x-[0-9]{8}[.]md$')\"",
+                  "nightly-skill-consolidation"),
+    ]) + "\n", encoding="utf-8")
+
+    rc, out = run_audit(store, timeout=5)
+    lines = out.splitlines()
+    tally = [ln for ln in lines if ln.startswith("vacuous_pins:")]
+    assert len(tally) == 1, out
+    assert "latest_wins 1" in tally[0], tally[0]
+    assert lines[-1] == "keys: 2 unrunnable: 0", (
+        "both keys are still counted by `keys:`, and the grep-shaped one is not in the "
+        f"tally: {lines}")
+    runs = [i for i, ln in enumerate(lines) if ln.startswith("run_rows:")]
+    assert runs and lines.index(tally[0]) < runs[0], (
+        "the new tally enters above run_rows: so no pinned line below it changes index: "
+        + out)
+    assert rc == 0, out
+
+    clean = tmp_path / "clean.jsonl"
+    clean.write_text(_row_3941(
+        "Bash-FS/explore", declares(f"echo x; ls '{tmp_path}' | grep -cE 'x[0-9]{8}'"),
+        "nightly-skill-consolidation", verdict="reviewed_no_skill") + "\n",
+        encoding="utf-8")
+    rc_clean, out_clean = run_audit(clean, timeout=5)
+    assert rc_clean == 0, out_clean
+    assert "vacuous_pins: latest_wins 0" in out_clean, out_clean
+
+
+def test_the_legacy_disposal_tombstones_stay_exempt_from_input_lost(tmp_path):
+    """Clause 5: the new tally must not drag #2433's red term back with it.
+
+    `candidate_input_lost` returns None for a disposal tombstone before it lists a
+    directory (:2013-2024): those rows record a file retention unlinked on purpose, so
+    counting them as `input_lost` would make the term permanently red and stop it naming
+    the attrition it exists to name. The live ledger holds 31 such rows — 25 of them
+    latest-wins keys, four of which are ALSO regex-shaped. This is that population in
+    miniature: three plain tombstones and one regex tombstone, where the regex one is
+    counted by the new tally and `input_lost` stays 0 for all four.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    plain = (f'echo "dated_corpus_files=$(ls -1 '
+             f"'{CANDIDATE_DIR_3941}/candidate-bash-network-20260908.md' 2>/dev/null "
+             f"| wc -l) pinned_input='"
+             f"{CANDIDATE_DIR_3941}/candidate-bash-network-20260908.md'\"")
+    rows = [_row_3941(f"Bash/network{i}", plain, "root-move-repair-disposal")
+            for i in range(3)]
+    rows[0] = _row_3941("Edit/tool_error", _vacuous_pin_cmd_3941(),
+                        "root-move-repair-disposal")
+    store.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    # The positive control for a zero here: every command in this fixture really is the
+    # exempt shape, so `input_lost 0` is a result about the exemption and not an artifact
+    # of an empty ledger.
+    for row in rows:
+        assert sv._LEGACY_DISPOSAL_TOMBSTONE_RE.fullmatch(
+            json.loads(row)["evidence_cmd"]), row
+
+    rc, out = run_audit(store, timeout=5)
+    assert ("candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0") in out, out
+    assert "vacuous_pins: latest_wins 1" in out, out
+    assert rc == 0, out
