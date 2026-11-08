@@ -55,20 +55,28 @@ STALE_DAYS_THRESHOLD = 60
 #: Either ghost population above this count makes the run an alarm rather than a
 #: footnote (#3849).
 #:
-#: Above the residue, below a leak. Measured 2026-11-06 over the live tree: 12 index
-#: fact rows the walk never accounted for and 43 `entities` rows with no directory, so
-#: the nightly run that first prints the row is silent — an alarm that fired on today's
-#: numbers would be noise from day one and the first thing deleted off the dashboards.
-#: The floor sits at 60 because the entity side is the one that moves: of the 43 ghosts,
-#: 31 were minted on 2026-09-23 (the migrate-and-rebuild day) and 12 have accrued since,
-#: the newest
-#: registered 2026-11-04, so growth of a few per month is already underway and crossing
-#: 60 means the accrual sped up by an order of magnitude — the point at which "residue"
-#: is the wrong word. A fact side above 60 says rows are being orphaned nightly rather
-#: than left behind once, which is the item's own rule for the alarm case.
+#: Above the residue, below a leak — and priced on the accrual, not on a point count.
+#: Measured 2026-11-08 through `app.kg_store`: 44 `entities` rows name no directory,
+#: 31 of them minted on 2026-09-23 (the migrate-and-rebuild day) and 13 registered on
+#: or after 2026-09-24 — the 45 days to the measurement, which is ~2 entity ghosts a
+#: week (2.02). Left unpruned that drip reaches 60 by itself in roughly eight more
+#: weeks, so the first crossing lands about early January 2027 with nothing having
+#: sped up at all; a leak accruing ten times as fast would be over the floor inside a
+#: week. The alarm line prints the newest ghost's registered date beside the count
+#: exactly because the two cases arrive at the same count on different dates.
 #:
-#: `entities.register()` never prunes (`app/kg_store.py:1326`), so no reindex can clear
-#: an entity ghost and this row cannot heal itself; the number is a report to a person.
+#: So the floor is priced against the residue a prune leaves behind, NOT against the
+#: 44 standing on the tree today: the prune is #3951 and it is still `draft`, so
+#: nothing expires these rows yet and no post-prune residue figure is measurable. When
+#: #3951 lands the residue is projected at ~0-4 and the owed-check job re-prices 60
+#: against it; that ruling is deliberately not taken here. A fact side above 60 says
+#: rows are being orphaned nightly rather than left behind once, which is the item's
+#: own rule for the alarm case.
+#:
+#: `entities.register()` never prunes (`app/kg_store.py:1037`) and the nightly reindex
+#: only registers (`app/kg_store.py:1328`), so no reindex can clear an entity ghost.
+#: This row cannot heal itself, which is why a crossing is a report to a person rather
+#: than proof the accrual sped up.
 GHOST_INDEX_ROWS_ALARM_FLOOR = 60
 #: Share of ACTIVE records that have to carry one `created_at` calendar date before
 #: that date stops being a recording date and is a re-derivation stamp (#2179).
@@ -1222,6 +1230,42 @@ def _provenance_cell(pv: dict | None) -> str:
             f"(created_at {pv['created_at_pct']}%, source_doc {pv['source_doc_pct']}%)")
 
 
+_EPOCH_AWARE = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _created_at_sortable(value: object) -> datetime:
+    """One registry `created_at` as an aware datetime, to pick newest and oldest.
+
+    `app.kg_store._now()` is the only writer and always emits UTC `isoformat()` with a
+    `+00:00` offset, so a string compare would already order them; parsing anyway,
+    because a `Z`-suffixed or hand-made row would sort lexicographically wrong against
+    a `+00:00` one, and `max()` over mixed-awareness datetimes raises outright — which
+    is why an unparseable value becomes the epoch rather than a bare `None` that would
+    take the whole comparison down with it.
+    """
+    text = str(value or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return _EPOCH_AWARE
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _ghost_date_label(value: object) -> str:
+    """A ghost's `created_at` as it should read on an alarm line, or `""` for none.
+
+    The calendar date is the whole signal here — a drip and a leak differ by weeks, not
+    hours — and an unknown date prints nothing at all rather than today's, which on an
+    alarm line would be a fabricated age.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text[:10] if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", text) else text
+
+
 def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
                        store=None) -> dict:
     """Index rows and registry entities the markdown tree cannot show, counted against
@@ -1284,6 +1328,18 @@ def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
       16,654 against `entities` 16,695 explicable, so it is returned rather than
       dropped — but the count here is about registry rows the tree cannot show.
 
+    The dates that travel with the count
+    ------------------------------------
+    `oldest_ghost` and `newest_ghost` (#3953) are the `created_at` extremes of the
+    entity ghosts THIS call counted, read off the same `entities.rows()` result as the
+    names — not of the registry, whose extremes sit outside the ghost range in both
+    directions. They are what makes a count readable: `created_at` is when the entity
+    was registered, so a newest date of 2026-09-23 says the residue is the
+    migrate-and-rebuild leftover and nothing new is being orphaned, while a newest date
+    of this morning says rows are being orphaned now. The over-floor alarm line prints
+    the newest one for exactly that reason. Either is `None` when the counted
+    population is empty or carries no date, which the alarm renders as no date at all.
+
     Failure is a value, never a zero
     --------------------------------
     A store that cannot be read yields `{"error": ...}` naming the cause, and the
@@ -1305,9 +1361,14 @@ def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
 
     try:
         index_counts: dict[str, int] = store.facts_idx.file_row_counts()
-        # `entities.all()` returns names, not rows — every registered name, expired or
-        # not, which is the population the tree is being compared against.
-        registry = [str(n) for n in store.entities.all()]
+        # The registry read has to be the one that yields ROWS. `entities.all()`
+        # (`app/kg_store.py:1097`) returns bare names — every registered name, expired
+        # or not — and carries no `created_at`, which is the column the over-floor
+        # alarm line prints (#3953); `entities.rows()` (`app/kg_store.py:1146`) is
+        # `SELECT *` over that same population in that same order, so one read serves
+        # the name set and the dates and the two cannot disagree about what was
+        # counted. One read of the root is also what the #3849 advisory asked for.
+        registry_rows = list(store.entities.rows())
     except Exception as exc:                           # a half-read store is a failure
         return {"error": f"store read failed: {type(exc).__name__}: {exc}"}
 
@@ -1347,8 +1408,21 @@ def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
     # subdirectories, none hidden or underscored), so this is not why the count is 43.
     dirs = {d.name for d in root.iterdir()
             if d.is_dir() and not d.name.startswith((".", "_"))} if root.is_dir() else set()
-    names = {n for n in registry if n}
+    names = {n for n in (str(r.get("name") or "") for r in registry_rows) if n}
     ghosts = sorted(n for n in names if n not in dirs)
+    ghost_set = set(ghosts)
+
+    # Dated against the GHOSTS just counted, never the registry at large: on
+    # 2026-11-08 that is 44 rows out of 16,910, and the whole-registry extremes
+    # (2026-09-23 in, and tonight's registrations out) are both outside the ghost
+    # range, so a reader that dated the full population would print a pair of dates
+    # about a different set of rows than the count beside them (#3953). `None`, not
+    # `0` and never today's date, when the counted population carries no date.
+    dated = [(_created_at_sortable(r.get("created_at")), str(r["created_at"]))
+             for r in registry_rows
+             if str(r.get("name") or "") in ghost_set and r.get("created_at")]
+    newest_ghost = max(dated)[1] if dated else None
+    oldest_ghost = min(dated)[1] if dated else None
 
     return {
         "facts": unopened_rows + under_parsed_rows,
@@ -1361,6 +1435,7 @@ def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
         "unregistered_dirs": sorted(dirs - names),
         "registry_rows": len(names),
         "ghost_names": ghosts,
+        "newest_ghost": newest_ghost, "oldest_ghost": oldest_ghost,
     }
 
 
@@ -2521,25 +2596,39 @@ def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
     if duplicate_id_files:
         out.append(f"{duplicate_id_files} fact files carry duplicate fact IDs")
     # The index claiming more than the tree holds, past the floor (#3849). Only the
-    # over-floor case alarms: today's 12 and 43 are residue a person has to decide
+    # over-floor case alarms: today's 12 and 44 are residue a person has to decide
     # about, and a bell rung nightly over a number nobody can act on is a footnote with
     # noise attached. Each population gets its own line naming WHICH store drifted,
     # because the two have different remedies — an orphaned fact row is a writer or a
     # vanished file, an orphaned entity row is a registration that never landed. An
     # unmeasured population cannot alarm, the same convention that keeps an unreadable
     # store from becoming a `0 edges` verdict above.
+    #
+    # Only the entity line carries a date, and only the newest one (#3953). The fact
+    # side is `facts_idx` rows with no file — rows of an index, which has no registry
+    # `created_at` to print — so an age printed there would attribute the age of an
+    # entity registration to a vanished `/tmp/blastroute2_u9ny_mb6/A.md`. The newest
+    # date is the one that separates the two stories a bare count cannot tell apart: 60
+    # ghosts spread over eight weeks is the drip the floor is priced against, 60 dated
+    # this week is the leak. A report with the key absent still alarms on the count —
+    # an alarm that raises is an alarm that does not fire.
     g = index_ghosts or {}
     if g and not g.get("error"):
-        for key, phrase in (
+        for key, phrase, newest_key in (
                 ("facts", "facts_idx rows whose file_path the walk parsed no fact file "
-                          "for"),
-                ("entities", "`entities` rows naming no directory under the facts tree")):
+                          "for", None),
+                ("entities", "`entities` rows naming no directory under the facts tree",
+                             "newest_ghost")):
             n = g.get(key) or 0
             if n > GHOST_INDEX_ROWS_ALARM_FLOOR:
-                out.append(f"{n:,} {phrase} — above the {GHOST_INDEX_ROWS_ALARM_FLOOR} "
-                           f"floor: rows are being orphaned, not left behind once. "
-                           f"`entities.register()` never prunes, so only a "
-                           f"referentially-checked prune clears them")
+                when = _ghost_date_label(g.get(newest_key)) if newest_key else ""
+                out.append(
+                    f"{n:,} {phrase}"
+                    + (f" (newest registered {when})" if when else "")
+                    + f" — above the {GHOST_INDEX_ROWS_ALARM_FLOOR} floor: rows are "
+                       f"being orphaned, not left behind once. "
+                       f"`entities.register()` never prunes, so only a "
+                       f"referentially-checked prune clears them")
     return out
 
 

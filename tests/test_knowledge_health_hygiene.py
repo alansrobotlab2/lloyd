@@ -1374,25 +1374,45 @@ def test_one_missing_file_and_one_missing_directory_print_one_and_one(tmp_path):
         db.close()
 
 
-def _ghosts(facts: int, entities: int) -> dict:
+#: The dates a real `count_index_ghosts()` returns beside its entity count (#3953):
+#: the live oldest and newest `created_at` of 2026-11-08, so a fixture that only
+#: changes the counts still carries the shape the alarm has to read.
+LIVE_OLDEST_GHOST = "2026-09-23T04:24:54+00:00"
+LIVE_NEWEST_GHOST = "2026-11-08T02:41:12+00:00"
+
+
+def _ghosts(facts: int, entities: int, *, newest: str | None = LIVE_NEWEST_GHOST,
+            oldest: str | None = LIVE_OLDEST_GHOST) -> dict:
+    """One `count_index_ghosts()` result, shaped as the shipped reader returns it.
+
+    `newest`/`oldest` travel with the counts because that is what the module returns
+    above the floor (#3953); pass `oldest=None` to hold a population with no
+    registry date at all, and `without_dates=True` at the call site to drop the keys.
+    """
     return {"facts": facts, "entities": entities, "error": None,
             "unopened_rows": facts, "unopened_paths": 1 if facts else 0,
             "under_parsed_rows": 0, "under_parsed_paths": 0,
             "index_short_rows": 0, "index_short_paths": 0,
             "unwalked_files": 0, "unregistered_dirs": [],
-            "registry_rows": entities, "ghost_names": []}
+            "registry_rows": entities, "ghost_names": [],
+            "newest_ghost": newest, "oldest_ghost": oldest}
 
 
 def test_the_ghost_alarm_fires_only_above_the_named_floor():
     """Clause 4: `GHOST_INDEX_ROWS_ALARM_FLOOR = 60` gates the alarm.
 
-    Today's live readings are 12 fact rows and 43 entity rows, so the nightly exit
+    Today's live readings are 12 fact rows and 44 entity rows, so the nightly exit
     status on the day this lands is exactly what it was before — an alarm that fired
     on the residue would be noise from day one, and a number nobody can act on
     overnight is a footnote with a bell attached. Above the floor the line names WHICH
     population drifted and how many, because an orphaned fact row (a vanished file, or
     a scratch writer that reached the live store) and an orphaned entity row (a
     registration that never landed) are not the same repair.
+
+    The fixture now carries the newest and oldest ghost dates #3953 adds, so the
+    at-or-below-the-floor silence below is pinned WITH those dates present: a
+    population that has a date to print is still not a population that may ring the
+    bell, and that is what keeps the nightly exit status unchanged.
     """
     assert khr.GHOST_INDEX_ROWS_ALARM_FLOOR == 60
     store = {"edges_active": 53416}
@@ -1427,7 +1447,229 @@ def test_the_ghost_alarm_fires_only_above_the_named_floor():
     assert khr._alarms(store, _hygiene(), 0, 53416) == []
 
 
-# ── #3952: the reader that cut the block at the first `---` at ANY column ──────────
+# ── #3953: the ghost count carries the date its newest row was registered ──────────
+#
+# A count alone cannot tell the two stories apart. 44 directory-less `entities` rows
+# measured 2026-11-08, 13 of them registered on or after 2026-09-24, is ~2 entity
+# ghosts a week — a drip that reaches 60 by itself about early January 2027. A leak
+# would put the same 60 rows there in days. The count is identical in both cases; the
+# NEWEST registered date is not, so the number has to travel with the date it belongs
+# to, and the alarm line has to print it.
+
+def _ghost_dated_tree(tmp_path, monkeypatch):
+    """Three registered entities with NO directory, dated 2026-01-01, -02 and -03,
+    beside two entities that DO have a directory and are dated OUTSIDE that range.
+
+    The registry order is chosen so the fixture cannot pass by accident: `rows()`
+    returns `ORDER BY name`, which here is `Ghost One` (2026-01-02), `Ghost Three`
+    (2026-01-03), `Ghost Two` (2026-01-01) — so neither end of the read is the newest
+    or the oldest row, and only a comparison over the dates finds both.
+
+    The two directory-backed entities are dated 2025-12-20 and 2026-06-15, one on each
+    side of the ghost range, because that is what makes "the dates describe the counted
+    ghost population" a testable claim rather than a sentence: a reader that took the
+    whole registry would return 2025-12-20 and 2026-06-15 and fail on both ends.
+
+    Dates are set through `app.kg_store._now`, the only writer of `created_at`
+    (`register()` stamps it), so the rows reach the store the way production rows do.
+    """
+    from app import kg_store
+    from app.kg_store import KGStore
+
+    root, files = _two_entity_tree(tmp_path)          # Alpha and Beta, both on disk
+    db = KGStore(tmp_path / "kg.sqlite")
+    # Registered BEFORE the index write on purpose: `facts_idx.update_file` registers
+    # the entity it indexes, and `register()` on an existing row leaves `created_at`
+    # alone — so stamping here is the only way these rows keep the dates below.
+    for f, stamp in zip(files, ("2025-12-20T10:00:00+00:00", "2026-06-15T10:00:00+00:00")):
+        monkeypatch.setattr(kg_store, "_now", lambda s=stamp: s)
+        db.entities.register(f.parent.name)
+    for f in files:
+        db.facts_idx.update_file(f, root=root)
+    for name, stamp in (("Ghost One", "2026-01-02T09:00:00+00:00"),
+                        ("Ghost Three", "2026-01-03T09:00:00+00:00"),
+                        ("Ghost Two", "2026-01-01T09:00:00+00:00")):
+        monkeypatch.setattr(kg_store, "_now", lambda s=stamp: s)
+        db.entities.register(name)                    # never a directory: these are ghosts
+    return root, db
+
+
+def test_the_ghost_count_also_returns_its_newest_and_oldest_registered_date(tmp_path,
+                                                                           monkeypatch):
+    """Clauses 1 and 2: the two dates describe the GHOSTS, not the registry.
+
+    Both ends are pinned, and against a fixture in which the rest of the registry sits
+    outside the ghost date range on both sides, so an implementation that dated the
+    whole population fails at each end rather than passing on one of them.
+    """
+    root, db = _ghost_dated_tree(tmp_path, monkeypatch)
+    try:
+        recon = khr.count_index_ghosts(_walked(root), root, store=db)
+        assert recon.get("error") is None, recon
+        assert recon["entities"] == 3, recon
+        assert recon["ghost_names"] == ["Ghost One", "Ghost Three", "Ghost Two"], recon
+        assert str(recon["newest_ghost"]).startswith("2026-01-03"), (
+            f"the newest of the three counted ghosts, not the newest row on the "
+            f"registry (Beta is dated 2026-06-15): {recon}")
+        assert str(recon["oldest_ghost"]).startswith("2026-01-01"), (
+            f"the oldest of the three counted ghosts, not the oldest row on the "
+            f"registry (Alpha is dated 2025-12-20): {recon}")
+        assert recon["entities"] == 3 and recon["registry_rows"] == 5, (
+            "three ghosts out of five registered rows is the whole point of scoping "
+            "the dates to the counted population")
+    finally:
+        db.close()
+
+
+class _RowsOnlyStore:
+    """A store that yields registry ROWS and refuses the name-only read.
+
+    Clause 1's other half: `entities.all()` (`app/kg_store.py:1097`) returns bare
+    names, so it cannot be where a `created_at` comes from, while `entities.rows()`
+    (`app/kg_store.py:1146`) returns the dicts that carry the column. Making `all()`
+    raise means a regression back to the name read cannot quietly return dates from
+    somewhere else — `count_index_ghosts` catches the exception and returns its
+    `{"error": ...}` value, which the node below refuses.
+    """
+
+    class _Idx:
+        def file_row_counts(self):
+            return {}
+
+    class _Ent:
+        def rows(self):
+            return [{"name": "Ghost One", "created_at": "2026-01-02T09:00:00+00:00"},
+                    {"name": "Ghost Three", "created_at": "2026-01-03T09:00:00+00:00"},
+                    {"name": "Ghost Two", "created_at": "2026-01-01T09:00:00+00:00"}]
+
+        def all(self):
+            raise AssertionError("entities.all() returns names and has no created_at")
+
+    def __init__(self):
+        self.facts_idx = self._Idx()
+        self.entities = self._Ent()
+
+
+def test_the_ghost_dates_come_from_the_row_read_not_the_name_read(tmp_path):
+    """Clause 1: the read that yields rows is the one the dates are taken from.
+
+    A root with no directories at all, so all three stub registry names are ghosts and
+    the count and the dates are about the same three rows.
+    """
+    recon = khr.count_index_ghosts({}, tmp_path / "no-such-facts",
+                                   store=_RowsOnlyStore())
+    assert recon.get("error") is None, (
+        f"a registry read that yields rows must be enough; the name-only read is the "
+        f"one this store refuses: {recon}")
+    assert recon["entities"] == 3, recon
+    assert str(recon["newest_ghost"]).startswith("2026-01-03"), recon
+    assert str(recon["oldest_ghost"]).startswith("2026-01-01"), recon
+
+
+def test_the_over_floor_entity_line_prints_the_newest_ghost_date_and_the_fact_one_does_not():
+    """Clause 3: the date rides the entity line, and only the entity line.
+
+    The fact-side population is `facts_idx` rows with no file — rows of an index, not
+    registry entries — so they have no `created_at` to print at all, and the same
+    dict-shaped ghost report is what both lines are built from. A date printed there
+    would attribute the age of a registry entry to a vanished
+    `/tmp/blastroute2_u9ny_mb6/A.md`.
+
+    A ghost report with no date keys at all is the shape every caller in this file was
+    written against, so it must still alarm on the count rather than raise: an alarm
+    that crashes is an alarm that does not fire.
+    """
+    store = {"edges_active": 53416}
+
+    over_entities = khr._alarms(store, _hygiene(), 0, 53416,
+                                _ghosts(12, 61, newest="2026-01-03T09:00:00+00:00",
+                                        oldest="2026-01-01T09:00:00+00:00"))
+    assert len(over_entities) == 1, over_entities
+    line = over_entities[0]
+    assert "61 `entities` rows" in line, line
+    assert "2026-01-03" in line, f"the newest ghost's date beside the count: {line}"
+    assert "2026-01-01" not in line, (
+        f"the line prints the NEWEST date, the one that separates a drip from a leak: "
+        f"{line}")
+
+    over_facts = khr._alarms(store, _hygiene(), 0, 53416,
+                             _ghosts(61, 12, newest="2026-01-03T09:00:00+00:00"))
+    assert len(over_facts) == 1, over_facts
+    assert "61 facts_idx rows" in over_facts[0], over_facts[0]
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", over_facts[0]), (
+        f"the fact side has no registry `created_at`, so its line may print no date: "
+        f"{over_facts[0]}")
+
+    # The keys absent entirely: still an alarm, still no date, and no exception.
+    undated = _ghosts(12, 61)
+    undated.pop("newest_ghost")
+    undated.pop("oldest_ghost")
+    no_keys = khr._alarms(store, _hygiene(), 0, 53416, undated)
+    assert len(no_keys) == 1, no_keys
+    assert "61 `entities` rows" in no_keys[0], no_keys[0]
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", no_keys[0]), no_keys[0]
+
+    # A measured population whose dates are unknown (None) prints no date either —
+    # the absence has to read as unknown, never as today's date.
+    dated_none = khr._alarms(store, _hygiene(), 0, 53416,
+                             _ghosts(12, 61, newest=None, oldest=None))
+    assert len(dated_none) == 1, dated_none
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", dated_none[0]), dated_none[0]
+
+    # And at or below the floor the dates do not buy the line an appearance: this is
+    # the nightly exit status staying exactly where it is.
+    assert khr._alarms(store, _hygiene(), 0, 53416, _ghosts(12, 60)) == []
+
+
+def _comment_block_above(constant: str) -> str:
+    """The contiguous `#` comment block sitting directly above a module constant.
+
+    Read from the shipped file (`khr.__file__`), because the thing under test is the
+    rationale a reader finds next to the number, which no `import` ever loads.
+    """
+    lines = Path(khr.__file__).read_text(encoding="utf-8").splitlines()
+    at = [i for i, ln in enumerate(lines) if ln.startswith(f"{constant} =")]
+    assert len(at) == 1, f"{constant} is not defined exactly once: {at}"
+    block: list[str] = []
+    i = at[0] - 1
+    while i >= 0 and lines[i].lstrip().startswith("#"):
+        block.append(lines[i])
+        i -= 1
+    assert block, f"nothing comments {constant}"
+    return "\n".join(reversed(block))
+
+
+def test_the_ghost_floor_comment_prices_the_number_on_the_measured_accrual():
+    """Clause 4: the rationale beside 60 is the accrual, not the old guess.
+
+    The sentence this replaces claimed that "crossing 60 means the accrual sped up by
+    an order of magnitude". Measured 2026-11-08 through `app.kg_store`, the live entity
+    ghosts accrue at ~2 a week, which reaches 60 on its own about early January 2027 —
+    wrong by roughly 8x, and in the direction that leaves a real leak looking ordinary.
+    The block now has to carry the rate, the projection, the fact that the floor is
+    priced against the residue AFTER #3951's prune rather than the 44 on the tree
+    today, and what a crossing actually means: a report to a person.
+    """
+    block = _comment_block_above("GHOST_INDEX_ROWS_ALARM_FLOOR")
+    # Unwrapped: the rationale is hand-wrapped at ~95 columns, and a claim split across
+    # two comment lines is the same claim.
+    prose = " ".join(ln.strip().lstrip("#:").strip() for ln in block.splitlines())
+    assert "order of magnitude" not in prose, prose
+    assert "2 entity ghosts a week" in prose, (
+        f"the measured accrual has to be in the rationale that prices the floor: {prose}")
+    assert "13" in prose and "2026-09-24" in prose and "45 days" in prose, prose
+    assert "2.02" in prose, f"the rate is stated twice, once rounded: {prose}"
+    assert "January 2027" in prose, (
+        f"the unpruned crossing has to be projected, so a reader can tell a drip from "
+        f"a leak before the bell: {prose}")
+    assert "#3951" in prose, (
+        f"the residue the floor is priced against belongs to a prune that has not "
+        f"landed, and the block must say so: {prose}")
+    assert "44" in prose and "NOT against the 44" in prose, (
+        f"the block must say the floor is not priced against today's tree: {prose}")
+    assert "report to a person" in prose, prose
+    assert khr.GHOST_INDEX_ROWS_ALARM_FLOOR == 60, (
+        "this item re-prices the RATIONALE and deliberately leaves the number alone")
 #
 # `count_index_ghosts` counts `under_parsed_rows` — index rows for a file the walk
 # DID open but parsed short — and the live cause of all 4 such rows was this
