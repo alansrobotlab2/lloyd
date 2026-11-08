@@ -1254,6 +1254,19 @@ def _failed_union(draws: list[dict]) -> list[str]:
     return seen
 
 
+#: #3925: #3718's marker key, for the family #3718 ruled on but did not reach. The
+#: ruling (session 20261106_024106_owedcheck_b4b7, 2026-11-06T10:44Z) was that a
+#: lock-busy land "DOES get the same treatment" as a `ran: 0` land, because it is the
+#: same green light: `state: skipped`, no draw, `ok: true` and a commit sha. The KEY is
+#: therefore shared, and the SENTENCE cannot be: "the proposed-vault draw ran 0 tests"
+#: is false of a draw that was never launched, and a key that means two different
+#: things is worth less than either. So one key, two honest strings, and both say the
+#: same consequence — the heavy rung judged nothing about this land.
+NO_DRAW_VERDICT_MARKER = (
+    "no heavy-rung verdict: the probe launched no test draw at all, so the code-agreement "
+    "rung judged nothing about this land beyond the cheap validators")
+
+
 def agreement(*, paths: list[str], ack: list[str] | None = None,
               message: str = "",
               live_root: Path | None = None,
@@ -1348,11 +1361,17 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     failed the pre-land side too is pre-existing rather than this land's.
     `reason` says which of the non-answers it was whenever `state` is `skipped`,
     and each run's own `seconds`, `files` and captured `excerpt` ride along so a
-    non-answer explains itself. `heavy_rung_verdict` is #3718's marker for the one
-    non-answer that a green result hid: a proposed-vault draw that ran ZERO tests, so
-    the heavy rung issued no verdict about this land and the land committed anyway. It
-    never appears on the other non-answer — a draw that ran, saw failures, and could not
-    attribute them — which carries `unadjudicated` beside a non-zero `candidate.ran`.
+    non-answer explains itself. `heavy_rung_verdict` is #3718's marker for the
+    non-answer a green result hid, and since #3925 it names every way this probe can
+    reach a verdict of nothing: a proposed-vault draw that ran ZERO tests, and a probe
+    that never launched a draw at all — the gate's tests lock stayed busy for the whole
+    queue, no usable pytest-xdist, no room for a run in what is left of the budget, a
+    mirror or a baseline or a proposal commit that could not be made. In every one of
+    those shapes the land committed anyway with `ok: true` and a sha. The key's ONE
+    exclusion is the other non-answer — a draw that ran, saw failures, and could not
+    attribute them — which carries `unadjudicated` beside a non-zero `candidate.ran`
+    instead, because saying "no verdict" about a draw that judged 12,000 nodes would
+    make the key worth less than it says.
     """
     # The budget is settled before anything else, including the nesting guard below,
     # because a row that carried no `budget` would leave "what was this probe allowed"
@@ -1394,6 +1413,18 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     def done(**kw) -> dict:
         report.update(kw)
         report["seconds"] = round(time.time() - started, 1)
+        # #3925: #3718's marker, on every skip that never launched a draw. This report
+        # seeds no `candidate`, so the key's absence is this function's own convention
+        # for "no run was started" — the same rule `_guards_row` reads. A `skipped`
+        # without it is therefore a probe the heavy rung never got an answer from, which
+        # is what `ok: true` beside a commit sha used to hide. One rule at the one place
+        # every skip is written, so the next pre-launch `return done(...)` cannot
+        # re-open the hole the way the ten pre-launch returns did. A skip that DID launch a
+        # draw keeps its own shape (`unadjudicated` beside a non-zero `candidate.ran`,
+        # and no key), and the `ran: 0` branch sets its own string before calling this,
+        # which `setdefault` leaves alone.
+        if report["state"] == "skipped" and "candidate" not in report:
+            report.setdefault("heavy_rung_verdict", NO_DRAW_VERDICT_MARKER)
         return report
 
     def left() -> float:

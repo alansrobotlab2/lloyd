@@ -6976,6 +6976,268 @@ def test_the_no_heavy_verdict_marker_reaches_the_land_row_and_the_land_result(
     assert row["guards"]["heavy_rung_verdict"] == g["heavy_rung_verdict"], row["guards"]
 
 
+def test_a_lock_busy_probe_that_launched_no_draw_marks_the_heavy_rung_as_answering_nothing(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#3925 clauses 1 and 5: the shape 15 committed rows wore as a green light.
+
+    #3718's owed-check ruling (session 20261106_024106_owedcheck_b4b7,
+    2026-11-06T10:44Z) said the lock-busy lands "DO get the same treatment" as the
+    `ran: 0` lands and filed nothing. #3925's triage then counted what the gap cost:
+    15 `vault_land` rows between that ruling and 2026-11-08T05:22Z whose probe never
+    launched a draw, every one of them `ok: true` with a commit sha and none carrying
+    `heavy_rung_verdict`, out of 105 lock-busy skips in the ledger. This node is that
+    row with only the queue stood in — the `LockHeld` is raised at the seam
+    `test_the_probe_queues_behind_the_gates_tests_rung_and_says_so` already pins, so what
+    is measured here is what the probe does with the refusal, not the polling that ends.
+
+    Clause 5 is pinned in the same node because it is the same observation from the other
+    side: the fix adds a KEY and no word to that row, so the `reason` asserted verbatim
+    here is byte-identical to the two existing pins in
+    `test_a_skip_that_reached_no_completed_run_keeps_candidate_and_reason_untouched` and
+    in the queue node above. A paraphrase would break a pin this change has no licence to
+    touch, and the `_busy` stub repeats their canned holder for exactly that reason.
+    """
+    from scripts.automod import state as ST
+
+    _disagreement_vault(vault)
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0})
+    launched: list[int] = []
+    canned_run = VG._run_selection
+
+    def _counting_run(*args, **kw):
+        launched.append(1)
+        return canned_run(*args, **kw)
+
+    monkeypatch.setattr(VG, "_run_selection", _counting_run)
+
+    def _busy(*args, **kw):
+        raise ST.LockHeld("canned: tests lock held by gate-SM_TEST")
+
+    monkeypatch.setattr(VG, "_wait_for_tests_slot", _busy)
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      budget_ledger=tmp_path / "no-ledger-here.jsonl")
+
+    # Clause 1, the shape: a skip that refuses nothing and holds no numbers.
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep["reason"]
+    assert launched == [], f"a lock-busy probe launched {len(launched)} draw(s)"
+    assert "candidate" not in rep and "unadjudicated" not in rep, rep
+    # Clause 1, the marker: it says the heavy rung issued no verdict, and says WHY.
+    # "ran 0 tests" would be a lie about a draw that was never launched, so the two
+    # families share the key and never the sentence.
+    mark = rep["heavy_rung_verdict"]
+    assert mark.startswith("no heavy-rung verdict"), rep
+    assert "no test draw" in mark, mark
+    assert "ran 0 tests" not in mark, mark
+    # Clause 5: the wording the two existing pins hold, unchanged.
+    assert rep["reason"] == ("the gate's tests lock stayed busy for the whole queue: "
+                             "canned: tests lock held by gate-SM_TEST"), rep
+
+
+def test_every_skip_that_never_launched_a_draw_carries_the_no_verdict_marker(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#3925 clause 2: the rule sits where every skip is written, not on one branch.
+
+    `agreement` answers `skipped` from ten returns that exist before any child run does,
+    and #3718 marked none of them — its one writer is after the launch, in the `ran: 0`
+    branch, so it is not this family. The triage read the rest as the same row shape as
+    the lock-busy one: `state: skipped`, no `candidate` block, and `ok: true` with a sha
+    on the ledger. Each canned failure below drives one of those returns, and every shape
+    is checked for its own `reason` first, because a shape that silently fired an earlier
+    branch would stop covering the family its name claims.
+
+    The `no test draw` sentence is asserted on all of them: a marker that could be
+    reached only by the lock branch would leave the other nine reading as judged, which is
+    the hole this item was filed for.
+    """
+    _disagreement_vault(vault)
+    ledger = tmp_path / "no-ledger-here.jsonl"
+
+    # The nesting guard reads the env the suite runs under, so it is measured first and
+    # cleared here rather than by the stand-ins below, which clear it as a side effect.
+    monkeypatch.setenv(VG.NESTING_ENV, "1")
+    nested = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    monkeypatch.delenv(VG.NESTING_ENV, raising=False)
+
+    # One shared set of stood-in runs and clock, so no shape's skip depends on how long
+    # a real `git worktree add` took the day the suite ran, and the queue for the gate's
+    # tests lock is canned at 0.0 s so the shapes below reach the step they name.
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0}, queue_wait_s=0.0)
+    monkeypatch.setattr(VG, "_parallel_workers", lambda python: (8, "canned: 8 workers"))
+
+    no_tree = _probe_here(tmp_path, tmp_path / "no-such-tree", vault,
+                          budget_ledger=ledger)
+    with monkeypatch.context() as m:
+        m.setattr(VG, "_parallel_workers",
+                  lambda python: (1, "canned: `import xdist` failed"))
+        no_xdist = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    no_room = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger,
+                          timeout=2.0)
+    with monkeypatch.context() as m:
+        m.setattr(VG, "_copy_vault", lambda dest, live: "canned: no space left")
+        no_mirror = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    with monkeypatch.context() as m:
+        m.setattr(VG, "_copy_vault", lambda dest, live: None)
+        m.setattr(VG, "baseline_vault",
+                  lambda dest, live, paths: {"ok": False, "restored": [], "removed": [],
+                                             "reason": "canned: HEAD has no such file"})
+        no_baseline = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    with monkeypatch.context() as m:
+        m.setattr(VG, "_copy_vault", lambda dest, live: None)
+        m.setattr(VG, "baseline_vault",
+                  lambda dest, live, paths: {"ok": True, "restored": [], "removed": [],
+                                             "reason": ""})
+        m.setattr(VG, "commit_proposal",
+                  lambda mirror, paths, message: {
+                      "ok": False,
+                      "reason": "canned: the mirror refused the commit"})
+        no_commit = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+
+    shapes = [
+        ("nesting guard", nested, "not run inside a test run or a probe child"),
+        ("unreadable code tree", no_tree, "cannot read the code tree's HEAD at"),
+        ("no pytest-xdist", no_xdist,
+         "the selection was not run: canned: `import xdist` failed"),
+        ("no room for a run in the budget", no_room,
+         "no run fits what is left of the 2s probe budget"),
+        ("the vault mirror failed", no_mirror,
+         "cannot mirror the vault as proposed: canned: no space left"),
+        ("the pre-land vault could not be built", no_baseline,
+         "cannot build the pre-land vault: canned: HEAD has no such file"),
+        ("the proposal commit was refused", no_commit,
+         "cannot commit the proposal into the mirror: canned: the mirror refused"),
+    ]
+    for label, rep, why in shapes:
+        assert rep["reason"].startswith(why), (label, rep["reason"])
+        assert rep["state"] == "skipped" and rep["refuse"] is False, (label, rep)
+        assert "candidate" not in rep, (label, rep)
+        mark = rep.get("heavy_rung_verdict")
+        assert mark is not None, (label, rep["reason"])
+        assert mark.startswith("no heavy-rung verdict"), (label, mark)
+        assert "no test draw" in mark and "ran 0 tests" not in mark, (label, mark)
+
+
+def test_a_draw_that_ran_never_borrows_the_no_verdict_marker(
+        tmp_path, monkeypatch, vault, guard_tree):
+    """#3925 clause 3: the key keeps meaning "the heavy rung judged nothing".
+
+    Three skips where a real draw came back. Two are the baseline-side pair
+    (`the pre-land run could not start`, `the pre-land run answered nothing`), which
+    #3925's triage put under owed-check as a RULING rather than a round precisely because
+    they carry a non-zero `candidate.ran` and so sit outside #3718's ruling and outside
+    this item's no-`candidate` rule; pinning them marker-free is what stops this round
+    making that ruling by default. The third is #3718's own excluded family — a parallel
+    run that SAW failures and could not re-ask them, which keeps `unadjudicated` beside
+    its denominator and never the marker.
+
+    The last block is the contrast that keeps the two sentences from collapsing into one:
+    the `ran: 0` draw, whose marker still says the draw ran nothing rather than that none
+    was launched.
+
+    What this node can refuse is the obvious over-reach — a `done()` that keys the marker
+    on `state == "skipped"` alone. That rule marks all three of the reports below (each
+    measured: the node fails at block (a)'s assertion) while still passing the two nodes
+    that prove the marker appears, which is the whole content of clause 3: the key means
+    "the heavy rung judged nothing", and a draw that judged 12,000 nodes and could not
+    attribute two of them is not that.
+    """
+    _disagreement_vault(vault)
+    ledger = tmp_path / "no-ledger-here.jsonl"
+
+    # (a) #3718's excluded family: 2 failures seen, no re-ask could start.
+    _budget_runs(monkeypatch, parallel={"seconds": 296.0, "failed": [SEEN_A, SEEN_B]},
+                 queue_wait_s=0.0)
+    not_re_asked = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    assert not_re_asked["reason"].startswith(
+        "the serial re-ask of the parallel run's 2 failing node(s) could not start"), \
+        not_re_asked["reason"]
+    assert not_re_asked["candidate"]["ran"] >= 1, not_re_asked["candidate"]
+    assert not_re_asked["unadjudicated"] == [SEEN_A, SEEN_B], not_re_asked
+    assert "heavy_rung_verdict" not in not_re_asked, not_re_asked
+
+    # (b) the pre-land side cannot start: 289.0 + 2 x 1.0 of a 300.0 s working budget
+    # leaves 9.0 s, and 9.0 / 2 draws owed is 4.5 s, under the 5.0 s a draw needs.
+    _budget_runs(monkeypatch, parallel={"seconds": 289.0, "failed": [SEEN_A]},
+                 re_ask=[{"seconds": 1.0, "failed": [SEEN_A]},
+                         {"seconds": 1.0, "failed": [SEEN_A]}],
+                 base=[{"seconds": 1.0}], queue_wait_s=0.0)
+    base_no_room = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    assert base_no_room["reason"].startswith(
+        "the pre-land run could not start inside the 300s probe budget"), \
+        base_no_room["reason"]
+    assert base_no_room["proposed_runs"] == 2, base_no_room
+    assert base_no_room["candidate"]["ran"] >= 1, base_no_room["candidate"]
+    assert "heavy_rung_verdict" not in base_no_room, base_no_room
+
+    # (c) the pre-land side ran and answered nothing.
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0, "failed": [SEEN_A]},
+                 re_ask=[{"seconds": 1.0, "failed": [SEEN_A]},
+                         {"seconds": 1.0, "failed": [SEEN_A]}],
+                 base=[{"seconds": 1.0, "ran": 0, "note": "canned: collection died"}],
+                 queue_wait_s=0.0)
+    base_nothing = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    assert base_nothing["reason"].startswith(
+        "the pre-land run answered nothing"), base_nothing["reason"]
+    assert base_nothing["candidate"]["ran"] >= 1, base_nothing["candidate"]
+    assert "heavy_rung_verdict" not in base_nothing, base_nothing
+
+    # (d) the contrast: a launched draw that collected nothing keeps ITS sentence.
+    _budget_runs(monkeypatch, parallel={"seconds": 296.2, "ran": 0,
+                                        "note": "timed out after 296.2s"},
+                 queue_wait_s=0.0)
+    ran_zero = _probe_here(tmp_path, guard_tree, vault, budget_ledger=ledger)
+    assert ran_zero["candidate"]["ran"] == 0, ran_zero["candidate"]
+    assert "ran 0 tests" in ran_zero["heavy_rung_verdict"], ran_zero["heavy_rung_verdict"]
+    assert "no test draw" not in ran_zero["heavy_rung_verdict"], ran_zero
+
+
+def test_a_land_over_a_probe_that_launched_no_draw_still_commits_and_marks_the_row(
+        tmp_path, monkeypatch, vault, guard_tree, probed):
+    """#3925 clause 4, across both surfaces the clause names.
+
+    A whole `land()`: the real probe path against fixture roots, the real vault commit,
+    the real row on a real promotions ledger, with only the queue for the gate's tests
+    lock stood in. Both surfaces are one projection (`_guards_row`), which already copies
+    the key on truthiness alone and not on `candidate` being present — so the seam this
+    change crosses is the report-to-row one, and nothing in `vault_round.py` moved. The
+    hop this node still does not cross is the serialised tool answer, crossed by
+    `tests/test_automod_hardening.py::test_a_vault_land_answer_shows_the_agent_the_heavy_rung_ran_nothing`.
+
+    What must NOT change is the other half of the clause: `ok: true` with a commit sha.
+    #3718's ruling forbids a refusal (`vault_round.py:1969-1973` — a probe that cannot
+    judge records why and proceeds), so the marker is a signal and never a block, and a
+    node that only proved the marker would hide the fact that this change could have
+    quietly turned 15 lands a day into errors.
+    """
+    from scripts.automod import state as ST
+
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _budget_runs(monkeypatch, parallel={"seconds": 1.0}, real_clock=True)
+
+    def _busy(*args, **kw):
+        raise ST.LockHeld("canned: tests lock held by gate-SM_TEST")
+
+    monkeypatch.setattr(VG, "_wait_for_tests_slot", _busy)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n\n#3925 the queue gave up.\n")
+
+    out = V.land(["skills/foo/SKILL.md"],
+                 "#3925 a land over a probe that drew nothing", item_id=None)
+
+    assert out["ok"] is True, "the ruling is that a non-judging probe still commits"
+    assert out["commit"], out
+    g = out["guards"]
+    assert g["state"] == "skipped" and "candidate" not in g, g
+    assert g["heavy_rung_verdict"].startswith("no heavy-rung verdict"), g
+    assert "no test draw" in g["heavy_rung_verdict"], g
+    assert json.loads(json.dumps(out))["guards"]["heavy_rung_verdict"] == \
+        g["heavy_rung_verdict"], "the tool result is a JSON dump of this dict"
+    row = _events("vault_land")[-1]
+    assert row["ok"] is True and row["commit"] == out["commit"], row
+    assert row["guards"]["state"] == "skipped", row["guards"]
+    assert "candidate" not in row["guards"], row["guards"]
+    assert row["guards"]["heavy_rung_verdict"] == g["heavy_rung_verdict"], row["guards"]
+
+
 def test_the_row_shows_the_budget_and_the_cost_of_every_draw_side_by_side(
         tmp_path, monkeypatch, vault, guard_tree, probed):
     """Clause 4 on the row: budget beside elapsed, and every draw's own cost.
