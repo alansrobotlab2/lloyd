@@ -28,8 +28,10 @@ and slash commands, `/v1/...` endpoints, templates (`YYYY-MM-DD.md`, `<id>`,
 globs), URLs, commands with spaces and truncated ids are never extracted.
 
 A cite is `exempt` when its line says the target is gone on purpose ("no longer
-exists", "retired", ...), when it carries `<!-- ri:known-absent -->`, or when
-its target is in `KNOWN_ABSENT` — the same shape as skill_lint's
+exists", "retired", and the two spellings #3944 found missing: an attributive
+`deleted` before the path, and the shell's own `No such file or directory`), when
+it carries `<!-- ri:known-absent -->`, or when its target is in `KNOWN_ABSENT` —
+the same shape as skill_lint's
 `KNOWN_ABSENT_SCRIPTS`: absent path -> why that is fine. Exempt cites do not
 count toward the exit code.
 
@@ -89,11 +91,21 @@ CORPUS = ("lloyd/USER.md", "lloyd/MEMORY.md", "memory/mental-models.md")
 KNOWN_ABSENT: dict[str, str] = {}
 
 EXEMPT_MARKER = "<!-- ri:known-absent -->"
+# The vocabulary held the postpositive form ("`x` was deleted") but not the two
+# spellings a person reaching for a sentence about a gone path actually write, so
+# `memory/mental-models.md:2407` ("…run a watchdog under a deleted
+# `lloyd-work/SM_20261104_123801/` round root…") and :2199 ("`ls
+# ~/.local/state/lloyd-fleet-watchdog/` → `No such file or directory`") printed as
+# dangling records a human could not repair (#3944). `\bdeleted\b` subsumes
+# `was deleted|were deleted`, which stay readable in the alternation. Deliberately
+# no bare `\bremoved\b`: `was removed|were removed` are already here, and the two
+# cites this widening newly exempts are both caught above, so a wider `removed`
+# would weaken the one guard that keeps a moved cite red for no cite needing it.
 _ABSENCE_PROSE = re.compile(
-    r"no longer exist|does not exist|doesn't exist|did not exist|was deleted|"
-    r"were deleted|was removed|were removed|\bretired\b|\bis gone\b|\bare gone\b|"
-    r"\bnever landed\b|\bnever existed\b|\babsent\b|\bsuperseded\b|\brenamed\b|"
-    r"\bmissing\b|\bneither is\b",
+    r"no longer exist|does not exist|doesn't exist|did not exist|\bdeleted\b|"
+    r"was removed|were removed|no such file or directory|\bretired\b|\bis gone\b|"
+    r"\bare gone\b|\bnever landed\b|\bnever existed\b|\babsent\b|\bsuperseded\b|"
+    r"\brenamed\b|\bmissing\b|\bneither is\b",
     re.IGNORECASE,
 )
 

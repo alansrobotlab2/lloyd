@@ -137,6 +137,122 @@ def test_documented_absence_is_exempt_and_does_not_fail_the_run(world):
     assert ri.main(_args(world)) == 0
 
 
+# ── the two absence spellings that sat outside the vocabulary (#3944) ───────
+# The exempt rows in `MEMORY` above are the postpositive form ("`x` was deleted").
+# The two forms a person reaches for when recording that a path is gone were not in
+# `_ABSENCE_PROSE`, so `memory/mental-models.md:2407` ("… run a watchdog under a
+# deleted `lloyd-work/SM_20261104_123801/` round root …") and :2199 ("`ls
+# ~/.local/state/lloyd-fleet-watchdog/` → `No such file or directory`") each printed
+# in `## Dangling`, in a report the module docstring defines as a red run. Each case
+# below is the shape of one of those two lines, plus the control that keeps the
+# guard worth having.
+_GONE_ROOT = "lloyd-work/SM_20261104_123801/"
+_GONE_STATE = "~/.local/state/lloyd-fleet-watchdog/alert.json"
+
+_ABSENCE_CASES = {
+    # Clause 1: `deleted` used attributively, sitting before the path it describes.
+    "attributive-deleted": (
+        f"- a watchdog ran under a deleted `{_GONE_ROOT}` round root.\n",
+        "exempt", _GONE_ROOT),
+    # Clause 2: the literal error string the shell printed for the path.
+    "shell-error-string": (
+        f"- the alarm named a state file at `{_GONE_STATE}`: "
+        "`ls ~/.local/state/lloyd-fleet-watchdog/` → `No such file or directory`.\n",
+        "exempt", _GONE_STATE),
+    # Clause 3's control: the same absent path, in a sentence that reports no
+    # absence at all. A cite whose target is not where the line says it is — the
+    # event the report exists for — must stay red whatever the vocabulary grows.
+    "no-absence-prose": (
+        f"- the watchdog runs from `{_GONE_ROOT}` and writes its log under it.\n",
+        "dangling", _GONE_ROOT),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(_ABSENCE_CASES))
+def test_recording_that_a_path_is_gone_exempts_its_cite(tmp_path, spelling):
+    """Clauses 1-3: exempt on either absence spelling, red on neither.
+
+    `how_checked` is asserted too: the row has to name the check that moved it out
+    of `## Dangling`, because a verdict nobody can re-run is #882's whole complaint.
+    """
+    line, want, target = _ABSENCE_CASES[spelling]
+    vault = tmp_path / "vault"
+    (vault / "memory").mkdir(parents=True)
+    (vault / "memory" / "mental-models.md").write_text(line, encoding="utf-8")
+    got = [r for r in ri.scan(vault=vault, repo=tmp_path / "repo",
+                              home=tmp_path / "home",
+                              corpus=("memory/mental-models.md",))
+           if r["target"] == target]
+    assert len(got) == 1, (spelling, got)
+    assert got[0]["verdict"] == want, (spelling, got[0])
+    if want == "exempt":
+        assert "absence prose" in got[0]["how_checked"], got[0]
+    else:
+        assert "absence prose" not in got[0]["how_checked"], got[0]
+
+
+def test_a_cite_that_moved_stays_dangling_under_the_widened_vocabulary(tmp_path):
+    """Clause 3, the code half: a `path:N` whose file moved out from under it.
+
+    The shape #3637 clause 4 refuses to let an exemption swallow — past EOF, in a
+    line with no absence word in it — is the case the widened vocabulary must not
+    reach. `test_documented_absence_is_exempt_and_does_not_fail_the_run` holds the
+    postpositive spelling and the clean-exit half; this node holds the red half.
+    """
+    vault, repo = tmp_path / "vault", tmp_path / "repo"
+    (vault / "memory").mkdir(parents=True)
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "queue.py").write_text("a\nb\nc\n", encoding="utf-8")
+    (vault / "memory" / "mental-models.md").write_text(
+        "- the claim is published by `app/queue.py:999`.\n", encoding="utf-8")
+    got = ri.scan(vault=vault, repo=repo, home=tmp_path / "home",
+                  corpus=("memory/mental-models.md",))
+    assert [r["verdict"] for r in got] == ["dangling"], got
+    assert "beyond eof (3)" in got[0]["how_checked"], got[0]
+
+
+def test_the_widened_vocabulary_is_the_one_the_gate_matches_with(tmp_path,
+                                                                 monkeypatch):
+    """Clause 4's seam: the two consumers of this rule are one object, not two.
+
+    `scripts/automod/prose_consumers.py:439` binds `exempt_lines =
+    RI.ABSENCE_PROSE` rather than compiling its own (#3309), so widening it also
+    widens what the gate's observe-only rung declines to flag as a consumer. The
+    assertion is on the pattern object the matcher RECEIVES: identity proves one
+    copy, and searching it with the two new spellings proves the widening is the
+    half the gate got, not a vocabulary only the nightly sweep ever sees.
+    """
+    from scripts.automod import prose_consumers as PC
+
+    base, head = tmp_path / "base", tmp_path / "head"
+    for tree, body in ((base, "KEEP = 1\ndef retired_worker_entrypoint():\n"
+                               "    return KEEP\n"), (head, "KEEP = 1\n")):
+        (tree / "app").mkdir(parents=True)
+        (tree / "app" / "m.py").write_text(body, encoding="utf-8")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    diff = ("\n".join(["--- a/app/m.py", "+++ b/app/m.py", "@@ -1,2 +0,0 @@",
+                       "-def retired_worker_entrypoint():", "-    return KEEP"]) + "\n")
+    seen: dict = {}
+    real = PC._match
+
+    def spy(vault_: Path, candidates: list, **kw):
+        seen.update(kw)
+        return real(vault_, candidates, **kw)
+
+    monkeypatch.setattr(PC, "_match", spy)
+    PC.scan(head, base, ["app/m.py"], diff, checkout=head, vault=vault,
+            home=tmp_path / "home")
+    exempt_lines = seen.get("exempt_lines")
+    assert exempt_lines is ri.ABSENCE_PROSE, (
+        "the gate received a pattern of its own: the two copies of this rule are "
+        "what #3309 exists to refuse")
+    assert seen.get("exempt_marker") == ri.EXEMPT_MARKER
+    assert exempt_lines.search("a watchdog ran under a deleted "
+                               "`lloyd-work/SM_20261104_123801/` round root")
+    assert exempt_lines.search("`ls ~/nowhere/` → `No such file or directory`")
+
+
 def _snapshot(root: Path) -> dict[str, str]:
     return {str(p.relative_to(root)): hashlib.sha1(p.read_bytes()).hexdigest()
             for p in sorted(root.rglob("*")) if p.is_file()}
