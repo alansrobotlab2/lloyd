@@ -1010,6 +1010,137 @@ def pid_alive(pid) -> bool:
     return True
 
 
+#: When a marker's pid has an unreadable cmdline, the most recently it may have
+#: started and still be taken for the marker's owner: 5 seconds. `started_at` is
+#: wall clock and the kernel's starttime is boot-relative, so the two are
+#: reconciled through `/proc/uptime` plus whatever slack that leaves and the
+#: interpreter's own seconds-to-import. A recycled pid is a pid the counter came
+#: back round to, so it started minutes-to-months after the stamp, never 5 seconds.
+MARKER_START_SLACK_S = 5.0
+
+
+def read_proc_cmdline(pid) -> str | None:
+    """`/proc/<pid>/cmdline` with its NULs intact, or None when it cannot be
+    read. Distinct from an empty string, which is a readable cmdline with
+    nothing in it — a kernel thread or a non-dumpable process — and belongs on
+    the starttime leg rather than being taken for identity."""
+    try:
+        return Path(f"/proc/{int(pid)}/cmdline").read_bytes().decode("utf-8", "replace")
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _proc_start_epoch(pid) -> float | None:
+    """The wall-clock instant `pid` began, or None when any step is unreadable.
+    Field 22 of `/proc/<pid>/stat` is clock ticks since boot; `/proc/uptime` is
+    what rebases it onto the epoch. Stdlib only — there is no psutil here."""
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8", errors="replace")
+        ticks = float(stat.rsplit(")", 1)[1].split()[19])
+        uptime = float(Path("/proc/uptime").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError):
+        hz = 0
+    if not hz or hz < 0:
+        hz = 100  # the POSIX default; an unusable hz must not fake a start time
+    return time.time() - uptime + ticks / float(hz)
+
+
+def _marker_time(value) -> float | None:
+    """A marker's own start stamp in epoch seconds. `started_at` is written as a
+    float; the lock payload's `since` and every `started_iso` are `now_iso()`
+    text. None when there is nothing to compare against, which is what lets the
+    identity leg alone decide."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def identity_is_automod(cmdline: str) -> bool:
+    """Whether a `/proc/<pid>/cmdline` names one of this loop's own processes.
+
+    Both launch forms are accepted, and each is matched on an argv POSITION
+    rather than as a substring of the whole line, so a process that merely
+    mentions the path — `grep scripts.automod gate.log`, `tail
+    .../scripts/automod/gate.log` — is not mistaken for the loop: the module
+    form (`-m scripts.automod`, or a submodule like `scripts.automod.round`), or
+    a `.py` file inside `scripts/automod/`. The `-m` token is matched
+    space-free because argv elements are NUL-separated here, unlike
+    `app/harness/service_control.py`, which folds two argv words into one
+    identity string before matching.
+
+    Every legitimate marker writer is one of these, checked writer by writer on
+    2026-11-08: the gate and land children are spawned as
+    `[python, "-m", "scripts.automod.round", <verb>, …]` (`round.gate_detached`,
+    `round.land_detached`, `round.flush_detached`), `run_gate` and `round.land`
+    rewrite their marker with their own pid, and the flush marker is written by
+    `promote.flush_pending`, which is reachable only through `round flush`. No
+    writer runs inside `lloyd-mcp` or `lloyd-backend`, so an identity check can
+    never declare a real holder dead."""
+    args = [a for a in str(cmdline or "").split("\0") if a]
+    for i, arg in enumerate(args):
+        if arg == "-m" and i + 1 < len(args):
+            nxt = args[i + 1]
+            if nxt == "scripts.automod" or nxt.startswith("scripts.automod."):
+                return True
+        name = arg.rsplit("/", 1)[-1]
+        if name.endswith(".py") and "scripts/automod/" in arg:
+            return True
+    return False
+
+
+def marker_pid_is_live(pid, started_at=None) -> bool:
+    """Whether `pid` is a live process that could be the automod process owning
+    a marker stamped `started_at`.
+
+    `pid_alive` alone is not enough, because pids are recycled: this box runs
+    `kernel.pid_max = 4194304` and the pid counter wraps, so a marker outlives
+    its process and later names somebody else's. That is not rare — on
+    2026-11-08 `gate_in_progress("SM_20261016_164802")` returned a 23-day-dead
+    gate because pid 4694 was alive, and `/proc/4694/cmdline` was
+    `/usr/lib/thunderbird/thunderbird -contentproc`; a hand-run calibrate
+    launcher held for its whole 700 s on `SM_20261105_154814/land.running`
+    (pid 367826) for the same reason. The process behind a recycled pid keeps
+    changing, which is why the check is "is this one of ours" and never a match
+    against a known engine.
+
+    So: the pid exists and is not a zombie (`pid_alive`, whose zombie leg is
+    untouched), AND the process at it names `scripts.automod`. When a live
+    pid's cmdline cannot be read, the fallback is timing rather than a bare
+    "alive": the pid counts as the marker's owner only if it began at or before
+    the marker's stamp (plus `MARKER_START_SLACK_S`), since a process that
+    started after the marker was written cannot be the one that wrote it. A pid
+    with no marker time to compare against keeps the old, weaker verdict — no
+    legitimate marker is written without one, so this is the lock payload's
+    case, not a hole for a recycled one.
+    """
+    if not pid_alive(pid):
+        return False
+    cmdline = read_proc_cmdline(pid)
+    if cmdline:
+        return identity_is_automod(cmdline)
+    started = _marker_time(started_at)
+    if started is None:
+        return True
+    started_now = _proc_start_epoch(pid)
+    if started_now is None:
+        return True
+    return started_now <= started + MARKER_START_SLACK_S
+
+
 def write_gate_marker(round_id: str, *, pid: int, head: str = "", by: str = "") -> dict:
     path = gate_marker_path(round_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1038,11 +1169,12 @@ def clear_gate_marker(round_id: str) -> None:
 
 
 def gate_in_progress(round_id: str) -> dict | None:
-    """The marker when its process is still alive, else None. A dead
-    marker is left in place: whether that gate finished or died is the
-    reader's call (`gate.json` newer than the marker says finished)."""
+    """The marker when its process is still a live automod process, else None.
+    A dead or recycled-pid marker is left on disk: whether that gate finished
+    or died is the reader's call (`gate.json` newer than the marker says
+    finished), and no reader here unlinks one (#3926)."""
     rec = read_gate_marker(round_id)
-    if rec is None or not pid_alive(rec.get("pid") or 0):
+    if rec is None or not marker_pid_is_live(rec.get("pid") or 0, rec.get("started_at")):
         return None
     return rec
 
@@ -1093,9 +1225,12 @@ def clear_land_marker(round_id: str, *, pid: int | None = None) -> None:
 
 
 def land_in_progress(round_id: str) -> dict | None:
-    """The marker when its process is still alive, else None."""
+    """The marker when its process is still a live automod process, else None.
+    The recycled-pid case matters most here: `rounds_landing` runs this read over
+    every round directory, so one `land.running` naming a pid the kernel handed
+    to something else freezes the whole loop, not one round (#3926)."""
     rec = read_land_marker(round_id)
-    if rec is None or not pid_alive(rec.get("pid") or 0):
+    if rec is None or not marker_pid_is_live(rec.get("pid") or 0, rec.get("started_at")):
         return None
     return rec
 
@@ -1200,11 +1335,13 @@ def clear_flush_marker(*, pid: int | None = None) -> None:
 
 
 def flush_in_progress() -> dict | None:
-    """The flush marker when its process is alive, else None. Held by the
-    implement source (no new round starts under a flush) and by the worker
-    pool's round hold, exactly like a live land marker."""
+    """The flush marker when its process is a live automod process, else None.
+    Held by the implement source (no new round starts under a flush) and by the
+    worker pool's round hold, exactly like a live land marker — which is why
+    this one reads through the identity check too: it is one global file, so a
+    recycled pid in it stops every round, not one (#3926)."""
     rec = read_flush_marker()
-    if rec is None or not pid_alive(rec.get("pid") or 0):
+    if rec is None or not marker_pid_is_live(rec.get("pid") or 0, rec.get("started_at")):
         return None
     return rec
 
@@ -1517,10 +1654,15 @@ def landing_lock(path: Path | None = None) -> dict | None:
     refusal.
 
     Deliberately weaker than a hold, and that is the point: a dead pid means
-    a killed landing, not a landing. Only `land-*` owners count — a
-    `round-start` or `gate-*` holder does not have an idle wait to starve.
+    a killed landing, not a landing — and so does a live pid that is not an
+    automod process, which is the same kill followed by the pid counter coming
+    round (`Lock.acquire` stamps `since`, which is what the unreadable-cmdline
+    leg compares). Only `land-*` owners count — a `round-start` or `gate-*`
+    holder does not have an idle wait to starve. The only holder in the tree is
+    `round.py`'s `Lock(owner=f"land-{round_id}")`, i.e. `round land` itself, so
+    the identity leg can never misdeclare a real holder dead.
     """
     rec = read_lock_payload(path)
     if not rec or not str(rec.get("owner") or "").startswith("land-"):
         return None
-    return rec if pid_alive(rec.get("pid") or 0) else None
+    return rec if marker_pid_is_live(rec.get("pid") or 0, rec.get("since")) else None

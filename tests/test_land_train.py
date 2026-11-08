@@ -62,6 +62,13 @@ def isolated(tmp_path, monkeypatch):
 def _train(monkeypatch, on=True, aware=True, **cfg):
     monkeypatch.setattr(S, "landing_cfg", lambda repo=None: {"defer_restart": on, **cfg})
     monkeypatch.setattr(S, "guardian_batch_aware", lambda bin_dir=None: aware)
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
 
 
 @pytest.fixture()
@@ -587,6 +594,13 @@ def test_land_on_the_train_waits_for_no_round_and_no_settle(world, monkeypatch):
 
 
 def test_flush_detached_writes_the_childs_pid_before_returning(monkeypatch):
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     spawned: list = []
     monkeypatch.setattr(S, "spawn_detached", lambda argv, log, cwd=None: spawned.append(argv) or 1)
     out = R.flush_detached(by="autocode", now=True)

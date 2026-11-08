@@ -652,7 +652,16 @@ def _real_landing_holder(tmp_path: Path, owner: str = "land-SM_LANDING"):
            "from scripts.automod import state as S\n"
            "S.Lock(Path(sys.argv[1]), owner=sys.argv[2]).acquire()\n"
            "time.sleep(60)\n")
-    child = subprocess.Popen([sys.executable, "-c", src, str(path), owner, str(ROOT)],
+    # #3926: a `land-` lock only holds the loop while the pid at it is an automod
+    # process, so the holder is launched the way `round land` is — a file inside
+    # `scripts/automod/` — rather than as `python -c`, which is argv that names
+    # nothing. Still a second real process writing the payload through `Lock`.
+    holder = tmp_path / "scripts" / "automod" / "holder.py"
+    holder.parent.mkdir(parents=True, exist_ok=True)
+    holder.parent.parent.joinpath("__init__.py").write_text("", encoding="utf-8")
+    holder.parent.joinpath("__init__.py").write_text("", encoding="utf-8")
+    holder.write_text(src, encoding="utf-8")
+    child = subprocess.Popen([sys.executable, str(holder), str(path), owner, str(ROOT)],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         for _ in range(200):
@@ -839,6 +848,13 @@ def test_maybe_flush_spawns_once_at_a_natural_gap(monkeypatch, tmp_path):
         spawned.append(by)
         S.write_flush_marker(pid=1, by=by)       # pid 1 is always alive
         return {"pid": 1, "log": "x"}
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     monkeypatch.setattr(R, "flush_detached", detached)
 
     I._maybe_flush(_Queue([]))

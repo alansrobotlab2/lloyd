@@ -932,7 +932,12 @@ def test_a_fresh_probe_is_not_refreshed_and_a_running_one_is_not_doubled(pool, m
 def test_only_a_live_marker_counts(tmp_path, monkeypatch):
     from scripts.automod import state as S
     monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
-    monkeypatch.setattr(S, "pid_alive", lambda pid: int(pid or 0) == 777)
+# #3926: liveness moved from bare pid existence to
+    # `marker_pid_is_live`, so the fake-alive seam is that helper —
+    # these pids are not automod processes, and patching only
+    # `pid_alive` would leave the identity leg to run for real.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: int(pid or 0) == 777)
     S.write_land_marker("SM_LIVE", pid=777, by="round.land")
     S.write_land_marker("SM_DEAD", pid=778, by="round.land")
     (tmp_path / "SM_NONE").mkdir()

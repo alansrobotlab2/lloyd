@@ -465,6 +465,13 @@ def test_an_umbrella_mid_round_is_never_unfolded(isolated, monkeypatch, tmp_path
     import os
     _folded_umbrella(isolated)
     monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     monkeypatch.setattr(S, "read_current", lambda: None)
     if shape == "in_flight":
         S.append_event({"event": "backlog_implement", "item_id": 50, "phase": "started"},

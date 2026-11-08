@@ -458,7 +458,9 @@ def _gate_wait(round_id: str, *, wait_seconds: int = 240, note: str = "") -> dic
                 return _report()
             return {"error": f"no gate has been started for {round_id} — call automod_gate first"}
         started = float(marker.get("started_at") or 0)
-        if not S.pid_alive(marker.get("pid") or 0):
+        # Identity, not bare liveness: a recycled pid here used to spin this
+        # loop to its deadline instead of reporting the gate that died (#3926).
+        if not S.marker_pid_is_live(marker.get("pid") or 0, marker.get("started_at")):
             S.clear_gate_marker(round_id)
             if gate_path.exists() and gate_path.stat().st_mtime >= started - 1:
                 return _report()

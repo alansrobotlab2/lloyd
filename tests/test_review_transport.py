@@ -59,6 +59,13 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "BACKLOG_DIR", d)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     return d
 
 

@@ -193,6 +193,13 @@ def _run_turn(monkeypatch, tmp_path, item_id, structured, *, rid="SM_T", land=Tr
     monkeypatch.setattr(sio, "active_sessions_snapshot", lambda: [])
     monkeypatch.setattr(C, "source_inner_voice", lambda source, default=True: False)
     monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
 
     async def turn(prompt, **kw):
         S.append_event({"event": "round_start", "round_id": rid, "item_id": item_id,

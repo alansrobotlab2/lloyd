@@ -1726,6 +1726,13 @@ def test_a_round_with_a_running_gate_or_landing_is_never_reaped(isolated, monkey
     write_item(isolated, 2)
     aborted = _reaper_env(monkeypatch, tmp_path, observed=False)
     _finished()
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     write = S.write_gate_marker if marker == "gate" else S.write_land_marker
     write("SM_X", pid=os.getpid())
     later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
@@ -1763,6 +1770,13 @@ def test_a_landing_owns_its_marker_and_a_dry_run_leaves_it_alone(monkeypatch, tm
     import os
     from scripts.automod import round as R
     monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    # #3926: a *.running marker now counts as live only when the pid at it is an
+    # automod process. This test's landing is `R.land` in-process, so the pid on
+    # its own marker is this pytest's, and identity is not the subject here —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness stays what it
+    # was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     seen = {}
 
     def promote(round_id, wt, base, **kw):
@@ -4105,6 +4119,13 @@ def test_an_item_whose_landing_is_in_flight_is_never_retriaged(isolated, monkeyp
     monkeypatch.setattr(S, "read_current", lambda: None)
     write_item(isolated, 940)
     _spent_after_review(940, round_id="SM_LAND")
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     S.write_land_marker("SM_LAND", pid=os.getpid())
     assert B.retriage_spent_items(S.LEDGER_PATH) == []
     S.clear_land_marker("SM_LAND")
@@ -4151,6 +4172,13 @@ def test_no_hand_off_while_the_round_is_alive(isolated, monkeypatch, tmp_path, a
     if alive == "gate":
         monkeypatch.setattr(S, "gate_in_progress", lambda rid: rid == "SM_ALIVE")
     elif alive == "land":
+        # #3926: a *.running marker now counts as live only when the pid at it is
+        # an automod process. This fixture plants a live pid that is not one (this
+        # pytest process), and identity is not the subject here —
+        # tests/test_automod_marker_identity.py pins that leg. Liveness stays what
+        # it was: `pid_alive`, so a dead pid still reads stale.
+        monkeypatch.setattr(S, "marker_pid_is_live",
+                            lambda pid, started_at=None: S.pid_alive(pid))
         S.write_land_marker("SM_ALIVE", pid=os.getpid())
     elif alive == "current":
         monkeypatch.setattr(S, "read_current", lambda: {"round_id": "SM_ALIVE", "state": "landing"})

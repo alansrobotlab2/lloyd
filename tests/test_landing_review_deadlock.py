@@ -144,7 +144,12 @@ def env(tmp_path, monkeypatch):
         world["spawned"].append([str(a) for a in argv])
         return 424242
     monkeypatch.setattr(S, "spawn_detached", spawn)
-    monkeypatch.setattr(S, "pid_alive", lambda pid: int(pid or 0) in world["alive"])
+# #3926: liveness moved from bare pid existence to
+    # `marker_pid_is_live`, so the fake-alive seam is that helper —
+    # these pids are not automod processes, and patching only
+    # `pid_alive` would leave the identity leg to run for real.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: int(pid or 0) in world["alive"])
     fm = {"status": "in_progress", "priority": "medium", "board": "lloyd", "tags": [],
           "created": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()}
     (d / f"{ITEM}-a-thing.md").write_text(

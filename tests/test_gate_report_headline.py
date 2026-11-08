@@ -273,6 +273,13 @@ def test_a_refused_or_ungated_round_aborts_as_before(tmp_path, monkeypatch, pass
 def test_an_abort_under_a_running_landing_is_refused_whatever_it_is_told(passed_round, monkeypatch):
     """`round.abort` removes the worktree; the promoter is using it."""
     monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
+    # #3926: a *.running marker now counts as live only when the pid at it
+    # is an automod process. These fixtures plant a live pid that is not one
+    # (this pytest process, or pid 1), and identity is not their subject —
+    # tests/test_automod_marker_identity.py pins that leg. Liveness here stays
+    # what it was: `pid_alive`, so a dead pid still reads stale.
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
     rid, _state, aborted = passed_round
     S.write_land_marker(rid, pid=os.getpid(), by="automod_land")
     out = _abort(round_id=rid, reason="changed my mind", discard_passed_gate=True)
