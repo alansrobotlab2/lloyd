@@ -306,6 +306,56 @@ def test_the_default_repo_is_the_one_backup_vault_sh_writes_by_default():
     assert VW.SNAPSHOT_REPO == Path.home() / VW.SNAPSHOT_REPO_REL, VW.SNAPSHOT_REPO
 
 
+def test_the_store_a_seal_names_is_resolved_and_asked_for_at_call_time(tmp_path, monkeypatch):
+    """Clause 1 (#3933): the accessor answers the repository's RESOLVED location, read at
+    CALL time, so a tick whose `$HOME` is a round's names a store the sweep of that round
+    cannot take with it.
+
+    The witness is `~/obsidian/memory/2026-11-07.md`'s one `cleared:` line, still on the
+    page: it instructs a reader to `ls -d
+    `/home/alansrobotlab/lloyd-work/SM_20261107_145946/home/.local/state/lloyd-vault-backup/vault.git``,
+    a root `ls` answers *No such file or directory* for since the round was swept, while
+    the store it meant answers one symlink away and holds the very commit the line cites
+    (`git --git-dir=/home/alansrobotlab/.local/state/lloyd-vault-backup/vault.git log -1`
+    → `a7c268ca 2026-11-07 08:00:37 -0800`). The round spelled it that way for a reason
+    that is true of the store and not of the path: `scripts/automod/worktree.py` links
+    everything but `lloyd` and `lloyd-data` into a round home, so `.local` is a symlink,
+    and the repository READS through it while the string is PRINTED under the doomed root.
+
+    The fixture rebuilds both spellings in one tree — `<tmp>/SM_PROBE/home/.local` is a
+    symlink to `<tmp>/real/.local` — so what is asserted is the difference between them.
+    On the real home `resolve()` is the identity, which is why the live watchdog's
+    published path does not move at all; what changes is the spelling a redirected
+    process publishes. The constant stays the import-time `$HOME` relative that
+    `test_the_default_repo_is_the_one_backup_vault_sh_writes_by_default` pins against
+    `backup-vault.sh`'s default: this is a fix to the accessor, not to the constant.
+    """
+    real_home = tmp_path / "real"
+    real_store = real_home / VW.SNAPSHOT_REPO_REL
+    real_store.parent.mkdir(parents=True)
+    _git("init", "--quiet", "--bare", str(real_store))
+
+    monkeypatch.setenv("HOME", str(real_home))
+    assert VW.snapshot_repo() == str(real_store.resolve()), (
+        "an ordinary home must name the store where it lies, unchanged by the fix — "
+        f"otherwise this node proves only that the accessor moved, not where:\n"
+        f"{VW.snapshot_repo()}")
+
+    round_home = tmp_path / "SM_PROBE" / "home"
+    round_home.mkdir(parents=True)
+    (round_home / ".local").symlink_to(real_home / ".local", target_is_directory=True)
+
+    monkeypatch.setenv("HOME", str(round_home))        # derived at call time, not at import
+
+    named = VW.snapshot_repo()
+
+    assert "SM_PROBE" not in named, (
+        "a tick standing in a round home published the round's own tree as the backup "
+        f"store's address, which is the address that dies with the worktree:\n{named}")
+    assert named == str(real_store.resolve()), named
+    Path(named).stat()        # the route a reader can still walk after the writer is gone
+
+
 def test_the_beat_is_the_same_file_the_producer_writes_into_the_repo():
     """The beat crosses a language boundary too: the check reads
     `<repo>/lloyd-last-count` because that is the name

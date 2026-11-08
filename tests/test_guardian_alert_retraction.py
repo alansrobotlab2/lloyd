@@ -2099,3 +2099,320 @@ def test_an_uncoalesced_snapshot_section_is_the_one_resolve_could_never_seal(tmp
     assert _snapshot_note(guard) == before, (
         "`resolve` reported a seal and wrote nothing: exactly the dead end an "
         "uncoalesced section is")
+
+
+# ── #3933: the store a seal names must outlive the tree that wrote it ────────
+#
+# `vaultwatch.snapshot_repo()` returned the import-time `Path.home() / rel` unresolved, so
+# a guardian tick run by an automod round — `HOME=<round>/home`, whose `.local` is a
+# symlink into the real home (`scripts/automod/worktree.py`: `round_home`, and
+# `HOME_LINK_SKIP`, which spares only `lloyd` and `lloyd-data`) — read the backup
+# repository THROUGH that link and published the round's own doomed path. The page is
+# `~/obsidian/memory/2026-11-07.md`, whose one `cleared:` line still instructs a reader to
+# `ls -d /home/alansrobotlab/lloyd-work/SM_20261107_145946/home/.local/state/`
+# `lloyd-vault-backup/vault.git`, a root deleted with the round, while the store it meant
+# answers at `/home/alansrobotlab/.local/state/lloyd-vault-backup/vault.git` and holds the
+# commit the line cites (`a7c268ca`, committed `2026-11-07 08:00:37 -0800`). The seal was
+# honest at the instant it was written and became unreadable in the sweep — the worse
+# failure of the two, because the surviving page is now an instruction that cannot be run.
+#
+# #3795 landed that rule for the published COMMAND line (`policy.published_watchdog_script`)
+# and left the published STORE, which `guardian.py` feeds into the alert body's "`<repo>`
+# is the vault's only copy outside the vault" sentence and `snapshot_age_state` feeds into
+# the seal's own sentence through `state["text"]`. Two published surfaces, one fix site.
+#
+# These nodes run the REAL leg over a REAL planted repository with NOTHING injected into
+# the reading — the #3882 nodes above inject a stand-in because they were about the two
+# edges of the seal, and this item is about the STRING the reading carries. The path token
+# under test therefore comes from the shipping accessor, and the boundary is crossed for
+# real: a round's `$HOME`, then the sweep that deletes it.
+
+import os as _os                    # noqa: E402
+import shutil as _shutil            # noqa: E402
+import subprocess as _subprocess    # noqa: E402
+import time as _time                # noqa: E402
+
+#: Past `vaultwatch.SNAPSHOT_MAX_AGE_SECONDS` (3 h) by enough that a slow gate cannot
+#: read it as fresh, and the age `memory/2026-11-07.md:19`'s own alarm printed.
+STALE_AGE = 4 * 3600.0 + 12 * 60.0
+
+#: The round's component. Absent from a page the fix wrote, and the marker of a page it
+#: did not: nothing else in these fixtures is spelled this way.
+ROUND = "SM_PROBE"
+
+
+def _git_c(*args: str, at_age: float | None = None) -> str:
+    """`git` with its identity on the command line.
+
+    `-c user.*` rather than the ambient config because these nodes MOVE `$HOME` — the
+    whole point of them does — and a plant that depends on whichever home the gate handed
+    the run fails in the fixture instead of reporting the defect.
+    """
+    env = dict(_os.environ)
+    if at_age is not None:
+        stamp = int(_time.time() - at_age)
+        env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = f"@{stamp} +0000"
+    r = _subprocess.run(
+        ["git", "-c", "user.name=guardian-node",
+         "-c", "user.email=guardian-node@example.invalid", *args],
+        capture_output=True, text=True, env=env)
+    assert r.returncode == 0, f"{args}: {r.stdout}{r.stderr}"
+    return r.stdout.strip()
+
+
+def _plant_backup_repo(owner_dir: Path, *, age_seconds: float) -> Path:
+    """A bare backup repository in the owner position, its HEAD `age_seconds` old.
+
+    `backup-vault.sh`'s shape — a bare repo driven by `--git-dir` against a separate
+    `--work-tree` — because the stamp the check reads is git's `%ct`, and the planted age
+    is read back out of git below: a node that planted nothing and passed anyway is the
+    failure this helper exists to refuse.
+    """
+    owner_dir.mkdir(parents=True, exist_ok=True)
+    repo, work = owner_dir / "vault.git", owner_dir / "vault-worktree"
+    work.mkdir(parents=True)
+    (work / "note.md").write_text("a note\n")
+    _git_c("init", "--quiet", "--bare", str(repo))
+    _git_c("--git-dir", str(repo), "--work-tree", str(work), "add", "--all", ".")
+    _git_c("--git-dir", str(repo), "--work-tree", str(work), "commit", "--quiet",
+           "--no-verify", "-m", "snapshot", at_age=age_seconds)
+    stored = int(_git_c("--git-dir", str(repo), "log", "-1", "--format=%ct"))
+    assert abs(_time.time() - stored - age_seconds) < 120.0, (
+        f"git stored a HEAD {stored}, not one {age_seconds} s old: the age this whole "
+        "family weighs is the commit's own, so a plant that did not land makes every "
+        "assertion below about a stream that is actually fine")
+    return repo
+
+
+def _deliver_again(repo: Path) -> str:
+    """One more snapshot reaches the repository: the outage is over, HEAD is now's.
+
+    The fresh edge cannot be planted by a date the way a stale one can — "committed within
+    the last three hours" is whatever the run's clock says when it runs — so this is what
+    `backup-vault.sh` does between a stall and the tick that retracts it.
+    """
+    work = repo.parent / "vault-worktree"
+    (work / "note.md").write_text("a note\nand a delivery\n")
+    _git_c("--git-dir", str(repo), "--work-tree", str(work), "add", "--all", ".")
+    _git_c("--git-dir", str(repo), "--work-tree", str(work), "commit", "--quiet",
+           "--no-verify", "-m", "snapshot after the stall")
+    return _git_c("--git-dir", str(repo), "log", "-1", "--format=%H")
+
+
+def _guardian_in_home(home: Path, tmp_path: Path, monkeypatch):
+    """A real `Guardian` standing in `home`, reading a real repository: nothing injected.
+
+    `_snapshot_guardian` above replaces `snapshot_age_state` with a stand-in. Here the
+    accessor, the `git` call, the age judgement, the alert body and the seal sentence all
+    have to be the shipped ones, because the thing under test is a path token that only
+    they produce. So the fixture arranges a filesystem and `$HOME` — the two facts that
+    decide that token — and nothing else.
+
+    The daily note lives UNDER `home`, which is how a round's tick reached the live page
+    at all: `obsidian` is in the round home's link farm, and `HOME_LINK_SKIP` spares only
+    `lloyd` and `lloyd-data`.
+    """
+    monkeypatch.setenv("HOME", str(home))
+    # A `Path` for `REPO` and `GUARDIAN_STATE`, as above: `policy.published_watchdog_script`
+    # calls `.expanduser()` on both while building the alert body this leg publishes.
+    monkeypatch.setattr(gmod.policy, "REPO", tmp_path / "repo")
+    monkeypatch.setattr(gmod.policy, "VAULT_ROOT", str(tmp_path / "vault"))
+    monkeypatch.setattr(gmod.policy, "DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setattr(gmod.policy, "GUARDIAN_STATE", tmp_path / "guardian-state")
+    args = types.SimpleNamespace(
+        repo=str(tmp_path / "repo"), state=str(tmp_path / "state.json"),
+        guardian_state=str(tmp_path / "guardian-state"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0)
+    (home / "obsidian" / "memory").mkdir(parents=True, exist_ok=True)
+    guard = gmod.Guardian(args)
+    guard.notifier.vault_root = home / "obsidian"
+    guard.notifier._last_key = None
+    guard.alert_file_incident = lambda: (home / "ALERT.md", False)
+    guard._vault_snapshots_checked_at = -1e9
+    return guard
+
+
+def _round_home(tmp_path: Path, real_home: Path) -> Path:
+    """`<tmp>/SM_PROBE/home`, the layout a round's tick is handed, over `real_home`.
+
+    `.local` and `obsidian` are links into the real home and nothing else: a store that
+    reads through a link but is printed under the link's own name, and a vault note both
+    processes reach. Everything under `real_home` survives what `real_home`'s neighbour
+    does not.
+    """
+    (real_home / ".local").mkdir(parents=True, exist_ok=True)
+    (real_home / "obsidian" / "memory").mkdir(parents=True, exist_ok=True)
+    home = tmp_path / ROUND / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".local").symlink_to(real_home / ".local", target_is_directory=True)
+    (home / "obsidian").symlink_to(real_home / "obsidian", target_is_directory=True)
+    return home
+
+
+def _note_of(real_home: Path) -> str:
+    return (real_home / "obsidian" / "memory"
+            / f"{datetime.date.today()}.md").read_text(encoding="utf-8")
+
+
+def _store_tokens(text: str) -> list[str]:
+    """The absolute backup-store path tokens one passage names — what a reader goes to `stat`.
+
+    Asserted non-empty on purpose: the clauses below are claims about a published path, and
+    a node that silently had no path to check is #3792's amended owed row — a green that
+    only an empty corpus could produce.
+    """
+    tokens = [t for t in notify._absolute_roots(text) if "lloyd-vault-backup" in t]
+    assert tokens, f"that passage names no backup store, so nothing was measured:\n{text}"
+    return tokens
+
+
+def _witness_of_a_round_seal(tmp_path, monkeypatch) -> tuple[str, str, Path]:
+    """The 2026-11-07 shape, end to end: the live watchdog opens the section, a round's
+    tick seals it. Returns `(note, cleared line, round home)`.
+
+    Two processes because the page was written by two. The section names the store as the
+    live watchdog knows it — which is what makes a seal naming a DIFFERENT route a foreign
+    clearance rather than a refresh, and what makes clause 4's marker falsifiable at all.
+    """
+    real_home = tmp_path / "real"
+    repo = _plant_backup_repo(real_home / gmod.vaultwatch.SNAPSHOT_OWNER_DIR_REL,
+                              age_seconds=STALE_AGE)
+    live = _guardian_in_home(real_home, tmp_path, monkeypatch)
+    _tick(live, 10_000.0)                        # the stall, published by the live tick
+    assert notify.DAILY_STILL_OPEN in _note_of(real_home), (
+        "the live tick left no open section, so a seal below would be writing into a page "
+        "that never carried the alarm it is closing")
+
+    sha = _deliver_again(repo)                   # the stream comes back
+    round_home = _round_home(tmp_path, real_home)
+    ticking = _guardian_in_home(round_home, tmp_path, monkeypatch)
+    _tick(ticking, 10_900.0)                     # and a round's tick retracts it
+
+    note = _note_of(real_home)
+    line = _cleared_line(note, SNAPSHOT)
+    assert sha[:8] in line, (
+        "the round's tick wrote a seal that does not carry the commit it measured, so "
+        f"these clauses would be graded over a line no one wrote:\n{line}")
+    return note, line, round_home
+
+
+def test_an_honest_seal_still_lands_and_its_store_path_can_be_walked(tmp_path, monkeypatch):
+    """Clause 2, and the load-bearing green case: the fix retires a spelling, not the seal.
+
+    A readable fixture repository in the owner position, an ordinary (unredirected) home, a
+    stale tick that opens the section and a fresh tick that closes it: the open marker is
+    gone, the `cleared:` line names the commit and age the fresh reading measured, and the
+    backup-store token in it `stat()`s. Nothing was refused, and no marker was added —
+    `memory/2026-11-07.md:17`'s own body is honest prose, and an honest seal is supposed to
+    stay byte-identical marker-less prose (#3792 clause 2).
+    """
+    home = tmp_path / "home"
+    repo = _plant_backup_repo(home / gmod.vaultwatch.SNAPSHOT_OWNER_DIR_REL,
+                              age_seconds=STALE_AGE)
+    guard = _guardian_in_home(home, tmp_path, monkeypatch)
+
+    _tick(guard, 10_000.0)
+    opened = _snapshot_note(guard)
+    assert notify.DAILY_STILL_OPEN in opened, (
+        "the stall published no open section, so the seal below would seal nothing")
+    assert set(_store_tokens(opened)) == {str(repo)}, (
+        "the alarm body named some store other than the one this tick measured")
+
+    sha = _deliver_again(repo)
+    _tick(guard, 10_900.0)
+
+    note = _snapshot_note(guard)
+    assert notify.DAILY_CLEARED_PREFIX in note, (
+        "the stream came back and the page still says snapshots are not arriving — the "
+        f"fix refused an honest seal:\n{note}")
+    line = _cleared_line(note, SNAPSHOT)
+    assert guard.notifier._daily_open_at(note, SNAPSHOT) is None, (
+        "the open marker survived the seal")
+    assert sha[:8] in line and "4 h 12 m" not in line, (
+        "the seal is not carrying the FRESH reading — the commit the second tick measured "
+        f"and its age, not the stalled one's: {line}")
+    for token in _store_tokens(line):
+        Path(token).stat()                       # the route a reader can walk today
+    assert notify.DAILY_CROSS_ROOT_CLEAR_PREFIX not in line, (
+        f"an honest all-clear gained a #3792 marker, which is what makes the marker mean "
+        f"nothing:\n{line}")
+
+
+def test_a_seal_written_under_a_round_home_names_a_store_the_sweep_leaves_behind(
+        tmp_path, monkeypatch):
+    """Clause 3: the repository reachable only through a round-style HOME symlink is still
+    named by its resolved route, so every store token the seal wrote `stat()`s AFTER the
+    round home is deleted.
+
+    This is the property the 11-07 line failed. The seal it wrote was readable for exactly
+    as long as the round that wrote it, which is no time at all to a reader who arrives the
+    next morning — and `already_sealed` (`scripts/maintenance/guardian_note_sweep.py`) bars
+    the sweep from editing an already-`cleared:` block, so a page can carry the dead
+    instruction indefinitely whatever later rounds do.
+    """
+    note, line, round_home = _witness_of_a_round_seal(tmp_path, monkeypatch)
+
+    _shutil.rmtree(tmp_path / ROUND)             # the sweep takes the round's tree
+
+    assert not (tmp_path / ROUND).exists(), "the sweep did not take the round's tree"
+    assert not round_home.exists()
+    assert notify.DAILY_STILL_OPEN not in note, (
+        f"the round's tick closed the section and left its open marker standing:\n{note}")
+    for token in _store_tokens(line):
+        Path(token).stat()                       # still walks, with the round gone
+
+
+def test_a_round_rooted_seal_of_a_store_the_page_already_names_carries_no_marker(
+        tmp_path, monkeypatch):
+    """Clause 4: that same seal carries no `cross-root clearance:` marker.
+
+    The marker means "this all-clear measured a root the section did not", and the round's
+    tick DID measure the store the live watchdog's section named — through a link, which is
+    the same repository (`snapshot_repo_is_owned` resolves both sides for exactly this
+    reason). The unresolved spelling made the two strings disagree, so `memory/2026-11-07.md`
+    carries a marker asserting that the process which wrote the seal stood somewhere the
+    vault backup was not. With the resolved store the seal root is covered by the section's
+    roots, `_cross_root_clear_marker` returns "", and an honest seal is plain prose again.
+    """
+    note, line, _round_home = _witness_of_a_round_seal(tmp_path, monkeypatch)
+
+    assert ROUND not in line, (
+        f"the seal published the round's own tree as the store's address:\n{line}")
+    assert notify.DAILY_CROSS_ROOT_CLEAR_PREFIX not in line, (
+        "a seal of the store the section already names was labelled a clearance of a "
+        f"different root, which is the claim the marker exists to make and this is not:\n"
+        f"{line}")
+
+
+def test_a_stale_reading_taken_under_a_round_home_publishes_the_durable_store(
+        tmp_path, monkeypatch):
+    """Clause 5: the alert BODY's "`<repo>` is the vault's only copy outside the vault"
+    sentence names the resolved store, not one under the round home.
+
+    The scoping claim that this surface was already fixed is false: #3795 landed the
+    published-COMMAND line, and `memory/2026-11-07.md`'s body names the real path only
+    because that body came from the live watchdog. A round's tick that reads a stall raises
+    this sentence too, and a reader told to check "the vault's only copy outside the vault"
+    at a path the sweep deleted is being sent to check a copy that does not exist.
+    """
+    real_home = tmp_path / "real"
+    repo = _plant_backup_repo(real_home / gmod.vaultwatch.SNAPSHOT_OWNER_DIR_REL,
+                              age_seconds=STALE_AGE)
+    round_home = _round_home(tmp_path, real_home)
+    ticking = _guardian_in_home(round_home, tmp_path, monkeypatch)
+
+    _tick(ticking, 10_000.0)                     # the stall, seen through the link
+
+    note = _note_of(real_home)
+    sections = _sections_of(note, SNAPSHOT)
+    assert len(sections) == 1, note
+    assert f"{repo} is the vault's only copy outside the vault" in note, (
+        "the sentence that sends a reader to the vault's only off-vault copy named a "
+        f"repository other than the one that holds it:\n{note}")
+    assert ROUND not in note, note
+
+    _shutil.rmtree(tmp_path / ROUND)             # the sweep, then a reader obeys the page
+
+    for token in _store_tokens(sections[0]):
+        Path(token).stat()

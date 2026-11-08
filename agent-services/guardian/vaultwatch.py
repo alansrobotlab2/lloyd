@@ -599,8 +599,10 @@ def sync_gate(root: str = VAULT_ROOT, state_dir: Path = GUARDIAN_STATE) -> tuple
 
 
 def snapshot_repo() -> str:
-    """The vault's backup repository, from the same `LLOYD_VAULT_BACKUP_REPO`
-    override `backup-vault.sh` takes, so both name one repo without a config.
+    """The vault's backup repository, named by the route a later reader can still walk.
+
+    From the same `LLOYD_VAULT_BACKUP_REPO` override `backup-vault.sh` takes, so both
+    name one repo without a config.
 
     The override is the knob `backup-vault.sh` reads, which is what lets a test or a
     restore point the writer and this reading at one repository — and it is also the
@@ -610,8 +612,51 @@ def snapshot_repo() -> str:
     checkout root. `snapshot_repo_is_owned` is the other half of that pair: an
     override moves the reading, and ownership decides whether the reading may be
     taken to a human (#3149).
+
+    RESOLVED, and derived from `$HOME` at CALL time rather than read off the import-time
+    `SNAPSHOT_REPO` — the two properties `snapshot_owner_dir()` has always had and this
+    accessor did not (#3933).
+
+    * Durability of the printed path. This string is not only read, it is PUBLISHED:
+      `snapshot_age_state` puts it in `state["text"]`, which the guardian hands to
+      `Notifier.resolve` as the sentence of a `cleared:` seal, and `guardian.py` puts it
+      in the alert body's "`<repo>` is the vault's only copy outside the vault"
+      sentence. An automod round runs a guardian tick with `HOME=<round>/home`
+      (`scripts/automod/worktree.py::round_home`) and links everything but `lloyd` and
+      `lloyd-data` into that home (`HOME_LINK_SKIP`), so `.local` is a symlink: the
+      store READS through it but was PRINTED under the doomed round root. That is
+      `~/obsidian/memory/2026-11-07.md`'s only `cleared:` line, which to this minute
+      instructs a reader to `ls -d` a path under `lloyd-work/SM_20261107_145946/` — gone
+      with the swept round — while the repository it meant is alive one symlink away.
+      The seal was honest when it was written; it became unreadable in the sweep, which
+      is the worse of the two failures, because the surviving page is an instruction
+      that cannot be run. A path that exists only while the writer's tree exists is not
+      an instruction (#3795's rule, which landed for the published COMMAND and left the
+      published STORE behind).
+    * Call-time derivation, so a process whose `$HOME` is not the importing process's
+      answers for the home it actually stands in.
+
+    On this box's real home `resolve()` is the identity, so the live watchdog's
+    published path does not change at all; what changes is the spelling a redirected
+    process publishes. Ownership is untouched for the same reason —
+    `snapshot_repo_is_owned` resolves both sides before it compares, and the
+    `SNAPSHOT_REPO` constant stays the import-time `$HOME` relative that
+    `test_the_default_repo_is_the_one_backup_vault_sh_writes_by_default` pins against
+    `backup-vault.sh`'s own default.
     """
-    return os.environ.get("LLOYD_VAULT_BACKUP_REPO") or str(SNAPSHOT_REPO)
+    override = os.environ.get("LLOYD_VAULT_BACKUP_REPO")
+    repo = (Path(override).expanduser() if override
+            else Path.home() / SNAPSHOT_REPO_REL)
+    try:
+        return str(repo.resolve())
+    except (OSError, RuntimeError):
+        # A path that cannot be walked at all — a symlink loop in the round home's link
+        # farm, a home that will not `realpath` — is still the store this process was
+        # pointed at, and the tick that reads it is the one that stops sync within one
+        # tick of a wipe. The unresolved spelling is published instead: same as before,
+        # and better than a reading that raises out of a method whose contract is that
+        # it never raises.
+        return str(repo)
 
 
 def snapshot_owner_dir() -> Path:
