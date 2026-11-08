@@ -2035,7 +2035,15 @@ UNMEASURED — so a printed `0.0` can only ever mean measured-zero. Two scans of
 as it stood at **2026-11-04T23:27Z**, replayed through `--sessions-dir` over the 12,087 session
 files whose mtime precedes that instant, and measured at **01:07Z on 2026-11-05**; that is the
 corpus the retired baseline's era ends in, and replaying it reproduces the figures the
-triage published. The second is the **live store at 01:03Z on 2026-11-05**, 12,075 sessions:
+triage published. That first scan has committed witness bytes:
+`eval/measurements/refusal-detours/2026-11-04.rows.jsonl`, 450 rows and 238,525 bytes, which
+is exactly what `wc -l -c` prints on it — one row per refusal, so
+`tests/test_refusal_hint_doc_claims.py` re-aggregates the four rows of that first block from
+those bytes instead of leaving a reader to trust this page. The file has no field for how many
+sessions a scan opened, so it corroborates those four per-guard rows and nothing else in this
+section. The second scan is a **live-store reading at 01:03Z on 2026-11-05**, 12,075 sessions,
+and it has no committed bytes: no rows file was written for it, so its four rows exist only as
+printed below:
 
 | guard | refusals | measurable | same-target | same-effect |
 | --- | --- | --- | --- | --- |
@@ -2043,7 +2051,7 @@ triage published. The second is the **live store at 01:03Z on 2026-11-05**, 12,0
 | `grant` — same scan | 14 | 14 measurable | 1/14 (0.071) | 1/14 (0.071) |
 | `safety` — same scan | 393 | 244 measurable | 147/244 (0.602) | 85/244 (0.348) |
 | `tool_sandbox` — same scan | 43 | 42 measurable | 0/42 (0.0) | 0/42 (0.0) |
-| `all` — live store, 2026-11-05 01:03Z, 12,075 scanned | 454 | 303 measurable | 151/303 (0.498) | 87/303 (0.287) |
+| `all` — live-store reading, no committed bytes, 2026-11-05 01:03Z, 12,075 scanned | 454 | 303 measurable | 151/303 (0.498) | 87/303 (0.287) |
 | `grant` — same scan | 14 | 14 measurable | 1/14 (0.071) | 1/14 (0.071) |
 | `safety` — same scan | 397 | 247 measurable | 150/247 (0.607) | 86/247 (0.348) |
 | `tool_sandbox` — same scan | 43 | 42 measurable | 0/42 (0.0) | 0/42 (0.0) |
