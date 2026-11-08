@@ -56,16 +56,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "policy"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -74,6 +84,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -155,16 +166,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -173,6 +194,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -256,16 +278,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -274,6 +306,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(secondary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -404,16 +437,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "policy"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -422,6 +465,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -511,16 +555,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "policy"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 4,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -529,6 +583,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -608,16 +663,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 4,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -626,6 +691,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -706,16 +772,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 4,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -724,6 +800,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(secondary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -832,16 +909,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "policy"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 4,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -850,6 +937,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -962,6 +1050,12 @@
       "name": "policy"
      },
      {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
+     },
+     {
       "args": {
        "already_injected": []
       },
@@ -974,10 +1068,14 @@
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -986,6 +1084,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1069,6 +1168,12 @@
       "name": "safety"
      },
      {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
+     },
+     {
       "args": {
        "already_injected": []
       },
@@ -1081,10 +1186,14 @@
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1093,6 +1202,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1182,6 +1292,12 @@
       "name": "safety"
      },
      {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
+     },
+     {
       "args": {
        "already_injected": []
       },
@@ -1194,10 +1310,14 @@
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1206,6 +1326,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(override-model)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1289,6 +1410,12 @@
       "name": "safety"
      },
      {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
+     },
+     {
       "args": {
        "already_injected": []
       },
@@ -1301,10 +1428,14 @@
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1313,6 +1444,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1479,6 +1611,12 @@
       "name": "policy"
      },
      {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
+     },
+     {
       "args": {
        "already_injected": []
       },
@@ -1491,10 +1629,14 @@
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 200,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1503,6 +1645,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1583,16 +1726,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1601,6 +1754,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1680,16 +1834,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1698,6 +1862,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1779,16 +1944,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1797,6 +1972,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(secondary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1876,16 +2052,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1894,6 +2080,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],
@@ -1973,16 +2160,26 @@
       "fail_closed": true,
       "matcher": null,
       "name": "safety"
+     },
+     {
+      "args": null,
+      "fail_closed": true,
+      "matcher": null,
+      "name": "_make_cb.<locals>._secret_read_pretool_cb"
      }
     ]
    },
    "intra_turn_microcompact_enabled": true,
    "intra_turn_microcompact_keep_recent": 15,
    "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_name_session_record": false,
    "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_observation_head_chars": 400,
+   "intra_turn_microcompact_observation_stubs": false,
    "intra_turn_microcompact_target_fraction": 0.6,
    "intra_turn_microcompact_threshold": 15,
    "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_context_overflow_recoveries": 2,
    "max_turns": 60,
    "max_turns_wrapup": false,
    "max_turns_wrapup_base_urls": [],
@@ -1991,6 +2188,7 @@
      "url": "u"
     }
    },
+   "microcompact_reduction_sidecar": true,
    "model": "R(primary)",
    "notification_drain": null,
    "parallel_safe_task_profiles": [],

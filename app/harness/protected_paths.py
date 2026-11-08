@@ -385,6 +385,26 @@ def protected_read_roots() -> list[tuple[str, str]]:
     return out
 
 
+def read_deny_covering_root(target: str) -> str | None:
+    """The realpath of the `PROTECTED_READ_ROOTS` entry covering `target`, or None.
+
+    The one walk the read deny rests on, exposed so a caller that must decide
+    *which* root it is being refused by can ask without re-implementing `_covers`.
+    `app/harness/secret_read_deny.py` needs exactly that: its carve-out is a set of
+    roots that some armed scopes may read, and "is this refusal a carved root?" is a
+    question about the root, not about the label — two entries could share wording
+    and the answer would still have to be the path. `read_deny_reason` below is this
+    function with the label looked up, so the two can never disagree.
+    """
+    if not target:
+        return None
+    real = os.path.realpath(target)
+    for root, _label in protected_read_roots():
+        if _covers(root, real):
+            return root
+    return None
+
+
 def read_deny_reason(target: str) -> str | None:
     """The reason string of the read-deny entry covering `target`, or None.
 
@@ -395,6 +415,13 @@ def read_deny_reason(target: str) -> str | None:
     check. A sibling named `.env.example` is therefore outside the `~/lloyd/.env`
     entry, and `~/.ssh_backups` outside `~/.ssh`.
 
+    Source-independent by design, and pinned so by
+    `tests/test_secret_read_deny.py::test_the_registry_is_named_by_the_deny_predicate_for_every_source`
+    (#3846): the RULE that denies the credential registry holds for every source, so
+    this predicate takes no `source`. Where a scope may read less than it does not
+    live here — it is `secret_read_deny` deciding which of these roots it carves out
+    for the turn it is arming, and it never carves a root this module does not name.
+
     No grant lifts it, and since #3563 there is no write-side lift either for it
     to be confused with — the write deny-set's one exemption is a git commit
     (`automod_vault_land`), which never reaches this module. There is no
@@ -402,11 +429,11 @@ def read_deny_reason(target: str) -> str | None:
     lift mechanism readable from the same context would just be a second way to
     lose the property.
     """
-    if not target:
+    root = read_deny_covering_root(target)
+    if root is None:
         return None
-    real = os.path.realpath(target)
-    for root, label in protected_read_roots():
-        if _covers(root, real):
+    for entry_root, label in protected_read_roots():
+        if entry_root == root:
             return label
     return None
 

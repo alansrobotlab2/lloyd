@@ -38,6 +38,7 @@ three paths still read.
 """
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -65,10 +66,15 @@ CHAT_SOURCE = "autotriage"     # a worker source OUTSIDE the untrusted fleet
 # ── Driving the seam, not a copy of it ────────────────────────────────────
 
 def _hooks_for(source):
-    """A registry as one of these turns would have it, through the installer."""
+    """A registry as one of these turns would have it, through the installer.
+
+    Since #3949 the installer arms for every source, so the assertion here is that
+    it armed at all — the per-source question this helper used to check
+    (`armed == (source in UNTRUSTED)`) is now the carve-out question, asserted
+    where it belongs: against the reads, in the nodes below.
+    """
     hooks = HookRegistry()
-    armed = install_secret_read_deny(hooks, source=source)
-    assert armed == (source in UNTRUSTED), (source, armed)
+    assert install_secret_read_deny(hooks, source=source) is True, source
     return hooks
 
 
@@ -293,53 +299,134 @@ def test_every_untrusted_ingest_source_arms_the_deny(source, credential_home):
 
 @pytest.mark.parametrize("source", ["", CHAT_SOURCE, "scheduled-task",
                                     "arch-review", "mission-control"])
-def test_a_source_outside_the_fleet_gets_no_new_hook(source, credential_home):
-    """Not armed, not journalled, not a widened reach.
+def test_a_source_outside_the_fleet_is_armed_and_carved_rather_than_unhooked(
+        source, credential_home):
+    """#3949 moved this boundary: these turns are armed, and carved instead.
 
-    These are the turns the deny must not touch: `github-auth` reads `~/.ssh` from
-    an attended chat, and an automod round greps the tree that holds `.env`. An
-    arm on these trades a worker-turn hole for an operator outage, which is why the
-    installer returns False rather than installing and second-guessing itself.
+    This node used to prove `install_secret_read_deny` returned False for them —
+    #3524's position that arming an attended turn "trades a worker-turn hole for an
+    operator outage", because `github-auth` reads `~/.ssh` from an attended chat and
+    an automod round greps the tree holding `.env`. Both halves of that are answered
+    now: the outage is prevented by `CREDENTIAL_CARVE_OUT_LABELS` (the next two nodes),
+    and the hole was real — `~/lloyd/.env` still holds the values, and with no hook
+    installed here an attended `Read` of it was never even evaluated. The `arch-review`
+    and `scheduled-task` sources are unattended but not untrusted-input: they were
+    unhooked too, which is how the fleet-only gate leaked.
+
+    What is asserted is the *replacement* for the old boundary: armed, and the
+    operator's two carve-out paths still readable through the installed hook.
     """
-    hooks = HookRegistry()
-    assert install_secret_read_deny(hooks, source=source) is False
-    assert hooks._pre == [], hooks._pre
-    assert not _fire(hooks, "Read",
-                     {"file_path": str(credential_home / ".ssh" / "id_ed25519")})[0]
+    hooks = _hooks_for(source)
+    assert install_secret_read_deny(HookRegistry(), source=source) is True
+    for rel in (".ssh/id_ed25519.pub", ".config/gh/hosts.yml"):
+        denied, reason = _fire(hooks, "Read",
+                               {"file_path": str(credential_home / rel)})
+        assert not denied, (source, rel, reason)
+    # …while the thing this whole rail exists for stays refused on the same hook.
+    denied, reason = _fire(hooks, "Read",
+                           {"file_path": str(credential_home / "lloyd/.env")})
+    assert denied and DENY_MARKER in reason, (source, reason)
+
+
+def test_the_carve_out_is_named_by_label_and_bound_to_its_scope(
+        credential_home):
+    """The carve-out is one named pair, it cannot invent permissions, and the fleet
+    never gets it.
+
+    `carve_out_roots` is the only thing that narrows a scope, and it resolves an
+    entry only when `protected_paths.PROTECTED_READ_ROOTS` carries that label. So this
+    module can loosen `protected_paths` and never tighten it: reword or drop an entry
+    and the carve-out comes back EMPTY — the deny stays whole — instead of surviving
+    as a second, independent list of paths the read lane allows.
+
+    Naming by label rather than by path is forced by `tests/test_protected_paths.py::
+    test_the_read_lane_holds_no_credential_literal_of_its_own`, which fails this lane
+    on any root-shaped string literal, and it is also the safer direction — but it
+    means a reworded label would silently un-carve the operator's own reads. Both
+    labels are therefore asserted to resolve, to the exact root the item names.
+    """
+    from app.harness.secret_read_deny import (CARVE_ENTRY_GH_CLI,
+                                              CARVE_ENTRY_SSH_KEYS,
+                                              CREDENTIAL_CARVE_OUT_LABELS,
+                                              carve_out_roots)
+    from app.harness.protected_paths import protected_read_roots
+
+    roots = protected_read_roots()
+    by_label = {label: root for root, label in roots}
+    assert {CARVE_ENTRY_SSH_KEYS, CARVE_ENTRY_GH_CLI} <= set(by_label), sorted(by_label)
+    assert by_label[CARVE_ENTRY_SSH_KEYS] == os.path.realpath(
+        os.path.expanduser("~/.ssh")), by_label[CARVE_ENTRY_SSH_KEYS]
+    assert by_label[CARVE_ENTRY_GH_CLI] == os.path.realpath(
+        os.path.expanduser("~/.config/gh")), by_label[CARVE_ENTRY_GH_CLI]
+    assert CREDENTIAL_CARVE_OUT_LABELS == frozenset(
+        {CARVE_ENTRY_SSH_KEYS, CARVE_ENTRY_GH_CLI})
+
+    # An armed non-fleet source carves exactly those two declared roots…
+    armed = carve_out_roots(CHAT_SOURCE)
+    assert armed == frozenset(by_label.values()) & {
+        by_label[CARVE_ENTRY_SSH_KEYS], by_label[CARVE_ENTRY_GH_CLI]}
+    for src in ("", "scheduled-task", "autocode", "mission-control"):
+        assert carve_out_roots(src) == armed, src
+    # …and the untrusted fleet carves nothing at all: #3524 intact, per source.
+    for src in UNTRUSTED:
+        assert carve_out_roots(src) == frozenset(), src
+    # And none of the real secrets is in it, in either scope.
+    for secret in ("lloyd/.env", ".openclaw"):
+        real = os.path.realpath(str(credential_home / secret))
+        assert not any(real == r or real.startswith(r + os.sep) for r in armed)
 
 
 def test_the_identical_read_under_each_source(credential_home):
     """The acceptance check, run against the real read lane both ways.
 
-    One path, three turns: a `youtube-digest` registry refuses it before dispatch,
-    and a registry belonging to a source outside the fleet or to a person's chat
-    runs it and returns the bytes. The bytes come from `agent_mcp.builtin_fs._read`
-    itself — the handler that has no path check in it — from the scratch home the
-    fixture built, never from the box's own `~/lloyd/.env`.
+    Two paths, driven through `agent_mcp.builtin_fs._read` — the handler that has no
+    path check in it — against the scratch home the fixture built, never against the
+    box's own `~/lloyd/.env`:
+
+      * `lloyd/.env` is refused on EVERY armed source now, the fleet and the
+        newly-armed attended/`scheduled-task` turns alike. That is the whole of
+        #3949: before it, the second group ran unhooked and this read returned real
+        bytes, which is what `_read` still does for anything the guard does not name.
+      * `~/.ssh/id_ed25519` splits the scopes. The fleet is refused (#3524, unmoved);
+        an attended turn is allowed and `_read` returns the fixture's bytes — the
+        carve-out doing exactly the work #3524 declined to arm for.
     """
     from agent_mcp.builtin_fs import _read
 
     secret = str(credential_home / "lloyd" / ".env")
-    body = (credential_home / "lloyd" / ".env").read_text(encoding="utf-8")
 
     denied, _ = _fire(_hooks_for(DIGEST), "Read", {"file_path": secret})
     assert denied
 
+    # The newly-armed half: refused, and the refusal is the only thing the turn gets.
     for source in ("", CHAT_SOURCE):
-        hooks = _hooks_for(source)
-        denied, reason = _fire(hooks, "Read", {"file_path": secret})
+        denied, reason = _fire(_hooks_for(source), "Read", {"file_path": secret})
+        assert denied, (source, reason)
+        assert "credential read denied" in reason, (source, reason)
+        assert "the runtime secret file the services load at boot" in reason, \
+            (source, reason)
+
+    # And on those same turns the carved read still returns its bytes, in `_read`'s
+    # own framing (`cat -n`: the line number right-padded before a tab), so the
+    # carve-out is checked as a working read and not merely as an absent refusal.
+    carved = credential_home / ".ssh" / "id_ed25519"
+    carved_body = carved.read_text(encoding="utf-8")
+    for source in ("", CHAT_SOURCE):
+        denied, reason = _fire(_hooks_for(source), "Read",
+                               {"file_path": str(carved)})
         assert not denied, (source, reason)
-        got = _read({"file_path": secret})
-        # `_read` returns `cat -n` framing (the line number right-padded before a
-        # tab), so the payload is compared after the framing rather than
-        # byte-for-byte against the file.
+        got = _read({"file_path": str(carved)})
         number, _, payload = got.partition("\t")
         assert number.strip() == "1", got
-        assert payload.strip() == body.strip(), got
+        assert payload.strip() == carved_body.strip(), got
         assert "denied" not in got and "error" not in got.lower(), got
+    # …and the same carved path is still refused to the fleet, so the carve-out is
+    # bound to the armed scope and does not leak into #3524's.
+    denied, reason = _fire(_hooks_for(DIGEST), "Read", {"file_path": str(carved)})
+    assert denied and "the SSH private keys" in reason, reason
 
 
-def test_the_session_backed_turn_arms_it_and_a_chat_turn_does_not(
+def test_every_session_backed_turn_arms_it_including_a_chat_turn(
         tmp_path, monkeypatch):
     """The live video turn's options, built by the builder that actually builds them.
 
@@ -347,9 +434,10 @@ def test_the_session_backed_turn_arms_it_and_a_chat_turn_does_not(
     POSTs to the stream router, so the only place its source reaches the turn's
     options is `app/routers/turn_options.py` reading the session's own
     `platform`/`source`. Both halves are driven here through the real builder —
-    nothing in this node is a hand-built registry — and the chat and
-    non-untrusted-worker rows are the ones that prove the hook list is unchanged
-    for every turn a person starts.
+    nothing in this node is a hand-built registry. The node's own name used to end
+    "_and_a_chat_turn_does_not": that was the gate inside `install_secret_read_deny`,
+    and #3949 removed it, so the attended half of this list is now the point of the
+    node rather than its exception.
     """
     import app.routers.turn_options as to
     from app.routers.turn_options import SessionSnapshot, build_turn_options
@@ -368,35 +456,47 @@ def test_the_session_backed_turn_arms_it_and_a_chat_turn_does_not(
         built = build_turn_options(snap, {"tool_log": []}, "stream", text="go")
         return _hook_names(built.hooks)
 
-    for source in UNTRUSTED:
-        names = pre(source, "worker")
+    def armed(source, platform):
+        names = pre(source, platform)
         assert any("_secret_read_pretool_cb" in n for n in names), (source, names)
+        return names
+
+    # Every source that reaches this builder is armed now — the untrusted fleet, as
+    # before, and the attended and non-untrusted sources whose turns used to be built
+    # with no read hook whatsoever.
+    for source in UNTRUSTED:
+        armed(source, "worker")
     for source in (CHAT_SOURCE, "scheduled-task", ""):
-        names = pre(source, "worker" if source else "")
-        assert not any("secret_read" in n for n in names), (source, names)
-    # The chat turn's hooks are exactly what they were before this change: safety,
-    # and the outbound gate on a stream turn. Nothing about them mentions a path.
-    assert [n for n in pre("", "")] == [
+        armed(source, "worker" if source else "")
+    # A person's chat turn keeps the hooks it had and gains this one last: the safety
+    # lane installs the outbound gate inside itself, so the read deny lands after both.
+    # That third hook is the change; the operator's legitimate `~/.ssh` read survives it
+    # because `CREDENTIAL_CARVE_OUT_LABELS` is what the installed callback resolves for this
+    # source, not the absence of a callback.
+    assert armed("", "") == [
         "_safety_pretool_cb",
-        "install_outbound_content_gate.<locals>._content_pretool_cb"], pre("", "")
+        "install_outbound_content_gate.<locals>._content_pretool_cb",
+        "_make_cb.<locals>._secret_read_pretool_cb"], pre("", "")
 
 
-def test_the_in_process_worker_turn_arms_it_for_its_source():
+def test_the_in_process_worker_turn_arms_it_for_every_source():
     """The other arm point, through the builder every in-process worker uses.
 
     Two arm points is where a guard goes missing (the file's own comment says the
     automod ban already has), so both are pinned, and both through the function
     that installs the rest of the turn's safety rather than a registry assembled
-    here.
+    here. #3949 is why this node no longer has a "and these do not" half:
+    `scheduled-task`, `autocode` and `autotriage` run through here, are not in the
+    untrusted-ingest fleet, and used to get no read hook at all — the clause this
+    node now pins is that *no* source reaching this builder is left unhooked,
+    including `None`, which arrives as `""`.
     """
     from workers.sources._common import _worker_run_options
 
-    for source in UNTRUSTED:
+    for source in (*UNTRUSTED, CHAT_SOURCE, "scheduled-task", "autocode",
+                   "autotriage", None):
         names = _hook_names(_worker_run_options(1, source=source).hooks)
         assert any("_secret_read_pretool_cb" in n for n in names), (source, names)
-    for source in (CHAT_SOURCE, "scheduled-task", None):
-        names = _hook_names(_worker_run_options(1, source=source).hooks)
-        assert not any("secret_read" in n for n in names), (source, names)
 
 
 # ── Clause 4: the job still works, and the envelope is untouched ──────────
@@ -633,19 +733,34 @@ def test_every_untrusted_ingest_source_is_refused_the_registry(source,
     assert denied, f"{source} was allowed to read the credential registry"
 
 
-@pytest.mark.parametrize("source", ["", CHAT_SOURCE, "scheduled-task"])
-def test_this_change_did_not_arm_the_attended_fleet(source, credential_home):
-    # What this node pins is a BOUNDARY, and it is here because #3846's clause 5
-    # asks for "every scope including attended chat" and this diff does not go
-    # there. The predicate above already names the registry for those turns; the
-    # HOOK is still installed only for untrusted-ingest sources, which is #3524's
-    # decision and is pinned by `test_a_source_outside_the_fleet_gets_no_new_hook`
-    # and by `armed == (source in UNTRUSTED)` at the top of this file. Widening it
-    # means a fail-closed callback on every read of every human turn — the exact
-    # trade #3524's docstring refuses ("a gate that refuses normal work gets routed
-    # around"). Nothing here reads the registry on an attended turn, so the deny
-    # would guard an unused path while adding a way to break a working one. Left to
-    # a human on #3846; this node fails loudly if someone arms it by accident and
-    # nobody reads the clause.
+@pytest.mark.parametrize("source", ["", CHAT_SOURCE, "scheduled-task",
+                                    "mission-control", "voice"])
+def test_the_attended_fleet_is_now_armed_and_refused_the_registry(
+        source, credential_home):
+    # This node used to pin the opposite — "did NOT arm" — and its comment closed
+    # with "Left to a human on #3846". #3949 IS that answer, so the boundary this
+    # file asserts moved from *which turns have the hook* to *which roots each armed
+    # scope may read*: attended chat, voice and mission-control are armed now, and
+    # what keeps #3524's reasoning alive is that the carve-out they get is
+    # `CREDENTIAL_CARVE_OUT_LABELS` and nothing wider.
+    #
+    # The registry and `~/lloyd/.env` are refused to them exactly as to the fleet —
+    # which is also why arming is not what satisfies #3846's registry clause: that
+    # clause is met by `PROTECTED_READ_ROOTS` naming the path, unmoved by this diff,
+    # and `test_the_registry_is_named_by_the_deny_predicate_for_every_source` still
+    # pins the predicate's signature at `["target"]`.
     hooks = _hooks_for(source)
-    assert not any("_secret_read_pretool_cb" in n for n in _hook_names(hooks))
+    assert any("_secret_read_pretool_cb" in n for n in _hook_names(hooks)), source
+    denied, reason = _fire(hooks, "Read", {"file_path": str(cs.store_path())})
+    assert denied, f"{source} was allowed to read the credential registry"
+    denied, reason = _fire(hooks, "Read",
+                           {"file_path": str(Path.home() / "lloyd" / ".env")})
+    assert denied, f"{source} was allowed to read ~/lloyd/.env"
+    denied, reason = _fire(hooks, "Read",
+                           {"file_path": str(Path.home() / ".openclaw" / "x" / "y")})
+    assert denied, f"{source} was allowed to read under ~/.openclaw"
+    # …and the two roots the operator's turn needs are the only ones it gets back.
+    for allowed in (".ssh/id_ed25519.pub", ".config/gh/hosts.yml"):
+        denied, reason = _fire(hooks, "Read",
+                               {"file_path": str(Path.home() / allowed)})
+        assert not denied, (source, allowed, reason)

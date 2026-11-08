@@ -18,14 +18,33 @@ its most-used tool (2947 Read / 967 Grep / 303 Glob over 458 transcripts) with
 `READ_FILES` or bounding `Read` to the bundle would break the job. A credential
 root is something no digest, distill or research job has a reason to read.
 
-Why per-source rather than fleet-wide: an attended chat turn reads `~/.ssh`
-legitimately (the `github-auth` skill), so a read deny armed everywhere trades a
-worker-turn hole for an operator outage. The arm decision therefore reads the
-turn's *source*, which only the two places that build a worker turn's options
-know — `workers/sources/_common.py` (in-process turns) and
-`app/routers/turn_options.py` (session-backed turns, which is where the live
-video turn's options are actually built). Both call `install_secret_read_deny`,
-and each arm point is pinned by a node in `tests/test_secret_read_deny.py`.
+Why the deny is armed for every source now, and what that took (#3949): this
+module used to arm for the untrusted-ingest fleet alone, because an attended chat
+turn reads `~/.ssh` legitimately (the `github-auth` skill) and a read deny armed
+everywhere traded a worker-turn hole for an operator outage. That reason is answered
+by a named carve-out instead of by leaving turns unhooked at all:
+`CREDENTIAL_CARVE_OUT_LABELS` below names the two entries an operator's own turn
+needs, and every *other* source — including the whole untrusted fleet, exactly as
+#3524 left it — is still refused them. What stayed open before #3949 was wider than the
+attended turn: `scheduled-task`, `autocode` and `autotriage` runs are unattended and
+outside the fleet, so they ran unhooked on this box. The arm decision still reads the
+turn's *source*, which only the two places that build a turn's options know —
+`workers/sources/_common.py` (in-process turns) and `app/routers/turn_options.py`
+(session-backed turns, which is where the live video turn's options are actually built).
+Both call `install_secret_read_deny`, both are pinned by a node in
+`tests/test_secret_read_deny.py`, and a guard widened at one of the two would not be
+widened.
+
+A carve-out is a scope decision and lives here, never in
+`app/harness/protected_paths.py::read_deny_reason`: that predicate is
+source-independent by #3846's pin, the RULE that denies the credential registry holds
+for every source, and the read-deny roster does not move for anybody. It has to be
+applied to *both* arms of this module — the path arm (`read_deny_reason`) and the
+pattern arm (`root_reached_by_pattern`) — or it is not a carve-out: with the path arm
+alone, `Glob(pattern="**/*", path="$HOME")` on an attended turn stays refused purely by
+the pattern arm, because `~/.openclaw` is a *directory* root. That particular refusal is
+kept for every armed scope, attended included: a broad home glob is not what the
+`github-auth` skill does.
 
 Denied, never raised: the hook contract's deny outcome is what reaches the model
 as `Tool call denied: …` (`app/harness/loop.py`), and the registry writes exactly
@@ -66,7 +85,8 @@ import os
 import re
 from typing import Any
 
-from app.harness.protected_paths import protected_read_roots, read_deny_reason
+from app.harness.protected_paths import read_deny_reason, read_deny_covering_root
+from app.harness.protected_paths import protected_read_roots
 
 logger = logging.getLogger("lloyd-secret-read-deny")
 
@@ -146,7 +166,8 @@ def _matches_parts(pat: list[str], tgt: list[str], deeper: bool) -> bool:
     return fnmatch.fnmatchcase(tgt[0], head) and _matches_parts(rest, tgt[1:], deeper)
 
 
-def root_reached_by_pattern(joined: str) -> str | None:
+def root_reached_by_pattern(joined: str,
+                            skip_roots: frozenset[str] = frozenset()) -> str | None:
     """The label of a read-deny root this glob pattern could name; None if not.
 
     The de-wildcarded readings in `_pattern_variants` cannot see a pattern whose
@@ -168,9 +189,19 @@ def root_reached_by_pattern(joined: str) -> str | None:
     `/bundles/`, `~/obsidian`, `~/obsidian/backlog` and `~/lloyd`, and of those
     only `~/lloyd` is an ancestor of a read-deny root, whose one entry there is
     a file.
+
+    `skip_roots` is the armed scope's carve-out, realpaths of the roots that turn
+    may read (`CREDENTIAL_CARVE_OUT_LABELS` below). It skips entries, it does not skip
+    the arm: a `Glob(pattern="**/*", path="$HOME")` on a carved scope still lands
+    here, still finds `~/.openclaw`, and is still refused — which is the intended
+    outcome, not an oversight to "fix" by dropping this arm. A pattern that can
+    only name carved roots (`*/**/id_ed25519` over `$HOME`, where the only match
+    is `~/.ssh`) is what the carve-out is for.
     """
     parts = [p for p in _expand(joined, None).split(os.sep) if p]
     for root, label in protected_read_roots():
+        if root in skip_roots:
+            continue
         tgt = [p for p in root.split(os.sep) if p]
         deeper = len(parts) > len(tgt) and not os.path.isfile(root)
         if _matches_parts(parts, tgt, deeper):
@@ -236,6 +267,88 @@ def target_paths(tool_name: str, tool_input: dict[str, Any] | None,
     return out
 
 
+#: The read-deny roots a turn outside `capabilities.UNTRUSTED_INGEST_SOURCES` may
+#: still read (#3949), as the `~`-relative templates `protected_paths` uses.
+#:
+#: Exactly two entries, and each is there for one named reason, not for a class:
+#:
+#:   * `~/.ssh` — the `github-auth` skill has an attended turn read a public key
+#:     and `~/.ssh/config` to set up a git remote. This is the reason #3524 armed
+#:     the deny for the fleet alone, and it is why the deny could not simply be
+#:     widened: the measured census of the newest 400 session files holds 747
+#:     `Read` calls and *zero* `file_path` values naming `.ssh` or `.env`, so the
+#:     need is real but unobserved in ordinary chat and would first appear as an
+#:     operator outage.
+#:   * `~/.config/gh` — the same skill's other half: `gh auth status` and
+#:     `gh auth login` read and write `hosts.yml`. Refusing the file while the
+#:     `gh` CLI still reads it (Bash is not in `READ_TOOLS`) would deny the model
+#:     the thing it needs to diagnose, and grant the secret to the CLI anyway.
+#:
+#: Everything else the owner's read-deny roster names stays denied for *every*
+#: source, attended included: `~/lloyd/.env` and `~/.openclaw` are real values on
+#: this box (`app/harness/credential_store.py`'s `STORE_TEMPLATE` comment says so
+#: in its own words: "The real values stay in `~/lloyd/.env`"), and the credential
+#: registry's clause is met by that roster alone and must not move —
+#: `tests/test_secret_read_deny.py::test_the_registry_is_named_by_the_deny_predicate_for_every_source`
+#: pins that (#3846). Adding a third entry here is how this set rots: a carve-out
+#: must arrive with the skill whose documented need it answers.
+#:
+#: The two entries are named by their LABELS, never by their paths. `tests/
+#: test_protected_paths.py::test_the_read_lane_holds_no_credential_literal_of_its_own`
+#: fails this module on any root-shaped string literal in its code — the rule that
+#: keeps exactly one copy of the roster in `app/harness/protected_paths.py`, because
+#: that is how the earlier four spellings of "protected" on this box diverged — and a
+#: carve-out is an exception to a rule about entries, not a licence to copy them. A
+#: label is the one handle that survives the pin: `protected_paths` owns path→label,
+#: so an entry whose path moves while its label stands stays carved with no edit here,
+#: and an entry whose label is reworded makes `carve_out_roots` come back EMPTY, which
+#: narrows the deny to nothing rather than silently carving a different directory.
+#: `test_the_carve_out_is_bound_to_its_scope_and_its_labels_are_pinned` asserts both
+#: labels still resolve, so that fail-safe cannot rot quietly either.
+CARVE_ENTRY_SSH_KEYS = "the SSH private keys"
+CARVE_ENTRY_GH_CLI = "the GitHub CLI credentials"
+CREDENTIAL_CARVE_OUT_LABELS: frozenset[str] = frozenset(
+    {CARVE_ENTRY_SSH_KEYS, CARVE_ENTRY_GH_CLI})
+
+
+def _is_untrusted_ingest(source: str) -> bool:
+    """Whether this source's whole input is somebody else's fetched text.
+
+    The one question that decides both what a scope's carve-out is and how its
+    refusal is worded, asked in one place so the two cannot drift. Lazy import for
+    the same reason the safety lane reaches `capabilities` lazily: this module is
+    imported by the option builders, and `capabilities` is the worker-side table.
+    """
+    from app.harness.capabilities import UNTRUSTED_INGEST_SOURCES
+
+    return source in UNTRUSTED_INGEST_SOURCES
+
+
+def carve_out_roots(source: str) -> frozenset[str]:
+    """The read-deny roots THIS source may read, realpaths, as a frozenset.
+
+    Empty for every source in `capabilities.UNTRUSTED_INGEST_SOURCES`: the fleet
+    keeps #3524's full deny, the SSH key directory and the GitHub CLI credentials
+    included, so binding the carve-out to the armed scope is what keeps this change
+    from weakening it. For any other source — attended chat, mission-control, voice,
+    and the unattended but not-untrusted sources (`scheduled-task`, `autocode`,
+    `autotriage`) that #3949 armed — the carved roots are returned only if
+    the owner's roster still carries an entry under each label in
+    `CREDENTIAL_CARVE_OUT_LABELS`.
+
+    That label lookup is not a courtesy. This module may *narrow* a scope's deny and
+    nothing else: it never states a path, so it cannot name a directory the owner does
+    not know about, and if an entry's label is ever reworded the carve-out comes back
+    empty — the deny widens back to everything rather than this file quietly pointing
+    at whatever `~/.ssh` means now. One source of truth for both directions.
+    """
+    if _is_untrusted_ingest(source):
+        return frozenset()
+    by_label = {label: root for root, label in protected_read_roots()}
+    return frozenset(
+        by_label[label] for label in CREDENTIAL_CARVE_OUT_LABELS if label in by_label)
+
+
 def deny_reason(tool_name: str, tool_input: dict[str, Any] | None,
                 cwd: str | None = None, source: str = "") -> str | None:
     """Why this call must not run, or None to allow it.
@@ -252,16 +365,41 @@ def deny_reason(tool_name: str, tool_input: dict[str, Any] | None,
     not a restatement of the first: `*/**/id_ed25519` over `$HOME` is neither a
     path nor, with its metacharacters stripped or its wildcard components
     dropped, a path that resolves under `~/.ssh`.
+
+    `source` selects the scope's carve-out (`carve_out_roots`) and it is applied to
+    **both** questions. Applying it to the first alone is the mistake this sentence
+    exists to stop: on an attended turn with only the path arm carved,
+    `Glob(pattern="**/*", path="$HOME")` is still refused, by the pattern arm,
+    because `~/.openclaw` is a directory root — so `~/.ssh` would remain unreadable
+    through the one verb an operator uses to find a key, and the carve-out would
+    look like it did nothing. `~/.openclaw` stays refused by that arm on every
+    scope: a glob that can name the whole home directory is not what `github-auth`
+    does, and it is pinned as intended by
+    `tests/test_secret_read_deny.py::test_a_broad_home_glob_stays_refused_where_a_carved_scope_is_armed`.
     """
+    carved = carve_out_roots(source)
     for arg, target in target_paths(tool_name, tool_input, cwd=cwd):
+        root = read_deny_covering_root(target)
+        if root is not None and root in carved:
+            continue
         reason = read_deny_reason(target)
         if reason is None and _META.search(target):
-            reason = root_reached_by_pattern(target)
+            reason = root_reached_by_pattern(target, skip_roots=carved)
         if reason:
             where = f" on a {source} turn" if source else ""
+            # Wording follows the scope, because the refusal is the model's only
+            # reading of why: telling an attended turn "this turn's input is text
+            # fetched from outside" is false, and a false reason invites the model
+            # to argue the point rather than drop it.
+            because = (
+                "that path is "
+                + reason
+                + (", and this turn's input is text fetched from outside"
+                   if _is_untrusted_ingest(source)
+                   else ", which no turn on this box may read through these verbs")
+            )
             return (f"{DENY_MARKER}{where}: {tool_name} may not read {target!r} "
-                    f"via {arg} — that path is {reason}, and this turn's input is "
-                    f"text fetched from outside. Answer the prompt from the "
+                    f"via {arg} — {because}. Answer the prompt from the "
                     f"material it names.")
     return None
 
@@ -285,9 +423,11 @@ def _make_cb(source: str):
 
         Matcherless on purpose, like the bench-corpus deny it copies: the default
         safety hook returns early for anything that is not Bash, so before this a
-        worker turn had no way to refuse a `Read` at all. Being installed only on
-        the registries of `UNTRUSTED_INGEST_SOURCES` turns is what keeps it from
-        being a fleet policy.
+        worker turn had no way to refuse a `Read` at all. Since #3949 it is
+        installed on every armed turn, and what keeps it from being one flat fleet
+        policy is the `source` it closes over: `deny_reason` carves
+        `CREDENTIAL_CARVE_OUT_LABELS` in for a source outside
+        `UNTRUSTED_INGEST_SOURCES` and refuses them to a source inside it.
         """
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input") or {}
@@ -310,17 +450,36 @@ def _make_cb(source: str):
 
 
 def install_secret_read_deny(hooks: Any, *, source: str = "") -> bool:
-    """Arm the credential-read deny on `hooks` when `source` is untrusted-ingest.
+    """Arm the credential-read deny on `hooks`, for whatever `source` may read.
 
     Returns whether it armed, so a caller can log or test the decision without
     reaching into `hooks._pre`. Fail-closed like every other gate: a raise inside
     this callback (a `HOME` that will not expand, a registry passed as something
     else) denies the read rather than opening it, because a gate that cannot
     evaluate has not answered the question.
-    """
-    from app.harness.capabilities import UNTRUSTED_INGEST_SOURCES
 
-    if not source or source not in UNTRUSTED_INGEST_SOURCES:
-        return False
+    Since #3949 this arms for **every** source and returns True. `source` now
+    selects the scope's carve-out (`carve_out_roots`) inside `deny_reason` instead
+    of deciding whether the rail exists at all: it used to answer `not source or
+    source not in UNTRUSTED_INGEST_SOURCES → False`, which left an attended turn
+    free to `Read` `~/lloyd/.env` and its real values, and left every unattended
+    source outside that three-name fleet — `scheduled-task`, `autocode`,
+    `autotriage`, all live on this box — running with no read hook whatsoever. An
+    empty `source` is armed too, and gets the carve-out: it is the shape a
+    session-backed turn has before its identity is resolved, and arming it can
+    only refuse more, never less.
+
+    What arming still does NOT close, so a later reader does not take it as closed:
+    the outbound half. `http_fetch` / `http_search` / `browser_navigate` sit in
+    neither `policy.TIER2_TOOLS` nor `TIER3_TOOLS` and
+    `harness.egress_policy.enforce` is false by #3846's own owed-row-2 ruling, so a
+    value that reaches a turn by any route can still leave it; `config.yaml`'s
+    `${LIVEKIT_API_KEY}`-style expansions resolve inside `app/config.py`, outside
+    this rail entirely; and Bash is not in `READ_TOOLS`, so `cat ~/.ssh/id_ed25519`
+    is a different item's problem. This rail closes *reading a credential through
+    the three file-inspection verbs* — the route injected content can ask for, and
+    now the route no armed turn may take for `~/lloyd/.env`, the credential
+    registry or `~/.openclaw`.
+    """
     hooks.add_pre_tool_use(None, _make_cb(source), fail_closed=True)
     return True
