@@ -1337,3 +1337,181 @@ def test_the_reserve_waits_for_a_refusal_by_the_derived_bound_not_by_a_fixed_rai
         assert reason in block, \
             f"the reserve is no longer findable inside the block by its marker reason " \
             f"`{reason}`, which is how it is located without a line number"
+
+
+#: What #3922's generalized node has to keep saying, as phrases of its whitespace-FLATTENED
+#: source. Flattened rather than line-matched deliberately: reflowing a docstring must stay
+#: legal, and #3803 clause 5 (`test_a_rewritten_claim_with_the_same_prose_is_falsified`)
+#: settled that a pin which only passes at one line width re-breaks on the next rewrap. What
+#: must NOT stay legal is losing a FIGURE or a destruction claim. The node stopped asserting
+#: the 2026-09-05 bucket's numbers because that bucket was destroyed, so its docstring is the
+#: only surviving place where a reader learns the numbers were real once and cannot be
+#: re-derived — which is the whole difference between "the invariant was generalized" and
+#: "#392's regression coverage was dropped", and prose that nothing reads is prose the next
+#: round rewords away. Pinned the way this block already pins the reserve's sentences
+#: (`test_the_reserve_is_one_ruling_and_names_its_trigger`).
+_DEAD_PIN_PROSE = (
+    "30 `error_tools`",
+    "7 / 5 / 18",
+    "6 real `stats.is_error` failures",
+    "3 in iv5174, 2 in iv2314, 1 in ivbf4f",
+    "destroyed on 2026-09-22 and cannot be re-derived",
+    "machine-readable session JSON",
+    "`.md` renderings",
+    "carry no `stats.is_error` at all",
+    "the earliest bucket on this machine is 2026-09-22",
+    "Measured 2026-11-08 over those buckets",
+    "17,322 entries scanned",
+    "20,289 `error_tools` flags",
+    "7,661 entries carrying `has_errors` together with a non-empty `error_tools`",
+)
+
+#: Spellings the node's CODE must not contain. `_entries(path)` is the dead node's
+#: single-bucket read (the live helper reads `_entries(p)`), so it marks the whole old form;
+#: `pytest.skip` marks a reintroduced skip, which is precisely what left the old assertions
+#: unreachable for nine weeks. Matched against the node with its docstring EXCISED, because
+#: the docstring quotes the deleted skip and the deleted lookup as history — `pytest.skip(
+#: "2026-09-05 bucket not on this machine")` is in it, deliberately. A check over the whole
+#: slice would therefore be red on the landing commit and, worse, would have to be satisfied
+#: by deleting the history clause 4 exists to keep.
+#:
+#: These needles live in THIS file while the scanned file's code holds none of them, so an
+#: absence check can run here at all — the reason the pin sits in this block rather than
+#: inside the file it reads, where an absence needle would match its own spelling.
+_DEAD_PIN_REVIVALS = (
+    "found == expected",
+    '"iv5174": 3',
+    "buckets.get(ERROR_REGENERATED_FROM)",
+    "_entries(path)",
+    "pytest.skip",
+)
+
+
+def _code_without_docstring(node_src: str) -> str:
+    """One function's source with its docstring lines removed."""
+    fn = ast.parse(node_src).body[0]
+    first = fn.body[0]
+    has_doc = (isinstance(first, ast.Expr)
+               and isinstance(first.value, ast.Constant)
+               and isinstance(first.value.value, str))
+    lines = node_src.splitlines()
+    return "\n".join(lines[first.end_lineno:] if has_doc else lines)
+
+
+def _dead_pin_prose_findings(flat: str) -> list[str]:
+    """What the node's flattened PROSE no longer says.
+
+    Flattened text, not the raw slice — and that is load-bearing for the falsifier rather
+    than cosmetic: the first draft aimed its `.replace` at raw source, where a figure like
+    `30 `error_tools` — 7 / 5 / 18 across` is split by a line wrap, so the replace matched
+    nothing, the mutation silently did nothing, and the check reported the history intact
+    while having deleted none of it. A falsifier whose fixture edit may no-op is worse than
+    no falsifier, so the arm takes flattened text and the node asserts the edit changed it.
+    """
+    return [f"the prose no longer says {phrase!r}"
+            for phrase in _DEAD_PIN_PROSE if phrase not in flat]
+
+
+def _dead_pin_code_findings(code_flat: str) -> list[str]:
+    """Which dead spellings are back in the node's CODE, docstring already excised."""
+    return [f"the dead single-bucket form is back in the code: {needle!r}"
+            for needle in _DEAD_PIN_REVIVALS if needle in code_flat]
+
+
+def _constant_users(src: str, constant: str) -> list[str]:
+    """Top-level function names in `src` whose own source mentions `constant`."""
+    lines = src.splitlines()
+    return sorted(n.name for n in ast.parse(src).body
+                  if isinstance(n, ast.FunctionDef)
+                  and constant in "\n".join(lines[n.lineno - 1:n.end_lineno]))
+
+
+def test_the_dead_bucket_pin_survives_as_pinned_prose_and_nothing_else():
+    """#3922 clauses 3 and 4, pinned rather than read.
+
+    The gate's first refusal on this round graded clause 4 `partial`: the docstring said
+    the right thing and NOTHING in the tree would notice it being reworded away, so after
+    landing there was no artifact distinguishing "generalized the invariant" from "deleted
+    the #392 coverage". Three claims over `tests/test_trajectory_extraction.py`, the file
+    this block already AST-inspects for the consumer count (`_live_bucket_consumers`) and
+    the skip sites (`:917`):
+
+    1. The node still carries every dated figure — the 30-vs-6 comparison, the 7 / 5 / 18
+       per-session counts, the 3 / 2 / 1 split over `iv5174` / `iv2314` / `ivbf4f` — and
+       still says the bucket AND the machine-readable session JSON were destroyed on
+       2026-09-22 and cannot be re-derived, naming the surviving `.md` renderings as
+       carrying no `stats.is_error`, together with the 2026-11-08 reading of the live
+       store: 47 buckets, 17,322 entries, 20,289 flags, 7,661 entries with both signals.
+    2. None of the dead form survives in its CODE — no `found == expected`, no `"iv5174": 3`
+       dict, no `buckets.get(ERROR_REGENERATED_FROM)`, no `_entries(path)` single-bucket read
+       and no `pytest.skip`, that skip being what made the assertions unreachable. CODE, not
+       prose: the docstring quotes the deleted skip and the deleted lookup as history, so a
+       check over the whole slice would be red on the commit that lands this and could only
+       be satisfied by deleting the history clause 4 is here to protect.
+    3. `ERROR_REGENERATED_FROM` is referenced by exactly one test function, the keyword
+       sweep sibling, so the constant still names the regression it is for and no longer
+       selects a bucket for a node that could never find it.
+
+    Falsified on string-mutated copies of the real slice: reword the figures out and claim 1
+    reports it; re-add a dead assertion or a skip and claim 2 reports it; let a second node
+    mention the constant and claim 3 reports it — with the scan itself falsified, so claim 3
+    cannot be green because it cannot see.
+    """
+    traj = ROOT / "tests" / "test_trajectory_extraction.py"
+    body = _body_of(traj, "test_the_regenerated_window_flags_only_persisted_flag_failures")
+    flat = " ".join(body.split())
+    code_flat = " ".join(_code_without_docstring(body).split())
+    assert _dead_pin_prose_findings(flat) == [], \
+        f"the generalized node lost its history: {_dead_pin_prose_findings(flat)}"
+    assert _dead_pin_code_findings(code_flat) == [], \
+        f"the dead single-bucket form is back in the node's code: " \
+        f"{_dead_pin_code_findings(code_flat)}"
+
+    # The split claim itself, both halves: the deleted skip's spelling is present in the
+    # node's PROSE and absent from its CODE. Flip either half and claim 2's scoping is a
+    # lie — prose without the quote means the history is gone (if the quote is deleted on
+    # purpose, that is a history deletion, and this is the node that has to be told about
+    # it, not a check to be widened); code with the spelling means the skip is back.
+    assert "pytest.skip" in flat, \
+        "the node no longer quotes the deleted `pytest.skip` in prose, so the prose/code " \
+        "split claim 2 rests on is protecting nothing and the destruction history has gone"
+    assert "pytest.skip" not in code_flat, \
+        "a skip is executable again inside the node, which is how the old assertions " \
+        "stopped running for nine weeks"
+
+    stripped = (flat.replace("30 `error_tools`", "`error_tools`")
+                    .replace("7 / 5 / 18", "some split")
+                    .replace("destroyed on 2026-09-22 and cannot be re-derived",
+                             "no longer available"))
+    assert stripped != flat, \
+        "none of the three figure-phrases was found, so this falsifier removes nothing and " \
+        "its 'intact history' reading above would mean nothing either"
+    lost = _dead_pin_prose_findings(stripped)
+    assert any("30 `error_tools`" in r for r in lost), \
+        f"rewording the figures out did not read as losing the history: {lost}"
+    assert any("7 / 5 / 18" in r for r in lost), \
+        f"the per-session split could be deleted unnoticed: {lost}"
+    assert any("destroyed on 2026-09-22" in r for r in lost), \
+        f"the node could stop saying why the numbers are gone: {lost}"
+
+    revived = _dead_pin_code_findings(code_flat + " assert found == expected")
+    assert any("found == expected" in r for r in revived), \
+        f"re-adding the dead bucket-total assertion read as clean: {revived}"
+    skipper = _dead_pin_code_findings(code_flat + ' pytest.skip("not on this machine")')
+    assert any("pytest.skip" in r for r in skipper), \
+        f"a reintroduced skip — the thing that made the old assertions unreachable — " \
+        f"read as clean: {skipper}"
+
+    src = traj.read_text(encoding="utf-8")
+    users = _constant_users(src, "ERROR_REGENERATED_FROM")
+    assert users == ["test_no_regenerated_bucket_promotes_the_keyword_sweep"], \
+        f"`ERROR_REGENERATED_FROM` is read by {users}, expected only the keyword-sweep " \
+        "sibling: a second reader means a dated bucket is selecting something again"
+    planted = src.replace(
+        "    uncorroborated, orphaned, entries, flagged = _error_flag_audit(_live_buckets())\n",
+        "    uncorroborated, orphaned, entries, flagged = _error_flag_audit(_live_buckets())\n"
+        "    _ = ERROR_REGENERATED_FROM\n", 1)
+    assert planted != src, \
+        "the plant site moved, so this falsifier has been checking nothing all along"
+    assert _constant_users(planted, "ERROR_REGENERATED_FROM") != users, \
+        "the scan cannot see a newly planted reference, so the claim above is unread"

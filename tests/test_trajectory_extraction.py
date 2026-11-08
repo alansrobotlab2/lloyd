@@ -3126,36 +3126,219 @@ def test_no_regenerated_bucket_promotes_the_keyword_sweep():
     )
 
 
+def _error_flag_audit(paths):
+    """Scan `paths` for the two things #392 leaves true of every bucket, and count what was read.
+
+    Takes the bucket list rather than fetching it, so the synthetic-store falsifiers can hand
+    this the same audit the live node runs on 47 real buckets — a falsifier with its own copy
+    of the loop would prove the copy fails, not the guard.
+
+    Returns `(uncorroborated, orphaned, entries, flagged)`: the first two are
+    bucket-name → hit-count maps, because a whole-store failure that says only "something is
+    wrong" cannot be acted on — the bucket is what a re-extract has to be aimed at. `entries`
+    and `flagged` are the non-vacuity pair: a scan of an empty or unreadable store produces
+    two empty maps and would otherwise pass as cleanly as a healthy one.
+
+    `flagged` counts entries carrying BOTH signals (`has_errors` truthy and a non-empty
+    `error_tools`), which is the population the second invariant is about; 7,661 of the 17,322
+    entries in today's 47 buckets are in it, and 0 of them are the other way round.
+    """
+    uncorroborated: dict[str, int] = {}
+    orphaned: dict[str, int] = {}
+    entries = 0
+    flagged = 0
+    for path in paths:
+        for entry in _entries(path):
+            entries += 1
+            flags = entry.get("error_tools") or []
+            bad = sum(1 for f in flags
+                      if f.get("error_source") not in CORROBORATED_SOURCES)
+            if bad:
+                uncorroborated[path.name] = uncorroborated.get(path.name, 0) + bad
+            if entry.get("has_errors"):
+                if flags:
+                    flagged += 1
+                else:
+                    orphaned[path.name] = orphaned.get(path.name, 0) + 1
+    return uncorroborated, orphaned, entries, flagged
+
+
 def test_the_regenerated_window_flags_only_persisted_flag_failures():
-    """Read-only. #392's reproduction clause, machine-checked: 2026-09-05
-    carried 30 `error_tools` — 7 / 5 / 18 across three sessions — against 6 real
-    `stats.is_error` failures (3 in iv5174, 2 in iv2314, 1 in ivbf4f). ~20 of
-    the 30 were `Read`/`Grep` output quoting source code that merely contains
-    the word `error` or `Warning`, and all three sessions were flagged."""
-    buckets = {p.stem: p for p in _live_buckets()}
-    path = buckets.get(ERROR_REGENERATED_FROM)
-    if path is None:
-        pytest.skip(f"{ERROR_REGENERATED_FROM} bucket not on this machine")
-    expected = {"iv5174": 3, "iv2314": 2, "ivbf4f": 1}
-    found: dict[str, int] = {}
-    uncorroborated: list[str] = []
-    for entry in _entries(path):
-        key = str(entry.get("session_key", ""))
-        flags = entry.get("error_tools") or []
-        uncorroborated += [f"{key}:{f.get('name')}={f.get('error_source')}"
-                           for f in flags
-                           if f.get("error_source") not in CORROBORATED_SOURCES]
-        if not flags and entry.get("has_errors"):
-            uncorroborated.append(f"{key}: has_errors with no error_tools")
-        for tag, want in expected.items():
-            if tag in key:
-                found[tag] = len(flags)
+    """Read-only. #392's whole-store invariant: no bucket promotes a flag the harness never
+    corroborated, and no bucket sets `has_errors` without naming the flag behind it.
+
+    What this node used to be, and why it cannot be that again: #392's reproduction was
+    measured on the `2026-09-05` bucket, which carried 30 `error_tools` — 7 / 5 / 18 across
+    three sessions — against 6 real `stats.is_error` failures (3 in iv5174, 2 in iv2314, 1 in
+    ivbf4f); ~20 of the 30 were `Read`/`Grep` output quoting source code that merely contains
+    the word `error` or `Warning`, and all three sessions were flagged. Those six numbers are
+    history and are no longer asserted, because the artifact that carried them was destroyed
+    on 2026-09-22 and cannot be re-derived: the 2026-09-05 bucket is gone (the earliest bucket
+    on this machine is 2026-09-22), and so is the machine-readable session JSON behind it —
+    `~/lloyd-data/sessions` holds no `20260905*` file and nothing older than
+    `20260909_153801_autonomy_2cf3.json.gz`. What survives of those three sessions is only
+    `.md` renderings (under `~/lloyd-data/recovered/qmd-sessions-pre-wipe/gemma-20260921/` and
+    `_pipeline/vault-derived/sessions/2026-09-05/`), and they carry no `stats.is_error` at all,
+    so no reading of them can reproduce a per-session flag count. The node therefore skipped
+    on every machine — `pytest.skip("2026-09-05 bucket not on this machine")` — and its three
+    numeric assertions executed nowhere, which is #3803's owed entry #1 ruling on it.
+
+    Generalizing it loses no coverage: the invariants it asserted were always whole-store
+    claims about the extractor, and they are now checked against all 47 buckets instead of one
+    date that no longer exists. Measured 2026-11-08 over those buckets: 17,322 entries
+    scanned, 20,289 `error_tools` flags with `error_source` `protocol` 20,287 and `exit_code`
+    2 — so 0 uncorroborated — and 7,661 entries carrying `has_errors` together with a
+    non-empty `error_tools`, 0 carrying `has_errors` with an empty one.
+
+    The provenance arm has no live population today (0 uncorroborated of 20,289), so it is
+    pinned by the two falsifiers below rather than by traffic: they point `_BUCKET_STORE` at a
+    synthetic store and drive THIS node red, which is the only way a node that has never
+    reached an assertion in nine weeks can be shown to be able to fail. That this is not a
+    dropped #392 regression is the point of those two nodes, and the named keyword-sweep node
+    above stays as the same bug's narrower pin.
+    """
+    uncorroborated, orphaned, entries, flagged = _error_flag_audit(_live_buckets())
     assert not uncorroborated, (
-        f"`error_tools` entries with no corroborating signal: {uncorroborated}")
-    assert found == expected, (
-        f"2026-09-05 flagged steps per session are {found}, expected {expected} "
-        "— the extractor is not deriving them from `stats.is_error`")
-    assert sum(len(e.get("error_tools") or []) for e in _entries(path)) == 6
+        f"`error_tools` flags with no corroborating `error_source`, by bucket: "
+        f"{uncorroborated} — every flag must name a source in {sorted(CORROBORATED_SOURCES)}, "
+        "which is what #392 broke when the sweep derived a failed step from result TEXT: a "
+        "bucket named here is the one to re-extract")
+    assert not orphaned, (
+        f"`has_errors` set with an empty `error_tools`, by bucket: {orphaned} — the flag and "
+        "the list are written from the same `stats.is_error` read, so an entry in a bucket "
+        "named here has a failure the miner cannot see what caused")
+    assert entries > 0, (
+        f"the audit scanned 0 entries across {len(list(_BUCKET_STORE.glob('*.jsonl')))} "
+        "buckets, so "
+        "both invariants above are being satisfied by an unreadable store rather than by "
+        "clean data — which is exactly how this node passed for nine weeks doing nothing")
+    assert flagged > 0, (
+        "no entry in any bucket carries `has_errors` AND a non-empty `error_tools`, so the "
+        "two invariants above have no population at all: an all-clean-looking store is not "
+        "evidence the extractor corroborates its flags")
+
+
+def _write_error_bucket(store: Path, name: str, rows: list[dict]) -> None:
+    """One synthetic bucket of `rows`, in the shape `_entries` reads back."""
+    store.mkdir(parents=True, exist_ok=True)
+    (store / name).write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def _store_is(tmp_path, monkeypatch, buckets: dict[str, list[dict]]) -> Path:
+    """Point the module's store at a throwaway tree holding `buckets`, and return it.
+
+    Redirects `_BUCKET_STORE` by name, the way `test_live_buckets_reads_the_bucket_store_and_
+    not_the_checkout` does, because that global is the only path `_live_buckets` reads and the
+    falsifiers have to drive the LIVE node, not a fixture-shaped stand-in for it.
+    """
+    store = tmp_path / "synthetic-store"
+    for name, rows in buckets.items():
+        _write_error_bucket(store, name, rows)
+    monkeypatch.setattr(_THIS, "_BUCKET_STORE", store)
+    return store
+
+
+def test_a_synthetic_uncorroborated_flag_drives_the_store_audit_red(tmp_path, monkeypatch):
+    """#3922: the provenance invariant can fail, and says WHICH bucket.
+
+    Necessary because that arm has zero live population — 0 of 20,289 flags are uncorroborated
+    today — so on production data the node cannot be distinguished from one that asserts
+    nothing. A bucket carrying one `error_source: "keyword"` flag beside a healthy
+    `protocol` flag goes red naming `2099-01-03.jsonl` and its hit count of 1, not the
+    neighbouring good bucket; and rewriting that same file so both flags are corroborated
+    makes the same node pass, which is what stops the control being a rigged red. A third
+    arm writes `KEYWORD_ONLY_SOURCE` ("semantic") — the value the extractor really emitted
+    before #392, and what the keyword-sweep sibling greps for — so the falsifier is the
+    regression itself and not only a shape that happens to trip the set test.
+    """
+    store = _store_is(tmp_path, monkeypatch, {
+        "2099-01-03.jsonl": [
+            {"session_key": "ivkeyword", "step": 0, "has_errors": True,
+             "error_tools": [{"name": "Read", "error_source": "keyword"}]},
+            {"session_key": "ivgood", "step": 1, "has_errors": True,
+             "error_tools": [{"name": "Bash", "error_source": "protocol"}]},
+        ],
+        "2099-01-04.jsonl": [
+            {"session_key": "ivclean", "step": 0, "has_errors": True,
+             "error_tools": [{"name": "Grep", "error_source": "exit_code"}]},
+        ],
+    })
+    with pytest.raises(AssertionError) as raised:
+        test_the_regenerated_window_flags_only_persisted_flag_failures()
+    message = str(raised.value)
+    assert "'2099-01-03.jsonl': 1" in message, (
+        "the failure does not name the offending bucket with its hit count, so a re-extract "
+        f"has nothing to aim at: {message!r}")
+    assert "2099-01-04.jsonl" not in message, (
+        f"the failure blames the clean bucket beside the bad one: {message!r}")
+
+    _write_error_bucket(store, "2099-01-03.jsonl", [
+        {"session_key": "ivkeyword", "step": 0, "has_errors": True,
+         "error_tools": [{"name": "Read", "error_source": "protocol"}]},
+        {"session_key": "ivgood", "step": 1, "has_errors": True,
+         "error_tools": [{"name": "Bash", "error_source": "protocol"}]},
+    ])
+    test_the_regenerated_window_flags_only_persisted_flag_failures()
+
+    # …and the value the extractor ACTUALLY wrote before #392: `KEYWORD_ONLY_SOURCE`
+    # ("semantic"), the spelling the keyword-sweep sibling greps for. The item's clause names
+    # `'keyword'`, so that stays the first arm; this one makes the falsifier the regression
+    # itself rather than only an example of its shape.
+    _write_error_bucket(store, "2099-01-03.jsonl", [
+        {"session_key": "ivkeyword", "step": 0, "has_errors": True,
+         "error_tools": [{"name": "Read", "error_source": KEYWORD_ONLY_SOURCE}]},
+        {"session_key": "ivgood", "step": 1, "has_errors": True,
+         "error_tools": [{"name": "Bash", "error_source": "protocol"}]},
+    ])
+    with pytest.raises(AssertionError) as raised:
+        test_the_regenerated_window_flags_only_persisted_flag_failures()
+    assert "'2099-01-03.jsonl': 1" in str(raised.value), (
+        "the real pre-#392 `semantic` source did not drive the store audit red naming its "
+        f"bucket, so the falsifier is not the regression this node exists to catch: "
+        f"{raised.value}")
+
+
+def test_an_unflagged_error_and_an_empty_store_both_refuse_the_audit(tmp_path, monkeypatch):
+    """#3922: the consistency arm fails on its own defect, and neither arm passes on nothing.
+
+    Three arms, because the two assertions are different claims and a scan of an empty store
+    satisfies both of them by silence:
+    a bucket whose rows set `has_errors` with NO `error_tools` goes red naming that bucket —
+    the flag list is missing, not the provenance, so the first assert must not be the one that
+    fires; a store whose buckets hold zero rows goes red on the non-vacuity pair, which is the
+    failure mode this file knows best (the node this one falsifies passed for nine weeks on an
+    absent bucket); and a well-formed store passes, so neither control is a rigged red.
+    """
+    store = _store_is(tmp_path, monkeypatch, {
+        "2099-01-05.jsonl": [
+            {"session_key": "ivorphan", "step": 0, "has_errors": True, "error_tools": []},
+            {"session_key": "ivorphan2", "step": 1, "has_errors": True},
+        ],
+    })
+    with pytest.raises(AssertionError) as raised:
+        test_the_regenerated_window_flags_only_persisted_flag_failures()
+    message = str(raised.value)
+    assert "'2099-01-05.jsonl': 2" in message, (
+        f"the two unflagged `has_errors` rows are not reported as two hits on their own "
+        f"bucket: {message!r}")
+    assert "no corroborating `error_source`" not in message, (
+        f"a missing `error_tools` list was reported as a missing `error_source`, so the "
+        f"failure points at the wrong defect: {message!r}")
+
+    _write_error_bucket(store, "2099-01-05.jsonl", [
+        {"session_key": "ivclean", "step": 0, "has_errors": True,
+         "error_tools": [{"name": "Bash", "error_source": "protocol"}]},
+    ])
+    test_the_regenerated_window_flags_only_persisted_flag_failures()
+
+    _write_error_bucket(store, "2099-01-06.jsonl", [])
+    (store / "2099-01-05.jsonl").write_text("", encoding="utf-8")
+    with pytest.raises(AssertionError) as raised:
+        test_the_regenerated_window_flags_only_persisted_flag_failures()
+    assert "scanned 0 entries" in str(raised.value), (
+        f"a store of two empty buckets did not trip the non-vacuity assertion, so an "
+        f"unreadable store still passes for a clean one: {str(raised.value)!r}")
 
 
 def test_live_buckets_reads_the_bucket_store_and_not_the_checkout(monkeypatch, tmp_path):
