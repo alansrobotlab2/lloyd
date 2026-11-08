@@ -234,6 +234,18 @@ def rs(tmp_path, monkeypatch):
         # beside it — `_archive_append` and `_rewrite_live_ledger` both write into
         # `journal.parent` — so this one path redirects the whole store, siblings included.
         ("SAFETY_DENIALS_JOURNAL", "safety/denials.jsonl", False),
+        # Store 27 (#3951), the knowledge store's index residue. The database is a FILE and
+        # deliberately NOT created: an absent store is the state of a tree that has never
+        # run the extractor, and the fact this file's shape guards depend on is that the arm
+        # prints `no store yet` and opens nothing in that case — which is also what keeps the
+        # thirty-odd `main()` runs below from reading the live 195,082-row store, the one
+        # thing here a wrong redirect could not undo. The facts tree IS created: an empty tree
+        # beside an absent database is the bounded state, and a node that wants residue seeds
+        # both itself. Single segment each, because the mkdir below has no `parents=True`, and
+        # `KG_FACTS_ROOT` is derived from `KG_DB_PATH` in the module while these two are
+        # redirected independently — a node that cares about the join passes both explicitly.
+        ("KG_DB_PATH", "kg.sqlite", False),
+        ("KG_FACTS_ROOT", "facts", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1971,11 +1983,11 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 26, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 27, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "26 unbounded-growth stores" in text, (
+    assert "27 unbounded-growth stores" in text, (
         "the skill's description states a store count other than 22")
-    assert "26 in all" in text, "the skill's body states a store count other than 26"
+    assert "27 in all" in text, "the skill's body states a store count other than 27"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2064,8 +2076,8 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "twenty-three store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports twenty-three stores by design: "
+    assert "twenty-four store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports twenty-four stores by design: "
         "the three automod rungs collapse into one refusal line, and the #3789 "
         "safety-denial store prints there like every data-root store before it")
 
@@ -2197,6 +2209,10 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # graded against the 26 lines the sweep prints rather than raising
                       # `unrecognised store-count numeral`.
                       "26": 26,
+                      # #3951 added the twenty-seventh store (the kg index residue arm), so a vault
+                      # file saying "27 unbounded-growth stores" is graded against the 27 lines the sweep
+                      # prints rather than raising `unrecognised store-count numeral`.
+                      "27": 27,
                       "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
@@ -2255,9 +2271,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     # #3499 added the twenty-fifth store line (the dated semantic-* recordings) and #3789
     # the twenty-sixth (the guard-refusal journal under `safety/`), so the census this guard
     # compares prose against moved from 24 to 25 to 26.
-    assert len(_store_report) == 26, (
-        f"the sweep prints {len(_store_report)} store lines, not the 26 its report "
-        f"has had since #3789 added the safety denial journal: {_store_report}")
+    assert len(_store_report) == 27, (
+        f"the sweep prints {len(_store_report)} store lines, not the 27 its report "
+        f"has had since #3951 added the kg index residue store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2304,6 +2320,10 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
                                                                   branch_line,
                                                                   ledger_line,
+                                                  # #3951 store 27: its line ends in the
+                                                  # dry-run parenthetical or a bracketed
+                                                  # name list, never a freed word.
+                                                  "kg index residue",
                                                                   prov_line,
                                                                   turn_line,
                                                                   pytest_line,
@@ -2380,7 +2400,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_three_stores_and_o
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty-three store
+    `  automod stores: REFUSED: …`, so a reader holding that output sees twenty-four store
     lines while the skill says 23 — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
     (just "23", which makes every sandbox run look like it lost three stores) or the
@@ -2392,7 +2412,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_three_stores_and_o
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints twenty-three store lines plus one refusal
+    the rule. A refused run therefore still prints twenty-four store lines plus one refusal
     line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
     nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
     three print here whatever the tree is, and the last two of those are asserted below
@@ -2403,7 +2423,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_three_stores_and_o
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 23, f"a refusal run should report twenty-three stores: {report}"
+    assert len(report) == 24, f"a refusal run should report twenty-four stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2615,7 +2635,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 26, (
+    assert len(items) == len(_store_report) == 27, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2683,6 +2703,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     # `denials-archive-<YYYYMM>.jsonl.gz`, and the worker writing the daily report is the
     # reader who has to be able to say where the rows went.
     assert items[25][0] == 26, items[25]
+    assert items[26][0] == 27, items[26]
     assert "safety" in items[25][1] and "denials" in items[25][1], items[25]
     item26 = re.sub(r"\s+", " ", description[description.index("26 safety denials"):
                                              description.index("Report all")])
@@ -7804,8 +7825,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "26 unbounded-growth stores" in front, front[:200]
-    assert "26 in all" in text, "the skill's body states a count other than 26"
+    assert "27 unbounded-growth stores" in front, front[:200]
+    assert "27 in all" in text, "the skill's body states a count other than 27"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -8897,7 +8918,7 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
 def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prints_twenty_three(
         rs, monkeypatch, capsys):
     """#2862 clause 4, re-pointed by #2924, #3188, #3209, #3379, #3499 and #3789: a refused
-    run prints twenty-three lines and a production run prints 26, with the canary line
+    run prints twenty-four lines and a production run prints 27, with the canary line
     SEVENTH-LAST in both.
 
     Seventh-last is not a demotion, it is the pin that the append order is intact.
@@ -8922,16 +8943,16 @@ def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prin
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 26, f"a production run prints 26 store lines: {lines}"
+    assert len(lines) == 27, f"a production run prints 27 store lines: {lines}"
     # #3499 appended the memory-graph store below it and #3789 the safety-denial store below
     # that, so this line sits seven from the end.
-    assert lines[-7].split(":")[0].strip().startswith("injection-canary corpus"), lines[-7]
+    assert lines[-8].split(":")[0].strip().startswith("injection-canary corpus"), lines[-8]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 23, (
-        f"a refused run prints twenty-three store lines plus the refusal: {refused}")
-    assert refused[-7].split(":")[0].strip().startswith("injection-canary corpus"), refused[-7]
+    assert len(refused) == 24, (
+        f"a refused run prints twenty-four store lines plus the refusal: {refused}")
+    assert refused[-8].split(":")[0].strip().startswith("injection-canary corpus"), refused[-8]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -9160,12 +9181,12 @@ def test_the_ceiling_sample_store_prints_sixth_last_and_survives_the_refusal(rs,
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 26, f"a production run prints 26 store lines: {report}"
-    assert report[-6].split(":")[0].strip().startswith("ceiling sample rows"), report[-6]
+    assert len(report) == 27, f"a production run prints 27 store lines: {report}"
+    assert report[-7].split(":")[0].strip().startswith("ceiling sample rows"), report[-7]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 23, f"a refused run prints twenty-three store lines: {refused}"
-    assert refused[-6].split(":")[0].strip().startswith("ceiling sample rows"), refused[-6]
+    assert len(refused) == 24, f"a refused run prints twenty-four store lines: {refused}"
+    assert refused[-7].split(":")[0].strip().startswith("ceiling sample rows"), refused[-7]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -9358,12 +9379,12 @@ def test_the_capture_store_prints_fifth_last_and_survives_the_refusal(rs, monkey
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 26, f"a production run prints 26 store lines: {report}"
-    assert report[-5].split(":")[0].strip().startswith("canary tool-call captures"), report[-5]
+    assert len(report) == 27, f"a production run prints 27 store lines: {report}"
+    assert report[-6].split(":")[0].strip().startswith("canary tool-call captures"), report[-6]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 23, f"a refused run prints twenty-three store lines: {refused}"
-    assert refused[-5].split(":")[0].strip().startswith("canary tool-call captures"), refused[-5]
+    assert len(refused) == 24, f"a refused run prints twenty-four store lines: {refused}"
+    assert refused[-6].split(":")[0].strip().startswith("canary tool-call captures"), refused[-6]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -10167,16 +10188,16 @@ def test_the_temp_store_line_prints_third_last_and_survives_the_refusal(rs, monk
     # "one candidate" rather than "the one candidate was held because it is the newest".
     monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 26, f"a production run prints 26 store lines: {report}"
-    last = report[-3]
+    assert len(report) == 27, f"a production run prints 27 store lines: {report}"
+    last = report[-4]
     assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
     assert "1 would delete" in last, last
     assert "inode(s) candidate" in last, last
     assert victim.is_dir(), "the dry run deleted"
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 23, f"a refused run prints twenty-three store lines: {refused}"
-    assert refused[-3].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-3]
+    assert len(refused) == 24, f"a refused run prints twenty-four store lines: {refused}"
+    assert refused[-4].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-4]
 
 
 def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
@@ -10498,10 +10519,10 @@ def test_the_memory_graph_horizon_is_one_constant_quoted_in_the_store_and_regist
     # #3789 appended the safety-denial store below it. What that clause was for — the store is
     # registered and prints in the appended tail, not inserted among items 1-24 — is unchanged,
     # so the position moves to second-to-last and the reason stays on the line.
-    assert lines.index(mg[0]) == len(lines) - 2, (
-        "the store does not print second-to-last, the slot #3499's append left it in once "
-        "#3789 appended another store: task 79's numbered enumeration is matched to these "
-        "lines positionally")
+    assert lines.index(mg[0]) == len(lines) - 3, (
+        "the store does not print third-to-last, the slot #3499's append left it in once "
+        "#3789 appended the safety-denial store and #3951 the kg index residue store below "
+        "it: task 79's numbered enumeration is matched to these lines positionally")
 
 
 def test_an_absent_memory_graph_directory_reports_itself_as_absent_and_is_not_created(rs):
@@ -11784,3 +11805,343 @@ def test_a_head_with_two_shapes_of_sidecar_archives_both(rs):
         for f in (head, side):
             assert (rs.SESSIONS_DIR / (f.name + ".gz")).exists(), (
                 f"{f.name} has no archive beside it")
+
+
+# ── #3951: store 27, index residue ─────────────────────────────────────────────
+#
+# `facts_idx` rows outlive the file they indexed and `entities` rows outlive the
+# directory they were registered from, so the live store accrues both: 6 rows on 4
+# `/tmp/blastroute2_u9ny_mb6/*.md` paths tmpfs has already reclaimed, and 44 registry
+# rows naming no directory (both measured 2026-11-08 through `app.kg_store`). This is the
+# one store of the 27 that mutates a store the engine is writing to, so every node below
+# reads the store back through `app.kg_store` after a run — `for_entity` and
+# `file_row_counts` are the questions the store asks itself, and no test here opens a
+# `sqlite3` handle on a database.
+#
+# The nodes take the `rs` fixture for its import guard and its data-root skip, and pass
+# their own facts tree and database rather than the redirected pair: the join between a
+# `facts_idx.file_path` and the tree it was indexed against is the whole subject of
+# clause 2, so it has to be a tree the node laid out.
+
+def _rs_yaml():
+    """The same loader the store's own parser uses, so a fixture cannot disagree with it."""
+    import yaml
+    return yaml
+
+
+def _kg_pair(tmp_path: Path) -> tuple[Path, Path]:
+    """A facts tree and a database beside it, laid out like the real pair.
+
+    Production keeps them as siblings under `vault-derived/`, and `KG_FACTS_ROOT` is
+    derived from `KG_DB_PATH` in the module; a fixture that scattered them in unrelated
+    places could never show an arm joining against the wrong tree.
+    """
+    derived = tmp_path / "vault-derived"
+    (derived / "facts").mkdir(parents=True)
+    return derived / "facts", derived / "kg.sqlite"
+
+
+def _kg_fact_file(root: Path, entity: str, *, facts: list[dict]) -> Path:
+    """Write `root/<entity>/<entity>-state.md` carrying `facts`, and return its path.
+
+    The shape `_rows_for_file` indexes: front matter `entity:` plus a `facts:` list of
+    `id`/`fact` pairs. Any extra key on a fact (a node below needs `invalid_at`) is
+    indexed straight into the row, which is how one file holds both a live row and an
+    already-retired one without a second writer.
+    """
+    # `path.parent`, not the entity directory: an entity NAME containing `/` is one
+    # registry name and two path components, so `f"{entity}-state.md"` nests as well and
+    # the real file lands two levels down. That is not a fixture quirk — it is exactly the
+    # live shape, `Databricks AI/BI Genie/Databricks AI/BI Genie-state.md`, and it is the
+    # reason `root.iterdir()` calls that registry row a ghost while `root / name` finds the
+    # directory. `parents=True` is what lays it out.
+    path = root / entity / f"{entity}-state.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = _rs_yaml().dump({"entity": entity, "facts": facts},
+                           sort_keys=False, allow_unicode=True, default_flow_style=False)
+    path.write_text(f"---\n{body}---\n", encoding="utf-8")
+    return path
+
+
+def _kg_fact_part(line: str) -> str:
+    """The fact half of an index-residue line, counts and its named paths together.
+
+    The arm joins its two sides with `; `, so this is the arm's own seam rather than a
+    substring guess: a node about which FACT rows were named must not be answered by the
+    entity half, whose named list legitimately carries registry rows — and it must not be
+    answered by an absent fact path that only the entity half mentions.
+    """
+    body = line.split("kg index residue:", 1)[1]
+    return body.split("; ")[0]
+
+
+def _kg_entity_part(line: str) -> str:
+    """The entity half of an index-residue line, for the mirror-image reason.
+
+    Cut at the separator that opens the first `entity row(s)` count, so the slice holds both
+    sides' entity counts and the dry run's would-be parenthetical, and none of the fact half.
+    """
+    body = line.split("kg index residue:", 1)[1]
+    i = body.find("entity row(s)")
+    return body[max(0, body.rfind(",", 0, i)):] if i >= 0 else ""
+
+
+def test_the_index_residue_default_run_names_the_row_and_marks_nothing(rs, tmp_path):
+    """Clause 1, first half: the arm's default run mutates nothing.
+
+    The fixture is the shape the live residue has — a file that was indexed and then
+    removed. `count(..., active_only=True)` is how the node asks whether any row is still
+    live, so the assertion is the store's own definition of a retired row rather than a
+    column read that could be satisfied by some other column.
+    """
+    root, db = _kg_pair(tmp_path)
+    from app.kg_store import KGStore
+    store = KGStore(db)
+    victim = _kg_fact_file(root, "Vanishing", facts=[{"id": "f1", "fact": "One fact."}])
+    assert store.facts_idx.update_file(victim, root=root) == 1
+    assert store.facts_idx.count("Vanishing", active_only=True) == 1
+    victim.unlink()
+    victim.parent.rmdir()
+
+    line, changed = rs._kg_index_residue(root, db, apply=False)
+
+    assert changed == 0, line
+    assert "1 fact row(s) on 1 absent path(s) named" in line, line
+    assert "0 row(s) marked expired" in line, line
+    assert "Vanishing" in line, f"the path was not named: {line}"
+    assert "dry run" in line, line
+    assert store.facts_idx.count("Vanishing", active_only=True) == 1, (
+        f"the default run retired a row: {line}")
+    assert store.entities.exists("Vanishing"), f"the default run removed a row: {line}"
+    store.close()
+
+
+def test_the_index_residue_apply_marks_the_rows_it_named(rs, tmp_path):
+    """Clause 1, second half: `--apply` on that same fixture marks them.
+
+    Marked, never deleted: the row is still in `file_row_counts()` afterwards, which is
+    both the store's own convention (#2483 — a live row refuses the re-derivation that
+    would replace it) and the measure the nightly report reads, so an arm that deleted
+    would silently move a number it was not asked to move.
+    """
+    root, db = _kg_pair(tmp_path)
+    from app.kg_store import KGStore
+    store = KGStore(db)
+    victim = _kg_fact_file(root, "Vanishing", facts=[{"id": "f1", "fact": "One fact."}])
+    store.facts_idx.update_file(victim, root=root)
+    # The file goes and the ENTITY DIRECTORY STAYS, which is what isolates the fact half of
+    # the line: an empty directory is still a directory, so `Vanishing` is not a ghost and
+    # the changed count below is the fact side alone. The dry-run node above removes the
+    # directory too, because there the question is only whether anything was written.
+    victim.unlink()
+
+    line, changed = rs._kg_index_residue(root, db, apply=True)
+
+    assert changed == 1, line
+    assert "1 row(s) marked expired" in line, line
+    assert store.facts_idx.count("Vanishing", active_only=True) == 0, line
+    assert store.facts_idx.file_row_counts()["Vanishing/Vanishing-state.md"] == 1, (
+        "the row was deleted rather than marked; expiry is the store's convention")
+    store.close()
+
+
+def test_the_index_residue_selects_on_the_joined_path_not_on_a_count(rs, tmp_path):
+    """Clause 2: a row whose file exists is never named, in whichever spelling it is stored.
+
+    Three shapes the live store contains, each defeating a different wrong join:
+
+    * an in-tree row whose file is there — naming it would delete indexed facts;
+    * a row under an entity name containing `/`, nested one level below the depth the
+      nightly walk reaches (`Databricks AI/BI Genie/Databricks AI/BI Genie-state.md`) —
+      its key has a slash in the MIDDLE, so a selection keyed on the first path component,
+      or on the report's depth-1 ghost list, names a row whose file is on disk;
+    * a row indexed from outside the tree, stored as an ABSOLUTE key — joined under the
+      root it becomes `<root>/tmp/...`, a path that never existed, and the row would be
+      retired while its file sits there untouched.
+    """
+    root, db = _kg_pair(tmp_path)
+    from app.kg_store import KGStore
+    store = KGStore(db)
+    here = _kg_fact_file(root, "Still Here", facts=[{"id": "f1", "fact": "Kept."}])
+    nested = _kg_fact_file(root, "Databricks AI/BI Genie", facts=[{"id": "f1", "fact": "Kept."}])
+    outside = _kg_fact_file(tmp_path / "scratch", "Scratch Live",
+                            facts=[{"id": "f1", "fact": "Kept."}])
+    for f in (here, nested, outside):
+        assert store.facts_idx.update_file(f, root=root) == 1
+    assert store.facts_idx.file_row_counts()[str(outside)] == 1, (
+        "the absolute key was not stored as an absolute key — this fixture would prove nothing")
+    gone = _kg_fact_file(root, "Also Gone", facts=[{"id": "f1", "fact": "Residue."}])
+    store.facts_idx.update_file(gone, root=root)
+    gone.unlink()
+
+    line, changed = rs._kg_index_residue(root, db, apply=False)
+    fact_part = _kg_fact_part(line)
+
+    assert changed == 0, line
+    assert "1 fact row(s) on 1 absent path(s) named" in fact_part, fact_part
+    assert "Also Gone" in fact_part, fact_part
+    for live in ("Databricks AI/BI Genie", "Scratch Live", "Still Here"):
+        assert f"] {live}" not in fact_part and f"[{live}" not in fact_part \
+            and f"{live}/" not in fact_part.split("] ")[-1], (
+            f"a path whose file exists was named as residue: {live} in {fact_part}")
+    for entity in ("Still Here", "Databricks AI/BI Genie", "Scratch Live"):
+        assert store.facts_idx.count(entity, active_only=True) == 1, (
+            f"a row whose file exists was retired: {entity}")
+    store.close()
+
+
+def test_an_entity_with_no_directory_anywhere_is_removed_and_a_nested_one_is_not(
+        rs, tmp_path):
+    """Clause 3: `root / name` is the whole test, and a slash in the name is not a miss.
+
+    `Databricks AI/BI Genie` is one of the two names the live report counts as a ghost,
+    because the report compares registry names against `root.iterdir()`. Here it is a
+    directory holding its own fact file one level down, so removing its registry row would
+    delete the entity that owns an indexed fact — the arm holds it and says why.
+    """
+    root, db = _kg_pair(tmp_path)
+    from app.kg_store import KGStore
+    store = KGStore(db)
+    _kg_fact_file(root, "Databricks AI/BI Genie", facts=[{"id": "f1", "fact": "Owned."}])
+    store.entities.register("Databricks AI/BI Genie")
+    store.entities.register("Orphan Registry")               # no directory, at any depth
+
+    held_line, held_changed = rs._kg_index_residue(root, db, apply=False)
+    entity_part = _kg_entity_part(held_line)
+    assert held_changed == 0, held_line
+    assert "1 entity row(s) would be removed" in entity_part, entity_part
+    assert "Databricks AI/BI Genie" not in entity_part, entity_part
+
+    line, changed = rs._kg_index_residue(root, db, apply=True)
+
+    assert changed == 1, line
+    assert "1 entity row(s) removed" in line, line
+    assert store.entities.exists("Databricks AI/BI Genie"), (
+        f"a slash-named entity whose nested directory holds a fact file was removed: {line}")
+    assert not store.entities.exists("Orphan Registry"), line
+    store.close()
+
+
+def test_an_entity_named_by_an_active_edge_or_an_alias_canonical_is_held(rs, tmp_path):
+    """Clause 4: the arm never writes an edge, and holds what an edge or an alias names.
+
+    The two held names are the live store's own shapes — `Lloyd -[discusses]-> Computer
+    Vision for Robotics` among its 14 active edges, and `Entity Resolution Sweep Task` ->
+    `Entity Resolution Sweep` among its 3 alias rows pointing at a ghost. Expiring them is
+    a ruling about relationships; a sweep that bounds growth does not make it. Every edge
+    row is compared before and after, because the clause is "never expires or deletes an
+    edge" — the ids and the active flags all have to be identical, not merely plausible.
+    """
+    root, db = _kg_pair(tmp_path)
+    from app.kg_store import KGStore
+    store = KGStore(db)
+    for name in ("Lloyd", "Edge Held", "Alias Held", "Orphan Registry"):
+        store.entities.register(name)
+    store.edges.add({"source": "Lloyd", "target": "Edge Held",
+                     "type": "discusses", "provenance": "STATED"})
+    store.aliases.set("Entity Resolution Sweep Task", "Alias Held",
+                      kind="manual", origin="manual")
+    before = [(r["id"], r["expired_at"]) for r in store.edges.all_rows()]
+    assert len(before) == 1 and before[0][1] is None
+
+    held_line, _ = rs._kg_index_residue(root, db, apply=False)
+    entity_part = _kg_entity_part(held_line)
+    # All three ghosts are held, and `Lloyd` is in that set for a reason worth stating: it
+    # is itself a registry row with no directory, and the edge it SOURCES names it, so the
+    # arm holds the subject as readily as the object. Nothing is removable here, which is
+    # why the dry run reports `0 entity row(s) would be removed` over three held names.
+    assert "1 entity row(s) would be removed" in entity_part, entity_part
+    assert "3 entity name(s) held by a live edge or an alias canonical" in entity_part, \
+        entity_part
+    for name in ("Lloyd", "Edge Held", "Alias Held"):
+        assert name in held_line, (name, held_line)
+
+    line, changed = rs._kg_index_residue(root, db, apply=True)
+
+    assert changed == 1, line
+    # The three held names are still on the line after the write, in the same rendering the
+    # dry run used: a reader comparing the two runs has to be able to see that the same
+    # three rows were declined both times, and `1 entity row(s) removed` has to be the only
+    # movement on the line.
+    assert "3 entity name(s) held by a live edge or an alias canonical" in line, line
+    assert "[Alias Held, Edge Held, Lloyd]" in line, line
+    assert "1 entity row(s) removed" in line, line
+    assert store.entities.exists("Edge Held"), f"an active edge's endpoint was deleted: {line}"
+    assert store.entities.exists("Alias Held"), f"an alias canonical was deleted: {line}"
+    assert not store.entities.exists("Orphan Registry"), (
+        f"the one ghost nothing named was not removed: {line}")
+    assert [(r["id"], r["expired_at"]) for r in store.edges.all_rows()] == before, (
+        "the arm wrote an edges row")
+    assert store.aliases.all()["Entity Resolution Sweep Task"] == "Alias Held", line
+    assert store.entities.exists(store.aliases.all()["Entity Resolution Sweep Task"]), (
+        "an alias surface no longer resolves to a surviving entity")
+    store.close()
+
+
+def test_the_named_and_marked_counts_are_separate_numbers(rs, tmp_path):
+    """Clause 5: a row that already carried a stamp is named, and never counted as marked.
+
+    `expire_files` writes `WHERE expired_at IS NULL AND invalid_at IS NULL`, so on the
+    live store the 6 rows this arm names take only 2 new stamps — 4 already carry
+    `invalid_at` from the 2026-10-19 quarantine pass. One file holding two facts, one of
+    them `invalid_at` in its own front matter, reproduces that ratio as a fixture:
+    named=2, marked=1. A line that printed `2 row(s) marked expired` would be reporting a
+    write that did not happen, which is the defect #3718 and #3789 keep naming.
+    """
+    root, db = _kg_pair(tmp_path)
+    from app.kg_store import KGStore
+    store = KGStore(db)
+    path = _kg_fact_file(root, "Half Retired", facts=[
+        {"id": "f1", "fact": "A live row on a file about to vanish."},
+        {"id": "f2", "invalid_at": "2026-10-19T00:00:00",
+         "fact": "A row the quarantine pass already marked."},
+    ])
+    assert store.facts_idx.update_file(path, root=root) == 2
+    assert store.facts_idx.count("Half Retired", active_only=True) == 1, (
+        "the pre-stamped fact did not index that way, so this fixture proves nothing")
+    path.unlink()
+
+    dry, _ = rs._kg_index_residue(root, db, apply=False)
+    assert "2 fact row(s) on 1 absent path(s) named" in dry, dry
+    assert "0 row(s) marked expired" in dry, dry
+
+    line, changed = rs._kg_index_residue(root, db, apply=True)
+
+    assert changed == 1, line
+    assert "2 fact row(s) on 1 absent path(s) named" in line, line
+    assert "1 row(s) marked expired" in line, line
+    assert "1 row(s) already carried a retire stamp" in line, line
+    assert "2 row(s) marked expired" not in line, line
+    store.close()
+
+
+def test_main_prints_the_index_residue_line_as_the_twenty_seventh_store(rs, capsys,
+                                                                       monkeypatch):
+    """The wiring: `main()` reaches the arm, and reaches it last and once.
+
+    Every node above calls the arm directly, so none of them can show that the nightly
+    run reaches it at all — the seam a report is read from is `main()`'s stdout. Both of
+    the new constants are redirected by `rs` to a store that is not there, so the expected
+    line is the absent one, and its presence is what proves the call is wired: an arm that
+    is never invoked prints no line and drops the report to 26. Appended rather than
+    inserted, which is what keeps items 1-26 of task 79's enumeration where the positional
+    guard reads them (#2862, inherited through #3499 and #3789).
+    """
+    argv = ["retention-sweep"]
+    monkeypatch.setattr(sys, "argv", argv)
+    rs.main()
+    # The shared collector, not a prefix filter of my own: the store lines it recognises
+    # are the definition every other count guard in this file compares against, and a
+    # second spelling of "what is a store line" is a second answer (#1835).
+    lines = _store_report_lines(capsys.readouterr().out)
+    kg = [l for l in lines if "kg index residue" in l]
+    assert len(kg) == 1, f"expected exactly one index-residue line in {lines}"
+    assert kg[0] == lines[-1], (
+        f"the store was not printed last, so the positional enumeration moved: {lines[-3:]}")
+    assert "no store yet" in kg[0], kg[0]
+    assert len(lines) == 27, f"a run prints {len(lines)} store lines: {lines}"
+
+    argv.append("--apply")
+    rs.main()
+    applied = [l for l in capsys.readouterr().out.splitlines() if "kg index residue" in l]
+    assert applied and "no store yet" in applied[0], applied

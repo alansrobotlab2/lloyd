@@ -483,14 +483,14 @@ for _p in (_TREE, _TREE / "app"):
         sys.path.insert(0, str(_p))
 del _p  # a module-level Path left by that loop is a name a test could delete from
 try:
-    from app.data_root import (DataRootMissing, resolve_data_root_for_tree,
-                               vault_root)
+    from app.data_root import (DataRootMissing, kg_store_for_root,
+                               resolve_data_root_for_tree, vault_root)
 except ModuleNotFoundError:
     # `app` is a name a stray `app.py` on the path can shadow, and nothing else in
     # this file imports `app.*`. The second spelling is the same file, and
     # tests/test_retention_sweep.py pins both against the one resolver.
-    from data_root import (DataRootMissing, resolve_data_root_for_tree,
-                           vault_root)
+    from data_root import (DataRootMissing, kg_store_for_root,
+                           resolve_data_root_for_tree, vault_root)
 try:
     # The same module as an OBJECT, for the two predicates the automod rungs'
     # production guard reads. Through the module rather than by name, so a caller
@@ -5158,6 +5158,168 @@ def _sidecar_beside(head: Path, sessions_dir: Path) -> list[Path]:
     return found
 
 
+#: The store this arm prunes, and the tree its paths are relative to. Both hang off
+#: `DATA_ROOT` exactly as `MEMORY_GRAPH_DIR` does, and through the same one spelling:
+#: `kg_store_for_root` is the resolver the guardian's tripwire also calls (#1525), and
+#: importing the function rather than restating `_pipeline/vault-derived/kg.sqlite` here is
+#: the point: a sweep that spelled the database path out against its own root is how a
+#: prune aimed at a sandbox lands on the live store instead (#1415). Redirect these two
+#: names — as `tests/test_retention_sweep.py` does for every other store constant — to
+#: point the arm at a copy.
+KG_DB_PATH = kg_store_for_root(DATA_ROOT)
+KG_FACTS_ROOT = KG_DB_PATH.parent / "facts"
+
+
+def _kg_index_residue(facts_root: Path, db_path: Path, *,
+                      apply: bool) -> tuple[str, int]:
+    """Index residue: `facts_idx` rows whose file is gone and `entities` rows with no
+    directory. The 27th store, and the only one of the 27 that mutates the shared
+    knowledge store — which is why every rule below is a refusal rather than a setting.
+
+    Why a sweep has to do this at all
+    --------------------------------
+    Deleting a fact file does not retire its `facts_idx` rows: `reindex()` rebuilds
+    from the tree and `entities.register()` only ever inserts (`app/kg_store.py:1329`),
+    so a registration outlives the directory that created it and nothing on this box
+    ever removed the row. The live store measured 2026-11-08 carries 6 rows on 4 paths
+    under `/tmp/blastroute2_u9ny_mb6/`, a scratch tree tmpfs has already reclaimed
+    (#3095 — the writer reached the live store through it), plus that same scratch name
+    as an `entities` row, and 44 entity rows naming no directory at all. Nothing
+    bounded either number; a full `reindex()` would clear the fact half by rewriting
+    195,082 rows to drop 6.
+
+    How it reaches the store, and what it refuses to touch
+    ------------------------------------------------------
+    Reads and writes go through `app.kg_store` and nowhere else — no `sqlite3` handle is
+    opened on `kg.sqlite` here, because that connection belongs to the engine's writers.
+    Selection is `facts_idx.file_row_counts()` (every path the index names, retired rows
+    included — a retired row is still a row the arm must be able to SEE),
+    `entities.rows()` for the registry, `edges.active_endpoints()` and `aliases.all()`
+    for what may not go.
+
+    It NEVER writes an `edges` row. The 14 active edges naming a ghost entity are real
+    relationships whose object simply never got a directory — `87804 Arize AI
+    -[discusses]-> AI Agent Evaluation` is knowledge, not residue — so an entity named
+    by an active edge is HELD and named on the line; whether those edges get expired or
+    their objects re-homed is a ruling this arm does not make. An alias canonical is
+    held for the same reason in the other direction: `entities.remove()` is
+    `DELETE FROM entities` (`app/kg_store.py:1093`; the table has no `expired_at`, which
+    is the one place this arm is not reversible), so removing a canonical would leave
+    its surface resolving to a name with no entity behind it.
+
+    Why the line separates NAMED from MARKED
+    ----------------------------------------
+    `facts_idx.expire_files` writes `WHERE expired_at IS NULL AND invalid_at IS NULL`
+    (`app/kg_store.py:1371`), so of the 6 live rows it names on the real store only the
+    2 the quarantine pass left alone take a new stamp — 4 already carry `invalid_at`
+    from 2026-10-19. "6 expired" would be a false count and "2 expired" would hide the
+    4 rows this pass selected and did not touch, so both numbers are printed, plus the
+    rows that were already retired when this arm found them.
+
+    An absent store is `no store yet`, never a zero: a store that has not been created
+    is a fresh box, and an absent file is created by the first writer, not by this one.
+    A store that opens and then fails to answer is `store unreadable`, never a clean
+    `0 named`, because a sweep that reports a clean night over a store it could not
+    read is the failure #60 was written against.
+    """
+    line_head = "  kg index residue:"
+    try:
+        try:
+            from app.kg_store import KGStore
+        except ModuleNotFoundError:
+            # The same file the engine's writers import, spelled without the package, for
+            # the reason this file already carries that fallback above: `app` is a name a
+            # stray `app.py` earlier on `sys.path` can shadow. A total failure to import
+            # is not an empty store — it goes to `store unreadable` below, because an arm
+            # that prints a clean line over a store it never opened is the
+            # monitor-reports-success defect this repo keeps having to write down.
+            from kg_store import KGStore
+    except Exception as exc:
+        return (f"{line_head} store unreadable: {type(exc).__name__}: {exc}", 0)
+    store = None
+    if Path(db_path).is_file():
+        try:
+            store = KGStore(Path(db_path))
+            counts = dict(store.facts_idx.file_row_counts())
+            registry = list(store.entities.rows())
+            held_by_edge = set()
+            for edge in store.edges.active_endpoints():
+                held_by_edge.add(str(edge[0]))
+                held_by_edge.add(str(edge[1]))
+            canonicals = {str(c) for c in store.aliases.all().values() if c}
+        except Exception as exc:
+            return (f"{line_head} store unreadable: {type(exc).__name__}: {exc}", 0)
+    else:
+        return (f"{line_head} no store yet (dry run: created on first write)", 0)
+
+    root = Path(facts_root)
+    absent: list[tuple[str, Path, int]] = []
+    for key in sorted(counts):
+        key = str(key)
+        if not key:
+            continue
+        # Absolute keys are used as-is: a row written with `/tmp/…/A.md` in it describes
+        # that path and nothing under the facts tree, and joining it under the root would
+        # test `<root>/tmp/…` — a file that never existed — and name a row whose real file
+        # may be sitting right there.
+        target = Path(key)
+        if not target.is_absolute():
+            target = root / key
+        if not target.exists():
+            absent.append((key, target, int(counts[key] or 0)))
+    named_rows = sum(n for _k, _t, n in absent)
+
+    registry_names = sorted({str(r.get("name") or "") for r in registry} - {""})
+    # `root / name` is the whole test. For a name containing a slash — `Databricks AI/BI
+    # Genie` — it lands on the nested directory that genuinely holds that entity's fact
+    # file below the depth the nightly report walks, and `is_dir()` is True, so the row is
+    # held. The report counts those two as ghosts because it compares against
+    # `root.iterdir()`; this arm holds them anyway, because holding a row the report calls
+    # a ghost costs one more nightly line and removing one deletes the registry entry that
+    # owns live facts.
+    ghosts = [n for n in registry_names if not (root / n).is_dir()]
+    held = sorted(n for n in ghosts if n in held_by_edge or n in canonicals)
+    removable = [n for n in ghosts if n not in set(held)]
+
+    marked = removed = 0
+    if apply and absent:
+        try:
+            # `root=` is the tree those keys were indexed against, and the store matches
+            # on that spelling: it re-relativises every path it is handed against `root`
+            # and falls back to the absolute string, exactly as `reindex` stored them. A
+            # call without it would default to `VAULT_FACTS_ROOT` — the live tree — and
+            # the WHERE clause would then match a different spelling than the one in the
+            # row, marking 0 rows while reporting that it had marked them.
+            marked = store.facts_idx.expire_files([t for _k, t, _n in absent], root=root)
+        except Exception as exc:
+            return (f"{line_head} fact side NOT retired: {type(exc).__name__}: {exc}", 0)
+    if apply and removable:
+        try:
+            for name in removable:
+                if store.entities.remove(name):
+                    removed += 1
+        except Exception as exc:
+            return (f"{line_head} entity side incomplete: removed {removed} of "
+                    f"{len(removable)} before {type(exc).__name__}: {exc}", removed)
+
+    line = (f"{line_head} {named_rows} fact row(s) on {len(absent)} absent path(s) named, "
+            f"{marked} row(s) marked expired, {removed} entity row(s) removed, "
+            f"{len(held)} entity name(s) held by a live edge or an alias canonical")
+    if named_rows != marked:
+        line += (f", {named_rows - marked} row(s) already carried a retire stamp and "
+                 f"were left as they were")
+    if held:
+        line += f" [{', '.join(held[:3])}{' etc' if len(held) > 3 else ''}]"
+    if absent:
+        line += f" [{', '.join(f'{k} ({n})' for k, _t, n in absent[:3])}" \
+                f"{' etc' if len(absent) > 3 else ''}]"
+    if not apply:
+        line += (f" (dry run: {named_rows} row(s) would be marked, {len(removable)} "
+                 f"entity row(s) would be removed)"
+                 if (named_rows or removable) else " (dry run: nothing pending)")
+    return line, marked + removed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -5394,6 +5556,15 @@ def main() -> int:
     # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
     # #3379 and #3499 — and this line is the 26th.
     print(_safety_denials_line(denials))
+    # Store 27 (#3951), printed LAST and outside the refusal guard like the seven lines
+    # above it. It is the one store of the 27 that mutates a store the engine is writing
+    # to, and it prints outside the guard for the same reason store 20 does: the guard
+    # refuses deletions that could name a production checkout's refs, and this arm's
+    # target is the data root `resolve_data_root_for_tree` has already decided this tree
+    # may reach (#1415). Appending rather than inserting keeps items 1-26 of task 79's
+    # enumeration where the positional guard reads them — #2862's reason, inherited
+    # through #2924, #3188, #3209, #3379, #3499 and #3789 — and this line is the 27th.
+    print(_kg_index_residue(KG_FACTS_ROOT, KG_DB_PATH, apply=args.apply)[0])
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0
