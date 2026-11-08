@@ -44,6 +44,13 @@ measured off the real artifact:
   absent**, and the write goes through. `#3720` is unambiguous because all seven
   of its multi-word quotes miss both of its files.
 
+* **A `key: value` rendering of a field the artifact holds is the same quote.** A
+  round copying `gate.json`'s `"head": "a8773819…"` into prose writes `head:
+  a8773819`, which is no substring of the file it came from — so the match step
+  also compares the two as *fields*, not as bytes (`_key_value_reproduces`). Only
+  an abbreviation of a value that long is read that way: a prefix shorter than
+  `MIN_VALUE_PREFIX_CHARS` is a guess about the number, and stays absent.
+
 A backtick, not a quotation mark, is what marks the claim: this corpus writes
 verbatim copies as inline code and its own prose in ordinary sentences, so prose
 outside backticks is never checked here. The judgement is checkable by hand
@@ -176,6 +183,79 @@ def _artifacts(round_dir: Path) -> list[tuple[Path, str]]:
     return out
 
 
+#: One `key: value` pair and nothing else — a key token, a colon, one value token.
+#: The shape a round writes when it copies a JSON field into prose.
+_KEY_VALUE = re.compile(r"[\"']?([A-Za-z_][A-Za-z0-9_.\-]*)[\"']?[ \t]*:[ \t]*(\S+)")
+
+#: How much of a value a prefix must carry to count as copied rather than guessed.
+#: `passed: 2290` against `"passed": 22907` is a guess about a count: the span is
+#: 12 characters, so `MIN_QUOTE_CHARS` lets it through, and only 4 of them are the
+#: value. `head: a8773819` is an abbreviation of a sha that means nothing except as
+#: a copy of the field it names, so a floor on the VALUE is what separates them.
+MIN_VALUE_PREFIX_CHARS = 6
+
+#: Punctuation that belongs to the artifact and not to the value: JSON's quoting
+#: and its trailing comma, a shell's quoting. Stripped off both ends of a token.
+_VALUE_EDGE_CHARS = "\"'`, \t"
+
+#: The same pair scanned out of an artifact's own lines: the key quoted as JSON
+#: writes it or bare as YAML and a log's summary line write it, the value run up to
+#: the next space or comma.
+_LINE_FIELD = re.compile(
+    r"[\"']?([A-Za-z_][A-Za-z0-9_.\-]*)[\"']?[ \t]*:[ \t]*([^\s,]+)")
+
+
+def _key_value(span: str) -> tuple[str, str] | None:
+    """The (key, value) of a span that is exactly one `key: value` pair, else None."""
+    match = _KEY_VALUE.fullmatch(span.strip())
+    if match is None:
+        return None
+    return match.group(1), match.group(2).strip(_VALUE_EDGE_CHARS)
+
+
+def _merged_fields(artifacts: list[tuple[Path, str]]) -> dict[str, set[str]]:
+    """Every `key: value` field the round's own files carry, merged across them."""
+    out: dict[str, set[str]] = {}
+    for _, text in artifacts:
+        for match in _LINE_FIELD.finditer(text):
+            out.setdefault(match.group(1), set()).add(
+                match.group(2).strip(_VALUE_EDGE_CHARS))
+    return out
+
+
+def _key_value_reproduces(span: str, fields: dict[str, set[str]]) -> bool:
+    """Is this `key: value` span the artifact's own field, abbreviated honestly?
+
+    **The false refusal this exists for, re-runnable.** The only blocker this guard
+    has ever refused was an honest one: `mcp.err:13135` (in
+    `~/lloyd-data/logs/mcp.err`, 2026-11-07) reads ``Refused: this blocker quotes
+    `head: a8773819` as a line copied out of round SM_20261107_150028's report``,
+    while `gate.json:4` of that very round holds
+    `"head": "a8773819348e8795b922e45901be1f5f98de1159"` and `gate.log:290` holds
+    `(a8773819)`. The substring test can never see it: prose
+    renders the field `head: …`, the JSON renders it `"head": "…"`, so even a
+    byte-exact `head: <full sha>` was refused. Re-run:
+
+        cd ~/lloyd && .venvs/lloyd/bin/python -c 'from pathlib import Path; \\
+        from app.backlog_evidence import absent_quotes as A; \\
+        print(len(A("round SM_20261107_150028 `head: a8773819`", rounds_dir=Path("/home/alansrobotlab/.local/state/lloyd-automod/rounds"))))'
+
+    1 before this normaliser, 0 after it — while `head: 9999dead` (key present,
+    value in no file) and `passed: 2290` (a 4-character prefix of `"passed": 22907`,
+    under `MIN_VALUE_PREFIX_CHARS`) both stay at 1.
+    """
+    pair = _key_value(span)
+    if pair is None:
+        return False
+    key, quoted = pair
+    for value in fields.get(key, ()):
+        if quoted == value:
+            return True
+        if len(quoted) >= MIN_VALUE_PREFIX_CHARS and value.startswith(quoted):
+            return True
+    return False
+
+
 def absent_quotes(body: str, *, rounds_dir: Path | None = None) -> list[dict]:
     """Quotes the body presents as copied out of a round's report that no such report holds.
 
@@ -206,12 +286,18 @@ def absent_quotes(body: str, *, rounds_dir: Path | None = None) -> list[dict]:
         if not artifacts:
             continue  # nothing readable: unverifiable, not absent
         rendered = [(path, text, _collapse(text)) for path, text in artifacts]
+        # Built only when some span in this paragraph is a `key: value` pair, so the
+        # every-day path reads the artifacts exactly as many times as it did.
+        fields = (_merged_fields(artifacts)
+                  if any(_key_value(q) for q in quotes) else {})
         for quote in quotes:
             if quote in seen:
                 continue
             flat = _collapse(quote)
             if any(quote in text or flat in fold for _, text, fold in rendered):
                 continue
+            if _key_value_reproduces(quote, fields):
+                continue  # the artifact's own field, rendered as prose `key: value`
             seen.add(quote)
             absent.append({"quote": quote,
                            "round_ids": round_ids,

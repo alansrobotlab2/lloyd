@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -326,3 +327,165 @@ def test_whitespace_is_collapsed_before_a_line_is_called_absent(store):
     assert EV.absent_quotes(
         f"From `{store['gate_json']}`: `all   5 failure(s)    are new in  this round`\n",
         rounds_dir=store["rounds"]) == []
+
+
+# ===========================================================================
+# #3960 — a `key: value` rendering of a field the artifact holds is the quote
+#
+# The fixture's `gate.json` writes `"head":
+# "0ec76a74d3bd349f175572def818e9cd9b572e37"`; prose that copies that field writes
+# `head: 0ec76a74d3bd349f175572def818e9cd9b572e37`, and an abbreviating round
+# writes `head: 0ec76a74`. Neither is a substring of the JSON, which is the whole
+# reason the guard's one real firing (2026-11-07, `mcp.err:13135`, round
+# SM_20261107_150028, `head: a8773819`) refused an honest blocker.
+# ===========================================================================
+
+HEAD_SHA = "0ec76a74d3bd349f175572def818e9cd9b572e37"
+
+
+def _plain_keys(store, blocker_file):
+    """The front matter keys an ordinary create writes, for a no-new-key compare."""
+    plain = _write(store, name="An ordinary item", description="Do the thing.",
+                   tags=("backlog",))
+    assert plain.get("success") is True, plain
+    other = [p for p in store["board"].iterdir() if p != blocker_file][0]
+    return set(MCP.parse_frontmatter(other.read_text(encoding="utf-8"))[0])
+
+
+# --- Clause 1: the honest rendering files, and files exactly as untouched ----
+
+def test_an_abbreviated_head_quote_of_the_field_the_json_holds_is_accepted(store):
+    """`head: 0ec76a74` against `"head": "0ec76a74d3bd349f…"` is a copy, not a lie."""
+    out = _write(store, description=_body(str(store["gate_json"]), "head: 0ec76a74"))
+    assert out.get("success") is True, out
+    assert out.get("created") is True, out
+    assert len(_files(store["board"])) == 1
+    (item,) = list(store["board"].iterdir())
+    fm = MCP.parse_frontmatter(item.read_text(encoding="utf-8"))[0]
+    assert fm["status"] == "draft"
+    # Clause 1's other half: a quote that reproduces is not a finding about the
+    # item, so the filed blocker carries no front matter key an ordinary create
+    # does not also write.
+    assert set(fm) == _plain_keys(store, item), (set(fm) ^ _plain_keys(store, item))
+
+
+def test_a_byte_exact_head_quote_of_the_field_the_json_holds_is_accepted(store):
+    """Even the whole sha refused: prose writes `head: X`, the JSON `"head": "X"`."""
+    out = _write(store, description=_body(str(store["gate_json"]), f"head: {HEAD_SHA}"))
+    assert out.get("success") is True, out
+    assert len(_files(store["board"])) == 1
+
+
+def test_the_accepted_abbreviation_reaches_the_board_over_the_mcp_tool_seam(store):
+    """The round calls the tool, so acceptance has to survive `call_tool` too.
+
+    The refusal seam is pinned above; the false refusal this item is about was a
+    refusal *answer*, so the same seam is pinned going the other way: an honest
+    abbreviation must come back `success: true` with a board file behind it.
+    """
+    args = {"name": "Blocks #3609: the gate report cannot be read for a head",
+            "description": _body(str(store["gate_json"]), "head: 0ec76a74"),
+            "board": "lloyd", "tags": ["spawned-by-autocode", "blocker"]}
+    result = asyncio.run(MCP.call_tool("backlog_write_task", args))
+    text = "".join(getattr(block, "text", "") for block in result.content)
+    assert json.loads(text)["success"] is True, text
+    assert len(_files(store["board"])) == 1
+
+
+# --- Clause 2: the rule itself, on the unit surface -------------------------
+
+def test_a_key_value_span_reproduces_when_a_line_holds_the_key_and_the_value(store):
+    """Equality, a prefix at the 6-character floor, and a key spelled bare or quoted."""
+    json_key = str(store["gate_json"])  # artifact line: "head": "0ec76a74d3bd…"
+    for quoted in (f"head: {HEAD_SHA}",          # equal to the value token
+                   "head: 0ec76a74",              # an 8-char prefix of it
+                   "head: 0ec76a",                # exactly MIN_VALUE_PREFIX_CHARS
+                   '"head": 0ec76a74'):           # the span itself quoted: key stripped
+        assert EV.absent_quotes(f"From `{json_key}`: `{quoted}`\n",
+                                rounds_dir=store["rounds"]) == [], quoted
+    # …and the same rule off a bare (YAML-shaped) key in another file the round wrote.
+    (store["round_dir"] / "run_spec.yaml").write_text(f"head: {HEAD_SHA}\n",
+                                                      encoding="utf-8")
+    assert EV.absent_quotes(f"From `{json_key}`: `head: 0ec76a74`\n",
+                            rounds_dir=store["rounds"]) == []
+
+
+# --- Clause 3: the fabricated quote is still caught --------------------------
+
+def test_a_key_value_quote_of_a_value_the_round_never_held_is_still_refused(store):
+    """`head: 9999dead`: the key is real, the value is in no file, so the catch bites.
+
+    This is also the clause that fails any fix that took the easy way out and made
+    `key: value` spans *unverifiable* in `_is_verifiable` — exempting the shape
+    there would file this item. The span stays verifiable, and the refusal is the
+    answer, which is what keeps the fix inside the match step.
+    """
+    assert EV._is_verifiable("head: 9999dead") is True
+    out = _write(store, description=_body(str(store["gate_json"]), "head: 9999dead"))
+    assert out.get("success") is False, out
+    assert "head: 9999dead" in out["error"]
+    assert str(store["gate_json"]) in out["error"]
+    assert _files(store["board"]) == []
+
+
+# --- Clause 4: the prefix floor bites ---------------------------------------
+
+def test_a_short_prefix_of_a_value_is_refused_though_the_key_is_real(store):
+    """`passed: 2290` against `"passed": 22907` is a guess about a count, not a copy."""
+    assert EV._is_verifiable("passed: 2290") is True  # 12 chars: MIN_QUOTE_CHARS clears
+    out = _write(store, description=_body(str(store["gate_json"]), "passed: 2290"))
+    assert out.get("success") is False, out
+    assert "passed: 2290" in out["error"]
+    assert _files(store["board"]) == []
+    # One character longer on the value side is not a prefix, it is the value:
+    # equality needs no floor, so this renders and files.
+    files = _write(store, description=_body(str(store["gate_json"]), "passed: 22907"))
+    assert files.get("success") is True, files
+
+
+# --- Clause 5: nothing else about what is checked moved ---------------------
+
+def test_the_field_arm_exempts_the_spreads_it_always_exempted_and_no_more(store):
+    """#3720's prose quote, an elision, a bare token, a command, an unattributed span.
+
+    Every one of those paragraphs names the round, so each span is offered as the
+    gate's output; only the multi-word fabrication is absent, exactly as before the
+    field arm existed.
+    """
+    cited = f"From `{store['gate_json']}`"
+    missing = EV.absent_quotes(
+        f"Blocks #3609\n\n{cited}: `{FABRICATED}`\n\n"
+        f"{cited}, elided: `all 5 failure(s) are new … in this round`\n\n"
+        f"{cited}, the node is "
+        "`tests/test_skill_verdicts.py::test_a_run_row_whose_falsifier_cannot_see_its_input`\n\n"
+        f"{cited}, Check: `cd ~/lloyd && git grep -n passed -- scripts/automod/gate.py`\n\n"
+        "No round is named in this paragraph, so `head: 9999dead` is not a claim "
+        "about its report.\n", rounds_dir=store["rounds"])
+    assert [m["quote"] for m in missing] == [FABRICATED]
+
+
+def test_the_normaliser_names_the_false_refusal_it_exists_for():
+    """A later reader can re-run the incident from the comment beside the code.
+
+    The comment has to be readable where the normaliser is, not merely somewhere in
+    the file: the slice under test runs from the field-arm patterns to `absent_quotes`.
+    """
+    src = (ROOT / "app" / "backlog_evidence.py").read_text(encoding="utf-8")
+    start = src.index("_KEY_VALUE = re.compile")
+    block = src[start:src.index("def absent_quotes", start)]
+    assert "mcp.err:13135" in block, block
+    assert "head: a8773819" in block
+    assert "SM_20261107_150028" in block
+
+
+def test_the_guard_is_still_reached_from_only_the_two_files_it_was():
+    """The fix is inside `absent_quotes`, so no new caller may appear (item clause 4).
+
+    The symbol is spelled in two fragments on purpose: a file whose own text
+    contains the string being grepped shows up as a hit, and this file must not be
+    one — the grep's result set is the thing under test.
+    """
+    proc = subprocess.run(["git", "grep", "-n", "blocker_quote_" + "refusal",
+                           "--", "*.py"], cwd=ROOT, capture_output=True, text=True)
+    files = sorted({line.split(":", 1)[0] for line in proc.stdout.splitlines()})
+    assert files == ["agent_mcp/backlog.py", "app/backlog_evidence.py"], proc.stdout
