@@ -11290,6 +11290,295 @@ def test_the_safety_denials_store_states_a_live_bound_under_the_witness_cap(rs):
         f"{witness_cap / bound:.2f}")
 
 
+
+# ─────────── #3921: store 26's SECOND bound — live bytes, not only age ───────────
+#
+# `SAFETY_DENIALS_ARCHIVE_AGE_DAYS` bounds the journal by the RATE the guards refuse at: after
+# a fold the live file IS the rolling-30-day volume, and a rate is not a property of the file
+# it bounds. Measured 2026-11-08, the worst rolling 30 days came to 644,204 B (61.4 % of the
+# witness cap) while the 7-day mean of the SAME file extrapolated to a 1,263,180 B plateau
+# over it. So the fold stops at a byte ceiling as well as at an age. The nodes below pin the
+# ceiling and its relation to the cap, the order it folds in, the two rows it may never fold,
+# its silence when the age cut was enough, the line that says which bound fired, and the two
+# documents that state the bound to the worker running the sweep.
+
+
+def test_the_live_byte_bound_is_three_quarters_of_the_witness_cap(rs):
+    """#3921 clause 1: the ceiling exists, and its relation to the cap is pinned, not prose.
+
+    `WITNESS_MAX_BYTES` is PARSED out of `scripts/automod/backlog.py` rather than imported:
+    this script is stdlib-only and runs from cron with no venv, which is exactly why
+    `SAFETY_DENIALS_LIVE_MAX_BYTES` is a literal — and a literal whose relation to another
+    module's constant lives only in a comment is a literal that drifts. Parsing is the seam
+    that keeps the two honest without adding an import.
+
+    Three quarters, not the cap. The cap is the size at which `_witness_within_size_bound`
+    starts DEMANDING an extract (#2267 / #2382), so a backstop set AT it fires only once the
+    degradation it exists to prevent has already happened.
+    """
+    assert rs.SAFETY_DENIALS_LIVE_MAX_BYTES == 786_432
+    src = (_SCRIPT.parent.parent / "automod" / "backlog.py").read_text(encoding="utf-8")
+    hits = re.findall(r"^WITNESS_MAX_BYTES\s*=\s*([0-9_]+)", src, re.M)
+    assert len(hits) == 1, f"expected one WITNESS_MAX_BYTES line, found {hits}"
+    cap = int(hits[0].replace("_", ""))
+    assert cap == 1_048_576, f"the witness cap itself moved: {cap}"
+    assert rs.SAFETY_DENIALS_LIVE_MAX_BYTES * 4 == 3 * cap, (
+        f"{rs.SAFETY_DENIALS_LIVE_MAX_BYTES} is not exactly three quarters of the "
+        f"{cap}-byte witness cap — the backstop has drifted off its stated relation")
+
+
+def test_the_byte_bound_folds_a_journal_that_is_entirely_inside_the_age_window(rs,
+                                                                              monkeypatch):
+    """#3921 clause 2: every row inside 30 days, bytes over the bound — fold oldest `at` first.
+
+    The case an age cut cannot see at all. Five planted rows, all days old: the window keeps
+    100 % of them, and a store bounded only by age reports a clean sweep while the file walks
+    past the cap. The ceiling is set to the byte figure that the TWO OLDEST rows, and nothing
+    less, bring the journal down to — which pins the ORDER (oldest `at` first) as well as the
+    stopping point (at or below, never further under than it has to).
+
+    And the three ways a fold can quietly break the promise every archive here makes: unlink
+    the journal, re-serialise a kept line (`json.dumps` rewrites key order and spacing, so a
+    "kept" row's bytes would no longer match the gzip it recovers from), or file a folded row
+    under the month the sweep ran instead of the month its own `at` names.
+    """
+    now = time.time()
+    ages = (20.0, 15.0, 10.0, 5.0, 2.0)
+    lines = [_denial_line(now, d, session=f"chat-{k}") for k, d in enumerate(ages)]
+    journal = _plant_denial_journal(rs, *lines)
+    bound = sum(len(ln) for ln in lines[2:])         # the two oldest are exactly enough
+    monkeypatch.setattr(rs, "SAFETY_DENIALS_LIVE_MAX_BYTES", bound)
+
+    out = rs.sweep_safety_denials(True, now)
+    assert out["moved"] == 2 and out["backstop"] == 2, (
+        f"the fold moved {out['moved']} row(s), {out['backstop']} of them on the byte bound: "
+        "the age cut should have aged nothing in this fixture and the bytes should have cost "
+        "exactly the two oldest rows")
+    assert out["kept_bytes"] == bound, (
+        f"the fold left {out['kept_bytes']} B against a ceiling of {bound} B — it stops at or "
+        "below the bound, never above it and never further under than it has to")
+    assert out["over_bound"] is False and out["refused"] is None
+    assert out["bytes"] == out["backstop_bytes"] == len(lines[0]) + len(lines[1]), (
+        "`out[\"bytes\"]` is what left the file and this fold is the only thing that moved "
+        "rows, so the two must be one sum over the same rows — and both are FILE bytes, "
+        "newline included, the same sum `out[\"after\"]` and `wc -c` are")
+
+    assert journal.exists(), "the byte bound folded rows; it does not remove the journal"
+    assert journal.read_bytes() == b"".join(lines[2:]), (
+        "the kept rows must be the ORIGINAL BYTES in file order — a re-serialised keep is a "
+        "row whose bytes no longer match the archive it came from")
+    for k in (0, 1):
+        arc = journal.parent / _denials_archive_name(_utc_month(now, ages[k]))
+        assert arc.exists(), f"the {ages[k]}-day row never reached its month archive"
+        with gzip.open(arc, "rb") as fh:
+            assert lines[k] in fh.read(), (
+                f"the {ages[k]}-day row is not recoverable byte-for-byte out of {arc.name}")
+
+
+def test_the_byte_bound_never_folds_the_newest_or_undated_row(rs, monkeypatch):
+    """#3921 clause 3: the two classes the ceiling may not touch, and a bound it cannot reach.
+
+    The ceiling is a target for a fold, not an invariant on a file. The newest stamped row
+    (#3789 clause 3: the store's freshest witness — and note it is always INSIDE the window,
+    so it is in the byte pool precisely because it is protected, which is why the fold skips
+    it by index and not by age) and every undated row (store 14's rule: an `at` that does not
+    parse has no proven month, and a `None`-named archive is the orphan #1649 exists to clean)
+    are outside it by prior ruling.
+
+    So the second run sets the ceiling to what those rows can NEVER leave behind. One answer is
+    right: fold everything foldable, keep the journal present with its kept rows readable and
+    byte-identical, report `over_bound`, and return normally. Unlinking the journal or dropping
+    rows to hit the number is the failure mode every store in this sweep was written against.
+    """
+    now = time.time()
+    und = [_denial_line_with(at="not a timestamp", note="u1"), _denial_line_with(note="u2")]
+    aged = _denial_line(now, 60.0, session="chat-aged")
+    mid = _denial_line(now, 20.0, session="chat-mid")       # comfortably inside the window
+    young = _denial_line(now, 3.0, session="chat-young")
+    newest = _denial_line(now, 1.0, session="chat-new")
+    _plant_denial_journal(rs, *und, aged, mid, young, newest)
+    monkeypatch.setattr(rs, "SAFETY_DENIALS_LIVE_MAX_BYTES", 1)   # unreachable on purpose
+
+    out = rs.sweep_safety_denials(True, now)
+    assert out["moved"] == 3 and out["backstop"] == 2, (
+        f"moved={out['moved']} backstop={out['backstop']}: the 60-day row is the age cut's, "
+        "the 30-day and 3-day rows are the ceiling's, and the newest and undated rows are "
+        "nobody's to fold")
+    assert out["kept_newest"] == 1 and out["undated"] == 2
+    residue = sum(len(ln) for ln in (*und, newest))
+    assert out["kept_bytes"] == residue and out["over_bound"] is True, (
+        f"kept {out['kept_bytes']} B of un-foldable residue against a ceiling of 1 B; the "
+        "store has to SAY it could not reach the bound, not fail or reach for the journal")
+    assert out["refused"] is None, "an unreachable bound is not a refused fold"
+
+    journal = Path(rs.SAFETY_DENIALS_JOURNAL)
+    assert journal.exists(), "the fold could not reach the bound and removed the journal"
+    live = journal.read_bytes()
+    assert live == b"".join([*und, newest]), (
+        "the residue must survive verbatim: it is the whole reason the bound is unreachable")
+    for ln in live.splitlines():
+        json.loads(ln)                                     # every kept line still readable
+    for days_ago, row in ((60.0, aged), (20.0, mid), (3.0, young)):
+        arc = journal.parent / _denials_archive_name(_utc_month(now, days_ago))
+        with gzip.open(arc, "rb") as fh:
+            assert row in fh.read(), (
+                f"the {days_ago}-day row is not recoverable byte-for-byte out of "
+                f"{arc.name}, so a fold that cannot reach its bound also lost the rows it "
+                "could reach")
+
+    # …and the same residue with a ceiling it CAN satisfy reports the bound as reached, so
+    # `over_bound` is a measurement of the residue against the bound and not a label for
+    # "there were undated rows".
+    _plant_denial_journal(rs, *und, aged, mid, young, newest)
+    monkeypatch.setattr(rs, "SAFETY_DENIALS_LIVE_MAX_BYTES", residue)
+    out2 = rs.sweep_safety_denials(True, now)
+    assert out2["over_bound"] is False and out2["moved"] == 3
+    assert Path(rs.SAFETY_DENIALS_JOURNAL).read_bytes() == live, (
+        "a reachable ceiling and an unreachable one must leave the SAME residue: only the "
+        "wording differs, and a fold that kept more rows because the number moved is not "
+        "bounded by the number")
+
+
+def test_the_byte_bound_is_a_no_op_when_the_age_cut_was_enough(rs, monkeypatch):
+    """#3921 clause 4: under the ceiling, the fold is byte-for-byte what it was before #3921.
+
+    The fixture the age-only nodes use — one row past 30 days, rows inside it. The default
+    ceiling (786,432 B, two orders of magnitude above these bytes) must archive nothing extra
+    and write no second month gzip: the backstop is ADDITIVE, so a run whose age cut sufficed
+    is indistinguishable from a pre-#3921 run, which is what lets the seven existing store-26
+    nodes pass unchanged.
+
+    The second half is why no node here has to build a 786,432-byte journal: the limit is a
+    module constant read at call time, so `monkeypatch.setattr(rs, ...)` reaches the very value
+    `sweep_safety_denials` reads and the SAME fixture folds the moment it is lowered.
+    """
+    now = time.time()
+    aged = _denial_line(now, 90.0, session="chat-oct")
+    mid = _denial_line(now, 10.0, session="chat-mid")
+    newest = _denial_line(now, 2.0, session="chat-new")
+    journal = _plant_denial_journal(rs, aged, mid, newest)
+
+    out = rs.sweep_safety_denials(True, now)
+    assert out["backstop"] == 0 and out["backstop_bytes"] == 0 and out["over_bound"] is False, (
+        f"the ceiling fired on a journal of {out['before']} bytes against its "
+        f"{rs.SAFETY_DENIALS_LIVE_MAX_BYTES}-byte bound: {out}")
+    assert out["moved"] == 1, "the age cut should have aged exactly the 90-day row"
+    assert journal.read_bytes() == mid + newest
+    gz = sorted(p.name for p in journal.parent.glob("denials-*.jsonl.gz"))
+    assert gz == [_denials_archive_name(_utc_month(now, 90.0))], (
+        f"the backstop wrote an archive into a run it should not have fired in: {gz}")
+
+    _plant_denial_journal(rs, aged, mid, newest)
+    monkeypatch.setattr(rs, "SAFETY_DENIALS_LIVE_MAX_BYTES", len(newest))
+    out2 = rs.sweep_safety_denials(True, now)
+    assert out2["backstop"] == 1 and out2["over_bound"] is False, (
+        f"the same fixture under a lowered ceiling reported {out2['backstop']} ceiling "
+        "fold(s): the limit is not being read from the module at call time")
+    # …and the row it wrote is `mid`, read back out of the gzip — the fold ORDER as bytes. With
+    # the comparison reversed `newest` is the biggest single-row saving a greedy fold reaches
+    # for first, and it is also the row #3789 clause 3 protects, so an inverted fold destroys
+    # the store's freshest witness while still reporting a bound it reached.
+    with gzip.open(journal.parent / _denials_archive_name(_utc_month(now, 10.0)), "rb") as fh:
+        archived = fh.read()
+    assert mid in archived, (
+        "the ceiling folded `newest` instead of `mid`: it is folding NEWEST-first, taking the "
+        "row a reader is asking about and the row no fold may take")
+    assert newest not in archived, "the newest stamped row reached an archive"
+    assert journal.read_bytes() == newest
+
+
+def test_the_store_line_says_which_bound_fired(rs, monkeypatch, capsys):
+    """#3921 clause 5 (the code half): the line names the bound, because the fixes differ.
+
+    An age cut that is too wide and a refusal rate that needs chasing are different jobs — the
+    rate roughly tripled in the week this item was filed (7,180 B on 2026-11-01 to 65,176 B on
+    2026-11-07) — so a line that cannot tell the two bounds apart sends the next reader after
+    the wrong one. When the age cut was enough the line keeps the wording #3789's nodes pin,
+    with no backstop phrase in it; when the ceiling fired it says how many of the moved rows
+    are its and what bound they were moved for; when the residue is itself over the ceiling it
+    says the bound was NOT reached, because a line that reads as a finished fold over a file
+    that is still unbounded is worse than no line at all.
+    """
+    now = time.time()
+    aged = _denial_line(now, 60.0, session="chat-aged")
+    mid = _denial_line(now, 10.0, session="chat-mid")
+    newest = _denial_line(now, 2.0, session="chat-new")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    _plant_denial_journal(rs, aged, mid, newest)
+    assert rs.main() == 0
+    line = _store_line(capsys.readouterr().out, "safety denials")
+    assert ": 1 archived (" in line, line
+    assert "byte backstop" not in line, (
+        f"the line blames the ceiling for a fold the age cut did on its own: {line!r}")
+
+    _plant_denial_journal(rs, aged, mid, newest)
+    monkeypatch.setattr(rs, "SAFETY_DENIALS_LIVE_MAX_BYTES", len(newest))
+    assert rs.main() == 0
+    fired = _store_line(capsys.readouterr().out, "safety denials")
+    assert f"1 of the 2 by the {rs.SAFETY_DENIALS_LIVE_MAX_BYTES} B byte backstop" in fired, (
+        f"the line does not say which bound moved how many rows: {fired!r}")
+    assert "STILL ABOVE IT" not in fired, fired
+
+    _plant_denial_journal(rs, _denial_line_with(note="u1"), aged, mid, newest)
+    monkeypatch.setattr(rs, "SAFETY_DENIALS_LIVE_MAX_BYTES", 1)
+    assert rs.main() == 0
+    unreachable = _store_line(capsys.readouterr().out, "safety denials")
+    assert "STILL ABOVE IT" in unreachable and "byte backstop" in unreachable, unreachable
+    assert Path(rs.SAFETY_DENIALS_JOURNAL).exists(), (
+        f"the line reports an unreachable bound; the store's answer must not be the journal: "
+        f"{unreachable!r}")
+
+
+def test_the_skill_row_and_the_vehicle_description_state_store_26_as_age_or_bytes():
+    """#3921 clause 5 (the document half): the bound the worker READS is the real one.
+
+    The worker running `--apply` approves the deletion from these two texts, not from the
+    source: SKILL.md's table is the store list it is told to reproduce and
+    `autonomy/79-retention-sweep.md` is the task description in front of it. Both said, in
+    2026-11-08's reading, that 30 days "needs no smaller window" at "~1.95x headroom" off a
+    538,773 B figure — arithmetic written in `59ce4d49` and never re-measured, and false at
+    the 7-day rate the same file shows. A bound the code enforces twice and the docs describe
+    as age-only is a bound the operator is not approving.
+
+    Asserted with DIGITS, not thousands-separated prose: `_assert_description_names_the_reported_stores`
+    compares a store line's digits against the item's, and a comma is enough to make an equals
+    sign read as a minus.
+    """
+    vault = Path.home() / "obsidian"
+    skill = vault / "skills" / "retention-sweep" / "SKILL.md"
+    task = vault / "autonomy" / "79-retention-sweep.md"
+    if not skill.exists() or not task.exists():
+        pytest.skip("the vault is not mounted, so the two documents cannot be checked")
+    row = next((ln for ln in skill.read_text(encoding="utf-8").splitlines()
+                if "safety denials" in ln and "denials.jsonl" in ln), "")
+    # The WHOLE of item 26, not its first line: the bound is now several sentences, and an
+    # extractor that reads one line asserts against a summary of the claim rather than the
+    # claim — a document that names the constant lower down and keeps the stale arithmetic
+    # on line one would pass that. The item ends where the enumeration stops being one.
+    _task_text = task.read_text(encoding="utf-8")
+    _i = _task_text.find("26 safety denials journal")
+    assert _i >= 0, "store 26 vanished from the vehicle's description"
+    _rest = _task_text[_i:]
+    _j = _rest.find("Report one line per store")
+    item = " ".join((_rest if _j < 0 else _rest[:_j]).split())
+    assert row and item, "store 26's line vanished from one of the two documents"
+
+    bound = "786432"
+    for label, text in (("SKILL.md", row), ("task 79", item)):
+        assert bound in text.replace(",", ""), (
+            f"{label} does not name the {bound}-byte bound the sweep now folds at: {text!r}")
+        assert "30" in text and "86400" not in text, f"{label} lost its age arm: {text!r}"
+        assert re.search(r"(?i)\bor\b", text), (
+            f"{label} states one bound where the store now has two: {text!r}")
+        assert "538,773" not in text and "538773" not in text, (
+            f"{label} still quotes the stale 538,773 B volume: {text!r}")
+        assert "needs no smaller window" not in text, (
+            f"{label} still claims the age cut alone is sufficient: {text!r}")
+    assert "byte backstop" in row or "byte backstop" in item, (
+        "neither document names the second bound by the name the report line uses")
+
+
 # ─────────────── #3815: the microcompact reduction sidecar ───────────────
 # `app/harness/microcompact.reduction_sidecar_path` writes
 # `sessions/<sid>.microcompact-reduced.json` — a bookkeeping record of which tool

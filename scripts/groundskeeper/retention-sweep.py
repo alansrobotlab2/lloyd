@@ -4792,19 +4792,56 @@ def _memory_graph_line(p: dict) -> str:
 # 16.3 KB/day over the whole span, 24.3 over the last 10 days, 29.3 over the last 7, single
 # worst day 51,957 B (2026-11-01) — which puts the crossing between 2026-11-22 and 12-04.
 #
-# EXPECTED LIVE BYTES UNDER THIS WINDOW, and why 30 days needs no smaller one: after a fold
-# the live file holds exactly the rows stamped inside the window, so its steady-state
-# ceiling is the largest volume any one 30-day span has actually produced. Computed as a
+# EXPECTED LIVE BYTES, and why an age window alone is not a bound (#3921). After a fold the
+# live file holds exactly the rows stamped inside the window, so its steady-state ceiling IS
+# the largest volume any one 30-day span has actually produced — live bytes equal
+# rolling-30-day volume, which makes the bound a bet on the refusal rate. Computed as a
 # per-day byte tally of the rows' own `at` stamps — NOT the file size divided by days since
 # the first row, which averages the ramp away — the worst rolling 30-day volume in this
-# journal is 538,773 B (window starting 2026-10-07): 51.4 % of 1_048_576, so ~1.95x
-# headroom at the worst month the store has ever had. The rolling 21-day max is 390,226 B
-# and the 14-day max 287,730 B. A 30-day window therefore keeps the live store under the
-# witness cap at the observed worst, which is why the horizon below is stores 13/14/15's 30
-# and not a smaller number. (Numbers at filing; a fold run at that moment aged 92 rows /
-# 44,884 B — the head of the file, whose witness item #3789 records as owed before the
-# first --apply.)
+# journal is 644,204 B (measured 2026-11-08T04:35Z over 1,048 rows spanning 2026-10-08 to
+# 2026-11-08, i.e. exactly one window back from the last --apply): 61.4 % of 1_048_576, so
+# ~1.63x headroom. The rolling 21-day max is 495,227 B and the 14-day max 405,031 B.
+#
+# And that headroom is a rate, not a property of the file. The 7-day window measured
+# 294,745 B = 42,106 B/day and the single worst day 65,176 B (2026-11-07); hold the 7-day
+# rate for 30 days and the plateau is 1,263,180 B, ABOVE the witness cap, and hold the
+# 14-day rate and it is 867,923 B. The rate is not stable enough to bound on either: it went
+# 7,180 B (2026-10-31) to 51,957 B (11-01) to 65,176 B (11-07), and the live file grew
+# +79,657 B in the 21 hours after the 11-07 fold (585,170 to 664,827 B). So the window is
+# kept at stores 13/14/15's 30 — it is the horizon every reader of this file asks about, and
+# shrinking it is a separate ruling, not a code gap — and the byte backstop below is what
+# stops the size depending on the rate: the store is bounded by AGE **or BYTES**, whichever
+# arrives first. (Numbers at filing; a fold run at that moment aged 92 rows / 44,884 B — the
+# head of the file, whose witness item #3789 records as owed before the first --apply.)
+#
+# WHAT WOULD RESTORE AGE-ONLY BEHAVIOUR: the 30-day volume alone is the bound again exactly
+# when the worst rolling 30-day tally falls to or below `SAFETY_DENIALS_LIVE_MAX_BYTES`
+# (786,432 B), i.e. a sustained 26,214 B/day or less, because at that rate the age cut
+# reaches the bound before the backstop ever can. The measured 7-day rate is 42,106 B/day —
+# 1.6x that — so on this machine the backstop is the operative bound today, and it is the
+# one that holds if the rate triples again.
 SAFETY_DENIALS_JOURNAL = DATA_ROOT / "safety" / "denials.jsonl"
+
+#: Live-bytes ceiling for the journal, the second of the store's two bounds (#3921). A
+#: LITERAL rather than an import because this script is stdlib-only and runs from cron with
+#: no venv, while `WITNESS_MAX_BYTES` lives in `scripts/automod/backlog.py`; the relation to
+#: that cap is pinned by a test that PARSES the cap out of that file, so the two cannot
+#: drift apart. Three quarters of `WITNESS_MAX_BYTES = 1_048_576`, not the cap itself,
+#: because the cap is where `_witness_within_size_bound` starts demanding an extract rather
+#: than where it fails: sitting at the cap is the degraded state (#2267 clause 3 / #2382),
+#: and a backstop set at the boundary is a backstop that fires only once the degradation it
+#: exists to prevent has happened. The remaining quarter is the room a fold run has to
+#: complete while `append_denial` keeps appending: the helper grafts any row that lands
+#: mid-fold back onto the live file, so the size the fold actually leaves is `kept` PLUS
+#: whatever the guards refused during it, and a bound with no slack is a bound the fold
+#: cannot hit on a busy machine.
+#:
+#: It is a CEILING ON A FOLD, not an invariant on the file: a journal whose un-foldable rows
+#: (the newest stamped row and every undated row) alone exceed it is left over the bound,
+#: intact, and says so on the store's line. Read at call time, so a test lowers it with
+#: `monkeypatch.setattr(rs, "SAFETY_DENIALS_LIVE_MAX_BYTES", ...)` instead of writing a
+#: 786 KB fixture.
+SAFETY_DENIALS_LIVE_MAX_BYTES = 786_432    # 0.75 * WITNESS_MAX_BYTES (backlog.py:1450)
 
 #: Days after which one denial row is past every reader's window and moves into its own
 #: month's gzip. The store's own rule, imported from nobody — the writer prunes nothing —
@@ -4870,7 +4907,19 @@ def _denials_archive_tally(journal: Path) -> tuple[int, int]:
 
 
 def sweep_safety_denials(apply, now, *, journal=None, on_attempt=None) -> dict:
-    """Fold denial rows older than SAFETY_DENIALS_ARCHIVE_AGE_DAYS into month gzips.
+    """Fold denial rows older than SAFETY_DENIALS_ARCHIVE_AGE_DAYS into month gzips, then
+    fold on until the live journal is at or below SAFETY_DENIALS_LIVE_MAX_BYTES.
+
+    TWO BOUNDS, evaluated in that order (#3921). The age cut is the one every reader of this
+    file asks about and it runs first, so a run that ages rows never pays for the second
+    look; the byte ceiling then folds oldest-`at` rows into the SAME month gzips until the
+    kept bytes fit under it. The second bound exists because the first is a rate in disguise:
+    after a fold, live bytes ARE the rolling-30-day volume, so an age-only store is bounded by
+    however often the guards refuse — 644,204 B at the worst 30 days measured, but a plateau
+    of 1,263,180 B at the 7-day rate of the same file, over `WITNESS_MAX_BYTES`, which is the
+    size at which a round's witness stops being quotable (#2267/#2382). Both bounds ARCHIVE:
+    a row the ceiling removes goes into the gzip of its own `at` month exactly like a row the
+    window removes, and it is recoverable from there byte-for-byte.
 
     ARCHIVE ONLY: every row is appended to `its own UTC month`'s gzip BEFORE the live file
     is rewritten, and the live journal is never unlinked — the same order and the same
@@ -4900,6 +4949,7 @@ def sweep_safety_denials(apply, now, *, journal=None, on_attempt=None) -> dict:
     journal = Path(journal) if journal is not None else SAFETY_DENIALS_JOURNAL
     out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
            "moved": 0, "archived": 0, "undated": 0, "kept_newest": 0,
+           "backstop": 0, "backstop_bytes": 0, "kept_bytes": 0, "over_bound": False,
            "archive_files": 0, "archive_bytes": 0, "refused": None}
 
     def with_archives(res: dict) -> dict:
@@ -4931,26 +4981,70 @@ def sweep_safety_denials(apply, now, *, journal=None, on_attempt=None) -> dict:
             newest_at, newest_index = seconds, index
 
     buckets: dict[str, list[bytes]] = {}
-    kept: list[bytes] = []
+    kept_idx: list[int] = []        # indices the AGE cut kept, in file order
     for index, line in enumerate(lines):
         seconds = stamps[index]
         if seconds is None:
-            kept.append(line)                                    # undated: stays, counted apart
+            kept_idx.append(index)                             # undated: stays, counted apart
             continue
         if index == newest_index:
             out["kept_newest"] = 1
-            kept.append(line)                                    # never archived, however old
+            kept_idx.append(index)                             # never archived, however old
             continue
         if now - seconds <= SAFETY_DENIALS_ARCHIVE_AGE_DAYS * 86400:
-            kept.append(line)                                    # inside the window
+            kept_idx.append(index)                             # inside the window
             continue
         # The bucket is the ROW's month, never the month the sweep ran: a fold that filed
         # every aged row under `now` would put October's refusals in a November gz and make
         # "open last month's archive" meaningless.
         buckets.setdefault(time.strftime("%Y%m", time.gmtime(seconds)), []).append(line)
 
-    out["moved"] = sum(len(rows) for rows in buckets.values())
-    out["bytes"] = sum(len(ln) for rows in buckets.values() for ln in rows)
+    # #3921, the store's SECOND bound. The cut above bounds the file by the RATE the guards
+    # refuse at — live bytes after a fold are exactly the rolling-30-day volume — and that
+    # rate went 7,180 B (2026-10-31) to 65,176 B (2026-11-07) in a week, whose 7-day mean
+    # extrapolates to a 1,263,180 B plateau over the witness cap. So once the cut has had its
+    # say, fold oldest-`at` first until the kept bytes are at or below
+    # SAFETY_DENIALS_LIVE_MAX_BYTES. Summed over the KEPT rows and not over the file: rows the
+    # cut already aged are gone, and the backstop is additive to the cut — it archives rows the
+    # cut would have kept, and never re-buckets one the cut archived.
+    # `len(line)` on a `splitlines(keepends=True)` line IS the row's on-disk byte count,
+    # newline included, so this sum equals `len(b"".join(kept))` = `out["after"]` = what
+    # `wc -c` answers — the number `over_bound` and the report line speak. Adding a newline per
+    # row here over-counts one byte a row and claims a size the file does not have.
+    kept_bytes = sum(len(lines[i]) for i in kept_idx)
+    backstop = 0
+    backstop_bytes = 0
+    if kept_bytes > SAFETY_DENIALS_LIVE_MAX_BYTES:
+        # Oldest first, skipping the two classes nothing may fold: the newest stamped row
+        # (`out["kept_newest"]`'s rule, #3789 clause 3 — and it is always inside the window, so
+        # it is in `kept_idx` precisely because it is protected) and every undated row (store
+        # 14's rule: no parseable `at` means no proven month, and a `None` month is an orphaned
+        # row wearing an honest filename). Folded rows join the SAME `buckets` dict, so they go
+        # through the same `_archive_append` before the rewrite and inherit its skip-lines-it-
+        # already-holds behaviour — an identical row the cut also aged is archived once.
+        for _seconds, index in sorted((stamps[i], i) for i in kept_idx
+                                     if i != newest_index and stamps[i] is not None):
+            if kept_bytes <= SAFETY_DENIALS_LIVE_MAX_BYTES:
+                break
+            buckets.setdefault(time.strftime("%Y%m", time.gmtime(stamps[index])),
+                               []).append(lines[index])
+            kept_idx.remove(index)
+            backstop += 1
+            backstop_bytes += len(lines[index])
+            kept_bytes -= len(lines[index])
+    kept = [lines[i] for i in kept_idx]
+    # True when the fold gave up everything it is ALLOWED to give and the journal is STILL
+    # over the bound, because the un-foldable residue (the newest row plus the undated rows)
+    # is itself bigger than the ceiling. Reported, never failed: `live <= bound` is the target
+    # of a fold, not an invariant on a file, and the two alternatives — unlink the journal or
+    # drop rows to hit the number — are the exact failure every other store here was written
+    # against. It is also why a bound the residue can exceed has to be stated as a bound.
+    over_bound = kept_bytes > SAFETY_DENIALS_LIVE_MAX_BYTES
+
+    out.update({"moved": sum(len(rows) for rows in buckets.values()),
+                "bytes": sum(len(ln) for rows in buckets.values() for ln in rows),
+                "backstop": backstop, "backstop_bytes": backstop_bytes,
+                "kept_bytes": kept_bytes, "over_bound": over_bound})
     if not buckets or not apply:
         return with_archives(out)
 
@@ -4999,6 +5093,17 @@ def _safety_denials_line(p: dict) -> str:
             if p["archive_files"] else " [no month archive yet]")
     tail = (f" — {p['undated']} undated row(s) kept (no parseable `at`)"
             if p["undated"] else "")
+    # #3921: named only when it fired, so a line that reads as it did before the backstop
+    # existed is evidence the age cut was enough this run — the two bounds have different
+    # fixes (a widening window vs a rate that needs chasing), and a line that cannot tell them
+    # apart sends the next reader after the wrong one. The bound is spelled into the phrase
+    # because the skill's store table cites that phrase and the doc guard requires a real
+    # report-line substring.
+    bs = (f", {p['backstop']} of the {p['moved']} by the {SAFETY_DENIALS_LIVE_MAX_BYTES} B "
+          f"byte backstop" if p["backstop"] else "")
+    if p["over_bound"]:
+        bs += (f" — STILL ABOVE IT at {p['kept_bytes']} B kept "
+               f"(the newest row and {p['undated']} undated row(s) never fold)")
     if not p["present"]:
         return f"{label}: no journal yet — nothing to bound{arch}"
     if p["refused"]:
@@ -5006,12 +5111,12 @@ def _safety_denials_line(p: dict) -> str:
                 f"{p['archived']} row(s) already archived{arch}")
     verb = "archived" if p["apply"] else "would archive"
     if p["moved"] == 0:
-        return f"{label}: 0 {verb} ({p['before']} bytes live){tail}{arch}"
+        return f"{label}: 0 {verb} ({p['before']} bytes live){bs}{tail}{arch}"
     if not p["apply"]:
         return (f"{label}: {p['moved']} {verb} ({p['before']} bytes live, "
-                f"{p['bytes']} B of it){tail}{arch}")
+                f"{p['bytes']} B of it){bs}{tail}{arch}")
     return (f"{label}: {p['moved']} {verb} ({p['before']} -> {p['after']} bytes live, "
-            f"{p['bytes']} B out){tail}{arch}")
+            f"{p['bytes']} B out){bs}{tail}{arch}")
 
 
 # ── #3815: the microcompact reduction sidecar ────────────────────────────────────
