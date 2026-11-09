@@ -7,9 +7,11 @@ committed copy of `skills/nightly-reflection-knowledge-write/step-2a-ter-curatio
 `tests/test_memory_ledger_bound.py::test_the_live_curation_skill_has_not_drifted_from_the_witness_the_ban_reads`
 byte-compares the two, and
 `::test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling`
-certifies that copy as a whole file by string identity — its front matter, then the
-first and last headings of its section spine — so a slice cannot pass for the whole
-skill. It states no size of its own: the receipt it prints is measured from the bytes
+certifies that copy as a whole file by string identity — its front matter, then its whole
+section spine, every `^## ` heading of the skill in the skill's own order, section for
+section — so a slice cannot pass for the whole skill, and neither can a copy that lost a
+heading from between the spine's two ends. It states no size of its own: the receipt it
+prints is measured from the bytes
 it just read, which is what #3904 changed after ten re-freezes had to move a typed
 byte and newline count by hand. Vault `e45a6b6c` appended one bullet to
 §2a-ter on 2026-10-06, nobody re-froze the copy, and nothing said so until the next

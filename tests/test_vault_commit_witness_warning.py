@@ -371,6 +371,42 @@ def test_the_rungs_own_docstring_names_the_witness_and_types_no_size():
         "expect, which turns the rung's silence into a coverage gap")
 
 
+def test_the_rung_describes_the_witness_as_the_whole_ordered_spine_the_node_compares():
+    """#4013 clause 5: the docstring explained the pinning node as an ends-only check.
+
+    It said the copy is certified by "its front matter, then the first and last headings of
+    its section spine". That is not the comparison the node makes:
+    `tests/test_memory_ledger_bound.py::test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling`
+    takes every `^## ` heading and requires `tuple(headings) == WITNESS_SECTION_SPINE` —
+    the whole spine, section for section and in order, which is how that node's own
+    docstring words it — and `test_a_copy_that_is_not_the_whole_skill_reddens_the_corpus_node`
+    is the node that proves a copy which lost a MIDDLE heading, both ends intact, is the
+    case this catches. So the twin description understated the guard in the one file a
+    committing job reads: a writer told the check is ends-only concludes that an interior
+    omission is invisible and stops treating the witness as whole-file, which is the
+    reading #3904 closed by retiring the byte pin in favour of the spine equality.
+
+    The phrase the node uses is therefore pinned here in both directions: the ends-only
+    wording may not come back, and the whole-spine wording may not be dropped for a
+    vaguer one. The two phrases the sibling node above already pins — `string identity`
+    and `byte-compares` — are re-asserted here because clause 5 asks for them in the same
+    breath as the spine, and this is the node about the explanation rather than the number.
+    """
+    doc = " ".join((rung.__doc__ or "").split())
+    assert "first and last headings" not in doc, (
+        "the rung is back to describing the pinning node as an ends-only check, which is "
+        "the mis-description that made an interior omission look uncaught")
+    for wording in ("whole section spine", "section for section"):
+        assert wording in doc, (
+            f"the rung no longer says the pinning node compares the {wording!r}, so a "
+            "reader of this file cannot tell what the witness actually covers")
+    assert "string identity" in doc and "byte-compares" in doc, (
+        "the two mechanisms the advice rests on are gone: how the copy is certified, and "
+        "which node compares the pair byte for byte")
+    assert not typed_size_statements(RUNG.read_text(encoding="utf-8")), (
+        "rewording the explanation put a size figure back into the rung's source")
+
+
 # ---------------------------------------------------------------------------
 # Clauses 4 and 5: the guardrail the committing job has to follow, read off the
 # live skill page.
@@ -468,6 +504,42 @@ def test_the_guardrail_records_2284_and_refuses_an_automatic_refreeze_path():
     assert "reviewed act" in section, (
         "the guardrail must state WHY there is no auto path, not just that there "
         f"is none: {section}")
+
+
+@pytest.mark.live_vault
+def test_the_guardrail_types_no_witness_size_and_names_the_fixture_as_the_only_re_freeze_target():
+    """#4013: the vault half of #3904, which nothing was guarding when this round opened.
+
+    The guardrail paragraph used to state the witness's size — the figure this item's triage
+    had to re-measure twice over, because the fixture had outgrown it — and then ordered the
+    nightly to "move the byte/newline literals" in the pinning node. #3904 (`0bf6a859`)
+    deleted that instruction from the rung's `ADVICE` and every literal it pointed at from
+    the pinning node, and the node above pins both facts FOR THE CODE. Nothing swept the
+    vault: `tests/_typed_size_scan.py::typed_size_statements` is called over two test-source
+    sites and the rung's module text, and never over a skill page. That asymmetry is how the
+    sentence survived a retirement whose own guard was green — and the prose is the half the
+    nightly job follows, where an instruction to move literals the pinning node does not
+    have sends a writer to edit a test file that a re-freeze must not touch.
+
+    So the two retired shapes are pinned as banned, with the positive half beside them: the
+    recipe names the fixture as the single file a re-freeze re-copies and says out loud that
+    no test file moves with it. `live_vault` for this file's standing reason — the skill body
+    belongs to the nightly skills pass, so an unmarked node here would redden the next
+    author's gate for the previous writer's edit. Run it with `-m live_vault`.
+    """
+    section = _witness_guardrail()
+    assert "15,555" not in section and "74 newlines" not in section, (
+        "a witness size is back in the guardrail — a figure a writer copies into a "
+        "re-freeze draft instead of measuring it, which is what #3904 retired")
+    assert "byte/newline literals" not in section, (
+        "the guardrail is ordering a literal move the pinning node cannot perform, which "
+        "is the instruction #3904 retired from the rung's advice as well as from here")
+    assert "tests/fixtures/step_2a_ter_curation_witness_2212.md" in section, (
+        "the re-freeze recipe no longer names the file it re-copies, so the writer has no "
+        "target and will go looking for one in the test tree")
+    assert "moves nothing in a test file" in section, (
+        "the guardrail no longer says a re-freeze touches only the fixture — the sentence "
+        "that keeps a nightly out of the pinning node")
 
 
 # ---------------------------------------------------------------------------
