@@ -30,8 +30,10 @@ synthetic corpora built in `tmp_path`.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 GATE_PATH = ROOT / "scripts" / "consolidation_source_gate.py"
 MINER_PATH = ROOT / "scripts" / "mine-trajectories.py"
+VERDICTS_PATH = ROOT / "scripts" / "skill_verdicts.py"
 APPLIER_PATH = ROOT / "scripts" / "maintenance" / "apply-1287-phase-1-3-source-gate.py"
 SKILL = Path.home() / "obsidian" / "skills" / "nightly-skill-consolidation" / "SKILL.md"
 
@@ -56,6 +59,11 @@ applier = _load(APPLIER_PATH, "applier_under_test")
 # An independent load of the miner, so a test can compare the gate's decision against
 # the emitter without borrowing the module object the gate itself chose.
 miner_ref = _load(MINER_PATH, "miner_for_source_gate")
+
+# Likewise the ledger: the lapsed-leg tests build a fixture ledger file in its own JSONL
+# shape and compare `check`'s release line against its own line renderer, so neither is
+# paraphrased here (#4003).
+sv = _load(VERDICTS_PATH, "sv_for_source_gate")
 
 
 # ── the five shapes clause 3 names, built the way the miner builds them ──────
@@ -418,6 +426,221 @@ def test_keys_are_grouped_on_their_own_pattern_field_not_a_filename_glob(tmp_pat
     assert result["eligible"] == 2
     assert sorted(k for k, _f, _r in result["dropped"]) == [
         "seq-2-bash-fs-read", "seq-2-bash-fs-read-and-more"]
+
+
+# ── clauses 1–4: a superseded snapshot whose ledger leg has lapsed (#4003) ───
+
+#: The status `mine-trajectories.py::status_block` writes when the ledger blocks a key.
+SUPERSEDED = "superseded_by_verdict"
+LAPSED = "seq-2-lapsed-err-read"
+BINDING = "seq-2-binding-err-read"
+
+
+def verdict_row(key: str, *, age_days: int,
+                verdict: str = "reviewed_no_skill",
+                occurrences_at_decision: int = 4) -> dict:
+    """One terminal ledger line, anchored `age_days` ago.
+
+    Written in the ledger's own JSONL shape (`tests/test_skill_verdicts.py`'s
+    `_crossed_cohort_ledger` is the precedent) so the gate is tested against the file
+    `load_verdicts` parses, not against a dict this file invented. `first_decided_at` is
+    the anchor the 60-day leg weighs on (#2746); `occurrences_at_decision: 4` keeps the
+    growth leg out of every verdict below, so each one turns on the date alone.
+    """
+    stamp = (datetime.now(tz=timezone.utc) - timedelta(days=age_days))
+    return {"pattern_key": key, "verdict": verdict, "reason": "fixture",
+            "decided_at": stamp.isoformat(), "first_decided_at": stamp.isoformat(),
+            "occurrences_at_decision": occurrences_at_decision}
+
+
+def point_ledger_at(tmp_path, monkeypatch, rows: list[dict]) -> Path:
+    """A live ledger at `$SKILL_VERDICTS_STORE`, carrying `rows`."""
+    ledger = tmp_path / "reviews" / "verdicts.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                      encoding="utf-8")
+    monkeypatch.setenv("SKILL_VERDICTS_STORE", str(ledger))
+    return ledger
+
+
+def check_lines(corpus: Path, capsys) -> list[str]:
+    """`check`'s whole stdout for a corpus, through the real CLI entry point.
+
+    The nightly greps read this program's stdout, not a Python return value, so the
+    clause that promises a line is graded on the process boundary it names.
+    """
+    assert csg.main(["check", "--candidates", str(corpus)]) == 0
+    return capsys.readouterr().out.strip().splitlines()
+
+
+def test_a_superseded_key_whose_ledger_leg_crossed_reaches_the_evidence_gates(
+        tmp_path, monkeypatch):
+    """Clause 1: the file's status is a *copy* of a row, and the row has lapsed.
+
+    The fixture is one key with two dated snapshots and `sessions: 3` — the shape
+    `seq-2-edit-err-read` had on the live corpus the night its leg crossed: `check`
+    printed `REOPEN` for it while this gate's last line read `eligible: 0
+    dropped_by_source_gate: 0 eligible_after_source_gate: 0`, so the key sat in none of
+    the three buckets and no report named it.
+    """
+    corpus = tmp_path / "candidates"
+    write_pair(corpus, key=LAPSED, pattern=SEQ_TRUE, sessions=3, status=SUPERSEDED)
+    point_ledger_at(tmp_path, monkeypatch,
+                    [verdict_row(LAPSED, age_days=sv.REOPEN_AFTER_DAYS + 1)])
+
+    result = csg.scan(corpus)
+
+    assert result["scanned"] == 1
+    assert result["eligible"] == 1, "a lapsed verdict must not keep filtering"
+    assert [k for k, _f, _r in result["kept"]] == [LAPSED]
+    assert result["eligible_after_source_gate"] == 1
+    assert result["dropped_by_source_gate"] == 0
+    assert result["released_lapsed_leg_keys"] == [LAPSED]
+
+
+def test_the_same_fixture_reads_eligible_zero_with_no_lapsed_leg_to_release_it(
+        tmp_path):
+    """Clause 1's other half: today's reading of that same corpus is `eligible: 0`.
+
+    `ledger={}` is "no row behind any of these keys", which is what the status filter
+    already saw — an absent or emptied ledger releases nothing, because releasing on it
+    is the 09-09 re-adjudication loop #530 exists to prevent. The last assertion is the
+    pre-fix call itself, unchanged: `evidence_eligible` with its default flag.
+    """
+    corpus = tmp_path / "candidates"
+    write_pair(corpus, key=LAPSED, pattern=SEQ_TRUE, sessions=3, status=SUPERSEDED)
+
+    assert csg.scan(corpus, ledger={})["eligible"] == 0
+    assert csg.scan(corpus, ledger={})["released_by_lapsed_leg"] == 0
+    rows = csg.group_candidates(corpus)[LAPSED]
+    assert csg.evidence_eligible(rows, csg.terminal_statuses()) is False
+
+
+def test_a_still_binding_verdict_keeps_the_key_filtered_and_the_status_terminal(
+        tmp_path, monkeypatch):
+    """Clause 2: the same front matter, a leg that has NOT crossed, filters as today.
+
+    The guard #530 exists for is that the ledger is *asked*, not that the status is
+    ignored, so this pins both sides: the row really is read and really binds, and
+    `SUPERSEDED_STATUS` is still in the skip list it was filtered through.
+    """
+    corpus = tmp_path / "candidates"
+    write_pair(corpus, key=BINDING, pattern=SEQ_TRUE, sessions=9, status=SUPERSEDED)
+    ledger = point_ledger_at(tmp_path, monkeypatch,
+                             [verdict_row(BINDING, age_days=sv.REOPEN_AFTER_DAYS - 20)])
+    assert ledger.exists()
+
+    table = csg.ledger_verdict_table()
+    assert table is not None and BINDING in table
+    assert csg.terminal_verdict_binds(BINDING, 0, table) is True, \
+        "the row must still bind, or this test proves nothing"
+
+    result = csg.scan(corpus, ledger=table)
+    assert result["eligible"] == 0
+    assert result["dropped_by_source_gate"] == 0
+    assert result["released_by_lapsed_leg"] == 0
+    assert csg.verdicts().SUPERSEDED_STATUS in csg.terminal_statuses()
+
+
+def test_the_ledger_is_never_read_for_a_status_the_ledger_did_not_mint(
+        tmp_path, monkeypatch):
+    """Clause 3: `consolidated`, `noise` and a `TERMINAL_VERDICTS` value stay filtered.
+
+    Each of the three carries a ledger row whose leg crossed, so if the ask were keyed on
+    anything but the one status the miner mints, all three would be released. They are
+    dispositions a consolidator or a hand adjudication *wrote*, so the file is the record
+    and asking the ledger is not owed — and the assertion that no read happens at all is
+    what makes "consulted only for that status" checkable rather than a comment.
+    """
+    def no_ledger_read():
+        raise AssertionError("the ledger was read for a status it did not mint")
+
+    monkeypatch.setattr(csg, "ledger_verdict_table", no_ledger_read)
+    corpus = tmp_path / "candidates"
+    for key, status in (("seq-consolidated", "consolidated"),
+                        ("seq-noise", "noise"),
+                        ("seq-verdicted", "reviewed_no_skill")):
+        write_pair(corpus, key=key, pattern=SEQ_TRUE, sessions=9, status=status)
+
+    result = csg.scan(corpus, ledger={
+        "seq-consolidated": verdict_row("seq-consolidated",
+                                        age_days=sv.REOPEN_AFTER_DAYS + 1),
+        "seq-noise": verdict_row("seq-noise", age_days=sv.REOPEN_AFTER_DAYS + 1),
+        "seq-verdicted": verdict_row("seq-verdicted",
+                                     age_days=sv.REOPEN_AFTER_DAYS + 1)})
+
+    assert result["scanned"] == 3
+    assert result["eligible"] == 0
+    assert result["released_by_lapsed_leg"] == 0
+
+
+def test_a_superseded_key_is_released_beside_a_consolidated_one_that_is_not(
+        tmp_path, monkeypatch):
+    """Clause 3 again, from the other side, on one corpus and one ledger read.
+
+    `seq-lapsed-pair` has NO ledger row at all and is released; `seq-consolidated-pair`
+    has a row whose leg crossed and is not, because for that status the row is never
+    asked. A fix that released on "the ledger has no binding row" — i.e. that dropped
+    `SUPERSEDED_STATUS` from the skip list wholesale — would let the second key through.
+    """
+    corpus = tmp_path / "candidates"
+    write_pair(corpus, key="seq-lapsed-pair", pattern=SEQ_TRUE, sessions=4,
+               status=SUPERSEDED)
+    write_pair(corpus, key="seq-consolidated-pair", pattern=SEQ_TRUE, sessions=4,
+               status="consolidated")
+    point_ledger_at(tmp_path, monkeypatch,
+                    [verdict_row("seq-consolidated-pair",
+                                 age_days=sv.REOPEN_AFTER_DAYS + 1)])
+
+    result = csg.scan(corpus)
+
+    assert result["released_lapsed_leg_keys"] == ["seq-lapsed-pair"]
+    assert [k for k, _f, _r in result["kept"]] == ["seq-lapsed-pair"]
+    assert result["eligible"] == 1 and result["scanned"] == 2
+
+
+def test_check_names_the_released_keys_in_the_ledger_reopened_grammar(
+        tmp_path, monkeypatch, capsys):
+    """Clause 4: the release is reported, in `ledger_reopened_keys`' grammar.
+
+    `dropped_by_source_gate: 0` was published over a pool emptied upstream of the
+    emitter, which is how a silent drop read as a clean emitter. So the line names the
+    count and every key, and prints the zero case too — and the totals stay the last
+    line, which is the contract the runbook greps.
+    """
+    corpus = tmp_path / "candidates"
+    write_pair(corpus, key=LAPSED, pattern=SEQ_TRUE, sessions=3, status=SUPERSEDED)
+    write_pair(corpus, key=BINDING, pattern=SEQ_TRUE, sessions=9, status=SUPERSEDED)
+    point_ledger_at(tmp_path, monkeypatch, [
+        verdict_row(LAPSED, age_days=sv.REOPEN_AFTER_DAYS + 1),
+        verdict_row(BINDING, age_days=sv.REOPEN_AFTER_DAYS - 20)])
+
+    lines = check_lines(corpus, capsys)
+
+    released = [ln for ln in lines if ln.startswith("released_by_lapsed_leg:")]
+    assert released == [f"released_by_lapsed_leg: 1 :: {LAPSED}"]
+    # The same grammar and unit as the verdicts module's own line, byte for byte:
+    # swap the label and this is what `ledger_reopened_line` would have printed.
+    assert released[0].replace("released_by_lapsed_leg",
+                               sv.LEDGER_REOPENED_LABEL, 1) == \
+        sv.ledger_reopened_line([LAPSED])
+    assert lines[-1].startswith("scanned:")
+    assert "eligible: 1" in lines[-1] and "dropped_by_source_gate: 0" in lines[-1]
+
+
+def test_check_prints_the_zero_release_case_when_no_leg_has_lapsed(
+        tmp_path, monkeypatch, capsys):
+    """Clause 4's zero case: a line that appears only on findings cannot tell a quiet
+    night from a comparison nobody ran (#2644's reason for the line it sits beside)."""
+    corpus = tmp_path / "candidates"
+    write_pair(corpus, key=BINDING, pattern=SEQ_TRUE, sessions=9, status=SUPERSEDED)
+    point_ledger_at(tmp_path, monkeypatch,
+                    [verdict_row(BINDING, age_days=sv.REOPEN_AFTER_DAYS - 20)])
+
+    lines = check_lines(corpus, capsys)
+
+    assert "released_by_lapsed_leg: 0 :: none" in lines
+    assert lines[-1].startswith("scanned:")
 
 
 # ── clause 2: the runbook says it, in the right place ───────────────────────

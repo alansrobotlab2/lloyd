@@ -77,6 +77,26 @@ on its own front matter and under-dropping is hand-adjudication rather than a lo
 lesson. Newly mined candidates carry the new meaning, so the pool this gate keeps
 shrinks towards the keys that really recovered.
 
+**A verdict that has lapsed stops being a filter.** The skip list above is
+`terminal_statuses()`, and it includes the status the miner writes when the ledger
+blocks a key: `superseded_by_verdict`. That status is a *copy* of a ledger row, and the
+row expires — `skill_verdicts.py` reopens a terminal verdict 60 days after
+`decided_at`, so on the night the leg crosses the ledger says "propose freely" while
+the file still says "already dispositioned", and `evidence_eligible()` filtered on the
+file before `is_emittable()` was ever asked. Measured 2026-11-09T11:5xZ over the live
+corpus: `skill_verdicts.py check` printed 43 `REOPEN` rows over 6 keys while this
+tool's last line read `scanned: 12  eligible: 0  dropped_by_source_gate: 0
+eligible_after_source_gate: 0` — two of those keys clear `sessions >= 3` and the
+2-snapshot gate and landed in neither bucket. So for that one status the gate now asks
+the ledger through `terminal_verdict()`, the same function `check` weighs a `REOPEN`
+on, and releases the key when it answers None; the ledger is read once per scan and
+never at all for any other status. Dropping `SUPERSEDED_STATUS` from the set wholesale
+is the 09-09 re-adjudication loop #530 exists to prevent, and it stays in: the guard is
+that the ledger is asked, not that the status is ignored. A release is named on the
+`released_by_lapsed_leg: N :: a, b` line (``0 :: none`` on a quiet night), in
+`ledger_reopened_keys`' grammar, so the counts above can never again be published over
+a pool emptied upstream of the emitter with nothing to show for it.
+
 Usage:
   consolidation_source_gate.py check --candidates ~/lloyd-data/_pipeline/skills/candidates/
   consolidation_source_gate.py drop-reason --frontmatter '<yaml-ish dict>'   # debug
@@ -307,26 +327,133 @@ def _sessions(frontmatter: dict) -> int:
         return -1
 
 
-def evidence_eligible(rows: list[tuple[str, dict]], terminal: frozenset[str]) -> bool:
+# ── the ledger leg: a superseded snapshot whose verdict has lapsed (#4003) ────
+
+RELEASED_LABEL = "released_by_lapsed_leg"
+
+
+def _occurrences(frontmatter: dict) -> int:
+    """The snapshot's own `occurrences:` count; 0 when the file never recorded one.
+
+    The growth leg of the reopen rules weighs live occurrences against the
+    `occurrences_at_decision` baseline the verdict was written with. A file that
+    recorded no count cannot assert growth, and 0 is also what the miner passes when
+    `--occurrences` is omitted (#736), so gate and emitter ask the same question.
+    """
+    try:
+        return int(_field_text(frontmatter.get("occurrences")) or 0)
+    except ValueError:
+        return 0
+
+
+def ledger_verdict_table() -> dict | None:
+    """One ledger read for a whole scan, or None when there is nothing to ask.
+
+    None is deliberately not an empty table: `terminal_verdict` answers None for every
+    key when no ledger survives in either tree — and for every key when the file is
+    present but emptied, which `check` treats as a different event from a deleted one
+    and refuses to paper over. Releasing on either reading is the 09-09 re-adjudication
+    loop #530 exists to prevent, so an unreadable or empty ledger keeps filtering
+    exactly as it did before this leg existed.
+    """
+    v = verdicts()
+    if not v.store_path(None).exists():
+        return None
+    source, _fell_back = v.resolve_verdict_source(None)
+    table = v.load_verdicts(source)
+    return table or None
+
+
+def terminal_verdict_binds(key: str, occurrences: int, table: dict) -> bool:
+    """The ledger's own answer, delegated to `terminal_verdict`, never recomputed.
+
+    That is the same function `skill_verdicts.py check` weighs a `REOPEN` on, so "the
+    leg has lapsed" means one thing here and there: it returns None on a non-terminal
+    line or on a line the reopen rules have lifted.
+    """
+    return verdicts().terminal_verdict(key, occurrences=occurrences,
+                                       verdicts=table) is not None
+
+
+def lapsed_leg_released(key: str, newest: dict, table: dict | None,
+                        binds=terminal_verdict_binds) -> bool:
+    """Whether this key's `superseded_by_verdict` front matter has outlived its ledger.
+
+    Scoped to the one status the *miner mints from the ledger*. `consolidated`, `noise`
+    and every `TERMINAL_VERDICTS` value were written by a consolidator or a hand
+    adjudication, so the file is the record of that decision and stays filtered with the
+    ledger never consulted. Only `superseded_by_verdict` is a *copy* of a ledger row,
+    and for that copy the row — not the file — decides. `SUPERSEDED_STATUS` stays in
+    `terminal_statuses()` for the same reason: the guard is that the ledger is asked,
+    not that the status is ignored.
+
+    The status test is equality, not the prefix match the skip list uses, so a status
+    that merely begins with the word `superseded` cannot borrow this leg.
+    """
+    if not table or not key:
+        return False
+    if _field_text(newest.get("status")) != verdicts().SUPERSEDED_STATUS:
+        return False
+    return not binds(key, _occurrences(newest), table)
+
+
+def released_line(keys: list[str]) -> str:
+    """`released_by_lapsed_leg: 2 :: a, b`, and `released_by_lapsed_leg: 0 :: none`.
+
+    The same grammar and unit (keys, not files, every name printed with no cap) as
+    `skill_verdicts.py`'s `ledger_reopened_keys`, because the two lines describe one lap
+    of one clock from two ends and a nightly reads them as a pair. It prints the zero
+    case for the reason #2644 recorded: a line that appears only when something happened
+    cannot tell a quiet night from a comparison nobody ran — which is the exact gap that
+    let `dropped_by_source_gate: 0` be published beside a pool emptied upstream of it.
+    """
+    return (f"{RELEASED_LABEL}: {len(keys)} :: "
+            + (", ".join(keys) if keys else "none"))
+
+
+def evidence_eligible(rows: list[tuple[str, dict]], terminal: frozenset[str],
+                      released_by_lapsed_leg: bool = False) -> bool:
     """Phase 1.2/1.3's evidence gates, on the newest snapshot: not already
-    dispositioned, `sessions >= 3`, and 2+ dated snapshots."""
+    dispositioned, `sessions >= 3`, and 2+ dated snapshots.
+
+    `released_by_lapsed_leg` is `scan`'s reading of the ledger for this key
+    (`lapsed_leg_released`): a superseded snapshot whose verdict the reopen rules have
+    lifted is no longer a disposition, so the key falls through to the evidence gates
+    like any other. Every other terminal status reaches this call with it False.
+    """
     newest = rows[-1][1]
-    if newest_status_is_terminal(newest.get("status", ""), terminal):
+    if not released_by_lapsed_leg and newest_status_is_terminal(
+            newest.get("status", ""), terminal):
         return False
     return _sessions(newest) >= 3 and len(rows) >= 2
 
 
-def scan(candidates_dir: Path) -> dict:
-    """Apply the Phase 1.3 evidence gates, then the source gate, to a corpus."""
+def scan(candidates_dir: Path, ledger: dict | None = None) -> dict:
+    """Apply the Phase 1.3 evidence gates, then the source gate, to a corpus.
+
+    `ledger` is the verdict table the lapsed-leg check asks; None reads the live one,
+    and only when some key on disk actually carries the status the ledger mints — a
+    corpus of `pending_review` files costs no ledger read at all, and a read is one
+    parse for the whole scan rather than one per superseded key. Pass a table (or `{}`
+    for "no ledger behind any of these") to adjudicate a corpus against a known ledger.
+    """
     terminal = terminal_statuses()
     groups = group_candidates(Path(candidates_dir))
+    superseded = [k for k in sorted(groups)
+                  if _field_text(groups[k][-1][1].get("status"))
+                  == verdicts().SUPERSEDED_STATUS]
+    table = ledger if ledger is not None else (
+        ledger_verdict_table() if superseded else None)
+    released = [k for k in superseded
+                if lapsed_leg_released(k, groups[k][-1][1], table)]
+    released_set = set(released)
     eligible: list[tuple[str, dict, str | None]] = []
     for key in sorted(groups):
         rows = groups[key]
-        if not evidence_eligible(rows, terminal):
+        if not evidence_eligible(rows, terminal,
+                                 released_by_lapsed_leg=key in released_set):
             continue
-        newest = rows[-1][1]
-        eligible.append((key, newest, drop_reason(newest)))
+        eligible.append((key, rows[-1][1], drop_reason(rows[-1][1])))
     dropped = [row for row in eligible if row[2] is not None]
     return {
         "scanned": len(groups),
@@ -335,6 +462,8 @@ def scan(candidates_dir: Path) -> dict:
         "kept": [row for row in eligible if row[2] is None],
         "dropped_by_source_gate": len(dropped),
         "eligible_after_source_gate": len(eligible) - len(dropped),
+        "released_by_lapsed_leg": len(released),
+        "released_lapsed_leg_keys": released,
     }
 
 
@@ -346,6 +475,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"DROP {key} :: {reason} (newest snapshot, sessions={newest.get('sessions')})")
     for key, _newest in [(k, n) for k, n, r in result["kept"]]:
         print(f"KEEP {key}")
+    # The release is named before the totals, so a `dropped_by_source_gate: 0` can never
+    # again sit above a pool that was emptied upstream of the emitter with no evidence
+    # that anything was ever behind it.
+    print(released_line(result["released_lapsed_leg_keys"]))
     # Totals stay the last line: the runbook and the nightly greps read the counts
     # off `splitlines()[-1]`, the same contract `skill_verdicts.py check` keeps.
     print(
