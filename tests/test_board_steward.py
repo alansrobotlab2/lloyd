@@ -5523,3 +5523,61 @@ def test_the_binding_does_not_stop_scoring_a_draft_proposal_for_a_non_guard_line
         f"from: {sides}")
     assert row["moves"][0]["item_id"] == 41 and row["moves"][0]["status"] == "draft", \
         row["moves"]
+
+
+def _tick_with_moves(board, monkeypatch, moves: list[dict]):
+    """One applied tick whose answer is `moves`; everything else is production."""
+    from workers.sources import _common as C
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": moves, "next_pick": 0,
+                               "next_pick_reason": "", "summary": "moved two, picked none"}}
+
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    return asyncio.run(W.execute(SimpleNamespace(payload={"apply": True})))
+
+
+def test_a_tick_that_moved_items_names_the_one_it_moved_first(board, monkeypatch):
+    """#3992 clause 4: the column gets the backlog reference for the item this tick
+    moved, in the steward's own reported order.
+
+    Of the 939 board-steward successes in the 30-day window read on 2026-11-09, 88
+    moved exactly one item and 91 moved more than one, so a reference column that
+    holds one value names the first and points at the ledger row for the rest.
+    """
+    from workers.queue import backlog_artifact
+    _ten_item_board(board)
+    out = _tick_with_moves(board, monkeypatch, [
+        {"item_id": 7, "status": "up_next", "note": "ready: acceptance recorded"},
+        {"item_id": 4, "status": "draft", "note": "needs-human, parked"},
+    ])
+
+    assert out["status"] == "success"
+    assert out["artifact_path"] == backlog_artifact(7) == "backlog#7"
+    assert out["artifact_path"] != backlog_artifact(4), (
+        "the column holds one reference, so it is the first reported move and not an "
+        "arbitrary one — the full set is in `meta.agreement` and the ledger row")
+
+
+def test_a_tick_that_moved_nothing_says_so_rather_than_leaving_the_column_empty(
+        board, monkeypatch):
+    """The load-bearing half of clause 4, and the reason this source needed the token
+    more than any other: 760 of the 939 ticks in the 30-day window moved nothing, and
+    until now those 760 were indistinguishable in the table from the 179 that moved
+    something. A census reading `artifact_path <> ''` scored board-steward as producing
+    nothing on every run; with the token it scores 760 stated nothings and 179 yields.
+
+    `runs.summary` already distinguishes them for a human ("0 move(s)"), but `pool.py`
+    only warns when BOTH summary and artifact are missing, so no log signal ever fired
+    and nothing was countable in SQL.
+    """
+    from workers.queue import NO_ARTIFACT
+    _ten_item_board(board)
+    out = _tick_with_moves(board, monkeypatch, [])
+
+    assert out["status"] == "success"
+    assert out["artifact_path"] == NO_ARTIFACT == "__none__"
+    assert out["artifact_path"] != "", (
+        "an empty string here is the unsaid case again — the whole point of the token "
+        "is that attested-nothing and unsaid are two values, not two readings of one")

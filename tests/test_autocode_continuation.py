@@ -336,3 +336,58 @@ def test_a_turn_that_left_its_round_open_is_not_continued(env, monkeypatch):
            if e["event"] == "backlog_implement" and e["phase"] == "finished"][-1]
     assert fin["continuable"] is False
     assert _warm() is None
+
+
+# ── #3992 clause 5: the run row names the round it opened ───────────────────
+
+def test_a_success_that_opened_a_round_names_that_round(env, monkeypatch):
+    """`runs.artifact_path` gets `round:<round_id>` — the same token `meta_json.round_id`
+    carries, which 937 of the 1,377 autocode successes in the 30-day window read on
+    2026-11-09 already had in meta and none of them had in the column, so the census
+    that asks "did this run produce anything" returned 0 for the source that opens
+    Lloyd's changes.
+
+    Driven through the real `execute`, so the reference comes off a round the turn
+    actually recorded: `_landing_turn` writes the `round_start` event that
+    `_round_opened_since` reads, and nothing hands the return dict its own round id.
+    """
+    write_item(env["backlog"], 41, status="up_next")
+    _confirm(41)
+    monkeypatch.setattr(I, "_loop_is_free", lambda depth=None: (True, "free"))
+    monkeypatch.setattr(I, "reap_abandoned_rounds", lambda *a, **k: [])
+    monkeypatch.setattr(C, "run_prompt_in_session", _landing_turn(env))
+
+    out = asyncio.run(I.execute(_Item()))
+
+    assert out["status"] == "success" and out["round_id"] == "SM_1"
+    assert out["artifact_path"] == "round:SM_1"
+    assert out["artifact_path"] == f"round:{out['round_id']}", (
+        "one id, one spelling: the column is the round the run opened, rendered by the "
+        "shared grammar, beside the item it was working on")
+
+
+def test_a_success_that_opened_no_round_still_names_the_item_it_settled(env, monkeypatch):
+    """440 of those 1,377 successes carry no `round_id` in meta at all: 300 landed a
+    vault commit, 76 opened nothing, and 64 name a round in their summary while
+    carrying no `round_id` key. None of them is the no-artifact case — a turn that
+    opened no round still returned the verdict that settles the item, which is what
+    `implement_outcomes` closes it from — so the reference is the item, and the
+    no-artifact token stays reserved for a run that attests it produced nothing.
+
+    Whether those 440 produced something worth naming is a ruling owed on #3992. This
+    node pins what the code does, and it is the item either way.
+    """
+    write_item(env["backlog"], 42, status="up_next")
+    _confirm(42)
+    monkeypatch.setattr(I, "_loop_is_free", lambda depth=None: (True, "free"))
+    monkeypatch.setattr(I, "reap_abandoned_rounds", lambda *a, **k: [])
+
+    async def turn(prompt, **kw):
+        return {"text": "No round opened.", "session_id": "sess_c", "stop_reason": "stop",
+                "num_turns": 4, "errors": [], "structured": None}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+
+    out = asyncio.run(I.execute(_Item()))
+
+    assert out["status"] == "success" and not out["round_id"]
+    assert out["artifact_path"] == f"backlog#{out['item_id']}" == "backlog#42"

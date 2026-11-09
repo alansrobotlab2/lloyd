@@ -1011,3 +1011,45 @@ def test_the_other_four_surfaces_are_stored_exactly_as_parsed(backlog_dir, ledge
     row = _triage_rows(ledger)[-1]
     assert row["surface"] == surface, row
     assert "surface_note" not in row and "surface_stated" not in row
+
+
+# ---------------------------------------------------------------------------
+# #3992 clause 3: the run row names the item it triaged
+# ---------------------------------------------------------------------------
+
+def test_a_triage_verdict_names_the_item_it_was_about_in_the_run_row(
+        backlog_dir, ledger, monkeypatch):
+    """`runs.artifact_path` is `backlog#<candidate.id>` — the item that was triaged,
+    never the session the verdict was read out of.
+
+    This is the one source of the four that recorded no item reference anywhere: its
+    2,131 successes in the 30-day window read on 2026-11-09 carried only
+    `session_ids`/`scratchpad`/`num_turns` in meta, so nothing in the table tied a
+    triage to the item it decided. `out["session_id"]` is a transcript handle and stays
+    a separate key.
+    """
+    write_item(backlog_dir, 71)
+    _stub_turn(monkeypatch, verdict="confirmed", acceptance="the check passes")
+
+    out = asyncio.run(M.execute(_QItem({"group_triage": False,
+                                        "implement_pool_floor": 40})))
+
+    assert out["status"] == "success" and out["item_id"] == 71
+    assert out["artifact_path"] == "backlog#71" == f"backlog#{out['item_id']}"
+    assert out["session_id"] == "s" and out["session_id"] not in out["artifact_path"], (
+        "the session id identifies where the verdict came from, not what it was about")
+
+
+def test_the_unverifiable_branch_names_the_same_item(backlog_dir, ledger, monkeypatch):
+    """A verdict of `unverifiable` is a success row like any other — the run did its
+    work and annotated the item — so it names that item too. Retiring and non-retiring
+    verdicts take different returns in the source and both carry the reference; a
+    census that only counted `confirmed` rows would under-read the source again."""
+    write_item(backlog_dir, 72)
+    _stub_turn(monkeypatch, verdict="unverifiable")
+
+    out = asyncio.run(M.execute(_QItem({"group_triage": False,
+                                        "implement_pool_floor": 40})))
+
+    assert out["status"] == "success" and out["verdict"] == "unverifiable"
+    assert out["artifact_path"] == "backlog#72"

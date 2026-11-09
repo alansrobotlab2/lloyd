@@ -2021,3 +2021,30 @@ def test_a_closed_item_whose_human_clauses_are_payload_keys_derives_nothing(isol
     fm["human_clauses"] = ["1.", "1]}],", "rule on whether the mining pass still carries the"]
     assert [e["what"] for e in O.derived_entries(fm)] == \
         ["rule on whether the mining pass still carries the"]
+
+
+def test_a_ruling_names_the_item_it_ruled_on_in_the_run_row(isolated, monkeypatch):
+    """#3992 clause 2: `runs.artifact_path` gets `backlog#<id>` rendered from the same
+    value `meta_json.item_id` already carried. 2,350 of 2,350 owed-check successes in
+    the 30-day window read on 2026-11-09 had that meta key and none of them had the
+    column, so the census that asks "did this run produce anything" returned 0 for
+    this source while every one of its runs had just ruled on an item.
+
+    An applied and a proposed ruling name the same item: what differs between them is
+    in the summary and in the ledger row's own `apply` key, so a reference that went
+    missing on dry runs would leave the proposed half looking unsaid for a second time.
+    """
+    from workers.sources import _common as C
+    p, _ = _colliding(isolated, 904)
+    monkeypatch.setattr(C, "run_prompt_in_session", _fake_session(
+        {"entries": list(_COLLIDING),
+         "summary": "Entry 1 is reopened, not closed: clause 1 is rewritten"}))
+    out = asyncio.run(OC.execute(_Job({"apply": True})))
+
+    assert out["status"] == "success"
+    assert out["artifact_path"] == "backlog#904"
+    assert out["artifact_path"] == f"backlog#{out['meta']['item_id']}", (
+        "one id, one spelling: the column is the meta value rendered by the shared "
+        "grammar, not a second decision about which item the run was about")
+    assert str(out["meta"]["session_id"]) not in out["artifact_path"], (
+        "a transcript handle is not the thing a run produced")

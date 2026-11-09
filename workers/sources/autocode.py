@@ -45,7 +45,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from workers.queue import WorkQueue, QueueItem
+from workers.queue import WorkQueue, QueueItem, backlog_artifact, round_artifact
 
 logger = logging.getLogger("lloyd-workers.automod")
 
@@ -2602,6 +2602,13 @@ async def _run_and_record(item, candidate, triage, budget, started,
     # whether the backend is still running the turn, so that round waits for
     # housekeeping's pass.
     await _reap_at_turn_end(run["session_id"])
+    # #3992 clause 5: a round is the product of a round, so that is the reference when
+    # one was opened — the same token `meta.round_id` carries. A turn that opened no
+    # round still settled an item (its `outcome` verdict is what closes the item and
+    # what `implement_outcomes` judges it by), so the reference is the item. The
+    # `outcome` string above is prose for a log line; this is the queryable one.
     return {"status": "success", "item_id": candidate.id, "round_id": round_id,
+            "artifact_path": (round_artifact(round_id) if round_id
+                              else backlog_artifact(candidate.id)),
             "session_id": run["session_id"], "stop_reason": run.get("stop_reason"),
             "summary": f"#{candidate.id}: {outcome}"}

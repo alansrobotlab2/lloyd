@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import uuid
@@ -316,6 +317,80 @@ def _effective_priority_sql() -> "tuple[str, list]":
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+#: #3992 — the one grammar for naming, in `runs.artifact_path`, what a run produced.
+#:
+#: The column was built for a filesystem path (`youtube-digest` writes the note path,
+#: `scheduled-task` writes the artifact it generated, and
+#: `scheduled_task._artifact_on_disk` stats the ones it owns), but most durable
+#: effects in this pool are not paths: a triaged backlog item is an id, an autocode
+#: run's effect is a round. So the four highest-volume sources left the column empty:
+#: the 30-day census read 2,328 of 9,132 successes naming anything, and 6,797 of the
+#: remainder were owed-check, autotriage, autocode and board-steward. Every
+#: cross-source question of the form "did this run produce something" therefore
+#: answered "no" about runs that plainly did.
+#:
+#: A reference is a token with a scheme prefix, and the scheme says what to open:
+#:
+#:   backlog#3992               a backlog item, by id
+#:   round:SM_20261109_084155   an automod round
+#:   /abs/path/note.md          a real file — what the sources that have one already write
+#:   __none__                   NO_ARTIFACT: the run finished and named nothing it produced
+#:
+#: The empty string is deliberately NOT the no-artifact token. Empty means *unsaid*:
+#: a source that never filled the field (most of them, and every run written before
+#: this grammar) must stay distinguishable from a run that attests it produced
+#: nothing. A yield census therefore counts
+#: `artifact_path NOT IN ('', '__none__')` and can report the unsaid population
+#: separately instead of folding it into "produced nothing".
+#:
+#: None of this is a filesystem consumer's problem: the two readers that stat the
+#: column — `scheduled_task._artifact_on_disk` and `research_store.artifact_on_disk` —
+#: each stat only their own source's rows, and `web/src` never reads it.
+NO_ARTIFACT = "__none__"
+BACKLOG_REF = "backlog#"
+ROUND_REF = "round:"
+
+#: What a reference may carry. Both patterns guard the same failure: a source
+#: spelling some other number — a session id, a turn count — into the artifact
+#: column, which would be the item's misinformation in a load-bearing shape.
+_BACKLOG_ID_RE = re.compile(r"^[1-9][0-9]*$")
+_ROUND_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
+def backlog_artifact(item_id: Any) -> str:
+    """Render a backlog item as its artifact reference: `backlog#3992`.
+
+    Raises on anything but a positive integer (as an int or as digits). A session id,
+    a path or a title reaching here means the caller named the wrong thing, and
+    `backlog#00b11c3f` would read to a census as a perfectly good reference. `None`
+    raises rather than rendering: `str(None)` is `"None"`, which would survive a
+    regex as an id-shaped word and count as an artifact.
+    """
+    if isinstance(item_id, bool) or not isinstance(item_id, (int, str)):
+        raise ValueError(f"not a backlog item id: {item_id!r}")
+    rendered = str(item_id).strip()
+    if not _BACKLOG_ID_RE.match(rendered):
+        raise ValueError(f"not a backlog item id: {item_id!r}")
+    return f"{BACKLOG_REF}{rendered}"
+
+
+def round_artifact(round_id: str) -> str:
+    """Render an automod round as its artifact reference: `round:SM_20261109_084155`.
+
+    Raises on an empty id or one carrying a separator (`:`, `/`, whitespace), which
+    would put a second scheme prefix inside a value that is supposed to have one. A
+    non-string is refused before it is stringified: `str(None)` is `"None"`, and
+    `round:None` is a wrong number rendered into a real-looking reference — the one
+    failure mode a census cannot see from the outside.
+    """
+    if isinstance(round_id, bool) or not isinstance(round_id, str):
+        raise ValueError(f"not an automod round id: {round_id!r}")
+    rendered = round_id.strip()
+    if not _ROUND_ID_RE.match(rendered):
+        raise ValueError(f"not an automod round id: {round_id!r}")
+    return f"{ROUND_REF}{rendered}"
 
 
 def _iso_or_none(raw: Any) -> Optional[datetime]:

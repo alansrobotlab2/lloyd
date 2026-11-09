@@ -37,7 +37,7 @@ import asyncio
 import logging
 from typing import Any
 
-from workers.queue import QueueItem, WorkQueue
+from workers.queue import QueueItem, WorkQueue, backlog_artifact
 
 logger = logging.getLogger("lloyd-workers.owed-check")
 
@@ -464,4 +464,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                         + (f"; answers collide on {', '.join(f'#{n}' for n in collided)}, "
                            f"held owed" if collided else "")
                         + f" — {parsed['summary']}"),
-            "meta": {"session_id": run.get("session_id"), "item_id": owing.item.id}}
+            # #3992 clause 2: the pass always rules on exactly one item, and the id is
+            # the one this row already carries in `meta` — the column gets the same
+            # value, in the shared grammar, readable by plain SQL. Whether the ruling
+            # was applied or only proposed is in the summary and in the ledger row's
+            # own `apply` key, so the reference stays the item either way.
+            "meta": {"session_id": run.get("session_id"), "item_id": owing.item.id},
+            "artifact_path": backlog_artifact(owing.item.id)}

@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from workers.queue import WorkQueue, QueueItem
+from workers.queue import WorkQueue, QueueItem, NO_ARTIFACT, backlog_artifact
 # #3519's reader. A sibling source module, and the one import of it this gets:
 # `board_disagreement` imports no host module at its own top level, so this line
 # adds nothing to the `app` closure the import-surface test guards.
@@ -1677,8 +1677,16 @@ async def execute(item: QueueItem) -> dict[str, Any]:
               f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
               f"where the machine abstains, {len(agree['missed'])} missed); "
               f"next pick #{parsed['next_pick'] or '—'}")
+    # #3992 clause 4: a tick that moved nothing is now a stated fact rather than an
+    # empty column. 760 of the last 939 ticks moved nothing, and today they are
+    # indistinguishable from the 179 that moved something — the census could only say
+    # "board-steward never produces anything". A tick that moved items names the first
+    # one in the steward's own reported order: the column holds one reference, and the
+    # full set is in `meta.agreement` and the ledger row this same tick writes.
     return {"status": "success",
             "summary": (f"{parsed['summary']} — {counts}"
                         if parsed["summary"] else counts),
+            "artifact_path": (backlog_artifact(parsed["moves"][0]["item_id"])
+                              if parsed["moves"] else NO_ARTIFACT),
             "meta": {"session_id": run.get("session_id"), "agreement": agree}}
 

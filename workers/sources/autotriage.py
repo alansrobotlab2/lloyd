@@ -26,7 +26,7 @@ import re
 import time
 from typing import Any
 
-from workers.queue import WorkQueue, QueueItem
+from workers.queue import WorkQueue, QueueItem, backlog_artifact
 from workers.sources._common import WORKER_AUTOMOD_BAN
 
 logger = logging.getLogger("lloyd-workers.autotriage")
@@ -1268,7 +1268,10 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
                         "finalizer_tokens": run.get("finalizer_tokens"),
                         "stop_reason": stop_reason})
         logger.warning("backlog #%s: %s", candidate.id, evidence)
+        # #3992: the artifact is the item this verdict is about, never the session the
+        # verdict came out of — `session_id` is already its own key next to it.
         return {"status": "success", "item_id": candidate.id, "verdict": "unverifiable",
+                "artifact_path": backlog_artifact(candidate.id),
                 "session_id": session_id, "summary": evidence[:200]}
 
     # Retiring verdicts close the item; everything else only annotates it.
@@ -1362,8 +1365,13 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
 
     logger.info("backlog #%s → %s%s%s (session %s)", candidate.id, parsed["verdict"],
                 " (closed)" if close else "", " (held: pool full)" if hold else "", session_id)
+    # #3992 clause 3: the reference is the item that was triaged. `candidate.id` is
+    # the only item a single-item pass can name, and it is not the session id that
+    # sits beside it — a census that asks "which item did this run touch" has to read
+    # a value that was never derivable from the transcript.
     return {"status": "success", "item_id": candidate.id, "name": candidate.name,
             "verdict": parsed["verdict"], "closed": close, "held": hold,
+            "artifact_path": backlog_artifact(candidate.id),
             "session_id": session_id,
             "summary": f"#{candidate.id} → {parsed['verdict']}"
                        f"{' (closed)' if close else ''}"

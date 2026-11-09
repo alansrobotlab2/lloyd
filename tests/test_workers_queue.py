@@ -2877,3 +2877,114 @@ def test_the_kind_split_moves_no_existing_rollup_key(q):
     assert plain_split == {NO_KIND: {"total": 2, "failed": 1, "fail_rate": 0.5}}, (
         "a source whose runs carry no kind must publish one `__none__` group, not "
         "an empty map — an empty map is how a missing column would read")
+
+
+# ---------------------------------------------------------------------------
+# #3992 — the artifact reference grammar in `runs.artifact_path`
+# ---------------------------------------------------------------------------
+
+
+def test_the_artifact_grammar_renders_one_spelling_per_kind_of_thing():
+    """Clause 1: `backlog#<id>`, `round:<id>`, and one literal no-artifact token.
+
+    The four highest-volume sources wrote nothing here — of the 9,132 successes in
+    the 30-day window read 2026-11-09, 2,328 named an artifact and 6,797 of the rest
+    were owed-check, autotriage, autocode and board-steward — so a census across
+    sources had one spelling available and it was the empty string. These two
+    renderers are now the only way a source puts a backlog item or a round in the
+    column, so the spelling cannot drift per source.
+    """
+    from workers.queue import NO_ARTIFACT, NO_KIND, backlog_artifact, round_artifact
+
+    assert backlog_artifact(3992) == "backlog#3992"
+    assert backlog_artifact("3992") == backlog_artifact(3992), (
+        "an id read out of `meta_json` as a string renders identically to an int — the "
+        "sources take the value from the same field they already publish there")
+    assert round_artifact("SM_20261109_084155") == "round:SM_20261109_084155"
+    assert backlog_artifact(3992) != round_artifact("SM_20261109_084155"), (
+        "the two schemes are distinguishable, which is what tells a reader what to open")
+    assert NO_ARTIFACT == "__none__"
+    assert NO_ARTIFACT == NO_KIND, (
+        "one module, one sentinel for 'explicitly nothing, and countable': the no-kind "
+        "bucket above already settled on `__none__` and its reason (no real value can "
+        "be spelled with leading and trailing underscores) holds for this column too")
+
+
+def test_a_value_that_is_not_an_id_is_refused_rather_than_rendered():
+    """The failure the renderers guard is a wrong number rendered into a real-looking
+    reference: a session id, a commit sha, a turn count. `backlog#00b11c3f` would
+    count as an artifact in exactly the census this grammar exists to serve, so the
+    check is on the value, not on the caller's intent."""
+    from workers.queue import backlog_artifact, round_artifact
+
+    for bad in ("00b11c3f", "s", "", "  ", "12a", 0, -1, None, "3992x"):
+        with pytest.raises(ValueError):
+            backlog_artifact(bad)
+    for bad in ("", "  ", "SM_2026/a", "SM:a", None, "SM 2026"):
+        with pytest.raises(ValueError):
+            round_artifact(bad)
+
+
+def test_no_artifact_and_unsaid_stay_two_different_values_in_a_run_row(q):
+    """Clause 1's third element is the load-bearing one: a run that attests it
+    produced nothing must not be readable as a run that never said.
+
+    Both are "empty-ish" in ordinary prose, and both arrive at `record_run` as a
+    string, so the only thing keeping them apart is that one is a token and the other
+    is the empty string. A yield census therefore counts
+    `artifact_path NOT IN ('', '__none__')` and can report the unsaid rows apart —
+    which is the measurement #3992 was filed for: 6,797 named-nothing successes were
+    unsaid, not produced-nothing, and nothing in the table could tell them apart.
+    """
+    from workers.queue import NO_ARTIFACT
+
+    q.record_run("run-said", None, "board-steward", "success", "2026-11-09T08:00:00+00:00",
+                 "2026-11-09T08:00:05+00:00", 5.0, "0 move(s) proposed", NO_ARTIFACT)
+    q.record_run("run-unsaid", None, "board-steward", "success", "2026-11-09T08:10:00+00:00",
+                 "2026-11-09T08:10:05+00:00", 5.0, "0 move(s) proposed", "")
+    q.record_run("run-named", None, "autotriage", "success", "2026-11-09T08:20:00+00:00",
+                 "2026-11-09T08:20:05+00:00", 5.0, "#3992 → confirmed", "backlog#3992")
+
+    rows = {r["run_id"]: r["artifact_path"] for r in q.list_runs(limit=10)}
+    assert rows["run-said"] == NO_ARTIFACT
+    assert rows["run-unsaid"] == "", "the unsaid row stays the empty string, not a token"
+    assert rows["run-said"] != rows["run-unsaid"], (
+        "if these two arrive at the same value the grammar has collapsed and the "
+        "census is back to reading 760 empty ticks as the 179 that moved items")
+
+    with q._connect() as conn:
+        named = conn.execute(
+            "SELECT count(*) FROM runs WHERE artifact_path NOT IN ('', '__none__')"
+        ).fetchone()[0]
+        attested = conn.execute(
+            "SELECT count(*) FROM runs WHERE artifact_path = '__none__'").fetchone()[0]
+        silent = conn.execute(
+            "SELECT count(*) FROM runs WHERE artifact_path = ''").fetchone()[0]
+    assert (named, attested, silent) == (1, 1, 1), (
+        "one row in each of the three states the grammar distinguishes — yield, "
+        "attested-nothing, unsaid — so the census expression is exercised end to end")
+
+
+def test_the_pool_forwards_a_reference_it_did_not_invent():
+    """The boundary the four sources actually cross: a source returns a dict, the
+    pool normalises it (`str(result.get(...) or "")`), and only that reaches
+    `runs.artifact_path`. A truthy token survives; an absent key becomes the unsaid
+    empty string — which is why NO_ARTIFACT had to be a token and not `None`."""
+    from types import SimpleNamespace
+
+    from workers.pool import normalize_result
+    from workers.queue import NO_ARTIFACT
+
+    item = SimpleNamespace(id=1, source="autocode", kind="backlog_implement",
+                           payload={}, run_id="run_x")
+    named = normalize_result(
+        item, {"status": "success", "summary": "#3992: round SM_20261109_084155",
+               "artifact_path": "round:SM_20261109_084155"})
+    attested = normalize_result(
+        item, {"status": "success", "summary": "0 move(s) proposed",
+               "artifact_path": NO_ARTIFACT})
+    silent = normalize_result(item, {"status": "success", "summary": "nothing to do"})
+
+    assert named["artifact_path"] == "round:SM_20261109_084155"
+    assert attested["artifact_path"] == NO_ARTIFACT
+    assert silent["artifact_path"] == ""
