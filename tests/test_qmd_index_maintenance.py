@@ -7354,7 +7354,10 @@ def _scheduled_nightly(monkeypatch, tmp_path, capsys, *, at: datetime,
                        tty: bool = False, copy_present: str | None = None,
                        build_raises=None, spy: bool = True,
                        bare_copy: str | None = None,
-                       shape: dict | None = None):
+                       shape: dict | None = None,
+                       swap_behaviour: str = "ok",
+                       swap_recorder: list | None = None,
+                       before_run=None):
     """Drive one in-band nightly run: clock pinned, stdin of one kind, build watched.
 
     `at` is the pinned start instant; `tty` chooses what `_stdin_is_interactive`
@@ -7371,8 +7374,13 @@ def _scheduled_nightly(monkeypatch, tmp_path, capsys, *, at: datetime,
     `spy=False` leaves the real one in place, for
     `test_the_scheduled_name_is_derived_from_the_run_date_so_a_hand_copy_cannot_collide`,
     which pins the name against the real `SideCopyRefused`.
-    `swap_side_copy` raises on contact: clause 1's "reaches swap_side_copy never" is
-    pinned by the run having to complete. `supervisorctl` is unreachable two ways —
+    `swap_behaviour` is what the nightly's swap caller does — "ok" (the copy goes in and
+    the check passes), "failed_check" (it goes in and the post-check fails, which is
+    #3978 clause 3's red night), "refused" (the route refuses it), or
+    "refuse_on_contact" (it raises, for the nodes whose whole point is that the run never
+    got there). `swap_recorder`, if given, collects the kwargs the swap was called with,
+    which is how a node sees `auto_restore=True` — the thing that distinguishes the
+    scheduled caller from a terminal one. `supervisorctl` is unreachable two ways —
     `supervisor` explodes and `_sh` is recorded rather than run — so clause 3's "stops
     no service" is a count over the whole run, not a guess about the route.
 
@@ -7403,11 +7411,54 @@ def _scheduled_nightly(monkeypatch, tmp_path, capsys, *, at: datetime,
     monkeypatch.setattr(m, "_sh", recording_sh)
     monkeypatch.setattr(m, "supervisor", explode)
 
-    def no_swap(*a, **k):
-        raise AssertionError("the scheduled run reached swap_side_copy: the swap stays "
-                             "a terminal's (#3460 clause 1)")
+    # #3978 (Alan's ruling on #3119) retired this fixture's `no_swap` guard, which raised
+    # on contact because "the swap stays a terminal's" was clause 1 of #3460. The nightly
+    # IS a swap caller now, so the fixture has a knob instead: `refuse_on_contact` still
+    # raises, and the nodes that need that property ask for it by name —
+    # `test_a_nightly_at_or_above_the_swap_ceiling_swaps_nothing_and_records_the_measured_`
+    # `occupancy` (the threshold decision) and
+    # `test_the_scheduled_swap_authority_is_a_python_call_and_no_argument_of_the_route_reaches_it`
+    # (the rail). A knob whose default was "never" would have quietly untested the new
+    # path, so the default here is the behaviour the ruling actually allows.
+    def fake_swap(name, verification, *, auto_restore=False):
+        if swap_recorder is not None:
+            swap_recorder.append({"name": name, "auto_restore": auto_restore})
+        if swap_behaviour == "refuse_on_contact":
+            raise AssertionError(
+                "this run reached swap_side_copy and it should not have: the swap is "
+                "reached only below the occupancy ceiling, by a non-terminal caller that "
+                "built or topped up a copy in the same run (#3978)")
+        if swap_behaviour == "refused":
+            raise m.SideCopyRefused("regression.lock is not free (test)")
+        # The stamp is assembled at runtime, never typed: #2323's tree-wide ban (pinned by
+        # `test_the_keep_list_is_a_data_file_and_no_scanned_file_names_a_real_candidate`) is
+        # that no scanned file names a concrete dated backup candidate, and this file is one
+        # of the files that walk scans.
+        bak = m.INDEX.with_name(m.INDEX.name + ".bak-" + "20261109-041812")
+        if swap_behaviour == "failed_check":
+            return {"swapped": True, "retrieval_ok": False, "daemon_healthy": False,
+                    "retrieval_hits": 0, "restored": True, "backup": str(bak),
+                    "revert": "stop, mv back, start", "actions": ["stop w", "stop d"],
+                    "restore_actions": ["start d", "start w"]}
+        return {"swapped": True, "retrieval_ok": True, "daemon_healthy": True,
+                "retrieval_hits": 5, "backup": str(bak),
+                "revert": "stop, mv back, start",
+                "actions": ["stop w", "stop d", "rename", "start d", "start w"],
+                "backup_retention": {"kept": bak.name,
+                                     "dropped": ["index.sqlite.bak-" + "20261030-041812"],
+                                     "failed": {}}}
 
-    monkeypatch.setattr(m, "swap_side_copy", no_swap)
+    monkeypatch.setattr(m, "swap_side_copy", fake_swap)
+    # The copy is a 12-byte stub in this fixture, so the real re-verification could not
+    # pass even if a GPU were free: what is under test is which copy the nightly chooses
+    # to swap and what it does with the answer. The real re-verification of a real copy on
+    # a non-terminal stdin is pinned by
+    # `test_a_scheduled_swap_on_a_non_terminal_takes_a_real_copy_through_the_scripts_own_route`.
+    monkeypatch.setattr(m, "verify_side_copy", lambda name: {
+        "name": name,
+        "verification": dict(SCHEDULED_VERIFIED, name=name),
+        "side_bytes": 481_000_000, "side_occupancy": 0.822,
+    })
 
     builds: list[str] = []
 
@@ -7438,6 +7489,12 @@ def _scheduled_nightly(monkeypatch, tmp_path, capsys, *, at: datetime,
 
     with _stdin_on(tty=tty):
         monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+        if before_run is not None:
+            # A chance to measure the index directory (or anything else) in the state the
+            # run is about to be handed, on the same stdin the run gets — the only way to
+            # pin "this nightly changed nothing on disk" as a comparison rather than a
+            # description. #3978 clause 2's listing test is why it exists.
+            before_run()
         rc = m.main()
     cap = capsys.readouterr()
     out, err = cap.out, cap.err
@@ -7446,23 +7503,36 @@ def _scheduled_nightly(monkeypatch, tmp_path, capsys, *, at: datetime,
     return rc, report, out, shell, builds, err
 
 
-def test_a_capacity_approaching_nightly_builds_the_side_copy_exactly_once_and_never_swaps(
+def test_a_capacity_approaching_nightly_builds_the_side_copy_exactly_once_and_swaps_it_in(
         monkeypatch, tmp_path, capsys):
-    """Clause 1, and the name convention with it.
+    """Clause 1 of #3460 as amended by #3978, and the name convention with it.
 
     The 2026-10-20 state (occupancy 0.3285, 483.5 MiB dead) is `capacity_approaching`
     true with `need_capacity` false, which is what seven straight nightly reports read
     from 10-21 to 10-26; stdin is a pipe, because that is what the job runs on. The run
-    has to hand `rebuild_side_copy` exactly one name and complete — `swap_side_copy`
-    raises on contact, so reaching it would fail this node rather than be reported by
-    it. The name is `rebuild-YYYYMMDD` of the run: derived from the date rather than
-    fixed, because `rebuild_side_copy` refuses a name whose database exists without its
-    marker, so a fixed name a person had already used would make every later nightly
-    refuse itself against that copy forever.
+    still has to hand `rebuild_side_copy` exactly one name — one build per night, not one
+    per attempt — and 0.3285 is below `m.SWAP_OCCUPANCY_CEILING`, so the same run then
+    swaps that copy in with `auto_restore=True`, which is what this node now pins.
+
+    AMENDED 2026-11-09: this node used to end its clause with "...and never swaps",
+    proved by a fixture that made `swap_side_copy` raise on contact. Alan's 2026-11-08
+    ruling on #3119 retired that half for the scheduled path, so the raise is now the
+    opt-in `swap_behaviour="refuse_on_contact"` and the two nodes that still need it say
+    so: `test_a_nightly_at_or_above_the_swap_ceiling_swaps_nothing_and_records_the_measured_occupancy`
+    (the threshold's negative edge) and
+    `test_the_scheduled_swap_authority_is_a_python_call_and_no_argument_of_the_route_reaches_it`
+    (the #2458 rail). #3460's own precedent for this is clause 5 of that round, which
+    retired a contradiction rather than tripping over it.
+
+    The name is `rebuild-YYYYMMDD` of the run: derived from the date rather than fixed,
+    because `rebuild_side_copy` refuses a name whose database exists without its marker,
+    so a fixed name a person had already used would make every later nightly refuse
+    itself against that copy forever.
     """
     at = _local_wallclock(5, 1)
+    swaps: list[dict] = []
     rc, report, out, shell, builds, err = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=at)
+        monkeypatch, tmp_path, capsys, at=at, swap_recorder=swaps)
 
     assert report["capacity_approaching"] is True and report["need_capacity"] is False
     assert builds == [f"rebuild-{at:%Y%m%d}"], (
@@ -7477,6 +7547,15 @@ def test_a_capacity_approaching_nightly_builds_the_side_copy_exactly_once_and_ne
     # read from, so this is the first evidence that the scheduled route writes it.
     assert list(m.REPORT_DIR.glob(f"qmd-side-copy-{builds[0]}-*.json")), (
         f"no side-copy witness beside {sorted(p.name for p in m.REPORT_DIR.iterdir())}")
+    # #3978: the copy this invocation built is the copy it swapped, it asked for the
+    # unattended post-check half, and the report says so. `shell` stays empty because the
+    # swap here is the fixture's stand-in; the real rename/service sequence is pinned by
+    # `test_a_scheduled_swap_on_a_non_terminal_takes_a_real_copy_through_the_scripts_own_route`.
+    swap = report["side_copy_swap"]
+    assert swap["swapped"] is True and swap["retrieval_ok"] is True, swap
+    assert swap["name"] == builds[0], f"swapped {swap.get('name')}, built {builds}"
+    assert swap["attempted"] is True and "skipped" not in swap and "failed" not in swap, swap
+    assert swaps == [{"name": builds[0], "auto_restore": True}], swaps
 
 
 def test_the_window_guard_is_end_of_build_plus_2400_seconds_outside_22_to_04():
@@ -8151,3 +8230,378 @@ def test_these_nodes_reach_the_gate_unmarked_rather_than_by_exclusion():
         assert not set(marks) & {"skip", "skipif", "xfail", "live_vault",
                                  "fault_injection"}, (
             f"{name} carries {marks}: #3964's green may not be bought that way")
+
+
+# ── #3978: the nightly takes the swap itself, below the occupancy ceiling ───────
+#
+# Alan's 2026-11-08 ruling on #3119: the vec0 side-copy SWAP may run unattended from the
+# scheduled maintenance path. That relaxes #2458's terminal rail for ONE caller — the
+# in-process call the nightly `main()` makes after it has measured the occupancy and built
+# or topped up a copy — and for nothing else. Five nodes below, one per acceptance clause,
+# plus the ceiling's own arithmetic.
+#
+# The 2026-11-08 nightly report is the shape three of them run on, because it is the real
+# state the ruling was made about: occupancy 0.4889 and 323.0 MiB dead, `capacity_
+# approaching` true and `need_capacity` false — a build night that must NOT swap, at the
+# same time as the 2026-10-20 shape (0.3285, 483.5 MiB) must.
+NOV_08_SHAPE = {**OCT_20_SHAPE,
+                "vec0": {**OCT_20_SHAPE["vec0"], "occupancy": 0.4889, "dead_mib": 323.0}}
+
+
+def _swapped_out(shape: dict, occupancy: float) -> dict:
+    """The measured `vec0` block a nightly would hand the swap decision."""
+    return {"occupancy": occupancy, "dead_mib": shape["vec0"]["dead_mib"]}
+
+
+def test_the_swap_ceiling_sits_between_the_build_trigger_and_the_red_one(monkeypatch):
+    """The threshold's arithmetic, as one number and one comparison.
+
+    Three constants and their measured provenance: 0.50 is the night a BUILD starts, 0.25
+    the night the run goes red, and 0.35 in between so that a skipped or failed swap still
+    leaves nights before the red (`OCT_20_SHAPE`'s 0.3285 is below it, `NOV_08_SHAPE`'s
+    0.4889 above). The comparison is STRICT: an index sitting exactly on 0.35 has room, so
+    the serving path is not stopped for it.
+    """
+    assert m.SWAP_OCCUPANCY_CEILING == 0.35
+    assert m.CAPACITY_OCCUPANCY_TRIGGER < m.SWAP_OCCUPANCY_CEILING \
+        < m.CAPACITY_APPROACHING_OCCUPANCY
+    assert m.CAPACITY_OCCUPANCY_TRIGGER == 0.25 and m.CAPACITY_APPROACHING_OCCUPANCY == 0.50
+    assert m.CAPACITY_DEAD_MIB_FLOOR == 256.0        # the red trigger's other half, unchanged
+    assert NOV_08_SHAPE["vec0"]["occupancy"] >= m.SWAP_OCCUPANCY_CEILING
+    assert OCT_20_SHAPE["vec0"]["occupancy"] < m.SWAP_OCCUPANCY_CEILING
+
+    # The strict edge, measured rather than asserted about: exactly on the ceiling the
+    # index has room and nothing is stopped; one ten-thousandth below, it does not.
+    reached: list[str] = []
+    monkeypatch.setattr(m, "verify_side_copy", lambda name: {
+        "name": name, "verification": dict(SCHEDULED_VERIFIED, name=name)})
+    monkeypatch.setattr(m, "swap_side_copy",
+                        lambda name, v, **k: reached.append(name) or {"swapped": True,
+                                                                      "retrieval_ok": True,
+                                                                      "retrieval_hits": 1})
+    m.scheduled_side_copy_swap({"built": "rebuild-edge"},
+                               {"occupancy": m.SWAP_OCCUPANCY_CEILING, "dead_mib": 300.0})
+    assert reached == [], "an index exactly on the ceiling was swapped for no reason"
+    m.scheduled_side_copy_swap({"built": "rebuild-edge"},
+                               {"occupancy": m.SWAP_OCCUPANCY_CEILING - 0.0001,
+                                "dead_mib": 300.0})
+    assert reached == ["rebuild-edge"], reached
+
+
+def test_an_unmeasured_occupancy_is_not_a_low_one_so_the_nightly_swaps_nothing(
+        monkeypatch, tmp_path, capsys):
+    """The one input that must never reach a rename: a vec0 reading that is missing.
+
+    #844's same reasoning as the capacity verdict's: the reading that failed and the
+    reading that is fine look identical to a comparison, and `None >= 0.35` is a TypeError
+    that would take the nightly report down with it. Both directions are pinned — a missing
+    vec0 block and a block without an occupancy — because each is a real shape the
+    2026-10-04 failure produced.
+    """
+    calls: list = []
+    monkeypatch.setattr(m, "swap_side_copy", lambda *a, **k: calls.append(a))
+    for vec0 in (None, {}, {"dead_mib": 620.0}):
+        out = m.scheduled_side_copy_swap({"built": "rebuild-20261108"}, vec0)
+        assert out["swapped"] is False and out["attempted"] is False, vec0
+        assert "skipped" in out and "failed" not in out, vec0
+        assert out["threshold"] == m.SWAP_OCCUPANCY_CEILING
+    assert calls == []
+
+
+def test_a_nightly_at_or_above_the_swap_ceiling_swaps_nothing_and_records_the_measured_occupancy(
+        monkeypatch, tmp_path, capsys):
+    """Clause 2, on the real 2026-11-08 numbers.
+
+    `swap_behaviour="refuse_on_contact"` is what the fixture's guard became: the property
+    this node needs is that the run never reached the swap function at all, and the run
+    completing is what proves it — no rename happened, no service was named, and the index
+    directory is byte-for-byte the listing it started with. The block must still record the
+    decision, because after this change a reader cannot tell "this version had no swap"
+    from "the swap was offered and declined" without it.
+    """
+    at = _local_wallclock(5, 1)
+    swaps: list[dict] = []
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, shape=NOV_08_SHAPE,
+        swap_behaviour="refuse_on_contact", swap_recorder=swaps)
+    listing = _stat_listing(m.INDEX.parent)
+
+    assert rc == 0, f"a skipped swap must leave the exit code where it was, got {rc}"
+    assert swaps == [] and builds == [f"rebuild-{at:%Y%m%d}"], (builds,)
+    swap = report["side_copy_swap"]
+    assert swap["swapped"] is False and swap["attempted"] is False, swap
+    assert swap["occupancy"] == 0.4889 and swap["threshold"] == 0.35, swap
+    assert "at or above" in swap["skipped"], swap
+    assert shell == [], f"a skipped swap ran shell commands: {shell}"
+    assert "side copy SWAP" in out and "skipped" in out, out
+    assert "index.sqlite" in listing and not any(".bak-" in n for n in listing), sorted(listing)
+
+
+def test_a_skipped_swap_leaves_the_index_directory_byte_for_byte_untouched(
+        monkeypatch, tmp_path, capsys):
+    """Clause 2's other half, measured rather than described.
+
+    The listing is taken through the fixture's `before_run` hook — one instant before
+    `main()`, on the same stdin the run gets — and compared afterwards on the NAME SET and
+    on the main database's own size and mtime. The name set is what catches a swap: a
+    rename, a new `.bak-<stamp>` or a copy consumed all change it. `index.sqlite` itself is
+    pinned separately because a swap that renamed a copy onto the same name would leave the
+    set alone. The `-shm` is deliberately NOT compared: the run opens the index read-only to
+    measure it (#844's measurement path), and SQLite re-derives a shared-memory file on any
+    open, so its size and mtime moving is the inspection doing its job and not this decision
+    mutating anything — the 200-byte stub this fixture plants is not a real shm image. The
+    2026-11-08 shape is the one that matters: occupancy 0.4889 is the state every in-band
+    night between the 0.50 build trigger and the 0.35 ceiling is in, so this is the
+    commonest nightly the change runs on, and the copy it builds must sit on disk untouched
+    until a person or a lower night takes it.
+    """
+    at = _local_wallclock(5, 1)
+    seen: list[dict] = []
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, shape=NOV_08_SHAPE,
+        swap_behaviour="refuse_on_contact",
+        before_run=lambda: seen.append(_stat_listing(m.INDEX.parent)))
+    after = _stat_listing(m.INDEX.parent)
+
+    assert rc == 0, rc
+    assert len(seen) == 1 and seen[0], "the hook did not run inside the nightly"
+    assert set(after) == set(seen[0]), (
+        f"a skipped swap changed which files exist: {sorted(set(after) ^ set(seen[0]))}")
+    assert not [n for n in after if ".bak-" in n], sorted(after)
+    assert after["index.sqlite"] == seen[0]["index.sqlite"], (
+        f"the live database moved: {seen[0]['index.sqlite']} -> {after['index.sqlite']}")
+    assert shell == [] and report["side_copy_swap"]["swapped"] is False
+
+
+def test_the_scheduled_swap_authority_is_a_python_call_and_no_argument_of_the_route_reaches_it(
+        monkeypatch, tmp_path, capsys):
+    """Clause 3: #2458's rail holds for an ad-hoc call, and nothing lifts it.
+
+    The environment variables and the marker file are the shapes an unattended caller
+    would actually try — they are how a worker says "I am the schedule" — and #2458 refused
+    that authority precisely because a name is settable: "refused by what it *is*, not by a
+    name it could set" (`_stdin_is_interactive`). So all four are present at once, in a
+    directory holding a real, verified, ready-to-swap copy, with stdin a real pipe: the run
+    still exits 2, names the terminal, touches no service, renames nothing and writes no
+    report. The second half is structural: the CLI route's signature and the flag surface
+    carry no scheduled authority, so the only way to `swap_side_copy` from a non-terminal
+    is a Python call site, which is `main()`'s capacity branch and nothing else.
+    """
+    fq, d = _side_env(monkeypatch, tmp_path)
+    assert _route(monkeypatch, "--rebuild-side-copy", SIDE) == 0, (
+        "the fixture's own build failed, so there would be no copy to refuse")
+    for var in ("QMD_SCHEDULED_SWAP", "LLOYD_SCHEDULED_SWAP", "QMD_SWAP_OK",
+                "QMD_SWAP_UNATTENDED"):
+        monkeypatch.setenv(var, "1")
+    (d / "scheduled-swap.ok").write_text("")
+    m.REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    (m.REPORT_DIR / "scheduled-swap.ok").write_text("")
+    listing = _stat_listing(d)
+    # The build above legitimately wrote its own witness, so the property is "the refused
+    # swap added none", measured against the set that already existed.
+    witnesses = sorted(p.name for p in m.REPORT_DIR.glob("qmd-side-copy-*.json"))
+    assert witnesses, "the fixture's own build left no witness to compare against"
+
+    with _stdin_on(tty=False):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+    err = capsys.readouterr().err
+
+    assert rc == 2, f"an ad-hoc non-TTY --swap exited {rc}"
+    assert m.SWAP_NEEDS_TERMINAL in err, err
+    assert _stat_listing(d) == listing, "a refused swap changed the index directory"
+    assert fq.services() == [], f"a refused swap named a service: {fq.services()}"
+    assert sorted(p.name for p in m.REPORT_DIR.glob("qmd-side-copy-*.json")) == witnesses, (
+        "a refused swap wrote a report, so it behaved as though it had run")
+
+    import inspect
+    params = list(inspect.signature(m.run_side_copy_route).parameters)
+    assert params == ["name", "swap", "dry_run", "as_json"], (
+        f"the CLI route grew a keyword an unattended caller could set: {params}")
+    src = Path(m.__file__).read_text(encoding="utf-8")
+    flags = re.findall(r'add_argument\("--([a-z][a-z-]+)"', src)
+    assert "swap" in flags
+    assert not [f for f in flags if any(w in f for w in
+                ("sched", "unattend", "yes", "nightly", "force-swap"))], flags
+    assert "scheduled_side_copy_swap" not in inspect.getsource(m.run_side_copy_route)
+
+
+def test_a_scheduled_swap_on_a_non_terminal_takes_a_real_copy_through_the_scripts_own_route(
+        monkeypatch, tmp_path, capsys):
+    """Clause 1's mechanics, with no stand-in for the swap.
+
+    Everything here is the script's own code on a non-terminal stdin: the build was made by
+    the real route with the fake qmd CLI, the re-verification is the real
+    `verify_side_copy`, and `swap_side_copy` is the real one — the same function a person
+    reaches with `--swap`, which is the point of the ruling ("through the script's own
+    route": the UTC-stamped `.bak`, its `-wal`/`-shm` moved alongside, the copy renamed into
+    place, both services stopped before and started after, `regression.lock` held across the
+    sequence, the revert command printed). `main()`'s decision is pinned by the fixture
+    nodes; this is the half below it.
+    """
+    fq, d = _side_env(monkeypatch, tmp_path)
+    assert _route(monkeypatch, "--rebuild-side-copy", SIDE) == 0
+    assert (d / f"{SIDE}.sqlite.rebuild.json").is_file()
+    before = (d / "index.sqlite").read_bytes()
+
+    with _stdin_on(tty=False):
+        out = m.scheduled_side_copy_swap(
+            {"built": SIDE}, _swapped_out(OCT_20_SHAPE, 0.20))
+        printed = capsys.readouterr().out
+
+    assert out["swapped"] is True and out["retrieval_ok"] is True and "failed" not in out, out
+    assert out["name"] == SIDE and out["occupancy"] == 0.20, out
+    names = {p.name for p in d.iterdir()}
+    baks = sorted(n for n in names if ".bak-" in n)
+    assert len([n for n in baks if not n.endswith(("-wal", "-shm"))]) == 1, baks
+    bak = next(n for n in baks if not n.endswith(("-wal", "-shm")))
+    assert re.fullmatch(r"index\.sqlite\.bak-\d{8}-\d{6}", bak), bak
+    assert f"{bak}-wal" in names, f"the live WAL did not move with its database: {sorted(names)}"
+    assert not (d / f"{SIDE}.sqlite").exists(), sorted(names)
+    assert not (d / f"{SIDE}.sqlite.rebuild.json").exists(), "a swapped-in copy keeps its marker"
+    assert (d / "index.sqlite").read_bytes() != before, "the live index did not change"
+    assert fq.services() == [("stop", m.WATCHER_SERVICE), ("stop", m.SERVICE),
+                             ("start", m.SERVICE), ("start", m.WATCHER_SERVICE)], fq.services()
+    assert (_FakeLock.held, _FakeLock.released) == (1, 1), (
+        "the swap did not take and release regression.lock exactly once")
+    assert "to revert: stop" in printed and str(m.INDEX) in printed, printed
+    assert "side copy SWAP" in printed, printed
+
+
+def test_a_scheduled_swap_whose_post_check_fails_restores_the_backup_and_exits_non_zero(
+        monkeypatch, tmp_path, capsys):
+    """Clause 4, and the exit code with it: the half that makes this safe unattended.
+
+    The post-swap check is made to fail by taking the daemon's health away — the same
+    measurement the hand route has always made, and the one it only had prose for
+    (`to_undo`, before #3978). On this path there is nobody to carry out a recipe, so the
+    function moves the backup back over the live index, restarts both services and reports
+    `restored`. The failed copy keeps its marker and its own name: the database is back
+    where it was, so the disk reads as a held side copy and tomorrow's top-up can fix what
+    tonight could not, instead of paying a 36-minute re-embed to find the same failure.
+    """
+    fq, d = _side_env(monkeypatch, tmp_path)
+    assert _route(monkeypatch, "--rebuild-side-copy", SIDE) == 0
+    before = (d / "index.sqlite").read_bytes()
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: False)
+
+    with _stdin_on(tty=False):
+        out = m.scheduled_side_copy_swap(
+            {"built": SIDE}, _swapped_out(OCT_20_SHAPE, 0.20))
+        printed = capsys.readouterr().out
+
+    assert out["restored"] is True and out["swapped"] is False, out
+    # The daemon's health is the half that went red here; retrieval still answers (the fake
+    # CLI returns its 3 rows), which is why the check is the AND of the two measurements and
+    # not a health probe alone.
+    assert out["retrieval_ok"] is False and out["retrieval_hits"] == 3, out
+    # The `failed` line names both measurements that were taken and what was done about them,
+    # because this string is the only thing a person reads the next morning.
+    assert "daemon_healthy False" in out["failed"], out["failed"]
+    assert f"retrieval hits {out['retrieval_hits']}" in out["failed"], out["failed"]
+    assert "restored" in out["failed"] and "serving again" in out["failed"], out["failed"]
+    assert out.get("backup_retention") is None, (
+        "retention ran on a swap that failed its check, dropping the older backup for nothing")
+    names = {p.name for p in d.iterdir()}
+    assert not [n for n in names if ".bak-" in n], (
+        f"a restored swap left its backup stranded: {sorted(names)}")
+    assert (d / "index.sqlite").read_bytes() == before, (
+        "the live index is not the database that was serving before the swap")
+    assert (d / f"{SIDE}.sqlite").is_file() and (d / f"{SIDE}.sqlite.rebuild.json").is_file(), (
+        f"the failed copy is not back as a held side copy: {sorted(names)}")
+    assert fq.services() == [("stop", m.WATCHER_SERVICE), ("stop", m.SERVICE),
+                             ("start", m.SERVICE), ("start", m.WATCHER_SERVICE),
+                             ("stop", m.WATCHER_SERVICE), ("stop", m.SERVICE),
+                             ("start", m.SERVICE), ("start", m.WATCHER_SERVICE)], fq.services()
+    assert (_FakeLock.held, _FakeLock.released) == (1, 1), (
+        "the restore ran outside regression.lock")
+    assert "FAILED" in printed, printed
+    assert m._exit_code({"daemon_healthy": True, "need_capacity": False,
+                         "side_copy_swap": out}) == 1, (
+        "a swap that had to be undone exited green")
+
+
+def test_a_scheduled_swap_that_fails_its_post_check_makes_the_nightly_run_red(
+        monkeypatch, tmp_path, capsys):
+    """The same night through `main()`, so the red is the job's, not a helper's.
+
+    The daemon answers and `need_capacity` is false, so the ONLY reason this nightly exits
+    1 is the failed swap: that is what puts a threshold night that had to be undone in front
+    of a person rather than in a green run log.
+    """
+    at = _local_wallclock(5, 1)
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, swap_behaviour="failed_check")
+
+    assert rc == 1, f"expected the failed swap to redden the run, got {rc}"
+    swap = report["side_copy_swap"]
+    assert swap["restored"] is True and swap["swapped"] is False, swap
+    assert "failed" in swap and swap["retrieval_ok"] is False, swap
+    assert report["daemon_healthy"] is True and report["need_capacity"] is False
+    assert "FAILED" in out, out
+
+
+def test_a_passing_scheduled_swap_leaves_exactly_one_backup_and_drops_the_older_one(
+        monkeypatch, tmp_path, capsys):
+    """Clause 5, on the disk state the 2026-11-08 tree is actually in.
+
+    The older `.bak` is planted with its `-wal`/`-shm` NEWER than its own main file, which
+    is the real 2026-10-30 backup's condition and the reason the general stray sweep has
+    held 1.19 GB for six runs (#2119's measured false hold: a sidecar mtime reads as a
+    current read-write open). The swap's retention must not care, and it may not: a live
+    index is 1.4 GB, so a swap every ~3 weeks that never drops anything is an unbounded
+    pile. What is kept is this swap's own backup and its sidecars — the only revert target
+    worth having once the check passed.
+    """
+    fq, d = _side_env(monkeypatch, tmp_path)
+    assert _route(monkeypatch, "--rebuild-side-copy", SIDE) == 0
+    # Assembled at runtime for #2323's ban, same as the fixture above; the 2026-10-30 copy
+    # this stands in for is named in the prose, not as a literal in a scanned file.
+    old = d / ("index.sqlite.bak-" + "20261030-041812")
+    old.write_bytes(b"the 1.45 GB copy of 2026-10-30")
+    for suffix in m.LIVE_SIDECARS:
+        (d / f"{old.name}{suffix}").write_bytes(b"sidecar")
+    old_ns = 1_700_000_000_000_000_000                 # 2023: older than its own sidecars
+    os.utime(old, ns=(old_ns, old_ns))
+
+    with _stdin_on(tty=False):
+        out = m.scheduled_side_copy_swap(
+            {"built": SIDE}, _swapped_out(OCT_20_SHAPE, 0.20))
+        capsys.readouterr()
+
+    assert out["swapped"] is True and "failed" not in out, out
+    mains = sorted(p.name for p in d.iterdir()
+                   if p.is_file() and ".bak-" in p.name and not p.name.endswith(("-wal", "-shm")))
+    assert mains == [Path(out["backup"]).name], mains
+    assert Path(out["backup"]).name != old.name
+    assert out["backup_retention"]["kept"] == Path(out["backup"]).name, out["backup_retention"]
+    assert out["backup_retention"]["failed"] == {}, out["backup_retention"]
+    assert out["backup_retention"]["dropped"] == [
+        old.name, f"{old.name}-shm", f"{old.name}-wal"], out["backup_retention"]
+    names = {p.name for p in d.iterdir()}
+    assert not any(n.startswith(old.name) for n in names), sorted(names)
+    assert f"{Path(out['backup']).name}-wal" in names, (
+        f"the kept backup lost a sidecar: {sorted(names)}")
+
+
+def test_a_nightly_below_the_ceiling_swaps_the_copy_it_topped_up_not_a_new_one(
+        monkeypatch, tmp_path, capsys):
+    """Clause 1's "the copy that same invocation built or topped up", under #3954.
+
+    A capacity cycle allows one full re-embed, so on a night that finds an earlier night's
+    copy on disk the build function returns that EARLIER name as `reused` and mints nothing
+    new. 0.3285 is below the ceiling, so this is also a swap night — and the swap must take
+    the held copy, because that is the database whose rows were just topped up and the only
+    one this process verified. A swap of tonight's date instead would rename a 36-minute
+    build's output over the live index and leave the held copy stranded on disk.
+    """
+    at = _local_wallclock(5, 1)
+    held = "rebuild-20261101"
+    swaps: list[dict] = []
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, copy_present=held, swap_recorder=swaps)
+
+    assert rc == 0, rc
+    assert builds == [held] and report["side_copy_build"]["reused"] == held
+    swap = report["side_copy_swap"]
+    assert swap["swapped"] is True and swap["name"] == held, swap
+    assert swaps == [{"name": held, "auto_restore": True}], swaps

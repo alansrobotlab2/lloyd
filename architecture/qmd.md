@@ -279,16 +279,24 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   it in, in seconds, running no rebuild. `--swap` with no copy present still builds
   first, and the old form — `--swap` on a line that also builds — pays the re-embed again
   for a copy that exists, which is the duplicated cost the split removes. `--dry-run`
-  prints the commands it would actually run, and runs none. No scheduled run passes
-  `--swap`: that half stays a person's. The BUILD is scheduled as of #3460 — the
+  prints the commands it would actually run, and runs none. No command line passes
+  `--swap` without a terminal: the rail (#2458) refuses it with exit 2 before it names a
+  service or renames anything, and no flag, environment variable or marker file lifts it.
+  Exactly one unattended swap exists as of #3978 — Alan's ruling on #3119 — and it is not
+  a command line: `scheduled_side_copy_swap` is called in-process by the nightly run, for
+  the copy that same run built or topped up, only while its measured occupancy is below
+  `SWAP_OCCUPANCY_CEILING` (**0.35**) and at or above the red trigger, and a post-swap
+  check that fails puts the backup back by itself and exits 1 (see
+  `scheduled_side_copy_swap`). The BUILD is scheduled as of #3460 — the
   nightly run whose report reads `capacity_approaching` and finds no copy on disk
   launches `--rebuild-side-copy rebuild-YYYYMMDD` itself, the name derived from the run
   date so it can never be refused as somebody else's copy. One guard reads the clock:
   `scheduled_build_window` refuses to start a build whose `SCHEDULED_BUILD_BUDGET_S`
   (**2400 s**) budget would put its end inside the nightly hours **22:00–04:00**
   (`SCHEDULED_BUILD_WINDOW_HOURS`), printing and recording the reason, and a run that
-  finds a copy already waiting launches nothing and prints the `--swap` command for a
-  terminal to take in seconds. The measured nightly start of 05:01 ends 05:41, which is
+  finds a copy already waiting launches nothing and reuses that copy's name in seconds —
+  the name is the decision the swap then acts on, so a cycle holds one full re-embed and
+  the swap takes the earlier copy rather than a fresh one. The measured nightly start of 05:01 ends 05:41, which is
   41 minutes past the close of that window. It is the only branch on `.hour` in
   `scripts/maintenance/qmd_index_maintenance.py`: everywhere else the route is refused
   by a failed verification or a busy embed lock, never by the time of day. It has been

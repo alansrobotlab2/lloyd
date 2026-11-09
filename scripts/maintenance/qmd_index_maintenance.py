@@ -167,7 +167,9 @@ Usage:
   python scripts/maintenance/qmd_index_maintenance.py --dry-run  # report only
   python scripts/maintenance/qmd_index_maintenance.py --force    # prune anyway
 
-By hand only, never scheduled (#1992, see "the side-copy rebuild" below):
+By hand only, never scheduled from a command line (#1992, see "the side-copy rebuild"
+below). #3978 (Alan's ruling on #3119) added exactly one unattended swap, and it is a
+Python call inside the nightly run, never one of these flags:
   ... --rebuild-side-copy NAME --dry-run   # print the commands, run none
   ... --rebuild-side-copy NAME             # BUILD: re-embed a side index and verify it
   ... --rebuild-side-copy NAME --swap      # SWAP: verify NAME and move it in
@@ -180,7 +182,11 @@ with `NAME.sqlite` already on disk it only re-verifies that copy (its recorded r
 pending 0, a real vsearch, and that the live index has not outgrown it) and moves it in,
 in seconds; with no copy on disk it builds first, because there is nothing to swap. The
 old form — `--swap` on a line that also builds — still works, it just pays the 36 minutes
-again for a copy that is already there.
+again for a copy that is already there. Since #3978 the nightly maintenance run may take
+that step without a person — below `SWAP_OCCUPANCY_CEILING` occupancy, for the copy that
+same run built or topped up, with the backup restored automatically if the check after the
+swap fails (`scheduled_side_copy_swap`) — which is a relaxation of the ruling for that one
+caller, granted on #3119, and for nothing else.
 
 That rule is enforced for the third line, not just printed: `--swap` is the one flag
 here that stops the serving path, so it is refused unless stdin is an interactive
@@ -188,7 +194,9 @@ terminal — exit 2, with the reason on stderr, before the route names a service
 database or writes a report. `--rebuild-side-copy` on its own, with or without
 `--dry-run`, is untouched by that rail: it is the rail's own reason for sitting behind
 the dry-run early return, so the printed plan a person reads stays available to any
-caller. A scheduler that asks for a swap gets a refusal, not a daemon restart.
+caller. A command line that asks for a swap gets a refusal, not a daemon restart, and no
+flag, environment variable or marker file lifts it — the scheduled swap #3978 allows is
+reached only in-process, from the `main()` that measured the occupancy and built the copy.
 """
 from __future__ import annotations
 
@@ -363,6 +371,19 @@ CAPACITY_DEAD_MIB_FLOOR = 256
 #: rebuild, and a warning printed for two weeks after every swap is one nobody reads.
 #: `_exit_code` deliberately does not read this band: a notice, not a second alarm.
 CAPACITY_APPROACHING_OCCUPANCY = 0.50
+#: Occupancy strictly below which the nightly run takes the vec0 side-copy SWAP itself
+#: (#3978, Alan's 2026-11-08 ruling on #3119). Three numbers set it, all measured:
+#: `CAPACITY_APPROACHING_OCCUPANCY` (0.50) is the night the BUILD starts, so the ceiling
+#: must sit below it or there would be no copy to take; `CAPACITY_OCCUPANCY_TRIGGER`
+#: (0.25) is the red night; and the decay between them is ~0.036 occupancy/night (the six
+#: nightly reports to 2026-11-08 read 0.7032 → 0.4889, ~+34 MiB/day of dead against a
+#: ~632 MiB allocation). 0.35 is therefore ~3 nights of slack before that trigger fires:
+#: a nightly that skips, or whose swap its own check sent back, still leaves two more
+#: in-band nights in which a person can act, which is what makes it safe to hand an
+#: unattended caller a daemon restart. Whether 0.35 is the right number is owed to at least two observed threshold
+#: nights after landing, and is recorded as owed on #3978 rather than asserted here.
+#: Read only by `scheduled_side_copy_swap`; `--swap` from a command line never consults it.
+SWAP_OCCUPANCY_CEILING = 0.35
 VEC0_REBUILD_RULED_OUT = (
     "ruled out as an unattended action: the one measured rebuild (2026-09-21 "
     "model switch) was a side copy re-embedded in full and swapped in, 1.25 GB "
@@ -371,8 +392,11 @@ VEC0_REBUILD_RULED_OUT = (
     "side copy has to be built and then swapped in: the BUILD is this script's own "
     "`--rebuild-side-copy NAME`, needs no terminal and may run unattended, and the "
     "SWAP is the half a person does from a terminal (#3314). Since #3460 the nightly "
-    "run whose report reads `capacity_approaching` is what launches that BUILD, and it "
-    "never reaches the SWAP.")
+    "run whose report reads `capacity_approaching` is what launches that BUILD, and "
+    "since #3978 the same nightly run takes that SWAP itself when its own measured "
+    "occupancy is below 0.35 — for the copy it built or topped up in that same run, with "
+    "the backup put back automatically if the check after the swap fails. A command-line "
+    "`--swap` still needs a terminal.")
 
 QMD_ENV = {
     "HOME": str(Path.home()),
@@ -1583,20 +1607,29 @@ CAPACITY_WHAT_TO_DO = (
     "rebuild a side copy re-embedded in full and swap it in while the daemon "
     "serves the old one, BY HAND (the 2026-09-21 procedure: 1.25 GB -> 481 MB at "
     "56% occupancy). Never in place: an in-place vec0 drop leaves the serving "
-    "daemon with no vector leg for the whole re-embed. Two steps, and only the second "
-    "one is a person's: BUILD with this script's `--rebuild-side-copy <name>` — a full "
+    "daemon with no vector leg for the whole re-embed. Two steps: BUILD with this "
+    "script's `--rebuild-side-copy <name>` — a full "
     "re-embed of about 36 minutes that stops no service and moves no exit code, so it "
     "may run unattended — then SWAP from a terminal with the same command plus "
     "`--swap`, which on a copy that build left behind re-verifies it and moves it in in "
     "seconds. Ask for `--swap` with no copy present and it builds first, paying the 36 "
-    "minutes again. Since #2458 the script refuses `--swap` outright unless stdin is an "
-    "interactive terminal; no scheduled run passes it. The BUILD is scheduled as of "
+    "minutes again. Since #2458 the script refuses a command-line `--swap` outright "
+    "unless stdin is an "
+    "interactive terminal, and no flag, environment variable or marker file lifts it. The "
+    "SWAP has one unattended caller, and it is not a command line: since #3978 the nightly "
+    "run takes the swap in-process for the copy IT built or topped up minutes earlier, but "
+    "only while its measured occupancy is in the band below 0.35 and at or above the 0.25 "
+    "red trigger — a fired verdict like this one is below the ceiling too, so a nightly "
+    "with nothing waiting tries the build and the swap here as well. Read the run's "
+    "`side_copy_swap` block before concluding anything is owed to you: a nightly that took "
+    "it says `swapped: true` there, and only a `skipped` or a `failed` line leaves the "
+    "terminal route below. The BUILD is scheduled as of "
     "#3460: the nightly run that reports `capacity_approaching` and finds no copy of this "
     "route's on disk launches its own `--rebuild-side-copy rebuild-YYYYMMDD`, refuses to "
     "start one whose 2400-second budget would end inside the 22:00-04:00 nightly hours, "
     "and when a copy of this route's is already waiting prints the `--swap` command for a "
-    "terminal instead of running it. What is owed here is therefore the seconds-scale swap, not the "
-    "36-minute sitting, and since #3954 one full rebuild per capacity cycle rather than "
+    "terminal instead of running it. Since #3978 the seconds-scale swap is scheduled too, so "
+    "what is owed a person on a fired night is only what that run could not do, and since #3954 one full rebuild per capacity cycle rather than "
     "per in-band night: a later in-band night that finds an earlier night's copy on disk "
     "tops that copy up under its own name in seconds instead of minting a new dated one.")
 
@@ -1766,8 +1799,17 @@ def _exit_code(report: dict) -> int:
     rebuild, which is the mechanism and not a regression: the alternative is the
     2026-09-30 state, six nightly readings of a strictly decaying occupancy and no
     signal anywhere. A False verdict on a healthy daemon still exits 0.
+
+    The third red is #3978's: a swap this run ATTEMPTED and its own post-check rejected.
+    It is red even though the auto-restore put the old index back and the daemon answers
+    again, because the run stopped the serving path for nothing, the capacity is still
+    owed, and nobody was there to see it. A night that merely `skipped` — at or above the
+    ceiling, nothing built, stdin a terminal, occupancy unmeasured — leaves the exit code
+    exactly where it was: that night asked for nothing.
     """
     if report.get("need_capacity"):
+        return 1
+    if (report.get("side_copy_swap") or {}).get("failed"):
         return 1
     return 0 if report["daemon_healthy"] else 1
 
@@ -2910,12 +2952,108 @@ def _regression_lock():
     return S.Lock(S.STATE_DIR / "regression.lock", owner=f"qmd side-copy swap {os.getpid()}")
 
 
-def swap_side_copy(name: str, verification: dict | None) -> dict:
+#: The one wording of "how to undo a swap", shared by the recipe a hand swap prints when
+#: its post-check fails, the line a successful swap always prints, and the
+#: `side_copy_swap` block of a nightly report. A revert instruction that exists in two
+#: spellings is one that drifts, and after #3978 the unattended path prints it on a night
+#: nobody watched.
+SWAP_REVERT_COMMAND = (
+    "stop {watcher} and {daemon}, then mv {index} aside and mv {bak} {index} "
+    "(with its -wal and -shm), then start them again")
+
+
+def drop_older_backups(keep: Path) -> dict:
+    """Unlink every older `index.sqlite.bak-*` in the series, keeping `keep` and its sidecars.
+
+    #3978 clause 4. The swap makes one backup per run and the live index is 1.4 GB, so a
+    swap every ~3 weeks with nothing dropped is a pile that grows without bound — and the
+    general stray sweep cannot be counted on to clear it. Its rule 2 holds an older copy
+    whose `-shm`/`-wal` mtime still reads as a current read-write open, and that is exactly
+    the state the real 2026-10-30 `.bak` is in: its sidecars are stamped the same morning
+    as a run that never opened them (#2119's measured false-hold, which held 1.19 GB for
+    six runs). The swap is therefore its own retention event, gated on the one thing the
+    sweep has no access to: this swap's post-check passed, so the copy it replaced is the
+    only revert target still worth having.
+
+    Deliberately unconditional about mtime and about `code_reference_hits`, and safe for a
+    reason the sweep is not: `swap_side_copy` calls this with both services stopped or
+    freshly restarted on the NEW database, and an older `.bak` is a name nothing in this
+    sequence can be holding open. `failed` names anything that would not unlink, so a
+    partial drop is reported rather than a clean count.
+    """
+    dropped: list[str] = []
+    failed: dict[str, str] = {}
+    for p in sorted(INDEX.parent.glob(f"{INDEX.name}{BACKUP_INFIX}-*")):
+        if p.name == keep.name or p.name.startswith(keep.name + "-"):
+            continue                       # this swap's own backup and its -wal/-shm
+        if not p.is_file():
+            continue
+        try:
+            p.unlink()
+        except OSError as e:               # reported, never swallowed
+            failed[p.name] = f"{type(e).__name__}: {e}"
+            continue
+        dropped.append(p.name)
+    return {"kept": keep.name, "dropped": dropped, "failed": failed}
+
+
+def restore_swap_backup(bak: Path, side: Path) -> dict:
+    """Put a swap back: the backup returns over the live index, the copy back to its own name.
+
+    #3978 clause 3, and the half that makes an unattended swap survivable. The inverse of
+    `swap_side_copy`'s renames in the same order it used (stop both services, move, start
+    them), called while `regression.lock` is still held. Nothing opens either database:
+    the failed copy is the thing currently answering to `INDEX`, and the live trio is where
+    the swap renamed it under `bak`.
+
+    The copy that failed is restored under its own side-copy name rather than deleted. Its
+    marker is still there — a restoring swap does not undo the build's work — so the disk
+    reads as a held side copy again and the next night's top-up can fix what this one could
+    not, instead of paying a 36-minute re-embed to discover the same failure.
+    """
+    out: dict = {"restored": False, "restore_actions": []}
+    try:
+        for svc in (WATCHER_SERVICE, SERVICE):
+            rc, _ = supervisor("stop", service=svc)
+            out["restore_actions"].append(f"stop {svc} rc={rc}")
+        for suffix in ("",) + LIVE_SIDECARS:
+            src = INDEX.with_name(INDEX.name + suffix)
+            if src.exists():
+                dst = side.with_name(side.name + suffix)
+                os.rename(src, dst)
+                out["restore_actions"].append(f"{src.name} -> {dst.name}")
+        for suffix in ("",) + LIVE_SIDECARS:
+            src = bak.with_name(bak.name + suffix)
+            if src.exists():
+                dst = INDEX.with_name(INDEX.name + suffix)
+                os.rename(src, dst)
+                out["restore_actions"].append(f"{src.name} -> {dst.name}")
+        out["restored"] = True
+    except Exception as e:  # noqa: BLE001 — a half-moved trio must be reported, not raised
+        out["restore_failed"] = f"{type(e).__name__}: {e}"
+    finally:
+        for svc in (SERVICE, WATCHER_SERVICE):
+            rc, _ = supervisor("start", service=svc)
+            out["restore_actions"].append(f"start {svc} rc={rc}")
+        out["restored_daemon_healthy"] = daemon_healthy()
+    return out
+
+
+def swap_side_copy(name: str, verification: dict | None,
+                   *, auto_restore: bool = False) -> dict:
     """Move the verified side copy into the live index's place.
 
-    Refuses outright unless `verification` is the passed result `rebuild_side_copy`
-    returned for this name in this process: there is no flag, file or earlier run
-    that stands in for it. The live database is renamed, never opened.
+    Refuses outright unless `verification` is the passed result `rebuild_side_copy` or
+    `verify_side_copy` returned for this name in this process: there is no flag, file or
+    earlier run that stands in for it. The live database is renamed, never opened.
+
+    `auto_restore` is the unattended half (#3978, Alan's ruling on #3119): when the
+    post-swap health/retrieval check fails, this function moves the backup back over the
+    live index itself, restarts both services and records `restored`, instead of leaving a
+    `to_undo` recipe for a reader who is by definition not there. The hand route leaves the
+    default False and prints the recipe, because there the person holding the terminal is
+    the one who decides whether a bad-looking copy is worth a second look. Either way
+    `retrieval_ok` stays False, and that is what moves the caller's exit code.
     """
     _check_side_name(name)
     if not verification or verification.get("passed") is not True \
@@ -2968,11 +3106,25 @@ def swap_side_copy(name: str, verification: dict | None) -> dict:
             ["/usr/bin/node", str(QMD_CLI), "vsearch", "--format", "json", "-n", "5",
              SIDE_PROBE_QUERY])
         out["retrieval_ok"] = out["daemon_healthy"] and out["retrieval_hits"] > 0
-        if out["swapped"]:
+        revert = SWAP_REVERT_COMMAND.format(watcher=WATCHER_SERVICE, daemon=SERVICE,
+                                            index=INDEX, bak=bak)
+        out["revert"] = revert
+        if out["retrieval_ok"]:
             marker.unlink(missing_ok=True)                # ours: written by the rebuild
-        if not out["retrieval_ok"]:
-            out["to_undo"] = (f"stop both services, then mv {INDEX} aside and "
-                              f"mv {bak} {INDEX} (with its -wal and -shm), then start them")
+            # Retention is gated on this check and on nothing else: see the function.
+            out["backup_retention"] = drop_older_backups(bak)
+        else:
+            out["to_undo"] = revert
+            if auto_restore:
+                out.update(restore_swap_backup(bak, side))
+                if out.get("restored"):
+                    # Nothing is left to undo — the pre-swap index is serving again. What
+                    # stays owed is the capacity itself, which is why the caller's exit
+                    # code still goes red off `retrieval_ok`.
+                    out.pop("to_undo", None)
+            # A copy whose swap was restored keeps its marker deliberately: the database
+            # is back under its own name, so it is a held side copy again and tonight's
+            # failure is tomorrow's 11-second top-up rather than a fresh 36-minute build.
     finally:
         lock.release()
     return out
@@ -2985,7 +3137,8 @@ def swap_side_copy(name: str, verification: dict | None) -> dict:
 SWAP_NEEDS_TERMINAL = (
     "--swap is the hand step: it stops agent-qmd-watcher and the serving qmd daemon, so "
     "it is accepted only from an interactive terminal and stdin here is not one (#1992: "
-    "by hand, never scheduled). It is the only half that needs one. The BUILD — "
+    "by hand from a command line — #3978's nightly run is the only scheduled swap, and it "
+    "is reached in-process, never by this flag). It is the only half that needs one. The BUILD — "
     "`--rebuild-side-copy <name>` with no --swap — re-embeds and verifies a copy without "
     "touching the serving path and may run unattended; the swap then takes that copy in "
     "seconds, or builds one first if none is there. Drop --swap to build and verify the "
@@ -3103,6 +3256,10 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
             print("swap: " + (sw.get("refused") or
                               f"swapped={sw['swapped']} retrieval_ok={sw.get('retrieval_ok')} "
                               f"backup {sw.get('backup')}"))
+            if sw.get("revert") and sw.get("retrieval_ok"):
+                # Only on a swap that stuck: on one that did not, `to_undo` below IS this
+                # line, and printing the same mv twice reads as two different repairs.
+                print(f"  to revert: {sw['revert']}")
             if sw.get("to_undo"):
                 print(f"  to undo: {sw['to_undo']}")
         print(f"report: {out}")
@@ -3230,8 +3387,12 @@ def scheduled_side_copy_build(started: datetime) -> dict:
     `tests/test_qmd_index_maintenance.py`:
 
       * it never swaps. `run_side_copy_route` is called with `swap=False`, so
-        `swap_side_copy` — the only caller of `supervisorctl stop` in this file — is not
-        reached from here, and #2458's terminal rail is untouched.
+        `swap_side_copy` — which, with the `restore_swap_backup` it calls on a failed
+        check, is where every `supervisorctl stop` in this file happens — is not reached
+        from here, and #2458's terminal rail is untouched. What changed in #3978 is
+        ONE FUNCTION FURTHER OUT: `scheduled_side_copy_swap` is a second caller of
+        `swap_side_copy`, called by `main()` immediately after this one returns, and it
+        takes only the copy this block records as `built` or `reused`.
       * it never starts a build whose end lands in `SCHEDULED_BUILD_WINDOW_HOURS`, and
         the refusal is both printed and recorded in the block it returns.
       * it never moves the exit code. The route's own rc is recorded as `route_rc` and
@@ -3328,6 +3489,124 @@ def scheduled_side_copy_build(started: datetime) -> dict:
               f"hand step: {out['hand_step']}")
     else:
         out["built"] = name
+    return out
+
+
+def scheduled_side_copy_swap(build_block: dict, vec0: dict | None) -> dict:
+    """Take the SWAP from the nightly run itself when the index is running out of room.
+
+    #3978, Alan's 2026-11-08 ruling on #3119: the vec0 side-copy swap may run unattended
+    from the scheduled maintenance path. This is that one caller, and it is the ONLY
+    relaxation of #2458's terminal rail — an in-process function call, not a flag.
+    `run_side_copy_route` still refuses a command-line `--swap` on a non-terminal stdin
+    before it renames or stops anything, and there is no option, environment variable or
+    marker file that reaches this function: the only way in is the nightly `main()` that
+    measured the occupancy a few lines above and built the copy a few minutes earlier.
+
+    Four conditions, and the block records which one it reached:
+
+      * stdin is not a terminal. The hand invocation is `--rebuild-side-copy NAME --swap`,
+        and a person at a keyboard must not get an unattended daemon restart from the
+        plain script — the same property #3460's build skip keys on.
+      * the run's own measured `vec0` occupancy is strictly below `SWAP_OCCUPANCY_CEILING`.
+        An UNMEASURED vec0 is not a low one (#844's same reasoning), so a measurement gap
+        swaps nothing.
+      * this invocation built or topped up a copy — `built` or `reused` in `build_block`.
+        That is #3954's cycle-bound pick: the EARLIER-dated held copy when the disk holds
+        one, tonight's fresh name otherwise. The swap takes exactly that copy and never a
+        name read off the directory, which is what keeps "the copy that same invocation
+        made" true when a held copy and a fresh one are both present.
+      * the copy re-verifies here, through the route's own `verify_side_copy` — the same
+        measurement a hand swap makes, and a real one on this path: a 36-minute build's
+        floor was measured before the live index grew by the ~900-1100 vectors a night the
+        watcher writes while it runs.
+
+    A failed post-check restores the backup (`auto_restore=True`), because on this path
+    nobody is watching to carry out the recipe the hand path prints. `regression.lock` is
+    held across the whole stop/rename/start sequence by `swap_side_copy` itself, which is
+    what CLAUDE.md asks of anything that restarts the qmd daemon; the nightly inherits it,
+    it does not reimplement it (#3978 clause 5). The block's `failed` is what turns the
+    run red through `_exit_code`: a swap that had to be undone stopped the serving path for
+    nothing and left the capacity still owed.
+    """
+    occ = (vec0 or {}).get("occupancy")
+    out: dict = {"threshold": SWAP_OCCUPANCY_CEILING, "occupancy": occ,
+                 "attempted": False, "swapped": False}
+    if _stdin_is_interactive():
+        out["skipped"] = ("stdin is an interactive terminal: a person gets the swap by "
+                          "asking for it with `--swap`, not by running the plain script")
+        print(f"  side copy SWAP      skipped — {out['skipped']}")
+        return out
+    if occ is None:
+        out["skipped"] = ("vec0 occupancy was not measured, and an unmeasured index is "
+                          "not a low one")
+        print(f"  side copy SWAP      skipped — {out['skipped']}")
+        return out
+    if occ >= SWAP_OCCUPANCY_CEILING:
+        out["skipped"] = (f"occupancy {occ} is at or above the "
+                          f"{SWAP_OCCUPANCY_CEILING} swap ceiling: the index has room, "
+                          f"so the serving path is not stopped")
+        print(f"  side copy SWAP      skipped — {out['skipped']}")
+        return out
+    name = build_block.get("built") or build_block.get("reused")
+    if not name:
+        out["skipped"] = ("this run built or topped up no side copy, so it holds no "
+                          "verification made in this process to swap on")
+        print(f"  side copy SWAP      skipped — {out['skipped']}")
+        return out
+    out["name"] = name
+    out["attempted"] = True
+    print(f"  side copy SWAP      {name}: occupancy {occ} is below the "
+          f"{SWAP_OCCUPANCY_CEILING} ceiling, so this run takes the swap itself — "
+          f"re-verifies the copy, then stops {WATCHER_SERVICE} and {SERVICE} for seconds "
+          f"under regression.lock, and puts the backup back if the check after it fails")
+    try:
+        measured = verify_side_copy(name)
+    except SideCopyRefused as e:
+        out["failed"] = f"the copy this run made could not be verified: {e}"
+        print(f"  side copy SWAP      REFUSED  {out['failed']}")
+        return out
+    if not measured["verification"]["passed"]:
+        out["failed"] = ("the copy this run made failed re-verification: "
+                         + "; ".join(measured["verification"]["failed"]))
+        print(f"  side copy SWAP      REFUSED  {out['failed']}")
+        return out
+    try:
+        swap = swap_side_copy(name, measured["verification"], auto_restore=True)
+    except SideCopyRefused as e:
+        out["failed"] = str(e)
+        print(f"  side copy SWAP      REFUSED  {out['failed']}")
+        return out
+    except Exception as e:  # noqa: BLE001 — a night's swap must not take the report with it
+        out["failed"] = f"{type(e).__name__}: {e}"
+        print(f"  side copy SWAP      FAILED  {out['failed']}")
+        return out
+    out["restored"] = bool(swap.get("restored"))
+    out["swapped"] = bool(swap.get("swapped")) and not out["restored"]
+    out["retrieval_ok"] = bool(swap.get("retrieval_ok"))
+    out["retrieval_hits"] = swap.get("retrieval_hits")
+    out["backup"] = swap.get("backup")
+    out["backup_retention"] = swap.get("backup_retention")
+    out["actions"] = list(swap.get("actions") or []) + list(swap.get("restore_actions") or [])
+    if out["retrieval_ok"]:
+        print(f"  side copy SWAP      swapped {name} in: daemon healthy and retrieval "
+              f"answers ({swap.get('retrieval_hits')} hits); the index it replaced is at "
+              f"{swap.get('backup')}")
+        print(f"                    to revert: {swap.get('revert')}")
+        dropped = (out.get("backup_retention") or {}).get("dropped") or []
+        if dropped:
+            print(f"                    older backups dropped: {', '.join(dropped)}")
+    else:
+        out["failed"] = (
+            f"the check after the swap failed (daemon_healthy "
+            f"{swap.get('daemon_healthy')}, retrieval hits "
+            f"{swap.get('retrieval_hits')})"
+            + ("; the backup was restored, so the pre-swap index is serving again"
+               if out["restored"] else
+               "; the backup was NOT restored"
+               + (f" ({swap['restore_failed']})" if swap.get("restore_failed") else "")
+               + f": {swap.get('to_undo')}"))
+        print(f"  side copy SWAP      FAILED  {out['failed']}")
     return out
 
 
@@ -3504,6 +3783,15 @@ def main() -> int:
     # dry run records no decision because it makes none.
     if report["capacity_approaching"] and not args.dry_run:
         report["side_copy_build"] = scheduled_side_copy_build(started)
+        # #3978 (Alan's ruling on #3119): the same run then takes the SWAP for the copy it
+        # just made, when its own measured occupancy is below the ceiling. ABOVE the work
+        # gate for #2709's reason — the nights that need a swap are exactly the nights that
+        # need no prune and no embed — and BELOW the build block because it swaps the copy
+        # that block says it built or topped up, never one it found on its own. Present
+        # beside the build block on every such night, decision or no decision, so a reader
+        # never has to tell "skipped" from "this version had no swap".
+        report["side_copy_swap"] = scheduled_side_copy_swap(
+            report["side_copy_build"], before.get("vec0"))
 
     # #2709: the WAL reset, ABOVE the work gate rather than inside it. On the 2026-10-14
     # run `need_prune` and `need_embed` were both False, so a checkpoint placed in the
@@ -3704,12 +3992,14 @@ def _emit(r: dict, as_json: bool) -> None:
         # `BY HAND` of the fired run's instruction, because those two lines are counted
         # by name and this is a different state.
         print(f"  capacity APPROACHING  {100*v['occupancy']:.1f} % occupancy, "
-              f"{v['dead_mib']:,.0f} MiB dead — a side-copy rebuild is due by hand "
+              f"{v['dead_mib']:,.0f} MiB dead — a side-copy rebuild is due "
               f"before the red trigger at "
-              f"{100*CAPACITY_OCCUPANCY_TRIGGER:.0f}% occupancy fires, and only its swap "
-              f"needs the terminal: build with `--rebuild-side-copy <name>` (about 36 "
-              f"minutes, stops no service), then swap that copy in with `--swap` from a "
-              f"terminal")
+              f"{100*CAPACITY_OCCUPANCY_TRIGGER:.0f}% occupancy fires. This run builds "
+              f"the copy itself (about 36 minutes, stops no service), and since #3978 it "
+              f"swaps it in too when occupancy is below "
+              f"{100*SWAP_OCCUPANCY_CEILING:.0f}% — the `side_copy_swap` block says what it "
+              f"decided, and a night it did not swap is still owed by hand from a terminal: "
+              f"build with `--rebuild-side-copy <name>`, then swap that copy in with `--swap`")
     owed = r.get("capacity_owed_to_a_person")
     if owed:
         # Its own line, and the run's exit status (#1897). The `capacity verdict
