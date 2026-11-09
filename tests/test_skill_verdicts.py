@@ -698,15 +698,33 @@ def copy_live_ledger(tmp_path) -> Path:
 
 
 def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path):
-    """No `seq-*` row in the real ledger may stop binding because of #1131.
+    """No `seq-*` row in the real ledger may stop **resolving** because of #1131.
 
     For each stored key under the cap: the pattern it came from re-derives that
     exact key — an unscoped disambiguator breaks here, which is the point — and the
     miner's join (`verdict_for`) reaches the row that `terminal_verdict` reaches by
     key. "Under the cap" is measured on the whole key, because that is what the rule
-    measures: `seq-3-` spends 6 of the 50 characters. Measured 2026-09-15 every one
-    of the 53 seq-* rows / 28 distinct keys is under it (longest key 47 characters),
+    measures: `seq-3-` spends 6 of the 50 characters. Measured 2026-11-09 every one
+    of the 327 seq-* rows / 69 distinct keys is under it (longest key 47 characters),
     so the loop below is every row the ledger holds.
+
+    **Resolving is not binding, and only the first one is this node's subject.** A
+    terminal row stops answering `terminal_verdict` for two unrelated reasons: its key
+    became unreachable — the orphaning #1131 exists to catch — or one of its two reopen
+    legs lifted it, which is the ledger *working*: `REOPEN_AFTER_DAYS` releases a
+    terminal verdict 60 days after the key's first decision so the pattern can be
+    re-adjudicated (#2746). Asking the question on the wall clock makes this node a
+    calendar: on 2026-11-09 the 2026-09-10 cohort came due — 3 of the 68 terminal keys
+    released (`seq-2-bash-fs-err-bash-fs` and `seq-3-bash-fs-bash-fs-err-bash-fs`
+    anchored 2026-09-10T08:50:30Z, `seq-2-edit-err-read` 08:50:29Z), exactly the crossing
+    `skill_verdicts.date_leg_crossed` had predicted the day before — and the node went
+    red over a passing of days, which no fix can prevent again. So resolution is now
+    asked on a clock pinned one day inside the row's own window with `occurrences` equal
+    to the stored baseline, which puts BOTH legs inside their windows and leaves the key
+    rule as the only thing that can answer None; binding is still checked on the real
+    clock the miner actually runs on, and a release there is demanded to carry a
+    `reopen_reason`, because a None from neither leg is an orphaning. The three releases
+    stand: their keys are free to be re-proposed tonight, which is what the leg is for.
 
     A stored key *at or past* the cap is out of this loop's reach for a mechanical
     reason: the row stores the key, not the n-gram, so `seq_pattern_for_key` cannot
@@ -768,12 +786,32 @@ def test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_pat
         occ = int(row.get("occurrences_at_decision") or 0)
         pattern["total_calls"] = occ
         joined = mt.verdict_for(pattern, store=store)
-        if sv.is_terminal(row):
-            assert sv.terminal_verdict(key, store=store, occurrences=occ) is not None
-            assert joined is not None, f"{key}: the miner's join missed a terminal row"
-            assert joined["verdict"] == row["verdict"]
-        else:
+        if not sv.is_terminal(row):
             assert joined is None, f"{key}: a non-terminal row now blocks a candidate"
+            continue
+        # RESOLVES, on a clock pinned inside this row's own window. `now` one day past
+        # the row's anchor keeps the 60-day leg un-crossed (`date_leg_crossed` releases
+        # only strictly past `REOPEN_AFTER_DAYS`), and `occurrences == the stored
+        # baseline` keeps the >10x growth leg un-fired, so the only mechanism left that
+        # can answer None is a key that no longer reaches its row. A row whose date
+        # cannot be read is never crossed at all, so it needs no pin.
+        anchor = sv.date_leg_anchor(row)
+        pinned = anchor + timedelta(days=1) if anchor is not None else None
+        resolved = sv.terminal_verdict(key, store=store, occurrences=occ, now=pinned)
+        assert resolved is not None, (
+            f"{key}: a terminal row under the cap stopped resolving with both reopen "
+            "legs pinned inside their windows — that is an orphaning, not a lapse")
+        assert resolved["verdict"] == row["verdict"]
+        # BINDS, on the clock the miner really runs on: `verdict_for` passes no `now`,
+        # so its join and the key lookup have to agree on the wall clock or the two
+        # readers of one ledger disagree about which patterns are suppressed.
+        live = sv.terminal_verdict(key, store=store, occurrences=occ)
+        assert joined == live, (
+            f"{key}: the miner's join and the key lookup disagree on the same clock")
+        if live is None:
+            assert sv.reopen_reason(row, occurrences=occ) is not None, (
+                f"{key}: released by neither reopen leg, so this None is an orphaning "
+                "wearing a lapse's clothes")
 
 
 def test_the_sequence_verdict_guard_skips_when_the_verdict_ledger_is_absent(
@@ -837,6 +875,57 @@ def test_an_empty_but_present_ledger_fails_rather_than_skips(tmp_path, monkeypat
     with pytest.raises(AssertionError) as caught:
         test_every_stored_sequence_verdict_still_resolves_after_the_widening(tmp_path)
     assert "under-cap seq-* rows" in str(caught.value), caught.value
+
+
+def _crossed_cohort_ledger(tmp_path, *, with_orphan: bool):
+    """A synthetic present ledger of 24 under-cap `seq-*` keys / 48 rows, every one of
+    them terminal and anchored 61 days ago, so every leg the guard's pin neutralises is
+    crossed on the real clock. `with_orphan` adds one key the rule cannot emit
+    (`seq-2-ab--cd`: a double hyphen collapses, so the stored key is unreachable) — the
+    orphaning the node below is looking for, wearing a crossed leg.
+    """
+    stamp = (datetime.now(tz=timezone.utc) - timedelta(days=sv.REOPEN_AFTER_DAYS + 1))
+    lines = []
+    for key in [f"seq-2-k{n:02d}-a" for n in range(24)] + (
+            ["seq-2-ab--cd"] if with_orphan else []):
+        for _ in range(2):
+            lines.append(json.dumps({
+                "pattern_key": key, "verdict": "rejected_unverifiable",
+                "reason": "fixture", "decided_at": stamp.isoformat(),
+                "first_decided_at": stamp.isoformat(),
+                "occurrences_at_decision": 4}))
+    ledger = tmp_path / "reviews" / "verdicts.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return ledger
+
+
+def test_a_crossed_date_leg_neither_blinds_the_guard_nor_reddens_it(
+        tmp_path, monkeypatch):
+    """Both directions of the resolving/binding split above, on a cohort whose 60-day
+    leg is crossed so the wall clock cannot be the answer.
+
+    The crossed cohort WITHOUT the orphan must PASS: 48 rows, every terminal row released
+    by the date leg on the real clock, and the guard still resolves each one and demands
+    a `reopen_reason` for its release — which is the #3995 red, made impossible on a
+    ledger that merely aged. The same cohort WITH one unreachable key must FAIL on the
+    key-rule assertion: a lapse buys an orphaning nothing. `seq-2-ab--cd` is unreachable
+    because `slug_for` collapses the doubled hyphen, so no pattern re-derives the stored
+    key — measured, not assumed, by the assert below."""
+    assert mt.candidate_pattern_key(seq_pattern_for_key("seq-2-ab--cd")) != "seq-2-ab--cd", \
+        "the fixture key stopped being the unreachable shape this node needs"
+
+    clean = _crossed_cohort_ledger(tmp_path / "aged", with_orphan=False)
+    monkeypatch.setattr(_THIS, "LIVE_LEDGER", clean)
+    test_every_stored_sequence_verdict_still_resolves_after_the_widening(
+        tmp_path / "aged-copy")
+
+    dirty = _crossed_cohort_ledger(tmp_path / "orphaned", with_orphan=True)
+    monkeypatch.setattr(_THIS, "LIVE_LEDGER", dirty)
+    with pytest.raises(AssertionError) as caught:
+        test_every_stored_sequence_verdict_still_resolves_after_the_widening(
+            tmp_path / "orphaned-copy")
+    assert "the key rule changed below the cap" in str(caught.value), caught.value
 
 
 def test_a_widened_sequence_key_survives_the_candidate_round_trip(tmp_path, store):
