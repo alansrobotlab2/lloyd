@@ -1405,8 +1405,8 @@ def test_the_own_series_ruling_lands_in_the_definition_and_not_in_the_tier_table
     # That the seven-job check can fail is shown, not claimed: the same read of a
     # table with #90 moved up one row reports it moved.
     seeded = _text().replace("#78 #80 #36 #86 #90 · ", "#78 #80 #36 #86 · ", 1)
-    seeded = seeded.replace("#92 #93 #94 #99 #103 | 28 |",
-                            "#90 #92 #93 #94 #99 #103 | 28 |", 1)
+    seeded = seeded.replace("#92 #93 #94 #99 #103 | 29 |",
+                            "#90 #92 #93 #94 #99 #103 | 29 |", 1)
     assert seeded != _text(), (
         "the seeded movement did not take, so the check below would prove nothing")
     seeded_hits = [t for t, ids in _tiers_from(seeded).items() if "#90" in ids]
@@ -6443,7 +6443,13 @@ CADENCE_CELLS: dict[str, dict[str, str]] = {
                       # §Bound entropy gained pins on the same footing as #104's and
                       # #108's — and the row-set node keeps the row and this key one
                       # set, so neither can arrive without the other.
-                      "#110": "daily"},
+                      "#110": "daily",
+                      # #4021: `~/obsidian/autonomy/111-entity-vectors-rebuild.md` declares
+                      # `frequency: weekly` and no `runs_per_day`, so `_frequency_interval_seconds`
+                      # resolves the word alone (604800 s) and the row §Bound entropy gained pins
+                      # on the same footing as #104's, #108's and #110's — with the row-set node
+                      # keeping row and key one set.
+                      "#111": "weekly"},
     # #3738: §Watch the machinery, and the one entry in this dict nobody types. The
     # cadence is `WATCH_JOBS`'s first probe — the value #2630 read off each job's task
     # file and has pinned its row's Freq cell against ever since — so the fifteen cells

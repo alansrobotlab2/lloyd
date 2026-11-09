@@ -221,14 +221,18 @@ sources to `extract_entities_from_query`, both unioned AFTER the lexical top
 names (scoring their canonical), and `k=3` Qwen3-Embedding-0.6B nearest entities
 over `name (kind): top facts` (`app/entity_linker.py`, index built by
 `scripts/memory/build_entity_vectors.py`, query embedded in-process by
-`app/qwen3_embed.py`). That builder **has never been scheduled**: no queue kind, no
-autonomy task and no unit in this tree runs it, the job that would is not armed, so
-the artifact is hand-built and its age is bounded only by `MAX_INDEX_AGE_DAYS` in
-`app/entity_linker.py` and the reading
+`app/qwen3_embed.py`). That builder had **no runner at all** when #3907 read it: no queue
+kind, no autonomy task and no unit in this tree ran it, so the artifact was hand-built and
+its age was bounded only by `MAX_INDEX_AGE_DAYS` in `app/entity_linker.py` and the reading
 `scripts/memory/build_entity_vectors.py --status` (rows, age, live-entity coverage,
-provenance; exit 1 stale, 2 absent, 3 store unreadable). On 2026-11-07 that check
-exits 1 — 11,990 rows against 16,846 live entities, 42.9 days old, `build.json` absent
-(#3907) — and `_load_index` now logs the same line once per cold load instead of
+provenance; exit 1 stale, 2 absent, 3 store unreadable). #4021 armed autonomy job **#111**
+on 2026-11-09 to rebuild it weekly (`skills/entity-vectors-rebuild/SKILL.md`,
+`timeout_seconds: 7200`), so the bound now has a cadence behind it. Read again at
+2026-11-09T21:59Z, before that job's first run, the same check still exits 1 — 11,990 rows
+against 16,964 live entities, **44.90 days** old, 70.4% coverage (5,020 entities unseedable,
+46 index names no longer live), `build.json` **ABSENT**
+(#3907 read it at 42.9 days with `build.json` absent; nothing has rebuilt it since) —
+and `_load_index` now logs the same line once per cold load instead of
 serving an unbounded-age index in silence. `recall_seeds` is the one list `vault_recall` and the eval
 both use; the doc leg starts before the seeds when the semantic half is on.
 Paired on one pin, 86 queries: entity_hit 0.337 → 0.500 (+0.163 [0.093, 0.244]),

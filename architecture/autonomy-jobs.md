@@ -39,9 +39,13 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: ids run 24 through 110 or beyond, with gaps where tasks were retired
-(2026-11-09). #110, the guardian daily-note `dated:` sweep, is the newest in these tables — its
-task file entered the directory at 16:25Z on 2026-11-09, filed by backlog item #3999 through
+ordered: ids run 24 through 111 or beyond, with gaps where tasks were retired
+(2026-11-09). #111, the entity-vector index rebuild, is the newest in these tables — filed by
+backlog item #4021 at 21:05Z on 2026-11-09 with its row in both tables written in the same
+round, so the `DOC_MEMBERSHIP` warning the two before it owed never opened, and armed by that
+round's next commit, which moved `status` and nothing else; #110, the guardian daily-note
+`dated:` sweep, is the newest before it — its task file entered the directory at 16:25Z on
+2026-11-09, filed by backlog item #3999 through
 `automod_vault_land` rather than the `autonomy_write_task` route, so no commit named it
 as it was filed and the two `DOC_MEMBERSHIP` warnings it owed stayed open until #4010 paid
 them the same day; #109, the behaviour-exhibit daily sweep, was the newest before it — its
@@ -87,8 +91,12 @@ include it. The dependency arithmetic follows the fleet that actually runs inste
 #98 declares `depends_on: 24` while it sits `status: draft`, so the wiring diagram
 still draws the ten arrows #1520 verified and §The wiring keeps its own dated count.
 Arming the job is what adds the eleventh arrow and moves that sentence one, and
-sending a filed task to `up_next` is a dispatch-affecting edit an unattended round
-may not make, which is why that step is a person's. Which state an id is in is
+sending a filed task to `up_next` is a dispatch-affecting edit, and #3464 narrowed what
+that means for a round: `policy.first_arm_allowed` lets an unattended round land a task's
+FIRST arm — a never-run, unparked file whose move carries `status` and no other dispatch
+field, which is why a round's create lands `draft` and the arm that follows is a one-key
+commit — while every other dispatch-field move (`frequency`, `preferred_hours`,
+`depends_on`, any cadence change on an armed task) stays a person's step. Which state an id is in is
 `GET /api/autonomy/tasks`'s business, as above.
 
 **Membership below is complete as of 2026-10-17, in both directions, and since
@@ -138,7 +146,7 @@ other direction, for three.
 | [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges |
 | [Canonicalize](#canonicalize-48-67-84-98) | #48 #67 #84 #98 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
-| [Bound entropy](#bound-entropy-79-81-78-80-90-104-108-110) | #79 #81 #78 #80 · #90 · #104 · #108 · #110 | stop the stores rotting or growing without limit |
+| [Bound entropy](#bound-entropy-79-81-78-80-90-104-108-110-111) | #79 #81 #78 #80 · #90 · #104 · #108 · #110 · #111 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
 | [Watch the machinery](#watch-the-machinery-91-92-93-94-95-96-97-99-100-101-102-103-105-106-107-109) | #91 #92 #93 #94 #95 #96 #97 #99 #100 #101 #102 #103 #105 #106 #107 #109 | read the machinery the rest of the fleet runs on — session traces, the engine's log window, run records, loaded memory, the mitigations, the decision engine, the loop's own landings, the instrument index, the retrieval arms run, the shipped code rules, the published paired-check maxima, the flip gate's own ceiling reading, the exhibit rate swept from the session corpus — and report what it looks like |
 
@@ -193,7 +201,7 @@ run reads what it wrote. The five rows, each with the count beside it:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 #110 · #48 #98 · #92 #93 #94 #99 #103 | 28 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 #110 · #48 #98 #111 · #92 #93 #94 #99 #103 | 29 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
 | Reports only | #60 #82 #70 #78 #80 #36 #86 #90 · #91 #95 #96 #97 · #100 #101 #102 · #104 #105 #106 #107 · #108 · #109 | 21 |
@@ -1060,7 +1068,7 @@ replaced it.
 
 ---
 
-## Bound entropy: #79, #81, #78, #80, #90, #104, #108, #110
+## Bound entropy: #79, #81, #78, #80, #90, #104, #108, #110, #111
 
 Stop the stores rotting or growing without limit. The group splits on write
 authority: #79 and #81 delete and rebuild, #78 and #80 only report what they find,
@@ -1082,6 +1090,7 @@ beyond its own output", or #90's row contradicts its own Role cell.
 | #104 | daily | yes | Keep `~/Projects/ArtCraft` current: one `sync.sh -j 6` call reads every repo there together with its upstream, advances each repo's current branch with `--ff-only`, and leaves behind those advanced pointers plus one closing `artcraft sync: updated=<N> current=<N> held=<N> failed=<N>` line — nothing in any store this fleet reads back. A repo the script held is the finding, not a flake: the run must never merge, rebase, stash, reset or force one, and never edit `sync.sh` or `sync.conf` to move it |
 | #108 | daily | yes | Keep one repo, `~/Projects/SolidCraft`, current: fetch every remote with `--prune`, then advance the *not-checked-out* `main` to `origin/main` with the single git command its skill lets it author (`git fetch origin main:main`), and report every row it printed plus one closing `solidcraft sync: fetch=<ok\|failed> main=<uptodate\|updated\|held> head=<branch> held=<N>` line. The only state it moves is that repository's own tracked branch pointer, on a pure fast-forward, so it too changes bytes in none of the stores this document governs; the working copy normally sits on a feature branch with unpushed work, which is why `held=1` is the expected reading and why `git status`/`git log` there answer about a stale `main` and a live fork. A branch it refused to move is the finding, not a flake: never checkout or switch, merge, rebase, stash, reset, clean or push, and never move a branch that needs a human's merge decision |
 | #110 | daily | yes | Date the guardian alarm blocks a live re-read refutes: `scripts/maintenance/guardian_note_sweep.py` re-reads the four witnesses (`supervisorctl status`, the `/tmp` inode figure, the data/vault tripwires, the snapshot HEAD) and, on a second explicitly-flagged `--apply` pass only, appends a `dated:` retraction naming the reading that now contradicts the block — the repair the guardian cannot make itself, because `notify.DAILY_SCAN_DAYS = 3` means it rewrites only the last three daily notes and an older alarm there stands unretracted. The run never passes `--notes`, `--conf` or `--day`: the first two retarget the corpus or the supervisord, and `--day` is the date stamped onto the retraction, so back-dating one fabricates the observation the marker exists to record honestly |
+| #111 | weekly | yes | Rebuild the entity-vector index the semantic seeding leg serves: `scripts/memory/build_entity_vectors.py` re-embeds every live entity into `names.json`, `vectors.npy` and `build.json` under `~/lloyd-data/_pipeline/vault-derived/entity-vectors/`; the run is `--status` before, the build, `--status` after, and one `entity-vectors: before=… after=… status=…` line — it edits no file, files no item, and never names `--out` |
 
 **#81 is the one with a measured payoff**: orphaned chunks had grown the index to
 24 GB and vec queries to 700 ms, and orphans displace real results, so it buys
@@ -1136,9 +1145,9 @@ corpora the write-authority table still tiers both `Reports only` — the one it
 run files is board bookkeeping, not a write into a corpus. Both are green as of 2026-10-27 — one weekly run each in
 the seven days to that date, no failure and no timeout, 0.06 GPU-h between them — and
 the group's other three ran seven times each over the same unclamped window, 0.53
-GPU-h across the group as it stood on that date. Eight members today, five of them
-over that window: #104 joined the group on 2026-10-29, #108 on 2026-11-03 and #110 on
-2026-11-09, all three after these seven days closed, so none of them is in any of these
+GPU-h across the group as it stood on that date. Nine members today, five of them
+over that window: #104 joined the group on 2026-10-29, #108 on 2026-11-03, and #110
+and #111 on 2026-11-09, all four after these seven days closed, so none of them is in any of these
 numbers. The number in this group worth
 watching is not a failure rate: #78's run of 2026-10-14 took 1,055.6 s of its
 1,200 s budget, 88% of it and the only approach to a cap any member has made, on a
