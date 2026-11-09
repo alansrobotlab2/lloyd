@@ -107,6 +107,466 @@ DEFAULT_PRIORITY = 60
 #: exactly nothing in `seen.json`.
 INFRA_DEFER_SECONDS = 900
 
+# ── The on-screen-text leg (item #3983) ─────────────────────────────────────
+#
+# The digester's known blind spot is the proper noun: auto-captions garble them
+# ("claw code"/"cloud code" for Claude Code, "Mario Zuckner" for Mario Zechner)
+# and a name the transcript cannot spell is a name the note either recovers from
+# model priors or logs as unverifiable. A frame can spell it. This leg reads the
+# on-screen text of the keyframes `youtube_channel_monitor --frames=<id>` samples
+# and writes a small, filtered TEXT sidecar into the bundle.
+#
+# It is not wired into any job: it runs only when a person invokes that flag,
+# because the paired comparison that has to justify the whole arm (#3983's owed
+# check) needs every nightly digest to stay the transcript-only control.
+#
+# What this is NOT, stated once so no later reader reconstructs it: not an input
+# to the live voice hotword set (#1057 — those terms are admitted per-term by
+# `hotword_eval.py`, and nothing here feeds it); not a claim about retrieval (no
+# `entity_hit_rate` effect is asserted anywhere in this file, and none is
+# measured); and not a way to put a video in front of the model.
+
+ONSCREEN_FILENAME = "onscreen.jsonl"
+FRAME_MANIFEST = "frames.jsonl"
+
+#: What the prompt's `onscreen:` line says when the bundle has no sidecar. Spelled
+#: out as a constant because the word is load-bearing: it is the same token the
+#: digest skill's provenance rule reads as "there is no second source here, so
+#: every literal you assert came from the transcript".
+ONSCREEN_ABSENT = "none"
+
+#: Hard ceiling on frames per vision request. The engine is booted
+#: `limit_mm_per_prompt: {'image': 20}` (asserted in
+#: `agent-services/bin/flash-next-bootfacts.sh`, pinned by
+#: `tests/test_flash_next_launcher.py`), so a request carrying 21 images is not
+#: merely slow, it is refused. Frames are split into batches at this number,
+#: never truncated to it.
+MAX_FRAMES_PER_REQUEST = 20
+
+#: Per frame. A slide has a title and a few body fragments; a model that returns
+#: a paragraph back is returning its own summary of the slide, and a summary of a
+#: slide is exactly the contamination this filter exists to keep out.
+MAX_LITERALS_PER_FRAME = 8
+MAX_LITERAL_CHARS = 80
+
+#: The vision slot, by alias — `models.primary.supports_vision: true`
+#: (`config.yaml:983`). Resolved through the real config rather than a hard-coded
+#: URL, so a box whose primary cannot take images degrades to "no on-screen text"
+#: instead of failing a bundle.
+VISION_MODEL_ALIAS = "primary"
+VISION_TIMEOUT_SECONDS = 300      # 20 images at ~1300 estimated tokens each
+VISION_MAX_NEW_TOKENS = 2200
+
+#: Candidate literals are dropped when every word in one is ordinary English. The
+#: subtraction is of GENERAL vocabulary, not of a name list: what is worth
+#: proposing is a rare token ("KernelBench", "RoPE", "roofline"), and a frame of
+#: ordinary prose ("We evaluate the model on three tasks") must contribute
+#: nothing. Deliberately short and deliberately boring — the owed measurement is
+#: allowed to sharpen it.
+GENERAL_VOCAB = frozenset("""
+a an the and or but if then than that this these those with without from into
+onto over under above below of for to in on at by as is are was were be been
+being do does did doing have has had having will would shall should can could
+may might must not no nor so such very more most other another some any each
+every all both few many much less least about after before during while when
+where why how who whom whose which what we our us you your yours they them
+their it its he she him her his hers one two three four five six seven eight
+nine ten hundred thousand million people person thing things way ways part
+parts example examples question questions answer answers problem problems
+result results data information model models system systems task tasks
+training trained train test testing code work working works using use used
+uses make makes made run runs running time times day days year years week
+weeks hour hours minute minutes second seconds good great bad better best new
+old first last next final large small high low big long short fast slow right
+left top bottom today tomorrow yesterday here there now also because however
+therefore within without across between among while
+""".split())
+
+#: Player and recorder chrome: text drawn around the talk rather than by it. It
+#: has its own rule because the chrome that matters survives a vocabulary test —
+#: a watermark URL, a `12:04 / 58:31` overlay — and it must never reach the
+#: candidate list at all.
+UI_CHROME_PATTERNS = (
+    re.compile(r"^\s*(subscribe|subscribed|subscription|subs|watch later|share|"
+               r"copy link|save|playlist|report|download|transcript|show more|"
+               r"show less|comments?|likes?|dislike|go to channel|scheduled pause)"
+               r"\s*[.:!]*\s*$", re.IGNORECASE),
+    re.compile(r"(youtube\.com|youtu\.be|bit\.ly|goo\.gl|discord\.(gg|com)|"
+               r"patreon\.com)", re.IGNORECASE),
+    re.compile(r"^\s*\d[\d:]*\s*/\s*\d[\d:]*\s*$"),
+    re.compile(r"^\s*\d[\d,.]*\s*(views?|subscribers?)\b", re.IGNORECASE),
+    # Anchored to the whole literal, and combinations allowed: a frame that reads
+    # `HD 1080p` is a quality badge, and the word-level list alone would keep it as
+    # a candidate entity on every video. Anchoring is what keeps `GitHub Copilot`
+    # alive — the exception in `is_general_vocabulary` runs one way on purpose.
+    re.compile(r"^\s*(cc|hd|sd|uhd|4k|8k|2160p|1440p|1080p|720p|480p|360p"
+               r"|settings?|auto(?:ded|matic)?|quality|annotations?)"
+               r"(\s+(cc|hd|sd|uhd|4k|8k|2160p|1440p|1080p|720p|480p|360p))*\s*$",
+               re.IGNORECASE),
+    re.compile(r"^\s*(youtube|subtitles?|captions?|watch later|not now|"
+               r"skip ad|skip intro|ads by|watch on youtube|new to youtube?"
+               r"|premiere[sd]?|live stream(ed)?|members only|donate|merch)"
+               r"(\s+\w+){0,3}\s*[.:!]*\s*$", re.IGNORECASE),
+    re.compile(r"^\s*[\W_]+\s*$"),
+    re.compile(r"^\s*(chapter|timestamp|skip (ad|intro))\b", re.IGNORECASE),
+)
+
+
+def literal_kind(item):
+    """('title' | 'body', text) for one OCR literal; default is the cautious 'body'."""
+    if isinstance(item, dict):
+        kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+        text = str(item.get("text") or item.get("literal") or "")
+    else:
+        kind, text = "", str(item if item is not None else "")
+    return ("title" if kind == "title" else "body"), text
+
+
+def is_ui_chrome(text):
+    """True when a literal is player/recorder chrome rather than slide content."""
+    return any(pattern.search(text) for pattern in UI_CHROME_PATTERNS)
+
+
+def _title_cased(text):
+    """True when every alphabetic word of the literal starts uppercase.
+
+    The signal the token test cannot have: `AI Engineer` is this channel's name and
+    every one of its tokens is in `GENERAL_VOCAB`, while the prose the drop exists
+    for — "the model is better" — is never written with every word capitalised. Two
+    words minimum, so a sentence-initial "The" or "Video" left alone by the OCR does
+    not become a candidate entity by the accident of starting a line.
+    """
+    words = [w for w in re.split(r"[^0-9A-Za-z']+", text) if w]
+    lettered = [w for w in words if any(c.isalpha() for c in w)]
+    return len(lettered) >= 2 and all(w[0].isupper() for w in lettered)
+
+
+def is_general_vocabulary(text):
+    """True when EVERY token of the literal is ordinary English — so, not a name.
+
+    Tokenised on non-alphanumerics and compared case-folded against
+    `GENERAL_VOCAB`. One token outside the list survives the drop, which is the
+    point: "the L/Z debate", "KernelBench" and "roofline" each carry a token worth
+    proposing, and "the model is better on the second task" carries none. Digits
+    are ordinary tokens, so a bare figure is dropped — a number becomes a
+    candidate only as part of a named thing ("GPT-4o", "Top-5").
+
+    A title-cased literal escapes the drop (`_title_cased`), because the
+    case-folded comparison cannot tell a two-word proper noun from a clause, and
+    the channel's own name is exactly that shape. Asymmetry is deliberate: a kept
+    phrase costs one row of the capped eight-literal list, a dropped name costs the
+    literal this leg was built to recover.
+    """
+    tokens = [t for t in re.split(r"[^0-9A-Za-z']+", text.lower()) if t]
+    if not tokens:
+        return True
+    if _title_cased(text):
+        return False
+    return all(token in GENERAL_VOCAB for token in tokens)
+
+
+def filter_onscreen_literals(parsed):
+    """Reduce one frame's raw OCR output to the literals worth proposing.
+
+    Input is a list of strings or `{"text", "kind"}` dicts — whatever the vision
+    model returned. Output is `{"literals": [{"text", "kind"}], "dropped": int}`.
+
+    Two rules in the order the research note settled them
+    (`knowledge/research/2026-10-19-keyframe-ocr-of-on-screen-text-as-a-candidate-entity-source-.md`,
+    item #3983 step 3): drop UI chrome first, because a
+    watermark is not even a candidate; then subtract general vocabulary. Title-flagged
+    literals are ordered before body ones, duplicates fold, and the list is capped at
+    `MAX_LITERALS_PER_FRAME` entries of `MAX_LITERAL_CHARS` characters — an over-long
+    literal is a summary of a slide, and a summary is where contamination comes from.
+
+    `dropped` is recorded rather than discarded: a pass that dropped everything it
+    read means the filter is wrong, and the count is how you notice.
+    """
+    kept, dropped = [], 0
+    for item in parsed or []:
+        kind, text = literal_kind(item)
+        text = re.sub(r"\s+", " ", text).strip(" \t\"'“”«»·-—")
+        if not text or len(text) > MAX_LITERAL_CHARS:
+            dropped += 1
+            continue
+        if is_ui_chrome(text) or is_general_vocabulary(text):
+            dropped += 1
+            continue
+        kept.append({"text": text, "kind": kind})
+    seen, out = set(), []
+    for row in sorted(kept, key=lambda r: 0 if r["kind"] == "title" else 1):
+        if row["text"].lower() in seen:
+            dropped += 1
+            continue
+        seen.add(row["text"].lower())
+        out.append(row)
+    return {"literals": out[:MAX_LITERALS_PER_FRAME],
+            "dropped": dropped + max(0, len(out) - MAX_LITERALS_PER_FRAME)}
+
+
+def read_frame_manifest(bundle_dir):
+    """The bundle's frame rows from `frames.jsonl`; [] when the bundle has none.
+
+    Absent is the normal case: a bundle written by `--fetch` alone has no frames,
+    and a digest run must not care. Never raises.
+    """
+    path = Path(bundle_dir) / FRAME_MANIFEST
+    rows = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("path") and "ts" in row:
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
+def plan_ocr_batches(rows, per_request=MAX_FRAMES_PER_REQUEST):
+    """Split frame rows into batches of at most `per_request` frames.
+
+    Splitting, never truncating: 24 frames is two requests of 20 and 4, not one
+    request that quietly dropped 4. A pass that silently skipped frames would make
+    `onscreen.jsonl` claim the screen said nothing in the part it never looked at.
+    `per_request` is injectable so the batching is testable without 20 real
+    images, and it can lower the batch size but never raise it past the engine's
+    `limit_mm_per_prompt: {'image': 20}` ceiling.
+    """
+    size = max(1, min(int(per_request), MAX_FRAMES_PER_REQUEST))
+    return [rows[start:start + size] for start in range(0, len(rows), size)]
+
+
+def ocr_prompt(frames):
+    """The instruction for one batch. `frames` is [(index, ts, path_under_bundle)].
+
+    Asks for per-frame literals with a title/body flag, in JSON, and says plainly
+    that a frame with no text is an empty list — a model that invents a title to
+    fill a response is the failure this whole leg is one filter away from. It asks
+    for text only, never a transcription of a sentence: the sidecar is a candidate
+    list for names, not a second transcript.
+    """
+    listed = "\n".join(f"  frame {index}: {path}" for index, _ts, path in frames)
+    return (
+        "Each image below is one keyframe sampled from a conference talk video, "
+        "in the order listed. Report only TEXT THAT IS VISIBLY RENDERED ON SCREEN "
+        "(slide titles, slide bullets, code or terminal identifiers, diagram "
+        "labels, equation as plain text). Do not transcribe speech. Do not "
+        "describe the scene. Do not report anything you infer rather than read.\n\n"
+        "Frames, in the order the images follow:\n" + listed + "\n\n"
+        "Reply with one JSON object: "
+        "{\"frames\": [{\"index\": <int>, \"literals\": "
+        "[{\"text\": <string>, \"kind\": \"title\"|\"body\"}]}]}. "
+        "One entry per frame you were given, in order. A frame with no visible "
+        "text gets \"literals\": [] — that is the correct answer for a talking "
+        "head, not a failure. Keep each text under 80 characters: a fragment, not "
+        "a sentence you assembled yourself.")
+
+
+def parse_ocr_answer(text, count):
+    """{index: [raw literal, …]} from a model reply; {} when the reply is unusable.
+
+    Tolerates a fenced block and surrounding prose because the model does that; a
+    reply that is not JSON yields {}, which the caller records as that batch
+    contributing nothing rather than as a crash.
+    """
+    body = (text or "").strip()
+    if body.startswith("```"):
+        body = re.sub(r"^```[a-zA-Z]*\s*", "", body)
+        body = re.sub(r"\s*```$", "", body).strip()
+    start, stop = body.find("{"), body.rfind("}")
+    if start < 0 or stop <= start:
+        return {}
+    try:
+        parsed = json.loads(body[start:stop + 1])
+    except ValueError:
+        return {}
+    rows = parsed.get("frames") if isinstance(parsed, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    out: dict[int, list] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            index = int(row.get("index"))
+        except (TypeError, ValueError):
+            continue
+        literals = row.get("literals")
+        if 0 <= index < count and isinstance(literals, list):
+            out[index] = literals
+    return out
+
+
+def vision_batch_data_urls(bundle_dir, frames):
+    """data: URLs for one batch's frames, read from the bundle at call time.
+
+    Returns (urls, error). A frame file that cannot be read fails the batch, not
+    the pass — the caller records the reason and moves to the next batch. Bytes
+    live in this list and in the request body only: they are never logged, written
+    to the bundle, or handed to a session.
+    """
+    import base64
+
+    urls = []
+    for _index, _ts, rel in frames:
+        path = Path(bundle_dir) / rel
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return [], f"{rel}: {type(exc).__name__}"
+        if not raw:
+            return [], f"{rel}: empty frame file"
+        urls.append("data:image/jpeg;base64,"
+                    + base64.b64encode(raw).decode("ascii"))
+    return urls, None
+
+
+def post_vision_batch(prompt, data_urls, *, alias=VISION_MODEL_ALIAS,
+                      timeout=VISION_TIMEOUT_SECONDS):
+    """One non-streaming vision request; (text, None) or ('', reason).
+
+    Mirrors `app/harness.tool_images.describe_image` — the same payload shape, the
+    same "empty string on any failure" posture — because a box whose primary
+    cannot take images, or an engine that is mid-restart, must leave the bundle
+    without a sidecar rather than fail the video. The request body carries the
+    images and is never logged, printed or written: `timeout` is the wall clock for
+    20 images at ~1300 estimated tokens each.
+    """
+    import httpx
+
+    from app.config import _get_model_cfg
+    from app.harness.tool_images import model_supports_vision
+
+    if not model_supports_vision(alias):
+        return "", (f"models.{alias}.supports_vision is not true — this box has "
+                    f"no vision route to read frames with")
+    entry = _get_model_cfg(alias) or {}
+    base_url = str(entry.get("base_url") or "").rstrip("/")
+    if not base_url:
+        return "", f"models.{alias}.base_url is empty"
+    payload = {
+        "model": entry.get("alias") or alias,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            *[{"type": "image_url", "image_url": {"url": url}}
+              for url in data_urls],
+        ]}],
+        "max_tokens": VISION_MAX_NEW_TOKENS,
+        "temperature": 0.1,
+        "stream": False,
+    }
+    try:
+        resp = httpx.post(f"{base_url}/chat/completions", json=payload,
+                          timeout=timeout)
+    except Exception as exc:                       # noqa: BLE001 — any transport
+        return "", f"vision request failed: {type(exc).__name__}: {str(exc)[:180]}"
+    if resp.status_code != 200:
+        return "", (f"vision route returned {resp.status_code}: "
+                    f"{resp.text[:180]}")
+    try:
+        body = resp.json()
+        content = body["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return "", "vision reply had no message content"
+    usage = body.get("usage") or {}
+    return (str(content), {"prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                           "completion_tokens": int(
+                               usage.get("completion_tokens") or 0)})
+
+
+def run_onscreen_pass(meta, *, log=print, vision=post_vision_batch,
+                      per_request=MAX_FRAMES_PER_REQUEST):
+    """Write the bundle's `onscreen.jsonl` from its sampled frames.
+
+    Returns (summary, None) or (None, reason). `vision` is the request function,
+    injectable so the batching and the filter are testable without an engine
+    booted for vision or a frame that ever left `/tmp`.
+
+    Rows are `{"ts": <frame seconds>, "literals": [{"text", "kind"}],
+    "dropped": <int>}` — the frame's timestamp is what makes a later claim
+    checkable, and it is the reason this file exists: the digest may assert a
+    screen-derived literal only with the timestamp it was read at, and a
+    deterministic check can then re-verify that the literal really is in this file
+    at that frame. No image bytes, ever: this file is text and the frames it
+    describes stay in `frames/`.
+    """
+    bundle_dir = meta.get("bundle_dir") or ""
+    if not bundle_dir:
+        return None, "meta.json has no bundle_dir"
+    rows = read_frame_manifest(bundle_dir)
+    if not rows:
+        return None, f"no {FRAME_MANIFEST} in the bundle (run --frames first)"
+    indexed = [(i, row["ts"], str(row["path"])) for i, row in enumerate(rows)]
+    batches = plan_ocr_batches(indexed, per_request=per_request)
+    out_rows, requests, prompt_tokens, failures = [], 0, 0, []
+    unreadable = 0
+    for batch in batches:
+        urls, err = vision_batch_data_urls(bundle_dir, batch)
+        if err:
+            unreadable += 1
+            failures.append(f"batch at frame {batch[0][0]}: {err}")
+            continue
+        answer, extra = vision(ocr_prompt(batch), urls)
+        if not answer:
+            failures.append(f"batch at frame {batch[0][0]}: {extra}")
+            continue
+        requests += 1
+        if isinstance(extra, dict):
+            prompt_tokens += int(extra.get("prompt_tokens") or 0)
+        answers = parse_ocr_answer(answer, len(indexed))
+        for index, ts, path_in_batch in batch:
+            filtered = filter_onscreen_literals(answers.get(index, []))
+            # `frame` is the path under the bundle, so a row is auditable on its
+            # own: whoever checks a note's provenance later opens exactly this
+            # JPEG without cross-referencing frames.jsonl. It is a name, never the
+            # bytes — see the module's text-only rule above.
+            out_rows.append({"ts": ts, "frame": path_in_batch, "frame_index": index,
+                             **filtered})
+    if requests == 0:
+        # Not one frame got read. Writing an empty sidecar here would be the one
+        # outcome worse than writing nothing at all: `onscreen.jsonl` would exist,
+        # the prompt would point the session at it, and its emptiness would read
+        # as "the screen said nothing" — a confident null, which is the failure the
+        # whole filtered-list design exists to avoid. The bundle keeps no sidecar,
+        # so the prompt renders `onscreen: none` and the digest degrades to the
+        # control arm instead of to a lie. The two reasons are kept apart because
+        # they call for different fixes: a missing JPEG is this bundle's frame
+        # directory, a refused request is the engine or the vision route.
+        if unreadable == len(batches):
+            return None, ("no readable frame image in the bundle: "
+                          + failures[0].split(": ", 1)[-1])
+        return None, ("every vision request failed: " + "; ".join(failures[:3]))
+
+    path = Path(bundle_dir) / ONSCREEN_FILENAME
+    try:
+        with path.open("w", encoding="utf-8") as handle:
+            for row in out_rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        return None, f"could not write {ONSCREEN_FILENAME}: {type(exc).__name__}"
+    kept = sum(len(r["literals"]) for r in out_rows)
+    dropped = sum(r["dropped"] for r in out_rows)
+    log(f"  {ONSCREEN_FILENAME}: {kept} literal(s) over {len(out_rows)} frame(s) "
+        f"from {len(rows)} frame(s) in {requests} vision request(s) "
+        f"({dropped} candidate(s) dropped by the filter, "
+        f"{prompt_tokens} prompt tokens)")
+    for note in failures:
+        log(f"  {ONSCREEN_FILENAME}: {note}")
+    return {"video_id": meta.get("video_id") or meta.get("id") or "",
+            "frames": len(rows), "batches": len(batches),
+            "requests": requests, "frames_answered": len(out_rows),
+            "literals": kept, "dropped": dropped,
+            "prompt_tokens": prompt_tokens, "failures": failures,
+            "path": str(path)}, None
+
+
 SCRIPT = LLOYD_HOME / "scripts" / "youtube_channel_monitor.py"
 PROFILE_PATH = LLOYD_HOME / "eval" / "lloyd_profile.md"
 BACKLOG_DIR = VAULT_ROOT / "backlog"
@@ -277,6 +737,7 @@ metadata: {meta_path}
 existing_note: {existing_note}
 enrichment_notes: {enrichment}
 measurements: {measurements_path} (live numbers captured at fetch time: {measurements_summary})
+onscreen: {onscreen} (on-screen text candidates read off sampled keyframes — one row per frame with its timestamp; 'none' means this bundle has no frames. Anything taken from it was seen on screen, not heard: it is not a thing the speaker said)
 </video>
 
 ## Your task
@@ -369,6 +830,23 @@ _EXISTING = (
 _FRESH = "   No note exists for this video yet."
 
 
+def onscreen_field(meta: dict) -> str:
+    """The bundle's on-screen-text sidecar path, or ``none`` when there is none.
+
+    Every #3983 bundle today has no sidecar — the leg is offline and inert until
+    its paired comparison measures a gain — so the honest rendering for the whole
+    corpus is ``none``, not an invented path. The field is still always present so
+    the digest skill's provenance rule has one thing to bind to: a line that
+    appeared only on some bundles would teach the session to ignore it, which is
+    how a rule about untrusted text stops being a rule.
+    """
+    bundle = str(meta.get("bundle_dir") or "")
+    if not bundle:
+        return ONSCREEN_ABSENT
+    sidecar = Path(bundle) / ONSCREEN_FILENAME
+    return str(sidecar) if sidecar.is_file() else ONSCREEN_ABSENT
+
+
 class SkillProtocolMissing(RuntimeError):
     """The vault skill carrying the digest protocol is absent or empty.
 
@@ -446,6 +924,7 @@ def build_prompt(meta: dict, tracked: list[dict], *, skill_text: Optional[str] =
         existing_note_instruction=_EXISTING if meta.get("existing_note") else _FRESH,
         measurements_path=meta.get("measurements_path") or "none",
         measurements_summary=meta.get("measurements_summary") or "none captured",
+        onscreen=onscreen_field(meta),
         profile_path=str(PROFILE_PATH),
         tracked="\n".join(tracked_lines),
         eval_tag=EVAL_TAG,

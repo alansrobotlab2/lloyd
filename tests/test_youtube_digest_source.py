@@ -759,7 +759,7 @@ PLACEHOLDERS = {
     "published", "transcript_path", "transcript_words", "transcript_lines",
     "meta_path", "existing_note", "enrichment", "target_note", "note_stem",
     "existing_note_instruction", "measurements_path", "measurements_summary",
-    "profile_path", "tracked", "eval_tag", "areas",
+    "profile_path", "tracked", "eval_tag", "areas", "onscreen",
 }
 
 
@@ -814,7 +814,7 @@ def test_the_protocol_reaches_the_prompt_through_the_loader_at_build_time(tmp_pa
     assert prompt.startswith(f'[SYSTEM: You are running the "{Y.NAME}" worker job')
 
 
-def test_the_task_block_supplies_all_22_placeholders_and_renders_them(tmp_path):
+def test_the_task_block_supplies_all_23_placeholders_and_renders_them(tmp_path):
     """Every per-bundle value is supplied, and none survives unrendered.
 
     `build_prompt` used to `.format()` the whole protocol, which is why 467
@@ -1812,3 +1812,315 @@ def test_the_paper_turn_keeps_its_note_write_and_loses_every_egress_verb(tmp_pat
     assert sorted(turn.kwargs["extra_disallowed"]) == sorted(
         Y.TURN_ENVELOPES["paper-note-turn"]), (
         "the paper turn dispatched a deny the census does not measure")
+
+
+
+
+# ── #3983: the on-screen-text leg — the 20-frame ceiling, the filter, text-only ─
+#
+# Every test here injects the vision call, so none opens a socket. The ceiling under
+# test is not a tuning choice: the engine boots with
+# `limit_mm_per_prompt: {'image': 20}`, so a 21-image request is a rejected request.
+
+def _frames_bundle(tmp_path: Path, n: int, vid: str = "abc123") -> dict:
+    """A bundle the frame stage has already published: frames.jsonl plus the JPEGs.
+
+    Returns a meta dict of the shape `run_frame_stage` leaves behind, so the OCR leg
+    is driven off the manifest the fetcher writes rather than a shortcut around it.
+    """
+    bdir = tmp_path / "bundles" / vid
+    (bdir / "frames").mkdir(parents=True, exist_ok=True)
+    lines = []
+    for i in range(n):
+        (bdir / "frames" / f"{i:03d}.jpg").write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
+        lines.append(json.dumps({"path": f"frames/{i:03d}.jpg", "ts": float(i * 30)}))
+    (bdir / "frames.jsonl").write_text("\n".join(lines) + "\n")
+    (bdir / "transcript.txt").write_text(f"{BUNDLE_PROBE}\n" + "words\n" * 50)
+    meta = {"video_id": vid, "bundle_dir": str(bdir),
+            "transcript_path": str(bdir / "transcript.txt")}
+    (bdir / "meta.json").write_text(json.dumps(meta))
+    return meta
+
+
+class _Vision:
+    """A `vision=` double: records each request, answers per frame index.
+
+    Answers in the `{"frames": [...]}` shape `ocr_prompt` asks for, because a parser
+    tested against a shape the prompt never asks for proves nothing. `fail_calls`
+    stands for the engine refusing a batch — a different outcome from a frame whose
+    screen really is empty, and it must produce a different artifact.
+    """
+
+    def __init__(self, by_index=None, fail_calls=()):
+        self.by_index = dict(by_index or {})
+        self.fail = set(fail_calls)
+        self.calls = []
+
+    def __call__(self, prompt, data_urls):
+        self.calls.append({"images": len(data_urls), "prompt": prompt})
+        if len(self.calls) in self.fail:
+            return "", "RuntimeError: engine 400 image exceeds limit_mm_per_prompt"
+        return json.dumps({"frames": [
+            {"index": i, "literals": self.by_index.get(i, [])}
+            for i in range(len(data_urls))]}), {"prompt_tokens": 100 * len(data_urls)}
+
+
+def test_plan_ocr_batches_splits_at_twenty_frames_and_never_grows_past_it():
+    """Splitting, never truncating: 24 frames is 20 + 4, not a quietly dropped 4.
+
+    A pass that skipped frames would make `onscreen.jsonl` claim the screen said
+    nothing in the part of the video it never looked at — the expensive kind of
+    wrong, because the note reads as sourced.
+    """
+    assert Y.MAX_FRAMES_PER_REQUEST == 20, "the engine's own image ceiling"
+    rows = [{"path": f"frames/{i:03d}.jpg", "ts": float(i)} for i in range(24)]
+    assert [len(b) for b in Y.plan_ocr_batches(rows)] == [20, 4]
+    many = [{"path": f"frames/{i:03d}.jpg", "ts": float(i)} for i in range(45)]
+    assert [len(b) for b in Y.plan_ocr_batches(many)] == [20, 20, 5]
+    assert Y.plan_ocr_batches([]) == []
+
+
+def test_plan_ocr_batches_honours_a_smaller_batch_but_never_a_bigger_one():
+    """`per_request` exists for tests and a low-context route, not for overshoot."""
+    rows = [{"path": f"f{i}", "ts": float(i)} for i in range(50)]
+    assert [len(b) for b in Y.plan_ocr_batches(rows, per_request=7)] == [7] * 7 + [1]
+    assert [len(b) for b in Y.plan_ocr_batches(rows, per_request=500)] == [20, 20, 10]
+
+
+def test_the_filter_drops_ui_chrome_before_general_vocabulary():
+    """Both drops the research note settled, and the order it settled them in.
+
+    YouTube's own chrome is on every frame of every video, so a filter that let
+    `Watch on YouTube` through would hand every note the same candidate entity.
+    General vocabulary goes next: measured four ways in the literature, the way
+    slide text poisons a summariser is by becoming its connective tissue. A literal
+    with one token outside the ordinary-English list survives — "the L/Z debate" is
+    exactly the two-word shape a caption garbles into "local polo zer".
+    """
+    kept, dropped = _filter_names([
+        {"text": "AI Engineer", "kind": "title"},
+        {"text": "Roofline", "kind": "body"},
+        {"text": "vLLM 0.6.3", "kind": "body"},
+        {"text": "the L/Z debate", "kind": "body"},
+        {"text": "Watch on YouTube", "kind": "body"},
+        {"text": "HD 1080p", "kind": "body"},
+        {"text": "github.com/acme/harness", "kind": "body"},
+        {"text": "the model is better on the second task", "kind": "body"},
+    ])
+    assert kept == ["AI Engineer", "Roofline", "vLLM 0.6.3", "the L/Z debate",
+                    "github.com/acme/harness"], \
+        "a title leads the list; chrome and sentence fragments are not candidates"
+    assert dropped == 3, "three chrome/prose literals dropped, none of them a name"
+
+
+def test_the_filter_keeps_a_two_word_name_whose_words_are_all_ordinary():
+    """The one asymmetry in the drop, and why it runs this way.
+
+    `AI Engineer` — this channel's own name — has every token in the ordinary-English
+    list, and a case-folded token test cannot tell it from a clause. Title case is
+    the signal: prose is never written with every word capitalised. A kept phrase
+    costs one row of a list already capped at eight; a dropped name costs the whole
+    point of the leg.
+    """
+    assert _filter_names([{"text": "AI Engineer"}])[0] == ["AI Engineer"]
+    assert _filter_names([{"text": "the model is better"}])[0] == []
+    assert _filter_names([{"text": "The"}])[0] == [], \
+        "one capitalised word is a sentence start, not a name"
+
+
+def test_the_filter_caps_each_frame_at_eight_literals():
+    """Eight per frame, and the cap is for the prompt's sake, not for tidiness.
+
+    An IDE frame can carry forty identifiers; twelve frames × forty is the leg's
+    cost row made meaningless, and the digest prompt was never meant to hold a
+    second transcript.
+    """
+    assert Y.MAX_LITERALS_PER_FRAME == 8
+    many = [{"text": f"Thing{i}", "kind": "body"} for i in range(12)]
+    kept, dropped = _filter_names(many)
+    assert len(kept) == 8 and dropped == 4
+
+
+def test_run_onscreen_pass_writes_one_row_per_frame_with_its_timestamp_and_flags(tmp_path):
+    """`onscreen.jsonl`: timestamp, frame index, and a title/body flag per literal.
+
+    The timestamp is the artifact — it is what a deterministic check re-verifies a
+    note's provenance against, and what makes a screen literal a sighting rather
+    than something the speaker said. A frame the filter emptied still gets a row:
+    the pass looked and found nothing, which is not the same fact as a frame nobody
+    read.
+    """
+    meta = _frames_bundle(tmp_path, 3)
+    vision = _Vision({0: [{"text": "Roofline", "kind": "title"},
+                          {"text": "FLOPS/byte", "kind": "body"}],
+                      1: [{"text": "Watch on YouTube"}],
+                      2: []})
+    summary, reason = Y.run_onscreen_pass(meta, vision=vision)
+    assert reason is None
+    assert summary["frames"] == 3 and summary["requests"] == 1
+    rows = [json.loads(l) for l in
+            (Path(meta["bundle_dir"]) / "onscreen.jsonl").read_text().splitlines()]
+    assert [r["ts"] for r in rows] == [0.0, 30.0, 60.0], "one row per frame, in order"
+    assert [r["frame_index"] for r in rows] == [0, 1, 2]
+    assert rows[0]["literals"] == [{"text": "Roofline", "kind": "title"},
+                                   {"text": "FLOPS/byte", "kind": "body"}]
+    assert rows[1]["literals"] == [] and rows[1]["dropped"] == 1, \
+        "the chrome-only frame keeps an empty list and says it dropped one"
+    assert rows[2]["literals"] == [] and rows[2]["dropped"] == 0
+    assert summary["literals"] == 2 and summary["dropped"] == 1
+    assert summary["prompt_tokens"] == 300, "cost is counted, not guessed"
+
+
+def test_run_onscreen_pass_sends_at_most_twenty_frames_per_vision_request(tmp_path):
+    """45 frames is three requests of 20 / 20 / 5 — never a 21-image call.
+
+    This is the process boundary between the leg and the engine: `limit_mm_per_prompt:
+    {'image': 20}` is enforced in the request, and a nightly job that learned the
+    ceiling at 03:00 would have burned every frame it had just sampled.
+    """
+    meta = _frames_bundle(tmp_path, 45)
+    vision = _Vision({0: [{"text": "Roofline", "kind": "title"}]})
+    summary, reason = Y.run_onscreen_pass(meta, vision=vision)
+    assert reason is None
+    assert [c["images"] for c in vision.calls] == [20, 20, 5]
+    assert max(c["images"] for c in vision.calls) <= Y.MAX_FRAMES_PER_REQUEST
+    assert summary["requests"] == 3 and summary["batches"] == 3
+    assert summary["frames"] == 45 and summary["frames_answered"] == 45
+
+
+def test_run_onscreen_pass_asks_for_on_screen_text_only_per_frame(tmp_path):
+    """The prompt names the frames it sent and forbids speech, description, inference.
+
+    The instruction is part of the contamination mitigation, so it is on the test
+    surface: a rewrite that drops "Do not transcribe speech" turns a candidate list
+    back into a second transcript, which is the thing the leg was scoped away from.
+    """
+    meta = _frames_bundle(tmp_path, 2)
+    vision = _Vision()
+    Y.run_onscreen_pass(meta, vision=vision)
+    prompt = vision.calls[0]["prompt"]
+    assert "frame 0: frames/000.jpg" in prompt and "frame 1: frames/001.jpg" in prompt
+    assert "TEXT THAT IS VISIBLY RENDERED ON SCREEN" in prompt
+    assert "Do not transcribe speech" in prompt
+    assert "Do not report anything you infer rather than read" in prompt
+
+
+def test_run_onscreen_pass_writes_no_image_bytes_to_the_bundle_or_the_log(tmp_path):
+    """The sidecar and the log lines are text artefacts; the JPEGs stay where they are.
+
+    An image inlined into a prompt is an image inlined into the session transcript
+    that recorded the prompt — and a transcript is archived, indexed for retrieval
+    and shipped to a model every turn afterwards. The frames belong in the bundle
+    (that is the frame stage's artifact, clause 2); what must not escape the request
+    is a copy of them.
+    """
+    meta = _frames_bundle(tmp_path, 2)
+    vision = _Vision({0: [{"text": "vLLM", "kind": "body"}]})
+    logs = []
+    summary, reason = Y.run_onscreen_pass(meta, log=logs.append, vision=vision)
+    assert reason is None
+    sidecar = (Path(meta["bundle_dir"]) / "onscreen.jsonl").read_text()
+    joined_logs = " ".join(logs)
+    for haystack, label in ((sidecar, "sidecar"), (joined_logs, "log")):
+        assert "base64" not in haystack, f"the word base64 appears in the {label}"
+        assert "data:image" not in haystack, f"an image is inlined in the {label}"
+        assert not any(len(tok) >= 128 for tok in haystack.split()), \
+            f"a long encoded blob hides in the {label}"
+    assert "frames/000.jpg" in sidecar, "the row names the frame, not its bytes"
+    assert summary["path"].endswith("onscreen.jsonl")
+    assert sorted(p.name for p in Path(meta["bundle_dir"]).iterdir()) == \
+        ["frames", "frames.jsonl", "meta.json", "onscreen.jsonl", "transcript.txt"], \
+        "the leg adds exactly one file to the bundle"
+
+
+def test_run_onscreen_pass_writes_no_sidecar_when_no_frame_can_be_read(tmp_path):
+    """Frames named but absent: no sidecar at all, and the reason names the frames.
+
+    An empty `onscreen.jsonl` would be worse than none: the prompt would point the
+    session at it and its emptiness would read as "the screen said nothing" — a
+    confident null. Without the file the prompt renders `onscreen: none`, which is
+    the honest word for a leg that did not look.
+    """
+    meta = _frames_bundle(tmp_path, 2)
+    for jpg in (Path(meta["bundle_dir"]) / "frames").iterdir():
+        jpg.unlink()
+    vision = _Vision()
+    summary, reason = Y.run_onscreen_pass(meta, vision=vision)
+    assert summary is None and "no readable frame image" in reason
+    assert not (Path(meta["bundle_dir"]) / "onscreen.jsonl").exists()
+    assert vision.calls == [], "nothing is sent when there is nothing to send"
+
+
+def test_run_onscreen_pass_writes_no_sidecar_when_every_request_fails(tmp_path):
+    """Every request refused: no sidecar, and the engine's own words survive.
+
+    Same rule as an unreadable frame, for the same reason. The reason text is kept
+    separate from the missing-file case because the two call for different fixes —
+    one is this bundle's frames directory, the other is the engine.
+    """
+    meta = _frames_bundle(tmp_path, 2)
+    summary, reason = Y.run_onscreen_pass(meta, vision=_Vision(fail_calls={1}))
+    assert summary is None and "every vision request failed" in reason
+    assert "limit_mm_per_prompt" in reason, "the refusal is quoted, not paraphrased"
+    assert not (Path(meta["bundle_dir"]) / "onscreen.jsonl").exists()
+
+
+def test_a_bundle_without_frames_gets_no_sidecar_and_a_reason_that_says_what_to_run(tmp_path):
+    """No frames is the state of the entire corpus today, not a failure to report."""
+    meta = _meta(tmp_path)
+    vision = _Vision()
+    summary, reason = Y.run_onscreen_pass(meta, vision=vision)
+    assert summary is None and "no frames.jsonl" in reason
+    assert "--frames" in reason, "the reason names the stage to run first"
+    assert vision.calls == []
+
+
+def test_build_prompt_names_the_sidecar_path_when_it_exists_and_none_when_not(tmp_path):
+    """`onscreen:` is in the `<video>` block either way — path when present, `none`.
+
+    A field that appeared only on some bundles would teach the session to ignore it,
+    which is how a rule about untrusted text stops being a rule. Every bundle on disk
+    renders `none` today, so digest behaviour is unchanged until the paired comparison
+    (#3983's owed check) says otherwise. The prompt carries the sidecar's LOCATION,
+    never its contents — exactly as it does for the transcript.
+    """
+    meta = _meta(tmp_path)
+    block = _video_block(Y.build_prompt(meta, []))
+    assert re.search(r"^onscreen: none ", block, re.M), \
+        "a bundle with no sidecar says so, in the same field"
+
+    sidecar = Path(meta["bundle_dir"]) / "onscreen.jsonl"
+    sidecar.write_text('{"ts": 0.0, "frame_index": 0, "literals": '
+                       '[{"text": "Roofline", "kind": "title"}], "dropped": 0}\n')
+    block2 = _video_block(Y.build_prompt(meta, []))
+    assert re.search(rf"^onscreen: {re.escape(str(sidecar))} ", block2, re.M), \
+        "the rendered value is a path the session can open"
+    assert block2.count("onscreen:") == 1, "the field appears once, in the video block"
+    assert "Roofline" not in Y.build_prompt(meta, []), \
+        "the sidecar's contents stay out of the prompt"
+
+
+def test_the_prompt_states_where_a_screen_literal_came_from(tmp_path):
+    """The one framing the leg may assert: seen on screen, not heard.
+
+    Contamination is the whole risk — naive slide-text injection took one model's
+    WER from 11.90 to 92.16, and VAPO measured a 63.28% Visual Interference Rate —
+    so this line is mitigation, not decoration. If it drifts into "additional
+    context", the provenance rule the digest skill binds to it binds on nothing.
+    """
+    line = [l for l in Y.build_prompt(_meta(tmp_path), []).splitlines()
+            if l.startswith("onscreen:")][0]
+    assert "not a thing the speaker said" in line
+    assert "timestamp" in line, "the field points at provenance, not just at text"
+
+
+def _filter_names(parsed):
+    """(kept_texts, dropped_count) — the filter, minus its bookkeeping."""
+    got = Y.filter_onscreen_literals(parsed)
+    return [row["text"] for row in got["literals"]], got["dropped"]
+
+
+def _video_block(prompt: str) -> str:
+    m = re.search(r"<video>\n(.*?)\n</video>", prompt, re.S)
+    assert m, "the prompt lost its <video> block"
+    return m.group(1)

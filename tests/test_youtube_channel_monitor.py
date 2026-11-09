@@ -815,3 +815,388 @@ def test_the_backfill_reads_bundles_on_disk_and_only_completed_videos(monkeypatc
     assert [(f["arxiv_id"], f["video_id"]) for f in found] == [("2609.04148", "done1")]
     assert "[[20260901-done]]" in Path(found[0]["note_path"]).read_text()
 
+
+
+# ── #3983: the keyframe leg — sampling, the frame stage, and its failure ─────
+#
+# All offline: `--frames=<id>` is the only entry, and nothing in `--fetch`, the
+# source job or the digest reaches any of it. What is pinned is the contract with
+# ffmpeg (one seeked JPEG pass per timestamp, scaled to the resolution cap), the
+# cap as a token budget, and the shape of a failure — a video with no downloadable
+# media must leave the bundle exactly as it was and `seen.json` untouched.
+
+def _frame_bundle(vid="vid1", **extra):
+    """A published bundle on disk (meta.json + transcript.txt); returns its dir."""
+    bdir = Path(M.bundle_dir(vid))
+    bdir.mkdir(parents=True, exist_ok=True)
+    meta = {"video_id": vid, "title": "A Talk", "published": "20261109",
+            "url": f"https://www.youtube.com/watch?v={vid}",
+            "bundle_dir": str(bdir),
+            "meta_path": str(bdir / "meta.json"),
+            "transcript_path": str(bdir / "transcript.txt"),
+            "transcript_words": 900, "transcript_lines": 40}
+    meta.update(extra)
+    (bdir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    (bdir / "transcript.txt").write_text("hello world\n")
+    return bdir
+
+
+def _run_frames_cli(argv):
+    """Run main() with argv, capture stdout. Returns (stdout, exception or None)."""
+    buf = io.StringIO()
+    saved = sys.argv
+    sys.argv = ["youtube_channel_monitor.py", *argv]
+    try:
+        with redirect_stdout(buf):
+            M.main()
+        return buf.getvalue(), None
+    except SystemExit as exc:          # argparse usage error, or a non-zero exit
+        return buf.getvalue(), exc
+    finally:
+        sys.argv = saved
+
+
+def test_sample_frame_timestamps_takes_one_frame_per_scene_change(tmp_path):
+    """≥ 2 detected cuts → exactly those timestamps, sorted and de-duplicated."""
+    seen = []
+
+    def probe(path, threshold, log):
+        seen.append((path, threshold))
+        return [12.5, 2.0, 12.5, 40.0]
+
+    got = M.sample_frame_timestamps("/tmp/x.mp4", duration=300.0, probe=probe)
+    assert got == [2.0, 12.5, 40.0], "one per change, ascending, no duplicate"
+    assert seen == [("/tmp/x.mp4", M.SCENE_THRESHOLD)], "probed once, at the threshold"
+
+
+@pytest.mark.parametrize("cuts", [[], [7.0]], ids=["no-cuts", "one-cut-only"])
+def test_sample_frame_timestamps_falls_back_to_a_uniform_30s_grid(cuts):
+    """Fewer than 2 cuts is the uniform regime — one cut is not a scene list.
+
+    A single cut tells you where *a* change was, not where the slides are, so the
+    grid is the honest answer and the pass still sees a whiteboard at 30 s.
+    """
+    got = M.sample_frame_timestamps("/tmp/x.mp4", duration=100.0,
+                                    probe=lambda p, t, l: list(cuts))
+    assert got == [0.0, 30.0, 60.0, 90.0]
+
+
+def test_sample_frame_timestamps_uniform_grid_stops_at_the_cap():
+    """10 hours at 30 s is 1200 frames; the cap is 24, and the cap wins.
+
+    The cap is a token budget, not a preference: 1300 estimated tokens per frame on
+    the primary's ViT against a 20-image-per-request ceiling.
+    """
+    assert M.MAX_FRAMES_PER_VIDEO == 24
+    got = M.sample_frame_timestamps("/tmp/x.mp4", duration=36000.0)
+    assert len(got) == 24 and got[0] == 0.0 and got[-1] == 690.0
+
+
+def test_sample_frame_timestamps_caps_the_scene_branch_too():
+    """The scene regime is capped by the same rule, keeping the earliest cuts."""
+    many = [float(i) for i in range(100)]
+    got = M.sample_frame_timestamps("/tmp/x.mp4", duration=1e6, cap=5,
+                                    probe=lambda p, t, l: many)
+    assert got == [0.0, 1.0, 2.0, 3.0, 4.0] and len(got) == 5
+
+
+def test_sample_frame_timestamps_without_a_duration_samples_frame_zero_only():
+    """Unknown duration bounds nothing, so the pass takes one frame, not zero.
+
+    Zero frames would make the caller report failure on a short clip that is
+    simply unprobeable; one frame is a real, if thin, answer.
+    """
+    assert M.sample_frame_timestamps("/tmp/x.mp4", duration=0.0,
+                                     probe=lambda p, t, l: []) == [0.0]
+
+
+def test_probe_scene_changes_escapes_the_filter_comma_and_parses_stamps(monkeypatch):
+    """The lavfi graph must survive argv, and ffprobe's framing lines must not.
+
+    `gt(scene\\,0.3)` needs the backslash because a bare comma would separate
+    filters instead of arguments; an unescaped graph fails to parse and every video
+    silently degrades to the uniform grid.
+    """
+    calls = []
+
+    class R:
+        returncode, stdout = 0, "frame=\n12.5\nframe=\n40\njunk\n"
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return R()
+
+    monkeypatch.setattr(M.subprocess, "run", fake_run)
+    assert M.probe_scene_changes("/tmp/a b.mp4") == [12.5, 40.0]
+    cmd = calls[0]
+    assert cmd[-1] == "movie=/tmp/a b.mp4,select=gt(scene\\,0.3)", \
+        "the lavfi graph is ffprobe's LAST argument and its ONLY input"
+    assert "/tmp/a b.mp4" not in cmd, (
+        "the graph IS the filename under -f lavfi, so naming the file again is a "
+        "SECOND input: ffmpeg n9.0.2 exits 1 with \"provided as input filename, but "
+        "'movie=…' was already specified\", and rc != 0 is indistinguishable from a "
+        "genuinely scene-free video — the scene branch would vanish on every video "
+        "with nothing printed but a uniform grid")
+
+
+def test_probe_scene_changes_returns_empty_list_when_ffprobe_fails(monkeypatch):
+    """A missing ffprobe degrades to uniform sampling; it must not raise."""
+    def boom(cmd, **kw):
+        raise OSError("ffprobe: command not found")
+
+    monkeypatch.setattr(M.subprocess, "run", boom)
+    assert M.probe_scene_changes("/tmp/x.mp4") == []
+    assert M.probe_duration("/tmp/x.mp4") == 0.0
+
+
+def test_extract_frames_runs_one_seeked_scaled_jpeg_pass_per_timestamp(tmp_path,
+                                                                      monkeypatch):
+    """The ffmpeg boundary: `-ss <ts> -i <media> -frames:v 1`, scaled to the cap.
+
+    Irregular scene-change timestamps rule out a single `fps=` filter pass, and a
+    frame that fails to extract drops out of the rows rather than failing the deck.
+    """
+    calls, out_dir = [], tmp_path / "frames"
+
+    class R:
+        returncode, stderr = 0, ""
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 2:
+            return R()                      # the middle timestamp fails to seek
+        target = Path(cmd[-1])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\xff\xd8\xff")
+        return R()
+
+    monkeypatch.setattr(M.subprocess, "run", fake_run)
+    rows = M.extract_frames("/tmp/x.mp4", [0.0, 30.0, 60.0], str(out_dir))
+    assert [r["path"] for r in rows] == ["frames/000.jpg", "frames/002.jpg"], \
+        "the failed frame is skipped, not zero-filled"
+    assert [r["ts"] for r in rows] == [0.0, 60.0]
+    first = calls[0]
+    assert first[first.index("-ss") + 1] == "0.0"
+    assert first[first.index("-frames:v") + 1] == "1"
+    scale = [a for a in first if a.startswith("scale=")][0]
+    assert f"{M.FRAME_RESOLUTION_CAP}:{M.FRAME_RESOLUTION_CAP}" in scale, \
+        "sampled at the recorded resolution cap, downscales only"
+    assert "-y" in first and not any("base64" in a for a in first)
+
+
+def test_frame_stage_writes_frames_manifest_and_meta_block(tmp_path, monkeypatch):
+    """`--frames=<id>` success path: frames/, frames.jsonl, and the meta.json block.
+
+    The manifest row is a path under the bundle plus a timestamp in seconds and
+    nothing else — it is how a later reader knows which frame said what without
+    putting a frame in a prompt. The meta block records count, ffmpeg version and
+    resolution cap because all three change what "found no literals" will mean.
+    """
+    bdir = _frame_bundle("vidA")
+    media = tmp_path / "media" / "vidA.mp4"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"video-bytes")
+    monkeypatch.setattr(M, "MEDIA_DIR", str(tmp_path / "media"))
+    monkeypatch.setattr(M, "fetch_media",
+                        lambda vid, url, log=print: (str(media), None))
+    monkeypatch.setattr(M, "probe_duration", lambda p, log=print: 90.0)
+    monkeypatch.setattr(M, "probe_scene_changes",
+                        lambda p, threshold=0.3, log=print: [10.0, 40.0])
+    monkeypatch.setattr(M, "ffmpeg_version", lambda log=print: "7.1.1")
+
+    def fake_extract(media_path, stamps, frames_dir, **kw):
+        Path(frames_dir).mkdir(parents=True, exist_ok=True)
+        rows = []
+        for i, ts in enumerate(stamps):
+            Path(frames_dir, f"{i:03d}.jpg").write_bytes(b"\xff\xd8\xff")
+            rows.append({"path": f"frames/{i:03d}.jpg", "ts": ts})
+        return rows
+
+    monkeypatch.setattr(M, "extract_frames", fake_extract)
+    summary, reason = M.run_frame_stage("vidA", log=lambda s: None)
+    assert reason is None and summary["frames"] == 2
+    assert summary["sampling"] == "scene-changes", "2 cuts is the scene regime"
+
+    rows = [json.loads(l) for l in
+            (bdir / "frames.jsonl").read_text().splitlines() if l.strip()]
+    assert rows == [{"path": "frames/000.jpg", "ts": 10.0},
+                    {"path": "frames/001.jpg", "ts": 40.0}]
+    assert sorted(p.name for p in (bdir / "frames").iterdir()) == \
+        ["000.jpg", "001.jpg"]
+
+    meta = json.loads((bdir / "meta.json").read_text())
+    block = meta["frames"]
+    assert block["count"] == 2
+    assert block["ffmpeg_version"] == "7.1.1"
+    assert block["resolution_cap_px"] == M.FRAME_RESOLUTION_CAP == 1280
+    assert block["cap_per_video"] == 24
+    assert block["manifest"] == "frames.jsonl" and block["directory"] == "frames/"
+    assert meta["transcript_path"] == str(bdir / "transcript.txt"), \
+        "a successful frame pass still leaves the transcript fields alone"
+    assert not media.exists(), "MEDIA_KEEP is False: the video is not the artifact"
+
+
+def test_frame_stage_writes_the_uniform_sampling_mode_in_meta(tmp_path, monkeypatch):
+    """One cut recorded as `uniform-30s`, so a reader knows the grid, not a slide."""
+    bdir = _frame_bundle("vidB")
+    media = tmp_path / "media" / "vidB.mp4"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"video-bytes")
+    monkeypatch.setattr(M, "MEDIA_DIR", str(tmp_path / "media"))
+    monkeypatch.setattr(M, "fetch_media",
+                        lambda vid, url, log=print: (str(media), None))
+    monkeypatch.setattr(M, "probe_duration", lambda p, log=print: 95.0)
+    monkeypatch.setattr(M, "probe_scene_changes",
+                        lambda p, threshold=0.3, log=print: [20.0])
+    monkeypatch.setattr(M, "ffmpeg_version", lambda log=print: "7.1.1")
+
+    def fake_extract(media_path, stamps, frames_dir, **kw):
+        Path(frames_dir).mkdir(parents=True, exist_ok=True)
+        return [{"path": f"frames/{i:03d}.jpg", "ts": ts}
+                for i, ts in enumerate(stamps)]
+
+    monkeypatch.setattr(M, "extract_frames", fake_extract)
+    summary, reason = M.run_frame_stage("vidB", log=lambda s: None)
+    assert reason is None and summary["sampling"] == "uniform-30s"
+    rows = [json.loads(l) for l in
+            (bdir / "frames.jsonl").read_text().splitlines() if l.strip()]
+    assert [r["ts"] for r in rows] == [0.0, 30.0, 60.0, 90.0]
+
+
+def test_frame_stage_on_unfetchable_media_writes_nothing(tmp_path, monkeypatch):
+    """Media failure: no frames/, no frames.jsonl, meta.json byte-identical.
+
+    This is the clause that keeps the arm honest — a bundle whose video cannot be
+    downloaded must be indistinguishable from a bundle the arm never touched, or a
+    digest run would see a frames block and reason about an absent screen.
+    """
+    bdir = _frame_bundle("vidC")
+    before = (bdir / "meta.json").read_bytes()
+
+    def failing_fetch(vid, url, log=print):
+        return "", "yt-dlp exited 1: video unavailable"
+
+    monkeypatch.setattr(M, "fetch_media", failing_fetch)
+    monkeypatch.setattr(M, "probe_duration",
+                        lambda p, log=print: pytest.fail("probed after a failed fetch"))
+    summary, reason = M.run_frame_stage("vidC", log=lambda s: None)
+    assert summary is None
+    assert "media unavailable" in reason and "video unavailable" in reason
+    assert not (bdir / "frames").exists(), "no frames/ directory"
+    assert not (bdir / "frames.jsonl").exists(), "no frame manifest"
+    assert (bdir / "meta.json").read_bytes() == before, \
+        "meta.json untouched: transcript fields and everything else"
+
+
+def test_frames_cli_exits_zero_and_leaves_seen_json_untouched(tmp_path, monkeypatch):
+    """`--frames=<id>` on unfetchable media: exit 0, the reason in the output, state dead.
+
+    A video with no downloadable media is a fact about that video, not a failed
+    command — and this pass has no status to advance, so `seen.json` must be
+    byte-identical afterwards. Were it written, a diagnostic run would move a
+    video's digest state, which is the difference between a leg and a second
+    ingest path.
+    """
+    # Configure the channel main() will configure FIRST, so the bundle and the
+    # seen.json seeded here are the ones the pass actually reads — not sibling
+    # files under another channel's sandbox that were never in play.
+    M.configure(M.DEFAULT_CHANNEL)
+    bdir = _frame_bundle("vidD")
+    M.save_state(_state(vidD={"status": "pending", "title": "A Talk"}))
+    seen_path = Path(M.STATE_FILE)
+    seen_before = seen_path.read_bytes()
+    monkeypatch.setattr(M, "fetch_media",
+                        lambda v, url, log=print: ("", "yt-dlp is not on PATH"))
+    out, exc = _run_frames_cli(["--frames=vidD", "--json"])
+    assert exc is None, f"the keyframe pass exited nonzero: {exc} / {out}"
+    assert "vidD" in out and "media unavailable" in out
+    assert seen_path.read_bytes() == seen_before, "seen.json untouched"
+    assert not (bdir / "frames").exists()
+    json_lines = [l for l in out.splitlines() if l.startswith(M.JSON_MARK)]
+    assert len(json_lines) == 1, f"--json must print exactly one JSON line: {out}"
+    payload = json.loads(json_lines[0][len(M.JSON_MARK):])
+    assert payload["ok"] is True and payload["seen_json_unchanged"] is True
+    assert payload["result"]["frame_reason"].startswith("media unavailable")
+    assert payload["result"]["onscreen"] is None, \
+        "no on-screen leg runs when no frames were sampled"
+
+
+def test_build_bundle_itself_never_samples_frames(monkeypatch, tmp_path):
+    """The REAL `build_bundle` runs to completion and the leg still does not run.
+
+    The reviewer's point on the first gate: pinning `main()` while stubbing
+    `build_bundle` leaves the natural insertion point unpinned — a
+    `run_frame_stage(...)` added inside the bundle build would have passed. So
+    nothing here stubs `build_bundle`: only its external I/O is replaced (yt-dlp
+    metadata, the transcript, GitHub clones, paper registration, the metrics
+    snapshot), the bundle is really written, and the assertion is about that
+    bundle on disk — no `frames/`, no `frames.jsonl`, no `frames` block, because
+    the transcript-only bundle is the control arm of the comparison that decides
+    whether this leg survives at all.
+    """
+    calls = []
+    monkeypatch.setattr(M, "run_frame_stage",
+                        lambda *a, **k: calls.append(("run_frame_stage",)) or (None, "x"))
+    monkeypatch.setattr(M, "run_frames",
+                        lambda *a, **k: calls.append(("run_frames",)) or ({}, None))
+    monkeypatch.setattr(M, "fetch_media",
+                        lambda *a, **k: calls.append(("fetch_media",)) or ("", "no"))
+    monkeypatch.setattr(M, "fetch_video_metadata",
+                        lambda vid: {"title": "A Talk", "upload_date": "20261109",
+                                     "description": "desc"})
+    monkeypatch.setattr(M, "fetch_transcript",
+                        lambda vid: ("some transcript long enough to bundle " * 20, None))
+    # Enrichment returns empty rather than failing: what this pins is that the
+    # frame leg is not part of a bundle build, and a stub that raises on the way
+    # would abort the build before the assertion could be made.
+    monkeypatch.setattr(M, "clone_and_note", lambda url: None)
+    monkeypatch.setattr(M, "enrich_papers", lambda ids, video=None: [])
+    monkeypatch.setattr(M, "fetch_generic_paper", lambda url: None)
+    def capture(bdir):
+        # Stands in for the metrics snapshot — which the real function ALWAYS
+        # writes, failures included — so the file list below is a claim about the
+        # leg's absence, not about a stubbed side effect.
+        path = Path(bdir) / "measurements.json"
+        path.write_text('{"captured_at": "2026-11-09T00:00:00+00:00", "errors": []}')
+        return str(path), {}
+
+    monkeypatch.setattr(M, "capture_measurements", capture)
+
+    meta, err = M.build_bundle("vidG", "A Talk", "20261109", {})
+    assert err is None and meta, f"the real bundle build failed: {err}"
+    bdir = Path(meta["bundle_dir"])
+    assert calls == [], f"the keyframe leg ran from inside build_bundle: {calls}"
+    assert not (bdir / "frames").exists() and not (bdir / "frames.jsonl").exists()
+    assert "frames" not in json.loads((bdir / "meta.json").read_text()), \
+        "a --fetch bundle carries no frames block"
+    assert sorted(p.name for p in bdir.iterdir()) == \
+        ["measurements.json", "meta.json", "transcript.txt"], \
+        "the control arm is still exactly three files"
+
+
+def test_fetch_wiring_never_touches_the_keyframe_leg(monkeypatch):
+    """`--fetch` must stay the transcript-only control arm of #3983's comparison.
+
+    Pinned structurally rather than by reading the code: the frame stage raises if
+    it is ever reached from a bundle build, so wiring `--frames` into `--fetch` —
+    which would contaminate the measurement that decides whether this leg survives
+    — fails here rather than in someone's eval.
+    """
+    calls = []
+    monkeypatch.setattr(M, "run_frame_stage",
+                        lambda *a, **k: calls.append(a) or (None, "must not run"))
+    monkeypatch.setattr(M, "run_frames",
+                        lambda *a, **k: calls.append(a) or (None, "must not run"))
+    monkeypatch.setattr(M, "fetch_media",
+                        lambda *a, **k: calls.append("media") or ("", "no"))
+    monkeypatch.setattr(M, "fetch_transcript",
+                        lambda vid: ("some transcript long enough to bundle " * 20, None))
+    monkeypatch.setattr(M, "build_bundle",
+                        lambda vid, title="", published="", entry=None: (
+                            {"video_id": vid, "title": title,
+                             "published": published or "20261109",
+                             "bundle_dir": "/tmp", "meta_path": "/tmp/meta.json",
+                             "transcript_path": "/tmp/transcript.txt"}, None))
+    out, exc = _run_frames_cli(["--fetch=vidF"])
+    assert exc is None
+    assert calls == [], f"the keyframe leg ran from --fetch: {calls}"

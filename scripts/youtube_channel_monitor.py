@@ -1523,6 +1523,416 @@ def load_bundle(video_id):
         return None
 
 
+# ── Keyframe + on-screen-text leg (item #3983) ──────────────────────────────
+#
+# OFFLINE AND INERT BY CONSTRUCTION. Nothing in `--fetch`, in the nightly source
+# job or in the digest calls anything in this block: no frame is sampled, no
+# media is downloaded and no vision request is made unless a person runs
+# `--frames=<id>` (or `--frames=all`, which only walks bundles a previous
+# `--fetch` already published). That is the item's own rule — the arm is
+# report-only until the paired 10-bundle comparison measures a gain — and
+# wiring this into `--fetch`'s default path would contaminate the control arm of
+# the measurement that has to happen first.
+#
+# The video itself is deliberately OUTSIDE the bundle directory: a 60 MB media
+# file sitting among the text artifacts is one `git add -A` away from a commit,
+# and the frames are the artifact, not the media.
+MEDIA_DIR = os.environ.get(
+    "YT_MEDIA_DIR", "/home/alansrobotlab/lloyd-data/media/youtube")
+MEDIA_KEEP = False          # frames are kept; the downloaded video is not
+FFMPEG = "ffmpeg"
+FFPROBE = "ffprobe"
+FRAME_DIRNAME = "frames"
+FRAME_MANIFEST = "frames.jsonl"
+MAX_FRAMES_PER_VIDEO = 24   # 1300 estimated tokens per frame on the primary's ViT
+                            # (config.yaml models.primary.image_token_estimate) and
+                            # a 20-image-per-request ceiling: 24 frames is two
+                            # requests, a 90-minute uncapped deck is tens of
+                            # thousands of tokens on a box with two 24 GB GPUs
+FRAME_RESOLUTION_CAP = 1280  # longest edge, in px — a guess, see the caveat
+FRAME_SAMPLE_SECONDS = 30.0  # the fallback cadence when no scene change is found
+SCENE_THRESHOLD = 0.30       # ffmpeg's `scene` filter cut confidence
+MEDIA_FETCH_TIMEOUT = 900
+FFPROBE_TIMEOUT = 120
+FRAME_FETCH_TIMEOUT = 300
+_FFMPEG_VERSION_RE = re.compile(r"ffmpeg version (\S+)")
+
+# CAVEAT, and it is deliberately not settled here: FRAME_RESOLUTION_CAP = 1280 is
+# a guess at where a dense slide stops being legible to this ViT, not a measured
+# threshold. The owed check for #3983 is a real dense-deck readability pass over
+# this channel's talks, and that pass owns this number. The failure mode is
+# safe — an illegible frame contributes no literals, it does not invent one.
+
+
+def probe_media(media_path, args, timeout, log=print, input_file=True):
+    """Run ffprobe with caller-chosen show-entries args; '' when it cannot.
+
+    Every caller reads '' as "no information", which is what makes a missing or
+    failing ffprobe a degradation to uniform sampling rather than an error: the
+    probe is the only thing standing between a slide deck and one frame every 30
+    seconds, so a probe that is not installed must not stop a frame pass.
+
+    `input_file=False` is for a `-f lavfi` graph, which IS the input: ffprobe takes
+    the graph as a filename, so appending the path again is a second input file, not
+    a redundant reference. ffmpeg n9.0.2 rejects that outright — "provided as input
+    filename, but 'movie=…' was already specified", rc 1 — and the resulting '' is a
+    silent loss of the scene branch on every video, because rc != 0 is also what a
+    genuinely scene-free file looks like from here.
+    """
+    cmd = [FFPROBE, "-v", "error"] + list(args)
+    if input_file:
+        cmd.append(media_path)
+    log("probe: " + " ".join(cmd))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  ffprobe raised {type(exc).__name__}: {str(exc)[:160]}")
+        return ""
+    if proc.returncode != 0:
+        print(f"  ffprobe rc={proc.returncode}: {str(proc.stderr or '')[:180]}")
+        return ""
+    return proc.stdout or ""
+
+
+def probe_duration(media_path, log=print):
+    """Seconds of video, or 0.0 when ffprobe cannot say. Bounds uniform sampling."""
+    out = probe_media(
+        media_path,
+        ["-show_entries", "format=duration", "-of", "default=nw=1:nk=1"],
+        FFPROBE_TIMEOUT, log=log)
+    try:
+        value = float(out.strip().splitlines()[0])
+    except (IndexError, ValueError):
+        return 0.0
+    return value if value > 0 else 0.0
+
+
+def probe_scene_changes(media_path, threshold=SCENE_THRESHOLD, log=print):
+    """Timestamps where ffmpeg's scene filter sees a cut; [] when it sees none.
+
+    The lavfi graph is `movie=<file>,select=gt(scene\\,<threshold>)`; the comma
+    inside `gt()` is backslash-escaped because the same character separates
+    filters in a filtergraph. Empty list — not an exception — when ffprobe is
+    absent, times out or the media will not decode, which is the caller's cue to
+    fall back to uniform sampling.
+    """
+    graph = f"movie={media_path},select=gt(scene\\,{threshold})"
+    out = probe_media(
+        media_path,
+        ["-select_streams", "v:0", "-show_entries", "frame=pts_time",
+         "-of", "default=nw=1:nk=1", "-f", "lavfi", "-i", graph],
+        FFPROBE_TIMEOUT, log=log, input_file=False)
+    stamps = []
+    for line in out.splitlines():
+        try:
+            stamps.append(round(float(line.strip()), 3))
+        except ValueError:
+            continue  # ffprobe's `frame=` / `[in]` / `[out]` framing lines
+    return sorted(set(stamps))
+
+
+def sample_frame_timestamps(media_path, duration=0.0, cap=MAX_FRAMES_PER_VIDEO,
+                            threshold=SCENE_THRESHOLD, probe=probe_scene_changes,
+                            log=print):
+    """Where to look: one timestamp per scene change, else a uniform 30-second grid.
+
+    Two regimes, from the shape this vault's research note settled
+    (`knowledge/research/2026-10-19-keyframe-ocr-of-on-screen-text-as-a-candidate-entity-source-.md`,
+    item #3983 step 2) — a slide deck is sampled where its
+    slides flip, a talking head gets a grid so the pass still catches a
+    whiteboard or an IDE window:
+
+      * the probe reports **2 or more** scene changes → those timestamps, sorted
+        and de-duplicated: one frame per detected change;
+      * fewer than 2 (exactly one cut, none at all, or ffprobe said nothing) →
+        `0.0, 30.0, 60.0, …` bounded by `duration`, which is `[0.0]` alone when
+        the duration is unknown. One frame is a legitimate answer for a short
+        clip, not an error.
+
+    **Never more than `cap` frames come back.** The scene branch keeps its first
+    `cap` cuts in time order; the uniform branch stops at the cap. The cap is a
+    token budget, not a preference — see MAX_FRAMES_PER_VIDEO.
+
+    `probe` is the scene probe, injectable so a test can hand this function two
+    cuts, one cut or none without a media file on disk.
+    """
+    changes = [t for t in (probe(media_path, threshold, log) or [])
+               if isinstance(t, (int, float)) and not isinstance(t, bool) and t >= 0]
+    if len(changes) >= 2:
+        # Sorted and de-duplicated before the cap, so what is dropped is the
+        # LATEST cuts rather than whichever ones the probe happened to report
+        # first, and so frames.jsonl reads in time order for whoever audits a
+        # frame later. ffprobe already walks a file forward; the sort is for the
+        # guarantee, not for the common case.
+        stamps = sorted({round(float(t), 3) for t in changes})
+        picked = stamps[:cap]
+        log(f"  {len(changes)} scene change(s) at threshold {threshold} → "
+            f"{len(stamps)} distinct cut(s), sampling {len(picked)} of them "
+            f"(cap {cap})")
+        return picked
+    if duration <= 0:
+        log(f"  {len(changes)} scene change(s) and no known duration: sampling "
+            f"frame 0 only")
+        return [0.0][:cap]
+    count = max(1, min(cap, int(duration // FRAME_SAMPLE_SECONDS) + 1))
+    stamps = [round(n * FRAME_SAMPLE_SECONDS, 3) for n in range(count)]
+    log(f"  {len(changes)} scene change(s) (< 2), uniform "
+        f"{FRAME_SAMPLE_SECONDS:g}s grid over {duration:g}s → {len(stamps)} "
+        f"frame(s) (cap {cap})")
+    return stamps
+
+
+def ffmpeg_version(log=print):
+    """The version token from `ffmpeg -version`, or 'unknown'. Recorded in meta.json."""
+    try:
+        proc = subprocess.run([FFMPEG, "-version"], capture_output=True,
+                              text=True, timeout=30)
+        match = _FFMPEG_VERSION_RE.search(proc.stdout or "")
+        return match.group(1) if match else "unknown"
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  ffmpeg -version raised {type(exc).__name__}")
+        return "unknown"
+
+
+def media_target(video_id):
+    """Where a downloaded video goes: MEDIA_DIR, never the bundle directory."""
+    return os.path.join(MEDIA_DIR, f"{video_id}.mp4")
+
+
+def fetch_media(video_id, url, log=print):
+    """Download the video into MEDIA_DIR. Returns (path, None) or ('', reason).
+
+    yt-dlp writes into a private temporary directory and the finished file is
+    moved to `MEDIA_DIR/<id>.mp4` — outside the bundle, and with no
+    delete-the-directory approach to cleanup: on a partial download the temporary
+    directory is discarded whole, so a failed fetch physically cannot reach a
+    transcript, a manifest or a frames directory an earlier run published.
+    `--no-playlist --no-part` and a progressive-capable format selection because
+    a DASH stream hands ffmpeg a fragment-only container it cannot seek.
+
+    Returns ('', reason) instead of raising: #3983's third clause is that a video
+    whose media cannot be fetched leaves the bundle untouched and the run still
+    exits 0.
+    """
+    if shutil.which("yt-dlp") is None:
+        return "", "yt-dlp is not on PATH"
+    target = media_target(video_id)
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"ytmedia-{video_id[:12]}-") as tmp:
+        staged = os.path.join(tmp, "source.%(ext)s")
+        cmd = ["yt-dlp", "--no-playlist", "--no-part", "--no-warnings",
+               "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
+               "-o", staged, url]
+        log("media fetch: " + " ".join(cmd))
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=MEDIA_FETCH_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return "", f"yt-dlp raised {type(exc).__name__}: {str(exc)[:160]}"
+        if proc.returncode != 0:
+            return "", (f"yt-dlp exited {proc.returncode}: "
+                        f"{str(proc.stderr or '')[:200]}")
+        import glob as _glob
+        made = [p for p in sorted(_glob.glob(os.path.join(tmp, "source.*")))
+                if os.path.isfile(p) and os.path.getsize(p) > 0]
+        if not made:
+            return "", "yt-dlp exited 0 but wrote no media file"
+        os.replace(made[0], target)
+    return target, None
+
+
+def extract_frames(media_path, timestamps, frames_dir, cap=MAX_FRAMES_PER_VIDEO,
+                   resolution_cap=FRAME_RESOLUTION_CAP, log=print):
+    """Write one JPEG per timestamp into `frames_dir`; return the frame rows.
+
+    One seeked invocation per timestamp (`-ss <t> -i <file> -frames:v 1`) rather
+    than a single `fps=` pass, because scene-change timestamps are irregular by
+    construction and an fps filter would have to be re-derived to match them. A
+    timestamp whose extraction fails is dropped from the returned rows rather than
+    failing the pass: three bad seeks in a 24-frame deck is a 21-frame deck.
+
+    Each row is `{"path": "frames/000.jpg", "ts": <seconds>}` — a path relative to
+    the bundle and a timestamp in seconds, nothing else. Those pixels are written
+    to `frames_dir` and named nowhere else: no base64, no text attachment, so they
+    cannot reach a session file, a log or a commit.
+    """
+    os.makedirs(frames_dir, exist_ok=True)
+    rows = []
+    scale = (f"scale={resolution_cap}:{resolution_cap}:"
+             f"force_original_aspect_ratio=decrease:force_divisible_by=2")
+    for index, stamp in enumerate(list(timestamps)[:cap]):
+        out = os.path.join(frames_dir, f"{index:03d}.jpg")
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", f"{stamp}",
+               "-i", media_path, "-frames:v", "1", "-vf", scale, "-q:v", "3",
+               "-y", out]
+        log(f"frame {index} @ {stamp}s: " + " ".join(cmd))
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=FRAME_FETCH_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"  frame {index} raised {type(exc).__name__}: "
+                  f"{str(exc)[:140]}")
+            continue
+        if (proc.returncode != 0 or not os.path.isfile(out)
+                or not os.path.getsize(out)):
+            print(f"  frame {index} skipped: ffmpeg rc={proc.returncode} "
+                  f"at {stamp}s: {str(proc.stderr or '')[:160]}")
+            continue
+        rows.append({"path": f"{FRAME_DIRNAME}/{index:03d}.jpg",
+                     "ts": round(float(stamp), 3)})
+    return rows
+
+
+def write_frame_manifest(bdir, rows):
+    """`frames.jsonl`, one row per frame: its path under the bundle, its timestamp.
+
+    Text only. Whatever reads the frames later walks this file, so it never has to
+    guess which JPEG is which — and never has to put one in a prompt.
+    """
+    with open(os.path.join(bdir, FRAME_MANIFEST), "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def frames_block(rows, ffmpeg_ver, resolution_cap, cap, sampling):
+    """The `frames` block for meta.json: what was sampled, by what, how finely.
+
+    The ffmpeg version and the resolution cap are recorded because both change
+    what the frames mean to a later reader: an ffmpeg upgrade moves what a scene
+    cut is, and a cap below the legibility floor makes "no literals found" mean
+    something different from "no text on screen".
+    """
+    return {
+        "count": len(rows),
+        "manifest": FRAME_MANIFEST,
+        "directory": FRAME_DIRNAME + "/",
+        "ffmpeg_version": ffmpeg_ver,
+        "resolution_cap_px": resolution_cap,
+        "cap_per_video": cap,
+        "sampling": sampling,
+        "sample_seconds": FRAME_SAMPLE_SECONDS,
+        "scene_threshold": SCENE_THRESHOLD,
+    }
+
+
+def run_frame_stage(video_id, log=print):
+    """Sample keyframes for one bundle. Returns (summary, None) or (None, reason).
+
+    On success writes `frames/`, `frames.jsonl` and a `frames` block in
+    `meta.json`. On a media failure writes **neither** `frames/` nor
+    `frames.jsonl`, leaves `meta.json` byte-identical, and returns the reason —
+    the caller exits 0, because a video with no downloadable media is a fact
+    about that video and not a failed command.
+
+    `seen.json` is not opened, read or written anywhere in this call path. The
+    stage is addressed by the id of a bundle a person already chose, so it has no
+    status to advance, no candidate to expire and no reason to touch state: this
+    is the difference between a diagnostic pass and a second ingest path.
+    """
+    bdir = bundle_dir(video_id)
+    meta_path = os.path.join(bdir, "meta.json")
+    if not os.path.isfile(meta_path):
+        return None, "no meta.json in the bundle (run --fetch first)"
+    try:
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"meta.json unreadable: {type(exc).__name__}"
+    url = meta.get("url") or f"https://www.youtube.com/watch?v={video_id}"
+    media_path, reason = fetch_media(video_id, url, log=log)
+    if not media_path:
+        return None, f"media unavailable: {reason}"
+    try:
+        duration = probe_duration(media_path, log=log)
+        changes = probe_scene_changes(media_path, log=log)
+        stamps = sample_frame_timestamps(
+            media_path, duration=duration,
+            probe=lambda path, threshold, _log: list(changes), log=log)
+        rows = extract_frames(media_path, stamps, os.path.join(bdir, FRAME_DIRNAME),
+                              log=log)
+        if not rows:
+            shutil.rmtree(os.path.join(bdir, FRAME_DIRNAME), ignore_errors=True)
+            return None, (f"no frame extracted: ffmpeg failed for all "
+                          f"{len(stamps)} attempt(s)")
+        write_frame_manifest(bdir, rows)
+        sampling = ("scene-changes" if len(changes) >= 2
+                    else f"uniform-{FRAME_SAMPLE_SECONDS:g}s")
+        meta["frames"] = frames_block(
+            rows, ffmpeg_version(log=log), FRAME_RESOLUTION_CAP,
+            MAX_FRAMES_PER_VIDEO, sampling)
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+        log(f"  {len(rows)} frame(s) into {FRAME_DIRNAME}/ and {FRAME_MANIFEST}, "
+            f"meta.json frames block written ({sampling})")
+        return {"video_id": video_id, "frames": len(rows), "sampling": sampling,
+                "duration_s": duration}, None
+    finally:
+        if not MEDIA_KEEP:
+            try:
+                os.unlink(media_path)
+            except OSError:
+                pass
+
+
+def run_onscreen_leg(video_id, log=print):
+    """Read a bundle's sampled frames into `onscreen.jsonl`. (summary, reason).
+
+    The leg's own code lives with the digest (`workers/sources/youtube_digest.py`)
+    and is imported lazily here. That keeps this script's import cost what
+    `--fetch` needs, and it puts the filter — a decision about what the digest is
+    allowed to assert — in the module that has to honour it. The frames stay here;
+    the digest never downloads or samples anything.
+    """
+    from workers.sources.youtube_digest import run_onscreen_pass
+
+    meta = load_bundle(video_id)
+    if meta is None:
+        return None, "no readable bundle (needs meta.json and transcript.txt)"
+    return run_onscreen_pass(meta, log=log)
+
+
+def run_frames(video_id, log=print, onscreen=True):
+    """One `--frames=<id>` run: sample the frames, then read their text. (summary, None).
+
+    The on-screen leg follows the frame stage and only the frame stage: writing an
+    empty `onscreen.jsonl` after a run that sampled no frames would assert that the
+    screen was blank, which is a claim, not an absence.
+    """
+    out = {"video_id": video_id, "frames": None, "frame_reason": None,
+           "onscreen": None, "onscreen_reason": None}
+    summary, reason = run_frame_stage(video_id, log=log)
+    out["frames"] = summary
+    out["frame_reason"] = reason
+    if summary and onscreen:
+        ocr, ocr_reason = run_onscreen_leg(video_id, log=log)
+        out["onscreen"] = ocr
+        out["onscreen_reason"] = ocr_reason
+    elif summary and not onscreen:
+        out["onscreen_reason"] = "--frames-only: on-screen leg not requested"
+    return out, None
+
+
+def run_frames_all(log=print, onscreen=True):
+    """`--frames=all` over bundles already on disk — never a channel enumeration.
+
+    `list_bundles()` walks the bundle directory, so this cannot discover a video,
+    enqueue one, or touch `seen.json`. It is a batch mode for what `--fetch`
+    published, not a second fetch path.
+    """
+    return [run_frames(vid, log=log, onscreen=onscreen)[0]
+            for vid in list_bundles()]
+
+
+def list_bundles():
+    """Video ids with a published bundle. Read-only: lists directories, no state."""
+    root = os.path.join(STATE_DIR, "bundles")
+    if not os.path.isdir(root):
+        return []
+    return sorted(name for name in os.listdir(root)
+                  if os.path.isfile(os.path.join(root, name, "meta.json")))
+
+
 # ── Papers ─────────────────────────────────────────────────────────────
 #
 # A paper a video cites becomes its own vault note, in two steps. When the
@@ -2550,6 +2960,17 @@ def main():
     session.add_argument("--reason", metavar="TEXT", help="With --fail: why")
     session.add_argument("--eval-report", action="store_true", help="Regenerate the channel's report note")
 
+    keyframes = parser.add_argument_group(
+        "keyframe leg (offline, item #3983 — never part of --fetch)")
+    keyframes.add_argument("--frames", metavar="VIDEO_ID",
+                           help="Sample keyframes for one bundle already on disk "
+                                "('all' = every published bundle). Offline and "
+                                "inert: --fetch, the nightly source job and the "
+                                "digest never call this")
+    keyframes.add_argument("--frames-only", action="store_true",
+                           help="With --frames: skip the on-screen-text (vision) "
+                                "leg and keep only the sampled frames")
+
     papers = parser.add_argument_group("papers (one registry for every channel)")
     papers.add_argument("--papers-pending", action="store_true", help="List the papers the worker may read")
     papers.add_argument("--paper-register", metavar="VIDEO_ID",
@@ -2690,6 +3111,43 @@ def main():
         print(f"\n✓ Fetched: {meta['title']} → {meta['bundle_dir']}")
         if args.json:
             emit_json({"ok": True, "meta": meta})
+        return
+
+    if args.frames:
+        # The keyframe leg is addressed by id and is never reached from --fetch:
+        # #3983's owed check is a paired comparison whose control arm is
+        # transcript-only, so an ingest path that sampled frames by default would
+        # contaminate the measurement that decides whether this stays. No
+        # save_state() on this path — see run_frame_stage's docstring; the bytes
+        # are compared before and after so the operator sees that claim rather
+        # than taking it on trust.
+        def _seen_bytes():
+            if not os.path.isfile(STATE_FILE):
+                return None
+            with open(STATE_FILE, "rb") as fh:
+                return fh.read()
+
+        before = _seen_bytes()
+        if args.frames == "all":
+            results = run_frames_all(log=print, onscreen=not args.frames_only)
+            payload = {"ok": True, "bundles": len(results), "results": results}
+            print(f"\n✓ Keyframe pass over {len(results)} bundle(s)")
+        else:
+            result, why = run_frames(args.frames, log=print,
+                                     onscreen=not args.frames_only)
+            payload = {"ok": True, "result": result}
+            if why:
+                payload["error"] = why
+            outcome = (result["frame_reason"]
+                       or f"{result['frames']['frames']} frame(s) sampled")
+            print(f"\n✓ Keyframe pass: {args.frames} — {outcome} "
+                  f"(exit 0 either way: a bundle with no downloadable media is a "
+                  f"fact about that video, not a failed command)")
+        payload["seen_json_unchanged"] = _seen_bytes() == before
+        if not payload["seen_json_unchanged"]:
+            print("✗ seen.json CHANGED during a keyframe pass — that is a bug")
+        if args.json:
+            emit_json(payload)
         return
 
     if args.complete:
