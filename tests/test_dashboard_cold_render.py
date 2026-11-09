@@ -122,8 +122,19 @@ RETIRED_P90_S = 16.69
 #: test_one_cold_dashboard_cycle_beats_the_budget`, one invocation per cycle) with
 #: `/proc/loadavg`'s 1-minute figure stamped before each. Re-based 2026-11-07 by round
 #: SM_20261107_014442 (#3860) — the perf round, on the tree that shipped the speed-up it
-#: measures, so the number is the speed-up and not a hope. Log:
-#: `/home/alansrobotlab/lloyd-work/meas-3860-r2.log`.
+#: measures, so the number is the speed-up and not a hope. The runs are committed to the
+#: VAULT, not left in the scratch checkout they were taken in:
+#: `backlog/data/meas-3860-r2.log` (11 lines, 995 B) holds the ten cycles the two
+#: `CURRENT_RE_BASE` rows of the table below re-derive their figures from. Two siblings
+#: came with it — `backlog/data/meas-3859.log` (294 lines, 24,238 B), the serial runs
+#: recorded while the board held 3,796 item files, and
+#: `backlog/data/meas-3860-retriage.log` (63 lines, 5,671 B), the run whose red drift
+#: node (`assert 3799 <= 3794`) is what made this re-base necessary. VAULT paths, not
+#: repo paths — `~/obsidian/` plus these, the spelling `app/usage_store.py`'s
+#: `REPREFILL_WITNESS` already uses — because a unit test that opened them would be
+#: measuring whichever machine ran it. What the repo carries instead is the
+#: path-and-figure table in `tests/test_cold_cycle_witness_cites.py`, which reddens when
+#: a cite here and a committed witness disagree.
 #:
 #:   set 1, machine load 3.46-3.79, 5 first samples: 9.86  10.33  10.42  10.62  11.53
 #:   set 2, machine load 3.43-3.97, 5 first samples: 10.15  10.16  10.21  10.45  10.86
