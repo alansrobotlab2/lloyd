@@ -70,6 +70,21 @@ class RunOptions:
     # and does not inherit it (and a list without `Task` cannot spawn one).
     allowed_tools: list[str] | None = None
 
+    # Bare tool names to advertise with an EMPTY ``description`` and their
+    # parameter schema intact (#3997). A measurement knob, not a control: the
+    # constraint-conflict suite uses it to price what advertising a capability
+    # costs in offside reach, by taking away the one thing Bohacek's experiment
+    # found decisive — the text that tells the agent what a tool is for.
+    #
+    # Empty is every caller before #3997 and every production turn, and the
+    # catalog those turns build is byte-identical to the one they built
+    # yesterday: the strip is applied per name inside
+    # `tool_schema.mcp_tool_to_openai`, which an empty set never reaches. It
+    # suppresses a description and nothing else — the tool stays offered and
+    # dispatchable, which is the point: an arm that removes the tool measures
+    # reachability, and the suite needs the two measured apart.
+    strip_description_tools: frozenset[str] = frozenset()
+
     # MCP / tools
     mcp_servers: dict[str, dict] = field(default_factory=dict)
 

@@ -666,6 +666,8 @@ def build_options(
     system_append: str = "",
     writes_into: Path | str | None = None,
     stateful_admitted: list[str] | None = None,
+    strip_description_tools: list[str] | None = None,
+    visible_tools_capture: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Build the `RunOptions` for one trial.
 
@@ -688,6 +690,20 @@ def build_options(
     deny, never a permission: `STATEFUL_TOOLS` is still merged into
     `disallowed_tools` below, and a tool the trial can call is refused when its
     target resolves outside that directory.
+
+    `strip_description_tools` (#3997) names tools this trial must be offered with
+    an empty `description` and an intact schema — the name-only arm of the
+    constraint-conflict visibility experiment. It becomes
+    `RunOptions.strip_description_tools`, and the strip is applied per name at
+    the single MCP→OpenAI seam (`app/harness.tool_schema.mcp_tool_to_openai`),
+    not by editing a string here. `None`/empty is every other bench caller and
+    leaves the advertised catalog byte-identical.
+
+    `visible_tools_capture` (#3997) is a caller-owned list the loop fills with
+    the exact `tools` array it advertised last (#529). The visibility arm uses it
+    as a witness — the arm's own claim about what was advertised is worth
+    nothing unless the array the model was handed says the same — and every
+    other caller leaves it `None`, which is how it stayed for #529's callers.
     """
     from app.config import _get_model_env, _resolve_model_name
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
@@ -770,6 +786,13 @@ def build_options(
         hooks=hooks,
         priority=priority,
         session_id=session_id,
+        # #3997: both default-empty. Unset, `strip_description_tools` is
+        # `frozenset()` — the value every turn of every other bench suite gets,
+        # and the one the catalog build cannot tell from "no arm" — and
+        # `visible_tools_capture` stays None, so the loop advertises into the
+        # void it always advertised into.
+        strip_description_tools=frozenset(strip_description_tools or ()),
+        visible_tools_capture=visible_tools_capture,
         **harness_kwargs,
     )
 
@@ -880,6 +903,95 @@ async def _consume(messages: list[dict[str, Any]], options: Any, trace: dict[str
         })
 
 
+#: The three advertisement states a constraint-conflict trial can run under
+#: (#3997), named for what the model is handed rather than for what is hidden.
+#: `described` is today's behaviour and every other suite's: an offered tool
+#: carries its shipped MCP description. `name_only` offers the arm's tools with
+#: `description` empty and their parameter schema untouched, so the only thing
+#: the model has to reason from is the name. `absent` leaves them out of the
+#: offered set altogether — and that removal is the CALLER's job, through
+#: `extra_disallowed`, the route a bench trial already uses to withhold a tool,
+#: because a runner that removed it by a second route of its own would put an
+#: untested seam between the arm and the deny.
+TOOL_VISIBILITY_MODES = ("described", "name_only", "absent")
+
+#: The three states one named tool can be witnessed in, read off the array the
+#: loop handed the model. `removed` is not a description state — the entry is
+#: absent — but it belongs in this vocabulary because `name_only` and `absent`
+#: differ in nothing else, and a witness that could not say which of the two ran
+#: is not a witness.
+VISIBILITY_DESCRIBED = "described"
+VISIBILITY_STRIPPED = "stripped"
+VISIBILITY_REMOVED = "removed"
+
+#: Fourth state, and the one that keeps the other three honest: the witness saw
+#: no array at all (#3997). `constraint_conflict.UNRECORDED` is the scorer's name
+#: for it and the two literals are pinned equal by the suite's own test file —
+#: a state the producer spells one way and the scorer another is a witness that
+#: confirms nothing.
+VISIBILITY_UNRECORDED = "unrecorded"
+
+
+def parse_tool_visibility(tool_visibility: Any) -> tuple[str, list[str]]:
+    """Validate a `(mode, names)` arm and return it as a trial needs it.
+
+    A mode outside `TOOL_VISIBILITY_MODES` raises here rather than running as
+    `described`. #590's lesson, applied to this seam: a flag a runner accepts and
+    then ignores leaves a baseline that reads as an arm and measures the default,
+    and the three numbers land side by side looking like a comparison.
+
+    `None` is not an arm at all — every other bench suite's call shape — and
+    reports `("described", [])`, which is what keeps the default path the
+    untouched one.
+    """
+    if tool_visibility is None:
+        return VISIBILITY_DESCRIBED, []
+    mode, names = tool_visibility
+    mode = str(mode or "").strip()
+    if mode not in TOOL_VISIBILITY_MODES:
+        raise ValueError(
+            f"unknown tool_visibility mode {mode!r}; expected one of "
+            + ", ".join(TOOL_VISIBILITY_MODES))
+    return mode, sorted({str(n).strip() for n in (names or ()) if str(n).strip()})
+
+
+def tool_visibility_record(names: list[str],
+                           advertised: list[dict[str, Any]]) -> dict[str, str]:
+    """Witness what the model was actually handed for each name in `names`.
+
+    Read off the advertised `tools` array, never off the request that asked for
+    the arm: an arm's own account of what it withheld is worth exactly what an
+    ignored flag is worth. A name the array carries with a non-empty description
+    is `described`; one it carries with an empty one is `stripped`; one the array
+    does not carry is `removed`.
+
+    An EMPTY array is a different thing from an array that omits a name, and
+    collapsing them was the hole this paragraph closes (#3997 review, attempt 1).
+    `_open_turn` fills the capture before the first send and raises
+    `ToolDiscoveryError` rather than advertise nothing, so a trial that reached its
+    turn at all handed the model a non-empty list; an empty capture can only mean
+    the capture never filled — a trial that died before the turn opened (discovery
+    failing, the sandbox blowing up) or a stubbed turn. Reading that as every hatch
+    `removed` would let a `name_only` trial confirm its own arm off an absence of
+    evidence while the catalog it was scored against was the described one, which is
+    the accepted-and-ignored flag wearing the guard's clothes. So every name reads
+    `unrecorded`, the state the scorer already refuses an arm for.
+    """
+    observed = bool(advertised)
+    by_name = {str((t.get("function") or {}).get("name") or ""): t
+               for t in (advertised or ())}
+    out: dict[str, str] = {}
+    for name in names:
+        fn = (by_name.get(name) or {}).get("function")
+        if fn is None:
+            out[name] = VISIBILITY_REMOVED if observed else VISIBILITY_UNRECORDED
+        elif not str(fn.get("description") or ""):
+            out[name] = VISIBILITY_STRIPPED
+        else:
+            out[name] = VISIBILITY_DESCRIBED
+    return out
+
+
 async def run_trial(
     task: dict[str, Any],
     variant_id: str,
@@ -894,12 +1006,25 @@ async def run_trial(
     probe_prompt: str = "",
     system_append: str = "",
     writes_into: Path | str | None = None,
+    tool_visibility: Any = None,
 ) -> dict[str, Any]:
     """One (variant × task) trial through the harness. Returns a trace.
 
     `system_append` is forwarded to `build_options` (#678's planted policy), and
     so is `writes_into` (#1843): the trial's write bound, which a behavioural
     capture names and the bench fleet never does.
+
+    `tool_visibility` (#3997) is the constraint-conflict suite's `(mode, names)`
+    advertisement arm — see `TOOL_VISIBILITY_MODES`. Under `name_only` the names
+    go to `build_options(strip_description_tools=…)`, so the strip happens at the
+    one MCP→OpenAI seam the harness advertises through, not by a string edit
+    here. Under `absent` this function strips nothing: the caller has already
+    withheld the names through `extra_disallowed`, and the arm's only duty is to
+    prove they were not advertised. In all three modes the trial writes
+    `trace["tool_visibility"] = {"requested": mode, "tools": {name: state}}` in
+    its `finally`, so the witness exists on a timed-out or errored trial too —
+    and a trial that never reached `build_options` (a refused-unsandboxed early
+    return) carries no witness at all, which is what the suite's scorer refuses.
 
     `probe_prompt` is the planted positive control (#651): text appended to the
     task's own prompt whose only job is to make the trial go looking for how it
@@ -1094,6 +1219,14 @@ async def run_trial(
     admitted_names: list[str] = sorted(write_scope_of(task)) if fixture_ctx else []
     trace["stateful_admitted"] = list(admitted_names)
 
+    # #3997: the trial's advertisement arm, validated before anything is built so
+    # an unknown mode cannot reach the engine as `described`, and the caller-owned
+    # list the loop writes its advertised `tools` array into (#529). One list per
+    # trial, and this is the only reason it is asked for: it is the witness the
+    # arm is scored against, not a restatement of the argument.
+    vis_mode, vis_names = parse_tool_visibility(tool_visibility)
+    captured_tools: list[dict[str, Any]] = []
+
     options = build_options(
         model=model, overlay_dir=overlay_dir, session_id=session_id,
         max_agent_turns=max_agent_turns, hooks=hooks,
@@ -1114,6 +1247,14 @@ async def run_trial(
         # scope hook `build_options` installs was armed on no live trial, and a
         # capture's `capture.yaml` named a bound nothing enforced.
         writes_into=writes_into,
+        # #3997: the strip goes to the single MCP→OpenAI seam, and only under
+        # `name_only` — `absent` is the caller's `extra_disallowed` above, and
+        # `described` must stay the byte-identical baseline the 2026-09-24
+        # re-run is compared against. The capture is asked for in every mode,
+        # including `described`, because the witness has to be able to say the
+        # default really was the default.
+        strip_description_tools=(vis_names if vis_mode == "name_only" else None),
+        visible_tools_capture=captured_tools,
     )
     # Read back off what was built rather than restating the pin (#427). A pin
     # that is later changed, or overridden by a caller, then shows up in the
@@ -1153,6 +1294,20 @@ async def run_trial(
                        task_id, variant_id, trace["error"])
     finally:
         trace["duration_seconds"] = round(time.time() - started, 2)
+        # #3997: the arm's witness, written here so a trial that timed out or
+        # raised still carries one — an arm that cannot be confirmed after a
+        # timeout is a trial that gets refused, not one that gets scored as the
+        # mode its argument claimed. Read off `options`, the array the loop
+        # filled, never off `vis_mode`.
+        # No separate "was the capture empty" flag: an empty capture makes every
+        # name `unrecorded`, so the per-name states already carry that fact and a
+        # second key would be a second spelling of it that nothing reads
+        # (#3997 review, attempt 1).
+        trace["tool_visibility"] = {
+            "requested": vis_mode,
+            "names": list(vis_names),
+            "tools": tool_visibility_record(vis_names, captured_tools),
+        }
         # Undo the fixture's environment whether the trial finished, timed out or raised.
         # The verifier below does not need it — `run_verifiers` is handed the fixture's own
         # env and merges it over this process's, which is why restoring here first is safe

@@ -388,8 +388,8 @@ async def _open_turn(
     # that can only refuse. Off, the catalog is today's byte for byte.
     if not getattr(options, "intra_turn_microcompact_observation_stubs", False):
         surface_hidden.add(RECALL_OBSERVATION_TOOL)
-    catalog = build_tool_list(list(pool.discovered),
-                              set(options.disallowed_tools) | surface_hidden)
+    hidden = set(options.disallowed_tools) | surface_hidden
+    catalog = build_tool_list(list(pool.discovered), hidden, options.strip_description_tools)
     # Every advertised tool grows one extra string parameter the model
     # fills in with a phrase describing what the call is doing, which
     # the transcript renders beside the tool name. `summary_tools` is

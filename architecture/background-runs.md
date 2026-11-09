@@ -800,8 +800,8 @@ round that ran it and for nothing else.
   that last reason only: `web/vitest.config.ts` runs in `environment: "node"` with no DOM
   package installed, so a state machine and a hook-free component can be EXECUTED by
   `web/src/components/pages/BackgroundPage.test.ts` where a mounted panel cannot.
-- **Matched as a family, not one name.** `bench` is
-  `scripts/autoresearch/bench_runner_sdk.py:908`; `bench-mine` is
+- **Matched as a family, not one name.** `bench` is the trial's producer slug,
+  `scripts/autoresearch/bench_runner_sdk.py:341`; `bench-mine` is
   `workers/sources/bench_mine.py`, whose 424 live transcripts this item never
   counted. Both stamp `platform: "worker"`, so the platform cannot tell a trial from a
   job and only `source` can; a rule matching `bench` alone leaves a fifth of the family

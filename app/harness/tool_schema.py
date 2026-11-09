@@ -121,8 +121,23 @@ def pop_summary(args: dict[str, Any]) -> str:
     return value.strip()
 
 
-def mcp_tool_to_openai(tool: dict[str, Any]) -> dict[str, Any]:
-    """Translate one MCP tool definition into the OpenAI tools schema."""
+def mcp_tool_to_openai(tool: dict[str, Any], *,
+                       strip_description: bool = False) -> dict[str, Any]:
+    """Translate one MCP tool definition into the OpenAI tools schema.
+
+    ``strip_description`` (#3997) advertises the tool with its ``description``
+    set to the empty string and its ``parameters`` untouched — the
+    name-only condition the Bohacek experiment measured, where an agent has to
+    infer what a tool does from its bare name. It is a suppression of one field
+    and nothing else: the entry stays in the catalog, reachable, with the full
+    schema, so a rate that moves under it is about what the model was *told*,
+    not about a tool it could not find. ``False`` — the default, and every
+    caller before #3997 — returns the shipped description byte-for-byte.
+
+    This is the one place the strip happens. Doing it here rather than in each
+    caller means the measured arm is the same surface production advertises
+    through, and an empty set upstream (every existing caller) cannot reach it.
+    """
     name = tool["name"]
     if len(name) > OPENAI_TOOL_NAME_MAX:
         raise ValueError(
@@ -133,7 +148,7 @@ def mcp_tool_to_openai(tool: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": name,
-            "description": tool.get("description") or "",
+            "description": "" if strip_description else (tool.get("description") or ""),
             "parameters": parameters,
         },
     }
@@ -158,6 +173,7 @@ def resolve_tool_name(advertised_name: str) -> tuple[str | None, str]:
 def build_tool_list(
     discovered: list[tuple[str, list[dict[str, Any]]]],
     disallowed: set[str],
+    strip_description_for: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Build the OpenAI ``tools=[...]`` payload from MCP discovery output.
 
@@ -166,6 +182,15 @@ def build_tool_list(
     ``mcp__server__tool`` form is also accepted so old config can be
     rolled forward.
 
+    ``strip_description_for`` (#3997) is the set of bare tool names to advertise
+    with an empty ``description`` and an intact schema — the name-only arm of the
+    constraint-conflict visibility experiment. Empty (the default, and every
+    caller before #3997) is today's catalog byte for byte; the strip itself
+    lives in ``mcp_tool_to_openai``, so this function only decides which names it
+    applies to. A name in BOTH sets is removed, not described-and-stripped:
+    ``disallowed`` is the stronger statement, and the `absent` arm reaches the
+    harness through `disallowed_tools` rather than through here.
+
     Raises ``ToolDiscoveryError`` if two servers export the same bare tool
     name — bare-name advertise gives us no way to disambiguate, and we want
     a loud error rather than silent shadowing. It is a discovery failure,
@@ -173,6 +198,13 @@ def build_tool_list(
     an empty catalog (D13). A tool whose name is over the 64-char limit is
     left out with a warning, not silently.
     """
+    # Both spellings the `disallowed` checks below honour: the bare advertised
+    # name, and the legacy ``mcp__<server>__<tool>`` form old config and old
+    # transcripts carry. Normalised here, at the one seam that decides what is
+    # advertised, rather than by every caller — the #3997 arm hands this function
+    # `RunOptions.strip_description_tools` verbatim, and a name that missed on a
+    # spelling would quietly measure the described condition under `name_only`.
+    strip_for = {resolve_tool_name(str(n))[1] for n in (strip_description_for or ())}
     tools: list[dict[str, Any]] = []
     seen: dict[str, str] = {}  # bare_name -> server_name
     for server_name, mcp_tools in discovered:
@@ -194,7 +226,8 @@ def build_tool_list(
                     servers=[seen[bare], server_name],
                 )
             try:
-                openai_tool = mcp_tool_to_openai(mcp_tool)
+                openai_tool = mcp_tool_to_openai(
+                    mcp_tool, strip_description=bare in strip_for)
             except ValueError as exc:
                 logger.warning(
                     "tool_schema: not advertising %r from %r: %s",
