@@ -1405,8 +1405,8 @@ def test_the_own_series_ruling_lands_in_the_definition_and_not_in_the_tier_table
     # That the seven-job check can fail is shown, not claimed: the same read of a
     # table with #90 moved up one row reports it moved.
     seeded = _text().replace("#78 #80 #36 #86 #90 · ", "#78 #80 #36 #86 · ", 1)
-    seeded = seeded.replace("#92 #93 #94 #99 #103 | 27 |",
-                            "#90 #92 #93 #94 #99 #103 | 27 |", 1)
+    seeded = seeded.replace("#92 #93 #94 #99 #103 | 28 |",
+                            "#90 #92 #93 #94 #99 #103 | 28 |", 1)
     assert seeded != _text(), (
         "the seeded movement did not take, so the check below would prove nothing")
     seeded_hits = [t for t, ids in _tiers_from(seeded).items() if "#90" in ids]
@@ -6437,7 +6437,13 @@ CADENCE_CELLS: dict[str, dict[str, str]] = {
                       # #104's — and `test_the_cadence_rows_pinned_are_exactly_the_group_
                       # table_rows` is what makes the row and this key one set, so neither
                       # can arrive without the other.
-                      "#108": "daily"},
+                      "#108": "daily",
+                      # #4010: `~/obsidian/autonomy/110-guardian-note-sweep-daily.md`
+                      # declares `frequency: daily` and no `runs_per_day`, so the row
+                      # §Bound entropy gained pins on the same footing as #104's and
+                      # #108's — and the row-set node keeps the row and this key one
+                      # set, so neither can arrive without the other.
+                      "#110": "daily"},
     # #3738: §Watch the machinery, and the one entry in this dict nobody types. The
     # cadence is `WATCH_JOBS`'s first probe — the value #2630 read off each job's task
     # file and has pinned its row's Freq cell against ever since — so the fifteen cells
@@ -6603,19 +6609,30 @@ def test_widening_a_freq_cell_fails_the_cadence_pin():
             f"widening {job} to {stale!r} still agreed with the typed value, which "
             f"means the typed value has already rotted and the pin is green for free")
 
+    # The seeded id is DERIVED, not typed. It was the literal `#110` until #4010 made
+    # #110 a real member of §Bound entropy, and this node's own precondition tripped: a
+    # typed seed is a collision waiting for the fleet to grow into it, which is the
+    # staleness this whole file exists to catch. One past the numbering note's own
+    # ceiling cannot collide, because `test_the_fleet_bound_floors_the_range_at_the_
+    # newest_task` holds that ceiling at or above the newest member the tables name.
+    seed = f"#{_num(re.search(r'ids run \d+ through (\d+) or beyond',
+                              _numbering_note()).group(1)) + 1}"
     # The id is a real-looking `#NN` on purpose: the reader only accepts a row whose
     # first cell is `#\d+`, so a placeholder like `#53x` would be skipped and the row-set
     # comparison would come out equal for the wrong reason — the check reading as green
     # while its own seed never entered the table.
     gained = re.sub(r"(?m)^\| #53 \| daily \|.*$",
-                    lambda m: m.group(0) + "\n| #110 | daily | seeded row |", doc,
+                    lambda m: m.group(0) + f"\n| {seed} | daily | seeded row |", doc,
                     count=1)
     assert gained != doc, (
         "the seeded §Ingest row never arrived, so the row-set half of clause 3 went "
         "untested rather than passing")
-    assert "| #110 |" not in doc, "`#110` is already a §Ingest row, so it seeds nothing"
+    assert f"| {seed} |" not in doc, (
+        f"`{seed}` is already a §Ingest row, so it seeds nothing — a numbering note "
+        "behind the fleet the tables name is what "
+        "`test_the_fleet_bound_floors_the_range_at_the_newest_task` also weighs")
     after = sorted(_cadence_rows(gained, "Ingest"))
-    assert after == sorted(list(CADENCE_CELLS["Ingest"]) + ["#110"]), (
+    assert after == sorted(list(CADENCE_CELLS["Ingest"]) + [seed]), (
         f"§Ingest reads {after} after gaining a row nobody typed a cadence for; the "
         f"row-set comparison must see the extra id, or an eighth member's cadence "
         f"would go unchecked exactly as #3333's two cells did")
