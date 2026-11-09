@@ -2698,9 +2698,10 @@ def side_copy_plan(name: str, swap: bool) -> list[str]:
     cli = f"node {QMD_CLI} --index {name}"
     if swap and side_copy_exists(name):
         plan = [
-            f"verify the copy already at {side_index_path(name)}: live_rows >= the floor "
-            f"{side_marker_path(name).name} recorded, pending 0, vsearch hits > 0, and "
-            "the live index not outgrown since that build",
+            f"verify the copy already at {side_index_path(name)}: its non-orphan vectors "
+            f">= the floor {side_marker_path(name).name} recorded, pending 0, vsearch "
+            "hits > 0, its orphans under the live prune's bar, and the live index not "
+            "outgrown since that build — measured only: this step prunes nothing",
         ]
     else:
         plan = [
@@ -2708,9 +2709,11 @@ def side_copy_plan(name: str, swap: bool) -> list[str]:
             f"{cli} update",
             f"{cli} embed    # retried while the watcher holds the embed lock",
             f"{cli} status   # pending must read 0",
+            f"{cli} cleanup  # prune the orphans this top-up wrote (#4006): nothing "
+            "else in the system prunes a dated copy",
             f"{cli} vsearch --format json -n 5 {SIDE_PROBE_QUERY!r}",
-            f"verify: side live_rows >= live index's non-orphan vectors, pending 0, "
-            f"vsearch hits > 0",
+            f"verify: side non-orphan vectors >= live index's non-orphan vectors, "
+            f"pending 0, vsearch hits > 0, orphans under the live prune's bar",
         ]
     if swap:
         ctl = f"supervisorctl -c {SUPERVISOR_CONF}"
@@ -2726,6 +2729,44 @@ def side_copy_plan(name: str, swap: bool) -> list[str]:
             f"node {QMD_CLI} vsearch --format json -n 5 {SIDE_PROBE_QUERY!r}",
         ]
     return plan
+
+
+#: The two ways a side copy's orphans are read, and the bar they are held to.
+#:
+#: A dated `rebuild-YYYYMMDD` copy has no cleaner anywhere else in the system:
+#: `lloyd-qmd-cleanup.service` runs `qmd.js cleanup` with NO `--index` (its
+#: `ExecStart`, line 14), so the nightly timer prunes only the live index and the copy's
+#: own figure can only ever move up while the live one moves down. #4006 measured one
+#: 266-second top-up leave `rebuild-20261108` at 3,262 orphaned rows of 83,593 (ratio
+#: 0.039) against the live index's 70 of 80,321 (0.0009) — every one of them written by
+#: the top-up, since the fresh build two nights earlier ended at 0 — and the bar it is
+#: held to here is not invented for the copy: it is the live prune's own `need_prune`
+#: pair, imported and ANDed the same way.
+def orphan_bar_exceeded(orphan_rows, orphan_ratio) -> bool:
+    """True when a side copy's orphans pass the bar that makes the LIVE prune run.
+
+    Both arms, ANDed, exactly as `main()` reads them — a small index does not trip the
+    ratio on noise and a large one does not trip the floor on a healthy index. Read
+    `>=` like the live check does, not `>`. A count that could not be measured is not a
+    failure: an unreadable database is already named by the arm that could not read it.
+    """
+    return (orphan_rows is not None and orphan_ratio is not None
+            and orphan_ratio >= ORPHAN_RATIO_TRIGGER
+            and orphan_rows >= ORPHAN_ABS_TRIGGER)
+
+
+def _orphan_note(v: dict) -> str:
+    """The copy's dirt as one person-facing phrase, with the bar it was judged against.
+
+    Printed beside the live/occupancy figures on the route's summary line so the ratio
+    survives into the terminal output of the run whose report says `swapped: true` — the
+    witness JSON holds `side_after`, but nothing a person reads did (#4006).
+    """
+    rows, ratio = v.get("side_orphan_rows"), v.get("side_orphan_ratio")
+    if rows is None or ratio is None:
+        return "orphans unmeasured"
+    return (f"orphans {rows:,} = {ratio:.1%} (the live prune's bar: "
+            f">= {ORPHAN_RATIO_TRIGGER:.0%} AND >= {ORPHAN_ABS_TRIGGER:,} rows)")
 
 
 def _status_pending(out: str) -> int:
@@ -2813,9 +2854,31 @@ def rebuild_side_copy(name: str) -> dict:
             # for the watcher's cycle to release the lock and go again.
             time.sleep(SIDE_EMBED_RETRY_SLEEP_S)
 
+    # Prune the copy before anything about it is measured (#4006). A top-up re-writes
+    # the hash of every edited document, and an edited document orphans its whole chunk
+    # series IN THE COPY: 289 re-embedded hashes on the 2026-11-09 top-up left 3,262
+    # orphaned rows, ~11 per edited document, and the copy's ratio can only climb from
+    # there — no timer reaches a dated copy, because the nightly unit's `cleanup` has no
+    # `--index` on it. Same verb the live mutating section runs, aimed at the copy
+    # through `_qmd_side`, with the live prune's own 5400 s. It runs only on a copy whose
+    # embed finished: an unfinished one is already refused by the arm below, and pruning
+    # a half-written index is not what that step is for.
+    if embed_ok:
+        t = time.time()
+        rc, out = _sh(_qmd_side(name, "cleanup"), 5400, env=QMD_ENV)
+        report["actions"].append(f"cleanup rc={rc} in {time.time() - t:.0f}s :: "
+                                 f"{_last_line(out)}")
+
     after = inspect_index(side)
     report["side_after"] = after
-    side_rows = ((after.get("vec0") or {}).get("live_rows")) if not after.get("error") else None
+    # The copy is counted on the ruler `floor` itself measures — non-orphan vectors — not
+    # on `vec0.live_rows`, which still holds the rows of vectors the join does not count.
+    # The old basis is why the copy could read 83,593 against a floor of 80,251 and pass:
+    # 3,262 of those rows were orphans, so pruning took the copy to ~80,331 and left an
+    # 80-row margin where the bar needed a count that means "vectors a query can return".
+    side_rows = after.get("vectors_live") if not after.get("error") else None
+    side_orphans = after.get("vectors_orphaned") if not after.get("error") else None
+    side_ratio = after.get("orphan_ratio") if not after.get("error") else None
     hits = _vsearch_hits(_qmd_side(name, "vsearch", "--format", "json", "-n", "5",
                                    SIDE_PROBE_QUERY)) if embed_ok else 0
     failed = []
@@ -2828,10 +2891,17 @@ def rebuild_side_copy(name: str) -> dict:
                       f"{floor} non-orphan vectors")
     if hits <= 0:
         failed.append("the vsearch against the side index returned no hits")
+    if orphan_bar_exceeded(side_orphans, side_ratio):
+        failed.append(f"the side copy holds {side_orphans:,} orphaned vectors "
+                      f"({side_ratio:.1%} of {after.get('vectors_total'):,}), past the "
+                      f"live prune's own bar of {ORPHAN_RATIO_TRIGGER:.0%} ratio AND "
+                      f"{ORPHAN_ABS_TRIGGER:,} rows")
     report["verification"] = {
         "passed": not failed,
         "name": name,
+        # The copy's NON-ORPHAN vectors: the quantity `floor_vectors_live` is a count of.
         "side_live_rows": side_rows,
+        "side_vec0_live_rows": (after.get("vec0") or {}).get("live_rows"),
         # The floor is the live index's NON-ORPHAN vectors, not its vec0 live_rows:
         # the live table still holds its orphans, a fresh copy never has them, so
         # the raw count is a bar a correct rebuild cannot reach.
@@ -2839,6 +2909,11 @@ def rebuild_side_copy(name: str) -> dict:
         "live_vec0_live_rows": (live.get("vec0") or {}).get("live_rows"),
         "pending_embeddings": pending,
         "vsearch_hits": hits,
+        # The copy's own dirt, measured after the prune, on the same witness that says
+        # whether it may be swapped in (#4006).
+        "side_orphan_rows": side_orphans,
+        "side_orphan_ratio": side_ratio,
+        "orphan_bar": {"ratio": ORPHAN_RATIO_TRIGGER, "rows": ORPHAN_ABS_TRIGGER},
         "failed": failed,
     }
     report["side_bytes"] = after.get("index_bytes")
@@ -2871,13 +2946,22 @@ def verify_side_copy(name: str) -> dict:
     `rebuild_side_copy` returns, `"verified_without_build": true` aside, and
     `swap_side_copy` cannot tell the two apart.
 
-    Three measurements are the same three a build ends with: the copy's own `vec0`
-    live rows against the floor its build recorded in the marker, `qmd status` pending at
-    0, and one real `vsearch` against it. The fourth is new because a copy measured days
+    Three measurements are the same three a build ends with: the copy's own non-orphan
+    vector count against the floor its build recorded in the marker, `qmd status` pending
+    at 0, and one real `vsearch` against it. The fourth is new because a copy measured days
     after it was built needs something a fresh one never did: that the live index has not
     outgrown it since. That check is a count, not a set difference, so vectors deleted and
     added in balance do not move it — the floor says the copy is as full as its own build
     claimed, and this says nothing newer has arrived.
+
+    A fifth figure rides here too — the copy's orphan rows and ratio (#4006) — and it is
+    reported and gated, never acted on. This half runs NO `cleanup`: it is the
+    seconds-scale step a person invokes from a terminal, and silently pruning a copy they
+    are about to promote is not what `--swap` promises them. The prune belongs to the
+    build/top-up half, which is the unattended one and the one that writes the orphans;
+    what this half owes instead is that a person reading `swapped: true` can see the ratio
+    they just installed, and that a copy past the live prune's own bar is refused rather
+    than swapped.
 
     Raises `SideCopyRefused` only for a name that is not this route's copy at all. A copy
     that is there and measures wrong is reported, not raised: `failed` says how.
@@ -2903,7 +2987,9 @@ def verify_side_copy(name: str) -> dict:
                     "actions": [], "live_before": live}
     after = inspect_index(side)
     report["side_after"] = after
-    side_rows = (after.get("vec0") or {}).get("live_rows") if not after.get("error") else None
+    side_rows = after.get("vectors_live") if not after.get("error") else None
+    side_orphans = after.get("vectors_orphaned") if not after.get("error") else None
+    side_ratio = after.get("orphan_ratio") if not after.get("error") else None
     src, sout = _sh(_qmd_side(name, "status"), 180, env=QMD_ENV)
     pending = _status_pending(sout) if src == 0 else -1
     hits = _vsearch_hits(_qmd_side(name, "vsearch", "--format", "json", "-n", "5",
@@ -2925,11 +3011,19 @@ def verify_side_copy(name: str) -> dict:
         failed.append(f"{name} is stale: it was built against {floor} live vectors and "
                       f"the live index now holds {live_now} non-orphan ones, so the "
                       f"{live_now - floor} vectors ingested since that build are not in it")
+    if orphan_bar_exceeded(side_orphans, side_ratio):
+        failed.append(f"the side copy holds {side_orphans:,} orphaned vectors "
+                      f"({side_ratio:.1%} of {after.get('vectors_total'):,}), past the "
+                      f"live prune's own bar of {ORPHAN_RATIO_TRIGGER:.0%} ratio AND "
+                      f"{ORPHAN_ABS_TRIGGER:,} rows")
     report["verification"] = {
         "passed": not failed,
         "name": name,
         "verified_without_build": True,
+        # The copy's NON-ORPHAN vectors — the quantity `floor` is a count of, and the one
+        # `side_vec0_live_rows` above the orphans that inflates it are not (#4006).
         "side_live_rows": side_rows,
+        "side_vec0_live_rows": (after.get("vec0") or {}).get("live_rows"),
         # The floor the build recorded, not a fresh count: see the note above.
         "floor_vectors_live": floor,
         "live_vec0_live_rows": (live.get("vec0") or {}).get("live_rows"),
@@ -2937,6 +3031,9 @@ def verify_side_copy(name: str) -> dict:
         "stale": floor < live_now,
         "pending_embeddings": pending,
         "vsearch_hits": hits,
+        "side_orphan_rows": side_orphans,
+        "side_orphan_ratio": side_ratio,
+        "orphan_bar": {"ratio": ORPHAN_RATIO_TRIGGER, "rows": ORPHAN_ABS_TRIGGER},
         "failed": failed,
     }
     report["side_bytes"] = after.get("index_bytes")
@@ -3246,7 +3343,8 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
                   f"invocation, no rebuild run")
         print(f"side copy {name}: verification {'passed' if v['passed'] else 'NOT passed'} "
               f"(live_rows {v['side_live_rows']} vs floor {v['floor_vectors_live']}, "
-              f"pending {v['pending_embeddings']}, vsearch hits {v['vsearch_hits']}); "
+              f"pending {v['pending_embeddings']}, vsearch hits {v['vsearch_hits']}, "
+              f"{_orphan_note(v)}); "
               f"{(report.get('side_bytes') or 0) / 1e6:.0f} MB at occupancy "
               f"{report.get('side_occupancy')} against live {report.get('live_occupancy')}")
         for why in v["failed"]:

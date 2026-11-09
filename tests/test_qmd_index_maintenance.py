@@ -4195,16 +4195,45 @@ def test_the_committed_witness_agrees_with_the_fixture_this_change_is_pinned_to(
 SIDE = "rebuild-a"
 
 
+def _prune_the_side_copy(path: Path) -> int:
+    """Delete the rows `inspect_index` counts as orphaned, and their vec0 slot rows.
+
+    What this stands in for is the COUNT the route gates on, not the fork's predicate:
+    `cleanupOrphanedVectors` (qmd/src/store.ts:2787, whose two DELETEs key on
+    `documents.hash = content_vectors.hash AND d.active = 1`) prunes by the DOCUMENT side,
+    while `inspect_index`'s orphan figure is `content_vectors` counted against `content`,
+    and this fixture writes no `documents` rows at all — a faithful fork predicate here
+    would delete a healthy copy down to nothing. The fake therefore removes exactly the
+    rows the measurement under test calls orphans, which is the relation every node below
+    reasons about. The returned count is what `cleanup` prints.
+    """
+    import sqlite3
+    con = sqlite3.connect(path)
+    gone = con.execute("delete from content_vectors "
+                       "where hash not in (select hash from content)").rowcount
+    # The live rows' vec0 ids are `<hash>_0` (`_vec0_index`), the orphans' are bare, so
+    # this is the fork's delete-by-`hash_seq` in the fixture's own spelling.
+    con.execute("delete from vectors_vec_rowids "
+                "where id not in (select hash || '_0' from content)")
+    con.commit()
+    con.close()
+    return gone
+
+
 class _FakeQmd:
     """`_sh`, standing in for the qmd CLI and supervisorctl.
 
-    `update` creates the side database (a vec0-shaped one with `side_rows` vectors),
-    `embed` is busy for `busy` calls and then succeeds, `status` reports pending 0 once
-    it has, `vsearch` returns `hits` rows. Every command is recorded.
+    `update` creates the side database (a vec0-shaped one with `side_rows` vectors, plus
+    `side_orphans` orphaned ones and their vec0 slot rows, production's shape), `embed` is
+    busy for `busy` calls and then succeeds, `status` reports pending 0 once it has,
+    `cleanup` prunes the copy and returns `cleanup_rc`, `vsearch` returns `hits` rows.
+    Every command is recorded.
     """
 
-    def __init__(self, side: Path, *, side_rows: int = 40, hits: int = 3, busy: int = 0):
+    def __init__(self, side: Path, *, side_rows: int = 40, hits: int = 3, busy: int = 0,
+                 side_orphans: int = 0, cleanup_rc: int = 0):
         self.side, self.side_rows, self.hits, self.busy = side, side_rows, hits, busy
+        self.side_orphans, self.cleanup_rc = side_orphans, cleanup_rc
         self.calls: list[list[str]] = []
         self.embedded = False
 
@@ -4214,7 +4243,10 @@ class _FakeQmd:
         if cmd[0] != "/usr/bin/node":
             return 0, ""                                   # supervisorctl, curl
         if "update" in cmd:
-            _vec0_index(self.side, chunks=1, chunk_slots=64, live=self.side_rows)
+            rows = self.side_rows + self.side_orphans
+            _vec0_index(self.side, chunks=max(1, -(-rows // 64)), chunk_slots=64,
+                        live=self.side_rows, orphaned=self.side_orphans,
+                        vec_orphans=self.side_orphans)
             return 0, "Indexed 40 documents"
         if "embed" in cmd:
             if self.busy > 0:
@@ -4222,6 +4254,10 @@ class _FakeQmd:
                 return 0, "Another embed process is already running. Skipping."
             self.embedded = True
             return 0, "Embedded 40 chunks"
+        if "cleanup" in cmd:
+            if self.cleanup_rc:
+                return self.cleanup_rc, "cleanup failed: database is locked"
+            return 0, f"Removed {_prune_the_side_copy(self.side)} orphaned embeddings"
         if "status" in cmd:
             return 0, f"  Pending: {0 if self.embedded else 40}\n"
         if "vsearch" in cmd:
@@ -4331,6 +4367,16 @@ def test_the_route_builds_a_named_side_index_and_never_writes_the_live_one(monke
     assert fq.qmd() and all(c[2:4] == ["--index", SIDE] for c in fq.qmd()), fq.qmd()
     verbs = [c[4] for c in fq.qmd()]
     assert verbs[0] == "update" and verbs.count("embed") == 3 and verbs[-1] == "vsearch", verbs
+    # #4006 clause 1: exactly one prune, after the embed loop and before the probe — so
+    # every number the report below measures is a number off a pruned copy, and the
+    # `vsearch` whose hits are counted runs against the index the swap would install.
+    assert verbs.count("cleanup") == 1, verbs
+    assert verbs[-2:] == ["cleanup", "vsearch"], verbs
+    assert verbs.index("cleanup") > max(i for i, v in enumerate(verbs) if v == "embed"), verbs
+    # The plan printed by `--dry-run` is a promise about this invocation, so the verb the
+    # route now runs has to be in it or the promise is the old one.
+    plan = m.side_copy_plan(SIDE, swap=False)
+    assert any("cleanup" in line for line in plan), plan
     # The side config is the live one, where `--index <name>` looks for it.
     assert m.side_config_path(SIDE).read_text() == LIVE
     # The live database: same bytes, same mtime, and every open of it read-only.
@@ -4347,6 +4393,18 @@ def test_the_route_builds_a_named_side_index_and_never_writes_the_live_one(monke
     assert report["verification"]["passed"] is True and "swap" not in report
     assert report["verification"]["floor_vectors_live"] == 32      # orphans are not the bar
     assert report["verification"]["live_vec0_live_rows"] == 32
+    # The prune is on the record as its own action line — rc, elapsed seconds, last line
+    # of output — in the shape the live mutating section writes for its cleanup. That
+    # section's comment defines `actions` as "the record of the subprocess commands run
+    # against the index (`cleanup rc=...`, `embed rc=...`)", so a prune that is not in the
+    # list did not happen as far as any later reader of the witness can tell.
+    assert [a for a in report["actions"] if a.startswith("cleanup rc=0 in ")], \
+        report["actions"]
+    # This copy came out of the fake `update` with no orphans, so the prune cleared
+    # nothing and the two counts that can disagree about a dirty copy agree here.
+    assert report["verification"]["side_orphan_rows"] == 0
+    assert report["verification"]["side_live_rows"] == 40
+    assert report["verification"]["side_vec0_live_rows"] == 40
 
 
 @pytest.mark.parametrize("fake, why", [
@@ -4895,6 +4953,311 @@ def test_the_staleness_bar_is_the_non_orphan_count_so_a_correct_copy_is_swappabl
     assert v["passed"] is True and v["stale"] is False
     assert v["floor_vectors_live"] == 32 and v["live_vectors_live"] == 32
     assert v["live_vec0_live_rows"] == 43, "the report stopped saying which count it read"
+
+
+# ── #4006: the top-up prunes what it writes, and the copy's dirt is on the record ─────
+#
+# The 2026-11-09 witness: the fresh build of `rebuild-20261108` ended at 78,980 vectors and
+# ZERO orphans; one 266-second top-up two nights later ended at 83,593 with 3,262 orphans
+# (ratio 0.039) while the live index it would replace sat at 80,321 / 70 / 0.0009. Nothing
+# prunes a dated copy — `lloyd-qmd-cleanup.service`'s ExecStart has no `--index` — so that
+# figure can only climb across the multi-night dwell #3954 measured. These nodes hold the
+# three things the item asked for: the prune runs in the unattended half, the ratio is
+# reported in both halves, and the bar that refuses a copy is the live prune's own pair.
+#
+# Clause → node, for whoever grades this and for the round's finalizer report:
+#   1  the prune runs after the embed loop and is recorded as `cleanup rc=<rc> in <n>s`:
+#      `test_the_route_builds_a_named_side_index_and_never_writes_the_live_one` (verb
+#      position and the action line) and
+#      `test_a_top_up_night_ends_with_the_copy_no_dirtier_than_the_index_it_would_replace`
+#      (`cleanup rc=0` on a night that had to prune).
+#   2  the copy's own rows and ratio in BOTH verification blocks and on the printed line:
+#      `test_a_top_up_prunes_the_copy_it_just_wrote_and_prints_what_the_prune_left` (the
+#      build half, and the summary line's `orphans 12 = 23.1%`) and
+#      `test_a_hand_swap_reports_the_dirt_of_the_copy_it_promotes_and_prunes_nothing` (the
+#      `verify_side_copy` half, in both of its parametrisations).
+#      `test_a_copy_that_cannot_be_measured_says_so_instead_of_a_ratio` is the same line's
+#      other branch.
+#   3  a figure refuses only past BOTH arms of the imported bar, and changes no verdict at
+#      or below it: `test_the_side_copy_orphan_bar_is_the_live_prunes_own_pair_anded` (the
+#      constants themselves) and
+#      `test_a_side_copy_past_the_live_prunes_own_orphan_bar_is_the_only_case_that_fails`
+#      (the same two copies through the route, differing only in their dirt).
+#   4  the row floor is the copy's non-orphan count, so pruning cannot refuse a complete
+#      copy: `test_the_row_floor_reads_the_copies_non_orphan_count_so_its_dirt_cannot_prop_
+#      it_up`, which runs both the short-and-dirty copy and the full-and-dirty one.
+#
+# What no node here can prove is named in the item's owed-after-landing list, not papered
+# over: the fork's own DELETE behind `node qmd.js --index <copy> cleanup` runs in a
+# subprocess no fixture can open, so only a real top-up night's
+# `qmd-side-copy-rebuild-*.json` — `cleanup rc=0` and a copy ratio near the live index's —
+# shows production's prune lowering the figure the block reports.
+
+def _reshape_the_side_copy(d: Path, *, live: int, orphaned: int, vec_orphans: int = 0) -> None:
+    """Re-write `<SIDE>.sqlite` on disk with `live` non-orphan and `orphaned` orphaned
+    vectors, as a top-up that re-wrote hashes would leave it. Used where a copy has to be
+    handed to the hand-swap half in a state the build half cannot produce."""
+    for suffix in ("", "-wal", "-shm"):
+        p = d / f"{SIDE}.sqlite{suffix}"
+        if p.exists():
+            p.unlink()
+    _vec0_index(d / f"{SIDE}.sqlite", chunks=max(1, -(-(live + orphaned) // 64)),
+                chunk_slots=64, live=live, orphaned=orphaned, vec_orphans=vec_orphans)
+
+
+def test_the_side_copy_orphan_bar_is_the_live_prunes_own_pair_anded():
+    """Clause 3's arithmetic, told by the imported constants rather than by typed numbers.
+
+    The bar is not a new bar: it is `need_prune`'s pair, ANDed, read `>=` the way
+    `main()` reads it. Both arms have to bite — `ORPHAN_RATIO_TRIGGER` alone would fire on
+    a nearly-empty index's noise, `ORPHAN_ABS_TRIGGER` alone would refuse #4006's own live
+    index (387 orphan rows at 0.48% every night), and the history of getting this wrong is
+    the comment on those two constants: they were ANDed at 50,000 once, which on a
+    21,000-vector corpus put the ratio out of reach entirely.
+    """
+    assert m.orphan_bar_exceeded(m.ORPHAN_ABS_TRIGGER, m.ORPHAN_RATIO_TRIGGER) is True
+    assert m.orphan_bar_exceeded(m.ORPHAN_ABS_TRIGGER - 1, 0.99) is False, \
+        "the row floor alone must not refuse a copy"
+    assert m.orphan_bar_exceeded(99 * m.ORPHAN_ABS_TRIGGER,
+                                 m.ORPHAN_RATIO_TRIGGER - 0.0001) is False, \
+        "the ratio alone must not refuse a copy"
+    assert m.orphan_bar_exceeded(None, 0.9) is False, \
+        "a count that could not be read is named by the arm that could not read it"
+    assert m.orphan_bar_exceeded(5000, None) is False
+
+
+def test_a_top_up_prunes_the_copy_it_just_wrote_and_prints_what_the_prune_left(
+        monkeypatch, tmp_path, capsys):
+    """Clauses 1 and 2 on the unattended half: the route prunes the copy through
+    `--index <name>`, records the verb with its rc, and puts the ratio that survives on
+    both the witness and the printed line.
+
+    The prune is made to fail (`cleanup_rc=1`) so the orphans are still there when the
+    copy is measured, and the dirt chosen is 12 rows of 52 — 23.1%, past
+    `ORPHAN_RATIO_TRIGGER` but nowhere near `ORPHAN_ABS_TRIGGER`, so the copy is REPORTED
+    and not refused. That is a different shape from #4006's own copy, which sat under both
+    arms (3,262 rows at 3.9%, ratio below 20%) and so was never a candidate for refusing
+    either; the item's complaint about it was that nothing said the number out loud, which
+    is what the second half of this node is for. Four separate things are checked because
+    each one failing alone would leave the next reader guessing: the verb ran against the
+    named copy, its rc reached `actions`, the figure reached the JSON, and the ratio
+    reached the terminal line the run prints beside the live and occupancy figures.
+    """
+    fq, _ = _side_env(monkeypatch, tmp_path, side_orphans=12, cleanup_rc=1)
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE)
+    assert rc == 0, capsys.readouterr()
+    side_verbs = [c[4] for c in fq.qmd() if c[2:4] == ["--index", SIDE]]
+    assert "cleanup" in side_verbs, side_verbs
+    assert all(c[2:4] == ["--index", SIDE] for c in fq.qmd()), \
+        "a prune aimed at the copy was aimed somewhere else"
+
+    report = _report_of(tmp_path)
+    assert [a for a in report["actions"] if a.startswith("cleanup rc=1 in ")], \
+        report["actions"]
+    v = report["verification"]
+    assert v["passed"] is True and v["failed"] == [], \
+        "a copy past the ratio and short of the row floor is not a failed copy"
+    assert v["side_orphan_rows"] == 12 and v["side_orphan_ratio"] == 0.2308, v
+    assert v["orphan_bar"] == {"ratio": m.ORPHAN_RATIO_TRIGGER,
+                               "rows": m.ORPHAN_ABS_TRIGGER}, v
+    assert v["side_live_rows"] == 40 and v["side_vec0_live_rows"] == 52, \
+        "the two counts have to be reported apart or the ratio cannot be checked"
+    out = capsys.readouterr().out
+    assert "orphans 12 = 23.1%" in out, out
+
+
+@pytest.mark.parametrize("orphans, ratio, verdict", [
+    (2001, 0.1999, True),    # row floor met, ratio arm NOT met
+    (2400, 0.2306, False),   # both arms met
+])
+def test_a_side_copy_past_the_live_prunes_own_orphan_bar_is_the_only_case_that_fails(
+        monkeypatch, tmp_path, orphans, ratio, verdict):
+    """Clause 3 through the route: `passed: false` and a named failure only when BOTH arms
+    of the imported bar are met, and a copy at or below it changes no verdict at all.
+
+    Both copies hold the same 8,007 non-orphan vectors and differ only in their dirt, so
+    the row floor, the staleness check, pending and the vsearch probe are identical in the
+    two runs — the orphan figure is the only thing that can move the verdict between them.
+    The counts are not round on purpose: `inspect_index` reports the ratio to 4 dp, so a
+    fixture aimed at exactly 20.00% would be decided by rounding, and the boundary itself
+    is pinned against the constants by
+    `test_the_side_copy_orphan_bar_is_the_live_prunes_own_pair_anded`.
+
+    Both runs carry `cleanup rc=1`, and neither is refused for it: a prune that failed on a
+    copy still under the bar is a line in `actions`, not a red run — refusing a swap the
+    live index could not be beaten by would trade #4006's whole point for a stricter exit
+    code.
+    """
+    _side_env(monkeypatch, tmp_path, side_rows=8007, side_orphans=orphans, cleanup_rc=1)
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE)
+    report = _report_of(tmp_path)
+    v = report["verification"]
+
+    assert rc == (0 if verdict else 1), (rc, v["failed"])
+    assert v["passed"] is verdict, v["failed"]
+    assert v["side_orphan_rows"] == orphans and v["side_orphan_ratio"] == ratio, v
+    dirty = [f for f in v["failed"] if "orphaned vectors" in f]
+    assert len(dirty) == (0 if verdict else 1), v["failed"]
+    if verdict:
+        assert v["failed"] == [], "a below-the-bar figure must add no other failure either"
+    else:
+        assert "2,400 orphaned vectors" in dirty[0] and "20%" in dirty[0] and \
+            "2,000 rows" in dirty[0], dirty[0]
+
+
+def test_the_row_floor_reads_the_copies_non_orphan_count_so_its_dirt_cannot_prop_it_up(
+        monkeypatch, tmp_path):
+    """Clause 4, both directions, on one fixture shape.
+
+    SHORT AND DIRTY: 30 non-orphan vectors against the 32 its build recorded, and 12
+    orphans whose vec0 slot rows are still in the shadow tables — production's shape, the
+    one `_vec0_index`'s `vec_orphans` knob exists for — so `vec0.live_rows` reads 42. Read
+    off `vec0.live_rows`, which is what the route did before #4006, a copy two documents
+    short of its own floor passes the bar and is swapped into the serving path on the
+    strength of rows no query can return. The 2026-11-09 witness shows the same inflation
+    from the other side: `vec0.live_rows` 83,593 against a floor of 80,251, 3,262 of those
+    rows orphans. On the non-orphan basis the copy is refused, and the report keeps both
+    counts so a reader can see which one was read.
+
+    FULL AND DIRTY: 32 non-orphan vectors, the same 12 orphans, and a prune that worked.
+    The prune takes the copy down to its floor and not under it — 32 against 32, the
+    margin #4006 measured as 80 rows on the real index — so cleaning the copy can never
+    refuse an otherwise-complete one, which is the trap the bar would have sprung on the
+    first top-up with more orphans than the copy had margin.
+    """
+    _side_env(monkeypatch, tmp_path, side_rows=30, side_orphans=12, cleanup_rc=1)
+    v_short = m.rebuild_side_copy(SIDE)["verification"]
+    assert v_short["side_live_rows"] == 30 and v_short["side_vec0_live_rows"] == 42, v_short
+    assert v_short["floor_vectors_live"] == 32
+    assert v_short["passed"] is False, \
+        "a copy 2 vectors short passed on the 12 orphans propping it to 42"
+    assert any("side live_rows 30 is under the live index's 32 non-orphan vectors" in f
+               for f in v_short["failed"]), v_short["failed"]
+
+    (tmp_path / "full").mkdir()
+    _side_env(monkeypatch, tmp_path / "full", side_rows=32, side_orphans=12)
+    v_full = m.rebuild_side_copy(SIDE)["verification"]
+    assert v_full["side_orphan_rows"] == 0, "the prune left the dirt it was for"
+    assert v_full["side_live_rows"] == 32 == v_full["floor_vectors_live"], v_full
+    assert v_full["passed"] is True, \
+        "a complete copy was refused by the very step that cleaned it"
+
+
+def test_a_top_up_night_ends_with_the_copy_no_dirtier_than_the_index_it_would_replace(
+        monkeypatch, tmp_path, capsys):
+    """The acceptance check, end to end through the route: after a top-up the witness lists
+    a `cleanup rc=0` action and its verification ratio is at or near the live index's —
+    not the 3.9% that made #4006 an item.
+
+    The fixture's two indexes hold the shape of the 2026-11-09 pair at node scale: the live
+    index carries orphans of its own (6 of 38, 0.1579, the kind the nightly timer prunes
+    every day) and the copy the top-up leaves behind is the DIRTER one (12 of 52, 0.2308 —
+    the item's copy was 3,262 of 83,593 against a live index at 0.0009). Scale is the only
+    thing that cannot travel into a test: the real figures would be 250,000 inserts. What
+    is checked is the relation the check names — copy ratio against the live index's own
+    ratio, read off the same report — plus the half that must stay true for the comparison
+    to mean anything: the prune reached the copy and only the copy, so the live index's 6
+    orphans are there after the run exactly as they were before it.
+    """
+    fq, _ = _side_env(monkeypatch, tmp_path, side_orphans=12)
+    live_before = m.inspect_index(m.INDEX)
+    index_bytes = m.INDEX.read_bytes()
+
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE)
+    assert rc == 0, capsys.readouterr()
+
+    report = _report_of(tmp_path)
+    assert [a for a in report["actions"] if a.startswith("cleanup rc=0 in ")], \
+        report["actions"]
+    v = report["verification"]
+    live_after = m.inspect_index(m.INDEX)
+    assert v["side_orphan_ratio"] == 0.0, v
+    assert v["side_orphan_ratio"] <= live_after["orphan_ratio"], \
+        f"copy {v['side_orphan_ratio']} vs live {live_after['orphan_ratio']}"
+    assert (live_after["vectors_orphaned"], live_after["orphan_ratio"]) == \
+        (live_before["vectors_orphaned"], live_before["orphan_ratio"]), live_after
+    assert m.INDEX.read_bytes() == index_bytes, "the prune reached the live index"
+    assert all(c[2:4] == ["--index", SIDE] for c in fq.qmd()), \
+        "a side verb was issued without --index — that is how a copy's prune reaches live"
+
+
+def test_a_copy_that_cannot_be_measured_says_so_instead_of_a_ratio(monkeypatch, tmp_path,
+                                                                    capsys):
+    """The summary line's other branch: a copy whose database cannot be read reports that in
+    words, and the report keeps `None` where a number would have been.
+
+    The refusal itself is pinned by the floor arm elsewhere; this node is only about what a
+    person reads, because the line is assembled from the same keys and an unguarded f-string
+    would print `orphans None = None%` beside `verification NOT passed` and leave the reader
+    to guess whether the copy is dirty or unreadable. `inspect_index` is the one call that
+    turns an unreadable database into an `error` key instead of raising, and the patch aims
+    it at the COPY only — the live index is still measured, so the run has a real floor to
+    miss and the only thing missing is the copy's own numbers. A locked or half-written copy
+    is what a top-up can leave behind, which is why this branch is reachable at all.
+    """
+    _side_env(monkeypatch, tmp_path)
+    real = m.inspect_index
+    monkeypatch.setattr(m, "inspect_index", lambda *a: (
+        {"error": "unable to open database file"}
+        if a and str(a[0]).endswith(f"{SIDE}.sqlite") else real(*a)))
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE)
+
+    assert rc == 1, capsys.readouterr()
+    out = capsys.readouterr().out
+    assert "verification NOT passed" in out, out
+    assert "orphans unmeasured" in out, out
+    assert "None = " not in out, out
+    v = _report_of(tmp_path)["verification"]
+    assert v["side_orphan_rows"] is None and v["side_orphan_ratio"] is None, v
+    assert v["floor_vectors_live"] == 32, "the live index stopped being measured with it"
+    assert any("side live_rows None is under" in f for f in v["failed"]), v["failed"]
+
+
+@pytest.mark.parametrize("orphans, swapped", [(12, True), (2400, False)])
+def test_a_hand_swap_reports_the_dirt_of_the_copy_it_promotes_and_prunes_nothing(
+        monkeypatch, tmp_path, capsys, orphans, swapped):
+    """Clause 2's hand-swap half plus #4006's design call: `verify_side_copy` gains the
+    figure and the bar, and still issues no `cleanup`.
+
+    The copy is built clean, then re-written on disk in the state a top-up leaves, and
+    handed to `--swap` from a terminal. Under the bar (12 rows of 52 — 23%, ratio arm only)
+    the swap proceeds with the ratio in front of the person who asked for it; past both
+    arms (2,400 rows of 2,440) the same copy is refused, exit 2, with the bar named, and
+    nothing on disk or in the service list touched. Neither run prunes: this is the
+    seconds-scale step a person invokes, and silently pruning a copy they are about to
+    promote is not what `--swap` promises — the `status`/`vsearch` pair asserted below is
+    the whole side-command trace of the swap's own window.
+    """
+    fq, d = _built_side_copy(monkeypatch, tmp_path)
+    _reshape_the_side_copy(d, live=40, orphaned=orphans, vec_orphans=orphans)
+    build_calls = len(fq.calls)
+    before = _dir_shape(d)
+
+    with _stdin_on(tty=True):
+        rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+
+    tail = [c[4] for c in fq.calls[build_calls:] if c[2:4] == ["--index", SIDE]]
+    assert tail == ["status", "vsearch"], \
+        f"the hand swap ran {tail} against the copy instead of only measuring it"
+    ratio = round(orphans / (40 + orphans), 4)
+
+    if swapped:
+        assert rc == 0, capsys.readouterr()
+        v = _report_of(tmp_path)["verification"]
+        assert v["passed"] is True and v["verified_without_build"] is True, v["failed"]
+        assert v["side_orphan_rows"] == orphans and v["side_orphan_ratio"] == ratio, v
+        assert v["side_live_rows"] == 40 and v["side_vec0_live_rows"] == 40 + orphans, v
+        out = capsys.readouterr().out
+        assert f"orphans {orphans:,} = {ratio:.1%}" in out, out
+        assert "swap: swapped=True" in out, out
+    else:
+        err = capsys.readouterr().err
+        assert rc == 2, err
+        assert "cannot be swapped" in err, err
+        assert f"{orphans:,} orphaned vectors" in err and "20%" in err, err
+        assert fq.services() == [] and _FakeLock.held == 0
+        assert _dir_shape(d) == before, "a refused swap changed the index directory"
+        assert not (tmp_path / "reflection").exists(), "a refused swap wrote a report"
 
 
 def test_a_hand_swap_over_a_pipe_is_refused_even_with_a_verified_copy_present(
