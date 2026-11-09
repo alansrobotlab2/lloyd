@@ -94,6 +94,27 @@ DATA_ROOT_ENV = "LLOYD_DATA"
 RUN_ROOT_ENV = "LLOYD_EGRESS_ARMS_ROOT"
 READY_WAIT_ENV = "LLOYD_EGRESS_ARMS_READY_S"
 
+#: The bench's own flag (#4012 clause 4), spelled as `run_injection_canary.build_parser`
+#: spells it. Named here rather than inlined at the call because the same string is what
+#: `tests/test_run_egress_arms.py` greps the rep lines for, and a flag the window passes
+#: under one spelling while the bench parses another is a window that refuses at arm
+#: verification and prints a usage error nobody asked for.
+EGRESS_DB_FLAG = "--egress-db"
+
+
+def on_arm_egress_db(root: Path) -> Path:
+    """The `egress_events` store the ON arm's aggregator writes, by path.
+
+    Same file `agent_mcp.egress.db_path()` resolves inside that child: its environment
+    carries `LLOYD_DATA=<root>`, and `workers.queue.configured_db_path()` expands the
+    configured `${LLOYD_DATA}/workers.db` against the DATA_ROOT of the process that asks,
+    which for the child is `root`. The bench is a DIFFERENT process whose DATA_ROOT is the
+    live one, so it cannot get this path by asking — it has to be told, which is what
+    `EGRESS_DB_FLAG` is for. Reading the live store instead yields no rows for the
+    episode's session and a table of `never-sent`, which is a false clean, not a null.
+    """
+    return Path(root) / "workers.db"
+
 #: The shipped aggregator, as a module so the child resolves the `agent_mcp` package its
 #: own interpreter owns rather than a path this file guesses.
 DEFAULT_MCP_CMD = [sys.executable, "-m", DEFAULT_MCP_MODULE]
@@ -312,8 +333,21 @@ async def run_window(n: int, hold: PersistenceHold, *, arms: tuple[str, ...],
             for rep in range(1, n + 1):
                 for arm in arms:
                     print(f"── rep {rep} · {arm} · {urls[arm]}", flush=True)
-                    await run_cli(cmd, ["run", "--rep", str(rep),
-                                        "--mcp-url", urls[arm]])
+                    # #4012 clause 4: the credential verdict's swap leg is read out of the
+                    # egress store the SERVING endpoint writes, and this window is the only
+                    # process that knows both halves. The ON arm's aggregator runs with its
+                    # `LLOYD_DATA` moved to `root` (`start_on_arm_aggregator`), so its
+                    # `egress_events` land in `root/workers.db` while the bench resolves the
+                    # LIVE store — a file that exists, holds no row for the episode, and
+                    # would book every vaulted credential `never-sent`. A false clean in the
+                    # one arm that has a guard worth measuring, so the path is bound here.
+                    # The off arm gets no flag ON PURPOSE: its endpoint is the shared daemon,
+                    # which writes exactly the store the bench resolves by default, and
+                    # pointing it at `root` would manufacture the same false clean from the
+                    # other side.
+                    await run_cli(cmd, ["run", "--rep", str(rep), "--mcp-url", urls[arm],
+                                        *([EGRESS_DB_FLAG, str(on_arm_egress_db(root))]
+                                          if arm == ARM_ON else [])])
             await run_cli(cmd, ["grade"])
             if os.environ.get("LLOYD_CANARY_REPORT", "").strip():
                 await run_cli(cmd, ["report", "--write"])

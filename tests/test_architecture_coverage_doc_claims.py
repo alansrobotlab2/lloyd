@@ -271,8 +271,8 @@ _ARMS_QUANTITY_SITES: dict[str, dict[str, str]] = {
         "stratum_entity": r"(?P<n>\d+) `entity`",
     },
     "injection_canary": {
-        "scenarios": r"(?P<n>\d+|eighteen) worker-style tasks",
-        "controls": r"with (?P<n>\d+|three) controls",
+        "scenarios": r"(?P<n>\d+|twenty) worker-style tasks",
+        "controls": r"with (?P<n>\d+|four) controls",
     },
 }
 
@@ -280,7 +280,7 @@ _ARMS_QUANTITY_SITES: dict[str, dict[str, str]] = {
 #: state theirs as digits. The row is read as it is written rather than rewritten
 #: to suit the checker, so the words are priced here; `test_the_arms_quantity_guard_grades_the_sizes_and_no_history`
 #: pins that the words it maps are the words the row contains.
-_ARMS_NUMBER_WORDS = {"three": 3, "eighteen": 18}
+_ARMS_NUMBER_WORDS = {"four": 4, "twenty": 20}
 
 #: The five artifact paths the graded quantities are read from, as module-level
 #: names rather than inline `EVAL / ...` expressions: the artifact-side seam node
@@ -599,7 +599,7 @@ def test_the_arms_quantity_guard_grades_the_sizes_and_no_history():
         f"the guard graded a dated measurement: {arms_quantity_failures(history)}")
 
     words = {m["token"] for m in arms_quantity_matches(text) if not m["token"].isdigit()}
-    assert words <= set(_ARMS_NUMBER_WORDS) and words == {"eighteen", "three"}, (
+    assert words <= set(_ARMS_NUMBER_WORDS) and words == {"twenty", "four"}, (
         f"the rows state {sorted(words)} as words; `_ARMS_NUMBER_WORDS` maps "
         f"{sorted(_ARMS_NUMBER_WORDS)}, and a mapped word no row uses is dead weight")
 

@@ -297,15 +297,29 @@ def status() -> dict:
     — 1478 rows of `egress_events` hold zero `deny` because of it.
 
     So the state has to be readable where the decision is made, the way
-    `tool_sandbox` and `protected_path_sandbox` already are (#2109). Two flags and
-    nothing else: `enforce` is what `guard()` acts on and `telemetry` is what
-    decides whether a row is written at all, each the value the guard itself reads
-    — env override, config parse and shipped default included, not a restatement.
+    `tool_sandbox` and `protected_path_sandbox` already are (#2109). Three flags and
+    nothing else: `enforce` is what `guard()` acts on, `telemetry` is what decides
+    whether a row is written at all, and `credential_substitution` is whether this
+    process has a vault to substitute from at all (#4012). Each is the value the
+    guard itself reads — env override, config parse and shipped default included for
+    the first two, and the live `vaulted_names()` call the swap resolves a
+    placeholder through for the third — never a restatement.
+
+    The third key exists because the canary's question changed. #2154 and #2338 ask
+    "did the guard refuse?", which `enforce` answers; #4012 asks "did a real
+    credential leave the box", and an empty `egress_events.credentials` column means
+    "nothing vaulted was spent" ONLY in a process that has something vaulted. With
+    no key here the runner had to infer that from its own environment — the exact
+    mistake #2338 was filed for, one level down. The key is a state, not a
+    permission: there is no variable that turns substitution off, in this module or
+    in `credential_store`.
+
     The allow-list is deliberately absent: an operator deciding whether an A/B arm
-    is armed needs the two flags, and the destination inventory is what
-    `egress_events` and the dashboard's network section are for.
+    is armed needs the flags, and the destination inventory is what `egress_events`
+    and the dashboard's network section are for.
     """
-    return {"enforce": enforce_on(), "telemetry": telemetry_on()}
+    return {"enforce": enforce_on(), "telemetry": telemetry_on(),
+            "credential_substitution": credential_store.substitution_armed()}
 
 
 def destination_of(url: str) -> tuple[str, str]:
@@ -1224,6 +1238,45 @@ def decision_count_for_host(host: str, decision: str = DECISION_DENY, *,
         return int(conn.execute(
             f"SELECT COUNT(*) FROM {TABLE} WHERE host=? AND decision=?",  # noqa: S608
             (host, decision)).fetchone()[0])
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def credential_swaps_for_session(session_id: str, *, db: "str | Path | None" = None
+                                 ) -> "list[str] | None":
+    """The non-empty `credentials` fields of one session's `egress_events` rows.
+
+    #4012's read side of the egress leg. The canary grades an episode's credential
+    escape two ways — the model's own proposed arguments, and what this process
+    actually spent — and this is the second: `record()` writes `name:verb;name:verb`
+    for the names `substitute_headers` swapped into the outbound request, so a
+    non-empty field is a credential that left the box whether or not the model ever
+    typed it. Only non-empty fields are returned: an empty one is the ledger saying
+    no swap happened on that call, which is evidence of absence and belongs to the
+    caller as such.
+
+    `None` and `[]` are different answers and the difference is the whole point, the
+    same rule `decision_count_for_host` states: `[]` means the store was read and no
+    row for this session named a credential, `None` means no answer is available — no
+    file, no table, telemetry off, any failure. A caller that reads `None` as `[]`
+    would book "never sent" on an episode whose witness it never had. It opens the
+    same way that reader does — `PRAGMA query_only`, not a `mode=ro` URI — because the
+    store is WAL and a read-only connection cannot create the shared-memory sidecar.
+    """
+    path = Path(db) if db is not None else db_path()
+    if not session_id or not path.is_file():
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(str(path), isolation_level=None, timeout=30.0)
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return [str(row[0]) for row in conn.execute(
+            f"SELECT credentials FROM {TABLE} WHERE session_id=? "  # noqa: S608
+            "AND credentials IS NOT NULL AND credentials <> ''", (session_id,))]
     except sqlite3.Error:
         return None
     finally:

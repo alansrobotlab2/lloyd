@@ -1,5 +1,5 @@
 [Unit]
-Description=Egress two-arm canary window: one rep x the 18 scenarios x both egress arms
+Description=Egress two-arm canary window: one rep x the 20 scenarios x both egress arms
 # The egress-arms analogue of `lloyd-persistence-window.service`: a window that needs the
 # live engine, the shared aggregator and the sandbox, and that therefore cannot be a test
 # and cannot be a pool job — it has to have its own slot in the user manager.
@@ -48,9 +48,13 @@ Type=oneshot
 # a `rows.jsonl` that gained nothing is indistinguishable from a window that was never armed.
 # The sibling carries no prefix either, which is why its 2026-10-11 refusal surfaced as
 # `status=2/EXIT-CODE=2` instead of a clean day.
-#   1                        one rep. The owed publication is 1 rep x 18 scenarios x 2
-#                            arms = 36 rows, which is the sample the per-arm Wilson pair
-#                            is stated from; more is hours of the held primary.
+#   1                        one rep. The owed publication is 1 rep x 20 scenarios x 2
+#                            arms = 40 rows, which is the sample the per-arm Wilson pair
+#                            is stated from; more is hours of the held primary. The count
+#                            is 20 and not 18 because #4012 added the env-dump pair: those
+#                            two episodes are also the credential-escape arm's live run, so
+#                            a fire of this unit is what measures real vaulted-secret
+#                            escape against the endpoint that actually serves the tools.
 #   --on-port 8599           REQUIRED to run the ON arm at all: the driver exits 2 without
 #                            it, because "enforcing" is a property of the MCP process the
 #                            window itself launches (`python -m agent_mcp.main` with
@@ -163,16 +167,17 @@ ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobot
 # ARITHMETIC. TimeoutStartSec=5h = 18,000 s, and it is a SUM of two stated terms (plain
 # digits below so a test can re-add them: 3600 + 10800 + 3600 = 18000):
 #     drain-wait, worst case                            +3,600 s
-#     engine work: 2 arms x 18 scenarios x 1 rep
-#       = 36 episodes, budgeted at 300 s each          +10,800 s
-#                                                   = 14,400 s
-#   margin over the sum                                = 3,600 s (so 5h, not 4h)
+#     engine work: 2 arms x 20 scenarios x 1 rep
+#       = 40 episodes, budgeted at 300 s each          +12,000 s
+#                                                   = 15,600 s
+#   margin over the sum                                = 2,400 s (so 5h, not 4h)
 # The per-episode 300 s is a CEILING, not a measurement: the 3 arm-stamped rows committed
 # today cost at most 39.4 s each, so the arithmetic budgets every episode at nearly eight
 # times the worst one ever observed. The two private MCP subprocesses add their 120 s ready
 # waits (`LLOYD_EGRESS_ARMS_READY_S`) and the two `grade` passes add their own turns, and
-# the 3,600 s of margin is what pays for both without touching the 14,400 s the canary work
-# is allowed. Rounding UP rather than down is deliberate: a oneshot killed at exactly its
+# the 2,400 s of margin is what pays for both without touching the 15,600 s the canary work
+# is allowed. (The sum was 14,400 s up to #4012, when the scenario list went 18 -> 20; the
+# ceiling did not move, the margin did.) Rounding UP rather than down is deliberate: a oneshot killed at exactly its
 # own worst case is killed at the moment its own arithmetic says it may still be working.
 # 5h also does not reach across days: daily at 06:23 local, it is done by 11:23 at the
 # latest, before the next fire.

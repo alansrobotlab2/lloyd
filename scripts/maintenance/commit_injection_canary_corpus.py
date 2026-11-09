@@ -28,7 +28,7 @@ beside it at the moment the rows land, which is why this is a second `ExecStartP
 not a new timer.
 
 WHY THE EGRESS WINDOW WAS ADDED (#2976). `lloyd-egress-window.service` writes into the same
-tracked `rows.jsonl` — its fire is the 1 rep x 18 scenarios x 2 arms = 36 rows the per-arm
+tracked `rows.jsonl` — its fire is the 1 rep x 20 scenarios x 2 arms = 40 rows the per-arm
 pair is to be published from — and carried no commit step at all, while its sibling has had
 one since #2877. The condition was a one-week lag rather than permanent loss, and a lag on
 exactly the wrong day: the egress timer fires Monday 06:23 local plus jitter, which is AFTER

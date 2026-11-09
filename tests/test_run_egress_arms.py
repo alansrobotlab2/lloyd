@@ -118,7 +118,11 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        body = json.dumps({"egress": {"enforce": enforce, "telemetry": True},
+        # `credential_substitution` is published because the shipped `verified_arm` now
+        # refuses a run whose endpoint will not state it (#4012) — a stub that omitted it
+        # would make the window's own bench exit 2 for a reason this file is not testing.
+        body = json.dumps({"egress": {"enforce": enforce, "telemetry": True,
+                                      "credential_substitution": True},
                            "ok": True}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -176,8 +180,13 @@ class Stub:
                     self._send({"paused": stub.paused, "paused_by": stub.holders,
                                 "paused_since": "2026-10-08T00:00:00+00:00"})
                 elif self.path.startswith("/state"):
+                    # The key is here for the same reason as in `_stub_http`: the OFF
+                    # arm's bench subprocess reads this endpoint's `/state`, and an
+                    # endpoint that states no substitution state is refused (#4012).
                     self._send({"egress": {"enforce": stub.shared_enforce,
-                                           "telemetry": True}, "ok": True})
+                                           "telemetry": True,
+                                           "credential_substitution": True},
+                                "ok": True})
                 else:
                     self._send({"detail": "not found"}, 404)
 
@@ -955,3 +964,48 @@ def test_the_import_pre_flight_never_asks_the_question_of_the_wrappers_cwd(tmp_p
     assert AB.import_needed_by(stub_argv) is None
     assert AB.aggregator_import_check(stub_argv) == (0, "")
     assert AB.import_needed_by(EA.DEFAULT_MCP_CMD) == "agent_mcp.main"
+
+
+# ── #4012: the ON arm's egress ledger is named to the bench ────────────────────
+
+def test_the_bench_is_named_the_ledger_the_on_arm_aggregator_writes_to(tmp_path):
+    """The window moves the ON arm's data root, so it owes the bench the new path.
+
+    `start_on_arm_aggregator` gives the child `LLOYD_DATA=<run root>`, which is how its
+    `egress_events` are kept out of the live store — and which means the bench process,
+    resolving its own configured path, reads a DIFFERENT file. That file exists, answers
+    no rows for the episode's session, and so books every vaulted credential
+    `never-sent`: a false clean in the one arm that has a guard worth measuring (#4012
+    clause 4). The window is the only process that knows both halves, so the window hands
+    the path over, and this node pins that it is the SAME root the child was given — not
+    merely a plausible-looking one.
+
+    The off arm is asserted to carry NO `--egress-db`, which is the other half of the
+    clause: its endpoint is the shared daemon, which writes the store the bench resolves
+    by default. Passing it the run root would manufacture the identical false clean from
+    the opposite direction, and a test that only checked "both arms get a path" would pass
+    on that mistake.
+    """
+    stub = Stub(db=make_db(tmp_path))
+    try:
+        env = window_env(tmp_path, stub, make_db(tmp_path))
+        root = tmp_path / "run-root"
+        out = run_window(tmp_path, 1, "--on-port", free_port(), "--run-root", root,
+                         env=env)
+        assert out.returncode == 0, out.stderr
+        rec = agg_record(tmp_path)
+        assert Path(rec["data_root"]) == root, rec
+        runs = [ln for ln in rep_lines(tmp_path) if ln.startswith("run")]
+        assert len(runs) == 2, runs
+        on = [ln for ln in runs if f"http://127.0.0.1:{rec['port']}" in ln]
+        off = [ln for ln in runs if stub.mcp_url in ln]
+        assert len(on) == 1 and len(off) == 1, runs
+        named = on[0].split("--egress-db", 1)[1].split()[0]
+        assert named == str(root / "workers.db"), (
+            f"the ON arm's bench was pointed at {named}, but its aggregator writes its "
+            f"egress_events under {rec['data_root']}")
+        assert "--egress-db" not in off[0], (
+            f"the off arm's endpoint is the shared daemon, whose store the bench already "
+            f"resolves; naming the run root there reads an empty file: {off[0]}")
+    finally:
+        stub.close()

@@ -491,7 +491,7 @@ def test_the_timeout_outlives_the_drain_plus_the_engine_work_and_states_the_sum(
     assert timeout > drain, (timeout, drain)
 
     n = len(_scenarios())
-    assert n == 18, n
+    assert n == 20, n
     assert timeout >= drain + 2 * n * EPISODE_BUDGET_S, (
         f"{timeout} s must exceed the drain ({drain}) plus 2 arms x {n} scenarios x "
         f"{EPISODE_BUDGET_S} s")
@@ -500,8 +500,8 @@ def test_the_timeout_outlives_the_drain_plus_the_engine_work_and_states_the_sum(
     assert re.search(rf"^TimeoutStartSec={re.escape(tvals[0])}\s*$",
                      SERVICE.read_text(encoding="utf-8"), re.M)
     assert str(drain) in c, f"the drain term must appear in the comment: {drain}"
-    assert re.search(r"2 arms x 18 scenarios", c), \
-        "the comment must name both multipliers: 2 arms and the 18 shipped scenarios"
+    assert re.search(r"2 arms x 20 scenarios", c), \
+        "the comment must name both multipliers: 2 arms and the 20 shipped scenarios"
     assert str(EPISODE_BUDGET_S) in c, "the per-episode budget must be stated, not implied"
     assert re.search(r"\b90 s\b", c), \
         "the default the unit outlives has to be named or the number is arbitrary"
@@ -1023,7 +1023,8 @@ def test_the_drain_still_has_no_self_exclusion_so_the_unit_is_still_needed():
     so — the same role the sibling test's `not yet` node plays for the persistence window.
 
     The scenario count is asserted here too because the timeout's arithmetic and the owed
-    row-count check (>=36) both multiply it: 18 scenarios x 1 rep x 2 arms = 36 rows.
+    row-count check (>=36) both multiply it: 20 scenarios x 1 rep x 2 arms = 40 rows, the
+    count #4012 moved from 18 by adding the env-dump credential pair.
     """
     ev = ARMS_PY.read_text(encoding="utf-8")
     assert re.search(r"def in_flight\(", ev), "the drain predicate moved"
@@ -1033,7 +1034,7 @@ def test_the_drain_still_has_no_self_exclusion_so_the_unit_is_still_needed():
     assert "depth_by_source" in QUEUE.read_text(encoding="utf-8"), \
         "the queue's per-source depth query moved"
     keys = _scenarios()
-    assert len(keys) == 18, (len(keys), keys)
+    assert len(keys) == 20, (len(keys), keys)
     assert "collect.off-allow-list.invalid" in DRIVER.read_text(encoding="utf-8"), \
         "the canary host literal the leak witness counts on moved; the unit comment is stale"
 

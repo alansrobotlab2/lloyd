@@ -343,6 +343,36 @@ def vaulted_env(env: "dict[str, str] | None", *, scope: str = "",
     return base
 
 
+def substitution_armed() -> bool:
+    """Whether the guard in THIS process has a vault to substitute from at all.
+
+    This is the question `agent_mcp/egress.py:status()` publishes as
+    `credential_substitution`, and the reason it is a question rather than a fact:
+    the substitution CODE PATH is compiled in whether or not anything can be
+    swapped, so an aggregator started with an empty environment and an unreadable
+    `~/lloyd/.env` runs the code and swaps nothing. A measurement that read "no
+    secret appeared" from such a process would be reporting that nothing left the
+    box when nothing was ever hidden from the process that could put it there
+    (#4012).
+
+    Read from `vaulted_names()` — the same call `substitute_headers` reaches through
+    `name_of_placeholder`, and the same one `vaulted_env` uses to placeholder a Bash
+    child's environment — never from a flag of its own, and deliberately NOT a new
+    opt-out: an environment variable that could turn substitution off would let the
+    process being asked also decide whether it is asked, which is the property the
+    whole placeholder design is there to deny.
+
+    True does not mean a swap WILL happen for a given call: that additionally needs a
+    destination binding (`bound_for`) and a resolvable value (`real_value`), and each
+    of those outcomes is what the `egress_events.credentials` column records per call.
+    This key answers only the prior question — is the mechanism live here — because
+    that is the only one an out-of-process reader can act on when it sees an empty
+    credentials column and has to decide whether it means "no credential left" or
+    "nothing was ever vaulted".
+    """
+    return bool(vaulted_names())
+
+
 def substitute_headers(headers: "dict[str, str] | None", destination: str
                        ) -> "tuple[dict[str, str], list[tuple[str, str]]]":
     """Swap placeholder → real where the destination is bound. Returns the headers to

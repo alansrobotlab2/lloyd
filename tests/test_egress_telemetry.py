@@ -534,3 +534,78 @@ def test_an_existing_store_without_the_column_migrates_before_the_first_insert(
     assert len(live) == 2, "the new row was lost — the fail-open branch swallowed it"
     assert live[0]["credentials"] == "", "the pre-existing row must not be rewritten"
     assert live[1]["destination"] == "https://migrate.example"
+
+
+# ── #4012 clause 2: the aggregator states its own credential-substitution arm ──
+
+def test_the_guard_publishes_whether_it_has_credentials_to_substitute(db, monkeypatch):
+    """`GET /state`'s egress section carries the flag the #4012 canary arm refuses to run without.
+
+    Three keys and not a fourth opinion: `enforce` and `telemetry` are what the guard
+    acts on, and `credential_substitution` is whether this process has anything to
+    substitute AT ALL — which the canary's escape verdict cannot be read without. A run
+    against a daemon started with a bare environment records no secret in any argument
+    for a reason that has nothing to do with the guard, and before this key existed the
+    only way to notice was to know how the daemon had been started.
+    """
+    monkeypatch.setattr(egress.credential_store, "vaulted_names",
+                        lambda: frozenset({"ANTHROPIC_API_KEY"}))
+    st = egress.status()
+    assert set(st) == {"enforce", "telemetry", "credential_substitution"}, st
+    assert st["credential_substitution"] is True, st
+
+
+def test_the_published_substitution_flag_is_the_stores_own_answer_not_a_restatement(db,
+                                                                                   monkeypatch):
+    """Read from the same call `substitute_headers` resolves a placeholder through.
+
+    A second implementation of "am I substituting" inside `status()` would be a claim
+    about the guard rather than a reading of it, and it would drift the first time the
+    vault's emptiness rules moved. This node is the one that fails if `status()` ever
+    grows its own env flag or its own copy of the emptiness logic.
+    """
+    calls = []
+
+    def empty():
+        calls.append("asked")
+        return frozenset()
+
+    monkeypatch.setattr(egress.credential_store, "vaulted_names", empty)
+    assert egress.status()["credential_substitution"] is False
+    assert calls == ["asked"], (
+        "status() did not ask the store; it decided for itself")
+
+
+def test_a_process_with_nothing_vaulted_publishes_the_flag_as_false(db, monkeypatch):
+    """The empty vault is a state the daemon reports, not a run it refuses.
+
+    `vaulted_names()` is empty when the registry will not open and the env file holds no
+    secret-shaped name — the normal state of a gate worktree. `status()` publishes False
+    and the RUN is refused by the caller; the daemon itself keeps serving, because it is
+    the measurement that is uninterpretable here, not the tool call.
+    """
+    monkeypatch.setattr(egress.credential_store, "vaulted_names", frozenset)
+    st = egress.status()
+    assert st["credential_substitution"] is False, st
+    assert st["enforce"] is False and st["telemetry"] is True, (
+        "the two #2338 flags must not change shape when a third is added")
+
+
+def test_the_substitution_state_survives_the_aggregators_state_route(db, monkeypatch):
+    """The flag has to reach a client, not just the function that computes it.
+
+    `agent_mcp/main.py` publishes `egress.status()` under `/state`'s `egress` key; a key
+    dropped there is a key the canary cannot read, and the reading is the whole clause.
+    Read from the shipped source because starting the aggregator in a unit test is not
+    what this file does.
+    """
+    import pathlib
+
+    assert egress.status().get("credential_substitution") is not None
+    src = (pathlib.Path(egress.__file__).parent / "main.py").read_text(encoding="utf-8")
+    route = [ln for ln in src.splitlines() if '"egress":' in ln]
+    assert len(route) == 1, route
+    # Handed to `asyncio.to_thread` rather than called inline, so the name appears
+    # without parentheses — what matters is that the route runs THIS function and not a
+    # hand-assembled dict that would have to be updated by hand whenever a flag is added.
+    assert "egress.status" in route[0], route[0]

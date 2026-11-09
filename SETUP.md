@@ -1482,7 +1482,7 @@ missed by sleeping, which on a weekly timer can now be up to a week late.
 ### The egress-arms window
 
 ```bash
-systemctl --user enable --now lloyd-egress-window.timer   # 1 rep x 18 scenarios x 2 arms, Mondays 06:23
+systemctl --user enable --now lloyd-egress-window.timer   # 1 rep x 20 scenarios x 2 arms, Mondays 06:23
 ```
 
 `lloyd-egress-window.service` is tracked beside it and `install-services.sh` links it
