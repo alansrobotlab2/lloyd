@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -656,3 +658,321 @@ def test_a_k_row_carries_its_k_its_budget_and_its_family(hays, monkeypatch):
     assert row["verdicts"]["port"] == "wrong" and row["outcomes"]["port"] == "wrong"
     assert sum(1 for w in row["placed"] if w["kind"] == "distractor") == 8
     assert E.summarize(rows)["session"]["k_curve"]["distractK"]["50000"]["curve"]["8"]["wrong"] == 1.0
+
+
+# ── #3989: the landed ksweep doc, its checker, and the five ways a doc lies ──────
+#
+# The 2026-11-08 k sweep's raw artifact cannot be committed (`eval/baselines/*` and
+# `*.json` are both ignored and a round may not write `.gitignore`), so what lands is
+# the measurement doc plus the checker that proves the doc against the bytes wherever
+# they live. No node here reads the runtime directory: each one runs the landed checker
+# over an artifact+doc pair generated into `tmp_path` by the runner's own
+# `summarize`/`recommend`/`render_md`, so the clean pair holds exactly the relationship
+# the real run's two files had, and a doc mutation is then the only difference between
+# a pass and a refusal. A committed `.json` fixture is not available to this round,
+# which is why the pair is built rather than stored.
+
+CHECKER = ROOT / "eval" / "check_doc_matches_json.py"
+KS_DOC = ROOT / "eval" / "measurements" / "context-rot-ksweep-2026-11-08.md"
+
+#: sha256 of the runtime artifact the landed doc reports, measured 2026-11-09 over
+#: `/home/alansrobotlab/lloyd-data/ksweep-2026-11-08/context-rot-ksweep-2026-11-08.json`.
+#: Re-measuring it against those bytes is the owed post-landing check; this constant is
+#: what pins the doc's quote to the figure the triage recorded, in the meantime.
+KS_ARTIFACT_SHA = "e463040b404ed7b743dc55e3595feb9a0a053656d776e5f89f1cb2767980459f"
+
+KS_SHAPE, KS_LENGTHS, KS_KS, KS_SEEDS, KS_IV_MAX = "repo", [50_000, 150_000], [0, 1, 2, 4], [1, 2, 3], 3
+#: one shape x 2 lengths x 4 ks x 3 seeds x 2 k arms x depth 0.5
+KS_CELLS = len(KS_LENGTHS) * len(KS_KS) * len(KS_SEEDS) * len(E.K_ARMS)
+KS_JACCARD = {"distractK": {0: 0.0, 1: 0.143, 2: 0.286, 4: 0.429},
+              "dissimilarK": {0: 0.0, 1: 0.077, 2: 0.154, 4: 0.231}}
+#: The two appendix rows and the headline row the mutations below rewrite, spelled as
+#: `render_md` renders them for this fixture: 3 seeds graded `correct`, so n is 3 and
+#: every rate is 1.00/0.00.
+KS_ROW_K2 = "| 2 | 1.00 | 0.00 | 0.00 | 0.00 | 0.286 | 3 |"
+KS_ROW_K4 = "| 4 | 1.00 | 0.00 | 0.00 | 0.00 | 0.429 | 3 |"
+KS_HEADLINE_50K = "| repo | distractK | 50,000 | 4 | None |"
+
+
+def _ks_rows() -> list[dict]:
+    """The fixture's 48 k-arm rows: every (arm, length, k, seed) of a one-shape tranche,
+    each grading one fact `correct`, so the curve is flat and no hedged cliff exists."""
+    return [{"shape": KS_SHAPE, "length": L, "depth": 0.5, "condition": arm, "k": k,
+             "accuracy": 1.0, "counts": {"correct": 1, "hedged": 0, "wrong": 0, "miss": 0},
+             "cold": {"ttft_s": L / 10_000, "prompt_tokens": L},
+             "distractors": {"max_pairwise_jaccard": KS_JACCARD[arm][k]}}
+            for arm in E.K_ARMS for L in KS_LENGTHS for k in KS_KS for seed in KS_SEEDS]
+
+
+def _ks_artifact() -> dict:
+    """An artifact shaped like the run's, computed by the runner rather than typed out:
+    `summarize` derives `k_curve`, `recommend` with `full_grid=False` derives the
+    inconclusive/partial-grid decision block the doc reports."""
+    rows = _ks_rows()
+    a = {"meta": {"date": "2026-11-08", "commit": "21d1ae0020abcd",
+                  "expect_model": "Qwen3.8-Flash-Next",
+                  "engine": {"served": "Qwen3.8-Flash-Next-nvfp4", "max_model_len": 262144},
+                  "pool": ["pool paused by this run; lease refreshing every 60 s",
+                           "pool resumed"],
+                  "grid": {"shapes": [KS_SHAPE], "lengths": list(KS_LENGTHS),
+                           "depths": [0.5], "conditions": list(E.K_ARMS), "ks": list(KS_KS),
+                           "seeds": list(KS_SEEDS), "cells": KS_CELLS}},
+         "complete": True, "rows": rows, "summary": E.summarize(rows),
+         "cost": {"turns": 8, "verdict": "not applicable: the trigger does not move"}}
+    a["decision"] = E.recommend(a["summary"], threshold=2048, current_trigger=0.74,
+                                current_target=0.62, full_grid=False)
+    return a
+
+
+def _ks_doc(a: dict) -> str:
+    """The doc half: the prose the checker is told to require, the headline table whose
+    rows it compares whole, and the runner's own `render_md` appendix below."""
+    g = a["meta"]["grid"]
+    headline = [f"| {shape} | {arm} | {L:,} | "
+                f"{a['summary'][shape]['k_curve'][arm][str(L)]['largest_k_correct_at_least_0.9']} | "
+                f"{a['summary'][shape]['k_curve'][arm][str(L)]['first_k_hedged_over_0.1']} |"
+                for shape in g["shapes"] for arm in g["conditions"] for L in g["lengths"]]
+    top = "\n".join([
+        "# Context rot fixture: the k axis, for the doc-vs-JSON checker",
+        "",
+        "Artifact: the generated file beside this one. `meta.expect_model` "
+        "`Qwen3.8-Flash-Next`, `complete: True`.",
+        "Grid actually run: shapes " + str(g["shapes"]) + ", arms " + str(g["conditions"])
+        + ", lengths " + str(g["lengths"]) + ", depths " + str(g["depths"]) + ", ks "
+        + json.dumps(g["ks"]).replace(" ", "") + ", seeds " + str(g["seeds"])
+        + " -> " + str(g["cells"]) + " cells.",
+        "**The curve is TRUNCATED** -- depths " + str(g["depths"]) + ", ks " + str(g["ks"])
+        + " only, so the k axis stops at 4.",
+        "",
+        "| shape | arm | length | largest k, correct >= 0.9 | first k, hedged > 0.1 |",
+        "|---|---|---|---|---|",
+        *headline,
+        "",
+        "Pool status read before: `{'running': True, 'paused': False, 'paused_by': []}`",
+        "",
+        "Pool status read after: `{'running': True, 'paused': False, 'paused_by': []}`",
+        "",
+        "**The hold was not clean**, and the log says so: a first launch died before its release.",
+        "",
+        "**Cliff verdict, one line:** no hedged cliff was measured: no arm's hedged rate "
+        "exceeded 0.1 anywhere in the k range that ran (" + str(g["ks"]) + "), while real "
+        "interactive turns reach k = " + str(KS_IV_MAX) + " -- so the reading is censored.",
+        "",
+    ])
+    return top + E.render_md(a)
+
+
+@pytest.fixture(scope="module")
+def ks_pair():
+    return _ks_artifact(), _ks_doc(_ks_artifact())
+
+
+def _pair_files(tmp_path, ks_pair, mutate=None):
+    artifact, text = ks_pair
+    if mutate is not None:
+        text = mutate(text)
+    ap, dp = tmp_path / "context-rot-ksweep-mini.json", tmp_path / "context-rot-ksweep-mini.md"
+    ap.write_text(json.dumps(artifact), encoding="utf-8")
+    dp.write_text(text, encoding="utf-8")
+    iv = tmp_path / "conflicts-iv.json"
+    iv.write_text(json.dumps({"max_items_seen": KS_IV_MAX}), encoding="utf-8")
+    return ap, dp, iv
+
+
+def _run_checker(artifact: Path, doc: Path, iv: Path | None = None,
+                 lloyd_data: str | None = None):
+    cmd = [sys.executable, str(CHECKER), str(artifact), str(doc)]
+    if iv is not None:
+        cmd.append(str(iv))
+    env = {k: v for k, v in os.environ.items() if k != "LLOYD_DATA"}
+    if lloyd_data is not None:
+        env["LLOYD_DATA"] = lloyd_data
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, env=env)
+
+
+def _report(p) -> dict:
+    """The checker's verdict. A traceback prints no JSON, so a crash surfaces here as a
+    decode error naming the stdout it got rather than as a missing-file pass."""
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:                                  # noqa: TRY301
+        raise AssertionError(f"the checker printed no verdict:\n{p.stdout[:400]}\n"
+                             f"stderr:\n{p.stderr[:600]}")
+
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+
+
+def test_the_checker_accepts_a_generated_pair_and_says_what_it_counted(tmp_path, ks_pair):
+    """The clean case has to be clean for stated reasons: 48 cells, the 4 curve rows the
+    grid implies, no cliff, a truncated tranche. A fixture the checker waved through for
+    the wrong reason would satisfy every mutation node below and prove nothing."""
+    ap, dp, iv = _pair_files(tmp_path, ks_pair)
+    r = _report(_run_checker(ap, dp, iv))
+    assert r["ok"] is True and r["failures"] == []
+    assert (r["cells"], r["curve_rows"], r["cliff"], r["truncated"]) == (KS_CELLS, 4, None, True)
+    assert r["sample_read"] is True and r["conflicts_sample"] == str(iv)
+
+
+def _perturb_cell(t: str) -> str:
+    return t.replace(KS_ROW_K2, "| 2 | 0.75 | 0.25 | 0.00 | 0.00 | 0.286 | 3 |", 1)
+
+
+def _delete_row(t: str) -> str:
+    return t.replace(KS_ROW_K2 + "\n", "", 1)
+
+
+def _fabricate_row(t: str) -> str:
+    """A k the grid never ran, printed as though it had."""
+    return t.replace(KS_ROW_K4 + "\n",
+                     KS_ROW_K4 + "\n| 8 | 1.00 | 0.00 | 0.00 | 0.00 | 0.500 | 3 |\n", 1)
+
+
+def _move_headline(t: str) -> str:
+    """The SECOND headline cell rewritten: the lie a prefix comparison cannot see, which
+    is why the checker compares the whole row."""
+    return t.replace(KS_HEADLINE_50K, "| repo | distractK | 50,000 | 2 | None |", 1)
+
+
+def _delete_cliff(t: str) -> str:
+    return "\n".join(ln for ln in t.splitlines()
+                     if not ln.startswith("**Cliff verdict, one line:**")) + "\n"
+
+
+def _spell_length_not_k(t: str) -> str:
+    return t.replace("### repo distractK at 50k", "### repo distractK at 50000k", 1)
+
+
+@pytest.mark.parametrize("mutate,why", [
+    (_perturb_cell, "doc row"),
+    (_delete_row, "k rows"),
+    (_fabricate_row, "k rows"),
+    (_move_headline, "headline table row"),
+    (_delete_cliff, "exactly one cliff verdict line"),
+], ids=["perturbed-cell", "deleted-row", "fabricated-row", "moved-headline-figure",
+        "deleted-cliff-line"])
+def test_each_of_the_five_doc_mutations_is_refused_and_says_which_one(
+        tmp_path, ks_pair, mutate, why):
+    """A checker that passes a doc whose figures were rewritten is not a check. Each
+    mutation is applied alone to the generated doc, and the refusal has to name the kind
+    of lie it caught — exiting non-zero for an unrelated reason would not close this."""
+    ap, dp, iv = _pair_files(tmp_path, ks_pair, mutate)
+    p = _run_checker(ap, dp, iv)
+    r = _report(p)
+    assert p.returncode != 0 and r["ok"] is False, f"{mutate.__name__} passed the checker"
+    assert any(why in f for f in r["failures"]), \
+        f"{mutate.__name__} refused for the wrong reason: {r['failures']}"
+
+
+def test_the_curve_sections_are_found_by_the_heading_the_runner_derives(tmp_path, ks_pair):
+    """`### {shape} {arm} at {L // 1000}k` is built from the artifact's own `k_curve`
+    keys, reproducing `render_md`. Spelling the heading from `meta.grid.lengths` instead
+    yields `at 50000k`, matches nothing, and reports a complete doc as broken — so the
+    checker must fail here on the MISSING SECTION message, not on a row comparison."""
+    ap, dp, iv = _pair_files(tmp_path, ks_pair, _spell_length_not_k)
+    r = _report(_run_checker(ap, dp, iv))
+    assert r["ok"] is False
+    assert any("no k_curve section headed '### repo distractK at 50k'" in f
+               for f in r["failures"]), r["failures"]
+    assert not any("doc row" in f for f in r["failures"]), \
+        f"a missing heading must not be reported as a row disagreement: {r['failures']}"
+
+
+def test_the_cliff_sample_resolves_from_lloyd_data_and_its_absence_is_a_refusal(
+        tmp_path, ks_pair):
+    """The checker's third input used to default to an absolute path inside the one
+    runtime directory this run's bytes sit in, while the doc's own command passes two
+    arguments — so the documented invocation died on `FileNotFoundError` as soon as that
+    directory was cleaned. It resolves under `LLOYD_DATA` now, and a missing input is a
+    refusal naming the path, never a traceback and never a verdict."""
+    ap, dp, iv = _pair_files(tmp_path, ks_pair)
+    staged = tmp_path / "data" / "ksweep-2026-11-08"
+    staged.mkdir(parents=True)
+    (staged / "conflicts-iv.json").write_text(iv.read_text(encoding="utf-8"), encoding="utf-8")
+
+    found = _report(_run_checker(ap, dp, lloyd_data=str(tmp_path / "data")))
+    assert found["ok"] is True and found["sample_read"] is True, found["failures"]
+    assert found["conflicts_sample"] == str(staged / "conflicts-iv.json")
+
+    gone = tmp_path / "gone"
+    p = _run_checker(ap, dp, lloyd_data=str(gone))
+    assert p.returncode != 0, "a missing cliff sample must not read as a clean doc"
+    assert "Traceback" not in p.stderr and "FileNotFoundError" not in p.stderr, p.stderr[:400]
+    r = _report(p)
+    assert r["ok"] is False and r["sample_read"] is False
+    assert str(gone / "ksweep-2026-11-08" / "conflicts-iv.json") in p.stdout, \
+        "the refusal has to name the path it looked for"
+    assert not any("doc row" in f or "cliff verdict" in f for f in r["failures"]), \
+        f"an unreadable input is not a doc disagreement: {r['failures']}"
+
+
+def test_the_landed_checker_carries_no_absolute_path_to_one_machine():
+    src = CHECKER.read_text(encoding="utf-8")
+    assert "/home/alansrobotlab" not in src, \
+        "one machine's home directory in the checker is how it dies on the next box"
+    assert "LLOYD_DATA" in src
+
+
+def test_the_doc_names_the_checker_by_a_path_that_resolves_from_the_repo_root():
+    text = KS_DOC.read_text(encoding="utf-8")
+    hits = [m.start() for m in re.finditer(r"check_doc_matches_json\.py", text)]
+    assert len(hits) >= 2, "the doc must cite the checker in prose and in its command block"
+    assert all(text[i - 5:i] == "eval/" for i in hits), \
+        "every checker citation has to carry the repo-root path; a bare filename is a file " \
+        f"that is not there: {[text[max(0, i - 12):i + 26] for i in hits if text[i - 5:i] != 'eval/']}"
+
+    cmds = [ln for ln in text.splitlines() if "check_doc_matches_json.py " in ln]
+    assert len(cmds) == 1, cmds
+    toks = cmds[0].split()
+    i = toks.index("eval/check_doc_matches_json.py")
+    assert toks[i + 1] == ("/home/alansrobotlab/lloyd-data/ksweep-2026-11-08/"
+                           "context-rot-ksweep-2026-11-08.json"), \
+        "the documented command must name the bytes the artifact line names"
+    assert toks[i + 2] == "eval/measurements/context-rot-ksweep-2026-11-08.md"
+    assert cmds[0].startswith("cd ~/lloyd"), "the command resolves from the repo root"
+    for rel in (toks[i], toks[i + 2]):
+        assert (ROOT / rel).is_file(), f"{rel} does not resolve from the repo root"
+
+
+def test_the_doc_names_where_the_bytes_live_and_promises_no_repo_copy():
+    text = KS_DOC.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    art = [ln for ln in lines if ln.startswith("Artifact")]
+    assert len(art) == 1, "one artifact line, so no stale uncommittable path survives beside it"
+    a = art[0]
+    assert ("/home/alansrobotlab/lloyd-data/ksweep-2026-11-08/"
+            "context-rot-ksweep-2026-11-08.json") in a, a
+    assert KS_ARTIFACT_SHA in a and KS_ARTIFACT_SHA.startswith("e463040b")
+    assert "`2d2aaba3`" in a, "the provenance commit the bytes came from"
+    assert "backlog/data/2026-11-09.3923-context-rot-ksweep-2026-11-08.json" in a, \
+        "the vault copy is where the bytes outlive the runtime directory"
+    assert "No copy of the JSON is ever added to this repo" in a
+    assert "eval/baselines" not in text, \
+        "the doc must not point at a repo path the ignore rules make impossible to land"
+
+    by = [ln for ln in lines if "partial_grid" in ln]
+    assert len(by) == 1 and "by construction" in by[0].lower(), \
+        "the inconclusive verdict must be labelled as structural, once"
+    assert "eval/run_context_rot_eval.py:1239" in by[0] and "inconclusive" in by[0]
+    assert "summary[shape].k_curve" in by[0]
+    src = (ROOT / "eval" / "run_context_rot_eval.py").read_text(encoding="utf-8").splitlines()
+    assert '"partial_grid": not full_grid' in src[1238], "the :1239 citation must resolve"
+    assert 'action="inconclusive"' in src[1240], "the :1241 citation must resolve"
+
+
+def test_the_doc_and_the_checker_are_tracked_and_neither_needed_an_ignore_rule_moved():
+    """The witness is `git ls-files eval/ | grep -cE 'ksweep|check_doc_matches_json'`
+    going 0 -> 2. Pinned with the reason the raw JSON is not a third landed file: the
+    artifact path still matches its blanket ignore rule, and the two paths this round
+    added are not ignored at all, so no `.gitignore` edit was needed — if a negation ever
+    makes the artifact committable, this node is what says the doc's promise is stale."""
+    tracked = _git("ls-files", "--", "eval/").stdout.split()
+    assert "eval/measurements/context-rot-ksweep-2026-11-08.md" in tracked
+    assert "eval/check_doc_matches_json.py" in tracked
+    assert len([p for p in tracked if re.search(r"ksweep|check_doc_matches_json", p)]) == 2
+    for rel in ("eval/measurements/context-rot-ksweep-2026-11-08.md",
+                "eval/check_doc_matches_json.py"):
+        assert _git("check-ignore", "-q", rel).returncode == 1, f"{rel} is git-ignored"
+    held = _git("check-ignore", "-v", "eval/baselines/context-rot-ksweep-2026-11-08.json")
+    assert held.returncode == 0 and "eval/baselines/*" in held.stdout, held.stdout
