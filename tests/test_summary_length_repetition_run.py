@@ -30,7 +30,6 @@ published as a measurement.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
 import re
@@ -137,8 +136,54 @@ def test_the_bands_sit_beside_the_number_re_derived_from_the_corpus_not_retyped(
     own scope and grouping, and the item's cited figures are asserted to be what that
     derivation still returns — the test fails on either side of a drift, so nobody can
     quietly edit one of the two lists to make the paragraph read better.
+
+    The comparison is `cited_bands_differ`, not `==`, and the one field it exempts is
+    `excluded_after_cited_scope` — the windows the corpus carries AFTER the cited cut,
+    which grows every time a fire lands, by the field's own definition. Comparing the two
+    dicts whole therefore pinned the corpus against ever growing: the
+    2026-11-09 persistence-window fire appended its rows, that window appeared in the
+    exclusion list, and a red suite named figures nobody cited (`#4000`). What must not
+    move is everything inside the scope, and the recorded exclusions must survive as an
+    ordered prefix of the live ones.
     """
-    assert ARTIFACT["corpus_bands"] == BANDS_LIVE
+    bad = REP.cited_bands_differ(ARTIFACT["corpus_bands"], BANDS_LIVE)
+    assert not bad, (
+        f"the artifact's bands are not what the corpus still derives: {bad}")
+    rec_excl = ARTIFACT["corpus_bands"]["excluded_after_cited_scope"]
+    live_excl = BANDS_LIVE["excluded_after_cited_scope"]
+    assert live_excl[:len(rec_excl)] == rec_excl, (live_excl, rec_excl)
+    assert len(live_excl) >= len(rec_excl), (live_excl, rec_excl)
+
+
+def test_a_cited_band_that_moves_is_still_named_and_a_post_cut_window_is_not():
+    """`cited_bands_differ` is a guard, not an exemption list: both sides are checked.
+
+    The change above widens what the comparison accepts, so it has to be shown still
+    refusing the drift it existed to refuse. Three synthetic live dicts, identical to the
+    artifact except in one place each: one cited window's mean nudged by 1 character, that
+    window dropped from the published five, and one more post-cut window appended (the
+    shape of the real 2026-11-09 fire). Only the first two may come back named; the third
+    is growth past the cut, which the rule permits on purpose.
+    """
+    base = ARTIFACT["corpus_bands"]
+    assert base["excluded_after_cited_scope"] == ["2026-11-02"], base
+    # `healthy` is the list of per-window bands the run published, not a mapping:
+    # [{window, controls, mean_summary_chars, …}, …] — the three cited days.
+    healthy = base["healthy"]
+    assert [w["window"] for w in healthy] == ["2026-10-13", "2026-10-14", "2026-10-15"], healthy
+    assert [w["mean_summary_chars"] for w in healthy] == [2997, 3066, 3056], healthy
+    moved_mean = {**base, "healthy": [
+        {**w, "mean_summary_chars": w["mean_summary_chars"] + 1} if w["window"] == "2026-10-15"
+        else w for w in healthy]}
+    lost_window = {**base, "healthy": [w for w in healthy if w["window"] != "2026-10-14"]}
+    grew = {**base, "excluded_after_cited_scope": ["2026-11-02", "2026-11-09 x 6867ac96"]}
+    assert REP.cited_bands_differ(base, moved_mean) == ["healthy"], moved_mean
+    assert REP.cited_bands_differ(base, lost_window) == ["healthy"], lost_window
+    assert REP.cited_bands_differ(base, grew) == [], grew
+    assert REP.cited_bands_differ(base, base) == [], "a comparison to itself named a field"
+    dropped = {**base, "excluded_after_cited_scope": []}
+    named = REP.cited_bands_differ(base, dropped)
+    assert len(named) == 1 and named[0].startswith("excluded_after_cited_scope"), named
     assert BANDS_LIVE["healthy_means"] == [2997, 3066, 3056], BANDS_LIVE["healthy_means"]
     assert BANDS_LIVE["flagged_means"] == [2669, 2746], BANDS_LIVE["flagged_means"]
     # 51 control rows, not 50: the 2026-10-26 window carries 11 controls on the tracked
@@ -231,23 +276,80 @@ def test_the_run_appended_no_row_to_the_tracked_canary_corpus():
     """Clause 4 of the item: re-check the bytes and git dirtiness NOW, not as recorded.
 
     The artifact claims `unchanged: true`; the claim is worthless if it is only ever read
-    back. So the node hashes the tracked file itself and asks git whether it is dirty, and
-    compares both against what the run recorded either side of itself.
+    back. So the node asks git whether the tracked file is dirty today, and asks whether
+    the bytes the run recorded are still a PREFIX of it.
+
+    It no longer asks the live file to EQUAL the recorded sha. That question had a shelf
+    life, because the corpus is append-only and not static:
+    `lloyd-persistence-window.service` appends its arm's rows every Monday, and the
+    2026-11-09 fire appended 30 of them — so the 2026-11-04 artifact's sha stopped naming
+    the file's end and a witness about a run that wrote nothing read as a corrupted store
+    (`#4000`). Prefix + clean-in-git + no tracked row carrying a timestamp from inside the
+    run's own window is the same claim, and it is the half that survives a healthy append:
+    a truncation, a rewrite, or a row edited mid-file still goes red, which is what the
+    equality check was for.
     """
     cw = ARTIFACT["corpus_write"]
     assert cw["appended_rows"] == 0
     assert cw["before"]["sha256"] == cw["after"]["sha256"]
     assert not cw["before"]["git_status_porcelain"].strip()
     assert not cw["after"]["git_status_porcelain"].strip()
-    live = hashlib.sha256(CANARY.ROWS_PATH.read_bytes()).hexdigest()
-    assert live == cw["after"]["sha256"], (
-        "the tracked corpus changed AFTER the run: this artifact's bands are not the ones "
-        "the corpus has now")
+    w = REP.corpus_grew_only_by_appending(cw["after"]["sha256"])
+    assert w["found_at_commit"], (
+        f"the corpus the run measured is not recoverable from this tree's git history: "
+        f"{w['reason']} ({w['commits_searched']} commit(s) searched)")
+    assert w["prefix_of_live"], (
+        f"{w['reason']} — {w['recorded_bytes']} recorded bytes against "
+        f"{w['live_bytes']} live")
+    assert w["recorded_bytes"] <= w["live_bytes"], w
     porcelain = subprocess.run(
         ["git", "-C", str(ROOT), "status", "--porcelain", "--",
          str(CANARY.ROWS_PATH.relative_to(ROOT))],
         capture_output=True, text=True).stdout
     assert not porcelain.strip(), f"the tracked corpus is dirty in git: {porcelain!r}"
+    inside = [r for r in CANARY.report_rows()
+              if ARTIFACT["measured_at"] <= (r.get("ts") or "") <= ARTIFACT["completed_at"]]
+    assert not inside, (
+        f"{len(inside)} tracked row(s) carry a ts inside the run's own window "
+        f"{ARTIFACT['measured_at']} .. {ARTIFACT['completed_at']}: the run's output "
+        "reached the tracked corpus, so its `appended_rows: 0` is false")
+
+
+def test_the_append_only_witness_says_no_to_a_rewritten_corpus(tmp_path):
+    """The witness above cannot pass vacuously — on damaged bytes it says NO.
+
+    `corpus_grew_only_by_appending` is now the only thing standing between a rewritten
+    corpus and a green suite, and no tracked file may be mutated to prove that, so the
+    guard is exercised on copies of the live bytes: the recorded region damaged at byte 0
+    (the shape of a mid-file edit, which is exactly what the equality check this replaced
+    could not tell apart from an append) must come back refused while the same recorded
+    sha is still FOUND in history; an sha no commit holds must come back not found, having
+    actually searched; and an unchanged copy must come back clean.
+    """
+    live = CANARY.ROWS_PATH.read_bytes()
+    rec_sha = ARTIFACT["corpus_write"]["after"]["sha256"]
+    w = REP.corpus_grew_only_by_appending(rec_sha)
+    assert w["prefix_of_live"] and w["found_at_commit"], w["reason"]
+    # The corpus did grow since the run — which is the fact that made the old
+    # equality assertion red, pinned here so a future reader sees it is expected.
+    assert 0 < w["recorded_bytes"] < len(live), w
+
+    damaged = bytearray(live)
+    assert damaged[0] != ord("#")
+    damaged[0] = ord("#")                       # inside the recorded region
+    hurt = tmp_path / "rows.jsonl"
+    hurt.write_bytes(bytes(damaged))
+    bad = REP.corpus_grew_only_by_appending(rec_sha, live=hurt)
+    assert bad["found_at_commit"] == w["found_at_commit"], (
+        f"a corpus whose first bytes were changed no longer matches the recorded sha in "
+        f"history at all, so the guard cannot tell rewrite from growth: {bad['reason']}")
+    assert not bad["prefix_of_live"], (
+        "a recorded region edited in place was still reported as an append-only growth")
+
+    ghost = REP.corpus_grew_only_by_appending("0" * 64)
+    assert ghost["found_at_commit"] is None and not ghost["prefix_of_live"], ghost
+    assert ghost["commits_searched"] > 0, (
+        "the search ran over no commits, so 'not found' proves nothing")
 
 
 def test_the_runner_redirects_its_write_path_and_never_calls_append_rows():

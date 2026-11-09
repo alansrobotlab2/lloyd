@@ -360,6 +360,96 @@ def _corpus_sha256_and_porcelain() -> dict:
     return {"path": str(path), "sha256": sha, "git_status_porcelain": porcelain}
 
 
+def corpus_grew_only_by_appending(recorded_sha256: str,
+                                  live: Path | None = None) -> dict:
+    """Is the corpus a run recorded still a PREFIX of the tracked corpus? (#4000).
+
+    `_corpus_sha256_and_porcelain` writes a sha of the whole tracked file into the
+    artifact, and the node that re-reads that witness used to ask the live bytes to
+    EQUAL it. That question has a shelf life, because the corpus is append-only and
+    not static: `lloyd-persistence-window.service` appends its arm's rows every
+    Monday, and on 2026-11-09 it appended 30 of them — so the 2026-11-04 artifact's
+    sha stopped naming the file's end, and a witness about a run that wrote nothing
+    read as if the run had corrupted the store.
+
+    What the witness was ever for is the half that survives growth: the rows that were
+    there when the run measured are still there, unmodified, in the same order. Git can
+    answer that from the recorded sha alone — the sha is the hash of a historical blob
+    of this same path, and a file that only grew still begins with those bytes. A
+    rewrite, a truncation, or a row edited in the middle makes `prefix_of_live` false,
+    which the equality check could not distinguish from a healthy append anyway.
+
+    `live` exists so the guard is falsifiable: a caller may point it at a mutated copy
+    of the corpus and watch this say NO. The git half always runs over the tracked
+    corpus's own path, because that is the store the recorded sha came from.
+    """
+    path = live or CANARY.ROWS_PATH
+    rel = str(CANARY.ROWS_PATH.relative_to(REPO_ROOT))
+    out = {"recorded_sha256": recorded_sha256, "path": str(path), "live_sha256": None,
+           "live_bytes": None, "recorded_bytes": None, "found_at_commit": None,
+           "commits_searched": 0, "prefix_of_live": False, "reason": ""}
+    try:
+        live_bytes = path.read_bytes()
+    except OSError as exc:
+        out["reason"] = f"the corpus could not be read: {exc}"
+        return out
+    out["live_sha256"] = hashlib.sha256(live_bytes).hexdigest()
+    out["live_bytes"] = len(live_bytes)
+    if out["live_sha256"] == recorded_sha256:
+        out.update(found_at_commit="HEAD (the live bytes themselves)",
+                   recorded_bytes=len(live_bytes), prefix_of_live=True,
+                   reason="unchanged since the run was measured")
+        return out
+    log = subprocess.run(["git", "-C", str(REPO_ROOT), "log", "--format=%H", "--", rel],
+                         capture_output=True, text=True, timeout=60)
+    commits = log.stdout.split()
+    out["commits_searched"] = len(commits)
+    for sha in commits:
+        blob = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"{sha}:{rel}"],
+                              capture_output=True, timeout=60).stdout
+        if hashlib.sha256(blob).hexdigest() == recorded_sha256:
+            out.update(found_at_commit=sha, recorded_bytes=len(blob),
+                       prefix_of_live=live_bytes.startswith(blob))
+            out["reason"] = ("the rows the run measured are a prefix of the corpus today"
+                             if out["prefix_of_live"] else
+                             "the bytes recorded are NOT a prefix of the corpus today: "
+                             "history was rewritten, truncated, or a row edited in place")
+            return out
+    out["reason"] = (f"no commit touching {rel} holds a blob with sha256 "
+                     f"{recorded_sha256} ({len(commits)} commit(s) searched): the bytes "
+                     "the run recorded are not recoverable from this tree's history")
+    return out
+
+
+def cited_bands_differ(artifact_bands: dict, live_bands: dict) -> list[str]:
+    """Which CITED figures moved between a run and now — the growth exception stated.
+
+    `corpus_bands` publishes the cited healthy/flagged windows and, beside them,
+    `excluded_after_cited_scope`: every window the corpus now carries that falls after
+    `cited_through`. Comparing the two dicts whole therefore pinned the corpus against
+    ever growing — a new fire after the cut lands in that list by definition, and the
+    2026-11-09 persistence window did exactly that, going red on figures nobody cited.
+
+    So the rule this states: every figure INSIDE the cited scope must be identical, and
+    the recorded exclusion list must still be an ordered prefix of the live one. A cited
+    mean that moved, a window that appeared or vanished inside the scope, or a recorded
+    exclusion that disappeared from the live list all come back named here.
+    """
+    bad = [k for k in artifact_bands
+           if k != "excluded_after_cited_scope"
+           and artifact_bands.get(k) != live_bands.get(k)]
+    rec, now = (artifact_bands.get("excluded_after_cited_scope") or [],
+                live_bands.get("excluded_after_cited_scope") or [])
+    if now[:len(rec)] != rec:
+        bad.append(f"excluded_after_cited_scope (recorded {rec} is not an ordered "
+                   f"prefix of the live {now})")
+    for w in now[len(rec):]:
+        if not w > artifact_bands["cited_through"]:
+            bad.append(f"excluded_after_cited_scope gained {w!r}, which is not after "
+                       f"cited_through {artifact_bands['cited_through']!r}")
+    return bad
+
+
 def _engine_witness(summary_model: str) -> dict:
     """What build answered, as far as this box can say. The corpus rows record only
     `summary_model: "primary"`; that absence is why October cannot be attributed, so the

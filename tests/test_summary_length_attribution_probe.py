@@ -544,21 +544,88 @@ def test_identity_less_rows_keep_bucketing_by_the_bare_utc_date_exactly():
     assert [w["window"] for w in ws] == ["2026-10-26"] and ws[0]["controls"] == 3
 
 
+def _stamped(row: dict) -> bool:
+    """Does this corpus row name the fire that produced it (#3748's stamps)?"""
+    return "fire_unit" in row or "fire_invocation" in row
+
+
+def _stamps_inside_the_cited_scope(rows: list[dict]) -> list[str]:
+    """Name every row whose fire stamp would MOVE a published window.
+
+    The invariant the cited figures rest on: a control row carries a fire stamp only if
+    its UTC date is AFTER `CITED_CORPUS_END`. On or inside the cut a row must keep
+    falling back to the bare `ts[:10]` bucket, because the five published windows are
+    dated buckets and a stamp splits that day per fire (#3748's own rule) — so a stamped
+    row there means a published denominator moved. After the cut a stamp is expected and
+    welcome: the persistence arm has been stamping its rows since the 2026-11-09 fire,
+    and separating those fires is what #3748 was built to do.
+    """
+    return [f"{r.get('key')}@{r.get('ts')}" for r in rows
+            if _stamped(r) and (r.get("ts") or "")[:10] <= CITED_CORPUS_END]
+
+
 def test_every_row_on_the_tracked_corpus_still_falls_back_to_the_date_bucket():
-    """The shipped corpus carries no stamps yet, so its grouping IS its historical one.
+    """No CITED window on the tracked corpus is anything but its bare UTC date.
 
     The machine-readable half of "no published figure is re-derived", read off the
     tracked bytes rather than synthetic rows: if a future commit ever stamps history
     after the fact, or the fallback changes shape, the cited five-window figures this
     file's other nodes protect would silently move — this node goes red first.
+
+    It used to assert that NO row on the corpus carries a stamp. That was a reading of
+    the corpus as it stood when #3748 was written, not a property of it: the
+    2026-11-09 `lloyd-persistence-window.service` fire appended 30 rows, 10 of them
+    controls, every one stamped and every one dated after the cut — the case #3748
+    exists to separate. So the guard is now scoped to the windows this file cites, and
+    still fires on the failure it was written for: a stamp on or inside 2026-10-26,
+    which is what back-stamping history looks like. `#4000`.
     """
     rows = P.control_rows(P.report_rows())
     assert rows, "the tracked corpus read came back empty"
-    assert all("fire_unit" not in r and "fire_invocation" not in r for r in rows), (
-        "a tracked-corpus row now carries a fire stamp: the published windows of THAT "
-        "day split per fire — re-verify every figure this file pins before accepting")
+    moved = _stamps_inside_the_cited_scope(rows)
+    assert not moved, (
+        f"{len(moved)} tracked-corpus row(s) inside the cited scope carry a fire stamp "
+        f"({moved[:3]}): the published windows of THAT day split per fire — re-verify "
+        "every figure this file pins before accepting")
     labels = [w["window"] for w in P.per_window(rows)]
-    assert labels == sorted(labels) and all(" " not in lab for lab in labels), labels
+    assert labels == sorted(labels), labels
+    cited = [lab for lab in labels if lab <= CITED_CORPUS_END]
+    assert cited, "no cited window derives from the tracked corpus at all"
+    assert all(" " not in lab for lab in cited), (
+        f"a cited window is labelled {cited} — a per-fire label inside the cited scope "
+        "means a published denominator was re-derived")
+
+
+def test_a_stamp_after_the_cut_is_kept_and_one_on_the_cited_day_is_a_violation():
+    """The scoping above is a rule, not a licence: both directions are checked here.
+
+    The node over tracked bytes is worth only what a falsifiable rule backs it with, and
+    the failure it exists for is not observable on the tracked corpus without rewriting
+    history. So one stamped row on 2026-10-26 (the shape of back-stamped history) and two
+    stamped rows on 2026-11-09 (the shape of the real fire that made #4000) go in, and the
+    rule must name exactly the first. An identity-less row inside the scope is clean too
+    — that is the fallback the published figures are computed from.
+    """
+    on_the_cut = _fired("2026-10-26T06:49:00+00:00", 2669, 5,
+                        "lloyd-persistence-window.service", "a" * 32)
+    after_the_cut = [
+        _fired("2026-11-09T02:21:00+00:00", 2983, 5,
+               "lloyd-persistence-window.service", "b" * 32),
+        _fired("2026-11-09T02:21:04+00:00", 3010, 6,
+               "lloyd-persistence-window.service", "b" * 32, rep=2)]
+    plain = {"ts": "2026-10-26T07:00:00+00:00", "summary_chars": 3056,
+             "benign_survival": {"planted": 6, "found": 5}}
+    assert _stamps_inside_the_cited_scope([plain]) == [], (
+        "an identity-less row inside the scope was reported as a moved window")
+    assert _stamps_inside_the_cited_scope(after_the_cut) == [], (
+        "a stamped row after the cited cut was reported as moving a published figure: "
+        "the 2026-11-09 fire would read as history rewritten")
+    named = _stamps_inside_the_cited_scope([plain] + after_the_cut + [on_the_cut])
+    assert named == [f"control-benign@{on_the_cut['ts']}"], named
+    # And the split the rule protects against is real, not rhetorical: that stamped row
+    # does move the day's bucket label once `per_window` gets to see its stamp.
+    assert [w["window"] for w in P.per_window([plain, on_the_cut])] == [
+        "2026-10-26", "2026-10-26 persistence-window aaaaaaaa"]
 
 
 # ── #3747: the docstring's code-side claim, re-derived from git ───────────
