@@ -1504,12 +1504,40 @@ def test_a_run_with_no_out_flag_writes_the_named_store_and_reports_movement(tmp_
 # — the same root `app/autonomy.py` lists tasks from, so this asserts on the directory the
 # scheduler will actually read.
 #
-# `status: draft` is asserted, not excused. An unattended round cannot arm a recurring job
-# (`app/harness/policy.py::create_arms_a_task` refuses it on a task that has never run), so
-# the file lands fully authored and one flip from firing — the #2858 precedent, which
-# landed 101-gate-to-land-lag-daily-record.md the same way. The clause is "a daily task
-# exists, on the right cadence, after the retention sweep, running that command"; the
-# flip is what the first published reading waits on, and it is named in the notes.
+# `status` has two legitimate readings and the test accepts both. `draft` is the state an
+# unattended round must leave a new task in — `app/harness/policy.py::create_arms_a_task`
+# refuses a created file that would be dispatchable on landing, so the file ships fully
+# authored and one flip from firing, the #2858 precedent that landed
+# 101-gate-to-land-lag-daily-record.md the same way — and `up_next` is what the flip that
+# the file's own notes named actually did: #3977 armed #109 on 2026-11-09 through the file
+# lane, whose predicate is `first_arm_allowed` (one dispatch field, `status`, moving alone
+# on a never-run, unparked task). Asserting `draft` therefore certified the stall rather
+# than the schedule, and the node went red on the day the step it demanded was taken —
+# which is what #3980 is.
+#
+# Whether the task ever fires is not this node's question either: the instrument index row
+# for this store (`cadence_days=1`, `hand_run_by_ruling=False`, and
+# `scheduled_by="autonomy/109-behaviour-exhibit-daily.md"` in
+# `scripts/eval_instrument_index.py`) prints `missing or stale: behaviour_exhibit` on a day
+# with no dated artifact, and that headline is the documented detector. What is asserted
+# here is the schedule's shape, and that the file states the reason for its own status —
+# #3464's unattributed arm is what an armed file with stale notes reads as.
+
+from app.harness.policy import DISPATCHING_STATUS, create_arms_a_task  # noqa: E402
+
+#: What a round may leave a new task reading, and the one status the queue dispatches
+#: (`DISPATCHING_STATUS` is imported from the policy module the scheduler mirrors, so
+#: this test follows the rail instead of restating a string the rail could move under).
+AUTHORED_STATUS = "draft"
+SCHEDULE_STATES = (AUTHORED_STATUS, DISPATCHING_STATUS)
+
+#: What the file's `notes` must say for each status it may hold. The authored reason is
+#: required in both readings: #3977's arm commit retired the old "status is draft
+#: deliberately" paragraph and replaced it with one that still carries that reason
+#: alongside the arm, and an armed file that stopped saying why it was written unarmed is
+#: the file the next reader "fixes" without knowing who set what.
+STATUS_PROVENANCE = {AUTHORED_STATUS: ("draft",),
+                     DISPATCHING_STATUS: ("draft", "first_arm_allowed")}
 
 TASK_FILE = "109-behaviour-exhibit-daily.md"
 RETENTION_TASK_FILE = "79-retention-sweep.md"
@@ -1542,7 +1570,9 @@ def test_the_sweep_is_scheduled_as_a_daily_task_running_the_documented_command()
     an hour after the retention sweep. The command assertion is the cross-tree seam: it is
     a string inside a `description` field, and the only reason a daily job runs the real
     sweep instead of paraphrasing it is that the string says so — so the string is
-    compared to the module's own parser as well as to the clause text.
+    compared to the module's own parser as well as to the clause text. The status is read
+    the same way, against the policy module's own `DISPATCHING_STATUS`: either legitimate
+    reading passes, and the file must state the reason for the one it carries.
     """
     fm = _task_fields(TASK_FILE)
     assert fm["id"] == 109, fm["id"]
@@ -1582,13 +1612,40 @@ def test_the_sweep_is_scheduled_as_a_daily_task_running_the_documented_command()
     ns = parser.parse_args(argv)
     assert ns.days == 7 and ns.out is None and ns.sessions_dir is None, vars(ns)
 
-    assert fm["status"] == "draft", (
-        "an unattended round may not arm a recurring job (policy.create_arms_a_task); a "
-        "file claiming up_next from inside a round would be a schedule nobody turned on. "
-        "The flip is the human step the notes name.")
-    assert "draft" in str(fm.get("notes", "")), (
-        "the reason has to be in the file, or the next reader 'fixes' the status and the "
-        "rail refuses them")
+    # Only the two readings the scheduler knows. `up_next` is the one status that
+    # dispatches (`app/autonomy.py::_is_task_due`), `draft` is the authored wait for the
+    # flip, and anything else — `paused`, a misspelling — dispatches nothing while the
+    # file still looks configured on the board.
+    status = str(fm["status"]).strip()
+    assert status in SCHEDULE_STATES, (
+        f"`status: {fm['status']}` is neither `{AUTHORED_STATUS}` (authored, waiting for "
+        "the human flip) nor the dispatching status: the daily artifact that goes missing "
+        "from here is the silence #3886 was filed about")
+    for word in STATUS_PROVENANCE[status]:
+        assert word in str(fm.get("notes", "")), (
+            f"a file reading `status: {status}` has to carry {word!r} in its notes, or the "
+            "next reader 'fixes' the status without knowing who set it — the reason #3977 "
+            "retired the stale notes paragraph in the same commit as the flip")
+
+
+def test_the_rail_that_left_the_file_unarmed_still_refuses_an_arming_create():
+    """The policy the red assertion was only narrating, checked at the rail itself.
+
+    #3886 authored #109 `draft` because an unattended round cannot turn on an engine, and
+    the 2026-11-09 arm did not weaken that rule — it exercised the one move the file lane
+    had gained for a never-run, unparked task (`app/harness/policy.py::first_arm_allowed`,
+    #3464). The sentence therefore belongs on the predicate that enforces it, not on a
+    status string in a file that has legitimately moved past it. Both readings are pinned,
+    because this item's fix removes the only place the schedule's own file spelled the
+    policy out: a CREATED task reading `up_next` is exactly what the two file lanes refuse
+    (`agent_mcp/builtin_fs.py` and `agent_mcp/vault.py` both branch on this predicate), and
+    the authored shape — `skill_name` and `frequency` beside `draft` — is the nightly
+    chain's documented hand-down and must stay accepted.
+    """
+    assert create_arms_a_task({"status": DISPATCHING_STATUS}) is True
+    assert create_arms_a_task({"status": AUTHORED_STATUS,
+                               "skill_name": "behaviour-exhibit-daily",
+                               "frequency": "daily"}) is False
 
 
 def test_the_sweep_is_ordered_after_the_retention_sweep_it_must_not_race():
