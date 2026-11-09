@@ -904,3 +904,110 @@ def test_a_high_draft_is_triaged_even_when_holding_is_off_and_the_pool_is_full(b
                                         "hold_confirmations": False})))
     assert out["status"] == "success" and out["item_id"] == 8 and len(turn.calls) == 1
     assert _status(backlog_dir, 8)[0] == "up_next"
+
+
+# ---------------------------------------------------------------------------
+# #3988 — a `mixed` surface that names no landable `~/lloyd` path is a lie about
+# the route, and it is recorded on the only write surface both graders read.
+#
+# `surface` reaches the ledger verbatim from the turn (`workers/sources/
+# autotriage.py`: `"surface": parsed["surface"]`), and `backlog.confirmed_verdicts`
+# is exactly what `review.grade_vault` and `vault_round._vault_verdict_shortfall`
+# consult. A `mixed` verdict whose clauses are all vault paths is therefore graded
+# by NEITHER reader: the vault grader abstains on the surface ("the clauses are
+# graded at the code gate") and, for the shape #3855 shows, no code round is ever
+# opened, so there is no code gate either. Demoting the label at the record is what
+# hands the next vault land to a grader that actually grades it.
+# ---------------------------------------------------------------------------
+
+def _stub_surface(monkeypatch, surface: str, clauses: list[str], verdict: str = "confirmed"):
+    """A triage turn stating `surface` with a numbered ACCEPTANCE_CLAUSES block.
+
+    The text path, not the finalizer object: this is the same fallback
+    `_stub_turn` drives, and the guard has to sit on the record, not on one
+    parser.
+    """
+    block = "\n".join(f"{i}. {c}" for i, c in enumerate(clauses, 1))
+
+    async def turn(prompt, **kw):
+        turn.calls.append(prompt)
+        return {"text": f"VERDICT: {verdict}\nSURFACE: {surface}\n"
+                        "CHECK: git grep -n SURFACES -- scripts/ app/ workers/\n"
+                        "EVIDENCE: still reproduces at HEAD.\n"
+                        "ACCEPTANCE: the guard is on the record path.\n"
+                        f"ACCEPTANCE_CLAUSES:\n{block}\n"
+                        "HUMAN_CLAUSES: none\nSPAWNED: none\n",
+                "session_id": "s", "stop_reason": "stop", "num_turns": 3, "errors": []}
+    turn.calls = []
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    return turn
+
+
+def _triage_rows(ledger):
+    return [e for e in S.read_events(path=ledger) if e.get("event") == "backlog_triage"]
+
+
+#: Every clause of this contract is a prose edit to a vault file. This is #3855's
+#: shape verbatim in kind: 5 clauses, all of them the one skill file, `mixed`, and
+#: an `item_landed` row naming no round at all.
+ALL_VAULT_CLAUSES = [
+    "The curation step names the two new legs — "
+    "`skills/nightly-reflection-knowledge-write/step-2a-ter-curation.md`.",
+    "The retraction is appended to the owed register under `backlog/data/`.",
+]
+#: The same contract with one clause that a round could actually commit.
+ONE_CODE_CLAUSE = ALL_VAULT_CLAUSES + [
+    "The record-path guard lands in `scripts/automod/backlog.py` — tests/test_autotriage.py",
+]
+
+
+def test_a_mixed_verdict_whose_clauses_name_no_lloyd_path_is_recorded_vault(backlog_dir, ledger, monkeypatch):
+    """#3988 clause 1: `mixed` is accepted only when a clause names a landable
+    `~/lloyd` path; otherwise the record says `vault` and says why."""
+    path = write_item(backlog_dir, 42, days_old=300)
+    _stub_surface(monkeypatch, "mixed", ALL_VAULT_CLAUSES)
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "success" and out["item_id"] == 42, out
+    row = _triage_rows(ledger)[-1]
+    assert row["verdict"] == "confirmed"
+    assert row["surface"] == "vault", (
+        "a `mixed` verdict with no code clause leaves both graders blind: the vault "
+        "grader abstains on the label and no code round is ever opened")
+    assert row["surface_stated"] == "mixed", "what the turn said stays readable"
+    assert "no acceptance clause names a path" in row["surface_note"], row
+    fm = yaml.safe_load(path.read_text(encoding="utf-8").split("---\n")[1])
+    assert any("surface recorded as `vault`" in str(e) for e in fm["activity_log"]), \
+        "the item's own triage record must state the demotion and its reason"
+
+
+def test_one_clause_naming_a_lloyd_path_keeps_the_mixed_surface(backlog_dir, ledger, monkeypatch):
+    """#3988 clause 2, the no-over-demote half: one landable code clause is what
+    `mixed` means, so it survives — and the demotion never rewrites the clauses."""
+    path = write_item(backlog_dir, 43, days_old=300)
+    _stub_surface(monkeypatch, "mixed", ONE_CODE_CLAUSE)
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "success" and out["item_id"] == 43, out
+    row = _triage_rows(ledger)[-1]
+    assert row["surface"] == "mixed", "a clause naming scripts/automod/backlog.py IS a code half"
+    assert "surface_note" not in row and "surface_stated" not in row, \
+        "an undemoted verdict writes no demotion keys at all"
+    fm = yaml.safe_load(path.read_text(encoding="utf-8").split("---\n")[1])
+    assert fm["acceptance_clauses"] == ONE_CODE_CLAUSE, \
+        "the guard decides the label and never touches the contract"
+    assert row["acceptance_clauses"] == ONE_CODE_CLAUSE
+
+
+@pytest.mark.parametrize("surface", ["code", "frontend", "vault", "external"])
+def test_the_other_four_surfaces_are_stored_exactly_as_parsed(backlog_dir, ledger, monkeypatch,
+                                                             surface):
+    """#3988 clause 2 again: the guard is one label wide. A `vault` verdict stays
+    `vault` and a `code` verdict stays `code` even when every clause names a vault
+    path — rewriting those is #3988 over-reaching, and a `code` item with vault-only
+    clauses is a routing problem the gate reports, not a label to invent."""
+    write_item(backlog_dir, 44, days_old=300)
+    _stub_surface(monkeypatch, surface, ALL_VAULT_CLAUSES)
+    out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert out["status"] == "success" and out["item_id"] == 44, out
+    row = _triage_rows(ledger)[-1]
+    assert row["surface"] == surface, row
+    assert "surface_note" not in row and "surface_stated" not in row

@@ -10262,3 +10262,112 @@ def _tree_paths(vault):
     """
     return [l for l in git(vault, "ls-tree", "-r", "--name-only", "HEAD").stdout.splitlines()
             if l.strip()]
+
+
+# ======================================================================================
+# #3988 clauses 3 and 4 — a `mixed` land that committed no `~/lloyd` path says so on
+# its own row, and that sentence never becomes a shortfall.
+#
+# #3916's witness commit and #3855's `item_landed` are the two witnesses: a `mixed`
+# item's vault land is committable with zero clause verdicts, because `grade_vault`
+# abstains on the surface and `_vault_verdict_shortfall` early-returns "" for a
+# non-vault surface. Clause 3 makes that visible on the row; clause 4 is the reason it
+# must stay a note — a non-empty shortfall refuses the land through the #2263 rail, so
+# a note that leaked into that return would have blocked #3916's commit.
+# ======================================================================================
+
+#: `review.grade_vault`'s own abstention for this surface, quoted byte for byte from
+#: its `if surface and surface != "vault"` return — the sentence #3988 clause 5 forbids
+#: changing, so what is graded here is a note sitting BESIDE that reason, not a
+#: paraphrase of it.
+ABSTENTION_3988 = ("surface is mixed, not vault: the clauses are graded at the code "
+                   "gate, not the vault contract")
+
+
+def _mixed_item(items, item_id: int) -> None:
+    write_item(items, item_id, SIX)
+    _ev(event="backlog_triage", item_id=item_id, verdict="confirmed", surface="mixed",
+        acceptance="x", acceptance_clauses=SIX)
+
+
+def test_a_mixed_land_that_changed_no_lloyd_path_notes_the_mislabel(vault, items, monkeypatch):
+    """#3988 clause 3: the row gains a note naming the mislabel case beside the
+    existing abstention. Before this the row said only `surface is mixed, not vault`,
+    which cannot distinguish "the code half is coming in a round" from "there is no
+    code half and never was" — the reading #3855 needed and did not have."""
+    _mixed_item(items, 660)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("skipped", ABSTENTION_3988, []))
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "mixed-half.md").write_text("# mixed half\n")
+    out = V.land(["memory/mixed-half.md"], "mixed half (#660)", item_id=660)
+    assert out["ok"] is True, out["errors"]
+    row = _rows("vault_review", 660)[-1]
+    assert row["kind"] == "skipped" and row["blocking"] is False
+    assert row["review_reason"].startswith(ABSTENTION_3988), \
+        "the abstention is kept verbatim; the note is appended beside it"
+    assert "MISLABEL WATCH" in row["review_reason"]
+    assert "no path under ~/lloyd" in row["review_reason"]
+    assert "MISLABEL WATCH" in row["mixed_no_code"]
+    assert "#2263" in row["mixed_no_code"], \
+        "the note has to say for itself that it is not a verdict, or the next reader " \
+        "reads it as one and wonders why the land went through"
+
+
+def test_a_mixed_land_with_a_gated_round_does_not_cry_mislabel(vault, items, monkeypatch):
+    """The same measured fact, the second reading. #3988's own triage measured 214
+    items whose newest `vault_review` says `surface is mixed`, and 4 of them with no
+    gate row — so the accusation belongs to 4 items and not to 210, and a note that
+    called every abstaining mixed land a mislabel would be believed by nobody when
+    #3855's shape came back. The row still records that this land carried no code
+    half; it does not accuse, because a gated round naming the item answers it."""
+    _mixed_item(items, 663)
+    S.append_event({"event": "round_start", "item_id": 663, "round_id": "SM_20261109_000000"})
+    S.append_event({"event": "gate", "round_id": "SM_20261109_000000", "rung": "tests",
+                    "ok": True})
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("skipped", ABSTENTION_3988, []))
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "mixed-gated.md").write_text("# mixed half, code gated\n")
+    out = V.land(["memory/mixed-gated.md"], "mixed half (#663)", item_id=663)
+    assert out["ok"] is True, out["errors"]
+    note = _rows("vault_review", 663)[-1]["mixed_no_code"]
+    assert note.startswith("NO CODE HALF IN THIS LAND"), note
+    assert "MISLABEL WATCH" not in note
+
+
+def test_a_vault_surface_land_writes_no_mislabel_note(vault, items, monkeypatch):
+    """The note is about a label that promised a code half. A `vault` item's land
+    changing no `~/lloyd` path is exactly what it said on the tin, so a note there
+    would be noise on the commonest row in this file."""
+    write_item(items, 661, SIX)
+    _ev(event="backlog_triage", item_id=661, verdict="confirmed", surface="vault",
+        acceptance="x", acceptance_clauses=SIX)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (
+        "pass", "", [{"clause": i, "verdict": "met"} for i in range(1, 7)]))
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "vault-half.md").write_text("# a vault half\n")
+    out = V.land(["memory/vault-half.md"], "vault half (#661)", item_id=661)
+    assert out["ok"] is True, out["errors"]
+    row = _rows("vault_review", 661)[-1]
+    assert "mixed_no_code" not in row, "this label never promised a code half"
+
+
+def test_the_mislabel_note_never_becomes_a_verdict_shortfall(vault, items, monkeypatch):
+    """#3988 clause 4: the note is a row note and nothing else. This land is already
+    ON its second attempt, which is where the #2263 shortfall is computed at all — so
+    if the note ever reached that return, this is the land that would be refused, and
+    it is the shape of #3916's witness commit."""
+    _mixed_item(items, 662)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("skipped", ABSTENTION_3988, []))
+    S.append_event({"event": "vault_review", "item_id": 662, "kind": "retry", "blocking": True})
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "mixed-note.md").write_text("# mixed half, attempt 2\n")
+    out = V.land(["memory/mixed-note.md"], "mixed half, attempt 2 (#662)", item_id=662)
+    assert out["ok"] is True, out["errors"]
+    assert out["review"] == "skipped"
+    assert _rows("vault_land", 662)[-1]["ok"] is True, "the #2263 rail refused a mixed land"
+    row = _rows("vault_review", 662)[-1]
+    assert "MISLABEL WATCH" in row["mixed_no_code"]
+    assert row["verdict_shortfall"] == "", row
+    # The return itself, read directly: the abstention with no clause rows and no
+    # landing clauses is the exact input this item's mixed land hands the gate.
+    assert V._vault_verdict_shortfall(662, "skipped", [], []) == ""

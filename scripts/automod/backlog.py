@@ -8300,6 +8300,93 @@ def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...]
     return False
 
 
+#: The two spellings a clause uses for the code tree's root. `spec.normalize` keeps
+#: the prefix, so `classify("~/lloyd/scripts/automod/gate.py")` answers `unlisted` —
+#: judging that token as a path would demote a verdict that really does name a
+#: landable file, which is exactly the over-reach clause 2 of #3988 forbids.
+_LLOYD_ROOT_PREFIXES = ("~/lloyd/", "/home/alansrobotlab/lloyd/")
+
+#: What is recorded when a `mixed` verdict is demoted, and why. The sentence has to
+#: stand on the item as well as on the ledger row, because the row is what the
+#: machine reads and the item is what the next human reads.
+MIXED_NO_CODE_NOTE = (
+    "surface recorded as `vault`, not `mixed`: no acceptance clause names a path a "
+    "round could commit under ~/lloyd, so there is no code half for the code gate to "
+    "grade — and `review.grade_vault` abstains on any surface but `vault`, which is "
+    "how a `mixed` item ends up graded by neither grader (#3988)")
+
+
+def names_landable_lloyd_path(text: str) -> bool:
+    """Does this prose name a path a round could actually put in a diff?
+
+    `spec.classify` is gate rung 0's own rail, so "landable" here and "the gate would
+    have committed it" cannot come apart — the same reason `_human_only_head` judges
+    its marker against the same table rather than a second opinion of its own.
+
+    `protected` counts, and so does `config.yaml`: both LAND (the first turns on the
+    rollback drill, the second is admitted by content under the key fence), so a
+    verdict naming either has a code half. What does not count is the vault root, the
+    loop's runtime data root, and any other absolute path — none of them is ever in a
+    round's diff.
+    """
+    from scripts.automod import spec
+    for tok in _PATH_TOKEN.findall(str(text or "")):
+        tok = re.sub(r":\d[\d,\-]*$", "", tok.strip("`'\"()[],;:")).rstrip(".")
+        if not tok:
+            continue
+        low = tok.lower()
+        if _under_runtime_data_root(low):
+            continue
+        for root in _LLOYD_ROOT_PREFIXES:
+            if low.startswith(root):
+                tok = tok[len(root):]
+                break
+        else:
+            if low.startswith(("~/obsidian/", "/home/alansrobotlab/obsidian/")):
+                continue
+            if tok.startswith(("~", "/")):
+                continue
+            if tok.endswith("/"):
+                continue                       # a directory named in prose, not a file
+        if tok == "config.yaml":
+            return True
+        if spec.classify(tok) in ("allowed", "protected"):
+            return True
+    return False
+
+
+def demote_mixed_surface(verdict: str, surface: str, acceptance_clauses) -> tuple[str, str]:
+    """`(surface_to_record, note)`: `mixed` is accepted only with a code clause.
+
+    The promise a `mixed` label makes is two halves, and the record is the last
+    moment anyone can check it. Both readers of `confirmed_verdicts` decide by this
+    one word: `review.grade_vault` returns its abstention for any surface that is not
+    `vault`, and `vault_round._vault_verdict_shortfall` early-returns `""` for the
+    same shapes, so a `mixed` item with no landable code clause has its contract
+    graded by neither grader. #3855 is the witness — `surface=mixed`, five clauses
+    all naming one vault skill file, a `vault_land` that changed only that file, and
+    an `item_landed` naming no round at all, so the code gate never opened and the
+    `no changes to promote` rail never had a chance to refuse the empty code half.
+
+    The demotion therefore goes to `vault`, which is the label under which the next
+    vault land IS graded — this is not a stricter verdict, it is a readable one. Only
+    the label moves: the clauses are never rewritten, and no other surface is
+    touched, because a `code` item with vault-only clauses is a routing problem the
+    gate reports, not a label to invent.
+
+    Only a `confirmed` verdict is judged, because only a confirmed one has a contract
+    for a grader to read: `confirmed_verdicts` returns confirmed rows alone, so
+    relabelling a `stale` or `not_code` row's surface would move a label no reader
+    consults and make the ledger disagree with the turn for nothing.
+    """
+    s = str(surface or "").strip().lower()
+    if str(verdict or "").strip().lower() != "confirmed" or s != "mixed":
+        return s, ""
+    if any(names_landable_lloyd_path(c) for c in (acceptance_clauses or ())):
+        return s, ""
+    return "vault", MIXED_NO_CODE_NOTE
+
+
 def record_verdict(item: Item, verdict: str, evidence: str, *,
                    check: str = "", close: bool = False,
                    spawned: list[int] | tuple[int, ...] = (),
@@ -8308,7 +8395,8 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
                    acceptance_clauses: list[str] | tuple[str, ...] = (),
                    human_clauses: list[str] | tuple[str, ...] = (),
                    dropped_clauses: list[str] | tuple[str, ...] = (),
-                   hold: bool = False) -> Path | None:
+                   hold: bool = False,
+                   surface_note: str = "") -> Path | None:
     """Append the verdict to the item's activity log, optionally closing it.
 
     Always writes the evidence, never just the conclusion. An item closed as
@@ -8328,6 +8416,13 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     409); this module was the loud-refuse/silent-destroy asymmetry (#1020). A
     triage row on the ledger with no matching change on the item is the
     consequence — see the note on the item.
+
+    `surface_note` states why the recorded surface differs from the one the triage
+    turn gave — only `demote_mixed_surface`'s demotion of a `mixed` verdict with no
+    landable `~/lloyd` clause writes it (#3988). It goes on BOTH records: the ledger
+    row is what the two graders read, and the item is what the next human reads. A
+    label that moved in one of the two and not the other is an unexplained
+    disagreement, which is the failure this parameter exists to prevent.
     """
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
@@ -8344,6 +8439,11 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         entry += " Filed as new items: " + ", ".join(f"#{i}" for i in spawned) + "."
     if merged:
         entry += " Merged findings into: " + ", ".join(f"#{i}" for i in merged) + "."
+    if surface_note:
+        # The surface is the route both graders read, so a record that quietly
+        # disagrees with the triage turn is worse than an unguarded label: the next
+        # reader of the item would see `vault` and no reason (#3988 clause 1).
+        entry += " " + surface_note.strip().rstrip(".") + "."
     log = list(fm.get("activity_log") or [])
     log.append(entry)
     fm["activity_log"] = log
@@ -8449,6 +8549,11 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
 
     section = (f"\n\n## Automod triage — {stamp[:10]}\n\n"
                f"**Verdict:** {verdict}\n\n{evidence.strip()}\n")
+    if surface_note:
+        # Alongside the verdict, not buried in the activity log: the surface decides
+        # which grader reads this item, and a reader who disagrees with the label has
+        # to be able to see that it moved and why (#3988 clause 1).
+        section += f"\n**Surface:** {surface_note.strip()}\n"
     if verdict == "confirmed" and hold:
         section += ("\n**Held:** the implement pool was full when this was confirmed. It stays "
                     "in `draft` and enters `up_next`, oldest first, when a slot opens.\n")
@@ -8644,15 +8749,24 @@ def record_group_verdict(cluster: dict, members: list[Item], verdicts: dict[int,
     if umbrella is not None and fold_ids:
         clauses, dropped = cap_new_clauses(umbrella_fields.get("acceptance_clauses") or ())
         dropped = list(umbrella_fields.get("clauses_dropped_text") or []) + dropped
+        # The same guard the single-item writer applies (#3988), on the clauses this
+        # call is about to record. A guard on one of the two `confirmed_verdicts`
+        # writers is no guard at all: an umbrella is a confirmed row like any other, and
+        # it is read by both graders under whatever label this line put on it.
+        surface, surface_note = demote_mixed_surface(
+            "confirmed", str(umbrella_fields.get("surface") or "code"), clauses)
         record_verdict(umbrella, "confirmed", str(umbrella_fields.get("evidence") or ""),
                        check=str(umbrella_fields.get("check") or ""),
                        acceptance=str(umbrella_fields.get("acceptance") or ""),
-                       acceptance_clauses=clauses, dropped_clauses=dropped, hold=hold)
+                       acceptance_clauses=clauses, dropped_clauses=dropped, hold=hold,
+                       surface_note=surface_note)
         update_frontmatter(umbrella.path, {"members": sorted(fold_ids)}, add_tags=("umbrella",))
         S.append_event({"event": "backlog_triage", "item_id": umbrella.id, "verdict": "confirmed",
                         "held": bool(hold), "clauses_dropped": len(dropped),
                         "clauses_dropped_text": dropped,
-                        "surface": str(umbrella_fields.get("surface") or "code"),
+                        "surface": surface,
+                        **({"surface_stated": str(umbrella_fields.get("surface") or "code"),
+                            "surface_note": surface_note} if surface_note else {}),
                         "check": str(umbrella_fields.get("check") or ""),
                         "evidence": str(umbrella_fields.get("evidence") or "")[:1000],
                         "acceptance": str(umbrella_fields.get("acceptance") or ""),

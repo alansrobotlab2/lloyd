@@ -1301,13 +1301,19 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
         # "picked up next" would have meant never.
         live = await asyncio.to_thread(B.live_blockers, S.LEDGER_PATH, items=[candidate])
         hold = bool(gate["full"]) and candidate.id not in live and not B.is_high(candidate)
+    # The recorded surface, not the stated one, is what `confirmed_verdicts` hands to
+    # both graders, so the check that `mixed` really means two halves belongs here — on
+    # the record, which is the surface #3855's five vault-only clauses passed straight
+    # through. The label moves; the clauses never do.
+    surface, surface_note = B.demote_mixed_surface(
+        parsed["verdict"], parsed["surface"], parsed.get("acceptance_clauses") or ())
     B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
                      check=parsed["check"], close=close, spawned=spawned, merged=merged,
                      acceptance=parsed["acceptance"],
                      acceptance_clauses=parsed.get("acceptance_clauses") or (),
                      human_clauses=parsed.get("human_clauses") or (),
                      dropped_clauses=parsed.get("clauses_dropped_text") or (),
-                     hold=hold)
+                     hold=hold, surface_note=surface_note)
 
     # The cap is a prompt instruction, and the items exist on disk by the time
     # we read SPAWNED — unfiling them would destroy real findings. So it is
@@ -1324,7 +1330,12 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
                     "name": candidate.name[:200], "age_days": candidate.age_days,
                     "spawn_cap": spawn_cap, "spawned_over_cap": over_cap,
                     "findings_appended": findings_appended,
-                    "verdict": parsed["verdict"], "surface": parsed["surface"],
+                    "verdict": parsed["verdict"], "surface": surface,
+                    # The stated label survives only when it was changed, so a reader
+                    # of the ledger can always recover what the turn said (#3988
+                    # clause 1: "and say so in the triage findings").
+                    **({"surface_stated": parsed["surface"],
+                        "surface_note": surface_note} if surface_note else {}),
                     "held": hold,
                     "check": parsed["check"],
                     "evidence": parsed["evidence"][:1000],

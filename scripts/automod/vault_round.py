@@ -1622,6 +1622,94 @@ def _no_change_refusal(norm: list[str], held: dict[str, str]) -> str:
                if lacking else ""))
 
 
+#: #3988 clause 3 — what an abstaining `mixed` land writes beside the abstention, when
+#: its own diff shows no code half. Observability and nothing else: a non-empty
+#: `verdict_shortfall` refuses the land at the #2263 rail (`_vault_verdict_shortfall`,
+#: consumed a few lines below the row), which is exactly why this goes on a key of its
+#: own instead of joining that return — folded in there, it would have refused #3916's
+#: witness commit, the land this item exists to make legible.
+#:
+#: Two readings, because the one fact ("this land changed no path under ~/lloyd") has
+#: two causes and the row must not accuse where it cannot prove. The label is
+#: contradicted only when nothing else in the ledger carries the code half either.
+MIXED_MISLABEL_NOTE = (
+    "MISLABEL WATCH (#3988): this `mixed`-surface land changed no path under ~/lloyd, "
+    "and no gate row names any round the ledger names for this item — so the code half "
+    "the label promises was never graded either, and the contract has now been read by "
+    "neither grader (#3855's shape: five all-vault clauses, one vault path committed, "
+    "`item_landed` naming no round at all). Observability only: this is NOT a verdict "
+    "shortfall, and feeding it into `_vault_verdict_shortfall` would refuse every mixed "
+    "vault land at the #2263 rail")
+#: The same measured fact, with the accusation withdrawn because the ledger answers it.
+MIXED_CODE_EVIDENCED_NOTE = (
+    "NO CODE HALF IN THIS LAND (#3988): this `mixed`-surface land changed no path under "
+    "~/lloyd, which is what a vault land always does; a gated round does name this "
+    "item, so the label is not contradicted by this row")
+
+
+def _item_surface(item_id: int) -> str:
+    """The surface `confirmed_verdicts` holds for this item, `""` when it has none.
+
+    Read here rather than passed in: `land()` is reached from MCP, from the CLI and
+    from the finalizer report, and none of those carries the triage label."""
+    from scripts.automod import backlog as B
+    try:
+        return str((B.confirmed_verdicts(S.LEDGER_PATH).get(int(item_id))
+                    or {}).get("surface") or "").strip().lower()
+    except Exception:                                    # noqa: BLE001
+        # No surface, no note. An observability lookup that cannot read the ledger is
+        # never a reason to refuse a land whose commit is already staged.
+        return ""
+
+
+def _item_gated_rounds(item_id: int) -> set[str]:
+    """Rounds that were gated AND name this item.
+
+    Two steps because the ledger splits the fact in two: `round_start` carries
+    `item_id` and `round_id`, a `gate` row carries `round_id` and never the item. This
+    is the join #3988's own re-measurement runs, and it is what distinguishes #3916
+    (two `round_start` rows, zero gate rows — an intention, not a code half) from a
+    mixed item whose code half really went through the gate.
+    """
+    try:
+        events = S.read_events(S.LEDGER_PATH, 0)         # limit=0 is the whole file
+    except Exception:                                    # noqa: BLE001
+        return set()
+    named: set[str] = set()
+    for ev in events:
+        try:
+            if int(ev.get("item_id") or -1) == int(item_id) and ev.get("round_id"):
+                named.add(str(ev["round_id"]))
+        except (TypeError, ValueError):
+            continue
+    if not named:
+        return set()
+    return {str(ev.get("round_id")) for ev in events
+            if ev.get("event") == "gate"} & named
+
+
+def _mixed_mislabel_note(item_id: int, changed: list, kind: str) -> str:
+    """What this abstaining land's own diff says about the `mixed` label. `""` if it
+    has nothing to say.
+
+    Three reads, no inference: the grader abstained — only an abstention is the row
+    clause 3 describes, since a graded row already names the verdicts it reached; the
+    recorded surface is `mixed`; and not one changed path is a file a round could
+    commit under `~/lloyd`. Which of the two notes that fact earns is then read from
+    the ledger. #3988's triage measured 214 items whose newest `vault_review` abstains
+    on `mixed` and 4 of them with no gate row at all, so an unconditional accusation
+    would land on 210 items whose code half did pass a gate — and an instrument that
+    does that is not believed when #3855's shape shows up again.
+    """
+    from scripts.automod import backlog as B
+    if kind != "skipped" or _item_surface(int(item_id)) != "mixed":
+        return ""
+    if any(B.names_landable_lloyd_path(p) for p in (changed or [])):
+        return ""
+    return (MIXED_CODE_EVIDENCED_NOTE if _item_gated_rounds(int(item_id))
+            else MIXED_MISLABEL_NOTE)
+
+
 def _vault_verdict_shortfall(item_id: int, kind: str, clauses: list,
                              landing_indices: list) -> str:
     """Why this item's newest vault review is NOT a verdict on its contract;
@@ -1962,6 +2050,13 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         # `status: done`.
         shortfall = (_vault_verdict_shortfall(int(item_id), kind, clauses, list(landing))
                      if attempts >= VAULT_REVIEW_MAX else "")
+        # #3988 clause 3: beside the abstention, when the land's own diff shows no
+        # code half, the row says the label is the suspect. `review_reason` keeps the
+        # grader's sentence first and verbatim — the reader must still be able to tell
+        # an abstention from a verdict at a glance — and the note is a second key, so
+        # nothing here can be mistaken for a shortfall (#2263, clause 4).
+        mislabel = _mixed_mislabel_note(int(item_id), norm, kind)
+        reason = findings[:600] if kind == "skipped" else ""
         # Every non-blocking outcome is recorded, an abstention included: before
         # #955 the reason for a skip was discarded here and the only trace was
         # the bare word `skipped` on the landing, which could not distinguish
@@ -1969,8 +2064,9 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
                         "kind": kind, "blocking": False, "findings": findings[:600],
                         "verdict_shortfall": shortfall,
-                        "review_reason": findings[:600] if kind == "skipped" else "",
+                        "review_reason": (f"{reason} — {mislabel}" if mislabel else reason),
                         "clauses": clauses,
+                        **({"mixed_no_code": mislabel} if mislabel else {}),
                         **({"verdict_shortfall": shortfall} if shortfall else {})})
         if shortfall:
             undone = revert_paths(norm)
