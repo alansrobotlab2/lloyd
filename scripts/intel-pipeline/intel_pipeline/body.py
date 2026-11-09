@@ -471,7 +471,30 @@ def _drop_footer_residue(lines: list) -> list:
     object so the caller can tell "nothing changed" from "changed to the same
     characters" (#2143's whitespace property).
     """
+    # #3982: step over a trailing CHAPTER TRAILER — the timestamped rows and, above
+    # them, the one heading that rules them — BEFORE judging the tail. A chapter row is
+    # not residue (#1561's ruling: timestamps with no promo above them are content) and
+    # no shape names one, so the walk used to stop on its very FIRST line whenever a
+    # channel put its footer ABOVE its own table of contents: prose, a rule, a promo
+    # label, two section labels, eight timestamp rows. That is the shape that turned the
+    # three shipped-digest nodes red on 2026-11-09, and the classifier named every one
+    # of those five residue lines the whole time — only the walk's start point was wrong.
+    # The guarantee does not move: this consumes trailing indices, it does not delete
+    # them, and when the walk below finds no strong shape `strong` stays False and the
+    # SAME list object comes back, so the common shape — a chapter list with prose over
+    # it — is returned untouched, exactly as before. The heading goes only when rows
+    # followed it, so a chapter heading over prose stays prose's own heading.
+    # (`_CHAPTER_LINE_RE` and `_CHAPTERS_HEADING_RE` are bound below this function and
+    # read here at call time.)
     i = len(lines)
+    while i > 0 and not lines[i - 1].strip():
+        i -= 1
+    while i > 0 and _CHAPTER_LINE_RE.match(lines[i - 1].strip()):
+        i -= 1
+        while i > 0 and not lines[i - 1].strip():
+            i -= 1
+    if i > 0 and _CHAPTERS_HEADING_RE.match(lines[i - 1].strip()):
+        i -= 1
     strong = False
     while i > 0:
         line = lines[i - 1]

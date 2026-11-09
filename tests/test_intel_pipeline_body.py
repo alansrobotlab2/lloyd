@@ -5263,3 +5263,149 @@ def test_a_body_the_keycap_rule_cannot_reach_is_still_returned_byte_identical():
         "I Ran a 27B Model on This Tiny PC. I Was Fixing the Wrong Thing.",
     ):
         assert body_mod.strip_link_footer(text) == text, text
+
+
+# ── #3982: a trailing chapter list hid a mid-body footer from the tail walk ────
+
+#: The channel description that turned the three shipped-digest nodes red on
+#: 2026-11-09, verbatim from the 29-line `summary` of the feed raw row
+#: `_pipeline/vault-derived/memory/feeds/raw/2026-11-09.jsonl` for
+#: `youtube:…:2lt4P_xGFL8` (`Anthropic just built it...`). It is reproduced here
+#: rather than read from that row at test time because the raw file is runtime data the
+#: retention sweep ages (#79), and a node that goes green when the evidence it quotes
+#: is deleted is a node that reports its own absence.
+CHAPTER_TOMBSTONED_FOOTER = (
+    "what's Anthropic building in there?\n"
+    "they just REDACTED most of their internal audit\n"
+    "one of their models just broke ALL benchmarks\n"
+    "\n"
+    "______________________________________________\n"
+    "\n"
+    "My Links 🔗\n"
+    "\n"
+    "______________________________________________\n"
+    "\n"
+    "SOURCES:\n"
+    "\n"
+    "CHAPTERS:\n"
+    "\n"
+    "00:00 Redacted Audit\n"
+    "\n"
+    "06:53 Model 4\n"
+    "\n"
+    "09:12 2x Safety Line\n"
+    "\n"
+    "15:12 AECI Benchmarks\n"
+    "\n"
+    "23:47 Trend Inflection\n"
+    "\n"
+    "28:58 Researcher Interviews\n"
+    "\n"
+    "32:42 Compute Allocation\n"
+    "\n"
+    "36:43 30,000 AI Agents")
+
+
+def test_a_footer_under_a_trailing_chapter_list_is_dropped_by_the_write_path():
+    """#3982: the writer's tail walk stops at a chapter line and publishes the footer
+    sitting ABOVE it.
+
+    The digest this entry reached reads `… benchmarks`, then an underscore rule, then
+    `My Links 🔗`, then `SOURCES:`, `CHAPTERS:`, and eight `00:00` chapter lines — a
+    footer with its tombstone and its table of contents still attached. What makes it a
+    hole in `_drop_footer_residue` rather than a rule nobody wrote is that the
+    classifier already names every one of those five lines: `footer_residue_lines`
+    reports all five on this text while `strip_link_footer` returns it character for
+    character. The walk starts at the LAST line, a chapter line, which no residue
+    shape claims, so it stops on the first step and the block below the prose is never
+    reached.
+
+    Chapter lines are not residue, and that is right twice over: `#1561`'s ruling is
+    that timestamps with no promo above them are content, and the #3399 node below
+    this file's end holds a body closing on a chapter list UNCHANGED. So the fix is
+    not a wider residue shape — it is the one thing the read side already knows and
+    the write side did not: once the trailing chapter block is stepped over, what
+    opens the block decides, and a strong shape (a promo label, a section label) opens
+    it exactly as a hashtag would. A chapter list that rules its OWN section, with
+    prose above it, stays: stepping over it finds prose, and prose stops the walk.
+    """
+    assert body_mod.footer_residue_lines(CHAPTER_TOMBSTONED_FOOTER), (
+        "the read side stopped naming the footer the writer is supposed to drop")
+    out = body_mod.strip_link_footer(CHAPTER_TOMBSTONED_FOOTER)
+    assert out != CHAPTER_TOMBSTONED_FOOTER, (
+        "strip_link_footer returned a published footer character for character")
+    assert "My Links" not in out and "______" not in out, out
+    assert "SOURCES" not in out and "CHAPTERS" not in out, out
+    assert out.splitlines() == ["what's Anthropic building in there?",
+                                "they just REDACTED most of their internal audit",
+                                "one of their models just broke ALL benchmarks"], out
+    assert body_mod.footer_residue_lines(out) == [], out
+
+
+def test_a_footer_under_a_trailing_chapter_list_never_reaches_the_digest():
+    """The same description through the writer, which is the route that published it.
+
+    `_entry_body` is what `write_item_to_vault` puts under the Source/Relevance line, so
+    this is the boundary the residue actually crossed: a feed description in, digest
+    prose out. The published file is asserted by the three shipped-digest nodes over;
+    this is the half that stops the next one arriving.
+    """
+    rendered = vw_mod._entry_body(_yt(summary=CHAPTER_TOMBSTONED_FOOTER))
+    assert "My Links" not in rendered and "______" not in rendered, rendered
+    assert "CHAPTERS" not in rendered and "00:00" not in rendered, rendered
+    assert "what's Anthropic building in there?" in rendered, rendered
+    assert body_mod.footer_residue_lines(rendered) == [], rendered
+
+
+def test_a_chapter_list_with_prose_over_it_is_still_kept():
+    """The half that must NOT change: chapter rows under prose are content.
+
+    Prose, then timestamps, nothing promo between them — the shape the digest's own
+    entries keep, and the reason the step-over is a step and not a delete: it moves the
+    walk's START line, and the first non-blank above it is prose, which no shape claims,
+    so `strong` never turns and the SAME list object comes back.
+
+    Deliberately no `Chapters:` line. A chapter HEADING is a ruleless-footer anchor in
+    its own right (#1861), and a body closing on `Chapters:` plus its rows has had that
+    block dropped since before this round — measured on the base commit, where
+    `strip_link_footer` answers `'A model that reads its own audit.'` to that text with
+    this round's change absent. Pinning it here as kept would be a claim about behaviour
+    this round does not own, and a false one.
+    """
+    text = ("A model that reads its own audit.\n\n"
+            "00:00 The audit\n\n06:53 The benchmarks")
+    assert body_mod.strip_link_footer(text) == text, body_mod.strip_link_footer(text)
+
+
+def test_the_live_digests_carry_no_residue_the_write_path_could_have_dropped():
+    """#3982 clause 1, stated as the property the three shipped-digest nodes grade.
+
+    Those nodes read the file the pipeline writes, so a red run means the published
+    vault holds text the writer has now been shown to refuse — the note scrub and the
+    `_drop_footer_residue` fix are two halves of one change, and this is where they
+    meet. The walk mirrors `test_no_shipped_digest_body_carries_a_tag_run_line`'s own
+    skip rules line for line (front matter is not a body, a structural line is not a
+    body), so this cannot read green over a file those nodes still fail, and it asks
+    `_shipped_digest()`, which re-answers the vault override, rather than the path
+    frozen at import. Both digests the instrument sweeps are checked, not only the one
+    that broke.
+    """
+    import board_presence
+
+    for rel in ("knowledge/ai-llms/youtube-digest.md",
+                "knowledge/robotics/youtube-digest.md"):
+        lines = (board_presence.vault_root() / rel).read_text(
+            errors="replace").splitlines()
+        in_front_matter = bool(lines) and lines[0].strip() == "---"
+        hits = []
+        for i, ln in enumerate(lines, 1):
+            text = ln.strip()
+            if in_front_matter:
+                if i > 1 and text == "---":
+                    in_front_matter = False
+                continue
+            if not text or body_mod.digest_structural_line(text):
+                continue
+            if (shape := body_mod.footer_residue_shape(text)) is not None:
+                hits.append((i, text[:40], shape))
+        assert hits == [], f"{rel}: residue still published: {hits}"
