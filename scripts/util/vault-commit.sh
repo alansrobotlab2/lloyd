@@ -47,6 +47,15 @@
 #      `knowledge/` path that has a whole-file witness under `tests/fixtures/`,
 #      with both sides' byte and newline counts (the witness block below).
 #      Reports, never blocks, and prints nothing when nothing matches. #2381.
+#   5e. Drop from the commit every `lloyd/bench/` card THIS commit ADDS whose stem has no
+#      assertion set in the lloyd repo's `eval/autoresearch_assertions.yaml` (the bench
+#      assertion rung below). This item is not one of the three report-only blocks above:
+#      a keyless card is pulled out of the index, so it cannot reach the vault's main
+#      through this door while it has no assertion rows — which is the asymmetry #3870
+#      left open and #3974 closes. And unlike the four sibling rungs, a rail module this
+#      script cannot import stops the commit outright: a guard that cannot read its own
+#      input has no verdict to give, and committing through it is a blind check reading as
+#      a clean tree. #3974.
 #   6. With LLOYD_JOB set, commit as the job rather than as whoever `user.name`
 #      says, and add a `Job:` trailer (see the job-identity block below). Unset
 #      means no change of any kind to what this wrapper used to do. #668.
@@ -544,6 +553,85 @@ else
         exit 1
     elif [ "$ORPHAN_TOPIC_RC" -gt 1 ]; then
         echo "vault-commit.sh: orphan topic-file CHECK FAILED (exit $ORPHAN_TOPIC_RC); committing whatever the index holds" >&2
+    fi
+fi
+
+# 5e. #3974: a bench card THIS commit ADDS whose stem has no assertion set behind it.
+# `app/harness/bench_authoring.py` refuses such a card on four writer lanes, and #3870
+# (`b6feeef0`) put the same refusal on the other door onto the vault's main,
+# `scripts/automod/vault_round.py::land()`. This door had no bench reference of any kind,
+# which is how bench_024–028 got in: `d1c89cf81`, `bf8be644e`, `dc72ec91a`, each a
+# `pre-flight … (unattributed dirty state)` snapshot — the whole-tree `git add` route this
+# wrapper still runs nightly (`cd53c4ef6`, `52007a4da` are two of them, 2026-11-08). #3870's
+# own land-rail comment said it "does NOT close `scripts/util/vault-commit.sh`, the second
+# door"; the owed-check ruling of 2026-11-09 settled that scope question and filed #3974 as
+# its follow-up. The two doors disagreed on one input, measured: the sweep committed
+# `lloyd/bench/bench_99_premise_repro.md` at exit 0 while the rail refused that path.
+#
+# The decision is the rail's, not a second one: `bench_assertion_findings.py` beside this
+# script imports `app.harness.bench_authoring` and answers through
+# `RAIL.bench_card_landing_defect(path, exists_at_head=…, table_path=…)` over
+# `git diff --cached --diff-filter=A` limited to `lloyd/bench/` — the two calls
+# `vault_round.py::_bench_card_assertion_errors` makes — so the doors cannot disagree about
+# the stem rule, the key lookup or the wording. Scope is one commit's staged ADDS and never
+# a whole-tree count, for the #2415 owed-ruling-2 reason the orphan rung above spells out:
+# this wrapper commits other writers' state, so a tree count would refuse a batch for a
+# card its author never touched. `exists_at_head` comes from `git cat-file -e HEAD:<path>`
+# in $VAULT, which is why editing a card that main already holds is never refused even with
+# its key missing — that edit is the only thing that can fix it.
+#
+# DROPPED, not refused, and that is the considered difference from the orphan and timezone
+# rungs above. Their remedy is a vault file the same commit can carry (stage the
+# `lloyd/MEMORY.md` hook line); this one's is `eval/autoresearch_assertions.yaml` in the
+# LLOYD REPO, which a nightly vault snapshot can neither include nor wait for. `git reset`
+# then `exit 1` there leaves the card dirty, the next bare invocation re-stages it, and
+# every pre-flight commit afterwards is refused over a file no job inside the vault can fix
+# — the nightly-wide red #2415's owed ruling 2 deliberately withheld, which #3870's ruling
+# warned about by name. So this takes the SQLite sidecar rung's shape (#3236): pull the path
+# out of the index with `git reset -q --` (`|| true`, the reason stated in the orphan rung —
+# a vault whose first commit is the one being answered has no HEAD for `reset` to consult),
+# say so at column 0 BEFORE the index readback below so the path appears in neither the
+# commit body nor the #1070 `unattributed dirty state:` list, and let the rest commit. The
+# trade-off is recorded on the item: a permanently keyless card is dropped repeatedly
+# rather than screaming, and the owed check watches real nightly traffic for exactly that.
+#
+# FAILS CLOSED where the four siblings fail open, and only for its own missing rail: exit 4
+# means `app.harness.bench_authoring` could not be imported, which is this guard going
+# blind rather than a writer's defect — never transient, nobody's fault, and committing
+# through it is a blind check reading as a clean tree. Any other exit past 1 (3: the vault
+# would not answer `git diff --cached`) stays the siblings' branch, because that one can be
+# a transient git condition and a freeze here is every job's snapshot.
+BENCH_RUNG="$SCRIPT_DIR/bench_assertion_findings.py"
+if [ ! -f "$BENCH_RUNG" ]; then
+    echo "vault-commit.sh: bench assertion CHECK SKIPPED (missing $BENCH_RUNG)" >&2
+elif [ -z "$PY" ]; then
+    echo "vault-commit.sh: bench assertion CHECK SKIPPED (no python interpreter)" >&2
+else
+    # On a drop the rung prints its paths one per line on stdout (reasons on stderr), which
+    # is what the loop below pulls out of the index.
+    set +e
+    BENCH_PATHS="$("$PY" "$BENCH_RUNG" --vault "$VAULT")"
+    BENCH_RC=$?
+    set -e
+    if [ "$BENCH_RC" -eq 1 ]; then
+        while IFS= read -r BENCH_PATH; do
+            [ -n "$BENCH_PATH" ] || continue
+            git -C "$VAULT" reset -q -- "$BENCH_PATH" || true
+            # Column 0 and before the index readback below, for the #1070 reason that
+            # governs the no-change block: an indented leading token does not survive
+            # reaching a caller as the first thing they read. The rail's own per-path
+            # sentence came out of the rung on this same stderr; this is the version whose
+            # remedy a caller of THIS door can perform. The rail's text says the rows go in
+            # "the SAME round as the card", and a sweep commit has no round and no repo —
+            # so the line says where the rows live and that they have to be there first,
+            # and never tells the caller to fix anything in the commit in front of it.
+            echo "vault-commit.sh: BENCH ASSERTION DROP: $BENCH_PATH is out of this commit — its stem has no assertion set in eval/autoresearch_assertions.yaml, which is a file of the lloyd repo (the checkout this script runs from), not of the vault. Its assertion rows have to land THERE first — a repo change, reviewed and merged like any other — and only then can this door carry the card. The path's bytes are untouched on disk, so its author can re-stage it once the rows exist; nothing else in this commit is affected (#3974, #3870's second door)." >&2
+        done <<< "$BENCH_PATHS"
+    elif [ "$BENCH_RC" -eq 4 ]; then
+        echo 'vault-commit.sh: bench assertion CHECK FAILED CLOSED (exit 4): bench_authoring could not be imported, so this door has no verdict to give and refuses the commit rather than committing whatever the index holds. Nothing is committed. Repair the interpreter or the checkout that owns app/harness/bench_authoring.py (#3974).' >&2
+        exit 1
+    elif [ "$BENCH_RC" -gt 1 ]; then
+        echo "vault-commit.sh: bench assertion CHECK FAILED (exit $BENCH_RC); committing whatever the index holds" >&2
     fi
 fi
 
