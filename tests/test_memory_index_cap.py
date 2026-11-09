@@ -2693,3 +2693,169 @@ def test_the_guard_off_a_line_the_file_already_holds_adds_no_freeze(memories_roo
     assert dup is not None, "a duplicate of an on-disk unrepresentable line was accepted"
     assert "can never carry" in dup, ("the refusal came from another arm", dup)
     assert "1 index line(s)" in dup, ("the duplicate was not counted as exactly one add", dup)
+
+
+# ── #3990: the option-(a) note says the ownership key is RULED, not owed ─────────
+#
+# `app/memory_ceiling.py`'s #3661 block was the only place in the repo carrying "ownership has
+# to key on the commit that added the file or on a disposition row, and that ruling is owed" —
+# a claim #3545's owed-check ruling of 2026-11-06 had already refuted, and a carried-forward
+# "still owed" sentence is re-cited by every later run and re-derived by none. A comment pin
+# that only greps its own words passes forever, so one node per acceptance clause reads the
+# block as text AND the identifiers it cites as code: write "owed" back, re-word the key to
+# "the commit that added the file", rename `added_topic_paths` or `DISPOSITION_FIELD`, or ship
+# the disposition arm in the validator, and the node for that clause reddens. The clause-3
+# reading that speaks about the vault (`0 disposition rows today`) is the one an in-repo string
+# pin cannot settle, so `test_the_note_s_disposition_row_count_matches_the_live_ledger` crosses
+# that boundary with the rail's own parser, marked `live_vault` as every other reader of the
+# live vault in this file is.
+
+
+def _comment_block_3661() -> str:
+    """The #3661 comment block in `app/memory_ceiling.py`, whitespace-flattened.
+
+    Sliced between its own rule and the first `def` below it rather than by line number,
+    because the whole point of that block is that it is comment-only and line-neutral;
+    flattening is what stops a harmless re-wrap failing a phrase check.
+    """
+    src = (ROOT / "app" / "memory_ceiling.py").read_text(encoding="utf-8")
+    start = src.index("# ── #3661: a repair write may spend the reserve")
+    end = src.index("def unlinked_topic_slugs", start)
+    return " ".join(src[start:end].split())
+
+
+def test_the_option_a_note_says_the_key_is_ruled_not_owed():
+    """#3990 clause 1: the outstanding-ruling claim is gone and the ruling is cited by date.
+
+    `that ruling is owed` is searched in the whole file because it is the exact string the
+    item's acceptance check greps, so this node fails on the bug exactly as filed. `is owed`
+    is checked inside the block too: "the key is still owed" would be the same rot re-worded.
+    The surviving `owed` is the job's own name in `owed-check`, which the citation needs — so
+    the node bans the reading, not the letters.
+    """
+    src = (ROOT / "app" / "memory_ceiling.py").read_text(encoding="utf-8")
+    block = _comment_block_3661()
+    assert "that ruling is owed" not in src, "the file carries the acceptance check's string"
+    assert "is owed" not in block, ("the note still calls a ruling outstanding", block)
+    assert "RULED" in block and "not owed" in block, block
+    assert "#3545" in block and "owed-check" in block and "2026-11-06" in block, \
+        "the note stopped citing the ruling that settled the key"
+
+
+def test_the_option_a_note_names_the_add_side_key_by_its_shipped_identifier():
+    """#3990 clause 2: the add-side key is `added_topic_paths`, keyed on staged adds.
+
+    The false note pointed at "the commit that added the file" — a blame, which is precisely
+    what #3545's ruling replaced with a shipped function. So the node bans that phrase and
+    requires the real identifier and the flag it keys on, then checks BOTH against
+    `scripts/util/orphan_topic_findings.py`: a comment that cites a renamed symbol is the same
+    rot one commit later, so the citation is graded against the module, not against prose.
+    """
+    block = _comment_block_3661()
+    orphans = (ROOT / "scripts" / "util"
+               / "orphan_topic_findings.py").read_text(encoding="utf-8")
+
+    assert "added_topic_paths" in block and "--diff-filter=A" in block, block
+    assert "commit that added the file" not in block, \
+        "the note points at a blame of a commit instead of the shipped key"
+    assert "def added_topic_paths" in orphans, \
+        "the note's add-side key was renamed and the comment is now a false citation"
+    assert "--diff-filter=A" in orphans, \
+        "the add-side key no longer keys on staged adds, so the note's flag is stale"
+
+
+def test_the_option_a_note_names_the_disposition_side_and_its_empty_reading():
+    """#3990 clause 3: the disposition side is `DISPOSITION_FIELD`, read by `dispositioned_slugs`.
+
+    Both live in the module the add-side key does, and the note states the reading that
+    follows from the ledger being empty today: `holding 0 rows today`, so the arm is
+    `defined-but-empty` and `every unlinked add is refused` — the safe direction.
+
+    The row count is the one figure here pinned as text rather than measured, and
+    `test_the_note_s_disposition_row_count_matches_the_live_ledger` is what keeps that honest:
+    it re-measures the same ledger across the repo→vault boundary with the module's own
+    parser. When it reddens because a writer added a disposition row, the note's sentence, the
+    `holding 0 rows today` pin below and the live node are re-pointed in ONE commit — which is
+    the repair the item hands to owed-check.
+    """
+    block = _comment_block_3661()
+    orphans = (ROOT / "scripts" / "util"
+               / "orphan_topic_findings.py").read_text(encoding="utf-8")
+
+    for name in ("DISPOSITION_FIELD", "dispositioned_slugs",
+                 "lloyd/reviews/memory-md-retired.md", "holding 0 rows today",
+                 "defined-but-empty", "every unlinked add is refused"):
+        assert name in block, ("the note no longer names", name)
+    assert "DISPOSITION_FIELD = " in orphans and "def dispositioned_slugs" in orphans, \
+        "the note's disposition side was renamed and the comment is now a false citation"
+
+
+@pytest.mark.live_vault
+def test_the_note_s_disposition_row_count_matches_the_live_ledger():
+    """#3990 clause 3's dated reading, measured across the boundary the comment speaks across.
+
+    The paragraph asserts something about a file outside this repository — that
+    `lloyd/reviews/memory-md-retired.md` holds 0 `**Topic file disposition:**` rows — so an
+    in-repo string pin can be satisfied while the vault says otherwise. This node counts the
+    rows with the rail's OWN parser and constants (`_FIELD_LINE_RE`, `DISPOSITION_FIELD`,
+    `LEDGER_REL`, imported rather than re-typed, so a rename lands here too) and compares that
+    count with the number the comment states. It therefore stays true while the comment is
+    true and goes false the moment the two part, instead of pinning 0 forever.
+
+    Marked `live_vault` for the reason pytest.ini gives: the gate runs `-m "not live_vault"`,
+    and the live vault is a file another job owns — this assertion is the nightly/owed-check
+    pass that re-points the dated sentence, not a round's.
+    """
+    from scripts.util import orphan_topic_findings as otf
+
+    ledger = Path.home() / "obsidian" / otf.LEDGER_REL
+    if not ledger.is_file():
+        pytest.skip("no vault")
+    text = ledger.read_text(encoding="utf-8")
+    rows = [ln for ln in text.splitlines()
+            if (m := otf._FIELD_LINE_RE.match(ln))
+            and m.group("label").strip().rstrip(":").strip().lower()
+            == otf.DISPOSITION_FIELD]
+
+    block = _comment_block_3661()
+    stated = re.search(r"holding (\d+) rows today", block)
+    assert stated, ("the note stopped stating its row count with its date", block)
+    assert int(stated.group(1)) == len(rows), (
+        f"the note says {stated.group(1)} disposition rows and the live ledger holds "
+        f"{len(rows)}: re-point the sentence in app/memory_ceiling.py together with the "
+        "'holding 0 rows today' pin in "
+        "tests/test_memory_index_cap.py::"
+        "test_the_option_a_note_names_the_disposition_side_and_its_empty_reading"
+    )
+    assert ("defined-but-empty" in block) == (len(rows) == 0), (
+        "the note's defined-but-empty claim no longer matches the ledger's row count")
+    assert (len(otf.dispositioned_slugs(text)) == 0) == (len(rows) == 0), \
+        "the ledger's disposition rows name no path: the arm is empty for a reason the " \
+        "note does not state"
+
+
+def test_the_option_a_note_says_why_option_a_stays_untaken_at_the_validator():
+    """#3990 clause 4: option (a) is untaken, and the validator is the reason it stays so.
+
+    Three facts, each checked against the file it describes rather than quoted: the note names
+    `scripts/memory/validate_memory_index.py` by its real path, says that file has
+    `no disposition arm`, and says its reverse arm records an unlinked topic file
+    `as an error, not a warning` — crediting #3539's `unnecessary` closure as the reason no
+    validator-side exemption was ever built. The structural halves are what rot silently, so
+    they are read from the validator: it still records findings through `errors.append`, it
+    carries no warning channel, and `disposition` appears nowhere in it. Build the ownership
+    arm there and this node fails — which is the moment the paragraph gets rewritten, not
+    re-cited.
+    """
+    block = _comment_block_3661()
+    validator = VALIDATOR.read_text(encoding="utf-8")
+
+    for name in ("scripts/memory/validate_memory_index.py", "no disposition arm",
+                 "#3539", "unnecessary", "as an error, not a warning"):
+        assert name in block, ("the note no longer names", name)
+    assert "errors.append" in validator, \
+        "the validator's reverse arm no longer records an unlinked topic file as an error"
+    assert not re.search(r"\bwarnings?\.append", validator), \
+        "the validator gained a warning channel: the note's error-not-warning half is stale"
+    assert "disposition" not in validator.lower(), \
+        "the validator grew the ownership arm option (a) was deferred for: rewrite the note"

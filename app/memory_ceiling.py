@@ -946,14 +946,14 @@ def index_bounds_apply(filename: str) -> bool:
 # added no hook line, so `index_repair_hook_slugs` answers empty for it and the reserve
 # speaks with its old text.
 #
-# The item's option (a) — deciding ownership in the VALIDATOR, so an orphan the calling job
-# did not create is a warning with a named owner — is the bigger design and is NOT taken here.
-# Triage records why it cannot be built yet: the orphan is UNTRACKED in the vault
-# (`?? lloyd/memory/…`), so a "tracked in HEAD ⇒ not this job's file" test classifies it as
-# this job's and keeps blocking; ownership has to key on the commit that added the file or on
-# a disposition row, and that ruling is owed. The half that can ship without an ownership
-# answer is this one, because "this write adds only hook lines for files that are on disk and
-# unlinked" does not need to know who wrote the file.
+# Option (a) — the VALIDATOR deciding ownership, so a file another job wrote is a warning — stays
+# untaken. The key is RULED, not owed: #3545's owed-check ruling of 2026-11-06 fixes one
+# canonical key — `added_topic_paths` in `scripts/util/orphan_topic_findings.py`, keyed on staged
+# `--diff-filter=A` paths, or the `DISPOSITION_FIELD` rows `dispositioned_slugs` reads there from
+# `lloyd/reviews/memory-md-retired.md`, holding 0 rows today: the arm is defined-but-empty, so
+# every unlinked add is refused. Option (a) stays untaken because #3539 closed `unnecessary` with
+# no validator-side exemption — `scripts/memory/validate_memory_index.py` has no disposition arm,
+# and its reverse arm records an unlinked topic file as an error, not a warning.
 #
 # Appended below `memory_write_error` for the standing reason at :350-358: three lines above
 # it are quoted by number in `lloyd/reviews/2026-09-14-user-md-audit.md`, and

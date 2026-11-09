@@ -410,6 +410,62 @@ def test_the_retired_human_clause_sentence_stays_out_of_the_ceiling_sources():
         LLOYD_REPO / "app/memory_ceiling.py").read_text(encoding="utf-8"), \
         "memory_ceiling dropped the old claim without naming the shipped guard"
 
+
+#: Vault surfaces that cite `app/memory_ceiling.py` by line number and are NOT the audit.
+#: `test_every_code_line_the_audit_cites_is_the_line_it_claims` reads only
+#: `lloyd/reviews/2026-09-14-user-md-audit.md`, whose three citations all sit ABOVE the #3661
+#: comment block; these two cite a line BELOW it, so nothing read them until #3990.
+_SURFACES_CITING_THE_CARRY = ("memory/mental-models.md", "backlog/data/refuted-claims.md")
+
+_CEILING_LINE_CITATION = re.compile(r"`app/memory_ceiling\.py:(\d+)`")
+
+
+@vault_only
+def test_the_carry_citation_both_vault_surfaces_make_still_lands_on_the_carry():
+    """#3990 clause 5: the line-number citations below the #3661 block are still true.
+
+    Two vault notes point at `app/memory_ceiling.py:1134` for the one `representable(` call in
+    the file. Both numbers sit BELOW the #3661 comment block, and no check read them — which is
+    why #3990's comment fix had to be line-neutral, and why the reading is pinned rather than
+    assumed. The expected line number is read FROM the notes, never re-typed here, so a round
+    cannot make this green by editing a number in this file: either the call still sits on the
+    cited line, or the two notes have to be re-pointed through the vault route.
+
+    Not marked `live_vault`, for the same reason as the audit node beside it: what this can
+    catch is a change to THIS repository moving a cited line, which is exactly what should stop
+    at a round's own gate. `memory_write_error` is asserted to stay above the #3661 block
+    because #3661's own comment says the block is appended below it, and that is what keeps the
+    audit's :114/:162/:262 pins out of reach of any later edit to it.
+    """
+    src = (LLOYD_REPO / "app" / "memory_ceiling.py").read_text(encoding="utf-8")
+    src_lines = src.splitlines()
+    assert src.index("def memory_write_error") < src.index("# ── #3661"), \
+        "the #3661 block moved above memory_write_error, into the lines the audit cites"
+
+    graded = 0
+    for rel in _SURFACES_CITING_THE_CARRY:
+        note = VAULT.parent / rel
+        if not note.is_file():
+            pytest.skip(f"{rel} is not on disk")
+        for note_line in note.read_text(encoding="utf-8").splitlines():
+            if "representable" not in note_line:
+                continue
+            for lineno in _CEILING_LINE_CITATION.findall(note_line):
+                graded += 1
+                assert int(lineno) <= len(src_lines), (
+                    f"{rel} cites app/memory_ceiling.py:{lineno}; the file has "
+                    f"{len(src_lines)} lines — re-point the note through the vault route")
+                assert "representable(anchor_of(" in src_lines[int(lineno) - 1], (
+                    f"{rel} cites app/memory_ceiling.py:{lineno} = "
+                    f"`{src_lines[int(lineno) - 1].strip()}`, which is no longer the "
+                    "representable/anchor_of carry check: re-point the note through the "
+                    "vault route, or keep a comment edit line-neutral as #3990's was")
+    assert graded >= 2, (
+        f"graded {graded} citation(s) over {_SURFACES_CITING_THE_CARRY}; both notes named "
+        "the carry and cited one line each, so this check has lost its denominator"
+    )
+
+
 # ── prompt_builder: the measurement that did not exist (#466) ───────────────
 
 def test_prompt_budget_constant_exists():
