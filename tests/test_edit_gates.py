@@ -377,6 +377,133 @@ async def test_a_dated_archive_copy_inside_the_governed_root_is_not_a_pointer(bo
     assert os.path.islink(str(copy))
 
 
+# ── a governed §2e stem aimed at the VAULT instead of the data root (#4004) ────
+#
+# On 2026-11-08 the nightly knowledge-write cycle read `steps-2b-2f.md`, which mandates
+# `Write(file_path="/home/alansrobotlab/lloyd-data/_pipeline/reflection/
+# tool-patterns-latest.md", …)`, and wrote BOTH governed pointers to
+# `~/obsidian/projects/ai/patterns/` instead — creating that directory, with no refusal
+# anywhere in the session. The pointer at the governed path did not advance that night
+# (`…-2026-11-07-0907.md` jumps to `…-2026-11-09-0905.md`, no 11-08 archive for either
+# stem), and the vault's own maintenance pass then filed the strays as knowledge notes
+# (`370986f20`, `e9345ab48`). Fifth stray root for these stems after `memory/`
+# (2026-10-15), `knowledge/conversation/` (2026-10-09) and `projects/ai/research/`
+# (2026-10-21).
+
+@pytest.fixture
+def vault_and_data_root(monkeypatch, tmp_path):
+    """A vault root and a data root, both under `tmp_path`, patched at the resolver.
+
+    `app.paths.VAULT_ROOT` and `app.paths.PIPELINE_DIR` rather than anything in the guard,
+    so the test crosses the same resolver the live write lane resolves through.
+    """
+    vault = tmp_path / "obsidian"
+    reflection = tmp_path / "_pipeline" / "reflection"
+    reflection.mkdir(parents=True)
+    monkeypatch.setattr("app.paths.VAULT_ROOT", vault)
+    monkeypatch.setattr("app.paths.PIPELINE_DIR", tmp_path / "_pipeline")
+    return vault, reflection
+
+
+async def test_a_governed_stem_written_under_the_vault_is_refused_and_named(bound,
+                                                                           vault_and_data_root):
+    """Clause 3, the create that the 2026-11-08 cycle actually attempted.
+
+    The file does not exist and its directory does not either: this is exactly the shape
+    `_gate_check` returns early on, which is why the guard sits ahead of it. Three things
+    are asserted, because a refusal that refuses the right write for the wrong reason is
+    how a rail becomes a mystery: the refusal, nothing on disk, and the ABSOLUTE reflection
+    target it tells the caller to re-issue against.
+    """
+    vault, reflection = vault_and_data_root
+    stray = vault / "projects" / "ai" / "patterns" / "tool-patterns-latest.md"
+    res = await FS.call_tool("Write", {"file_path": str(stray), "content": "# patterns\n"})
+    assert res.is_error, _text(res)
+    msg = _err(res)
+    assert "governed §2e pattern stem" in msg, msg
+    assert str(reflection / "tool-patterns-latest.md") in msg, (
+        f"the refusal must name the absolute target to re-issue: {msg}")
+    assert not stray.exists() and not stray.parent.exists(), (
+        "a refused write created the file or its directory")
+    assert not (reflection / "tool-patterns-latest.md").exists(), (
+        "the refusal is not a redirect: it writes nothing anywhere")
+
+
+async def test_a_governed_stem_edited_under_the_vault_is_refused_too(bound,
+                                                                     vault_and_data_root):
+    """Both verbs, because a stray a previous cycle created is edited, not created.
+
+    The file is on disk and Read first, so every other pre-write gate is satisfied — the
+    only thing left standing between these bytes and the wrong root is this guard.
+    """
+    vault, reflection = vault_and_data_root
+    stray = vault / "memory" / "conversation-patterns-latest.md"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("the 2026-10-15 stray\n", encoding="utf-8")
+    await FS.call_tool("Read", {"file_path": str(stray)})
+    res = await FS.call_tool("Edit", {"file_path": str(stray),
+                                      "old_string": "2026-10-15", "new_string": "2026-11-08"})
+    assert res.is_error, _text(res)
+    assert "governed §2e pattern stem" in _err(res)
+    assert str(reflection / "conversation-patterns-latest.md") in _err(res)
+    assert stray.read_text() == "the 2026-10-15 stray\n"
+
+
+async def test_the_two_shielded_knowledge_notes_still_write_under_the_vault(bound,
+                                                                           vault_and_data_root):
+    """The scope trap: this guard is keyed on `PATTERN_STEMS`, not on the pointer SHAPE.
+
+    `autonomous-systems-{failure,success}-patterns-latest.md` end in `-patterns-latest.md`
+    like the governed pointers do, and live under the vault ON PURPOSE — the 2026-11-07
+    owed-check ruling on #3751 keeps them as hand-maintained knowledge notes, and §2e names
+    them as never a run's deletion targets. A guard keyed on the `_POINTER_LATEST` shape
+    would have broken both, which is what this node is here to make expensive.
+    """
+    from scripts.reflection_archive import PATTERN_STEMS
+
+    vault, _ = vault_and_data_root
+    notes = vault / "projects" / "ai" / "tools"
+    notes.mkdir(parents=True)
+    for name in ("autonomous-systems-failure-patterns-latest.md",
+                 "autonomous-systems-success-patterns-latest.md"):
+        assert name[: -len(".md")] not in PATTERN_STEMS, (
+            f"{name} would be governed by the guard's own derivation")
+        p = notes / name
+        res = await FS.call_tool("Write", {"file_path": str(p), "content": "note\n"})
+        assert res.is_error is False, _text(res)
+        assert p.read_text() == "note\n", f"{name} did not land"
+        assert "governed §2e pattern stem" not in _text(res)
+
+
+async def test_a_governed_stem_at_its_reflection_root_is_still_written(bound,
+                                                                       vault_and_data_root):
+    """The other side of the directory axis: inside the data root the same name is normal.
+
+    Without this the guard's scope is unproven — a rule that refused the name everywhere
+    would pass the two refusal nodes above and would then refuse the only write that is
+    allowed, which is the §2e step itself.
+    """
+    _, reflection = vault_and_data_root
+    pointer = reflection / "tool-patterns-latest.md"
+    res = await FS.call_tool("Write", {"file_path": str(pointer), "content": "nightly\n"})
+    assert res.is_error is False, _text(res)
+    assert pointer.read_text() == "nightly\n"
+
+
+async def test_a_governed_stem_outside_both_roots_is_left_alone(bound, vault_and_data_root):
+    """Neither the vault nor the data root: none of this guard's business.
+
+    A scratch checkout, another project's tree — the 2026-10-21 node above already covers a
+    symlinked pointer there, and this covers the create, so the guard cannot have become a
+    global ban on the two names.
+    """
+    vault, reflection = vault_and_data_root
+    elsewhere = vault.parent / "elsewhere" / "notes" / "tool-patterns-latest.md"
+    res = await FS.call_tool("Write", {"file_path": str(elsewhere), "content": "scratch\n"})
+    assert res.is_error is False, _text(res)
+    assert elsewhere.read_text() == "scratch\n"
+
+
 # ── keys, sessions, kill switch ─────────────────────────────────────────────
 
 async def test_a_symlink_and_its_target_share_one_record(bound, tmp_path):

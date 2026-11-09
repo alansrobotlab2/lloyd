@@ -1073,6 +1073,87 @@ def _governed_pointer_refusal(mut: "_Mutation", op: str) -> str | None:
           "`skills/nightly-reflection-knowledge-write/steps-2b-2f.md` §2e (#3626).")})
 
 
+def _real_under(real: str, root_real: str) -> bool:
+    """Is the already-resolved `real` this path, or inside the resolved `root_real`?
+
+    Both arguments are `os.path.realpath` outputs, so no symlink is left to resolve and a
+    directory that merely shares the spelling of an ancestor cannot pass: the comparison is
+    on path components, not on the string, because `"/home/alan/obsidian2"` starts with
+    `"/home/alan/obsidian"` and is not inside it.
+    """
+    a, b = os.path.normpath(real), os.path.normpath(root_real)
+    return a == b or a.startswith(b.rstrip(os.sep) + os.sep)
+
+
+def _misrooted_governed_stem_refusal(mut: "_Mutation", op: str) -> str | None:
+    """A governed §2e pattern stem aimed at the VAULT instead of the data root: refuse.
+
+    The failure this refuses happened on 2026-11-08. The cycle read its own instruction
+    (`steps-2b-2f.md`, which mandates
+    `Write(file_path="<data root>/_pipeline/reflection/tool-patterns-latest.md")` and is
+    quoted verbatim in that file's §2e), then wrote both governed pointers to
+    `~/obsidian/projects/ai/patterns/` anyway, with no rail refusal anywhere in the
+    session — the only refusal recorded was an unrelated Edit-seen-first one. Its own note
+    then booked the mis-root as the step's output, and the vault's maintenance pass treated
+    the strays as knowledge notes (`370986f20`, `e9345ab48`). The governed pointer did not
+    advance that night: the reflection directory goes
+    `tool-patterns-latest-2026-11-07-0907.md` straight to `-2026-11-09-0905.md`. This is
+    the fifth stray root for these two stems: `memory/` (2026-10-15),
+    `knowledge/conversation/` (2026-10-09), `projects/ai/research/` (2026-10-21),
+    `projects/ai/patterns/` (2026-11-08).
+
+    Why a refusal and not prose: this write lane is where every surface converges, and the
+    four previous incidents were each recorded in prose that the next cycle read and
+    ignored. The consequence was not a messy vault — it was the §2e pointer not advancing
+    and a §2f `pattern_staleness` that read 3 and 5 days as fresh.
+
+    Scoped on the STEM, not on the `_POINTER_LATEST` shape, and the two are deliberately
+    different sets. `autonomous-systems-{failure,success}-patterns-latest.md` match that
+    shape and live under the vault on purpose — the 2026-11-07 owed-check ruling on #3751
+    keeps them as hand-maintained knowledge notes — so a shape-scoped guard here would
+    have broken two files this item is not about. `PATTERN_STEMS` is the set §2e governs,
+    imported from `scripts.reflection_archive` rather than restated: the same reason the
+    check above imports the pointer shape is that two definitions of "governed" is the
+    drift.
+
+    The DIRECTORY axis is the vault root, resolved on both sides so a vault reached through
+    a symlink is still recognised; a governed stem written anywhere else (any other
+    project, the scratch vault a test uses, a data root that is not this one) is untouched
+    by this guard — which is also why the pre-existing node that writes a governed-looking
+    name under a non-governed root stays green. And like the check above it returns None
+    when either root is unresolvable: a refusal whose target cannot be named is worse than
+    no refusal at all.
+    """
+    from app.paths import PIPELINE_DIR, VAULT_ROOT      # resolvers, never literals
+    from scripts.reflection_archive import PATTERN_STEMS
+
+    name = os.path.basename(mut.path)
+    # Every member of PATTERN_STEMS already ENDS in `-latest` (`tool-patterns-latest`,
+    # `conversation-patterns-latest`), so the suffix to strip is `.md` and what is left IS
+    # the stem. Stripping `-latest.md` instead yields `tool-patterns`, which matches no
+    # member, and the guard would silently refuse nothing — the worst failure mode here,
+    # because a guard that never fires reads exactly like a clean write lane.
+    if not name.endswith(".md") or name[: -len(".md")] not in PATTERN_STEMS:
+        return None                                 # not a governed stem, whatever its root
+    if PIPELINE_DIR is None or VAULT_ROOT is None:      # unresolvable: nothing governed
+        return None
+    reflection = os.path.realpath(str(PIPELINE_DIR / "reflection"))
+    if not _real_under(mut.real, os.path.realpath(str(VAULT_ROOT))):
+        return None                                     # not the vault: none of this guard's business
+    if _real_under(mut.real, reflection):
+        return None                                     # the governed home: nothing to refuse
+    return json.dumps({"error": (
+        f"{op} refused: {name} is a governed §2e pattern stem and {mut.path} is "
+        f"under the vault, so this write would land the pointer outside the root that "
+        f"governs it — the vault copy is never read by the §2f staleness check or the "
+        f"health report, and the pointer at the real path would silently not advance. "
+        f"Re-issue the write against {reflection}/{name} (create the parent with "
+        f"`mkdir -p {reflection}` if it does not exist). Nothing was written. See "
+        f"`skills/nightly-reflection-knowledge-write/steps-2b-2f.md` §2e (#4004, "
+        f"after the 2026-11-08 cycle wrote both pointers to "
+        f"`~/obsidian/projects/ai/patterns/`).")})
+
+
 #: `stat.S_IFMT` values in words, for the refusal above. A symlink is the type that
 #: actually happened; the fallback names the mode bits rather than calling an unknown
 #: type "other", because an uninformative name is how a pointer became invisible.
@@ -1135,6 +1216,13 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
     # (#3626). Refuses before `_ledger_begin`, like the ceiling and vocabulary checks
     # below: a write that never happened enters no undo record.
     refusal = _governed_pointer_refusal(mut, "Write")
+    if refusal is not None:
+        return refusal
+    # Same position for the same reason: a mis-rooted governed stem is a CREATE of a file
+    # that never existed (`~/obsidian/projects/ai/patterns/` did not exist on 2026-11-08),
+    # and `_gate_check` returns early on a create and for an unbound caller, so the guard
+    # that has to catch a nightly job's mis-root cannot sit behind it (#4004).
+    refusal = _misrooted_governed_stem_refusal(mut, "Write")
     if refusal is not None:
         return refusal
 
@@ -1266,6 +1354,12 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
     # lane open, which is the class #3626 is named for. A dangling pointer link never
     # reaches here: `p.exists()` above already refuses it as a missing file (#3626).
     refusal = _governed_pointer_refusal(mut, "Edit")
+    if refusal is not None:
+        return refusal
+    # Both verbs, as for the pointer-type rule: the 2026-11-08 mis-root used `Write`, and an
+    # Edit of a stray that a previous cycle already created is the same bytes in the same
+    # wrong place (#4004).
+    refusal = _misrooted_governed_stem_refusal(mut, "Edit")
     if refusal is not None:
         return refusal
 

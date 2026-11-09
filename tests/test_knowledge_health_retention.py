@@ -1119,17 +1119,24 @@ def test_the_2e_stray_pointer_bullet_records_the_2026_10_21_mis_root():
     assert stray in body, "§2e no longer names the 2026-10-21 governed-stem stray at all"
     assert "7c0fd930" in body, "the bullet no longer names the commit that mis-rooted it"
     assert "2026-10-21 mis-root" in body, "the bullet no longer dates the mis-root"
-    assert "Four governed-stem strays" in body, (
-        "the bullet is supposed to record this stray ALONGSIDE the three #2832 lists, "
-        "not in place of them — a removed count is a lost precedent")
+    assert "Five governed-stem strays" in body, (
+        "the bullet is supposed to record each stray ALONGSIDE the ones before it — the "
+        "count is how a reader sees this is a recurring mis-root and not one bad night. "
+        "#4004 added the 2026-11-08 instance, which took the literal from Four to Five; a "
+        "removed count is a lost precedent, and a count that no longer matches the list "
+        "beside it is how the next instance gets missed")
     for earlier in ("#2832", "#2502"):
         assert earlier in body, f"the bullet no longer cites {earlier}, the prior instance"
 
 
 
 @pytest.mark.live_vault
-def test_the_2026_10_21_governed_stem_stray_is_out_of_the_live_vault():
-    """Clause 4, state half: the file #3626 removed is neither on disk nor tracked.
+def test_no_governed_pattern_stem_exists_anywhere_in_the_live_vault():
+    """Clause 4's state half, widened from one path to every stem: no stray, on disk or tracked.
+
+    The name and the assertion both moved (#4004). What the node used to assert — that one
+    2026-10-21 path is absent — was a statement about an incident, and the next mis-root
+    landed in a different directory with this node green.
 
     Marked, and marked alone: this is the assertion about live vault STATE, which is what
     `pytest.ini:14-19` reserves the mark for -- "no round under test controls" it, and an
@@ -1143,13 +1150,82 @@ def test_the_2026_10_21_governed_stem_stray_is_out_of_the_live_vault():
     re-creates it -- #2832's lesson was that a strayed pointer gets folded back in by the
     next run that finds one -- which is why both halves are needed and neither is enough.
     """
-    stray = "projects/ai/research/conversation-patterns-latest.md"
     vault = Path.home() / "obsidian"
-    assert not (vault / stray).exists(), (
-        f"~/obsidian/{stray} is back on disk — it was #3626's deletion target")
-    tracked = [ln for ln in os.popen(
-        f"cd {vault} && git ls-files {stray} 2>/dev/null").read().splitlines() if ln.strip()]
-    assert tracked == [], f"~/obsidian/{stray} is still tracked by git: {tracked}"
+    strays = _governed_stem_strays(vault)
+    assert strays == [], (
+        f"~/obsidian holds a governed-stem file at {strays} — §2e's output belongs at "
+        "`/home/alansrobotlab/lloyd-data/_pipeline/reflection/<stem>-latest.md`, and the "
+        "2026-10-21, 2026-11-08 and 2026-10-15/16/09 instances above are all a run that put "
+        "it under the vault instead. Drop the stray, do not fold it: the governed pointer is "
+        "the newer text in every recorded case.")
+    # The whole index, filtered here rather than by a git pathspec: `*` in a pathspec is
+    # matched against the full path with rules of its own, and a scan whose pattern quietly
+    # matches nothing is the exact failure this node exists to prevent.
+    listing = os.popen(f"cd {vault} && git ls-files -z 2>/dev/null").read()
+    tracked = sorted(ln for ln in listing.split("\0")
+                     if ln.endswith(".md") and ln.split("/")[-1].startswith(ra.PATTERN_STEMS))
+    assert tracked == [], (
+        f"git still tracks governed-stem files under ~/obsidian: {tracked} — a deletion that "
+        "leaves them tracked keeps the vault's own data pipeline indexing them (#24)")
+
+
+def _governed_stem_strays(vault: Path) -> "list[str]":
+    """Every governed-stem file anywhere under `vault`, as paths relative to it.
+
+    Stem-general on purpose (#4004). The check that preceded this one pinned one hard-coded
+    path — `projects/ai/research/conversation-patterns-latest.md` — and so was green on
+    2026-11-08 while two governed-stem files sat under `projects/ai/patterns/`: the mis-root
+    is a different directory each time (memory/, knowledge/conversation/,
+    projects/ai/research/, projects/ai/patterns/), and a check that enumerates directories is
+    a check of the last incident. `PATTERN_STEMS` is the enumeration that matches the
+    contract, and it is imported from `scripts.reflection_archive` rather than restated, so
+    the lane that refuses the write and the check that reports the state cannot drift apart.
+
+    Every member already ENDS in `-latest` (`tool-patterns-latest`, not `tool-patterns`), so
+    the wildcard goes on the member as-is: `{stem}*.md` IS `tool-patterns-latest*.md`, which
+    catches the pointer and a dated archive copy alike. Appending `-latest*` instead asks for
+    `tool-patterns-latest-latest*`, matches nothing, and reports a clean vault forever — the
+    same silent-green failure the version it replaced had.
+    """
+    out = []
+    for stem in ra.PATTERN_STEMS:
+        for p in vault.rglob(f"{stem}*.md"):
+            out.append(str(p.relative_to(vault)))
+    return sorted(out)
+
+
+def test_a_synthetic_stray_under_any_directory_makes_the_vault_check_red(tmp_path):
+    """The guard the previous node needed: it must be able to go red on a mis-root.
+
+    The live node reads a tree this round does not control, so on its own it proves nothing
+    about its own reach — the version it replaced had pinned one path and stayed green
+    through a whole mis-root. So the shared scan runs here against a scratch vault with
+    three files in it: a governed stem in a directory neither node has ever seen, a governed
+    stem's DATED archive copy (the `-latest*` tail is what catches a cycle that archived into
+    the vault), and one of the four shielded `autonomous-systems-*` knowledge notes the
+    2026-11-07 ruling on #3751 keeps in place. Only the first two may be named; an
+    implementation that keyed on `-latest.md` shape generally, or on the directories of past
+    incidents, fails here in one direction or the other.
+    """
+    vault = tmp_path / "obsidian"
+    (vault / "projects" / "ai" / "patterns").mkdir(parents=True)
+    (vault / "projects" / "ai" / "tools").mkdir(parents=True)
+    planted = vault / "projects" / "ai" / "patterns" / "tool-patterns-latest.md"
+    planted.write_text("the 2026-11-08 mis-root\n", encoding="utf-8")
+    dated = vault / "projects" / "ai" / "patterns" / "conversation-patterns-latest-2026-11-08-0900.md"
+    dated.write_text("a dated copy in the wrong tree\n", encoding="utf-8")
+    shielded = (vault / "projects" / "ai" / "tools"
+                / "autonomous-systems-failure-patterns-latest.md")
+    shielded.write_text("a knowledge note, not a governed pointer\n", encoding="utf-8")
+
+    found = _governed_stem_strays(vault)
+    assert found == sorted([
+        "projects/ai/patterns/conversation-patterns-latest-2026-11-08-0900.md",
+        "projects/ai/patterns/tool-patterns-latest.md"]), found
+    assert not any("autonomous-systems" in f for f in found), (
+        "the scan reached a stem outside PATTERN_STEMS — it is the unsatisfiable wildcard "
+        "again, and obeying it deletes files §2e names as out of contract")
+    assert _governed_stem_strays(tmp_path / "empty-vault") == []
 
 
 def test_the_2e_vault_check_is_scoped_to_the_two_governed_stems_and_shields_the_other_two():
