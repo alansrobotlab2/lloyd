@@ -67,9 +67,13 @@ def _sandbox(tmp_path, monkeypatch):
 
     monkeypatch.setattr(M, "_arxiv_query", no_network)
     configure("discover-ai")
+    # #4015's commit-at-write failures are a per-run record, like the note index:
+    # one test's failed commit must not be published inside the next test's bundle.
+    M.NOTE_COMMIT_FAILURES.clear()
     yield
     real_configure(M.DEFAULT_CHANNEL)
     M._NOTE_INDEX.clear()
+    M.NOTE_COMMIT_FAILURES.clear()
 
 
 def _state(**seen):
@@ -1200,3 +1204,313 @@ def test_fetch_wiring_never_touches_the_keyframe_leg(monkeypatch):
     out, exc = _run_frames_cli(["--fetch=vidF"])
     assert exc is None
     assert calls == [], f"the keyframe leg ran from --fetch: {calls}"
+
+
+# ---------------------------------------------------------------------------
+# A note is durable the moment it is written (#4015)
+# ---------------------------------------------------------------------------
+#
+# Six enrichment notes are gone and cannot be recovered. `git log --all --
+# knowledge/github/siyan-zhao-OPSD.md` and the same query for its five siblings
+# return nothing, so git never held a copy of any of them and no revert, stash or
+# checkout can produce one: `knowledge/github/{siyan-zhao-OPSD,thunlp-OPD,
+# StellarCurtain-OPDArena}.md` from bundle oAtwkQg4ijI,
+# `knowledge/github/{runpod-flash,runpod-flash-examples}.md` from XczFLWEntiE and
+# `knowledge/papers/modular-modular.md` from 7BcQdtRA3Tc. The bundles still on
+# disk (776 directories, 767 meta.json) name 50 distinct note paths, 44 of which
+# are present — those six are the gap, and the Obsidian Sync log is the only
+# record that they existed.
+#
+# What killed them is the window between the write and the nightly
+# `pre-flight … (unattributed dirty state)` sweep, which commits a fresh note
+# within a day by way of a whole-tree `git add`. For that day the file is
+# untracked, and an untracked file is exactly what
+# `git stash push -u` (agent-services/guardian/rollback.py:204) and
+# `git clean -fd -- <paths>` (:221) remove.
+#
+# The boundary is python → bash → the git index, and the claim is about what a
+# later reader finds in history, so every test here runs the real
+# `scripts/util/vault-commit.sh` against a real fixture repo and reads the answer
+# back with `git ls-files` and `git log` — the route
+# tests/test_vault_commit_attribution.py takes for the same reason. A test that
+# asserted this module *called* something would still pass if the commit staged
+# the wrong path, carried the wrong subject, or swept the whole tree under the
+# enricher's name (#1070).
+
+
+def _git_vault(repo, *args):
+    proc = subprocess.run(("git", "-C", str(repo), *args),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
+    return proc.stdout
+
+
+def _vault_rel(repo, path):
+    return str(Path(path).resolve().relative_to(Path(repo).resolve()))
+
+
+def _vault_tracked(repo, path):
+    """Clause 1's own instrument: `git ls-files --error-unmatch <path>`."""
+    return subprocess.run(
+        ("git", "-C", str(repo), "ls-files", "--error-unmatch", _vault_rel(repo, path)),
+        capture_output=True, text=True).returncode == 0
+
+
+def _vault_history(repo, path):
+    """Subjects of every commit touching `path`, newest first."""
+    return [line for line in _git_vault(
+        repo, "log", "--format=%s", "--", _vault_rel(repo, path)).splitlines() if line]
+
+
+def _commit_touched(repo, sha="HEAD"):
+    return [line for line in _git_vault(
+        repo, "show", "--name-only", "--pretty=format:", sha).splitlines() if line]
+
+
+@pytest.fixture
+def vault_repo(tmp_path):
+    """The vault as a real repo on `main`, holding the module's note roots.
+
+    `_sandbox` already points `VAULT_GH_DIR`, `VAULT_PAPER_DIR` and `VAULT_YT_DIR`
+    under `tmp_path/vault`, so making that directory the repo puts every note two
+    or three levels below the root exactly as `~/obsidian` does — and
+    `vault_repo_root` has to walk up to find it, which is the production path.
+    `-b main` because the wrapper force-checks-out `main` (#341); on a `master`
+    fixture the test would be exercising the checkout, not the commit.
+    """
+    repo = tmp_path / "vault"
+    repo.mkdir(parents=True, exist_ok=True)
+    _git_vault(repo, "init", "-q", "-b", "main", ".")
+    _git_vault(repo, "config", "user.email", "alan@example.com")
+    _git_vault(repo, "config", "user.name", "alansrobotlab")
+    (repo / "seed.md").write_text("committed before the run\n", encoding="utf-8")
+    _git_vault(repo, "add", "-A")
+    _git_vault(repo, "commit", "-qm", "base")
+    return repo
+
+
+_REAL_RUN = subprocess.run
+
+
+def _stub_clone(monkeypatch):
+    """Replace only the two legs of `clone_and_note` that reach outside the box:
+    the `git clone` of the upstream repo and the LLM summary. The vault commit is
+    left real — that is what is under test — so everything that is not a clone is
+    handed to the real `subprocess.run`.
+    """
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, (list, tuple)) and "clone" in cmd:
+            dest = Path(str(cmd[-1]))
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "README.md").write_text("# harness\n\nA harness for the talk.\n",
+                                            encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return _REAL_RUN(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(M.subprocess, "run", fake_run)
+    monkeypatch.setattr(M, "call_llm", lambda *a, **k: "acme/harness is a test harness.")
+    M.ensure_dirs()
+
+
+def _paper_row(arxiv_id="2601.18734", video_id="7BcQdtRA3Tc"):
+    title = "Modular: Multi-Modal Reasoning"
+    M.ensure_dirs()
+    return {"arxiv_id": arxiv_id, "title": title, "summary": "An abstract.",
+            "authors": ["A. Author"], "published": "2026-01-27",
+            "note_path": M.target_paper_note(arxiv_id, title),
+            "videos": [{"channel": "discover-ai", "channel_name": "Discover AI",
+                        "video_id": video_id, "title": "A talk",
+                        "published": "2026-10-21", "note": "note.md"}]}
+
+
+def _github_note(monkeypatch):
+    _stub_clone(monkeypatch)
+    return Path(M.clone_and_note("https://github.com/acme/harness")["note_path"])
+
+
+def _video_note(monkeypatch):
+    monkeypatch.setattr(M, "fetch_video_metadata", lambda vid: {
+        "title": "Six Notes That Vanished", "upload_date": "20261021",
+        "channel": "Discover AI", "description": ""})
+    monkeypatch.setattr(M, "fetch_transcript", lambda vid: ("the talk " * 400, None))
+    monkeypatch.setattr(M, "generate_knowledge_note", lambda *a, **k: None)
+    M.ensure_dirs()
+    return Path(M.process_video("oAtwkQg4ijI", "Six Notes That Vanished", "2026-10-21"))
+
+
+def _paper_stub_note(monkeypatch):
+    row = _paper_row()
+    M.write_paper_stub(row)
+    return Path(row["note_path"])
+
+
+def _generic_paper_note(monkeypatch):
+    html = (b"<html><head><title>Modular Modular</title>"
+            b'<meta name="description" content="A paper about modular.">'
+            b"</head><body>body</body></html>")
+
+    class _FakeRequest:
+        @staticmethod
+        def Request(url, headers=None):
+            return url
+
+        @staticmethod
+        def urlopen(req, timeout=30):
+            return type("Resp", (), {"read": lambda self: html})()
+
+    monkeypatch.setattr(M, "request", _FakeRequest)
+    M.ensure_dirs()
+    return Path(M.fetch_generic_paper(
+        "https://www.modular.com/research/modular")["note_path"])
+
+
+#: Every place an enrichment run writes a note into the vault. All four are
+#: covered: the three the item names, plus `fetch_generic_paper`, which the item
+#: does not name and which writes under `knowledge/papers/` the same untracked way.
+_WRITE_SITES = {
+    "clone_and_note": _github_note,
+    "process_video": _video_note,
+    "write_paper_stub": _paper_stub_note,
+    "fetch_generic_paper": _generic_paper_note,
+}
+
+#: The identity each site's commit subject has to carry: owner/repo for the
+#: GitHub note, the video id for the video note and for the paper stub that cites
+#: it, the note stem for a paper fetched by URL.
+_SITE_IDENTITIES = {
+    "clone_and_note": "acme/harness",
+    "process_video": "oAtwkQg4ijI",
+    "write_paper_stub": "7BcQdtRA3Tc",
+    "fetch_generic_paper": "modular-modular",
+}
+
+
+def test_a_github_note_is_tracked_the_moment_clone_and_note_returns(vault_repo, monkeypatch):
+    """#4015 clause 1: the note is `git ls-files --error-unmatch`-clean on return.
+
+    Before this change the call ended at `open(note_path, "w")` and a return, so
+    the file sat untracked until the nightly sweep reached it — the window through
+    which the six notes were lost.
+    """
+    note = _github_note(monkeypatch)
+    assert note.is_file()
+    assert _vault_tracked(vault_repo, note), (
+        f"{_vault_rel(vault_repo, note)} is on disk but not in git: while it is "
+        "untracked, `git clean -fd` and `git stash push -u` delete it and nothing "
+        "can restore it, because it has no history to restore from")
+    assert _vault_history(vault_repo, note), "tracked with no commit behind it"
+
+
+@pytest.mark.parametrize("site", sorted(_WRITE_SITES))
+def test_every_write_site_leaves_its_note_in_the_vault_history(vault_repo, monkeypatch, site):
+    """#4015 clause 2: the same holds at each of the write sites, not just GitHub.
+
+    One hole was enough to lose six notes, so the claim is per site.
+    """
+    note = _WRITE_SITES[site](monkeypatch)
+    assert note.is_file(), f"{site} returned a path that was never written"
+    assert _vault_tracked(vault_repo, note), (
+        f"{site} wrote {_vault_rel(vault_repo, note)} and left it untracked")
+    assert _vault_history(vault_repo, note)
+
+
+@pytest.mark.parametrize("site", sorted(_WRITE_SITES))
+def test_one_commit_per_note_names_what_the_note_is_about(vault_repo, monkeypatch, site):
+    """#4015 clause 3: one revertable commit, subject carrying the note's identity.
+
+    A reader who finds the note has to be able to say which video or repository
+    produced it and undo just that — which is what a sweep commit under
+    `pre-flight … (unattributed dirty state)` cannot offer (#1070).
+    """
+    note = _WRITE_SITES[site](monkeypatch)
+    subjects = _vault_history(vault_repo, note)
+    assert len(subjects) == 1, f"expected one commit naming the note, got {subjects}"
+    assert subjects[0].startswith(M.NOTE_COMMIT_TAG)
+    assert _SITE_IDENTITIES[site] in subjects[0]
+    assert _commit_touched(vault_repo) == [_vault_rel(vault_repo, note)], (
+        "the commit carried more than the note this call wrote: a path-scoped "
+        "door is what keeps another writer's dirty state out of this subject")
+
+
+def test_a_nightly_re_run_writes_the_same_note_but_creates_no_commit(vault_repo, monkeypatch):
+    """#4015 clause 4: bytes matching HEAD means no new commit.
+
+    `--fetch` re-stubs a paper's abstract on every pass it revisits a video, so
+    without this the vault log would gain an empty commit per note per night and
+    `git log` would stop being the record of note changes.
+    """
+    row = _paper_row()
+    note = Path(row["note_path"])
+    M.write_paper_stub(row)
+    first = _vault_history(vault_repo, note)
+    assert len(first) == 1
+    for _ in range(2):
+        M.write_paper_stub(row)
+    assert _vault_history(vault_repo, note) == first
+    assert _git_vault(vault_repo, "log", "--format=%s").splitlines() == [
+        first[0], "base"], "a nightly pass must not add commits it did not earn"
+    assert _git_vault(vault_repo, "status", "--porcelain").strip() == ""
+    assert M.NOTE_COMMIT_FAILURES == [], "nothing failed, so nothing is owed a record"
+
+
+def _stub_bundle_io(monkeypatch, transcript):
+    """The I/O around a real `build_bundle`, leaving `clone_and_note` real.
+
+    `_stub_fetchers` two tests up replaces `clone_and_note` outright; the failure
+    under test happens inside it, so this one stubs only the network legs.
+    """
+    monkeypatch.setattr(
+        M, "_fetch_text",
+        lambda url, timeout=6: (_ for _ in ()).throw(OSError("no network in tests")))
+    monkeypatch.setattr(M, "fetch_video_metadata", lambda vid: {
+        "title": "Six Notes That Vanished", "upload_date": "20261021",
+        "channel": "Discover AI", "description": "see https://github.com/acme/harness"})
+    monkeypatch.setattr(M, "fetch_transcript", lambda vid: (transcript, None))
+    monkeypatch.setattr(M, "fetch_generic_paper", lambda u: None)
+    monkeypatch.setattr(M, "_arxiv_query", lambda params: [])
+    _stub_clone(monkeypatch)
+
+
+_BUNDLE_TRANSCRIPT = "see https://github.com/acme/harness " + "the talk " * 400
+
+
+def test_a_vault_with_no_git_still_publishes_the_bundle_and_says_so(monkeypatch):
+    """#4015 clause 5, shape one: git is not there to be asked.
+
+    The note is still on disk and the bundle is still published — a missing
+    history is a degradation, and an abort would cost the video and the digest
+    session that reads the bundle.
+    """
+    _stub_bundle_io(monkeypatch, _BUNDLE_TRANSCRIPT)
+    meta, err = M.build_bundle("vidnogit", "Six Notes That Vanished", "20261021")
+    assert err is None and meta is not None
+    assert Path(meta["meta_path"]).is_file()
+    note = Path(M.VAULT_GH_DIR) / "acme-harness.md"
+    assert note.is_file(), "the commit failing must not stop the note being written"
+    failures = meta["note_commit_failures"]
+    assert [f["note_path"] for f in failures] == [str(note)]
+    assert "no git repository" in failures[0]["error"]
+    assert failures[0]["subject"] == f"{M.NOTE_COMMIT_TAG}: github acme/harness"
+    assert M.NOTE_COMMIT_FAILURES == [], "the record went into the bundle, not the next one"
+
+
+def test_a_refusing_hook_costs_the_commit_but_not_the_bundle(vault_repo, monkeypatch):
+    """#4015 clause 5, shape two: git answers and refuses.
+
+    A frozen vault, a hook that rejects, a rung that drops the path — the wrapper
+    exits non-zero and says why. That reason belongs in the bundle, because it is
+    the only place a later reader learns the note has no history yet.
+    """
+    hook = vault_repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'vault is frozen' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _stub_bundle_io(monkeypatch, _BUNDLE_TRANSCRIPT)
+    meta, err = M.build_bundle("vidhook", "Six Notes That Vanished", "20261021")
+    assert err is None and meta is not None
+    assert Path(meta["meta_path"]).is_file()
+    failures = meta["note_commit_failures"]
+    assert [f["note_path"] for f in failures] == [
+        str(Path(M.VAULT_GH_DIR) / "acme-harness.md")]
+    assert "vault is frozen" in failures[0]["error"]
+    assert _git_vault(vault_repo, "log", "--format=%s").splitlines() == ["base"], (
+        "a refused commit must leave the vault where it was")

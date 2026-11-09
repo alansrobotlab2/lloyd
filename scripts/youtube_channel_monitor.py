@@ -68,6 +68,7 @@ import re
 import shutil
 import tempfile
 import subprocess
+import sys
 import time
 import unicodedata
 from datetime import datetime, timezone
@@ -148,6 +149,46 @@ def channel_info():
 VAULT_GH_DIR = os.path.expanduser("~/obsidian/knowledge/github")
 VAULT_PAPER_DIR = os.path.expanduser("~/obsidian/knowledge/papers")
 TMP_CLONES = os.path.expanduser("~/.cache/ai-engineer-clones")
+
+# ── Vault durability (#4015) ───────────────────────────────────────────────
+#
+# Writing a note is not the same as keeping one. An enrichment note that only
+# exists on disk has no history, and three live routes delete an untracked vault
+# file: the guardian's `git stash push -u` and `git clean -fd -- <paths>`
+# (agent-services/guardian/rollback.py:204, :221) and a refused
+# `automod_vault_land` (#3375's `_kept_when_untracked` spares only what it
+# arming covers). Six notes died that way — `knowledge/github/siyan-zhao-OPSD.md`,
+# `-thunlp-OPD.md`, `-StellarCurtain-OPDArena.md` (bundle oAtwkQg4ijI),
+# `-runpod-flash.md`, `-runpod-flash-examples.md` (XczFLWEntiE) and
+# `knowledge/papers/modular-modular.md` (7BcQdtRA3Tc) — and none of them can be
+# recovered, because `git log --all -- <path>` is empty for all six: git never
+# held a copy, so no revert and no stash can give one back. The Obsidian Sync log
+# is the only surviving witness that those files ever existed.
+#
+# The nightly `pre-flight … (unattributed dirty state)` commit normally sweeps a
+# fresh note in within a day, so the exposure is the window between the write and
+# that sweep — which is exactly where the six died. Closing it means putting the
+# note in history at the instant it is written.
+#
+# `scripts/util/vault-commit.sh` is the route, not a bare `git add`/`git commit`:
+# that door carries the #341 branch guard (never commit a stranded HEAD), the
+# #1070 attribution rules (a pathspec, so the commit carries only what this run
+# wrote), #668's job identity and the UTC-subject rule `scripts/skill_timezone.py`
+# refuses. `scripts/automod/vault_round.py` and `scripts/autoresearch/promote.py`
+# already commit the vault through it.
+VAULT_COMMIT_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "util", "vault-commit.sh")
+VAULT_COMMIT_TIMEOUT = 120
+
+#: Every enrichment commit subject starts with this literal, so `git log
+#: --grep=youtube-enrich -- <path>` is the whole history of one note's writes.
+NOTE_COMMIT_TAG = "youtube-enrich"
+
+#: Commit-at-write failures recorded this run, drained into the next bundle's
+#: meta.json by `build_bundle`. A module list because the write sites are three
+#: calls deep (`build_bundle` → `enrich_papers` → `register_paper` →
+#: `write_paper_stub`) and the bundle is written at the top.
+NOTE_COMMIT_FAILURES = []
 
 MAX_FAILURE_RETRIES = 12
 TRANSIENT_RETRIES = 3  # Transient failures (network, quota) before hard-fail
@@ -595,6 +636,99 @@ def extract_entities(transcript):
     return entities
 
 
+# ── Committing a note the moment it is written (#4015) ─────────────────────
+
+def vault_repo_root(note_path):
+    """The git repository a vault note lives in, or None.
+
+    Walks up from the note instead of hardcoding `~/obsidian`, so the live vault
+    and a test's fixture vault repo are the same code path — the claim under test
+    is "this note is in git history", which only a real repo can answer.
+    """
+    d = os.path.dirname(os.path.abspath(note_path))
+    for _ in range(10):
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
+def record_note_commit_failure(note_path, subject, error):
+    """Note a commit-at-write failure for the bundle's meta.json and stdout."""
+    entry = {"note_path": note_path, "subject": subject, "error": error,
+             "at": datetime.now(timezone.utc).isoformat()}
+    NOTE_COMMIT_FAILURES.append(entry)
+    return entry
+
+
+def drain_note_commit_failures():
+    """This run's recorded failures, and the list is empty afterwards.
+
+    Drained rather than read so a failure recorded for one video cannot be
+    published again inside the next video's bundle.
+    """
+    drained = list(NOTE_COMMIT_FAILURES)
+    del NOTE_COMMIT_FAILURES[:]
+    return drained
+
+
+def commit_note_in_vault(note_path, subject, log=print):
+    """Put one freshly written vault note into the vault's history.
+
+    Returns `(True, "")` when the note is in a commit by the time the call
+    returns — including the case where it already was: the wrapper stages only
+    the named path and exits 0 when that path holds no change, so rewriting a
+    note whose bytes match HEAD creates no empty commit and a nightly pass does
+    not litter the log. `(False, why)` otherwise, and it never raises: no repo
+    above the path, no git, a timeout, a hook that refused.
+
+    Every caller treats False as a degradation, not a failure of the run: the
+    bytes are on disk, the bundle still gets published, and the nightly
+    whole-tree sweep still reaches the path the next day. What this call closes
+    is that window — a note that gets its commit one minute after it is written
+    instead of one day later, which is the difference between the six that
+    survived and the six that did not (#4015).
+    """
+    repo = vault_repo_root(note_path)
+    if repo is None:
+        error = f"no git repository above {note_path}"
+    else:
+        argv = ["bash", VAULT_COMMIT_SCRIPT, subject, "--",
+                os.path.relpath(note_path, repo)]
+        env = dict(os.environ, VAULT_DIR=repo, LLOYD_PYTHON=sys.executable)
+        try:
+            proc = subprocess.run(argv, cwd=repo, env=env, capture_output=True,
+                                  text=True, timeout=VAULT_COMMIT_TIMEOUT)
+        except Exception as e:  # noqa: BLE001 — a broken commit must not cost the note
+            error = f"{type(e).__name__}: {e}"
+        else:
+            if proc.returncode == 0:
+                return True, ""
+            error = ((proc.stderr or proc.stdout).strip()[-400:]
+                     or f"exit {proc.returncode}")
+    log(f"  VAULT COMMIT FAILED ({subject}): {error}")
+    return False, error
+
+
+def commit_new_note(note_path, subject, log=print):
+    """Commit a note this call just wrote, and record it if that failed.
+
+    Only ever called on a path this run created: the write sites return early
+    when the note already exists, so the commit carries nothing but these bytes.
+    Committing an already-present path instead would put another writer's
+    uncommitted edit — a hand edit, or the full note the youtube-digest job
+    replaces a stub with — under this job's subject, which is the #1070 mistake
+    this item exists to stop widening.
+    """
+    ok, error = commit_note_in_vault(note_path, subject, log=log)
+    if not ok:
+        record_note_commit_failure(note_path, subject, error)
+    return ok
+
+
 # ── GitHub cloning & note creation ─────────────────────────────────────
 
 def clone_and_note(github_url):
@@ -672,6 +806,9 @@ cloned_at: {now}
     with open(note_path, "w") as f:
         f.write(note_content)
     print(f"  Created: {note_path}")
+    # Durable now, not at the next sweep: the subject names owner/repo so the
+    # commit is attributable and revertable on its own (#4015).
+    commit_new_note(note_path, f"{NOTE_COMMIT_TAG}: github {owner}/{repo}", log=print)
 
     # Cleanup
     subprocess.run(["rm", "-rf", clone_path], capture_output=True)
@@ -732,6 +869,8 @@ fetched_at: {now}
         with open(final_path, "w") as f:
             f.write(note_content)
         print(f"  Created: {final_path}")
+        commit_new_note(final_path, f"{NOTE_COMMIT_TAG}: paper {title_slug}",
+                        log=print)
         return {"url": url, "note_path": final_path}
     except Exception as e:
         print(f"  Generic paper fetch failed: {e}")
@@ -1007,6 +1146,9 @@ Processing failed — transcript below.
         f.write(knowledge_note)
     print(f"  Created vault note: {note_path}")
     _NOTE_INDEX.clear()
+    # The subject names the video id, which is what ties this commit to the
+    # bundle and to the video whose transcript produced the note (#4015).
+    commit_new_note(note_path, f"{NOTE_COMMIT_TAG}: video {video_id}", log=print)
 
     # The path, not True: callers record it in state. They used to write a
     # guessed `video-<id>.md` that never existed on disk.
@@ -1358,6 +1500,10 @@ def build_bundle(video_id, title="", published="", entry=None):
         "transcript_lines": wrapped.count("\n") + 1,
         "entities": {k: entities.get(k, []) for k in ("github_urls", "paper_arxiv", "paper_urls", "other_urls")},
         "enrichment": enrichment,
+        # A vault commit that failed is a degradation the digest session can see,
+        # not an abort: the note is on disk and the sweep still reaches it, but
+        # its history is missing until then and this is the only record (#4015).
+        "note_commit_failures": drain_note_commit_failures(),
         "existing_note": existing,
         "target_note": target,
         "measurements_path": measurements_path,
@@ -2149,6 +2295,23 @@ def discussed_lines(row):
     return lines or ["- None recorded"]
 
 
+def paper_stub_subject(row):
+    """Commit subject for a paper stub: the paper, and the video(s) that cited it.
+
+    A later reader has to be able to attribute the commit and revert it alone
+    (#4015 clause 3), so the arXiv id and the citing video ids are both in the
+    subject. More than three citing videos is rare and a subject is not a
+    changelog, so the rest is counted rather than listed.
+    """
+    vids = [v.get("video_id") for v in (row.get("videos") or []) if v.get("video_id")]
+    subject = f"{NOTE_COMMIT_TAG}: paper {row.get('arxiv_id') or 'unknown'}"
+    if vids:
+        shown = ",".join(vids[:3])
+        extra = f"+{len(vids) - 3}" if len(vids) > 3 else ""
+        subject += f" video {shown}{extra}"
+    return subject
+
+
 def write_paper_stub(row):
     body = (
         paper_note_header(row, DIGEST_ABSTRACT)
@@ -2160,6 +2323,7 @@ def write_paper_stub(row):
     os.makedirs(os.path.dirname(row["note_path"]), exist_ok=True)
     with open(row["note_path"], "w") as f:
         f.write(body)
+    commit_new_note(row["note_path"], paper_stub_subject(row))
 
 
 def _append_discussed(path, line):
