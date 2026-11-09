@@ -945,16 +945,27 @@ def test_the_real_in_tree_store_reports_its_real_newest_date():
 
 # ── the report-only rule ──────────────────────────────────────────────────────
 
-#: The three files allowed to name the index: the publisher itself, `app/paths.py`
-#: where the store is declared, and this file — whose whole job is to prove the
-#: rule, and which cannot prove it without spelling the name. Everything else that
-#: reads the published row would be a gate, a promotion rule or a rollback path,
-#: which v1 forbids.
+#: The four files allowed to name the index: the publisher itself, `app/paths.py`
+#: where the store is declared, this file — whose whole job is to prove the rule, and
+#: which cannot prove it without spelling the name — and, since #3979, the doc-claims
+#: suite, which imports the arm *declarations* to grade §Watch the machinery's
+#: read-back sentences against the code instead of against the doc's memory of it.
+#: Everything else that reads the published row would be a gate, a promotion rule or a
+#: rollback path, which v1 forbids. The fourth entry is the only widening of that rule
+#: and it is narrowed by name, not trusted:
+#: `test_the_fourth_declared_reader_touches_only_the_arm_declarations` binds it to the
+#: one attribute it was granted, so being allowed to name the module never becomes a
+#: route to the row.
 DECLARED_IN = frozenset({
     "scripts/eval_instrument_index.py",
     "app/paths.py",
     "tests/test_eval_instrument_index.py",
+    "tests/test_autonomy_jobs_doc_claims.py",
 })
+
+#: The declaration-only reader, and the single attribute of the publisher it may use.
+DECLARED_DECLARATION_READER = "tests/test_autonomy_jobs_doc_claims.py"
+GRANTED_SURFACE = frozenset({"INSTRUMENTS"})
 
 #: Directories that are not Lloyd's own source: version control, throwaway
 #: virtualenvs, caches, build output, and the data root as it resolves inside a
@@ -984,7 +995,11 @@ SCAN_SENTINELS = ("server.py",
                   "scripts/automod/round.py",
                   "scripts/automod/promote.py",
                   "agent_mcp/__init__.py",
-                  "tests/test_eval_instrument_index.py")
+                  "tests/test_eval_instrument_index.py",
+                  # The declared declaration-only reader: the walk has to reach it, so
+                  # that a future edit removing it from DECLARED_IN is caught by the scan
+                  # rather than silently shrinking the set of files it ever opened.
+                  "tests/test_autonomy_jobs_doc_claims.py")
 
 
 def _python_files_in_tree() -> list[Path]:
@@ -1122,6 +1137,89 @@ def test_no_gate_promotion_or_rollback_path_reads_the_index():
             continue
         offenders.extend(f"{rel}: {hit}" for hit in _index_reads_in(path))
     assert offenders == [], f"something outside the publisher reads the index: {offenders}"
+
+
+def _publisher_surface_used_by(path: Path) -> set[str]:
+    """Which names of the publisher one file actually touches.
+
+    Three spellings, because that is how a widening would arrive: a name imported
+    straight out of the module is granted outright, a module bound under an alias is
+    used through its attributes, and prose about the module is nothing at all. An
+    allow-list entry says a file may name the module; what the v1 boundary is about is
+    what it then takes from it, so the grant has to be measured on attributes and
+    imports rather than on the import statement.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    aliases: set[str] = set()
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            direct = (node.module or "").endswith("eval_instrument_index")
+            for alias in node.names:
+                if alias.name.endswith("eval_instrument_index"):
+                    aliases.add(alias.asname or alias.name)
+                elif direct:
+                    used.add(alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.endswith("eval_instrument_index"):
+                    aliases.add(alias.asname or alias.name)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id in aliases):
+            used.add(node.attr)
+    return used
+
+
+def test_the_fourth_declared_reader_touches_only_the_arm_declarations(tmp_path):
+    """#3979 widened `DECLARED_IN` by one file; this node is what makes that an entry
+    rather than a hole in the v1 boundary.
+
+    §Watch the machinery's read-back sentences are graded against the arm tuple now, so
+    the doc-claims suite imports the publisher — and an import is a read, which is why
+    the whole-tree scan above had to be told the file exists. What it was granted is one
+    attribute: `INSTRUMENTS`, the declarations. The published row stays the publisher's
+    alone, so the surface that file uses is pinned to `GRANTED_SURFACE`, and a later edit
+    that reaches for `read_instrument`, `build_row` or `main` reds here, in the file that
+    owns the rule, instead of widening it through the allow-list. The three seeded files
+    are the controls: without them an empty return from the helper — the failure mode
+    `_index_reads_in` was itself written against — would satisfy the equality as well as a
+    correct reading does.
+    """
+    reader = ROOT / DECLARED_DECLARATION_READER
+    assert reader.is_file(), (
+        f"{DECLARED_DECLARATION_READER} is declared as a reader but is not in this tree, "
+        "which leaves the grant unowned and the boundary wider than it reads")
+    used = _publisher_surface_used_by(reader)
+    assert used == GRANTED_SURFACE, (
+        f"{DECLARED_DECLARATION_READER} may name the publisher for one attribute and now "
+        f"uses {sorted(used) or 'nothing'}; anything outside {sorted(GRANTED_SURFACE)} is "
+        "the row side of the module, which v1 keeps to the publisher")
+
+    imported_direct = tmp_path / "widened_import.py"
+    imported_direct.write_text(
+        "from scripts.eval_instrument_index import read_instrument\n\n"
+        "def read(i):\n    return read_instrument(i)\n", encoding="utf-8")
+    assert _publisher_surface_used_by(imported_direct) == {"read_instrument"}, (
+        "a name imported out of the publisher is not reported as a use, so the grant "
+        "above could be widened by an import that never shows up")
+
+    via_alias = tmp_path / "widened_attr.py"
+    via_alias.write_text(
+        "from scripts import eval_instrument_index as eii\n\n"
+        "def build():\n    return eii.build_row(eii.INSTRUMENTS)\n", encoding="utf-8")
+    assert _publisher_surface_used_by(via_alias) == {"build_row", "INSTRUMENTS"}, (
+        "an attribute read through an alias is not reported, which is exactly the spelling "
+        "the real reader uses and the one a widening would keep")
+
+    prose_only = tmp_path / "prose_only.py"
+    prose_only.write_text(
+        '"""The publisher lives in scripts/eval_instrument_index.py."""\n\nX = 1\n',
+        encoding="utf-8")
+    assert _publisher_surface_used_by(prose_only) == set(), (
+        "a file that only names the module in prose is reported as using its surface, so "
+        "a comment would redden this node and the next reader starts trusting the "
+        "allow-list instead of the surface")
 
 
 #: What the probe prints: whether the publisher ended up in the boot path's module

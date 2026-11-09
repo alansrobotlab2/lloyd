@@ -70,6 +70,21 @@ unit a reviewer could be sent to. The reconciliation reads the live config throu
 `workers.sources.get_sources_config` and the live doc through `find_section`, so it
 binds the two files the cadence actually reads rather than two copies of them, and
 its failure is demonstrated on a seeded heading rather than described.
+
+A fifth contract joined with #3979 (2026-11-09): a read-back the doc asserts has to be
+a read-back the code performs. §Watch the machinery placed #109 in the report-only row
+because "its artifact is read back by #100's index exactly the way #91's scan artifact
+is", and the second half of that was invented — `scripts/eval_instrument_index.py`
+defines nine arms, names five task files in their `scheduled_by` fields (`#82 #86 #97
+#101 #109`), and has never had a thinking-fidelity arm: `git grep -c thinking_fidelity
+scripts/eval_instrument_index.py` returns no match at base and `git log -S fidelity --
+scripts/eval_instrument_index.py` returns no commit. No node here caught it, because no
+node read the module: the whole suite was green over the false sentence (182 passed at
+base). The five nodes at the foot of this file therefore take the doc's read-back claims
+and grade them against `eval_instrument_index.INSTRUMENTS` itself, so adding a real #91
+arm makes the doc's claim admissible rather than pre-falsifying it — the same reason the
+other contracts here derive their expectation from code or from another sentence in the
+doc instead of typing a roster that rots.
 """
 
 from __future__ import annotations
@@ -8272,3 +8287,269 @@ def test_step_3b_prints_the_per_kind_split_by_reading_the_field_the_api_publishe
     assert "`window_clamped_to_hours`" in step, (
         "the reason a derived split disagrees is no longer stated in the step that forbids "
         "deriving one, which is the sentence that stops the next reader re-adding the join")
+
+
+# ── contract 5 (#3979) — a read-back the doc asserts is one the code performs ─────
+#
+# At base §Watch the machinery justified #109's report-only row with "its artifact is
+# read back by #100's index exactly the way #91's scan artifact is", and the module named
+# no such arm. The whole suite was green over that sentence, so these five nodes read the
+# index module rather than the doc's memory of it.
+
+#: #100 is the index's own id: in a sentence about what a read-back moves it names the
+#: reader, never a row, so it comes off before an id set is compared with the arm set.
+INDEX_JOB_ID = "#100"
+
+#: The only non-test file allowed to name #91's prevalence series — the script that
+#: appends it. Checked against the tracked tree below, not against this comment.
+PREVALENCE_WRITER = "scripts/thinking_fidelity_scan.py"
+PREVALENCE_SERIES_TOKEN = "thinking-fidelity-prevalence"
+
+#: The filing test's own words, first written in this paragraph for #92 #93 #94 #99 #103.
+ACT_ON_PHRASE = "job or a person will act on"
+
+READ_BACK_RE = re.compile(r"read[\s-]back|reads?\s+it\s+back|read\s+back", re.I)
+MOVING_RE = re.compile(r"\bmov(?:e|es|ed|ing)\b|\bwould place\b", re.I)
+
+
+def _index_arm_job_ids() -> set[str]:
+    """The jobs whose artefact `scripts/eval_instrument_index.py` reads back.
+
+    Derived from the module's own `INSTRUMENTS` tuple: an arm's `scheduled_by` names the
+    task file of the job that produces the artefact that arm scores, so the ids in those
+    fields are exactly the jobs with an index read-back. At base that is `#82 #86 #97
+    #101 #109` — the other four arms carry `scheduled_by=None` because their artefacts
+    come from automod's ledger, `app/tool_quality.py`, `scripts/uptake_probe.py` and
+    `scripts/funnel_census.py` rather than from a row of §Watch the machinery. #91 is in
+    none of them, and never was: `git log -S fidelity -- scripts/eval_instrument_index.py`
+    returns no commit. Reading the set instead of typing a ban is what lets a real #91 arm
+    in future make the doc's claim admissible rather than red a node nobody can satisfy.
+    """
+    import sys
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts import eval_instrument_index as eii
+
+    out = set()
+    for arm in eii.INSTRUMENTS:
+        m = re.search(r"autonomy/(\d+)-", arm.scheduled_by or "")
+        if m:
+            out.add(f"#{m.group(1)}")
+    assert out, (
+        "no arm of eval_instrument_index.INSTRUMENTS names a task file, so every job "
+        "read-back claim in the doc is now unfounded and these nodes have no set to "
+        "grade them against")
+    return out
+
+
+def _id_order(ids) -> str:
+    """`{"#82", "#109"}` as `#82 #109`, so a failure message reads like the doc's own list."""
+    return " ".join(sorted(ids, key=lambda tok: int(tok.lstrip("#"))))
+
+
+def _watch_tier_paragraph() -> str:
+    """The paragraph that splits §Watch the machinery's sixteen into the two tiers.
+
+    Scoped the way `_parked_job_section()` scopes §#68: a phrase checked "in the tier
+    paragraph" must not be satisfiable by the same words somewhere else in the file.
+    """
+    text = _text()
+    start = text.find("**Five of the sixteen are not report-only")
+    assert start >= 0, "the paragraph naming the unattended-writer five is not in the document"
+    return text[start:].split("\n\n", 1)[0]
+
+
+def _tier_paragraph_sentences() -> list[str]:
+    """The tier paragraph as sentences, hard wraps collapsed."""
+    return [s.strip() for s in _SENT_SPLIT.split(_flat(_watch_tier_paragraph())) if s.strip()]
+
+
+def _tracked_py_files_naming(token: str) -> list[str]:
+    """Tracked `.py` paths whose bytes contain `token`, read from the checkout itself.
+
+    `git ls-files` rather than `rglob`, so the ignored venv roots under the checkout are
+    never crawled and an untracked scratch file cannot lend a claim support.
+    """
+    listing = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.py"],
+        capture_output=True, check=True).stdout.decode()
+    files = [f for f in listing.split("\0") if f]
+    assert files, f"`git ls-files -- '*.py'` returned nothing under {ROOT}"
+    hits = []
+    for rel in files:
+        try:
+            body = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if token in body:
+            hits.append(rel)
+    return hits
+
+
+def test_no_sentence_asserts_an_index_read_back_the_module_does_not_define():
+    """Clause 1: the doc's read-back claims agree with the arm set the module defines.
+
+    Three checks, one per surface the false claim sat on. The literal
+    `#91's scan artifact` appears nowhere in the file — that is the acceptance check's
+    `grep -n` as an assertion. #109's own table row cites no other job and no read-back at
+    all, which is the half a sentence-level scan cannot see because `_live_sentences()`
+    drops table rows. And every live sentence that says #100's index reads something back
+    may name only ids the module schedules: at base that set is `#82 #86 #97 #101 #109`,
+    so the restored sentence would red this node on `#91`, while an arm actually added to
+    the module turns the same sentence green.
+    """
+    text = _text()
+    assert "#91's scan artifact" not in text, (
+        "`grep -n \"#91's scan artifact\" architecture/autonomy-jobs.md` is non-empty "
+        "again. eval_instrument_index.py has never defined a thinking-fidelity arm, so "
+        "the sentence is false wherever it stands — in #109's row, in the tier paragraph, "
+        "or in a §Review log entry")
+
+    rows = [ln for ln in text.splitlines() if ln.startswith("| #109 |")]
+    assert len(rows) == 1, f"#109 should have exactly one row in its group's table, found {len(rows)}"
+    assert "#91" not in rows[0], (
+        "#109's row has started resting on #91 again; the two rows are placed by what each "
+        "of them files, not by a read-back one of them shares")
+    assert not READ_BACK_RE.search(rows[0]), (
+        "#109's row is justified by a read-back again. The row's Writes cell may state "
+        "that the index scores the arm — it does — but the placement argument belongs in "
+        "the tier paragraph, where the filing test is the one actually applied")
+
+    arms = _index_arm_job_ids()
+    offenders = []
+    for s in _live_sentences():
+        if INDEX_JOB_ID in s and READ_BACK_RE.search(s):
+            strays = set(_ids(s)) - {INDEX_JOB_ID} - arms
+            if strays:
+                offenders.append((sorted(strays), s[:140]))
+    assert not offenders, (
+        f"{len(offenders)} live sentence(s) have #100's index reading back a job the "
+        f"module does not schedule: {offenders}. The arms and their `scheduled_by` task "
+        f"files are the only read-backs that exist, and they cover "
+        f"{_id_order(arms)}")
+
+
+def test_109_s_report_only_row_is_placed_by_the_filing_test_not_by_an_arm():
+    """Clause 2: #109 sits in the report-only row because it files nothing to act on.
+
+    The paragraph already had the test — "Those are files another job or a person will act
+    on, so the five sit in the unattended-writer tier" — so the fix reuses those words for
+    #109 rather than inventing a criterion, and states outright that the index arm neither
+    earns nor denies a tier. Both halves are pinned: the placement sentence carries the
+    filing phrase and the vault-or-queue bound, and a second sentence says the arm is not
+    the reason. `ACT_ON_PHRASE` appearing twice in one paragraph is the mechanical form of
+    "the same test the paragraph already uses".
+    """
+    sentences = _tier_paragraph_sentences()
+    para = _flat(_watch_tier_paragraph())
+
+    placed = [s for s in sentences if "#109" in s and ACT_ON_PHRASE in s and "queue" in s]
+    assert placed, (
+        f"#109's placement is no longer argued from {ACT_ON_PHRASE!r} together with the "
+        "vault-and-queue bound. That is the test the paragraph applies to #92 #93 #94 #99 "
+        "#103, and a tier argued from any other property is the drift #3979 was filed on")
+    assert para.count(ACT_ON_PHRASE) >= 2, (
+        f"{ACT_ON_PHRASE!r} occurs {para.count(ACT_ON_PHRASE)}x in the tier paragraph, so "
+        "the #92-#103 sentence and the #109 sentence are no longer using one test; two "
+        "criteria for one tier is how the row split stopped meaning anything")
+
+    earned = [s for s in sentences if "earns a tier" in s and "denies" in s]
+    assert earned, (
+        "the paragraph no longer says that having an artefact the index scores neither "
+        "earns nor denies a tier. Without that sentence a reader who finds the "
+        "behaviour_exhibit arm in the module has a reason to move the row")
+    assert any("index" in s.lower() for s in earned), (
+        "the neither-earns-nor-denies sentence no longer names the index, so it reads as a "
+        "general remark about tiers instead of the answer to the arm argument")
+
+
+def test_the_read_back_conjunct_s_consequence_names_the_rows_the_index_actually_scores():
+    """Clause 3: taken literally, the read-back conjunct moves five rows, not two.
+
+    The consequence is stated so the false equivalence cannot be re-added as a harmless
+    aside: a sentence in the tier paragraph names #100's index, says a read-back would move
+    rows, and the ids it lists must be exactly the module's scheduled set. Typing two of
+    them, or the nine-item list of every report-only row, fails the equality; so does
+    deleting the sentence, which is why the node asserts the sentence exists at all.
+    """
+    arms = _index_arm_job_ids()
+    conseq = [s for s in _tier_paragraph_sentences()
+              if READ_BACK_RE.search(s) and MOVING_RE.search(s) and INDEX_JOB_ID in s]
+    assert conseq, (
+        "the tier paragraph no longer states what taking the read-back conjunct literally "
+        "would move, which is the sentence that makes the equivalence expensive to re-add")
+    for s in conseq:
+        named = set(_ids(s)) - {INDEX_JOB_ID}
+        assert named == arms, (
+            f"the consequence sentence names {_id_order(named)} but the module "
+            f"schedules read-backs for {_id_order(arms)}; the two lists are the "
+            "same claim, and the sentence is wrong the moment the module gains or drops an "
+            "arm")
+
+
+def test_91_s_series_is_named_an_own_series_and_the_tracked_code_says_so():
+    """Clause 4: #91 is in the same row for a reason the code supports.
+
+    The tier paragraph calls #91's prevalence series an `own series`, and the phrase is
+    load-bearing: §Write authority defines it ("a dated series that job alone appends to,
+    which nothing reads back but its own next run") and that definition is what keeps #90
+    out of the top tier. So the definition has to still exist for the term to mean
+    anything, and the supporting fact — the series' only reader is its own writer — is
+    checked against the tracked tree: at base exactly three `.py` files name
+    `thinking-fidelity-prevalence`, `scripts/thinking_fidelity_scan.py` and two tests, so
+    naming the writer is a fact and not a hope.
+    """
+    own = [s for s in _tier_paragraph_sentences() if "#91" in s and "own series" in s]
+    assert own, (
+        "#91's placement is no longer stated as an `own series`. Without that phrase the "
+        "row is two unrelated jobs sitting together, which is what invited the invented "
+        "read-back in the first place")
+
+    text = _text()
+    assert "**`own series`**" in text, (
+        "§Write authority's definition of `own series` is gone, so every later use of the "
+        "term — including #91's placement — is a bare coinage no reader can check")
+
+    naming = _tracked_py_files_naming(PREVALENCE_SERIES_TOKEN)
+    assert PREVALENCE_WRITER in naming, (
+        f"{PREVALENCE_WRITER} no longer names the series, so the claim that #91's series is "
+        "read back by nothing but its own writer has lost its source")
+    strays = [p for p in naming if p != PREVALENCE_WRITER and not p.startswith("tests/")]
+    assert not strays, (
+        f"{PREVALENCE_SERIES_TOKEN!r} now has a reader outside its writer and the tests: "
+        f"{strays}. That is the fact the tier question turns on — a real second lane "
+        "reading the series back is a `durable state` argument, and it belongs in the "
+        "tier paragraph, not in a node that quietly keeps calling it an own series")
+
+
+def test_the_tier_rows_still_count_their_own_ids_with_109_in_the_report_only_row():
+    """Clause 5: the tables are untouched by the correction, derived rather than typed.
+
+    #3979 fixes a reason, not a placement, so the membership tables must come out of the
+    round exactly as they went in. This is the same agreement the membership-vs-count node
+    above enforces — every tier row's typed count equals the ids written beside it — stated
+    here so a clause about the tables is pinned by a node inside this diff, plus the one
+    thing the clause is really about: #109 stays in the report-only row and does not
+    appear in the unattended-writer row. The counts themselves are not typed here, because
+    a frozen 21 is false the morning a job is rostered and the ids-vs-count rule above is
+    what catches a stale number.
+    """
+    text = _text()
+    i = text.find("### Write authority")
+    assert i >= 0, "the write-authority table is not in the document"
+    rows = {r.group(1).strip(): (_ids(r.group(2)), r.group(3))
+            for r in re.finditer(r"^\| ([^|]+) \| ([^|]*) \| (\d+) \|$",
+                                 text[i:text.find("\n## ", i)], re.M)}
+    assert rows, "the write-authority table parsed no rows"
+
+    stale = {k: v for k, v in rows.items() if len(v[0]) != _num(v[1])}
+    assert not stale, f"tier rows whose count column disagrees with their ids: {stale}"
+
+    report_only = rows["Reports only"][0]
+    assert "#109" in report_only, (
+        "#109 left the `Reports only` row. The tier call is settled and owed to the "
+        "owed-check pass; this round was asked to fix the reason, not the placement")
+    assert "#109" not in rows["Writes durable state unattended"][0], (
+        "#109 was promoted into the unattended-writer row on the strength of a read-back. "
+        "The filing test is the reason it is not there")
