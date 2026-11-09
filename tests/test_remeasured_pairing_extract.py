@@ -44,7 +44,9 @@ instead of failing the next author for the previous writer's change.
 
 from __future__ import annotations
 
+import inspect
 import os
+import re
 import sqlite3
 import statistics
 from pathlib import Path
@@ -591,3 +593,162 @@ def test_the_sibling_marker_names_the_keys_the_reader_and_what_the_bytes_cannot_
         assert not (data_dir / sibling).exists() or not _tracked(data_dir / sibling), (
             f"{sibling} is in the vault index: a write-ahead sibling is never part of a "
             "witness (#2960)")
+
+
+# --------------------------------------------------------------------------- #
+# #4011 — the page that publishes these blocks has to say where the bytes are,
+# which module re-derives them, and what these bytes cannot speak to
+# --------------------------------------------------------------------------- #
+
+#: The doc whose prose this module makes a claim about, and the section publishing
+#: the two blocks above. Read from THIS checkout, never from the vault: a citation
+#: committed in a page is a statement about this repo, so this node has no vault
+#: dependency to skip over — see `_rewrite_cost_section`.
+DOC_PATH = Path(__file__).resolve().parents[1] / "architecture" / "context-window.md"
+REWRITE_COST_HEADING = "What a rewrite costs, priced per mechanism"
+
+#: The one spelling of the artifact's location that survives a move: `~/obsidian/`
+#: names a tree, where a bare `backlog/data/…` resolves against whatever directory a
+#: reader is standing in, and a literal `/home/<user>/…` commits a username into a doc.
+#: The coverage suite's own citation resolver would accept all three — its roots
+#: include the vault — so the only thing that keeps one spelling is this assertion.
+VAULT_PREFIX = "~/obsidian/"
+
+#: How the page names the module that re-derives its figures, built from this file's
+#: own name so a rename moves the page instead of silently retiring the pin.
+MODULE_CITATION = "`tests/" + Path(__file__).name + "`"
+
+#: The live-store half of the ban, as the page words it. The refusal `conftest.py`
+#: raises is about the data tree, and the page used to blame that refusal for a
+#: blanket "nothing recomputes these" that this module had already contradicted.
+LIVE_STORE_BAN = "recomputing them from the live store"
+
+#: The two figures a single-rank reading of the truncated 2026-10-02 block returns
+#: over these bytes. They belong in this comment and in no page: the extract starts
+#: after that block starts, so it is a truncated window here and not a refutation of
+#: a figure this module has no business republishing.
+TRUNCATED_BLOCK_FIGURES = ("155,812", "26 pairs")
+
+#: What a node about the page must never reach for. Built by concatenation because the
+#: node reads this module's own source: a marker written literally IS the thing it bans,
+#: and the check would fail on its own text — the same reason the coverage file builds
+#: its `PAIRING_RECOMPUTE_MARKERS` this way.
+DOC_TEXT_ONLY_MARKERS = ("_extract" + "(",
+                         "_vault_root" + "(",
+                         "pytest." + "skip",
+                         "sqlite3." + "connect(")
+
+
+def _rewrite_cost_section() -> str:
+    """The body of §What a rewrite costs, up to the next `## ` — prose and nothing else.
+
+    Deliberately independent of the artifact reader above, which skips when the vault
+    has no extract. This node's subject is a paragraph committed in this checkout, and
+    a retention sweep that ages the extract out is precisely the window in which the
+    page's sentence about those bytes stops being checkable by hand — so the node keeps
+    running, and keeps failing on drift, with the artifact gone.
+    """
+    text = DOC_PATH.read_text(encoding="utf-8")
+    m = re.search(rf"^## {re.escape(REWRITE_COST_HEADING)}.*?$(.*?)(?=^## |\Z)",
+                  text, re.MULTILINE | re.DOTALL)
+    assert m, (
+        f"architecture/context-window.md has no '## {REWRITE_COST_HEADING}' section, so "
+        "the prose pinned below has moved somewhere nothing here is looking")
+    return m.group(1)
+
+
+def test_the_page_cites_the_committed_extract_and_names_this_module_as_the_recomputer():
+    """#4011: §What a rewrite costs cites the projection beside its two blocks, names
+    this module as what re-derives them, states the median convention, and leaves the
+    truncated block outside what these bytes can say.
+
+    The sentence this node exists for read "no node recomputes them", and
+    `test_the_two_published_blocks_recompute_from_the_committed_bytes` refuted it the
+    day it landed: both published blocks ARE recomputed, from the artifact this module
+    opens. What is genuinely forbidden is reaching for the live store — a gate worktree
+    has no copy of it, and a node that queried one would either fail for a reason that
+    is not the page's or certify figures over an empty directory. The page now says
+    which of those two it means, and prose is the only enforcement this section has, so
+    a node has to keep it saying so.
+
+    The structural assertion runs first on purpose. Turning this node back into one that
+    depends on the vault would make it skip for the whole period a sweep has aged the
+    extract out, and a skipped node is the exact shape that let the sentence rot for
+    four days: green, watching nothing.
+    """
+    own = (inspect.getsource(_rewrite_cost_section)
+           + inspect.getsource(
+               test_the_page_cites_the_committed_extract_and_names_this_module_as_the_recomputer))
+    for marker in DOC_TEXT_ONLY_MARKERS:
+        assert marker not in own, (
+            f"this node now reaches for {marker!r}, which would have it skip or open a "
+            "database instead of reading the page it is about")
+
+    # And the markers have to be capable of firing at all: the artifact reader two
+    # screens up is the node that DOES reach for them, on purpose, so if a rename ever
+    # broke the concatenation the absence above would go quietly vacuous.
+    reaching = [m for m in DOC_TEXT_ONLY_MARKERS if m in inspect.getsource(_extract)]
+    assert reaching, (
+        "none of the markers occurs in the module's own artifact reader, so this node is "
+        "asserting an absence its pattern could never have detected")
+
+    flat = " ".join(_rewrite_cost_section().split())
+
+    # Clause 1: the projection and its marker, each as a code span carrying the prefix.
+    for span in (f"`{VAULT_PREFIX}{ARTIFACT_PATH}`", f"`{VAULT_PREFIX}{MARKER_PATH}`"):
+        assert span in flat, (
+            f"§What a rewrite costs no longer cites {span} as a code span, so a reader "
+            "of the two blocks has nothing to check them against and no idea the bytes "
+            "exist")
+    # Every other mention of these two names has to carry the prefix too. Scoped to the
+    # basenames rather than to `backlog/data/` at large because the section cites a
+    # different vault artifact as well, and how THAT one is spelled is not this node's
+    # claim to make.
+    for basename in (EXTRACT_BASENAME, MARKER_BASENAME):
+        strays = [flat[max(0, i - 24):i + len(basename)]
+                  for i in (m.start() for m in re.finditer(re.escape(basename), flat))
+                  if not flat[:i].endswith(f"{VAULT_PREFIX}backlog/data/")]
+        assert not strays, (
+            f"the section mentions {basename} in a spelling that does not name the vault: "
+            f"{strays}. A bare `backlog/data/…` resolves against the reader's own "
+            "directory and a literal `/home/…` form bakes this machine's username into a "
+            "doc; the `~/obsidian/` prefix is the spelling that means the same thing "
+            "everywhere")
+
+    # Clause 2: the refuted claim is gone, the recomputing module is named, and the ban
+    # is worded against the live store rather than against recomputation as such.
+    assert "no node recomputes them" not in flat and "no node" not in flat, (
+        "the section is back to asserting that nothing recomputes these figures. This "
+        "module does, from committed vault bytes — see the node that re-derives 18 pairs "
+        "/ median 36,460.75 and 112 pairs / median 84,474.0")
+    assert MODULE_CITATION in flat, (
+        f"the section does not name {MODULE_CITATION} as the module that recomputes its "
+        "two blocks, so its reader has no route from the figures to the bytes")
+    assert LIVE_STORE_BAN in flat, (
+        f"the section no longer words its ban as {LIVE_STORE_BAN!r}; the blanket form is "
+        "the one that became false, and the live store is the half that is actually "
+        "unreachable from a gate worktree")
+
+    # Clause 3: the statistic is named, because the published medians are the even-n
+    # mean and a single-rank reading of the same bytes is a different measurement.
+    assert "`statistics.median`" in flat and "even-n" in flat, (
+        "the section stopped stating that its medians are `statistics.median` — the "
+        "even-n mean. Both published medians come from an even number of deltas, so an "
+        "unstated convention is a figure a later reader cannot reproduce")
+
+    # Clause 4: what these bytes price, and the one block they cannot price.
+    assert "`pairing_bounds`" in flat and "price exactly the two blocks" in flat, (
+        "the section no longer scopes these bytes to the two windows `pairing_bounds` "
+        "names, so the rolling rows below the blocks read as re-derivable from them too")
+    assert "`2026-10-02T01:32:11`" in flat and "`2026-10-09T01:32:11`" in flat \
+            and "lower bound" in flat, (
+        "the section no longer says that the 2026-10-02→2026-10-09 block opens below "
+        "this extract's lower bound. It is the one published block the projection "
+        "truncates, and 'these bytes disagree' is the wrong reading of a window whose "
+        "first ~32 h is simply absent")
+    for figure in TRUNCATED_BLOCK_FIGURES:
+        assert figure not in flat, (
+            f"the section now publishes {figure!r} for the truncated block. A partial "
+            "window's median is not a correction of the published one, and quoting it "
+            "here would put a figure on the page that no measurement of that window "
+            "produced")

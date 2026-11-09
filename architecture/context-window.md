@@ -451,6 +451,17 @@ per-arm means and its session-hold counts were not re-derived here. The design s
 - `2026-10-03T09:47:08` → `2026-10-31T09:47:08` (672 h): **112 pairs**, median delta
   **+84,474**, signs **73 up / 33 down / 6 unchanged** — above the bar, and roughly 2:1.
 
+Both blocks are re-derivable from bytes committed to the vault rather than from the live
+store. The projection they were re-derived from is
+`~/obsidian/backlog/data/2026-10-31.3631-lloyd-data-usage.db`
+and its sibling marker, which names the projection and the windows it prices, is
+`~/obsidian/backlog/data/2026-10-31.3631-lloyd-data-usage-witness.md`
+Those bytes price exactly the two blocks above and nothing else: the extract's own
+`pairing_bounds` table carries just those two windows. The rolling rows below are outside
+them, and the first of them — `2026-10-02T01:32:11` → `2026-10-09T01:32:11` — opens below
+this extract's lower bound, so over these bytes that block is truncated and the committed
+projection neither confirms nor contradicts the figure it published.
+
 Every consecutive 168 h window measured since the 2026-10-02 one has come back with a
 positive median: +164,725 (`2026-10-02T01:32:11` → `2026-10-09T01:32:11`, 29 pairs), +53,332
 (`2026-10-09T01:32:11` → `2026-10-16T01:32:11`, 31 pairs), +84,474
@@ -461,10 +472,18 @@ a later window measured a *higher* share of exactly-zero next-turn observations 
 and still returned a positive median, so the honest statement is that the 2026-10-02 week
 happened to sit on 0, not that something about it kept the pairing from separating.
 
-These figures are quoted on this page as measurements with their bounds, and no node
-recomputes them: `tests/conftest.py` refuses the suite against the live data tree and a
-gate worktree's own data root is empty, so a re-computing node would fail for a reason
-that is not this page's. Re-running the pairing over a further window is owed-check work.
+These figures are quoted on this page as measurements with their bounds, and the ban here
+is on recomputing them from the live store: `tests/conftest.py` refuses the suite against
+the live data tree and a gate worktree's own data root is empty, so a node that opened
+`~/lloyd-data/usage.db` would fail in a round for a reason that is not this page's — or
+pass while measuring an empty directory and certify figures nobody checked. Recomputing
+them from committed vault bytes is a different matter, and it already happens:
+`tests/test_remeasured_pairing_extract.py` re-derives both blocks above from the extract
+cited beside them, reading the vault and never the store. The median convention there is
+`statistics.median` — the even-n mean, the mean of the two middle deltas — and it is
+load-bearing, not house style: a single-rank reading over those same bytes returns figures
+that appear nowhere on this page, so a median taken that way is not this page's median.
+Re-running the pairing over a further window is owed-check work.
 Both windows above are single-regime knob-off, like the 60.6% table: counting rows whose
 record carries `turn_start.microcompact_sidecar`, through the same two keys
 `usage_store._sidecar_flags` reads, finds 0 knob-on rows of 2,899 in the 168 h block and 0
