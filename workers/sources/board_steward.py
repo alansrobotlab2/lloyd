@@ -38,7 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from workers.queue import WorkQueue, QueueItem, NO_ARTIFACT, backlog_artifact
+from workers.queue import (WorkQueue, QueueItem, NO_ARTIFACT, backlog_artifact,
+                           SUMMARY_MARKER, shorten_summary)
 # #3519's reader. A sibling source module, and the one import of it this gets:
 # `board_disagreement` imports no host module at its own top level, so this line
 # adds nothing to the `app` closure the import-surface test guards.
@@ -1170,6 +1171,60 @@ def build_prompt(*, events: list[dict], items: list[Any], n_open: int, since_ts:
 
 # ── output ───────────────────────────────────────────────────────────────
 
+def _fit_prose(text: str, limit: int) -> str:
+    """Fit one steward prose field into `limit` characters, cut on a word boundary.
+
+    Called ONLY from `parse_steward`, on the three prose fields (`note`,
+    `next_pick_reason`, `summary`) and nowhere else, because the ledger-facing
+    value of each is produced at that one site and a sanitiser beside the write
+    would leave the dry-run row (`apply: false`, what ships today) carrying what
+    the apply row does not.
+
+    A field that FITS — its whitespace-normalised form is AT or UNDER `limit` —
+    comes back byte-identical: no reflow, no marker, and any legitimate non-ASCII
+    in it survives. The trigger is `len(text) > limit`, never `>=`, because #2197
+    made the schema caps and the parse ceilings one number so that an answer legal
+    at the caps is recorded as the answer given; `>=` would re-cut a legitimate
+    300-character note and contradict `STEWARD_SCHEMA`'s own `maxLength`.
+
+    A field that overflows is cut by `shorten_summary` (#1606, the mechanism
+    `runs.summary` already uses): at the last word boundary fitting inside
+    `limit - len(SUMMARY_MARKER)`, with the ASCII marker appended so the marker
+    counts against the cap. A stored value therefore ends on a whole word and a
+    visible "there was more", not where 300 characters ran out. The 2026-11-09
+    scan of the live promotion ledger found 4 `moves[].note`, 9 `next_pick_reason`
+    and 13 `summary` values sitting at exactly their cap and ending in a CJK
+    codepoint — "…so a draft proposal is机器" — which is precisely what a blind
+    `[:cap]` leaves behind.
+
+    The one thing `shorten_summary` cannot do is drop a non-ASCII FRAGMENT that
+    ends at the cut. Its back-off fires on the character AT the cut being
+    non-whitespace; a degenerate run like `…is机器` ending exactly there with a
+    space next makes the space the boundary and keeps the fragment. A steward that
+    has degenerated is writing in no language a later reader of the item's
+    activity log can use, so the kept text's trailing non-ASCII run is dropped
+    along with everything after it — and dropped again while the tail still ends
+    non-ASCII, because the space that separated two CJK words is itself a word
+    boundary, and stopping at it would hand the reader back a value ending in one
+    word of the same degenerate run. What ships therefore ends on a character a
+    reader can read, or on nothing.
+
+    If nothing is left — a field that overflowed while being non-ASCII throughout
+    — the marker alone is stored. It still says content followed, and a steward
+    that wrote 400 characters of CJK noise told the human nothing the marker does
+    not say, while the unreadable text would have filled the ledger row.
+    """
+    if len(text) <= limit:
+        return text
+    cut = shorten_summary(text, limit)
+    body = (cut[:-len(SUMMARY_MARKER)] if cut.endswith(SUMMARY_MARKER) else cut).rstrip()
+    while body and ord(body[-1]) > 127:
+        while body and ord(body[-1]) > 127:
+            body = body[:-1]
+        body = body.rstrip()          # the space that fronted the run goes with it
+    return body + SUMMARY_MARKER if body else SUMMARY_MARKER
+
+
 def parse_steward(structured: Any) -> dict | None:
     """Validated and clamped, or None. `done` can never come out of here.
 
@@ -1178,7 +1233,10 @@ def parse_steward(structured: Any) -> dict | None:
     never asked to produce, and the clamp stays because guided decoding is a
     request, not a guarantee. The two have to be one number: an answer that is
     legal at the caps has to come out of here unchanged, or the record of what
-    the steward decided is not the answer it gave.
+    the steward decided is not the answer it gave. The three prose fields go
+    through `_fit_prose`, which keeps that property (it only ever touches text
+    LONGER than the cap) while cutting an overflow on a word boundary instead of
+    at the character the cap happens to fall on (#3991).
     """
     if not isinstance(structured, dict):
         return None
@@ -1198,16 +1256,17 @@ def parse_steward(structured: Any) -> dict | None:
             "tags_add": [str(x)[:TAG_MAX] for x in (raw.get("tags_add") or []) if x][:TAGS_MAX],
             "tags_remove": [str(x)[:TAG_MAX] for x in (raw.get("tags_remove") or [])
                             if x][:TAGS_MAX],
-            "note": " ".join(str(raw.get("note") or "").split())[:NOTE_MAX],
+            "note": _fit_prose(" ".join(str(raw.get("note") or "").split()), NOTE_MAX),
         })
     try:
         pick = int(structured.get("next_pick") or 0)
     except (TypeError, ValueError):
         pick = 0
     return {"moves": moves, "next_pick": max(0, pick),
-            "next_pick_reason": " ".join(
-                str(structured.get("next_pick_reason") or "").split())[:REASON_MAX],
-            "summary": " ".join(str(structured.get("summary") or "").split())[:SUMMARY_MAX]}
+            "next_pick_reason": _fit_prose(
+                " ".join(str(structured.get("next_pick_reason") or "").split()), REASON_MAX),
+            "summary": _fit_prose(
+                " ".join(str(structured.get("summary") or "").split()), SUMMARY_MAX)}
 
 
 def _as_instant(raw: Any) -> datetime | None:

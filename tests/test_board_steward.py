@@ -776,6 +776,260 @@ def test_a_reply_past_the_caps_is_still_clamped_by_the_parser():
     assert len(parsed["summary"]) == W.SUMMARY_MAX
 
 
+# ---------------------------------------------------------------------------
+# #3991: the prose cut. A steward field that overflows its cap is stored cut on a
+# word boundary with the ASCII marker inside the cap, and never ends on a
+# non-ASCII fragment; a field that fits is stored byte-identical.
+# ---------------------------------------------------------------------------
+
+def _reply_with_prose(note: str = "", reason: str = "", summary: str = "") -> dict:
+    """A steward answer whose three prose fields are exactly `note`/`reason`/`summary`."""
+    return {"moves": [{"item_id": 7, "status": "draft", "tags_add": [],
+                       "tags_remove": [], "note": note}],
+            "next_pick": 0, "next_pick_reason": reason, "summary": summary}
+
+
+def _overflow_with_cjk_at_the_cut(cap: int) -> str:
+    """Text LONGER than `cap` whose non-ASCII run ends EXACTLY at its cut boundary.
+
+    `shorten_summary` cuts at index `cap - 3` and backs off to the previous word
+    only when the character AT that index is not whitespace. So the alignment that
+    tests #3991's strip is a fragment ENDING at `cap - 4` with a SPACE at
+    `cap - 3`: the back-off finds its boundary exactly where the fragment stops and
+    keeps the fragment. Any other over-`cap` string is fixed by the back-off alone,
+    and a test built from one would pass green with the strip deleted — which is
+    the trap #3991's triage names. The assertions are this fixture's own contract:
+    if an edit stops them holding, the test that uses it has stopped proving.
+    """
+    from workers.queue import SUMMARY_MARKER
+    room = cap - len(SUMMARY_MARKER)                     # where `shorten_summary` cuts
+    frag_len = room % 6 or 6                             # room - frag_len ≡ 0 (mod 6)
+    frag = ("机器" * 4)[:frag_len]
+    head = " ".join(["alpha"] * ((room - frag_len) // 6))   # each word is 5 chars + 1 space
+    text = " ".join([head, frag, " ".join(["omega"] * 20)])
+    assert len(text) > cap, f"the fixture does not overflow the cap {cap}: {len(text)}"
+    assert text == " ".join(text.split()), "the fixture must already be whitespace-normal"
+    assert ord(text[room - 1]) > 127, (
+        f"the fragment has to occupy the character BEFORE the cut; index {room - 1} "
+        f"holds {text[room - 1]!r}, so a green run here would not prove the strip exists")
+    assert text[room] == " ", (
+        f"the character AT the cut has to be the space that stops the back-off; "
+        f"index {room} holds {text[room]!r}")
+    return text
+
+
+def test_a_note_over_the_cap_is_cut_on_a_word_boundary_with_the_marker():
+    """Clause 1: an overflowing `note` is stored cut at a word boundary, ends with
+    the truncation marker, and the marker counts against `NOTE_MAX`.
+
+    The line this replaces was `" ".join(...split())[:NOTE_MAX]` — a character
+    slice that ended the note where 300 characters ran out. The fixture is whole
+    5-character words on a 6-character stride, so index 297 falls inside the word
+    at 294-298: the blind slice stops at `…alph`, the guard has to back off to the
+    space at 293, and the two answers are different strings. A cut that lands on a
+    boundary is also SHORTER than the cap, which is the shape the post-landing
+    ledger scan looks for (no new value sitting exactly at the cap).
+    """
+    from workers.queue import SUMMARY_MARKER
+    note = " ".join(["alpha"] * 100)                     # 599 characters of whole words
+    assert len(note) > W.NOTE_MAX
+    stored = W.parse_steward(_reply_with_prose(note=note))["moves"][0]["note"]
+    assert stored.endswith(SUMMARY_MARKER), "a note that was cut has to say so"
+    body = stored[:-len(SUMMARY_MARKER)]
+    assert len(stored) <= W.NOTE_MAX, "the marker has to count against the cap"
+    assert len(stored) < W.NOTE_MAX, (
+        "a word-boundary cut is SHORTER than the cap — a value sitting at exactly "
+        f"NOTE_MAX is the blind slice, not the guard: tail {stored[-12:]!r}")
+    assert note.startswith(body) and note[len(body)] == " ", (
+        f"the cut landed mid-word, not on a boundary: tail {stored[-12:]!r}")
+    assert not body.endswith("alph"), "half a word survived the cut"
+
+
+def test_a_cut_note_never_ends_on_a_non_ascii_fragment():
+    """Clause 2: the degenerate tail a cut leaves behind is dropped, not stored.
+
+    The ledger the item was filed from holds four cap-length `moves[].note` values
+    ending in CJK — newest 2026-11-09T00:49:54Z, "…so a draft proposal is机器" —
+    and the note is a human-facing field on the item's activity log, so a
+    mid-token non-Latin fragment is unreadable to every later reader.
+
+    Three alignments, because only the first needs the new strip: the fragment ENDING
+    at the cut (where `shorten_summary`'s back-off does nothing), the fragment
+    STRADDLING the cut (where the back-off already handles it and the guard must not
+    un-handle it), and a reply that overflowed while non-ASCII THROUGHOUT, which has
+    no readable prefix to keep and gets the marker alone rather than a fragment.
+    """
+    from workers.queue import SUMMARY_MARKER
+    stored = W.parse_steward(_reply_with_prose(
+        note=_overflow_with_cjk_at_the_cut(W.NOTE_MAX)))["moves"][0]["note"]
+    assert all(ord(c) <= 127 for c in stored), (
+        f"a cut note was stored ending {stored[-8:]!r} — the fragment at the cut has "
+        "to be dropped along with the text after it")
+    assert stored.endswith(SUMMARY_MARKER), "dropping the fragment must still say so"
+    assert len(stored) < W.NOTE_MAX
+    assert _overflow_with_cjk_at_the_cut(W.NOTE_MAX).startswith(
+        stored[:-len(SUMMARY_MARKER)]), "the kept text was reflowed"
+
+    straddles = " ".join(["alpha"] * 49) + " 机器机器机器机器 " + " ".join(["omega"] * 20)
+    assert len(straddles) > W.NOTE_MAX
+    cut_mid = W.parse_steward(_reply_with_prose(note=straddles))["moves"][0]["note"]
+    assert all(ord(c) <= 127 for c in cut_mid), f"straddling run kept: {cut_mid[-10:]!r}"
+    assert cut_mid.endswith(SUMMARY_MARKER)
+
+    all_cjk = " ".join(["机器机器"] * 80)                 # 399 chars, no ASCII anywhere
+    assert len(all_cjk) > W.NOTE_MAX
+    assert W.parse_steward(_reply_with_prose(note=all_cjk))["moves"][0]["note"] == (
+        SUMMARY_MARKER), "a field with nothing readable to keep must store the marker alone"
+
+
+def test_the_reason_and_the_summary_get_the_same_cut_as_the_note():
+    """Clause 3: the same cut-and-drop at each field's own cap — `next_pick_reason`
+    at `REASON_MAX` (300) and `summary` at `SUMMARY_MAX` (400).
+
+    All three are cut by the same expression in `parse_steward`, and the live-ledger
+    scan that filed this item counted 4 cap-length CJK-terminated `note` values
+    beside 9 `next_pick_reason` and 13 `summary` ones, so a guard on `note` alone
+    would have left the majority of the observed rows exactly as degenerate.
+    """
+    from workers.queue import SUMMARY_MARKER
+    for label, cap in (("note", W.NOTE_MAX), ("next_pick_reason", W.REASON_MAX),
+                       ("summary", W.SUMMARY_MAX)):
+        text = _overflow_with_cjk_at_the_cut(cap)
+        parsed = W.parse_steward(_reply_with_prose(
+            note=text if label == "note" else "",
+            reason=text if label == "next_pick_reason" else "",
+            summary=text if label == "summary" else ""))
+        got = (parsed["moves"][0]["note"] if label == "note" else
+               parsed["next_pick_reason"] if label == "next_pick_reason" else
+               parsed["summary"])
+        assert got, f"{label} came out empty"
+        assert got.endswith(SUMMARY_MARKER), f"{label} was cut with no marker"
+        assert len(got) < cap, f"{label} sits at its cap ({len(got)}={cap}) mid-token"
+        assert all(ord(c) <= 127 for c in got), (
+            f"{label} was stored ending {got[-8:]!r}, the shape the ledger scan counted")
+        assert text.startswith(got[:-len(SUMMARY_MARKER)]), f"{label} was reflowed"
+
+
+def test_a_field_at_or_under_its_cap_is_stored_byte_identical():
+    """Clause 4: the guard triggers on overflow only, so an answer that is legal at
+    the caps is recorded as the answer the steward gave, with its non-ASCII kept.
+
+    Two `>=` bugs, both pinned. A field of EXACTLY its cap — the size the longest
+    legitimate replies in the ledger sit at, which is why `test_the_caps_sit_above_
+    the_largest_reply_a_real_tick_ever_sent` asserts `parsed == reply` for exact-cap
+    input — has to survive whole. And a field that FITS while ending in CJK has to
+    keep that CJK: the strip belongs to a cut, and a short note written in Chinese
+    is the steward writing a real sentence, not degenerating. (The clause as written
+    cites a node named `test_a_reply_at_the_caps_survives_the_parser_whole`; that
+    name is not in this file and never was — `git grep -n 'parsed == reply'` on the
+    base commit lands on the assertion above, which is what the clause means.)
+    """
+    from workers.queue import SUMMARY_MARKER
+    exact_note, exact_reason, exact_summary = (_normalised(W.NOTE_MAX),
+                                               _normalised(W.REASON_MAX),
+                                               _normalised(W.SUMMARY_MAX))
+    parsed = W.parse_steward(_reply_with_prose(note=exact_note, reason=exact_reason,
+                                               summary=exact_summary))
+    assert parsed["moves"][0]["note"] == exact_note
+    assert parsed["next_pick_reason"] == exact_reason
+    assert parsed["summary"] == exact_summary
+    assert SUMMARY_MARKER not in exact_summary, "a field that fits got a marker"
+
+    ends_cjk = _normalised(W.NOTE_MAX - 2) + "机器"        # exactly at the cap, ends non-ASCII
+    assert len(ends_cjk) == W.NOTE_MAX
+    kept = W.parse_steward(_reply_with_prose(note=ends_cjk))["moves"][0]["note"]
+    assert kept == ends_cjk, (
+        f"a note AT the cap was re-cut (tail {kept[-10:]!r}): the trigger is "
+        "len(text) > cap, never >=")
+
+    short = "净流量 +43，needs-human 保持 parked — 已确认"
+    assert len(short) < W.NOTE_MAX
+    assert W.parse_steward(_reply_with_prose(note=short))["moves"][0]["note"] == short, (
+        "legitimate non-ASCII in a field that fits must survive untouched")
+
+
+def _degenerate_prose_reply() -> dict:
+    """A model answer whose every prose field overflows its cap with a non-ASCII
+    fragment sitting AT the cut — the shape the 2026-11-09 ledger scan counted."""
+    return {"moves": [{"item_id": 1, "status": "up_next", "tags_add": [],
+                       "tags_remove": [], "note": _overflow_with_cjk_at_the_cut(W.NOTE_MAX)}],
+            "next_pick": 0,
+            "next_pick_reason": _overflow_with_cjk_at_the_cut(W.REASON_MAX),
+            "summary": _overflow_with_cjk_at_the_cut(W.SUMMARY_MAX)}
+
+
+def _tick_with_degenerate_prose(board, monkeypatch, apply: bool) -> dict:
+    """One steward tick with `apply` and the degenerate answer above; returns its
+    `board_steward` ledger row, read back off the file the writer appended to."""
+    from workers.sources import _common as C
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": _degenerate_prose_reply()}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": apply})))
+    assert out["status"] == "success", out
+    row = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "board_steward"][-1]
+    assert row["apply"] is apply, f"the {apply} tick booked the other kind of row"
+    return row
+
+
+def test_a_dry_run_row_and_an_apply_row_book_the_identical_prose(board, monkeypatch):
+    """Clause 5: the guard sits at the one normalisation site, so the `apply: false`
+    row (what ships today) and the `apply: true` row carry the same sanitised strings
+    for the same model reply.
+
+    `parse_steward` is where all three fields are cut and `execute` has a single
+    `S.append_event` for both row kinds, so a guard placed beside the write or on the
+    apply branch would still reach one of these two rows — which is what this test
+    can catch: the pair has to be equal AND the dry-run row has to be sanitised, since
+    equality alone is satisfied by two unsanitised copies. The model answer is the
+    only fake; the board, the flag split, the agreement and the ledger are production.
+    """
+    from workers.queue import SUMMARY_MARKER
+    _ten_item_board(board)
+    dry = _tick_with_degenerate_prose(board, monkeypatch, apply=False)
+    live = _tick_with_degenerate_prose(board, monkeypatch, apply=True)
+    assert dry["moves"] == live["moves"], "the two rows disagree about the note"
+    assert dry["next_pick_reason"] == live["next_pick_reason"], (
+        "the two rows disagree about next_pick_reason")
+    assert dry["summary"] == live["summary"], "the two rows disagree about the summary"
+    for value in (dry["moves"][0]["note"], dry["next_pick_reason"], dry["summary"]):
+        assert value.endswith(SUMMARY_MARKER), f"a dry-run value was not cut: {value[-10:]!r}"
+        assert all(ord(c) <= 127 for c in value), (
+            f"a dry-run value ends {value[-8:]!r} — the strip ran on the apply row only")
+
+
+def test_the_activity_line_an_apply_tick_writes_is_the_sanitised_note(board, monkeypatch):
+    """The one destination of the note that a human reads: `apply_moves` puts
+    `m["note"]` into `B.set_status(..., why=...)`, which writes the item's activity
+    line and rewrites the item's markdown file — a second store, reached through a
+    different writer than the ledger row, so the ledger assertions alone would not
+    see a fragment escape that way.
+
+    Asserts the move really landed first: an applied-empty tick would leave the file
+    untouched and the rest of this would pass by never having tested anything.
+    """
+    from workers.queue import SUMMARY_MARKER
+    _ten_item_board(board)
+    row = _tick_with_degenerate_prose(board, monkeypatch, apply=True)
+    landed = [a for a in row["applied"] if a["item_id"] == 1 and a["applied"]]
+    assert landed, f"the move never reached item 1, so this file proves nothing: {row['applied']}"
+    note = landed[0]["note"]
+    assert note.endswith(SUMMARY_MARKER) and len(note) < W.NOTE_MAX
+    # The activity entry is YAML front matter, and `yaml.dump` wraps a long scalar
+    # across lines, so compare on whitespace-collapsed text rather than bytes.
+    flat = " ".join((board / "1-item-1.md").read_text(encoding="utf-8").split())
+    assert f"board steward: {note}" in flat, (
+        f"the activity line did not carry the note the parser produced: {note[-30:]!r}")
+    foreign = {c for c in _degenerate_prose_reply()["moves"][0]["note"] if ord(c) > 127}
+    assert foreign, "the fixture's reply must end in a non-ASCII fragment"
+    assert not any(ch in flat for ch in foreign), (
+        "a CJK fragment from the reply reached the item's own activity log, the "
+        "human-facing field this item exists to protect")
+
+
 async def test_a_truncated_tick_is_blamed_on_divergence_and_not_on_the_budget(
         monkeypatch):
     """Clause 3: the captured completion, replayed through the real finalizer
