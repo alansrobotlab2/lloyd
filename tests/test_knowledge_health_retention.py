@@ -4,6 +4,7 @@ The count it states must be `copy_gaps`' count, and an empty result must say
 in words that no cycle is missing a copy — a silent section reads the same as
 a check that never ran.
 """
+import ast
 import importlib
 import importlib.util
 import inspect
@@ -1046,7 +1047,7 @@ def test_the_pointer_producer_set_is_exactly_the_two_stems_the_vault_check_is_sc
 # beside the `pointer_mtime_lag` code whose behaviour the prose describes. That pairing is
 # the point: a §2e run reads the bullet, then calls the tool these checks measure.
 #
-# Three nodes, and which of them carry `live_vault` is the decision, taken against two
+# Which of the nodes below carry `live_vault` is the decision, taken against two
 # house rulings that point in opposite directions:
 #   - `pytest.ini:14-19` reserves the mark for a node reading live `~/obsidian` STATE,
 #     which "no round under test controls" and an hourly promotion "can rewrite between
@@ -1058,12 +1059,17 @@ def test_the_pointer_producer_set_is_exactly_the_two_stems_the_vault_check_is_sc
 #     away is how "the checkout was red while every hard rung reported the suite clean"
 #     (:14-15).
 # A skill's RULE text is the structural kind, and the precedent for parsing it is
-# unmarked -- `tests/test_skill_reflection_archive.py:3354`
+# unmarked -- `tests/test_skill_reflection_archive.py:3544`
 # (`test_2e_prints_the_archive_names_it_governs_and_states_the_pointer_rule`) reads this
 # same file with no mark. So the two prose nodes and the code-fact node below run on the
 # hard rung, where the grader can see them; only the node asserting that the deleted stray
 # is absent from the live tree is marked, because that is the one claim an unrelated commit
 # can falsify.
+#
+# The count-word nodes #4007 added read a SYNTHETIC bullet, not the live file, and that is
+# what keeps them unmarked too: the live claim belongs to the node below, and a parse that
+# is only ever shown the text standing today cannot be shown to go green on the next
+# instance or red on a missing count.
 #
 # Every prose assertion goes through `_flat_prose`: the step file is hand-wrapped at ~80
 # columns, so a phrase worth asserting is split across a newline in the source, and
@@ -1095,17 +1101,126 @@ def _kw_step(rel: str = "steps-2b-2f.md") -> str:
     return p.read_text(encoding="utf-8")
 
 
+#: The count words the §2e stray bullet may spell, and the number each states. The bullet is
+#: append-only — every recorded mis-root adds an instance and moves the word it states, and
+#: vault commit `c80fb59e0` (2026-11-09, #4004's fifth instance) moved it from Four to Five and
+#: reddened the node that pinned the literal — so the count is READ out of the bullet and
+#: mapped here instead of being re-spelled in an assertion. The table stops at Twelve on
+#: purpose: a tally that outgrows the spelled words is a bullet a reader has to re-cut, and an
+#: unexpected word has to fail with a message naming it rather than a `ValueError` off a bare
+#: lookup, which would report a wording change as a crash.
+_STRAY_COUNT_WORDS = {
+    "Three": 3, "Four": 4, "Five": 5, "Six": 6, "Seven": 7, "Eight": 8,
+    "Nine": 9, "Ten": 10, "Eleven": 11, "Twelve": 12,
+}
+
+#: The floor the bullet's own tally has to clear. Four is the count as of the 2026-10-21
+#: mis-root this node exists to record — 2026-10-09 (#2502), 2026-10-15 and 2026-10-16
+#: (#2832), and 2026-10-21 — so a bullet stating fewer than four has dropped an instance from
+#: the record, which is the loss the count sitting beside the list is there to make visible.
+MIN_RECORDED_GOVERNED_STEM_STRAYS = 4
+
+#: The bullet's count phrase, as one pattern and one spelling of it. `[A-Z][a-z]+` because the
+#: bullet spells the number in words: a deleted phrase and a bare digit both leave ZERO
+#: matches, which the exactly-one check below turns into a failure instead of a silence.
+_STRAY_COUNT_PHRASE = re.compile(r"\b([A-Z][a-z]+) governed-stem strays have been found\b")
+
+#: Shorter on purpose: the trap this file fell into was the tally and its noun — `assert
+#: "Five governed-stem strays" in body` — with no verb, so a pin built on
+#: `_STRAY_COUNT_PHRASE` would have let the very literal that reddened main through. This is
+#: the wording that must never appear as a string here again; the parse above keeps the verb
+#: because the bullet's sentence is what the count is read out of.
+_SPELLS_THE_TALLY = re.compile(r"\b[A-Z][a-z]+ governed-stem strays\b")
+
+
+def _stray_bullet(count_word: str) -> str:
+    """A §2e stray bullet in the live file's shape, carrying whatever count word is asked for.
+
+    The synthetic twin the count assertions are tested against. It has to exist because the
+    live bullet states exactly one count at a time: a node that only ever sees today's word
+    cannot tell "the parse accepts the next instance" from "the parse hard-codes this word",
+    and cannot be shown going red at all. Built from the table's own words so this file never
+    re-spells the phrase literally — see
+    `test_no_string_in_this_file_re_spells_the_bullet_s_count_phrase`.
+    """
+    return _flat_prose(
+        f"- **A governed-stem `-latest.md` anywhere under `~/obsidian/` is a defect, never a "
+        f"pattern output.** These files have exactly one governed root. "
+        f"{count_word} governed-stem strays have been found: three on 2026-10-16, deleted by "
+        f"#2832 — the 2026-10-15 mis-root and the 2026-10-09 instance #2502 records — and a "
+        f"fourth, `projects/ai/research/conversation-patterns-latest.md`, the **2026-10-21 "
+        f"mis-root** written by vault commit `7c0fd930`.")
+
+
+def _assert_stray_bullet_states_its_count(body: str) -> int:
+    """Assert the §2e stray bullet states its own tally, and return the number it states.
+
+    Three checks, ordered the way a reader needs them reported. (1) EXACTLY one count phrase:
+    the node's stated purpose is that a removed count is a lost precedent, so zero matches is
+    a failure — and two is a bullet carrying two different tallies. (2) The word has to be one
+    this file maps, and the failure names the word it found. (3) The mapped count has to
+    reach the four instances the node records, so a bullet that keeps the phrase but loses an
+    entry still goes red.
+
+    Returns the number rather than a bare bool because the caller's assertion is about the
+    tally, and an assertion that cannot report the count it read cannot be checked against the
+    list beside it.
+    """
+    words = _STRAY_COUNT_PHRASE.findall(body)
+    assert len(words) == 1, (
+        f"the §2e stray bullet states its count phrase {len(words)} times; expected exactly "
+        "one '<count word> governed-stem strays have been found'. The tally beside the list is "
+        "how a reader sees a mis-root is recurring and not one bad night, so a bullet that "
+        "dropped the count lost the precedent, and one carrying two tallies states two "
+        "different records — fix the bullet, do not relax this check")
+    word = words[0]
+    assert word in _STRAY_COUNT_WORDS, (
+        f"the §2e stray bullet counts its instances with the word {word!r}, outside the "
+        f"spelled words this file maps ({' / '.join(_STRAY_COUNT_WORDS)}). A word past the "
+        "table means the tally outgrew the spelled range and the bullet needs re-cutting, not "
+        "a wider table by reflex — and a numeral would land here as a missing count, which is "
+        "the same ambiguity")
+    count = _STRAY_COUNT_WORDS[word]
+    assert count >= MIN_RECORDED_GOVERNED_STEM_STRAYS, (
+        f"the §2e stray bullet states {count}, below the "
+        f"{MIN_RECORDED_GOVERNED_STEM_STRAYS} instances this node exists to record — 2026-10-09 "
+        "(#2502), 2026-10-15 and 2026-10-16 (#2832), and the 2026-10-21 mis-root. An entry "
+        "left the list; the count is what notices")
+    return count
+
+
+def _top_level_functions() -> dict:
+    """Every top-level function in THIS file, by name, read off its own syntax.
+
+    The mark decisions in this file are the claim, and a claim about how a node is decorated
+    cannot be read off the markers in effect: `skip`/`skipif` deselect just as dead as
+    `live_vault` and would leave the file looking like it still asserted what it asserts.
+    """
+    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+    return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+
 def test_the_2e_stray_pointer_bullet_records_the_2026_10_21_mis_root():
-    """Clause 4, prose half: the fourth stray is named, dated, and tied to its commit.
+    """Clause 4, prose half: the fourth stray is named, dated, tied to its commit, and counted.
 
     Unmarked, and that is deliberate rather than an oversight: the precedent for reading
-    this file is `tests/test_skill_reflection_archive.py:3354`
+    this file is `tests/test_skill_reflection_archive.py:3544`
     (`test_2e_prints_the_archive_names_it_governs_and_states_the_pointer_rule`), which
     parses the same §2e step text and carries no mark, so it runs on the gate's hard rung.
     A skill's RULE is a structural claim about a surface this item changed, and
     `tests/test_archived_skill_artifacts.py:30-40` is explicit that marking that kind of
     node away is how a checkout goes red while every hard rung says clean. What IS marked
     is the node below, which reads the tree STATE.
+
+    The count is PARSED, never re-spelled (#4007). This node used to assert the current
+    count word as a literal, and the corpus it reads only ever appends: #4004's vault commit
+    `c80fb59e0` (2026-11-09) recorded the fifth instance, the word moved Four → Five, and this
+    node went red for a writer who had done exactly what the bullet asks of them. The repair
+    at `64ec9df7` changed the literal to the new word and re-armed the same trap. So the
+    number now comes out of the bullet's own phrase through
+    `_assert_stray_bullet_states_its_count`, which keeps the two halves of the original
+    intent — a missing count still fails, and a tally that no longer reaches the recorded
+    instances still fails — without pinning which word the list happens to have reached.
 
     The provenance is what a reader cannot re-derive: `7c0fd930` wrote that whole cycle's
     §2e output into `~/obsidian` instead of
@@ -1119,14 +1234,170 @@ def test_the_2e_stray_pointer_bullet_records_the_2026_10_21_mis_root():
     assert stray in body, "§2e no longer names the 2026-10-21 governed-stem stray at all"
     assert "7c0fd930" in body, "the bullet no longer names the commit that mis-rooted it"
     assert "2026-10-21 mis-root" in body, "the bullet no longer dates the mis-root"
-    assert "Five governed-stem strays" in body, (
-        "the bullet is supposed to record each stray ALONGSIDE the ones before it — the "
-        "count is how a reader sees this is a recurring mis-root and not one bad night. "
-        "#4004 added the 2026-11-08 instance, which took the literal from Four to Five; a "
-        "removed count is a lost precedent, and a count that no longer matches the list "
-        "beside it is how the next instance gets missed")
+    _assert_stray_bullet_states_its_count(body)
     for earlier in ("#2832", "#2502"):
         assert earlier in body, f"the bullet no longer cites {earlier}, the prior instance"
+
+
+def test_the_stray_count_assertion_maps_every_spelled_word_and_fails_below_the_floor():
+    """The table is the whole policy, so every word in it is exercised — none of them by luck.
+
+    Hermetic by construction: every bullet here is written by `_stray_bullet`, so the words
+    above `Five` are tested long before the live corpus reaches them. That is the difference
+    between a parse and a re-spelling — the live file can show a node one word at a time, and
+    a node that is green on that one word is green either way. The next §2e instance is the
+    case this exists for, so the words at and above today's count must already be known good;
+    and the low side has to be known red, or the floor is decorative.
+    """
+    assert list(_STRAY_COUNT_WORDS.values()) == list(
+        range(3, 13)), "the spelled table is not Three through Twelve in order"
+    assert MIN_RECORDED_GOVERNED_STEM_STRAYS == 4, (
+        "the floor is the four instances this node records, not a knob: raise it and the next "
+        "writer is ordered to invent an entry, lower it and an entry can leave the list quietly")
+
+    for word, stated in _STRAY_COUNT_WORDS.items():
+        body = _stray_bullet(word)
+        if stated >= MIN_RECORDED_GOVERNED_STEM_STRAYS:
+            assert _assert_stray_bullet_states_its_count(body) == stated, (
+                f"a bullet stating {word} has to read as {stated} — the next §2e entry changes "
+                "this word and must not have to change this node")
+        else:
+            with pytest.raises(AssertionError, match="below the"):
+                _assert_stray_bullet_states_its_count(body)
+
+
+def test_the_stray_count_assertion_goes_red_on_no_count_phrase_or_two():
+    """A lost count is the failure this node exists for, so it has to be reachable.
+
+    Three shapes the live file cannot offer, because it currently states one clean tally: the
+    phrase gone (a count dropped while an entry was folded in), the phrase twice (a bullet that
+    grew a second tally line and kept the old one), and the count as a numeral — which a writer
+    reaches for eventually and which must fail here rather than go missing somewhere less
+    visible. The substitutes are built by replacing the phrase the parse itself found, so this
+    file never re-spells the phrase in order to test its absence — see
+    `test_no_string_in_this_file_re_spells_the_bullet_s_count_phrase`.
+    """
+    stated = _stray_bullet("Six")
+    phrase = _STRAY_COUNT_PHRASE.search(stated).group(0)
+    gone = stated.replace(phrase, "several instances are on record")
+    numeral = stated.replace(phrase, "6 instances have been logged")
+    twice = stated + " " + stated
+
+    for label, body in (("the count phrase deleted", gone),
+                        ("the count spelled as a numeral", numeral),
+                        ("the count phrase twice over", twice)):
+        try:
+            counted = _assert_stray_bullet_states_its_count(body)
+        except AssertionError as exc:
+            assert "expected exactly one" in str(exc), f"{label}: wrong failure — {exc}"
+        else:
+            raise AssertionError(
+                f"{label}: the check returned {counted} for a bullet holding no single tally")
+
+
+def test_an_unexpected_count_word_fails_naming_the_word_not_raising_value_error():
+    """The table's job is a readable red, not a crash — so the exception TYPE is the assertion.
+
+    `pytest.raises(AssertionError)` is what pins it: a `ValueError` off a bare
+    `_STRAY_COUNT_WORDS[word]` would escape the `with` block and ERROR the node, so the
+    assert-then-look-up shape is the only one that passes here. Each word is first shown to
+    reach the lookup, because a word the phrase never matched would pass this node while
+    testing the missing-count path instead. The message has to carry the word itself: "outside
+    the spelled words" without the word is a failure nobody can act on without opening the
+    file. `Thirteen` is the first word the growing tally will reach, `Several` is what a
+    writer writes when they stop counting.
+    """
+    for word in ("Thirteen", "Fourteen", "Several"):
+        body = _stray_bullet(word)
+        assert _STRAY_COUNT_PHRASE.search(body), f"{word} never reached the table lookup"
+        with pytest.raises(AssertionError) as caught:
+            _assert_stray_bullet_states_its_count(body)
+        assert word in str(caught.value), (
+            f"{word!r} is outside the table, so the failure has to name the word it found")
+
+
+def test_no_string_in_this_file_re_spells_the_bullet_s_count_phrase():
+    """The file that guards an append-only corpus must not itself spell the corpus's tally.
+
+    This is the shape the trap had: an assertion string holding the current tally, which the
+    next recorded instance silently falsifies. The parse moved the spelling into
+    `_STRAY_COUNT_PHRASE` (a pattern, whose `[A-Z][a-z]+` is not a word) and
+    `_STRAY_COUNT_WORDS` (bare words, never the tally-and-noun that reads as a count), so
+    nothing here has to match the bullet's wording any more — and this node fails the moment
+    someone puts it back, in an assertion, a message, a fixture or a docstring. It searches
+    `_SPELLS_THE_TALLY`, the shorter form, because the literal that reddened main carried no
+    verb.
+    """
+    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+    spelled = sorted({c.value for c in ast.walk(tree)
+                      if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                      and _SPELLS_THE_TALLY.search(c.value)})
+    assert spelled == [], (
+        f"{spelled} spells the bullet's tally as a literal in this file: the count belongs to "
+        "the corpus, which only appends — read it with _STRAY_COUNT_PHRASE")
+
+
+def test_the_stray_count_node_carries_no_mark_and_its_neighbour_still_does():
+    """Clause 5: the fix is the parse, so the node must not have been moved off the hard rung.
+
+    Deselecting the node would answer the red exactly as badly as re-spelling the word did —
+    the gate's `-m "not live_vault and not fault_injection"` rung would then certify nothing
+    about the claim, while the same prose keeps being read unmarked by the precedent at
+    `tests/test_skill_reflection_archive.py:3544`. Read off the syntax rather than the
+    markers in effect, because what is being pinned is the text's own decorator list: an
+    added `skip` or `skipif` would leave the count unpinned while the file still looked like
+    it asserted it. The neighbour's mark is asserted in the same breath — the one claim here
+    that would otherwise stay green if the mark simply moved onto this node.
+    """
+    fns = _top_level_functions()
+    node = fns["test_the_2e_stray_pointer_bullet_records_the_2026_10_21_mis_root"]
+    assert node.decorator_list == [], (
+        "the §2e stray-count node grew a decorator: marked away, the gate's hard rung would "
+        "stop grading the bullet at all — the count parse is the fix, not the selection")
+    neighbour = fns["test_no_governed_pattern_stem_exists_anywhere_in_the_live_vault"]
+    assert [ast.unparse(d) for d in neighbour.decorator_list] == ["pytest.mark.live_vault"], (
+        "the state node's mark moved or multiplied; this file marks exactly the one node "
+        "reading live vault STATE, and this one is not it")
+    assert any(isinstance(n, ast.Assert) for n in ast.walk(node)), (
+        "the node has no assertion left to run: an empty node is green whatever the bullet says")
+
+
+def test_the_stray_count_node_still_asserts_the_provenance_beside_the_count():
+    """A tally with no provenance is a number: none of the five facts may be quietly dropped.
+
+    The count is what makes a mis-root legible as a recurrence; the path, the sha, the date and
+    the two earlier item numbers are what make it checkable, and they are the part a future
+    edit reaches for when a node "only" needs to count. So the pin is the node's own body,
+    re-read off the syntax with the docstring stripped — prose is exactly where a fact goes to
+    look asserted after someone deletes the assertion that carried it. Two more claims ride
+    along because they are the same shape of loss: the node must route its count through the
+    parse (that IS the change), and its body must not spell the tally itself.
+    """
+    node = _top_level_functions()[
+        "test_the_2e_stray_pointer_bullet_records_the_2026_10_21_mis_root"]
+    executable = [s for s in node.body
+                  if not (isinstance(s, ast.Expr)
+                          and isinstance(s.value, ast.Constant)
+                          and isinstance(s.value.value, str))]
+    assert executable, "the node is nothing but a docstring, which pytest reports as passing"
+    src = "\n".join(ast.unparse(s) for s in executable)
+
+    for fact, why in (
+        ("projects/ai/research/conversation-patterns-latest.md",
+         "the path the 2026-10-21 stray sat at"),
+        ("7c0fd930", "the vault commit that wrote it there"),
+        ("2026-10-21 mis-root", "the date the whole node is about"),
+        ("#2832", "the instance before it"),
+        ("#2502", "the instance before that"),
+    ):
+        assert fact in src, (
+            f"the node stopped asserting {why}: without it the count is a tally nobody can "
+            "check, and the next reader cannot tell a recurring mis-root from a stale note")
+    assert "_assert_stray_bullet_states_its_count(body)" in src, (
+        "the node no longer routes its count through the parse, which is the whole fix")
+    assert _SPELLS_THE_TALLY.search(src) is None, (
+        "the node spells the tally in its own body again — the literal this item exists to remove")
+
 
 
 
