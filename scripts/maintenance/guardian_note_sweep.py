@@ -111,6 +111,17 @@ STATES = ("FATAL", "STOPPED", "EXITED", "BACKOFF", "STARTING")
 STATE_LINE = re.compile(r"(?m)^(\S+?):\s+(%s)\b" % "|".join(STATES))
 HEADING = re.compile(r"(?m)^## (.*)$")
 GUARDIAN_TITLE = "Self-mod guardian:"
+#: Where a section's OWN content stops: the first line of something that is not prose of that
+#: block — a bare `---` thematic rule or an atx heading of any level.
+#:
+#: `sections()` ends a span at the NEXT `## ` heading, or at the end of the file for the last one,
+#: so anything of this shape inside a span was swallowed by it. In the daily notes that tail is the
+#: note's own `---` rule and the `### Session …` auto-captured digest that follows it: 37 of the 125
+#: guardian spans of the 2026 notes have one, and 21 of those 37 are NOT the note's last section —
+#: which is why this is a rule about the span and not an `is-last-section` test. Dating inside the
+#: swallowed tail put a retraction below Alan's own digest, where the destructive instruction the
+#: block retracts reads as unretracted to anyone reading the block (#3993).
+SPAN_TAIL = re.compile(r"(?m)^(?:---[ \t]*$|#{1,6}[ \t])")
 # Two properties this line has to keep, and both are measured by the corpus it fixes rather
 # than by taste. It names the DATE and the read, because a refutation is a session and not a
 # second. And apart from its own `dated:` prefix it contains NEITHER marker word: #2221's
@@ -548,6 +559,46 @@ def _guardian_sections(text: str):
         yield title, heading_start + len("## " + title) + 1, end
 
 
+def stamp_position(text: str, start: int, end: int) -> tuple[int, str]:
+    """(offset, padding) for the stamps of the block whose span is `text[start:end]`.
+
+    `end` is the next `## ` heading, or the end of the file for the note's last section, so it is
+    where the block's span stops — not where the block's writing stops. Splicing at `end` put the
+    retraction below whatever the span had swallowed: in these notes that is the file's own `---`
+    rule and the `### Session …` auto-captured digest after it, so on `memory/2026-11-04.md` the
+    retraction of the block at :54-64 was written at :72, under Alan's digest at :68, and the
+    destructive instruction it retracts still read as unretracted to anyone reading the block
+    (#3993). The offset is therefore the end of the block's OWN content — the start of the blank run
+    preceding the first thing in the span that is not prose — falling back to `end` when the span
+    holds no such tail, which is the position the sweep has always used and the one that stays right
+    for the 88 spans of 125 with no tail.
+
+    The search starts after the block's own heading line, which is a `#`-heading like any other and
+    must not end the block before it has begun. The offset stays inside `[start, end]`, which is what
+    keeps a re-run a no-op: `already_sealed` and the cross-note backstop both read `text[start:end]`,
+    so a stamp moved ABOVE the block's own heading or BELOW `end` would either date the block again
+    every pass or be read as a foreign block's stamp and silently stop dating this note.
+
+    `padding` is the second half of the answer: a `---` sitting directly under a text line is that
+    line's setext heading, not a thematic rule, so where the swallowed rule had no blank line above
+    it the stamp is followed by one — inserted, because reformatting the human's own lines is not
+    this sweep's to do.
+    """
+    heading_end = text.find("\n", start, end)
+    if heading_end < 0 or heading_end + 1 >= end:
+        return end, ""
+    tail = SPAN_TAIL.search(text, heading_end + 1, end)
+    if tail is None:
+        return end, ""
+    cut = tail.start()
+    # Back over the BLANK lines only — a blank line is a newline whose predecessor is also a
+    # newline — so the block's own terminating newline stays with the block, and the stamp is
+    # spliced after it with the note's own blank line as the separator below.
+    while cut > heading_end + 1 and text[cut - 1] == "\n" and text[cut - 2] == "\n":
+        cut -= 1
+    return cut, "" if text[cut:tail.start()] else "\n"
+
+
 def date_note(text: str, running: set[str], day: str, fraction: float | None = None,
               tripwire: "dict[str, TripwireReading] | None" = None,
               snapshot: "SnapshotReading | None" = None) -> "tuple[str, int, list[str]]":
@@ -592,7 +643,14 @@ def date_note(text: str, running: set[str], day: str, fraction: float | None = N
             stamps.append(snap_stamp)
             reasons.append(f"snapshot repo {snapshot.repo} fresh at commit "
                            f"{(snapshot.sha or 'unknown')[:8]}")
-        inserts.append((end, separator(body) + "\n\n".join(stamps) + "\n"))
+        # The offset is the end of the block's CONTENT, not of its span: `end` is the next
+        # `## ` heading, or the end of the file for the note's last section, and dating at
+        # that put a retraction below the human's own `---` rule and session digest (#3993).
+        at, pad = stamp_position(text, start, end)
+        # `separator` reads the END OF THE BLOCK, not of the span: the span can run on past the
+        # block's last line through a swallowed rule and digest, and asking it how the SPAN ends
+        # would ask the wrong question about how the gap above the stamp should look.
+        inserts.append((at, separator(text[start:at]) + "\n\n".join(stamps) + "\n" + pad))
         notes.append(f"{title}: " + "; ".join(reasons))
     if not inserts:
         return text, 0, []

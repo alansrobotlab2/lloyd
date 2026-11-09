@@ -296,9 +296,12 @@ def test_the_fraction_stamp_is_written_once_and_the_second_pass_finds_nothing():
 def test_the_real_2026_10_15_bytes_gain_a_stamp_under_both_sections_with_both_bodies_intact():
     """The dated note, measured against the bytes the item names.
 
-    The bodies are snapshotted from the fixture's own section slices before the pass and
-    required back verbatim after it, so "byte-for-byte intact" is asserted against the
-    region the sweep is supposed to append below rather than against a hand-typed string.
+    The bodies are snapshotted from the fixture's own section slices before the pass and every
+    non-blank line of them required back, in order and byte-identical, after it — so "bodies
+    intact" is asserted against the region the sweep appends into rather than against a
+    hand-typed string. Required as lines and not as one contiguous slice because since #3993 a
+    stamp belongs INSIDE the span, above the `---` rule and the `### Session` digest the span
+    swallows, so the slice is no longer contiguous with itself.
     The `/tmp: … inodes used (N%)` lines and the largest-entries listings are named as
     well, because those are the figures a reader would notice having been edited, and each
     of the two blocks has its OWN numbers — 845,813/(81%) with a 298,118 `/tmp/fwg-b` at
@@ -322,11 +325,24 @@ def test_the_real_2026_10_15_bytes_gain_a_stamp_under_both_sections_with_both_bo
     assert n == 2
 
     for body in bodies_before:
-        assert body in new, "an alarm body was rewritten, not answered"
+        # Not `body in new`: #3993 moved the stamp INSIDE the span, above the `---` rule and the
+        # `### Session` digest this note's spans swallow, so a stamp now sits between an alarm's
+        # last line and the swallowed tail that `body` also contains. What must survive is the
+        # alarm's text, and the check is that its non-blank lines still occur in `new` in the
+        # same order — byte-identical, none dropped — rather than the slice being contiguous.
+        keep = [ln for ln in body.splitlines() if ln.strip()]
+        after = iter(new.splitlines())
+        missing = [ln for ln in keep if not any(ln == nxt for nxt in after)]
+        assert not missing, f"an alarm body was rewritten, not answered: {missing[:3]}"
     for body in _tmp_sections(new):
-        assert len([ln for ln in body.splitlines()
-                    if ln.startswith(notify.DAILY_DATED_PREFIX)]) == 1, (
+        stamps = [ln for ln in body.splitlines()
+                  if ln.startswith(notify.DAILY_DATED_PREFIX)]
+        assert len(stamps) == 1, (
             "each of the two sections must carry its own stamp: " + body[-400:])
+        tail = SWEEP.SPAN_TAIL.search(body, body.index("\n") + 1)
+        assert tail is None or body.index(stamps[0]) < tail.start(), (
+            "on the note the item names as misplaced, the stamp must land above the rule and "
+            "digest the span swallowed, not below them: " + body[:120])
 
     assert len(SWEEP.HEADING.findall(new)) == len(SWEEP.HEADING.findall(pre)), (
         "the pass invented a section")
@@ -1315,3 +1331,242 @@ def test_read_snapshot_maps_the_producer_s_own_reading_without_re_rendering_it()
         "text": ""})
     assert SWEEP.snapshot_stamp(blank, DAY) is None, (
         "a reading with no sentence in it has nothing to quote, so it dates nothing")
+
+
+# ── #3993: a dating lands inside the block it retracts ─────────────────────────
+#
+# The stamp is spliced at the refuted section's `end`, and `sections()` sets that to the NEXT `## `
+# heading or, for the note's last section, to the end of the FILE. So a block that the human's own
+# `---` rule and `### Session` digest sit inside — which is what a note ending in a guardian alarm
+# looks like — was dated below both. On `memory/2026-11-04.md` the retraction of the block at
+# :54-64 landed at :72, below Alan's digest at :68, so the destructive instruction inside that
+# block reads as unretracted to anyone reading the block, and the human's session digest reads as
+# followed by an alarm retraction. The rule is now the block's own content, not the section's index:
+# insert above the first bare `---` rule or `#`-heading the span swallowed. Measured 2026-11-09
+# across the 125 guardian spans of the 2026 daily notes, 37 have such a tail and 21 of those are NOT
+# the note's last section — which is why this is a span rule and not an `is-last-section` test. The
+# four nodes below pin the new placement plus the three properties that must not move with it: a
+# block with no tail keeps the offset it has always had, a second pass is still a byte-identical
+# no-op, and no line of the human's note is dropped or reworded by the new position.
+
+TAIL_NOTE = f"""---
+type: note
+timestamp: '2026-11-04T08:00:00'
+---
+
+# 2026-11-04
+
+## Self-mod guardian: {TW.ALERT_TITLE}
+
+/tmp measured 81% of inodes used at 08:00. This needs a human.
+
+## Something the human wrote
+
+A paragraph of the human's own note, mid-file.
+
+## Self-mod guardian: {TW.ALERT_TITLE}
+
+/tmp measured 82% of inodes used at 09:00. This needs a human.
+
+---
+
+### Session 10:32 PST — Auto-captured
+
+Alan's own session digest for the day.
+"""
+
+#: The same note with the refuted block followed straight by another `## ` section: its span holds
+#: no `---` rule and no `#`-heading, so the insertion offset must stay exactly where it is today.
+#: The positive control — without it a fix that inserted the stamp anywhere (start of file, start of
+#: the block, one blank line lower) could satisfy the placement node and corrupt every ordinary note.
+UNTILED_NOTE = f"""---
+type: note
+timestamp: '2026-11-04T08:00:00'
+---
+
+# 2026-11-04
+
+## Self-mod guardian: {TW.ALERT_TITLE}
+
+/tmp measured 81% of inodes used at 08:00. This needs a human.
+
+## What the human wrote next
+
+A section with no rule and no sub-heading in it.
+"""
+
+FRONT_MATTER_RULES = 2          # the note's own `---` pair, which is no block's tail
+
+
+def _line_numbers(lines: list[str], pred) -> list[int]:
+    """1-based line numbers of every line `pred` accepts."""
+    return [n for n, line in enumerate(lines, 1) if pred(line)]
+
+
+def _dated_numbers(lines: list[str]) -> list[int]:
+    return _line_numbers(lines, lambda l: l.startswith(notify.DAILY_DATED_PREFIX))
+
+
+def _one(lines: list[str], pred, what: str) -> int:
+    """Exactly one matching line number, or a failure naming what was found instead.
+
+    Every placement assertion needs line numbers, and a `.index` on a fixture that moved by one
+    line reports a number as if it were still the finding."""
+    hits = _line_numbers(lines, pred)
+    assert len(hits) == 1, f"{what}: expected exactly one line, found {hits} in {lines!r}"
+    return hits[0]
+
+
+def test_the_final_block_dating_lands_above_the_rule_and_digest_that_follow_it(tmp_path, capsys):
+    """Clause 1, through `--apply` and re-read from disk: under the block's body, above the rule.
+
+    The artifact is the note, so a splice that is right in the returned string and wrong on disk is
+    the same defect with one step missing.
+    """
+    note = tmp_path / "2026-11-04.md"      # `--notes` is tmp_path, as `_copy_fixture` puts it
+    note.write_text(TAIL_NOTE, encoding="utf-8")
+    rc = _run_cli(tmp_path, "--apply", "--day", DAY, fraction=0.2769)
+    out = capsys.readouterr().out
+    assert rc == 0 and "dated blocks: 2" in out, out
+    lines = note.read_text(encoding="utf-8").splitlines()
+    stamps = _dated_numbers(lines)
+    assert len(stamps) == 2, f"both refuted blocks are dated, one per block: {lines!r}"
+    rules = _line_numbers(lines, lambda l: l.strip() == "---")
+    assert len(rules) == FRONT_MATTER_RULES + 1, f"the human's rule plus the front-matter pair: {rules}"
+    rule, digest, final_stamp = rules[-1], _one(
+        lines, lambda l: l.startswith("### Session"), "the `### Session` digest"), stamps[1]
+    assert rule < digest and digest < len(lines), "the fixture: rule, then the human's digest"
+    assert final_stamp < rule, (
+        f"the dating for the final guardian block sits at {final_stamp}, at or below the note's "
+        f"`---` rule at {rule}: before #3993 the last section's insertion offset was the end of the "
+        f"FILE, so the retraction landed below the human's own digest at {digest}")
+    assert final_stamp > _one(lines, lambda l: l.startswith("/tmp measured 82%"),
+                              "the final block's alarm line"), \
+        "the stamp moved above the block it retracts instead of below its body"
+    assert lines[final_stamp - 1] != lines[rules[-1] - 1], "the stamp replaced the rule"
+
+
+def test_the_stamp_sits_under_the_body_it_retracts_and_not_one_line_lower():
+    """Clause 1's exact neighbourhood: the stamp follows the alarm line, and nothing else moved."""
+    out, n, _ = SWEEP.date_note(TAIL_NOTE, running=frozenset(), day=DAY, fraction=0.2769)
+    assert n == 2, out
+    lines = out.splitlines()
+    stamp = _dated_numbers(lines)[1]
+    body_end = _one(lines, lambda l: l.startswith("/tmp measured 82%"),
+                    "the final block's alarm line")
+    assert stamp == body_end + 2, (
+        f"the stamp is at {stamp} and the refuted alarm line at {body_end}: the retraction belongs "
+        f"directly under the block's own content, separated by the one blank line the note already "
+        f"had, and nowhere else")
+    assert lines[stamp - 2] == "", "no blank line invented between the body and its retraction"
+    assert _line_numbers(lines, lambda l: l.strip() == "---")[-1] == stamp + 2, \
+        "the blank line above the human's rule survived and nothing between them changed"
+
+
+def test_a_block_with_no_rule_or_heading_in_its_span_keeps_the_offset_it_has_always_had():
+    """Clause 2, the positive control: the mid-note position is what it always was.
+
+    `UNTILED_NOTE`'s refuted span ends at the next `## ` heading with nothing swallowed, so the
+    offset the sweep has always used is still the right one, and the shape that has always come out
+    is asserted rather than eyeballed: alarm line, blank, stamp, then the next heading on the very
+    next line.
+    """
+    out, n, _ = SWEEP.date_note(UNTILED_NOTE, running=frozenset(), day=DAY, fraction=0.2769)
+    assert n == 1, out
+    pre, post = UNTILED_NOTE.splitlines(), out.splitlines()
+    stamp = _dated_numbers(post)[0]
+    assert stamp == _one(post, lambda l: l.startswith("/tmp measured 81%"),
+                         "the alarm line") + 2, post
+    assert post[stamp] == "## What the human wrote next", (
+        f"line {stamp + 1} is {post[stamp]!r}: with nothing swallowed by the span the stamp must "
+        f"still be the last thing in the block, immediately before the next `## ` heading, exactly "
+        f"as it was before #3993 — no blank line invented, no position shifted")
+    assert _deletions(UNTILED_NOTE, out) == 0
+    assert len(post) - len(pre) == 1, "one line added: the stamp, and nothing else"
+
+
+def test_a_second_pass_over_the_final_block_fixture_is_byte_identical_and_dates_nothing():
+    """Clause 3: the new offset keeps the stamp inside the span, so idempotency survives.
+
+    `already_sealed` is a substring test over the block's own span, so a stamp moved UPWARD inside
+    that span is still seen by the next pass and a re-run writes nothing. That is what this node
+    exists for: a fix that pushed the stamp past the span's `end` would re-date the block every
+    pass, and one that pushed it above the block's own heading would trip the cross-note backstop
+    and go silent on that note forever.
+    """
+    once, n1, _ = SWEEP.date_note(TAIL_NOTE, running=frozenset(), day=DAY, fraction=0.2769)
+    assert n1 == 2, once
+    twice, n2, notes = SWEEP.date_note(once, running=frozenset(), day=DAY, fraction=0.2769)
+    assert twice == once and n2 == 0, (
+        f"a second pass changed the note again ({n2} block(s) dated, {notes}): the stamp no longer "
+        f"falls inside the span `already_sealed` reads, so every pass would add another")
+    sealed = [SWEEP.already_sealed(once[start:end])
+              for title, start, end in SWEEP._guardian_sections(once)]
+    assert sealed and all(sealed), \
+        f"a dated block whose own span no longer reads as sealed: {sealed}"
+
+
+def test_the_dating_is_the_only_change_and_no_note_line_is_dropped_or_reworded():
+    """Clause 4 for both fixtures: insert-only, and every original written line survives in order.
+
+    The fix is a splice position, so the whole risk is collateral: a `---` rule or a digest line
+    eaten by the arithmetic would be invisible to the placement nodes, which read only the
+    neighbourhood of the stamp. Checked over both shapes — the tail note is the one at risk, the
+    untilled note is the one that must never have been.
+
+    Blank lines are counted separately from written ones because the unit of a stamp is a LINE: a
+    stamp spliced above a swallowed rule needs a blank under it or that rule becomes its setext
+    underline, so the note legitimately gains one blank line per stamp that sits above a tail, and
+    gains none where the block already ended in a blank run. Blank lines are therefore asserted by
+    count, and every NON-blank line of the human's note is asserted to survive in order, byte for
+    byte, with every inserted non-blank line a `dated:` line.
+    """
+    # 2 for the tail note because it refutes TWO blocks, 1 for the untilled note: the count is not
+    # what this node is about, it only has to be right on both sides of the diff.
+    for text, dated, blanks_added in ((TAIL_NOTE, 2, 1), (UNTILED_NOTE, 1, 0)):
+        out, n, _ = SWEEP.date_note(text, running=frozenset(), day=DAY, fraction=0.2769)
+        assert n == dated, (n, out)
+        pre, post = text.splitlines(), out.splitlines()
+        assert _deletions(text, out) == 0, (out, text)
+        ops = {(op, i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in
+               difflib.SequenceMatcher(None, pre, post).get_opcodes()}
+        assert all(op in ("equal", "insert") for op, _, _ in ops), \
+            f"the splice rewrote or moved a line of the note rather than inserting: {sorted(ops)}"
+        assert [l for l in post if l.strip() and not l.startswith(notify.DAILY_DATED_PREFIX)] \
+            == [l for l in pre if l.strip()], \
+            "every written line of the note survives, in order, byte-identical"
+        assert len(_dated_numbers(post)) == dated, "the only lines added are the stamps"
+        assert sum(1 for l in post if not l.strip()) - sum(1 for l in pre if not l.strip()) \
+            == blanks_added, (
+            f"{blanks_added} blank line(s) may be gained, one per stamp that sits above a swallowed "
+            f"rule so that rule stays a thematic break and not the stamp's setext underline")
+        for pred, what in ((lambda l: l.strip() == "---", "`---` rule"),
+                           (lambda l: l.startswith("### Session"), "`### Session` digest"),
+                           (lambda l: l.startswith("## "), "`## ` heading")):
+            assert len(_line_numbers(post, pred)) == len(_line_numbers(pre, pred)), what
+
+    # The counterfactual, as arithmetic on the fixture rather than a claim about some other tree.
+    # Before #3993 the splice position WAS the span's `end` — `inserts.append((end, …))`, and
+    # `sections()` sets a final span's `end` to the end of the file — so the old placement needs no
+    # simulation: it is `f_end`, and its line number is what the stamp used to land on. The new one
+    # is the line the stamp actually occupies. Asserting the pair is what stops the placement node
+    # above passing on a fixture that had stopped containing the defect.
+    tail_out, _, _ = SWEEP.date_note(TAIL_NOTE, running=frozenset(), day=DAY, fraction=0.2769)
+    _, _, f_end = list(SWEEP._guardian_sections(TAIL_NOTE))[-1]
+    assert f_end == len(TAIL_NOTE), (
+        "the final guardian span no longer runs to the end of the note, so this fixture is no "
+        "longer the shape that misplaced a dating")
+
+    def _note_line(offset: int) -> int:
+        return TAIL_NOTE[:offset].count("\n") + 1
+
+    pre_lines = TAIL_NOTE.splitlines()
+    old_line = _note_line(f_end)                  # where the stamp sat before #3993, pre-fix lines
+    assert old_line > _line_numbers(pre_lines, lambda l: l.startswith("### Session"))[0] \
+        > _line_numbers(pre_lines, lambda l: l.strip() == "---")[-1], (
+        f"the pre-#3993 offset for this span is line {old_line} of {len(pre_lines)}, which is not "
+        f"below the human's `---` and digest: the fixture has stopped containing the defect, so "
+        f"the placement node above proves nothing")
+    post_lines = tail_out.splitlines()
+    assert _dated_numbers(post_lines)[-1] < _line_numbers(
+        post_lines, lambda l: l.strip() == "---")[-1], "the stamp sits at or below the `---`"
