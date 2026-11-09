@@ -61,6 +61,24 @@ from tests._live_data import require_live_data  # noqa: E402
 # both satisfy the same assertion.
 KW_SCORE_09 = 9
 
+#: `gh_mod.gh_cli` as shipped, so a test that wants the real discovery-plus-subprocess
+#: arm can reopen it over the closed state `redirect_paths` installs below.
+_REAL_GH_CLI = gh_mod.gh_cli
+
+
+def _gh_credential_absent(monkeypatch):
+    """Close the scanner's third token arm: no `gh` reachable at all.
+
+    Since #3981 `load_github_token()` falls back to `gh auth token`, and this box has a
+    `gh` signed in as `alansrobotlab2`, reachable through PATH or through the mise shim
+    under `$HOME`. Left open, that real credential would decide these tests: the
+    no-header test below asserts an `Authorization` header is ABSENT, and every
+    `gh auth token` call would be a live read of the user's keyring from inside the
+    suite. Stubbing the one discovery function closes the whole arm — `_gh_token("")`
+    short-circuits, so no subprocess spawns anywhere.
+    """
+    monkeypatch.setattr(gh_mod, "gh_cli", lambda home=None: "")
+
 
 @pytest.fixture
 def redirect_paths(tmp_path, monkeypatch):
@@ -68,6 +86,11 @@ def redirect_paths(tmp_path, monkeypatch):
 
     `_paths` derives from Path.home() at import time and each module imported the
     result by name, so rebinding the per-module names is what actually moves them.
+
+    The fixture is also the suite's "this box carries no GitHub credential" state:
+    `GITHUB_TOKEN` deleted, `CONFIG_PATH` pointed at a file that does not exist, and
+    the `gh` arm closed. #3981 added the third arm, so a fixture that closed only the
+    first two would have every token test downstream reading the real keyring.
     """
     vault = tmp_path / "obsidian"
     feeds = tmp_path / "lloyd" / "_pipeline" / "vault-derived" / "memory" / "feeds"
@@ -88,7 +111,41 @@ def redirect_paths(tmp_path, monkeypatch):
     monkeypatch.delenv("INTEL_DISABLE_LLM", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(gh_mod, "CONFIG_PATH", tmp_path / "absent-github-config.yml")
+    _gh_credential_absent(monkeypatch)
     return tmp_path
+
+
+def _fake_gh_cli(monkeypatch, tmp_path, *, prints, exit_code=0, on_path=True):
+    """Put a fixture `gh` where the scanner's real discovery will find it.
+
+    This is the seam #3981 opened: `load_github_token()` now shells out, so the test
+    that proves it must cross that boundary for real — a real executable file, a real
+    `subprocess.run`, a real stdout — rather than a stubbed return value that would
+    pass even if the scanner never called anything. PATH and HOME are both pinned to
+    `tmp_path` so the box's own `gh` and its own mise shim cannot answer instead.
+
+    `exit_code` is how the not-logged-in case is expressed (GitHub CLI exits 1 and
+    prints nothing); `on_path=False` puts the fixture under
+    `$HOME/.local/share/mise/shims/` instead, which is where it lives on a box whose
+    PATH has been stripped — the gate's own `tests` rung condition.
+    """
+    home = tmp_path / "gh-home"
+    home.mkdir(parents=True, exist_ok=True)
+    script = tmp_path / "bin" / "gh" if on_path else home / gh_mod.GH_CLI_HOME_PATH
+    script.parent.mkdir(parents=True, exist_ok=True)
+    if not on_path:
+        (tmp_path / "empty-bin").mkdir(parents=True, exist_ok=True)
+    lines = ["#!/bin/sh", 'if [ "$1" = auth ] && [ "$2" = token ]; then']
+    if prints:
+        lines.append("  printf '%s\\n' '" + prints + "'")
+    lines += [f"  exit {exit_code}", "fi", "exit 0"]
+    script.write_text("\n".join(lines) + "\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin") if on_path
+                       else str(tmp_path / "empty-bin"))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(gh_mod, "gh_cli", _REAL_GH_CLI)
+    return script
 
 
 # A profile in the shape the loader is supposed to read. Weights sit deliberately
@@ -783,9 +840,20 @@ def test_github_scanner_sends_an_authorization_header_when_a_token_is_set(redire
 
 
 def test_github_scanner_sends_no_authorization_header_without_a_token(redirect_paths, monkeypatch, tmp_path):
+    """The anonymous case is still expressible: no env, no config, and no `gh`.
+
+    #3981 added a third arm to `load_github_token()`, so the assertion below is now
+    about three sources rather than two, and it is only meaningful once the `gh` arm is
+    closed — on this box `gh` is signed in, so leaving the arm live would put an
+    `Authorization` header in the very request this test is proving unadorned. The arm
+    is stubbed empty here (and in `redirect_paths`, which every token test inherits);
+    the assertion itself is untouched, because an anonymous request is still the right
+    outcome for a box with no credential at all.
+    """
     cfg = tmp_path / "github-repos.yml"
     cfg.write_text("repos:\n  - owner: openclaw\n    repo: openclaw\n    track: [commits]\n")
     monkeypatch.setattr(gh_mod, "CONFIG_PATH", cfg)
+    _gh_credential_absent(monkeypatch)
     captured = []
     _install_fake_urlopen(monkeypatch, captured)
 
@@ -801,6 +869,95 @@ def test_token_prefers_the_environment_over_the_config(redirect_paths, monkeypat
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_from_env")
 
     assert gh_mod.load_github_token() == "ghp_from_env"
+
+
+# --- #3981 clause 1/2: the third arm, and what still outranks it -------------
+
+def test_the_gh_credential_is_found_when_env_and_config_are_empty(redirect_paths, monkeypatch, tmp_path):
+    """#3981 clause 1: the box already has the credential; the scanner now reaches it.
+
+    Before: `load_github_token()` stopped after its two arms and returned None, so the
+    2026-11-09 scan's 12 calls (4 repos x releases/commits/issues) all arrived anonymous
+    and every one came back 403 with `X-RateLimit-Remaining=0 of 60` — 0 GitHub items
+    where the 7 preceding days carried 20-37. The check that was red was
+    `print(load_github_token())` printing None with no `GITHUB_TOKEN` and no `token:`;
+    this is that check, with the subprocess reached for real.
+    """
+    _fake_gh_cli(monkeypatch, tmp_path, prints="gho_from_gh_store")
+
+    assert gh_mod.load_github_token() == "gho_from_gh_store", (
+        "None here is the anonymous 60 req/hour ceiling the scan exhausts in its "
+        "first minute")
+
+
+def test_the_gh_fallback_is_reached_through_the_mise_shim_when_path_has_no_gh(
+        redirect_paths, monkeypatch, tmp_path):
+    """The reason `GH_CLI_HOME_PATH` exists rather than a bare `shutil.which`.
+
+    The gate's `tests` rung runs candidate code with `PATH=/usr/bin:/bin`, which on this
+    box carries no `gh` — the CLI is a mise shim under `$HOME`. A discovery that looked
+    only at PATH would pass on a developer's shell and run the scan anonymous in
+    exactly the place that matters: the unattended nightly run.
+    """
+    _fake_gh_cli(monkeypatch, tmp_path, prints="gho_via_shim", on_path=False)
+
+    assert gh_mod.load_github_token() == "gho_via_shim"
+
+
+def test_gh_being_signed_out_leaves_the_scanner_unauthenticated_rather_than_raising(
+        redirect_paths, monkeypatch, tmp_path):
+    """`gh auth token` exits non-zero and prints nothing when not signed in.
+
+    That must land back on the old behaviour — None, and the run says so — not an
+    exception out of the scanner's fetch path, which is the failure mode that would
+    turn a missing credential back into the indistinguishable 0 items of #570.
+    """
+    _fake_gh_cli(monkeypatch, tmp_path, prints="", exit_code=1)
+
+    assert gh_mod.load_github_token() is None
+
+
+def test_a_configured_token_beats_the_gh_credential(redirect_paths, monkeypatch, tmp_path):
+    """#3981 clause 2: env and config each still outrank whatever CLI is installed.
+
+    A human who wrote `token:` into the config chose that credential for a reason —
+    usually the narrower one — so silently preferring the broad `repo`-scoped gh token
+    would replace a deliberate choice with an accident.
+    """
+    cfg = tmp_path / "github-repos.yml"
+    cfg.write_text("token: ghp_from_config\nrepos: []\n")
+    monkeypatch.setattr(gh_mod, "CONFIG_PATH", cfg)
+    _fake_gh_cli(monkeypatch, tmp_path, prints="gho_from_gh_store")
+
+    assert gh_mod.load_github_token() == "ghp_from_config"
+
+
+def test_an_env_token_beats_both_the_config_and_the_gh_credential(
+        redirect_paths, monkeypatch, tmp_path):
+    """All three present at once: the exported value is what comes back (#3981 clause 2)."""
+    cfg = tmp_path / "github-repos.yml"
+    cfg.write_text("token: ghp_from_config\nrepos: []\n")
+    monkeypatch.setattr(gh_mod, "CONFIG_PATH", cfg)
+    _fake_gh_cli(monkeypatch, tmp_path, prints="gho_from_gh_store")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_from_env")
+
+    assert gh_mod.load_github_token() == "ghp_from_env"
+
+
+def test_a_request_sends_the_gh_token_over_a_real_http_exchange(
+        redirect_paths, monkeypatch, tmp_path, github_stub):
+    """The arm earns its keep only if the header rides the wire, not just the return value.
+
+    `github_stub` answers 200 solely for `Authorization: Bearer ghp_stub`, so this
+    passes only when the token `gh auth token` printed is the one urllib sent.
+    """
+    monkeypatch.setattr(gh_mod, "GITHUB_API_URL",
+                        f"http://127.0.0.1:{github_stub.server_port}")
+    _fake_gh_cli(monkeypatch, tmp_path, prints="ghp_stub")
+
+    assert gh_mod.fetch_commits("openclaw", "openclaw") == []
+    assert any("/repos/openclaw/openclaw/commits" in p for p in github_stub.paths), (
+        "the gh credential never reached the request, so the stub answered 403")
 
 
 def test_http_403_raises_a_named_rate_limit_error(redirect_paths, monkeypatch, tmp_path):
@@ -996,6 +1153,10 @@ def test_the_quota_is_named_whatever_casing_the_wire_used(
 
     assert exc.value.remaining == "0", "the quota was not read off a lower-cased wire"
     assert exc.value.limit == "60"
+    # All three headers the item names, because the run report is written from them:
+    # a missing `reset` is a quota the reader cannot say anything useful about (#3981
+    # clause 4 — the ceiling must stay tellable apart from a quiet day).
+    assert exc.value.reset == "1789139000"
 
 
 # --- seams: the CLI as the autonomy task actually runs it -------------------

@@ -5,6 +5,8 @@ import urllib.request
 import json
 import os
 import re
+import shutil
+import subprocess
 import hashlib
 from datetime import datetime
 from pathlib import Path
@@ -50,16 +52,54 @@ class GitHubRateLimitError(Exception):
         self.reset = reset
 
 
-def load_github_token(config_path: Optional[Path] = None) -> Optional[str]:
-    """GitHub token: `GITHUB_TOKEN` in the environment, else `token:` in config.
+#: Where to look for the `gh` CLI when PATH does not carry it. The gate's `tests`
+#: rung runs candidate code with `PATH=/usr/bin:/bin` (`gate._child_env`), which has
+#: no mise shim on this box, while the rung's round home symlinks every real-home
+#: entry — so one PATH lookup plus one home-relative absolute candidate reaches the
+#: shim. Same constant, same reasoning, as
+#: `scripts/verify_cited_identifier.py::GH_CLI_HOME_PATH`.
+GH_CLI_HOME_PATH = ".local/share/mise/shims/gh"
 
-    None when neither is set — the honest unauthenticated state, not an error.
-    """
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if token:
-        return token
 
-    path = Path(config_path) if config_path else CONFIG_PATH
+def gh_cli(home: Optional[str] = None) -> str:
+    """An executable `gh`, or `""`. Never raises.
+
+    No CLI is the ordinary state on a box that is not this one, and a discovery
+    failure must not become a fetch failure — the scanner has already learned once
+    that a swallowed error here reads as a quiet day (#570)."""
+    found = shutil.which("gh")
+    if found:
+        return found
+    home = (os.environ.get("HOME") or os.path.expanduser("~")) if home is None else home
+    shim = os.path.join(home, GH_CLI_HOME_PATH)
+    return shim if os.access(shim, os.X_OK) else ""
+
+
+def _gh_token(cli: str) -> str:
+    """The token `gh auth token` prints, or `""`.
+
+    This box's only GitHub credential is the one `gh` holds: `config/github-repos.yml`
+    has no `token:` line and no `GITHUB_TOKEN` is exported, which is why the 2026-11-09
+    scan spent all 12 calls against the anonymous 60/hour ceiling and reported 0 GitHub
+    items (`scripts/verify_cited_identifier.py::_gh_token`'s docstring names the same
+    credential and the same waste). A subprocess is a process boundary, so every failure
+    mode returns `""` — no binary, a timeout, a non-zero exit (not logged in), or a
+    successful call that printed nothing — and each of them lands the scan back on the
+    anonymous ceiling it was on before, rather than raising mid-scan."""
+    if not cli:
+        return ""
+    try:
+        r = subprocess.run([cli, "auth", "token"], capture_output=True,
+                           text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _config_token(path: Path) -> Optional[str]:
+    """The `token:` line of the scanner config, or None.
+
+    The parse itself is unchanged: PyYAML when importable, a line regex when not."""
     if not path.exists():
         return None
     text = path.read_text()
@@ -74,6 +114,30 @@ def load_github_token(config_path: Optional[Path] = None) -> Optional[str]:
     except ImportError:
         m = re.search(r'^\s*token:\s*(.+?)\s*$', text, re.MULTILINE)
         return m.group(1).strip().strip('"').strip("'") if m else None
+
+
+def load_github_token(config_path: Optional[Path] = None) -> Optional[str]:
+    """GitHub token: `GITHUB_TOKEN`, else `token:` in config, else what `gh` holds.
+
+    Ordered so an explicitly configured value always beats whatever CLI happens to be
+    installed — the same precedence `scripts/verify_cited_identifier.py::github_token`
+    ships, with one deliberate difference: that resolver also accepts `GH_TOKEN`, while
+    this scanner's env arm stays `GITHUB_TOKEN`-only, because that is the precedence
+    `tests/test_intel_pipeline_scorer.py` has pinned since #570 and a second env spelling
+    would silently outrank a `token:` a human wrote down.
+
+    None when all three arms are empty — the honest unauthenticated state, not an error,
+    and the state `scan_github_repos` names in its run output.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        return token
+
+    token = _config_token(Path(config_path) if config_path else CONFIG_PATH)
+    if token:
+        return token
+
+    return _gh_token(gh_cli()) or None
 
 
 def _api_headers(token: Optional[str] = None) -> Dict[str, str]:
@@ -291,9 +355,9 @@ def scan_github_repos() -> List[FeedItem]:
         return []
 
     if load_github_token() is None:
-        print(f"No GitHub token configured (GITHUB_TOKEN, or `token:` in {CONFIG_PATH}) "
-              f"— running against the unauthenticated {UNAUTHENTICATED_HOURLY_LIMIT} "
-              f"requests/hour ceiling")
+        print(f"No GitHub token configured (GITHUB_TOKEN, `token:` in {CONFIG_PATH}, "
+              f"or `gh auth token`) — running against the unauthenticated "
+              f"{UNAUTHENTICATED_HOURLY_LIMIT} requests/hour ceiling")
 
     # Load current state
     current_state = state.load_state()
@@ -446,9 +510,11 @@ def scan_github_repos() -> List[FeedItem]:
         for repo_key, detail in rate_limited.items():
             print(f"GITHUB_RATE_LIMIT {repo_key} — {detail}")
         print("GITHUB_RATE_LIMIT: 0 items from the repos above is a quota failure, "
-              "NOT a quiet day. Set GITHUB_TOKEN or `token:` in "
-              f"{CONFIG_PATH} to raise the ceiling from "
-              f"{UNAUTHENTICATED_HOURLY_LIMIT} to 5000 requests/hour.")
+              "NOT a quiet day. Set GITHUB_TOKEN, or `token:` in "
+              f"{CONFIG_PATH}, or sign in to `gh`, to raise the ceiling from "
+              f"{UNAUTHENTICATED_HOURLY_LIMIT} to 5000 requests/hour; if the scan was "
+              "already authenticated, this is GitHub's own limit and not the anonymous "
+              "one.")
 
     # Save raw items
     if all_items:
