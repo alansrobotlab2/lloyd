@@ -1509,10 +1509,14 @@ def test_the_2e_vault_check_is_scoped_to_the_two_governed_stems_and_shields_the_
     the defect the check exists for, and additionally catches a dated copy a mis-rooted
     cycle archived into the vault.
 
-    The shield is as load-bearing as the scoping. Both `autonomous-systems-*` files came
-    from the same `7c0fd930`, and whether they are another contract's governed pointers
-    or knowledge notes with a pointer-shaped name is a ruling no round can make; a §2e
-    run that read only "a -latest.md in the vault is a defect" would delete them.
+    The shield is as load-bearing as the scoping, and the owed-check ruling of 2026-11-07 on
+    #3751 is why the pages it shields are settled rather than merely tolerated: it types all
+    four `projects/ai/tools/autonomous-systems-*` pages as KNOWLEDGE NOTES, not another
+    contract's governed pointers, and keeps every one of them in place — never folded, never
+    moved, never deleted. Both `autonomous-systems-*` files came from the same `7c0fd930`,
+    and the shield, not that ruling, is what stops the deletion from here — this check never
+    reads #3751, so a §2e run that read only "a -latest.md in the vault is a defect" would
+    delete the two `autonomous-systems-*-latest.md` pages.
     """
     body = _flat_prose(_kw_step())
 
@@ -1533,3 +1537,38 @@ def test_the_2e_vault_check_is_scoped_to_the_two_governed_stems_and_shields_the_
         "reader cannot tell shielded from overlooked")
     assert "names it in its completion note" in body, (
         "the run is left without a what-to-do-instead: name it, do not delete it")
+
+
+def test_the_shield_docstring_records_the_disposition_as_ruled():
+    """#3984: a closed question may not stay phrased as an open one.
+
+    This file used to call the two pages' classification a ruling no pass of this loop
+    could get made, and the owed-check ruling of 2026-11-07 on #3751 answers it: the four
+    `projects/ai/tools/autonomous-systems-*` pages are KNOWLEDGE NOTES and stay in place.
+    The stale sentence was never a claim about which mechanism is allowed to rule — it was
+    the sentence a later §2e round reads for why these pages are shielded, and it left the
+    disposition looking undetermined after it had been settled. So the pin holds both
+    halves that replaced it: the attribution, and the hazard that makes the shield
+    necessary. Precedent for retiring prose this way is
+    `test_the_deferral_about_the_dead_stem_no_longer_survives_in_the_prose`.
+
+    The retired wording is assembled below instead of pasted, because this item's
+    retirement check greps this whole file for that five-word phrase: a pin that quoted it
+    whole would fail the check it exists to prove, and the retirement could never be
+    verified. Both halves of clause 1 hold only because the literal is split.
+    """
+    stale = "no round can " "make"
+    doc = (test_the_2e_vault_check_is_scoped_to_the_two_governed_stems_and_shields_the_other_two
+           .__doc__ or "")
+    assert stale not in doc, (
+        "the shield is phrased as an unresolved question again — #3751 settled it on "
+        "2026-11-07 and the next §2e round reads this docstring for the answer")
+    assert "owed-check ruling of 2026-11-07" in doc, doc
+    assert "#3751" in doc, "the disposition has to name the ruling that closed it"
+    assert "knowledge notes" in doc.lower(), (
+        "the ruling's own word for the four pages is gone, so a reader cannot tell what "
+        "they are instead of governed pointers")
+    assert "load-bearing" in doc, "the shield's weight against the scoping is the point"
+    assert "a -latest.md in the vault is a defect" in doc, (
+        "the hazard the shield guards is unstated: a §2e run reading only that line would "
+        "delete the two autonomous-systems-*-latest.md pages")
