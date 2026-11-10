@@ -162,7 +162,7 @@ instant — no measurement, no stamp, rather than a 1969 date offered as evidenc
   is never the one that waits.
 - **`content` is truncated at 800 chars** when rendered, with an ellipsis. The
   summary line has its own, tighter cap the page did not used to state:
-  `AMBIENT_SUMMARY_MAX = 240` (`app/prefetch.py:146`), marked with
+  `AMBIENT_SUMMARY_MAX = 240` (`app/prefetch.py:222`), marked with
   ` [... truncated]`, applied to every ambient line — and the next-session
   channel caps its own fields at 720 / 2000 before a note is ever stored
   (`NEXT_SESSION_SUMMARY_MAX` / `NEXT_SESSION_CONTENT_MAX`,

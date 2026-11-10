@@ -96,6 +96,14 @@ collections:
   architecture:
     path: /home/alansrobotlab/obsidian/architecture
     pattern: "**/*.md"
+  # The lloyd checkout's own architecture docs (#1662 option (a), 2026-11-10).
+  # Named apart from `architecture` (the vault's April-era copies) so a hit's path
+  # says which it is; vault_read serves `lloyd-architecture/<doc>.md` from the
+  # checkout. Which of the two recall names is `vault_search.architecture`
+  # (eval/measurements/architecture-collection-2026-11-10.md).
+  lloyd-architecture:
+    path: /home/alansrobotlab/lloyd/architecture
+    pattern: "*.md"
 models:
   embed: hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
   generate: hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf

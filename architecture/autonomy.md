@@ -794,7 +794,7 @@ each naming the same directory — and the corpus the probe grades is
 naming an undelivered tool reddens the next round's base probe rather than the turn that
 wrote it. Reopen this ruling on one observable: that sweep yields an offender with no
 `guard="autonomy_body_rail"` denial row beside it — `agent_mcp/builtin_fs.py:572` and
-`agent_mcp/vault.py:1849` write such a row on each closed lane — because an offender that
+`agent_mcp/vault.py:2057` write such a row on each closed lane — because an offender that
 reached the corpus unrefused means the lane is producing bodies nobody refused, which is
 not what accepting it claimed.
 

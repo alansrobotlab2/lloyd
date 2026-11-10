@@ -1449,7 +1449,7 @@ def test_the_dead_detail_mode_still_answers_as_the_no_argument_call(tmp_path, mo
 
     plain = vault._vault_overview({})
     assert plain == {"total_files": 3, "segments": {
-        s: {"memory": 2, "knowledge": 1}.get(s, 0) for s in vault.VAULT_SEGMENTS}}, plain
+        s: {"memory": 2, "knowledge": 1}.get(s, 0) for s in vault.VAULT_DIR_SEGMENTS}}, plain
     assert vault._vault_overview({"detail": "hubs"}) == plain, (
         "the undeclared key now changes the answer, which is a different "
         "contract than the one this tool has always had")

@@ -26,6 +26,10 @@ import app.routers.voice as voice  # noqa: E402
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
+    # These pin the speaking reminder against the bare text; the `<now>` turn
+    # tail (prompt_layout.clock) is pinned in test_prefetch_query_shape_1110.
+    from app import prompt_layout
+    monkeypatch.setattr(prompt_layout, "clock_enabled", lambda: False)
     captured = {}
 
     async def fake_enqueue(session_id, turn, consumer_factory=None):

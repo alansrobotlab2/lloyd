@@ -710,7 +710,16 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_id = session_id.replace("/", "--")[:30]
     out_path = out_dir / f"{safe_id}.md"
-    out_path.write_text("\n".join(lines), encoding="utf-8")
+    rendered = "\n".join(lines)
+    # Written only when the text changed: the export is re-rendered on every
+    # capture pass now (see `_post_session_capture`), and an unchanged rewrite
+    # would still wake qmd-watcher into an update + embed cycle.
+    try:
+        if out_path.read_text(encoding="utf-8") == rendered:
+            return out_path
+    except FileNotFoundError:
+        pass
+    out_path.write_text(rendered, encoding="utf-8")
     return out_path
 
 
@@ -753,6 +762,17 @@ async def _post_session_capture(session_id: str):
 
         if not data.get("captured"):
             await _capture_summary_once(session_id, data)
+        else:
+            # The export follows the conversation. It used to be written only
+            # inside `_capture_summary_once`, i.e. once, on turn 1 — so the
+            # sessions collection qmd indexes held each chat's opening and
+            # nothing after it (2026-11-10: 47 of 106 exports with a surviving
+            # JSON were short, 163 of 301 user turns unsearchable). No model
+            # call here; the write is skipped when nothing changed.
+            try:
+                _export_session_markdown(session_id, data)
+            except Exception as me:
+                logger.warning(f"Session markdown re-export failed for {session_id}: {me}")
 
         # Export and summary above run for every platform; writing facts into
         # the knowledge graph does not — see the platform note inside

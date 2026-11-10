@@ -1485,7 +1485,16 @@ def main(argv: list[str] | None = None) -> int:
           "prints a QUESTION BREAK line naming the ids — an annotation like the "
           "fifth point's, never a refusal, but a pair carrying it is never an "
           "admissible verdict; the SUMMARY line counts how many transitions it could "
-          "compare, so a zero there is a measurement and not blindness.")
+          "compare, so a zero there is a measurement and not blindness. And a seventh "
+          "re-base point, which IS a corpus change and the undoing of the sixth: on "
+          "2026-11-10 the qmd collection `lloyd-architecture` (the checkout's own "
+          "architecture docs) was deployed and joined to the recall's segment list "
+          "(`vault_search.architecture: both`), and the same five queries came back "
+          "(81 -> 86 gold queries). The night after that landing is the first scored "
+          "on 86; do not compare absolute DOCUMENT-leg means across it. It arrives as "
+          "the id-join ERROR line, naming the five ids present only in the later "
+          "night. The paired measurement that licensed it is "
+          "eval/measurements/architecture-collection-2026-11-10.md.")
 
     by_label = {n.label: n for n in nights}
     claims = [] if args.no_claims else list(CLAIMS) + [_parse_claim(c) for c in args.claim]

@@ -37,8 +37,10 @@ keep this module's call sites and external consumers stable.
 """
 
 import datetime
+import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 from mcp.types import Tool
 
@@ -56,6 +58,8 @@ from app.entity_naming import (
     schema_identity as _schema_identity,
 )
 from agent_mcp import fact_write_gate
+
+logger = logging.getLogger("agent_mcp.facts")
 from agent_mcp._shared import (
     FACTS_ROOT,
     ErrorCode,
@@ -64,6 +68,7 @@ from agent_mcp._shared import (
     _find_entity_dir,
     _invalidate_entity_dirs_cache,
     _parse_fact_frontmatter,
+    _split_fact_frontmatter,
     _resolve_entity,
     _token_overlap,
     _wrap,
@@ -87,7 +92,6 @@ from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     fact_score as _fact_score,
     get_entity_edge_counts as _get_entity_edge_counts,
     get_facts_sync as _get_facts_sync,
-    graph_expand_entities as _graph_expand_entities,
     graph_weighted_neighbors as _graph_weighted_neighbors,
     invalidate_relationships_cache as _invalidate_relationships_cache,
     fact_source_file as _fact_source_file,
@@ -156,18 +160,33 @@ def _opposing_reason(t1: str, t2: str) -> str | None:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _reindex_files(paths) -> None:
-    """Re-read written fact files into the store's index.
+#: What actually rebuilds `facts_idx` from the markdown. There is no `kg
+#: reindex` command, which is what the warnings used to name.
+_FULL_REINDEX_HINT = ("a full reindex — app.kg_store.store().facts_idx.reindex() — "
+                      "or the next write to the same file brings it back")
+
+
+def _reindex_files(paths) -> Optional[str]:
+    """Re-read written fact files into the store's index; a warning when it could not.
 
     Every writer of a fact file owes the index this call: the markdown is
-    the fact layer, but `facts_idx` is what the router, `fact_get` and
-    the health report actually read. A write that skips it leaves the two
-    disagreeing until the next full reindex.
+    the fact layer, but `facts_idx` is what the router, the entity UI and the
+    health report read. A write that skips it leaves the two disagreeing
+    until the next full reindex.
+
+    An unavailable store is not a failed write — the markdown already landed —
+    but it is not nothing either: it used to be a bare `pass`, so
+    `fact_invalidate` and `fact_resolve_apply` reported a clean success while
+    the index went on serving the facts they had just retired. The caller puts
+    the returned string in its result as `warning`, as `fact_add` does.
     """
     try:
         _store().facts_idx.reindex(list(paths), root=FACTS_ROOT)
-    except StoreUnavailable:
-        pass          # markdown is written; `kg reindex` rebuilds the index
+    except StoreUnavailable as exc:
+        logger.warning("facts: index not updated after a fact write (%s)", exc)
+        return (f"facts written; store index not updated ({exc}); "
+                f"{_FULL_REINDEX_HINT}")
+    return None
 
 
 # ── write-time duplicate refusal (#499) ──────────────────────────────────────
@@ -404,8 +423,7 @@ def _apply_fact_marks(marks: dict, files_to_scan, *, field: str, stamp: str,
                 if stop_after_first:
                     break
             if changed:
-                body_start = content.find("---", 3)
-                body = content[body_start + 3:] if body_start != -1 else ""
+                _, body = _split_fact_frontmatter(content)
                 atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
                 touched.append(Path(fact_file))
 
@@ -419,12 +437,14 @@ def _apply_fact_marks(marks: dict, files_to_scan, *, field: str, stamp: str,
         unapplied.append({"id": None, "why": "; ".join(sorted(by_text))[:120],
                           "reason": "no fact text in the scanned files matched"})
 
-    if touched:
-        _reindex_files(touched)
-    return {"marked": len(matched), "matched_facts": matched,
-            "unapplied": unapplied, "already_marked": already_marked,
-            "files_touched": [str(t) for t in touched],
-            "files_scanned": sorted(seen_files)}
+    index_warning = _reindex_files(touched) if touched else None
+    out = {"marked": len(matched), "matched_facts": matched,
+           "unapplied": unapplied, "already_marked": already_marked,
+           "files_touched": [str(t) for t in touched],
+           "files_scanned": sorted(seen_files)}
+    if index_warning:
+        out["index_warning"] = index_warning
+    return out
 
 
 def _detect_contradictions_sync(entity: str, category: str = None, *,
@@ -722,8 +742,9 @@ def _fact_add(params: dict) -> dict:
             st.facts_idx.update_file(fact_file, root=FACTS_ROOT, register_entities=False)
         except StoreUnavailable as exc:
             # The markdown write already succeeded and is the fact layer; the
-            # index is derived and `kg reindex` rebuilds it. Say so, don't fail.
-            result["warning"] = f"fact written; store index not updated ({exc})"
+            # index is derived and rebuilt from it. Say so, don't fail.
+            result["warning"] = (f"fact written; store index not updated ({exc}); "
+                                 f"{_FULL_REINDEX_HINT}")
         if entity != raw_entity:
             result["resolved_from"] = raw_entity
         return result
@@ -864,6 +885,15 @@ def _contradiction_trace(winner: dict, winner_entity: str, reason: str,
     }
 
 
+def _writes_disabled_refusal(what: str, **extra) -> dict:
+    """The rebuild freeze, for every fact-file writer (one message, one rule)."""
+    return _err(
+        f"{what} are disabled (config.yaml knowledge_graph.write_enabled = false) "
+        "while a knowledge-graph rebuild is in progress; a write now would land "
+        "in a tree about to be replaced.",
+        ErrorCode.INTERNAL, **extra)
+
+
 def _fact_resolve_apply(params: dict) -> dict:
     """Mark the lower-confidence side of each contradictory pair `invalid_at`.
 
@@ -885,6 +915,11 @@ def _fact_resolve_apply(params: dict) -> dict:
     refuse it, a sessionless call is refused, and the pool will not re-send it
     after a dropped transport.
     """
+    # The rebuild freeze covers every writer of a fact file, not only the two
+    # that add: a mark written into the tree a rebuild is about to swap out is
+    # lost at the swap exactly as an added fact would be.
+    if not _writes_enabled():
+        return _writes_disabled_refusal("fact marks")
     scanned = _resolve_scan(params)
     if "error" in scanned:
         return scanned
@@ -943,6 +978,8 @@ def _fact_resolve_apply(params: dict) -> dict:
                # Which facts, in which files. A count without the list cannot be
                # audited, and this change exists because a count was trusted.
                "facts": applied["matched_facts"]}
+        if applied.get("index_warning"):
+            out["warning"] = applied["index_warning"]
         if untraceable:
             out["untraceable"] = [
                 {"id": None, "why": "",
@@ -966,6 +1003,8 @@ def _fact_resolve_apply(params: dict) -> dict:
 
 def _fact_invalidate(params: dict) -> dict:
     """Expire facts that are no longer current (were true, now outdated)."""
+    if not _writes_enabled():
+        return _writes_disabled_refusal("fact marks", expired_count=0)
     entity = (params.get("entity") or "").strip()
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM, expired_count=0)
@@ -1019,16 +1058,18 @@ def _fact_invalidate(params: dict) -> dict:
                     expired_count += 1
                     matched_facts.append({"id": f.get("id"), "fact": f.get("fact", "")[:80]})
                 if changed:
-                    body_start = content.find("---", 3)
-                    body = content[body_start + 3:] if body_start != -1 else ""
+                    _, body = _split_fact_frontmatter(content)
                     atomic_write_text(fact_file, _write_fact_frontmatter(frontmatter) + body)
                     touched.append(fact_file)
         # The index is what the router and vault_recall read. Without this an
         # expired fact went on being served as current until the next full
         # reindex — the markdown said expired, the Memory page said active.
-        if touched:
-            _reindex_files(touched)
-        return {"success": True, "entity": resolved, "expired_count": expired_count, "matched_facts": matched_facts}
+        out = {"success": True, "entity": resolved, "expired_count": expired_count,
+               "matched_facts": matched_facts}
+        index_warning = _reindex_files(touched) if touched else None
+        if index_warning:
+            out["warning"] = index_warning
+        return out
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, expired_count=0)
 
@@ -1090,17 +1131,59 @@ def _fact_relate(params: dict) -> dict:
         return _err(str(exc), ErrorCode.INTERNAL)
 
 
+#: `fact_relationships` page size. Every active edge used to come back, each with
+#: every column: `Lloyd` has 1,363 of them (2026-11-10) — about 840 KB of JSON,
+#: which the harness spills to a file, so the model got a file pointer for
+#: exactly the entities it most needed a ranked answer about.
+RELATIONSHIPS_DEFAULT_LIMIT = 40
+RELATIONSHIPS_MAX_LIMIT = 200
+#: `evidence` is up to 500 chars in the store; enough to judge an edge by is less.
+RELATIONSHIPS_EVIDENCE_CHARS = 200
+#: What a reader of an edge needs. Dropped: classifier_meta / classifier_model
+#: (the classifier's own bookkeeping), extra, superseded_edge_id, and the
+#: expiry columns, which are NULL on every active edge.
+_RELATIONSHIP_FIELDS = ("id", "source", "target", "type", "confidence",
+                        "provenance", "origin", "created_at", "source_doc",
+                        "evidence")
+
+
+def _trim_edge(edge: dict) -> dict:
+    out = {k: edge.get(k) for k in _RELATIONSHIP_FIELDS if edge.get(k) is not None}
+    ev = out.get("evidence")
+    if isinstance(ev, str) and len(ev) > RELATIONSHIPS_EVIDENCE_CHARS:
+        out["evidence"] = ev[:RELATIONSHIPS_EVIDENCE_CHARS].rstrip() + "…"
+    return out
+
+
 def _fact_relationships(params: dict) -> dict:
-    """Get all relationships for an entity (inbound + outbound)."""
+    """An entity's active edges, strongest first, one page of them.
+
+    Ordered by confidence, then newest first, and cut at `limit`. `count` is
+    every matching edge and `by_type` counts them per type, so a caller that
+    got a truncated page can narrow with `type` or `direction` instead of
+    guessing what it missed. `type` is canonicalised the way `fact_relate`
+    canonicalises it: `depends-on` reaches the `depends_on` edges, where it
+    used to match nothing and return an empty list as if there were none.
+    """
     entity = params.get("entity", "").strip()
     if not entity:
         return _err("entity is required", ErrorCode.MISSING_PARAM, edges=[])
     direction = params.get("direction", "both")
-    rel_type = params.get("type") or None
+    raw_type = (params.get("type") or "").strip()
+    rel_type = canonical_edge_type(raw_type) if raw_type else None
+    if rel_type is not None and rel_type not in EDGE_TYPES:
+        return _err(
+            f"type {raw_type!r} is not an edge type; use one of: "
+            + ", ".join(sorted(EDGE_TYPES)),
+            ErrorCode.INVALID_PARAM, edges=[])
     # The confidence floor `fact_neighbors` applied during its walk (#1077).
-    # 0.0 is `edges.active`'s own default, so a call that passes nothing gets
-    # byte-for-byte the edges it got before the removed tool existed.
+    # 0.0 is `edges.active`'s own default: every edge, whatever its confidence.
     min_confidence = float(params.get("min_confidence", 0.0))
+    try:
+        limit = int(params.get("limit", RELATIONSHIPS_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        limit = RELATIONSHIPS_DEFAULT_LIMIT
+    limit = max(1, min(limit, RELATIONSHIPS_MAX_LIMIT))
     try:
         resolved, _ = _resolve_entity(entity, mode="read")
         st = _store()
@@ -1114,7 +1197,19 @@ def _fact_relationships(params: dict) -> dict:
         else:
             edges = st.edges.active(either=resolved, types=types,
                                     min_confidence=min_confidence)
-        return {"entity": resolved, "edges": edges, "count": len(edges)}
+        by_type: dict[str, int] = {}
+        for e in edges:
+            by_type[e.get("type") or "?"] = by_type.get(e.get("type") or "?", 0) + 1
+        # Two stable sorts: newest first, then confidence descending on top.
+        edges = sorted(edges, key=lambda e: str(e.get("created_at") or ""), reverse=True)
+        edges = sorted(edges, key=lambda e: float(e.get("confidence") or 0.0), reverse=True)
+        page = [_trim_edge(e) for e in edges[:limit]]
+        out = {"entity": resolved, "edges": page, "count": len(edges),
+               "returned": len(page), "truncated": len(edges) > len(page),
+               "by_type": dict(sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0])))}
+        if rel_type and raw_type != rel_type:
+            out["type"] = rel_type
+        return out
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, edges=[])
 
@@ -1127,8 +1222,8 @@ async def list_tools():
     return [
         Tool(name="fact_get", description=f"Use to read what is known about one entity; for a question across documents use vault_recall instead. Returns the entity's facts, at most {FACT_RANK_CAP_SEED} per category (most recent, or most relevant to `query`); a capped category is named in truncated_categories.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference)"}, "query": {"type": "string", "description": "Rank each category by relevance to this text instead of recency"}, "limit_per_category": {"type": "integer", "description": f"Facts kept per category (default {FACT_RANK_CAP_SEED}; 0 = no cap)"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
-        Tool(name="fact_add", description="Add a structured fact for a named entity and category. Writes a line to the entity's markdown fact file and indexes it; use one clear sentence per call rather than a paragraph. An entity that already carries that text verbatim is refused: the result reports success with skipped=true and the surviving copy in `duplicate_of`, and nothing is written, whatever category was asked for.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference)"}, "fact": {"type": "string", "description": "The fact, as one self-contained sentence that will still make sense read on its own"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the fact (default 0.9); the weaker side loses a contradiction"}, "valid_at": {"type": "string", "description": "ISO date the fact started being true (default: today)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this fact came from, for provenance"}, "entity_type": {"type": "string", "enum": list(_SCHEMA_TYPES), "description": "What kind of thing a NEW entity is; ignored for one that already exists (default: derived from the name)"}}, "required": ["entity", "category", "fact"]}),
+        Tool(name="fact_add", description="Add a fact for a named entity and category, written to its fact file and indexed; one sentence per call rather than a paragraph. Text the entity already carries verbatim is refused: success with skipped=true, the surviving copy in `duplicate_of`, nothing written.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference)"}, "fact": {"type": "string", "description": "The fact, as one self-contained sentence that will still make sense read on its own"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the fact (default 0.9); the weaker side loses a contradiction"}, "valid_at": {"type": "string", "description": "ISO date the fact started being true. Omit when unknown: a fact without one counts as true at every `as_of`"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this fact came from, for provenance"}, "entity_type": {"type": "string", "enum": list(_SCHEMA_TYPES), "description": "Kind of a NEW entity; ignored for an existing one"}}, "required": ["entity", "category", "fact"]}),
         Tool(name="fact_resolve", description=f"Report contradictions between an entity's facts; it marks nothing — `fact_resolve_apply` is the call that marks. Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to scan a slice.", inputSchema={
             "type": "object", "properties": {
                 "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},
@@ -1141,10 +1236,10 @@ async def list_tools():
             }, "required": ["entity"]}),
         Tool(name="fact_invalidate", description="Expire facts that stopped being true by setting expired_at. Needs a scope, `fact_substring` or `category`: an unscoped call is refused. For a fact that lost a contradiction, use fact_resolve_apply instead.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference)"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when the fact stopped being true (default: today)"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity"]}),
-        Tool(name="fact_relate", description="Add a typed relationship edge between two entities in the knowledge graph. Edges are expired rather than deleted, so a wrong edge is recoverable.", inputSchema={
-            "type": "object", "properties": {"source": {"type": "string", "description": "Entity the edge points from (alias-resolved)"}, "target": {"type": "string", "description": "Entity the edge points to (alias-resolved)"}, "type": {"type": "string", "description": "Relationship type (e.g. built_on, uses, part_of, related_to)"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the edge (default 0.9)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the edge was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this edge came from, for provenance"}}, "required": ["source", "target", "type"]}),
-        Tool(name="fact_relationships", description="Use to list an entity's typed edges, in and out; for its own facts use fact_get instead. Across documents and facts, use vault_recall. `min_confidence` drops weaker edges (default 0.0 — every edge, whatever its confidence).", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "direction": {"type": "string", "enum": ["in", "out", "both"], "description": "Edge direction to return (default both)"}, "type": {"type": "string", "description": "Only return edges of this relationship type"}, "min_confidence": {"type": "number", "description": "Drop edges below this confidence (default 0.0 — keep all of them)"}}, "required": ["entity"]}),
+        Tool(name="fact_relate", description="Use only when a relationship is stated or evident: adds a typed edge between two entities, with `evidence`. No tool here expires an edge.", inputSchema={
+            "type": "object", "properties": {"source": {"type": "string", "description": "Entity the edge points from (alias-resolved)"}, "target": {"type": "string", "description": "Entity the edge points to (alias-resolved)"}, "type": {"type": "string", "description": "Relationship type (e.g. built_on, uses, part_of, related_to)"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the edge (default 0.9)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the edge was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this edge came from, for provenance"}, "evidence": {"type": "string", "description": "The sentence or reason that establishes the relationship"}}, "required": ["source", "target", "type"]}),
+        Tool(name="fact_relationships", description="Use to list an entity's typed edges; for its own facts use fact_get. Strongest first (confidence, then newest), at most `limit`; `count` and `by_type` cover every match, so narrow with `type` or `direction` rather than raising the limit.", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "direction": {"type": "string", "enum": ["in", "out", "both"], "description": "Edge direction to return (default both)"}, "type": {"type": "string", "description": "Only edges of this type (e.g. uses, part_of; spelling variants accepted)"}, "min_confidence": {"type": "number", "description": "Drop edges below this confidence (default 0.0)"}, "limit": {"type": "integer", "description": f"Edges returned (default {RELATIONSHIPS_DEFAULT_LIMIT}, max {RELATIONSHIPS_MAX_LIMIT})"}}, "required": ["entity"]}),
     ]
 
 

@@ -784,13 +784,15 @@ whole collections — so check the nightly `config_drift` entry in
 `~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-<date>.json` first, and re-sync the
 other way (below) if it reports a difference.
 
-It defines **14 collections**, every one of which is live: 12 rooted under
+It defines **15 collections**, every one of which is live: 12 rooted under
 `~/obsidian` (`memory`, `knowledge`, `projects`, `lloyd`, `personal`, `work`,
-`skills`, `people`, `subliminal`, `backlog`, `autonomy`, `architecture`) plus
-two that point into the data root (`~/lloyd-data`, [data-home](architecture/data-home.md)) —
+`skills`, `people`, `subliminal`, `backlog`, `autonomy`, `architecture`), one
+rooted in this checkout, and two that point into the data root (`~/lloyd-data`,
+[data-home](architecture/data-home.md)) —
 
 | collection | path | what it is |
 |---|---|---|
+| `lloyd-architecture` | `~/lloyd/architecture` | this checkout's own `architecture/*.md` (top level only), added 2026-11-10; the recall asks for it beside the vault's `architecture` when `vault_search.architecture` is `both` (eval/measurements/architecture-collection-2026-11-10.md) |
 | `autonomy-runs` | `~/lloyd-data/autonomy-runs` | task run records, `*/run_*.md` |
 | `sessions` | `~/lloyd-data/_pipeline/vault-derived/sessions` | the session-recall corpus: `app/post_capture.py` writes each finished session there through `app.paths.VAULT_SESSIONS_DIR`, which is why qmd indexes that path and not `~/obsidian/sessions` (a directory that exists but is empty) |
 

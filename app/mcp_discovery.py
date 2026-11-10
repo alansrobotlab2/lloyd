@@ -44,6 +44,7 @@ _TOOL_EXACT_CATEGORY: dict[str, str] = {
     "Glob": "Filesystem",
     "Task": "Agents",
     "session_recall": "Memory: Session",
+    "session_read": "Memory: Session",
     "session_inject_context": "Memory: Session",
     "ambient_decide": "Ambient",
 }

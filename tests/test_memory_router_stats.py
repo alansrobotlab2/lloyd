@@ -37,6 +37,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent_mcp.vault import VAULT_SEGMENTS
+# The walk counts the vault's own directories; since 2026-11-10 the recall's
+# list can also name `lloyd-architecture`, which lives in the checkout.
+from agent_mcp.vault import VAULT_DIR_SEGMENTS
 from app.routers import memory as MR
 
 # The two readings #3503 replaces the stale budget note with, in both the module
@@ -132,7 +135,7 @@ def vault(tmp_path, monkeypatch):
     `test_memory_router_frontmatter.py`'s fixture makes, for the same reason.
     """
     root = tmp_path / "obsidian"
-    for segment in VAULT_SEGMENTS:
+    for segment in VAULT_DIR_SEGMENTS:
         seg_dir = root / segment
         seg_dir.mkdir(parents=True)
         (seg_dir / "note.md").write_text(
@@ -167,9 +170,9 @@ def test_doc_count_counts_backlog_and_architecture_notes(client, vault):
     body = client.get("/api/memory/stats").json()
     assert body["types"]["backlog"] == 1, "a backlog note is invisible to the stats walk"
     assert body["types"]["architecture"] == 1, "an architecture note is invisible to it"
-    assert body["docCount"] == len(VAULT_SEGMENTS), (
+    assert body["docCount"] == len(VAULT_DIR_SEGMENTS), (
         f"`docCount` is {body['docCount']} over a vault of one note in each of the "
-        f"{len(VAULT_SEGMENTS)} searchable segments; the walk's segment set is "
+        f"{len(VAULT_DIR_SEGMENTS)} searchable segments; the walk's segment set is "
         f"{sorted(body['types'])}")
 
 
@@ -185,7 +188,7 @@ def test_stats_tags_come_from_the_segments_the_search_reaches(client, vault):
     _await_tally()
     body = client.get("/api/memory/stats").json()
     counts = {t["tag"]: t["count"] for t in body["topTags"]}
-    assert body["tagCount"] == len(VAULT_SEGMENTS), (
+    assert body["tagCount"] == len(VAULT_DIR_SEGMENTS), (
         f"the walk saw tags from {sorted(counts)}, not one per searchable segment")
     for segment in ("backlog", "architecture"):
         assert counts.get(f"{segment}-tag") == 1, (
@@ -309,21 +312,21 @@ def test_the_stats_route_reads_no_note_to_answer_the_counts(client, vault, vault
         f"the stats request read {len(vault_reads_denied)} note(s): {vault_reads_denied[:3]}. "
         "`docCount`/`types` are supposed to come from the signature walk, which stats "
         "files and never opens one")
-    assert body["docCount"] == len(VAULT_SEGMENTS)
+    assert body["docCount"] == len(VAULT_DIR_SEGMENTS)
     assert body["types"]["backlog"] == 1 and body["types"]["architecture"] == 1
     assert len(kicks) == 1, (
         f"a cold signature queued {len(kicks)} tag rebuilds; clause 3 wants the parse "
         "handed off, clause 4's flag wants exactly one in flight")
-    assert len(kicks[0]) == len(VAULT_SEGMENTS)
+    assert len(kicks[0]) == len(VAULT_DIR_SEGMENTS)
 
     # Positive control, through the real builder: the same guard fires on reads the
     # route no longer makes. It swallows the AssertionError the way it swallows any
     # unreadable note, so the evidence is the recorded paths, not a raise — and the
     # count is the builder's own walk of this vault.
     MR._build_stats_payload()
-    assert len(vault_reads_denied) == len(VAULT_SEGMENTS), (
+    assert len(vault_reads_denied) == len(VAULT_DIR_SEGMENTS), (
         f"the guard recorded {len(vault_reads_denied)} reads from a builder that walks "
-        f"one note in each of {len(VAULT_SEGMENTS)} segments, so it was not recording "
+        f"one note in each of {len(VAULT_DIR_SEGMENTS)} segments, so it was not recording "
         "and the empty assertion above proved nothing")
 
 
@@ -348,7 +351,7 @@ def test_the_signature_derived_map_equals_the_walked_one(client, vault):
         f"{walked['types']} over the same vault")
     assert served["docCount"] == walked["docCount"]
     assert served["types"]["backlog"] == 1 and served["types"]["architecture"] == 1
-    assert served["docCount"] == len(VAULT_SEGMENTS)
+    assert served["docCount"] == len(VAULT_DIR_SEGMENTS)
 
 
 def test_a_segment_directory_that_is_missing_stays_absent_from_types(client, vault):
@@ -373,7 +376,7 @@ def test_a_segment_directory_that_is_missing_stays_absent_from_types(client, vau
     assert missing not in served["types"], (
         "`types` serves a 0 for a directory that does not exist, which the Memory tab "
         "renders as an empty segment rather than an absent one")
-    assert served["docCount"] == walked["docCount"] == len(VAULT_SEGMENTS) - 1
+    assert served["docCount"] == walked["docCount"] == len(VAULT_DIR_SEGMENTS) - 1
 
 
 def test_a_note_that_cannot_be_statted_is_counted_as_a_note_that_is_read(client, vault, monkeypatch):
@@ -420,14 +423,14 @@ def test_the_first_request_answers_zeros_and_the_tally_arrives_after_it(client, 
     first = client.get("/api/memory/stats").json()
     assert first["tagCount"] == 0, "a cold process reported a tag count it never built"
     assert first["topTags"] == []
-    assert first["docCount"] == len(VAULT_SEGMENTS), (
+    assert first["docCount"] == len(VAULT_DIR_SEGMENTS), (
         "the counts waited for the tag build; clause 1 says they never do")
     assert first["types"]["backlog"] == 1
 
     _await_tally()
     second = client.get("/api/memory/stats").json()
-    assert second["tagCount"] == len(VAULT_SEGMENTS)
-    assert second["docCount"] == len(VAULT_SEGMENTS)
+    assert second["tagCount"] == len(VAULT_DIR_SEGMENTS)
+    assert second["docCount"] == len(VAULT_DIR_SEGMENTS)
 
 
 def test_a_stale_signature_gets_the_previous_tally_while_the_build_is_parked(client, vault, monkeypatch):
@@ -483,15 +486,15 @@ def test_a_stale_signature_gets_the_previous_tally_while_the_build_is_parked(cli
     # this response was never allowed to have.
     assert enter.wait(timeout=10), "the rebuild for the new signature never started"
     assert MR._STATS_CACHE["in_flight"] is True, "the flag is clear while a build is parked"
-    assert body["tagCount"] == len(VAULT_SEGMENTS), (
+    assert body["tagCount"] == len(VAULT_DIR_SEGMENTS), (
         f"a stale signature served tagCount={body['tagCount']}; it must serve the last "
-        f"completed tally ({len(VAULT_SEGMENTS)}) and let the rebuild land later")
-    assert body["docCount"] == len(VAULT_SEGMENTS) + 1, (
+        f"completed tally ({len(VAULT_DIR_SEGMENTS)}) and let the rebuild land later")
+    assert body["docCount"] == len(VAULT_DIR_SEGMENTS) + 1, (
         "the counts went stale with the tally; they come from this request's walk")
 
     release.set()
-    _await_tally(len(VAULT_SEGMENTS) + 1)
-    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_SEGMENTS) + 1
+    _await_tally(len(VAULT_DIR_SEGMENTS) + 1)
+    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_DIR_SEGMENTS) + 1
     assert MR._STATS_CACHE["in_flight"] is False
 
 
@@ -534,12 +537,12 @@ def test_a_rebuild_that_raises_clears_the_in_flight_flag_and_is_retried(client, 
     (vault / "backlog" / "later.md").write_text(
         "---\ntags: [late-tag]\n---\n\n# Later\n", encoding="utf-8")
     body = client.get("/api/memory/stats").json()
-    assert body["docCount"] == len(VAULT_SEGMENTS) + 1, (
+    assert body["docCount"] == len(VAULT_DIR_SEGMENTS) + 1, (
         "the counts stopped moving after a failed build; they are independent of it")
-    _await_tally(len(VAULT_SEGMENTS) + 1)
+    _await_tally(len(VAULT_DIR_SEGMENTS) + 1)
     assert calls["n"] == 2, (
         f"the tally was not retried on the next signature change ({calls['n']} builds)")
-    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_SEGMENTS) + 1
+    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_DIR_SEGMENTS) + 1
     assert MR._STATS_CACHE["in_flight"] is False
 
 
@@ -650,13 +653,13 @@ def test_a_stale_signature_inside_the_floor_serves_the_previous_tally_and_kicks_
         "a build is still running after the burst went unanswered, so the tally the "
         "burst served was not the last completed one")
     for i, body in enumerate(bodies, start=1):
-        assert body["tagCount"] == len(VAULT_SEGMENTS), (
+        assert body["tagCount"] == len(VAULT_DIR_SEGMENTS), (
             f"request {i} served tagCount={body['tagCount']} instead of the previous "
-            f"tally ({len(VAULT_SEGMENTS)}); rate-limiting the kick must not rate-limit "
+            f"tally ({len(VAULT_DIR_SEGMENTS)}); rate-limiting the kick must not rate-limit "
             "what is served")
-        assert body["docCount"] == len(VAULT_SEGMENTS) + i, (
+        assert body["docCount"] == len(VAULT_DIR_SEGMENTS) + i, (
             f"request {i} served docCount={body['docCount']} on a vault holding "
-            f"{len(VAULT_SEGMENTS) + i} notes; the counts come off this request's walk, "
+            f"{len(VAULT_DIR_SEGMENTS) + i} notes; the counts come off this request's walk, "
             "never off the lagged tally")
     assert bodies[-1]["lastRefresh"], "the served tally lost its completion stamp"
 
@@ -684,18 +687,18 @@ def test_a_stale_signature_past_the_floor_kicks_exactly_one_rebuild_and_the_next
     _expire_tally_stamp()
 
     body = client.get("/api/memory/stats").json()
-    assert body["tagCount"] == len(VAULT_SEGMENTS), (
+    assert body["tagCount"] == len(VAULT_DIR_SEGMENTS), (
         f"the request that starts the rebuild served tagCount={body['tagCount']}; it "
         "waits for nothing, so it serves the last completed tally")
-    assert body["docCount"] == len(VAULT_SEGMENTS) + 1
+    assert body["docCount"] == len(VAULT_DIR_SEGMENTS) + 1
     client.get("/api/memory/stats")      # arrives while the rebuild is running or after
 
-    _await_tally(len(VAULT_SEGMENTS) + 1)
+    _await_tally(len(VAULT_DIR_SEGMENTS) + 1)
     assert builds == [1, 2], (
         f"a stale signature past the floor produced {builds}: clause 2 wants exactly "
         "one rebuild for it, and a floor that swallowed this kick would leave the tag "
         "count wrong for the life of the process")
-    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_SEGMENTS) + 1, (
+    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_DIR_SEGMENTS) + 1, (
         "the rebuild published a tally no request ever served")
     assert MR._STATS_CACHE["in_flight"] is False
 
@@ -734,7 +737,7 @@ def test_the_floor_never_rate_limits_before_a_tally_has_ever_landed(client, vaul
 
     first = client.get("/api/memory/stats").json()
     assert first["tagCount"] == 0, "the first-ever request did not answer zeros"
-    assert first["docCount"] == len(VAULT_SEGMENTS), "the counts waited on the tally"
+    assert first["docCount"] == len(VAULT_DIR_SEGMENTS), "the counts waited on the tally"
     _await_no_rebuild()
     assert calls["n"] == 1, f"the first-ever build was not kicked ({calls['n']} calls)"
     assert MR._STATS_CACHE["tally_built_at"] == armed_stamp, (
@@ -744,13 +747,13 @@ def test_the_floor_never_rate_limits_before_a_tally_has_ever_landed(client, vaul
     (vault / "backlog" / "later.md").write_text(
         "---\ntags: [late-tag]\n---\n\n# Later\n", encoding="utf-8")
     second = client.get("/api/memory/stats").json()
-    assert second["docCount"] == len(VAULT_SEGMENTS) + 1
-    _await_tally(len(VAULT_SEGMENTS) + 1)
+    assert second["docCount"] == len(VAULT_DIR_SEGMENTS) + 1
+    _await_tally(len(VAULT_DIR_SEGMENTS) + 1)
     assert calls["n"] == 2, (
         f"a raising first build was not retried on the next signature change even "
         f"though the stamp seeded here is milliseconds old ({calls['n']} calls): the "
         "floor reached a state with no tally")
-    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_SEGMENTS) + 1
+    assert client.get("/api/memory/stats").json()["tagCount"] == len(VAULT_DIR_SEGMENTS) + 1
     assert MR._STATS_CACHE["in_flight"] is False
 
 
@@ -789,9 +792,9 @@ def test_a_rate_limited_response_still_answers_the_counts_without_reading_a_note
     assert body["tagCount"] == 7 and body["lastRefresh"] == "tally-built-before-the-vault-moved", (
         "the lagged tally is supposed to be what this response serves; something else "
         "answered it")
-    assert body["docCount"] == len(VAULT_SEGMENTS) + 1, (
+    assert body["docCount"] == len(VAULT_DIR_SEGMENTS) + 1, (
         f"docCount stayed at {body['docCount']} on a vault holding "
-        f"{len(VAULT_SEGMENTS) + 1} notes: the counts were served from the tally")
+        f"{len(VAULT_DIR_SEGMENTS) + 1} notes: the counts were served from the tally")
     assert body["types"]["backlog"] == 2, (
         f"`types` says backlog={body['types']['backlog']} after a backlog note was "
         "written while the tally sat inside its floor")
@@ -801,9 +804,9 @@ def test_a_rate_limited_response_still_answers_the_counts_without_reading_a_note
         "counts from the cached payload")
 
     real_build()
-    assert len(vault_reads_denied) == len(VAULT_SEGMENTS) + 1, (
+    assert len(vault_reads_denied) == len(VAULT_DIR_SEGMENTS) + 1, (
         f"the guard recorded {len(vault_reads_denied)} reads from a builder that walks "
-        f"{len(VAULT_SEGMENTS) + 1} notes here (one per segment plus the `extra.md` "
+        f"{len(VAULT_DIR_SEGMENTS) + 1} notes here (one per segment plus the `extra.md` "
         "this node wrote), so it was not recording and the empty assertion above proved "
         "nothing")
 

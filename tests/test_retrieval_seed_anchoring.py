@@ -476,8 +476,11 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
         "isaac-gr00t-n17", "graph-rerank-ab-cache",
     ], out["anchorless"]
     ceiling = (out["n_queries"] - len(out["anchorless"])) / out["n_queries"]
+    # 2026-11-10: the five checkout-doc queries came back (81 -> 86). None joins the
+    # residue — the list above is unchanged — so only the denominator moves:
+    # (86-24)/86 = 0.721.
     assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
-        24, 81, 0.704
+        24, 86, 0.721
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 

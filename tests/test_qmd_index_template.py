@@ -160,7 +160,9 @@ def test_the_patched_setup_md_stops_calling_sessions_empty(tmp_path):
     section = _collections_section(setup.read_text())
     assert SESSIONS_PATH in _documented_paths(section, colls)
     assert "`facts` and `sessions` — are **empty**" not in section
-    assert "15 collections" not in section
+    # The pre-#1652 "15 collections" counted `facts`; the count now has to be the
+    # template's own (15 again since lloyd-architecture, 2026-11-10).
+    assert f"**{len(colls)} collections**" in section, len(colls)
 
 
 def test_the_patched_setup_md_keeps_the_command_the_drift_check_prints(tmp_path):
@@ -173,7 +175,7 @@ def test_the_patched_setup_md_keeps_the_command_the_drift_check_prints(tmp_path)
 def test_the_dropped_facts_collection_stays_dropped(tmp_path):
     tmpl, setup = _patched(tmp_path)
     colls = yaml.safe_load(tmpl.read_text())["collections"]
-    assert DROPPED not in colls and len(colls) == 14, sorted(colls)
+    assert DROPPED not in colls and len(colls) == 15, sorted(colls)  # +lloyd-architecture 2026-11-10
     assert "/home/alansrobotlab/obsidian/facts" not in tmpl.read_text()
     section = _collections_section(setup.read_text())
     assert "still lists `facts`" not in section and "open in #1298" not in section
@@ -242,7 +244,7 @@ def test_the_file_a_round_may_now_rewrite_is_the_one_the_drift_check_reads():
     rule exists to prevent. What the suite does hold a rewrite to is everything
     checkable without the live file: `test_the_patched_setup_md_accounts_for_every_collection_the_template_defines`
     (SETUP.md must still describe exactly the collections the template defines) and
-    `test_the_dropped_facts_collection_stays_dropped` (14 collections, no `facts`).
+    `test_the_dropped_facts_collection_stays_dropped` (15 collections, no `facts`).
     The comparable assertion below is the denominator control: it fails if either
     side stops being readable, because a drift check that compared nothing would
     otherwise report zero drift forever.
@@ -466,6 +468,9 @@ EXPECTED_PATTERNS = {
     "autonomy-runs": "*/run_*.md",
     "sessions": "**/*.md",
     "architecture": "**/*.md",
+    # 2026-11-10: the checkout's own architecture docs, top level only (no subdirs
+    # hold docs there). eval/measurements/architecture-collection-2026-11-10.md.
+    "lloyd-architecture": "*.md",
 }
 
 #: What the `subliminal:` comment block has to carry for the clause to be worth
@@ -603,7 +608,7 @@ def test_the_narrow_is_block_scoped_and_the_documented_resync_would_break_it():
         "of it — #2311's rule, and the first thing the daemon's file does not have")
 
     colls = yaml.safe_load(text)["collections"]
-    assert len(colls) == 14, sorted(colls)
+    assert len(colls) == 15, sorted(colls)  # +lloyd-architecture 2026-11-10
 
 
 # --- #3160: every collection the memory route names is one this file declares --

@@ -65,6 +65,7 @@ _STATE_PIPELINE = Path(os.environ.get("LLOYD_DATA") or production_data_root()) /
 from fact_extractor import FactExtractor
 from relations_index import RelationsIndexGenerator
 from profile_generator import ProfileGenerator
+from agent_mcp.fact_supersede import supersede_after_reextract  # noqa: E402
 
 
 _SELF_WRITTEN_MEMORY_NOTES = frozenset({
@@ -551,6 +552,16 @@ class NightlyExtraction:
         except Exception as e:
             print(f"Error writing facts for {md_file}: {e}")
             return 0, 0, False, "", 0, 0
+
+        # Facts this note's EARLIER bytes produced and this pass did not restate
+        # (`knowledge_graph.supersede_on_reextract`, off by default). Judged only
+        # on a pass that read the whole note from offset 0. Never raises.
+        sup = supersede_after_reextract(
+            doc_path, source_hash, [str(f.get("fact") or "") for f in result.get("facts") or []],
+            read_whole_note=(resume_from == 0 and chars_covered >= chars_total))
+        if sup.get("mode") != "off" and (sup.get("would_expire") or sup.get("error")
+                                         or sup.get("verdict") == "skipped"):
+            print(f"[{index}/{total}] supersede {doc_path}: {sup}")
 
         return processed, facts_count, True, source_hash, chars_covered, chars_total
 

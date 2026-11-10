@@ -132,6 +132,25 @@ this turn and logged:
 prefetch budget=300ms exceeded, dropped=facts
 ```
 
+**A leg that failed is not a leg that found nothing** (2026-11-10). Each worker
+runs through `_tracked`, which hands back the failure the leg recorded on its
+own thread (`_note_leg_failure`) beside its still-empty result. `_search_vault`
+records `QmdUnavailable` instead of silently returning `[]`, and a leg that
+raises is named rather than swallowed. The run logs
+
+```
+prefetch failed=vault:QmdUnavailable,vault_vec:QmdUnavailable
+```
+
+(the per-leg warning is rate-limited to one a minute per leg and exception
+class), and when a source failed AND contributed nothing the block carries one
+`<retrieval_unavailable>` line naming it, so the model does not read an outage
+as evidence that nothing relevant exists. The vault is reported only when both
+of its legs failed. A crash in the budgeted half itself no longer reaches the
+route as a 500: `_recover_from_run_failure` puts the ambient entries and
+next-session notes it had already drained back, and the turn runs with the
+bare message.
+
 The pool is deliberately **not** used as a context manager — `with` blocks on
 `__exit__` until every future finishes, which would defeat the whole point.
 `pool.shutdown(wait=False)` lets stragglers finish detached; Python GCs the pool
@@ -228,10 +247,14 @@ facts@6ms vault@140ms` shows when each one arrived.
   entirely while staying on disk. This is the lever for pulling a misbehaving skill
   out of circulation without deleting it — e.g. auto-generated bash-runbook skills
   the model echoes verbatim instead of acting on. The norm is `status: active`.
-- **Plan-mode augmentation:** when `session.plan.plan_mode` is true, the query
-  tokens are unioned with `{plan, mode, authoring, planning, plan-mode,
-  plan-mode-authoring}` so the `plan-mode-authoring` skill auto-loads regardless of
-  what the user typed.
+- **Plan mode pins the skill:** when the turn is in plan mode,
+  `_pin_skill(skills_result, PLAN_MODE_SKILL)` binds `plan-mode-authoring` to the
+  turn regardless of what the user typed — bound, not matched. (The older
+  token-union augmentation this bullet used to describe is gone.)
+- **Embedding re-order (chat only):** `_search_skills_for_turn` re-orders the
+  lexical top offers with `app.skill_embed_rank` when `skills.embed_fusion` is on
+  and the session is not background-shaped (2026-11-09: hit@1 0.510 → 0.686 on
+  the 51-turn set). Scores stay lexical, so the injection gate is unchanged.
 
 ### Worker 2: Entity fact search
 
@@ -593,6 +616,25 @@ nothing.
 
 **IDE state** is read from the in-process MC state mirror (`app.mc_state.get_ide_snapshot`)
 — no HTTP round-trip — and spliced in just before the closing `</context>` tag.
+Only for a session that is not background-shaped (2026-11-10): the IDE is the
+human's, and a worker turn — most of prefetch traffic — was being handed
+whatever file Alan had open as if it were its own context.
+
+**`<retrieval_unavailable>`** is spliced the same way when a source failed and
+contributed nothing (see "Latency budget").
+
+**What is searched vs what is shown.** `prefetch_context(_async)` takes an
+optional `query_text`: the text retrieval searches and the focus tracker learns
+from, while the returned message still ends with the caller's `text`. The voice
+route passes the transcript with its `[Speaker]: ` tags stripped
+(`voice.strip_speaker_tags`, `livekit.voice_turn.prefetch_strip_speaker`, on):
+on the 81-query prefetch eval (2026-11-10) the `[Alan]: ` prefix cut merged
+doc_hit 0.210 → 0.148 and MRR 0.113 → 0.064, because the name became a query
+term every spoken turn and took the top focus weight.
+
+**The clock is not here.** A `<now>` line rides on the turn tail
+(`prompt_layout.clock_line`, `harness.prompt_layout.clock`), after the user's
+text, not in this block — see `architecture/harness.md` P1.
 
 ## Subliminal capture (#306)
 
@@ -676,7 +718,14 @@ Background tasks fired via `asyncio.ensure_future` after a turn completes
    (`count_human_user_turns`, which excludes `[System: Background task ...`
    rows), because a watchdog's injected turn used to arm extraction on a session
    nobody spoke in.
-2. Exports the session as searchable markdown. A user session goes to
+2. Exports the session as searchable markdown — **on every pass**, not only the
+   first (2026-11-10). The export used to live inside the once-only summary
+   half, so the `sessions` collection held each chat's opening and nothing
+   after it (47 of 106 exports with a surviving JSON were short, 163 of 301
+   user turns unsearchable). An already-`captured` session is now re-exported
+   each turn, written only when the rendered text changed so an idle pass does
+   not wake the watcher; `scripts/maintenance/reexport_sessions.py` repaired the
+   exports written before. A user session goes to
    `vault-derived/sessions/` — which is why `sessions` is a QMD collection the
    vault worker searches — and a background one to
    `vault-derived/sessions-background/`, which qmd does not watch. The watcher
@@ -847,12 +896,20 @@ Two things to be honest about:
 
 ### Prefetch-path eval
 
-`eval/run_prefetch_eval.py` runs the same 20 queries through the vault leg as
+`eval/run_prefetch_eval.py` runs the `vault_recall_queries.yaml` set (81 queries
+on 2026-11-10; it was 20 when this section was first written, and the table below
+is from then) through the vault leg as
 deployed, as a *first turn* (fresh `SessionFocus`, no prior context — the
 hardest case), and scores `doc_hit` / MRR against `expect_docs` for the lex
 leg, the hybrid straggler, and their merge (what the next turn injects). Run it
 twice back to back to see cold-term and warm-term latency; hit rates are the
-same either way. Outputs land in `eval/baselines/` (gitignored).
+same either way. Outputs land in `eval/baselines/` (gitignored). `--prefix`
+prepends a string to every query — `--prefix "[Alan]: "` is the voice shape.
+
+| 2026-11-10, 81 queries | lex doc_hit | hybrid doc_hit | merged doc_hit | merged MRR |
+|---|---|---|---|---|
+| plain | 0.099 | 0.160 | 0.210 | 0.113 |
+| `[Alan]: ` prefix | 0.074 | 0.086 | 0.148 | 0.064 |
 
 | Metric | 2026-09-03 before | after (cold terms) | after (warm terms) |
 |---|---|---|---|

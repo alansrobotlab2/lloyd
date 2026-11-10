@@ -686,7 +686,10 @@ def test_memory_search_names_the_recall_s_eleven_collections(monkeypatch):
     named = seen[0]["collections"]
     assert named == list(vault.VAULT_SEGMENTS), (
         f"the search named {named}; the recall names {list(vault.VAULT_SEGMENTS)}")
-    assert len(named) == 11, f"{len(named)} collections named, not the recall's 11: {named}"
+    # Eleven vault segments, plus the checkout's architecture docs when
+    # `vault_search.architecture` is `both` (the deployed value since 2026-11-10).
+    want = 12 if vault.architecture_collection_mode() == "both" else 11
+    assert len(named) == want, f"{len(named)} collections named, not the recall's {want}: {named}"
     assert "agents" not in named, (
         "`agents` is on `subliminal`'s ignore list in both index configs and is not a "
         "vault directory: qmd cannot answer for it")

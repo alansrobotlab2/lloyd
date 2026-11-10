@@ -37,7 +37,7 @@ DOC_TEXT = DOC.read_text(encoding="utf-8")
 
 #: The three switches `architecture/harness.md`'s P1 section describes, named
 #: as `config.yaml` names them under `harness.prompt_layout`.
-SWITCHES = ("session_state", "freeze_memory", "replay_injected_context")
+SWITCHES = ("session_state", "freeze_memory", "replay_injected_context", "clock")
 
 #: The commit that rolled `session_state` out to `system_tail` (P1 rollout
 #: step 1, 2026-09-25). The doc records a rollout step as shipped by naming it.

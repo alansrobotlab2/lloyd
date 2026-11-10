@@ -76,6 +76,28 @@ def lexical_top5(turn: str) -> list[str]:
     return [skill["name"] for _score, skill in scored[:K]]
 
 
+def tool_arm(embed: bool, weight: float = 2.0, k: int = 16) -> Arm:
+    """The `skills_search` TOOL's top 5, lexical or embedding re-ordered.
+
+    The other arms score prefetch's matcher (`_injectable_skills`, gated by the
+    injection thresholds); this one scores what the model gets when it SEARCHES —
+    every metadata hit, ranked. The re-order arm builds every skill vector first,
+    synchronously, so no query is scored in lexical order for want of a vector.
+    """
+    from agent_mcp import skills as skills_mod
+    from app import skill_embed_rank
+
+    cfg = skill_embed_rank.tool_settings_from({"weight": weight, "k": k}) if embed else False
+    if embed:
+        cfg["wait_ms"] = 60_000
+        skill_embed_rank._build_vectors(list(skills_mod.load_skills_cached()))
+
+    def arm(turn: str) -> list[str]:
+        scored = skills_mod._skills_search_scored(turn, embed=cfg)
+        return [skill["name"] for _s, skill in scored[:K]]
+    return arm
+
+
 def pseudo_query_arm(path: str | Path, weight: float = 3.0,
                      mode: str = "union") -> Arm:
     """#1490 arm (a): the production matcher with `skills.pseudo_queries` on.
@@ -370,6 +392,9 @@ def main(argv: list[str] | None = None) -> int:
                          "arm per weight and pool")
     ap.add_argument("--embed-pools", default="rerank,admit")
     ap.add_argument("--embed-floor", type=float, default=0.6)
+    ap.add_argument("--tool-arm", action="store_true",
+                    help="2026-11-10: also score the skills_search TOOL, lexical and "
+                         "embedding re-ordered (skills.search_embed_rerank)")
     args = ap.parse_args(argv)
 
     records = load_records()
@@ -415,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
                 tag = f"_f{args.embed_floor:g}" if pool == "admit" else ""
                 extra[f"embed_{pool}_w{w:g}{tag}"] = score(
                     records, embed_fusion_arm(w, pool=pool, floor=args.embed_floor))
+    if args.tool_arm:
+        extra["tool_lexical"] = score(records, tool_arm(False))
+        extra["tool_embed_w2"] = score(records, tool_arm(True))
     for name, r in extra.items():
         print(line(name, r))
         r["vs_lexical"] = {m: paired(lex, r, m) for m in ("recall", "hit1", "rr", "named")}

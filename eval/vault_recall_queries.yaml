@@ -66,12 +66,20 @@
 #   retriever currently returns manufactures the passing eval this growth exists to
 #   prevent, which is why the spot-check is owed by a person and not by this file.
 #
-# GOLD SET SIZE: 81 queries — the count of `- id:` entries below, which is the
+# GOLD SET SIZE: 86 queries — the count of `- id:` entries below, which is the
 #   denominator the nightly's document-leg means are taken over. Read as a measurement
 #   and not a memo: tests/test_eval_corpus_guard.py
 #   ::test_the_gold_file_states_the_size_it_actually_has re-counts the entries on every
 #   run and fails if this line disagrees, which is the only thing that makes a stated
 #   count worth the bytes it sits on.
+#
+#   2026-11-10 (#1662 option (a)) — the same five RESTORED, 81 → 86. A RE-BASE POINT
+#   FOR THE DOCUMENT LEG: DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. The qmd
+#   collection `lloyd-architecture` now indexes the checkout's architecture/*.md and the
+#   recall names it (`vault_search.architecture: both`), so their labels are returnable.
+#   Measured before adoption, paired over the 79 doc-gold queries: mrr_doc +0.061
+#   [+0.009, +0.123]; over the 74 that predate the five, +0.011 [-0.019, +0.047]
+#   (eval/measurements/architecture-collection-2026-11-10.md).
 #
 #   2026-09-28 (#1662) — five queries RETIRED, 86 → 81. THIS IS A RE-BASE POINT FOR THE
 #   DOCUMENT LEG: DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. The five (#1354)
@@ -1004,6 +1012,60 @@ queries:
     expect_docs:
       - 'backlog/733-app-paths-anchors-lloyd-home-to-the-imported-tree-.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
     notes: "A relative artifact path lands in the worktree and disappears with it."
+
+  # --- #1354's checkout-doc queries: RESTORED 2026-11-10, option (a) taken ---
+  #
+  # The five below were retired on 2026-09-28 (the record that follows) because no
+  # collection served `~/lloyd/architecture/`. Option (a) — register it, "deployed only
+  # if it measurably helps Lloyd's code-work recall" — was taken on 2026-11-10: qmd
+  # collection `lloyd-architecture`, `vault_search.architecture: both` (it joins the
+  # recall fan-out beside the vault's `architecture`, which keeps its floors).
+  # Measured on these 86 queries, two interleaved runs per arm, live qmd + djev
+  # (eval/measurements/architecture-collection-2026-11-10.md): MRR +0.056
+  # [+0.008, +0.112]; the five 0.0 -> 0.8 (four found at rank 1); the original 81
+  # MRR +0.010 [-0.017, +0.042], doc_hit -0.037 (three hits at ranks 5/13/14 pushed
+  # past the cut). Replacing `architecture` outright (`repo`) cost the 81 MRR -0.019
+  # and was not taken. Adding these back moves absolute means once (81 -> 86):
+  # compare paired, by id, across this point.
+  - id: harness-system-prompt-frozen
+    query: "Why does the agent loop never rebuild the system prompt in the middle of a turn, and how does it update state like the todo list instead?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/harness.md'  # #1354: checkout doc, §Invariants "Position 0 is frozen for the turn"
+    notes: "The position-0 rule: the prompt prefix stays KV-cached, and mid-turn state is appended via state_anchor."
+
+  - id: automod-gate-rungs
+    query: "What checks does the automod gate run on a self-modification before it can land, and which one asks whether the change did what the item asked?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/automod.md'  # #1354: checkout doc, §4 "The gate" rung table and §4.5 the review rung
+    notes: "The rung ladder, cheapest first, fail-closed; the review rung is the one that reads the item's clauses."
+
+  - id: recall-doc-pool-ordering
+    query: "How does vault recall build its pool of candidate documents, and what orders them before the top results come back?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/retrieval.md'  # #1354: checkout doc, §1 "The pipeline today" (fused head + floors, djev orders)
+    notes: "Global fusion head plus per-collection floors, ordered by djev, with the cross-encoder as the fallback."
+
+  - id: qmd-embed-model-switch
+    query: "Where is the embedding model for qmd configured, and what happens to the index when you change it?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/qmd.md'  # #1354: checkout doc, §3 "Models, and the one place they are set"
+    notes: "models: in ~/.config/qmd/index.yml beats the env var; a change is a full re-embed that starts by itself."
+
+  - id: djev-rank-not-gate
+    query: "Why is djev only used to rank candidates and never trusted as a yes-or-no gate with a fixed cutoff?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/djev.md'  # #1354: checkout doc, §7.2 "Accuracy — the reason nothing gates"
+    notes: "Listwise capacity and label_mass collapse; thresholds belong to one frozen schema, so rank with it, do not gate on it."
 
   # --- #1354's checkout-doc queries: RETIRED by #1662 on Alan's ruling (2026-09-28) ---
   #

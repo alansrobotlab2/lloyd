@@ -1422,6 +1422,35 @@ class _FactsIdx:
                               tuple(params))
         return [self._row(r) for r in rows]
 
+    def active_for_source(self, source_doc: str) -> list[dict]:
+        """Every active row filed from one vault note, oldest first.
+
+        The read half of superseding a re-extracted note
+        (`agent_mcp.fact_supersede`): which facts that note's earlier bytes
+        produced, with the `source_hash` each was extracted under. Read-only;
+        the expiry itself goes through the fact files and `reindex`.
+        """
+        if not source_doc:
+            return []
+        rows = self._s._query(
+            "SELECT * FROM facts_idx WHERE source_doc=? AND expired_at IS NULL "
+            "AND invalid_at IS NULL ORDER BY rowid", (source_doc,))
+        return [self._row(r) for r in rows]
+
+    def active_counts_by_source_hash(self) -> list[dict]:
+        """`[{source_doc, source_hash, n}]` over active rows that name both.
+
+        What `scripts/memory/supersede_report.py` compares against each note's
+        current bytes to say how many active facts came from earlier versions.
+        """
+        rows = self._s._query(
+            "SELECT source_doc, source_hash, COUNT(*) AS n FROM facts_idx "
+            "WHERE expired_at IS NULL AND invalid_at IS NULL "
+            "AND source_doc IS NOT NULL AND source_doc != '' "
+            "AND source_hash IS NOT NULL AND source_hash != '' "
+            "GROUP BY source_doc, source_hash")
+        return [self._row(r) for r in rows]
+
     def for_session(self, session_id: str) -> list[dict]:
         """Every row the index attributes to one session, oldest first (#1709).
 
@@ -1562,13 +1591,6 @@ class _FactsIdx:
     def entities_with_category(self, category: str) -> set[str]:
         return {r["entity"] for r in self._s._query(
             "SELECT DISTINCT entity FROM facts_idx WHERE category=?", (category,))}
-
-    def search(self, q: str, limit: int = 50) -> list[dict]:
-        like = f"%{q.lower()}%"
-        rows = self._s._query(
-            "SELECT * FROM facts_idx WHERE LOWER(fact) LIKE ? OR LOWER(entity) LIKE ? LIMIT ?",
-            (like, like, int(limit)))
-        return [self._row(r) for r in rows]
 
     def last_reindex(self) -> Optional[str]:
         return self._s.meta_get("last_reindex")

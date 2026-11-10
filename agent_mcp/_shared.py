@@ -1232,6 +1232,40 @@ def _fuzzy_entity_match(name: str, candidates: list[str], threshold: float = 0.8
 
 # ── Fact frontmatter helpers ────────────────────────────────────────────────
 
+def _split_fact_frontmatter(content: str) -> tuple[Optional[str], str]:
+    """(yaml_text, body) of a fact file, or (None, content) without frontmatter.
+
+    The closing fence is a LINE that is exactly `---`, never the first `---`
+    anywhere. `content.find("---", 3)` — what this module used to do — stopped
+    inside a fact whose own text contained `---` (yaml.dump writes `a --- b`
+    as a plain scalar on the fact's line), so the YAML handed to the loader was
+    cut mid-list: every later fact in the file vanished from the read, and the
+    read-modify-write paths (`fact_add`, `fact_invalidate`, the mark pass)
+    wrote the truncated list back. A multi-line fact cannot forge a fence:
+    yaml.dump indents its continuation lines. Same rule as
+    `app.kg_store.parse_fact_file` (#1400) and the extractor.
+
+    `body` is everything after the closing fence's own newline, so
+    `_write_fact_frontmatter(fm) + body` round-trips without growing.
+    """
+    if not content.startswith("---"):
+        return None, content
+    first_nl = content.find("\n")
+    if first_nl == -1 or content[:first_nl].rstrip() != "---":
+        return None, content
+    pos = first_nl + 1
+    while pos <= len(content):
+        nl = content.find("\n", pos)
+        line_end = len(content) if nl == -1 else nl
+        if content[pos:line_end].rstrip() == "---":
+            body = "" if nl == -1 else content[nl + 1:]
+            return content[first_nl + 1:pos], body
+        if nl == -1:
+            break
+        pos = nl + 1
+    return None, content
+
+
 def _parse_fact_frontmatter(content: str) -> dict:
     """Parse YAML frontmatter from the head of a markdown string.
 
@@ -1239,15 +1273,13 @@ def _parse_fact_frontmatter(content: str) -> dict:
     or YAML parse error). Logs YAML errors so bad files are visible without
     crashing the caller — a single corrupt fact file should not kill an
     entity-wide read. See backlog #343/#348 for the bug class this protects
-    against.
+    against. The fence rule is `_split_fact_frontmatter`'s.
     """
-    if not content.startswith("---"):
-        return {}
-    end = content.find("---", 3)
-    if end == -1:
+    yaml_text, _ = _split_fact_frontmatter(content)
+    if yaml_text is None:
         return {}
     try:
-        return yaml.safe_load(content[3:end]) or {}
+        return yaml.safe_load(yaml_text) or {}
     except yaml.YAMLError as e:
         # Fail-soft: log and skip. Caller gets an empty dict (treated as
         # "no facts in this file") rather than an exception that aborts

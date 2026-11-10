@@ -2159,7 +2159,7 @@ async def post_message_stream(request: Request):
     # the difference between "the retrieval changed" and "the user said
     # something different". Never raises, and off by config like the rest.
     from app.component_manifest import note_prefetch
-    note_prefetch(session_id, prefetched_text or "")
+    note_prefetch(session_id, _prompt_layout.without_clock(prefetched_text or ""))
     # #624: the capped route's share of skill bytes, per turn, beside the two
     # uncapped routes autonomy and the worker prompt record. Never raises.
     from app.skill_embed import record_context_skills

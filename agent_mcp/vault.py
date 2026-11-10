@@ -87,6 +87,26 @@ VAULT_SEGMENTS = [
     "memory", "knowledge", "projects", "personal", "work", "skills",
     "architecture", "lloyd", "autonomy", "backlog", "people",
 ]
+#: The vault's own top-level directories, for the counters (`vault_overview`, the
+#: Memory page). Not the search fan-out: since 2026-11-10 `VAULT_SEGMENTS` may name
+#: a collection that is not a vault directory (below), so the two lists are kept
+#: apart rather than having a counter walk `~/obsidian/lloyd-architecture`.
+VAULT_DIR_SEGMENTS = list(VAULT_SEGMENTS)
+
+# ── Lloyd's own architecture docs (#1662 option (a), 2026-11-10) ─────────────
+#
+# The qmd `architecture` collection is `~/obsidian/architecture`: April-era copies
+# of a few docs (`tools.md` 6 KB against the checkout's 89 KB) and docs
+# `architecture/index.md` lists as retired, holding guaranteed floor slots in every
+# recall. The current docs, `~/lloyd/architecture/*.md`, were indexed by nothing.
+# `lloyd-architecture` is the collection over the checkout's docs; which of the two
+# the fan-out names is `vault_search.architecture` (`vault` | `repo`), swapped in
+# place by `apply_architecture_collection` so every importer of these lists sees
+# one answer. `vault_read` serves `lloyd-architecture/<doc>.md` from the checkout,
+# read-only — the docs are code, edited and landed like code.
+REPO_ARCHITECTURE_COLLECTION = "lloyd-architecture"
+REPO_ARCHITECTURE_DIR = Path(__file__).resolve().parent.parent / "architecture"
+_ARCH_PAIR = ("architecture", REPO_ARCHITECTURE_COLLECTION)
 # Over-request factor for the unrestricted path in `_qmd_daemon_search`, and the
 # ceiling on it. `limit` is the size of the *answer*; these size the *pool* it is
 # ranked out of.
@@ -272,6 +292,40 @@ RECALL_RERANKER = "djev"
 RECALL_LEX_MODE = "or"
 RECALL_DJEV_HEAD = 20
 RECALL_DJEV_FLOOR = {"autonomy": 2, "architecture": 2, "skills": 2}
+
+
+def architecture_collection_mode() -> str:
+    """`vault_search.architecture`: `repo` (the checkout's docs) or `vault`."""
+    try:
+        from app.config import CONFIG
+        mode = str(((CONFIG or {}).get("vault_search") or {}).get("architecture", "vault"))
+    except Exception:  # noqa: BLE001
+        mode = "vault"
+    return mode if mode in ("vault", "repo", "both") else "vault"
+
+
+def apply_architecture_collection(mode: str) -> None:
+    """Name `lloyd-architecture` (mode `repo`) or `architecture` (`vault`) in the
+    search fan-out and the recall floors — or, `both`, keep `architecture` with its
+    floors and add `lloyd-architecture` to the fan-out with none. In place, so
+    `from agent_mcp.vault import VAULT_SEGMENTS` elsewhere (prefetch, the memory
+    router, the eval) follows."""
+    if mode == "both":
+        apply_architecture_collection("vault")
+        VAULT_SEGMENTS.append(REPO_ARCHITECTURE_COLLECTION)
+        return
+    if REPO_ARCHITECTURE_COLLECTION in VAULT_SEGMENTS and "architecture" in VAULT_SEGMENTS:
+        VAULT_SEGMENTS.remove(REPO_ARCHITECTURE_COLLECTION)   # leaving `both`
+    old, new = _ARCH_PAIR if mode == "repo" else _ARCH_PAIR[::-1]
+    for i, seg in enumerate(VAULT_SEGMENTS):
+        if seg == old:
+            VAULT_SEGMENTS[i] = new
+    for floors in (RECALL_COLLECTION_FLOOR, RECALL_DJEV_FLOOR):
+        if old in floors:
+            floors[new] = floors.pop(old)
+
+
+apply_architecture_collection(architecture_collection_mode())
 # The pool this ranker orders is deliberately NOT a number written here. It is
 # derived from the canvas the engine is served with — `recall_djev_pool()`,
 # reading `app/djev.py` at call time (#2112) — so the width lives in exactly one
@@ -552,7 +606,8 @@ RECALL_QMD_RERANK = True
 # a strong signal — the user almost certainly wants this file, not the
 # memory log that mentions it.
 _CANONICAL_PREFIXES = (
-    "autonomy/", "skills/", "backlog/", "architecture/", "knowledge/", "facts/",
+    "autonomy/", "skills/", "backlog/", "architecture/", "lloyd-architecture/",
+    "knowledge/", "facts/",
 )
 
 # Source-code grep fallback. QMD's index covers `~/obsidian/` only, so
@@ -1238,7 +1293,113 @@ def strip_qmd_snippet(raw: str) -> tuple[str, int | None]:
     return text, line
 
 
-def _run_vault_search(query: str, max_results: int, min_score: float, scope: str, consolidate: bool) -> dict:
+def _unknown_scope_segments(scope: str) -> list[str]:
+    """First path components of `scope` that name no indexed collection.
+
+    A scope's collection is its first component (`knowledge/agents` lives in
+    `knowledge`), so only that component is checked; nested scopes stay valid.
+    """
+    segs = [s.strip().strip("/").split("/")[0]
+            for s in scope.split(",") if s.strip().strip("/")]
+    return list(dict.fromkeys(s for s in segs if s not in VAULT_SEGMENTS))
+
+
+# ── vault_search's document pipeline (2026-11-10, default "legacy") ──────────
+#
+# "legacy" is what vault_search has always run: AND keywords, qmd's
+# cross-encoder, no djev. "recall" is vault_recall's document leg — OR keywords,
+# djev ordering with the cross-encoder as its fallback, the collection floors —
+# without the entity facts. The measured comparisons (retrieval.md §3.1/§3.2)
+# were all run on vault_recall, and vault_search's descriptions route every prose
+# question here, so whether the recall pipeline is also better for THIS tool is
+# measured by `eval/run_vault_search_eval.py` before the default moves. Config:
+# `vault_search.pipeline` and `vault_search.consolidate_default`.
+VAULT_SEARCH_PIPELINES = ("legacy", "recall")
+
+
+def _vault_search_cfg() -> dict:
+    try:
+        from app.config import CONFIG
+        block = (CONFIG or {}).get("vault_search") or {}
+        return block if isinstance(block, dict) else {}
+    except Exception:  # noqa: BLE001 — no config means today's behaviour
+        return {}
+
+
+def vault_search_pipeline() -> str:
+    mode = str(_vault_search_cfg().get("pipeline") or "legacy").strip().lower()
+    return mode if mode in VAULT_SEARCH_PIPELINES else "legacy"
+
+
+def vault_search_consolidate_default() -> bool:
+    """Whether vault_search adds a model-written summary when the caller is silent.
+
+    True is the behaviour it has always had: one primary-model call (up to 1,000
+    tokens, 10 s) per search with 4+ hits, returned BESIDE the excerpts.
+    """
+    return bool(_vault_search_cfg().get("consolidate_default", True))
+
+
+def _vault_search_recall_rows(query: str, coll_list: list, *,
+                              nested_prefixes: tuple = (), wide: int | None = None,
+                              ) -> list[dict]:
+    """vault_recall's document leg over `coll_list`, ranked; raw qmd row shape.
+
+    Raises `QmdUnavailable` like every daemon read. A djev miss is booked and
+    answered by one cross-encoder request, as in `_vault_recall_base`.
+
+    A scope below its collection (`knowledge/youtube/X`) is #670's case: the
+    in-scope rows are outranked by the rest of the collection, so the leg's fixed
+    pool can hold none of them. Then qmd is asked for `wide` rows, the reply is
+    filtered to `nested_prefixes` BEFORE ranking, and the ranker sees at most its
+    usual pool of the in-scope rows.
+    """
+    def _ask(shape: dict) -> list[dict]:
+        floor = {c: n for c, n in (shape.get("floor") or {}).items() if c in coll_list}
+        limit, cand = shape["limit"], shape["candidateLimit"]
+        if wide and nested_prefixes:
+            limit = cand = max(limit, wide)
+            floor = {}
+        rows = _qmd_daemon_search(query, limit, coll_list,
+                                  skip_rerank=not shape["rerank"],
+                                  exact_pool=limit,
+                                  candidate_limit=cand,
+                                  floor=floor or None,
+                                  lex_mode=shape.get("lexMode"))
+        if nested_prefixes:
+            rows = [r for r in rows
+                    if (r.get("file", "").removeprefix("qmd://").removeprefix("obsidian/")
+                        ).startswith(nested_prefixes)][:shape["limit"]]
+        return rows
+
+    def _as_docs(rows: list[dict]) -> list[dict]:
+        docs = [{**r, "path": r.get("file", "").removeprefix("qmd://").removeprefix("obsidian/")}
+                for r in rows]
+        for d in docs:
+            if _DAILY_LOG_RE.search(d["path"]):
+                d["score"] = round(float(d.get("score", 0) or 0) * DAILY_LOG_DEMOTE_FACTOR, 6)
+        docs.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+        return docs
+
+    ranker = recall_reranker()
+    docs = _as_docs(_ask(recall_doc_leg_shape(ranker)))
+    if ranker == "djev":
+        from app import qmd_health
+        ranked, reason = _djev_rank_recall(docs, query)
+        if ranked is None:
+            qmd_health.note_ranker(False, reason)
+            docs = _as_docs(_ask(recall_doc_leg_shape("qmd")))
+        else:
+            qmd_health.note_ranker(True)
+            docs = ranked
+    return docs
+
+
+def _run_vault_search(query: str, max_results: int, min_score: float, scope: str,
+                      consolidate: bool, *, pipeline: str | None = None) -> dict:
+    """`pipeline` is keyword-only and never read from the tool's arguments: only
+    the eval names it, in process; production reads `vault_search.pipeline`."""
+    pipeline = pipeline or vault_search_pipeline()
     scope_prefixes = []
     if scope:
         for item in scope.split(","):
@@ -1292,6 +1453,14 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
         # `_lookup_entity_facts` pays +2 ms on each of its six `limit=2` calls.
         # The only ask that moves materially is `_vault_recall`'s doc leg, 43 ms
         # -> 322 ms, and that is the ask this change exists to widen.
+        if pipeline == "recall":
+            # Any prefix below its collection: filter on EVERY scope prefix (a
+            # mixed `knowledge/youtube/X, memory` keeps its memory rows).
+            nested = any(p.rstrip("/").count("/") for p in scope_prefixes)
+            return _vault_search_recall_rows(
+                query, coll_list,
+                nested_prefixes=tuple(scope_prefixes) if nested else (),
+                wide=ask if nested else None)
         return _qmd_daemon_search(query, ask, coll_list)
 
     def _do_grep():
@@ -1313,12 +1482,15 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
                 all_raw.append(gr)
 
     # Lever 1: demote memory daily logs so they don't dominate canonical sources.
-    for r in all_raw:
-        path_for_demote = r.get("file", "").removeprefix("qmd://").removeprefix("obsidian/")
-        if _DAILY_LOG_RE.search(path_for_demote):
-            r["_pre_demote_score"] = r.get("score", 0)
-            r["score"] = round(float(r.get("score", 0)) * DAILY_LOG_DEMOTE_FACTOR, 6)
-    all_raw.sort(key=lambda x: float(x.get("score", 0)), reverse=True)
+    # The recall pipeline demoted before its ranker and must keep the ranker's
+    # order, so only the legacy pool is re-scored and re-sorted here.
+    if pipeline != "recall":
+        for r in all_raw:
+            path_for_demote = r.get("file", "").removeprefix("qmd://").removeprefix("obsidian/")
+            if _DAILY_LOG_RE.search(path_for_demote):
+                r["_pre_demote_score"] = r.get("score", 0)
+                r["score"] = round(float(r.get("score", 0)) * DAILY_LOG_DEMOTE_FACTOR, 6)
+        all_raw.sort(key=lambda x: float(x.get("score", 0)), reverse=True)
 
     parsed = []
     for r in all_raw:
@@ -1332,7 +1504,14 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
         if scope_prefixes and not any(path.startswith(p) for p in scope_prefixes):
             continue
         snippet, _line = strip_qmd_snippet(r.get("snippet", ""))
-        parsed.append({"path": path, "score": round(score, 4), "snippet": snippet[:300], "citation": path})
+        row = {"path": path, "score": round(score, 4), "snippet": snippet[:300], "citation": path}
+        if pipeline == "recall":
+            # The fields #994 stripped from this tool's rows and kept on the
+            # prefetch block: what the note is called, and where the hit sits.
+            row["title"] = r.get("title", "")
+            if _line is not None:
+                row["line"] = _line
+        parsed.append(row)
 
     trimmed = parsed[:max_results]
 
@@ -1341,7 +1520,7 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
         consolidated = _consolidate_results(query, trimmed)
 
     return {
-        "results": trimmed, "mode": "hybrid",
+        "results": trimmed, "mode": "hybrid" if pipeline != "recall" else "recall",
         "consolidated": consolidated is not None,
         "consolidated_summary": consolidated,
         "collections_searched": coll_list,
@@ -1556,18 +1735,47 @@ def _audit_write(path: str, byte_count: int, *, session: str = "", turn: str = "
 
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
+def _repo_doc_target(path: str):
+    """`lloyd-architecture/<doc>.md` -> the checkout's doc, or None for any other path.
+    Contained: a path that resolves outside the docs directory is not served."""
+    prefix = REPO_ARCHITECTURE_COLLECTION + "/"
+    if not path.startswith(prefix):
+        return None
+    root = REPO_ARCHITECTURE_DIR.resolve()
+    target = (REPO_ARCHITECTURE_DIR / path[len(prefix):]).resolve()
+    return target if target.is_relative_to(root) else False
+
+
 def _vault_read(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
         return _err(norm_err, ErrorCode.MISSING_PARAM if "required" in norm_err else ErrorCode.PATH_ESCAPE)
     try:
+        repo_doc = _repo_doc_target(path)
+        if repo_doc is False:
+            return _err(f"Path escapes the architecture docs: {path}", ErrorCode.PATH_ESCAPE)
+        if repo_doc is not None:
+            if not repo_doc.is_file():
+                return _err(f"File not found: {path}", ErrorCode.NOT_FOUND)
+            text = repo_doc.read_text(encoding="utf-8", errors="replace")
+            start_line = int(params.get("start_line", 0))
+            num_lines = int(params.get("num_lines", 0))
+            if start_line > 0 or num_lines > 0:
+                lines = text.splitlines()
+                start = max(0, start_line - 1)
+                end = (start + num_lines) if num_lines > 0 else len(lines)
+                text = "\n".join(lines[start:end])
+            return {"path": path, "text": text or "(empty file)",
+                    "source": "lloyd checkout (architecture docs; read-only here)"}
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
             return _err(_vault_escape_message(path, target), ErrorCode.PATH_ESCAPE)
         if not target.exists():
             resolved = _resolve_case_insensitive(path)
             if resolved is None:
-                return _err(f"File not found: {path}", ErrorCode.NOT_FOUND)
+                hint = _session_path_hint(path)
+                return _err(f"File not found: {path}" + (f" — {hint}" if hint else ""),
+                            ErrorCode.NOT_FOUND)
             target = resolved
         text = target.read_text(encoding="utf-8", errors="replace")
         # The read half of #3291's clobber gate: seeing a note is what makes writing it
@@ -2279,6 +2487,10 @@ def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
         return _err(norm_err, ErrorCode.MISSING_PARAM if "required" in norm_err else ErrorCode.PATH_ESCAPE)
+    if path.startswith(REPO_ARCHITECTURE_COLLECTION + "/"):
+        return _err(f"{path} is a lloyd checkout doc, not a vault note; it is code, "
+                    f"changed with Edit in the checkout and landed like code.",
+                    ErrorCode.PATH_ESCAPE)
     refusal = _protected_write_refusal(path)
     if refusal is not None:
         return refusal
@@ -2437,7 +2649,7 @@ def _vault_overview(params: dict) -> dict:
             return _err(f"Vault not found: {VAULT}", ErrorCode.NOT_FOUND)
         totals: dict = {}
         grand_total = 0
-        for segment in VAULT_SEGMENTS:
+        for segment in VAULT_DIR_SEGMENTS:
             seg_dir = VAULT / segment
             if not seg_dir.is_dir():
                 totals[segment] = 0
@@ -2454,8 +2666,18 @@ def _vault_search(params: dict) -> dict:
     query = params.get("query", "").strip()
     if not query:
         return _err("query is required", ErrorCode.MISSING_PARAM, results=[])
+    unknown = _unknown_scope_segments(params.get("scope", "") or "")
+    if unknown:
+        # A scope outside the indexed collections used to search everything and
+        # then filter the reply down to nothing — an empty list that read as
+        # "no notes on this", when the truth was "that folder is not indexed".
+        return _err(
+            f"scope {', '.join(repr(u) for u in unknown)} is not a searchable "
+            f"vault segment; valid segments: {', '.join(VAULT_SEGMENTS)}. "
+            f"Past conversations are searched with session_recall, not vault_search.",
+            ErrorCode.INVALID_PARAM, results=[])
     try:
-        return _run_vault_search(query, int(params.get("max_results", 10)), float(params.get("min_score", 0.0)), params.get("scope", ""), params.get("consolidate", True))
+        return _run_vault_search(query, int(params.get("max_results", 10)), float(params.get("min_score", 0.0)), params.get("scope", ""), params.get("consolidate", vault_search_consolidate_default()))
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, results=[])
 
@@ -2694,6 +2916,99 @@ def _drop_recall_self_hits(query: str, documents: list[dict]) -> list[dict]:
     return [d for d in documents if keep(d)]
 
 
+RECALL_DOCUMENTS_ERROR_KEY = "documents_error"
+
+#: Present on a `vault_recall` result only when the entity-vector index the semantic
+#: seeds read is past `app.entity_linker.MAX_INDEX_AGE_DAYS` (2026-11-10). It was 46
+#: days old against a 10-day bound with nothing but a log line saying so; the model
+#: and the eval read results, not server.err. Absent when fresh or never loaded.
+RECALL_SEED_INDEX_STALE_KEY = "seed_index_stale"
+
+
+def _seed_index_stale() -> Optional[dict]:
+    """`{age_days, max_age_days, refresh}` when the loaded entity-vector index is
+    stale, else None. Reads the loader's cached status only; never loads or blocks."""
+    try:
+        from app import entity_linker
+
+        st = entity_linker.index_status()
+    except Exception:  # noqa: BLE001 — a report, never a reason to fail a recall
+        return None
+    if not isinstance(st, dict) or not st.get("stale"):
+        return None
+    return {"age_days": st.get("age_days"), "max_age_days": st.get("max_age_days"),
+            "refresh": "scripts/memory/build_entity_vectors.py (job entity-vectors-rebuild)"}
+
+
+def _recall_outage_result(query: str, exc: Exception, facts: list, graph_facts: list,
+                          fact_reads: dict) -> dict:
+    """A recall whose document leg could not reach qmd.
+
+    The fact leg reads markdown and never needed qmd, so what it found is
+    returned with the outage named in `documents_error`. With no facts there is
+    nothing to hand over and the reply is the error it always was — an outage
+    must never read as "no documents matched".
+    """
+    msg = str(exc)
+    if not facts and not graph_facts:
+        return _err(msg, ErrorCode.INTERNAL, documents=[], facts=[],
+                    **{RECALL_DOCUMENTS_ERROR_KEY: msg})
+    out = {"documents": [], "facts": facts, "query": query,
+           RECALL_DOCUMENTS_ERROR_KEY: msg,
+           "n_fact_reads_failed": int(fact_reads["n_failed"]),
+           "fact_read_first_error": fact_reads["first_error"]}
+    if graph_facts:
+        out["graph_expanded_facts"] = graph_facts
+    return out
+
+
+_SESSION_EXPORT_RE = re.compile(r"^sessions/\d{4}-\d{2}-\d{2}/([^/]+)\.md$")
+
+
+def _session_path_hint(path: str) -> str:
+    """For a recall's `sessions/<date>/<id>.md` path: how to actually open it.
+
+    Those exports live under the data root, not the vault `vault_read` reads, so
+    the path a recall handed back was a dead end (a recorded "File not found:
+    sessions/…" on 2026-11-09). `session_read` opens the transcript by id.
+    """
+    m = _SESSION_EXPORT_RE.match(str(path or "").strip().lstrip("/"))
+    if not m:
+        return ""
+    return f"past conversations are not vault files; use session_read with session_id={m.group(1)!r}"
+
+
+def _model_facing_recall(result: dict) -> dict:
+    """The recall as the model receives it over MCP.
+
+    Two things the in-process callers (the eval, the topics merge, tests) still
+    see and the model does not: qmd's diff formatting in each snippet (the same
+    strip `vault_search` and prefetch apply; the start line survives as `line`),
+    and the `_`-prefixed bookkeeping keys (`_fusion_score`, `_pre_demote_score`,
+    graph-lookup provenance) that were costing context and meant nothing to it.
+    """
+    docs = result.get("documents")
+    if not isinstance(docs, list):
+        return result
+    clean = []
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        row = {k: v for k, v in d.items() if not str(k).startswith("_")}
+        snippet, line = strip_qmd_snippet(row.get("snippet", "") or "")
+        row["snippet"] = snippet
+        if line is not None:
+            row["line"] = line
+        m = _SESSION_EXPORT_RE.match(str(row.get("path", "")))
+        if m:
+            # A past conversation: its path is not a vault file. Hand over the
+            # id the reader that CAN open it takes.
+            row["session_id"] = m.group(1)
+            row["open_with"] = "session_read"
+        clean.append(row)
+    return {**result, "documents": clean}
+
+
 def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
                        reranker: str | None = None, facts_only: bool = False) -> dict:
     """Combined recall over documents, entity facts and graph neighbours.
@@ -2754,7 +3069,7 @@ def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
     ranker = reranker or recall_reranker()
     doc_shape = recall_doc_leg_shape(ranker)
 
-    def _do_search():
+    def _do_search(doc_shape=doc_shape):
         # Daemon is the only search path. A CLI subprocess fallback was removed
         # 2026-04-20: on daemon failure it hits the same broken state, then eats
         # 30s before returning empty. The orphaned function that comment
@@ -2992,18 +3307,14 @@ def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
         # caller that has to report them.
         return facts, graph_facts, fact_reads
 
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            _nothing = lambda: []  # noqa: E731 — a leg `facts_only` skips
-            search_fut = (pool.submit(_nothing) if facts_only else
-                          _early_search if _early_search is not None else pool.submit(_do_search))
-            facts_fut = pool.submit(_do_facts)
-            grep_fut = pool.submit(_nothing if facts_only else _do_code_grep)
-            graph_lookup_fut = pool.submit(_nothing if facts_only else _do_graph_lookup)
-            raw_results = search_fut.result()
-            facts, graph_facts, fact_reads = facts_fut.result()
-            grep_results = grep_fut.result()
-            graph_lookup_results = graph_lookup_fut.result()
+    def _build_documents(raw_results: list[dict], doc_shape: dict) -> list[dict]:
+        """Merge the alternate legs into qmd's reply and shape the pre-rank pool.
+
+        One definition for the first pass and the cross-encoder fallback, so a
+        djev miss re-asks qmd only — the grep, graph-lookup and fact legs it
+        already paid for are reused, not run a second time.
+        """
+        raw_results = list(raw_results)
         # Merge alternate-retrieval sources: dedupe by file path; first
         # wins (QMD primary, then grep, then graph-lookup).
         existing_files = {r.get("file", "") for r in raw_results}
@@ -3047,6 +3358,31 @@ def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
                     d["_pre_demote_score"] = d.get("score", 0)
                     d["score"] = round(float(d.get("score", 0)) * demote_factor, 6)
             documents.sort(key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+        return documents
+
+    _nothing = lambda: []  # noqa: E731 — a leg `facts_only` skips
+    try:
+        search_error: Exception | None = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            search_fut = (pool.submit(_nothing) if facts_only else
+                          _early_search if _early_search is not None else pool.submit(_do_search))
+            facts_fut = pool.submit(_do_facts)
+            grep_fut = pool.submit(_nothing if facts_only else _do_code_grep)
+            graph_lookup_fut = pool.submit(_nothing if facts_only else _do_graph_lookup)
+            try:
+                raw_results = search_fut.result()
+            except QmdUnavailable as exc:
+                # The document leg failed; the fact leg does not need qmd and
+                # may well have answered. Its answer is kept and the outage is
+                # named beside it, never folded into "no documents matched".
+                raw_results, search_error = [], exc
+            facts, graph_facts, fact_reads = facts_fut.result()
+            grep_results = grep_fut.result()
+            graph_lookup_results = graph_lookup_fut.result()
+        if search_error is not None:
+            return _recall_outage_result(query, search_error, facts, graph_facts,
+                                         fact_reads)
+        documents = _build_documents(raw_results, doc_shape)
         # ── djev: the eval arm, then the shadow seam ─────────────────────
         # `documents` holds qmd's reranked pool in the order production
         # returns it: the demote has sorted it and the slice has not run. Both
@@ -3087,13 +3423,23 @@ def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
             # "djev did not answer" for a canvas split as for an engine that was
             # unreachable. The ranker now says which one it hit.
             ranked, rank_reason = _djev_rank_recall(documents, query)
-            if ranked is None:
-                from app import qmd_health
-                qmd_health.note_ranker(False, rank_reason)
-                return _vault_recall(params, seed_top_k=seed_top_k, reranker="qmd")
             from app import qmd_health
-            qmd_health.note_ranker(True)
-            documents = ranked
+            if ranked is None:
+                qmd_health.note_ranker(False, rank_reason)
+                # Only the document leg is re-asked, in the cross-encoder's
+                # shape. The seeds, the fact reads and the grep leg do not
+                # depend on who orders the pool, and the whole-recall rerun
+                # this replaced paid for all of them twice.
+                fallback_shape = recall_doc_leg_shape("qmd")
+                try:
+                    raw_results = _do_search(fallback_shape)
+                except QmdUnavailable as exc:
+                    return _recall_outage_result(query, exc, facts, graph_facts,
+                                                 fact_reads)
+                documents = _build_documents(raw_results, fallback_shape)
+            else:
+                qmd_health.note_ranker(True)
+                documents = ranked
         elif djev_rerank:
             documents = _djev_rerank_pool(documents, query, djev_rerank_top)
         elif reranker is None:
@@ -3124,6 +3470,9 @@ def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
         # name WHAT raised, and the count says how widespread it was.
         result["n_fact_reads_failed"] = int(fact_reads["n_failed"])
         result["fact_read_first_error"] = fact_reads["first_error"]
+        _stale = _seed_index_stale()
+        if _stale:
+            result[RECALL_SEED_INDEX_STALE_KEY] = _stale
         if graph_facts:
             result["graph_expanded_facts"] = graph_facts
         if weighted_neighbors:
@@ -3298,14 +3647,14 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
 
 async def list_tools():
     return [
-        Tool(name="vault_read", description="Use when you know the vault path; to find a note by topic, use vault_search first.\n\nRead a file from the obsidian vault. Path is vault-relative (e.g. 'memory/learnings/DAILY_NOTES.md'); a leading '~/obsidian/' is stripped automatically.", inputSchema={
+        Tool(name="vault_read", description="Use when you know the vault path; to find a note by topic, use vault_search first.\n\nRead a file from the obsidian vault.", inputSchema={
             "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "start_line": {"type": "integer", "description": "1-based first line to return; omit to read from the top"}, "num_lines": {"type": "integer", "description": "How many lines to return from start_line; omit to read to the end"}}, "required": ["path"]}),
-        Tool(name="vault_write", description="Use to create a vault file or overwrite one wholesale; to amend an existing note, vault_read it first.\n\nWrite content to a vault file. Audit-logged. Path is vault-relative (e.g. 'memory/learnings/DAILY_NOTES.md'); a leading '~/obsidian/' is stripped automatically.", inputSchema={
+        Tool(name="vault_write", description="Use to create a vault file or overwrite one wholesale; to amend an existing note, vault_read it first.\n\nWrite content to a vault file. Audit-logged.", inputSchema={
             "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "content": {"type": "string", "description": "Full file contents. This replaces the file wholesale — read it first if you mean to amend rather than overwrite."}}, "required": ["path", "content"]}),
         Tool(name="vault_overview", description="Summarize the obsidian vault: file counts per top-level segment. Use this to orient before searching when you do not know what the vault holds.", inputSchema={
             "type": "object", "properties": {}}),
-        Tool(name="vault_search", description="Use to find vault notes by topic when you do not know the path; then vault_read the winner.\n\nSearch the obsidian vault, combining BM25 keyword matching with vector similarity. Returns ranked excerpts with their vault paths; use vault_read to pull a full file.", inputSchema={
-            "type": "object", "properties": {"query": {"type": "string", "description": "Natural-language or keyword query"}, "max_results": {"type": "integer", "description": "Maximum excerpts to return (default 10)"}, "min_score": {"type": "number", "description": "Drop results scoring below this threshold"}, "scope": {"type": "string", "description": "Restrict to a vault segment, e.g. 'knowledge' or 'memory/learnings'"}, "consolidate": {"type": "boolean", "description": "Summarize the hits into one synthesized answer instead of returning raw excerpts"}}, "required": ["query"]}),
+        Tool(name="vault_search", description="Use to find vault notes by topic when you do not know the path; then vault_read the winner.\n\nSearch the vault's documents by keywords and vector similarity, best first.", inputSchema={
+            "type": "object", "properties": {"query": {"type": "string", "description": "Natural-language or keyword query"}, "max_results": {"type": "integer", "description": "Maximum excerpts to return (default 10)"}, "min_score": {"type": "number", "description": "Drop results scoring below this threshold"}, "scope": {"type": "string", "description": "Restrict to a vault segment, e.g. 'knowledge' or 'memory/learnings'"}, "consolidate": {"type": "boolean", "description": "Also return one model-written summary of the hits beside the excerpts (default true)"}}, "required": ["query"]}),
         Tool(name="vault_recall", description="Use when a question spans documents and entity facts; for prose alone use vault_search instead.\n\nCombined recall: vault search and the facts of the entities the query names, in parallel.", inputSchema={
             "type": "object", "properties": {
                 "query": {"type": "string", "description": "Natural-language query; entities mentioned in it are resolved and their facts returned alongside documents"},
@@ -3333,6 +3682,8 @@ async def call_tool(name: str, arguments: dict):
         # consolidation LLM call) with multi-second timeouts — run them in a
         # worker thread so the shared event loop never stalls.
         result = await asyncio.to_thread(handler, arguments)
+        if name == "vault_recall" and isinstance(result, dict):
+            result = _model_facing_recall(result)
         if stripped and isinstance(result, dict) and "error" not in result:
             # The strip is the right answer about retrieval and was still
             # silence as an answer to the client (#1372): a caller that sent

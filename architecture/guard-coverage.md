@@ -89,7 +89,7 @@ absence grep, `text_delta` in `app/harness/action_review.py`, with its control i
 | `app/harness/outbound_content.py` | what is inside the arguments | string argument values, direction `out` | beside the safety hook, and per scoped turn builder |
 | `app/harness/action_review.py` | is this call what the task asked for | the worker's prompt and the calls it has made | `build_turn_options`, `kind == "stream"`, worker platforms only |
 | `agent_mcp/_injection_probe.py` | is this result instruction-shaped | the text of five tools' results, background sessions | `agent_mcp/main.call_tool` |
-| `agent_mcp/session.py::_check_injection` | is this memory entry instruction-shaped | the `entry` of `memory_add`, the `new_text` of `memory_replace` | inside the two writers (`agent_mcp/session.py:408`, `:460`) — it **refuses**, `ErrorCode.INJECTION` |
+| `agent_mcp/session.py::_check_injection` | is this memory entry instruction-shaped | the `entry` of `memory_add`, the `new_text` of `memory_replace` | inside the two writers (`agent_mcp/session.py:411`, `:463`) — it **refuses**, `ErrorCode.INJECTION` |
 | `agent_mcp/egress.py` | is this destination allowed for this scope | the host of four network tools | `agent_mcp/http_tools.py:108`, `:435`, `:549`, `agent_mcp/browser.py:723` — its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, which **is set `false`** at `config.yaml`: #2123 seeded that block on 2026-10-04 and the comment above it closes "Arming `enforce` is a separate decision", so the branch is unarmed by reviewed decision, not by an unset default a reader could flip (#1965, which also made the value parsed rather than `bool()`-coerced, so a quoted `"off"` cannot arm it). The posture is published by `egress.network_report()`'s `policy.enforce`, live at `GET /api/dashboard` → `network.policy` and rendered `enforcing` / `recording only` |
 
 ```
@@ -268,7 +268,7 @@ Nothing on this box scans what a tool was **sent**, or what came back from the
 provider. One thing does scan text the model authored, and it is not on this
 path: `agent_mcp/session.py::_check_injection` reads the `entry` of `memory_add`
 and the `new_text` of `memory_replace` against six families and
-answers `ErrorCode.INJECTION` (`agent_mcp/session.py:408`, `:460`). It sits
+answers `ErrorCode.INJECTION` (`agent_mcp/session.py:411`, `:463`). It sits
 between a model and loaded memory, never between a model and a call, so it
 narrows this section's claim without weakening it. Its families and the probe's
 come from one table, `agent_mcp/_injection_patterns.py`, and are **different

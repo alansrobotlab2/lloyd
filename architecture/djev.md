@@ -1076,7 +1076,7 @@ has to show a gain, so `RECALL_DJEV_RERANK` stays off. A djev that *replaces*
 the cross-encoder only has to match it, which is #1336.
 
 **Carry the caveat anyway.** The labelled set is 20 queries and 50 doc labels,
-and the eval block above `RECALL_QMD_FUSION` (`agent_mcp/vault.py:216`) puts the noise floor at 0.02 MRR. Reproducing +0.09
+and the eval block above `RECALL_QMD_FUSION` (`agent_mcp/vault.py:236`) puts the noise floor at 0.02 MRR. Reproducing +0.09
 three times against a deterministic baseline is much stronger than one run, but
 it is still twenty questions. The absolute latencies above were taken on a box
 that was also running the test suite. The comparison between arms is fair,

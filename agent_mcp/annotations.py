@@ -49,7 +49,8 @@ READ_ONLY: frozenset[str] = frozenset({
     "fact_relationships",
     # Vault + memory + sessions
     "vault_read", "vault_overview", "vault_search", "vault_recall",
-    "memory_read", "session_recall", "chat_list_sessions", "chat_get_session",
+    "memory_read", "session_recall", "session_read", "chat_list_sessions",
+    "chat_get_session",
     # Skills
     "skills_search", "skills_read",
     # Autonomy / backlog / research — inspection halves

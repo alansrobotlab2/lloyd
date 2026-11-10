@@ -1085,6 +1085,17 @@ RETIRED_TOOLS = frozenset({
 # `http_search`, `http_request`). 22,261 over 104 tools without the module, 22,429
 # over 105 with it. No tool was un-listed to pay for it and no input_schema changed:
 # `test_no_module_tool_is_left_off_the_wire` is the node that holds that floor.
+#
+# 2026-11-10, the same route again for `session_read` (~130 estimated tokens): a
+# recall hit is a session id and three snippets, and nothing could open the rest.
+# Paid for by prose that restated a parameter's own schema or the description's own
+# first line — `vault_read`/`vault_write` repeating the `path` rules, `vault_search`
+# repeating "then vault_read", `chat_get_session` saying "metadata" three times,
+# `session_recall` and `chat_list_sessions` re-listing their pointers. 22,473 over
+# 106 tools. No tool un-listed, no input_schema property removed. The same day
+# `fact_relationships` gained `limit` and `vault_search` its pipeline note (22,577);
+# paid back from the fact tools' own prose (a routing line `vault_recall` already
+# carries, a parameter restating the response) to 22,492, every trigger clause kept.
 INTERNAL_CATALOG_TOKEN_CEILING = 22_500
 
 

@@ -1480,6 +1480,11 @@ def test_memory_dispatch_is_inline_and_the_filesystem_lane_is_on_a_thread():
         f"shape and the claim about it needs rewriting:\n{mem}"
     )
     assert "handler(arguments)" in mem, mem
+    # 2026-11-10: session_recall/session_read go off the loop through `_off_loop`;
+    # no memory_* tool may join them, or the race below is not the shipped shape.
+    from agent_mcp import session as _session
+    assert not any(t.startswith("memory_") for t in _session.OFF_LOOP_TOOLS), (
+        sorted(_session.OFF_LOOP_TOOLS))
 
     fs = ast.unparse(_call_tool(fs_src))
     assert "asyncio.to_thread(handler, arguments, mut)" in fs, fs

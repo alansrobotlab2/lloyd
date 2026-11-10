@@ -738,20 +738,42 @@ ZERO_RESULT_REASON = (
 )
 
 
+def _skills_search_scored(query: str, *, embed: dict | None | bool = None) -> list:
+    """The tool's ranked `(score, skill)` list.
+
+    `embed` is keyword-only and never read from the tool's arguments: None reads
+    `skills.search_embed_rerank` (default off), False forces lexical, a dict is
+    the re-order settings — the eval's two arms. The re-order changes order only;
+    scores, the metadata gate and `total` stay lexical.
+    """
+    query_tokens = _query_tokens(query)
+    skills = load_skills_cached()
+    scored = []
+    for skill in skills:
+        score = _score_skill(skill, query_tokens, require_metadata_hit=True)
+        if score > 0:
+            scored.append((score, skill))
+
+    scored.sort(key=lambda x: -x[0])
+    if embed is not False and len(scored) > 1:
+        try:
+            from app import skill_embed_rank
+
+            cfg = embed if isinstance(embed, dict) else skill_embed_rank.tool_settings()
+            if cfg:
+                scored = skill_embed_rank.rerank(query, scored, skills, cfg)
+        except Exception:  # noqa: BLE001 — lexical order is always an answer
+            pass
+    return scored
+
+
 def _skills_search(params: dict) -> str:
     query = params.get("query", "").strip()
     if not query:
         return json.dumps({"error": "query is required", "results": []})
     max_results = int(params.get("max_results", 10))
     query_tokens = _query_tokens(query)
-
-    scored = []
-    for skill in load_skills_cached():
-        score = _score_skill(skill, query_tokens, require_metadata_hit=True)
-        if score > 0:
-            scored.append((score, skill))
-
-    scored.sort(key=lambda x: -x[0])
+    scored = _skills_search_scored(query)
 
     results = []
     for score, skill in scored[:max_results]:

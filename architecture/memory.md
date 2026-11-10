@@ -47,7 +47,7 @@ mark on `(source_file, fact_id)` through `app.fact_ids.fact_identity`.
 
 ## 2. `improve`: the detector is evidence, never a verdict
 
-`_detect_contradictions_sync` (`agent_mcp/facts.py:430`) fires when two of an
+`_detect_contradictions_sync` (`agent_mcp/facts.py:450`) fires when two of an
 entity's facts share >0.6 token overlap. That is *phrased alike*, not
 *disagrees* — measured on `Lloyd`: 32,857 "contradictions" from 5,489 facts,
 and the scan is O(n²). So the loop requires an independent reason per action:
@@ -72,7 +72,7 @@ pass this changed 749 candidate actions into 17.
 The `Lloyd` measurement above is now itself history, and worth keeping as the
 reason for the bound rather than deleting as out of date: that 113-second,
 15-million-comparison scan is why `_detect_contradictions_sync` refuses any
-entity holding more than `FACT_GODNODE_THRESHOLD` (50, `agent_mcp/retrieval.py:114`)
+entity holding more than `FACT_GODNODE_THRESHOLD` (50, `agent_mcp/retrieval.py:115`)
 facts at all. So the entity that produced the 32,857 false positives can no
 longer be scanned, and `plan_entity` propagates that as `refused` rather than
 as "nothing found" — the two must never read alike. It used to bite harder than
@@ -187,10 +187,11 @@ Signal sources, both real, neither invented:
 
 Writers are the existing tools called as functions. Three writers of
 `expired_at` would be the drift bug `fact_get` and the router already had
-— `_reindex_files` (`agent_mcp/facts.py:159`), whose docstring is the rule:
-the markdown is the fact layer, `facts_idx` is what the router, `fact_get`
-and the health report actually read, and a write that skips the reindex leaves
-the two disagreeing. Every run writes a JSON record under
+— `_reindex_files` (`agent_mcp/facts.py:169`), whose docstring is the rule:
+the markdown is the fact layer, `facts_idx` is what the router, the entity UI
+and the health report read (`fact_get` reads the markdown), and a write that
+skips the reindex leaves the two disagreeing. An unavailable store is returned
+as a `warning` the writer surfaces, never a silent success (2026-11-10). Every run writes a JSON record under
 `_pipeline/improvement/` with before/after active-fact counts and one reason
 string per action.
 
@@ -262,7 +263,7 @@ this arm `expand_graph_matches_production` is False while
 `store_true` flag compared with its own absence, which could only ever switch the
 verdict off — and gave the knob its own field instead, as
 `tests/test_eval_scorer.py:774` pins. Production's own default,
-`RECALL_EXPAND_GRAPH = False` (`agent_mcp/vault.py:510`), is not a recent change
+`RECALL_EXPAND_GRAPH = False` (`agent_mcp/vault.py:564`), is not a recent change
 either: that commit *named* the literal that was already there
 (`params.get("expand_graph", False)` → the constant), so nothing flipped, and what
 the eval adds is a knob the caller may pass rather than a configuration nothing
@@ -335,11 +336,11 @@ expired 8 more — 18 of those 30 refused outright as god-nodes — including
 #376's acceptance says "a change that cannot move that metric is not this
 feature". Two findings say the criterion is mis-aimed rather than the code dead:
 
-1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:2971`,
+1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:3286`,
    nested in `_vault_recall_base` at `:2697`, over the pool `_collect` builds at
    `:2933`) caps the returned fact list at `FACT_RANK_CAP_SEED=10`
-   (`agent_mcp/retrieval.py:118`; graph-expanded neighbours get their own
-   `FACT_RANK_CAP_GRAPH=5`, `:119`, on the leg production does not run while
+   (`agent_mcp/retrieval.py:119`; graph-expanded neighbours get their own
+   `FACT_RANK_CAP_GRAPH=5`, `:120`, on the leg production does not run while
    `RECALL_EXPAND_GRAPH` is False) across *all* seed entities — the only per-entity
    guardrail is a query-token filter, and it applies only above
    `FACT_GODNODE_THRESHOLD=50`. So

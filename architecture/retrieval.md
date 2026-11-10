@@ -17,7 +17,7 @@ kept or rejected. CLAUDE.md carries a line per decision; this is the long versio
 
 ```
 query ──► qmd /query (daemon :8181, fork ~/lloyd/qmd)
-            lex leg:  BM25 over the 11 vault collections, terms ORed   (lexMode "or")
+            lex leg:  BM25 over the 11 vault collections + lloyd-architecture, terms ORed
             vec leg:  Qwen3-Embedding-0.6B (embeddinggemma-300M until 2026-09-21)
             fusion:   global — one ranking across collections by score
             pool:     fused head 20 + floors of 2 for autonomy/architecture/skills
@@ -39,11 +39,32 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
 - **Paths arrive decoded.** qmd percent-encodes every path segment; `qmd_file()`
   decodes at `_qmd_post` (and again in the Mission Control memory search), so
   `people/Ali Behrouz.md` is citable. 18 indexed notes carry a space, `+`, `#`
-  or `&`. Two callers open their own sockets and are not doors: the MC memory
-  search reads `results` straight (`app/routers/memory.py`, it does apply
-  `qmd_file`) and write-time backlog dedupe reads them raw
-  (`agent_mcp/backlog_similar.py:176`), so neither's rerank fallback reaches
-  `qmd_health`. See `architecture/qmd.md`.
+  or `&`. Every caller now goes through `qmd_query` (#1498): the MC memory
+  search (`app/routers/memory.py`) and write-time backlog dedupe
+  (`agent_mcp/backlog_similar.py`) included, so their rerank fallbacks are
+  counted by `qmd_health` like the recall's. See `architecture/qmd.md`.
+- **Which collections.** `VAULT_SEGMENTS` is the eleven vault segments, and
+  `vault_search.architecture` (config.yaml, read at aggregator import by
+  `apply_architecture_collection`) decides the architecture docs: `vault` is the
+  vault's `architecture` copies, `repo` swaps in `lloyd-architecture` (this
+  checkout's `architecture/*.md`), `both` (deployed 2026-11-10) asks for the two,
+  with the floor staying on the vault copy. A `lloyd-architecture/<doc>.md` hit
+  opens through `vault_read`, which serves it from the checkout read-only;
+  `vault_write` refuses it. The counters (`vault_overview`, MC stats) walk
+  `VAULT_DIR_SEGMENTS`, the vault's own directories. The prefetch block keeps
+  the vault list in `both` mode — its 300 ms budget was not where this was
+  measured. `eval/measurements/architecture-collection-2026-11-10.md`.
+- **Session hits are ids, not paths.** A `sessions` hit (the episodic floor, or
+  prefetch's recent-sessions leg) carries `session_id` and `open_with:
+  session_read`; `session_read` (`agent_mcp/session.py`) returns that chat's
+  user and assistant text by turn range, size-capped. The export is re-written
+  whenever the chat grows (`app/post_capture.py`), not only at turn 1.
+- **`vault_search` has its own pipeline key.** `vault_search.pipeline: legacy`
+  (AND keywords, cross-encoder, the tool's long-standing shape) or `recall`
+  (this doc-leg's request and djev order). `vault_search.consolidate_default`
+  is whether the tool spends a primary-model call summarising its hits when the
+  caller does not say. Both are measured by `eval/run_vault_search_eval.py
+  --compare`; the defaults are what that measurement chose.
 - **Tests never reach the live djev.** `tests/conftest.py` pins the recall to
   `"qmd"`; `tests/test_recall_djev_ranker.py` opts in with djev stubbed.
 - **The prefetch hybrid leg lands on the same turn** (2026-09-24, #1482
@@ -271,7 +292,7 @@ facts-only topic recalls that skip semantic seeds. `eval/measurements/recall-top
 | activity logs stripped from backlog/autonomy (1,272 docs, −20% bytes) | doc_hit −0.037, NDCG +0.024, both inside the interval | mixed |
 | qmd's own query expansion (1.7B) | doc_hit −0.037, doc_recall −0.061, MRR +0.027; generation 0.74 s p50, 4.7 s p90 | slower, trades hits for order |
 | near-duplicate collapse before ranking (48-row pool) | doc_hit −0.012, MRR +0.015, +78 ms | neutral, slower |
-| `~/lloyd/architecture` as a qmd collection | doc_recall −0.025 (−0.059 with the floor moved to it) | NOT a verdict: no gold label points into those docs, so the eval can only see them take pool slots — the current architecture docs are unreachable by recall today (backlog follow-up) |
+| `~/lloyd/architecture` as a qmd collection, config entry only (2026-09-21; #3076 2026-10-20) | doc_recall −0.025 (−0.059 with the floor moved to it); #3076: 0.000 on both legs | superseded 2026-11-10: a collection the recall does not name is never asked for. Deployed as the two-change option (`vault_search.architecture: both`), measured over the restored five: mrr_doc +0.061 [+0.009, +0.123] over 79 doc-gold queries, three low-ranked hits lost on the other 74 |
 | binary relevance rows instead of the 4-level scale (#1468) | `noul` MRR −0.063 [−0.114, −0.018], 9/17; 2-level −0.010 | the scale's expected value carries the gradation |
 | FIRST-style top-1 `choice` row, with and without CapCal (#1469) | −0.074 / −0.064 MRR, both clear of zero; letter labels alone −0.036 | the row's pick disagreed on 55/86 and lost |
 | djev orders the facts leg (#1470) | fact_entity_recall +0.008 (1 query), +280 ms | no gain |
@@ -323,3 +344,9 @@ because a broken label misses in every arm.
   not fixed here: the nightly task's prescribed `run_eval.py` command does not
   parse, and the baseline it produces is scored graph-on against its own
   procedure (#1373).
+- **2026-11-10** — `lloyd-architecture` deployed beside the vault's
+  `architecture` (§1 "Which collections", §4); the five checkout-doc queries
+  restored (81 → 86, a re-base point); session hits name `session_read`; the
+  `vault_search` pipeline and consolidate keys documented. Corrected: the MC memory
+  search and backlog dedupe no longer open their own sockets — both call
+  `qmd_query` since #1498.

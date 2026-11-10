@@ -324,6 +324,8 @@ def _no_skill_embed_fusion_in_tests(monkeypatch):
     library in a background thread. A test that drives prefetch would do that in
     the test process, under xdist once per worker. Held off here; the tests that
     exercise the leg (`tests/test_skill_embed_rank.py`) set it and fake the model.
+    `skills.search_embed_rerank` (the skills_search TOOL's re-order, on since
+    2026-11-10) loads the same weights on a tool call, so it is held off too.
     """
     try:
         from app import config
@@ -331,6 +333,7 @@ def _no_skill_embed_fusion_in_tests(monkeypatch):
         return
     skills_cfg = dict(config.CONFIG.get("skills") or {})
     skills_cfg["embed_fusion"] = {**(skills_cfg.get("embed_fusion") or {}), "enabled": False}
+    skills_cfg["search_embed_rerank"] = False
     monkeypatch.setitem(config.CONFIG, "skills", skills_cfg)
 
 

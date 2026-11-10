@@ -661,6 +661,11 @@ harness:
     session_state: system_tail
     freeze_memory: false
     replay_injected_context: false
+    # A `<now>` line (weekday, date, time, zone) at the head of the turn tail on
+    # chat, voice and worker turns (2026-11-10). Nothing else gave a chat turn a
+    # clock; it rides on the current user message only, so the cached prefix is
+    # untouched (past user rows replay bare while replay_injected_context is off).
+    clock: true
   context_anchor:
     enabled: true
     warn_fraction: 0.76
@@ -1265,6 +1270,10 @@ livekit:
     # event stream. Off = the old path: wait for the finished message, have the
     # secondary rewrite it, poll it out of the transcript.
     stream_replies: true
+    # Search prefetch with the `[Speaker]: ` tag removed (the model still sees
+    # it). Measured 2026-11-10 on the 81-query prefetch eval: the tag cut
+    # merged doc_hit 0.210 -> 0.148, MRR 0.113 -> 0.064.
+    prefetch_strip_speaker: true
     # A started spoken turn that sends nothing for this long outside a tool
     # call says it has stalled and lets go of the turn (the backend keeps a
     # quiet stream alive with a comment every 15 s, so this is the model or
@@ -1733,6 +1742,12 @@ skills:
     weight: 2.0
     k: 16
     wait_ms: 200
+  # The same re-order for the skills_search TOOL (app.skill_embed_rank.tool_settings),
+  # which embed_fusion above does not reach. On since 2026-11-10: eval/
+  # run_skill_match_eval.py --tool-arm, 54 records, hit@1 0.481 -> 0.722, recall@5
+  # 0.694 -> 0.806 (eval/measurements/skills-search-embed-2026-11-10.md). Costs ~2.5 GB
+  # RSS in the aggregator, loaded on the first skills_search call.
+  search_embed_rerank: true
 # P5 pull arm: push: false stops injecting a matched skill's body into the
 # turn's <context> (offers are still logged) and the index note says to load
 # skills with skills_read. true is today's behaviour. Stays true: desc_pull lost
@@ -1763,6 +1778,25 @@ prefetch:
 # eval/measurements/recall-topics-merge-2026-09-25.md
 vault_recall:
   topics_merge: "off"
+# vault_search's document pipeline (agent_mcp/vault.py, "vault_search's document
+# pipeline"). legacy = AND keywords + qmd cross-encoder, as it has always run;
+# recall = vault_recall's document leg (OR keywords, djev ordering, collection
+# floors) without entity facts. recall since 2026-11-10: paired over the 79 doc-gold
+# queries, mrr +0.125 [+0.038, +0.214], ndcg10 +0.104 [+0.027, +0.182], doc_hit +0.076
+# [-0.025, +0.177], p50 1006 -> 397 ms (eval/measurements/vault-search-pipeline-2026-11-10.md).
+# consolidate_default: whether a search that does not pass `consolidate` gets the
+# extra primary-model summary beside its hits (unmeasured; kept as it was).
+vault_search:
+  pipeline: recall
+  consolidate_default: true
+  # Which architecture docs recall reaches (2026-11-10, #1662 option (a)): `vault` is
+  # the qmd `architecture` collection (~/obsidian/architecture), `repo` swaps it for
+  # `lloyd-architecture` (this checkout's architecture/*.md), `both` asks for the two.
+  # `both` vs `vault`, paired over the 79 doc-gold queries: mrr_doc +0.061 [+0.009,
+  # +0.123], ndcg10 +0.070 [+0.018, +0.131]; on the 74 that predate the five, mrr +0.011
+  # [-0.019, +0.047] and doc_hit -0.041 (3 lost, 0 gained). `repo` lost on the 74
+  # (eval/measurements/architecture-collection-2026-11-10.md). Read at aggregator import.
+  architecture: both
 workers:
   db_path: ${LLOYD_DATA}/workers.db
   enabled: true
@@ -2670,6 +2704,32 @@ knowledge_graph:
   # switch: LLOYD_FACT_WRITE_GATE=off.
   write_gate:
     mode: "noop"
+  # Re-extracting a changed note appends its new facts and expires nothing, so
+  # the facts its EARLIER bytes produced stay active beside the new ones (up to
+  # 62k active rows, 31%, on non-latest hashes, 2026-11-10 — an upper bound,
+  # since feeds keep old facts legitimately). off | dry_run (journal what would
+  # expire to _pipeline/fact-supersede.jsonl) | apply (expire them: expired_at,
+  # never a delete). Only a pass that read the whole note from offset 0 judges
+  # it; a fact the new pass restated verbatim stays; a pass whose restated +
+  # new facts number under `min_restate_ratio` of the old active set is
+  # skipped as too thin to judge by. Feeds that append are exempt by glob.
+  # Ships as dry_run (2026-11-10): the nightly passes journal what they WOULD
+  # expire, nothing is expired. `apply` is a proposal, adopted only on a
+  # measured gain (stale-fact eval #622, LloydMemEval) read against that
+  # journal. Report: scripts/memory/supersede_report.py.
+  supersede_on_reextract:
+    mode: "dry_run"
+    min_restate_ratio: 0.5
+    exempt_globs:
+      - "memory/*.md"
+      - "memory/**/*.md"
+      - "knowledge/_log.md"
+      - "knowledge/feeds/**"
+      - "projects/lloyd/channel-eval/**"
+      - "**/prs.md"
+      - "**/updates.md"
+      - "**/releases.md"
+      - "**/youtube-digest.md"
 
 # Query → entity seeding beyond the lexical extractor (#1486, app/entity_linker.py).
 # On since 2026-09-25 on a paired pinned-corpus measurement (86 queries):

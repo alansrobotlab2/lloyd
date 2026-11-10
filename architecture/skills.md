@@ -199,7 +199,7 @@ nested `metadata: openclaw: status: archived` a retirement and missed a
 
 `app/prefetch.py` scores the *user's message* against every skill and injects the
 winner's body into a `<context>` block ahead of the turn. Thresholds
-(`app/prefetch.py:53`):
+(`app/prefetch.py:129`):
 
 | | value |
 |---|---|
@@ -383,7 +383,7 @@ path-valued `skill_path` is still read as given.
 
 ## The MCP tools
 
-Two, both read-only (`agent_mcp/annotations.py:54`), both served by the
+Two, both read-only (`agent_mcp/annotations.py:55`), both served by the
 `skills` module inside the lloyd-mcp aggregator (`agent_mcp/main.py:176`,
 where its tools are spliced into `TOOLS`; the module itself is imported at the head of that file):
 

@@ -83,7 +83,7 @@ prompt cannot be access control — is for.
 | id | Seam | What crosses | Who authorizes | Chokepoint |
 |---|---|---|---|---|
 | B1 | external text → turn context | fetched pages, API bodies, transcripts, search results | the model's judgement, plus a destination table | `agent_mcp/egress.py`, `agent_mcp/http_tools.py` |
-| B2 | vault text → turn context | prefetched notes, skills excerpts, facts, backlog rows | the subliminal matcher's relevance score | `app/prefetch.py:1820` |
+| B2 | vault text → turn context | prefetched notes, skills excerpts, facts, backlog rows | the subliminal matcher's relevance score | `app/prefetch.py:1941` |
 | B3 | loaded memory → every system prompt | `MEMORY.md`, `USER.md`, the identity file | whatever the last writer did | `app/prompt_builder.py:927`, `app/prompt_surface.py` |
 | B4 | skill body → instruction | a `SKILL.md` delivered as a dispatch marker | the skill's own name and its front matter | `app/harness/skill_dispatch.py:276` |
 | B5 | tool result → next turn's input | every tool's own output, including a subprocess's stdout | nothing: results are trusted as authored | `agent_mcp/_injection_probe.py:121` (records) |
@@ -122,7 +122,7 @@ appears in this table: those threats are in the next one.
 | T-03 | B6 | T | A turn runs a denied shape on a path that never installed the hook | `agent_mcp/main.py:531` |
 | T-04 | B6 | E | A turn reaches a protected root through a symlink pointing into one | `app/harness/protected_paths.py::protected_write_roots` |
 | T-05 | B7 | T | A turn writes into a protected root through the generic file lane | `agent_mcp/builtin_fs.py:239` |
-| T-06 | B7 | T | A turn writes into a protected root through the vault lane | `agent_mcp/vault.py:1715` |
+| T-06 | B7 | T | A turn writes into a protected root through the vault lane | `agent_mcp/vault.py:1923` |
 | T-07 | B7 | E | The one exempt write lane commits bytes no loader validated | `scripts/automod/vault_round.py` |
 | T-08 | B7 | I | A vault write copies a credential into a file the sync client pushes | `app/harness/outbound_content.py:526` |
 | T-09 | B3 | T | A durable memory line becomes an instruction every later turn obeys | `app/prompt_surface.py` |
@@ -133,7 +133,7 @@ appears in this table: those threats are in the next one.
 | T-14 | B4 | S | A skill named to collide with a real one is delivered instead of it | `app/harness/skill_dispatch.py:212` |
 | T-15 | B1 | inject | Prose from a fetched page instructs the turn that fetched it | `agent_mcp/_injection_probe.py:121` |
 | T-16 | B5 | inject | A tool result's own content instructs the next turn | `agent_mcp/_injection_probe.py:52` |
-| T-17 | B2 | inject | A vault note's text is matched as relevant and then obeyed | `app/prefetch.py:1820` |
+| T-17 | B2 | inject | A vault note's text is matched as relevant and then obeyed | `app/prefetch.py:1941` |
 | T-18 | B1 | E | Fetched content points the browser at a loopback or private address | `egress._is_private_host` — one resolving predicate since #2584, which retired the text-only copy the HTTP lane used to carry. `browser.py`'s `_host_block_reason`, `http_fetch` and `http_request` all call it, each hop of a redirect chain included, and `egress.floor_reason` answers from it too, so arming `enforce` adds the allow-list rather than changing this answer |
 | T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` — the measurement, not the gate: its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, false here, so the table holds zero denies (#2580) |
 | T-20 | B8 | I | A credential rides out inside a request body the model composed | `app/harness/outbound_content.py:526` |

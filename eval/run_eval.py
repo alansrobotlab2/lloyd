@@ -840,7 +840,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
             # seeds retrieval actually used — while leaving the wire shape
             # exactly the schema's.
             result = _vault_recall(recall_params, seed_top_k=seed_top_k)
-            err = None
+            err = ((result.get("error") or result.get("documents_error")) if isinstance(result, dict) else None)  # an outage is an error row, never a zero; facts survive one, so documents_error is read too
         except Exception as e:
             result = {"documents": [], "facts": []}
             err = f"{type(e).__name__}: {e}"

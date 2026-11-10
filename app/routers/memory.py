@@ -9,6 +9,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from agent_mcp.vault import VAULT_DIR_SEGMENTS as _VAULT_DIR_SEGMENTS
 from agent_mcp.vault import VAULT_SEGMENTS as _VAULT_SEGMENTS
 from app.data_root import vault_root
 
@@ -168,7 +169,7 @@ def _stats_signature() -> tuple:
     inventing a `0` entry (#3503 clause 2).
     """
     parts: list = []
-    for seg in _VAULT_SEGMENTS:
+    for seg in _VAULT_DIR_SEGMENTS:
         seg_dir = _VAULT / seg
         if not seg_dir.is_dir():
             parts.append((seg, 0, 0.0, False))
@@ -229,7 +230,7 @@ def _build_stats_payload() -> dict:
     types: dict[str, int] = {}
     tag_counts: dict[str, int] = {}
     doc_count = 0
-    for seg in _VAULT_SEGMENTS:
+    for seg in _VAULT_DIR_SEGMENTS:
         seg_dir = _VAULT / seg
         if not seg_dir.is_dir():
             continue

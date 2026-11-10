@@ -121,12 +121,16 @@ def _score(expected_docs: list[str], results: list[dict]) -> dict:
     }
 
 
-def run(queries: list[dict], skip_hybrid: bool = False) -> list[dict]:
+def run(queries: list[dict], skip_hybrid: bool = False, prefix: str = "") -> list[dict]:
+    """`prefix` is prepended to every query before retrieval, the way a voice
+    turn reaches prefetch as `[Alan]: <words>` — the arm that measures what the
+    speaker tag costs the vault legs (2026-11-10)."""
     records = []
     for spec in queries:
         query = spec.get("query", "")
         if not query:
             continue
+        query = prefix + query
         focus = prefetch.SessionFocus()
         focus.update(query)
 
@@ -241,16 +245,18 @@ def _run_cli() -> int:
     ap.add_argument("--label", default="prefetch-baseline")
     ap.add_argument("--notes", default="")
     ap.add_argument("--skip-hybrid", action="store_true", help="Lex leg only (no 1-3 s vec calls)")
+    ap.add_argument("--prefix", default="",
+                    help="Prepend this to every query, e.g. '[Alan]: ' for the voice shape")
     args = ap.parse_args()
 
     spec = yaml.safe_load(Path(args.queries).read_text())
     queries = spec.get("queries") or []
     print(f"[info] loaded {len(queries)} queries; budget={prefetch.PREFETCH_BUDGET_MS}ms "
           f"min_score={prefetch.VAULT_MIN_SCORE} lex_max_terms={prefetch.VAULT_LEX_MAX_TERMS}")
-    records = run(queries, skip_hybrid=args.skip_hybrid)
+    records = run(queries, skip_hybrid=args.skip_hybrid, prefix=args.prefix)
     summary = summarize(records)
     out = {
-        "label": args.label, "notes": args.notes,
+        "label": args.label, "notes": args.notes, "prefix": args.prefix,
         "ran_at": datetime.now(timezone.utc).isoformat(),
         "budget_ms": prefetch.PREFETCH_BUDGET_MS,
         "vault_min_score": prefetch.VAULT_MIN_SCORE,

@@ -96,10 +96,14 @@ def test_the_watcher_defines_its_helpers_before_the_pipeline():
     the event stream. The first cut of the throttle shipped exactly that."""
     text = WATCHER.read_text()
     pipe = text.index("inotifywait -m")
-    for helper in ("debounce()", "drain_for()"):
+    for helper in ("debounce()", "drain_for()", "watch_loop()"):
         assert text.index(helper) < pipe, f"{helper} must be defined above the pipeline"
     tail = text[pipe:]
-    assert re.search(r"\|\s*\nwhile read -r; do", tail), "the loop is no longer the pipe's reader"
+    # Since 2026-11-10 the loop is the function `watch_loop` (so tests can source and
+    # drive it); the pipe's reader is that call, with nothing defined in between.
+    assert re.search(r"\|\s*\nwatch_loop\s*$", tail, re.M), "the loop is no longer the pipe's reader"
+    assert "read -r" in text[text.index("watch_loop()"):pipe], (
+        "watch_loop no longer reads the event stream")
 
 
 def test_the_watcher_throttles_a_continuous_event_stream(tmp_path):

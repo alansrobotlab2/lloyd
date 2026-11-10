@@ -33,7 +33,10 @@ from agent_mcp.facts import (
     _extract_entities_from_query, _fact_query_tokens, _fact_score, _get_facts_sync,
 )
 from agent_mcp.session import _load_session_index, _score_session
-from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
+from agent_mcp.vault import (_SESSION_EXPORT_RE, _qmd_daemon_search,
+                             _qmd_strip_stopwords, strip_qmd_snippet)
+from agent_mcp.vault import REPO_ARCHITECTURE_COLLECTION as _REPO_ARCH
+from agent_mcp.vault import architecture_collection_mode as _vault_arch_mode
 from app.prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
 from app.event_log import log_event
 from app.sessions_io import ambient_clock_stamp, is_background_session_name
@@ -47,6 +50,79 @@ from app.next_session_notes import NEXT_SESSION_CONTENT_MAX, NEXT_SESSION_SUMMAR
 from app.data_root import vault_root
 
 logger = logging.getLogger("lloyd.prefetch")
+
+
+# ── Leg failures are recorded, not just swallowed ─────────────────────────────
+#
+# Every retrieval leg is non-fatal by design, and until 2026-11-10 that also
+# meant invisible: `_search_vault` turned a `QmdUnavailable` into `[]` with no
+# log, so a qmd outage rendered exactly like "nothing in the vault matched" —
+# to the model and to anyone reading server.err. The legs still return their
+# empty answer (callers and tests rely on that), but they write the failure to
+# a per-thread slot first. `_tracked` runs each leg in its pool thread, reads
+# the slot and hands it back beside the result, so `_prefetch_run` knows which
+# source was unavailable and can say so in the block.
+
+_leg_state = threading.local()
+_LEG_LOG_INTERVAL_S = 60.0
+_leg_last_logged: dict[tuple[str, str], float] = {}
+_leg_log_lock = threading.Lock()
+
+
+def _note_leg_failure(leg: str, exc: BaseException) -> None:
+    """Record a swallowed failure on this thread and log it, at most once a
+    minute per (leg, exception class) so an outage costs one line, not one per
+    turn per ladder step."""
+    cls = type(exc).__name__
+    _leg_state.failure = cls
+    now = time.monotonic()
+    key = (leg, cls)
+    with _leg_log_lock:
+        last = _leg_last_logged.get(key, 0.0)
+        if now - last < _LEG_LOG_INTERVAL_S:
+            return
+        _leg_last_logged[key] = now
+    logger.warning("prefetch: %s leg failed (%s: %s); rendered as no hits this turn",
+                   leg, cls, str(exc)[:200])
+
+
+def _tracked(fn, *args):
+    """Run one leg and return `(result, failure_class_or_None)`."""
+    _leg_state.failure = None
+    try:
+        res = fn(*args)
+    except Exception as exc:  # noqa: BLE001 — recorded, then re-raised
+        _note_leg_failure(getattr(fn, "__name__", "leg"), exc)
+        raise
+    return res, getattr(_leg_state, "failure", None)
+
+
+#: Which sources a failed leg makes unavailable, for the note in the block.
+_LEG_SOURCE = {"vault": "vault search", "vault_vec": "vault search",
+               "facts": "entity facts", "sessions": "recent-session search",
+               "skills": "skill matching", "backlog": "backlog lookup"}
+
+
+def _format_unavailable(failed: dict[str, str], have: dict[str, bool]) -> str:
+    """One line naming each source that failed AND contributed nothing.
+
+    A vault outage is only reported when both vault legs failed (one leg
+    landing hits means the source answered). Empty string when nothing is
+    worth saying."""
+    sources: dict[str, str] = {}
+    for leg, cls in failed.items():
+        src = _LEG_SOURCE.get(leg)
+        if not src or have.get(src):
+            continue
+        if src == "vault search" and not ({"vault", "vault_vec"} <= set(failed)):
+            continue
+        sources.setdefault(src, cls)
+    if not sources:
+        return ""
+    names = ", ".join(f"{s} ({c})" for s, c in sorted(sources.items()))
+    return (f"<retrieval_unavailable>{names} failed this turn, so their absence "
+            f"below is not evidence that nothing relevant exists; call the "
+            f"matching tool if it matters.</retrieval_unavailable>")
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
 
@@ -153,6 +229,10 @@ VAULT_MIN_QUERY_LEN = 25        # skip vault search for short/vague messages
 # are exactly what it needs mid-task. Warm lex cost 6→9 collections: +5-30ms.
 VAULT_COLLECTIONS = ["memory", "knowledge", "projects", "lloyd", "work", "sessions",
                      "architecture", "autonomy", "backlog"]
+# `architecture` names the checkout's docs (`lloyd-architecture`) when
+# `vault_search.architecture` is `repo` — one switch for prefetch and the tools.
+if _vault_arch_mode() == "repo":
+    VAULT_COLLECTIONS = [_REPO_ARCH if c == "architecture" else c for c in VAULT_COLLECTIONS]
 VAULT_CARRY_MAX_AGE_S = 900.0   # max age of a carried-over vault result (either leg)
 # The lex leg is waited on for at most this long once every other required
 # worker has landed. A term the daemon has never seen costs 0.5-1.3s on
@@ -952,8 +1032,10 @@ def _search_vault(query: str, focus: SessionFocus | None = None,
                 "truncated": len(snippet) > VAULT_SNIPPET_MAX,
             })
         return out
-    except Exception:
-        return []  # Non-fatal
+    except Exception as exc:  # noqa: BLE001
+        # Non-fatal, but recorded: `QmdUnavailable` is not "zero matches".
+        _note_leg_failure("vault", exc)
+        return []
 
 
 # Don't start another lex round-trip when fewer than this many seconds of
@@ -1183,7 +1265,8 @@ def _search_recent_sessions(query: str) -> list[dict]:
         scored.sort(key=lambda x: -x[0])
 
         return [s for _, s in scored[:SESSION_PREFETCH_LIMIT]]
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        _note_leg_failure("sessions", exc)
         return []
 
 
@@ -1358,7 +1441,14 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
             if vr.get("truncated"):
                 snippet += " [... truncated]"
             path = _vault_rel_path(vr.get("file", ""))
-            meta = f"score: {score:.2f}" + (f", file: {path}" if path else "")
+            # A past conversation is not a vault file: `vault_read` cannot open
+            # `sessions/<date>/<id>.md`, `session_read` opens it by id (2026-11-10).
+            sm = _SESSION_EXPORT_RE.match(path or "")
+            if sm:
+                meta = (f"score: {score:.2f}, past conversation session_id: "
+                        f"{sm.group(1)}, open with session_read")
+            else:
+                meta = f"score: {score:.2f}" + (f", file: {path}" if path else "")
             if vr.get("line") is not None:
                 meta += f", line: {vr['line']}"
             if vr.get("carried"):
@@ -1557,7 +1647,8 @@ def _prefetch_prepare(text: str, session_id: str | None,
 def _prefetch_run(text: str, ambient_entries: list, notes: list,
                   focus: SessionFocus | None,
                   plan_mode: bool,
-                  session_id: str | None = None) -> str:
+                  session_id: str | None = None,
+                  message: str | None = None) -> str:
     """Blocking half of prefetch: budgeted parallel search + formatting.
     Safe to run in a worker thread.
 
@@ -1576,6 +1667,7 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
     session_result: list[dict] = []
     backlog_result: list[str] = []
     dropped: list[str] = []
+    failed: dict[str, str] = {}   # worker -> exception class it failed with
     landed: dict[str, int] = {}   # worker -> ms after t0 when its result landed
     t0 = time.monotonic()
 
@@ -1589,13 +1681,13 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
         # running in a daemon-like pool that GCs after their threads finish.
         budget_s = PREFETCH_BUDGET_MS / 1000.0
         pool = ThreadPoolExecutor(max_workers=6)
-        f_skills = pool.submit(_search_skills_for_turn, query_tokens, text, session_id)
-        f_facts = pool.submit(_search_facts, text)
-        f_vault_lex = pool.submit(_search_vault_lex_and_stash, text, focus,
+        f_skills = pool.submit(_tracked, _search_skills_for_turn, query_tokens, text, session_id)
+        f_facts = pool.submit(_tracked, _search_facts, text)
+        f_vault_lex = pool.submit(_tracked, _search_vault_lex_and_stash, text, focus,
                                   t0 + VAULT_LEX_STRAGGLE_MAX_S)
-        f_vault_hybrid = pool.submit(_search_vault_hybrid_and_stash, text, focus, f_vault_lex)
-        f_sessions = pool.submit(_search_recent_sessions, text)
-        f_backlog = pool.submit(_search_backlog_refs, text)
+        f_vault_hybrid = pool.submit(_tracked, _search_vault_hybrid_and_stash, text, focus, f_vault_lex)
+        f_sessions = pool.submit(_tracked, _search_recent_sessions, text)
+        f_backlog = pool.submit(_tracked, _search_backlog_refs, text)
         named = (
             ("skills", f_skills), ("facts", f_facts), ("vault", f_vault_lex),
             ("vault_vec", f_vault_hybrid), ("sessions", f_sessions),
@@ -1628,30 +1720,36 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
                 break  # timed out
             now_ms = int((time.monotonic() - t0) * 1000)
             for future in done:
-                for name, f in named:
-                    if f is future:
-                        landed[name] = now_ms
+                fname = next(n for n, f in named if f is future)
                 try:
-                    if future is f_skills:
-                        skills_result = future.result()
-                    elif future is f_facts:
-                        facts_result = future.result()
-                    elif future is f_vault_lex:
-                        vault_lex_result = future.result()
-                    elif future is f_vault_hybrid:
-                        vault_hybrid_result = future.result()
-                    elif future is f_sessions:
-                        session_result = future.result()
-                    elif future is f_backlog:
-                        backlog_result = future.result()
-                except Exception:
-                    pass  # Individual failure — non-fatal
+                    res, fail = future.result()
+                except Exception as exc:  # noqa: BLE001 — non-fatal, but named
+                    failed[fname] = type(exc).__name__
+                    continue
+                landed[fname] = now_ms
+                if fail:
+                    failed[fname] = fail
+                if future is f_skills:
+                    skills_result = res
+                elif future is f_facts:
+                    facts_result = res
+                elif future is f_vault_lex:
+                    vault_lex_result = res
+                elif future is f_vault_hybrid:
+                    vault_hybrid_result = res
+                elif future is f_sessions:
+                    session_result = res
+                elif future is f_backlog:
+                    backlog_result = res
 
         # The hybrid leg may have finished between the last wait and here.
         if vault_hybrid_result is None and f_vault_hybrid.done():
             try:
-                vault_hybrid_result = f_vault_hybrid.result()
-            except Exception:
+                vault_hybrid_result, fail = f_vault_hybrid.result()
+                if fail:
+                    failed["vault_vec"] = fail
+            except Exception as exc:  # noqa: BLE001
+                failed["vault_vec"] = type(exc).__name__
                 vault_hybrid_result = None
 
         # Record which required subtasks missed the budget for
@@ -1669,6 +1767,9 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
         if dropped:
             logger.info("prefetch budget=%dms exceeded, dropped=%s",
                         PREFETCH_BUDGET_MS, ",".join(dropped))
+        if failed:
+            logger.info("prefetch failed=%s",
+                        ",".join(f"{k}:{v}" for k, v in sorted(failed.items())))
 
     # Vault: this turn's landed legs fused (see `_fuse_fresh_vault`) plus
     # whatever the previous turn's stragglers stashed. A leg that landed
@@ -1710,11 +1811,28 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
                               show_skill_hint=not is_continuation,
                               notes=notes)
 
+    # A source that failed is said to have failed (2026-11-10), spliced into
+    # the block like `<ide_state>` so it sits beside what did arrive.
+    unavailable = _format_unavailable(failed, {
+        "vault search": bool(vault_result), "entity facts": bool(facts_result),
+        "recent-session search": bool(session_result),
+        "skill matching": bool(skills_result), "backlog lookup": bool(backlog_result),
+    })
+    if unavailable:
+        if context:
+            context = context.rsplit("</context>", 1)[0] + unavailable + "\n</context>"
+        else:
+            context = "<context>\n" + unavailable + "\n</context>"
+
     # IDE state — what folder/file the user has open in the IDE tab. Tiny,
     # always-fresh, helps the agent answer "what file am I looking at?"
     # without needing a tool call. Folded into the existing <context>
     # envelope when present so it sits next to skills/facts/vault.
-    ide_block = _format_ide_state()
+    # The IDE is the human's. A worker turn (four-part id, ~97% of prefetch
+    # traffic) was handed whatever file Alan had open, unstamped, as if it were
+    # that worker's context (2026-11-10).
+    ide_block = ("" if session_id and is_background_session_name(session_id)
+                 else _format_ide_state())
     if ide_block:
         if context:
             # Splice <ide_state>...</ide_state> just before the closing
@@ -1741,10 +1859,13 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
         " ".join(f"{k}@{v}ms" for k, v in sorted(landed.items(), key=lambda kv: kv[1])),
     )
 
+    # `text` is what was searched; `message` (when the caller passed one) is
+    # what the model reads — a voice turn searches without its speaker tag.
+    shown = text if message is None else message
     if not context:
-        return text
+        return shown
 
-    return context + "\n\n" + text
+    return context + "\n\n" + shown
 
 
 # ── Per-section injected size (#562) ─────────────────────────────────────────
@@ -1898,7 +2019,8 @@ def log_turn_prompt_budget(injected: str, *, session_id: str | None = None,
 
 
 def prefetch_context(text: str, session_id: str | None = None,
-                     plan_mode: bool | None = None) -> str:
+                     plan_mode: bool | None = None,
+                     query_text: str | None = None) -> str:
     """
     Return the user message with a <context> block prepended if relevant
     skill/fact/vault content was found. Returns original text unchanged if
@@ -1913,25 +2035,75 @@ def prefetch_context(text: str, session_id: str | None = None,
     `plan_mode` lets a caller that already loaded the session pass the flag
     through; when None it is read from the session JSON.
 
+    `query_text` overrides what is searched (see `prefetch_context_async`).
+
     Blocks the calling thread for up to PREFETCH_BUDGET_MS. From coroutine
     code use `prefetch_context_async` instead.
     """
-    prep = _prefetch_prepare(text, session_id, plan_mode)
+    q = text if query_text is None else query_text
+    prep = _prefetch_prepare(q, session_id, plan_mode)
     if prep is None:
         return text
-    return _prefetch_run(text, *prep, session_id=session_id)
+    try:
+        return _prefetch_run(q, *prep, session_id=session_id, message=text)
+    except Exception:  # noqa: BLE001
+        return _recover_from_run_failure(text, prep, session_id)
 
 
 async def prefetch_context_async(text: str, session_id: str | None = None,
-                                 plan_mode: bool | None = None) -> str:
+                                 plan_mode: bool | None = None,
+                                 query_text: str | None = None) -> str:
     """`prefetch_context` for coroutine callers: the cheap bookkeeping runs
     on the loop thread (in request order), the budgeted search phase runs
     in a worker thread so the event loop keeps serving other sessions,
-    SSE streams, and Inner Voice while we wait."""
-    prep = _prefetch_prepare(text, session_id, plan_mode)
+    SSE streams, and Inner Voice while we wait.
+
+    `query_text`, when given, is what retrieval searches and the focus tracker
+    learns from; `text` is still what the returned message ends with."""
+    q = text if query_text is None else query_text
+    prep = _prefetch_prepare(q, session_id, plan_mode)
     if prep is None:
         return text
-    return await asyncio.to_thread(_prefetch_run, text, *prep, session_id=session_id)
+    try:
+        return await asyncio.to_thread(_prefetch_run, q, *prep,
+                                       session_id=session_id, message=text)
+    except Exception:  # noqa: BLE001
+        return _recover_from_run_failure(text, prep, session_id)
+
+
+def _recover_from_run_failure(text: str, prep: tuple, session_id: str | None) -> str:
+    """A crash in the budgeted half costs this turn its context, nothing more.
+
+    Before 2026-11-10 an exception here reached the route as a 500 — after
+    `_prefetch_prepare` had already drained the session's ambient queue and the
+    next-session notes, and delivery consumes. The drained entries are put back
+    so the next turn delivers them, and the turn goes ahead with the bare
+    message.
+    """
+    logger.exception("prefetch: budgeted half raised; turn runs without context")
+    ambient_entries, notes = prep[0], prep[1]
+    if session_id and ambient_entries:
+        try:
+            from app.sessions_io import enqueue_ambient_prefetch
+            for entry in reversed(ambient_entries):   # drained newest-first
+                enqueue_ambient_prefetch(session_id, entry)
+        except Exception:  # noqa: BLE001
+            logger.warning("prefetch: could not re-queue %d ambient entries for %s",
+                           len(ambient_entries), session_id, exc_info=True)
+    if notes:
+        try:
+            from app.next_session_notes import write_next_session_note
+            now = time.time()
+            for n in notes:
+                ttl = int(n.expires_at - now) if n.expires_at else 0
+                if n.expires_at and ttl <= 0:
+                    continue
+                write_next_session_note(n.source, n.summary, n.content,
+                                        dedup_key=n.dedup_key, ttl_seconds=ttl)
+        except Exception:  # noqa: BLE001
+            logger.warning("prefetch: could not restore %d next-session notes",
+                           len(notes), exc_info=True)
+    return text
 
 
 def _format_ide_state() -> str:

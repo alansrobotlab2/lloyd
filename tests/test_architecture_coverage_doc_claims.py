@@ -2593,7 +2593,7 @@ NAMED_SYMBOL_UNNAMED_FLOOR = 0
 #: definition is the only way to move it, and doing that means lowering this
 #: number in the same commit that cleared the anchor.
 #: `test_the_fallback_anchor_ceiling_is_shown_able_to_bite` is what re-measures it.
-NAMED_SYMBOL_UNNAMED_CEILING = 192
+NAMED_SYMBOL_UNNAMED_CEILING = 191
 
 
 def fallback_decision(text: str) -> list[dict]:
@@ -12279,8 +12279,8 @@ def test_the_witness_pass_reports_every_seeded_anchor_the_2026_10_31_review_repl
     """
     text = (ARCH / "guard-coverage.md").read_text()
     stale = {
-        "`agent_mcp/session.py:408`": "`agent_mcp/session.py:299`",
-        "`:460`": "`:351`",
+        "`agent_mcp/session.py:411`": "`agent_mcp/session.py:299`",
+        "`:463`": "`:351`",
         "`agent_mcp/http_tools.py:108`": "`agent_mcp/http_tools.py:119`",
         "`:435`": "`:413`",
         "`:549`": "`:523`",

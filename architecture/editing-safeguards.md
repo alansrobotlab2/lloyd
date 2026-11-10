@@ -98,7 +98,7 @@ before assuming a layer can be turned off — or that it is installed.
   `:2175` sync), which covers the session-backed workers too, since those post
   to the chat endpoint — and `builtin_task.py` for subagents. Two paths build
   options and get *no* registry at all: **voice**
-  (`app/routers/voice.py:123` passes no `hooks=`, and `_run_turn` fills in
+  (`app/routers/voice.py:139` passes no `hooks=`, and `_run_turn` fills in
   every other option but never that one, so an IV-off voice turn has neither
   this nor the grant gate) and the bare `HookRegistry` that
   `attach_observer_for_turn` creates when it finds none. The two *direct*

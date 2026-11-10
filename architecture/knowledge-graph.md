@@ -107,7 +107,9 @@ mechanical aliases and the undated two-thirds went out with the old tree.
 Re-measured 2026-10-18 on the current one: **15,164 entity dirs · 41,557 fact
 files · 161,168 indexed rows · 85,416 edges with 50,558 active · 15,200
 registered entities · 239 aliases · `created_at` and `source_doc` NULL on 0
-rows.** The provenance gap this section called outstanding is closed — that is
+rows.** Re-measured 2026-11-10 (read-only): 17,024 entity dirs · 48,049 fact
+files · 197,898 indexed rows · 101,748 edges with 60,195 active · 17,029
+registered entities · 281 aliases. The provenance gap this section called outstanding is closed — that is
 exactly what the rebuild bought. What the swap did not re-grow is the
 mechanical alias table (the sweep rebuilds it tier by tier) and the
 conversation-origin edges (#51 below).
@@ -280,8 +282,8 @@ Three other writers:
   and its four siblings — fold-not-literal, other-provenance, bracket-shape, and
   the extractor's own write path. So the six rows are gone the first time a
   gated write runs against the live store — the nightly extractor does it by
-  itself. What is
-  still a person's decision, and keeps #1234 open: whether `Knowledge Graphs`
+  itself. #1234 itself is closed (`done`); what it left as a person's
+  decision is whether `Knowledge Graphs`
   (22 facts) and `Periodic Memory Capture` (1 fact) merge into their old alias
   targets now that nothing routes them there, and which side is intended for
   `periodic memory capture`, where `aliases.resolve` answers `Memory Capture` and
@@ -375,8 +377,10 @@ because a gate you have to remember to enable is a gate that gets forgotten.
 
 ### The index is not optional
 
-The markdown is what a person reads; `facts_idx` is what the router,
-`fact_get`, the Memory page and the health report actually read. Every
+The markdown is what a person reads AND what `fact_get`, prefetch's `<facts>`
+and `vault_recall` read (`retrieval.get_facts_sync` parses the files); `facts_idx`
+is what the entity router, the Memory page, de-duplication and the health report
+read. Every
 writer of a fact file updates it in the same breath —
 `fact_add` through `facts_idx.update_file`, `fact_resolve` and
 `fact_invalidate` through `facts.py:_reindex_files()`, in the same call, as
@@ -385,7 +389,9 @@ soon as the markdown write returns. `fact_invalidate` did neither until
 the `locked_file` the other two had — so the file said expired while the Memory
 page went on serving the fact as current, and the two disagreed until the next
 full reindex. A `StoreUnavailable` here is not fatal — the markdown is written
-and `facts_idx.reindex()` rebuilds the index — but a silent skip is.
+and `facts_idx.reindex()` rebuilds the index — but a silent skip is, and
+since 2026-11-10 it is not one: `_reindex_files` returns a warning that
+`fact_invalidate` and `fact_resolve_apply` hand back in their result.
 
 ### The duplicate trend carries two denominators (#1942)
 

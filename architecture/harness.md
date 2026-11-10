@@ -1473,11 +1473,12 @@ turns re-prefills the whole previous conversation on the next turn's first
 iteration. Two things moved it: the session state (`<goal>`, `<plan>`,
 `<active_todos>`, rendered ahead of the static harness hints) and the memory
 files (re-read every turn, so one `memory_add` anywhere invalidated every open
-session). Three switches under `harness.prompt_layout`. What ships today, read
-off `config.yaml` and pinned by `tests/test_harness_doc_claims.py`:
-`session_state: system_tail`, `freeze_memory: false`,
-`replay_injected_context: false` — rollout step 1 landed in `ca7eb481`
-(2026-09-25), and the other two switches are still off:
+session). Three switches under `harness.prompt_layout`, plus the clock. What
+ships today, read off `config.yaml` and pinned by
+`tests/test_harness_doc_claims.py`: `session_state: system_tail`,
+`freeze_memory: false`, `replay_injected_context: false`, `clock: true` —
+rollout step 1 landed in `ca7eb481` (2026-09-25), the other two switches are
+still off, and the clock line shipped on 2026-11-10:
 
 - **`session_state: system_head | system_tail | user_tail`**
   (`prompt_builder.session_state_layout`, unknown values read as
@@ -1501,6 +1502,13 @@ off `config.yaml` and pinned by `tests/test_harness_doc_claims.py`:
   note (+/− line counts and the added lines, ≤2000 chars) on the turn tail —
   in every layout, since a system-prompt copy would defeat the freeze. The
   bypass is at the caller, not inside `_load_memories`.
+- **`clock`** (`prompt_layout.clock_line`, 2026-11-10): a
+  `<now>Tue 2026-11-10 11:05 PST</now>` line opens the turn tail on chat, voice
+  and worker turns (flush turns get no tail). Until then no chat or voice turn
+  carried a clock — only ambient envelopes did — and the system prompt cannot
+  carry one without re-prefilling the whole history every turn. The tail rides
+  on the current user message only, and past user rows replay bare while
+  `replay_injected_context` is off, so the stamp never enters the cached prefix.
 - **`replay_injected_context`**: `load_and_compact_session` re-joins each past
   user row with its turn's `subliminal` row (`prompt_layout.replay_injected`,
   after P3's `is_history_row` filter) so history replays what was sent. The subliminal rows never reach

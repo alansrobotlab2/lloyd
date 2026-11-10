@@ -1416,14 +1416,16 @@ def test_no_id_keyed_surface_names_a_query_the_gold_set_does_not_carry():
         "not-a-gold-query",))["pins_absent"] == ["not-a-gold-query"], (
         "an exemption naming a query that no longer exists went unreported")
 
-    # And the retired five are gone from BOTH surfaces rather than re-pointed at
-    # nothing: an id that left the gold file must not survive in either.
-    retired = {"harness-system-prompt-frozen", "automod-gate-rungs",
-               "recall-doc-pool-ordering", "qmd-embed-model-switch",
-               "djev-rank-not-gate"}
-    assert retired & set(cf.PLAN) == set(), sorted(retired & set(cf.PLAN))
-    assert retired & set(records) == set(), sorted(retired & set(records))
-    assert retired & gold == set(), "the five must be gone from gold too"
+    # The five #1662 retired came back on 2026-11-10 with the `lloyd-architecture`
+    # collection, and they came back on every surface at once: gold, plan and records.
+    # A query restored to one surface and not the others is the same dangling pair
+    # this node exists for, seen from the other side.
+    restored = {"harness-system-prompt-frozen", "automod-gate-rungs",
+                "recall-doc-pool-ordering", "qmd-embed-model-switch",
+                "djev-rank-not-gate"}
+    assert restored <= gold, sorted(restored - gold)
+    assert restored <= set(cf.PLAN), sorted(restored - set(cf.PLAN))
+    assert restored <= set(records), sorted(restored - set(records))
 
 
 # ── #1640: pins that were scored but never observed ───────────────────────────

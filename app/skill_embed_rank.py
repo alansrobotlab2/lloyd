@@ -81,6 +81,45 @@ def settings() -> dict | None:
     return out
 
 
+#: How long the `skills_search` TOOL waits for the query embed. A tool call is
+#: not inside prefetch's 300 ms budget; it still never waits on a cold model load
+#: (that call answers in lexical order and the next one is re-ordered).
+TOOL_WAIT_MS = 1500
+
+
+def tool_settings() -> dict | None:
+    """The re-order for the `skills_search` tool, or None (the default).
+
+    `skills.search_embed_rerank: true` turns it on — separately from
+    `skills.embed_fusion.enabled`, which is the chat PREFETCH leg the 2026-11-09
+    measurement adopted. The tool path was left lexical (hit@1 0.510, against
+    0.686 re-ordered) and is measured on its own by
+    `eval/run_skill_match_eval.py --tool-arm` before this goes on. Weight and `k`
+    come from `skills.embed_fusion` whether or not that leg is enabled. On, the
+    embedder (~2.5 GB) loads in the process serving the tool: the aggregator.
+    """
+    try:
+        from app.config import CONFIG
+
+        block = CONFIG.get("skills") or {}
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(block, dict) or block.get("search_embed_rerank") is not True:
+        return None
+    return tool_settings_from(block.get("embed_fusion") or {})
+
+
+def tool_settings_from(fusion: dict) -> dict:
+    out = dict(DEFAULTS, enabled=True, wait_ms=TOOL_WAIT_MS)
+    for key, cast in (("weight", float), ("k", int)):
+        try:
+            if isinstance(fusion, dict) and key in fusion:
+                out[key] = cast(fusion[key])
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def embed_text(skill: dict) -> str:
     """What a skill is embedded as: its index line (name, description)."""
     desc = " ".join(str(skill.get("description") or "").split())

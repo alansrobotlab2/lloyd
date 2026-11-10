@@ -354,15 +354,20 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     "eval-corpus-naming-conventions": ("artifact", "baseline artifacts",
                                        "session transcripts", [], ["naming rules"]),
 
-    # The #1354 block that stood here held five entries — harness-system-prompt-frozen,
-    # automod-gate-rungs, recall-doc-pool-ordering, qmd-embed-model-switch,
-    # djev-rank-not-gate — perturbation plans for the five queries #1662 retired, and it
-    # went with them. The ids stay named here because the table is the surface that
-    # silently rots: a plan entry whose query left the gold file is skipped by
-    # `build_perturbations`'s loop over the specs, so it survives as an entry that
-    # generates nothing while `set(PLAN)` still counts it. What catches that now is
-    # `dangling_references` below, and the records file's counterpart in
-    # tests/test_counterfactual_eval.py::test_no_id_keyed_surface_names_a_query_the_gold_set_does_not_carry.
+    # ── #1354: questions answered by the lloyd checkout's architecture docs ──
+    # Retired by #1662 (2026-09-28) and restored 2026-11-10 with the
+    # `lloyd-architecture` collection; these are the entries #1662 removed, verbatim.
+    # No expect_entities and no sibling: one modifier or artifact swap each, the
+    # pin being the system the question is about.
+    "harness-system-prompt-frozen": ("qualifier", "never rebuild", "always rebuild",
+                                     [], ["agent loop"]),
+    "automod-gate-rungs": ("qualifier", "before it can land", "after it has landed",
+                           [], ["automod"]),
+    "recall-doc-pool-ordering": ("artifact", "candidate documents",
+                                 "candidate entities", [], ["vault recall"]),
+    "qmd-embed-model-switch": ("artifact", "embedding model", "reranking model",
+                               [], ["qmd"]),
+    "djev-rank-not-gate": ("qualifier", "fixed cutoff", "learned cutoff", [], ["djev"]),
 }
 
 

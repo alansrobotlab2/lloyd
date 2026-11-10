@@ -1890,12 +1890,12 @@ def test_a_checkout_rooted_label_is_attributed_to_the_checkout_and_never_the_vau
     than an untested default.
     """
     rep = _doc_label_satisfiability_report()
-    by_checkout = [d for d in rep["satisfied_by"] if d["root"] == "checkout"]
-    assert by_checkout == [], (
-        f"labels resolved against the checkout: {by_checkout}. #1662 retired the five "
-        "that were there, so a new one means either a collection was deployed (then "
-        "the retirement note in the gold file and the five ids it names are stale too) "
-        "or a checkout doc was indexed by nothing and the query scores a permanent miss")
+    by_checkout = sorted(d["label"] for d in rep["satisfied_by"] if d["root"] == "checkout")
+    # Option (a) was taken on 2026-11-10 (`lloyd-architecture`), and the five #1662
+    # retired are back: they, and nothing else, resolve against the checkout.
+    assert by_checkout == sorted(label for _, label in RESTORED_GOLD_LABELS_1662), (
+        f"labels resolved against the checkout: {by_checkout}; expected exactly the "
+        "five restored on 2026-11-10. A new one needs the collection to serve it.")
 
     # The calibration that makes the emptiness above mean something: `root` has to be
     # capable of reading "checkout" at all, or `by_checkout == []` is a property of the
@@ -2478,7 +2478,10 @@ def test_the_committed_corpus_reports_three_states_with_no_dead_label(tmp_path):
     corpus6.write_text(yaml.safe_dump({"queries": [{
         "id": "sixth-checkout-label", "query": "injected", "category": "technical",
         "expect_entities": [], "expect_docs": [injected_label]}]}, sort_keys=False))
-    six = _doc_label_satisfiability_report(specs_path=corpus6, collections=colls)
+    # Asked against the deployed list with `lloyd-architecture` taken out, so the
+    # conditional is exercised whether or not this box registered it (2026-11-10).
+    colls_without = [c for c in colls if c["name"] != "lloyd-architecture"]
+    six = _doc_label_satisfiability_report(specs_path=corpus6, collections=colls_without)
     assert [(d["query"], d["label"]) for d in six["unsearchable"]] == [
         ("sixth-checkout-label", injected_label)], six
     assert six["satisfied_by"] == [], (
@@ -2489,8 +2492,8 @@ def test_the_committed_corpus_reports_three_states_with_no_dead_label(tmp_path):
     # #1662's whole premise rested on.
     served = _doc_label_satisfiability_report(
         specs_path=corpus6,
-        collections=colls + [{"name": "lloyd-architecture",
-                              "root": str(LLOYD_HOME / "architecture")}])
+        collections=colls_without + [{"name": "lloyd-architecture",
+                                      "root": str(LLOYD_HOME / "architecture")}])
     assert served["unsearchable"] == [], served
     assert [d["label"] for d in served["satisfied_by"]] == [injected_label], served
     # Bounded against the corpus size the way #606 insists a gold-side finding be.
@@ -2581,19 +2584,15 @@ def test_the_guard_and_the_eval_agree_on_which_collections_are_deployed(tmp_path
     assert doc_corpus.deployed_collections(index_path=tmp_path / "absent.sqlite") is None
 
 
-#: The five gold doc labels #1599 found unreturnable, recorded as RETIRED. #1662
-#: carried Alan's ruling on the item — "(c) Drop or relabel the five now: the labels
-#: are the bug. File (a) as its own proposal, deployed only if it measurably helps
-#: Lloyd's code-work recall" — and the drop is what landed, so the five are no longer
-#: in `queries:`. This tuple is the difference between a decision and a disappearance:
-#: in a diff an absent query and a retired one are the same five deleted blocks, and
-#: only one of them can be audited afterwards. #1599 pinned these ids as EXPECTED TO
-#: EXIST while the question was open; the question is closed, and what is pinned now is
-#: the record. Option (a) is still a person's call — registering an
-#: `lloyd-architecture` collection is what would make these five answerable, and a
-#: corpus that re-adds them behind a deployed collection is that option being taken,
-#: not this record being broken.
-RETIRED_GOLD_LABELS_1662 = (
+#: The five gold doc labels #1599 found unreturnable. #1662 retired them on Alan's
+#: ruling — "(c) Drop or relabel the five now: the labels are the bug. File (a) as its
+#: own proposal, deployed only if it measurably helps Lloyd's code-work recall" — and
+#: on 2026-11-10 option (a) was taken: qmd collection `lloyd-architecture` over
+#: `~/lloyd/architecture/`, joined to the recall fan-out (`vault_search.architecture:
+#: both`), measured first (mrr_doc +0.061 [+0.009, +0.123] over the 79 doc-gold
+#: queries; the five 0.0 -> 0.8; the 74 before them +0.011 [-0.019, +0.047]). Back in
+#: `queries:` and this tuple is now the record of what was restored.
+RESTORED_GOLD_LABELS_1662 = (
     ("harness-system-prompt-frozen", "lloyd-architecture/harness.md"),
     ("automod-gate-rungs", "lloyd-architecture/automod.md"),
     ("recall-doc-pool-ordering", "lloyd-architecture/retrieval.md"),
@@ -2601,85 +2600,47 @@ RETIRED_GOLD_LABELS_1662 = (
     ("djev-rank-not-gate", "lloyd-architecture/djev.md"),
 )
 
-#: What the corpus file itself must carry for the ids above to read as retired. A
-#: retirement that lives only in a test file is a claim; one written where the queries
-#: used to be is a record a reader of the corpus finds.
-#: Anchored on the block heading rather than the bare item number: the number appears
-#: in the file's size note too, and a window opened there would read the wrong note.
+#: The corpus carries both notes: the 2026-09-28 retirement (history) and the
+#: 2026-11-10 restoration, which must come first so a reader meets the current state.
 RETIREMENT_NOTE_WHO = "checkout-doc queries: RETIRED by #1662"
+RESTORATION_NOTE_WHO = "checkout-doc queries: RESTORED 2026-11-10, option (a) taken"
 
 
-def test_the_five_checkout_doc_queries_are_retired_by_record_and_still_a_tripwire(
+def test_the_five_checkout_doc_queries_are_restored_by_record_and_still_a_tripwire(
         tmp_path):
-    """#1662 clause 3: the presence tripwire becomes a retirement record.
+    """#1662's option (a), taken: the five are back, recorded, and the tripwire bites.
 
-    #1599 wrote this node to stop its own finding being made true by deleting what it
-    was about, and pinned the five as expected to EXIST. Alan's ruling then chose
-    exactly that option — the labels are the bug — so the pin had to be re-pointed
-    rather than removed: what stays is (a) the five ids, visible as retired, with the
-    authority that retired them named, and (b) the tripwire's actual purpose, which was
-    never "these five exist" but "a checkout-prefixed gold label must not sit in the
-    corpus unserved without anyone noticing". That half is exercised here by injection,
-    because after the drop the corpus contains no checkout-prefixed label at all and the
-    rule would otherwise be asserted over an empty set forever.
-
-    The injection is a label that has never existed in the corpus, so the node can
-    fail; the deletion it guards against is checked two ways, since the queries are
-    gone and a missing entry is otherwise indistinguishable from the file having never
-    had one.
+    (a) the five ids are in `queries:` with their checkout labels, and nothing else in
+    the corpus is checkout-prefixed; (b) the corpus says why — the restoration note
+    names the measurement and sits before the retirement note it supersedes, which
+    stays as history; (c) the tripwire is unchanged in purpose: a checkout-prefixed
+    label with no collection behind it is a finding, and registering the collection is
+    what clears an existing doc while a name no root holds stays dead.
     """
     raw = CORPUS.read_text()
     specs = yaml.safe_load(raw)["queries"]
-    ids = {str(s.get("id")) for s in specs}
+    by_id = {str(s.get("id")): s for s in specs}
     labels = {str(d) for s in specs for d in (s.get("expect_docs") or [])}
 
-    # (a) retired, not re-pointed: the ids are out of `queries:`, and so is every
-    # checkout-prefixed label they carried. Re-pointing one onto some in-corpus
-    # document would have kept the query and quietly changed what it tests.
-    still_there = [qid for qid, _label in RETIRED_GOLD_LABELS_1662 if qid in ids]
-    assert still_there == [], (
-        f"{still_there} are back in {CORPUS} with no retirement note changed, so "
-        "either option (a) was taken by someone who did not update this record or "
-        "the drop is being undone quietly — both are a person's decision, and the "
-        "note in the corpus is where it has to be written")
-    checkout_labels = [d for d in labels if any(
-        d.startswith(prefix) for prefix in CHECKOUT_LABEL_ROOTS)]
-    assert checkout_labels == [], (
-        f"{checkout_labels} resolve under a checkout prefix while no collection is "
-        "named for it, which is the permanent doc miss #1599 filed and #1662 retired")
+    missing = [qid for qid, _ in RESTORED_GOLD_LABELS_1662 if qid not in by_id]
+    assert missing == [], f"{missing} are not in {CORPUS} though option (a) was taken"
+    for qid, label in RESTORED_GOLD_LABELS_1662:
+        assert label in [str(d) for d in by_id[qid].get("expect_docs") or []], (qid, label)
+    checkout_labels = sorted(d for d in labels if any(
+        d.startswith(prefix) for prefix in CHECKOUT_LABEL_ROOTS))
+    assert checkout_labels == sorted(label for _, label in RESTORED_GOLD_LABELS_1662), (
+        f"checkout-prefixed labels beyond the five restored: {checkout_labels}")
 
-    # (b) the record: the file the queries were dropped from says so, names the
-    # authority, and names all five ids. Deleting gold and deleting the note that
-    # explained the deletion is the same edit to a reader six weeks on, so the note
-    # is asserted with the same weight the presence of the queries used to be.
-    assert RETIREMENT_NOTE_WHO in raw, (
-        f"{CORPUS} carries no note naming {RETIREMENT_NOTE_WHO}: the five are absent "
-        "and nothing in the corpus says why, which is a silent shrink by another name")
-    note = raw[raw.index(RETIREMENT_NOTE_WHO):]
-    unrecorded = [f"{qid} -> {label}" for qid, label in RETIRED_GOLD_LABELS_1662
-                  if qid not in note or label not in note]
-    assert unrecorded == [], (
-        f"{unrecorded} are gone from the corpus and named nowhere near the retirement "
-        f"note in {CORPUS}")
-    # The five docs the record retires are #1354's five, and each is a REAL file in
-    # this checkout — the retirement is therefore recorded against documents that
-    # exist and could be answered again under option (a), not against labels that
-    # never resolved. A fact about the tree, not a second literal: the same basename
-    # list is checked for existence here and named by the note above.
+    assert RESTORATION_NOTE_WHO in raw and RETIREMENT_NOTE_WHO in raw
+    assert raw.index(RESTORATION_NOTE_WHO) < raw.index(RETIREMENT_NOTE_WHO), (
+        "the restoration note must precede the retirement it supersedes")
     absent = [b for b in (label.rsplit("/", 1)[-1]
-                          for _, label in RETIRED_GOLD_LABELS_1662)
+                          for _, label in RESTORED_GOLD_LABELS_1662)
               if not (LLOYD_HOME / "architecture" / b).is_file()]
-    assert absent == [], (
-        f"{absent}: the retirement names a document that is not in "
-        f"{LLOYD_HOME / 'architecture'}, so the record points at nothing to restore")
-    assert ({label.rsplit("/", 1)[-1] for _, label in RETIRED_GOLD_LABELS_1662}
+    assert absent == [], f"{absent}: a restored label names no checkout doc"
+    assert ({label.rsplit("/", 1)[-1] for _, label in RESTORED_GOLD_LABELS_1662}
             == set(CHECKOUT_DOCS_REQUIRED)), CHECKOUT_DOCS_REQUIRED
 
-    # (c) the tripwire, still able to bite. One injected corpus, three labels: a
-    # checkout doc that exists but no collection serves (the exact shape #1599
-    # found), a checkout-prefixed name no root holds at all (so the node does not
-    # depend on a file anyone might add), and a vault-served label that must stay
-    # clean or the check would be reporting the whole corpus.
     served_doc = sorted(p.name for p in (LLOYD_HOME / "architecture").glob("*.md"))
     assert served_doc, f"{LLOYD_HOME / 'architecture'} has no docs to inject"
     corpus_x = tmp_path / "tripwire.yaml"
@@ -2693,19 +2654,15 @@ def test_the_five_checkout_doc_queries_are_retired_by_record_and_still_a_tripwir
     ]}, sort_keys=False))
     colls = _deployed_collections()
     assert colls, "no deployed collection list readable; the tripwire has no denominator"
-    rep = _doc_label_satisfiability_report(specs_path=corpus_x, collections=colls)
+    colls_without = [c for c in colls if c["name"] != "lloyd-architecture"]
+    rep = _doc_label_satisfiability_report(specs_path=corpus_x, collections=colls_without)
     fired = {d["query"] for k in ("unsearchable", "dead") for d in rep[k]}
     assert fired == {"re-added", "never-written"}, rep
     assert [d["query"] for d in rep["satisfied_by"]] == ["served"], rep
-
-    # And the fix is a deployment, not a re-label: register the collection the prefix
-    # names and the existing doc stops being a finding, while the name no root holds
-    # stays one. The two must move differently or the report is conflating a dead
-    # label with an unserved one.
     fixed = _doc_label_satisfiability_report(
         specs_path=corpus_x,
-        collections=colls + [{"name": "lloyd-architecture",
-                              "root": str(LLOYD_HOME / "architecture")}])
+        collections=colls_without + [{"name": "lloyd-architecture",
+                                      "root": str(LLOYD_HOME / "architecture")}])
     assert "re-added" not in {d["query"] for k in ("unsearchable", "dead")
                               for d in fixed[k]}, fixed
     assert "never-written" in {d["query"] for d in fixed["dead"]}, fixed
@@ -2767,9 +2724,15 @@ def test_no_gold_query_scores_a_doc_leg_no_deployed_collection_can_answer():
     # collection serves.
     pool = ev.indexed_paths(colls)
     assert pool, "the deployed collections yielded no paths, so nothing below is a test"
+    # Since 2026-11-10 `lloyd-architecture` is deployed and the five labels it serves
+    # are back in the corpus, so the injection runs over the deployment WITHOUT it:
+    # the same string is unreturnable there, and the restored rows must not be named.
+    colls_without = [c for c in colls if c["name"] != "lloyd-architecture"]
     named = ev.gold_docs_unreturnable(
-        records + [{"id": "injected-checkout-label",
-                    "expected": {"docs": ["lloyd-architecture/harness.md"]}}], colls)
+        [r for r in records if not any(str(d).startswith("lloyd-architecture/")
+                                       for d in r["expected"]["docs"])]
+        + [{"id": "injected-checkout-label",
+            "expected": {"docs": ["lloyd-architecture/harness.md"]}}], colls_without)
     assert [n["query"] for n in named] == ["injected-checkout-label"], named
 
     # ...and one it must not: a label copied straight out of the live pool. Without
@@ -3232,7 +3195,7 @@ RECALL_SEGMENT_SOURCE = ROOT / "agent_mcp" / "vault.py"
 COLLECTIONS_INDEXED_BUT_NOT_RECALLED = {"autonomy-runs", "sessions", "subliminal"}
 
 
-def _recall_named_collections() -> set:
+def _vault_segments_literal() -> set:
     """The collection names `vault_recall`/`vault_search` put in the qmd payload.
 
     Read off `agent_mcp/vault.py`'s source by AST, not imported: this file's standing
@@ -3252,6 +3215,33 @@ def _recall_named_collections() -> set:
         f"no `VAULT_SEGMENTS = [...]` literal in {RECALL_SEGMENT_SOURCE}: the guard has "
         "no denominator, and a corpus silently unchecked against a renamed list is the "
         "failure this node exists to catch")
+
+
+def _recall_named_collections() -> set:
+    """`VAULT_SEGMENTS` as `vault_search.architecture` leaves it at import (2026-11-10).
+
+    The literal is read by AST as before; the config key and the checkout collection's
+    name are read off config.yaml and the source the same way, never imported. `both`
+    (the deployed value) adds `lloyd-architecture` beside the vault's `architecture`;
+    `repo` swaps one for the other; `vault` is the literal unchanged.
+    """
+    import ast
+
+    named = set(_vault_segments_literal())
+    repo_name = None
+    for node in ast.walk(ast.parse(RECALL_SEGMENT_SOURCE.read_text())):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == "REPO_ARCHITECTURE_COLLECTION"):
+            repo_name = node.value.value
+    assert repo_name, f"no REPO_ARCHITECTURE_COLLECTION literal in {RECALL_SEGMENT_SOURCE}"
+    mode = str(((yaml.safe_load((ROOT / "config.yaml").read_text()) or {})
+                .get("vault_search") or {}).get("architecture") or "vault").lower()
+    if mode == "both":
+        named.add(repo_name)
+    elif mode == "repo":
+        named.discard("architecture")
+        named.add(repo_name)
+    return named
 
 
 def _label_root(label: str):
@@ -3282,11 +3272,13 @@ def test_no_gold_label_names_a_collection_the_recall_never_requests():
     list that the index does not serve is the mirror: the payload asks for a collection
     that holds nothing, and every real collection shares its candidate quota.
     """
+    assert len(_vault_segments_literal()) == 11, (
+        "this node's claim about the eleven vault segments and its read of "
+        "`VAULT_SEGMENTS` have to be re-read together, not re-literalled")
     named = _recall_named_collections()
-    assert len(named) == 11, (
-        f"the recall names {len(named)} collections ({sorted(named)}); this node's claim "
-        "about the eleven vault segments and its read of `VAULT_SEGMENTS` have to be "
-        "re-read together, not re-literalled")
+    assert "lloyd-architecture" in named and len(named) == 12, (
+        f"the recall names {sorted(named)}; on 2026-11-10 `vault_search.architecture: "
+        "both` made it the eleven vault segments plus the checkout's docs")
 
     pairs = _gold_label_pairs()
     rooted = [lab for _, lab in (p.split(" -> ", 1) for p in pairs)
@@ -3323,13 +3315,13 @@ def test_a_collection_deployed_but_not_named_leaves_its_label_unreachable():
     reported both rows, or neither, would be describing the deployment rather than
     retrieval, and the trial would still be reading its own zero as a verdict.
     """
-    named = set(_recall_named_collections())
     served = {c["name"] for c in _deployed_collections()}
     assert served, "no deployed collection list to inject against"
-    assert "lloyd-architecture" not in served, (
-        "the trial's premise has changed: a lloyd-architecture collection is deployed. "
-        "The owed ruling on #3076 decided that, and this node's control row has to be "
-        "re-read against the deployed set instead of asserted absent")
+    # Re-read 2026-11-10: the ruling on #3076 deployed the two-change option — the
+    # collection in qmd's config AND its name in the recall's list. Both halves hold.
+    assert "lloyd-architecture" in served and "lloyd-architecture" in (
+        _recall_named_collections()), (sorted(served), sorted(_recall_named_collections()))
+    named = set(_recall_named_collections()) - {"lloyd-architecture"}
 
     injected = {"qmd -> lloyd-architecture/qmd.md", "kg -> knowledge/ai/x.md",
                 "bare -> workers.md"}
@@ -3385,6 +3377,9 @@ TRIAL_DIR = production_data_root() / "eval" / "3076"
 TRIAL_ARTIFACTS = TRIAL_DIR / "data" / "eval" / "baselines"
 TRIAL_NOTE = TRIAL_VAULT / "eval" / "measurements" / "lloyd-architecture-ab-2026-10-20.md"
 TRIAL_PROBE = TRIAL_NOTE.with_name("lloyd-architecture-ab-2026-10-20-probe.yaml")
+#: The deploy that ended the trial's no-touch claim, and where its measurement lives.
+TRIAL_SUPERSEDED_MARK = "Superseded 2026-11-10"
+TRIAL_SUPERSEDED_BY = "eval/measurements/architecture-collection-2026-11-10.md"
 
 
 def test_the_3076_side_index_ab_artifacts_record_what_the_note_claims():
@@ -3400,9 +3395,13 @@ def test_the_3076_side_index_ab_artifacts_record_what_the_note_claims():
     # written from the live config verbatim — the arm's with exactly one entry added.
     conf_dir = TRIAL_DIR / "idx" / "conf"
     live = yaml.safe_load(TRIAL_LIVE_YML.read_text())
+    # The trial ran before 2026-11-10's deploy; the live set it snapshotted is today's
+    # minus the one collection that deploy added.
+    live_at_trial = {k: v for k, v in live["collections"].items()
+                     if k != "lloyd-architecture"}
     ctrl_conf = yaml.safe_load((conf_dir / "control.yml").read_text())
     arm_conf = yaml.safe_load((conf_dir / "arm.yml").read_text())
-    assert len(ctrl_conf["collections"]) == len(live["collections"]), (
+    assert len(ctrl_conf["collections"]) == len(live_at_trial), (
         "the control's scratch config is not the live config's collection set, so the "
         "two arms did not start from one snapshot")
     assert len(arm_conf["collections"]) == len(ctrl_conf["collections"]) + 1, (
@@ -3415,10 +3414,10 @@ def test_the_3076_side_index_ab_artifacts_record_what_the_note_claims():
     assert set(arm_conf["collections"]) - set(ctrl_conf["collections"]) == {
         "lloyd-architecture"}, sorted(set(arm_conf["collections"]) ^ set(
             ctrl_conf["collections"]))
-    assert "lloyd-architecture" not in live["collections"], (
-        "the live qmd config now declares the collection, so the trial's whole premise "
-        "— an A/B with no live-config edit — has ended: this node has to be re-read "
-        "against a deployed collection, not re-asserted")
+    # Re-read against the deployed collection (2026-11-10): live declares it, rooted
+    # where the trial's arm rooted it, top-level only (the checkout keeps no subdirs).
+    deployed = live["collections"].get("lloyd-architecture") or {}
+    assert deployed.get("path") == "/home/alansrobotlab/lloyd/architecture", deployed
 
     def head(label_prefix):
         import glob
@@ -3712,8 +3711,10 @@ def test_the_3076_note_prints_the_arm_listing_the_command_emitted():
     names = [l.rsplit("/", 1)[-1].strip() for l in ls]
     assert len(set(names)) == 36, "the captured stdout itself repeats a document"
     assert ing["arm_docs_in_collection"] == 36, ing["arm_docs_in_collection"]
-    assert sorted(names) == sorted(p.name for p in (ROOT / "architecture").rglob("*.md")), (
-        "the collection's 36 docs are not the checkout's 36 architecture docs")
+    checkout_docs = {p.name for p in (ROOT / "architecture").rglob("*.md")}
+    assert set(names) <= checkout_docs, (
+        f"{sorted(set(names) - checkout_docs)}: the trial listed a doc the checkout no "
+        "longer has (docs added since the trial are expected and not checked here)")
     # The retracted claim: the first issue said `workers.md` and `qmd.md` were absent
     # from the ingest and called it "a defect in the arm's ingest". Both are listed.
     for name in ("qmd.md", "workers.md"):
@@ -3859,14 +3860,13 @@ def test_the_3076_cost_table_is_the_artifacts_said_over_the_same_81_queries():
     # The one-sidedness the clause asks the note to admit out loud, plus the fact
     # that makes it true and the denominators the two populations actually have.
     assert "can only tie or lose" in text
+    # The corpus has moved on since: 2026-11-10 deployed the collection and restored
+    # the five, which is exactly the "only legal after a deployed collection" case.
     corpus_labels = [d for q in yaml.safe_load(CORPUS.read_text())["queries"]
                      for d in (q.get("expect_docs") or [])]
-    assert not [l for l in corpus_labels if l.startswith("lloyd-architecture/")], (
-        "an anchored lloyd-architecture/ gold label is in the corpus, so the cost leg is "
-        "no longer one-sided — which is only legal after a deployed collection")
-    assert sum(1 for l in CORPUS.read_text().splitlines() if l.startswith("  - id: ")) == 81
-    gold_docs = [q for q in yaml.safe_load(CORPUS.read_text())["queries"] if q.get("expect_docs")]
-    assert len(gold_docs) == 74, len(gold_docs)
+    assert sorted(l for l in corpus_labels if l.startswith("lloyd-architecture/")) == sorted(
+        label for _, label in RESTORED_GOLD_LABELS_1662), corpus_labels
+    assert "lloyd-architecture" in {c["name"] for c in _deployed_collections()}
 
 
 def test_the_3076_gain_probe_is_root_anchored_outside_the_repo_and_its_twins_are_quoted():
@@ -3900,7 +3900,7 @@ def test_the_3076_gain_probe_is_root_anchored_outside_the_repo_and_its_twins_are
     checkout = {p.name for p in (ROOT / "architecture").rglob("*.md")}
     vault_twins = {p.name for p in (TRIAL_VAULT / "architecture").rglob("*.md")}
     checkout_only = checkout - vault_twins
-    assert len(checkout_only) == 26, sorted(checkout_only)
+    assert len(checkout_only) >= 26, sorted(checkout_only)  # 26 at the trial
     got = {l.split("/")[-1] for l in labels}
     assert got <= checkout_only, sorted(got - checkout_only)
     assert {"qmd.md", "workers.md"} <= checkout_only
@@ -3955,48 +3955,53 @@ def test_the_3076_note_states_the_two_numbers_and_the_live_config_is_untouched()
     """
     _3076_require_trial()
 
-    for path in (TRIAL_LIVE_YML, TRIAL_TEMPLATE_YML):
-        assert "lloyd-architecture" not in path.read_text(), (
-            f"{path} now declares the collection: the trial's no-touch claim is over "
-            "and the note must be superseded, not re-asserted")
-
-    live = yaml.safe_load(TRIAL_LIVE_YML.read_text())["collections"]
-    assert len(live) == 14, sorted(live)
-
     text = TRIAL_NOTE.read_text()
-    block = _3076_fenced_after(text, "Re-run fresh at")
-    # Commands and their outputs, in the order they appear: a block of `$ cmd` lines
-    # followed by the lines that cmd printed. Read sequentially, because a dict built
-    # by filtering the whole tail is a dict whose first command "prints" every number
-    # in the block — which is how the previous issue's no-touch section could stand.
-    cmds: list[tuple[str, list[str]]] = []
-    for line in block:
-        stripped = line.strip()
-        if stripped.startswith("$ "):
-            cmds.append((stripped[2:], []))
-        elif stripped and cmds:
-            cmds[-1][1].append(stripped)
-    assert len({c for c, _ in cmds}) == len(cmds), [c for c, _ in cmds]
-    printed = dict(cmds)
+    deployed = [path for path in (TRIAL_LIVE_YML, TRIAL_TEMPLATE_YML)
+                if "lloyd-architecture" in path.read_text()]
+    if deployed:
+        # 2026-11-10: the collection was deployed, so the no-touch claim is history.
+        # The note has to say so at its head and point at the measurement that
+        # licensed the deploy; the two numbers below are still checked.
+        head = text.split("\n## ", 1)[0]
+        assert TRIAL_SUPERSEDED_MARK in head and TRIAL_SUPERSEDED_BY in head, (
+            f"{deployed} declare the collection: the trial's no-touch claim is over "
+            "and the note must be superseded, not re-asserted")
+    else:
+        live = yaml.safe_load(TRIAL_LIVE_YML.read_text())["collections"]
+        assert len(live) == 14, sorted(live)
+        block = _3076_fenced_after(text, "Re-run fresh at")
+        # Commands and their outputs, in the order they appear: a block of `$ cmd` lines
+        # followed by the lines that cmd printed. Read sequentially, because a dict built
+        # by filtering the whole tail is a dict whose first command "prints" every number
+        # in the block — which is how the previous issue's no-touch section could stand.
+        cmds: list[tuple[str, list[str]]] = []
+        for line in block:
+            stripped = line.strip()
+            if stripped.startswith("$ "):
+                cmds.append((stripped[2:], []))
+            elif stripped and cmds:
+                cmds[-1][1].append(stripped)
+        assert len({c for c, _ in cmds}) == len(cmds), [c for c, _ in cmds]
+        printed = dict(cmds)
 
-    def says(command: str, *expected: str):
-        hits = [k for k in printed if command in k]
-        assert len(hits) == 1, (command, sorted(printed))
-        assert printed[hits[0]] == list(expected), (command, printed[hits[0]], expected)
+        def says(command: str, *expected: str):
+            hits = [k for k in printed if command in k]
+            assert len(hits) == 1, (command, sorted(printed))
+            assert printed[hits[0]] == list(expected), (command, printed[hits[0]], expected)
 
-    says("grep -c lloyd-architecture ~/.config/qmd/index.yml", "0", "rc=1")
-    says("grep -c lloyd-architecture ~/lloyd/agent-services/conf/qmd-index.yml", "0", "rc=1")
-    says("grep -cE '^  [A-Za-z0-9_-]+:$'",
-         f"{TRIAL_LIVE_YML}:14", f"{PRODUCTION_REPO}/agent-services/conf/qmd-index.yml:14")
-    says("qmd collection list | head -1", "Collections (14):")
-    says("qmd collection list | grep -c 'qmd://'", "14")
-    says("qmd collection list | grep -c 'lloyd-architecture'", "0")
-    says("grep -c '^  - id: ' ~/lloyd/eval/vault_recall_queries.yaml", "81")
-    says("find ~/lloyd/architecture -name '*.md' | wc -l",
-         str(len(list((PRODUCTION_REPO / "architecture").rglob("*.md")))))
-    header = [l for l in CORPUS.read_text().splitlines() if "GOLD SET SIZE" in l]
-    assert len(header) == 1 and " 81 queries" in header[0], header
-    says('grep -n "GOLD SET SIZE"', header[0].strip())
+        says("grep -c lloyd-architecture ~/.config/qmd/index.yml", "0", "rc=1")
+        says("grep -c lloyd-architecture ~/lloyd/agent-services/conf/qmd-index.yml", "0", "rc=1")
+        says("grep -cE '^  [A-Za-z0-9_-]+:$'",
+             f"{TRIAL_LIVE_YML}:14", f"{PRODUCTION_REPO}/agent-services/conf/qmd-index.yml:14")
+        says("qmd collection list | head -1", "Collections (14):")
+        says("qmd collection list | grep -c 'qmd://'", "14")
+        says("qmd collection list | grep -c 'lloyd-architecture'", "0")
+        says("grep -c '^  - id: ' ~/lloyd/eval/vault_recall_queries.yaml", "81")
+        says("find ~/lloyd/architecture -name '*.md' | wc -l",
+             str(len(list((PRODUCTION_REPO / "architecture").rglob("*.md")))))
+        header = [l for l in CORPUS.read_text().splitlines() if "GOLD SET SIZE" in l]
+        assert len(header) == 1 and " 81 queries" in header[0], header
+        says('grep -n "GOLD SET SIZE"', header[0].strip())
 
     # The two numbers, each over its own denominator, and the rule they are read by.
     cost = _3076_paired(_3076_artifact("x3076r-81-control_seg")[0],

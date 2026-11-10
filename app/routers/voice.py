@@ -17,6 +17,7 @@ playback is published as a LiveKit audio track instead of POSTed to
 the daemon.
 """
 
+import re
 import logging
 import uuid
 from datetime import datetime
@@ -101,6 +102,21 @@ def voice_room_prefix(session_id: str) -> str:
 
 def _voice_turn_cfg() -> dict:
     return ((CONFIG.get("livekit") or {}).get("voice_turn") or {})
+
+
+_SPEAKER_TAG_RE = re.compile(r"(?m)^\[[^\]\n]{1,40}\]:[ \t]*")
+
+
+def strip_speaker_tags(text: str) -> str:
+    """`[Alan]: words` -> `words`, on every line (a superseding request carries
+    the earlier fragments, each tagged).
+
+    The tag is for the model, which needs to know who spoke; retrieval does
+    not. Searched as-is, the name became a query term every spoken turn and
+    took the top focus weight: on the 81-query prefetch eval (2026-11-10) the
+    `[Alan]: ` prefix cut merged doc_hit 0.210 -> 0.148 and MRR 0.113 -> 0.064.
+    """
+    return _SPEAKER_TAG_RE.sub("", text)
 
 
 def _voice_extra_body() -> dict:
@@ -189,6 +205,8 @@ async def voice_inject(request: Request):
     model, meta_path, options = setup["model"], setup["meta_path"], setup["options"]
     prefetched_text = await prefetch_context_async(
         prompt_text, session_id=session_id, plan_mode=setup["plan_mode"],
+        query_text=(strip_speaker_tags(prompt_text)
+                    if _voice_turn_cfg().get("prefetch_strip_speaker", True) else None),
     )
     if _voice_turn_cfg().get("reminder", True):
         prefetched_text = VOICE_TURN_REMINDER + prefetched_text

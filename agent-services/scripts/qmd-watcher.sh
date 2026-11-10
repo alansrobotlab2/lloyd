@@ -23,6 +23,11 @@ VAULT="$HOME/obsidian"
 # the daily-note append from the same capture, except when that capture is
 # skipped as TRIVIAL and no vault write follows the export at all.
 SESSIONS="${LLOYD_DATA:-$HOME/lloyd-data}/_pipeline/vault-derived/sessions"
+# The checkout's architecture docs, qmd's `lloyd-architecture` collection
+# (2026-11-10). A landing rewrites them in ~/lloyd and nothing else in the watch
+# moves with it, so without this the collection would serve the docs as of the
+# last unrelated vault write.
+ARCH_DOCS="$HOME/lloyd/architecture"
 DEBOUNCE_SEC=2
 # A no-op `qmd update` is not cheap: it re-hashes every file of every collection
 # `index.yml` declares before it discovers that one of them changed. No count is
@@ -57,11 +62,17 @@ DEBOUNCE_SEC=2
 # 213 cycles were logged in one evening.
 #
 # COOLDOWN_SEC is the floor between two walks: after a cycle, events are
-# consumed without triggering work until it expires. Worst-case staleness is
-# COOLDOWN_SEC + the cycle itself; `backlog_similar` already assumes qmd may
-# not have seen an item created in the last ten minutes (its rule B covers
-# exactly this window with a lexical leg), so a minute of lag costs nothing
-# that is not already designed for.
+# consumed without triggering work until it expires. An event consumed there —
+# or one that arrived while the walk itself ran, which waits in the pipe and is
+# read by the same drain — is REMEMBERED, and one more cycle runs as soon as
+# the floor has passed. Until 2026-11-10 those events were read and dropped,
+# and nothing re-triggered: an edit landing during a walk stayed unindexed until
+# some unrelated write happened, which on a quiet vault could be hours, and the
+# old "worst case = cooldown + cycle" here was not true. Worst-case staleness
+# is now one cycle + COOLDOWN_SEC + MAX_DEBOUNCE_SEC + one cycle.
+# `backlog_similar` already assumes qmd may not have seen an item created in the
+# last ten minutes (its rule B covers exactly this window with a lexical leg), so
+# a minute of lag costs nothing that is not already designed for.
 COOLDOWN_SEC=60
 # And the debounce needs a ceiling of its own, or it starves in the other
 # direction: `while read -t 2` only exits on a 2s quiet gap, so a vault under
@@ -78,25 +89,22 @@ debounce() {
   done
 }
 
-# Consume events for $1 seconds without acting on them. Returns early only if
-# the whole remaining window was quiet, in which case the outer blocking read
-# is equivalent -- either way no walk starts before the floor has passed.
+# Consume events for $1 seconds without acting on them, and set DRAINED=1 if
+# any arrived (including those buffered while the walk ran). Returns early only
+# if the whole remaining window was quiet -- either way no walk starts before
+# the floor has passed.
+DRAINED=0
 drain_for() {
   local end=$(( SECONDS + $1 )) remaining
+  DRAINED=0
   while (( (remaining = end - SECONDS) > 0 )); do
     read -r -t "$remaining" || return 0
+    DRAINED=1
   done
 }
 
-log "Watching $VAULT and $SESSIONS for .md changes (debounce: ${DEBOUNCE_SEC}s, max ${MAX_DEBOUNCE_SEC}s; cooldown: ${COOLDOWN_SEC}s)"
-
-mkdir -p "$SESSIONS"
-
-inotifywait -m -r -e close_write,create,delete,moved_to,moved_from \
-  --include '\.md$' "$VAULT" "$SESSIONS" |
-while read -r; do
-  debounce
-
+# One walk: update, then embed what the update found.
+run_cycle() {
   log "Change detected, updating index..."
   if "${QMD_CLI[@]}" update 2>&1; then
     log "Index updated, embedding new documents..."
@@ -104,6 +112,37 @@ while read -r; do
   else
     log "WARNING: update failed"
   fi
-  log "Ready (cooldown ${COOLDOWN_SEC}s)"
-  drain_for "$COOLDOWN_SEC"
-done
+}
+
+# The loop, reading one event per line on stdin until EOF. A change seen during
+# a walk or its cooldown is owed one more walk, which runs without waiting for
+# a fresh event.
+watch_loop() {
+  local pending=0
+  while :; do
+    if [[ $pending == 0 ]]; then
+      read -r || return 0
+    fi
+    debounce
+    run_cycle
+    log "Ready (cooldown ${COOLDOWN_SEC}s)"
+    drain_for "$COOLDOWN_SEC"
+    pending=$DRAINED
+    if [[ $pending == 1 ]]; then
+      log "Changes arrived during the last walk; re-running"
+    fi
+  done
+}
+
+# Sourced by tests/test_qmd_watcher_rerun.py to drive watch_loop with a stub CLI.
+if [[ ${QMD_WATCHER_LIB:-0} == 1 ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+log "Watching $VAULT, $SESSIONS and $ARCH_DOCS for .md changes (debounce: ${DEBOUNCE_SEC}s, max ${MAX_DEBOUNCE_SEC}s; cooldown: ${COOLDOWN_SEC}s)"
+
+mkdir -p "$SESSIONS"
+
+inotifywait -m -r -e close_write,create,delete,moved_to,moved_from \
+  --include '\.md$' "$VAULT" "$SESSIONS" "$ARCH_DOCS" |
+watch_loop

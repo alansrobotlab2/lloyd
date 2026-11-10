@@ -19,6 +19,7 @@ vault_recall breakage. These names are the public API; treat changes to
 their signatures as cross-module breaking changes.
 """
 
+import datetime
 import math
 import re
 from functools import lru_cache
@@ -187,6 +188,13 @@ def invalidate_fact_file_cache() -> None:
     _fact_file_cache.clear()
 
 
+def _iso_stamp(value) -> str:
+    """A fact timestamp as an ISO string, whatever YAML made of it."""
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    return str(value)
+
+
 def get_facts_sync(entity: str, category: str = None, as_of: str = None,
                    include_expired: bool = False,
                    with_source_file: bool = False) -> dict:
@@ -221,11 +229,15 @@ def get_facts_sync(entity: str, category: str = None, as_of: str = None,
         facts = [f for f, _ in entries]
     if not include_expired:
         if as_of:
-            # Return facts valid at a specific point in time
+            # Return facts valid at a specific point in time. Compared as ISO
+            # strings on BOTH sides: an unquoted `valid_at: 2026-03-01` is a
+            # `datetime.date` once YAML has read it (82 live files carry one),
+            # and `date <= str` raised a TypeError that failed the whole read.
+            as_of_s = _iso_stamp(as_of)
             facts = [f for f in facts
-                     if (not f.get("valid_at") or f["valid_at"] <= as_of)
-                     and (not f.get("expired_at") or f["expired_at"] > as_of)
-                     and (not f.get("invalid_at") or f["invalid_at"] > as_of)]
+                     if (not f.get("valid_at") or _iso_stamp(f["valid_at"]) <= as_of_s)
+                     and (not f.get("expired_at") or _iso_stamp(f["expired_at"]) > as_of_s)
+                     and (not f.get("invalid_at") or _iso_stamp(f["invalid_at"]) > as_of_s)]
         else:
             # Default: only current facts
             facts = [f for f in facts if not f.get("expired_at") and not f.get("invalid_at")]
@@ -532,7 +544,8 @@ def extract_entities_from_query(query: str, *, semantic: Optional[bool] = None,
     # never asked the store what a name IS, so a query phrased as an alias —
     # `Relationship Graph`, `Autonomy Pipeline` — seeded on the alias and left the
     # entity its facts, edges and documents actually live under unreachable at any
-    # seed budget. The store holds 4,026 alias rows saying exactly that, and
+    # seed budget. The store holds alias rows saying exactly that (281 on
+    # 2026-11-10, after the 2026-09-22 rebuild dropped the mechanical ones), and
     # `store.resolve` was never called on this path. The directory-name check is
     # what keeps the fold honest: an alias routing to a name with no facts under it
     # would replace a seed that reads with one that reads nothing.

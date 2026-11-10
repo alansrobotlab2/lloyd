@@ -609,6 +609,10 @@ One SQLite queue drained by `workers.slots` asyncio workers inside the backend
   (the regression pin reads it there).
 - Do not time qmd while something else owns GPU 0; read `meta.phases` and
   `nvidia-smi` first.
+- **A qmd collection is reachable only if the recall names it** (`VAULT_SEGMENTS`,
+  plus `lloyd-architecture` — the checkout's own docs — under
+  `vault_search.architecture: both`); a config entry alone is never asked for (#3076).
+  Session hits carry an id for `session_read`, not a path.
 - `architecture/qmd.md` (the engine), `architecture/retrieval.md` (the recall
   and every measurement).
 

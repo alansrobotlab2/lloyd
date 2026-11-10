@@ -463,7 +463,7 @@ only when a change both names it there and reads it somewhere.
 Pinned by `tests/test_autonomy_config_write.py`, `tests/test_tool_sandbox.py`,
 `tests/test_mcp_pool_retry_policy.py` and the `fact_resolve_apply` cases in
 `tests/test_memory_improvement.py`. One name in the class is still open by
-decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`agent_mcp/annotations.py:83`)
+decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`agent_mcp/annotations.py:84`)
 and its handler `mkdir`s the screenshot directory and writes a PNG on every call
 (`agent_mcp/browser.py:1015`). It is a derived artifact, like the code graph's cache
 `annotations.py` explicitly justifies a few lines above — but that comment covers
@@ -499,7 +499,7 @@ self-evidently a file with a fresh timestamp.
 | `djev` | 3 | typed decisions on GPU 2's DiffusionGemma, ~40 ms each. Ranking only: the scores are not calibrated ([[djev]]) |
 | `facts` | 7 | the knowledge-graph fact layer and store ([[knowledge-graph]]). `fact_check` and `fact_profile` were retired 2026-09-23 into `fact_resolve` and `fact_get`, which is why this row once read 9 |
 | `vault` | 5 | the Obsidian vault: read, write, search, recall |
-| `session` | 5 | `MEMORY.md`/`USER.md`, and transcript search |
+| `session` | 6 | `MEMORY.md`/`USER.md`, transcript search, and reading one past chat |
 | `mission_control` | 2 | chat session listing |
 | `mission_control_ui` | 3 | what tab the user is on, and moving them |
 | `ide` | 3 | the IDE tab |
@@ -691,7 +691,7 @@ re-implements the caps.
 | `vault_search` | RO | `query` | BM25 + vector search over the vault |
 | `vault_recall` | RO | `query` | Vault search plus entity facts in parallel; carries the djev rerank arm and shadow seam. Its seven eval knobs (`RECALL_EVAL_KNOBS`: graph expansion and rerank, djev rerank) are read from params in process only; `call_tool` strips them, and the schema no longer lists them |
 
-#### `session` (5)
+#### `session` (6)
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
@@ -700,6 +700,7 @@ re-implements the caps.
 | `memory_replace` | ID | `old_text`, `new_text` | Replace text in a memory file (fails if absent) |
 | `memory_remove` | DX ID | `entry` | Remove an entry from a memory file |
 | `session_recall` | RO | `query` | Search recent session transcripts |
+| `session_read` | RO | `session_id` | One past chat's user and assistant text, by turn range, size-capped |
 
 #### `mission_control` (2)
 

@@ -1,27 +1,24 @@
 """The per-turn half of the prompt layout (P1): what rides on the user message.
 
 `prompt_builder.build_system_prompt` decides what the system prompt holds;
-this decides what the turn's user message carries at its tail instead. Two
-things can land there, and both exist to keep the system prompt — and so the
+this decides what the turn's user message carries at its tail instead. Three
+things can land there, and all exist to keep the system prompt — and so the
 whole previous conversation behind it — byte-stable from one turn to the next:
 
+  * the `<now>` clock line when `harness.prompt_layout.clock` is on;
   * the `<session_state>` block (goal, plan, todos) when
     `harness.prompt_layout.session_state` is `user_tail`;
   * the `<memory_delta>` note when `harness.prompt_layout.freeze_memory` is on
     and the memory files moved since the session's snapshot
     (`app/memory_snapshot.py`).
 
-Neither half is a property of this module, and no current value is stated
-here: what ships is `harness.prompt_layout` in `config.yaml`, and a docstring
-that repeats a switch goes stale the day someone moves it. The tail is "" only
-when both of its halves are, and they are empty for two independent reasons —
-the `<session_state>` half whenever the placement switch is anything but
-`user_tail` (the block rides inside the system prompt instead, so this module
-has nothing to carry), and the `<memory_delta>` half whenever
-`freeze_memory` is off (no snapshot is taken, so nothing has diverged to
-report). When both switches say so, `turn_tail` returns "" and every caller's
-`prefetched_text` is exactly what it was — which of the two is on is a
-`config.yaml` question, not one this file can answer.
+None of the three is a property of this module, and no current value is
+stated here: what ships is `harness.prompt_layout` in `config.yaml`. The
+`<session_state>` part is empty whenever the placement switch is anything but
+`user_tail` (the block rides inside the system prompt instead), the
+`<memory_delta>` part whenever `freeze_memory` is off (no snapshot is taken,
+so nothing has diverged to report), and the clock whenever `clock` is off. With all three off `turn_tail` returns "" and every caller's
+`prefetched_text` is exactly what it was.
 
 The four hand-built turn paths (stream, ambient, sync in `messages.py`;
 `voice.py`) call `turn_tail` + `append_turn_tail`, and `_run_turn` records the
@@ -32,12 +29,15 @@ so the chat UI still shows everything the model saw.
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger("lloyd-server")
 
 #: Tags a turn tail can open with. `_split_subliminal` recognises the tail by
 #: these, so a user message that happens to end in its own text is not split.
-TAIL_TAGS = ("<session_state>", "<memory_delta>")
+#: `<now>` is first: the tail opens with it when the clock is on, and the
+#: splitter takes the first tag it finds as the start of the whole tail.
+TAIL_TAGS = ("<now>", "<session_state>", "<memory_delta>")
 TAIL_SEP = "\n\n"
 
 
@@ -55,10 +55,45 @@ def replay_injected_context() -> bool:
     return bool(_cfg().get("replay_injected_context", False))
 
 
+def clock_enabled() -> bool:
+    """`harness.prompt_layout.clock` (default false in code; config.yaml says)."""
+    return bool(_cfg().get("clock", False))
+
+
+def clock_line(now: float | None = None) -> str:
+    """`<now>Tue 2026-11-10 11:05 PST</now>`, or "" when it cannot be stamped.
+
+    The system prompt carries no clock on purpose (a timestamp there would bust
+    the cached prefix every turn), and until 2026-11-10 nothing else did on a
+    chat or voice turn — only ambient envelopes were stamped — so "yesterday",
+    "this week" or a deadline was composed in prose (#1197's failure). The tail
+    rides on the current user message only; past user rows replay bare, so the
+    stamp never enters the cached history.
+    """
+    import time as _time
+    from datetime import datetime
+
+    from app.sessions_io import ambient_clock_stamp
+
+    t = _time.time() if now is None else now
+    stamp = ambient_clock_stamp(t)
+    if not stamp:
+        return ""
+    day = datetime.fromtimestamp(t).astimezone().strftime("%a")
+    return f"<now>{day} {stamp}</now>"
+
+
 def turn_tail(todos: list[dict] | None = None, plan: dict | None = None,
               goal: dict | None = None, memory_note: str = "") -> str:
     """The text a turn appends to its user message, or "". Never raises."""
     parts: list[str] = []
+    try:
+        if clock_enabled():
+            line = clock_line()
+            if line:
+                parts.append(line)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("prompt_layout: clock line failed: %s", exc)
     try:
         from app import prompt_builder as pb
 
@@ -77,6 +112,16 @@ def append_turn_tail(prefetched_text: str, tail: str) -> str:
     if not tail:
         return prefetched_text
     return f"{prefetched_text}{TAIL_SEP}{tail}"
+
+
+_CLOCK_RE = re.compile(r"(?:\n\n)?<now>[^<\n]*</now>")
+
+
+def without_clock(text: str) -> str:
+    """`text` with the `<now>` line removed: the clock moves every minute, so a
+    digest of the injected block that kept it (the component manifest, #581)
+    would read as "the retrieval changed" on every turn."""
+    return _CLOCK_RE.sub("", text or "")
 
 
 def mem_kwargs(memories_text: str | None) -> dict:

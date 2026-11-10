@@ -310,6 +310,11 @@ VAULT_FACTS_ROOT_DEFAULT = VAULT_DERIVED_ROOT / "facts"
 VAULT_FACTS_ROOT = Path(os.environ["LLOYD_FACTS_ROOT"]) if os.environ.get("LLOYD_FACTS_ROOT") \
     else VAULT_FACTS_ROOT_DEFAULT
 
+# One JSONL row per fact a re-extracted note would expire (dry_run) or did expire
+# (apply) — `agent_mcp.fact_supersede`, gated by
+# `knowledge_graph.supersede_on_reextract`. A witness, never an input.
+FACT_SUPERSEDE_JOURNAL_PATH = PIPELINE_DIR / "fact-supersede.jsonl"
+
 # The knowledge-graph store: edges, aliases, entity registry and the fact
 # index live in one SQLite file, and `app.kg_store` is the only WRITER. It is
 # not the only opener: the guardian's data-damage tripwire opens it read-only for
@@ -505,3 +510,6 @@ SKILLS_INDEX_RANK_PATH = PIPELINE_DIR / "skills-index-rank.json"
 # Per-skill `name: description` embeddings for the chat matcher's fusion leg
 # (`app.skill_embed_rank`), keyed by text hash; regenerable, pruned to live skills.
 SKILL_EMBED_CACHE_PATH = PIPELINE_DIR / "skill-embeddings.json"
+# `eval/run_vault_search_eval.py` artifacts: vault_search scored per document
+# pipeline. Its own directory so the nightly baseline readers never glob them.
+EVAL_VAULT_SEARCH_DIR = DATA_ROOT / "eval" / "vault-search"

@@ -176,18 +176,21 @@ def test_the_chat_readers_name_the_allow_list_predicate_and_the_others_do_not():
     delivery deny-list — the state that leaked 3 `e2e-harness` automod smokes
     (93, 203 and 134 messages) into the chat history AND into the corpus qmd
     embeds. Four readers decide what a human sees or which corpus a transcript
-    lands in; those must name `is_conversation_session`. The titler and the
-    recall tool answer the delivery question and must NOT have been moved,
-    because a background run still gets titled and still must not be recalled as
-    the user's own words.
+    lands in; those must name `is_conversation_session`. `session_recall`
+    (agent_mcp/session.py) is one of them since 2026-11-10: which past chats it
+    searches is a chat-membership question, and the deny-list let an
+    unclassified machine platform (`canary`, `e2e-harness`) be recalled as the
+    user's own words. The titler answers the delivery question and must NOT have
+    been moved, because a background run still gets titled.
     """
     for rel in ("app/routers/sessions.py", "app/routers/dashboard.py",
-                "app/routers/mc_ui.py", "app/post_capture.py"):
+                "app/routers/mc_ui.py", "app/post_capture.py",
+                "agent_mcp/session.py"):
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert "is_conversation_session(" in text, (
             f"{rel} decides chat membership or corpus placement with the "
             f"delivery deny-list again — the leak #1064 is about")
-    for rel in ("app/session_titles.py", "agent_mcp/session.py"):
+    for rel in ("app/session_titles.py",):
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert "is_user_session(" in text, (
             f"{rel} answers the delivery question with the listing predicate: a "
@@ -1194,7 +1197,6 @@ def test_brief_delivery_keeps_the_deny_list_and_the_split_stays_honest():
     failure the deny-list was written for.
     """
     for rel in ("app/sessions_io.py",     # get_active_session_id
-                "agent_mcp/session.py",   # _resolve_target_session
                 "app/session_titles.py"):
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert "is_user_session(" in text, (

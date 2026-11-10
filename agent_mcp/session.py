@@ -18,7 +18,9 @@ Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns:
       recall ("what did we work on yesterday?")
 """
 
+import asyncio
 import datetime
+import functools
 import json
 import re
 import time
@@ -74,7 +76,8 @@ _INJECTION_PATTERNS = [rx for _id, rx in
 
 from app.atomic_io import commit_lock, write_text_durable
 from app.paths import SESSIONS_DIR  # anchored to LLOYD_HOME, not $HOME/lloyd
-from app.sessions_io import is_user_session
+from app.sessions_io import (is_background_session_name, is_conversation_session,
+                             is_session_head)
 _SESSION_INDEX_TTL = 120       # cache session index for 2 min
 
 _session_index_cache: Optional[tuple] = None  # (monotonic_ts, max_days, {filename: metadata})
@@ -610,82 +613,141 @@ def _load_session_index(max_days: int = 14) -> dict:
         return index
 
     for f in SESSIONS_DIR.iterdir():
-        if not f.name.endswith(".json") or f.name.startswith("autonomy_"):
+        name = _session_file_stem(f.name)
+        if name is None:
             continue
-        parts = f.name.split("_")
+        parts = name.split("_")
         if len(parts) < 3 or len(parts[0]) != 8:
             continue
         if parts[0] < cutoff:
             continue
-
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            # Recall is over what the USER said. A worker turn arrives through
-            # the chat path, so without this the model's own background jobs
-            # were being recalled back to it as the user's conversations.
-            if not is_user_session(data):
-                continue
-
-            # One row per indexed turn: (message index, role, start, end) into
-            # `corpus`, with the WHOLE turn in the corpus rather than a clip of
-            # it. The corpus used to be cut per message (500 chars user, 300
-            # assistant) and then cut again from the head at 5,000 chars, so the
-            # tail of every long session was unsearchable and text past the
-            # per-message clip was unsearchable even in a short one. Scoring
-            # read only that string, so such a term could not be found by any
-            # path — and the empty result looked exactly like a session that
-            # never mentioned it. The rows are what let a hit report where in
-            # the transcript it came from instead of quoting the head.
-            #
-            # No cap replaces them: a fixed cap leaves the same blind spot on
-            # whatever the long tail grows to. Cost was measured, not assumed —
-            # on 2026-09-22 the live 14-day window held 88 sessions and 0.59 MB
-            # of searchable text (0.93 MB for the whole index, keys and turn
-            # rows included), building it ran 1.4x FASTER than the clipping
-            # version (9.3 ms vs 14.0 ms best-of-3 over the same parsed files),
-            # and a full scoring pass got 0.14 ms slower. The cap was buying
-            # latency nobody was paying.
-            turns: list[tuple] = []
-            user_texts: list[str] = []
-            chunks: list[str] = []
-            pos = 0
-            for i, msg in enumerate(data.get("messages", [])):
-                role = msg.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-                text = _extract_msg_text(msg)
-                if not text.strip():
-                    continue
-                lowered = text.lower()
-                if chunks:
-                    pos += 1              # the single space joining turns
-                chunks.append(lowered)
-                turns.append((i, role, pos, pos + len(lowered)))
-                pos += len(lowered)
-                if role == "user":
-                    user_texts.append(text)
-
-            corpus = " ".join(chunks)
-
-            index[f.name] = {
-                "filename": f.name,
-                "session_id": data.get("session_id", f.stem),
-                "date_str": parts[0],
-                "time_str": parts[1] if len(parts) > 1 else "",
-                "created_at": data.get("created_at", ""),
-                "model": data.get("model", ""),
-                "preview": data.get("preview", ""),
-                "message_count": data.get("message_count", 0),
-                "platform": data.get("platform", ""),
-                "corpus": corpus,
-                "turns": turns,
-                "user_snippets": [t[:300] for t in user_texts[:8]],
-            }
-        except Exception:
+        # Decided on the NAME before any byte is read: a background run's id is
+        # four-part, and in a 14-day window they outnumber chats ~200 to 1.
+        # Parsing all of them to discard them after was ~3.4 s per cache miss
+        # (5,033 files, 943 MB, 2026-11-10) — and the aggregator waited on it.
+        if is_background_session_name(name + ".json") or not is_session_head(name + ".json"):
             continue
+        row = _indexed_session_row(f, name, parts)
+        if row is not None:
+            index[f.name] = row
 
     _session_index_cache = (now, max_days, index)
     return index
+
+
+def _session_file_stem(filename: str) -> str | None:
+    """The session id of a `<id>.json` or a retention-swept `<id>.json.gz`."""
+    if filename.endswith(".json.gz"):
+        return filename[:-8]
+    if filename.endswith(".json"):
+        return filename[:-5]
+    return None
+
+
+def _read_session_json(path: Path) -> dict:
+    """A session file, plain or gzipped by the retention sweep."""
+    if path.name.endswith(".gz"):
+        import gzip
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            return json.load(fh)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+#: Per-file memo of `_indexed_session_row`, keyed by path and invalidated by
+#: (mtime_ns, size): a cache miss of the index re-reads only the chats that
+#: changed since, not every chat in the window.
+_session_row_memo: dict[str, tuple[int, int, Optional[dict]]] = {}
+
+
+def _indexed_session_row(f: Path, name: str, parts: list[str]) -> Optional[dict]:
+    try:
+        st = f.stat()
+    except OSError:
+        return None
+    key = str(f)
+    memo = _session_row_memo.get(key)
+    if memo is not None and memo[0] == st.st_mtime_ns and memo[1] == st.st_size:
+        return memo[2]
+    row = _build_session_row(f, name, parts)
+    _session_row_memo[key] = (st.st_mtime_ns, st.st_size, row)
+    return row
+
+
+def _build_session_row(f: Path, name: str, parts: list[str]) -> Optional[dict]:
+    try:
+        data = _read_session_json(f)
+        # Recall is over conversations a person had — the allow-list, not
+        # the delivery deny-list: a platform nobody classified (`canary`,
+        # `e2e-harness`) is a machine run, and recalling it back as the
+        # user's conversation is the failure this exists to prevent.
+        if not is_conversation_session(name, data):
+            return None
+
+        # One row per indexed turn: (message index, role, start, end) into
+        # `corpus`, with the WHOLE turn in the corpus rather than a clip of
+        # it. The corpus used to be cut per message (500 chars user, 300
+        # assistant) and then cut again from the head at 5,000 chars, so the
+        # tail of every long session was unsearchable and text past the
+        # per-message clip was unsearchable even in a short one. Scoring
+        # read only that string, so such a term could not be found by any
+        # path — and the empty result looked exactly like a session that
+        # never mentioned it. The rows are what let a hit report where in
+        # the transcript it came from instead of quoting the head.
+        #
+        # No cap replaces them: a fixed cap leaves the same blind spot on
+        # whatever the long tail grows to. Cost was measured, not assumed —
+        # on 2026-09-22 the live 14-day window held 88 sessions and 0.59 MB
+        # of searchable text (0.93 MB for the whole index, keys and turn
+        # rows included), building it ran 1.4x FASTER than the clipping
+        # version (9.3 ms vs 14.0 ms best-of-3 over the same parsed files),
+        # and a full scoring pass got 0.14 ms slower. The cap was buying
+        # latency nobody was paying.
+        #
+        # Those numbers counted parsed CHATS only. By 2026-11-10 the same
+        # directory held ~33k background runs beside ~240 chats, every one in
+        # the window was parsed to be discarded, and a cold index took ~3.4 s
+        # (5,033 files, 943 MB). The name pre-filter and the per-file memo in
+        # `_load_session_index` bring that to 335 ms cold / 92 ms memo-warm for
+        # the 18 chats of a 14-day window (0.12 MB of text), most of it the
+        # directory listing itself.
+        turns: list[tuple] = []
+        user_texts: list[str] = []
+        chunks: list[str] = []
+        pos = 0
+        for i, msg in enumerate(data.get("messages", [])):
+            role = msg.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            text = _extract_msg_text(msg)
+            if not text.strip():
+                continue
+            lowered = text.lower()
+            if chunks:
+                pos += 1              # the single space joining turns
+            chunks.append(lowered)
+            turns.append((i, role, pos, pos + len(lowered)))
+            pos += len(lowered)
+            if role == "user":
+                user_texts.append(text)
+
+        corpus = " ".join(chunks)
+
+        return {
+            "filename": f.name,
+            "session_id": data.get("session_id", name),
+            "date_str": parts[0],
+            "time_str": parts[1] if len(parts) > 1 else "",
+            "created_at": data.get("created_at", ""),
+            "model": data.get("model", ""),
+            "preview": data.get("preview", ""),
+            "message_count": data.get("message_count", 0),
+            "platform": data.get("platform", ""),
+            "corpus": corpus,
+            "turns": turns,
+            "user_snippets": [t[:300] for t in user_texts[:8]],
+        }
+    except Exception:
+        return None
 
 
 def _score_session(session: dict, query_tokens: set) -> float:
@@ -700,10 +762,26 @@ def _score_session(session: dict, query_tokens: set) -> float:
         return 0.0
     score = 0.0
     for token in query_tokens:
-        count = corpus.count(token)
+        # At most 5 hits matter to the score, so the scan stops there.
+        count = 0
+        for _m in _token_re(token).finditer(corpus):
+            count += 1
+            if count >= 5:
+                break
         if count > 0:
             score += 1.0 + 0.3 * min(count - 1, 4)
     return score / len(query_tokens)
+
+
+@functools.lru_cache(maxsize=512)
+def _token_re(token: str) -> "re.Pattern[str]":
+    """A query token matched at the START of a word.
+
+    `corpus.count(token)` matched anywhere, so `ai` scored on every `said` and
+    `again`, and a two-letter token lifted unrelated chats over the threshold.
+    Anchoring only the start keeps inflections (`rollback` finds `rollbacks`).
+    """
+    return re.compile(r"(?<!\w)" + re.escape(token))
 
 
 # How much of a matched turn a result quotes, and how many matched turns it
@@ -745,7 +823,7 @@ def _match_evidence(session: dict, query_tokens: set,
     location: dict = {}
     for msg_index, role, start, end in session.get("turns", []):
         turn = corpus[start:end]
-        hits = [turn.find(token) for token in query_tokens if token in turn]
+        hits = [m.start() for m in (_token_re(t).search(turn) for t in query_tokens) if m]
         if not hits:
             continue
         if not location:
@@ -832,6 +910,113 @@ def _session_recall_qmd(query: str, days: int, limit: int) -> dict:
             "backend": "qmd"}
 
 
+# ── session_read: what was said in one past session ─────────────────────────
+#
+# `session_recall` and `vault_recall` return a session id with three 300-char
+# snippets, and until this tool nothing could open the rest: `chat_get_session`
+# is metadata only, and a recall's `sessions/<date>/<id>.md` path does not exist
+# under the vault `vault_read` resolves against. The conversation is returned as
+# the people in it saw it — user text and Lloyd's replies, tool calls as names —
+# never the thinking rows, the injected `<context>` or the tool results.
+SESSION_READ_MAX_CHARS = 30_000
+_SESSION_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _session_file(session_id: str) -> Optional[Path]:
+    for suffix in (".json", ".json.gz"):
+        p = SESSIONS_DIR / f"{session_id}{suffix}"
+        if p.is_file():
+            return p
+    return None
+
+
+def _assistant_parts(msg: dict) -> tuple[str, list[str]]:
+    content = msg.get("content")
+    text, tools = "", []
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+        tools = [b.get("name", "?") for b in content
+                 if isinstance(b, dict) and b.get("type") == "tool_use"]
+    for tc in msg.get("tool_calls") or []:
+        fn = (tc or {}).get("function") or {}
+        tools.append(fn.get("name") or (tc or {}).get("name") or "?")
+    return text.strip(), tools
+
+
+def _session_read(params: dict) -> dict:
+    """One past session's conversation, by user turn, size-capped."""
+    sid = str(params.get("session_id", "") or "").strip()
+    if not sid:
+        return _err("session_id is required", ErrorCode.MISSING_PARAM, turns=[])
+    if sid.endswith(".md"):
+        sid = Path(sid).stem          # a recall's export path, handed back whole
+    if not _SESSION_ID_OK.match(sid) or ".." in sid:
+        return _err(f"not a session id: {sid!r}", ErrorCode.INVALID_PARAM, turns=[])
+    path = _session_file(sid)
+    if path is None:
+        return _err(f"no session {sid!r} (sessions before 2026-09-22 survive only as "
+                    f"vault_recall snippets)", ErrorCode.NOT_FOUND, turns=[])
+    try:
+        data = _read_session_json(path)
+    except Exception as exc:  # noqa: BLE001 — a corrupt file is an answer, not a crash
+        return _err(f"could not read session {sid!r}: {type(exc).__name__}: {exc}",
+                    ErrorCode.INTERNAL, turns=[])
+
+    start = max(0, int(params.get("start_turn", 0) or 0))
+    end_raw = params.get("end_turn")
+    end = int(end_raw) if end_raw is not None else None
+
+    # Group the transcript into user turns: each user message opens a turn and
+    # everything Lloyd said until the next one belongs to it.
+    turns: list[dict] = []
+    for msg in data.get("messages", []):
+        role = msg.get("role")
+        if role == "user":
+            text = _extract_msg_text(msg).strip()
+            if not text:
+                continue
+            turns.append({"turn": len(turns), "user": text, "lloyd": "", "tools": []})
+        elif role == "assistant" and turns:
+            text, tools = _assistant_parts(msg)
+            cur = turns[-1]
+            if text:
+                cur["lloyd"] = (cur["lloyd"] + "\n\n" + text).strip()
+            cur["tools"].extend(tools)
+
+    total = len(turns)
+    window = turns[start:(end + 1) if end is not None else None]
+    out: list[dict] = []
+    used = 0
+    truncated = False
+    next_start: Optional[int] = None
+    for t in window:
+        size = len(t["user"]) + len(t["lloyd"]) + 20 * len(t["tools"])
+        if out and used + size > SESSION_READ_MAX_CHARS:
+            truncated, next_start = True, t["turn"]
+            break
+        if size > SESSION_READ_MAX_CHARS:
+            # One turn alone over the cap: cut its reply, say so.
+            keep = max(0, SESSION_READ_MAX_CHARS - len(t["user"]))
+            t = {**t, "lloyd": t["lloyd"][:keep]}
+            truncated = True
+            next_start = t["turn"] + 1 if t["turn"] + 1 < total else None
+        if not t["tools"]:
+            t = {k: v for k, v in t.items() if k != "tools"}
+        out.append(t)
+        used += size
+        if truncated:
+            break
+    result = {"session_id": sid, "title": data.get("title") or data.get("preview", ""),
+              "created_at": data.get("created_at", ""), "platform": data.get("platform", ""),
+              "total_turns": total, "turns": out, "truncated": truncated}
+    if next_start is not None:
+        result["next_start_turn"] = next_start
+    return result
+
+
 def _session_recall(params: dict) -> dict:
     """Search recent session transcripts for topics, decisions, or discussions."""
     query = params.get("query", "").strip()
@@ -850,7 +1035,13 @@ def _session_recall(params: dict) -> dict:
     index = _load_session_index(max_days=max(days, 14))
 
     cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y%m%d")
-    sessions = [s for s in index.values() if s["date_str"] >= cutoff]
+    from agent_mcp import _task_registry
+    own = str(_task_registry.current_session_id.get("") or "")
+    # The caller's own chat holds the query it just typed; recalling it back as
+    # "a past conversation about this" is the self-hit vault_recall and the qmd
+    # backend already drop (#1511).
+    sessions = [s for s in index.values()
+                if s["date_str"] >= cutoff and not (own and s["session_id"] == own)]
 
     query_tokens = {w for w in re.findall(r"\w+", query.lower())
                     if w not in _ENTITY_STOPWORDS and len(w) >= 2}
@@ -954,18 +1145,38 @@ async def list_tools():
             "type": "object", "properties": {"file": _FILE_PARAM, "old_text": {"type": "string", "description": "Existing text to find (substring, must appear exactly once)"}, "new_text": {"type": "string", "description": "Replacement text"}}, "required": ["old_text", "new_text"]}),
         Tool(name="memory_remove", description="Use to drop a memory entry that is wrong or obsolete; to correct it in place use memory_replace. Remove that entry from MEMORY.md, USER.md or a topics/<slug> file: `entry` is matched as a substring, and the whole line holding it goes, so a partial phrase cannot leave half an entry behind.", inputSchema={
             "type": "object", "properties": {"file": _FILE_PARAM, "entry": {"type": "string", "description": "Text to find; the whole entry line containing it is removed"}}, "required": ["entry"]}),
-        Tool(name="session_recall", description="Search recent session transcripts for topics, decisions, or discussions from past sessions. Use for cross-session context like 'what did we work on today?' or 'what was decided about X?'", inputSchema={
+        Tool(name="session_recall", description="Use to find past chats about a topic ('what was decided about X?'); then session_read the one you need.", inputSchema={
             "type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "days": {"type": "integer", "description": "Days back to search (default: 7)"}, "limit": {"type": "integer", "description": "Max results (default: 5)"}}, "required": ["query"]}),
+        Tool(name="session_read", description="Use when you have a past session's id and need what was said in it; to find sessions by topic use session_recall.\n\nUser and Lloyd text by turn, tool calls as names; 30,000-char pages (follow next_start_turn).", inputSchema={
+            "type": "object", "properties": {
+                "session_id": {"type": "string", "description": "e.g. 20261109_181624_ivd095"},
+                "start_turn": {"type": "integer", "description": "0-based user turn"},
+                "end_turn": {"type": "integer", "description": "inclusive"}},
+            "required": ["session_id"]}),
     ]
+
+
+#: The read-only transcript tools, run off the event loop: a cold `session_recall`
+#: reads transcripts from disk (~3.4 s measured 2026-11-10), and the aggregator serves
+#: every tool call from this one loop. The memory_* handlers stay inline on purpose —
+#: tests/test_memory_writer_lane.py pins that shape and the race it rests on.
+OFF_LOOP_TOOLS = frozenset({"session_recall", "session_read"})
+
+
+async def _off_loop(handler, arguments: dict):
+    # `to_thread` copies the context, so `current_session_id` still reads.
+    return await asyncio.to_thread(handler, arguments)
 
 
 async def call_tool(name: str, arguments: dict):
     handlers = {
         "memory_read": _memory_read, "memory_add": _memory_add,
         "memory_replace": _memory_replace, "memory_remove": _memory_remove,
-        "session_recall": _session_recall,
+        "session_recall": _session_recall, "session_read": _session_read,
     }
     handler = handlers.get(name)
-    if handler:
-        return _wrap(handler(arguments))
-    return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))
+    if handler is None:
+        return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))
+    if name in OFF_LOOP_TOOLS:
+        return _wrap(await _off_loop(handler, arguments))
+    return _wrap(handler(arguments))

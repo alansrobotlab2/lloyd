@@ -90,15 +90,6 @@ def _cache_put(cache: dict, key, payload):
     return payload
 
 
-def _load_active_edges() -> list[dict]:
-    """Every currently-active edge. `[]` when the store cannot be read — the
-    Memory page degrades to facts-only rather than 500ing."""
-    try:
-        return _store().edges.active()
-    except StoreUnavailable:
-        return []
-
-
 def _overview_file(entity_dir: Path) -> Path:
     return entity_dir / f"{entity_dir.name}-overview.md"
 
