@@ -10,8 +10,8 @@ What each part has to get right, as tests rather than log lines:
     meant for Lloyd; a judge that does not answer is a drop;
   * a closer ends the conversation; Lloyd's own voice is never a person;
   * pause/resume loses nothing, and what was heard is what finished playing;
-  * a barge-in pauses on sustained speech and the words decide: silence or a
-    backchannel resumes, real words stop the reply, tell the backend what was
+  * a barge-in pauses on sustained speech and the words decide: silence or an
+    empty transcript resumes; any words stop the reply (a backchannel too, 2026-11-09), tell the backend what was
     heard and cancel the turn being spoken — and only that one;
   * a tool turn says what it is doing, and a turn stuck behind another says so;
   * Smart Turn, the recogniser and the embedding run at the same time;
@@ -652,18 +652,42 @@ def test_the_warm_up_ignores_speech_as_a_reply_starts():
     assert asyncio.run(go()).tts.pauses == 0
 
 
-def test_a_backchannel_over_lloyd_resumes_him():
-    b = _barge_bridge(["Yeah."])
-
+def _talk_over(b):
     async def go():
         b._on_speech_start("user-a")
         await asyncio.sleep(0.05)
+        assert b.tts.pauses == 1 and b._barge
         await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
         await asyncio.sleep(0.05)
         return b
-    b = asyncio.run(go())
+    return asyncio.run(go())
+
+
+def test_a_backchannel_over_lloyd_stops_him_as_stop_does():
+    """2026-11-09: words from the person he is talking with, over a paused
+    reply, stop it, also when they are not a turn. Resuming after being
+    understood read as Lloyd ignoring the interruption."""
+    b = _talk_over(_barge_bridge(["Yeah."]))
+    assert b.tts.interrupts == 1 and b.tts.resumes == 0 and b._barge is None
+    # Stopped exactly as "stop" stops him: what was heard is reported and the
+    # spoken turn is cancelled, and nothing is asked.
+    assert b.http.interrupted and b.http.cancels == ["t-old"]
+    assert [p for p in b.http.posts if p and "text" in p] == []
+
+
+def test_stop_on_words_off_resumes_after_a_backchannel():
+    b = _barge_bridge(["Yeah."])
+    b._barge_stop_on_words = False
+    b = _talk_over(b)
     assert b.tts.resumes == 1 and b.tts.interrupts == 0
     assert [p for p in b.http.posts if p and "text" in p] == []
+
+
+def test_an_empty_transcript_over_lloyd_still_resumes_him():
+    """No words were recognised (a noise that held the VAD), so nothing was
+    said to stop him with."""
+    b = _talk_over(_barge_bridge([""]))
+    assert b.tts.resumes == 1 and b.tts.interrupts == 0
 
 
 def test_a_real_request_over_lloyd_stops_him_reports_what_was_heard_and_asks():

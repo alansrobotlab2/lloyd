@@ -806,14 +806,19 @@ Agents and Unmute guard it:
 - **pause, then decide** (LiveKit's false-interruption handling):
   `TTSStreamer.pause()` takes back every frame queued but not yet played and
   clears the source; the utterance that follows decides. An empty transcript,
-  a backchannel, a drop of any kind, or no words within
-  `false_interruption_timeout_s` (2 s) of the speaker going quiet (the
-  pipeline's new `silence` event) → `resume()`, which replays the taken-back
+  echo of his own voice, a different voice (anchor mismatch, not enrolled), or
+  no words within `false_interruption_timeout_s` (2 s) of the speaker going
+  quiet (the pipeline's new `silence` event) → `resume()`, which replays the taken-back
   frames first, so nothing is lost. (Until 2026-11-09 that sentence was not
   true: the replay went through the same paused-check as new audio, found the
   streamer still marked paused, and stashed the frames again — a false
   interruption lost the rest of the clause. The replay now bypasses the check,
-  C1.) Words → `_commit_barge_in`;
+  C1.) Words → `_commit_barge_in`. **Any words from the person he is talking
+  with stop him, as "stop" does, also when they are not a turn** — a
+  backchannel, a bare "Lloyd", speech judged not addressed, the name mentioned
+  mid-sentence (`_barge_heard_words`, `barge_in.stop_on_words`, on since
+  2026-11-09): resuming after being understood read as Lloyd ignoring the
+  interruption;
 - **his own voice rejected** by voiceprint (step 4 of the gate): enrol it with
   `scripts/voice/enroll_own_voice.py`, which renders eight sentences in the
   production voice and stores their mean as `lloyd-voice` (held-out renders
@@ -2191,6 +2196,7 @@ at room start (`lloyd-agent-worker`), backend keys at boot.
 | follow-up window after a reply | 6 s (code 12 s) | `wake.continuation_seconds` | worker |
 | conversation idle close / question window | 90 s / 20 s | `conversation.idle_close_s`, `.question_window_s` | worker |
 | barge-in: sustained speech, warm-up, false-interruption, max pause | 0.5 s, 3 s, 2 s, 8 s | `barge_in.min_duration_s`, `.warmup_s`, `.false_interruption_timeout_s`, `.max_pause_s` | worker |
+| barge-in: words over a paused reply stop it | on | `barge_in.stop_on_words` | worker |
 | filler / queued notice / progress line | 2.5 s / 1.5 s / every 8 s | `voice_turn.filler.after_seconds`, `.queued_notice.after_seconds`, `.progress.every_seconds` | worker |
 | stall apology (no event outside a tool) | 30 s | `voice_turn.stall_after_seconds` | worker |
 | keep-warm touch | 15 s | `voice_turn.keep_warm.every_seconds` | worker |
@@ -2265,7 +2271,8 @@ voice.
   Lloyd's own voice dropped; the three post-VAD stages overlapping; pause
   taking back unplayed frames and resume replaying them first, a push held by
   a pause and released by an interrupt, heard text; barge-in pausing on
-  sustained speech, the warm-up, silence and a backchannel resuming, real words
+  sustained speech, the warm-up, silence and an empty transcript resuming, a
+  backchannel (or any words) stopping him unless `stop_on_words` is off, real words
   stopping him with `interrupted` + a cancel of that turn only; a new request
   during a spoken turn's silent tool phase cancelling it (whichever spoken
   turn is running, never a typed one, nothing with barge-in off), an

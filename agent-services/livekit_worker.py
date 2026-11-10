@@ -1708,6 +1708,7 @@ class RoomBridge:
         self._barge_warmup_s = float(bi.get("warmup_s", 3.0))
         self._barge_false_timeout_s = float(bi.get("false_interruption_timeout_s", 2.0))
         self._barge_max_pause_s = float(bi.get("max_pause_s", 8.0))
+        self._barge_stop_on_words = bool(bi.get("stop_on_words", True))
         self._preroll_ms = int(bi.get("preroll_ms", 300)) if self._barge_in_enabled else 0
         #: The pending possible interruption: {identity, paused_at, silence_at}.
         self._barge: Optional[dict] = None
@@ -2555,6 +2556,21 @@ class RoomBridge:
             return
         self._spawn(self._barge_resume(why))
 
+    def _barge_heard_words(self, identity: str, why: str) -> None:
+        """The person Lloyd is talking with said words over a paused reply that
+        are not a turn (a backchannel, a bare "Lloyd", speech judged not
+        addressed). With `barge_in.stop_on_words` that stops the reply as "stop"
+        does — they talked over him and were understood — rather than resuming
+        it. Echo, an empty transcript and a different voice still resume
+        (`_barge_resolve`)."""
+        b = self._barge
+        if b is None or b["identity"] != identity:
+            return
+        if not self._barge_stop_on_words:
+            self._spawn(self._barge_resume(why))
+            return
+        self._spawn(self._commit_barge_in(identity, f"words while paused ({why})"))
+
     async def _commit_barge_in(self, identity: str, why: str) -> None:
         """A real interruption: stop speaking, record what was heard, cancel
         the turn being spoken (only that one), and let the caller carry on."""
@@ -3147,9 +3163,10 @@ class RoomBridge:
                 and voice_conv.is_backchannel(
                     text, after_question=voice_conv.ends_with_question(self._last_agent_text))):
             # 'Yeah.' while Lloyd reads an answer aloud is the listener
-            # listening. Keep the conversation open; never a turn, never an
-            # interruption.
-            self._barge_resolve(identity, "backchannel")
+            # listening. Keep the conversation open; never a turn. Said over a
+            # reply that a barge-in already paused, it stops the reply as "stop"
+            # does (`barge_in.stop_on_words`, 2026-11-09).
+            self._barge_heard_words(identity, "backchannel")
             if in_follow:
                 wake.extend(identity)
             else:
@@ -3209,7 +3226,7 @@ class RoomBridge:
                         "judged not addressed" if v is not None else "no verdict",
                         (f"p={v.probability:.2f}/{self.addressee.mode}" if v is not None
                          else self.addressee.mode), text[:60])
-                    self._barge_resolve(identity, "not addressed (conversation)")
+                    self._barge_heard_words(identity, "not addressed (conversation)")
                     return
                 LOG.info("[%s] conversation: addressed (p=%.2f, %.0f ms) — injecting",
                          self.room_name, v.probability, v.latency_ms)
@@ -3237,7 +3254,7 @@ class RoomBridge:
                         "[%s] bare wake-word (%s/%.2f) — opening %.1fs window, no inject",
                         self.room_name, ww_name, ww_score, wake.continuation_seconds,
                     )
-                    self._barge_resolve(identity, "bare wake word")
+                    self._barge_heard_words(identity, "bare wake word")
                     return
                 inject_text = tail or text
             elif word_count <= 2:
@@ -3263,6 +3280,7 @@ class RoomBridge:
                         "(woke from transcript only) — window open %.1fs",
                         self.room_name, text[:40], wake.continuation_seconds,
                     )
+                    self._barge_heard_words(identity, "short transcript")
                     return
             elif _mentions_wake_name(text, wake.words):
                 # The name is in the transcript, but in the middle of the
@@ -3274,7 +3292,7 @@ class RoomBridge:
                     "[%s] wake name mentioned, not addressed (%s/%.2f) in %r — dropped",
                     self.room_name, ww_name, ww_score, text[:80],
                 )
-                self._barge_resolve(identity, "name mentioned")
+                self._barge_heard_words(identity, "name mentioned")
                 return
             else:
                 # A full sentence whose wake word the ASR spelled differently.

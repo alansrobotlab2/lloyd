@@ -1358,9 +1358,14 @@ livekit:
     # nothing in the first seconds of each reply, while AEC converges on it;
     warmup_s: 3.0
     # pause first; if no words follow within this long after the speaker goes
-    # quiet (an empty transcript, a backchannel), resume where it stopped;
+    # quiet (an empty transcript), resume where it stopped;
     false_interruption_timeout_s: 2.0
     max_pause_s: 8.0
+    # words from the person he is talking with, once the reply is paused, stop
+    # it as "stop" does — also when they are not a turn (a backchannel, a bare
+    # "Lloyd", speech judged not addressed). Only echo of his own voice, an
+    # empty transcript or a different voice resumes it (2026-11-09).
+    stop_on_words: true
     # A 300 ms chime on Lloyd's track when someone joins, so the browser's
     # echo canceller has heard his track before his first reply.
     preroll_ms: 300
