@@ -113,3 +113,38 @@ def test_the_scorer_imports_the_production_matcher(monkeypatch):
     # `_search_skills` to the whole offer set).
     assert ev.lexical_top5("restart the backend please") == ["k"]
     assert seen and isinstance(seen[0], set)
+
+
+def test_the_gold_set_carries_queries_whose_skill_the_pruned_arm_cuts_away():
+    """#4027 clause 4: the gold set can actually populate the deferred-task control.
+
+    `split_by_advertisement` derives the tail by diffing the two arms' advertised name sets, so a
+    gold set whose every labelled skill survives the cut would report `tail_n: 0` and print the
+    surviving-skill half as though it were the whole claim — the false green the item names. This
+    node asks the rendered prompts who was cut (never a hardcoded skill, which would change
+    population when the 30-day rank table moves) and requires at least three labelled records whose
+    expected skill production advertises WITHOUT a description and the pruned arm drops entirely:
+    a names-only skill is exactly the one a cut is supposed to cost, because it was already the
+    weakest signal on the page.
+    """
+    import importlib.util as ilu
+    import yaml
+    root = Path(__file__).resolve().parent.parent
+    spec = ilu.spec_from_file_location("rpe_4027", str(root / "eval" / "run_prefetch_cost_eval.py"))
+    ev = ilu.module_from_spec(spec)
+    spec.loader.exec_module(ev)
+
+    pruned = ev.advertised_skill_names(ev.ARM_INJECTED_PRUNED)
+    block = ev.advertised_index_block(ev.ARM_INJECTED)
+    prod = ev.advertised_skill_names(ev.ARM_INJECTED)
+    described = {ln.strip()[2:].split(" — ")[0] for ln in block.splitlines() if " — " in ln}
+    assert prod and len(pruned) < len(prod), (len(prod), len(pruned))
+
+    gold = yaml.safe_load((root / "eval" / "skill_match_queries.yaml").read_text())
+    tail = [r["id"] for r in gold["records"]
+            if any(s in prod and s not in described and s not in pruned
+                   for s in (r.get("expected_skills") or []))]
+    assert len(tail) >= 3, (
+        f"only {len(tail)} labelled records name a skill the pruned arm cuts away ({tail}); "
+        "the pruned arm would then be scored on surviving queries alone and its headline is the "
+        "green this clause forbids")

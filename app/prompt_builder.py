@@ -568,7 +568,7 @@ def build_system_prompt(
         skills = _load_skills_index(overlay)
         if skills:
             components["skills_index"] = (
-                f"<available_skills>\n{skills}\n</available_skills>\n"
+                f"{SKILLS_OPEN_TAG}\n{skills}\n{SKILLS_CLOSE_TAG}\n"
                 + _skills_index_note(skills_push_enabled())
             )
 
@@ -1185,6 +1185,12 @@ _is_quarantined_skill = is_quarantined_skill_file
 # ---------------------------------------------------------------------------
 SKILLS_INDEX_BUDGET_CHARS = 12_000
 SKILLS_INDEX_MAX_DESCRIPTION_CHARS = 100
+#: The fence the advertised index is wrapped in. Named because #4027's pruned arm has to
+#: MEASURE that block out of a built system prompt (how many skill lines does this arm
+#: advertise, how many characters), and a caller that re-types the tags is a measurement that
+#: silently reads nothing when the fence here is next renamed.
+SKILLS_OPEN_TAG = "<available_skills>"
+SKILLS_CLOSE_TAG = "</available_skills>"
 #: The ranking window. `skill_telemetry.DEFAULT_DAYS` today; restated so a change
 #: to that reader's default does not silently re-rank the prompt.
 SKILLS_INDEX_RANK_DAYS = 30
@@ -1207,7 +1213,11 @@ def _skills_index_settings() -> dict:
     the cached prefix, and a yaml hiccup must not be what changes it.
     """
     out = {"descriptions": False, "budget_chars": SKILLS_INDEX_BUDGET_CHARS,
-           "max_description_chars": SKILLS_INDEX_MAX_DESCRIPTION_CHARS}
+           "max_description_chars": SKILLS_INDEX_MAX_DESCRIPTION_CHARS,
+           # None = advertise every active skill, which is what production sends and what
+           # `_skills_index_lines` has always done (#4027). An int is the eval's pruned arm:
+           # only that many skills, highest rank first, get an index line at all.
+           "advertise_top_n": None}
     try:
         from app.config import CONFIG
 
@@ -1221,6 +1231,9 @@ def _skills_index_settings() -> dict:
         val = cfg.get(key)
         if isinstance(val, int) and not isinstance(val, bool) and val > 0:
             out[key] = val
+    n = cfg.get("advertise_top_n")
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        out["advertise_top_n"] = n
     return out
 
 
@@ -1401,6 +1414,10 @@ def _skills_index_lines(active, counts: dict[str, int] | None, *,
     in rank order while the whole index stays within `budget` characters; one
     that does not fit is skipped and the next, shorter one may still fit. A skill
     with no description is its name.
+
+    A caller that wants to advertise FEWER skills passes a shorter `active`, which is
+    what `_load_skills_index(advertise_top_n=…)` does; nothing here drops a skill to
+    make room, and what a cut set does and does not mean is written there (#4027).
     """
     counts = counts or {}
     rows: dict[str, str] = {}
@@ -1422,8 +1439,15 @@ def _skills_index_lines(active, counts: dict[str, int] | None, *,
     return [header] + [f"- {n} — {rows[n]}" if n in granted else f"- {n}" for n in names]
 
 
+#: `advertise_top_n` default meaning "whatever config.yaml says". `None` is a real value
+#: in that setting — "advertise every active skill" — so it cannot double as the
+#: keyword's default, or an arm wanting production's set would have to know to write it.
+_READ_CONFIG = object()
+
+
 def _load_skills_index(overlay: Path | None = None, *,
-                       descriptions: bool | None = None) -> str | None:
+                       descriptions: bool | None = None,
+                       advertise_top_n: "int | None | object" = _READ_CONFIG) -> str | None:
     """Build the advertised skill index from skill directories (overlay first).
 
     The set is the single walker's (#1294). This function used to do its own
@@ -1434,6 +1458,13 @@ def _load_skills_index(overlay: Path | None = None, *,
 
     `descriptions` overrides `skills.index.descriptions` (None reads config). Off
     is the names-only line exactly as it has always been rendered.
+
+    `advertise_top_n` overrides `skills.index.advertise_top_n`; the `...` default
+    reads config, because `None` is a meaningful config value there ("advertise
+    everything") and an arm that wanted production's set would have to spell it. The
+    cap applies to both renderings — a names-only index that silently advertised
+    everything would let a pruned arm be measured against an unpruned one. See
+    `_skills_index_lines` for what a pruned set is and is not (#4027).
     """
     active = list(iter_active_skills(overlay=overlay, roots=_skill_walk_roots()))
     if not active:
@@ -1441,8 +1472,19 @@ def _load_skills_index(overlay: Path | None = None, *,
     settings = _skills_index_settings()
     if descriptions is None:
         descriptions = settings["descriptions"]
+    if advertise_top_n is _READ_CONFIG:
+        advertise_top_n = settings["advertise_top_n"]
+    # One cut, applied to the walked set before either rendering, so the described
+    # index and the names-only line cannot disagree about who is advertised — and the
+    # rank that decides it is read once, so the cut and the description grant order
+    # the library by the same numbers.
+    counts = _skill_rank_counts()
+    if advertise_top_n is not None and len(active) > advertise_top_n:
+        keep = set(sorted((a.name for a in active),
+                          key=lambda n: (-int(counts.get(n, 0)), n))[:advertise_top_n])
+        active = [a for a in active if a.name in keep]
     if not descriptions:
-        return "Available skills: " + ", ".join(a.name for a in active)
+        return "Available skills: " + ", ".join(sorted(a.name for a in active))
     return "\n".join(_skills_index_lines(
-        active, _skill_rank_counts(),
+        active, counts,
         budget=settings["budget_chars"], max_desc=settings["max_description_chars"]))

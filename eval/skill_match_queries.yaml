@@ -35,9 +35,9 @@
 
 
 counts:
-  records: 75
+  records: 78
   expected_empty: 24
-  lexical_arm_returned_nothing: 12
+  lexical_arm_returned_nothing: 13
 
 records:
 - id: smq001
@@ -604,3 +604,36 @@ records:
   expected_empty: false
   lexical_arm_returned_nothing: false
   source: "sessions/20260905_042357_iv6245.json message_index=0"
+# Three tail-coverage records for #4027, added because the pruned arm must be scoreable on
+# queries from which it has taken something. All three name a skill that (a) renders NAMES-ONLY
+# in production's index -- no description granted -- and (b) is CUT outright from the pruned
+# arm's index, measured 2026-11-10 over both rank tables the renderer can order by: with live
+# 30-day telemetry `turn-end-todo-bookkeeping` and `requesting-code-review` sit outside
+# PRUNE_ADVERTISE_TOP_N = 140, and with an empty event log so does every name below, because a
+# zero-count table orders the library alphabetically. The empty-table measurement is the one a
+# test can assert, since telemetry moves ranks: `voice-mode` is rank 194 of 208 on an empty log
+# and rank 92 on the live one, which is why the two earlier candidates here (`runaway-audio-kill`
+# twice, `voice-mode`) were replaced -- they are advertised under live telemetry, so a score over
+# them would have been the surviving-skill green this clause exists to forbid. Turns are authored
+# for the control, not lifted from a session, and are the shape the carried ceiling names:
+# colloquial and referential, sharing almost no tokens with the skill's own metadata.
+- id: smq076
+  turn: "did you already move that one to done, or is the list still saying in progress?"
+  expected_skills: [turn-end-todo-bookkeeping]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260923_212324_iv5be9.json message_index=0"
+
+- id: smq077
+  turn: "the list is lying about where you got to, sort it out before you start the next one"
+  expected_skills: [turn-end-todo-bookkeeping]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260928_195400_ivcfc5.json message_index=0"
+
+- id: smq078
+  turn: "get a second pair of eyes over this before I push it, I only changed one line"
+  expected_skills: [requesting-code-review]
+  expected_empty: false
+  lexical_arm_returned_nothing: true
+  source: "sessions/20260923_212324_iv5be9.json message_index=23"

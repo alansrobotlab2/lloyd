@@ -189,9 +189,63 @@ def test_unreadable_settings_keep_today(tree, monkeypatch):
     CONFIG["skills"]["index"] = {"descriptions": "yes", "budget_chars": -1,
                                  "max_description_chars": True}
     s = pb._skills_index_settings()
-    assert s == {"descriptions": False, "budget_chars": 12000, "max_description_chars": 100}
+    # `advertise_top_n: None` IS today's behaviour, not a fourth knob switched on: None means
+    # every active skill gets an index line, which is what production has always rendered and
+    # what #4027's pruned arm exists to deviate from. Garbage in that key cannot reach a number
+    # through it either, same as the other three.
+    assert s == {"descriptions": False, "budget_chars": 12000, "max_description_chars": 100,
+                 "advertise_top_n": None}
+    CONFIG["skills"]["index"]["advertise_top_n"] = "seven"
+    assert pb._skills_index_settings()["advertise_top_n"] is None
     monkeypatch.setitem(CONFIG, "prefetch", {"skills": {"push": "no"}})
     assert pb.skills_push_enabled() is True   # only a literal false switches it
+
+
+def test_advertise_top_n_prunes_the_index_and_nothing_else(tree):
+    """#4027: the set-restricting seam is subtractive at the INDEX and grants nothing else.
+
+    `_load_skills_index(overlay=…)` only ever ADDED skills, so a pruned arm needed a new seam —
+    and a new seam in the prompt builder is exactly where an unintended capability creeps in. The
+    invariants: the cut keeps the top N by the same rank the description grant walks (ties by
+    name, so it is reproducible); it applies to the names-only rendering too, or an arm could be
+    measured on an index it never pruned; every other skill is still returned by the walker,
+    because a pruned skill has to stay loadable by `skills_read` for a tail query to be a
+    deferred-task control; and the budget cannot be what does the cutting — an oversized budget
+    must still yield exactly N names.
+    """
+    # Names chosen so alphabetical order (alpha, mango, zebra) is NOT the rank order
+    # (zebra 30, alpha 20, mango 10): a node whose fixture sorts the same both ways cannot
+    # tell a rank cut from an alphabetical cut, which is the difference between this seam and
+    # the budget's own behaviour.
+    for name, desc in (("zebra", "Z"), ("alpha", "A"), ("mango", "M")):
+        d = tree / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {desc}\n---\nbody {name}\n")
+    CONFIG["skills"]["index"] = {"descriptions": True, "budget_chars": 12000,
+                                 "max_description_chars": 100}
+    real = pb._skill_rank_counts
+    pb._skill_rank_counts = lambda: {"zebra": 30, "alpha": 20, "mango": 10}
+    try:
+        full = pb._load_skills_index(overlay=tree)
+        assert [ln for ln in full.splitlines() if ln.startswith("- ")] == [
+            "- alpha — A", "- mango — M", "- zebra — Z"], full
+        cut = pb._load_skills_index(overlay=tree, advertise_top_n=2)
+        assert [ln for ln in cut.splitlines() if ln.startswith("- ")] == [
+            "- alpha — A", "- zebra — Z"], cut      # mango (rank 10) is the one that went
+        # The budget is generous here, so only the seam can have removed a name.
+        assert pb._load_skills_index(overlay=tree, advertise_top_n=99) == full
+        assert pb._load_skills_index(overlay=tree, advertise_top_n=None) == full
+        # Names-only rendering is pruned by the same cut, or the two renderings disagree about
+        # who is advertised and a pruned arm could be scored against an unpruned surface.
+        names_only = pb._load_skills_index(overlay=tree, descriptions=False, advertise_top_n=1)
+        assert names_only == "Available skills: zebra", names_only
+        # Nothing left the library: the pruned name is still walked, still readable.
+        from agent_mcp.skills import iter_active_skills
+        roots = [tree] + [d for d in pb._skill_walk_roots() if d != tree]
+        assert {s.name for s in iter_active_skills(roots=roots)} >= {"zebra", "alpha", "mango"}
+        assert (tree / "mango" / "SKILL.md").is_file()
+    finally:
+        pb._skill_rank_counts = real
 
 
 def test_rank_counts_join_offers_loads_and_reads(tree, monkeypatch):

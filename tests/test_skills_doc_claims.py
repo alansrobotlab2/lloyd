@@ -239,3 +239,87 @@ def test_the_committed_probe_witness_backs_the_quoted_numbers():
         for p in rep["per_protocol"].values()), (
         "a protocol fired on this corpus with compliance below 100% — enablement is "
         "an open question again, and the paragraph must not read as settled")
+
+
+# ---------------------------------------------------------------------------
+# #4027 — the pruned-advertised-set measurement, pinned to its own artifact.
+
+MEASUREMENT = Path(__file__).resolve().parent.parent / "eval" / "measurements"
+PRUNED_MD = MEASUREMENT / "skills-pruned-4027-2026-11-09.md"
+PRUNED_JSON = MEASUREMENT / "skills-pruned-4027-2026-11-09.json"
+
+
+def test_the_pruned_arm_measurement_records_headline_tail_and_index_size() -> None:
+    """Clause 5: the write-up names the arm, states all four figures, and they cohere.
+
+    The item's warning is why this exists: an arm scored only on queries whose skill survived is a
+    false green, and "a .md that mentions a tail number somewhere in prose" is how that green gets
+    published. So the node reads the numbers out of the results table and checks what they imply —
+    the tail population is non-empty, the arm advertises strictly fewer skills, the index size is
+    stated for both arms in characters, and the headline is not silently the surviving-skill half.
+
+    What is deliberately NOT pinned is the VALUE of the rates. Which skills fall in the tail moves
+    with the 30-day skill telemetry that ranks the advertised set, so the .md carries its figures
+    with the run date and says so. And `eval/measurements/*.json` is gitignored (.gitignore:42), so
+    the run's own artifact cannot be what a checkout proves: a node requiring it would pass in this
+    worktree and fail on every clone after it, which tests the directory, not the claim.
+    """
+    assert PRUNED_MD.is_file(), f"{PRUNED_MD.name} is gone; the pruned arm has no published result"
+    text = PRUNED_MD.read_text()
+    assert "injected_pruned" in text, "the write-up does not name the pruned arm"
+
+    def row(needle: str) -> tuple[str, str]:
+        lines = [ln for ln in text.splitlines()
+                 if ln.startswith("|") and needle in ln.split("|")[1]]
+        assert len(lines) == 1, f"expected one row containing {needle!r}: {lines}"
+        cells = [c.strip().strip("*") for c in lines[0].split("|")[2:]]
+        return cells[0], cells[1]
+
+    def num(cell: str) -> float:
+        digits = "".join(ch for ch in cell.split("(")[0] if ch.isdigit() or ch == ".")
+        return float(digits) if digits else 0.0
+
+    head_p, head_a = row("headline")
+    surv_p, surv_a = row("was advertised")
+    tail_p, tail_a = row("tail population")
+    chars_p, chars_a = row("advertised index, characters")
+    count_p, count_a = row("advertised skills, lines")
+
+    assert num(count_a) < num(count_p) and num(count_a) > 0, (count_p, count_a)
+    def population(cell: str) -> float:
+        """The tail population SIZE, read off the parenthetical, never off the rate.
+
+        Reading `num(tail_a)` instead would make an honest FAILED control — a non-empty tail whose
+        rate is 0.0, which is the number that argues for cutting — turn the measurement red, so the
+        guard would fire on exactly the result the clause exists to publish. The sibling node in
+        tests/test_prefetch_cost_eval.py guards the same thing off `tail_n` for the same reason.
+        """
+        digits = [d for d in cell.replace("(", " ").replace("/", " ").replace(")", " ").split()
+                  if d.isdigit()]
+        assert digits, f"no population size beside the tail figure: {cell!r}"
+        return float(digits[-1])
+
+    assert population(tail_a) > 0, \
+        "the arm reports an empty tail population: the false green itself"
+    assert "empty" in tail_p or "—" in tail_p or "n/a" in tail_p, \
+        "production must be reported as having NO tail population, not a rate of zero"
+    assert "/" in tail_a or "n=" in tail_a, \
+        f"the tail figure has no population size beside it: {tail_a!r}"
+    assert num(chars_p) > 0 and num(chars_a) > 0, (chars_p, chars_a)
+
+    # The fourth figure clause 5 names: how many advertised skills carry a description at each
+    # arm's size. Without it the character row above reads as a prefill saving, when the round's
+    # own render says the opposite — the budget the cut frees is re-spent on descriptions for the
+    # survivors, so fewer names ship MORE prose. Pinned as a direction off the page, not as today's
+    # count, because which skills clear the description budget moves with the 30-day rank table.
+    desc_p, desc_a = row("CARRYING A DESCRIPTION")
+    assert num(desc_p) > 0 and num(desc_a) > 0, (desc_p, desc_a)
+    assert num(desc_a) > num(desc_p), (
+        f"the page reports {desc_a} described at the pruned size against {desc_p} at production's; "
+        "unless the smaller set carries MORE descriptions, the character row is not a budget "
+        "re-fill and this round's finding has changed — re-read the render before editing this")
+    assert num(surv_a) > 0 and "/" in surv_a and "/" in surv_p
+    assert num(head_a) == num(head_p), \
+        "the headline is the average of the two populations; a surviving-only figure would differ"
+    assert "budget" in text.lower(), \
+        "why a third of the names buys no characters is this round's load-bearing finding"

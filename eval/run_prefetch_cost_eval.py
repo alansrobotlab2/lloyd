@@ -112,7 +112,14 @@ ARM_NO_SKILL = "no_skill"
 ARM_AA = "injected_aa"
 ARM_DESC_PUSH = "desc_push"
 ARM_DESC_PULL = "desc_pull"
-ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA, ARM_DESC_PUSH, ARM_DESC_PULL)
+#: The seventh arm, and the only one that changes WHICH skills are advertised rather than
+#: whether they carry a description or get pushed into the turn. Every other arm renders the
+#: whole library, so the standing claim that a big skill library degrades an agent —
+#: knowledge/video-summaries/more-skills-worse-agents.md — has never been testable here, and
+#: `skills-index-2026-09-25.md` is not evidence about it either way. (#4027.)
+ARM_INJECTED_PRUNED = "injected_pruned"
+ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA, ARM_DESC_PUSH, ARM_DESC_PULL,
+        ARM_INJECTED_PRUNED)
 #: What a bare run does: the #562 arms. The P5 arms are asked for by name.
 DEFAULT_ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA)
 #: Arms whose prompt is the injected rendering minus these sections.
@@ -122,6 +129,15 @@ ABLATIONS = {ARM_NO_SKILL: ("skill",), ARM_DESC_PULL: ("skill",)}
 #: production prompt as config.yaml builds it.
 SYSTEM_VARIANTS = {ARM_DESC_PUSH: {"descriptions": True, "push": True},
                    ARM_DESC_PULL: {"descriptions": True, "push": False}}
+
+#: How many skills the pruned arm advertises. Chosen against the 51 labelled turns of
+#: eval/skill_match_queries.yaml rather than by taste: at N=140 the set splits 42 turns whose
+#: expected skill survives / 9 whose expected skill is in the pruned tail, and the index is
+#: 10,608 chars against production's 11,998 over 208 skills. A smaller N is a bigger cut but
+#: shrinks the tail population the deferred-task control needs — at N=30 only 2 of the 51
+#: labelled turns still have their expected skill advertised, so the headline would be
+#: describing two queries and the tail would be everything.
+PRUNE_ADVERTISE_TOP_N = 140
 
 COST_METRIC = "prefill_tokens"
 LEGACY_N = 20
@@ -183,25 +199,127 @@ def load_queries(path) -> list[dict]:
     return out
 
 
+#: Arms that change only the advertised skill SET, overlaid on `skills.index`. Kept apart
+#: from SYSTEM_VARIANTS because the two mechanisms differ in what they are allowed to touch: a
+#: SYSTEM_VARIANTS arm flips `descriptions` and `push` together, and an arm here must leave both
+#: at whatever config.yaml says, or the comparison is no longer "same surface, fewer names".
+#: The key is `prompt_builder`'s, not a copy: the pruned arm advertises exactly the set
+#: production would advertise with that setting, and nothing in this file re-implements it.
+ADVERTISE_VARIANTS = {ARM_INJECTED_PRUNED: {"advertise_top_n": PRUNE_ADVERTISE_TOP_N}}
+
+
+_INDEX_BLOCK_CACHE: dict[str, str] = {}
+
+
+def advertised_index_block(arm: str) -> str:
+    """The inside of an arm's `<available_skills>` block — the advertised surface, in chars.
+
+    Read out of the prompt that arm actually runs under, so `advertised_index_chars` in the
+    summary is a measurement of what was sent and not of what this file believes was sent. An
+    arm whose prompt carries no index at all gets "", which is `no_skill`'s honest answer.
+    """
+    from app.prompt_builder import SKILLS_CLOSE_TAG, SKILLS_OPEN_TAG
+
+    if arm in _INDEX_BLOCK_CACHE:
+        return _INDEX_BLOCK_CACHE[arm]
+    prompt = system_prompt_for(arm)
+    start = prompt.find(SKILLS_OPEN_TAG)
+    block = "" if start < 0 else prompt[
+        start + len(SKILLS_OPEN_TAG):prompt.find(SKILLS_CLOSE_TAG, start)].strip("\n")
+    _INDEX_BLOCK_CACHE[arm] = block
+    return block
+
+
+def advertised_skill_names(arm: str) -> set[str]:
+    """The skill names one arm advertises, parsed off its own rendered index.
+
+    Not recomputed from the rank: a tail derived here from `sorted(counts)[:140]` would be a
+    second implementation of the renderer's cut, and the two would disagree the first time the
+    renderer changed — which is the one place this eval could quietly mis-populate the control.
+    Both renderings parse: the description arm's `- name — text` lines, and the names-only
+    arm's single comma-joined line.
+    """
+    names: set[str] = set()
+    for line in advertised_index_block(arm).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            names.add(stripped[2:].split(" — ")[0])
+        elif stripped.startswith("Available skills:"):
+            names.update(n.strip() for n in stripped.split(":", 1)[1].split(",") if n.strip())
+    return names
+
+
+def scored_rows(records: list[dict], arm: str) -> list[tuple[str, list[str], bool]]:
+    """`(query id, expected skills, reached?)` for every query this arm scored on the skill metric.
+
+    `right_skill_reached` is None where the query expects no skill (#469: no skill is the right
+    answer for some turns), and an errored arm has no answer at all — both are out, so a tail
+    population is only ever made of queries that were actually measured.
+    """
+    rows: "list[tuple[str, list[str], bool]]" = []
+    for rec in records:
+        arm_rec = (rec.get("arms") or {}).get(arm) or {}
+        # Labels come off the RECORD, which is where run() writes them, and not out of the
+        # arm's own dict, where they have never been. Reading them there is the silent failure
+        # this line exists for: every artifact would label every query with an empty skill
+        # list, so every arm would report right_skill_reached_tail_n: 0 forever and the
+        # deferred-task control would keep saying "there is no tail" — the exact false green
+        # this clause was added to make impossible.
+        expected = [s for s in (rec.get("expected_skills") or []) if s]
+        if not expected or arm_rec.get("right_skill_reached") is None:
+            continue
+        rows.append((str(rec["id"]), expected, bool(arm_rec["right_skill_reached"])))
+    return rows
+
+
+def split_by_advertisement(arm: str,
+                           rows: list[tuple[str, list[str], bool]]
+                           ) -> tuple[list[tuple[str, list[str], bool]],
+                                      list[tuple[str, list[str], bool]]]:
+    """Rows whose expected skill the arm advertises, and the tail rows whose skill it cut away.
+
+    The deferred-task control the item calls load-bearing. A pruned arm reported only over the
+    first list is a false green by construction: it says the index got smaller and retrieval
+    held, on the turns from which nothing was taken. The tail is the only place the cost of a
+    cut can show up — the skill is still on disk, still findable by `skills_search`, still
+    readable by `skills_read`, so a non-zero tail rate means the model reached a skill nobody
+    advertised to it and a zero is the number that would argue for cutting.
+    """
+    advertised = advertised_skill_names(arm)
+    kept = [row for row in rows if any(s in advertised for s in row[1])]
+    tail = [row for row in rows if not any(s in advertised for s in row[1])]
+    return kept, tail
+
+
 def system_prompt_for(arm: str) -> str:
     """The system prompt one arm runs under — production's unless it is a variant.
 
-    The variant is built by the production builder with the two config keys
-    swapped in for the call and restored after, so the arm measures exactly
-    what flipping those keys in config.yaml would send.
+    The variant is built by the production builder with the config keys swapped in for the
+    call and restored after, so the arm measures exactly what changing those keys in
+    config.yaml would send. A SYSTEM_VARIANTS arm swaps `skills.index.descriptions` and
+    `prefetch.skills.push`; an ADVERTISE_VARIANTS arm (#4027) adds one key to `skills.index`
+    and deliberately does not write `prefetch.skills` at all, because the set is the only
+    thing it is allowed to change.
     """
     from app.config import CONFIG
     from app.prompt_builder import build_system_prompt
 
     variant = SYSTEM_VARIANTS.get(arm)
-    if variant is None:
+    extra = ADVERTISE_VARIANTS.get(arm)
+    if variant is None and extra is None:
         return build_system_prompt()
     skills = CONFIG.setdefault("skills", {})
     prefetch_cfg = CONFIG.setdefault("prefetch", {})
     saved = (skills.get("index"), prefetch_cfg.get("skills"))
     try:
-        skills["index"] = dict(saved[0] or {}, descriptions=variant["descriptions"])
-        prefetch_cfg["skills"] = dict(saved[1] or {}, push=variant["push"])
+        index = dict(saved[0] or {})
+        if variant is not None:
+            index["descriptions"] = variant["descriptions"]
+        if extra is not None:
+            index.update(extra)
+        skills["index"] = index
+        if variant is not None:
+            prefetch_cfg["skills"] = dict(saved[1] or {}, push=variant["push"])
         return build_system_prompt()
     finally:
         for block, key, old in ((skills, "index", saved[0]), (prefetch_cfg, "skills", saved[1])):
@@ -316,6 +434,18 @@ def summarize(records: list[dict]) -> dict:
             "completed_rate": _mean(int(x["completed"]) for x in clean
                                     if x.get("completed") is not None),
         }
+        # #4027. The headline above is the mean over EVERY labelled query; these are the two
+        # populations it averages, printed so an arm that cut the index cannot report the
+        # surviving-skill half as though it were the result. On an arm advertising the whole
+        # library `tail_n` is 0 and the tail rate None — an empty population, not a zero.
+        kept, tail = split_by_advertisement(arm, scored_rows(records, arm))
+        per_arm[arm]["advertised_index_chars"] = len(advertised_index_block(arm))
+        per_arm[arm]["advertised_skill_count"] = len(advertised_skill_names(arm))
+        for label, rows in (("advertised", kept), ("tail", tail)):
+            per_arm[arm][f"right_skill_reached_{label}_rate"] = _mean(
+                int(row[2]) for row in rows)
+            per_arm[arm][f"right_skill_reached_{label}_n"] = len(rows)
+        per_arm[arm]["tail_query_ids"] = sorted(row[0] for row in tail)
 
     out: dict[str, Any] = {"n_queries": len(records), "cost_metric": COST_METRIC,
                            "tuning_floors": dict(TUNING_FLOORS), "arms": per_arm,
@@ -333,7 +463,11 @@ def summarize(records: list[dict]) -> dict:
                                ("aa_minus_injected", ARM_INJECTED, ARM_AA),
                                ("desc_push_minus_injected", ARM_INJECTED, ARM_DESC_PUSH),
                                ("desc_pull_minus_injected", ARM_INJECTED, ARM_DESC_PULL),
-                               ("desc_pull_minus_desc_push", ARM_DESC_PUSH, ARM_DESC_PULL)):
+                               ("desc_pull_minus_desc_push", ARM_DESC_PUSH, ARM_DESC_PULL),
+                               # #4027: b − a is what a smaller advertised set BUYS in prefill;
+                               # paired with the tail rate, because the saving is only a saving
+                               # if the tail was reachable anyway.
+                               ("pruned_minus_injected", ARM_INJECTED, ARM_INJECTED_PRUNED)):
         if a_arm not in arms or b_arm not in arms:
             continue
         c = {}

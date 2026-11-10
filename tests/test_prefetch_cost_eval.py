@@ -236,3 +236,190 @@ def test_merge_joins_arms_by_query_and_drops_the_heavy_fields():
     assert set(rec["arms"]) == {ev.ARM_INJECTED, ev.ARM_SUPPRESSED, ev.ARM_AA, ev.ARM_NO_SKILL}
     assert "rendered" not in rec and "answer" not in rec["arms"][ev.ARM_NO_SKILL]
     assert m["summary"]["negative_marginal_hit_count"] == 1
+
+
+
+# ---------------------------------------------------------------------------
+# #4027 — the arm that varies WHICH skills are advertised, and the population split
+# that keeps it honest. All six earlier arms render the whole library, so nothing in
+# this file could ever have tested the claim in
+# knowledge/video-summaries/more-skills-worse-agents.md that a big skill library
+# degrades an agent, and `skills-index-2026-09-25.md` is not evidence about it either
+# way. These nodes are what makes the claim reachable; the tail split is what stops a
+# smaller set from being scored only on the queries its surviving skills cover.
+
+def test_the_pruned_arm_is_selectable_and_advertises_a_strict_subset() -> None:
+    """Clause 1: the arm exists, is accepted by --arms, and its index is a strict subset.
+
+    The set figures are the live library as this round measured it and do not move with
+    the event log: 208 skills and 11,998 characters of index for production, 140 skills
+    at PRUNE_ADVERTISE_TOP_N, so exactly 68 names stop being advertised and every one of
+    those 68 is still a production name.
+
+    The CHARACTER figure is deliberately NOT asserted to fall, and that is the round's
+    most useful finding rather than a hedge: `skills.index.budget_chars: 12000` is
+    already saturated by the full library, so removing 68 lines frees budget that the
+    renderer immediately spends on descriptions for the survivors. Measured 2026-11-09
+    over the live 30-day event log, the advertised index went 11,998 -> 11,999
+    characters — the arm cut a third of the names and bought one character back — while
+    the system+tools prefix measured 68 tokens cheaper. What that says about pruning as
+    a prefill optimisation is the arm's first result, and the assertion below is what
+    stops a future reader from claiming the cut bought space it did not buy.
+    """
+    assert ev.ARM_INJECTED_PRUNED in ev.ARMS, ev.ARMS
+    prod, pruned = ev.advertised_skill_names(ev.ARM_INJECTED), \
+        ev.advertised_skill_names(ev.ARM_INJECTED_PRUNED)
+    assert len(prod) == 208, f"the live library moved off the 208 this round measured: {len(prod)}"
+    assert len(pruned) == ev.PRUNE_ADVERTISE_TOP_N == 140, len(pruned)
+    assert pruned < prod, f"the arm invented skills: {sorted(pruned - prod)}"
+    assert len(prod - pruned) == 68, sorted(prod - pruned)[:5]
+
+    prod_block, pruned_block = (ev.advertised_index_block(ev.ARM_INJECTED),
+                                ev.advertised_index_block(ev.ARM_INJECTED_PRUNED))
+    assert prod_block and pruned_block, "the <available_skills> fence moved; the reader is blind"
+    assert len(prod_block.splitlines()) - len(pruned_block.splitlines()) == 68, \
+        (len(prod_block.splitlines()), len(pruned_block.splitlines()))
+    assert abs(len(pruned_block) - len(prod_block)) <= 0.02 * len(prod_block), (
+        f"the char gap widened past the budget-refill effect "
+        f"(prod {len(prod_block)} vs pruned {len(pruned_block)}): either the renderer "
+        f"changed or the claim written here is now false")
+
+
+def test_the_pruned_arm_changes_only_the_advertised_set() -> None:
+    """Clause 2: one variable, and the library it prunes from is intact.
+
+    Three things must hold for the arm's number to mean anything. The two config keys the
+    variant arms already swap — `skills.index.descriptions`, `prefetch.skills.push` — have
+    to be at their production values after this arm builds a prompt, or the arm is a
+    description experiment wearing a set experiment's clothes. The rendered TURN must be
+    byte-identical to `injected`'s, because everything outside the system prompt is the
+    same measurement. And the pruned skill must still be on disk and walkable by the
+    library's own walker: it is un-advertised, not deleted, which is the only reason a
+    tail query is a deferred-task control instead of an ablation.
+
+    Which skill is in the tail is not hardcoded: the pruned set is ranked by the 30-day
+    event log, so a name that is in today's tail is out of it next week (`voice-mode`
+    sits at rank 194 of 208 on an empty log and inside the top 140 on the live one). The
+    node derives one from the difference and asserts the invariant that does not move.
+    """
+    import yaml
+    from app.config import CONFIG
+    from agent_mcp.skills import iter_active_skills
+    from app.prompt_builder import _skill_walk_roots
+
+    prod, pruned = ev.system_prompt_for(ev.ARM_INJECTED), \
+        ev.system_prompt_for(ev.ARM_INJECTED_PRUNED)
+    assert prod != pruned
+    # Each prompt is cut at its OWN fence: the two blocks are not the same length (the
+    # pruned one is 11,999 chars against production's 11,988), so slicing both at one
+    # offset would compare a suffix against itself shifted by a character and read as a
+    # difference the arms do not have.
+    open_tag, close_tag = "<available_skills>", "</available_skills>"
+    for name, text in (("production", prod), ("pruned", pruned)):
+        assert text.count(open_tag) == 1 and text.count(close_tag) == 1, name
+    assert prod[:prod.index(open_tag)] == pruned[:pruned.index(open_tag)], \
+        "the arms differ BEFORE the advertised index"
+    assert prod[prod.index(close_tag):] == pruned[pruned.index(close_tag):], \
+        "the arms differ AFTER the advertised index"
+
+    live = ((CONFIG.get("skills") or {}).get("index") or {})
+    cfg_path = Path(ev.__file__).resolve().parents[1] / "config.yaml"
+    disk = yaml.safe_load(cfg_path.read_text("utf-8"))
+    on_disk = ((disk.get("skills") or {}).get("index") or {})
+    assert live.get("descriptions") == on_disk.get("descriptions") is True, live
+    assert "advertise_top_n" not in on_disk, "the arm leaked its overlay into config.yaml"
+    assert ((disk.get("prefetch") or {}).get("skills") or {}).get("push") is True, \
+        "prefetch.skills.push moved out from under the arm"
+    assert live.get("advertise_top_n") is None, \
+        "the pruned set became production's default: the production arm is no longer production"
+
+    query = "why is the TTS still cutting off mid-sentence"
+    rendered = "<ctx/>\n<skill>x</skill>"
+    assert ev.arm_prompt(rendered, query, ev.ARM_INJECTED_PRUNED) \
+        == ev.arm_prompt(rendered, query, ev.ARM_INJECTED)
+
+    tail = sorted(ev.advertised_skill_names(ev.ARM_INJECTED)
+                  - ev.advertised_skill_names(ev.ARM_INJECTED_PRUNED))[0]
+    on_disk_names = {s.name for s in iter_active_skills(roots=_skill_walk_roots())}
+    assert tail in on_disk_names, f"{tail} pruned out of the LIBRARY; the control is void"
+    assert tail not in ev.advertised_skill_names(ev.ARM_INJECTED_PRUNED), \
+        "the control's skill is advertised again, so there is no deferred task to defer"
+
+def test_the_summary_reports_advertised_and_tail_populations_separately() -> None:
+    """Clause 3: the headline cannot be the surviving-skill half wearing a mean's clothes.
+
+    `summarize` is fed records shaped exactly as `run` writes them — `expected_skills` on
+    the RECORD, the flags inside `arms[arm]` — because the failure this pins is a
+    plausible-looking summary whose split is silently empty: labels read from the arm's
+    dict are absent there, which would make every arm report `tail_n: 0` forever and leave
+    the deferred-task control reporting "no tail" while the risk it guards stays open.
+    Production's arm must show an EMPTY tail population (n 0, rate None — not a 0.0, which
+    would read as "the tail was reached perfectly"), and the pruned arm must show the tail
+    this round measured: 25 of the 54 labelled queries, `smq078` among them.
+    """
+
+    def rec(qid: str, skills: list[str], *, reached: bool) -> dict:
+        flags = {"completed": 1, "judge_score": 2, "doc_hit": 0, "doc_gold": 0,
+                 "duration_s": 0.5, "injected_tokens": 100, "reached_expected": 1,
+                 "right_skill_reached": int(reached), "iterations": 1, "tool_names": []}
+        return {"id": qid, "category": "skill", "expected_skills": skills, "query": qid,
+                "arms": {ev.ARM_INJECTED: dict(flags),
+                         ev.ARM_INJECTED_PRUNED: dict(flags)}}
+
+    # Which skill is in the tail moves with the 30-day telemetry, so both populations are
+    # derived from the live advertised sets rather than named here.
+    advertised = sorted(ev.advertised_skill_names(ev.ARM_INJECTED_PRUNED))[0]
+    tail_skill = sorted(ev.advertised_skill_names(ev.ARM_INJECTED)
+                        - ev.advertised_skill_names(ev.ARM_INJECTED_PRUNED))[0]
+    kept_q, tail_q = "qA", "qB"
+    records = [rec(kept_q, [advertised], reached=True),      # expected skill survives the cut
+               rec(tail_q, [tail_skill], reached=False)]     # expected skill pruned away
+    summary = ev.summarize(records)
+    prod, arm = summary["arms"][ev.ARM_INJECTED], summary["arms"][ev.ARM_INJECTED_PRUNED]
+
+    for key in ("right_skill_reached_advertised_rate", "right_skill_reached_advertised_n",
+                "right_skill_reached_tail_rate", "right_skill_reached_tail_n",
+                "tail_query_ids", "advertised_index_chars", "advertised_skill_count"):
+        assert key in arm, f"{key} missing from the pruned arm's summary: {sorted(arm)}"
+        assert key in prod, f"{key} missing from production's summary: {sorted(prod)}"
+
+    assert prod["right_skill_reached_tail_n"] == 0
+    assert prod["right_skill_reached_tail_rate"] is None, "an empty tail is not a rate of 0.0"
+    assert prod["right_skill_reached_advertised_n"] == 2
+    assert prod["advertised_skill_count"] == 208
+
+    assert arm["right_skill_reached_tail_n"] == 1
+    assert arm["tail_query_ids"] == [tail_q]
+    assert arm["right_skill_reached_tail_rate"] == 0.0, "the control must be able to FAIL"
+    assert arm["right_skill_reached_advertised_n"] == 1
+    assert arm["right_skill_reached_advertised_rate"] == 1.0
+    assert arm["right_skill_reached_rate"] == 0.5, \
+        "the headline is both populations, not the surviving one alone"
+    assert arm["advertised_skill_count"] == ev.PRUNE_ADVERTISE_TOP_N
+    # The cut is measured in NAMES, not in characters. This node used to assert the chars shrank,
+    # a direction the round's own published table contradicts (11,998 → 11,999, because the freed
+    # budget re-fills with descriptions for the survivors) — it held only on a synthetic library
+    # where the budget is not already saturated, which is a test that passes for a reason the
+    # reader cannot reproduce. The strict inequality clause 1 asks for is the line count.
+    assert arm["advertised_skill_count"] < prod["advertised_skill_count"]
+    for stats in (prod, arm):
+        k, t = (stats["right_skill_reached_advertised_n"], stats["right_skill_reached_tail_n"])
+        head = ((stats["right_skill_reached_advertised_rate"] * k
+                 + (stats["right_skill_reached_tail_rate"] or 0.0) * t) / max(1, k + t))
+        assert stats["right_skill_reached_rate"] == head, (stats["right_skill_reached_rate"], head)
+
+
+def test_the_arms_help_lists_the_pruned_arm() -> None:
+    """Clause 1's second half, at the process boundary: an operator can DISCOVER the arm.
+
+    The help string is generated from `ARMS`, so this is satisfied by construction and is
+    the cheapest node here — which is why it earns its line. The day the help stops
+    interpolating `ARMS`, the arm stops being runnable by anyone who has not read the
+    source, and a mechanism that only its author can invoke measures nothing.
+    """
+    import subprocess
+
+    out = subprocess.run([sys.executable, str(REPO / "eval" / "run_prefetch_cost_eval.py"),
+                          "--help"], capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-400:]
+    assert "injected_pruned" in out.stdout, out.stdout[-600:]
