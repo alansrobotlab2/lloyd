@@ -22,10 +22,20 @@ Its entire value is that it refuses far more readily than it deletes. The refusa
 order they are asked — every one of them a class the live root held a member of on
 2026-10-27, so none is hypothetical:
 
-1. **The name is not one bare, non-dot basename.** No path, no `..`, no glob character. The
+1. **The name is not one bare, non-dot basename.** No path, no `..`, no `*`, `[` or `]`. The
    item's rule "never a glob, never recursive" is a statement about this program's own
    reach: it unlinks the names it was handed, one `os.unlink` per name it accepted, and a
    `*` in an argument means somebody meant a sweep, which is a different and louder act.
+   `?` is the one glob character that is not refused on shape alone, because it is the one a
+   real data-root name carries: a SQLite URI typed without its `file:` scheme —
+   `sqlite3.connect(os.path.expanduser("~/lloyd-data/workers.db") + "?mode=ro")` — reads the
+   whole string as a filename and leaves a 0-byte stub named `workers.db?mode=ro` (#4025). Such
+   an argument is read as a NAME when its own spelling stands at the root, and as a sweep — a bad
+   invocation, refused before any name is touched — when it instead resolves to some other name
+   there (`fals?` beside `false`). A `?` spelling matching nothing at all is simply a name that
+   is not here, and gets the run's `nothing to remove` at exit 0, which is what makes a repeat
+   `--apply` of a name this run already deleted a no-op. All of that grants the accepted name
+   nothing: the tests below it are asked of it unchanged.
 2. **It is not a 0-byte regular file.** A directory, a symlink, a socket, a fifo or anything
    with bytes in it is not this class. `os.lstat` answers size and type in one call, and it is
    `lstat` and not `stat` so a symlink is refused as what it is rather than resolved into the
@@ -73,6 +83,7 @@ gets hand-rolled a second time (#1525's shape).
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import stat as _stat
 import subprocess
@@ -97,9 +108,22 @@ import datawatch as DW                                          # noqa: E402
 #: `datawatch.py`, so a checker that wants to refuse one has to carry the word itself.
 LOCK_SUFFIX = ".lock"
 
-#: Glob and path characters an argument may not contain. `?` and `*` and `[` are the intent
-#: of a sweep; `/` is a path, and the root this program acts under is decided once.
-_FORBIDDEN_CHARS = ("*", "?", "[", "]", "/", "\\")
+#: Glob and path characters an argument may NEVER contain, literal or not. `*`, `[` and `]` are
+#: the intent of a sweep — a shell that had expanded them leaves no trace of the class that was
+#: meant; `/` and `\` are a path, and the root this program acts under is decided once.
+_FORBIDDEN_CHARS = ("*", "[", "]", "/", "\\")
+
+#: The one glob character a genuine data-root name carries, so a literal one is a name rather
+#: than a sweep. `?` is what a mis-spelled SQLite URI leaves behind: `sqlite3.connect` handed
+#: `os.path.expanduser("~/lloyd-data/workers.db") + "?mode=ro"` — no `file:` scheme, no
+#: `uri=True` — reads the whole string as a FILENAME, and the default read-write-create open
+#: turns it into a 0-byte stub literally named `workers.db?mode=ro` (#4025, 2026-11-09, created
+#: by an owed-check session 56 s into its own run). Refusing `?` outright made exactly that class
+#: uncloseable: the remover could neither unlink the file nor prune its arrivals-baseline entry,
+#: so the hourly leg could name it forever and never clear it. It is therefore accepted when and
+#: only when the literal name stands at the root — see `_unliteral_glob_names`, which answers
+#: that question before any name in the run is acted on.
+URI_QUERY_CHAR = "?"
 
 EXIT_OK = 0
 #: A name was looked at and declined. Distinct from 2 because the program DID start and DID
@@ -110,6 +134,38 @@ EXIT_REFUSED = 1
 #: the reader — NO name was considered, so nothing was declined on its merits.
 EXIT_NO_ROOT = 2
 EXIT_USAGE = 2
+
+
+def _unliteral_glob_names(names: "list[str]", scan: "dict[str, float]") -> "list[str]":
+    """Which `?`-bearing arguments are a sweep rather than a name the operator is standing next to.
+
+    Two questions, both answered from the SAME measurement — the leg's own top-level scan — so the
+    gate and the hourly leg cannot disagree about what is here:
+
+    * **Is the spelling itself standing here?** Then it is a name, and it falls through to
+      `classify`, which tests its size, mode, store ownership, suffixes, siblings, pairing and
+      handles like anyone else's. That is the whole of what accepting `?` grants: being read as a
+      name. `workers.db?mode=ro` is not a declared store (`app.paths.WORKERS_DB`'s basename is
+      `workers.db`), does not end in a database suffix (`_DB_SUFFIXES` is `.db`/`.sqlite`/
+      `.sqlite3` and this ends `=ro`), and `splitext` answers `('workers.db?mode', '.ro')` with no
+      such base standing at the root, so the derived-name rule does not fire either.
+    * **Does it otherwise resolve to some other name in the scan** — `fals?` to `false`,
+      `usage.db-wa?` to a live `-wal`? Then it is the sweep the rule exists to refuse, and it is a
+      bad INVOCATION asked of every argument before the first unlink, not a per-name refusal that
+      leaves the names beside it already deleted.
+    * **Neither**, because nothing spelled like it is here and nothing would match: `false` after a
+      successful `--apply`, or a name that was never in this root. That is not a sweep, it is a
+      name that is not there, and the answer is the run's existing `nothing to remove` at exit 0 —
+      the same no-op `false` gets when it is already gone, which is what makes clause 2's repeat
+      `--apply` safe to type twice.
+
+    Symlinks and directories are absent from `scan` by construction, so an `x?y` symlink matching
+    nothing falls through and `classify` refuses it as what it is (exit 1, "a symlink, which would
+    be followed out of the root") rather than as a typo.
+    """
+    return [n for n in names
+            if URI_QUERY_CHAR in n and n not in scan
+            and any(fnmatch.fnmatchcase(k, n) for k in scan)]
 
 
 def data_root(tree: "str | None" = None, override: "str | None" = None) -> Path:
@@ -193,6 +249,13 @@ def _bad_name(raw: str) -> str:
     characters that turn a name list into a path or a sweep, and an argument carrying either is
     evidence about the operator's intent that the accept-set must not quietly overrule by
     answering "no such file".
+
+    `?` is the exception, and it is answered one step later rather than not at all. This function
+    has no root to look in, and a `?` is the only glob character a genuine data-root name ever
+    carries — `workers.db?mode=ro`, the stub a SQLite URI typed without its `file:` scheme leaves
+    behind (#4025) — so refusing it here on the shape alone meant the one remover of this class
+    could not be handed the file it exists to delete. `_unliteral_glob_names` asks the question
+    this one cannot: does THAT spelling stand at the root?
     """
     if not raw:
         return "is empty"
@@ -201,9 +264,11 @@ def _bad_name(raw: str) -> str:
     if "/" in raw or "\\" in raw:
         return ("is a path: this program is handed the names it deletes, one at a time, and "
                 "resolves nothing")
-    if any(c in raw for c in "*?["):
+    if any(c in raw for c in "*[]"):
         return ("carries a glob character, and a shell that had expanded it would have left "
                 "no trace of the sweep you meant")
+    # `?` is deliberately absent from this set: answered per-root by `_unliteral_glob_names`,
+    # which can see whether the literal spelling stands here. See the docstring.
     if any(c.isspace() for c in raw):
         # Quoting gone wrong (`--apply "false sqlite3"`) reads as one name to the shell and as
         # a name that does not exist to this program; answering "not there" would tell the
@@ -225,6 +290,12 @@ def classify(name: str, root: Path, scan: "dict[str, float]",
     is what "standing in the same scan" means in the sidecar predicate's own words — the
     hourly leg's snapshot, not a re-read, so this program and the leg cannot disagree about
     which stores are present.
+
+    A `?` in `name` is not refused here. `run()` has already settled that the argument is a name
+    and not a sweep (`_unliteral_glob_names`), which is all accepting `?` grants: every test below
+    is asked of it unchanged, so a `usage.db?mode=ro` with a `-wal` beside it, or at mode 666, or
+    claimed by a declared store, or missing from `scan`, is refused on its own reason exactly as
+    `false` would be.
     """
     if not name or name in (".", "..") or name.startswith(".") \
             or any(c in name for c in _FORBIDDEN_CHARS):
@@ -341,6 +412,25 @@ def run(argv: "list[str] | None" = None) -> int:
     except OSError as exc:
         print(f"refused to run: the root could not be scanned ({exc})")
         return EXIT_NO_ROOT
+
+    # The `?` rule, asked for EVERY argument at once and before the loop, for the same reason a
+    # path or a `*` is: if `fals?` was a pattern the operator expected the shell to expand, the run
+    # must not first delete the other names it was handed. It is asked after the scan because the
+    # scan is what answers it — the same measurement the sidecar test and the hourly leg read, so
+    # a name this program is about to delete and a name the alert would report are decided from one
+    # listing (#3210's "both sides read one measurement"). A literal `?`-bearing name standing at
+    # the root falls through to `classify`, which tests it like any other name (#4025).
+    sweeping = _unliteral_glob_names(list(args.names), scan)
+    if sweeping:
+        for raw in sweeping:
+            here = ", ".join(sorted(k for k in scan if fnmatch.fnmatchcase(k, raw))[:4])
+            print(f"refused before any name was read: {raw!r} carries {URI_QUERY_CHAR!r} and no "
+                  f"name spelled exactly like it stands here, while it does match {here}, so it "
+                  "reads as a glob the shell was meant to expand")
+        print(f"result: {len(sweeping)} of {len(args.names)} arguments were not names standing "
+              "here, so NO name was looked at; this program takes names, never a path or a glob")
+        return EXIT_USAGE
+
     stores = declared_store_names()
 
     removed: "list[str]" = []

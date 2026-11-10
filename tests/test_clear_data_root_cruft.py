@@ -43,6 +43,15 @@ SCRIPT = REPO / "scripts/maintenance/clear_data_root_cruft.py"
 # The two cruft names as filed, so a node reads as the incident rather than as a string.
 CRUFT = ("false", "sqlite3")
 
+# The #4025 name. `sqlite3.connect(os.path.expanduser("~/lloyd-data/workers.db") + "?mode=ro")`
+# — a URI with no `file:` scheme and no `uri=True` — reads the whole string as a FILENAME, and the
+# default read-write-create open leaves a 0-byte stub whose name is that string. The live root has
+# carried `workers.db?mode=ro` since 2026-11-09 15:05, created by an owed-check session 56 s into
+# its own run. `?` is therefore the one glob character a genuine data-root name carries, so the
+# rule about it is about literal presence, not about shape. This fixture member is named for the
+# store it sits beside, exactly as the live one is.
+URI_STUB = "usage.db?mode=ro"
+
 
 def _run(root: Path, *args: str, state_dir: "Path | None" = None) -> subprocess.CompletedProcess:
     """One invocation of the real program against a fixture root."""
@@ -274,6 +283,191 @@ def test_a_path_or_glob_argument_is_refused_without_being_resolved(root: Path):
     assert "refused: .." in proc.stdout, proc.stdout
     assert (sub / "false").exists(), "a path argument reached into a subdirectory"
     assert (root / "false").exists(), f"a glob deleted the real one:\n{proc.stdout}"
+
+
+def test_a_uri_shaped_stub_is_named_by_a_dry_run_rather_than_refused_as_a_glob(root: Path):
+    """#4025 clause 1: the remover can name the stub a mis-spelled SQLite URI leaves behind.
+
+    `usage.db?mode=ro` is 0 bytes, is a regular file at 644, is not a declared store's basename
+    (`app.paths` declares `usage.db`), does not end in a database suffix (`_DB_SUFFIXES` is
+    `.db`/`.sqlite`/`.sqlite3` and this ends `=ro`), and has no `-wal`/`-shm` sibling of its own —
+    every property of the class this program exists to clear. Before this change it could not be
+    handed to the program at all: `?` sat in `_FORBIDDEN_CHARS`, so the run printed "were not bare
+    names, so NO name was looked at" and exited 2, which meant neither the unlink nor the
+    arrivals-baseline prune could run and the hourly alert could only be closed by a hand-written
+    `rm`. An operator reads the dry run before the real one, so the deliverable is the same two
+    lines the `false` class gets: the mode, and the name with its inertness reason beside it.
+    """
+    (root / URI_STUB).write_bytes(b"")
+    proc = _run(root, URI_STUB)
+    assert proc.returncode == 0, (
+        f"a literal ?-bearing name exited {proc.returncode}; it must reach the accept-set, not "
+        f"the usage error\n{proc.stdout}{proc.stderr}")
+    assert "were not bare names" not in proc.stdout, proc.stdout
+    assert "mode: dry run — pass --apply to delete anything" in proc.stdout, proc.stdout
+    assert (f"would remove: {URI_STUB}: 0-byte regular file, no declared owner, no sidecar, "
+            "no handle") in proc.stdout, proc.stdout
+    assert (root / URI_STUB).exists(), f"the rehearsal deleted:\n{proc.stdout}"
+    assert (root / "usage.db").stat().st_size > 0, "the store beside it was touched"
+
+
+def test_apply_unlinks_the_uri_shaped_stub_alone_and_prunes_it_from_the_baseline(
+        root: Path, tmp_path: Path):
+    """#4025 clause 2: `--apply` clears exactly that name, and a recurrence stays nameable.
+
+    The prune is half of the deletion, not a courtesy. `write_arrivals_baseline` merges
+    monotonically, so a `seen` key that survives its own unlink mutes the class forever — the
+    arrivals leg that reported `workers.db?mode=ro` on 2026-11-09 could never report it twice.
+    The survivors are named individually rather than counted, because a run that swept the root
+    would leave the same count as one that named one file. The second `--apply` is here because
+    the same command is what an operator types again when the first one scrolled past.
+    """
+    (root / URI_STUB).write_bytes(b"")
+    state = tmp_path / "guardian-state"
+    state.mkdir()
+    sys.path.insert(0, str(REPO / "agent-services/guardian"))
+    import datawatch as dw
+    dw.write_arrivals_baseline(state, {URI_STUB: 1.0, "usage.db": 2.0}, now=100.0,
+                               data_root=str(root))
+
+    first = _run(root, "--apply", URI_STUB, state_dir=state)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert f"removed: {URI_STUB}: 0-byte regular file, no declared owner, no sidecar, " \
+           "no handle" in first.stdout, first.stdout
+    assert f"arrivals baseline pruned: {URI_STUB}" in first.stdout, first.stdout
+    assert not (root / URI_STUB).exists(), f"reported removed but still standing:\n{first.stdout}"
+    for name in ("usage.db", "usage.db-wal", "workers.db", "workers.db-wal", "kg.sqlite",
+                 "next-session-notes.json", "next-session-notes.json.lock", "false", "sqlite3",
+                 "mc-state.json.bak", "cache", "cache-wal"):
+        assert (root / name).exists(), (
+            f"{name} was deleted by a run that named exactly one name:\n{first.stdout}")
+    seen = dw.read_arrivals_baseline(state, str(root))
+    assert seen == {"usage.db": 2.0}, f"the prune was not exact: {seen}"
+
+    second = _run(root, "--apply", URI_STUB, state_dir=state)
+    assert second.returncode == 0, (
+        f"a repeat apply of the same name exited {second.returncode}:\n"
+        f"{second.stdout}{second.stderr}")
+    assert "nothing to remove" in second.stdout, second.stdout
+
+
+@pytest.mark.parametrize("bad, why", [
+    ("fals?", "it resolves to `false`, which is standing right here — the sweep this rule is for"),
+    ("usage.db-wa?", "it resolves to the live `usage.db-wal`: the sidecar a ? glob would take"),
+    ("*", "the whole-class sweep"),
+    ("[cf]alse", "a bracket class, refused on shape alone as always"),
+])
+def test_a_glob_that_is_not_a_name_here_is_refused_before_any_deletion(
+        root: Path, bad: str, why: str):
+    """#4025 clause 3: relaxing `?` did not relax the reach rule the `?` rule was protecting.
+
+    Each argument is handed alongside `false`, a perfectly removable 0-byte stub, so a program
+    that answered the bad spelling per-name would delete `false` on the way to refusing it. It
+    must not: a pattern the shell was meant to expand is a bad INVOCATION, and the exit is 2 with
+    "NO name was looked at", never the per-name refusal with exit 1 that reads as "the accept-set
+    judged these". `fals?` is the case the `?` relaxation had to keep refusing, and it is refused
+    from the root's own scan, which is the same listing the sidecar test and the hourly leg read.
+    """
+    proc = _run(root, "--apply", "false", bad)
+    assert proc.returncode == 2, (
+        f"{bad!r} ({why}) exited {proc.returncode}; expected 2, no name looked at\n"
+        f"{proc.stdout}{proc.stderr}")
+    assert "refused before any name was read" in proc.stdout, proc.stdout
+    assert "NO name was looked at" in proc.stdout, proc.stdout
+    assert (root / "false").exists(), (
+        f"{bad!r} ({why}) was answered after `false` had already been unlinked:\n{proc.stdout}")
+    assert (root / "sqlite3").exists(), f"{bad!r} swept the class instead of naming it"
+
+
+def test_a_question_bearing_name_matching_nothing_at_all_is_the_same_no_op_as_false(
+        root: Path):
+    """A `?` spelling that resolves to nothing is an absent name, not a sweep — exit 0, nothing gone.
+
+    The two halves of the `?` rule are told apart by evidence, not by intent: `fals?` is a sweep
+    because something here answers to it, while `usage.db?mode=ro` in a root holding no such file
+    (and this fixture deliberately holds none, unlike the live root) is a name that is simply not
+    here — the identical situation as handing `false` after a successful `--apply`. Both must read
+    as `nothing to remove` at exit 0, because a run that answered them as a usage error would make
+    the repeat `--apply` of clause 2 fail, and an operator who re-types a command whose first run
+    scrolled past is the ordinary case. Rehearsed rather than applied here, since the legitimate
+    `false` beside it is supposed to be deleted when `--apply` is passed; the state where nothing
+    may be touched is the sweep node above.
+    """
+    proc = _run(root, "false", URI_STUB)
+    assert proc.returncode == 0, (
+        f"an absent ?-bearing name exited {proc.returncode} instead of reading as a name that "
+        f"is not here\n{proc.stdout}{proc.stderr}")
+    assert "were not bare names" not in proc.stdout, proc.stdout
+    assert f"nothing to remove: {URI_STUB}" in proc.stdout, proc.stdout
+    assert "would remove: false" in proc.stdout, proc.stdout
+    assert (root / "false").exists(), f"the rehearsal deleted:\n{proc.stdout}"
+
+
+@pytest.mark.parametrize("sibling, mode, fragment", [
+    ("-wal", 0o644, "sidecar(s) beside it: usage.db?mode=ro-wal"),
+    ("-shm", 0o644, "sidecar(s) beside it: usage.db?mode=ro-shm"),
+    ("", 0o666, "world-writable"),
+])
+def test_a_literal_question_mark_buys_no_second_acceptance(
+        root: Path, sibling: str, mode: int, fragment: str):
+    """#4025 clause 4: literal presence is the ONLY thing accepting `?` grants.
+
+    `usage.db?mode=ro` beside its own `-wal` is a store in use, not a stub, and one at mode 666 is
+    not the residue of a create that died — the same two refusals, in the same words, with the
+    same exit 1, that `false` would get. The fragment is matched on the line for THIS name and
+    nowhere else in the output, because a refusal by an earlier rule leaves the class untested
+    while the fixture still survives: nothing but this assertion would notice.
+    """
+    victim = root / URI_STUB
+    victim.write_bytes(b"")
+    if sibling:
+        (root / (URI_STUB + sibling)).write_bytes(b"w" * 16)
+    if mode != 0o644:
+        os.chmod(victim, mode)
+    proc = _run(root, "--apply", URI_STUB)
+    assert proc.returncode == 1, (
+        f"a {sibling or 'world-writable'} {URI_STUB} exited {proc.returncode}:\n"
+        f"{proc.stdout}{proc.stderr}")
+    line = next((ln for ln in proc.stdout.splitlines()
+                 if ln.startswith(f"refused: {URI_STUB}")), "")
+    assert line, f"no `refused: {URI_STUB}:` line in:\n{proc.stdout}"
+    assert fragment in line, (
+        f"{URI_STUB} was refused, but not by the rule that owns it. Expected {fragment!r} on "
+        f"its own line, got:\n  {line}")
+    assert victim.exists(), f"{URI_STUB} was unlinked despite the refusal"
+    assert (root / "usage.db").stat().st_size > 0, "the populated store beside it was touched"
+
+
+def test_a_question_bearing_name_claimed_by_a_store_or_missing_from_the_scan_is_refused(
+        root: Path):
+    """The two clause-4 halves no fixture on disk can hold, asked of `classify` itself.
+
+    A name cannot be both `usage.db?mode=ro` and one of the basenames `declared_store_names()`
+    reads out of `app.data_root` and `app/paths.py`, and a file that stands at the root is by
+    definition in the scan taken from it — so those two rules are unreachable through a
+    subprocess, and were the reason a `?` rule that only re-checked the accept-set could look
+    covered while quietly waving a store through. Both are therefore asked of the real function
+    with the one argument a fixture cannot supply: the store set, and the scan mapping. The scan
+    is taken with the leg's own `top_level_regular_files`, which is also the proof that the
+    `?`-bearing name is visible to the hourly walk at all.
+    """
+    sys.path.insert(0, str(REPO / "scripts/maintenance"))
+    import clear_data_root_cruft as crc
+    (root / URI_STUB).write_bytes(b"")
+    scan = crc.DW.top_level_regular_files(str(root))
+    assert URI_STUB in scan, "the leg's own scan cannot see a ?-bearing name"
+    stores = crc.declared_store_names()
+    assert URI_STUB not in stores, (
+        f"{URI_STUB} is a declared store basename today, so the hypothetical below is not one")
+
+    verdict, reason = crc.classify(URI_STUB, root, scan, stores | {URI_STUB})
+    assert verdict == "refuse" and "declared store" in reason, (
+        f"a store-claimed ?-bearing name answered {verdict}: {reason}")
+    stripped = {k: v for k, v in scan.items() if k != URI_STUB}
+    verdict2, reason2 = crc.classify(URI_STUB, root, stripped, stores)
+    assert verdict2 == "refuse" and "not in the scan" in reason2, (
+        f"a ?-bearing name outside the scan answered {verdict2}: {reason2}")
+    assert (root / URI_STUB).exists(), "classify is not a deletion route"
 
 
 def test_a_nonempty_or_special_file_is_refused(root: Path):
