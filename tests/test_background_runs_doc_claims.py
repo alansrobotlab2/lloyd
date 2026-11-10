@@ -330,7 +330,7 @@ def _sentences(flat: str) -> list[str]:
     """Sentences of an already-flattened block.
 
     A period ends a sentence only when the next word starts capitalised or with a
-    backtick, because this page is full of `app/sessions_io.py:1330-1348` spans
+    backtick, because this page is full of `app/sessions_io.py:1363-1348` spans
     and `<id>.tool-results` names whose periods are not full stops.
     """
     return [s.strip() for s in re.split(r"(?<=\.) (?=[A-Z`])", flat) if s.strip()]

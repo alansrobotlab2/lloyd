@@ -264,7 +264,7 @@ def _dropped_verdicts(report: dict) -> tuple[int, int, dict]:
     the deadline text is part of the key, which is what makes "did a retuned
     deadline help?" a field comparison rather than a re-read of prose. A dropped
     verdict is recorded `action='noop'` with `error` set
-    (`app/inner_voice/observer.py:932` writes the label, `:960-966` folds it into a
+    (`app/inner_voice/observer.py:957` writes the label, `:960-966` folds it into a
     noop), so `http_error` and anything else carrying an `error` also produced no
     verdict and belongs in the numerator. Because the grader's counter only sees
     truthy `error` values, every key here is evidence of a dropped call; the

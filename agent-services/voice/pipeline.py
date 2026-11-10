@@ -79,6 +79,11 @@ class HearingEvent:
     wake: Optional[WakeDetection] = None
     text: str = ""
     turn_p: Optional[float] = None
+    #: For an utterance released from a Smart-Turn hold: when the speaker really
+    #: stopped (monotonic), which is earlier than `at` by the hold wait. None
+    #: for an utterance the segmenter closed — `at` minus its silence is then
+    #: the end of speech.
+    speech_end: Optional[float] = None
 
 
 class HearingPipeline:
@@ -169,6 +174,9 @@ class HearingPipeline:
 
         # 2. Segmentation.
         utterances = self.segmenter.feed(audio)
+        take = getattr(self.segmenter, "take_tentatives", None)
+        for t in (take() if take is not None else ()):
+            events.append(HearingEvent("tentative", utterance=t, sample=t.end_sample))
 
         # A rising edge into speech is the barge-in signal, and it has to be
         # reported before the utterance closes or it is useless for that.

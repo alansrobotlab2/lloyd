@@ -48,6 +48,26 @@ The row (schema `v`, `SCHEMA_VERSION`):
     stages / eos_to_audio / max_gap_s   the timeline's own `as_dict()`; `at` and `epoch`
                                         come back inside it, since it is the half that
                                         knows the instant
+    eos_to_answer, sound                (v2) also the timeline's: end of speech to the
+                                        ANSWER's first frame, and the first-sound marks
+                                        an aside can set. In v1, `eos_to_audio` and the
+                                        last three `stages` timed the filler whenever
+                                        one played (19 of the first 28 rows)
+    held_s, held_audio_s                (v2) how long the turn waited in a Smart-Turn
+                                        hold after the speaker stopped (a released
+                                        hold; 0 for a hold joined by its
+                                        continuation), and how much audio a hold
+                                        prepended
+    asides                              (v2) fillers, queued notices and progress lines
+                                        spoken before or during the answer
+    engine                              (v2) facts from the backend about this turn's
+                                        first model request — `prompt_tokens`,
+                                        `cached_tokens`, `ttft_ms`, `request_ms`,
+                                        `queue_wait_s` (session queue, enqueue to start),
+                                        `setup_ms` (backend setup + prefetch before the
+                                        stream head) and `prewarm` (the session's last
+                                        prewarm: `age_s`, `trigger`, `result`,
+                                        `prefill_s`). Absent keys were not reported
 
 `append_turn` never raises: a row is a measurement OF a turn, never a participant in
 one, and the worker's contract is that a spoken turn finishes being spoken whatever the
@@ -88,7 +108,7 @@ LOG = logging.getLogger("lloyd-voice-turns")
 TURNS_RELATIVE = Path("voice") / "turns.jsonl"
 
 #: Bump on a layout change rather reinterpreting an old file. `v` rides on each row.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def data_root() -> Path:
@@ -104,6 +124,8 @@ def turns_path(root: Optional[Path] = None) -> Path:
 def turn_row(timeline, *, turn_id: str = "", room: str = "", interrupted: bool = False,
              queued_behind: bool = False, tools_ran: bool = False,
              spoken_chars: int = 0, capped: bool = False,
+             held_s: float = 0.0, held_audio_s: float = 0.0, asides: int = 0,
+             engine: Optional[dict] = None, spec: Optional[dict] = None,
              epoch: Optional[float] = None) -> dict:
     """The whole row for one completed spoken turn: `timeline.as_dict()` plus the identity.
 
@@ -117,7 +139,10 @@ def turn_row(timeline, *, turn_id: str = "", room: str = "", interrupted: bool =
     return {"v": SCHEMA_VERSION, "turn_id": turn_id, "room": room,
             "interrupted": bool(interrupted), "queued_behind": bool(queued_behind),
             "tools_ran": bool(tools_ran), "spoken_chars": int(spoken_chars),
-            "capped": bool(capped), **timeline.as_dict(epoch=epoch)}
+            "capped": bool(capped), "held_s": round(float(held_s), 3),
+            "held_audio_s": round(float(held_audio_s), 3), "asides": int(asides),
+            "engine": dict(engine or {}), **({"spec": dict(spec)} if spec else {}),
+            **timeline.as_dict(epoch=epoch)}
 
 
 def append_turn(row: dict, *, path: Optional[Path] = None) -> bool:

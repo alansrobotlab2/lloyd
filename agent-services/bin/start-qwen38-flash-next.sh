@@ -571,6 +571,14 @@ FLASHINFER_AUTOTUNE="${FLASHINFER_AUTOTUNE:-0}"
 # architecture/vllm.md §3.3 has the rest.
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
 
+# Per-step cap on one long prefill's share of that budget while another
+# request is eligible (vLLM's --long-prefill-token-threshold; empty = 0 =
+# no cap). Without it a running cold 100k prefill (an autotriage session)
+# takes all 4096 tokens of every step and a spoken turn's 8k prefill waits
+# behind it: running requests are scheduled before waiting ones, priority
+# only orders the waiting queue. architecture/voice.md "First token".
+LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-}"
+
 # Escape hatch for one-off arms. Word-split deliberately.
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -590,6 +598,7 @@ else
 fi
 [[ -n "$MOE_BACKEND" ]] && AB_ARGS+=(--moe-backend "$MOE_BACKEND")
 [[ -n "$MAX_NUM_BATCHED_TOKENS" ]] && AB_ARGS+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
+[[ -n "$LONG_PREFILL_TOKEN_THRESHOLD" ]] && AB_ARGS+=(--long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD")
 [[ -n "$GDN_PREFILL_BACKEND" ]] && AB_ARGS+=(--gdn-prefill-backend "$GDN_PREFILL_BACKEND")
 if [[ "$FLASHINFER_AUTOTUNE" == "1" ]]; then
   AB_ARGS+=(--enable-flashinfer-autotune)

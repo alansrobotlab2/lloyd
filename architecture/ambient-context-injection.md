@@ -73,7 +73,7 @@ meant to receive it (#2598).
 
 The cheap tier is still sold as costing nothing, but the exact phrase "zero SDK
 cost" is not in `agent_mcp/ambient.py` — it is the first line of the
-`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1383`).
+`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1408`).
 The tool description a producer actually reads says the signal is queued "at no
 cost" (`agent_mcp/ambient.py:65`) and the module docstring says "cheap prefetch
 drain (no SDK turn)" (`:11`); this page attributed the wording to the wrong file
@@ -278,7 +278,7 @@ If the user sends a message while an ambient turn is running or queued:
   `AMBIENT_QUEUE_CAP` eviction.
 
 User turns always win, and `/cancel` never drops one: `drain_pending`'s
-`source=None` default means "ambient only" (`app/sessions_io.py:1109`), which
+`source=None` default means "ambient only" (`app/sessions_io.py:1142`), which
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
@@ -525,7 +525,7 @@ mode has no reason to block it.
   turn as a third occupant of the ambient tier; and `is_conversation_session` as
   the listing predicate that is deliberately *not* the delivery predicate.
   Corrected: two drifted line pointers `drain_pending` is
-  `app/sessions_io.py:1109`, not `1030-1074`; the `DELETE` route is
+  `app/sessions_io.py:1142`, not `1030-1074`; the `DELETE` route is
   `app/routers/sessions.py`, not `811-840`), the "zero SDK cost"
   attribution — that phrase is the `/inject-prefetch` docstring, not the tool
   description, which says "at no cost" — the override path, which is

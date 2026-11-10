@@ -894,7 +894,7 @@ def test_the_post_start_command_resolves_from_the_directory_systemd_starts_it_in
     and that is the ground the `-m` form falls through: `python -m
     eval.run_injection_canary report` from outside the checkout dies with
     `ModuleNotFoundError: No module named 'eval'`, while the absolute-script form exits 0
-    from anywhere because `OUT_DIR` (`eval/run_injection_canary.py:80`) is derived from
+    from anywhere because `OUT_DIR` (`eval/run_injection_canary.py:100`) is derived from
     `LLOYD_HOME`, the script's own resolved parent, not from the cwd. `cwd="/"` here is
     stricter than `%h` on purpose: if it resolves from the filesystem root it resolves
     from home too.
@@ -939,7 +939,7 @@ def test_the_post_start_carries_force_because_a_same_day_rerun_would_otherwise_r
 
     The flag is not decoration. `_report_cmd` computes the target, sees it exists and
     returns 1 with `[refused] … already exists — pass --force to overwrite`
-    (`eval/run_injection_canary.py:1735-1738`, the lines #2749's two new helpers pushed
+    (`eval/run_injection_canary.py:2348-1738`, the lines #2749's two new helpers pushed
     the refuse down by), which on a unit whose window actually
     succeeded reads as `Failed with result 'exit-code'` — a second completed window on
     one UTC day would fail the very run that earned the report. So this writes twice to

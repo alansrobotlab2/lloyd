@@ -150,17 +150,24 @@ Bus order matters; every GPU program pins `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
 
 | GPU | Card | Runs |
 |---|---|---|
-| 0 | RTX 3090 (24 GB) | Qwen3-TTS (`:8090`), the voice worker, qmd embeddings |
+| 0 | RTX 3090 (24 GB) | the voice worker, qmd embeddings, and the vendored Qwen3-TTS fallback (`:8090`) |
 | 1 | RTX PRO 6000 Blackwell (96 GB) | the primary LLM: Qwen3.8-Flash-Next NVFP4 on vLLM (`:8096`) |
 | 2 | RTX 3090 (24 GB) | djev: DiffusionGemma, structured decisions and recall ranking — not a chat slot |
+| 3 | RTX 3090 (24 GB) | the voice: Qwen3-TTS 1.7B on vLLM-Omni (`:8093`), cloned voice, streamed per clause |
+| 4 | RTX 3090 (24 GB) | idle — the bench card for TTS and model trials |
 
 The primary serves a 262 k context with an FP8 KV cache and multi-token
 speculative decoding, launched with `--enable-auto-tool-choice
 --tool-call-parser qwen3_xml --reasoning-parser qwen3`. Every chat turn, worker
 job and subagent runs on it. A llama.cpp secondary slot (`:8091`) exists but
 has been off since 2026-09-20; its jobs moved to the primary. The voice
-worker's own models (Silero VAD, openWakeWord, Smart Turn, Parakeet, CAM++)
-are CPU ONNX.
+worker's own models (Silero VAD, openWakeWord, turn-1-mini, Parakeet, CAM++)
+are CPU ONNX. A spoken turn is a normal chat turn at engine priority 0; every
+one writes a latency row to `~/lloyd-data/voice/turns.jsonl` (end of speech →
+first word of the answer, with the engine's own numbers beside it), and
+`scripts/maintenance/voice_turn_trend.py` reads them. If the primary TTS fails
+or stalls, a clause is retried once on `:8090`, and a failed turn is spoken
+as a short apology rather than silence.
 
 Details: [infrastructure](architecture/infrastructure.md) § GPUs and § Model
 slots, [vllm](architecture/vllm.md), [djev](architecture/djev.md).

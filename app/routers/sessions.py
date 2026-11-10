@@ -1219,9 +1219,34 @@ async def cancel_session(session_id: str, request: Request):
     Query params:
         drain_pending: if "true" (or "1"), also clear queued ambient
             turns. User turns are never silently dropped by this call.
+        turn_id: (also accepted as a JSON body field) cancel only if this is
+            the turn running now; otherwise answer `cancelled: false` and touch
+            nothing. The voice worker names the turn it decided to cancel: it
+            reads `/queue` and then posts here, and a typed turn that started
+            between the two used to be the one cancelled (2026-11-09 review,
+            C7). Without it the cancel is unconditional, as the browser's
+            Stop button needs.
     """
     cancel_event = get_cancel_event(session_id)
     drain = request.query_params.get("drain_pending", "").lower() in ("true", "1", "yes")
+    want = (request.query_params.get("turn_id") or "").strip()
+    if not want:
+        # A caller that builds its own request (the mitigation drill, the
+        # tests) may carry query params only — no body to read.
+        read = getattr(request, "body", None)
+        try:
+            raw = await read() if read is not None else b""
+            body = json.loads(raw) if raw else {}
+        except Exception:  # noqa: BLE001 — an unreadable body names no turn
+            body = {}
+        if isinstance(body, dict):
+            want = str(body.get("turn_id") or "").strip()
+    if want:
+        cur = (get_queue_state(session_id) or {}).get("current") or {}
+        if cur.get("turn_id") != want:
+            return JSONResponse({"cancelled": False, "drained": 0,
+                                 "detail": "turn not running",
+                                 "current": cur.get("turn_id")})
 
     drained = 0
     if drain:

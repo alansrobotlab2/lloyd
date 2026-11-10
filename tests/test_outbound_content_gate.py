@@ -825,7 +825,7 @@ def test_the_finder_reads_a_builder_that_never_mentions_a_registry(tmp_path):
     `HookRegistry()` and `RunOptions(`" — this fixture is never even looked at: it
     contains one of the two strings, so the file falls outside the grep's scope
     and no report is produced. That is the exact shape the grader named against
-    the previous round's finder: `app/routers/voice.py:236` built a spoken turn's
+    the previous round's finder: `app/routers/voice.py:254` built a spoken turn's
     `RunOptions` with no hooks, no registry and no installer, and was invisible
     to it. Here the finder reads every `RunOptions` build first and asks, per
     build, whether it passed a registry it armed.

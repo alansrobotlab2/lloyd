@@ -809,7 +809,11 @@ Agents and Unmute guard it:
   a backchannel, a drop of any kind, or no words within
   `false_interruption_timeout_s` (2 s) of the speaker going quiet (the
   pipeline's new `silence` event) → `resume()`, which replays the taken-back
-  frames first, so nothing is lost. Words → `_commit_barge_in`;
+  frames first, so nothing is lost. (Until 2026-11-09 that sentence was not
+  true: the replay went through the same paused-check as new audio, found the
+  streamer still marked paused, and stashed the frames again — a false
+  interruption lost the rest of the clause. The replay now bypasses the check,
+  C1.) Words → `_commit_barge_in`;
 - **his own voice rejected** by voiceprint (step 4 of the gate): enrol it with
   `scripts/voice/enroll_own_voice.py`, which renders eight sentences in the
   production voice and stores their mean as `lloyd-voice` (held-out renders
@@ -824,11 +828,22 @@ anything, and `_on_stop_word` stops him and cancels the turn being spoken —
 for the person he is talking with only. A bare "stop." is too short for it;
 the transcript's stop words catch that one a beat later.
 
-A real interruption stops the audio, POSTs `/api/voice/interrupted` with
-`heard` — the clauses whose playout had finished by the audio clock
-(`TTSStreamer.heard_text`) — and cancels the turn being spoken **only if it is
-still the session's running turn** (`GET /api/sessions/{id}/queue` first), so a
-barge-in never cancels the request it just made. The next turn, spoken or
+A real interruption stops the audio and records `heard` — the clauses whose
+playout had finished **by the moment the reply paused**, not by the moment the
+interruption is committed up to 2 s later (C3: asking at commit time told the
+model the listener had heard words that never played), with the clause in
+flight counted as unheard. When the interruption *is* the next request — the
+common case — that note and the cancel ride the request itself: the inject's
+`supersede` field (`app/routers/voice.py::_supersede_spoken_turn`) records the
+note before the new turn reads it and cancels the running turn only if it is a
+spoken one (`voice_tap.is_voice_turn`). Before 2026-11-09 the worker did a
+`GET /queue` and two POSTs first, awaited, and on 2026-10-17 that put 0.9 s
+between the words and the inject. A stop word, a closer, or words while held
+still go through `_commit_barge_in`, which POSTs `/api/voice/interrupted` and
+a **named** cancel (`{"turn_id": …}`): the backend no-ops a cancel for a turn
+that is no longer running (C7 — a typed turn could start between the GET and
+the POST and be the one stopped), and the worker never names a typed turn
+(C8). The next turn, spoken or
 typed, carries "The listener interrupted your previous spoken reply. They heard
 only this much of it: …" in its prompt tail (`app/voice_tap.py`) — LiveKit
 Agents truncates its chat context at the playout position; the transcript here
@@ -856,10 +871,23 @@ Three fixes, one per cause:
   `_streamed_turns` minus `_tap_turns`) — the worker's `_active_turn` can lag
   the backend's current turn by one. **Never a typed turn**: someone
   mid-investigation in the chat is not interrupted by a word in the room;
-  that request queues and says so. The cancel and the heard-note POST go out
-  together (`asyncio.gather`); the cancel used to wait behind the note and
-  reached the backend 1.7 s after the words. The cancel itself is fast: the
-  harness races the model stream and every tool call against the event.
+  that request queues and says so. Since 2026-11-09 the cancel rides the
+  inject (`supersede`, above) rather than preceding it; before that it was a
+  `gather` of the cancel and the heard-note POST, and before *that* the cancel
+  waited behind the note and reached the backend 1.7 s after the words. The
+  harness races the model stream and every tool call against the event — and
+  since 2026-11-09 so does Inner Voice's terminal review
+  (`observer._judge_unless_cancelled`), which used to await its LLM judgment
+  and only then look at the cancel: on 2026-10-31 a cancelled spoken turn
+  stayed the running turn 6.6 s.
+- **spoken turns still queued are superseded too** (2026-11-09). That same
+  evening "Yeah, he found it." queued behind the turn being cancelled, ran its
+  whole answer when it got the slot, and "so anyways…" — said 4 s later —
+  waited 12.6 s behind it. The inject now drops every queued spoken turn
+  (`sessions_io.drop_pending_user_turns`; queued typed turns are left alone),
+  tells its reader `superseded` (the worker ends that reply quietly), and
+  prepends its words to the new request, so nothing said is lost and the
+  model answers the whole thing once.
 - the backchannel vocabulary carries "great", "good", "perfect", "sounds
   good", "makes sense" and their kin, split the same way as before — a word
   that answers a question is in `ANSWERING_BACKCHANNELS`, one that never does
@@ -875,8 +903,18 @@ already requested as something to wait behind (`get_queue_state` reports
 "still finishing the last thing" would describe nothing. Inner Voice can
 extend a spoken turn past its spoken answer (two observer injections on the
 09:04 turn kept it running 10 s after Lloyd had stopped talking); that is
-the observer's business, and with the cancel above it costs the listener
-nothing.
+the observer's business, and since its terminal review stops waiting on a
+cancel (above) it costs the listener nothing.
+
+**A stop that is also a closer** ("Stop, that's all.") stops the reply *and*
+closes the conversation (C5): `is_stopper`/`is_closer` accept a compound of
+control phrases, and closing clears the locked speaker and the anchor, so the
+next person is not held to the last one's voice. **Only a spoken turn's end
+extends the window** (C6): the end of an ambient reply or a poll-spoken one no
+longer reopens a conversation nobody was having, and `_last_agent_text` (what
+the own-voice and echo checks compare against) is set when a clause is heard,
+not when it is queued. **Lloyd's own voice is dropped before the hold
+decision** (C9): an own-voice segment is never prepended to a held one.
 
 Not yet measured: speakers instead of earbuds. If AEC3 leaks with the HDMI
 monitor speakers, the second stage is server-side AEC3 (`pywebrtc-audio`)
@@ -1121,6 +1159,21 @@ next thing the user says is still heard.
   being spoken (the browser's button also cancels the turn server-side).
 - **A backend without streaming** answers JSON; the worker leaves the turn to
   the poller.
+- **Failures are spoken** (C11, 2026-11-09). The listener has no screen: an
+  `error` frame, an inject that fails, or a stream that drops says
+  `voice_turn.error_phrase` / `lost_phrase` instead of going silent; a reply
+  that started and then hears nothing for `stall_after_seconds` (30) outside a
+  tool call says `stall_phrase` and lets the turn go (it runs on into the
+  chat). The read is bounded: the backend sends `: keepalive` every 15 s
+  (`VOICE_STREAM_KEEPALIVE_S`) while a turn is quiet, and the worker gives up
+  after 45 s with no line — it was `read=None`, which waited forever on a dead
+  backend.
+- **A TTS failure is not heard** (C4). A clause is logged as heard only when
+  frames were pushed; the primary TTS gets `first_byte_timeout_s` (3 s) and a
+  `chunk_gap_timeout_s` (5 s) between chunks, and a clause that produced no
+  frames is retried once on `livekit.tts.fallback_url` (the vendored `:8090`).
+  Before, a hung `:8093` request held the whole reply for the 30 s read
+  timeout and was then recorded as said.
 - **A tool turn says what it is doing** (2026-09-24). The turn that prompted
   this said "One moment." at 2.5 s and then nothing for 44 s across twenty tool
   calls. `ReplySpeaker` now speaks, whenever nothing has been heard for
@@ -1153,16 +1206,34 @@ next thing the user says is still heard.
   poll-and-rewrite path.
 - **Every turn logs where its time went** — one `[latency]` line
   (`voice/timeline.py`), pipecat's `LatencyBreakdown` in Lloyd's seams:
-  `speech_end` (VAD close minus its closing silence) → `vad_close` →
-  `turn_verdict` / `asr_done` / `embed_done` → `inject_sent` → `voice_turn` →
-  `first_delta` → `first_clause` → `first_tts_byte` → `first_pushed` →
-  `first_played` (push time plus audio already queued, from the streamer's
-  audio clock), with `eos→audio` total and `max_gap` — the longest silence
-  between audio the turn spoke. `scripts/voice/e2e_voice.py` prints them, and
+  `speech_end` (VAD close minus its closing silence — for a held utterance,
+  the end of the speech that was held, carried through `_release_held`) →
+  `vad_close` → `turn_verdict` / `asr_done` / `embed_done` → `inject_sent` →
+  `voice_turn` → `first_delta` → `first_clause` → `first_answer_byte` →
+  `first_answer_pushed` → `first_answer_played` (push time plus audio already
+  queued, from the streamer's audio clock), with `eos→answer` the total and
+  `max_gap` the longest silence between audio the turn spoke. **The answer's
+  marks are written only by the answer** (2026-11-09): a filler, a queued
+  notice or a progress line is an *aside* and writes only the first-sound
+  marks (`first_tts_byte`/`first_pushed`/`first_played`, row field `sound`,
+  total `eos_to_audio`). Before, the filler wrote the answer's marks, so
+  `eos→audio` measured the filler — 19 of the first 28 production rows had a
+  negative `first_tts_byte` and a headline number that was the 2.5 s filler
+  timer, not Lloyd. `scripts/voice/e2e_voice.py` prints them, and
   since `01c6f1f4` every *spoken* turn also writes one row to
   `<data root>/voice/turns.jsonl` (`app/voice_turns.py`), which
   `scripts/maintenance/voice_turn_trend.py` folds into a nightly stage p50/p90 —
   that file, not a log grep, is the witness for a latency claim about production.
+  Rows are **schema 2** since 2026-11-09 (`SCHEMA_VERSION`): label `voice` (v1
+  rows from the inject path were labelled by the speaker class and read as
+  typed in the trend), the answer and sound stages above, `eos_to_answer`,
+  `held_s` / `held_audio_s` (time the turn detector held the utterance, and
+  how much audio it held), `asides`, and `engine` — the backend's facts for
+  the first model request (`prompt_tokens`, `cached_tokens`, `ttft_ms`,
+  `request_ms`, `queue_wait_s`, from a `turn_stats` frame), its `setup_ms`,
+  and the session's last prewarm (`trigger`, `result`, `age_s`,
+  `prefill_s`). The trend tool reads both versions and keeps v1 rows in their
+  own `(v1)` population, since their totals measured something else.
 
 ### Prewarm: the prefill happens before the words arrive
 
@@ -1212,7 +1283,15 @@ The backend admits or refuses every trigger in `_prewarm_refusal`, answered
 in the JSON and never raised: the switch; a prefill already in flight for the
 session (`_PREWARM_INFLIGHT`, never two over one prefix); a turn running or
 queued on the session (`busy` — it is prefilling the same prefix itself);
-and the debounce, 20 s for a wake or a speech onset and 5 s for a keep-warm.
+and the debounce, 20 s for a wake or a speech onset and 5 s for a keep-warm —
+**which holds only while the session's history is the one the last prewarm
+warmed** (2026-11-09; the fingerprint is the session file's mtime and size).
+On the clock alone it refused the speech-onset prewarm of every follow-up
+asked within 20 s of the previous answer — the turns a conversation is made
+of — although the prefix it had warmed no longer matched once that answer
+landed. A speech onset also builds the turn's setup (system prompt, options;
+~130 ms warm, measured 2026-11-09) and the inject takes it once, if the
+history has not moved since (`_SETUP_CACHE`, 30 s).
 The log line is the measurement: `voice prewarm <session> (<trigger>):
 prefilled in 0.04s` is a hit, seconds are a prefill the listener would have
 waited through. Read it beside `first_delta` in `voice/turns.jsonl` to see
@@ -1228,6 +1307,39 @@ token, the micro-turn loop — maps onto things already in this tree
 (turn-1-mini's threshold, fillers and progress captions) or onto a separate
 duplex controller that was judged not worth building yet.
 
+### First token: where the 3–18 s went (2026-11-09)
+
+`first_delta` — inject to the model's first word — was the stage that varied:
+p50 about 1 s, but 5–31 s on a quarter of the 28 spoken turns of 2026-10-11..31.
+Joined to each turn's first-request stats in its session and to the worker runs
+overlapping it, three causes separate:
+
+- **Prefix misses are rare.** The engine's prefix cache works in 3,200-token
+  pages (every cached count observed is a multiple), and 24 of 26 turns were
+  warm, with 3.5–10 k uncached tokens — the turn's own user message, prefetch
+  block and page remainder. Two were cold (68 k → 31.4 s, 84 k → 7.7 s). What a
+  miss costs is now on every row (`engine.prompt_tokens`/`cached_tokens`).
+  The prewarm's debounce no longer refuses a follow-up whose history moved
+  (see "Prewarm").
+- **Engine admission is most of the tail.** The slow turns (18.1, 18.5, 31.4,
+  6.3, 5.2 s) start while worker sessions — autotriage above all — are
+  prefilling 100 k-token prompts cold. Priority 0 orders only the *waiting*
+  queue; vLLM's scheduler serves running requests first, so a running long
+  prefill takes the whole 4,096-token step budget and a spoken turn's prefill
+  waits behind it. `LONG_PREFILL_TOKEN_THRESHOLD` (the launcher's knob for
+  `--long-prefill-token-threshold`) caps a long prefill's share of each step
+  while another request is eligible; the A/B is below.
+- **Session queueing**: 3 of 28 turns waited 6–12.6 s behind another turn on
+  their own session — never a typed one: the spoken turn before, kept running
+  by a cancel that took 6.6 s (Inner Voice's terminal review) or queued itself.
+  Both are fixed (see "Barge-in").
+
+What remained on the path before the model was a few hundred milliseconds of
+backend work after the inject arrives: the turn's setup (~130 ms warm, now
+built at speech onset) and the prefetch (a 300 ms budget, which needs the
+transcript and so cannot move earlier). The barge-in round trips that used to
+precede the inject (up to 0.9 s) now ride it.
+
 ### Clauses play back to back
 
 `TTSStreamer` POSTs each clause to Qwen3-TTS (`stream: true`,
@@ -1240,6 +1352,21 @@ Waiting for playout between clauses would put a synthesis latency (~250 ms)
 of dead air after every sentence, and firing `on_utterance_end` per clause
 would re-extend the wake window mid-reply
 (`test_clauses_of_one_reply_run_together_and_end_once`).
+
+Before a clause is sent, `speakable.py` decides what not to say (markdown,
+URLs, code) and, with `livekit.tts.normalise_text` — **on** in config.yaml,
+off as a code default — `agent-services/tts_text.py::for_speech` expands what
+the vocoder would otherwise guess at: a small pronunciation lexicon, emails,
+phone numbers, ISO dates, ratios, approximate counts and home paths. Every rule
+is anchored on something a plain sentence does not contain, so a plain sentence
+passes byte-identical. It was switched on from `eval/run_tts_fidelity_eval.py`:
+tokens heard 90.9 % vs 81.2 % raw, the control identical at 98.6 %, paths the
+one bucket that dipped. `speakable` no longer treats "no" as an abbreviation
+(2026-11-09): a clause "No." was held waiting for the "No. 5" that never came.
+
+`close()` cancels the drain and waits at most 2 s for it (C2: a drain cancelled
+mid-clause used to swallow its own cancellation as "the utterance was
+interrupted" and loop on, so a room's teardown hung).
 
 ### The TTS server
 
@@ -1681,6 +1808,69 @@ moves the first *frame*, not the first byte. `enable_prefix_caching` on the
 talker stage, which the config suggests when the reference audio repeats, is
 untried.
 
+### Voice review experiments, 2026-11-09
+
+The 2026-11-09 review's experiments, run as proposals (a change ships only on a
+measured gain):
+
+| # | experiment | verdict |
+|---|---|---|
+| 1 | speculative turn start | **shadow** — on, records evidence, changes nothing |
+| 2 | prerendered asides (phrase cache) | **shipped** (`livekit.tts.phrase_cache`, on) |
+| 3 | barge-in classifier | **not yet** — the corpus is too small to train or judge one |
+| 4 | acoustic echo measurement | **not run** — needs a loudspeaker in the room |
+| 5 | dots.tts (Apache-2.0) as the voice | **rejected** — first byte 3× production's |
+| 6 | a replacement turn detector | **rejected** — neither candidate beats turn-1-mini |
+| 7 | emotion2vec on the user's audio | **not run** — lowest priority, no consumer yet |
+
+- **Speculative start, stage one in shadow.** The segmenter reports a
+  *tentative* close after `livekit.vad.tentative_silence_ms` (200) of silence,
+  once per pause (`agent-services/voice/vad.py` `take_tentatives`, emitted by the pipeline as a
+  `tentative` hearing event). Inside the follow-up window or an open
+  conversation the worker transcribes that audio off the loop
+  (`_on_tentative` → `_spec_asr`); when the turn really closes,
+  `_spec_verdict` records on the latency row `spec = {match, same_audio,
+  asr_saved_ms}` — whether the guess's transcript was the turn's, and how much
+  ASR time starting then would have saved. Nothing about what is injected or
+  when changes. `voice_turn_trend.py` prints `speculative start (shadow): X of
+  N guesses matched`; stage one (inject on the guess, supersede it if the
+  speaker goes on) is worth building only on a high hit rate, and the cost of a
+  miss is a superseded turn, which the barge-in path already handles.
+- **Prerendered asides.** The filler, the progress notices, the "queued"
+  notice and the three spoken-failure apologies are rendered once per room at
+  connect (`TTSStreamer.prerender`, its own `OutputShaper`, a 15 s budget) and
+  played from memory by `_stream_utterance`; a phrase that fails to render is
+  spoken live as before. An aside is the first thing heard on a slow turn, so
+  its synthesis time was paid exactly when the listener was already waiting.
+  Both stream calls build one body (`_speech_body`,
+  `tests/test_tts_head_silence.py` pins it).
+- **Barge-in classifier.** The worker's own pause log held 8 pause events, about
+  one a real interruption — nothing to fit or score a classifier on. Revisit
+  when `voice_turn_trend.py` shows a few dozen pauses; candidate models are in
+  `~/.cache/bargein-eval/`.
+- **Turn detector.** LiveKit's turn detector is under the LiveKit Model License
+  (use inside LiveKit Agents only), and Lloyd runs its own pipeline. Alkove Cue
+  reports on its own card 35.4 % of pauses cut off at 300 ms, level with Smart
+  Turn and behind turn-1-mini's 22.6 %; it also needs `alkove` 0.4.0, nine days
+  old against the 14-day install hold.
+- **dots.tts** (`dots-studio/dots.tts-mf`, continuation clone from `ref.wav` +
+  `ref.lab`, `optimize=True`, bf16, alone on GPU 4) against production on the
+  same day, `scripts/voice/tts_bakeoff.py`, ten sentences, raw (unshaped):
+
+  | candidate | TTFB p50/p90 | RTF | clause TTFA p50 | WER | spk sim | presence 1.5–9k (2.5–3.5k / 5–9k) | VRAM |
+  |---|---|---|---|---|---|---|---|
+  | production (`agent-tts-omni`, GPU 3) | 0.10 / 0.12 s | 0.17 | 0.43 s | 0.0 % | 0.90 | −3.6 (−3.4 / −4.0) | — |
+  | dots.tts-mf (GPU 4, idle) | 0.32 / 0.39 s | 0.34 | 0.68 s | 3.0 % | 0.90 | −1.6 (−1.1 / −3.3) | 6.5 GB |
+
+  The same similarity, 2 dB more presence (the shelves would have less to do),
+  and a quarter of a second later on every first clause; it also speaks
+  slower (the same ten sentences ran 58.6 s against 45.6 s). Rejected on
+  latency. Listen set and runner: `~/.cache/lloyd-voice-eval/dots-tts-2026-11-09/`.
+- **Echo measurement and emotion2vec** were not run. The first needs a
+  loudspeaker playing a known signal into the room's mic, which the bench
+  cannot do; the second has no consumer until something reads the user's
+  affect.
+
 ## The browser half
 
 `web/src/components/VoiceRoom.tsx`, mounted by `VoiceModeContext` when voice
@@ -1976,7 +2166,8 @@ clones, and voice mode keeps speaking the old voice.
 | the same, for spoken alerts | `systemctl --user restart lloyd-guardian` — re-stages, which re-runs `sync-voice-config.py` |
 | TTS model path / `default_model` | `agent-tts` |
 | `livekit.stt` / `.vad` / `.wake` / `.acoustic_wake` / `.voiceprint` / `.turn_detection` / `.barge_in` / `.conversation` | `lloyd-agent-worker` |
-| `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking`, `prewarm` and `typed_turns` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `typed_turns`, `filler`, `progress`, `queued_notice`, `thinking_sound`, `first_clause_chars`, `max_spoken_chars`, `prewarm` and `keep_warm` (`lloyd-agent-worker`) |
+| `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking`, `prewarm` and `typed_turns` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `typed_turns`, `filler`, `progress`, `queued_notice`, `thinking_sound`, `first_clause_chars`, `max_spoken_chars`, `prewarm`, `keep_warm`, `stall_after_seconds` and the `error_phrase`/`stall_phrase`/`lost_phrase` apologies (`lloyd-agent-worker`) |
+| `livekit.tts.fallback_url` / `.first_byte_timeout_s` / `.chunk_gap_timeout_s` / `.normalise_text` | `lloyd-agent-worker` |
 | `livekit.tts.voice`, or the voiceprint backend | also re-run `scripts/voice/enroll_own_voice.py` — the own-voice profile is of the old voice / model |
 | `livekit.yaml`, or the host's tailnet address | `agent-livekit-server` — it resolves `node_ip` at boot |
 
@@ -1984,6 +2175,30 @@ clones, and voice mode keeps speaking the old voice.
 restarting it does nothing for voice. Neither the worker nor the guardian
 restart is needed for voice to *work*, only for a change to reach that
 consumer.
+
+### Timers
+
+Every clock in a spoken turn, with the key that moves it. Worker keys are read
+at room start (`lloyd-agent-worker`), backend keys at boot.
+
+| Timer | Default | Key | Where |
+|---|---|---|---|
+| closing silence of an utterance | 380 ms | `livekit.vad.min_silence_ms` | worker |
+| hold while the turn detector says "unfinished" | 2.2 s per wait, 12 s total | `turn_detection.hold_timeout_ms`, `.hold_max_seconds` | worker |
+| follow-up window after a reply | 6 s (code 12 s) | `wake.continuation_seconds` | worker |
+| conversation idle close / question window | 90 s / 20 s | `conversation.idle_close_s`, `.question_window_s` | worker |
+| barge-in: sustained speech, warm-up, false-interruption, max pause | 0.5 s, 3 s, 2 s, 8 s | `barge_in.min_duration_s`, `.warmup_s`, `.false_interruption_timeout_s`, `.max_pause_s` | worker |
+| filler / queued notice / progress line | 2.5 s / 1.5 s / every 8 s | `voice_turn.filler.after_seconds`, `.queued_notice.after_seconds`, `.progress.every_seconds` | worker |
+| stall apology (no event outside a tool) | 30 s | `voice_turn.stall_after_seconds` | worker |
+| keep-warm touch | 15 s | `voice_turn.keep_warm.every_seconds` | worker |
+| speech-onset prewarm spacing | 2 s | `_PREWARM_POST_MIN_S` | worker |
+| prewarm debounce (same history) | 20 s wake/speech, 5 s keep-warm | `_PREWARM_DEBOUNCE_S`, `_KEEP_WARM_DEBOUNCE_S` | backend |
+| prebuilt turn setup kept | 30 s | `_SETUP_CACHE_TTL_S` | backend |
+| inject stream keepalive / worker read bound | 15 s / 45 s | `VOICE_STREAM_KEEPALIVE_S` / `_speak_voice_turn` | backend / worker |
+| TTS first byte / gap between chunks | 3 s / 5 s, then one retry on the fallback | `livekit.tts.first_byte_timeout_s`, `.chunk_gap_timeout_s`, `.fallback_url` | worker |
+| tail silence after a reply | 250 ms | `livekit.tts.tail_silence_ms` | worker |
+| no-audio warning | 15 s | `NO_AUDIO_WARN_S` | worker |
+| heard note kept for the next turn | 600 s | `HEARD_NOTE_TTL_S` | backend (`app/voice_tap.py`) |
 
 ### What a rebuild has to restore
 

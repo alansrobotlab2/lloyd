@@ -189,7 +189,7 @@ def _verdict(z: float | None) -> str:
 
 
 #: The one platform the stamping branch admits, and the two writer sites a reader needs
-#: to fix a window that enrolled nobody. `app/sessions_io.py:1361` gates assignment on
+#: to fix a window that enrolled nobody. `app/sessions_io.py:1394` gates assignment on
 #: `data["platform"] == "mission-control"` and `:1363` is the sole call, inside
 #: `_save_session_meta` and reached only on that function's create branch;
 #: `create_session` (`app/sessions_io.py:398`) is the writer every chat actually goes
@@ -197,7 +197,7 @@ def _verdict(z: float | None) -> str:
 #: and it never reaches that branch. The asymmetry is why iv-chat-1 read 0/0 across a
 #: window that held 29 mission-control sessions, none of them stamped (#3220).
 ENROLLED_PLATFORM = "mission-control"
-STAMPING_SITE = "_save_session_meta (app/sessions_io.py:1363)"
+STAMPING_SITE = "_save_session_meta (app/sessions_io.py:1396)"
 CREATE_WRITER = "create_session (app/sessions_io.py:398)"
 
 

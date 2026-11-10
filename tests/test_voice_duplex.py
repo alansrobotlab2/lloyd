@@ -82,6 +82,8 @@ class _HTTP:
 
 
 class _TTS:
+    paused_at = None
+
     def __init__(self, speaking=False, heard="It is seven.", last_end=None):
         self.is_speaking = speaking
         self.is_paused = False
@@ -91,10 +93,10 @@ class _TTS:
         self._heard = heard
         self.pauses = self.resumes = self.interrupts = 0
 
-    def heard_text(self):
+    def heard_text(self, at=None):
         return self._heard
 
-    def unheard_chars(self):
+    def unheard_chars(self, at=None):
         return 40
 
     def interrupt(self):
@@ -186,10 +188,36 @@ def test_the_breakdown_is_the_stages_in_order_and_sums_to_the_total():
     parts = tl.contributions()
     assert [p[0] for p in parts] == ["vad_close", "asr_done", "inject_sent",
                                      "first_delta", "first_clause",
-                                     "first_pushed", "first_played"]
+                                     "first_answer_pushed", "first_answer_played"]
     assert sum(dt for _, dt in parts) == pytest.approx(tl.total())
     assert tl.total() == pytest.approx(0.75)
-    assert "eos→audio=0.75s" in tl.summary()
+    assert "eos→answer=0.75s" in tl.summary()
+    assert "eos→audio=0.75s" in tl.summary(), "no aside: first sound is the answer"
+
+
+def test_an_aside_is_first_sound_and_never_the_answers_mark():
+    """2026-11-09: the filler shares the turn's timeline, and marks are
+    first-writer-wins, so `eos_to_audio` timed "One moment." — 19 of the first 28
+    production rows had a negative first_tts_byte delta. An aside now marks only
+    the first-sound stages; the chain carries the answer's own."""
+    tl = TurnTimeline("voice")
+    tl.mark("speech_end", 100.0)
+    tl.mark("inject_sent", 100.5)
+    tl.tts_byte(answer=False, at=103.0)               # the filler's first byte
+    tl.audio_pushed(103.0, 103.0, 0.7, answer=False)  # "One moment."
+    tl.mark("first_delta", 105.0)
+    tl.mark("first_clause", 106.0)
+    tl.tts_byte(answer=True, at=106.2)
+    tl.audio_pushed(106.3, 106.4, 0.1, answer=True)
+    assert tl.total() == pytest.approx(6.4), "eos→answer is the answer's playout"
+    assert tl.total("speech_end", "first_played") == pytest.approx(3.0)
+    parts = dict(tl.contributions())
+    assert all(dt >= 0 for dt in parts.values()), parts
+    assert "first_tts_byte" not in parts, "first sound is not a chain stage"
+    row = tl.as_dict(epoch=0.0)
+    assert row["eos_to_answer"] == pytest.approx(6.4)
+    assert row["eos_to_audio"] == pytest.approx(3.0)
+    assert row["sound"]["first_played"] == pytest.approx(3.0)
 
 
 def test_the_parallel_stages_are_measured_from_the_close_not_from_each_other():
@@ -420,6 +448,7 @@ def test_a_reply_that_asks_holds_the_window_open_longer():
     b.wake.extend("user-a")
     b._last_agent_text = "Should I restart it?"
     b._schedule_wake_state_publish = lambda: None
+    b._reply_kind = "voice"          # set by the spoken turn's ReplySpeaker.say
     b._on_tts_utterance_end()
     assert b.wake.remaining_s() > 15.0
 
@@ -586,6 +615,9 @@ def _barge_bridge(texts):
     b = _bridge(texts, barge=True)
     b.tts = _TTS(speaking=True)
     b._speaking_turn = "t-old"
+    # Production registers every spoken turn at its `voice_turn` head; the
+    # cancel acts only on a turn so registered (2026-11-09, C8).
+    b._streamed_turns.append("t-old")
     b._hearing["user-a"] = _Hearing(True)
     b.wake.extend("user-a")
     b.wake.open_conversation("user-a")
@@ -645,13 +677,19 @@ def test_a_real_request_over_lloyd_stops_him_reports_what_was_heard_and_asks():
         return b
     b = asyncio.run(go())
     assert b.tts.interrupts == 1
-    assert b.http.interrupted == [{"session_key": "20260924_000000_dplx",
-                                   "heard": "It is seven.", "unheard_chars": 40}]
-    assert b.http.cancels == ["t-old"]
-    assert [p["text"] for p in b.http.posts if p and "text" in p] == ["No, the other one."]
+    # The heard note and the cancel ride the inject (2026-11-09): the backend
+    # records the note before this turn reads it and cancels the running
+    # spoken turn (`app/routers/voice.py::_supersede_spoken_turn`), with no
+    # round trip in front of the request.
+    asks = [p for p in b.http.posts if p and "text" in p]
+    assert [p["text"] for p in asks] == ["No, the other one."]
+    assert asks[0]["supersede"] == {"heard": "It is seven.", "unheard_chars": 40}
+    assert b.http.interrupted == [] and b.http.cancels == []
 
 
-def test_a_barge_in_never_cancels_a_turn_that_is_not_the_one_being_spoken():
+def test_a_barge_in_cancels_nothing_from_the_worker():
+    """Which turn a barge-in cancels is the backend's call, made as it accepts
+    the request (only a voice-injected turn; tests/test_voice_inject_stream.py)."""
     b = _barge_bridge(["No, the other one."])
 
     async def go():
@@ -679,17 +717,17 @@ def test_a_new_request_while_a_spoken_turn_runs_silently_cancels_it():
         await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
         return b
     b = asyncio.run(go())
-    assert b.http.cancels == ["t-old"]
+    asks = [p for p in b.http.posts if p and "text" in p]
+    assert [p["text"] for p in asks] == ["Give me a full systems check, please."]
+    assert asks[0]["supersede"] == {}, "supersede the running turn; nothing heard"
     assert b.http.interrupted == []
-    assert [p["text"] for p in b.http.posts if p and "text" in p] == \
-        ["Give me a full systems check, please."]
 
 
-def test_a_new_request_cancels_whichever_spoken_turn_is_running():
+def test_a_new_request_supersedes_whichever_spoken_turn_is_running():
     """The worker's idea of the active turn can lag the backend's — a second
     spoken turn already started while the first's clauses were still playing.
-    What is cancelled is the session's running turn, provided this room spoke
-    it."""
+    So the request names no turn: the backend cancels the session's running
+    turn, provided it is a spoken one."""
     b = _barge_bridge(["No, the other one."])
     b._streamed_turns.extend(["t-old", "t-newer"])
 
@@ -698,7 +736,8 @@ def test_a_new_request_cancels_whichever_spoken_turn_is_running():
         b.http.current_turn = "t-newer"
         await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
         return b
-    assert asyncio.run(go()).http.cancels == ["t-newer"]
+    asks = [p for p in asyncio.run(go()).http.posts if p and "text" in p]
+    assert "supersede" in asks[0] and "turn_id" not in asks[0]["supersede"]
 
 
 def test_a_new_request_never_cancels_a_typed_turn():
@@ -758,20 +797,22 @@ def test_an_acknowledgement_over_a_silent_spoken_turn_cancels_nothing():
     assert [p for p in b.http.posts if p and "text" in p] == []
 
 
-def test_the_cancel_does_not_wait_behind_the_heard_note():
-    """Both POSTs go out together: on 2026-10-12 the cancel followed the
-    heard-note POST and reached the backend 1.7 s after the words."""
+def test_the_request_waits_on_no_round_trip_behind_a_barge_in():
+    """On 2026-10-12 the cancel followed the heard-note POST and reached the
+    backend 1.7 s after the words; on 2026-10-17 the GET + cancel still put
+    0.9 s in front of an inject. Now the request is the first POST out, and
+    it carries the heard note and the cancel with it."""
     b = _barge_bridge(["No, the other one."])
     order = []
 
     class _SlowHTTP(_HTTP):
+        async def get(self, url, timeout=None):
+            order.append("get")
+            await asyncio.sleep(0.2)
+            return await super().get(url, timeout=timeout)
+
         async def post(self, url, json=None, timeout=None):
-            if url.endswith("/api/voice/interrupted"):
-                order.append("interrupted-start")
-                await asyncio.sleep(0.2)
-                order.append("interrupted-end")
-            elif url.endswith("/cancel"):
-                order.append("cancel")
+            order.append("inject" if json and "text" in json else url.rsplit("/", 1)[-1])
             return await super().post(url, json=json, timeout=timeout)
     b.http = _SlowHTTP()
 
@@ -779,9 +820,8 @@ def test_the_cancel_does_not_wait_behind_the_heard_note():
         b._stream_replies = False
         await b._handle_utterance_event(HearingEvent("utterance", utterance=_utt()), "user-a")
         return b
-    b = asyncio.run(go())
-    assert b.http.cancels == ["t-old"]
-    assert order.index("cancel") < order.index("interrupted-end")
+    asyncio.run(go())
+    assert order and order[0] == "inject", order
 
 
 def test_stop_while_speaking_stops_and_injects_nothing():
@@ -935,7 +975,7 @@ class _SpeakTTS:
     def is_idle(self):
         return not self.is_speaking
 
-    async def speak(self, text, timeline=None):
+    async def speak(self, text, timeline=None, aside=False):
         self.said.append(text)
         self._silence = 0.0          # the listener just heard something
 
@@ -1190,7 +1230,7 @@ def test_the_row_shape_carries_every_stage_and_the_turn_in_both_clocks():
     tl.audio_pushed(base + 2.0, base + 2.0, 0.1)      # then the next frame goes out cold
     # ...which is the tool-turn silence the gap figure exists to catch: 1.15 s between
     # the end of the first frame's audio (base + 0.85) and the start of the second.
-    # `first_pushed`/`first_played` stay the FIRST frame's marks, so this does not
+    # `first_answer_pushed`/`_played` stay the FIRST frame's marks, so this does not
     # move the total — the gap is the second thing the row carries about the audio.
 
     row = voice_turns.turn_row(tl, room="lloyd-x", epoch=1759732200.5)
@@ -1200,13 +1240,14 @@ def test_the_row_shape_carries_every_stage_and_the_turn_in_both_clocks():
     # omitted it too would read as though `speech_end` never happened.
     assert list(row["stages"]) == ["speech_end", "vad_close", "asr_done",
                                    "inject_sent", "first_delta", "first_clause",
-                                   "first_pushed", "first_played"]
+                                   "first_answer_pushed", "first_answer_played"]
     assert row["stages"]["speech_end"] == 0.0, "the origin costs nothing"
     assert row["stages"]["vad_close"] == pytest.approx(0.1)
-    assert row["stages"]["first_pushed"] == pytest.approx(0.2)
-    assert row["stages"]["first_played"] == pytest.approx(0.05)
+    assert row["stages"]["first_answer_pushed"] == pytest.approx(0.2)
+    assert row["stages"]["first_answer_played"] == pytest.approx(0.05)
     assert sum(row["stages"].values()) == pytest.approx(0.75) == pytest.approx(
-        row["eos_to_audio"]), "the stages are a decomposition of the total, not a second measurement"
+        row["eos_to_answer"]), "the stages are a decomposition of the total, not a second measurement"
+    assert row["eos_to_audio"] == pytest.approx(0.75), "no aside: first sound is the answer"
     assert row["max_gap_s"] == pytest.approx(1.15)
     # The wall clock is one instant spelled twice: the sortable half a join needs,
     # and the half a human can read with its timezone written on it.
@@ -1226,16 +1267,16 @@ def test_eos_to_audio_is_null_and_never_zero_when_either_end_is_missing():
     typed.mark("first_clause", 5.0)
     typed.audio_pushed(5.1, 5.2, 0.5)
     row = voice_turns.turn_row(typed, room="lloyd-x", epoch=0.0)
-    assert row["eos_to_audio"] is None
+    assert row["eos_to_audio"] is None and row["eos_to_answer"] is None
     assert row["stages"]["first_clause"] == 0.0, "the origin of a partial turn is still its first mark"
-    assert row["stages"]["first_pushed"] == pytest.approx(0.1)
+    assert row["stages"]["first_answer_pushed"] == pytest.approx(0.1)
     assert row["max_gap_s"] == 0.0, "one frame cannot contain a silence in it"
 
     cancelled = TurnTimeline("voice")
     cancelled.mark("speech_end", 10.0)
     cancelled.mark("vad_close", 10.1)
     partial = voice_turns.turn_row(cancelled, room="lloyd-x", epoch=0.0)
-    assert partial["eos_to_audio"] is None
+    assert partial["eos_to_audio"] is None and partial["eos_to_answer"] is None
     assert partial["stages"] == {"speech_end": 0.0, "vad_close": pytest.approx(0.1)}
 
 
@@ -1270,8 +1311,9 @@ def test_the_rows_measurement_half_is_the_timelines_own_as_dict():
     tl.audio_pushed(10.6, 10.7, 0.4)
 
     payload = tl.as_dict(epoch=1759732200.5)
-    assert sorted(payload) == ["at", "eos_to_audio", "epoch", "label", "max_gap_s",
-                               "stages"], "the keys are the documented six, no more"
+    assert sorted(payload) == ["at", "eos_to_answer", "eos_to_audio", "epoch", "label",
+                               "max_gap_s", "sound", "stages"], \
+        "the keys are the documented eight, no more"
     assert payload["label"] == "voice"
     assert list(payload["stages"]) == [s for s in STAGES if s in tl.marks], (
         f"as_dict ordered {list(payload['stages'])}, STAGES orders "
@@ -1304,11 +1346,14 @@ def test_the_row_shape_is_read_off_the_real_timeline():
         "v": voice_turns.SCHEMA_VERSION, "turn_id": "abc123def456",
         "room": "lloyd-1", "interrupted": True, "queued_behind": True,
         "tools_ran": True, "spoken_chars": 42, "capped": False, "label": "voice",
+        "held_s": 0.0, "held_audio_s": 0.0, "asides": 0, "engine": {},
         "epoch": 1759732200.5,
         # Monotonic differences are exact to the float and approximated to the reader.
         "stages": {"speech_end": 0.0, "first_clause": pytest.approx(1.0),
-                   "first_pushed": pytest.approx(0.4),
-                   "first_played": pytest.approx(0.1)},
+                   "first_answer_pushed": pytest.approx(0.4),
+                   "first_answer_played": pytest.approx(0.1)},
+        "sound": {"first_pushed": pytest.approx(1.4), "first_played": pytest.approx(1.5)},
+        "eos_to_answer": pytest.approx(1.5),
         "eos_to_audio": pytest.approx(1.5), "max_gap_s": 0.0}
 
 

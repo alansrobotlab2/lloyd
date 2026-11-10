@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app import usage_store
+from app import usage_store, voice_tap as _voice_tap
 from app.config import (
     CONFIG,
     _model_base_url,
@@ -1365,8 +1365,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 # + 1`. Track completions rather than reading `iteration`
                 # off the event, which the recovery path can rewind.
                 current_iteration = evt.get("iteration") or (current_iteration + 1)
-                # Capture per-iteration usage so subsequent tool_call /
-                # tool_result rows can carry their own stats block.
+                # Per-iteration usage: tool rows carry it; a spoken turn's first request goes to the voice worker.
                 iter_usage = evt.get("usage") or {}
                 iter_input = iter_usage.get("input_tokens") or iter_usage.get("prompt_tokens", 0)
                 iter_output = iter_usage.get("output_tokens") or iter_usage.get("completion_tokens", 0)
@@ -1383,6 +1382,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "iteration": evt.get("iteration", 0),
                     "model": model,
                 }
+                await _voice_tap.emit_first_turn_stats(turn, evt, iter_usage, _emit)
                 _prefix_miss.record_iteration(
                     miss_tracker, int(evt.get("iteration") or current_iteration),
                     iter_usage, duration_ms=int(evt.get("duration_ms") or 0),

@@ -865,6 +865,31 @@ def _fast_path_assistant_message(
 # ---------------------------------------------------------------------------
 
 
+async def _judge_unless_cancelled(state: Any, call: Any) -> ObserverDecision:
+    """Await an observer judgment, or stop waiting the moment the turn is
+    cancelled.
+
+    A terminal review runs ON the turn: until it returns, the turn is still
+    the session's running turn. So a cancel that arrived during the judgment
+    — a person in a voice conversation saying the next thing — waited out a
+    whole LLM call before the turn let go, and the request that superseded it
+    queued behind it (2026-10-31 16:19:33: cancelled, still running 6.6 s
+    later; the next spoken request waited 12.6 s). The judgment of a
+    cancelled turn is discarded by the caller anyway, so it is not awaited.
+    """
+    task = asyncio.ensure_future(call)
+    stop = asyncio.ensure_future(state.cancel_event.wait())
+    try:
+        await asyncio.wait({task, stop}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stop.cancel()
+    if task.done():
+        return task.result()
+    task.cancel()
+    return ObserverDecision(action="noop", reason="turn cancelled while the "
+                            "observer judgment was in flight")
+
+
 async def _call_observer(
     *,
     user_prompt: str,
@@ -2415,11 +2440,11 @@ def install_observer(
                       is_terminal: bool, is_async: bool) -> None:
         """One LLM judgment over the turn's shape, then the guards and lever."""
         user_prompt = _build_event_user_prompt(state, summary)
-        decision = await _call_observer(
+        decision = await _judge_unless_cancelled(state, _call_observer(
             user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
             timeout_override=_judge_timeout(is_async),
             async_call=is_async, terminal=is_terminal,
-        )
+        ))
         if state.closed or state.cancel_event.is_set():
             decision.action = "noop_assistant_after_cancel"
             decision.reason = (

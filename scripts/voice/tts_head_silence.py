@@ -23,7 +23,7 @@ Needs the TTS service `livekit.tts.api_url` points at (production: `agent-tts-om
 :8093, GPU 3). It synthesises; it does not restart or reconfigure anything.
 
 WHAT IS MEASURED. For each fixture the worker's own request body is POSTed to
-`<api_url>/v1/audio/speech` (identical to `livekit_worker.py:641-656`, including
+`<api_url>/v1/audio/speech` (identical to `TTSStreamer._speech_body` in `livekit_worker.py`, including
 `stream_format: "audio"`, which is what stops vLLM-Omni answering SSE, and `speed: 1.0`,
 because the server's streaming path drops speed and the worker stretches instead). The
 response is decoded as s16le and head silence is measured twice over the *same* bytes:
@@ -248,7 +248,7 @@ class NonAudioResponse(RuntimeError):
 
 
 def speech_body(text: str, model: str, voice: str) -> dict:
-    """The worker's body, field for field (`agent-services/livekit_worker.py:641-656`).
+    """The worker's body, field for field (`agent-services/livekit_worker.py`, `TTSStreamer._speech_body`).
 
     `stream_format: "audio"` is what makes vLLM-Omni send raw s16le; without it the same
     request answers `text/event-stream` carrying base64 of it. `speed: 1.0` on the wire

@@ -257,10 +257,15 @@ def test_the_pinned_body_is_still_the_workers_body(ths):
     the worker's own source: the endpoint it posts to, and the keys and literals of the
     dict it posts, must be the ones `speech_body` builds."""
     worker = (ROOT / "agent-services" / "livekit_worker.py").read_text()
-    block = worker[worker.index("self._http.stream("):]
-    block = block[:block.index(") as resp:")]
-    assert '/v1/audio/speech' in block, "the worker's speech endpoint moved"
-    posted = re.findall(r'^\s{20}"([a-z_]+)":', block, re.M)
+    call = worker[worker.index("self._http.stream("):]
+    call = call[:call.index(") as resp:")]
+    assert '/v1/audio/speech' in call, "the worker's speech endpoint moved"
+    # The body has one definition, shared by live clauses and the prerendered
+    # phrase cache (2026-11-09); every stream call must post it.
+    assert worker.count("/v1/audio/speech\",") == worker.count("json=self._speech_body(text)")
+    block = worker[worker.index("def _speech_body("):]
+    block = block[:block.index("\n    def ")]
+    posted = re.findall(r'^\s+"([a-z_]+)":', block, re.M)
     assert posted == ["model", "input", "voice", "response_format", "stream",
                       "stream_format", "speed"], (
         f"the worker posts {posted}; speech_body must post the same fields in the same "
@@ -378,4 +383,7 @@ def test_no_first_audible_stage_exists(ths):
     tl = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tl)
     assert "first_audible" not in tl.STAGES
-    assert "first_played" in tl.STAGES
+    # Since 2026-11-09 the chain ends at the answer's own playout mark and the
+    # turn's first sound (an aside included) sits beside it — still frame starts.
+    assert "first_answer_played" in tl.STAGES
+    assert "first_played" in tl.SOUND_STAGES

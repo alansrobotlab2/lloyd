@@ -71,6 +71,8 @@ class _State:
     buf_len: int = 0
     start_sample: int = 0
     max_prob: float = 0.0
+    #: A tentative close was already reported for this pause.
+    tentative_sent: bool = False
 
 
 class SileroSegmenter:
@@ -89,6 +91,7 @@ class SileroSegmenter:
         speech_pad_ms: int = 220,
         min_utterance_ms: int = 250,
         max_utterance_ms: int = 30000,
+        tentative_silence_ms: int = 0,
     ) -> None:
         self._model = model if model is not None else load_vad_model()
         self.threshold = float(threshold)
@@ -99,6 +102,11 @@ class SileroSegmenter:
         self._pad = int(speech_pad_ms / 1000 * SAMPLE_RATE)
         self._min_utt = int(min_utterance_ms / 1000 * SAMPLE_RATE)
         self._max_utt = int(max_utterance_ms / 1000 * SAMPLE_RATE)
+        #: Speculative turn start, shadow (2026-11-09): after this much silence
+        #: — short of the close — the audio so far is reported as a tentative
+        #: utterance (`take_tentatives`), once per pause. 0 = off.
+        self._tentative = int(tentative_silence_ms / 1000 * SAMPLE_RATE)
+        self._tentatives: list[Utterance] = []
         self._chunker = FrameChunker(FRAME_SAMPLES)
         self._cursor = 0
         self._st = _State()
@@ -164,10 +172,22 @@ class SileroSegmenter:
             st.max_prob = max(st.max_prob, p)
             if p >= self.exit_threshold:
                 st.silence_run = 0
+                st.tentative_sent = False
             else:
                 st.silence_run += frame.size
 
             closed = st.silence_run >= self._min_silence
+            if (self._tentative and not closed and not st.tentative_sent
+                    and st.silence_run >= self._tentative):
+                st.tentative_sent = True
+                part = np.concatenate(st.buf)
+                if st.silence_run > self._pad:
+                    part = part[: max(0, part.size - (st.silence_run - self._pad))]
+                if part.size >= self._min_utt:
+                    self._tentatives.append(Utterance(
+                        audio=part, start_sample=st.start_sample,
+                        end_sample=st.start_sample + part.size,
+                        max_prob=st.max_prob, reason="tentative"))
             capped = st.buf_len >= self._max_utt
             if not (closed or capped):
                 continue
@@ -204,6 +224,11 @@ class SileroSegmenter:
                     "vad: dropped %.2fs utterance below min (%.2fs)",
                     audio.size / SAMPLE_RATE, self._min_utt / SAMPLE_RATE,
                 )
+        return out
+
+    def take_tentatives(self) -> list[Utterance]:
+        """The tentative closes reported since the last call."""
+        out, self._tentatives = self._tentatives, []
         return out
 
     def flush(self) -> Optional[Utterance]:
@@ -277,6 +302,7 @@ def build_segmenter(cfg: dict) -> SileroSegmenter:
     return SileroSegmenter(
         threshold=float(cfg.get("threshold", 0.5)),
         min_silence_ms=int(cfg.get("min_silence_ms", 380)),
+        tentative_silence_ms=int(cfg.get("tentative_silence_ms", 0)),
         speech_pad_ms=int(cfg.get("speech_pad_ms", 220)),
         min_utterance_ms=int(cfg.get("min_utterance_ms", 250)),
         max_utterance_ms=int(cfg.get("max_utterance_ms", 30000)),

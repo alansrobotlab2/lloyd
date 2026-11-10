@@ -1693,7 +1693,7 @@ BENIGN_ALL_ROWS = {
     "2026-10-15": ("49/60", False),
     "2026-10-19": ("16/60", True),
     # The table stops at 2026-10-19 on purpose. `RC.report_rows()` reads `ROWS_PATH`
-    # (`eval/run_injection_canary.py:81`), which the canary appends to while a window's day
+    # (`eval/run_injection_canary.py:101`), which the canary appends to while a window's day
     # is still running, so the newest day's summed figure is not a fact yet and cannot be
     # quoted here: a quoted figure for a live window is a figure the next run can change,
     # and the node would go red with nothing broken. Every day below is one the corpus has

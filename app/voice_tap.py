@@ -55,6 +55,55 @@ def mark_voice_turn(turn_id: str) -> None:
         _voice_turn_ids.append(turn_id)
 
 
+def is_voice_turn(turn_id: str) -> bool:
+    """Whether `turn_id` is a turn the voice worker injected (and reads)."""
+    return bool(turn_id) and turn_id in _voice_turn_ids
+
+
+#: Spoken turns whose first model request has already been reported.
+_stats_sent: "deque[str]" = deque(maxlen=256)
+
+
+def voice_turn_stats(turn: Any, evt: dict, usage: dict) -> dict:
+    """The first model request of a spoken turn, as the voice worker records it.
+
+    `prompt_tokens`/`cached_tokens` say whether the prewarm's prefix was hit,
+    `ttft_ms` is the engine's own first-token time for that request, and
+    `queue_wait_s` is how long the turn waited in the session queue before it
+    ran — the three hypotheses for a slow first word (prefix miss, engine
+    admission, a turn in front) read off one row.
+    """
+    def _int(value):
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    out = {
+        "prompt_tokens": _int(usage.get("input_tokens") or usage.get("prompt_tokens")),
+        "cached_tokens": _int(usage.get("cache_read") or usage.get("prompt_tokens_cached")
+                              or 0),
+        "ttft_ms": _int(evt.get("ttft_ms")),
+        "request_ms": _int(evt.get("request_ms")),
+    }
+    started, enqueued = getattr(turn, "started_at", None), getattr(turn, "enqueued_at", None)
+    if started is not None and enqueued is not None:
+        out["queue_wait_s"] = round(max(0.0, (started - enqueued).total_seconds()), 3)
+    return out
+
+
+async def emit_first_turn_stats(turn: Any, evt: dict, usage: dict, emit) -> None:
+    """Send one `turn_stats` frame on a spoken turn's first model request.
+
+    Called by the message path (app/routers/messages.py `_run_turn`) after every
+    completed model request; a typed turn, or any request after a spoken turn's
+    first, is a no-op. The voice worker (agent-services/livekit_worker.py) keeps
+    the frame on the turn's latency row.
+    """
+    turn_id = getattr(turn, "turn_id", "")
+    if not is_voice_turn(turn_id) or turn_id in _stats_sent:
+        return
+    _stats_sent.append(turn_id)
+    await emit(turn, "turn_stats", voice_turn_stats(turn, evt, usage))
+
+
 def open_tap(session_id: str) -> asyncio.Queue:
     q: asyncio.Queue = asyncio.Queue(maxsize=TAP_QUEUE_MAX)
     _taps.setdefault(session_id, set()).add(q)

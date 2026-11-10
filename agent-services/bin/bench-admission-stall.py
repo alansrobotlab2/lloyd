@@ -16,6 +16,12 @@ Two shapes, both from 2026-09-10 (architecture/vllm.md):
   cold    Only the cold admission: A decoding, B one nonce-prefixed prompt,
           then the same B again with A stopped (its prefill time alone). The
           Layer 3 max_num_batched_tokens shape.
+  voice   A spoken turn arriving behind a worker's cold prefill (2026-11-09,
+          architecture/voice.md "First token"): V, a cold `--v-tokens` prompt
+          at priority 0 like a voice turn, alone and then 1.5 s into B's cold
+          `--b-tokens` prefill, `--reps` times. Reports V's time to first
+          token both ways and B's prefill time. The A/B for vLLM's
+          --long-prefill-token-threshold (LONG_PREFILL_TOKEN_THRESHOLD).
 
 What it reports: A's inter-chunk gaps — one SSE chunk per engine step, so a
 gap is a step as the neighbour feels it — during B's prefill, B's prefill
@@ -33,6 +39,7 @@ otherwise. Every request goes at priority 1, so a real chat still outranks it.
 
     .venvs/lloyd/bin/python agent-services/bin/bench-admission-stall.py verify
     .venvs/lloyd/bin/python agent-services/bin/bench-admission-stall.py cold --label mnbt4096
+    .venvs/lloyd/bin/python agent-services/bin/bench-admission-stall.py voice --b-tokens 100000 --label lpt0
 """
 
 from __future__ import annotations
@@ -158,7 +165,7 @@ async def metrics_loop(client, rows: list, stop: asyncio.Event) -> None:
 
 async def one_request(messages: list[dict], *, max_tokens: int, extra: dict | None = None,
                       cancel: asyncio.Event | None = None,
-                      chunks: list | None = None) -> dict:
+                      chunks: list | None = None, priority: int = PRIORITY) -> dict:
     """One streamed completion through the harness's own client."""
     t0 = time.monotonic()
     first = None
@@ -167,7 +174,7 @@ async def one_request(messages: list[dict], *, max_tokens: int, extra: dict | No
     body = {**NO_THINK, "max_tokens": max_tokens, **(extra or {})}
     async for chunk in stream_chat(base_url=BASE, model=MODEL, messages=messages,
                                    tools=None, extra_body=body, cancel_event=cancel,
-                                   timeout_s=1800, priority=PRIORITY):
+                                   timeout_s=1800, priority=priority):
         if u := chunk.get("usage"):
             usage = _merge_usage(usage, u)
         for choice in chunk.get("choices") or []:
@@ -318,9 +325,41 @@ async def run_cold(args, client, a_msgs, b_text: str) -> dict:
     }
 
 
+async def run_voice(args, client, b_text: str, v_text: str) -> dict:
+    def nonce(text: str, ask: str) -> list[dict]:
+        return [{"role": "user", "content": f"[run {random.getrandbits(64):016x}]\n"
+                 + text + "\n\n" + ask}]
+
+    def ttft(r: dict) -> float:
+        return round((r["first"] or r["end"]) - r["t0"], 3)
+
+    alone, beside, b_beside = [], [], []
+    for _ in range(args.reps):
+        await wait_idle(client, quiet_s=2)
+        alone.append(ttft(await one_request(nonce(v_text, "Say OK."),
+                                            max_tokens=1, priority=0)))
+        await wait_idle(client, quiet_s=2)
+        b_task = asyncio.create_task(one_request(
+            nonce(b_text, "In one sentence: what does the code above do?"),
+            max_tokens=1))
+        await asyncio.sleep(1.5)
+        v = await one_request(nonce(v_text, "Say OK."), max_tokens=1, priority=0)
+        beside.append(ttft(v))
+        b_beside.append(ttft(await b_task))
+    await wait_idle(client, quiet_s=2)
+    b_alone = ttft(await one_request(
+        nonce(b_text, "In one sentence: what does the code above do?"), max_tokens=1))
+    med = statistics.median
+    return {"v_ttft_alone_s": alone, "v_ttft_beside_b_s": beside,
+            "v_ttft_alone_median_s": med(alone), "v_ttft_beside_b_median_s": med(beside),
+            "b_prefill_beside_v_s": b_beside, "b_prefill_alone_s": b_alone}
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("shape", choices=("verify", "cold"))
+    ap.add_argument("shape", choices=("verify", "cold", "voice"))
+    ap.add_argument("--v-tokens", type=int, default=8_000)
+    ap.add_argument("--reps", type=int, default=4)
     ap.add_argument("--label", default="")
     ap.add_argument("--a-tokens", type=int, default=120_000)
     ap.add_argument("--b-tokens", type=int, default=200_000)
@@ -353,6 +392,9 @@ async def main() -> None:
         try:
             if args.shape == "verify":
                 result = await run_verify(args, client, a_msgs, b_text, tool_pool)
+            elif args.shape == "voice":
+                v_text, _ = await text_of(client, TOOL_GLOBS, args.v_tokens, f"[V {run}]\n")
+                result = await run_voice(args, client, b_text, v_text)
             else:
                 result = await run_cold(args, client, a_msgs, b_text)
         finally:

@@ -923,6 +923,12 @@ node ABI. Rebuild it with **node-gyp** — `npm rebuild` silently no-ops on npm 
 > How the voice pipeline actually uses this engine — the `clone:` protocol,
 > why `1.7B-Base` is the default model, and the two client-side corrections
 > applied to its output — is in `architecture/voice.md`.
+>
+> The room speaks through vLLM-Omni on `:8093` (Part 4, `vllm-omni`). This
+> vendored server on `:8090` is still load-bearing: it is
+> `livekit.tts.fallback_url`, and a clause the primary fails to start within
+> `first_byte_timeout_s` (3 s) is retried here once. Keep `clone:dave_cullen`
+> enrolled in **both** stores — they are separate.
 
 `agent-services/services/tts/qwen3-tts/` is a checkout of
 [groxaxo/Qwen3-TTS-Openai-Fastapi](https://github.com/groxaxo/Qwen3-TTS-Openai-Fastapi)
@@ -1569,6 +1575,16 @@ curl -s localhost:8090/v1/voices | jq -r '.voices[].id'
 
 # LiveKit
 curl -s localhost:7880 && echo OK
+
+# Voice, end to end — a real room against a canary build of this checkout, timed
+# from the end of speech to Lloyd's first word. Pause the worker pool first (it
+# shares the primary): POST /api/workers/pause, then resume after.
+.venvs/lloyd/bin/python scripts/voice/e2e_voice.py
+
+# Voice in production — every spoken turn writes a schema-2 row; the trend tool
+# reports eos→answer, first_delta and the engine's own numbers (needs 30 rows for
+# a verdict).
+.venvs/lloyd/bin/python scripts/maintenance/voice_turn_trend.py
 
 # Frontend
 curl -sI localhost:5173 | head -1

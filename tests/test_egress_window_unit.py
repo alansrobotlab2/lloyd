@@ -264,13 +264,13 @@ def test_the_unit_sets_neither_egress_override_so_the_arms_stay_the_driver_forke
     `LLOYD_EGRESS_ENFORCE` is the thing UNDER test and it belongs only in the child: the
     module docstring (:14-17) says the ON arm's MCP subprocess is launched with the flag in
     ITS environment and the OFF arm's without it, and `start_on_arm_aggregator()`
-    (eval/egress_arms.py:194) is where that scoping lives. A unit-level `Environment=` would put enforcement on the parent that supervises
+    (eval/egress_arms.py:215) is where that scoping lives. A unit-level `Environment=` would put enforcement on the parent that supervises
     the OFF arm too; both arms would come back enforcing and the pair would read as "egress
     enforcement changed nothing" — the false negative in the shape of a clean result.
 
     `LLOYD_CANARY_ROWS` stays UNSET so the 36 armed rows land on the tracked corpus the
     canary `check` and `record` read. `run_root()` reads that same variable
-    (`eval/egress_arms.py:154`), so setting it would move the rows beside the scratch root
+    (`eval/egress_arms.py:175`), so setting it would move the rows beside the scratch root
     and the window would publish nothing anyone reads.
 
     `LLOYD_DATA` is absent for the mirror-image reason, and it is the one an editor is most
@@ -395,7 +395,7 @@ def test_widening_the_childs_environment_brought_no_arm_flag_and_no_working_dire
 def test_the_run_root_is_a_fixed_dir_under_lloyd_data_created_before_the_window():
     """#2555 clause 2: `run_root()` neither mkdirs nor stamps a date, so the unit must do both.
 
-    `eval/egress_arms.py:146-157` returns the `$LLOYD_EGRESS_ARMS_ROOT` value VERBATIM — no
+    `eval/egress_arms.py:167-157` returns the `$LLOYD_EGRESS_ARMS_ROOT` value VERBATIM — no
     mkdir, no date — and `start_on_arm_aggregator()` hands that same path to the child as
     `LLOYD_DATA`
     (:207). A root of its own is what makes the leak witness leak-proof: the child's

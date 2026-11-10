@@ -24,8 +24,4 @@ for port in $PORTS; do
   fi
 done
 
-# Also kill any orphaned llama-server or tool_services processes
-pkill -9 -f 'tool_services\.py.*--port 8093' 2>/dev/null
-pkill -9 -f 'voice_services\.py.*--port 8094' 2>/dev/null
-
 echo "cleanup-orphans: done"

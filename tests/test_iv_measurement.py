@@ -395,9 +395,9 @@ def test_section_3_names_the_wiring_gap_and_its_citations_resolve():
     s = _flat(_section_3(DOC.read_text()))
 
     assert "_save_session_meta" in s and "create_session" in s and "ab.assignment" in s
-    assert "app/sessions_io.py:1360" in s and "app/sessions_io.py:398" in s
+    assert "app/sessions_io.py:1393" in s and "app/sessions_io.py:398" in s
 
-    cited_branch = _cited_span("app/sessions_io.py", 1360, 1368)
+    cited_branch = _cited_span("app/sessions_io.py", 1393, 1401)
     assert "ab import assignment" in cited_branch and "_iv_ab(session_id)" in cited_branch
     assert "mission-control" in cited_branch
     assert _cited_span("app/sessions_io.py", 398, 398).startswith("def create_session(")
@@ -491,7 +491,7 @@ def test_the_grep_command_section_3_publishes_reproduces_the_call_site():
         f"the command §3 publishes exits {proc.returncode}: {proc.stderr.strip()!r}")
     hits = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     assert len(hits) == 1, f"§3 says one line, the command returned {len(hits)}: {hits}"
-    assert hits[0].startswith("app/sessions_io.py:1363:"), \
+    assert hits[0].startswith("app/sessions_io.py:1396:"), \
         f"the one hit is not the stamping call site: {hits[0]!r}"
     assert "import assignment" in hits[0]
 
@@ -504,7 +504,7 @@ def test_the_grep_command_section_3_publishes_reproduces_the_call_site():
 # sessions 0 / turns 0, every rate and z null, and exited 0 (landed 2f6bd2de). The
 # window held 29 mission-control sessions and none carried a stamp, because the sole
 # assignment call sits on `_save_session_meta`'s create branch
-# (app/sessions_io.py:1363) while `create_session` (app/sessions_io.py:398) mints every
+# (app/sessions_io.py:1396) while `create_session` (app/sessions_io.py:398) mints every
 # chat the API creates and never reaches it. These nodes pin the diagnostic that makes
 # that shape self-announcing, and pin that it announces without moving the verdict.
 
@@ -621,7 +621,7 @@ def test_the_gap_line_names_the_counts_and_both_writers(tmp_path, monkeypatch):
 
     assert line.startswith("ENROLLMENT-GAP:"), line
     assert "create_session" in line and "app/sessions_io.py:398" in line, line
-    assert "_save_session_meta" in line and "app/sessions_io.py:1363" in line, line
+    assert "_save_session_meta" in line and "app/sessions_io.py:1396" in line, line
     # The three counts, in words a reader can act on.
     assert " 3 mission-control sessions" in line, line
     assert "1 stamped for iv-chat-1" in line, line
@@ -737,7 +737,7 @@ def test_the_config_block_carries_the_precondition_as_comment_only():
 
     block = "\n".join(lines[start:start + 24])
     for phrase in ("0/0", "2026-10-18", "2f6bd2de", "#2149", "create_session",
-                   "app/sessions_io.py:398", "app/sessions_io.py:1363"):
+                   "app/sessions_io.py:398", "app/sessions_io.py:1396"):
         assert phrase in block, f"the ab block no longer says {phrase!r}:\n{block}"
     assert "record-only is permanent" in block.lower(), block
 

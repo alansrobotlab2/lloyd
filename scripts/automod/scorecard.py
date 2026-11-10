@@ -94,7 +94,7 @@ _HONESTY_RE = re.compile(r"^\+.*(\bor\s+True\b|^\+\s*assert\s+True\b)", re.M)
 # There is no canonical person-name source in the checkout to import: `grep -rn
 # "Alan" --include=*.py --include=*.yaml` outside `tests/`, `architecture/` and
 # `_pipeline/` returns comments only (`app/uptake.py:7`,
-# `scripts/automod/backlog.py:77,210`, `agent-services/livekit_worker.py:445`).
+# `scripts/automod/backlog.py:77,210`, `agent-services/livekit_worker.py:483`).
 # `config.yaml` is not the place either — it is human-only for the loop, which is
 # one of the gate's standing denials — so the list lives beside the one reader
 # that uses it. `people/alan/` is the vault's own record of the name; adding a

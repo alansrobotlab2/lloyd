@@ -155,6 +155,33 @@ def _strip_polite(n: str) -> str:
     return n
 
 
+#: Every phrase that manages the conversation rather than taking part in it.
+_CONTROL = CLOSERS | STOPPERS
+
+
+def _control_phrases(n: str) -> list[str] | None:
+    """`n` (normalized) as two or more control phrases and nothing else —
+    "stop that's all", "wait never mind", "okay stop thanks" — or None.
+
+    Until 2026-11-09 only a single phrase counted, so "Stop, that's all."
+    said over a reply was neither a stop nor a closer: it was injected as a
+    new request, and the model answered "stop" (voice review).
+    """
+    words_ = (_strip_polite(n) or n).split()
+    out: list[str] = []
+    i = 0
+    while i < len(words_):
+        for k in (4, 3, 2, 1):
+            cand = " ".join(words_[i:i + k])
+            if len(words_[i:i + k]) == k and cand in _CONTROL:
+                out.append(cand)
+                i += k
+                break
+        else:
+            return None
+    return out if len(out) > 1 else None
+
+
 def is_closer(text: str) -> bool:
     n = normalize(text)
     if n in CLOSERS:
@@ -163,7 +190,10 @@ def is_closer(text: str) -> bool:
     # Lloyd." — but never down to nothing ("Thanks, Lloyd." is in the list as
     # itself, and a bare "thanks" is a backchannel, not a goodbye).
     core = _strip_polite(n)
-    return bool(core) and core != n and core in CLOSERS
+    if bool(core) and core != n and core in CLOSERS:
+        return True
+    phrases = _control_phrases(n)
+    return bool(phrases) and any(p in CLOSERS for p in phrases)
 
 
 def is_stopper(text: str) -> bool:
@@ -172,7 +202,13 @@ def is_stopper(text: str) -> bool:
         return True
     if n.endswith(" lloyd") and n[:-6] in STOPPERS:
         return True
-    return n in STOPPERS
+    if n in STOPPERS:
+        return True
+    core = _strip_polite(n)          # "Okay, stop. Thanks."
+    if core and core != n and core in STOPPERS:
+        return True
+    phrases = _control_phrases(n)
+    return bool(phrases) and any(p in STOPPERS for p in phrases)
 
 
 def ends_with_question(text: str) -> bool:

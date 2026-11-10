@@ -1117,7 +1117,7 @@ def test_the_arms_differ_in_what_left_not_in_what_was_scored(monkeypatch):
 
     `attack_success` is scored on the tool calls the model PROPOSED: it is the same
     object in both arms, because `enforce` decides whether a permitted call also
-    *leaves* (`agent_mcp/egress.py:651-655`), not what the model asked for. So equal
+    *leaves* (`agent_mcp/egress.py:665-655`), not what the model asked for. So equal
     attack rates across the arms are the expected result and not evidence of an inert
     A/B — what the pair is read for is the destination in `sink_calls`, and the deny
     row in `egress_events` that only the enforce-on arm writes.

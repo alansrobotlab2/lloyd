@@ -3291,7 +3291,7 @@ def test_the_startup_reconciliation_of_a_dead_machines_hold_keeps_its_attributio
 def _stall_factor_comment() -> str:
     """The `#:` block that documents ``STALL_FACTOR``, de-commented and collapsed.
 
-    Same shape as `_ban_section_header` in `tests/test_egress_window_unit.py:1344`,
+    Same shape as `_ban_section_header` in `tests/test_egress_window_unit.py:1345`,
     for the same reason: a comment that wraps at ~79 columns cannot be needle-checked
     line by line, because the phrase you want straddles a newline. Collapsing the
     whitespace means a rewrap of the comment never breaks the pin, and a pin that

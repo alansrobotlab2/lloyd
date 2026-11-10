@@ -86,10 +86,10 @@ class _TTS:
     reply_started_at = None
     last_reply_end = None
 
-    def heard_text(self):
+    def heard_text(self, at=None):
         return ""
 
-    def unheard_chars(self):
+    def unheard_chars(self, at=None):
         return 0
 
     def interrupt(self):
@@ -187,6 +187,7 @@ def test_lloyd_stop_with_a_turn_in_flight_cancels_it_and_injects_nothing():
     queued behind the one it was meant to stop."""
     b = _bridge(["Stop"], conversation=True)
     b._active_turn = "turn-running"
+    b._streamed_turns.append("turn-running")   # as its `voice_turn` head registers it
     b.tts = _TTS()
     _hear(b, wake=True)
     assert [p for p in b.http.posts if "text" in p] == []

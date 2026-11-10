@@ -85,9 +85,13 @@ def test_stream_true_returns_the_turns_own_events_headed_by_its_id(harness):
                             "stream": True})
     assert r.headers["content-type"].startswith("text/event-stream")
     frames = _frames(r.text)
-    assert frames[0] == ("voice_turn", {"session_id": "s1",
-                                        "turn_id": captured["turn"].turn_id,
-                                        "queued_behind": False})
+    head = dict(frames[0][1])
+    assert frames[0][0] == "voice_turn"
+    assert isinstance(head.pop("setup_ms"), int), "setup + prefetch time rides the head"
+    assert head.pop("prewarm") == {"result": "none"}, "no prewarm ran on this session"
+    assert head.pop("superseded") is None, "nothing was superseded"
+    assert head == {"session_id": "s1", "turn_id": captured["turn"].turn_id,
+                    "queued_behind": False}
     assert [f[0] for f in frames[1:]] == ["text_delta", "done"]
     assert frames[1][1]["text"] == "It is noon."
 
@@ -191,7 +195,7 @@ def test_prewarm_triggers_and_their_debounce():
     voice._PREWARM_INFLIGHT.clear()
     ok = dict(enabled=True, busy=False)
     assert voice._prewarm_refusal("p", "wake", 100.0, **ok) is None
-    voice._PREWARM_LAST["p"] = 100.0
+    voice._PREWARM_LAST["p"] = (100.0, None)
     assert voice._prewarm_refusal("p", "wake", 110.0, **ok) == "recent"
     assert voice._prewarm_refusal("p", "speech", 110.0, **ok) == "recent"
     assert voice._prewarm_refusal("p", "keep-warm", 104.0, **ok) == "recent"
@@ -255,3 +259,87 @@ def test_prewarm_skips_a_session_that_will_summarize(prewarm, tmp_path, monkeypa
         "the prewarm now warms a prompt the turn will not send: the forwarded "
         "switch no longer resolves to the shipped default")
     assert runs == []
+
+
+def test_prewarm_debounce_holds_only_while_the_history_is_the_same():
+    """2026-11-09: a follow-up asked within 20 s of the previous answer got no
+    speech-onset prewarm — the debounce was on the clock alone, and the
+    prefix it had warmed no longer matched once the answer landed."""
+    voice._PREWARM_LAST.clear()
+    voice._PREWARM_INFLIGHT.clear()
+    ok = dict(enabled=True, busy=False)
+    voice._PREWARM_LAST["p"] = (100.0, (1, 10))
+    assert voice._prewarm_refusal("p", "speech", 105.0, fingerprint=(1, 10), **ok) == "recent"
+    assert voice._prewarm_refusal("p", "speech", 105.0, fingerprint=(2, 40), **ok) is None
+    # A changed history never overrides an in-flight prefill or a busy session.
+    assert voice._prewarm_refusal("p", "speech", 105.0, fingerprint=(2, 40),
+                                  enabled=True, busy=True) == "busy"
+
+
+def test_a_landed_turn_readmits_the_speech_prewarm(prewarm, tmp_path):
+    client, runs = prewarm
+    c = client()
+    f = tmp_path / "s9.json"
+    f.write_text(json.dumps({"messages": []}))
+    assert c.post("/api/voice/prewarm", json={"session_key": "s9", "reason": "speech"}).json()["started"]
+    _drain_tasks()
+    assert c.post("/api/voice/prewarm", json={"session_key": "s9", "reason": "speech"}).json()["reason"] == "recent"
+    f.write_text(json.dumps({"messages": [{"role": "user", "content": "hi"},
+                                          {"role": "assistant", "content": "hello"}]}))
+    assert c.post("/api/voice/prewarm", json={"session_key": "s9", "reason": "speech"}).json()["started"]
+
+
+def test_speech_onset_builds_the_turns_setup_and_the_inject_takes_it(harness, tmp_path, monkeypatch):
+    """The inject used to build the turn's setup after the person stopped
+    talking (~130 ms warm). A speech-onset prewarm builds it first; the
+    inject takes it once, and only over the same history."""
+    client, captured = harness
+    voice._PREWARM_LAST.clear(); voice._PREWARM_INFLIGHT.clear(); voice._SETUP_CACHE.clear()
+    (tmp_path / "s7.json").write_text(json.dumps({"messages": []}))
+    built = []
+    real = voice._voice_turn_setup
+    monkeypatch.setattr(voice, "_voice_turn_setup", lambda sid: built.append(sid) or real(sid))
+
+    async def no_prewarm(*a, **kw):
+        return None
+    monkeypatch.setattr(voice, "_prewarm", no_prewarm)
+    c = client()
+    c.post("/api/voice/prewarm", json={"session_key": "s7", "reason": "speech"})
+    assert built == ["s7"], "the setup is built at speech onset"
+    c.post("/api/voice/inject", json={"text": "hi", "session_key": "s7"})
+    assert built == ["s7"], "the inject took the prebuilt setup"
+    c.post("/api/voice/inject", json={"text": "again", "session_key": "s7"})
+    assert built == ["s7", "s7"], "taken once"
+    c.post("/api/voice/prewarm", json={"session_key": "s7", "reason": "speech"})
+    (tmp_path / "s7.json").write_text(json.dumps({"messages": [{"role": "user", "content": "x"}]}))
+    c.post("/api/voice/inject", json={"text": "third", "session_key": "s7"})
+    assert built == ["s7", "s7", "s7", "s7"], "a moved history rebuilds"
+
+
+def test_inject_supersede_records_heard_and_cancels_only_a_spoken_turn(harness, monkeypatch):
+    """The worker's barge-in rides the inject (2026-11-09): the heard note is
+    recorded before this turn reads it, and the running spoken turn is
+    cancelled without a round trip in front of the request. A typed turn
+    running on the session is never cancelled from the room."""
+    import app.sessions_io as sio
+    from app import voice_tap
+    client, captured = harness
+    ev = asyncio.Event()
+    state = {"current": {"turn_id": "spoken-1"}}
+    monkeypatch.setattr(sio, "get_queue_state", lambda sid: state)
+    monkeypatch.setattr(sio, "get_cancel_event", lambda sid: ev)
+    voice_tap.mark_voice_turn("spoken-1")
+    r = client().post("/api/voice/inject", json={
+        "text": "no, the other one", "session_key": "s8", "stream": True,
+        "supersede": {"heard": "The first option is", "unheard_chars": 40}})
+    head = _frames(r.text)[0][1]
+    assert head["superseded"] == "spoken-1" and ev.is_set()
+    assert "The first option is" in captured["turn"].payload["prefetched_text"], \
+        "the heard note reached THIS turn"
+
+    ev2 = asyncio.Event()
+    state["current"] = {"turn_id": "typed-1"}
+    monkeypatch.setattr(sio, "get_cancel_event", lambda sid: ev2)
+    r = client().post("/api/voice/inject", json={
+        "text": "hello", "session_key": "s8", "stream": True, "supersede": {}})
+    assert _frames(r.text)[0][1]["superseded"] is None and not ev2.is_set()

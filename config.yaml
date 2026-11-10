@@ -264,7 +264,7 @@ inner_voice:
     # invisible to the report: load_sessions selects solely on the stored
     # inner_voice_ab stamp. The window was not empty. It held 29 mission-control
     # sessions and not one carried a stamp, because the sole assignment call sits in
-    # _save_session_meta (app/sessions_io.py:1363), reached only on that function's
+    # _save_session_meta (app/sessions_io.py:1396), reached only on that function's
     # create branch, while every chat the API creates is minted by create_session
     # (app/sessions_io.py:398), which never reaches it. So an arm is never written on
     # the path chats actually take, and a window armed as this one was enrols nobody
@@ -1117,6 +1117,17 @@ livekit:
     # lloyd-agent-worker, re-stage the guardian. The clone must be registered
     # on the new server once (scripts/voice/register_tts_voice.py).
     api_url: http://127.0.0.1:8093
+    # Tried once for a clause the primary could not speak (an HTTP error, a
+    # refused connection, or no audio within first_byte_timeout_s), so a TTS
+    # hiccup is a slower clause rather than a hole the model is told was heard
+    # (2026-11-09 voice review, C4). Same clone, its own voice store; measured
+    # first byte 2.1 s cold. Empty disables the retry.
+    fallback_url: http://127.0.0.1:8090
+    # Bounds on one clause: the first PCM byte, then the gap between chunks.
+    # The old 120 s read timeout per chunk meant a stalled engine was two
+    # minutes of silence per clause. Primary first byte is p50 0.09 s.
+    first_byte_timeout_s: 3.0
+    chunk_gap_timeout_s: 5.0
     model: qwen3-tts
     # Cloned voice: Dave Cullen (The Dave Cullen Show, @TheDaveCullenShow).
     # Profile: agent-services/services/tts/qwen3-tts/voice_library/profiles/dave_cullen/
@@ -1206,6 +1217,12 @@ livekit:
     # (below) catches the mid-sentence pauses that a short silence would
     # otherwise cut; without that this would have to be 700 ms or more.
     min_silence_ms: 380
+    # Speculative turn start, SHADOW ONLY (2026-11-09): at this much silence,
+    # inside an open conversation, the ASR runs on the audio so far; when the
+    # turn closes, the row's `spec` field says whether that transcript was the
+    # turn's and how much ASR time starting there would have saved. It changes
+    # nothing the room does. 0 switches it off.
+    tentative_silence_ms: 200
     # Audio kept from before the onset, so the first phoneme is not clipped.
     # This is the old LEAD_IN_MS, raised from 200 ms because Silero triggers a
     # frame or two later than an energy threshold does on a soft onset.
@@ -1248,6 +1265,12 @@ livekit:
     # event stream. Off = the old path: wait for the finished message, have the
     # secondary rewrite it, poll it out of the transcript.
     stream_replies: true
+    # A started spoken turn that sends nothing for this long outside a tool
+    # call says it has stalled and lets go of the turn (the backend keeps a
+    # quiet stream alive with a comment every 15 s, so this is the model or
+    # the engine, not the connection). Errors and a dropped stream are spoken
+    # too (2026-11-09 voice review, C11). 0 disables the watchdog.
+    stall_after_seconds: 30
     # Tell the model it is being heard, in the prompt's tail (never the text
     # the chat shows). This is what replaced the secondary's rewrite, which
     # cannot run on a reply that has not been written yet.

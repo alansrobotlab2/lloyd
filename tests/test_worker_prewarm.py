@@ -420,7 +420,7 @@ def test_admission_refuses_for_exactly_the_four_named_reasons(wp):
 
     The rules belong to a pure function over (switch, in-flight, busy, already
     warmed) plus the module's registers — the shape the voice path uses for the same
-    decision (`app/routers/voice.py:361`), so the policy is readable and testable
+    decision (`app/routers/voice.py:510`), so the policy is readable and testable
     without an engine under it.
 
     The in-flight register is keyed on the head sha rather than on the source

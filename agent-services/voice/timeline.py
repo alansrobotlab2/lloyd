@@ -17,16 +17,26 @@ logs its breakdown as one `[latency]` line — pipecat's
     inject_sent     POST /api/voice/inject left the worker
     voice_turn      the backend's first frame came back
     first_delta     the model's first text delta
-    first_clause    the first clause went to TTS
-    first_tts_byte  the TTS server's first PCM
-    first_pushed    the first frame went into the LiveKit source
-    first_played    that frame's estimated playout (push + audio already queued) —
-                    the frame's *start*, not the first sample inside it that is
-                    audible. A frame is 100 ms, and `scripts/voice/tts_head_silence.py`
-                    measured what sits in front of the audio within it on production's
-                    first clause at p50 20 ms over N=44 (#3366; the engine samples, so
-                    p90 came out 60 ms and 97 ms on two runs): small, not zero, and no
-                    13th mark exists to close it.
+    first_clause    the first clause of the ANSWER went to TTS
+    first_answer_byte    the TTS server's first PCM of the answer
+    first_answer_pushed  the answer's first frame went into the LiveKit source
+    first_answer_played  that frame's estimated playout (push + audio already
+                    queued) — the frame's *start*, not the first sample inside it
+                    that is audible. A frame is 100 ms, and
+                    `scripts/voice/tts_head_silence.py` measured what sits in front
+                    of the audio within it on production's first clause at p50 20 ms
+                    over N=44 (#3366): small, not zero.
+
+Beside that chain sit three **first-sound** marks (`SOUND_STAGES`):
+`first_tts_byte`, `first_pushed`, `first_played` — the first audio of the turn of
+any kind, the filler ("One moment."), the queued notice and the progress lines
+included. Until 2026-11-09 those three WERE the chain's tail, and because the
+filler shares the turn's timeline and marks are first-writer-wins, `eos_to_audio`
+timed the filler: 19 of the first 28 production rows had a negative
+`first_tts_byte` delta (the filler's byte came before the answer's first clause),
+and the stored median of 3.2 s was the filler's, where end of speech to the first
+*answer* clause was 6.4 s. So the answer has its own marks, and `eos_to_answer`
+is the number to steer by; `eos_to_audio` stays as "how long was it silent".
 
 Marks are first-writer-wins, so a stage that happens many times (TTS bytes, a
 frame per 100 ms) records only its first occurrence. In the logged line
@@ -50,12 +60,20 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-#: The order stages happen in, which is also the order the breakdown prints.
+#: The answer's chain, in the order its stages happen — also the order the
+#: breakdown prints and the deltas sum along.
 STAGES = (
     "speech_end", "vad_close", "turn_verdict", "asr_done", "embed_done",
     "inject_sent", "voice_turn", "first_delta", "first_clause",
-    "first_tts_byte", "first_pushed", "first_played",
+    "first_answer_byte", "first_answer_pushed", "first_answer_played",
 )
+#: The first audio of the turn of ANY kind — an aside (filler, queued notice,
+#: progress) or the answer, whichever went first. Not part of the chain: an
+#: aside can precede `first_clause`, and a sequential delta to it is negative.
+SOUND_STAGES = ("first_tts_byte", "first_pushed", "first_played")
+#: What a schema-1 row called the chain's tail, before asides had their own
+#: marks. Those values timed whichever audio went first (usually the filler).
+V1_TAIL = SOUND_STAGES
 #: The stages that run at the same time after the VAD closes.
 PARALLEL = frozenset({"turn_verdict", "asr_done", "embed_done"})
 
@@ -71,6 +89,9 @@ class TurnTimeline:
         self._audio_until: Optional[float] = None
         self.max_gap_s = 0.0
         self.gaps: list[float] = []
+        #: Row-level facts the worker learns about this turn that are not marks
+        #: (`held_s`, `held_audio_s`) — carried to `app/voice_turns.turn_row`.
+        self.facts: dict = {}
 
     def mark(self, stage: str, at: Optional[float] = None) -> None:
         if stage not in self.marks:
@@ -79,8 +100,19 @@ class TurnTimeline:
     def has(self, stage: str) -> bool:
         return stage in self.marks
 
-    def audio_pushed(self, push_at: float, play_from: float, duration_s: float) -> None:
-        """A frame of this turn's audio went out; it plays from `play_from`."""
+    def tts_byte(self, answer: bool = True, at: Optional[float] = None) -> None:
+        """The TTS server answered with audio for this turn — an aside's or,
+        with `answer`, the answer's. First sound is marked either way."""
+        self.mark("first_tts_byte", at)
+        if answer:
+            self.mark("first_answer_byte", at)
+
+    def audio_pushed(self, push_at: float, play_from: float, duration_s: float,
+                     answer: bool = True) -> None:
+        """A frame of this turn's audio went out; it plays from `play_from`.
+
+        Gaps are measured across all of the turn's audio, asides included —
+        the listener does not care which kind of sound ended a silence."""
         if self._audio_until is not None and play_from > self._audio_until:
             gap = play_from - self._audio_until
             if gap >= 0.5:  # frame jitter and clause seams are not "silence"
@@ -89,6 +121,9 @@ class TurnTimeline:
         self._audio_until = max(self._audio_until or 0.0, play_from) + duration_s
         self.mark("first_pushed", push_at)
         self.mark("first_played", play_from)
+        if answer:
+            self.mark("first_answer_pushed", push_at)
+            self.mark("first_answer_played", play_from)
 
     def contributions(self) -> list[tuple[str, float]]:
         """(stage, seconds since the previous recorded stage), in order.
@@ -115,7 +150,8 @@ class TurnTimeline:
             prev = t
         return out
 
-    def total(self, start: str = "speech_end", end: str = "first_played") -> Optional[float]:
+    def total(self, start: str = "speech_end",
+              end: str = "first_answer_played") -> Optional[float]:
         a, b = self.marks.get(start), self.marks.get(end)
         if a is None or b is None:
             return None
@@ -125,8 +161,10 @@ class TurnTimeline:
         """The one-line breakdown the worker logs."""
         parts = [f"{stage}{'@' if stage in PARALLEL else '+'}{dt * 1000:.0f}"
                  for stage, dt in self.contributions()]
-        total = self.total()
-        head = f"eos→audio={total:.2f}s" if total is not None else "eos→audio=?"
+        answer = self.total()
+        sound = self.total("speech_end", "first_played")
+        head = (f"eos→answer={answer:.2f}s" if answer is not None else "eos→answer=?")
+        head += (f" eos→audio={sound:.2f}s" if sound is not None else " eos→audio=?")
         gap = f" max_gap={self.max_gap_s:.1f}s" if self._audio_until is not None else ""
         return f"{head}{gap} | " + " ".join(parts)
 
@@ -144,7 +182,14 @@ class TurnTimeline:
                         too would read as though `speech_end` never happened, which is
                         the survivorship half of the mistake the trend is built to
                         avoid.
-          `eos_to_audio`  end of speech to the playout of the first pushed *frame*, or
+          `eos_to_answer` end of speech to the playout of the answer's first frame —
+                        the number to steer by (schema 2). `None` when either end is
+                        missing.
+          `sound`       the three first-sound marks, each in seconds since the
+                        turn's first recorded mark (the chain's origin): when the
+                        listener first heard anything, aside or answer.
+          `eos_to_audio`  end of speech to the playout of the first pushed *frame* of
+                        any audio (an aside included), or
                         `None` when either end is missing — a typed turn has no
                         `speech_end`, a turn cancelled before any audio has no
                         `first_played`. `None` and never 0.0: a zero there is the fastest
@@ -175,6 +220,9 @@ class TurnTimeline:
         if first is not None and all(stage != first for stage, _ in pairs):
             pairs.append((first, 0.0))
         order = {stage: i for i, stage in enumerate(STAGES)}
+        origin = self.marks.get(first) if first is not None else None
+        sound = {stage: self.marks[stage] - origin for stage in SOUND_STAGES
+                 if stage in self.marks and origin is not None}
         return {
             "label": self.label,
             "at": datetime.fromtimestamp(epoch, timezone.utc).isoformat(
@@ -182,6 +230,8 @@ class TurnTimeline:
             "epoch": epoch,
             "stages": {stage: delta for stage, delta in
                        sorted(pairs, key=lambda sd: order.get(sd[0], len(order)))},
+            "sound": sound,
+            "eos_to_answer": self.total("speech_end", "first_answer_played"),
             "eos_to_audio": self.total("speech_end", "first_played"),
             "max_gap_s": self.max_gap_s,
         }

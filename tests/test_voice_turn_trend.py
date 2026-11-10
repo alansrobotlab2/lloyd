@@ -21,13 +21,18 @@ ROOT = Path(__file__).resolve().parent.parent
 #: Every stage a microphone turn that replied leaves behind.
 _FULL = {"speech_end": 0.0, "vad_close": 0.1, "turn_verdict": 0.2, "asr_done": 0.3,
          "embed_done": 0.15, "inject_sent": 0.05, "voice_turn": 0.05,
-         "first_delta": 0.4, "first_clause": 0.3, "first_tts_byte": 0.2,
-         "first_pushed": 0.1, "first_played": 0.05}
+         "first_delta": 0.4, "first_clause": 0.3, "first_answer_byte": 0.2,
+         "first_answer_pushed": 0.1, "first_answer_played": 0.05}
 #: A typed turn spoken out loud: everything between the microphone and the injection is
 #: absent, because there was no utterance to run it on. Measured on 2026-10-06, 7 of the
 #: 8 `[latency]` lines the worker had ever emitted were exactly this shape.
-_TYPED = {"first_delta": 0.4, "first_clause": 0.3, "first_tts_byte": 0.2,
-          "first_pushed": 0.1, "first_played": 0.05}
+_TYPED = {"first_delta": 0.4, "first_clause": 0.3, "first_answer_byte": 0.2,
+          "first_answer_pushed": 0.1, "first_answer_played": 0.05}
+#: A schema-1 microphone row: the tail timed whichever audio went first, and the
+#: filler's byte arrived before the answer's first clause (a negative delta).
+_V1 = {"speech_end": 0.0, "vad_close": 0.38, "asr_done": 0.2, "inject_sent": 0.01,
+       "voice_turn": 0.5, "first_delta": 3.8, "first_clause": 0.1,
+       "first_tts_byte": -2.4, "first_pushed": 0.001, "first_played": 0.0}
 
 
 @pytest.fixture(scope="module")
@@ -45,13 +50,16 @@ def vtt():
 
 
 def _row(*, label="voice", stages=None, eos=1.4, gap=0.5, interrupted=False,
-         queued_behind=False, tools_ran=False, turn_id="t1"):
-    return {"v": 1, "turn_id": turn_id, "room": "lloyd-20261006_063000",
+         queued_behind=False, tools_ran=False, turn_id="t1", answer="same", v=2,
+         engine=None, held=0.0):
+    return {"v": v, "turn_id": turn_id, "room": "lloyd-20261006_063000",
             "label": label, "at": "2026-10-06T06:30:00.500Z",
             "epoch": 1791268200.5, "stages": _FULL if stages is None else stages,
             "eos_to_audio": eos, "max_gap_s": gap, "interrupted": interrupted,
+            "eos_to_answer": eos if answer == "same" else answer,
             "queued_behind": queued_behind, "tools_ran": tools_ran,
-            "spoken_chars": 40, "capped": False}
+            "spoken_chars": 40, "capped": False, "held_s": held,
+            "engine": engine or {}}
 
 
 def _store(tmp_path, rows, *, extra_lines=()):
@@ -255,7 +263,8 @@ def test_the_json_output_and_the_table_are_one_measurement(vtt, tmp_path, capsys
     assert voice["stages"]["asr_done"]["p90"] == pytest.approx(0.3)
     assert voice["missing_stage_cells"] == {"absent": 0, "possible": 360, "rate": 0.0}
     assert voice["flags"]["interrupted"] == {"n": 0, "share": 0.0}
-    assert payload["bounds"] == {"max_gap_s_p90_s": 8.0, "eos_to_audio_p90_s": None}
+    assert payload["bounds"] == {"max_gap_s_p90_s": 8.0, "eos_to_audio_p90_s": None,
+                                 "eos_to_answer_p90_s": None}
     assert list(payload["populations"]) == ["voice"]
 
     assert vtt.main(["--store", str(store)]) == 0     # the same store, the same numbers
@@ -368,3 +377,51 @@ def test_a_row_the_worker_wrote_is_a_row_the_nightly_process_reads(tmp_path):
          "--store", str(store)],
         capture_output=True, text=True, timeout=120, check=False).stdout
     assert "tools ran: n=1" in table and "no tools: n=1" in table, table[-600:]
+
+
+# ── schema 2 (2026-11-09): the answer's own marks, and v1 kept apart ──────────
+
+def test_a_v1_row_is_its_own_population_and_never_an_answer_latency(vtt, tmp_path, capsys):
+    """A v1 spoken row was written with `label: ""` and timed the filler. It is
+    named for what it was and never pooled with v2's microphone rows."""
+    v1 = {"v": 1, "turn_id": "old", "room": "r", "label": "", "stages": _V1,
+          "eos_to_audio": 3.2, "max_gap_s": 4.0}
+    store = _store(tmp_path, [v1, v1, _row(eos=6.4)])
+    assert vtt.main(["--store", str(store)]) == 0
+    blocks = _blocks(_out(capsys))
+    assert set(blocks) == {"voice (v1)", "voice"}
+    old = _table(blocks["voice (v1)"])
+    assert old["eos→answer"][0] == "0", "a v1 row has no answer mark to report"
+    assert old["eos→audio"][2] == "3.200", "its first-sound number is printed as such"
+    assert old["first_tts_byte"][2] == "-2.400", "and its old tail under its own name"
+    assert _table(blocks["voice"])["eos→answer"][2] == "6.400"
+
+
+def test_the_answer_and_first_sound_are_two_lines(vtt, tmp_path, capsys):
+    store = _store(tmp_path, [_row(eos=3.0, answer=6.0) for _ in range(3)])
+    assert vtt.main(["--store", str(store)]) == 0
+    table = _table(_out(capsys))
+    assert table["eos→answer"][2] == "6.000"
+    assert table["eos→audio"][2] == "3.000"
+
+
+def test_engine_facts_are_summarised_per_population(vtt, tmp_path, capsys):
+    engine = {"prompt_tokens": 80000, "cached_tokens": 79000, "ttft_ms": 900,
+              "queue_wait_s": 0.0, "setup_ms": 400,
+              "prewarm": {"result": "ok", "age_s": 12.0, "trigger": "keep-warm"}}
+    cold = dict(engine, cached_tokens=0, ttft_ms=9000,
+                prewarm={"result": "none"})
+    store = _store(tmp_path, [_row(engine=engine), _row(engine=engine), _row(engine=cold)])
+    assert vtt.main(["--store", str(store), "--json"]) == 0
+    eng = json.loads(_out(capsys))["populations"]["voice"]["engine"]
+    assert eng["n"] == 3
+    assert eng["ttft_ms"]["p50"] == pytest.approx(900)
+    assert eng["cached_share"]["p50"] == pytest.approx(79000 / 80000)
+    assert eng["prewarm"] == {"ok": 2, "none": 1}
+    assert eng["prewarm_age_s"]["n"] == 2
+
+
+def test_a_released_hold_is_reported(vtt, tmp_path, capsys):
+    store = _store(tmp_path, [_row(held=2.2), _row(held=0.0)])
+    assert vtt.main(["--store", str(store)]) == 0
+    assert _table(_out(capsys))["held_s"][0] == "2"

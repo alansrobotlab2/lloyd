@@ -137,7 +137,7 @@ _WARMED_CAP = 32
 #: accepts. What the warm therefore buys is the head's blocks — position 0 of the
 #: rendered prompt and by far its largest span, against a real job whose per-run
 #: item content is hundreds of tokens after it. It is NOT a strict extension of the
-#: warm the way the voice warm is (`app/routers/voice.py:437` drops a trailing
+#: warm the way the voice warm is (`app/routers/voice.py:603` drops a trailing
 #: history message, and there is no history here to drop), which is exactly the
 #: distinction #520's committed probe turns on: over an engine that read an
 #: identical resend as 0 cached and a strict extension as 4800/60.0%, this is a
@@ -353,7 +353,7 @@ def _refusal(trigger: str, head_sha: str, *, enabled: bool,
              busy: bool) -> Optional[str]:
     """Why this request does not start a warm, or None when it does.
 
-    The voice path's ``_prewarm_refusal`` (`app/routers/voice.py:361`) is the
+    The voice path's ``_prewarm_refusal`` (`app/routers/voice.py`) is the
     shape: a pure function over its arguments plus the module registers, so the
     rules are testable without an engine. Four reasons, in the order they are
     checked:

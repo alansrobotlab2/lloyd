@@ -293,6 +293,15 @@ class Turn1MiniStream:
 
 TURN_BACKENDS = ("smart-turn", "turn-1-mini")
 DEFAULT_TURN1MINI = "agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx"
+#: Each backend's calibrated "finished" threshold. The two models' scores are
+#: on different scales: turn-1-mini's operating point is 0.06 (config.yaml,
+#: measured on eot-bench), and the 0.5 that is right for Smart Turn would hold
+#: nearly every turn-1-mini turn if the config key were ever dropped.
+DEFAULT_THRESHOLDS = {"smart-turn": 0.5, "turn-1-mini": 0.06}
+
+
+def default_threshold(backend: str) -> float:
+    return DEFAULT_THRESHOLDS.get(backend, 0.5)
 
 
 def build_turn_detector(cfg: dict):
@@ -303,7 +312,7 @@ def build_turn_detector(cfg: dict):
     backend = str(cfg.get("backend", "smart-turn"))
     if backend == "turn-1-mini":
         det = Turn1Mini(model_path=cfg.get("model_path", DEFAULT_TURN1MINI),
-                        threshold=float(cfg.get("threshold", 0.5)))
+                        threshold=float(cfg.get("threshold", default_threshold(backend))))
         det.load()
         return det
     if backend != "smart-turn":

@@ -21,6 +21,17 @@ silently computed over a handful of microphone turns while the TTS-side ones hav
 hundreds — the survivorship version of the zero-denominator mistake. So each
 label group gets its own table, its own N and its own verdict.
 
+Two schemas (`app/voice_turns.SCHEMA_VERSION`). A **v1** row (before 2026-11-09)
+timed whichever audio played first — usually the filler ("One moment."), whose
+TTS byte the stage chain then recorded as a negative delta — and spoken rows
+carried `label: ""`. So v1 rows are their own population, `<label> (v1)`, and
+are never pooled with v2's: their `eos_to_audio` is not an answer latency and
+cannot be turned into one after the fact. A **v2** row has the answer's own marks
+(`first_answer_*`, `eos_to_answer` — the number to steer by), keeps
+`eos_to_audio` as first sound of any kind, and carries `held_s` and the
+backend's `engine` facts (prompt/cached tokens, engine TTFT, session queue wait,
+setup time, the last prewarm), which the report summarises per population.
+
 Bounds are declared here, in the script that grades them, not in prose:
 `MAX_GAP_P90_BOUND_S` is the voice latency plan's 8 s bound on the silence inside a
 tool turn (the 2026-09-24 turn that prompted it was silent for 44 s), and
@@ -59,7 +70,7 @@ for _p in (REPO_ROOT, REPO_ROOT / "agent-services"):
         sys.path.append(str(_p))
 
 from app import voice_turns  # noqa: E402
-from voice.timeline import STAGES  # noqa: E402  (stdlib-only; no LiveKit, no venv)
+from voice.timeline import STAGES, V1_TAIL  # noqa: E402  (stdlib-only; no LiveKit)
 
 #: The declared floor, in rows, per label population. 30 because that is the
 #: number the item's own acceptance clause declares, and it is a floor and not an
@@ -79,6 +90,8 @@ MAX_GAP_P90_BOUND_S: Optional[float] = 8.0
 #: says set it from the first real week's numbers, so until rows exist the report
 #: prints it as undeclared rather than inventing 2.0 s from the rig's folklore.
 EOS_TO_AUDIO_P90_BOUND_S: Optional[float] = None
+#: The answer's bound, owed the same way: set from the first real week of v2 rows.
+EOS_TO_ANSWER_P90_BOUND_S: Optional[float] = None
 
 #: What each population's verdict can be.
 VERDICT_ABSTAIN = "abstain"
@@ -175,8 +188,8 @@ def _missing_stage_cells(rows: list[dict]) -> tuple[int, int]:
     produced all twelve would be grading its own survivors.
     """
     possible = len(STAGES) * len(rows)
-    present = sum(len(row.get("stages") or {}) if isinstance(row.get("stages"), dict)
-                  else 0 for row in rows)
+    present = sum(sum(1 for stage in STAGES if stage in row["stages"])
+                  if isinstance(row.get("stages"), dict) else 0 for row in rows)
     return max(possible - min(present, possible), 0), possible
 
 
@@ -206,15 +219,18 @@ def summarise(rows: list[dict], *, min_rows: int = MIN_ROWS_FOR_VERDICT) -> dict
     abstains — the word, printed, never a silent absence of a line.
     """
     n = len(rows)
-    stages = {stage: _stage_row(stage, rows) for stage in STAGES}
+    stages = {stage: _stage_row(stage, rows) for stage in _stage_names(rows)}
     eos = _numbers(rows, "eos_to_audio")
+    answer = _numbers(rows, "eos_to_answer")
+    held = _numbers(rows, "held_s")
     gap = _numbers(rows, "max_gap_s")
     absent, possible = _missing_stage_cells(rows)
     tools = [row for row in rows if row.get("tools_ran") is True]
     no_tools = [row for row in rows if row.get("tools_ran") is not True]
 
     graded: list[dict] = []
-    for field, bound, sample in (("eos_to_audio", EOS_TO_AUDIO_P90_BOUND_S, eos),
+    for field, bound, sample in (("eos_to_answer", EOS_TO_ANSWER_P90_BOUND_S, answer),
+                                 ("eos_to_audio", EOS_TO_AUDIO_P90_BOUND_S, eos),
                                  ("max_gap_s", MAX_GAP_P90_BOUND_S, gap)):
         p90 = _percentile(sample, 0.9)
         if bound is None or p90 is None:
@@ -229,9 +245,13 @@ def summarise(rows: list[dict], *, min_rows: int = MIN_ROWS_FOR_VERDICT) -> dict
         "min_rows_for_verdict": min_rows,
         "verdict": verdict,
         "stages": stages,
+        "eos_to_answer": _dist(answer, n),
         "eos_to_audio": {"n": len(eos), "missing": n - len(eos),
                          "p50": _percentile(eos, 0.5), "p90": _percentile(eos, 0.9),
                          "p95": _percentile(eos, 0.95)},
+        "held_s": _dist(held, n),
+        "engine": _engine(rows),
+        "spec": _spec(rows),
         "max_gap_s": {"n": len(gap), "missing": n - len(gap),
                       "p50": _percentile(gap, 0.5), "p90": _percentile(gap, 0.9),
                       "p95": _percentile(gap, 0.95)},
@@ -244,6 +264,92 @@ def summarise(rows: list[dict], *, min_rows: int = MIN_ROWS_FOR_VERDICT) -> dict
     }
 
 
+def _spec(rows: list[dict]) -> dict:
+    """The speculative-start shadow (`vad.tentative_silence_ms`): how often the
+    guess at 200 ms of silence had the turn's transcript, and the ASR time a
+    real speculative start would have saved on those. Stage one ships only on
+    a high hit rate."""
+    rec = [r["spec"] for r in rows if isinstance(r.get("spec"), dict)]
+    hits = [s for s in rec if s.get("match")]
+    saved = [float(s["asr_saved_ms"]) for s in hits
+             if isinstance(s.get("asr_saved_ms"), (int, float))]
+    return {"n": len(rec), "hits": len(hits), "hit_rate": _share(len(hits), len(rec)),
+            "saved_ms": _dist(saved, len(hits))}
+
+
+def _dist(sample: list[float], n: int) -> dict:
+    """N, missing and the three percentiles of one sample."""
+    return {"n": len(sample), "missing": n - len(sample),
+            "p50": _percentile(sample, 0.5), "p90": _percentile(sample, 0.9),
+            "p95": _percentile(sample, 0.95)}
+
+
+def _stage_names(rows: list[dict]) -> list[str]:
+    """The chain's stages, plus a v1 row's old tail when the population has one.
+
+    A v1 row's `first_tts_byte`/`first_pushed`/`first_played` deltas were the
+    chain's tail and timed whatever audio went first; they are printed under
+    their own names for the v1 population and never relabelled as the answer's.
+    """
+    names = list(STAGES)
+    for stage in V1_TAIL:
+        if any(isinstance(row.get("stages"), dict) and stage in row["stages"]
+               for row in rows):
+            names.append(stage)
+    return names
+
+
+def _engine_numbers(rows: Iterable[dict], key: str) -> list[float]:
+    out = []
+    for row in rows:
+        engine = row.get("engine")
+        if not isinstance(engine, dict):
+            continue
+        value = engine.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        out.append(float(value))
+    return out
+
+
+def _engine(rows: list[dict]) -> dict:
+    """The backend's facts about each turn's first model request (v2 rows).
+
+    What separates the three readings of a slow first word: a prefix miss
+    (`cached_share` low), engine admission (`ttft_ms` high with the prefix
+    cached), or a turn in front (`queue_wait_s`). `prewarm` counts each turn's
+    last prewarm result, and `prewarm_age_s` is how old it was at the inject.
+    """
+    shares = []
+    for row in rows:
+        engine = row.get("engine")
+        if not isinstance(engine, dict):
+            continue
+        prompt, cached = engine.get("prompt_tokens"), engine.get("cached_tokens")
+        if isinstance(prompt, (int, float)) and prompt and isinstance(cached, (int, float)):
+            shares.append(min(1.0, max(0.0, float(cached) / float(prompt))))
+    results: dict[str, int] = {}
+    ages = []
+    for row in rows:
+        pw = (row.get("engine") or {}).get("prewarm") if isinstance(row.get("engine"), dict) else None
+        if not isinstance(pw, dict):
+            continue
+        results[str(pw.get("result") or "none")] = results.get(str(pw.get("result") or "none"), 0) + 1
+        if isinstance(pw.get("age_s"), (int, float)) and not isinstance(pw.get("age_s"), bool):
+            ages.append(float(pw["age_s"]))
+    n_rows = sum(1 for row in rows if isinstance(row.get("engine"), dict) and row["engine"])
+    return {
+        "n": n_rows,
+        "prompt_tokens": _dist(_engine_numbers(rows, "prompt_tokens"), n_rows),
+        "cached_share": _dist(shares, n_rows),
+        "ttft_ms": _dist(_engine_numbers(rows, "ttft_ms"), n_rows),
+        "setup_ms": _dist(_engine_numbers(rows, "setup_ms"), n_rows),
+        "queue_wait_s": _dist(_engine_numbers(rows, "queue_wait_s"), n_rows),
+        "prewarm": results,
+        "prewarm_age_s": _dist(ages, n_rows),
+    }
+
+
 def _split_by_tools(rows: list[dict]) -> dict:
     """`eos→audio` over the rows that ran tools and the ones that did not.
 
@@ -253,8 +359,28 @@ def _split_by_tools(rows: list[dict]) -> dict:
     claims to move, not in the pooled number where it can hide behind the other.
     """
     eos = _numbers(rows, "eos_to_audio")
+    answer = _numbers(rows, "eos_to_answer")
     return {"n": len(rows), "eos_to_audio_n": len(eos),
-            "p50": _percentile(eos, 0.5), "p90": _percentile(eos, 0.9)}
+            "p50": _percentile(eos, 0.5), "p90": _percentile(eos, 0.9),
+            "eos_to_answer_n": len(answer), "answer_p50": _percentile(answer, 0.5),
+            "answer_p90": _percentile(answer, 0.9)}
+
+
+def _population_key(row: dict) -> str:
+    """`label` for a v2 row; `<label> (v1)` for a row of the old schema.
+
+    A v1 spoken row was written with `label: ""` (the timeline was built
+    without one), so it is named `voice (v1)` — what it was — rather than left
+    as `(no label)`, and kept apart from v2 because its `eos_to_audio` timed the
+    filler whenever one played.
+    """
+    label = str(row.get("label") or "")
+    version = row.get("v")
+    if isinstance(version, int) and not isinstance(version, bool) and version >= 2:
+        return label
+    if not label and isinstance(row.get("stages"), dict) and "speech_end" in row["stages"]:
+        label = "voice"
+    return f"{label} (v1)" if label else ""
 
 
 def populations(rows: list[dict]) -> dict[str, list[dict]]:
@@ -266,7 +392,7 @@ def populations(rows: list[dict]) -> dict[str, list[dict]]:
     """
     out: dict[str, list[dict]] = {}
     for row in rows:
-        out.setdefault(str(row.get("label") or ""), []).append(row)
+        out.setdefault(_population_key(row), []).append(row)
     return dict(sorted(out.items(), key=lambda kv: (-len(kv[1]), kv[0])))
 
 
@@ -305,25 +431,54 @@ def report_lines(store: Path, summaries: dict[str, dict], *, rows_read: int,
         n = summary["n"]
         lines.append("")
         lines.append(f"── population {label or '(no label)'}: {n} row(s) ──")
-        lines.append(f"  {'stage':<16} {'N':>5} {'miss':>6} "
+        lines.append(f"  {'stage':<20} {'N':>5} {'miss':>6} "
                      f"{'p50':>8} {'p90':>8} {'p95':>8}")
-        for stage in STAGES:
-            stage_row = summary["stages"][stage]
+        for stage, stage_row in summary["stages"].items():
             lines.append(
-                f"  {stage:<16} {stage_row['n']:>5} "
+                f"  {stage:<20} {stage_row['n']:>5} "
                 f"{_pct(_share(stage_row['missing'], n)):>6} "
                 f"{_fmt(stage_row['p50']):>8} {_fmt(stage_row['p90']):>8} "
                 f"{_fmt(stage_row['p95']):>8}")
+        ans = summary["eos_to_answer"]
+        lines.append(f"  {'eos→answer':<20} {ans['n']:>5} "
+                     f"{_pct(_share(ans['missing'], n)):>6} "
+                     f"{_fmt(ans['p50']):>8} {_fmt(ans['p90']):>8} "
+                     f"{_fmt(ans['p95']):>8}")
         eos = summary["eos_to_audio"]
-        lines.append(f"  {'eos→audio':<16} {eos['n']:>5} "
+        lines.append(f"  {'eos→audio':<20} {eos['n']:>5} "
                      f"{_pct(_share(eos['missing'], n)):>6} "
                      f"{_fmt(eos['p50']):>8} {_fmt(eos['p90']):>8} "
                      f"{_fmt(eos['p95']):>8}")
         gap = summary["max_gap_s"]
-        lines.append(f"  {'max_gap_s':<16} {gap['n']:>5} "
+        lines.append(f"  {'max_gap_s':<20} {gap['n']:>5} "
                      f"{_pct(_share(gap['missing'], n)):>6} "
                      f"{_fmt(gap['p50']):>8} {_fmt(gap['p90']):>8} "
                      f"{_fmt(gap['p95']):>8}")
+        held = summary["held_s"]
+        lines.append(f"  {'held_s':<20} {held['n']:>5} "
+                     f"{_pct(_share(held['missing'], n)):>6} "
+                     f"{_fmt(held['p50']):>8} {_fmt(held['p90']):>8} "
+                     f"{_fmt(held['p95']):>8}")
+        eng = summary["engine"]
+        if eng["n"]:
+            lines.append(
+                f"  engine (n={eng['n']}): prompt p50 "
+                f"{_fmt(eng['prompt_tokens']['p50'], '{:.0f}')} tok | cached share "
+                f"p50 {_pct(eng['cached_share']['p50'])} | ttft p50 "
+                f"{_fmt(eng['ttft_ms']['p50'], '{:.0f}')} ms p90 "
+                f"{_fmt(eng['ttft_ms']['p90'], '{:.0f}')} ms | queue wait p50 "
+                f"{_fmt(eng['queue_wait_s']['p50'], '{:.2f}')} s p90 "
+                f"{_fmt(eng['queue_wait_s']['p90'], '{:.2f}')} s | setup p50 "
+                f"{_fmt(eng['setup_ms']['p50'], '{:.0f}')} ms p90 "
+                f"{_fmt(eng['setup_ms']['p90'], '{:.0f}')} ms")
+            lines.append("  prewarm: " + (", ".join(
+                f"{k} {v}" for k, v in sorted(eng["prewarm"].items())) or "-")
+                + f" | age p50 {_fmt(eng['prewarm_age_s']['p50'], '{:.1f}')} s")
+        spec = summary.get("spec") or {}
+        if spec.get("n"):
+            lines.append(f"  speculative start (shadow): {spec['hits']} of {spec['n']} "
+                         f"guesses matched ({_pct(spec['hit_rate'])}) | ASR saved p50 "
+                         f"{_fmt(spec['saved_ms']['p50'], '{:.0f}')} ms")
         cells = summary["missing_stage_cells"]
         lines.append(f"  missing stages: {cells['absent']} of {cells['possible']} "
                      f"cells ({_pct(cells['rate'])})")
@@ -339,6 +494,10 @@ def report_lines(store: Path, summaries: dict[str, dict], *, rows_read: int,
         lines.append(f"  tools ran: n={ran['n']} eos→audio p50 {_fmt(ran['p50'])}s "
                      f"p90 {_fmt(ran['p90'])}s | no tools: n={absent['n']} "
                      f"p50 {_fmt(absent['p50'])}s p90 {_fmt(absent['p90'])}s")
+        if ran.get("eos_to_answer_n") or absent.get("eos_to_answer_n"):
+            lines.append(f"  eos→answer: tools ran p50 {_fmt(ran['answer_p50'])}s "
+                         f"p90 {_fmt(ran['answer_p90'])}s | no tools p50 "
+                         f"{_fmt(absent['answer_p50'])}s p90 {_fmt(absent['answer_p90'])}s")
         lines.append(f"  bounds: max_gap_s p90 <= {_fmt(MAX_GAP_P90_BOUND_S, '{:.1f}')}s"
                      + (f" | eos→audio p90 <= "
                         f"{_fmt(EOS_TO_AUDIO_P90_BOUND_S, '{:.1f}')}s"
@@ -395,7 +554,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "malformed_lines": malformed,
             "min_rows_for_verdict": args.min_rows,
             "bounds": {"max_gap_s_p90_s": MAX_GAP_P90_BOUND_S,
-                       "eos_to_audio_p90_s": EOS_TO_AUDIO_P90_BOUND_S},
+                       "eos_to_audio_p90_s": EOS_TO_AUDIO_P90_BOUND_S,
+                       "eos_to_answer_p90_s": EOS_TO_ANSWER_P90_BOUND_S},
             "populations": summaries,
         }, ensure_ascii=False))
     else:

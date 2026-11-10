@@ -85,7 +85,7 @@ class _TTS:
         self.generation = 0
         self.thinking = 0
 
-    async def speak(self, text, timeline=None):
+    async def speak(self, text, timeline=None, aside=False):
         self.said.append(text)
 
     def interrupt(self):

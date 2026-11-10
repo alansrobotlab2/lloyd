@@ -26,8 +26,11 @@ from __future__ import annotations
 
 import re
 
+#: `no` is not here: in speech "No." is a whole answer, and as an abbreviation
+#: it held the first clause of every "No. That would..." reply back until the
+#: next sentence ended (2026-11-09 review). "No. 5" is rare enough aloud.
 _ABBREV = {
-    "e.g", "i.e", "etc", "vs", "mr", "mrs", "ms", "dr", "st", "no", "approx",
+    "e.g", "i.e", "etc", "vs", "mr", "mrs", "ms", "dr", "st", "approx",
     "fig", "inc", "ltd", "jr", "sr", "a.m", "p.m",
 }
 

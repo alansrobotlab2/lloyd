@@ -171,7 +171,21 @@ async def voice_inject(request: Request):
         else text
     )
 
-    setup = _voice_turn_setup(session_id)
+    import time as _time
+    t_setup = _time.monotonic()
+    # A request that supersedes the spoken turn still running — the worker's
+    # barge-in — carries the cancel and the heard note with it, so neither
+    # costs the listener a round trip first (it cost up to 0.9 s on
+    # 2026-10-17), and the heard note is recorded before this turn reads it.
+    superseded = None
+    if isinstance(data.get("supersede"), dict):
+        superseded, earlier = await _supersede_spoken_turn(session_id, data["supersede"])
+        if earlier:
+            # Spoken requests still queued behind the one cancelled: this one
+            # supersedes them too, and carries their words, so the model
+            # answers what was said rather than each fragment in turn.
+            prompt_text = "\n".join(earlier + [prompt_text])
+    setup = _take_setup(session_id, _time.monotonic()) or _voice_turn_setup(session_id)
     model, meta_path, options = setup["model"], setup["meta_path"], setup["options"]
     prefetched_text = await prefetch_context_async(
         prompt_text, session_id=session_id, plan_mode=setup["plan_mode"],
@@ -230,13 +244,18 @@ async def voice_inject(request: Request):
     set_last_user_session(session_id)
 
     if stream:
-        from app.routers.messages import _turn_sse_generator
+        # Setup + prefetch + meta save + enqueue, all in front of the stream
+        # head; and the last prewarm this session had, so the worker's latency
+        # row can say whether the prefix was warmed and how long ago.
+        setup_ms = int((_time.monotonic() - t_setup) * 1000)
+        prewarm = prewarm_report(session_id, _time.monotonic())
 
         async def _sse():
             head = {"session_id": session_id, "turn_id": turn.turn_id,
-                    "queued_behind": queued_behind}
+                    "queued_behind": queued_behind, "setup_ms": setup_ms,
+                    "prewarm": prewarm, "superseded": superseded}
             yield f"event: voice_turn\ndata: {json.dumps(head)}\n\n"
-            async for chunk in _turn_sse_generator(turn):
+            async for chunk in _voice_sse_events(turn):
                 yield chunk
 
         return StreamingResponse(_sse(), media_type="text/event-stream")
@@ -244,6 +263,119 @@ async def voice_inject(request: Request):
     return JSONResponse(
         {"success": True, "session_id": session_id, "turn_id": turn.turn_id}
     )
+
+
+async def _supersede_spoken_turn(session_id: str, sup: dict) -> tuple[Optional[str], list[str]]:
+    """Record what the listener heard, drop the spoken turns still queued, and
+    cancel the running spoken turn.
+
+    `sup` is the inject payload's `supersede`: `{heard?, unheard_chars?}`.
+    `heard` is present only when a reply was audible when the person cut in.
+    Only turns the voice worker injected (`voice_tap.is_voice_turn`) are
+    touched — a typed turn in the same session, running or queued, is never
+    stopped by a word in the room. A queued spoken turn is dropped rather
+    than left to run after the cancel: on 2026-10-31 "Yeah, he found it."
+    queued behind a cancelled turn, ran its full answer, and the request that
+    superseded it waited 12.6 s. Returns the cancelled turn's id and the
+    dropped turns' texts, oldest first.
+    """
+    from app import voice_tap
+    from app.sessions_io import (drop_pending_user_turns, get_cancel_event,
+                                 get_queue_state)
+
+    dropped = await drop_pending_user_turns(
+        session_id, lambda t: not voice_tap.is_voice_turn(t.turn_id))
+    earlier = [str((t.payload or {}).get("text") or "") for t in dropped]
+    earlier = [e for e in earlier if e]
+    if dropped:
+        logger.info("voice inject on %s superseded %d queued spoken turn(s)",
+                    session_id, len(dropped))
+
+    if "heard" in sup:
+        try:
+            unheard = int(sup.get("unheard_chars") or 0)
+        except (TypeError, ValueError):
+            unheard = 0
+        voice_tap.record_interruption(session_id, str(sup.get("heard") or ""), unheard)
+    cur = (get_queue_state(session_id) or {}).get("current") or {}
+    cur_id = cur.get("turn_id")
+    if not cur_id or not voice_tap.is_voice_turn(cur_id):
+        return None, earlier
+    ev = get_cancel_event(session_id)
+    if ev is None:
+        return None, earlier
+    ev.set()
+    logger.info("voice inject on %s superseded spoken turn %s", session_id, cur_id)
+    return cur_id, earlier
+
+
+#: session_id -> (fingerprint, built_at, setup): a spoken turn's setup built at
+#: the speech onset that precedes it, so the inject does not pay for it after
+#: the person stops talking (~130 ms warm, measured 2026-11-09). Taken once;
+#: a stale or mismatched entry is rebuilt.
+_SETUP_CACHE: dict[str, tuple] = {}
+_SETUP_CACHE_TTL_S = 30.0
+
+
+def _session_fingerprint(session_id: str):
+    """What changes when the session's history does: its file's mtime and size."""
+    try:
+        st = (SESSIONS_DIR / f"{session_id}.json").stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _stash_setup(session_id: str, now: float) -> None:
+    try:
+        _SETUP_CACHE[session_id] = (_session_fingerprint(session_id), now,
+                                    _voice_turn_setup(session_id))
+    except Exception as e:  # noqa: BLE001 — the inject builds its own
+        logger.debug("voice setup precompute for %s failed: %s", session_id, e)
+
+
+def _take_setup(session_id: str, now: float) -> Optional[dict]:
+    hit = _SETUP_CACHE.pop(session_id, None)
+    if hit is None:
+        return None
+    fp, at, setup = hit
+    if now - at > _SETUP_CACHE_TTL_S or fp != _session_fingerprint(session_id):
+        return None
+    return setup
+
+
+#: A quiet spoken turn (a long tool call) sends an SSE comment this often, so
+#: the worker can bound its read and tell a dead backend from a busy one.
+VOICE_STREAM_KEEPALIVE_S = 15.0
+
+
+async def _voice_sse_events(turn: SessionTurn):
+    """The turn's own events as SSE, with a keepalive comment while it is quiet.
+
+    The worker read this stream with no read timeout, because a tool call can
+    be silent for minutes — so a backend that died mid-turn left the listener
+    in silence forever (2026-11-09 review, C11). The comment costs nothing and
+    lets the worker give up after three missed ones. Client disconnect cancels
+    this generator; the consumer keeps running and persistence still lands.
+    """
+    import asyncio
+    import json
+
+    try:
+        while True:
+            try:
+                evt = await asyncio.wait_for(turn.events.get(),
+                                             timeout=VOICE_STREAM_KEEPALIVE_S)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if evt is None:
+                break
+            yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'])}\n\n"
+    except asyncio.CancelledError:
+        logger.info("voice client disconnected from turn %s (consumer continues)",
+                    turn.turn_id)
+        raise
 
 
 def _voice_turn_setup(session_id: str) -> dict:
@@ -341,9 +473,10 @@ async def voice_interrupted(request: Request):
 
 # ── /api/voice/prewarm ────────────────────────────────────────────────────
 
-#: session_id -> monotonic time of the last prewarm, so a burst of wake fires
-#: (or a wake per sentence inside one window) costs one prefill, not several.
-_PREWARM_LAST: dict[str, float] = {}
+#: session_id -> (monotonic time, history fingerprint) of the last prewarm, so
+#: a burst of wake fires (or a wake per sentence inside one window) costs one
+#: prefill, not several — over the same history.
+_PREWARM_LAST: dict[str, tuple] = {}
 _PREWARM_DEBOUNCE_S = 20.0
 #: A keep-warm touch is admitted sooner: on a cache hit it costs the engine
 #: tens of milliseconds, and its whole point is to run before the pool evicts
@@ -351,6 +484,22 @@ _PREWARM_DEBOUNCE_S = 20.0
 _KEEP_WARM_DEBOUNCE_S = 5.0
 #: Sessions with a prewarm running right now — never two over one prefix.
 _PREWARM_INFLIGHT: set[str] = set()
+#: session_id -> the last prewarm that started: {at, trigger, result, prefill_s}.
+#: `result` is `running`, `ok`, `skipped` or `failed`. Read into each spoken
+#: turn's `voice_turn` head by `prewarm_report`.
+_PREWARM_STATE: dict[str, dict] = {}
+
+
+def prewarm_report(session_id: str, now: float) -> dict:
+    """The session's last prewarm, as a spoken turn's latency row records it."""
+    st = _PREWARM_STATE.get(session_id)
+    if not st:
+        return {"result": "none"}
+    out = {"age_s": round(now - st["at"], 2), "trigger": st.get("trigger"),
+           "result": st.get("result")}
+    if st.get("prefill_s") is not None:
+        out["prefill_s"] = st["prefill_s"]
+    return out
 #: What may ask for a prewarm. `wake`: the wake word fired mid-sentence.
 #: `speech`: the person in the conversation started talking (no wake word
 #: inside a conversation). `keep-warm`: the worker's periodic touch while the
@@ -359,14 +508,17 @@ PREWARM_TRIGGERS = ("wake", "speech", "keep-warm")
 
 
 def _prewarm_refusal(session_id: str, trigger: str, now: float, *,
-                     enabled: bool, busy: bool) -> Optional[str]:
+                     enabled: bool, busy: bool,
+                     fingerprint=None) -> Optional[str]:
     """Why this request does not start a prewarm, or None when it does.
 
     Pure over its arguments plus the two module registers, so the rules are
     testable without a request: the switch; a prefill already running over
     this prefix; a turn running or queued on the session (it is prefilling
     the same prefix itself, and the history will differ once it lands); and
-    the debounce — 20 s for a wake or a speech onset, 5 s for a keep-warm.
+    the debounce — 20 s for a wake or a speech onset, 5 s for a keep-warm —
+    which holds only while the session's history (`fingerprint`) is the one
+    the last prewarm warmed.
     """
     if not enabled:
         return "disabled"
@@ -374,8 +526,16 @@ def _prewarm_refusal(session_id: str, trigger: str, now: float, *,
         return "in flight"
     if busy:
         return "busy"
+    last_at, last_fp = _PREWARM_LAST.get(session_id, (float("-inf"), None))
+    if fingerprint is not None and fingerprint != last_fp:
+        # The history moved since the last prewarm (a turn landed): that
+        # prefill warmed a prefix the next turn no longer sends. Debouncing
+        # on the clock alone refused the speech-onset prewarm of every
+        # follow-up asked within 20 s of the previous answer — exactly the
+        # turns a conversation is made of.
+        return None
     gap = _KEEP_WARM_DEBOUNCE_S if trigger == "keep-warm" else _PREWARM_DEBOUNCE_S
-    if now - _PREWARM_LAST.get(session_id, float("-inf")) < gap:
+    if now - last_at < gap:
         return "recent"
     return None
 
@@ -422,13 +582,19 @@ async def voice_prewarm(request: Request):
     qs = get_queue_state(session_id)
     busy = bool(qs.get("current")) or bool(qs.get("pending_user"))
     now = time.monotonic()
-    why = _prewarm_refusal(session_id, trigger, now,
-                           enabled=bool(_voice_turn_cfg().get("prewarm", True)),
-                           busy=busy)
+    fp = _session_fingerprint(session_id)
+    enabled = bool(_voice_turn_cfg().get("prewarm", True))
+    if trigger == "speech" and enabled and not busy:
+        # The person is talking; the inject follows within seconds. Build its
+        # setup now, whatever the prefill decides below.
+        asyncio.get_running_loop().call_soon(_stash_setup, session_id, now)
+    why = _prewarm_refusal(session_id, trigger, now, enabled=enabled,
+                           busy=busy, fingerprint=fp)
     if why is not None:
         return JSONResponse({"started": False, "reason": why, "trigger": trigger})
-    _PREWARM_LAST[session_id] = now
+    _PREWARM_LAST[session_id] = (now, fp)
     _PREWARM_INFLIGHT.add(session_id)
+    _PREWARM_STATE[session_id] = {"at": now, "trigger": trigger, "result": "running"}
     asyncio.get_running_loop().create_task(_prewarm(session_id, trigger))
     return JSONResponse({"started": True, "trigger": trigger})
 
@@ -450,6 +616,7 @@ async def _prewarm(session_id: str, trigger: str = "wake") -> None:
     from app.routers._messages_harness_adapter import _prepare_messages_for_harness
 
     t0 = time.monotonic()
+    result = "failed"
     try:
         setup = _voice_turn_setup(session_id)
         options, meta_path = setup["options"], setup["meta_path"]
@@ -462,6 +629,7 @@ async def _prewarm(session_id: str, trigger: str = "wake") -> None:
             if comp.get("truncated"):
                 logger.info("voice prewarm %s: skipped (over the compaction "
                             "threshold — the turn will summarize)", session_id)
+                result = "skipped"
                 return
             history = await _prepare_messages_for_harness(comp["history"])
             if history and history[-1].get("role") == "user":
@@ -473,6 +641,7 @@ async def _prewarm(session_id: str, trigger: str = "wake") -> None:
         # The duration is the measurement: under a second the prefix was in
         # the cache (the touch did its job); seconds mean a prefill the
         # listener would otherwise have waited through.
+        result = "ok"
         logger.info("voice prewarm %s (%s): prefilled in %.2fs (%d history messages)",
                     session_id, trigger, time.monotonic() - t0, len(history))
     except Exception as e:
@@ -480,6 +649,10 @@ async def _prewarm(session_id: str, trigger: str = "wake") -> None:
                        session_id, trigger, time.monotonic() - t0, e)
     finally:
         _PREWARM_INFLIGHT.discard(session_id)
+        st = _PREWARM_STATE.get(session_id)
+        if st is not None and st.get("result") == "running":
+            st["result"] = result
+            st["prefill_s"] = round(time.monotonic() - t0, 2)
 
 
 # ── /api/voice/summarize ──────────────────────────────────────────────────

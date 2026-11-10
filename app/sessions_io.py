@@ -1106,6 +1106,39 @@ async def _broadcast_queue_state(session_id: str) -> None:
 DrainSource = Literal["user", "ambient", "system", "all"]
 
 
+async def drop_pending_user_turns(session_id: str, keep) -> list[SessionTurn]:
+    """Remove the queued user turns `keep(turn)` rejects, oldest first.
+
+    Each dropped turn's reader gets a `superseded` event and the end of its
+    stream; the turn never runs. The voice inject uses it for a spoken
+    request that a newer one supersedes (it folds their words into its own
+    message, so nothing said is lost). Never touches the running turn or the
+    ambient tier.
+    """
+    q = _session_queues.get(session_id)
+    if q is None:
+        return []
+    dropped: list[SessionTurn] = []
+    async with q.lock:
+        kept = deque()
+        for t in q.pending_user:
+            if keep(t):
+                kept.append(t)
+                continue
+            t.preempted = True
+            try:
+                t.events.put_nowait({"event": "superseded", "data": {"turn_id": t.turn_id}})
+                t.events.put_nowait(None)
+            except Exception:
+                pass
+            t.done.set()
+            dropped.append(t)
+        q.pending_user = kept
+    if dropped:
+        await _broadcast_queue_state(session_id)
+    return dropped
+
+
 async def drain_pending(session_id: str, source: Optional[DrainSource] = None) -> int:
     """Remove queued turns. If source is None, drains ambient only
     (the documented behavior for /cancel?drain_pending=true — user turns

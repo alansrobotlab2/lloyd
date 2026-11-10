@@ -102,7 +102,7 @@ JOB_CALLS: dict[str, Callable[[Any], Any]] = {
     "capture": _sync_secondary_capture_call,   # app/post_capture.py:356
     "facts": _sync_secondary_fact_extraction,  # app/post_capture.py:370
     "focus": _sync_secondary_focus_extraction,  # app/post_capture.py:169
-    "voice": _sync_secondary_voice_summary,    # app/routers/voice.py:215
+    "voice": _sync_secondary_voice_summary,    # app/routers/voice.py:229
 }
 
 # ── Decision policy, stated before the run ───────────────────────────────

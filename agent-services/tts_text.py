@@ -5,7 +5,7 @@ URLs — but expands nothing, so everything Lloyd says that is not an English
 word reaches Qwen3-TTS exactly as written: `qmd`, `vLLM`, an email address, a
 phone number, `2026-09-15`, `3.1x`, `~23.6k`, `~/obsidian/knowledge/foo.md`.
 How the vocoder reads those is its own guess, and nothing measured it until
-`eval/tts_fidelity_eval.py`.
+`eval/run_tts_fidelity_eval.py`.
 
 `for_speech(text)` is the deterministic half of the fix: a small pronunciation
 lexicon and spoken-form expansion for emails, phone numbers, ISO dates, ratios,
@@ -17,9 +17,11 @@ approximate counts and home paths. Two properties are the contract:
   very string it was given, and the text pass cannot move the control arm.
 * **No `@` and no slash-path survive** an expanded email or path.
 
-It is called from `TTSStreamer.speak()` behind `livekit.tts.normalise_text`,
-off by default: a rule stays only when the round-trip corpus shows it raising
-its item's score (Alan's measure-first rule), which is a live-GPU run.
+It is called from `TTSStreamer.speak()` behind `livekit.tts.normalise_text` —
+off as a code default, on in config.yaml since the round-trip corpus measured
+it (tokens heard 90.9 % vs 81.2 % raw, control unchanged). A rule stays only
+when that corpus shows it raising its item's score (Alan's measure-first
+rule), which is a live-GPU run.
 Per-entity slowdown is deliberately not here — it needs `OutputShaper` made
 span-aware (`tts_shaping.py`), and is a separate, by-ear decision.
 """
