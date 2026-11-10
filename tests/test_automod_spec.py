@@ -180,7 +180,7 @@ def test_the_solver_route_grant_holds_in_the_interpreter_that_gates():
 
     `gate_detached` spawns `[LIVE_ROOT/.venvs/lloyd/bin/python, "-m",
     "scripts.automod.round", "gate", <id>]` with `cwd=LIVE_ROOT`
-    (`scripts/automod/round.py:425-445`), so rung 0's `spec.check_scope`
+    (`scripts/automod/round.py:426-445`), so rung 0's `spec.check_scope`
     (`gate.py:928`, inside `rung_preflight`) runs in a process this test does not
     share, on the tuple that
     interpreter imported. Same spawn shape here: a fresh interpreter, started from
@@ -1525,7 +1525,7 @@ def test_a_second_interpreter_admits_the_tts_patch_the_way_rung_0_does():
 
     `automod_gate` is spawned detached against the live tree — `gate_detached`
     builds the argv and `S.spawn_detached(argv, log, cwd=LIVE_ROOT)` runs it
-    (`scripts/automod/round.py:527-555`) — so rung 0 grades with the `spec`
+    (`scripts/automod/round.py:535-555`) — so rung 0 grades with the `spec`
     module *that* interpreter imported: rung 0 calls
     `spec.check_scope` at `scripts/automod/gate.py:1296` and the drill rung asks
     `spec.requires_drill` at `gate.py:2846`. A widening that read as admitted only

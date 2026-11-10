@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -462,8 +463,8 @@ def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
 
     Reading the ledger *after* the marker is safe because of the landing's own
     ordering: `round.land` appends `promoted` inside `P.promote`
-    (`scripts/automod/promote.py:1459`) and clears the marker in its `finally`
-    (`scripts/automod/round.py:382`), so the row exists by the time the marker is
+    (`scripts/automod/promote.py:1564`) and clears the marker in its `finally`
+    (`scripts/automod/round.py:383`), so the row exists by the time the marker is
     gone — the two sources cannot both be empty on a completed landing.
     """
     if not round_id:
@@ -493,7 +494,7 @@ def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
 def _gate_reached(round_id: str | None, events: list[dict]) -> bool:
     """Did this round's gate ladder run at all? One `gate` row carrying the
     round's id is enough: `gate.py` writes a row per rung
-    (`scripts/automod/gate.py:2112`, `:2130`, `:4157`), so a round that was
+    (`scripts/automod/gate.py:2112`, `:2130`, `:4178`), so a round that was
     never gated has none and a round that was has at least one — whatever the
     rungs decided.
 
@@ -546,8 +547,28 @@ def _abandon_grace_seconds() -> int:
         return 0
 
 
+#: One reaper pass at a time. It is called from four threads (housekeeping,
+#: the held-loop retry, boot settle, turn end), and `land_detached` /
+#: `gate_detached` check their marker, spawn, then write it — two overlapping
+#: passes could start one landing twice or run `commit_pending` concurrently.
+_REAP_LOCK = threading.Lock()
+
+
 def reap_abandoned_rounds(now: float | None = None, *,
                           finished_session: str | None = None) -> list[dict]:
+    """`_reap_abandoned_rounds`, one pass at a time: a caller that finds a pass
+    already running returns [] at once rather than queueing behind it."""
+    if not _REAP_LOCK.acquire(blocking=False):
+        logger.debug("reaper: a pass is already running; this one stands down")
+        return []
+    try:
+        return _reap_abandoned_rounds(now, finished_session=finished_session)
+    finally:
+        _REAP_LOCK.release()
+
+
+def _reap_abandoned_rounds(now: float | None = None, *,
+                           finished_session: str | None = None) -> list[dict]:
     """Close rounds this source opened that nobody finished — after a grace
     period when someone may still finish them, and only while nothing is
     happening in their session.
@@ -631,6 +652,11 @@ def reap_abandoned_rounds(now: float | None = None, *,
         rid = e["round_id"]
         age = now - float(e.get("ts") or 0)
         if age < grace or e.get("session_id") in busy or not _reapable(rid):
+            continue
+        # A turn whose cancel the backend refused may still be running — a
+        # Bash child still writing in the worktree — however the snapshot
+        # reads; its round waits as an orphan's would.
+        if e.get("cancel_accepted") is False and age < ORPHAN_ROUND_MIN_AGE_SECONDS:
             continue
         # A gate that PASSED at the commit the round still holds is one call
         # short of landed, and the turn that would have made it is over.
@@ -1295,9 +1321,12 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
     except W.WorktreeListUnavailable as exc:
         return False, f"cannot list round worktrees: {exc}"
     owned, stray = _loop_worktrees(paths)
-    if stray:
-        logger.info("autocode: ignoring %d worktree(s) that are not a round under %s: %s",
-                    len(stray), _LOOP_WORKTREE_ROOT, ", ".join(stray[:3]))
+    # Said when the set changes, not on every 60 s look.
+    if set(stray) != _last_strays["paths"]:
+        _last_strays["paths"] = set(stray)
+        if stray:
+            logger.info("autocode: ignoring %d worktree(s) that are not a round under %s: %s",
+                        len(stray), _LOOP_WORKTREE_ROOT, ", ".join(stray[:3]))
     if len(owned) >= depth:
         return False, (f"a round is already open ({len(owned)} worktree(s))" if depth == 1 else
                        f"{len(owned)} round(s) open, depth {depth}")
@@ -1313,6 +1342,10 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
             return False, "a restart flush is running (the land train)"
         return False, f"round {landing[0]} passed its gate and is landing"
     return True, "free"
+
+
+#: The stray registrations `_loop_is_free` last logged.
+_last_strays: dict[str, set] = {"paths": set()}
 
 
 #: What `_rounds_about_to_land` names while a flush holds the loop.
@@ -1513,7 +1546,9 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     # The land train, before the free check: at a natural gap the flush takes
     # it, and its marker then holds the next round (`_rounds_about_to_land`).
     await asyncio.to_thread(_maybe_flush, queue)
-    free, why = _loop_is_free()
+    # `git worktree prune` + `list` under the hood: a git lock a landing holds
+    # would otherwise stall every request this loop serves.
+    free, why = await asyncio.to_thread(_loop_is_free)
     if not free:
         # Once per reason at INFO: at a 60 s retry the same sentence would
         # otherwise fill the log for the forty minutes a round runs.
@@ -1528,7 +1563,6 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         # landed (`_land_if_passed`) or closed, a minute after the gate says.
         await asyncio.to_thread(_reap_quietly)
         return DECLINED
-    _last_decline["why"] = ""
     # The gear change (2026-09-15): while autotriage's sweep still has open
     # items to read, no round starts. The round hold would otherwise keep the
     # sweep to the gaps between rounds — a third of the wall clock — and a
@@ -1558,6 +1592,9 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         # while it has work, and a full `interval_seconds` wait here left a
         # fresh confirmation idle for up to 15 minutes. Look again in
         # `retry_seconds` (the look is a board walk off the event loop).
+        # Logged like every other decline: an input-starved loop otherwise
+        # reads, in the log, exactly like one that is not running.
+        _log_decline("nothing ready: no confirmed item in the implement pool")
         return DECLINED
     new_id = queue.enqueue(
         source=NAME, kind="round",
@@ -1579,6 +1616,8 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         logger.debug("autocode: not queueing — the previous round's row is still in flight")
         return DECLINED
     logger.info("Enqueued backlog implement id=%d (slot %d of %d)", new_id, slot + 1, depth)
+    # A round went out: the next decline is news, whatever it says.
+    _last_decline["why"] = ""
     # One row per look. With a slot still empty, the next look is a retry
     # away rather than an interval — a decline in everything but name.
     return DECLINED if slot + 1 < depth else None
@@ -1645,6 +1684,12 @@ def _reap_quietly() -> None:
 
 
 def _housekeeping(src_cfg: dict) -> None:
+    """The board passes, never beside a turn end's (`_turn_end_passes`)."""
+    with _BOARD_PASS_LOCK:
+        _housekeeping_passes(src_cfg)
+
+
+def _housekeeping_passes(src_cfg: dict) -> None:
     """The board passes. Each is guarded: none may take the scheduler down."""
     from scripts.automod import backlog as B, state as S
 
@@ -1821,8 +1866,10 @@ def _decline_in_flight(item_id: int, *, name: str = "", slot: str | None,
                        held_by: str, also_held: list[int] | None = None) -> dict:
     """Say *skipped, already in flight* — and say who holds it, in the ledger.
 
-    The declining slot writes a `backlog_implement` row with `phase: "skipped"`
-    and no `started` row. Both halves matter. A `started` row here would make the
+    The declining slot writes a `backlog_implement` row with `phase: "declined"`
+    and no `started` row — `declined`, not `skipped`, because a `skipped` row
+    takes the item's latest `started` with it (`B.implement_history`), and that
+    `started` is the holder's. Both halves matter. A `started` row here would make the
     item's outcome `spent` and take an item out of rotation because someone
     looked at it; and the bare sentence *"skipped, already in flight"* is
     indistinguishable from *"no candidate"* to anyone reading the ledger a day
@@ -1841,7 +1888,7 @@ def _decline_in_flight(item_id: int, *, name: str = "", slot: str | None,
     """
     from scripts.automod import state as S
     S.append_event({"event": "backlog_implement", "item_id": item_id,
-                    "phase": "skipped", "slot": slot, "held_by": held_by,
+                    "phase": "declined", "slot": slot, "held_by": held_by,
                     **({"name": name[:200]} if name else {}),
                     **({"also_held": list(also_held)[:10]} if also_held else {}),
                     "summary": f"skipped, already in flight: item {item_id} is held "
@@ -1851,10 +1898,78 @@ def _decline_in_flight(item_id: int, *, name: str = "", slot: str | None,
             "summary": f"skipped, already in flight: #{item_id} is held by {held_by}"}
 
 
+#: Selection and its claim are one step. Off the event loop, two slots select
+#: in two threads, and without this both would name the same item and the
+#: second would decline it while another item was ready.
+_SELECT_LOCK = threading.Lock()
+#: The turn-end board passes and housekeeping's never walk the same item files
+#: at once; both run in threads.
+_BOARD_PASS_LOCK = threading.Lock()
+
+
+def _select_and_claim(slot: str | None) -> tuple[Any, str | None, list]:
+    """`(pair, held_by, held)`: the candidate, and the claim on it, in one step.
+
+    Blocking (a whole-board walk, ~2 s) — `execute` runs it in a thread. `pair`
+    is None when nothing is ready, and `held` then lists what another slot holds;
+    `held_by` names the slot that already holds the candidate."""
+    from scripts.automod import backlog as B, state as S
+    with _SELECT_LOCK:
+        pair = B.select_confirmed(S.LEDGER_PATH)
+        if pair is None:
+            return None, None, B.implement_held_confirmed(S.LEDGER_PATH)
+        return pair, B.claim_for_implement(slot, pair[0].id), []
+
+
+def _offer_blocks(candidate, triage, warm: dict | None) -> tuple[str, dict]:
+    """(re-offer banner + strategy block, arm fields). Ledger reads: run in a thread."""
+    strategy, arm_fields = _strategy_for(candidate, triage, warm)
+    return _reoffer_for(candidate.id) + strategy, arm_fields
+
+
+def _record_start(candidate, budget: int, slot: str | None, arm_fields: dict,
+                  warm: dict | None) -> None:
+    """The `started` row and the board move. `set_status` walks the board: run in a thread."""
+    from scripts.automod import backlog as B, state as S
+    S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                    "phase": "started", "name": candidate.name[:200],
+                    "budget": budget, "slot": slot, **arm_fields,
+                    **({"continues_session": warm["session_id"], "chain": warm["chain"],
+                        "history_tokens": warm["history_tokens"]} if warm else {})})
+    B.set_status(candidate.id, "in_progress", "automod round starting")
+
+
+def _turn_end_passes(item_id: int, started: float, exclude_key: str | None) -> None:
+    """Settle sweep, reconcile and land-train trigger after a turn. Never raises.
+
+    Whole-board walks plus git: run in a thread, under `_BOARD_PASS_LOCK` so two
+    turn ends (or a turn end and housekeeping) never move the same items at once."""
+    from scripts.automod import backlog as B, state as S
+    with _BOARD_PASS_LOCK:
+        try:
+            if _vault_landed_since(item_id, started):
+                cfg = _source_cfg(NAME)
+                for r in B.close_settled_items(
+                        S.LEDGER_PATH,
+                        close_members=bool(cfg.get("close_members_on_settle", True))):
+                    logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
+                                "closed" if r["closed"] else "noted, left open", r["acceptance"])
+        except Exception as exc:
+            logger.warning("close_settled_items after #%s failed: %s", item_id, exc)
+        try:
+            B.reconcile_statuses(S.LEDGER_PATH, retriage_enabled=bool(
+                _source_cfg(NAME).get("retriage_spent", True)))
+        except Exception as exc:
+            logger.warning("reconcile_statuses after #%s failed: %s", item_id, exc)
+        # Beside the reaper, at turn end: this turn was the last thing a
+        # natural gap waits for. Its own slot row is still `running`.
+        _maybe_flush(exclude_key=exclude_key)
+
+
 async def execute(item: QueueItem) -> dict[str, Any]:
     from scripts.automod import backlog as B, state as S
 
-    free, why = _loop_is_free()
+    free, why = await asyncio.to_thread(_loop_is_free)
     if not free:
         return {"status": "skipped", "summary": why}
     # The queue key is BOTH the warm-session key and the implement claim's key,
@@ -1862,14 +1977,27 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # both is what makes a decline provable: the holder named in the skip row is
     # the same string a reader can find in the item's later `started` row.
     slot = getattr(item, "dedup_key", None)
-    pair = B.select_confirmed(S.LEDGER_PATH)
+    # The hold is taken with the selection, in one step (`_select_and_claim`) —
+    # before the red-tree probe below, before the session warm, and long before
+    # the `started` row — and the placement IS the fix. The collision this
+    # closes is not a tight race: between the selection and the first row that
+    # mentions the item on the ledger sit a probe bounded by
+    # `gate.PICKUP_PROBE_TIMEOUT` (300 s) and a session load, so two slots in
+    # one tick overlap for as long as that probe takes. The two observed
+    # collisions were 1 s and 2 s apart (item 3367 on 2026-10-26, item 3153 on
+    # 2026-10-22, which opened two rounds two minutes apart); the second of each
+    # is exactly what a refused claim turns into a skip.
+    #
+    # It goes above the warm path for the same reason: `_warm_session` asks
+    # whether the SESSION is busy and nothing else, and 3367's second row was a
+    # warm continuation of the session that already held the item.
+    pair, held_by, held = await asyncio.to_thread(_select_and_claim, slot)
     if pair is None:
         # "Nothing ready" is two different sentences and the ledger has to say
         # which one this is. The pool is empty either because the board is empty
         # or because the one ready item is in the OTHER slot's hands at this
         # second — and the second is the state #3370 is about, which a reader
         # would otherwise read as an idle loop.
-        held = B.implement_held_confirmed(S.LEDGER_PATH)
         if held:
             held_item, holder = held[0]
             # `.id`, not the Item: `implement_held_confirmed` answers
@@ -1884,21 +2012,6 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return {"status": "skipped", "slot": slot,
                 "summary": "no confirmed item with an acceptance check"}
     candidate, triage = pair
-
-    # The hold is taken here — before the red-tree probe below, before the
-    # session warm, and long before the `started` row — and the placement IS the
-    # fix. The collision this closes is not a tight race: selection is a pure
-    # read, and between it and the first row that mentions the item on the ledger
-    # sit a probe bounded by `gate.PICKUP_PROBE_TIMEOUT` (300 s) and a session
-    # load, so two slots in one tick overlap for as long as that probe takes. The
-    # two observed collisions were 1 s and 2 s apart (item 3367 on 2026-10-26,
-    # item 3153 on 2026-10-22, which opened two rounds two minutes apart); the
-    # second of each is exactly what this line turns into a skip.
-    #
-    # It goes above the warm path for the same reason: `_warm_session` asks
-    # whether the SESSION is busy and nothing else, and 3367's second row was a
-    # warm continuation of the session that already held the item.
-    held_by = B.claim_for_implement(slot, candidate.id)
     if held_by is not None:
         return _decline_in_flight(candidate.id, name=candidate.name, slot=slot,
                                   held_by=held_by)
@@ -1915,8 +2028,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         # the attempt, so a probe after it is a probe that already cost one.
         settled = await asyncio.to_thread(_red_tree_settled_at_pickup, candidate)
         if settled.get("action") == "closed":
+            # `declined`: no `started` of its own, so a `skipped` row here would
+            # erase the item's previous attempt (`B.implement_history`).
             S.append_event({"event": "backlog_implement", "item_id": candidate.id,
-                            "phase": "skipped", "name": candidate.name[:200],
+                            "phase": "declined", "name": candidate.name[:200],
                             "slot": getattr(item, "dedup_key", None),
                             "reason": f"red tree healed before the attempt: "
                                       f"{settled.get('reason', '')}"[:400]})
@@ -1939,24 +2054,57 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         # strategy block: under the #1489 A/B a warm continuation inherits the
         # arm of the session it continues.
         warm = await _warm_session(slot)
-        strategy, arm_fields = _strategy_for(candidate, triage, warm)
-        reoffer = _reoffer_for(candidate.id) + strategy
+        reoffer, arm_fields = await asyncio.to_thread(_offer_blocks, candidate, triage, warm)
 
         # Recorded BEFORE the turn. `implemented_ids` counts any event for the
         # item, so this is what makes it one attempt per item: a turn that crashes
         # or times out must not put the item back on the pile to be retried
         # unattended.
         started = time.time()
-        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
-                        "phase": "started", "name": candidate.name[:200],
-                        "budget": budget, "slot": slot, **arm_fields,
-                        **({"continues_session": warm["session_id"], "chain": warm["chain"],
-                            "history_tokens": warm["history_tokens"]} if warm else {})})
-        B.set_status(candidate.id, "in_progress", "automod round starting")
+        start = asyncio.ensure_future(asyncio.to_thread(
+            _record_start, candidate, budget, slot, arm_fields, warm))
         try:
+            await asyncio.shield(start)
             return await _run_and_record(item, candidate, triage, budget, started, reoffer,
                                          warm=warm, slot=slot)
+        except asyncio.CancelledError as cancel:
+            # The pool cancelled `execute` (its own timeout, a pool stop).
+            # `run_prompt_in_session` has asked the backend to stop the turn;
+            # the terminal row is still owed, or `items_with_unfinished_rounds`
+            # holds the item until the next boot. Shielded so a second cancel
+            # cannot cut the write, and after the `started` row it closes; the
+            # reaper's next pass closes any round the turn left open.
+            stopping = _cancel_is_a_stop(item, started)
+            # Put there by `run_prompt_in_session` when the turn was running.
+            sid = getattr(cancel, "session_id", None)
+            accepted = getattr(cancel, "backend_cancelled", None)
+            logger.warning("backlog #%s: implement turn cancelled from outside (%s)",
+                           candidate.id, "pool stop" if stopping else "pool timeout")
+
+            async def _close() -> None:
+                try:
+                    await start
+                    # A terminal row still being written (the cancel came during
+                    # the post-turn record) is that row: wait for it, bounded,
+                    # before asking whether one is owed.
+                    pending = _TERMINAL_WRITES.get(candidate.id)
+                    if pending is not None:
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pending),
+                                                   TERMINAL_WRITE_WAIT_SECONDS)
+                        except Exception as exc:  # noqa: BLE001 — it failed or hung: write ours
+                            logger.warning("backlog #%s: terminal write did not finish: %r",
+                                           candidate.id, exc)
+                    await asyncio.to_thread(
+                        _record_cancelled, candidate, triage, started, stopping=stopping,
+                        session_id=sid, cancel_accepted=accepted)
+                except Exception as exc:  # noqa: BLE001 — the cancel is the error to raise
+                    logger.warning("backlog #%s: no terminal row after a cancel: %s",
+                                   candidate.id, exc)
+            await asyncio.shield(_close())
+            raise
         finally:
+            _TERMINAL_WRITES.pop(candidate.id, None)
             # Every exit — landed, aborted, timed out, never ran, skipped for a
             # drain — hands the item back to the ledger's verdict. Without this the
             # early returns left an item `in_progress` that nothing would ever
@@ -1970,28 +2118,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             # `up_next` at :38 and in a second round at 22:08:44.
             #
             # Only after a turn that made a vault landing: the sweep walks the
-            # whole board (~2.3 s measured, on the event loop), and a code landing
-            # has the guardian's window to wait out, which housekeeping covers.
-            # Synchronous like the reconcile beside it, so a cancelled `execute`
-            # cannot run the two concurrently over the same item files.
-            try:
-                if _vault_landed_since(candidate.id, started):
-                    cfg = _source_cfg(NAME)
-                    for r in B.close_settled_items(
-                            S.LEDGER_PATH,
-                            close_members=bool(cfg.get("close_members_on_settle", True))):
-                        logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
-                                    "closed" if r["closed"] else "noted, left open", r["acceptance"])
-            except Exception as exc:
-                logger.warning("close_settled_items after #%s failed: %s", candidate.id, exc)
-            try:
-                B.reconcile_statuses(S.LEDGER_PATH, retriage_enabled=bool(
-                    _source_cfg(NAME).get("retriage_spent", True)))
-            except Exception as exc:
-                logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
-            # Beside the reaper, at turn end: this turn was the last thing a
-            # natural gap waits for. Its own slot row is still `running`.
-            _maybe_flush(exclude_key=getattr(item, "dedup_key", None))
+            # whole board (~2.3 s measured), and a code landing has the
+            # guardian's window to wait out, which housekeeping covers. All three
+            # in one thread under `_BOARD_PASS_LOCK`, so a cancelled `execute`
+            # cannot run two of them concurrently over the same item files.
+            await asyncio.to_thread(_turn_end_passes, candidate.id, started,
+                                    getattr(item, "dedup_key", None))
     finally:
         # Every exit, including the ones above that never reached a turn. A hold
         # that outlived its turn would park the item out of every pool until the
@@ -2116,7 +2248,7 @@ async def _warm_session(slot: str | None) -> dict | None:
     except (TypeError, ValueError):
         return None
     from scripts.automod import state as S
-    rows = [e for e in S.read_events(limit=400)
+    rows = [e for e in await asyncio.to_thread(S.read_events, limit=400)
             if e.get("event") == "backlog_implement" and e.get("slot") == slot
             and e.get("phase") in ("started", "finished", "infra_failed")]
     if not rows:
@@ -2279,14 +2411,10 @@ def _strategy_for(candidate, triage, warm: dict | None = None) -> tuple[str, dic
     return block, fields
 
 
-async def _run_and_record(item, candidate, triage, budget, started,
-                          reoffer: str = "", *, warm: dict | None = None,
-                          slot: str | None = None) -> dict[str, Any]:
-    from scripts.automod import backlog as B, state as S
-    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
-    logger.info("implementing backlog #%s (budget %d): %s",
-                candidate.id, budget, candidate.name[:70])
-
+def _build_prompt(candidate, triage, budget: int, reoffer: str,
+                  warm: dict | None) -> tuple[str, int]:
+    """(prompt, id_floor). Reads the ledger and the board: run in a thread."""
+    from scripts.automod import backlog as B
     prompt = PROMPT.format(
         item_id=candidate.id, status=candidate.status, priority=candidate.priority,
         # 12k, not 30k. The template is ~10k chars and the item body is the
@@ -2322,69 +2450,141 @@ async def _run_and_record(item, candidate, triage, budget, started,
     )
     if warm:
         prompt = _continuation_block(warm, candidate.id) + prompt
-    want_outcome = bool((item.payload or {}).get("structured_outcome", True))
     # Taken BEFORE the turn: an id the turn claims that is at or below this
     # already existed, so it is a merge (or a citation), not a spawn.
     id_floor = B.max_item_id()
-    body_before = candidate.body
-    try:
-        run = await run_prompt_in_session(
-            prompt, title=f"autocode #{candidate.id}: {candidate.name[:48]}",
-            source=NAME, max_turns=budget, priority=1,
-            session_id=(warm or {}).get("session_id"),
-            final_schema=B.IMPLEMENT_OUTCOME_SCHEMA if want_outcome else None,
-            final_schema_prompt=(
-                "Restate the result of this round as a single JSON object matching "
-                "the schema: whether the change landed, and for EACH acceptance clause "
-                "in order whether it is now met, not_met, or deferred (with the ids it "
-                "waits on) and the test node id or file:line that shows it. Same filed "
-                "ids as your SPAWNED line. This is a transcription of what you already "
-                "reported, not a re-decision — `met` on every clause closes the item "
-                "once the promotion settles, and a deferral that names no id is "
-                "recorded as not_met, so say what is true. `landed` is true if you "
-                "called automod_land on a passed gate: the ledger records the promotion, "
-                "you were told to end the turn rather than watch it, and that is no "
-                "reason for `landed: false`, `not_met` or `rejected`. Judge each clause "
-                "on the change itself. `unnecessary` and `rejected` close the item with "
-                "no landing, so neither fits a round you landed with every clause met. "
-                "One thing can still be owed at this moment and cannot be settled by the "
-                "verdict: if the item you closed was filed by a knowledge note, and a "
-                "dated measurement artifact exists for it, that note may owe a "
-                "`Measured in Lloyd` section. The trigger for one, and every rule about "
-                "writing it, live in the vault's `knowledge/KNOWLEDGE_SCHEMA.md` — the "
-                "only place they are written."
-            ))
-    except DrainActive as exc:
-        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
-                        "phase": "skipped", "reason": f"landing in progress: {exc}"})
-        return {"status": "skipped", "summary": f"landing in progress: {exc}"}
-    except TurnTimeout as exc:
-        # `finished` rather than a bare failure, so `reap_abandoned_rounds`
-        # can still find and close a round this turn opened. In-band, so the
-        # queue does not retry: the `started` event above already means one
-        # attempt per item, and a retry would only re-discover that.
-        # `vault_commits` and `surface` as on the normal path: a vault item
-        # that landed a passing fix and then hit the wall clock is otherwise
-        # invisible to `settled_landings` — #575's churn by another exit.
-        timeout_events = S.read_events(limit=200)
-        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
-                        "phase": "finished", "reason": str(exc),
-                        "round_id": _round_opened_since(timeout_events, started,
-                                                        item_id=candidate.id),
-                        # No session id on this path: `run` is unbound because
-                        # the await raised, so a vault row can only be matched on
-                        # its own `item_id` here — same as before this round. The
-                        # attribution fallback belongs to the path that got a
-                        # session back, not to the one that ran out of clock.
-                        "vault_commits": _vault_commits_since(
-                            timeout_events, candidate.id, started),
-                        "surface": triage.get("surface") or "code",
-                        "stop_reason": "turn_timeout"})
-        logger.warning("backlog #%s: %s", candidate.id, exc)
-        await _reap_at_turn_end(None)
-        return {"status": "failed", "item_id": candidate.id,
-                "summary": f"#{candidate.id}: {exc}"}
+    return prompt, id_floor
 
+
+#: `{item_id: the thread writing that turn's terminal row}`. A cancel that lands
+#: while one runs waits for it (`execute`) before deciding a row is owed.
+_TERMINAL_WRITES: dict[int, asyncio.Future] = {}
+#: How long that wait may take before the cancel path writes its own row.
+TERMINAL_WRITE_WAIT_SECONDS = 60.0
+
+
+async def _terminal_write(item_id: int, fn, *args, **kwargs):
+    """Run a turn's terminal-row writer in a thread, registered and shielded: a
+    cancel cannot orphan it, and the cancel path can wait for it."""
+    fut = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    _TERMINAL_WRITES[item_id] = fut
+    return await asyncio.shield(fut)
+
+
+def _claim_ts(item, started: float) -> float:
+    """When the pool's clock on this run began: the queue claim, else `started`."""
+    began = started
+    claimed = getattr(item, "claimed_at", None)
+    if claimed:
+        try:
+            from datetime import datetime
+            began = min(began, datetime.fromisoformat(str(claimed)).timestamp())
+        except (TypeError, ValueError):
+            pass
+    return began
+
+
+def _turn_seconds_left(item, started: float) -> float:
+    """The turn's own clock: the pool's cap less the margin (`turn_timeout_for`),
+    less what this run has spent since its claim — the red-tree probe, the
+    warm-up and the board walks all run on the pool's clock, before the turn's."""
+    from workers.sources import _common as C
+    return max(60.0, C.turn_timeout_for(NAME) - max(0.0, time.time() - _claim_ts(item, started)))
+
+
+def _pool_cap_seconds() -> float:
+    """The pool's `max_duration_seconds` for this source, as `turn_timeout_for` reads it."""
+    from workers.sources import _common as C
+    return C.turn_timeout_for(NAME) + C.POOL_TIMEOUT_MARGIN_SECONDS
+
+
+#: How close to the pool's cap a cancel must come to be read as its timeout.
+POOL_CAP_SLACK_SECONDS = 30.0
+
+
+def _cancel_is_a_stop(item, started: float) -> bool:
+    """Whether a cancel of `execute` is the pool stopping (a UI stop, a backend
+    shutdown) rather than its `max_duration_seconds` running out: the pool says
+    it is no longer running, or the cancel came well before the cap."""
+    try:
+        from workers.pool import get_pool
+        pool = get_pool()
+        if pool is not None and not getattr(pool, "_running", True):
+            return True
+    except Exception:  # noqa: BLE001 — fall back to the clock
+        pass
+    return time.time() - _claim_ts(item, started) < _pool_cap_seconds() - POOL_CAP_SLACK_SECONDS
+
+
+def _record_cancelled(candidate, triage, started: float, *, stopping: bool,
+                      session_id: str | None = None,
+                      cancel_accepted: bool | None = None) -> None:
+    """The terminal row for an `execute` the pool cancelled, unless the turn
+    already wrote one (a cancel that arrives during the post-turn bookkeeping).
+
+    The pool's timeout is the turn running out of clock: `finished`, as a
+    `TurnTimeout`. A stop or a shutdown is not the item's doing: `infra_failed`,
+    stamped with this backend's boot, the row `settle_orphaned_turns` would have
+    written after the restart — one charge to the outage budget, not an attempt.
+    Reads the ledger: run in a thread."""
+    from scripts.automod import state as S
+    events = S.read_events(limit=200)
+    for e in events:
+        if (e.get("event") == "backlog_implement" and e.get("item_id") == candidate.id
+                and e.get("phase") in ("finished", "infra_failed", "skipped")
+                and float(e.get("ts") or 0) >= started):
+            return
+    if stopping:
+        S.append_event({**infra_failed_row(
+            candidate.id, session_id=session_id,
+            round_id=_round_opened_since(events, started, item_id=candidate.id,
+                                         session_id=session_id),
+            num_turns=None, stop_reason="pool_stopped",
+            errors=["the worker pool stopped (a pool stop or a backend shutdown) "
+                    "under the turn; no terminal row was written"],
+            boot=_backend_boot_ts()), "cancel_accepted": cancel_accepted})
+        return
+    _record_timeout(candidate, triage, started,
+                    "execute cancelled by the pool's timeout", cancelled=True,
+                    session_id=session_id, cancel_accepted=cancel_accepted)
+
+
+def _record_timeout(candidate, triage, started: float, reason: str, *,
+                    cancelled: bool = False, session_id: str | None = None,
+                    cancel_accepted: bool | None = None) -> None:
+    """The `finished` row for a turn that ran out of clock — its own, or the
+    pool's (`cancelled`: `execute` itself was cancelled). Reads the ledger: run
+    in a thread."""
+    from scripts.automod import state as S
+    timeout_events = S.read_events(limit=200)
+    S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                    "phase": "finished", "reason": reason,
+                    **({"cancelled": True} if cancelled else {}),
+                    # The session rides on the row (from `TurnTimeout`, or the
+                    # pool's `CancelledError`), so the reaper reads it as busy
+                    # while the backend still runs the turn, and a refused
+                    # cancel holds the round a while longer (`_reap_abandoned_rounds`).
+                    **({"session_id": session_id} if session_id else {}),
+                    **({"cancel_accepted": cancel_accepted}
+                       if cancel_accepted is not None else {}),
+                    "round_id": _round_opened_since(timeout_events, started,
+                                                    item_id=candidate.id,
+                                                    session_id=session_id),
+                    "vault_commits": _vault_commits_since(
+                        timeout_events, candidate.id, started, session_id=session_id),
+                    "surface": triage.get("surface") or "code",
+                    "stop_reason": "turn_timeout"})
+
+
+def _record_run(candidate, triage, run: dict, started: float, *, warm: dict | None,
+                slot: str | None, want_outcome: bool, id_floor: int,
+                body_before: str) -> tuple[dict | None, str | None, str | None]:
+    """Everything a finished turn writes: the ledger rows, the item verdict, the
+    notes. Whole-ledger reads and board walks — run in a thread.
+
+    `(early result, round_id, outcome)`: an early result is the whole answer
+    (the turn never completed); otherwise `outcome` is the log phrase."""
+    from scripts.automod import backlog as B, state as S
     events = S.read_events(limit=200)
     round_id = _round_opened_since(events, started, item_id=candidate.id,
                                    session_id=run.get("session_id"))
@@ -2412,8 +2612,9 @@ async def _run_and_record(item, candidate, triage, budget, started,
             boot=_backend_boot_ts()))
         logger.warning("backlog #%s: turn never completed (session %s); not an attempt",
                        candidate.id, run["session_id"])
-        return {"status": "failed", "item_id": candidate.id,
-                "summary": f"#{candidate.id}: turn never completed — not counted as an attempt"}
+        return ({"status": "failed", "item_id": candidate.id,
+                 "summary": f"#{candidate.id}: turn never completed — not counted as an attempt"},
+                None, None)
     turn_session = str(run.get("session_id") or "")
     vault_commits = _vault_commits_since(events, candidate.id, started,
                                          session_id=turn_session)
@@ -2589,6 +2790,82 @@ async def _run_and_record(item, candidate, triage, budget, started,
                f"vault commit {vault_commits[-1][:8]}" if vault_commits else "no round opened")
     logger.info("backlog #%s: %s (session %s, %s)", candidate.id, outcome,
                 run["session_id"], run.get("stop_reason"))
+    return None, round_id, outcome
+
+
+async def _run_and_record(item, candidate, triage, budget, started,
+                          reoffer: str = "", *, warm: dict | None = None,
+                          slot: str | None = None) -> dict[str, Any]:
+    from scripts.automod import backlog as B, state as S
+    from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
+    logger.info("implementing backlog #%s (budget %d): %s",
+                candidate.id, budget, candidate.name[:70])
+
+    # Off the event loop: the pacing marks and the members block read the
+    # ledger and the board.
+    prompt, id_floor = await asyncio.to_thread(_build_prompt, candidate, triage,
+                                               budget, reoffer, warm)
+    want_outcome = bool((item.payload or {}).get("structured_outcome", True))
+    body_before = candidate.body
+    try:
+        run = await run_prompt_in_session(
+            prompt, title=f"autocode #{candidate.id}: {candidate.name[:48]}",
+            source=NAME, max_turns=budget, priority=1,
+            session_id=(warm or {}).get("session_id"),
+            timeout_seconds=_turn_seconds_left(item, started),
+            final_schema=B.IMPLEMENT_OUTCOME_SCHEMA if want_outcome else None,
+            final_schema_prompt=(
+                "Restate the result of this round as a single JSON object matching "
+                "the schema: whether the change landed, and for EACH acceptance clause "
+                "in order whether it is now met, not_met, or deferred (with the ids it "
+                "waits on) and the test node id or file:line that shows it. Same filed "
+                "ids as your SPAWNED line. This is a transcription of what you already "
+                "reported, not a re-decision — `met` on every clause closes the item "
+                "once the promotion settles, and a deferral that names no id is "
+                "recorded as not_met, so say what is true. `landed` is true if you "
+                "called automod_land on a passed gate: the ledger records the promotion, "
+                "you were told to end the turn rather than watch it, and that is no "
+                "reason for `landed: false`, `not_met` or `rejected`. Judge each clause "
+                "on the change itself. `unnecessary` and `rejected` close the item with "
+                "no landing, so neither fits a round you landed with every clause met. "
+                "One thing can still be owed at this moment and cannot be settled by the "
+                "verdict: if the item you closed was filed by a knowledge note, and a "
+                "dated measurement artifact exists for it, that note may owe a "
+                "`Measured in Lloyd` section. The trigger for one, and every rule about "
+                "writing it, live in the vault's `knowledge/KNOWLEDGE_SCHEMA.md` — the "
+                "only place they are written."
+            ))
+    except DrainActive as exc:
+        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
+                        "phase": "skipped", "reason": f"landing in progress: {exc}"})
+        return {"status": "skipped", "summary": f"landing in progress: {exc}"}
+    except TurnTimeout as exc:
+        # `finished` rather than a bare failure, so `reap_abandoned_rounds`
+        # can still find and close a round this turn opened. In-band, so the
+        # queue does not retry: the `started` event above already means one
+        # attempt per item, and a retry would only re-discover that.
+        # `vault_commits` and `surface` as on the normal path: a vault item
+        # that landed a passing fix and then hit the wall clock is otherwise
+        # invisible to `settled_landings` — #575's churn by another exit.
+        sid = getattr(exc, "session_id", None)
+        await _terminal_write(candidate.id, _record_timeout, candidate, triage, started,
+                              str(exc), session_id=sid,
+                              cancel_accepted=getattr(exc, "cancelled", None))
+        logger.warning("backlog #%s: %s", candidate.id, exc)
+        # As on the `infra_failed` branch: a cancel the backend did not accept
+        # says the turn may still be running — a Bash child still writing in
+        # the worktree — so the round waits for a later pass, which reads the
+        # row's session as busy until the turn really ends.
+        if getattr(exc, "cancelled", None) is not False:
+            await _reap_at_turn_end(sid)
+        return {"status": "failed", "item_id": candidate.id,
+                "summary": f"#{candidate.id}: {exc}"}
+
+    early, round_id, outcome = await _terminal_write(
+        candidate.id, _record_run, candidate, triage, run, started, warm=warm, slot=slot,
+        want_outcome=want_outcome, id_floor=id_floor, body_before=body_before)
+    if early is not None:
+        return early
     # After `finished` too: `implement_outcomes` judges an item by its latest
     # row, and before that row is written the latest is `started`, whose
     # detail is empty — so this escalation, placed above it, never fired

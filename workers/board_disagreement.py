@@ -723,7 +723,7 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"days, #3089 asked / #3329 ruled), and this filing never edits a status: it is "
         f"filed `draft` and left for a judgment.\n"
     )
-    # `new_item` (host:scripts/automod/backlog.py:8573) returns the loaded Item and
+    # `new_item` (host:scripts/automod/backlog.py:8607) returns the loaded Item and
     # takes no activity line — the create's record is this body plus the ledger
     # row below, which is exactly one write and no second chance to fail.
     it = B.new_item(NAME, body, priority="medium", tags=[TAG], status="draft",

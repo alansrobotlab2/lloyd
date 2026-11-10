@@ -6546,7 +6546,7 @@ def test_a_probe_that_queued_reports_a_wall_clock_inside_the_stated_bound(
         tmp_path, monkeypatch, vault, guard_tree, probed):
     """#2743 clause 4: unbundling the queue leaves a STATED total, not an open one.
 
-    `land()` is called synchronously by `agent_mcp/automod.py:940` with no outer timeout
+    `land()` is called synchronously by `agent_mcp/automod.py:945` with no outer timeout
     of its own, so moving the queue off the runs raises the worst-case call from one
     budget to a budget plus a queue: the bound is therefore part of the change, and these
     three legs pin it at the three levels it means something.
@@ -6951,7 +6951,7 @@ def test_the_no_heavy_verdict_marker_reaches_the_land_row_and_the_land_result(
     guard path, the real vault commit, the real row on a real ledger, with only the pytest
     child stood in. The row is the shape the owed-check job scans with
     `grep vault_land ~/.local/state/lloyd-automod/promotions.jsonl`; the dict is what
-    `agent_mcp/automod.py:949-950` serialises into the tool answer, and the JSON
+    `agent_mcp/automod.py:954-950` serialises into the tool answer, and the JSON
     round-trip below is only that dict's own shape — the hop through the real handler is
     crossed by
     `tests/test_automod_hardening.py::test_a_vault_land_answer_shows_the_agent_the_heavy_rung_ran_nothing`,
@@ -8456,7 +8456,7 @@ async def test_the_witness_finding_survives_the_mcp_tool_boundary(vault, tmp_pat
                                                                   monkeypatch):
     """The process boundary the rung's text has to cross to be worth writing.
 
-    `agent_mcp/automod.py:941` calls `VR.land(...)` and hands the agent
+    `agent_mcp/automod.py:946` calls `VR.land(...)` and hands the agent
     `json.dumps(out)`: the finding is either in that string or it is in a ledger a
     week away, and the writer with the drift in front of it is the one that can act.
     The sibling node above (`test_the_landing_fields_survive_the_mcp_tool_boundary`)
@@ -9778,7 +9778,7 @@ def test_a_round_may_land_the_first_arm_of_a_never_run_unparked_task(tmp_path, m
     (r / TASK_REL).write_text(ARMED_TASK_BODY, encoding="utf-8")
     # `GRADER` is None at import, and this node asks only whether the LANE lets the
     # arm through — so the second reader must be the module's own default, not
-    # whatever a node earlier in this file left behind. `agent_mcp/automod.py:918`
+    # whatever a node earlier in this file left behind. `agent_mcp/automod.py:923`
     # wires `RV.grade_vault` onto the shared module on the first `automod_vault_land`
     # call and never unwinds it, so from that node on every later node in this file
     # is graded by the real reader, which reaches for the live backend that

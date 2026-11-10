@@ -612,6 +612,13 @@ PAUSE_ACTOR_RECONCILE = "startup-reconcile"
 #: killed or OOM'd setter stops being believed within one scheduler gap.
 MACHINE_LEASE_STALE_SECONDS = 300
 
+#: How long an AUTOMOD pause holds without being re-taken. The promoter re-posts
+#: it every minute while it waits and restarts (`promote.refresh_pool_pause`); a
+#: promoter SIGKILLed or OOM-killed mid-wait stops re-posting, and the pool then
+#: resumes on its own instead of staying paused until the next backend restart.
+#: The operator pause is persisted and has no such expiry.
+AUTOMOD_PAUSE_TTL_SECONDS = 900.0
+
 #: Watermark (#2773) naming the last boot that ANNOUNCED an inherited hold, written
 #: on the same `_pool` source as the hold rows because it describes the same hold.
 #: It exists because the announcement has to survive the thing that makes it
@@ -758,6 +765,7 @@ class WorkerPool:
         self._announce_override = announce
         self._paused_operator = self._load_operator_pause()
         self._paused_automod = False
+        self._automod_pause_until = 0.0   # time.monotonic(); see AUTOMOD_PAUSE_TTL_SECONDS
         self._workers: list[asyncio.Task] = []
         self._scheduler_task: Optional[asyncio.Task] = None
         self._in_flight: dict[int, dict[str, Any]] = {}
@@ -1066,7 +1074,16 @@ class WorkerPool:
         kind = HOLDER_MACHINE if holder_kind == HOLDER_MACHINE else HOLDER_PERSON
         journal_actor = (actor or "").strip() or PAUSE_ACTOR_DEFAULT
         if owner == "automod":
+            refresh = paused and self._automod_paused()
             self._paused_automod = paused
+            self._automod_pause_until = (time.monotonic() + AUTOMOD_PAUSE_TTL_SECONDS
+                                         if paused else 0.0)
+            if refresh:
+                # A lease refresh, not a new hold: one line per minute of a
+                # landing's wait is noise at INFO.
+                logger.debug("Worker pool automod pause refreshed (ttl=%.0fs)",
+                             AUTOMOD_PAUSE_TTL_SECONDS)
+                return
         else:
             already_held = self._paused_operator
             self._paused_operator = paused
@@ -1130,9 +1147,18 @@ class WorkerPool:
                 "correct, but nobody will be able to count it later",
                 value, holder_kind, actor)
 
+    def _automod_paused(self) -> bool:
+        """The automod pause, lapsed once its TTL passes without a refresh."""
+        if self._paused_automod and time.monotonic() >= self._automod_pause_until:
+            self._paused_automod = False
+            logger.warning("Worker pool: the automod pause lapsed after %.0fs without a "
+                           "refresh (its promoter died?); resuming",
+                           AUTOMOD_PAUSE_TTL_SECONDS)
+        return self._paused_automod
+
     @property
     def _paused(self) -> bool:
-        return self._paused_operator or self._paused_automod
+        return self._paused_operator or self._automod_paused()
 
     @property
     def paused(self) -> bool:
@@ -1141,7 +1167,7 @@ class WorkerPool:
     @property
     def paused_by(self) -> list[str]:
         return [o for o, on in (("operator", self._paused_operator),
-                                ("automod", self._paused_automod)) if on]
+                                ("automod", self._automod_paused())) if on]
 
     @property
     def paused_since(self) -> Optional[str]:

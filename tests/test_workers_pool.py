@@ -505,6 +505,28 @@ def test_an_automod_pause_does_not_survive_a_restart(q):
     assert WorkerPool(q, slots=1).paused is False
 
 
+def test_an_automod_pause_lapses_unless_it_is_re_taken(q, monkeypatch):
+    """A promoter SIGKILLed in its idle wait never releases its pause, and the
+    backend restart that would clear it is the one the paused loop no longer
+    produces. The pause lapses after its TTL; a refresh keeps it; a person's
+    pause has no TTL."""
+    import workers.pool as WP
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(WP.time, "monotonic", lambda: clock["t"])
+    pool = WorkerPool(q, slots=1)
+    pool.pause(True, owner="automod")
+    clock["t"] += WP.AUTOMOD_PAUSE_TTL_SECONDS - 1
+    assert pool.paused is True
+    pool.pause(True, owner="automod")             # the promoter's refresh
+    clock["t"] += WP.AUTOMOD_PAUSE_TTL_SECONDS - 1
+    assert pool.paused is True and pool.paused_by == ["automod"]
+    clock["t"] += 2                               # ...and then it died
+    assert pool.paused is False and pool.paused_by == []
+    pool.pause(True)                              # a person's pause
+    clock["t"] += 10 * WP.AUTOMOD_PAUSE_TTL_SECONDS
+    assert pool.paused is True and pool.paused_by == ["operator"]
+
+
 def test_an_automod_resume_does_not_lift_a_persons_pause(q):
     pool = WorkerPool(q, slots=1)
     pool.pause(True, owner="automod")
@@ -2159,14 +2181,14 @@ async def test_a_stamp_that_aged_only_because_the_pool_was_down_is_downtime(q):
     `verdict` judged the clean stamp's age and nothing else, so a pool that spent an
     hour stopped — the restart itself, or a halt — reads on its next boot as a source
     that stopped dispatching. The attempt stamp separates the two because the pool
-    writes it on EVERY outcome, including the raise (`workers/pool.py:1635-1636`, after
+    writes it on EVERY outcome, including the raise (`workers/pool.py:1661-1636`, after
     the `except` at :1628-1630): a live-but-failing source keeps it fresh, and only an
     absent pool lets both stamps age together past the window. The DECLINED back-date
     cannot fake the second shape either — it moves the attempt stamp by
     `interval - retry`, at most one interval, never the three the window needs.
 
     The exemption that has to survive is `REPOLL_ON_COMPLETE`
-    (`workers/sources/autocode.py:85`): that declaration re-arms the attempt stamp to
+    (`workers/sources/autocode.py:86`): that declaration re-arms the attempt stamp to
     the epoch after every finished run, so "older than the window" is permanently true
     for the one source this rule must never quiet.
     """
@@ -2191,7 +2213,7 @@ async def test_a_stamp_that_aged_only_because_the_pool_was_down_is_downtime(q):
 
     # Declined-and-back-dated is the benign in-between: on a 900 s interval with
     # `retry_seconds: 60` the pool pulls the attempt stamp back by the 840 s difference
-    # (`workers/pool.py:1633-1634`), which is inside that source's 2700 s window, so a
+    # (`workers/pool.py:1659-1634`), which is inside that source's 2700 s window, so a
     # clean stamp past the window is still read as a stall and not as downtime.
     wide, _ = _one_stalled_source(q, age_s=3000.0, interval=900)
     q.wm_set("s", "last_enqueue_check",

@@ -411,7 +411,7 @@ def test_no_backlog_writer_calls_the_local_clock(rel: str):
 # ── clause 5: the readers date a row in the clock it was written in ──────────
 
 def test_board_flow_counts_creation_in_each_rows_own_clock(la_clock, board):
-    """#1517 clause 5, the inflow side (`scripts/automod/backlog.py:5356`).
+    """#1517 clause 5, the inflow side (`scripts/automod/backlog.py:5375`).
 
     Judged against `CUTOVER + 3 h`, so the legacy rows below sit below the
     cut-off on any day this runs:

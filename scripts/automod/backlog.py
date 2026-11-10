@@ -4040,6 +4040,16 @@ def _after_mark(d: dict, marks: dict[int, float]) -> bool:
     return m is None or float(d.get("ts") or 0) > m
 
 
+def is_declined_row(d: dict) -> bool:
+    """A `backlog_implement` row a slot wrote without starting a turn: the item
+    was held by another slot, or its red tree healed at pickup. Written as
+    `phase: declined`; the in-flight declines written before that phase existed
+    were `skipped` rows carrying `held_by`. No attempt began, so no reader of
+    an item's attempt — its history, its latest phase — may count one."""
+    phase = str(d.get("phase") or "")
+    return phase == "declined" or (phase == "skipped" and bool(d.get("held_by")))
+
+
 def implement_history(ledger: Path, marks: dict[int, float] | None = None, *,
                       with_archives: bool = True) -> dict[int, list[dict]]:
     """`{item_id: [backlog_implement rows]}` in ledger order, counting from the
@@ -4051,7 +4061,13 @@ def implement_history(ledger: Path, marks: dict[int, float] | None = None, *,
     `skipped` — no round, no stop reason — and `implement_outcomes` fell
     through to `spent` for a turn that never ran. That was a quiet loss while
     a spend parked the item; with re-triage a spend discards its contract. So
-    a `skipped` row takes its `started` with it.
+    a `skipped` row takes its `started` with it — only when that `started` is
+    the item's latest row and from the same slot, since a skip with no
+    `started` of its own must not erase the previous attempt.
+
+    A `declined` row (`is_declined_row`: a slot that never started a turn —
+    the item was in another slot's hands, or its red tree had healed) is not
+    part of any attempt and is left out entirely.
 
     `with_archives` (default True, #3612) reads the `promotions-archive-*.jsonl.gz`
     rotations beside the ledger too, and the re-triage mark lookup is widened in the
@@ -4068,11 +4084,14 @@ def implement_history(ledger: Path, marks: dict[int, float] | None = None, *,
         if not _after_mark(d, marks):
             continue
         rows = out.setdefault(int(d["item_id"]), [])
+        if is_declined_row(d):
+            continue
         if str(d.get("phase") or "") == "skipped":
-            for i in range(len(rows) - 1, -1, -1):
-                if str(rows[i].get("phase") or "") == "started":
-                    del rows[i:]
-                    break
+            last = rows[-1] if rows else {}
+            if (str(last.get("phase") or "") == "started"
+                    and (not d.get("slot") or not last.get("slot")
+                         or d.get("slot") == last.get("slot"))):
+                rows.pop()
             continue
         rows.append(d)
     return {iid: rows for iid, rows in out.items() if rows}
@@ -6487,11 +6506,21 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     `retriage_enabled` is `workers.sources.autocode.retriage_spent`: with it
     off, a spend is a person's at once, as before the second life existed.
     """
-    confirmed = confirmed_verdicts(ledger)
+    # Archive-aware, like `held`, `verdicts` and `outcomes` beside it. Read from
+    # the live file alone, a confirmation whose row the 14-day fold had rotated
+    # was missing here while `triaged_ids` still said "confirmed": the item fell
+    # through to the `iid in verdicts` branch below and was moved up_next → draft
+    # as "triaged confirmed; not for the unattended loop", where neither triage
+    # (it is triaged) nor a round (it is not in the pool) reads it. #3024, #3041,
+    # #3068, #3196 and #3284 went that way on 2026-11-03..07, each right after a
+    # fold. A row ages out of the live file, never out of being a confirmation
+    # (#3612); the marks are widened with it so an archived confirmation voided
+    # by an archived mark stays void.
+    confirmed = confirmed_verdicts(ledger, with_archives=True)
     held = held_confirmations(ledger)
     verdicts = triaged_ids(ledger)
     outcomes = implement_outcomes(ledger)
-    marks = retriage_marks(ledger)
+    marks = retriage_marks(ledger, with_archives=True)
     # #3467: an applied board-steward move, and the newest machine event that ends its
     # claim on the item. Both read the rows `_ledger_events` already decoded, so this
     # is two filters over a file this function reads once regardless.
@@ -6509,6 +6538,8 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     # who may be running an hour after the turn began.
     latest_phase: dict[int, str] = {}
     for d in _ledger_events(ledger, "backlog_implement"):
+        if is_declined_row(d):
+            continue
         latest_phase[int(d["item_id"])] = str(d.get("phase") or "")
     in_flight = {i for i, ph in latest_phase.items() if ph == "started"} | set(open_round_items)
     reverted = _reverted_commits(ledger)
@@ -7930,7 +7961,10 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
     spent attempt, an in-flight gate or landing, or another slot's claim.
     """
     from scripts.automod import owed as _O
-    confirmed = confirmed_verdicts(ledger)
+    # With the archives, as `desired_statuses` reads it: the two must agree on
+    # what is confirmed, or the reconciler keeps an item in `up_next` that this
+    # function never offers.
+    confirmed = confirmed_verdicts(ledger, with_archives=True)
     if outcomes is None:
         outcomes = implement_outcomes(ledger)
     done = {iid for iid, (verdict, _) in outcomes.items() if verdict == "spent"}
@@ -9465,7 +9499,7 @@ def unfold_oversized_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DE
     from scripts.automod import state as S
     history = implement_history(ledger)
     unfinished = items_with_unfinished_rounds(ledger, history=history)
-    confirmed = confirmed_verdicts(ledger)
+    confirmed = confirmed_verdicts(ledger, with_archives=True)
     out: list[dict] = []
     for item in open_items(boards):
         if not is_umbrella(item) or item.id in history or item.id in unfinished:

@@ -51,6 +51,11 @@ def head_branch(repo: str) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def parent_of(repo: str, sha: str) -> str | None:
+    r = _git(repo, "rev-parse", "--verify", "--quiet", f"{sha}^")
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
 def commit_exists(repo: str, sha: str) -> bool:
     return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
 
@@ -280,6 +285,58 @@ def revert_commit(repo: str, sha: str, *, reason: str = "") -> str:
     if branch != "refs/heads/main":
         raise RollbackError(f"HEAD is {branch!r} after revert, expected refs/heads/main")
     return head
+
+
+REVERT_APPLIES, REVERT_CONFLICT, REVERT_EMPTY, REVERT_UNKNOWN = (
+    "applies", "conflict", "empty", "unknown")
+# The whole dry run, every git call in it: well under the unit's 90s
+# WatchdogSec, since nothing beats the watchdog while it runs.
+DRY_RUN_BUDGET_SECONDS = 30.0
+
+
+def revert_dry_run(repo: str, shas: list, head: str | None = None) -> tuple[str, str]:
+    """Would reverting `shas` (oldest first; reverted newest first) onto `head`
+    apply? Decided in the object store with `git merge-tree` — the same
+    three-way merge `git revert` runs — so the work tree, the index and the
+    running services are never touched.
+
+    REVERT_APPLIES; REVERT_CONFLICT; REVERT_EMPTY (would change nothing, which
+    `git revert` refuses: the change is already gone); REVERT_UNKNOWN (could
+    not tell, a timeout included; the caller proceeds as before).
+    """
+    deadline = time.monotonic() + DRY_RUN_BUDGET_SECONDS
+
+    def git(*args):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired("git", DRY_RUN_BUDGET_SECONDS)
+        return _git(repo, *args, timeout=left)
+
+    try:
+        return _revert_dry_run(git, shas, head or head_commit(repo))
+    except subprocess.TimeoutExpired:
+        return REVERT_UNKNOWN, f"dry run exceeded {DRY_RUN_BUDGET_SECONDS:.0f}s"
+
+
+def _revert_dry_run(git, shas: list, head: str | None) -> tuple[str, str]:
+    if not head or not shas:
+        return REVERT_UNKNOWN, "nothing to check"
+    r = git("rev-parse", "--verify", "--quiet", f"{head}^{{tree}}")
+    if r.returncode != 0:
+        return REVERT_UNKNOWN, f"cannot read the tree of {head[:8]}"
+    ours = r.stdout.strip()
+    for sha in reversed(list(shas)):
+        r = git("merge-tree", "--write-tree", "--no-messages",
+                f"--merge-base={sha}", ours, f"{sha}^")
+        tree = (r.stdout.splitlines() or [""])[0].strip()
+        if r.returncode == 1:
+            return REVERT_CONFLICT, f"reverting {sha[:8]} conflicts with later work"
+        if r.returncode != 0 or not tree:
+            return REVERT_UNKNOWN, f"merge-tree failed for {sha[:8]}: {r.stderr.strip()[:200]}"
+        if tree == ours:
+            return REVERT_EMPTY, f"reverting {sha[:8]} would change nothing"
+        ours = tree
+    return REVERT_APPLIES, "applies"
 
 
 class RevertConflict(RollbackError):

@@ -452,7 +452,7 @@ def _record_death(*, state: dict, apply: bool, since_ts: float, events: int,
     `workers/sources/_common.py` opens its stream with `httpx.AsyncClient` /
     `client.stream` and no `except httpx.*` anywhere in that module, so a connect
     failure left `execute` entirely and was recorded only by the pool's generic arm
-    (`workers/pool.py:2043`). Triage counted the cost on 2026-10-25: 13
+    (`workers/pool.py:2069`). Triage counted the cost on 2026-10-25: 13
     board-steward runs in the trailing 30 days died that way (11 `ConnectTimeout` +
     2 `ConnectError`), and ZERO `board_steward` rows fall inside any of those 13
     [started_at, completed_at] windows — while `_record_divergence` above
@@ -809,10 +809,10 @@ def round_flag(round_state: tuple | None) -> str:
 #: #3784 added the fourth because three were one too few: `confirmed` stood for two
 #: machine branches at once. `desired_statuses` asks a confirmed verdict a second
 #: question — `elif iid in confirmed and not is_human_only(...)`
-#: (`scripts/automod/backlog.py:6576`) — and a confirmation whose acceptance names a
+#: (`scripts/automod/backlog.py:6607`) — and a confirmation whose acceptance names a
 #: decision the gate would really refuse falls past that branch to
 #: `("draft", "triaged confirmed; not for the unattended loop")`
-#: (`scripts/automod/backlog.py:6584`), while a plain
+#: (`scripts/automod/backlog.py:6615`), while a plain
 #: one goes to `up_next`. One word covering both meant the prompt's confirmed rule
 #: (`workers/sources/board_steward.py:305-308`) ordered the steward to propose
 #: `up_next` for an item the machine had
@@ -831,7 +831,7 @@ def _triage_map(ledger) -> dict[int, str]:
     The point of this function is what it does NOT read. It calls the same
     `backlog.confirmed_verdicts` `desired_statuses` calls, and `held_confirmations`
     too, so the field and the machine's own branch — `elif iid in confirmed and not
-    is_human_only(...)` at `scripts/automod/backlog.py:6576` — answer from
+    is_human_only(...)` at `scripts/automod/backlog.py:6607` — answer from
     one measurement: a verdict that `confirmed_verdicts` drops as older than the
     item's newest `backlog_retriage` mark is absent HERE as well, and the line says
     `triage=none` rather than showing a verdict the machine no longer counts. That
@@ -845,14 +845,14 @@ def _triage_map(ledger) -> dict[int, str]:
     invite the model to keep such an item in the implement pool — the opposite error.
     An item held but with no live confirmed row is absent: `desired_statuses` only
     consults `held` behind `iid in confirmed`
-    (`scripts/automod/backlog.py:6576`), so showing held for
+    (`scripts/automod/backlog.py:6607`), so showing held for
     it would be a second, better-informed reader — #3677's exact defect.
 
     A third branch reads `confirmed-human-only` (#3784), for the confirmed item whose
     acceptance names a decision the gate would really refuse — #3782's opens
     `human-only: ~/obsidian/autonomy/105-check-health-census-weekly.md:14`. That is the
     case `desired_statuses` parks at `draft` "not for the unattended loop"
-    (`scripts/automod/backlog.py:6584`), so a line saying merely `confirmed` sent the
+    (`scripts/automod/backlog.py:6615`), so a line saying merely `confirmed` sent the
     model to the prompt's
     confirmed rule and the rule said `up_next`: the tick then scored the steward against
     a table the board line had already made unreachable. The predicate is
@@ -891,7 +891,7 @@ def _triage_map(ledger) -> dict[int, str]:
     """
     from scripts.automod import backlog as B
     from scripts.automod import owed as O
-    confirmed = B.confirmed_verdicts(ledger)
+    confirmed = B.confirmed_verdicts(ledger, with_archives=True)   # as `desired_statuses` reads it
     held = B.held_confirmations(ledger)
     out = {int(iid): ("confirmed-human-only"
                       if B.is_human_only((rec or {}).get("acceptance"))

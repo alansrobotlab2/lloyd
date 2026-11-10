@@ -16,9 +16,9 @@ after alike, is the widened one.) `app/live_strays.py` is that diff and nothing 
 four call sites are the reason it exists, named here fully qualified so no number in this
 file can be read against the wrong file:
 
-- `scripts/automod/round.py:169` reads the tree at round open and
-  `scripts/automod/round.py:205-207` writes that set as the baseline into the round's own
-  directory; the `round_start` row at `scripts/automod/round.py:210-235` carries a capped
+- `scripts/automod/round.py:170` reads the tree at round open and
+  `scripts/automod/round.py:206-207` writes that set as the baseline into the round's own
+  directory; the `round_start` row at `scripts/automod/round.py:211-235` carries a capped
   sample of it and its uncapped `live_untracked_count`;
 - `scripts/automod/gate.py:1079` / `scripts/automod/gate.py:1101` — the gate's own
   `start_live_strays` / `end_live_strays`, bracketing the ladder at
@@ -26,7 +26,7 @@ file can be read against the wrong file:
   the `finally`, so a round that stops mid-ladder still records.
 
 Two windows, because a round has two halves and only one of them is the gate: the
-baseline the round recorded at open (`scripts/automod/round.py:205-207`) reaches back over
+baseline the round recorded at open (`scripts/automod/round.py:206-207`) reaches back over
 the implement turn that ran before the gate process existed, while the gate's own
 snapshot (`scripts/automod/gate.py:1160`) covers only the ladder. `end_live_strays`
 subtracts the round's baseline when it has one and falls back to its own snapshot when

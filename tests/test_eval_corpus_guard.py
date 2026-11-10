@@ -3365,7 +3365,7 @@ def test_a_collection_deployed_but_not_named_leaves_its_label_unreachable():
 #: ...and the vault the note and the probe live in, and the qmd config the no-touch
 #: proof reads, are anchored the same way for the same reason: the gate does NOT run
 #: this file in the real home. `scripts/automod/gate.py:1595` sets `"HOME": str(home)`
-#: with `home` = `<round>/home`, the farm `scripts/automod/worktree.py:78
+#: with `home` = `<round>/home`, the farm `scripts/automod/worktree.py:100
 #: ensure_round_home` builds. Measured in this round's farm: `obsidian` and `.config`
 #: are SYMLINKS to the live ones, so a path built from `$HOME` names the same bytes but
 #: a DIFFERENT STRING — which is how SM_20261020_175859 lost two nodes, comparing a

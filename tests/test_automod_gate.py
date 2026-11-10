@@ -422,6 +422,74 @@ def test_preflight_judges_the_keys_inside_an_added_config_block(
         assert buckets["config_value"] == ["config.yaml"], buckets
 
 
+@pytest.mark.parametrize("dirt", ["untracked", "modified"])
+def test_preflight_refuses_a_worktree_the_commit_does_not_describe(
+        live_repo, tmp_path, monkeypatch, dirt):
+    """The gate records `head` and the promoter lands that sha; every rung between
+    runs in the working directory. With live HEAD unmoved nothing asked whether
+    the two agree, so a module the round wrote and never `git add`ed passed
+    `static` and `tests` from disk and was absent from what landed. Base is
+    deliberately unmoved here: the rebase path already refused dirt."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt"
+    git(live_repo, "worktree", "add", "-q", "-b", f"automod/{dirt}", str(wt), base)
+    (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "the committed half")
+    if dirt == "untracked":
+        (wt / "app" / "helper.py").write_text("H = 1\n", encoding="utf-8")
+        named = "app/helper.py"
+    else:
+        (wt / "app" / "m.py").write_text("V = 3\n", encoding="utf-8")
+        named = "app/m.py"
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, reason, data = g.rung_preflight()
+    assert not ok and "uncommitted" in reason and named in reason, reason
+    assert data["uncommitted"] == [named]
+    assert not data.get("external_blocker"), "the round's own state is no exemption"
+
+
+def test_preflight_does_not_count_an_ignored_file_as_uncommitted(live_repo, tmp_path, monkeypatch):
+    (live_repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    git(live_repo, "add", "-A")
+    git(live_repo, "commit", "-q", "-m", "ignore caches")
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt"
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/ign", str(wt), base)
+    (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "ordinary change")
+    (wt / "app" / "__pycache__").mkdir()
+    (wt / "app" / "__pycache__" / "m.pyc").write_bytes(b"x")
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, reason, _ = g.rung_preflight()
+    assert ok, reason
+
+
+def test_preflight_reads_the_worktree_status_without_taking_the_index_lock(
+        live_repo, tmp_path, monkeypatch):
+    """The round's own turn may be committing in that worktree while the gate
+    reads it: a plain `git status` refreshes the index under `index.lock`, and a
+    `git commit` that meets the lock fails. Read-only, it leaves the index as is."""
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt"
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/nolock", str(wt), base)
+    (wt / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "ordinary change")
+    index = Path(git(wt, "rev-parse", "--git-path", "index").stdout.strip())
+    index = index if index.is_absolute() else wt / index
+    # Same bytes, new stat: a status that may refresh the index rewrites it.
+    old = time.time() - 120
+    os.utime(wt / "app" / "m.py", (old, old))
+    before = index.stat().st_mtime_ns, index.read_bytes()
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, reason, _ = g.rung_preflight()
+    assert ok, reason
+    assert (index.stat().st_mtime_ns, index.read_bytes()) == before, \
+        "preflight rewrote the worktree's index, so it held index.lock"
+
+
 def test_preflight_accepts_an_in_scope_diff(live_repo, tmp_path, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"

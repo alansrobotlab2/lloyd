@@ -2204,7 +2204,7 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     fourth return value because one `grade_vault` call can issue several
     generations (#2341's shrink), so a single `usage` slot cannot say which one ran
     out, and because the 3-tuple is `vault_round.GRADER`'s contract, which a
-    64-caller test corpus and `agent_mcp/automod.py:919` all unpack. A caller that
+    64-caller test corpus and `agent_mcp/automod.py:924` all unpack. A caller that
     passes nothing loses nothing.
 
     The `kind` is `pass`, `retry`, `unsound`, `skipped` — and, since #2263,

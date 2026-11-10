@@ -1618,7 +1618,7 @@ def test_a_capture_pass_writes_its_watermark_in_the_root_and_leaves_the_tree_cle
 
     The dirt the old binding made was not invisible-but-harmless and not harmless-but-
     visible: `.gitignore` `!scripts/**/*.json` un-ignores where the file sat, so a pass
-    produced `git status` dirt, and `scripts/automod/worktree.py:301` runs `git add -A`
+    produced `git status` dirt, and `scripts/automod/worktree.py:343` runs `git add -A`
     then `commit --no-verify` over a round's worktree — vault `c2152284` is what a sweep
     of unattributed paths looks like on the other side.
     """

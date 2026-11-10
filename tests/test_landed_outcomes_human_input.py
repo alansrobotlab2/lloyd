@@ -21,7 +21,7 @@ neither is an absence the block prints instead of dropping silently.
 
 The ledger fixtures use the record shapes their live writers emit, because the
 answered-escalation join is graded on whether it reads records that exist:
-`review_escalated` comes from `workers/sources/autocode.py:1586` with `item_id`,
+`review_escalated` comes from `workers/sources/autocode.py:1625` with `item_id`,
 `round_id`, `reason` and sometimes `decider`; `human_paths` from `backlog.py:724` with
 `item_id` always and `round_id` on 18 of its 24 live rows; `hand_settle` from
 `scripts/automod/owed_check.py` with `item_id` and `outcome` — never `decision` — and

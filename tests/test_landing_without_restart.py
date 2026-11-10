@@ -320,7 +320,7 @@ def test_a_tree_that_did_not_move_is_a_failed_landing(tree, monkeypatch):
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         return real_run(argv, *a, **k)
     monkeypatch.setattr(P.subprocess, "run", run)
-    monkeypatch.setattr(P, "_rollback_inline", lambda live, target: {})
+    monkeypatch.setattr(P, "_rollback_inline", lambda *a, **k: {})
     with pytest.raises(P.PromoteError, match="live HEAD is"):
         P.promote("SM_COLD", tree["wt"], tree["base"], gate_report={"head": tree["head"]})
 

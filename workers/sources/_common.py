@@ -718,7 +718,7 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     # The outbound content gate (#1136) is armed on the same registry, and like
     # the grant gate above it takes its scope from `policy.current_scope`, which
     # the pool binds to `grant_scope_for(item)` around every job
-    # (`workers/pool.py:681`). Passing a scope here would invent a second
+    # (`workers/pool.py:688`). Passing a scope here would invent a second
     # spelling of the same string and could only drift from the one the grant
     # gate is already using.
     from app.harness import HookRegistry
@@ -1012,7 +1012,16 @@ class DrainActive(RuntimeError):
 
 
 class TurnTimeout(RuntimeError):
-    """The turn outlived its own budget and was cancelled in the backend."""
+    """The turn outlived its own budget and was cancelled in the backend.
+
+    `session_id` names the turn's session; `cancelled` is whether the backend
+    accepted the cancel (None when the raiser did not say)."""
+
+    def __init__(self, message: str = "", *, session_id: str | None = None,
+                 cancelled: bool | None = None) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+        self.cancelled = cancelled
 
 
 class _SSEParser:
@@ -1377,5 +1386,21 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
         cancelled = await _cancel_session_turn(backend, session_id)
         raise TurnTimeout(
             f"worker turn in {session_id} exceeded {timeout_seconds:.0f}s; "
-            f"backend cancel {'accepted' if cancelled else 'FAILED'}") from None
+            f"backend cancel {'accepted' if cancelled else 'FAILED'}",
+            session_id=session_id, cancelled=cancelled) from None
+    except asyncio.CancelledError as exc:
+        # The caller was cancelled (the pool's own timeout, a pool stop). The
+        # chat path survives a client disconnect, so without this the backend
+        # turn runs on with nobody owning it. Shielded: a second cancel must
+        # not cut the request that stops the turn. The session and whether the
+        # backend took the cancel ride on the exception, as on `TurnTimeout`:
+        # the caller's cancel path never gets `out` back.
+        exc.session_id, exc.backend_cancelled = session_id, None
+        try:
+            exc.backend_cancelled = await asyncio.shield(
+                _cancel_session_turn(backend, session_id))
+        except asyncio.CancelledError as again:
+            again.session_id, again.backend_cancelled = session_id, None
+            raise
+        raise
     return out

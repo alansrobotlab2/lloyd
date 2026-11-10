@@ -2248,7 +2248,7 @@ def test_a_tick_killed_on_the_wire_still_raises_it_to_the_pool_unchanged(board, 
     """Clause 2: recording must not convert the death into a returned record.
 
     This is the correction triage put on the item's own proposal. The pool's
-    generic arm (`workers/pool.py:2043`, `error_msg = f"{type(e).__name__}: {e}"`)
+    generic arm (`workers/pool.py:2069`, `error_msg = f"{type(e).__name__}: {e}"`)
     is what calls `mark_failed` and stamps `meta.failure_kind`; a returned dict
     goes to `mark_completed` with no retry. Live proof the retry is load-bearing:
     11 of the 13 failed queue rows carry `attempts=2` and their SECOND run
@@ -5043,9 +5043,9 @@ def test_a_confirmed_item_the_steward_parks_is_still_scored_as_a_disagreement(
 # recover, because a bare `confirmed` is not one observation but two machine
 # branches wearing one word. `desired_statuses` asks a second question of a
 # confirmed verdict — `elif iid in confirmed and not is_human_only(...)`
-# (scripts/automod/backlog.py:6576) — and a human-only confirmation falls past
+# (scripts/automod/backlog.py:6607) — and a human-only confirmation falls past
 # it into `("draft", "triaged confirmed; not for the unattended loop")`
-# (scripts/automod/backlog.py:6584), while a plain one goes to `up_next`.
+# (scripts/automod/backlog.py:6615), while a plain one goes to `up_next`.
 # `_triage_map` never asked that second question: it mapped every confirmed id to
 # `confirmed`, and the prompt's `up_next` -> `draft` bullet in
 # workers/sources/board_steward.py:305-308 then orders the model to answer a

@@ -309,7 +309,7 @@ def _round_worktree_session(sid: str,
     existing reader for that key, because the round's own state
     (`~/.local/state/lloyd-automod/rounds/`) names a worktree and not a session, and a
     refusal is raised in a tool process that knows only the session id.
-    `scripts/automod/round.py:155` stamps the round's turn with `directory=<worktree>`,
+    `scripts/automod/round.py:156` stamps the round's turn with `directory=<worktree>`,
     so the recorded start directory is `…/lloyd-work/SM_<ts>/home/lloyd` (#2718). That
     reader is also what sanitises the id and drops a value pointing inside the live
     checkout, so this predicate inherits both instead of re-implementing either;

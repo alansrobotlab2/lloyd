@@ -2,7 +2,7 @@
 cannot report being switched off, and nothing else looked either (#1747).
 
 Every alarm the fleet has lives in `WorkerPool._scheduler_loop`
-(`workers/pool.py:960`, awaiting `_watch_dispatch` and `_watch_fleet`). Two
+(`workers/pool.py:968`, awaiting `_watch_dispatch` and `_watch_fleet`). Two
 supported routes stop that loop, and both leave the system looking healthy from
 every surface the backend itself publishes:
 

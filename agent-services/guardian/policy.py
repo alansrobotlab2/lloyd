@@ -44,7 +44,16 @@ DEFAULT_BOOT_GRACE = 30.0
 # code reverted (see the 2026-09-06 incident) and how a merely *degraded*
 # aggregator gets read as a dead one.
 PROBE_FAIL_STREAK = 3            # REFUSED: nothing is listening. 3 x 5s = 15s.
-PROBE_TIMEOUT_STREAK = 24        # TIMEOUT: accepted but busy. 24 x 5s = 2 min.
+# TIMEOUT: accepted but busy. A budget in SECONDS from the streak's first
+# timeout (time.monotonic), not ticks: a timed-out tick costs the 10s probe plus
+# the 5s sleep, so "24 ticks" was really >= 360s. It may outlast the 300s
+# observation window: `maybe_settle` defers while any probe streak is open, so
+# a hung promotion is still under observation when this budget trips.
+PROBE_TIMEOUT_BUDGET_SECONDS = 300.0
+PROBE_TIMEOUT_MIN_TICKS = 4     # and at least this many timed-out probes
+# Settle defers while any probe streak is open. Kinds reset each other, so a
+# box flapping between timeout and 503 defers forever: warn once past this.
+SETTLE_DEFER_ALERT_SECONDS = 900.0
 # HTTP_ERROR: the socket answered with a non-200. The process is demonstrably
 # alive and serving, so this is never death — but a backend parked in
 # `degraded` (a router that failed to mount, startup that never completed) is
@@ -58,6 +67,10 @@ PROBE_HTTP_ERROR_STREAK = 36     # 36 x 5s = 3 minutes of answering, badly
 # supervisord itself unreachable for this many consecutive ticks before we
 # try to restart the unit. Never a code-rollback trigger.
 SUPERVISORD_DOWN_STREAK = 3
+
+# Consecutive ticks that raised before one alert says so. The heartbeat's
+# `error` state is read by nothing and WATCHDOG=1 is still sent.
+TICK_ERROR_ALERT_AFTER = 5
 
 # Consecutive ticks `/api/workers/status` must report no running pool, with
 # `/health` answering ok throughout, before the silence becomes an alert. Two
@@ -637,7 +650,7 @@ def deployed_watchdog_refusal(module_file: "str | None" = None,
     """None when the caller's `guardian.py` IS the promoted watchdog; else why not.
 
     Why a *location* check rather than a `HOME` or state-dir check, which is what the
-    2026-10-21 halt defeats: `scripts/automod/worktree.py:65` symlinks every home entry
+    2026-10-21 halt defeats: `scripts/automod/worktree.py:87` symlinks every home entry
     except `HOME_LINK_SKIP = {lloyd, lloyd-data}` into the live account, so a round's
     `<home>/.local/state/lloyd-guardian` IS the deployed state dir, and the review-prefetch
     rung runs with the real `HOME` anyway. Both of those answers say "owner" for the
@@ -685,7 +698,7 @@ def published_watchdog_script(module_file: "str | None" = None,
     while the writer's tree exists is not an instruction.
 
     The route is chosen the way `deployed_watchdog_refusal` decides whether a process IS
-    the watchdog, for the same reason: `scripts/automod/worktree.py:65` symlinks every
+    the watchdog, for the same reason: `scripts/automod/worktree.py:87` symlinks every
     home entry except `lloyd`/`lloyd-data` into a round, so `<GUARDIAN_STATE>/bin` is the
     promoted snapshot whichever tree loaded this module, and `bin/<script>` is what
     `lloyd-guardian.service:29` actually runs. So the same render comes back from the

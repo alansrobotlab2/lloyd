@@ -103,7 +103,7 @@ class Stub:
                         "paused": stub.paused,
                         "depth": ({"email-triage": {"queued": 2, "running": 1}} if busy
                                   else {"email-triage": {"queued": 2, "failed": 1}}),
-                        # `WorkerPool.status()` (`workers/pool.py:773-792`) is what this
+                        # `WorkerPool.status()` (`workers/pool.py:781-792`) is what this
                         # route returns, so the stub returns that shape too: `paused` and
                         # `paused_by` live INSIDE `pool`, and `PoolPause.status()` treats
                         # a body without them as an unreadable pool — as does the window.
@@ -375,7 +375,7 @@ def test_the_hold_state_machine_is_the_one_the_context_rot_window_already_used()
 
     `PoolPause.__aexit__` resumes only a pause it took and refuses to lift one the
     automod promoter still owns, because an OPERATOR resume lifts BOTH holders
-    (`workers/pool.py:716-728`) and would un-pause a landing's drain mid-flight. The
+    (`workers/pool.py:723-728`) and would un-pause a landing's drain mid-flight. The
     window subclass adds refusals on top of that machine rather than replacing it, so
     the rule a real promotion depends on is the rule that is running here.
     """
@@ -599,7 +599,7 @@ def test_the_runner_never_lifts_a_hold_the_automod_promoter_still_owns(tmp_path)
 
     The window's own resume did not clear the hold and `paused_by` still names `automod`,
     so the last-resort resume has to stay sheathed — an OPERATOR resume lifts both
-    holders (`workers/pool.py:716-728`), which would take the promoter's restart
+    holders (`workers/pool.py:723-728`), which would take the promoter's restart
     protection off mid-drain. Exit non-zero, hold intact, and not one resume POST.
     """
     db = make_db(tmp_path)

@@ -1949,7 +1949,7 @@ def test_the_vault_copy_of_the_bench_mine_witness_is_the_same_bytes_as_the_fixtu
 # ── #2309: `failure-ledger` is scheduled, and §6 names what it is measured on ──
 #
 # #2079 registered the source without giving it a `workers.sources` block, so
-# `WorkerPool._scheduler_pass` read `{}` for it (`workers/pool.py:1176`) and stepped
+# `WorkerPool._scheduler_pass` read `{}` for it (`workers/pool.py:1202`) and stepped
 # past it at `:1177` without calling `enqueue_if_due`. Three days passed with the sweep
 # running only inside its own tests, and nothing here could have caught it: the two
 # nodes that touch the roster pin one row per registered source and config ⊆ registry,
@@ -2071,10 +2071,10 @@ def test_the_failure_ledger_block_in_config_yaml_cites_code_not_line_numbers():
     """#3608: the `failure-ledger:` block points at code text, never at a line number.
 
     All seven numeric citations this block carried rotted but one. Written together
-    in `a82cf77c` (#2309) and never revised, they read `workers/pool.py:1179` for
+    in `a82cf77c` (#2309) and never revised, they read `workers/pool.py:1205` for
     `_scheduler_pass` (a blank line by 2026-11-03), `workers/sources/failure_ledger.py:228`
     for the min-interval read (a `finally:`), `(:103)` for `DEFAULT_INTERVAL_SECONDS`
-    (a sentence of prose), `workers/pool.py:1376` for the wall-clock read (unrelated
+    (a sentence of prose), `workers/pool.py:1402` for the wall-clock read (unrelated
     config-source prose), `workers/sources/failure_ledger.py:305` for the
     `run_prompt_on_primary` call (`conn.close()`), `:303-304` for
     `payload.get("max_turns")` (`return rows` / `finally:`), and `(:90)` for
@@ -3123,8 +3123,8 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     source's `last_sweep` unconditionally after `sweep_and_dispatch` returns, so it
     is the sweep's clock and says nothing about dispatch — 0 `failure_dispatches` rows
     sat against it at 2026-10-30T00:28Z. The pool's `last_enqueue_check`
-    (`workers/pool.py:1720`) is stamped on every ask and `last_enqueue_ok`
-    (`workers/pool.py:1731`) on a clean return only; `enqueue_if_due` returns early
+    (`workers/pool.py:1746`) is stamped on every ask and `last_enqueue_ok`
+    (`workers/pool.py:1757`) on a clean return only; `enqueue_if_due` returns early
     inside `min_interval_seconds` (`workers/sources/failure_ledger.py:250`) and that
     early return is clean, so the pair advances once per hourly ask whether or not the
     source swept. The retired paragraph quoted `last_enqueue_ok` as 'a pass completes
@@ -3147,7 +3147,7 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     # a completed pass. `The stamp `last_enqueue_ok` read 2026-11-01T04:59Z, so the
     # source is keeping up.` walked through it — and that sentence is the misreading
     # clause 5 names: `last_enqueue_check` is stamped on every ask, clean return or not
-    # (`workers/pool.py:1720`), so neither key says anything about this source unless
+    # (`workers/pool.py:1746`), so neither key says anything about this source unless
     # the sentence carrying it says so.
     pair_says = [s for s in sentences if _WM_PAIR.search(s)]
     assert pair_says, (
@@ -3210,11 +3210,11 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     # claims about the tree, and a doc-claims file that only greps the doc grades
     # prose against prose.
     pool = (ROOT / "workers" / "pool.py").read_text(encoding="utf-8").splitlines()
-    assert "last_enqueue_check" in pool[1719], (
-        f"workers/pool.py:1720 no longer stamps the pool's attempt key ({pool[1719]!r}) "
+    assert "last_enqueue_check" in pool[1745], (
+        f"workers/pool.py:1746 no longer stamps the pool's attempt key ({pool[1745]!r}) "
         "while §6 cites that line for it")
-    assert "OK_WM_KEY" in pool[1730], (
-        f"workers/pool.py:1731 no longer stamps the clean-return key ({pool[1730]!r})")
+    assert "OK_WM_KEY" in pool[1756], (
+        f"workers/pool.py:1757 no longer stamps the clean-return key ({pool[1756]!r})")
     src = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
         encoding="utf-8").splitlines()
     assert "WATERMARK_LAST_SWEEP" in src[273], (

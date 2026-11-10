@@ -139,6 +139,8 @@ def bootstrap_chronic(paths: list[str], *, max_bytes: int,
                 stamp = line[:13]  # "YYYY-MM-DD HH"
                 hours_by_sig.setdefault(parsed["signature"], set()).add(stamp)
             for ev in detect.extract_events(text):
-                if ev["level"] == "TRACEBACK":
-                    hours_by_sig.setdefault(ev["signature"], set()).add("tb")
+                # A traceback is dated by the nearest preceding timestamped
+                # line; one with none (mcp.err) can never become chronic.
+                if ev["level"] == "TRACEBACK" and ev.get("hour"):
+                    hours_by_sig.setdefault(ev["signature"], set()).add(ev["hour"])
     return {sig for sig, hours in hours_by_sig.items() if len(hours) >= min_distinct_hours}

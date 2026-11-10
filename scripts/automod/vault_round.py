@@ -1782,7 +1782,7 @@ def _witness_findings() -> list[str]:
     the answer that keeps this readable: one path in the whole vault has a fixture.
 
     Report-only, and it rides the returned dict rather than stdout. `land()` answers
-    its caller with one JSON document — `agent_mcp/automod.py:941` hands the agent
+    its caller with one JSON document — `agent_mcp/automod.py:946` hands the agent
     `json.dumps` of this dict, `main()` prints it — so a printed warning would corrupt
     the only channel the writer reads, and refusing would let one job's drift block
     every later land. Those are the wrapper's two reasons for not blocking, unchanged

@@ -211,7 +211,7 @@ def test_the_write_deny_set_is_exactly_one_constant():
     # template matters just as exactly: one directory up, `~/.local/share/uv`,
     # also holds the uv *tools* tree, and automod's own promotion execs
     # `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
-    # (`scripts/automod/promote.py:97`) — an entry widened to it would put the
+    # (`scripts/automod/promote.py:98`) — an entry widened to it would put the
     # parachute inside the deny-set. The sibling is refused behaviourally, by
     # name, in `test_the_uv_store_entry_covers_the_interpreter_and_no_more`.
     assert "uv" in entries[UV_STORE_TEMPLATE], entries[UV_STORE_TEMPLATE]
@@ -313,7 +313,7 @@ def test_the_uv_store_entry_covers_the_interpreter_and_no_more(linked_home):
     Half two is the scope rail. `~/.local/share/uv/tools` is where uv puts its
     installed tools, and automod's own promotion execs
     `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
-    (`scripts/automod/promote.py:97`), so an entry widened one directory up would
+    (`scripts/automod/promote.py:98`), so an entry widened one directory up would
     refuse the parachute; a `.venvs`-shaped path in an unrelated project is
     ordinary work, and `pyvenv.cfg` inside the real `.venvs` still belongs to the
     entry that has always covered it.
@@ -654,7 +654,7 @@ def test_the_vault_root_is_cited_as_a_symbol_with_no_line_pointer_left():
     exact form this file used, must catch a pointer into this file's *own* line
     numbers, and must stay silent on the symbol spelling — otherwise "no pointers"
     would only be evidence of a dead regex. Scope, honestly stated: the file still
-    cites `scripts/automod/promote.py:97`, which this reader does not cover and
+    cites `scripts/automod/promote.py:98`, which this reader does not cover and
     which measures accurate today; that is a finding on #1760, not a claim here.
     """
     text = SRC_PATH.read_text(encoding="utf-8")

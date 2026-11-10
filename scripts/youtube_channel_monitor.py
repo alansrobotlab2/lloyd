@@ -155,7 +155,7 @@ TMP_CLONES = os.path.expanduser("~/.cache/ai-engineer-clones")
 # Writing a note is not the same as keeping one. An enrichment note that only
 # exists on disk has no history, and three live routes delete an untracked vault
 # file: the guardian's `git stash push -u` and `git clean -fd -- <paths>`
-# (agent-services/guardian/rollback.py:204, :221) and a refused
+# (agent-services/guardian/rollback.py:209, :221) and a refused
 # `automod_vault_land` (#3375's `_kept_when_untracked` spares only what it
 # arming covers). Six notes died that way — `knowledge/github/siyan-zhao-OPSD.md`,
 # `-thunlp-OPD.md`, `-StellarCurtain-OPDArena.md` (bundle oAtwkQg4ijI),

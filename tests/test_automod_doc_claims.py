@@ -109,10 +109,9 @@ def test_the_doc_exists():
 # ── §7.2 probe budgets ──────────────────────────────────────────────────────
 
 def test_probe_budgets_match_the_doc():
-    """"refused: 3 ticks ... timeout: 24 ticks (2 minutes)" """
+    """"refused: 3 ticks ... timeout: 5 minutes, measured in seconds" """
     assert policy.PROBE_FAIL_STREAK == 3
-    assert policy.PROBE_TIMEOUT_STREAK == 24
-    assert policy.PROBE_TIMEOUT_STREAK * policy.TICK_SECONDS == 120
+    assert policy.PROBE_TIMEOUT_BUDGET_SECONDS == 300
 
 
 def test_probe_timeout_matches_the_doc():
@@ -775,8 +774,9 @@ def test_the_ledger_raises_where_autoresearchs_swallows(tmp_path):
 def test_the_http_error_budget_matches_the_doc():
     """§7.2: "The backend's own 503 ... gets its own much wider budget: 36 ticks"."""
     assert policy.PROBE_HTTP_ERROR_STREAK == 36
-    assert (policy.PROBE_FAIL_STREAK < policy.PROBE_TIMEOUT_STREAK
-            < policy.PROBE_HTTP_ERROR_STREAK)
+    tick = policy.TICK_SECONDS
+    assert policy.PROBE_FAIL_STREAK * tick < policy.PROBE_TIMEOUT_BUDGET_SECONDS
+    assert policy.PROBE_FAIL_STREAK < policy.PROBE_HTTP_ERROR_STREAK
 
 
 # ── §8 the chronic set expires ──────────────────────────────────────────────

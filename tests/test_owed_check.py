@@ -407,6 +407,49 @@ def test_an_amendment_that_cannot_be_applied_leaves_the_decision_owed(isolated, 
         assert out["moved"] == "reopened"
 
 
+# ── 2026-11-10: a rewording must be a clause ─────────────────────────────────
+
+#: The two live rows that booked a non-clause as the contract (2026-11 ledger).
+_DECLINED = ["not amended — see ruling",
+             "not amended — clause 5 is checkable as written (amend_clause: null)",
+             "Unchanged", "none", "(as written)"]
+
+
+@pytest.mark.parametrize("text", _DECLINED)
+def test_a_reopen_whose_text_declines_an_amendment_keeps_the_clause(isolated, text):
+    """#2620 and #3688 closed `done` against the literal sentence "not amended —
+    …": the field was booked as the clause. That sentence means a plain reopen."""
+    p = _contract(isolated, 92, ["a — tests/a.py", "b — tests/b.py"])
+    owing = O.owing_items()[0]
+    out = O.apply_verdict(p, owing.entries, [{
+        "n": 1, "outcome": "reopen", "evidence": "e", "ruling": "r",
+        "amend_clause": {"clause": 2, "text": text}}], item_id=92)
+    fm = fm_of(p)
+    assert fm["acceptance_clauses"] == ["a — tests/a.py", "b — tests/b.py"]
+    assert out["moved"] == "reopened"
+    assert not _events("clause_amended")
+
+
+@pytest.mark.parametrize("text", ["1]}],", "item_id", "b — tests/b.py"])
+def test_the_writer_refuses_text_that_is_not_a_new_clause(isolated, text):
+    p = _contract(isolated, 93, ["a — tests/a.py", "b — tests/b.py"])
+    with pytest.raises(ValueError):
+        O.amend_item_clause(p, 2, text, "why", item_id=93)
+    assert fm_of(p)["acceptance_clauses"] == ["a — tests/a.py", "b — tests/b.py"]
+
+
+def test_a_work_answer_that_files_nothing_is_dated_and_counted(isolated):
+    """Bare, the entry was due again on the next tick: 53 of 549 owed-check
+    sessions in the week to 2026-11-09 were this answer repeated."""
+    p = _contract(isolated, 94, ["a — tests/a.py"])
+    owing = O.owing_items()[0]
+    O.apply_verdict(p, owing.entries, [{"n": 1, "outcome": "work", "evidence": "e"}],
+                    item_id=94)
+    (entry,) = O.entries_of(fm_of(p), derived=False)
+    assert entry["rechecks"] == 1 and entry.get("recheck_after"), entry
+    assert O.owing_items() == [], "re-offered on the next tick"
+
+
 # ── 2026-11-08: two answers naming one entry are ambiguous, not last-wins ───
 
 #: #3908's own clause 1 shape: a human-only delete no round diff can carry.

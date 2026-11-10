@@ -469,6 +469,17 @@ BACKLOG_SKIP_STATE_NAME = "backlog-skipped.json"
 BACKLOG_READ_TIMEOUT_SECONDS = 30.0
 
 
+def _read_note(path) -> str:
+    """A note or ALERT.md this module rewrites. One invalid byte must not raise
+    out of every tick: undecodable bytes come back as surrogates, and
+    `_write_note` puts them back byte for byte."""
+    return path.read_text(encoding="utf-8", errors="surrogateescape")
+
+
+def _write_note(path, text: str) -> None:
+    path.write_text(text, encoding="utf-8", errors="surrogateescape")
+
+
 class Notifier:
     def __init__(self, *, ledger: Path, state_dir: Path, vault_root: str,
                  backend_url: str = "http://127.0.0.1:8080",
@@ -848,7 +859,7 @@ class Notifier:
         try:
             if not path.is_file():
                 return True
-            body = path.read_text(encoding="utf-8")
+            body = _read_note(path)
         except OSError:
             return False
         split = self._alert_file_split(body)
@@ -866,7 +877,7 @@ class Notifier:
                   + f"\n{ALERT_CLEARED_PREFIX} {stamp} — {note_text}\n\n"
                   + ALERT_CLEARED_BANNER + "\n\n" + quoted + "\n")
         try:
-            path.write_text(sealed, encoding="utf-8")
+            _write_note(path, sealed)
         except OSError:
             return False
         return True
@@ -926,7 +937,7 @@ class Notifier:
         try:
             if not path.is_file():
                 return None
-            body = path.read_text(encoding="utf-8")
+            body = _read_note(path)
         except OSError:
             return None
         split = self._alert_file_split(body)
@@ -981,7 +992,7 @@ class Notifier:
                 note.write_text(daily_note.fresh_header(self._stamp(),
                                                         self._today().isoformat()),
                                 encoding="utf-8")
-            body = note.read_text(encoding="utf-8") if exists else ""
+            body = _read_note(note) if exists else ""
             open_at = self._daily_open_at(body, title) if coalesce else None
             if open_at is not None:
                 start, end = open_at
@@ -999,7 +1010,7 @@ class Notifier:
                     refreshed += f"\n\n{carry}"
                 body = (body[:start] + lead + refreshed
                         + "\n\n" + DAILY_STILL_OPEN + "\n" + body[end:])
-                note.write_text(body, encoding="utf-8")
+                _write_note(note, body)
                 return True
             # The append branch is where a day's note gains a body, and it is the one
             # place on this path that can see the whole note. Both doors into it re-paste
@@ -1219,7 +1230,7 @@ class Notifier:
                 f.write(f"\n{line}\n")
             return True
         start, end, _old = span
-        note.write_text(body[:start] + line + body[end:], encoding="utf-8")
+        _write_note(note, body[:start] + line + body[end:])
         return True
 
     def resolve(self, title: str, note_text: str,
@@ -1319,7 +1330,7 @@ class Notifier:
             if note is None or not note.is_file():
                 continue
             try:
-                body = note.read_text(encoding="utf-8")
+                body = _read_note(note)
             except OSError:
                 wrote = False
                 continue
@@ -1348,7 +1359,7 @@ class Notifier:
             if sealed == body:
                 continue
             try:
-                note.write_text(sealed, encoding="utf-8")
+                _write_note(note, sealed)
             except OSError:
                 wrote = False
             else:

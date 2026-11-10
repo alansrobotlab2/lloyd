@@ -873,8 +873,10 @@ def test_maybe_flush_spawns_once_at_a_natural_gap(monkeypatch, tmp_path):
 def test_the_implement_source_asks_for_a_flush_before_the_free_check_and_at_turn_end():
     import inspect
     src = inspect.getsource(I.enqueue_if_due)
-    assert src.index("_maybe_flush") < src.index("_loop_is_free()")
-    assert "_maybe_flush(exclude_key=getattr(item, \"dedup_key\", None))" in inspect.getsource(I.execute)
+    assert src.index("_maybe_flush") < src.index("to_thread(_loop_is_free)")
+    assert "_turn_end_passes, candidate.id, started,\n" in inspect.getsource(I.execute)
+    assert "getattr(item, \"dedup_key\", None))" in inspect.getsource(I.execute)
+    assert "_maybe_flush(exclude_key=exclude_key)" in inspect.getsource(I._turn_end_passes)
 
 
 # ── one item, two slots: the implement claim (#3370) ───────────────────────
@@ -968,7 +970,7 @@ def _stub_the_turn(monkeypatch, seen):
         # skip row a second into it. A stub that returns at once inverts that:
         # it lets the winner read a ledger no production probe ever saw. So the
         # stub waits for the decline first and records what the winner then sees.
-        decline_seen = _wait_for_row(candidate.id, "skipped")
+        decline_seen = _wait_for_row(candidate.id, "declined")
         seen["probe"].append({
             "claimed": sorted(B.implement_claimed_ids()),
             "selector": B.select_confirmed(S.LEDGER_PATH),
@@ -1066,7 +1068,7 @@ def test_the_item_is_claimed_before_its_started_row_and_a_selector_cannot_name_i
         "the other slot never declined while the winner was in its probe: the " \
         "interleaving this node pins did not happen"
     assert p["claimed"] == [41], p
-    assert p["rows_already_written"] == ["skipped"], \
+    assert p["rows_already_written"] == ["declined"], \
         f"the only row the item may have while the winner is mid-probe is the " \
         f"other slot's decline; a `started` row here is the claim taken too late: " \
         f"{p['rows_already_written']}"
@@ -1077,7 +1079,7 @@ def test_the_item_is_claimed_before_its_started_row_and_a_selector_cannot_name_i
 def test_the_decline_names_the_holder_and_is_not_the_no_candidate_skip(isolated, monkeypatch):
     """"Skipped, already in flight" and "no candidate" must be told apart from the ledger.
 
-    Both are `phase: "skipped"`, and a reader a day later has only the row. The
+    The decline is a `phase: "declined"` row, and a reader a day later has only the row. The
     decline names the item and the holder — the other slot's queue key, the same
     string that appears in that slot's later `started` row — and writes no
     `started` row of its own, because a `started` row would make the item's
@@ -1086,7 +1088,7 @@ def test_the_decline_names_the_holder_and_is_not_the_no_candidate_skip(isolated,
     _ready(isolated, 42)
     _stub_the_turn(monkeypatch, {})
     _one_tick_two_slots()
-    skipped = [r for r in _rows() if r.get("phase") == "skipped"]
+    skipped = [r for r in _rows() if r.get("phase") == "declined"]
     assert len(skipped) == 1, skipped
     assert skipped[0]["item_id"] == 42 and skipped[0]["held_by"] == "autocode:round", skipped[0]
     assert skipped[0]["slot"] == "autocode:round:1", skipped[0]
@@ -1161,7 +1163,7 @@ def test_a_two_claim_decline_returns_skipped_and_writes_one_row_without_raising(
 
     assert res["status"] == "skipped", res
     assert "already in flight" in res["summary"], res
-    skipped = [r for r in _rows() if r.get("phase") == "skipped"]
+    skipped = [r for r in _rows() if r.get("phase") == "declined"]
     assert len(skipped) == 1, f"exactly one decline row, got: {skipped}"
     assert skipped[0]["event"] == "backlog_implement", skipped[0]
     assert skipped[0]["item_id"] == 100, \
@@ -1183,7 +1185,7 @@ def test_the_two_claim_decline_row_carries_also_held_as_item_ids_beside_held_by(
     _items_held_on_slots(isolated, monkeypatch, (100, 101))
     asyncio.run(I.execute(_slot("autocode:round:2")))
 
-    skipped = [r for r in _rows() if r.get("phase") == "skipped"]
+    skipped = [r for r in _rows() if r.get("phase") == "declined"]
     assert len(skipped) == 1, skipped
     row = skipped[0]
     assert row["held_by"] == "autocode:round", row
@@ -1210,7 +1212,7 @@ def test_a_single_claim_decline_writes_held_by_and_never_an_also_held_key(isolat
     _items_held_on_slots(isolated, monkeypatch, (200,))
     res_a = asyncio.run(I.execute(_slot("autocode:round:1")))
     assert res_a["status"] == "skipped", res_a
-    rows_a = [r for r in _rows() if r.get("phase") == "skipped"]
+    rows_a = [r for r in _rows() if r.get("phase") == "declined"]
     assert len(rows_a) == 1, rows_a
     assert rows_a[0]["item_id"] == 200 and rows_a[0]["held_by"] == "autocode:round", rows_a[0]
     assert "also_held" not in rows_a[0], \
@@ -1222,7 +1224,7 @@ def test_a_single_claim_decline_writes_held_by_and_never_an_also_held_key(isolat
     _ready(isolated, 210)
     _stub_the_turn(monkeypatch, {})
     _one_tick_two_slots()
-    rows_b = [r for r in _rows() if r.get("phase") == "skipped" and r.get("item_id") == 210]
+    rows_b = [r for r in _rows() if r.get("phase") == "declined" and r.get("item_id") == 210]
     assert len(rows_b) == 1, rows_b
     assert rows_b[0]["item_id"] == 210 and rows_b[0]["held_by"] == "autocode:round", rows_b[0]
     assert rows_b[0]["slot"] == "autocode:round:1", rows_b[0]
@@ -1254,7 +1256,7 @@ def test_the_two_claim_decline_consumes_nothing_from_the_ready_pool(isolated, mo
     after = B.select_confirmed(S.LEDGER_PATH)
     assert after is not None and after[0].id == 100, \
         f"the released item is takeable again: {after and after[0].id}"
-    assert sorted(r.get("phase") for r in _rows()) == ["skipped"], \
+    assert sorted(r.get("phase") for r in _rows()) == ["declined"], \
         "no started row: nothing here made either item spent"
 
 
@@ -1325,10 +1327,11 @@ def test_the_claim_lives_on_the_dispatch_side_and_round_start_still_cuts_any_sec
     """
     import inspect
     src = inspect.getsource(I.execute)
-    claim = src.index("B.claim_for_implement")
+    assert "B.claim_for_implement(slot" in inspect.getsource(I._select_and_claim)
+    claim = src.index("to_thread(_select_and_claim, slot)")
     for after, what in (("_red_tree_settled_at_pickup, candidate)", "the red-tree probe"),
                         ("_warm_session(slot)", "the warm-session load"),
-                        ('"phase": "started"', "the `started` row"),
+                        ("_record_start, candidate", "the `started` row"),
                         ("_run_and_record(", "the turn itself")):
         assert claim < src.index(after), f"the claim must precede {what}"
     assert src.index("B.release_implement_claim(slot)") > src.index("_run_and_record("), \

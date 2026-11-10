@@ -1210,7 +1210,7 @@ def _outranked_clause(
     minutes across 2026-10-13 is a head age that FALLS, which is only possible while the
     head is being claimed and replaced. A stalled pool's head age rises. What keeps its
     bytes exactly is the case this returns "" for: a queue nothing has claimed, whose
-    sentence `agent-services/guardian/detect.py:243` cites as the chronic signature and
+    sentence `agent-services/guardian/detect.py:336` cites as the chronic signature and
     which
     `tests/test_autonomy_scheduler.py::test_a_starving_queue_with_no_pause_alerts_byte_identically`
     pins.
@@ -1221,7 +1221,7 @@ def _outranked_clause(
     `owed-check`'s 72 — every one of their rows beats it, because max(priority) is below 72
     for all eleven and NO source spans the 72 line at all (so this is not the min()
     projection outranking on one lucky row), and no row in the store sits at priority 1 or 2
-    (the `priority=1` / `priority=2` arguments at `workers/sources/autotriage.py:1165` and
+    (the `priority=1` / `priority=2` arguments at `workers/sources/autotriage.py:1169` and
     `workers/sources/owed_check.py:355` are `run_prompt_in_session`'s model-request
     priority, not a queue row's, so they are not in this ranking):
     `scheduled-task` 20-50, `autocode` 40, `autotriage` 40-55, `youtube-digest` 45,
@@ -2081,7 +2081,7 @@ async def tick(queue: WorkQueue) -> None:
                 # Name the source the age belongs to ONLY where the queue can prove the
                 # pool is taking work. Without that proof the clause below is today's
                 # string character for character — the guardian watch at
-                # `agent-services/guardian/detect.py:243` cites it, and
+                # `agent-services/guardian/detect.py:336` cites it, and
                 # `test_a_starving_queue_with_no_pause_alerts_byte_identically` pins its
                 # bytes — so a source name never leaks into the genuine-stall case.
                 outranked = _outranked_clause(queue, starving, starving_source, max_dur)

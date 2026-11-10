@@ -109,7 +109,7 @@ notice", which no detector here can supply.
 
 It does not run itself. Nothing here is scheduled, and `failure-ledger` is not
 registered in `workers.sources.SOURCE_REGISTRY`, so a pool that claims one of
-these rows does not leave it queued waiting: `workers/pool.py:1250-1255` looks the
+these rows does not leave it queued waiting: `workers/pool.py:1276-1255` looks the
 row's `source` up in that registry, misses, logs `Unknown source … — marking
 poisoned` and calls `mark_failed(item.id, "unknown source failure-ledger", 0)`.
 Registering the source and writing its handler is the next round's, and is

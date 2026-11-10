@@ -2,7 +2,7 @@
 report their own death, so this one sits outside the pool entirely.
 
 Since #1682 every in-pool alarm runs in `WorkerPool._scheduler_loop`
-(`workers/pool.py:960`, awaiting `_watch_dispatch` at :973 and `_watch_fleet` at
+(`workers/pool.py:968`, awaiting `_watch_dispatch` at :973 and `_watch_fleet` at
 :979). Two supported routes stop that loop and neither can say so:
 
 * `workers.enabled: false` at boot — `start_worker_pool()`
@@ -24,7 +24,7 @@ worker row the dead pool was supposed to run.
 
 Out of scope by ruling: the pause. `WorkerPool.pause` (`workers/pool.py:555`) sets
 `_paused_operator` / `_paused_automod` and never touches `_running`, so the loop and
-its alarms stay alive; `Guardian._pause_workers` (`agent-services/guardian/guardian.py:1058`)
+its alarms stay alive; `Guardian._pause_workers` (`agent-services/guardian/guardian.py:1063`)
 drives it during a vault tripwire, which is exactly why this watch runs above
 `tick()`'s `paused` return. `paused: true` beside `running: true` is a working system
 doing something deliberate and must not page. It is asserted as such below.

@@ -211,7 +211,7 @@ def _is_trusted_peer(host: str) -> bool:
 # obvious way to close the docs surface and #2090 names it first. It would take the
 # loop's own boot probe down with it: `scripts/automod/canary.py:192` GETs
 # `/openapi.json` on the candidate and appends an error unless it is 200, and
-# `scripts/automod/gate.py:2958` fails `rung_canary_boot` on any such error — so
+# `scripts/automod/gate.py:2979` fails `rung_canary_boot` on any such error — so
 # every later round would be refused by a green change. `ApiPeerGate` therefore
 # denies the four paths to untrusted peers instead (`DOCS_PATHS`), which keeps the
 # loopback probe working. Before anyone re-does it the other way: repoint or delete

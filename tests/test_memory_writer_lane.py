@@ -2295,7 +2295,7 @@ async def test_the_memory_read_wire_payload_carries_the_path_it_read(off_tree):
 # a ruling this long: measured 2026-10-25, the same record's sibling `what` field
 # stops mid-word at "that needs the schem" (597 chars, no truncation marker),
 # because `_recorded` flattens that field through `_text`'s DEFAULT 600-char
-# bound (`scripts/automod/owed.py:119-120`, `_text` at :78) and a verdict writes
+# bound (`scripts/automod/owed.py:122-120`, `_text` at :78) and a verdict writes
 # the flattened text back. #1955 raised the bound on `evidence` and `ruling` to
 # SETTLED_TEXT_LIMIT = 1200 with a marker; `what` never went through it.
 #   20261011_193358_sessiondisti_21ba  2026-10-11T19:39:44  {"summary": "Reading loaded USER.md"}  — defaulted, not refused
@@ -2560,7 +2560,7 @@ def test_the_lane_note_records_the_reruling_with_all_three_reads_labelled_defaul
     The vault copy is not a durable home: measured 2026-10-25, the same
     `owed_settled` record's sibling `what` field stops mid-word after 597 chars
     with no truncation marker, because `_recorded` flattens it through `_text`'s
-    DEFAULT 600-char bound (scripts/automod/owed.py:119-120, `_text` at :78) and a
+    DEFAULT 600-char bound (scripts/automod/owed.py:122-120, `_text` at :78) and a
     verdict writes that flattened text back — `SETTLED_TEXT_LIMIT` never sees the
     field. So the record goes in the module-level note ABOVE `_LANE_FILES`, and
     the scan is cut at that anchor so a node cannot be satisfied by literals

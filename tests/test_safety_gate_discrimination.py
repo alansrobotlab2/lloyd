@@ -198,7 +198,7 @@ _ALLOWED_AROUND_THE_UV_STORE = [
     "echo x > ~/otherproject/.venvs/lloyd/pyvenv.cfg",
     # The scope rail, as a write: the uv *tools* tree beside the store holds the
     # supervisorctl automod's own promotion execs
-    # (`scripts/automod/promote.py:97`), so an entry widened one directory up to
+    # (`scripts/automod/promote.py:98`), so an entry widened one directory up to
     # `~/.local/share/uv` refuses the parachute with everything else.
     "echo unit | tee -a ~/.local/share/uv/tools/supervisor/bin/supervisorctl",
 ]
@@ -256,7 +256,7 @@ def test_the_write_check_allows_the_store_it_was_widened_for(deny_home, command)
     that answers refused if the entry is ever widened a directory up to
     `~/.local/share/uv`: automod's own promotion execs
     `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
-    (`scripts/automod/promote.py:97`), so that widening puts the parachute inside the
+    (`scripts/automod/promote.py:98`), so that widening puts the parachute inside the
     deny-set. What does start refusing is a write *into* the store, `uv python
     install` included: that writer is a human command (`SETUP.md:166`) and an agent
     owes a grant, which is the consequence the item asked for. The attack half of

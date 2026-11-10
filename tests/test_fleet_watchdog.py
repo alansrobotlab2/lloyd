@@ -2048,7 +2048,7 @@ def test_the_stall_alarm_reads_the_kind_from_the_row_not_from_a_second_counter(t
 # at priority 72 waiting while the pool drains work from the eleven sources whose rows ALL
 # sit numerically above it (max(priority) below 72 for every one; no source spans 72, and
 # no row in the store is at priority 1 or 2 — the `priority=1`/`priority=2` arguments at
-# workers/sources/autotriage.py:1165 and owed_check.py:355 belong to
+# workers/sources/autotriage.py:1169 and owed_check.py:355 belong to
 # `run_prompt_in_session`, which is the model-request priority of the session, not the
 # priority of a queue row, so they are not in this ranking at all). The
 # alarm held the source name in hand — `pending_wait_by_source()`
@@ -2217,7 +2217,7 @@ async def test_a_wait_with_nothing_claimed_in_the_window_keeps_today_s_sentence(
     Same board, same ages, the only difference being that the three `autotriage`
     claims sit at 400 min — outside the 180 min window, so nothing proves the pool is
     taking work, and the alarm has to keep the sentence
-    `agent-services/guardian/detect.py:243` watches. Character for character,
+    `agent-services/guardian/detect.py:336` watches. Character for character,
     including the absence of the source name: an attribution this file cannot
     establish must not leak into the genuine-stall case.
     """

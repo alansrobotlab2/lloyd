@@ -474,7 +474,7 @@ def test_a_dead_path_cited_as_an_example_of_a_wrong_path_is_not_counted_as_gold(
 # `<round home>/obsidian` is a symlink to the real vault: the `tests` rung runs with
 # `isolate_home=True` (`scripts/automod/gate.py:1495-1498` → `W.ensure_round_home`), and
 # that farm symlinks EVERY home entry except `HOME_LINK_SKIP = {"lloyd", "lloyd-data"}`
-# (`scripts/automod/worktree.py:65`, `:99-108`) — `obsidian` is not in the skip set, so
+# (`scripts/automod/worktree.py:87`, `:99-108`) — `obsidian` is not in the skip set, so
 # the vault is present by construction wherever this file is enforced. Which is why
 # `_live_vault` below asserts instead of skipping: there is no run of this file, gate or
 # bench, in which the vault is legitimately absent, and a skip on clause 5's only pin is

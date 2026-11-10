@@ -25,9 +25,12 @@ writers beside it), so the unparsed-YAML guard and the activity log hold.
 
 from __future__ import annotations
 
+import os
 import re
 import string
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -600,13 +603,73 @@ HAND_RUN_KEY = "hand_run"
 
 # A receipt is a shell command, and running it is the point: it is the only way
 # "ruled but unexecuted" stops being a sentence in a body and becomes a reading.
-# That makes item front matter an execution surface, so three bounds hold. It runs
-# only for an item that carries the block; only through `/bin/bash -c` with a hard
-# timeout, so one wedged probe cannot hang `board_health`; and it FAILS CLOSED — a
-# receipt that cannot be run, or is missing, reads as non-zero, which holds the
-# item open rather than close a debt nobody executed. The failure mode this
-# exists to kill is a false `done`, never a false hold.
+# That makes item front matter an execution surface, and item front matter is
+# written by loop sessions. Until 2026-11-10 the receipt ran as plain
+# `/bin/bash -c` in the backend process, on the 60 s autocode poll, outside the
+# tool sandbox, `check_bash_command` and the denial journal: whatever text a
+# session left under `hand_run.receipt` on a confirmed item, the backend ran with
+# its own privileges. So the bounds are now:
+#
+# * it runs only for an item that carries the block;
+# * it runs inside the same read-only bubblewrap the bench sessions get
+#   (`agent_mcp._tool_sandbox.bwrap_argv`: `/` read-only, no network, no host
+#   sockets, no credentials), with the data root overlaid on a throwaway tmpfs.
+#   The overlay is what lets a receipt be the probe it is meant to be — every live
+#   receipt reads a SQLite store, and SQLite writes its `-shm` file even to read —
+#   while a write, a delete, or a `curl` to the backend changes nothing;
+# * a hard timeout, so one wedged probe cannot hang `board_health`;
+# * it FAILS CLOSED — a receipt that cannot be run, a sandbox that cannot be
+#   built, or a missing receipt reads as non-zero, which holds the item open
+#   rather than close a debt nobody executed. The failure mode this exists to
+#   kill is a false `done`, never a false hold;
+# * a reading is reused for `RECEIPT_CACHE_SECONDS`, because the status machine
+#   asks on every poll from several readers and a hand-run is minutes, not
+#   seconds, from being done.
 RECEIPT_TIMEOUT_SECONDS = 10
+RECEIPT_CACHE_SECONDS = 120.0
+#: Overrides `RECEIPT_CACHE_SECONDS`; the test suite sets it to 0, because a test
+#: that changes a store and asks again inside one window is asking a new question.
+RECEIPT_CACHE_ENV = "LLOYD_RECEIPT_CACHE_SECONDS"
+_receipt_cache: dict[str, tuple[float, tuple[bool, str]]] = {}
+_receipt_cache_lock = threading.Lock()
+
+
+def clear_receipt_cache() -> None:
+    with _receipt_cache_lock:
+        _receipt_cache.clear()
+
+
+def _receipt_argv(receipt: str) -> tuple[list[str] | None, str]:
+    """The sandboxed argv for one receipt, or `(None, why)` when no sandbox can
+    be built — which the caller reads as a failing receipt, never as a reason to
+    run it bare."""
+    from agent_mcp import _tool_sandbox as T
+    ok, why = T.sandbox_available()
+    if not ok:
+        return None, f"not run: the read-only sandbox is unavailable ({_text(why, 120)})"
+    argv = T.bwrap_argv(receipt, str(_live_root()))
+    # The root the receipt itself will resolve, read now (it follows
+    # `LLOYD_DATA`), so a receipt sees the store its own process would open.
+    overlay: list[str] = []
+    try:
+        from app.data_root import resolve_data_root_for_tree
+        data = str(resolve_data_root_for_tree(_live_root()).resolve())
+        if os.path.isdir(data):
+            overlay = ["--overlay-src", data, "--tmp-overlay", data]
+    except Exception:  # noqa: BLE001 — no data root to overlay is a read-only one
+        overlay = []
+    # Before the `/dev/null` masks (host sockets, credentials): bwrap applies
+    # mounts in order, so an overlay placed after them would uncover a socket
+    # or a secret that lives under the data root.
+    i = next((k for k, a in enumerate(argv)
+              if a == "--ro-bind-try" or (a == "--ro-bind" and argv[k + 1] == "/dev/null")),
+             argv.index("--unshare-all"))
+    return argv[:i] + overlay + argv[i:], ""
+
+
+def _live_root() -> Path:
+    """The checkout this module runs from: the receipt's working directory."""
+    return Path(__file__).resolve().parent.parent.parent
 
 
 #: The keys of one `hand_runs()` row, in the order the writer emits them.
@@ -650,8 +713,30 @@ def _receipt_passes(receipt: str) -> tuple[bool, str]:
     hand-run is a state of the item, not an error of the reader."""
     if not receipt:
         return False, "names no receipt command"
+    now = time.monotonic()
     try:
-        r = subprocess.run(["/bin/bash", "-c", receipt], capture_output=True, text=True,
+        window = float(os.environ.get(RECEIPT_CACHE_ENV, RECEIPT_CACHE_SECONDS))
+    except ValueError:
+        window = RECEIPT_CACHE_SECONDS
+    with _receipt_cache_lock:
+        hit = _receipt_cache.get(receipt)
+        if hit and now - hit[0] < window:
+            return hit[1]
+    result = _run_receipt(receipt)
+    with _receipt_cache_lock:
+        _receipt_cache[receipt] = (time.monotonic(), result)
+    return result
+
+
+def _run_receipt(receipt: str) -> tuple[bool, str]:
+    try:
+        argv, why = _receipt_argv(receipt)
+    except Exception as exc:  # noqa: BLE001 — fail closed, never raise
+        return False, f"not run: could not build the sandbox ({_text(exc, 120)})"
+    if argv is None:
+        return False, why
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
                            timeout=RECEIPT_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         return False, f"timed out after {RECEIPT_TIMEOUT_SECONDS}s"
@@ -932,6 +1017,25 @@ def cite_for_child(what: str, revision: str | None = None) -> str:
     return f"{reduced} [{'cited at ' + revision if revision else UNPINNED}]"
 
 
+#: An `amend_clause.text` that says there is no amendment. Two of the first seven
+#: `clause_amended` rows were this: #2620 clause 2 became the literal text
+#: `not amended — see ruling`, #3688 clause 5 became `not amended — clause 5 is
+#: checkable as written… (amend_clause: null)`, and both items closed `done` on a
+#: next review that graded the annotation (or, in #3688's grader's words, "the
+#: clause text handed to me is the reopen annotation, not a check"). The model
+#: meant "reopen, clause unchanged"; the field took its sentence as the clause.
+_DECLINES_AMENDMENT_RE = re.compile(
+    r"^\W*(not\s+amended|no\s+amendment|unamended|unchanged|none|n/?a|null|"
+    r"keep(?:s|ing)?\s+(?:it|the\s+clause)|as\s+written|no\s+change)\b"
+    r"|amend_clause\s*[:=]\s*(?:null|none)",
+    re.IGNORECASE)
+
+
+def declines_amendment(text) -> bool:
+    """True when an `amend_clause.text` says there is no amendment to make."""
+    return bool(_DECLINES_AMENDMENT_RE.search(" ".join(str(text or "").split())))
+
+
 def amend_item_clause(path: Path, clause, text: str, why: str, *, item_id: int,
                       session_id: str = "") -> str:
     """Rewrite one acceptance clause on an owed-check ruling. Returns the old text.
@@ -966,7 +1070,14 @@ def amend_item_clause(path: Path, clause, text: str, why: str, *, item_id: int,
     text = " ".join(str(text or "").split())[:B.CLAUSE_MAX_CHARS]
     if not text:
         raise ValueError("the amended clause text is empty")
+    if declines_amendment(text):
+        raise ValueError(f"the amended text says there is no amendment ({_text(text, 80)!r}); "
+                         f"a reopen that keeps the clause carries no amend_clause")
+    if not B.names_a_demand(text):
+        raise ValueError(f"the amended text is not a clause ({_text(text, 80)!r})")
     old = clauses[idx - 1]
+    if " ".join(old.split()) == text:
+        raise ValueError("the amended text is the clause as it stands")
     clauses[idx - 1] = text
     B.update_frontmatter(path, {"acceptance_clauses": clauses},
                          activity=(f"owed-check ({session_id or 'session'}) amended clause {idx}: "
@@ -1090,7 +1201,9 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             continue
         a = by_n.get(n)
         if a is None:
-            _still_owed(e)
+            # Unanswered this pass. Dated so the next tick does not ask again at
+            # once; not counted, since the entry was never ruled on.
+            _still_owed(e, recheck_after=recheck_date("", now))
             continue
         out = a["outcome"]
         evidence, cut = _bounded(a.get("evidence"))
@@ -1121,6 +1234,11 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                 notes.append(f"#{n} reopen refused, still owed: {refusal}"[:300])
                 continue
         amend = a.get("amend_clause") if isinstance(a.get("amend_clause"), dict) else {}
+        if declines_amendment(amend.get("text")):
+            # "not amended — …" in the text field means reopen with the clause as
+            # written; booking that sentence as the clause is what closed #2620 and
+            # #3688 on a contract that was not one.
+            amend = {}
         if out == "reopen" and is_open and str(amend.get("text") or "").strip():
             # Before the reopen is recorded: a reopen whose clause could not be
             # reworded would send the next round into the refusal it is leaving.
@@ -1239,8 +1357,14 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             record["follow_up"] = new.id
         elif out == "work":
             # No follow-up could be filed (cap reached, none named, or a
-            # placeholder): still owed.
-            _still_owed(e)
+            # placeholder): still owed. Dated and counted like every other hold:
+            # bare, the entry was due again on the next tick, and 53 of 549
+            # owed-check sessions in the week to 2026-11-09 were this answer
+            # repeated (#3688 took six between 08:15 and 10:16 on 11-07);
+            # counted, `MAX_RECHECKS` turns a stubborn `work` into a ruling.
+            _still_owed(e, recheck_after=recheck_date("", now),
+                        rechecks=e.get("rechecks", 0) + 1,
+                        note="work named no fileable follow-up")
             notes.append(f"#{n} work owed but not filed this pass")
             continue
         if out == "reopen":

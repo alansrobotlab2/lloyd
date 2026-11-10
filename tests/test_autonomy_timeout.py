@@ -503,7 +503,7 @@ async def test_a_wall_clock_kill_records_the_idle_gap_and_the_tools_it_sent(
     assert out["meta"]["tool_calls_dispatched"] == 2, out["meta"]
     # The second store. `scheduled_task.execute` hands `result["meta"]` to the pool
     # whole (workers/sources/scheduled_task.py:460) and the pool writes
-    # `json.dumps(norm["meta"])` into `runs.meta_json` (workers/pool.py:1791), so
+    # `json.dumps(norm["meta"])` into `runs.meta_json` (workers/pool.py:1817), so
     # these keys reaching `meta_json` is a property of THIS dict's contents — the
     # query a reader re-runs is `select meta_json from runs where task_id='86'`.
     from workers.pool import normalize_result

@@ -384,7 +384,7 @@ def test_the_harness_pool_sends_the_credential_on_both_http_paths():
 def test_the_promotion_probes_stay_on_the_open_path():
     """`scripts/automod/promote.py` and `app/routers/health.py` probe `/health`,
     and the guardian's copy of that URL lives at
-    `agent-services/guardian/policy.py:84`. None of them can hold a credential:
+    `agent-services/guardian/policy.py:97`. None of them can hold a credential:
     the promotion probe runs from the round process, the guardian runs from a
     detached copy, and a refusal there reads as a dead aggregator."""
     from agent_mcp import main as mcp_main

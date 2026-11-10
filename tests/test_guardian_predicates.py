@@ -6,7 +6,7 @@ that the guardian *acts* — a drill script under `scripts/` — has never exist
 git history, so this file was the only place that script was ever referenced. The
 drill that does exist is the automod gate's `drill` rung,
 `scripts/automod/rehearse.py`, and it deliberately does NOT file: it passes
-`--no-external-alerts` (`agent-services/guardian/guardian.py:1390`) so a rehearsal
+`--no-external-alerts` (`agent-services/guardian/guardian.py:3642`) so a rehearsal
 cannot put a phantom item on the board, which is what
 `test_the_drill_passes_no_external_alerts` pins.
 
@@ -263,6 +263,93 @@ def test_one_traceback_is_one_event_not_one_per_frame():
             '  File "/c.py", line 3, in h\n'
             "ValueError: boom\n")
     assert len(detect.extract_events(text)) == 1
+
+
+# One exception chain is one event (F2). The live mcp.err carries two-level
+# `BlockingIOError -> LockHeld` chains from routine lock contention; counted
+# per header, one three-level chain was "3 distinct novel fatal signatures".
+CHAIN_3 = (
+    "Traceback (most recent call last):\n"
+    '  File "/home/u/lloyd/scripts/automod/state.py", line 10, in acquire\n'
+    "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+    "BlockingIOError: [Errno 11] Resource temporarily unavailable\n"
+    "\n"
+    "During handling of the above exception, another exception occurred:\n"
+    "\n"
+    "Traceback (most recent call last):\n"
+    '  File "/home/u/lloyd/scripts/automod/state.py", line 14, in acquire\n'
+    "    raise LockHeld(path)\n"
+    "state.LockHeld: lock is held\n"
+    "\n"
+    "The above exception was the direct cause of the following exception:\n"
+    "\n"
+    "Traceback (most recent call last):\n"
+    '  File "/home/u/lloyd/scripts/automod/state.py", line 30, in start\n'
+    "    acquire()\n"
+    '  File "/home/u/lloyd/agent_mcp/automod_tools.py", line 50, in automod_start\n'
+    "    raise RuntimeError('busy') from e\n"
+    "RuntimeError: busy\n"
+)
+
+
+def test_one_chained_exception_is_one_event_named_by_its_final_exception():
+    events = detect.extract_events(CHAIN_3)
+    assert len(events) == 1
+    assert events[0]["message"] == "RuntimeError: busy"
+    assert events[0]["frame"] == "/home/u/lloyd/agent_mcp/automod_tools.py"
+    fired, why = detect.error_spike(
+        events, chronic=set(), changed_paths=[],
+        novel_threshold=5, fatal_distinct_threshold=3, changed_path_threshold=2)
+    assert not fired, why
+
+
+def test_a_chain_whose_message_spans_lines_is_still_one_event():
+    """Review fix 7: a ValidationError's field lines sit between its exception
+    line and "During handling..."; the chain still folds."""
+    text = ("Traceback (most recent call last):\n"
+            '  File "/x/models.py", line 3, in load\n'
+            "pydantic_core._pydantic_core.ValidationError: 1 validation error for Item\n"
+            "name\n"
+            "  Field required [type=missing, input_value={}, input_type=dict]\n"
+            "    For further information visit https://errors.pydantic.dev/2/v/missing\n"
+            "\n"
+            "During handling of the above exception, another exception occurred:\n"
+            "\n"
+            "Traceback (most recent call last):\n"
+            '  File "/x/route.py", line 9, in handler\n'
+            "RuntimeError: bad item\n")
+    events = detect.extract_events(text)
+    assert [e["message"] for e in events] == ["RuntimeError: bad item"]
+
+
+def test_two_chains_and_a_plain_traceback_are_three_events():
+    plain = ("Traceback (most recent call last):\n"
+             '  File "/x.py", line 1, in f\n'
+             "KeyError: 'k'\n")
+    events = detect.extract_events(CHAIN_3 + CHAIN_3 + plain)
+    assert [e["message"] for e in events] == [
+        "RuntimeError: busy", "RuntimeError: busy", "KeyError: 'k'"]
+
+
+def test_a_traceback_passing_through_a_changed_file_does_not_name_it():
+    """Only the raising frame counts; a hot file mid-stack is not causal."""
+    events = detect.extract_events(CHAIN_3 * 2)
+    fired, why = detect.error_spike(
+        events, chronic=set(), changed_paths=["scripts/automod/state.py"],
+        novel_threshold=5, fatal_distinct_threshold=3, changed_path_threshold=2)
+    assert not fired, why
+    fired, why = detect.error_spike(
+        events, chronic=set(), changed_paths=["agent_mcp/automod_tools.py"],
+        novel_threshold=5, fatal_distinct_threshold=3, changed_path_threshold=2)
+    assert fired and "changed path" in why
+
+
+def test_a_traceback_is_dated_by_the_nearest_preceding_stamp():
+    text = ("2026-09-06 08:59:59,000 [INFO] lloyd-x: hello\n"
+            "2026-09-06 09:00:01,000 [ERROR] lloyd-x: failed\n" + CHAIN_3)
+    tb = [e for e in detect.extract_events(text) if e["level"] == "TRACEBACK"]
+    assert tb[0]["hour"] == "2026-09-06 09"
+    assert detect.extract_events(CHAIN_3)[0]["hour"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +717,7 @@ def test_a_crash_while_observing_a_promotion_does_revert(tmp_path, monkeypatch):
 # later rollback aims at a commit that was never watched.
 # ---------------------------------------------------------------------------
 
-def _settle_guardian(tmp_path, monkeypatch, current, *, degraded=None):
+def _settle_guardian(tmp_path, monkeypatch, current, *, degraded=None, streaks=None):
     import types
 
     import guardian as G
@@ -653,6 +740,8 @@ def _settle_guardian(tmp_path, monkeypatch, current, *, degraded=None):
     cleared: list = []
     monkeypatch.setattr(g.state, "clear_current", lambda: cleared.append(True))
     monkeypatch.setattr(G.gstate, "append_event", lambda *a, **k: None)
+    for attr, value in (streaks or {}).items():
+        setattr(g, attr, value)
     g.maybe_settle(current)
     return written, cleared
 
@@ -690,6 +779,61 @@ def test_settle_snapshots_the_mcp_degradation_baseline(tmp_path, monkeypatch):
     assert written["health"]["mcp_degraded_modules"] == ["thunderbird"]
 
 
+@pytest.mark.parametrize("streaks", [
+    {"probe_timeout": {"lloyd-mc:lloyd-backend": 1}},
+    {"probe_fail": {"lloyd-mc:lloyd-mcp": 1}},
+    {"probe_http": {"lloyd-mc:lloyd-backend": 2}},
+    {"mcp_fatal_streak": 1},
+])
+def test_settle_waits_while_a_probe_streak_is_open(tmp_path, monkeypatch, streaks):
+    """A backend hung past the window is not last-known-good (F3)."""
+    written, cleared = _settle_guardian(
+        tmp_path, monkeypatch,
+        {"commit": "b" * 40, "errors_until_ts": NOW - 1_000_000}, streaks=streaks)
+    assert written == {} and not cleared
+
+
+def test_a_settle_held_by_flapping_probes_warns_once_and_never_rolls_back(
+        tmp_path, monkeypatch):
+    """Review fix 4: timeout and 503 reset each other; past 900s, one warning."""
+    import types
+
+    import guardian as G
+    import policy
+    import probes as P
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = G.Guardian(args)
+    monkeypatch.setattr(P, "probe", lambda url, t: pytest.fail("settle must not proceed"))
+    clock = [5000.0]
+    monkeypatch.setattr(G.time, "monotonic", lambda: clock[0])
+    alerts: list = []
+    g.alert = lambda level, title, body, **kw: alerts.append(level)
+    g.do_rollback = lambda *a, **k: pytest.fail("a held settle is not a rollback")
+    current = {"commit": "b" * 40, "errors_until_ts": NOW - 1_000_000}
+    prog = "lloyd-mc:lloyd-backend"
+    for i in range(int(policy.SETTLE_DEFER_ALERT_SECONDS // 15) + 10):
+        g.probe_timeout = {prog: 3} if i % 2 else {prog: 0}
+        g.probe_http = {prog: 0} if i % 2 else {prog: 1}
+        g.maybe_settle(current)
+        clock[0] += 15.0
+    assert alerts == ["warn"]
+
+
+def test_a_stopped_synthesiser_does_not_hold_a_settle(tmp_path, monkeypatch):
+    """agent-tts is not restarted by a promotion; its refusals are not evidence."""
+    written, _ = _settle_guardian(
+        tmp_path, monkeypatch,
+        {"commit": "b" * 40, "errors_until_ts": NOW - 1_000_000},
+        streaks={"probe_fail": {"agent-tts": 40}})
+    assert written["commit"] == "b" * 40
+
+
 def test_settle_ignores_a_record_with_no_commit(tmp_path, monkeypatch):
     written, _ = _settle_guardian(
         tmp_path, monkeypatch, {"errors_until_ts": NOW - 1_000_000})
@@ -706,11 +850,14 @@ def test_settle_ignores_a_record_with_no_commit(tmp_path, monkeypatch):
 # reverts good code whenever the machine gets busy is worse than none.
 # ---------------------------------------------------------------------------
 
-def down2(proc, *, refused=0, timed_out=0, grace=45.0):
+def down2(proc, *, refused=0, timed_out=0, grace=45.0, seconds=None):
+    # A timed-out tick costs the 10s probe plus the 5s sleep.
     return detect.process_down(
         proc, now=NOW, grace=grace,
         probe_fail_streak=refused, probe_threshold=3,
-        probe_timeout_streak=timed_out, probe_timeout_threshold=24,
+        probe_timeout_streak=timed_out,
+        probe_timeout_seconds=timed_out * 15.0 if seconds is None else seconds,
+        probe_timeout_budget=300.0, probe_timeout_min_ticks=4,
         start_history=[NOW - 3600],
         crash_loop_starts=3, crash_loop_window=180.0,
     )
@@ -723,9 +870,58 @@ def test_a_busy_backend_timing_out_is_not_dead():
 
 
 def test_timeouts_still_fire_eventually():
-    """Unresponsive for two minutes is death, not busyness."""
-    is_down, reason = down2(info(start_ago=600.0), timed_out=24)
+    """Unresponsive for five minutes is death, not busyness."""
+    is_down, reason = down2(info(start_ago=600.0), timed_out=20)
     assert is_down and "unresponsive" in reason
+
+
+def test_the_timeout_budget_is_seconds_not_ticks():
+    """24 ticks of 15s each were 360s, not the "2 min" the comment claimed."""
+    assert not down2(info(start_ago=600.0), timed_out=19)[0]         # 285s
+    assert down2(info(start_ago=600.0), timed_out=20)[0]             # 300s
+    # One stalled guardian tick cannot span the budget on its own.
+    assert not down2(info(start_ago=600.0), timed_out=2, seconds=600.0)[0]
+
+
+def test_the_guardian_times_a_timeout_streak_from_its_first_failure(tmp_path, monkeypatch):
+    import time as T
+    import types
+
+    import guardian as G
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = G.Guardian(args)
+    clock = [1000.0]
+    monkeypatch.setattr(G.time, "monotonic", lambda: clock[0])
+    prog = "lloyd-mc:lloyd-backend"
+
+    def tick(kind):
+        snap = {"now": T.time(),
+                "procs": {prog: {"statename": "RUNNING", "start": T.time() - 3600}},
+                "probes": {prog: {"ok": kind == "ok", "kind": kind, "status": None,
+                                  "body": None, "error": None}}}
+        down, why = g.evaluate_liveness(snap)
+        clock[0] += 15.0
+        return down
+
+    assert [tick("timeout") for _ in range(20)] == [False] * 20  # 0..285s
+    assert tick("timeout") is True                                 # 300s
+    tick("ok")
+    assert g.probe_timeout_since == {} and not g.probe_streaks_open()
+    assert tick("timeout") is False
+
+
+def test_the_timeout_budget_is_the_reviewed_five_minutes():
+    """It may outlast the 300s window because settle defers on an open streak."""
+    import policy
+
+    assert policy.PROBE_TIMEOUT_BUDGET_SECONDS == 300.0
+    assert policy.PROBE_TIMEOUT_MIN_TICKS == 4
 
 
 def test_a_refused_connection_is_death_on_the_short_budget():
@@ -735,7 +931,7 @@ def test_a_refused_connection_is_death_on_the_short_budget():
 
 
 def test_refused_and_timeout_budgets_are_independent():
-    assert not down2(info(start_ago=600.0), refused=2, timed_out=20)[0]
+    assert not down2(info(start_ago=600.0), refused=2, timed_out=7)[0]
     assert down2(info(start_ago=600.0), refused=3, timed_out=0)[0]
 
 
@@ -752,7 +948,7 @@ def test_the_timeout_budget_covers_a_realistic_busy_window():
     """77 bench trials took ~90s of loop pressure; the budget must exceed it."""
     import policy
 
-    assert policy.PROBE_TIMEOUT_STREAK * policy.TICK_SECONDS >= 100
+    assert policy.PROBE_TIMEOUT_BUDGET_SECONDS >= 100
     assert policy.PROBE_TIMEOUT_SECONDS >= 10, (
         "a 2s timeout is shorter than a loaded event loop's scheduling delay")
 
@@ -1849,7 +2045,7 @@ def test_the_module_docstring_names_the_drill_that_exists_not_the_phantom():
         "the docstring does not name the drill that really runs the guardian")
     assert "--no-external-alerts" in doc, (
         "the docstring does not record that the drill deliberately does not file")
-    assert "guardian.py:1390" in doc, (
+    assert "guardian.py:3642" in doc, (
         "the docstring does not point at where that flag is parsed")
     assert (repo / "scripts" / "automod" / "rehearse.py").is_file(), (
         "scripts/automod/rehearse.py, named by the docstring, is not on disk")
@@ -4664,7 +4860,7 @@ def test_the_move_recorder_sees_a_code_tree_move(tmp_path, monkeypatch):
 
     With a code-tree stray present and the loop armed, `_runtime_data_incident` calls
     `quarantine_inert(policy.REPO, strays, policy.DATA_ROOT, now)` before anything else
-    (`agent-services/guardian/guardian.py:1597`) — so the recorder must see exactly one
+    (`agent-services/guardian/guardian.py:1807`) — so the recorder must see exactly one
     call, scoped to the tree, or the `moved_calls == []` assertions in this file would
     pass on a broken harness.
     """

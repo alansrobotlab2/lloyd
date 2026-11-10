@@ -53,7 +53,7 @@ def _builder():
     """Load the watchdog's builder the way the staged watchdog sees it: by path.
 
     `agent-services` is not a package, so this is the route `app/daily_note.py` itself
-    and `scripts/automod/promote.py:48` use.
+    and `scripts/automod/promote.py:49` use.
     """
     spec = importlib.util.spec_from_file_location("_dn_under_test", BUILDER)
     mod = importlib.util.module_from_spec(spec)

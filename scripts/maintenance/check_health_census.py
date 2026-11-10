@@ -11,7 +11,7 @@ and a rung whose every row is `seconds: 0.0` is not 554 fast healthy runs, it is
 None of those three was visible in any artifact this tree had, because every existing reader
 asks about ONE rung: `scripts/automod/scorecard.py:812` asks `rung == "review"`, `:1024` asks
 `rung == "tests" and ok`, `scripts/automod/backlog.py:3919,3925,3926,3983` ask about
-`preflight`/`tests`/`review`/`drill`, `workers/sources/autocode.py:403` asks `review`, and
+`preflight`/`tests`/`review`/`drill`, `workers/sources/autocode.py:404` asks `review`, and
 `eval/diagnosis_fanout_replay.py:275,315` asks `review`. Measured before writing this, those
 are ALL of the `get("rung")` sites outside `scripts/automod/gate.py` (one exception is noted
 in `--help`: `scripts/autonomy/checkpoint.py:53` matches on `rung` only because `GATE_RUNGS`

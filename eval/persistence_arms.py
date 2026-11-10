@@ -12,7 +12,7 @@ Why this is a driver and not a shell script with a `trap`: the hold/resume it ne
 already exists, hardened, as `eval/run_context_rot_eval.py::PoolPause` — it resumes
 only a pause it took, runs the resume in a `finally` behind SIGTERM/SIGHUP handlers,
 and refuses to lift a hold the automod promoter still owns (an operator resume lifts
-BOTH holders — `workers/pool.py:716-728` — so a hand-rolled `curl -d '{"paused":false}'`
+BOTH holders — `workers/pool.py:723-728` — so a hand-rolled `curl -d '{"paused":false}'`
 in an EXIT trap un-pauses a landing's drain mid-flight). This module subclasses it and
 adds the two refusals a measurement window needs on top. Since #2498 the inherited hold
 is a MACHINE hold with a lease refreshed every 60 s: as durable as it was while this

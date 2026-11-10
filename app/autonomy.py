@@ -3594,7 +3594,7 @@ def _backend_json(method: str, path: str, *, payload: Optional[dict] = None,
 
     The route, not an in-process writer: `POST /api/backlog/task-create` is the one
     backlog write every writer already shares — Mission Control's modal, the guardian
-    (`agent-services/guardian/notify.py:521`) and the MCP tool all pass the board map,
+    (`agent-services/guardian/notify.py:532`) and the MCP tool all pass the board map,
     `check_board`, `_VALID_STATUSES` and the OKF front matter at
     `app/routers/backlog.py:704`. A fifth writer inside `app/autonomy.py` is how
     #1167's missing `segment` and #1517's two-clock stamp happened. It is also the

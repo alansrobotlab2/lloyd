@@ -408,9 +408,11 @@ def test_a_backend_parked_in_degraded_eventually_counts():
 
 
 def test_the_three_probe_budgets_are_ordered_by_what_they_mean():
-    """refused < timeout < http-error: nothing listening, busy, answering badly."""
-    assert policy.PROBE_FAIL_STREAK < policy.PROBE_TIMEOUT_STREAK
-    assert policy.PROBE_TIMEOUT_STREAK < policy.PROBE_HTTP_ERROR_STREAK
+    """Refused is the shortest: nothing listening needs no patience. Busy and
+    answering-badly both get wider budgets (timeout in seconds, 503 in ticks)."""
+    tick = policy.TICK_SECONDS
+    assert policy.PROBE_FAIL_STREAK * tick < policy.PROBE_TIMEOUT_BUDGET_SECONDS
+    assert policy.PROBE_FAIL_STREAK < policy.PROBE_HTTP_ERROR_STREAK
 
 
 def test_our_own_quarantine_stop_is_not_an_outage():
@@ -2360,7 +2362,7 @@ async def test_a_vault_land_answer_shows_the_agent_the_heavy_rung_ran_nothing(
     `heavy_rung_verdict` on the probe report, `_guards_row` copies it, and `land()` hands
     the same projection back in its return. What no node crossed is the last hop — the
     answer an agent reads is `text_result(json.dumps(out, indent=2))`
-    (`agent_mcp/automod.py:949-950`), so a key that survives a Python dict but not the
+    (`agent_mcp/automod.py:954-950`), so a key that survives a Python dict but not the
     serialised text, or one the handler rebuilds without, never reaches the caller clause
     4 names. Hence the aggregator dispatch with a real session `_meta`, and assertions on
     the JSON that comes back out, not on the dict on its way in.

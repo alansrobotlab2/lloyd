@@ -1087,9 +1087,11 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
     group_pick = None
     if urgent is None and bool(payload.get("group_triage", True)):
         from scripts.automod import cluster as CL
-        pick = B.select_cluster(S.LEDGER_PATH, CL.load_clusters(),
-                                min_size=int(payload.get("group_min_items") or DEFAULT_GROUP_MIN_ITEMS),
-                                max_size=int(payload.get("group_max_items") or DEFAULT_GROUP_MAX_ITEMS))
+        pick = await asyncio.to_thread(
+            lambda: B.select_cluster(
+                S.LEDGER_PATH, CL.load_clusters(),
+                min_size=int(payload.get("group_min_items") or DEFAULT_GROUP_MIN_ITEMS),
+                max_size=int(payload.get("group_max_items") or DEFAULT_GROUP_MAX_ITEMS)))
         if pick is not None:
             # A qualifying cluster wins over the single pool: consolidation
             # is finite, the single pool is not — unless the single pool's
@@ -1130,8 +1132,9 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
                             f"{gate['bound']} ({gate['landed_items_7d']} items landed in 7 d, "
                             f"floor {gate['floor']}); group triage still runs")}
 
-    candidates, held = B.triage_pool(S.LEDGER_PATH)
-    candidate = B.select_candidate(S.LEDGER_PATH)
+    # Both whole-board walks, off the event loop.
+    (candidates, held), candidate = await asyncio.to_thread(
+        lambda: (B.triage_pool(S.LEDGER_PATH), B.select_candidate(S.LEDGER_PATH)))
     if candidate is None:
         # Say which empty this is. A queue drained of real work and a queue
         # holding 106 of this loop's own drafts look identical from here, and
@@ -1157,8 +1160,9 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
     prompt = await asyncio.to_thread(render_prompt, candidate, ledger=S.LEDGER_PATH,
                                      body_chars=body_chars, spawn_cap=spawn_cap)
     # Taken BEFORE the turn: an id the turn claims that is at or below this
-    # already existed, so it is a merge (or a citation), not a spawn.
-    id_floor = B.max_item_id()
+    # already existed, so it is a merge (or a citation), not a spawn. A glob of
+    # every item file, so off the event loop.
+    id_floor = await asyncio.to_thread(B.max_item_id)
     try:
         run = await run_prompt_in_session(
             prompt, title=f"backlog triage #{candidate.id}: {candidate.name[:48]}",
@@ -1177,12 +1181,28 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
         # back through the retry path, and since no verdict was recorded the
         # retry re-selects this same item — a second full triage of the item
         # that has already proved it does not finish in the time allowed.
-        S.append_event({"event": "backlog_triage", "item_id": candidate.id,
-                        "verdict": B.INCOMPLETE, "reason": "turn timeout",
-                        "budget": budget, "auto": True})
+        # Capped like the `max_turns` branch below: an item that always runs
+        # out of clock would otherwise top the pool and be retried forever.
+        sid = getattr(exc, "session_id", None)
+        attempt = await asyncio.to_thread(
+            lambda: B.incomplete_counts(S.LEDGER_PATH).get(candidate.id, 0) + 1)
         logger.warning("backlog #%s: %s", candidate.id, exc)
-        return {"status": "failed", "item_id": candidate.id,
-                "summary": f"#{candidate.id}: {exc}"}
+        if attempt < B.MAX_INCOMPLETE_ATTEMPTS:
+            S.append_event({"event": "backlog_triage", "item_id": candidate.id,
+                            "verdict": B.INCOMPLETE, "reason": "turn timeout",
+                            "attempt": attempt, "budget": budget, "auto": True,
+                            **({"session_id": sid} if sid else {})})
+            return {"status": "failed", "item_id": candidate.id,
+                    "summary": f"#{candidate.id}: {exc}"}
+        evidence = (f"ran out of clock on {attempt} consecutive attempts without reaching "
+                    f"a verdict; last transcript in session {sid or '(unknown)'}")
+        S.append_event({"event": "backlog_triage", "item_id": candidate.id,
+                        "verdict": "unverifiable", "check": "", "evidence": evidence,
+                        "auto": True, "session_id": sid, "verdict_source": "turn_timeout",
+                        "stop_reason": "turn_timeout", "budget": budget})
+        return {"status": "success", "item_id": candidate.id, "verdict": "unverifiable",
+                "artifact_path": backlog_artifact(candidate.id),
+                "session_id": sid, "summary": evidence[:200]}
 
     session_id = run["session_id"]
     stop_reason = run.get("stop_reason")
@@ -1401,7 +1421,7 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
     form_umbrellas = bool(payload.get("form_umbrellas", True))
     if not form_umbrellas:
         prompt += NO_UMBRELLA_RULE
-    id_floor = B.max_item_id()
+    id_floor = await asyncio.to_thread(B.max_item_id)
     try:
         run = await run_prompt_in_session(
             prompt, title=f"backlog group triage {cid}: {len(members)} items",

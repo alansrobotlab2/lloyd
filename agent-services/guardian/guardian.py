@@ -1028,6 +1028,11 @@ class Guardian:
             is_mcp = program.endswith("lloyd-mcp")
             if result is not None:
                 kind = result.get("kind")
+                if kind != "timeout" or result["ok"]:
+                    self._timeout_streak_ended(program)
+                elif not self.probe_timeout.get(program):
+                    self.probe_timeout_since = {**(self.probe_timeout_since or {}),
+                                                program: time.monotonic()}
                 if result["ok"]:
                     self.probe_fail[program] = 0
                     self.probe_timeout[program] = 0
@@ -1064,7 +1069,9 @@ class Guardian:
                 probe_fail_streak=self.probe_fail.get(program, 0),
                 probe_threshold=policy.PROBE_FAIL_STREAK,
                 probe_timeout_streak=self.probe_timeout.get(program, 0),
-                probe_timeout_threshold=policy.PROBE_TIMEOUT_STREAK,
+                probe_timeout_seconds=self._timeout_streak_seconds(program),
+                probe_timeout_budget=policy.PROBE_TIMEOUT_BUDGET_SECONDS,
+                probe_timeout_min_ticks=policy.PROBE_TIMEOUT_MIN_TICKS,
                 probe_http_streak=self.probe_http.get(program, 0),
                 probe_http_threshold=policy.PROBE_HTTP_ERROR_STREAK,
                 start_history=self.start_history.get(program, []),
@@ -1114,6 +1121,46 @@ class Guardian:
             elif is_mcp:
                 self.mcp_fatal_streak = 0
         return False, "all watched processes healthy"
+
+    # Class defaults below `evaluate_liveness`, not beside `_down_programs`:
+    # `architecture/threat-model.md` T-26 cites that method's line. A Guardian
+    # built with `__new__` in a test reads them as "nothing open".
+    # Monotonic time of each program's first timed-out probe in the current
+    # streak; replaced, never mutated in place.
+    probe_timeout_since: dict | None = None
+    # The (commits, HEAD) whose revert was last refused by the dry run, so a
+    # crash re-detected every tick reports it once.
+    _revert_refused_key = None
+    # The commit whose settle is being deferred on open probe streaks, since
+    # when (monotonic), and whether the long deferral has alerted.
+    _settle_deferred: str | None = None
+    _settle_deferred_since = 0.0
+    _settle_defer_alerted = False
+
+    def _timeout_streak_ended(self, program: str) -> None:
+        since = self.probe_timeout_since or {}
+        if program in since:
+            self.probe_timeout_since = {k: v for k, v in since.items() if k != program}
+
+    def _timeout_streak_seconds(self, program: str) -> float:
+        since = (self.probe_timeout_since or {}).get(program)
+        if since is None or not self.probe_timeout.get(program):
+            return 0.0
+        return max(0.0, time.monotonic() - since)
+
+    def probe_streaks_open(self) -> list[str]:
+        """Every probe failure streak still running on a program a promotion
+        restarts, named for the log. `agent-tts` is not one: the GPU switch
+        stops it for hours, and its refusals say nothing about the tree."""
+        open_ = [f"{name}:{program}={n}"
+                 for name, counts in (("refused", getattr(self, "probe_fail", {})),
+                                      ("timeout", getattr(self, "probe_timeout", {})),
+                                      ("http_error", getattr(self, "probe_http", {})))
+                 for program, n in counts.items()
+                 if n and program in policy.RESTART_ORDER]
+        if getattr(self, "mcp_fatal_streak", 0):
+            open_.append(f"mcp_fatal={self.mcp_fatal_streak}")
+        return open_
 
     # ── error-rate ─────────────────────────────────────────────────────
     def ensure_chronic(self) -> None:
@@ -1234,11 +1281,15 @@ class Guardian:
                     explicit_target: str | None = None,
                     explicit_commit: str | None = None,
                     explicit_changed: list | None = None,
-                    explicit_commits: list | None = None) -> bool:
+                    explicit_commits: list | None = None,
+                    resumed: bool = False) -> bool:
         current = self.state.current() or {}
         # A request may name a whole batch (the land train's promoter undoing
         # a flush it could not verify); its newest commit is then the blame.
         requested_batch = gstate.batch_commits({"commits": explicit_commits})
+        # A request naming ONE commit and no `commits` blames that commit only,
+        # even when it is the newest member of the observed batch.
+        explicit_single = gstate._is_sha(explicit_commit) and not requested_batch
         if requested_batch and not gstate._is_sha(explicit_commit):
             explicit_commit = requested_batch[-1]
         # Which commit this request BLAMES, decided once, here, before anything
@@ -1255,7 +1306,8 @@ class Guardian:
         blamed = (explicit_commit if gstate._is_sha(explicit_commit)
                   else current.get("commit"))
         blamed_is_observed = bool(blamed) and blamed == current.get("commit")
-        changed = (list(current.get("changed_paths") or []) if blamed_is_observed
+        changed = (list(current.get("changed_paths") or [])
+                   if blamed_is_observed and not (explicit_single and explicit_changed)
                    else list(explicit_changed or []))
         # The batch this rollback takes off `main`, oldest first: the observed
         # record's own `commits` when it is the one blamed, a request's when it
@@ -1263,7 +1315,9 @@ class Guardian:
         # the single-commit rollback it always was. A request blaming ONE
         # commit of an observed batch (the detached regression check) reverts
         # that commit only, and the batch's window closes unjudged.
-        if blamed_is_observed:
+        if explicit_single:
+            batch = []
+        elif blamed_is_observed:
             batch = gstate.batch_commits(current)
         else:
             batch = requested_batch
@@ -1272,6 +1326,10 @@ class Guardian:
 
         if explicit_target and gstate._is_sha(explicit_target):
             target, source = explicit_target, "explicit rollback request"
+        elif explicit_single:
+            # One commit named and no target: its own parent, never the
+            # observed batch's base (that resets the whole batch).
+            target, source = rb.parent_of(self.repo, blamed), f"parent of {blamed[:8]}"
         elif blamed_is_observed or not blamed:
             target, source = self.state.rollback_target(current)
         else:
@@ -1283,9 +1341,25 @@ class Guardian:
         head = rb.head_commit(self.repo)
         floor = self.state.floor()
 
+        def early(why: str, *, escalated: bool = False) -> bool:
+            # A resumed rollback may have stopped the services before the
+            # guardian died: close its intent row and bring them back.
+            if resumed:
+                extra = {}
+                if gone:
+                    # The interrupted run already moved the tree past the blamed
+                    # commit: finish its bookkeeping, or LKG names a dead commit.
+                    extra = self._record_reverted(blamed, batch, changed, current, head)
+                self._close_resumed_rollback("resume_abandoned", why, blamed=blamed,
+                                             target=target, restart=not escalated,
+                                             **extra)
+            return False
+
+        gone = False
+
         if not target:
             self.escalate("no rollback target", f"{reason}\n\n{source}")
-            return False
+            return early("no rollback target", escalated=True)
 
         # The blamed commit may already be gone — reverted by hand, or by a
         # promoter that failed after its merge and undid itself inline. Its
@@ -1308,7 +1382,8 @@ class Guardian:
                 # the stale thing and it goes. Otherwise the window still open
                 # belongs to a promotion this request never touched.
                 self.state.clear_current()
-            return False
+            gone = True
+            return early(f"{blamed[:8]} is not an ancestor of HEAD {head[:8]}")
         if batch and head:
             # A batch commit already gone from this history is not reverted
             # twice. What is left keeps the batch rule even if it is one
@@ -1321,19 +1396,40 @@ class Guardian:
                        f"{reason}\nHEAD is already the last known good ({target[:8]}). "
                        "Not rewriting history — this needs a human.",
                        needs_human=True)
-            return False
+            return early("HEAD is already the rollback target")
         if not rb.commit_exists(self.repo, target):
             self.escalate("rollback target missing", f"{target} is not in the object store")
-            return False
+            return early("rollback target missing", escalated=True)
         if floor and target != floor and not rb.is_ancestor(self.repo, floor, target):
             self.escalate("rollback target below floor",
                           f"{target[:8]} predates the guardian floor {floor[:8]}")
-            return False
+            return early("rollback target below floor", escalated=True)
+
+        # A revert that cannot apply must be found out BEFORE the services
+        # stop: stopping first turned a conflicting quality-regression revert
+        # into a full outage left BROKEN. Checked in the object store only.
+        if self._route_is_surgical(target, blamed, batch, head):
+            verdict, why = rb.revert_dry_run(self.repo, batch or [blamed], head)
+            if verdict == rb.REVERT_EMPTY and resumed:
+                # The interrupted run's revert commit is already on HEAD.
+                return self._resume_found_reverted(trigger, reason, why, blamed=blamed,
+                                                   target=target, batch=batch,
+                                                   changed=changed, current=current,
+                                                   head=head)
+            if verdict in (rb.REVERT_CONFLICT, rb.REVERT_EMPTY):
+                return self._revert_refused(trigger, reason, why, blamed=blamed,
+                                            target=target, batch=batch, head=head,
+                                            resumed=resumed, current=current)
+            if verdict == rb.REVERT_UNKNOWN:
+                log(f"revert dry run inconclusive, proceeding: {why}")
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
         gstate.append_event(self.state.ledger, {
             "event": "rollback_started", "trigger": trigger, "reason": reason[:1000],
             "from": head, "to": target, "stamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),  # marked, unlike the name
+            # What a resume needs to take the same route: never re-derived
+            # from whatever `current.json` holds after a restart.
+            "blamed": blamed, "changed_paths": changed,
             **({"commits": batch, "batch": len(batch)} if batch else {}),
         })
 
@@ -1396,11 +1492,7 @@ class Guardian:
         # only when HEAD is its newest commit AND `target..HEAD` is exactly the
         # batch. Otherwise something the loop never promoted sits inside or on
         # top of it, and every batch commit is reverted in place instead.
-        if batch:
-            surgical = not (head_before == blamed and rb.range_is_exactly(
-                self.repo, target, head_before, batch))
-        else:
-            surgical = bool(blamed and head_before and head_before != blamed)
+        surgical = self._route_is_surgical(target, blamed, batch, head_before)
 
         # 3. Stop the writers first — see the module docstring.
         for program in reversed(policy.RESTART_ORDER):
@@ -1478,16 +1570,6 @@ class Guardian:
         # hash alongside the SHA, so the same change re-derived under a new SHA
         # is caught too.
         bad = blamed or head_before
-        if batch:
-            # Every commit the batch took off `main`, each by its own content.
-            entries = {str(e.get("commit")): e for e in (current.get("entries") or [])
-                       if isinstance(e, dict)} if observed == blamed else {}
-            for c in batch:
-                paths = (list((entries.get(c) or {}).get("changed_paths") or [])
-                         or rb.changed_paths_of(self.repo, c))
-                self.state.deny(c, tree_hash=rb.changed_tree_hash(self.repo, c, paths))
-        elif bad:
-            self.state.deny(bad, tree_hash=rb.changed_tree_hash(self.repo, bad, changed))
 
         # A promotion that was under observation but NOT blamed now has no
         # window and no verdict. Alan's decision on #1358 (2026-09-23) is to
@@ -1506,14 +1588,8 @@ class Guardian:
         # rollback — and on 2026-09-21 dbec85aa settled at 21:37:32Z and was
         # reverted at 21:45:05Z, so the following rollback would have reset
         # `main` back onto it and discarded every commit since. Point it at what
-        # this rollback actually restored.
-        lkg = self.state.lkg() or {}
-        lkg_from = lkg.get("commit")
-        repointed = bool(expected and lkg_from) and (
-            lkg_from == bad or lkg_from in batch
-            or not rb.is_ancestor(self.repo, lkg_from, expected))
-        if repointed:
-            self.state.set_lkg(expected)
+        # this rollback actually restored. The denylist write is the same helper.
+        repoint = self._record_reverted(bad, batch, changed, current, expected)
 
         self.state.clear_current()
         gstate.append_event(self.state.ledger, {
@@ -1521,7 +1597,7 @@ class Guardian:
             "restored": expected, "target": target,
             "route": "revert" if surgical else "reset",
             "left_unjudged": left_unjudged,
-            "lkg_repointed_from": lkg_from if repointed else None,
+            **repoint,
             "head_before": head_before, "tag": tag, "stash": evidence.get("stash"),
             # Only on a batch, so a single-commit row is the row it always was.
             # `state.reverted_commits` counts every sha named here.
@@ -1532,6 +1608,7 @@ class Guardian:
             self.probe_fail[program] = 0
             self.probe_timeout[program] = 0
             self.start_history[program] = []
+        self.probe_timeout_since = {}
 
         recent = self.state.recent_rollbacks(policy.FLAP_WINDOW_SECONDS)
         extra = ""
@@ -1564,6 +1641,139 @@ class Guardian:
             evidence=json.dumps(evidence, indent=2),
             commit=bad or "", trigger=trigger, tag=tag,
         )
+
+    def _route_is_surgical(self, target: str, blamed: str | None, batch: list,
+                           head: str | None) -> bool:
+        """Revert in place (True) or reset to `target` (False); see `_rollback_once`."""
+        if batch:
+            return not (head == blamed and rb.range_is_exactly(
+                self.repo, target, head, batch))
+        return bool(blamed and head and head != blamed)
+
+    def _start_stack(self) -> None:
+        for program in policy.RESTART_ORDER:
+            ok, msg = self.sup.start(program, wait=False)
+            log(f"start {program}: {msg}")
+
+    def _record_reverted(self, bad: str | None, batch: list, changed: list,
+                         current: dict, restored: str | None) -> dict:
+        """Denylist what left `main` and repoint LKG off it; the row fields."""
+        observed = (current or {}).get("commit")
+        if batch:
+            # Every commit the batch took off `main`, each by its own content.
+            entries = {str(e.get("commit")): e for e in (current.get("entries") or [])
+                       if isinstance(e, dict)} if observed == bad else {}
+            for c in batch:
+                paths = (list((entries.get(c) or {}).get("changed_paths") or [])
+                         or rb.changed_paths_of(self.repo, c))
+                self.state.deny(c, tree_hash=rb.changed_tree_hash(self.repo, c, paths))
+        elif bad:
+            self.state.deny(bad, tree_hash=rb.changed_tree_hash(self.repo, bad, changed))
+        lkg_from = (self.state.lkg() or {}).get("commit")
+        repointed = bool(restored and lkg_from) and (
+            lkg_from == bad or lkg_from in batch
+            or not rb.is_ancestor(self.repo, lkg_from, restored))
+        if repointed:
+            self.state.set_lkg(restored)
+        return {"lkg_repointed_from": lkg_from if repointed else None}
+
+    def _resume_found_reverted(self, trigger: str, reason: str, why: str, *,
+                               blamed: str, target: str, batch: list, changed: list,
+                               current: dict, head: str | None) -> bool:
+        """A resumed surgical revert whose change is already off HEAD: the
+        interrupted run committed it. Finish it as done, not as a refusal."""
+        repoint = self._record_reverted(blamed, batch, changed, current, head)
+        observed = (current or {}).get("commit")
+        if observed and (observed == blamed or observed in batch):
+            self.state.clear_current()
+        gstate.append_event(self.state.ledger, {
+            "event": "rollback_succeeded", "trigger": trigger, "commit": blamed,
+            "restored": head, "target": target, "route": "revert",
+            "resumed": True, "already_reverted": why[:300], **repoint,
+            **({"commits": batch, "batch": len(batch)} if batch else {}),
+        })
+        self._start_stack()
+        self.alert("warn", "Interrupted rollback finished",
+                   f"{reason}\n\n{(blamed or '?')[:8]} was already reverted on HEAD "
+                   f"{(head or '?')[:8]} by the interrupted run; recorded it and "
+                   "started the services.", commit=blamed or "", trigger=trigger)
+        return True
+
+    def _close_resumed_rollback(self, code: str, detail: str, *, blamed: str | None,
+                                target: str | None, restart: bool, **fields) -> None:
+        """Terminal row for a resumed rollback that will not run, and the stack
+        brought back unless an escalation means to leave it stopped."""
+        gstate.append_event(self.state.ledger, {
+            "event": "rollback_failed", "trigger": "resume", "to": target,
+            "commit": blamed, "reason": code, "detail": detail[:500],
+            "services": "started" if restart else "left stopped", **fields,
+        })
+        if restart:
+            self._start_stack()
+
+    def _revert_refused(self, trigger: str, reason: str, why: str, *,
+                        blamed: str | None, target: str, batch: list,
+                        head: str | None, resumed: bool,
+                        current: dict | None = None) -> bool:
+        """The surgical revert would not apply: services untouched, not BROKEN,
+        one terminal row and one alert per (commits, HEAD)."""
+        shas = list(batch or [blamed])
+        key = (tuple(shas), head)
+        if key == self._revert_refused_key and not resumed:
+            log(f"revert still would not apply, already reported: {why}")
+            return False
+        self._revert_refused_key = key
+        # A promotion under observation that was judged bad must never settle
+        # as last-known-good just because it could not be reverted.
+        current = current or {}
+        observed = current.get("commit")
+        marked = bool(observed) and (observed == blamed
+                                     or observed in gstate.batch_commits(current))
+        if marked:
+            gstate.write_json_atomic(self.state.current_path, {
+                **current, "verdict": BAD_UNREVERTED,
+                "verdict_reason": f"{trigger}: {why}"[:500]})
+        gstate.append_event(self.state.ledger, {
+            "event": "rollback_failed", "trigger": trigger, "to": target,
+            "commit": blamed, "reason": "revert_conflict", "detail": why[:500],
+            "head": head, "services": "started" if resumed else "untouched",
+            **({"commits": batch, "batch": len(batch)} if batch else {}),
+        })
+        if resumed:
+            self._start_stack()
+        self.alert("error", "Rollback skipped: the revert would not apply",
+                   f"Trigger: {trigger}\n{reason}\n\nReverting "
+                   + ", ".join(c[:8] for c in shas if c)
+                   + f" onto HEAD {(head or '?')[:8]} would not apply ({why}). "
+                   "Nothing was stopped and nothing was changed. The code judged bad "
+                   "is STILL LIVE and running; it stays in the tree until a human "
+                   "reverts it by hand."
+                   + (" It will not be settled as last-known-good." if marked else ""),
+                   commit=blamed or "", trigger=trigger)
+        return False
+
+    def resume_rollback(self, pending: dict) -> bool:
+        """Finish a rollback the previous guardian died in, from its own row."""
+        reason = f"resumed after guardian restart: {pending.get('reason', '')}"
+        blamed, target = pending.get("blamed"), pending.get("to")
+        if not (gstate._is_sha(blamed) and gstate._is_sha(target)):
+            # No recorded blame (a row written before it was recorded, or a
+            # rollback that named none): re-deriving it from today's
+            # `current.json` is how a resume reset `main` to the LKG.
+            log("interrupted rollback has no recorded blame; not resuming")
+            self._close_resumed_rollback(
+                "resume_unrecorded", "the rollback_started row names no blamed commit",
+                blamed=blamed if gstate._is_sha(blamed) else None,
+                target=target if gstate._is_sha(target) else None, restart=True)
+            self.alert("error", "Interrupted rollback not resumed",
+                       f"{reason}\n\nThe intent row does not record which commit was "
+                       "blamed, so it cannot be resumed safely. Services were started; "
+                       "the tree is as the interrupted rollback left it.")
+            return False
+        return self.do_rollback(
+            "resume", reason, explicit_target=target, explicit_commit=blamed,
+            explicit_changed=pending.get("changed_paths"),
+            explicit_commits=pending.get("commits"), resumed=True)
 
     def escalate(self, title: str, body: str) -> None:
         """Terminal state. Leave the stack stopped rather than half-reverted.
@@ -1600,6 +1810,39 @@ class Guardian:
         except Exception as exc:
             log(f"notifier failed (continuing): {exc}")
 
+    # Consecutive raising ticks, and whether that streak has alerted. Class
+    # defaults, so a Guardian built with `__new__` in a test reads "none".
+    _tick_errors = 0
+    _tick_error_alerted = False
+
+    def _notify(self, method: str, *args, _default=False, **kw):
+        """Every notifier call the tick makes. One that raises (a daily note the
+        notifier cannot read) loses that one write, never the rest of the tick."""
+        try:
+            return getattr(self.notifier, method)(*args, **kw)
+        except Exception as exc:  # noqa: BLE001
+            log(f"notifier.{method} failed (continuing): {type(exc).__name__}: {exc}")
+            return _default
+
+    def _tick_outcome(self, exc: BaseException | None) -> None:
+        """Count consecutive tick errors; alert once when a streak reaches
+        `policy.TICK_ERROR_ALERT_AFTER`, and retract it when a tick completes.
+        The heartbeat's `error` state alone is read by nothing."""
+        if exc is None:
+            if self._tick_error_alerted:
+                self._notify("resolve", TICK_ERROR_ALERT_TITLE,
+                             f"a tick completed after {self._tick_errors} failing ticks")
+            self._tick_errors, self._tick_error_alerted = 0, False
+            return
+        self._tick_errors += 1
+        if self._tick_errors >= policy.TICK_ERROR_ALERT_AFTER and not self._tick_error_alerted:
+            self._tick_error_alerted = True
+            self.alert("critical", TICK_ERROR_ALERT_TITLE,
+                       f"{self._tick_errors} consecutive guardian ticks raised; the last: "
+                       f"{type(exc).__name__}: {exc}\n\nEvery check after the raising "
+                       "line, rollback and settle included, is skipped while this lasts. "
+                       "`journalctl --user -u lloyd-guardian` has each traceback line.")
+
     # ── worker-pool silence ────────────────────────────────────────────
     def check_pool(self, snap: dict) -> None:
         """Alarm when the worker pool is not running while the backend answers
@@ -1633,7 +1876,7 @@ class Guardian:
             # alarm used (#1536). `resolve` is idempotent and writes nothing when
             # no section of ours is open, so the healthy tick after the first is
             # silent — and a pool that was never reported cannot be un-reported.
-            self.notifier.resolve(
+            self._notify("resolve",
                 poolwatch.ALERT_TITLE,
                 "the worker pool reports running on the latest check — the "
                 "instructions above are stale, nothing further to enable")
@@ -1694,10 +1937,10 @@ class Guardian:
             return
         if action == "alert":
             log(f"TMP HEADROOM ({level}): {body.splitlines()[0]}")
-            self.notifier.alert(level, tmpwatch.ALERT_TITLE, body, coalesce=True)
+            self._notify("alert", level, tmpwatch.ALERT_TITLE, body, coalesce=True)
         elif action == "resolve":
             log(f"tmp headroom recovered: {body}")
-            self.notifier.resolve(tmpwatch.ALERT_TITLE, body)
+            self._notify("resolve", tmpwatch.ALERT_TITLE, body)
 
     # ── vault tripwire ─────────────────────────────────────────────────
     def check_vault(self) -> None:
@@ -1868,7 +2111,7 @@ class Guardian:
             # map: that map is for a cause a restarted process cannot otherwise
             # recover, and this leg measures its subject every
             # `policy.SNAPSHOT_CHECK_SECONDS` whether or not it raised the page.
-            self.notifier.resolve(
+            self._notify("resolve",
                 VAULT_SNAPSHOT_ALERT_TITLE,
                 f"{state['text']}, inside the "
                 f"{state['max_age'] / 3600.0:g} h limit — the same reading this alarm "
@@ -2144,7 +2387,7 @@ class Guardian:
             for heading in dict.fromkeys(
                     [*datawatch.read_arrivals_titles(arrivals_state),
                      RUNTIME_DATA_ARRIVALS_ALERT_TITLE]):
-                if not self.notifier.resolve(heading, note):
+                if not self._notify("resolve", heading, note):
                     still_open.append(heading)
             try:
                 datawatch.write_arrivals_titles(arrivals_state, still_open)
@@ -2176,7 +2419,7 @@ class Guardian:
             # The same arming rule the arrivals retraction obeys: the pass that recorded a
             # baseline compared it against nothing, so it earns no statement that nothing
             # left. `resolve` writes nothing unless this section is actually open.
-            self.notifier.resolve(
+            self._notify("resolve",
                 RUNTIME_DATA_DEPARTURES_ALERT_TITLE,
                 "No name left the data root's top level as of "
                 f"{time.strftime('%Y-%m-%d %H:%M')}. "
@@ -2249,7 +2492,7 @@ class Guardian:
             # makes and asserts they are exactly the headings of the incident that tick is
             # clearing, which is the same rule as a test: this leg may add a statement to a
             # tick only when it has something to state.
-            self.notifier.resolve(
+            self._notify("resolve",
                 RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE,
                 "Every payload in the stray quarantine has a row in its ledger as of "
                 f"{time.strftime('%Y-%m-%d %H:%M')}. "
@@ -2280,7 +2523,7 @@ class Guardian:
             if moved:
                 gone = {name for name, _ in moved}
                 strays = [s for s in strays if s not in gone]
-                self.notifier.announce(
+                self._notify("announce",
                     "Moved an empty stray out of the code tree",
                     "\n".join(f"{os.path.join(policy.REPO, name)} → {dest}"
                               for name, dest in moved)
@@ -2433,7 +2676,7 @@ class Guardian:
             # with the round's `home/lloyd-data`, and that is exactly the sentence the
             # marker now says out loud instead of publishing bare.
             for _title in RUNTIME_DATA_ALERT_TITLES:
-                self.notifier.resolve(_title, cleared, measured_root=shadow_root)
+                self._notify("resolve", _title, cleared, measured_root=shadow_root)
 
     def check_data(self) -> None:
         """Trip on a wipe of `~/lloyd-data`: pause workers, halt promotions,
@@ -2622,6 +2865,24 @@ class Guardian:
             return None
 
     # ── settle ─────────────────────────────────────────────────────────
+    def _settle_deferral_watch(self, commit: str, streaks: list[str]) -> None:
+        """Alternating failure kinds reset each other's streak, so a flapping box
+        neither trips nor settles. Say so once; never roll back on it."""
+        now = time.monotonic()
+        if self._settle_deferred != commit:
+            self._settle_deferred, self._settle_deferred_since = commit, now
+            self._settle_defer_alerted = False
+            return
+        waited = now - self._settle_deferred_since
+        if waited > policy.SETTLE_DEFER_ALERT_SECONDS and not self._settle_defer_alerted:
+            self._settle_defer_alerted = True
+            self.alert("warn", "Promotion settle held by flapping probes",
+                       f"{commit[:12]} finished its observation window {waited:.0f}s ago "
+                       f"but has not settled: a probe failure streak has been open on "
+                       f"every check since ({', '.join(streaks)}). It is not being "
+                       "rolled back for this; it settles on the first check with no "
+                       "streak open.", commit=commit)
+
     def maybe_settle(self, current: dict) -> None:
         """Advance LKG once a promotion survives its full observation window."""
         errors_until = float(current.get("errors_until_ts") or 0)
@@ -2632,6 +2893,25 @@ class Guardian:
         commit = current.get("commit")
         if not commit:
             return
+        if current.get("verdict") == BAD_UNREVERTED:
+            # Judged bad, revert refused: stop observing, never certify it.
+            self.state.clear_current()
+            gstate.append_event(self.state.ledger, {
+                "event": "settle_refused", "commit": commit,
+                "verdict": BAD_UNREVERTED, "reason": current.get("verdict_reason"),
+                **({"commits": gstate.batch_commits(current)}
+                   if gstate.batch_commits(current) else {}),
+            })
+            log(f"settle of {commit[:12]} refused: {BAD_UNREVERTED}")
+            return
+        # A streak still running is a verdict not yet reached; settling now
+        # would make a hung promotion last-known-good. Wait for a tick.
+        streaks = self.probe_streaks_open()
+        if streaks:
+            log(f"settle of {commit[:12]} deferred: probe streaks open {streaks}")
+            self._settle_deferral_watch(commit, streaks)
+            return
+        self._settle_deferred = None
         mcp = probes.probe(self.mcp_url, policy.PROBE_TIMEOUT_SECONDS)
         degraded = ((mcp.get("body") or {}).get("degraded_modules") or [])
 
@@ -2802,7 +3082,7 @@ class Guardian:
             # socket and nothing else: a retraction written after a service check would
             # leave a reader unable to tell which recovery it named.
             self._sup_unreachable_open = False
-            self.notifier.resolve(
+            self._notify("resolve",
                 SUPERVISOR_ALERT_TITLE,
                 "agent-supervisord answered again on the next tick.")
         self.sup_down_streak = 0
@@ -2836,7 +3116,7 @@ class Guardian:
             # through a pause is the artefact this clause is about.
             recovered = ", ".join(sorted(self._down_programs))
             self._down_programs = set()
-            self.notifier.resolve(
+            self._notify("resolve",
                 SERVICE_DOWN_ALERT_TITLE,
                 f"liveness read came back healthy: {recovered}.")
 
@@ -3048,7 +3328,7 @@ class Guardian:
         asserting this incident — the callers in `check_vault`/`check_data` discard it;
         it exists so a test can pin the verdict without scraping the log.
         """
-        incident = self.notifier.alert_file_incident()
+        incident = self._notify("alert_file_incident", _default=None)
         if incident is None or incident[0] != title or incident[1]:
             return                      # ALERT.md is not asserting this incident at all
         # The one shared condition, module level since #3502 so the note sweep answers the
@@ -3079,8 +3359,8 @@ class Guardian:
             log(f"ALERT.md still asserts {title!r} — its clear condition does not "
                 f"hold, so the incident stays open: {note}")
             return "still-open"
-        complete = self.notifier.resolve(title, note)
-        after = self.notifier.alert_file_incident()
+        complete = self._notify("resolve", title, note)
+        after = self._notify("alert_file_incident", _default=None)
         if after is None or not after[1]:
             log(f"ALERT.md still asserts {title!r} after reconciliation: resolve "
                 "could not seal the file — the incident stays as a live directive")
@@ -3148,7 +3428,7 @@ class Guardian:
 
         Never raises by contract: `run` calls this before the first tick, where an
         exception would look like a guardian that will not boot."""
-        incident = self.notifier.alert_file_incident()
+        incident = self._notify("alert_file_incident", _default=None)
         if incident is None:
             return "nothing-to-reconcile"
         title, sealed = incident
@@ -3176,7 +3456,7 @@ class Guardian:
         pending = self.state.unfinished_rollback()
         if pending:
             log(f"resuming interrupted rollback to {str(pending.get('to'))[:8]}")
-            self.do_rollback("resume", f"resumed after guardian restart: {pending.get('reason','')}")
+            self.resume_rollback(pending)
 
         # The other thing a restart inherits: an ALERT.md whose incident ended while
         # the previous process was alive, or while it was dead, and whose recovery
@@ -3195,9 +3475,14 @@ class Guardian:
         while True:
             try:
                 state = self.tick()
+                error = None
             except Exception as exc:
                 log(f"tick error (continuing): {type(exc).__name__}: {exc}")
-                state = "error"
+                state, error = "error", exc
+            try:
+                self._tick_outcome(error)
+            except Exception as exc:  # noqa: BLE001
+                log(f"tick error accounting failed: {exc}")
             self.heartbeat(state)
             sd_notify("WATCHDOG=1")
             self.maybe_selftest()
@@ -3217,6 +3502,9 @@ class Guardian:
 #: read both "a name left the data root" and "a payload appeared in the quarantine" would
 #: be retracted by the hour that contradicted half of it.
 RUNTIME_DATA_DEPARTURES_ALERT_TITLE = "A name left the data root's top level"
+TICK_ERROR_ALERT_TITLE = "Guardian ticks are failing"
+#: `current.json` verdict for a promotion judged bad whose revert would not apply.
+BAD_UNREVERTED = "bad_unreverted"
 RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE = "A quarantined stray has no ledger row"
 
 

@@ -54,7 +54,7 @@ the dispatch cwd for is every target it genuinely cannot read, and
 
 It is a *scoped* rail by construction: the
 self-modification loop lands by committing in linked worktrees of this very repo
-(`scripts/automod/round.py:111` — `git worktree add … /home/alansrobotlab/lloyd-
+(`scripts/automod/round.py:112` — `git worktree add … /home/alansrobotlab/lloyd-
 work/SM_…`), the arch-review source commits to production **with** a commit, and
 the nightly writers commit to the vault. A guard that refused `git commit`
 unconditionally in an unattended turn would stop Lloyd landing Lloyd; refusing the

@@ -724,7 +724,7 @@ def test_a_zero_occurrence_record_changes_nothing_and_dispatches_nothing(tmp_pat
 # asserts the seam between the two witnesses instead (below): row 1 here IS row 2164 there.
 #
 # Runs under the gate, unmarked: the automod round home symlinks `~/obsidian` across
-# (`scripts/automod/worktree.py:78-120` — "every entry but `lloyd` is symlinked across"),
+# (`scripts/automod/worktree.py:100-120` — "every entry but `lloyd` is symlinked across"),
 # so these committed bytes are readable in the round home, which is also how #2256's node
 # works. It is the mutable vault that needs `live_vault`; `backlog/data/` is durable.
 

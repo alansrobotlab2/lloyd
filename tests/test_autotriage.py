@@ -394,7 +394,7 @@ def test_a_two_item_sweep_render_carries_the_bullet_and_no_bigger_bound(backlog_
     """Clause 5, first half: the guidance reaches the sweep turn, not just the module.
 
     Rendered the way `_execute_sweep` renders it — `SWEEP_PROMPT.format` over
-    `_render_cluster` (`workers/sources/autotriage.py:1384`) — for a two-item batch.
+    `_render_cluster` (`workers/sources/autotriage.py:1404`) — for a two-item batch.
     The millisecond set is #1738's guard carried over: exactly the 120000 default the
     bullet warns about, so no bigger bound entered the sweep text either, and the
     regex keeps an instruction like `timeout: 600000` out of it in prose form too.

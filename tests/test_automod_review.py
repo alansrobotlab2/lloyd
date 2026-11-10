@@ -5379,7 +5379,7 @@ def test_grade_vault_without_an_out_param_still_returns_the_verdicts(
     Every grade_vault call in this file, in `tests/test_automod_gate.py`,
     `test_automod_vault_round.py`, `test_review_grader_determinism.py` and
     `test_automod_review_cli_rendering.py` unpacks three values, and
-    `agent_mcp/automod.py:919` hands `review.grade_vault` to
+    `agent_mcp/automod.py:924` hands `review.grade_vault` to
     `vault_round.GRADER` directly. This is the shape check for that: a call with no
     `usage_out` returns the same 3-tuple it always did, on the failing path too.
     """

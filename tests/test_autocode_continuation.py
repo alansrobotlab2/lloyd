@@ -257,7 +257,7 @@ def test_a_red_tree_whose_nodes_all_pass_at_head_is_never_started(env, monkeypat
     res = asyncio.run(I.execute(_Item()))
     assert res["status"] == "skipped" and res["item_id"] == iid, res
     assert turn.calls == [], "no implement turn, so nothing to record a turn against"
-    assert [r["phase"] for r in _implement_rows(iid)] == ["skipped"], \
+    assert [r["phase"] for r in _implement_rows(iid)] == ["declined"], \
         "no `started` row: the attempt was never spent"
     assert B.item_by_id(iid).status == "done"
     assert _fm(B.item_by_id(iid))["autotriage_retired"] == "already_done"

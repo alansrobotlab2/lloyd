@@ -17,6 +17,7 @@ branch twice, so every round gets its own `automod/<round_id>` branch.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,7 +31,28 @@ def git(repo: Path, *args: str, timeout: float = 120.0) -> subprocess.CompletedP
                           capture_output=True, text=True, timeout=timeout, check=False)
 
 
+#: One path component, starting with a letter or digit. Every id the loop mints
+#: (`SM_<stamp>`, `review_<label>`) fits; nothing that could name a directory
+#: other than a child of `WORK_ROOT` does.
+_ROUND_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+
+def valid_round_id(round_id: object) -> bool:
+    """True when `round_id` names exactly one child of `WORK_ROOT`.
+
+    `round_dir` is where a round id becomes a path, and `remove` hands that
+    path to `rmtree`. `Path("~/lloyd-work") / ""` is the work root itself (every
+    open round), `/ ".."` is `$HOME`, `/ "../lloyd"` is production, and an
+    absolute id replaces the root outright — and the id arrives from a tool
+    argument nothing validates. The 2026-09-29 rule (never delete a path you
+    computed) is kept here by refusing to compute one from such an id.
+    """
+    return isinstance(round_id, str) and bool(_ROUND_ID_RE.fullmatch(round_id))
+
+
 def round_dir(round_id: str) -> Path:
+    if not valid_round_id(round_id):
+        raise ValueError(f"not a round id: {round_id!r}")
     return WORK_ROOT / round_id
 
 
@@ -154,8 +176,17 @@ def delete_branch(repo: Path, branch: str) -> bool:
 
 
 def changed_paths(worktree: Path, base: str) -> list[str]:
-    """Repo-relative paths changed between `base` and the worktree's HEAD."""
-    r = git(worktree, "diff", "--name-only", f"{base}...HEAD")
+    """Repo-relative paths changed between `base` and the worktree's HEAD.
+
+    `--no-renames` is the point, as in `vet.py`: with rename detection on, a
+    `git mv` lists only the destination, and this list is what the scope fence
+    (`spec.classify`), the drill decision and the removed-tests check read.
+    `git mv config.yaml app/old.yaml` showed one allowed path; a protected file
+    renamed to an allowed name landed with no drill; a failing test moved out of
+    `tests/` was not a removed test. A rename is a delete and an add, and both
+    sides are judged.
+    """
+    r = git(worktree, "diff", "--name-only", "--no-renames", f"{base}...HEAD")
     if r.returncode != 0:
         return []
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
@@ -198,17 +229,28 @@ def squash_onto(worktree: Path, base: str, message: str, *,
     if git(worktree, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         return None, "worktree has uncommitted changes"
     old_tree = git(worktree, "rev-parse", f"{old}^{{tree}}").stdout.strip()
+    # The history is kept BEFORE the branch moves: killed between the reset
+    # and the commit, the branch sits at `base` and the round's commits would
+    # otherwise be reachable only through the reflog.
+    prior = git(worktree, "rev-parse", "-q", "--verify", keep_ref).stdout.strip() if keep_ref else ""
+    if keep_ref and git(worktree, "update-ref", keep_ref, old).returncode != 0:
+        return None, f"could not write {keep_ref}; branch untouched"
+
+    def _unkeep() -> None:
+        if keep_ref:
+            git(worktree, *(("update-ref", keep_ref, prior) if prior
+                            else ("update-ref", "-d", keep_ref)))
     if git(worktree, "reset", "--soft", base).returncode != 0:
+        _unkeep()
         return None, "reset --soft failed"
     commit = git(worktree, "commit", "-q", "--no-verify", "-m", message)
     new = head(worktree)
     new_tree = git(worktree, "rev-parse", "HEAD^{tree}").stdout.strip() if new else ""
     if commit.returncode != 0 or not new or new == base or new_tree != old_tree:
         git(worktree, "reset", "--hard", old)
+        _unkeep()
         return None, (f"squash did not reproduce the gated tree "
                       f"({(commit.stderr or '').strip()[:160]}); branch restored")
-    if keep_ref:
-        git(worktree, "update-ref", keep_ref, old)
     return new, f"squashed {count.stdout.strip()} commits ({old[:8]} → {new[:8]}), same tree"
 
 
@@ -382,6 +424,10 @@ def remove(round_id: str, *, keep_branch: bool = False, repo: Path | None = None
     if not keep_branch:
         git(repo, "branch", "-D", f"automod/{round_id}")
     rd = round_dir(round_id)
+    # Belt to `round_dir`'s braces: the directory deleted is a real child of the
+    # work root, never the root, a symlink out of it, or anything above it.
+    if rd.is_symlink() or rd.resolve().parent != WORK_ROOT.resolve():
+        raise ValueError(f"{rd} is not a round directory under {WORK_ROOT}")
     if rd.exists():
         shutil.rmtree(rd, ignore_errors=True)
 

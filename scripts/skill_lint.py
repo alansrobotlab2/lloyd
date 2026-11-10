@@ -757,7 +757,7 @@ def default_unit_roots() -> list[Path]:
     """Where a unit can exist on this box: the repo's tracked install list, and
     the user's systemd directory.
 
-    The same pair `scripts/automod/round.py:742` reads when it restarts a service
+    The same pair `scripts/automod/round.py:751` reads when it restarts a service
     (and `tests/test_automod_hardening.py:752` asserts on), so this check and the
     restart path agree about what is installed. A unit in neither is one no
     `systemctl` on this machine can start.

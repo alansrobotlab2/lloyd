@@ -2475,7 +2475,7 @@ def bare_anchor_citations(text: str) -> list[tuple[str, Path, int, str]]:
 
     #2971 banned the `workers/queue.py:<n>` spelling corpus-wide; this is the other
     half of that spelling — a number whose file was named earlier on the same line
-    (`(`workers/pool.py:1023`, body `:1028`)`) — and the extractor never saw it,
+    (`(`workers/pool.py:1031`, body `:1036`)`) — and the extractor never saw it,
     because `_CITATION` requires a slash-bearing path before the colon. Owning it is
     the cheaper call: measured at #3047's head, 17 corpus spans resolve this way and
     exactly one of them was wrong — `architecture/guard-coverage.md:93`'s `:412`, one
@@ -3133,8 +3133,15 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # grep '^@@'` answers those four hunks and nothing else, and
     # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
     # prints 1021 with 3362 below it.
-    assert heads[guardian]["main"] == 3362, (
-        f"`main` moved off :3362 ({heads[guardian]['main']}) — if it is gone "
+    # 3362 → 3552 is the 2026-11 guardian review's fixes (F1-F5, F8): every hunk in
+    # `agent-services/guardian/guardian.py` is below `evaluate_liveness` and above `main`
+    # (the new class defaults and probe-streak helpers sit after `evaluate_liveness` on
+    # purpose), so `evaluate_liveness` keeps :1021, the T-26 row does not move, and `main`
+    # takes the whole +190. 3552 → 3650 is that review's second pass (refused-revert
+    # settle, resume bookkeeping, flapping-settle warning), again all below
+    # `evaluate_liveness`.
+    assert heads[guardian]["main"] == 3650, (
+        f"`main` moved off :3650 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1021, (
         f"`evaluate_liveness` moved off :1021 "
@@ -3323,7 +3330,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 
     The doc must then carry no fallback-decided anchor at all. All six of its
     graded spans are re-typed to satisfy that — the five the item names
-    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3414`,
+    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3435`,
     and the stale pair) plus `eval/run_tool_choice_eval.py:498`, which the item's
     count missed because it appears twice and named nothing either time.
     `EVAL_BASELINES_DIR`, `main` and `rung_prompt_surface` now stand beside their
@@ -3333,11 +3340,12 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     already makes for such cites with its `historical` kind (the four admitted
     kinds are generated, historical, other-tree, stale).
 
-    The `gate.py` anchor is 3414, and it has moved three times since this rail was
+    The `gate.py` anchor is 3435, and it has moved four times since this rail was
     written: 3043→3287 when #3770 inserted the chrome-bundle provenance node into
     `gate.py` above this rung, 3287→3352 when #3868 inserted the
     `prose_consumers` rung directly behind `rung_pyright`, and 3352→3414 when #3930
-    inserted the `recovery` rung directly behind `rung_code_rules`. Each move is the rail
+    inserted the `recovery` rung directly behind `rung_code_rules`, and 3414→3435 when
+    preflight gained its clean-worktree check. Each move is the rail
     doing its job rather than a correction to it — the
     `label = f"item{…}" or f"gate-{…}"` assignment slid down by the inserted
     length, and the stale citation landed inside a rung the sentence does not name
@@ -3377,7 +3385,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
     seeded = text.replace("eval/run_eval.py:2716", "eval/run_eval.py:2055")
-    seeded = seeded.replace("scripts/automod/gate.py:3414", "scripts/automod/gate.py:1590")
+    seeded = seeded.replace("scripts/automod/gate.py:3435", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2055", "scripts/automod/gate.py:1590"], (
@@ -3395,7 +3403,8 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 #: #3770 inserted the chrome-bundle provenance node into `gate.py` above that rung.
 #: Kept as a constant because the negative control needs the *previous* number, not a
 #: number invented for the control: it is the one value the rail refused for real.
-_PRE_3770_PROMPT_SURFACE_ANCHOR = 3043
+#: 3043 then; 3064 since preflight's clean-worktree check moved `rung_pyright` down 21.
+_PRE_3770_PROMPT_SURFACE_ANCHOR = 3064
 
 
 def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
@@ -3406,7 +3415,7 @@ def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
     by any line inside `rung_prompt_surface`, and at 76 lines that rung has 75 other
     lines to land on. This node reads the bytes at the cited line and requires them
     to be the `label = f"item{…}" … f"gate-{…}"` assignment the doc is talking about,
-    which is the only property that makes `scripts/automod/gate.py:3414` the right
+    which is the only property that makes `scripts/automod/gate.py:3435` the right
     number rather than a defensible one.
 
     Then the failure this round would have shipped. #3770 inserts the chrome-bundle

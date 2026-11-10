@@ -295,6 +295,9 @@ def _no_voice_alerts_in_tests(monkeypatch):
     ones that exercise the channel assert on the dispatch decision instead.
     """
     monkeypatch.setenv("LLOYD_VOICE_ALERTS", "0")
+    # A hand-run receipt's reading is cached for two minutes in production;
+    # a test that changes a store and asks again is asking a new question.
+    monkeypatch.setenv("LLOYD_RECEIPT_CACHE_SECONDS", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -487,9 +490,9 @@ def _no_live_service_control_in_tests(monkeypatch):
     guarded names' ordinary path. `tick()` issues a real
     `subprocess.run(["systemctl", "--user", "restart", policy.SUPERVISORD_UNIT])` as
     soon as `sup_down_streak` passes `policy.SUPERVISORD_DOWN_STREAK` (3) —
-    `agent-services/guardian/guardian.py:1233-1236`, `policy.py:54` — `_stop_sync`
+    `agent-services/guardian/guardian.py:1280-1236`, `policy.py:54` — `_stop_sync`
     issues a real `pkill -f "sync --path …"` at `guardian.py:1054`, and the promoter
-    reaches `systemctl --user daemon-reload` (`scripts/automod/promote.py:710`) and
+    reaches `systemctl --user daemon-reload` (`scripts/automod/promote.py:770`) and
     `systemctl --user restart lloyd-guardian` (`:719`) through its own thin `_run`
     wrapper (`promote.py:542`), which calls the module-global `subprocess.run`.
 

@@ -114,10 +114,10 @@ class _FakeBackend:
 
     The class itself is replaced, not an attribute of `workers.sources._common`:
     `run_prompt_in_session` does `import httpx` inside its own body
-    (`workers/sources/_common.py:1220`), so a module attribute on the worker module
+    (`workers/sources/_common.py:1229`), so a module attribute on the worker module
     is a name that function never looks up. `.stream` is the turn — the POST is
     `client.stream("POST", f"{backend}/api/message/stream", json=payload)`
-    (`workers/sources/_common.py:1325`) — and `.post` is the turn-cancel call the
+    (`workers/sources/_common.py:1334`) — and `.post` is the turn-cancel call the
     wall-clock branch makes. Neither reaches a socket here.
     """
 
@@ -181,7 +181,7 @@ def _job_post(monkeypatch, *, extra_disallowed=None, max_turns: int = 60,
     """Dispatch a real autotriage turn; return the body the worker POSTed.
 
     The dispatch is autotriage's own — `run_prompt_in_session`, which is what
-    `workers/sources/autotriage.py:1163` calls for a triage turn — with its
+    `workers/sources/autotriage.py:1167` calls for a triage turn — with its
     `extra_disallowed` argument (None for single triage, the sweep's list for
     re-triage) and its `max_turns` default of 60 (`_common.py:1146`). Nothing here
     re-derives the request: the body is read out of the socket the worker would have
@@ -253,7 +253,7 @@ def test_warm_payload_is_the_head_the_real_job_sends(wp, tmp_path, monkeypatch):
     iteration-1 row never moves. So the comparison is against the job's own head read
     across the process boundary. `_worker_post_body` captures the JSON autotriage
     actually POSTs — built by `_run_turn` with the triage dispatch's own arguments
-    (`workers/sources/autotriage.py:1163-1173`: `max_turns=25`, `model="primary"`,
+    (`workers/sources/autotriage.py:1167-1173`: `max_turns=25`, `model="primary"`,
     `extra_disallowed=None`) — and `_backend_head` runs that POST through
     `build_turn_options`, the function `/api/messages/stream` composes the head with.
     Neither side of the equality is a builder call this test chose to make.
@@ -300,7 +300,7 @@ def test_warm_payload_is_the_head_the_real_job_sends(wp, tmp_path, monkeypatch):
         "the POST's user key is `text`, and the per-run item content is what follows "
         "the head — the part the warm must not contain")
     # The positive side, on the shape that does pass a list: the sweep dispatch
-    # (`workers/sources/autotriage.py:1487`, `extra_disallowed=list(SWEEP_DISALLOWED)`).
+    # (`workers/sources/autotriage.py:1507`, `extra_disallowed=list(SWEEP_DISALLOWED)`).
     # Without this leg the paragraph above would be an `if` that one real dispatch
     # never enters, which is the vacuity this node exists to avoid.
     from workers.sources.autotriage import SWEEP_DISALLOWED

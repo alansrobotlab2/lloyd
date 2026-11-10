@@ -54,7 +54,9 @@ def process_down(
     crash_loop_window: float,
     intentional_stop: bool = False,
     probe_timeout_streak: int = 0,
-    probe_timeout_threshold: int = 10**9,
+    probe_timeout_seconds: float = 0.0,
+    probe_timeout_budget: float = float("inf"),
+    probe_timeout_min_ticks: int = 1,
     probe_http_streak: int = 0,
     probe_http_threshold: int = 10**9,
 ) -> tuple[bool, str]:
@@ -97,9 +99,13 @@ def process_down(
         # longer budget before it counts as death.
         if probe_fail_streak >= probe_threshold:
             return True, f"health probe refused {probe_fail_streak} consecutive times"
-        if probe_timeout_streak >= probe_timeout_threshold:
-            return True, (f"health probe timed out {probe_timeout_streak} consecutive "
-                          f"times — unresponsive, not merely busy")
+        # The timeout budget is wall seconds since the streak's first timeout;
+        # the tick floor keeps one stalled guardian tick from spanning it.
+        if (probe_timeout_seconds >= probe_timeout_budget
+                and probe_timeout_streak >= probe_timeout_min_ticks):
+            return True, (f"health probe timed out for {probe_timeout_seconds:.0f}s "
+                          f"({probe_timeout_streak} consecutive probes) — unresponsive, "
+                          f"not merely busy")
         # An answered non-200 is the third case and it is neither of the other
         # two: the process is demonstrably alive and serving. It still counts
         # eventually, because a backend parked in `degraded` (a router that
@@ -187,45 +193,132 @@ def parse_log_line(line: str) -> dict | None:
     }
 
 
+_TB_HEADER = "Traceback (most recent call last):"
+# The two separators Python prints between the links of one exception chain.
+_CHAIN_MARKERS = (
+    "During handling of the above exception, another exception occurred:",
+    "The above exception was the direct cause of the following exception:",
+)
+_FRAME = re.compile(r'^\s+File "(?P<file>[^"]+)", line \d+')
+_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}")
+
+
+def _parse_tb_segment(lines: list[str], i: int) -> tuple[str, str, int]:
+    """Parse one `Traceback` block starting at header line `i`.
+
+    Returns (exception line, raising frame file, index after the block). A
+    block is: header, indented frames, then ONE non-indented exception line.
+    Stopping at that line matters — scanning a fixed window ahead made
+    consecutive tracebacks all report the *last* one's exception.
+    """
+    exc_line = ""
+    frame = ""
+    end = i + 1
+    for j in range(i + 1, min(i + 400, len(lines))):
+        candidate = lines[j]
+        m = _FRAME.match(candidate)
+        if m:
+            frame = m.group("file")
+        if candidate.strip() and not candidate.startswith((" ", "\t")):
+            exc_line = candidate.strip()
+            end = j + 1
+            break
+        end = j + 1
+    return exc_line, frame, end
+
+
+_CHAIN_SCAN_LINES = 50
+
+
+def _next_chain_header(lines: list[str], k: int) -> int | None:
+    """Index of the next link's header if a chain marker follows `k`, else None.
+
+    The exception message may span several lines (a pydantic ValidationError
+    lists its fields), so the marker is looked for past them: up to the next
+    `Traceback` header, frame or timestamped line, within a bounded window.
+    """
+    n = len(lines)
+    stop = min(n, k + _CHAIN_SCAN_LINES)
+    while k < stop:
+        line = lines[k]
+        if line.strip() in _CHAIN_MARKERS:
+            break
+        if (line.startswith(_TB_HEADER) or _FRAME.match(line)
+                or _STAMP.match(line)):
+            return None
+        k += 1
+    else:
+        return None
+    k += 1
+    while k < n and not lines[k].strip():
+        k += 1
+    if k < n and lines[k].startswith(_TB_HEADER):
+        return k
+    return None
+
+
 def extract_events(text: str) -> list[dict]:
     """Structured error events from a chunk of log text.
 
-    Traceback headers are counted once per exception rather than per frame, so
-    one raised error is one event. `[WARNING]` is never an error: production
-    emits 20+ per 20k lines at steady state from the worker pool, the autonomy
-    scheduler and the MCP pool.
+    One exception CHAIN is one event: the links joined by "During handling of
+    the above exception…" / "The above exception was the direct cause…" are
+    folded, and the event is the chain's final exception (the one that
+    escaped). Counting each `Traceback` header made one three-level chain
+    "3 distinct novel fatal signatures", enough to revert on its own.
+    `frame` is the file of the final exception's raising (last) frame, and
+    `hour` the `YYYY-MM-DD HH` of the nearest preceding timestamped line, so
+    a recurring traceback can become chronic.
+
+    `[WARNING]` is never an error: production emits 20+ per 20k lines at
+    steady state from the worker pool, the autonomy scheduler and the MCP pool.
     """
     events: list[dict] = []
     lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line.startswith("Traceback (most recent call last):"):
-            # A traceback is: header, indented frames, then ONE non-indented
-            # exception line. Stop at that line — scanning a fixed window
-            # ahead makes consecutive tracebacks all report the *last* one's
-            # exception, collapsing three distinct failures into one
-            # signature and hiding a real spike.
-            exc_line = ""
-            end = i + 1
-            for j in range(i + 1, min(i + 40, len(lines))):
-                candidate = lines[j]
-                if candidate.strip() and not candidate.startswith((" ", "\t")):
-                    exc_line = candidate.strip()
-                    end = j + 1
-                    break
-                end = j + 1
+    hour = ""
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith(_TB_HEADER):
+            start = i
+            exc_line, frame, end = _parse_tb_segment(lines, i)
+            nxt = _next_chain_header(lines, end)
+            while nxt is not None:
+                exc_line, frame, end = _parse_tb_segment(lines, nxt)
+                nxt = _next_chain_header(lines, end)
             events.append({
                 "level": "TRACEBACK",
                 "logger": "traceback",
                 "message": exc_line,
                 "signature": signature("traceback", exc_line),
-                "text": "\n".join(lines[i:end])[:2000],
+                "frame": frame,
+                "hour": hour,
+                "text": "\n".join(lines[start:end])[:2000],
             })
+            i = end
             continue
+        if _STAMP.match(line):
+            hour = line[:13]
         parsed = parse_log_line(line)
         if parsed and parsed["level"] in ("ERROR", "CRITICAL"):
             parsed["text"] = line[:2000]
             events.append(parsed)
+        i += 1
     return events
+
+
+def _names_changed_path(event: dict, changed_paths: list[str]) -> bool:
+    """A traceback names a changed path only through its raising frame.
+
+    A substring match over every frame tripped on any traceback merely
+    passing THROUGH a hot file the promotion touched (`workers/pool.py`).
+    A log line has no frame, so its message is what is matched.
+    """
+    if event.get("level") == "TRACEBACK":
+        frame = (event.get("frame") or "").replace("\\", "/")
+        return any(p and (frame == p or frame.endswith("/" + p.lstrip("/")))
+                   for p in changed_paths)
+    blob = event.get("text") or event.get("message") or ""
+    return any(p and p in blob for p in changed_paths)
 
 
 def error_spike(
@@ -256,8 +349,7 @@ def error_spike(
     # promotion just edited is causal evidence, not correlation.
     if changed_paths:
         for e in novel:
-            blob = e.get("text") or e.get("message") or ""
-            if any(p and p in blob for p in changed_paths):
+            if _names_changed_path(e, changed_paths):
                 if counts[e["signature"]] >= changed_path_threshold:
                     return True, (f"novel error naming a changed path "
                                   f"({counts[e['signature']]}x): {e['message'][:120]}")

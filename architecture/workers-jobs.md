@@ -42,7 +42,7 @@ Sixteen sources are registered.
 All sixteen have a block under `workers.sources`, and none is registered-but-off:
 `failure-ledger` was the last to get one, on 2026-10-06 (#2309). Until that block
 existed `WorkerPool._scheduler_pass` read an empty dict for the source
-(`workers/pool.py:1697`) and stepped past it at `:1698` without calling its
+(`workers/pool.py:1723`) and stepped past it at `:1724` without calling its
 `enqueue_if_due`, which is why its **on** column was the only **no** in the table and
 why its cadence was a module constant rather than a configured interval (see §6's
 last entry). Priority is `DEFAULT_PRIORITY` unless config overrides it —
@@ -322,15 +322,15 @@ and each stops the reporting of the problem along with the work:
 
 - **`workers.enabled: false` at boot.** `start_worker_pool()`
   (`app/routers/workers.py:962`) returns before `WorkerPool` is constructed, so
-  `_scheduler_loop` (`workers/pool.py:1650`) never runs at all.
+  `_scheduler_loop` (`workers/pool.py:1676`) never runs at all.
 - **`POST /api/workers/enable {"enabled": false}`.** `app/routers/workers.py:559`
   awaits `pool.stop()`, which clears `_running` and cancels `_scheduler_task`
-  (`workers/pool.py:839`).
+  (`workers/pool.py:847`).
 
 What either one silences is everything that rides that loop, not just dispatch: the
 parse announcement and both stall alarms above, `workers/service_probe.py`'s port
 watch, and — because the sources that *create* work are polled from `_scheduler_pass`
-on the same loop (`workers/pool.py:1680`, body `:1696`) — the entire autonomy/nightly chain,
+on the same loop (`workers/pool.py:1706`, body `:1722`) — the entire autonomy/nightly chain,
 including the job that would have written the alert. `/api/workers/status` and
 `/health` both publish the state honestly (`{"initialized": false}` on the boot
 route, with no `pool` key at all, because `get_queue()` raises to tell "switched off"
@@ -1546,8 +1546,8 @@ touching it are both about not lying to the reader.
   this source swept — and nothing about the day's outcome: a day with findings and a
   day with none move it identically. The pool's own pair answers a different question
   and neither one is "a pass completed": `last_enqueue_check` is stamped on every ask
-  whether or not the call returned (`workers/pool.py:1720`) and `last_enqueue_ok` only
-  on a clean return (`workers/pool.py:1731`, read by `workers/dispatch_watch.py`), so
+  whether or not the call returned (`workers/pool.py:1746`) and `last_enqueue_ok` only
+  on a clean return (`workers/pool.py:1757`, read by `workers/dispatch_watch.py`), so
   both advance once per pool ask, per source. A fresh `last_enqueue_ok` therefore says
   the pool is still asking, not that this source swept: `enqueue_if_due` returns early
   inside its own `min_interval_seconds` of the last sweep

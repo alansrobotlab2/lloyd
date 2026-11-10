@@ -104,7 +104,7 @@ in-memory set, so a restart empties it together with the turns it described.
 
 What the turn may not
 use is a **deny-list over the whole chat toolbox**, not a grant list:
-`workers/sources/_common.py:1189` says outright that a worker
+`workers/sources/_common.py:1198` says outright that a worker
 session "is handed exactly the toolbox a chat gets", and `DISALLOWED`
 subtracts from that. It names `Write` (the doc exists — a new file is either
 a finding to file or a stray write), `Task` (a subagent's writes land on the

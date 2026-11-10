@@ -19,7 +19,7 @@ the seven in that file or in its sibling `gate.log` (re-run 2026-11-04 at HEAD
 `full-suite failures that pass in isolation` — appears in no report line
 `scripts/automod/gate.py` writes (`git grep -c "pass in isolation" --
 scripts/automod/gate.py` → no match). The prompt already forbids it
-(`workers/sources/autocode.py:174-181`: "copy any gate or ledger line you quote
+(`workers/sources/autocode.py:175-181`: "copy any gate or ledger line you quote
 out of that artifact **re-read from disk** … and name the path you copied from"),
 and prose is what stopped it: one triage's refutation, or the pool moved.
 

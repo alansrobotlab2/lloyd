@@ -296,7 +296,7 @@ def test_the_execstart_is_a_direct_exec_of_the_script_and_not_an_enqueue():
     environment) reaches for `curl`, an enqueue route or the pause API: the driver's
     own `PoolPause` is the only thing that may take a hold, because its resume is the
     one that refuses to lift the automod promoter's hold along with the operator's
-    (`workers/pool.py:716-728`)."""
+    (`workers/pool.py:723-728`)."""
     execstart = _execstart()
     tokens = execstart.split()
     assert tokens[0].endswith(WINDOW_SCRIPT), execstart

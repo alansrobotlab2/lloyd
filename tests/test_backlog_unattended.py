@@ -2759,7 +2759,7 @@ def test_the_reaper_can_close_a_round_an_infra_failed_turn_left_open(isolated):
     ever close blocks `_loop_is_free` for every item behind it."""
     import inspect
     from workers.sources import autocode as I
-    src = inspect.getsource(I.reap_abandoned_rounds)
+    src = inspect.getsource(I._reap_abandoned_rounds)
     assert 'e.get("phase") in ("finished", "infra_failed")' in src
 
 

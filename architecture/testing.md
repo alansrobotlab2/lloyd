@@ -297,9 +297,9 @@ The subtraction is gated on the probe having reached a conclusion. Failures
 outside the round's own files that the base probe does **not** reproduce leave the
 rung unable to attribute them, and it fails closed — *"every failure outside the
 round's own files was unexplained, and the base probe could not say whose they
-are"* (`scripts/automod/gate.py:3574`) — filing nothing. Only a conclusive pass with an inherited
+are"* (`scripts/automod/gate.py:3595`) — filing nothing. Only a conclusive pass with an inherited
 red files the debt: `_file_red_tree` runs on `pre_existing and conclusive`
-(`scripts/automod/gate.py:3545`), and the verdict names the nodes under `pre_existing_failures`
+(`scripts/automod/gate.py:3566`), and the verdict names the nodes under `pre_existing_failures`
 with the tracker's id in `red_tree_item`. There is no `external_blocker` /
 `external_failures` pair in the gate — that was the pre-#2876 shape, and a round
 whose report contains neither key did not hit an inherited red.

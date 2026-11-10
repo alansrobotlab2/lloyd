@@ -247,7 +247,7 @@ def verdict(*, ok_stamp: Optional[str], attempt_stamp: Optional[str],
     if age > threshold:
         # Both stamps past the window is a different event from one of them, and the
         # two need different words (#3061). ``pool.py`` advances the attempt stamp on
-        # EVERY outcome, the raise included (``workers/pool.py:1635-1636``, sitting
+        # EVERY outcome, the raise included (``workers/pool.py:1661-1636``, sitting
         # after the ``except`` at :1628-1630), so a source that is being asked and
         # failing to answer keeps that stamp fresh — while a pool that was stopped,
         # halted or simply restarting asked nothing and let both stamps age together.
@@ -390,7 +390,7 @@ class DispatchWatch:
                           interval_seconds=cfg.get("interval_seconds",
                                                    DEFAULT_INTERVAL_S),
                           # Default False, which is the pool's own at
-                # `workers/pool.py:944` (`if not src_cfg.get("enabled", False):
+                # `workers/pool.py:952` (`if not src_cfg.get("enabled", False):
                 # continue`) and the health route's at
                 # `app/routers/workers.py`. A source that does not say it is on is
                 # not dispatching, so it must not be judged for not dispatching:

@@ -95,6 +95,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "count_kg_rows", lambda: 10)
     monkeypatch.setattr(P, "count_vault_files", lambda: 20)
     monkeypatch.setattr(P, "announce", lambda head, body: c["announce"].append((head, body)))
+    monkeypatch.setattr(P, "alert", lambda title, body, **k: c["announce"].append(("ALERT", title)))
     monkeypatch.setattr(P, "_announce_promoted", lambda *a, **k: c["announce"].append(a))
     monkeypatch.setattr(P, "_start_regression_runner", lambda: "stubbed")
     monkeypatch.setattr(P, "restart_needed", lambda changed, **k: w["needs"](changed))
@@ -110,6 +111,10 @@ def world(tmp_path, monkeypatch):
         w["running"] = _git(live, "rev-parse", "HEAD").stdout.strip()
         return True, "ok"
     monkeypatch.setattr(P, "restart_process", restart)
+    # A rollback's stop and start-again legs, never against the live socket.
+    monkeypatch.setattr(P, "stop_process", lambda program, wait=True: (True, "ok"))
+    monkeypatch.setattr(P, "start_process", lambda program, wait=False: (True, "ok"))
+    monkeypatch.setattr(P, "process_info", lambda program: {"statename": "RUNNING"})
     monkeypatch.setattr(P, "_wait_health", lambda url, budget: w["healthy"])
     monkeypatch.setattr(P, "_wait_for_commit", lambda url, budget: get(url)[1])
 
@@ -396,6 +401,40 @@ def test_an_undo_the_promoter_cannot_do_is_one_request_to_the_guardian(world, mo
     req = S.read_rollback_request()
     assert req["commits"] == [a["commit"], b["commit"]] and req["commit"] == b["commit"]
     assert req["target"] == world["base"]
+
+
+def test_a_flush_whose_undo_went_to_the_guardian_keeps_its_record(world, monkeypatch):
+    """The guardian rolls a batch back by `current.json`: a flush that could
+    not undo its batch inline must leave it, and must not say `rolled_back`."""
+    _train(monkeypatch)
+    a = _land(_round(world, "SM_A"))
+    world["healthy"] = False
+    monkeypatch.setattr(P, "_undo_batch", lambda *a_, **k: (_ for _ in ()).throw(
+        RuntimeError("index.lock")))
+    with pytest.raises(P.PromoteError, match="never became healthy"):
+        P.flush_pending("test")
+    assert S.read_current()["commits"] == [a["commit"]]
+    assert S.read_rollback_request()["commit"] == a["commit"]
+    row = _rows("flush_failed")[-1]
+    assert row["rolled_back"] is False and row["rollback"] == P.UNDO_HANDED_OFF
+    # The guardian discards the request: the batch still never goes back on the train.
+    S.clear_rollback_request()
+    assert S.read_current()["rollback_handed_off"] is True
+    assert P.release_stranded_landing(by="test") is None
+    assert S.read_pending() == [] and S.read_current()["commits"] == [a["commit"]]
+
+
+def test_a_merge_whose_undo_went_to_the_guardian_says_so(world, monkeypatch):
+    _train(monkeypatch)
+    monkeypatch.setattr(P, "_frontend_alive", lambda *a_, **k: (False, "vite down"))
+    monkeypatch.setattr(P, "_undo_batch", lambda *a_, **k: (_ for _ in ()).throw(
+        RuntimeError("index.lock")))
+    rd = _round(world, "SM_W", rel="web/src/x.ts")
+    with pytest.raises(P.PromoteError, match="frontend unreachable"):
+        _land(rd)
+    assert S.read_rollback_request()["commit"] == rd["head"]
+    row = _rows("land_failed")[-1]
+    assert row["rolled_back"] is False and row["rollback"] == P.UNDO_HANDED_OFF
 
 
 def test_undo_batch_reverts_around_a_foreign_commit(world, monkeypatch):

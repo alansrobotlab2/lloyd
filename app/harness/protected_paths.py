@@ -141,7 +141,7 @@ def protected_roots() -> list[Root]:
 # The entry stops at `uv/python` on purpose: `~/.local/share/uv/tools/supervisor`
 # is a different uv tree, and automod's own promotion path execs
 # `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
-# (`scripts/automod/promote.py:97`) — the broader entry would have put the
+# (`scripts/automod/promote.py:98`) — the broader entry would have put the
 # parachute inside the deny-set. The legitimate writer, `uv python install`, is
 # a human command (`SETUP.md:166`); nothing running inside this process is
 # entitled to write any of these paths, because #3563 found that the lift which

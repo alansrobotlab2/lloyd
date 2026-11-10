@@ -83,7 +83,7 @@ def _record(queue, wdb, *, source, tokens, day_offset, status="success",
     """One completed run whose sessions total `tokens`, plus its usage rows.
 
     `day_offset` counts back from now. The run row carries `session_ids` the way
-    `workers/pool.py:1458` does it, because that key is the only join this whole
+    `workers/pool.py:1484` does it, because that key is the only join this whole
     mechanism has between a run and a cost: nothing in `runs` records tokens.
     """
     now = datetime.now(timezone.utc) - timedelta(days=day_offset)

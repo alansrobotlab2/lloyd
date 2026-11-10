@@ -1134,12 +1134,15 @@ def test_a_request_naming_a_batch_is_one_batch_rollback(tmp_path, monkeypatch):
 
 def test_a_conflicting_batch_revert_puts_the_tree_back_and_escalates_once(tmp_path, monkeypatch):
     """A foreign commit that rewrote a batch landing's lines: no automatic
-    answer is safe. The revert of TWO it already made is taken back off, the
-    tree is exactly where it was, and it is not retried."""
+    answer is safe. When the dry run cannot tell, the revert of TWO it already
+    made is taken back off, the tree is exactly where it was, and it is not
+    retried."""
     repo = _batch_repo(tmp_path, foreign=True, foreign_edits_one=True)
     g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
     _settle(g.state, repo["base"])
     _observe_batch(g.state, repo)
+    monkeypatch.setattr(rb, "revert_dry_run",
+                        lambda *a, **k: (rb.REVERT_UNKNOWN, "inconclusive"))
     attempts = []
     real = rb.revert_commits
     monkeypatch.setattr(rb, "revert_commits",
@@ -1152,6 +1155,261 @@ def test_a_conflicting_batch_revert_puts_the_tree_back_and_escalates_once(tmp_pa
     assert git(repo["path"], "status", "--porcelain").stdout.strip() == ""
     assert g.state.is_broken()
     assert _halt_rows(g.state.ledger, "rollback_failed")
+
+
+def test_a_revert_that_would_conflict_stops_nothing_and_is_not_broken(tmp_path, monkeypatch):
+    """F4: the dry run finds the conflict before any service stops. One
+    terminal row, one alert, the tree untouched, and no BROKEN."""
+    repo = _batch_repo(tmp_path, foreign=True, foreign_edits_one=True)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["one"])
+    attempts = []
+    monkeypatch.setattr(g, "_rollback_once", lambda *a, **k: attempts.append(1))
+
+    def request():
+        return g.do_rollback("regression", "nDCG -0.03 after one",
+                             explicit_target=repo["base"], explicit_commit=repo["one"],
+                             explicit_changed=["app/one.py"])
+
+    assert request() is False
+    assert attempts == [] and g.sup.calls == [], "nothing was stopped or attempted"
+    assert not g.state.is_broken()
+    assert rb.head_commit(str(repo["path"])) == repo["two"]
+    assert git(repo["path"], "status", "--porcelain").stdout.strip() == ""
+    rows = _halt_rows(g.state.ledger, "rollback_failed")
+    assert len(rows) == 1 and rows[0]["reason"] == "revert_conflict"
+    assert rows[0]["commit"] == repo["one"] and rows[0]["services"] == "untouched"
+    assert not _halt_rows(g.state.ledger, "rollback_started")
+    assert g.state.unfinished_rollback() is None
+    assert [a["title"] for a in g.alerts] == ["Rollback skipped: the revert would not apply"]
+
+    # The same refusal again (a crash re-detected every tick) is not re-reported.
+    assert request() is False
+    assert len(_halt_rows(g.state.ledger, "rollback_failed")) == 1 and len(g.alerts) == 1
+
+
+def test_an_observed_promotion_whose_revert_was_refused_never_settles(tmp_path, monkeypatch):
+    """Review fix 1: a refused revert of the promotion under observation marks
+    it, and the window's close stops observing it without advancing LKG."""
+    repo = _batch_repo(tmp_path, foreign=True, foreign_edits_one=True)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo, errors_until_ts=time.time() - 1)
+
+    assert g.do_rollback("crash", "backend FATAL") is False
+    assert g.state.current()["verdict"] == "bad_unreverted"
+    assert "STILL LIVE" in g.alerts[-1]["body"]
+
+    g.maybe_settle(g.state.current())
+
+    assert g.state.lkg()["commit"] == repo["base"], "LKG never names the bad commit"
+    assert not _halt_rows(g.state.ledger, "settled")
+    rows = _halt_rows(g.state.ledger, "settle_refused")
+    assert len(rows) == 1 and rows[0]["commit"] == repo["two"]
+    assert not g.state.current_path.exists()
+
+
+def test_a_refused_revert_of_a_settled_commit_leaves_the_observed_record_alone(
+        tmp_path, monkeypatch):
+    repo = _batch_repo(tmp_path, foreign=True, foreign_edits_one=True)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["one"])
+    gstate.write_json_atomic(g.state.current_path, {
+        "schema": 1, "state": "observing", "commit": repo["two"],
+        "parent": repo["foreign"], "rollback_target": repo["foreign"],
+        "errors_until_ts": time.time() + 300})
+
+    assert g.do_rollback("regression", "nDCG -0.03 after one",
+                         explicit_target=repo["base"], explicit_commit=repo["one"],
+                         explicit_changed=["app/one.py"]) is False
+    assert "verdict" not in g.state.current()
+
+
+def test_the_dry_run_reads_the_object_store_only(tmp_path):
+    repo = _batch_repo(tmp_path, foreign=True, foreign_edits_one=True)
+    path = str(repo["path"])
+    assert rb.revert_dry_run(path, [repo["one"]])[0] == rb.REVERT_CONFLICT
+    assert rb.revert_dry_run(path, [repo["two"]])[0] == rb.REVERT_APPLIES
+    assert rb.revert_dry_run(path, [repo["foreign"], repo["two"]])[0] == rb.REVERT_APPLIES
+    assert rb.head_commit(path) == repo["two"]
+    assert git(path, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_a_dry_run_that_times_out_is_inconclusive_and_bounded(tmp_path, monkeypatch):
+    """Review fix 6: every git call fits a 30s budget, and a timeout reads as
+    "cannot tell" rather than raising out of the rollback."""
+    import subprocess
+
+    repo = _batch_repo(tmp_path)
+    seen = []
+    real = rb._git
+
+    def slow(repo_path, *args, timeout=60.0):
+        seen.append(timeout)
+        if args[0] == "merge-tree":
+            raise subprocess.TimeoutExpired("git", timeout)
+        return real(repo_path, *args, timeout=timeout)
+    monkeypatch.setattr(rb, "_git", slow)
+
+    verdict, why = rb.revert_dry_run(str(repo["path"]), [repo["one"]], repo["two"])
+    assert verdict == rb.REVERT_UNKNOWN and "30s" in why
+    assert seen and max(seen) <= 30.0
+
+
+def test_a_request_blaming_the_newest_batch_member_reverts_only_it(tmp_path, monkeypatch):
+    """F8: the regression check names one commit and no `commits`; the rest
+    of the observed batch stays in the tree and off the denylist."""
+    repo = _batch_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo)
+
+    assert g.do_rollback("regression", "nDCG -0.03 after two",
+                         explicit_target=repo["one"], explicit_commit=repo["two"],
+                         explicit_changed=["app/two.py"]) is True
+
+    row = _row(g, "rollback_succeeded")
+    assert "commits" not in row and row["commit"] == repo["two"]
+    assert rb.head_commit(str(repo["path"])) == repo["one"]
+    assert (repo["path"] / "app" / "one.py").exists(), "ONE was not the request's to revert"
+    denied = json.loads(g.state.denied.read_text())["commits"]
+    assert denied == [repo["two"]]
+
+
+def test_a_request_naming_one_batch_commit_and_no_target_reverts_only_it(
+        tmp_path, monkeypatch):
+    """Review fix 5: no target falls back to the named commit's parent, not the
+    observed batch's base, which would reset the whole batch."""
+    repo = _batch_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo)
+
+    assert g.do_rollback("regression", "nDCG -0.03 after two",
+                         explicit_commit=repo["two"]) is True
+
+    assert rb.head_commit(str(repo["path"])) == repo["one"]
+    assert (repo["path"] / "app" / "one.py").exists()
+    assert _row(g, "rollback_succeeded")["target"] == repo["one"]
+
+
+def _interrupt_after_start(g, monkeypatch):
+    """Let `do_rollback` write its intent row, then die like a guardian would."""
+    class Died(BaseException):
+        pass
+
+    def die(*a, **k):
+        raise Died()
+    monkeypatch.setattr(g, "_rollback_once", die)
+    return Died
+
+
+def test_a_resumed_rollback_reverts_the_commit_it_was_blaming(tmp_path, monkeypatch):
+    """F1 scenario A: the request blamed a settled commit and the guardian died.
+    The resume reverts that commit, not a reset of `main` to the LKG."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"], repo["newer"])
+    Died = _interrupt_after_start(g, monkeypatch)
+    with pytest.raises(Died):
+        _regression_request(g, repo, repo["older"])
+    pending = g.state.unfinished_rollback()
+    assert pending["blamed"] == repo["older"]
+
+    g2 = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _observe(g2.state, repo)   # a different promotion under observation now
+    assert g2.resume_rollback(pending) is True
+    row = _row(g2, "rollback_succeeded")
+    assert row["route"] == "revert" and row["commit"] == repo["older"]
+    assert (repo["path"] / "app" / "newer.py").exists(), "main was not reset"
+    assert not (repo["path"] / "app" / "older.py").exists()
+    assert g2.state.unfinished_rollback() is None
+
+
+def test_a_resume_that_finds_the_tree_already_moved_restarts_and_closes(tmp_path, monkeypatch):
+    """F1 scenario B: died after the reset, before the start. The resume
+    writes a terminal row and brings the stopped services back."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"])
+    _observe(g.state, repo)
+    Died = _interrupt_after_start(g, monkeypatch)
+    with pytest.raises(Died):
+        g.do_rollback("crash", "backend FATAL")
+    pending = g.state.unfinished_rollback()
+    git(repo["path"], "reset", "-q", "--hard", pending["to"])   # the reset happened
+
+    g2 = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    assert g2.resume_rollback(pending) is False
+    assert [c for c, _ in g2.sup.calls] == ["start"] * len(policy.RESTART_ORDER)
+    rows = _halt_rows(g2.state.ledger, "rollback_failed")
+    assert rows and rows[-1]["reason"] == "resume_abandoned"
+    assert g2.state.unfinished_rollback() is None
+
+
+def test_an_abandoned_resume_repoints_lkg_off_the_reverted_commit(tmp_path, monkeypatch):
+    """Review fix 3: the interrupted run reset past the blamed commit, which
+    LKG named. The resume finishes the denylist write and the LKG repoint."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"], repo["newer"])
+    Died = _interrupt_after_start(g, monkeypatch)
+    with pytest.raises(Died):
+        g.do_rollback("regression", "nDCG -0.03 after newer",
+                      explicit_target=repo["older"], explicit_commit=repo["newer"],
+                      explicit_changed=["app/newer.py"])
+    pending = g.state.unfinished_rollback()
+    git(repo["path"], "reset", "-q", "--hard", repo["older"])   # the reset happened
+
+    g2 = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    assert g2.resume_rollback(pending) is False
+    assert g2.state.lkg()["commit"] == repo["older"]
+    assert repo["newer"] in json.loads(g2.state.denied.read_text())["commits"]
+    row = _halt_rows(g2.state.ledger, "rollback_failed")[-1]
+    assert row["reason"] == "resume_abandoned" and row["lkg_repointed_from"] == repo["newer"]
+
+
+def test_a_resumed_revert_already_on_head_is_recorded_as_done(tmp_path, monkeypatch):
+    """Review fix 3: the dry run says the revert would change nothing because
+    the interrupted run committed it. That is a finished rollback."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"], repo["newer"])
+    Died = _interrupt_after_start(g, monkeypatch)
+    with pytest.raises(Died):
+        _regression_request(g, repo, repo["older"])
+    pending = g.state.unfinished_rollback()
+    git(repo["path"], "revert", "--no-edit", repo["older"])     # the revert happened
+    head = rb.head_commit(str(repo["path"]))
+
+    g2 = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    assert g2.resume_rollback(pending) is True
+    row = _row(g2, "rollback_succeeded")
+    assert row["commit"] == repo["older"] and row["restored"] == head and row["resumed"]
+    assert not _halt_rows(g2.state.ledger, "rollback_failed")
+    assert rb.head_commit(str(repo["path"])) == head, "nothing reverted twice"
+    assert repo["older"] in json.loads(g2.state.denied.read_text())["commits"]
+    assert [c for c, _ in g2.sup.calls] == ["start"] * len(policy.RESTART_ORDER)
+    assert g2.state.unfinished_rollback() is None
+    assert all("Rollback skipped" not in a["title"] for a in g2.alerts)
+
+
+def test_a_resume_without_a_recorded_blame_rewinds_nothing(tmp_path, monkeypatch):
+    """A row from before the blame was recorded is closed, never re-derived."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe(g.state, repo)
+    gstate.append_event(g.state.ledger, {"event": "rollback_started", "trigger": "regression",
+                                         "reason": "x", "from": repo["newer"],
+                                         "to": repo["base"]})
+    head = rb.head_commit(str(repo["path"]))
+
+    assert g.resume_rollback(g.state.unfinished_rollback()) is False
+    assert rb.head_commit(str(repo["path"])) == head
+    assert [c for c, _ in g.sup.calls] == ["start"] * len(policy.RESTART_ORDER)
+    assert g.state.unfinished_rollback() is None
+    assert _halt_rows(g.state.ledger, "rollback_failed")[-1]["reason"] == "resume_unrecorded"
 
 
 def test_a_batch_settles_with_one_row_per_commit(tmp_path, monkeypatch):

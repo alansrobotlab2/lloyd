@@ -110,7 +110,7 @@ MC_STATE_PATH = DATA_ROOT / "mc-state.json"
 # files as measured on 2026-10-06) and delivered only the 50 KB tail; and being
 # untracked-but-un-ignored
 # (`.gitignore` `!scripts/**/*.json`) it was `git status` dirt the moment a pass ran,
-# which a round's worktree reaper (`scripts/automod/worktree.py:301`, `git add -A`)
+# which a round's worktree reaper (`scripts/automod/worktree.py:343`, `git add -A`)
 # then commits under the round's own subject.
 #
 # `mc-state.json` above is Mission Control's UI mirror and has nothing to do with

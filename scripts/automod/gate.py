@@ -2265,7 +2265,7 @@ class Gate:
             if anc.returncode != 0:
                 return None
         delta = [p for p in _run(
-            ["git", "diff", "--name-only", f"{old_head}..{head}"],
+            ["git", "diff", "--name-only", "--no-renames", f"{old_head}..{head}"],
             cwd=self.worktree, timeout=60).stdout.splitlines() if p.strip()]
         why = self._reuse_rule(name, delta)
         if why is None:
@@ -2698,6 +2698,27 @@ class Gate:
         head = W.head(self.worktree)
         if not head:
             return False, "cannot read the worktree HEAD", {}
+
+        # The gate records `head` and the promoter lands that sha, but `static`,
+        # `tests` and the canary all run in the working directory. Until this
+        # check, a clean tree was only asked for inside `W.rebase_onto`, i.e.
+        # only when live HEAD had moved: 1,868 of 2,528 preflights (Oct-Nov
+        # 2026 ledger) passed with nobody having looked, and where the check
+        # did run it refused 5 of 608. A file the round wrote and never
+        # `git add`ed passes every rung from disk and is absent from the commit
+        # that lands. Untracked counts (ignored paths do not): that file is the
+        # case. The round's own state, so no exemption.
+        status = _run(["git", "--no-optional-locks", "-C", str(self.worktree), "status", "--porcelain"])
+        if status.returncode != 0:
+            return False, "cannot read the worktree's status", {}
+        uncommitted = [ln[3:] for ln in status.stdout.splitlines() if ln.strip()]
+        if uncommitted:
+            shown = ", ".join(uncommitted[:8]) + (
+                f" (+{len(uncommitted) - 8} more)" if len(uncommitted) > 8 else "")
+            return False, (f"worktree has uncommitted changes — the gate would test files "
+                           f"the commit at {head[:8]} does not contain: {shown}. Commit them "
+                           f"(or remove what is scratch) and gate again"), {
+                               "uncommitted": uncommitted[:50]}
 
         data: dict = {}
         live_head = _run(["git", "-C", str(self.live), "rev-parse", "HEAD"]).stdout.strip()
@@ -3486,7 +3507,7 @@ class Gate:
                 cwd=self.worktree, timeout=30).returncode != 0:
             return None
         delta = [p for p in _run(
-            ["git", "diff", "--name-only", f"{old_head}..{head}"],
+            ["git", "diff", "--name-only", "--no-renames", f"{old_head}..{head}"],
             cwd=self.worktree, timeout=60).stdout.splitlines() if p.strip()]
         if not delta:
             return None

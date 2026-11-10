@@ -7,7 +7,7 @@ that would put a worker's relative write back into the live checkout.
 
 `start_cwd` is a key on the session's own record (`~/lloyd-data/sessions/<id>.json`,
 or the directory a minter was handed); a round copies the same value into its
-`round_start` ledger row (`scripts/automod/round.py:211`) as a second reading. The
+`round_start` ledger row (`scripts/automod/round.py:212`) as a second reading. The
 session record is the session, and a mint that can reach the tool stamps it through
 `stamp_new_session` below. The mints, with what each one is:
 

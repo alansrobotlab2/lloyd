@@ -3393,8 +3393,11 @@ sample says RUNNING — by watching distinct spawn timestamps rather than
 
 **Probe failures are classified by cause**, and there are three causes, not
 two. A refused connection means nothing is listening: 3 ticks. A timeout means
-the socket accepted but the app was busy: 24 ticks (2 minutes). See §9 for why
-that distinction cost a false rollback to learn.
+the socket accepted but the app was busy: 5 minutes, measured in seconds from
+the streak's first timeout (24 ticks were >= 360 s, since a timed-out tick costs
+the probe timeout plus the sleep). A promotion does not settle while any probe
+streak is open, so the budget may outlast the window. See §9 for why that distinction
+cost a false rollback to learn.
 
 The third is an **answered non-200**, and folding it into "refused" was wrong
 in both directions. The aggregator returns 503 whenever *any* module is
@@ -4014,7 +4017,7 @@ perfectly good promotion was reverted. Left unfixed it would have recurred
 about once an hour, which is worse than having no watchdog at all.
 
 **Two fixes came out of it.** Probes now classify *why* they failed, with
-separate budgets for refused (3 ticks) and timeout (24 ticks), and the probe
+separate budgets for refused (3 ticks) and timeout (5 minutes), and the probe
 timeout went 2s → 10s — that is how long a *loaded* event loop may take to
 answer, not how long a healthy one does (0.37ms). Separately, the "stop:
 error: timed out" line exposed a 5s XML-RPC client timeout against a 15s

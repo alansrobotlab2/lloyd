@@ -1503,7 +1503,7 @@ def test_an_all_clear_with_nothing_to_seal_never_asks_the_board(tmp_path):
     """#3757 clause 4: the ordinary healthy all-clear costs no board read.
 
     `resolve` runs on every clean tick — the stray check is `STRAY_CHECK_SECONDS =
-    3600.0` (`agent-services/guardian/policy.py:413`, gated at `guardian.py:2381`, and a
+    3600.0` (`agent-services/guardian/policy.py:426`, gated at `guardian.py:2381`, and a
     clear leg like `guardian.py:2197` is what calls it) — as well as on the liveness
     recovery branch, and the row lookup it now performs for a sealed incident is the
     same `?q=` scan #3551 measured at 18.6 s cold over 3,693 rows — under the 5 s

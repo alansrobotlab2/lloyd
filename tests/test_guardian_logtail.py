@@ -158,6 +158,26 @@ def test_an_error_seen_in_only_one_hour_is_not_chronic(tmp_path):
     assert chronic == set()
 
 
+def test_a_traceback_recurring_across_hours_becomes_chronic(tmp_path):
+    """Dated by the nearest preceding stamp; it used to share one "tb" hour."""
+    tb = ("Traceback (most recent call last):\n"
+          '  File "/x.py", line 1, in f\n'
+          "ValueError: same every hour\n")
+    log = tmp_path / "server.err"
+    log.write_text("".join(
+        f"2026-09-06 0{h}:00:00,000 [ERROR] lloyd-x: request failed\n" + tb
+        for h in range(3)), encoding="utf-8")
+    chronic = logtail.bootstrap_chronic(
+        [str(log)], max_bytes=1 << 20, min_distinct_hours=3)
+    sig = detect.extract_events(tb)[0]["signature"]
+    assert sig in chronic
+
+    undated = tmp_path / "mcp.err"
+    undated.write_text(tb * 5, encoding="utf-8")
+    assert sig not in logtail.bootstrap_chronic(
+        [str(undated)], max_bytes=1 << 20, min_distinct_hours=3)
+
+
 def test_a_novel_error_still_fires_against_a_populated_chronic_set(log_setup):
     log, _ = log_setup
     chronic = logtail.bootstrap_chronic(

@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -235,6 +236,63 @@ def release_pool_pause() -> None:
         _POOL_PAUSED_BY_US = False
 
 
+# The backend lets an automod pause lapse after `AUTOMOD_PAUSE_TTL_SECONDS`
+# (workers/pool.py, 900 s) unless it is re-taken, so a promoter killed mid-wait
+# cannot leave the pool paused until the next backend restart. Re-taken this
+# often, from every wait that can outlast it.
+POOL_PAUSE_REFRESH_SECONDS = 60.0
+_pool_pause_refreshed_at = 0.0
+
+
+def refresh_pool_pause(*, force: bool = False) -> None:
+    """Re-take a pause THIS promoter holds, at most once a refresh interval."""
+    global _pool_pause_refreshed_at
+    if not _POOL_PAUSED_BY_US:
+        return
+    if force or time.time() - _pool_pause_refreshed_at >= POOL_PAUSE_REFRESH_SECONDS:
+        set_pool_paused(True)
+        _pool_pause_refreshed_at = time.time()
+
+
+@contextlib.contextmanager
+def _pool_pause_heartbeat():
+    """Re-take this promoter's pool pause every `POOL_PAUSE_REFRESH_SECONDS`
+    while the body runs: for a re-gate, which runs a full gate inline (672-1240 s
+    on the live ledger) and would otherwise outlast the pause's 900 s TTL. A
+    daemon thread, stopped on exit; a no-op while no pause of ours is held."""
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(POOL_PAUSE_REFRESH_SECONDS):
+            try:
+                refresh_pool_pause(force=True)
+            except Exception:  # noqa: BLE001 — a missed beat is not the gate's failure
+                pass
+    thread = threading.Thread(target=beat, name="pool-pause-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5.0)
+
+
+# True from just before a landing's fast-forward until `round.land` has put its
+# signal handlers back. From the merge on, a SIGTERM/SIGHUP is recorded by
+# `round._die_loudly_on_signal`, never raised: raised, it unwound a healthy
+# landing into the post-merge rollback.
+_LANDING_MERGED = False
+
+
+def landing_merged() -> bool:
+    return _LANDING_MERGED
+
+
+def mark_merged(on: bool) -> None:
+    global _LANDING_MERGED
+    _LANDING_MERGED = bool(on)
+
+
 def pool_in_flight() -> list[dict] | None:
     """The worker jobs the pool is running now (`source`, `started_at`), or
     None when the backend cannot say."""
@@ -396,10 +454,11 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
     the POOL is empty and the backend is still busy (a chat turn, a leaked
     counter); `automod.landing.idle_hard_max_wait_s` bounds the whole wait.
     """
-    global _POOL_PAUSED_BY_US
+    global _POOL_PAUSED_BY_US, _pool_pause_refreshed_at
     max_wait, hard_max = _idle_budget(max_wait)
     if pause_pool and pool_paused() is False and set_pool_paused(True):
         _POOL_PAUSED_BY_US = True
+        _pool_pause_refreshed_at = time.time()
     started = time.time()
     deadline = started + max_wait
     quiet = 0
@@ -411,6 +470,7 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
     busiest = ""
     armed_at = 0.0
     while time.time() < min(deadline, started + hard_max):
+        refresh_pool_pause()
         status, body = _get(f"{BACKEND}/health")
         if status == 200 and body:
             turns = body.get("turns") or {}
@@ -844,6 +904,29 @@ def announce(head: str, body: str) -> None:
         pass
 
 
+def alert(title: str, body: str, *, commit: str = "", trigger: str = "") -> None:
+    """An incident through the guardian's one producer (`notify.Notifier.alert`:
+    ledger, ALERT.md, journal, toast, voice). For a state only a person can
+    settle; call it once per state, never per check. Guarded like `announce`."""
+    try:
+        import sys
+        gdir = Path(__file__).resolve().parents[2] / "agent-services" / "guardian"
+        if not (gdir / "notify.py").is_file():
+            return
+        if str(gdir) not in sys.path:
+            sys.path.insert(0, str(gdir))
+        import gstate, notify as notify_mod, policy
+        notifier = notify_mod.Notifier(
+            ledger=gstate.AutomodState(Path(policy.AUTOMOD_STATE)).ledger,
+            state_dir=Path(policy.GUARDIAN_STATE),
+            vault_root=policy.VAULT_ROOT,
+            voice_window=policy.VOICE_REPEAT_SECONDS,
+        )
+        notifier.alert("error", title, body, commit=commit, trigger=trigger)
+    except Exception:
+        pass
+
+
 def vault_commits_for(round_id: str) -> list[str]:
     """Vault shas this round landed, newest last.
 
@@ -1239,8 +1322,9 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
         item_id = (spec.get("item") or {}).get("id")
     except Exception as exc:  # noqa: BLE001 — a missing spec is not fatal here
         print(f"[warn] could not read the run spec for {round_id}: {exc}")
-    report = G.Gate(round_id, Path(worktree), base, live_root=live,
-                    item_id=item_id).run()
+    with _pool_pause_heartbeat():
+        report = G.Gate(round_id, Path(worktree), base, live_root=live,
+                        item_id=item_id).run()
     rep = report.to_dict()
     S.write_gate_report(round_id, rep)
     if report.base != base:
@@ -1332,9 +1416,27 @@ def swap_candidate_venv(worktree: Path, live: Path, gate_report: dict | None,
     return True
 
 
+def _venv_swap_blocked(live: Path, gate_report: dict | None) -> str | None:
+    """Why a landing whose gate built a candidate venv cannot swap it in, asked
+    before anything moves; None when it can, or when it swaps nothing.
+
+    A `lloyd.prev` left by an earlier swap that was neither settled nor undone
+    made every later requirements-changing landing merge, fail the swap, and
+    roll itself back."""
+    if not str((gate_report or {}).get("venv") or "").strip():
+        return None
+    prev = Path(live) / ".venvs" / "lloyd.prev"
+    if prev.exists():
+        return (f"the gate built a candidate venv, but {prev} already exists — an earlier "
+                f"venv swap was never settled or undone. Not merging: the swap would "
+                f"fail after the merge")
+    return None
+
+
 def promote(round_id: str, worktree: Path, base: str, *,
             gate_report: dict | None = None, dry_run: bool = False) -> dict:
     live = LIVE_ROOT
+    mark_merged(False)
     head = W.head(Path(worktree))
     if not head:
         raise PromoteError("cannot read the candidate HEAD")
@@ -1452,6 +1554,9 @@ def promote(round_id: str, worktree: Path, base: str, *,
                      f"to move out of the tree, and nothing here needs a clean live "
                      f"tree to land again",
                      external=True, overlap=overlap)
+    venv_blocked = _venv_swap_blocked(live, gate_report)
+    if venv_blocked:
+        _land_failed(round_id, venv_blocked, external=True)
 
     result: dict = {"round_id": round_id, "commit": head, "parent": live_head,
                     "changed_paths": changed, "dry_run": dry_run,
@@ -1549,7 +1654,16 @@ def promote(round_id: str, worktree: Path, base: str, *,
         if live_now != base:
             base, head, gate_report = _regate_after_move(round_id, Path(worktree), live,
                                                          base, live_now)
+            refresh_pool_pause(force=True)
             if restart:
+                # A job claimed while the gate ran would die in the restart.
+                jobs = pool_in_flight()
+                if jobs:
+                    _land_failed(round_id,
+                                 "a worker job started while the landing re-gated: "
+                                 + ", ".join(sorted({str(j.get("source")) for j in jobs}))
+                                 + " — not restarting over it",
+                                 external=True, waited_idle=True)
                 set_drain(True, drain_ttl())
             live_head = live_now
             changed = W.changed_paths(Path(worktree), base)
@@ -1590,12 +1704,17 @@ def promote(round_id: str, worktree: Path, base: str, *,
         result["attribution"] = note
 
         # ── land ───────────────────────────────────────────────────────
+        venv_blocked = _venv_swap_blocked(live, gate_report)   # a re-gate may have moved it
+        if venv_blocked:
+            _land_failed(round_id, venv_blocked, external=True)
         if restart:
             S.set_pause(RESTART_LEASE)   # the guardian must not read our own restart as a crash
+        mark_merged(True)
         merge = subprocess.run(
             ["git", "-C", str(live), "merge", "--ff-only", f"automod/{round_id}"],
             capture_output=True, text=True)
         if merge.returncode != 0:
+            mark_merged(False)
             # Chased twice and still not a fast-forward: `main` is moving faster
             # than the loop can retest. Say so and stop; the item comes back.
             _land_failed(round_id,
@@ -1637,6 +1756,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
             # so a single lease taken before the merge could expire mid-restart
             # and hand the guardian its own deploy to judge.
             S.set_pause(RESTART_LEASE)
+            refresh_pool_pause()
             ok, msg = _restart_program(program)
             if not ok:
                 raise PromoteError(f"restart {program} failed: {msg}")
@@ -1715,7 +1835,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         result["promoted"] = True
         return result
 
-    except Exception:
+    except Exception as failure:
         S.clear_pause()
         if not merged:
             # Nothing has moved. A failure before the merge — the drain
@@ -1728,33 +1848,40 @@ def promote(round_id: str, worktree: Path, base: str, *,
             raise
         # Any failure between the merge and the verification: revert now
         # rather than waiting for the guardian's next tick. Uncommitted edits
-        # in the tree survive as `broken/<stamp>/dirty.patch` — the guardian's
-        # `preserve_evidence` contract — and the event says where.
-        try:
-            if batch and restart_began:
-                # The restart ran everything the train held, so any of it may
-                # be what failed: the batch goes, by the route its range allows.
-                _undo_batch_and_record(live, current, trigger="promote_failed",
-                                       round_id=round_id)
-            else:
-                evidence = _rollback_inline(live, live_head)
-                S.append_event({"event": "rollback_succeeded", "trigger": "promote_failed",
-                                "commit": head, "restored": live_head, "round_id": round_id,
-                                "stash": evidence.get("patch"), "tag": evidence.get("tag")})
-        except Exception as exc:
-            S.append_event({"event": "rollback_failed", "trigger": "promote_failed",
-                            "commit": head, "round_id": round_id, "error": str(exc)[:400]})
+        # in the tree stay where they are, and a copy goes to
+        # `broken/<stamp>/dirty.patch`; the event says where.
+        if batch and restart_began:
+            # The restart ran everything the train held, so any of it may
+            # be what failed: the batch goes, by the route its range allows.
+            undo = current
+        else:
+            undo = {"commit": head, "commits": [head], "rollback_target": live_head,
+                    "changed_paths": changed, "venv_swapped": current.get("venv_swapped")}
+            if current.get("commits"):
+                # Nothing the train held was restarted: if this goes to the
+                # guardian, its record must name this landing alone.
+                for key in ("commits", "entries"):
+                    current.pop(key, None)
+                current.update(schema=1, parent=live_head, rollback_target=live_head)
+                with contextlib.suppress(Exception):
+                    S.write_verified(S.CURRENT_PATH, current)
+        outcome = _undo_batch_and_record(live, undo, trigger="promote_failed",
+                                         round_id=round_id)
         # Say it on the ledger as the landing's failure, not the round's:
-        # the round passed every rung and the tree was put back. Without
-        # this row the finished implement row's `landed: true` stood alone
-        # and `implement_outcomes` read the attempt as spent (the 2026-09-16
-        # 16:31Z rollback of #658). `rolled_back_rounds` cannot help here —
-        # it joins through a `promoted` row that a pre-observation failure
-        # never writes.
+        # the round passed every rung. Without this row the finished
+        # implement row's `landed: true` stood alone and `implement_outcomes`
+        # read the attempt as spent (the 2026-09-16 16:31Z rollback of #658).
+        # `rolled_back` is what the rollback did, not what was hoped: a
+        # rollback handed to the guardian keeps `current.json`, which is
+        # what it rolls back by (and swaps a venv back by).
         S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
-                        "external_blocker": True, "rolled_back": True,
-                        "detail": f"landing rolled back after the merge: {sys.exc_info()[1]}"[:500]})
-        S.clear_current()
+                        "external_blocker": True,
+                        "rolled_back": outcome == UNDO_ROLLED_BACK, "rollback": outcome,
+                        "detail": f"landing {_UNDO_DETAIL[outcome]}: {failure}"[:500]})
+        if outcome == UNDO_HANDED_OFF:
+            _mark_handed_off(current)
+        else:
+            S.clear_current()
         raise
     finally:
         set_drain(False)
@@ -1919,6 +2046,7 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
     opening their window would leave them running unjudged. `skip_idle` maps to
     `--now`. The primary, if asked for too, gets its own leg afterwards.
     """
+    global _POOL_PAUSED_BY_US, _pool_pause_refreshed_at
     if S.read_pending() and {"lloyd-mcp", "lloyd-backend"} & set(programs):
         out = flush_pending(f"human restart: {reason}" if reason else "human restart",
                             kill_turns=skip_idle, by="restart", force_restart=True)
@@ -1953,8 +2081,9 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
         # broken: on 2026-09-16 a leaked `harness_runs` count held the
         # backend "busy" for nine hours, and the restart that would have
         # cleared the leak waited on the leak.
-        if pool_paused() is False:
-            set_pool_paused(True)
+        if pool_paused() is False and set_pool_paused(True):
+            _POOL_PAUSED_BY_US = True   # released in the finally below
+            _pool_pause_refreshed_at = time.time()
         ok, why = True, "idle wait skipped"
     else:
         ok, why = wait_idle(max_wait)   # pauses the pool, arms the drain, waits for quiet
@@ -1972,6 +2101,7 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
         for program in programs:
             leg = program
             S.set_pause(RESTART_LEASE)   # refreshed per leg, as the promoter does
+            refresh_pool_pause()
             if program == PRIMARY_PROGRAM:
                 # Never started again on a failure: below the RAM abort line
                 # leaving the engine stopped is the leg's deliberate answer.
@@ -2028,6 +2158,7 @@ def _wait_health(url: str, budget: float) -> bool:
         if budget > RESTART_LEASE and time.time() - refreshed > RESTART_LEASE / 2:
             S.set_pause(RESTART_LEASE)
             refreshed = time.time()
+        refresh_pool_pause()
         time.sleep(1.0)
     return False
 
@@ -2068,6 +2199,7 @@ def _wait_host_ram(floor_gib: int, budget: float) -> int:
     avail = _host_ram_available_gib()
     while avail < floor_gib and time.time() < deadline:
         S.set_pause(RESTART_LEASE)
+        refresh_pool_pause()
         time.sleep(5.0)
         avail = _host_ram_available_gib()
     return avail
@@ -2105,31 +2237,138 @@ def _restart_primary() -> tuple[bool, str]:
     return True, f"started after {avail} GiB host RAM free"
 
 
-def _rollback_inline(live: Path, target: str) -> dict:
-    """Reuse the guardian's rollback rather than reimplementing it.
+class RollbackLegFailed(PromoteError):
+    """The inline rollback moved the tree back but a service leg after it
+    failed. A second rollback would act on a tree already restored, so this
+    one is not handed to the guardian. `evidence` is what the rollback had
+    recorded by then (tag, patch, `venv_swap_back_failed`)."""
 
-    Returns `preserve_evidence`'s record — tag, and the patch any uncommitted
-    live edits were written to before `reset --hard` — so the caller can put
-    that path in front of whoever was editing.
-    """
-    import importlib.util
-    guardian_dir = live / "agent-services" / "guardian"
-    spec_ = importlib.util.spec_from_file_location("_g_rollback", guardian_dir / "rollback.py")
-    mod = importlib.util.module_from_spec(spec_)
-    spec_.loader.exec_module(mod)
+    evidence: dict | None = None
 
-    for program in ("lloyd-backend", "lloyd-mcp"):
-        stop_process(program, wait=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    evidence = mod.preserve_evidence(str(live), S.BROKEN_DIR / stamp, f"guardian-broken-{stamp}")
-    mod.restore_tree(str(live), target, ("app", "agent_mcp", "workers", "scripts",
-                                         "eval", "tests"),
-                     ("app", "agent_mcp", "workers", "scripts"))
-    mod.verify_tree(str(live), target)
-    for program, health in (("lloyd-mcp", MCP_HEALTH), ("lloyd-backend", f"{BACKEND}/health")):
-        restart_process(program)
-        _wait_health(health, 90.0)
-    return evidence or {}
+
+def _git_live(live: Path, *args: str, timeout: float = 120.0) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(live), *args], capture_output=True, text=True,
+                          timeout=timeout)
+
+
+def _preserve_evidence(live: Path, broken_dir: Path, tag: str) -> dict:
+    """Tag HEAD, write the uncommitted diff to a patch and copy untracked
+    source aside — the guardian's `preserve_evidence` without its `git stash
+    push -u`: the stash is the live checkout's one shared stack, and an
+    inline rollback leaves a human's uncommitted edits where they are."""
+    out: dict = {"tag": None, "stash": None, "patch": None, "untracked": []}
+    dest = Path(broken_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    if _git_live(live, "tag", tag, "HEAD").returncode == 0:
+        out["tag"] = tag
+    diff = _git_live(live, "diff", "HEAD")
+    if diff.returncode == 0 and diff.stdout.strip():
+        patch = dest / "dirty.patch"
+        patch.write_text(diff.stdout, encoding="utf-8")
+        out["patch"] = str(patch)
+    ls = _git_live(live, "ls-files", "--others", "--exclude-standard")
+    for rel in (ls.stdout.split() if ls.returncode == 0 else []):
+        if rel.endswith(".py"):
+            try:
+                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                (dest / rel).write_bytes((Path(live) / rel).read_bytes())
+                out["untracked"].append(rel)
+            except OSError:
+                pass
+    return out
+
+
+def _revert_in_place(live: Path, commits: list[str]) -> str:
+    """Revert `commits` (oldest first) newest first, leaving every later
+    commit standing; returns the new HEAD. On a conflict the sequence is
+    aborted, which leaves HEAD where it was, and this raises."""
+    start = _live_head(live)
+    r = _git_live(live, "-c", "user.name=lloyd-guardian", "-c", "user.email=guardian@localhost",
+                  "revert", "--no-edit", *reversed(commits))
+    if r.returncode != 0:
+        _git_live(live, "revert", "--abort", timeout=30)
+        raise PromoteError(f"git revert of {len(commits)} landed commit(s) failed: "
+                           f"{(r.stdout + r.stderr).strip()[:300]}")
+    new = _live_head(live)
+    if not new or new == start:
+        raise PromoteError("the revert produced no new commit")
+    return new
+
+
+def _rollback_inline(live: Path, target: str, commits: list[str], *,
+                     venv_swapped: bool = False) -> dict:
+    """Take this landing's `commits` (oldest first) off `main`, inline.
+
+    The guardian's route rule: `reset --keep target` only when HEAD is the
+    newest landed commit and `target..HEAD` is exactly `commits`; otherwise
+    something the loop did not land sits in the range or on top of it, and
+    each landed commit is reverted in place. A commit no longer in HEAD's
+    history is refused. Nothing is stashed: `--keep` and `revert` leave
+    disjoint uncommitted edits in place, and refuse rather than overwrite one.
+    A venv this landing swapped in is swapped back, as the guardian does.
+
+    Every leg must succeed — the tree move, both restarts, both health
+    waits — or this raises (`RollbackLegFailed` once the tree has moved).
+    Returns the evidence record (tag, patch) with `route` and `restored`."""
+    commits = [str(c) for c in commits if c]
+    if not commits or not target:
+        raise PromoteError("nothing named to roll back")
+    mod = _guardian_rollback_module(live)
+    head = _live_head(live)
+    gone = [c[:8] for c in commits if not _is_ancestor(live, c, head)]
+    if gone:
+        raise PromoteError(f"{', '.join(gone)} no longer in main's history (HEAD "
+                           f"{head[:8]}); not moving the tree")
+    route = ("reset" if head == commits[-1]
+             and mod.range_is_exactly(str(live), target, head, commits) else "revert")
+    stopped = moved = False
+    S.set_pause(RESTART_LEASE)   # our own stop is not a crash
+    try:
+        stopped = True
+        for program in ("lloyd-backend", "lloyd-mcp"):
+            stop_process(program, wait=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        evidence = _preserve_evidence(live, S.BROKEN_DIR / stamp, f"guardian-broken-{stamp}")
+        if route == "reset" and _live_head(live) != head:
+            route = "revert"   # a commit landed on top during the stop
+        if route == "reset":
+            r = _git_live(live, "reset", "--keep", target)
+            if r.returncode != 0:
+                raise PromoteError(f"git reset --keep {target[:8]} failed: "
+                                   f"{(r.stderr or r.stdout).strip()[:300]}")
+            mod.verify_tree(str(live), target)
+            moved = True
+            restored = target
+        else:
+            restored = _revert_in_place(live, commits)
+            moved = True
+        if venv_swapped:
+            try:
+                evidence["venv_failed_clone"] = mod.swap_venv_back(str(live))
+            except Exception as exc:
+                # `.venvs/lloyd` may now be missing: said on the row, not only raised.
+                evidence["venv_swap_back_failed"] = f"{type(exc).__name__}: {exc}"[:300]
+                raise PromoteError(f"swap_venv_back failed: {exc}") from exc
+        for program, health in (("lloyd-mcp", MCP_HEALTH), ("lloyd-backend", f"{BACKEND}/health")):
+            S.set_pause(RESTART_LEASE)
+            ok, msg = _restart_program(program)
+            if not ok:
+                raise PromoteError(f"restart {program} failed: {msg}")
+            if not _wait_health(health, 90.0):
+                raise PromoteError(f"{program} never became healthy after the rollback")
+        evidence.update(route=route, restored=restored)
+        return evidence
+    except Exception as exc:
+        if stopped:
+            for program in ("lloyd-mcp", "lloyd-backend"):
+                _start_again(program)
+        if moved and not isinstance(exc, RollbackLegFailed):
+            leg = RollbackLegFailed(f"tree restored ({route}), then: {exc}")
+            leg.evidence = dict(evidence)
+            raise leg from exc
+        raise
+    finally:
+        S.clear_pause()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2277,6 +2516,35 @@ def _release_stranded_locked(live: Path, *, by: str) -> dict | None:
     cur = S.read_current()
     if not cur or cur.get("state") != "landing":
         return None
+    # A landing whose inline rollback failed keeps its record for the
+    # guardian, which reads the request and then this record; requeueing the
+    # commit underneath it would hand a flush the commit being rolled back.
+    req = S.read_rollback_request() or {}
+    if req.get("commit") and str(req.get("commit")) in (
+            {str(cur.get("commit"))} | {str(c) for c in cur.get("commits") or []}):
+        return None
+    if cur.get("rollback_handed_off"):
+        # Never requeued: its commit failed verification. A request the
+        # guardian discarded as stale, or a guardian that is down, leaves it
+        # here; once that has lasted, say so once and keep holding the loop.
+        age = time.time() - float(cur.get("rollback_handed_off_ts") or 0)
+        if age >= HANDOFF_UNRESOLVED_AFTER_S and not cur.get("rollback_handoff_alerted"):
+            cur["rollback_handoff_alerted"] = time.time()
+            with contextlib.suppress(Exception):
+                S.write_verified(S.CURRENT_PATH, cur)
+            commit = str(cur.get("commit") or "")
+            S.append_event({"event": "rollback_handoff_unresolved", "commit": commit,
+                            "round_id": cur.get("round_id"), "by": by,
+                            "age_s": round(age, 1)})
+            alert("Failed landing was never rolled back",
+                  f"{commit[:8]} ({cur.get('round_id')}) failed verification after its "
+                  f"merge; the promoter could not undo it inline and asked the guardian "
+                  f"{age / 60:.0f} min ago, and no rollback has happened. It is still in "
+                  f"main's history and current.json still holds it as `landing`, which "
+                  f"holds every later landing and flush. Roll it back (a rollback "
+                  f"request naming {commit[:8]}, or a revert by hand) and then clear "
+                  f"current.json.", commit=commit, trigger="rollback_handoff_unresolved")
+        return None
     entries = [e for e in cur.get("entries") or [] if isinstance(e, dict) and e.get("commit")]
     if not entries:
         entries = [{k: cur.get(k) for k in ("commit", "parent", "round_id", "title",
@@ -2374,6 +2642,7 @@ def merge_round(round_id: str, worktree: Path, base: str, *,
     landing mid-restart) still refuses — though under the automod lock that
     record's writer cannot be running, so it is a dead one."""
     live = LIVE_ROOT
+    mark_merged(False)
     head = W.head(Path(worktree))
     if not head:
         raise PromoteError("cannot read the candidate HEAD")
@@ -2458,10 +2727,12 @@ def merge_round(round_id: str, worktree: Path, base: str, *,
             head = entry["commit"] = result["commit"] = reworded
             S.append_pending(entry)
         result["attribution"] = note
+        mark_merged(True)
         merge = subprocess.run(
             ["git", "-C", str(live), "merge", "--ff-only", f"automod/{round_id}"],
             capture_output=True, text=True)
         if merge.returncode != 0:
+            mark_merged(False)
             _land_failed(round_id, f"fast-forward failed after rebasing and retesting: "
                                    f"{merge.stderr.strip()[:300]}", external=True)
         merged = True
@@ -2476,21 +2747,17 @@ def merge_round(round_id: str, worktree: Path, base: str, *,
                 raise PromoteError(f"frontend unreachable after landing ({note}) at {FRONTEND_URL}")
         entry["merged_ts"] = time.time()
         pending = S.append_pending(entry)
-    except Exception:
+    except Exception as failure:
         S.remove_pending([entry["commit"]])
         if not merged:
             raise
-        try:
-            evidence = _rollback_inline(live, live_head)
-            S.append_event({"event": "rollback_succeeded", "trigger": "promote_failed",
-                            "commit": head, "restored": live_head, "round_id": round_id,
-                            "stash": evidence.get("patch"), "tag": evidence.get("tag")})
-        except Exception as exc:
-            S.append_event({"event": "rollback_failed", "trigger": "promote_failed",
-                            "commit": head, "round_id": round_id, "error": str(exc)[:400]})
+        outcome = _undo_batch_and_record(
+            live, {"commit": head, "commits": [head], "rollback_target": live_head,
+                   "changed_paths": changed}, trigger="promote_failed", round_id=round_id)
         S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
-                        "external_blocker": True, "rolled_back": True,
-                        "detail": f"merge rolled back: {sys.exc_info()[1]}"[:500]})
+                        "external_blocker": True,
+                        "rolled_back": outcome == UNDO_ROLLED_BACK, "rollback": outcome,
+                        "detail": f"merge {_UNDO_DETAIL[outcome]}: {failure}"[:500]})
         raise
 
     S.append_event({"event": "promoted", "round_id": round_id, "title": title,
@@ -2609,50 +2876,78 @@ def _guardian_rollback_module(live: Path):
     return mod
 
 
-def _undo_batch(live: Path, commits: list[str], target: str) -> dict:
-    """Take a batch the promoter restarted off `main`, inline, by the route
-    its range allows: `reset --hard target` only when HEAD is the newest batch
-    commit and `target..HEAD` is exactly the batch, every commit reverted in
-    place otherwise — the guardian's rule, through the guardian's code."""
-    mod = _guardian_rollback_module(live)
-    head = _live_head(live)
-    if head == commits[-1] and mod.range_is_exactly(str(live), target, head, commits):
-        evidence = dict(_rollback_inline(live, target) or {})
-        evidence.update(route="reset", restored=target)
-        return evidence
-    for program in ("lloyd-backend", "lloyd-mcp"):
-        stop_process(program, wait=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    evidence = dict(mod.preserve_evidence(str(live), S.BROKEN_DIR / stamp,
-                                          f"guardian-broken-{stamp}") or {})
-    restored = mod.revert_commits(str(live), list(commits))
-    for program, health in (("lloyd-mcp", MCP_HEALTH), ("lloyd-backend", f"{BACKEND}/health")):
-        restart_process(program)
-        _wait_health(health, 90.0)
-    evidence.update(route="revert", restored=restored)
-    return evidence
+def _undo_batch(live: Path, commits: list[str], target: str, *,
+                venv_swapped: bool = False) -> dict:
+    """Take a batch the promoter merged off `main`, inline, by the route its
+    range allows (`_rollback_inline`, the guardian's rule)."""
+    return _rollback_inline(live, target, commits, venv_swapped=venv_swapped)
+
+
+# What `_undo_batch_and_record` did: everything off `main` and both services
+# up; the rollback handed to the guardian with the tree untouched; or the tree
+# restored and a service leg after it failed.
+UNDO_ROLLED_BACK, UNDO_HANDED_OFF, UNDO_TREE_ONLY = "rolled_back", "handed_off", "tree_only"
+_UNDO_DETAIL = {
+    UNDO_ROLLED_BACK: "rolled back after the merge",
+    UNDO_HANDED_OFF: "could not be rolled back inline after the merge; the guardian was asked to",
+    UNDO_TREE_ONLY: "taken off main after the merge, but a service did not come back",
+}
+
+
+# How long a record handed to the guardian may stand with no request on disk
+# before it is called unresolved: twice the guardian's request age limit
+# (`ROLLBACK_REQUEST_MAX_AGE_SECONDS`, 900 s), so a rollback the guardian is
+# still carrying out is never reported as one it dropped.
+HANDOFF_UNRESOLVED_AFTER_S = 1800.0
+
+
+def _mark_handed_off(record: dict) -> None:
+    """Stamp a `landing` record whose rollback went to the guardian, so the
+    stranded-landing sweep never hands its commit back to the land train."""
+    record["rollback_handed_off"] = True
+    record["rollback_handed_off_ts"] = time.time()
+    with contextlib.suppress(Exception):
+        S.write_verified(S.CURRENT_PATH, record)
 
 
 def _undo_batch_and_record(live: Path, record: dict, *, trigger: str,
-                           round_id: str = "") -> None:
-    """`_undo_batch` for a record, with the ledger row; a batch that cannot be
-    undone inline is handed to the guardian as one request naming every
-    commit, which escalates to a human if it cannot either."""
+                           round_id: str = "") -> str:
+    """`_undo_batch` for a record, with the ledger row, and the outcome.
+
+    A batch that cannot be undone inline is handed to the guardian as one
+    request naming every commit (`UNDO_HANDED_OFF`), which escalates to a
+    human if it cannot either; the caller keeps its record for it. One whose
+    tree was restored but whose services did not come back is not requested
+    again (`UNDO_TREE_ONLY`): a second rollback would act on a restored tree."""
     commits = list(record.get("commits") or [record.get("commit")])
     target = str(record.get("rollback_target") or "")
+    rid = round_id or record.get("round_id")
     try:
-        ev = _undo_batch(live, commits, target)
+        ev = _undo_batch(live, commits, target,
+                         **({"venv_swapped": True} if record.get("venv_swapped") else {}))
         S.append_event({"event": "rollback_succeeded", "trigger": trigger,
                         "commit": commits[-1], "commits": commits, "batch": len(commits),
                         "restored": ev.get("restored"), "route": ev.get("route"),
-                        "round_id": round_id or record.get("round_id"),
-                        "stash": ev.get("patch"), "tag": ev.get("tag")})
+                        "round_id": rid, "stash": ev.get("patch"), "tag": ev.get("tag")})
+        return UNDO_ROLLED_BACK
+    except RollbackLegFailed as exc:
+        ev = getattr(exc, "evidence", None) or {}
+        S.append_event({"event": "rollback_failed", "trigger": trigger, "commit": commits[-1],
+                        "commits": commits, "round_id": rid, "tree_restored": True,
+                        "error": str(exc)[:400],
+                        **({"venv_swap_back_failed": ev["venv_swap_back_failed"]}
+                           if ev.get("venv_swap_back_failed") else {})})
+        return UNDO_TREE_ONLY
     except Exception as exc:  # noqa: BLE001 — the guardian is the escalation path
+        S.append_event({"event": "rollback_failed", "trigger": trigger, "commit": commits[-1],
+                        "commits": commits, "round_id": rid, "tree_restored": False,
+                        "handed_to": "guardian", "error": str(exc)[:400]})
         S.request_rollback(reason=f"{trigger}: the promoter could not undo the batch "
                                   f"inline ({exc})"[:1000],
                            trigger=trigger, target=target or None, commit=commits[-1],
                            commits=commits,
                            changed_paths=list(record.get("changed_paths") or []))
+        return UNDO_HANDED_OFF
     finally:
         S.remove_pending(commits)
 
@@ -2863,10 +3158,13 @@ def _flush_locked(live: Path, reason: str, *, kill_turns: bool, by: str,
             if isinstance(exc, PromoteError):
                 raise
             raise FlushNotStarted(str(exc)) from exc
-        _undo_batch_and_record(live, record, trigger="flush_failed")
-        S.clear_current()
-        _flush_failed(f"undone after the restart: {exc}", commits=commits, restarted=True,
-                      rolled_back=True)
+        outcome = _undo_batch_and_record(live, record, trigger="flush_failed")
+        if outcome == UNDO_HANDED_OFF:
+            _mark_handed_off(record)
+        else:
+            S.clear_current()
+        _flush_failed(f"batch {_UNDO_DETAIL[outcome]}: {exc}", commits=commits, restarted=True,
+                      rolled_back=outcome == UNDO_ROLLED_BACK, rollback=outcome)
         raise
     finally:
         set_drain(False)

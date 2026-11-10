@@ -12,7 +12,7 @@ Those prompts are the *predictable* ones: position 0 is the worker system prompt
 ``build_system_prompt(platform="worker")`` and nothing appended to it — and the
 per-run part, the skill body and the item content, is the user message that comes
 after it. (The denied-tools block is *not* in that prompt on this path: the worker
-pool appends it to the user text, ``workers/sources/_common.py:1280``. It is in the
+pool appends it to the user text, ``workers/sources/_common.py:1289``. It is in the
 system prompt only for the in-process shape, at ``_common.py:710`` — the two shapes
 do not share a head, which is the whole content of `warm_payload`'s docstring.)
 A predictable prompt has a predictable prefill, so the prefill can be
@@ -77,9 +77,9 @@ PREWARM_TRIGGERS = ("engine-ready", "prompt-surface-write", "head-sha-changed")
 #: ``runs`` table), which is most of the worker platform's 1839 iteration-1
 #: samples. Warming a second source is #3771's owed ruling, not this module's to
 #: take. Its plain triage turn passes no ``extra_disallowed``
-#: (``workers/sources/autotriage.py:1165``), which is why the head built here with
+#: (``workers/sources/autotriage.py:1169``), which is why the head built here with
 #: the default envelope is the head that turn sends; the sweep path at
-#: ``workers/sources/autotriage.py:1484`` adds ``SWEEP_DISALLOWED`` and so has a
+#: ``workers/sources/autotriage.py:1504`` adds ``SWEEP_DISALLOWED`` and so has a
 #: different head, and a different head simply does not hit this warm.
 DEFAULT_SOURCE = "autotriage"
 
@@ -90,7 +90,7 @@ DEFAULT_SOURCE = "autotriage"
 #: through a snapshot that also says ``exists=True``, which is what the warm
 #: snapshot now does. It is the value autotriage asks ``new_worker_session`` to
 #: write for its own sessions — ``new_worker_session`` hands ``create_session``
-#: an explicit ``platform="worker"`` (``workers/sources/_common.py:1079``).
+#: an explicit ``platform="worker"`` (``workers/sources/_common.py:1088``).
 #: Getting it wrong would warm a head no
 #: worker is ever shown, because the platform is also what arms the turn's tool
 #: policy and decides whether ``USER.md`` is in the prompt.
@@ -98,7 +98,7 @@ PLATFORM = "worker"
 
 #: The ``source`` half of the identity the warm has to answer with. It is the
 #: name autotriage hands ``run_prompt_in_session``
-#: (`workers/sources/autotriage.py:1164`, whose ``NAME`` is ``"autotriage"`` at
+#: (`workers/sources/autotriage.py:1168`, whose ``NAME`` is ``"autotriage"`` at
 #: that module's :34) and which therefore lands in the session file the run's
 #: iteration 1 is built from. It matters because the automod ban
 #: (`messages._ban_automod_for_workers`, #709) carves out exactly one source —
@@ -111,7 +111,7 @@ SOURCE = "autotriage"
 #: default. ``resolve_model`` reads the request body before the session
 #: (`app/routers/turn_options.py:173`), and the body a worker turn actually
 #: posts carries ``run_prompt_in_session``'s own default, ``"primary"``
-#: (`workers/sources/_common.py:1152`), so the real job resolves its engine that
+#: (`workers/sources/_common.py:1161`), so the real job resolves its engine that
 #: way and the warm has to resolve it the same way to warm the same engine's
 #: cache — the primary is the only one worth warming, since the secondary runs
 #: ``--parallel 1`` and keeps no prefix to reuse.
@@ -252,7 +252,7 @@ def _worker_fallback_payload(src: str | None) -> tuple[str, Any]:
 def warm_payload(src: str | None = None) -> tuple[str, Any]:
     """``(the stable head, the options that send it)``, from the builder the job uses.
 
-    Autotriage is a session-backed source: `workers/sources/autotriage.py:1163`
+    Autotriage is a session-backed source: `workers/sources/autotriage.py:1167`
     dispatches through ``run_prompt_in_session``, and `_common._run_turn` POSTs the
     contract to ``/api/message/stream`` with **no system prompt in the body**. The
     head the job actually sends is therefore built in the backend, by

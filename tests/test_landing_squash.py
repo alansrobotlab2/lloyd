@@ -106,6 +106,42 @@ def test_a_squash_that_cannot_reproduce_the_tree_restores_the_branch(branch, mon
     assert W.head(r) == old and git(r, "status", "--porcelain").stdout.strip() == ""
 
 
+def test_a_squash_killed_between_its_reset_and_its_commit_keeps_the_history(branch, monkeypatch):
+    """`keep_ref` used to be written after the commit: a kill in between left
+    the branch at `base` and the round's commits reachable only by reflog."""
+    r, base = branch
+    old = W.head(r)
+    real = W.git
+
+    def killed(repo, *args, **kw):
+        if args[:1] == ("commit",):
+            raise KeyboardInterrupt("SIGTERM mid-squash")
+        return real(repo, *args, **kw)
+    monkeypatch.setattr(W, "git", killed)
+    with pytest.raises(KeyboardInterrupt):
+        W.squash_onto(r, base, "msg", keep_ref="refs/automod/rounds/SM_X")
+    monkeypatch.setattr(W, "git", real)
+    assert W.head(r) == base, "the reset ran"
+    assert git(r, "rev-parse", "refs/automod/rounds/SM_X").stdout.strip() == old
+
+
+def test_a_squash_that_fails_leaves_keep_ref_as_it_found_it(branch, monkeypatch):
+    r, base = branch
+    real = W.git
+
+    def sabotage(repo, *args, **kw):
+        if args[:1] == ("commit",):
+            (Path(repo) / "a.py").write_text("A = 'tampered'\n")
+            real(repo, "add", "-A")
+        return real(repo, *args, **kw)
+    monkeypatch.setattr(W, "git", sabotage)
+    new, _ = W.squash_onto(r, base, "msg", keep_ref="refs/automod/rounds/SM_X")
+    monkeypatch.setattr(W, "git", real)
+    assert new is None
+    assert subprocess.run(["git", "-C", str(r), "rev-parse", "-q", "--verify",
+                           "refs/automod/rounds/SM_X"], capture_output=True).returncode != 0
+
+
 def test_the_promoter_rewrites_its_record_before_the_merge_and_the_switch_defaults_on(monkeypatch):
     src = (ROOT / "scripts/automod/promote.py").read_text().split("def promote(")[1]
     squash, record, merge = (src.index("W.squash_onto("), src.index('current["commit"] = result["commit"] = head'),

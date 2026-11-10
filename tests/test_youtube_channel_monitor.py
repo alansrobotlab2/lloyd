@@ -1225,7 +1225,7 @@ def test_fetch_wiring_never_touches_the_keyframe_leg(monkeypatch):
 # `pre-flight … (unattributed dirty state)` sweep, which commits a fresh note
 # within a day by way of a whole-tree `git add`. For that day the file is
 # untracked, and an untracked file is exactly what
-# `git stash push -u` (agent-services/guardian/rollback.py:204) and
+# `git stash push -u` (agent-services/guardian/rollback.py:209) and
 # `git clean -fd -- <paths>` (:221) remove.
 #
 # The boundary is python → bash → the git index, and the claim is about what a

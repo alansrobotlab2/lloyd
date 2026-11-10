@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -429,9 +430,9 @@ def _die_loudly_on_signal(round_id: str):
     `spent` (#1179, 2026-09-17, killed by `timeout 120` around a foreground
     `round land`). Raised as an exception instead, so `land`'s `finally`
     clears the marker and the ledger says what happened. Only while nothing
-    has merged: once `promote` is past the fast-forward its own rollback
-    path owns the failure, and this handler is restored to the default there
-    by the process simply not being in a wait.
+    has merged: from the fast-forward on (`P.landing_merged()`) a signal is
+    recorded and the landing finishes — raised there, it unwound a healthy
+    landing into its post-merge rollback.
 
     Returns a callable that puts the previous handlers back, and `land` calls
     it on the way out. The CLI never needed that — its process ends with the
@@ -444,6 +445,13 @@ def _die_loudly_on_signal(round_id: str):
     import signal
 
     def _handler(signum, _frame):
+        if P.landing_merged():
+            print(f"round land: signal {int(signum)} received after {round_id} merged; "
+                  f"the landing finishes first", file=sys.stderr, flush=True)
+            S.append_event({"event": "land_signal_held", "round_id": round_id,
+                            "signal": int(signum),
+                            "detail": "received after the merge; the landing was let finish"})
+            return
         S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
                         "external_blocker": True, "killed_by_signal": int(signum),
                         "detail": (f"the landing process was killed by signal {int(signum)} before it "
@@ -538,6 +546,7 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             S.clear_land_marker(round_id, pid=os.getpid())
         if restore_signals is not None:
             restore_signals()
+        P.mark_merged(False)
     # After the marker is gone: `flush_due` waits while any landing runs, and
     # this one would otherwise be the landing it waits for.
     if not dry_run and result.get("deferred"):

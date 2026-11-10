@@ -1056,7 +1056,7 @@ def probe_wall_bound(budget: float, max_wait_s: float | None = None) -> float:
     `max_wait_s` is what the caller ASKED the queue for; a smaller ask narrows the bound
     and a larger one never widens it past the ceiling. `agreement` clamps the run
     allowance to this ceiling, so it is a bound and not a description:
-    `agent_mcp/automod.py:940` calls `land()` synchronously with no outer timeout, which
+    `agent_mcp/automod.py:945` calls `land()` synchronously with no outer timeout, which
     makes unbundling the queue a longer call, and that is only acceptable while the
     longest it can be is a figure someone can read here.
     """

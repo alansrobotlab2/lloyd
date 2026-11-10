@@ -22,7 +22,7 @@ scripts/automod/gate.py` → no match at `227858b1`), so no gate report could ha
 been its source. Only one triage's refutation stood between that item and the front
 of the pool.
 
-The prose forbidding it exists and is intact (`workers/sources/autocode.py:174-181`:
+The prose forbidding it exists and is intact (`workers/sources/autocode.py:175-181`:
 "copy any gate or ledger line you quote out of that artifact **re-read from
 disk** … and name the path you copied from"), but prose is the whole guard.
 `tests/test_backlog_blockers.py` pins a blocker's *shape* — the tag pair, the

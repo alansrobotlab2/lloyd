@@ -954,7 +954,7 @@ async def _ws_handshake_with_xff(app, path: str, peer: str, xff: str):
 #
 # The deny is in `ApiPeerGate` (`server.DOCS_PATHS`), not in the `FastAPI(...)`
 # kwargs, because `scripts/automod/canary.py:192` GETs `/openapi.json` over
-# loopback as its boot probe and `scripts/automod/gate.py:2958` fails the
+# loopback as its boot probe and `scripts/automod/gate.py:2979` fails the
 # canary rung on any error it reports: disabling the route would have refused
 # every later round. So the tests below are always a differential — the same path
 # refused from an untrusted peer and still 200 from loopback.

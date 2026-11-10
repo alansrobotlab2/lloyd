@@ -2126,7 +2126,7 @@ async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
     what proves that, and it is also what makes driving a real pool safe here."""
     from workers.queue import WorkQueue
     # `from workers import sources`: the patch below WRAPS the registry's own entry, so
-    # this has to name the same registry dict `workers/pool.py:945` imports by name
+    # this has to name the same registry dict `workers/pool.py:953` imports by name
     # inside `_scheduler_pass` and indexes with `entry["enqueue_if_due"]`.
     from workers import sources
     import workers.sources.scheduled_task as st
@@ -5046,7 +5046,7 @@ async def test_a_starving_queue_with_no_pause_alerts_byte_identically(
         aut, monkeypatch, tmp_path):
     """Clause 3: the no-pause alert is today's string, character for character.
 
-    Byte-identical is the point: `agent-services/guardian/detect.py:243` watches
+    Byte-identical is the point: `agent-services/guardian/detect.py:336` watches
     this sentence, and a pause clause that leaked into the unpaused case would
     both break that watch and accuse an innocent operator. The second half is the
     resumed pool — the watermark row still exists and says "0", which is the live

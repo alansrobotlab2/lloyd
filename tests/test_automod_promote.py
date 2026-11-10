@@ -28,6 +28,9 @@ def isolated(tmp_path, monkeypatch):
                      ("BROKEN_PATH", "BROKEN"), ("DENIED_PATH", "denied.json"),
                      ("PAUSE_PATH", "pause"), ("LOCK_PATH", "lock")):
         monkeypatch.setattr(S, name, tmp_path / fn)
+    # Module globals a test that stubs `release_pool_pause` could leave set.
+    monkeypatch.setattr(P, "_POOL_PAUSED_BY_US", False)
+    monkeypatch.setattr(P, "_pool_pause_refreshed_at", 0.0)
     return tmp_path
 
 
@@ -365,6 +368,36 @@ def test_success_leaves_the_pool_paused_for_the_landing(monkeypatch):
     assert calls == [True, False]
 
 
+def test_the_idle_wait_keeps_re_taking_its_pause(monkeypatch):
+    """The backend lets an automod pause lapse after its TTL, so a promoter
+    killed mid-wait cannot leave the pool paused; a live one re-takes it."""
+    calls = _pool_spies(monkeypatch, paused_now=False)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"turns": {"active": 1, "queued": 0, "harness_runs": 0}}))
+    monkeypatch.setattr(P, "POOL_PAUSE_REFRESH_SECONDS", 0.0)
+    ok, _ = P.wait_idle(max_wait=0.05)
+    assert not ok and calls[0] is True and calls[-1] is False
+    assert calls.count(True) >= 3, "the pause was taken once and never refreshed"
+
+
+def test_a_skip_idle_restart_releases_the_pause_it_took(monkeypatch):
+    """`round restart --skip-idle` paused without marking the pause its own,
+    so `release_pool_pause` skipped it: an engine or aggregator restart (which
+    never restarts the backend) left the pool paused."""
+    calls = _pool_spies(monkeypatch, paused_now=False)
+    monkeypatch.setattr(P.S, "read_current", lambda: None)
+    monkeypatch.setattr(P.S, "read_pending", lambda path=None: [])
+    monkeypatch.setattr(P.S, "set_pause", lambda secs, cap=1800.0: secs)
+    monkeypatch.setattr(P.S, "clear_pause", lambda: None)
+    monkeypatch.setattr(P.S, "append_event", lambda ev: None)
+    monkeypatch.setattr(P, "restart_process", lambda program: (True, "ok"))
+    monkeypatch.setattr(P, "process_info", lambda name: {"statename": "RUNNING"})
+    monkeypatch.setattr(P, "start_process", lambda name, wait=False: (True, "ok"))
+    monkeypatch.setattr(P, "_wait_health", lambda url, budget: True)
+    P.restart_stack(("lloyd-mcp",), skip_idle=True)
+    assert calls == [True, False]
+    assert P._POOL_PAUSED_BY_US is False
+
+
 def test_pool_paused_reads_the_nested_status_shape(monkeypatch):
     monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (200, {"initialized": True, "pool": {"paused": True}}))
     assert P.pool_paused() is True
@@ -601,6 +634,30 @@ def test_the_recovery_row_comes_from_the_function_and_not_from_one_call_site(sha
         "rebased onto live main, so the new base is main and the head is the round's commit on top"
     assert rows[0]["from_base"] == t["base"] and rows[0]["to_base"] == base
     assert rows[0]["head"] == head and _events("land_failed") == []
+
+
+class _SlowGate(_StubGate):
+    def run(self):
+        time.sleep(0.3)
+        return super().run()
+
+
+def test_a_re_gate_keeps_the_pool_pause_alive(shared_tree, monkeypatch):
+    """A re-gate runs a full gate inline — 672-1240 s on the live ledger, past
+    the automod pause's 900 s TTL — so it is re-taken for as long as it runs."""
+    import scripts.automod.gate as G
+    _StubGate.verdict, _StubGate.seen = True, []
+    monkeypatch.setattr(G, "Gate", _SlowGate)
+    taken: list = []
+    monkeypatch.setattr(P, "set_pool_paused", lambda p: taken.append(p) or True)
+    monkeypatch.setattr(P, "_POOL_PAUSED_BY_US", True)
+    monkeypatch.setattr(P, "POOL_PAUSE_REFRESH_SECONDS", 0.05)
+    t = shared_tree
+    P._regate_after_move("SM_MV", t["wt"], t["live"], t["base"], t["moved"])
+    assert taken.count(True) >= 3, f"the pause was not re-taken during the gate: {taken}"
+    n = len(taken)
+    time.sleep(0.2)
+    assert len(taken) == n, "the heartbeat outlived the gate"
 
 
 def test_a_failure_before_the_merge_never_rolls_back(monkeypatch, tmp_path):
@@ -1629,6 +1686,81 @@ def test_a_candidate_venv_named_by_the_gate_reaches_the_landing_through_gate_jso
         "the candidate the gate named was not installed"
     assert (live / ".venvs" / "lloyd.prev" / "bin" / "python").read_text() == LIVE_MARKER
     assert json.loads(S.CURRENT_PATH.read_text())["venv_swapped"] is True
+
+
+def _candidate_clone(wt):
+    clone = wt / ".venvs" / "lloyd"
+    (clone / "bin").mkdir(parents=True)
+    (clone / "bin" / "python").write_text("candidate interpreter\n", encoding="utf-8")
+    return clone
+
+
+def _no_supervisord(monkeypatch):
+    monkeypatch.setattr(P, "stop_process", lambda program, wait=True: (True, "ok"))
+    monkeypatch.setattr(P, "start_process", lambda program, wait=False: (True, "ok"))
+    monkeypatch.setattr(P, "process_info", lambda program: {"statename": "RUNNING"})
+
+
+def test_a_leftover_lloyd_prev_refuses_the_landing_before_it_merges(tmp_path, monkeypatch):
+    """The `lloyd.prev` check used to run after the merge, so every
+    requirements-changing landing merged, failed the swap and rolled itself
+    back until a human removed the directory."""
+    live, wt, base, head = _landing_repo(tmp_path, monkeypatch)
+    _no_supervisord(monkeypatch)
+    (live / ".venvs" / "lloyd.prev").mkdir()
+    clone = _candidate_clone(wt)
+    with pytest.raises(P.PromoteError, match="lloyd.prev already exists"):
+        P.promote("SM_V", wt, base, gate_report={"head": head, "venv": str(clone)})
+    assert _sh(live, "rev-parse", "HEAD") == base, "it merged first"
+    events = [e.get("event") for e in S.read_events(path=S.LEDGER_PATH)]
+    assert "rollback_succeeded" not in events and "rollback_failed" not in events
+    row = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "land_failed"][-1]
+    assert row["external_blocker"] is True and "lloyd.prev" in row["detail"]
+    assert (live / ".venvs" / "lloyd" / "bin" / "python").read_text() == LIVE_MARKER
+
+
+def test_an_inline_rollback_swaps_the_candidate_venv_back(tmp_path, monkeypatch):
+    """After a swap, a failure that reset the tree left the candidate venv live
+    and `lloyd.prev` on disk: only the guardian ever swapped back."""
+    live, wt, base, head = _landing_repo(tmp_path, monkeypatch)
+    _no_supervisord(monkeypatch)
+    real = P._guardian_rollback_module
+    monkeypatch.setattr(P, "_guardian_rollback_module",
+                        lambda _live: real(_Path(__file__).resolve().parent.parent))
+    monkeypatch.setattr(P, "restart_process", lambda program: (True, "ok"))  # never picks it up
+    clone = _candidate_clone(wt)
+    with pytest.raises(P.PromoteError, match="did not pick up"):
+        P.promote("SM_V", wt, base, gate_report={"head": head, "venv": str(clone)})
+    assert _sh(live, "rev-parse", "HEAD") == base
+    assert (live / ".venvs" / "lloyd" / "bin" / "python").read_text() == LIVE_MARKER
+    assert not (live / ".venvs" / "lloyd.prev").exists()
+    assert list((live / ".venvs").glob("lloyd.failed-*")), "the candidate was not kept aside"
+
+
+def test_a_venv_that_could_not_be_swapped_back_is_said_on_the_rollback_row(tmp_path, monkeypatch):
+    """`.venvs/lloyd` may be missing after a failed swap-back; the next reader
+    learns it from the ledger, and the outcome stays `tree_only`."""
+    live, wt, base, head = _landing_repo(tmp_path, monkeypatch)
+    _no_supervisord(monkeypatch)
+    real = P._guardian_rollback_module
+
+    def module(_live):
+        mod = real(_Path(__file__).resolve().parent.parent)
+
+        def broken(repo):
+            raise OSError("rename .venvs/lloyd.prev: device busy")
+        mod.swap_venv_back = broken
+        return mod
+    monkeypatch.setattr(P, "_guardian_rollback_module", module)
+    monkeypatch.setattr(P, "restart_process", lambda program: (True, "ok"))  # never picks it up
+    clone = _candidate_clone(wt)
+    with pytest.raises(P.PromoteError, match="did not pick up"):
+        P.promote("SM_V", wt, base, gate_report={"head": head, "venv": str(clone)})
+    rows = S.read_events(path=S.LEDGER_PATH)
+    failed = [e for e in rows if e.get("event") == "rollback_failed"][-1]
+    assert "device busy" in failed["venv_swap_back_failed"] and failed["tree_restored"] is True
+    landed = [e for e in rows if e.get("event") == "land_failed"][-1]
+    assert landed["rollback"] == P.UNDO_TREE_ONLY
 
 
 # ── #2024: the maintenance lease is on the ledger, both edges ────────────────

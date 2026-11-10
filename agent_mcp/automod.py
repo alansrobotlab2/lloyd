@@ -583,6 +583,11 @@ def _abort_refusal(round_id: str, *, discard_passed_gate: bool = False) -> dict 
     The CLI and the reaper call `round.abort` directly and are not asked.
     """
     from scripts.automod import state as S, worktree as W
+    if not W.valid_round_id(round_id):
+        # An abort removes `~/lloyd-work/<round_id>`. With no id that is the
+        # work root (every open round); with `..` in it, a directory outside.
+        return {"error": (f"{round_id!r} is not a round id. Pass the id automod_start "
+                          f"returned (SM_<stamp>); nothing was removed.")}
     if S.land_in_progress(round_id):
         return {"error": (f"a landing is running for {round_id}; aborting would remove the "
                           f"worktree under it. End your turn — the landing reports to the ledger.")}
