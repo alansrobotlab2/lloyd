@@ -534,7 +534,8 @@ queue state because it is also the promoter's idle gate — no disk reads there.
 - Primary `:8096` = Qwen3.8-Flash-Next (vLLM, GPU 1). Its load-bearing values
   (`VLLM_VENV`, `KV_CACHE_DTYPE=fp8`, `MAX_NUM_BATCHED_TOKENS=4096`) live in
   `agent-llm-primary.conf`'s `environment=`, asserted at boot; the chunk budget
-  stays 4096.
+  stays 4096. `LONG_PREFILL_TOKEN_THRESHOLD=2048` there keeps a spoken turn from
+  waiting behind a running cold prefill (`architecture/vllm.md` §5.2).
 - The secondary (`:8091`, llama.cpp) is off since 2026-09-20 and its jobs run
   on the primary. **GPU 2 runs djev**: not a chat slot, nothing routes a turn
   to it; rank with it, never gate on it (`architecture/djev.md`).

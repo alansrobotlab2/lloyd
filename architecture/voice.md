@@ -1328,7 +1328,10 @@ overlapping it, three causes separate:
   prefill takes the whole 4,096-token step budget and a spoken turn's prefill
   waits behind it. `LONG_PREFILL_TOKEN_THRESHOLD` (the launcher's knob for
   `--long-prefill-token-threshold`) caps a long prefill's share of each step
-  while another request is eligible; the A/B is below.
+  while another request is eligible. **On since 2026-11-09 at 2048**: an
+  8k spoken prompt beside a 100k cold prefill now gets its first token in
+  1.62 s instead of 8.13 s (median of four), for about 1.2 s more on a cold
+  prefill that shares its steps (`architecture/vllm.md` §5.2).
 - **Session queueing**: 3 of 28 turns waited 6–12.6 s behind another turn on
   their own session — never a typed one: the spoken turn before, kept running
   by a cancel that took 6.6 s (Inner Voice's terminal review) or queued itself.

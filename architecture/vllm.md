@@ -472,6 +472,7 @@ Every knob is an environment variable the launcher reads, so an arm is one
 | `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main-1012`** | the BF16 worker build vs the FP8 main build (dated per rebuild; the undated path is the 09-17 revert target). The default names a venv that no longer exists (§1, #3136) |
 | `KV_CACHE_DTYPE` | *(empty = BF16)* | **`fp8`** | §3 |
 | `MAX_NUM_BATCHED_TOKENS` | *(empty = vLLM's 8192)* | **`4096`** | §5.1 |
+| `LONG_PREFILL_TOKEN_THRESHOLD` | *(empty = off)* | **`2048`** | §5.2: a long prefill's share of each step while another request is eligible |
 | `MAX_MODEL_LEN` | `262144` | default | §4 |
 | `MODEL_DIR` | the NVFP4 checkpoint | default | the YaRN shadow is the alternative |
 | `MAX_NUM_SEQS` | `8` | default | |
@@ -507,6 +508,35 @@ once from the API server and once from the engine core. It is about draft-token
 slots: with MTP k=3 every running request takes four of the step's tokens, 32
 at `max_num_seqs=8`, which even a 2048-token budget absorbs. It cost nothing
 measurable — decoding alone stepped at 17.8 ms p50 at both 8192 and 4096.
+
+### 5.2 A long prefill takes at most 2048 of a step (2026-11-09)
+
+`--scheduling-policy priority` orders only the *waiting* queue. vLLM's V1
+scheduler serves running requests first, so a worker's cold 100k-token prefill
+that is already running takes the whole 4096-token step, step after step, and
+a spoken turn's prefill (priority 0) waits behind it however urgent it is.
+This was most of the slow first words in `architecture/voice.md` "First
+token". `--long-prefill-token-threshold 2048` caps a long prefill's share of
+each step whenever another request is eligible; alone it still takes the whole
+budget.
+
+Measured with `agent-services/bin/bench-admission-stall.py` (the pool paused,
+`regression.lock` held, four repetitions; `voice` shape = an 8k-token spoken
+prompt issued while a 100k cold prefill runs; `cold` = a decoding 20k request
+beside a 100k cold prefill):
+
+| | threshold off | 2048 |
+|---|---|---|
+| spoken prompt's TTFT beside the cold prefill, median | 8.13 s | **1.62 s** |
+| spoken prompt's TTFT alone, median | 0.80 s | 0.63 s |
+| the 100k prefill beside the spoken prompt | 8.87 s | 8.56 s |
+| a decoding request's step during the cold prefill, p50 | 255 ms | **146 ms** |
+| the 100k prefill beside that decoding request | 8.54 s | 9.72 s |
+
+The price is the last row: a cold prefill that shares its steps with a
+decoding neighbour finishes about 1.2 s (14%) later. A worker turn is minutes
+of decoding and tool calls around one such prefill, so it is kept. Dropping the
+variable turns it off; the launcher passes the flag only when it is set.
 
 ## 6. Throughput: the 09-09 stall, and what keeps it fixed
 
