@@ -45,3 +45,29 @@ case that catches the wrong read — its range is the round's two cherry-picks
 (`bd033a19` + `01219641`) and prints both declared paths, while the tip commit
 alone prints one. `tests/test_automod_review_tools.py` pins every shipped case's
 `changed_paths` against that range for exactly this reason.
+
+## The cause corpus (`cause_corpus.jsonl`) — #4026
+
+Alongside the four graded cases sits a **cause-labelled disagreement corpus**: every
+grader-versus-reality dispute that is already written down, one JSON object per line,
+with exactly the keys `case_id`, `source`, `surface`, `verdict_given`,
+`contrary_evidence`, `cause_class`, `resolvable_now`. `cause_class` is one of
+`grader_defect`, `spec_ambiguity`, `graded_wrong_input`, `real_unmet_work`,
+`grader_wrong_on_approved_work`, `unknown` — the point of the fixed set is that a change
+to grader behaviour has to name the class it fixes, instead of the class of the last
+incident being guessed at.
+
+Two of the six fields carry the machine proof: `contrary_evidence` ends in
+`graded_commit=… graded_parent=… cites=…`, and `scripts/automod/review_cause.py`
+re-checks those citations against the git objects they name. `grader_defect` and
+`graded_wrong_input` are legal **only** when a cited `evidence_path`/`evidence_line`/
+`test_node_id` fails to resolve at the commit that was graded, or the graded range is not
+the surface the clause named; a label whose citation resolves is refused by the loader.
+That is what makes those two labels evidence rather than opinion, and why a row whose
+source does not resolve to a real backlog item or promotion-ledger round cannot load.
+
+`calibrate` prints one `cause <class>: <ok>/<n> agree` line per class present **before**
+the aggregate, which stays the last line and still counts every case:
+`scripts/automod/review_tools.py build-cause-corpus` rebuilds the corpus from the ledgers
+and publishes the dated distribution to `~/lloyd-data/eval/review-calibration/`. Growing
+the graded cases themselves to >=12 labelled fixtures is a second round.

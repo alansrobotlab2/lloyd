@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 from scripts.automod import review as RV
+from scripts.automod import review_cause as RC
 from scripts.automod import testpaths as TP
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -224,6 +225,11 @@ def load_fixtures(fixture_dir: Path | None = None) -> list[dict]:
         except ValueError:
             continue
         if isinstance(case, dict) and case.get("expect", {}).get("kind") in KINDS:
+            # #4026: a case may carry the cause class of the disagreement it pins, taken
+            # from the corpus (eval/review_calibration/cause_corpus.jsonl). Absent means no
+            # disagreement about this case is labelled there yet, and `calibrate` then
+            # counts it as unlabelled rather than inventing a cause for it.
+            case.setdefault("cause_class", "unlabelled")
             out.append(case)
     return out
 
@@ -261,6 +267,7 @@ def calibrate(*, repo: Path | None = None, fixture_dir: Path | None = None, grad
                               grader=grader)
         ok, why = compare(case, result)
         rows.append({"name": case["name"], "ok": ok, "why": why, "kind": result.get("kind"),
+                     "cause_class": case.get("cause_class") or "unlabelled",
                      "findings": (result.get("findings") or result.get("error") or "")[:400],
                      "session_id": result.get("session_id"), "provisional": case.get("provisional", False),
                      "seconds": round(time.time() - started, 1),
@@ -657,7 +664,28 @@ def main(argv=None) -> int:
     rc.add_argument("--limit", type=int, default=None,
                     help="stop after this many recorded blocking rows")
     rc.add_argument("--json", action="store_true", help="print the per-row result too")
+    g = sub.add_parser("build-cause-corpus",
+                       help="#4026: rebuild the cause-labelled disagreement corpus from the "
+                            "promotion ledgers and publish the dated distribution artifact. "
+                            "Reads ledgers and git, calls no model, and changes no grader "
+                            "behaviour, so it is safe to run while the loop is busy.")
+    g.add_argument("--date", default=None,
+                   help="stamp the audit artifact with this UTC date (default: today)")
+    g.add_argument("--audit-only", action="store_true",
+                   help="publish the artifact from the corpus already on disk, rewriting "
+                        "no corpus file")
     args = ap.parse_args(argv)
+
+    if args.cmd == "build-cause-corpus":
+        # The generator the owed-check runs in an idle window: it re-reads the ledgers,
+        # re-derives which recorded verdicts' own citations fail against the commit that
+        # graded them, writes the corpus, and publishes cause-audit-<date>.json, whose
+        # modal-cause sentence is the number the next grader change has to argue against.
+        res = ({"path": str(RC.CORPUS_PATH)} if args.audit_only else RC.build_cause_corpus())
+        print(RC.render_counts(RC.load_corpus()))
+        art = RC.write_audit(date=args.date)
+        print(f"corpus: {res['path']}\nartifact: {art}")
+        return 0
 
     if args.cmd == "fixture":
         p = write_fixture(name=args.name, round_id=args.round, expect_kind=args.expect_kind,
@@ -671,7 +699,14 @@ def main(argv=None) -> int:
             mark = "PASS" if r["ok"] else "FAIL"
             print(f"[{mark}] {r['name']}{' (provisional)' if r['provisional'] else ''}: {r['why']}"
                   f" — {r['kind']} · {r['findings'][:160]} · {r['seconds']}s")
-        print(f"\n{sum(r['ok'] for r in rows)}/{len(rows)} agree")
+        # #4026: agreement per cause class, so a disagreement says WHICH KIND of thing to
+        # fix rather than only that something disagreed. Printed above the aggregate and
+        # never replacing it: the `<ok>/<n> agree` line is still the last line and still
+        # counts every case, cause-labelled or not, so the value returned below is exactly
+        # the one it has always returned — 0 only when there are cases and all of them
+        # agree. This instrument may describe the grader; it may not soften it.
+        print("\n" + RC.render_agreement(RC.agreement_by_cause(rows, rows)))
+        print(f"{sum(r['ok'] for r in rows)}/{len(rows)} agree")
         return 0 if rows and all(r["ok"] for r in rows) else 1
     if args.cmd == "backfill":
         rows = backfill(limit=args.limit, only_items=args.item or None)

@@ -1,28 +1,29 @@
 {
-  "name": "392-small-met",
-  "item_id": 392,
-  "round_id": "SM_20260909_185311",
-  "parent": "ad64d31282279f93f91be895bf62c6a31fd85bf4",
-  "commit": "ce713bf39cf81d2d00b5ab1cbb0404209df4349e",
-  "changed_paths": [
-    "tests/test_trajectory_extraction.py"
-  ],
-  "strip_tests": false,
-  "expect": {
-    "kind": "retry",
-    "unmet_clauses": [],
-    "honesty_finding": true
-  },
-  "provisional": true,
-  "note": "Two live gradings of this landing answer `retry`, and the case now says what they answer. First disagreement, the 2026-10-22 merged-ledger calibrate run: the grader answered clause 1 partial \u2014 'The derivation half is genuinely in the tree and shipped before this diff' \u2014 in grader session `20261022_213857_review_2794` (158.4s), line 1 of `~/lloyd-data/logs/calibrate-2822-merged-213855.log`, the run that measured `2/4 agree`. Its reason is `grade_commit`'s range model: the graded surface is `parent..commit`, #392's derivation was promoted in `75ce62d`, before the parent `ad64d312` (`git merge-base --is-ancestor 75ce62d ad64d312` exits 0), and `git diff --name-only ad64d312 ce713bf3` prints exactly the one path this case declares \u2014 so the range the grader reads genuinely contains no derivation. Second disagreement, the 2026-10-27 run (`~/lloyd-data/logs/calibrate-3179-postlanding-.log`, footer `2/4 agree`): a test-honesty finding that `tests/test_trajectory_extraction.py:964` defines `_live_buckets()` reading `_ROOT / _pipeline`, absent both in that graded worktree and in the live checkout. That `:964` is line 964 of the graded tree `ce713bf3`; the same symbol sits at line 3099 of that same file at `4307f270`, the commit this re-mark was cut from, so the number in the finding and the number in a checkout are two numbers. And as of this 2026-11-01 re-mark `~/lloyd/_pipeline` does not exist on this box (the real buckets are under `~/lloyd-data/_pipeline/trajectories/`), so #392's own machine-checked acceptance nodes skip rather than run. Against both of those, the expectation rested on a diff read: ruling #2639's owed-check session 20261016_031621_owedcheck_e9d6 at 2026-10-16T10:33:07Z, entry #3, 'CONFIRM both expectations as pass and drop provisional:true', which read that same range as a test-only landing the author called met. Whether that `pass` or the grader's `retry` is correct \u2014 i.e. whether the fixture or `grade_commit`'s range model is what is wrong \u2014 is the ruling #3179 leaves to the owed-check job; re-marking the case to the graded reality is the record of the disagreement, not its resolution, which is why `provisional: true` stays. `provisional` is a record and not a mute: `compare()` never reads the flag and the CLI exit code does not either, so the FAIL still prints whatever the grader answers.",
   "author_outcome": {
-    "landed": true,
     "acceptance": "met",
     "deferred_to": [],
-    "summary": "Round SM_20260909_185311 (head ce713bf) \u2014 gate ok:true, \"2967 passed, 2 xfailed, 11 skipped\", canary \"real turn in 11.2s; Bash dispatched, sentinel round-tripped\"; autoimplement_land dispatched (pid 1986338), now landing -> observing. The acceptance's code half was already promoted in 75ce62d (#389's vehicle, whose acceptance absorbed #392) along with its unit pins, so this round landed the missin",
+    "landed": true,
     "spawned": [
       665,
       666
-    ]
-  }
+    ],
+    "summary": "Round SM_20260909_185311 (head ce713bf) \u2014 gate ok:true, \"2967 passed, 2 xfailed, 11 skipped\", canary \"real turn in 11.2s; Bash dispatched, sentinel round-tripped\"; autoimplement_land dispatched (pid 1986338), now landing -> observing. The acceptance's code half was already promoted in 75ce62d (#389's vehicle, whose acceptance absorbed #392) along with its unit pins, so this round landed the missin"
+  },
+  "cause_class": "grader_defect",
+  "changed_paths": [
+    "tests/test_trajectory_extraction.py"
+  ],
+  "commit": "ce713bf39cf81d2d00b5ab1cbb0404209df4349e",
+  "expect": {
+    "honesty_finding": true,
+    "kind": "retry",
+    "unmet_clauses": []
+  },
+  "item_id": 392,
+  "name": "392-small-met",
+  "note": "Two live gradings of this landing answer `retry`, and the case now says what they answer. First disagreement, the 2026-10-22 merged-ledger calibrate run: the grader answered clause 1 partial \u2014 'The derivation half is genuinely in the tree and shipped before this diff' \u2014 in grader session `20261022_213857_review_2794` (158.4s), line 1 of `~/lloyd-data/logs/calibrate-2822-merged-213855.log`, the run that measured `2/4 agree`. Its reason is `grade_commit`'s range model: the graded surface is `parent..commit`, #392's derivation was promoted in `75ce62d`, before the parent `ad64d312` (`git merge-base --is-ancestor 75ce62d ad64d312` exits 0), and `git diff --name-only ad64d312 ce713bf3` prints exactly the one path this case declares \u2014 so the range the grader reads genuinely contains no derivation. Second disagreement, the 2026-10-27 run (`~/lloyd-data/logs/calibrate-3179-postlanding-.log`, footer `2/4 agree`): a test-honesty finding that `tests/test_trajectory_extraction.py:964` defines `_live_buckets()` reading `_ROOT / _pipeline`, absent both in that graded worktree and in the live checkout. That `:964` is line 964 of the graded tree `ce713bf3`; the same symbol sits at line 3099 of that same file at `4307f270`, the commit this re-mark was cut from, so the number in the finding and the number in a checkout are two numbers. And as of this 2026-11-01 re-mark `~/lloyd/_pipeline` does not exist on this box (the real buckets are under `~/lloyd-data/_pipeline/trajectories/`), so #392's own machine-checked acceptance nodes skip rather than run. Against both of those, the expectation rested on a diff read: ruling #2639's owed-check session 20261016_031621_owedcheck_e9d6 at 2026-10-16T10:33:07Z, entry #3, 'CONFIRM both expectations as pass and drop provisional:true', which read that same range as a test-only landing the author called met. Whether that `pass` or the grader's `retry` is correct \u2014 i.e. whether the fixture or `grade_commit`'s range model is what is wrong \u2014 is the ruling #3179 leaves to the owed-check job; re-marking the case to the graded reality is the record of the disagreement, not its resolution, which is why `provisional: true` stays. `provisional` is a record and not a mute: `compare()` never reads the flag and the CLI exit code does not either, so the FAIL still prints whatever the grader answers.",
+  "parent": "ad64d31282279f93f91be895bf62c6a31fd85bf4",
+  "provisional": true,
+  "round_id": "SM_20260909_185311",
+  "strip_tests": false
 }

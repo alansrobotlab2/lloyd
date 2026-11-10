@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.automod import backlog as B, review as RV, review_tools as RT, state as S
+from scripts.automod import backlog as B, review as RV, review_cause as RC, review_tools as RT, state as S
 
 
 def git(repo, *args):
@@ -940,3 +940,247 @@ def test_the_remark_to_the_graded_reality_pins_both_cases_and_their_notes():
     assert not ok_stale544 and why_stale544 == (
         "clauses [4] expected unmet/partial, grader said met"), (
         f"the old expectation no longer produces the logged FAIL: {why_stale544!r}")
+
+
+# ── #4026: the cause-labelled disagreement corpus ─────────────────────────
+#
+# One node per acceptance clause. Two of them read the COMMITTED corpus rather than a
+# fixture, because the corpus is the deliverable and a unit test alone would pin the
+# code and leave the artifact unverified. `main` was reached by no node in this file
+# before this section, which is why the exit-code contract `calibrate` has always had
+# was pinned by nothing.
+
+
+def _cause_row(case_id, source, cause, commit, citations=(), parent=None,
+               surface="review", resolvable=False):
+    """A corpus row in the only shape the corpus allows: the six keys, with the machine
+    fields inside `contrary_evidence` written by the same encoder the builder uses, so
+    the test round-trips the real format instead of a paraphrase of it."""
+    return {"case_id": case_id, "source": source, "surface": surface,
+            "verdict_given": "the review rung returned `retry` on attempt 1",
+            "contrary_evidence": "a later record contradicts the verdict "
+                                 + RC.evidence_tail(commit, list(citations), parent),
+            "cause_class": cause, "resolvable_now": resolvable}
+
+
+def _corpus(tmp_path, name, rows):
+    p = tmp_path / name
+    p.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
+    return p
+
+
+def test_clause_1_the_committed_corpus_holds_30_rows_of_exact_keys_and_fixed_causes():
+    """#4026 clause 1: `eval/review_calibration/cause_corpus.jsonl` is committed with
+    >=30 rows, each carrying exactly the keys case_id, source, surface, verdict_given,
+    contrary_evidence, cause_class, resolvable_now, and every cause_class is one of the
+    five fixed classes or `unknown`."""
+    if not RC.ARTIFACT_LEDGER.exists():
+        pytest.skip(f"the promotion ledger the corpus cites is not on this machine: "
+                    f"{RC.ARTIFACT_LEDGER}")
+    rows = RC.load_committed_corpus()            # the loader is the validator
+    assert len(rows) >= 30, f"the corpus must hold >=30 labelled rows, got {len(rows)}"
+    for row in rows:
+        assert sorted(row) == sorted(RC.ROW_KEYS), (
+            f"{row['case_id']}: keys must be exactly the six, got {sorted(row)}")
+        assert row["cause_class"] in RC.FIXED_CAUSES
+        assert row["surface"] in RC.SURFACES
+
+
+def test_clause_1_a_row_outside_the_fixed_shape_is_refused_not_reparsed(tmp_path):
+    """The other half of clause 1: the schema is enforced, not decorative. A seventh key,
+    a missing key, and a cause outside the fixed set are each refused."""
+    good = _cause_row("ok", "backlog/4026", RC.UNKNOWN, "")
+    for row, why in ((dict(good, case_id="extra", extra_key="x"), "unexpected"),
+                     ({k: v for k, v in dict(good, case_id="absent").items() if k != "surface"},
+                      "missing"),
+                     (dict(good, case_id="badcause", cause_class="judge_was_having_a_day"),
+                      "is not in")):
+        with pytest.raises(RC.CorpusError) as e:
+            RC.load_corpus(_corpus(tmp_path, f"{row['case_id']}.jsonl", [row]),
+                           repo=RC.LIVE_ROOT, round_ids=set())
+        assert why in str(e.value), f"{row['case_id']}: {e.value}"
+
+
+def test_clause_2_the_loader_refuses_a_row_whose_source_does_not_resolve(world, tmp_path):
+    """#4026 clause 2: every row's `source` resolves against a record that exists — a
+    backlog item id or a round in the promotion ledger — and every non-`unknown` row names
+    the commit it was graded at. The loader refuses a bogus item id, a round the ledger
+    does not hold, and a labelled row with no commit, while the same row with a real
+    source loads."""
+    ids = RC.load_ledger_round_ids(world["ledger"])
+    assert "SM_9" in ids
+    refused = (
+        (_cause_row("bogus-item", "backlog/9999999", RC.UNKNOWN, ""), "no item file"),
+        (_cause_row("bogus-round", "round:SM_19999999_999999", RC.UNKNOWN, ""),
+         "not in the ledger"),
+        (_cause_row("no-commit", "round:SM_9", "spec_ambiguity", ""), "must name the commit"),
+        (_cause_row("malformed", "feelings/3", RC.UNKNOWN, ""), "must be backlog/"),
+    )
+    for row, why in refused:
+        with pytest.raises(RC.CorpusError) as e:
+            RC.load_corpus(_corpus(tmp_path, f"{row['case_id']}.jsonl", [row]),
+                           repo=world["repo"], round_ids=ids)
+        assert why in str(e.value), f"{row['case_id']}: {e.value}"
+    good = _cause_row("real", "round:SM_9", RC.UNKNOWN, world["commit"])
+    assert [r["case_id"] for r in RC.load_corpus(
+        _corpus(tmp_path, "good.jsonl", [good]), repo=world["repo"], round_ids=ids)] == ["real"]
+
+
+def test_clause_3_a_gated_label_is_legal_only_when_the_citation_fails(world, tmp_path):
+    """#4026 clause 3: a `grader_defect` or `graded_wrong_input` label is accepted only
+    when that row's cited evidence_path/evidence_line/test_node_id fails to resolve
+    against its stated graded commit, or its graded range is not the one the clause named.
+    Accepted here: one real corpus row, a line past the end of the graded file, a path no
+    commit of this repo can hold, and a surface outside the graded range. Refused: the
+    same citation resolving at that commit, a range that IS the graded surface, a range
+    with no parent recorded, and a failing citation wearing the other class's label."""
+    ids = RC.load_ledger_round_ids(world["ledger"])
+    if not RC.ARTIFACT_LEDGER.exists():
+        pytest.skip(f"the promotion ledger the corpus cites is not on this machine: "
+                    f"{RC.ARTIFACT_LEDGER}")
+    real = next(r for r in RC.load_committed_corpus() if r["cause_class"] in RC.GATED_CAUSES)
+    assert RC.legality(real)["legal"] is True, real["case_id"]
+    accepted = (
+        ("line-past-eof", _cause_row("line-past-eof", "round:SM_9", "grader_defect",
+                                     world["commit"], citations=[{"path": "app/m.py",
+                                                                  "line": 4000}])),
+        ("other-tree", _cause_row("other-tree", "round:SM_9", "graded_wrong_input",
+                                  world["commit"],
+                                  citations=[{"path": "/home/alansrobotlab/elsewhere/x.py"}])),
+        ("range-outside", _cause_row("range-outside", "round:SM_9", "grader_defect",
+                                     world["commit"], citations=[{"range": "docs/absent.md"}],
+                                     parent=world["parent"])),
+    )
+    for name, row in accepted:
+        rows = RC.load_corpus(_corpus(tmp_path, f"{name}.jsonl", [row]),
+                              repo=world["repo"], round_ids=ids)
+        assert [r["case_id"] for r in rows] == [name]
+        assert RC.legality(row, repo=world["repo"])["legal"] is True, name
+    refused = (
+        (_cause_row("resolves", "round:SM_9", "grader_defect", world["commit"],
+                    citations=[{"path": "app/m.py", "line": 1}]), "do not fail"),
+        (_cause_row("range-is-graded-surface", "round:SM_9", "grader_defect", world["commit"],
+                    citations=[{"range": "app/m.py"}], parent=world["parent"]), "do not fail"),
+        (_cause_row("range-no-parent", "round:SM_9", "grader_defect", world["commit"],
+                    citations=[{"range": "app/m.py"}]), "range_parent_missing"),
+        (_cause_row("wrong-arm", "round:SM_9", "graded_wrong_input", world["commit"],
+                    citations=[{"path": "app/m.py", "line": 4000}]), "is the grader_defect arm"),
+    )
+    for row, why in refused:
+        leg = RC.legality(row, repo=world["repo"])
+        assert leg["legal"] is False and why in leg["why"], (row["case_id"], leg)
+        with pytest.raises(RC.CorpusError) as e:
+            RC.load_corpus(_corpus(tmp_path, f"{row['case_id']}-2.jsonl", [row]),
+                           repo=world["repo"], round_ids=ids)
+        assert why in str(e.value), row["case_id"]
+    # The four ungated classes are never gated: this instrument may refuse a label that
+    # would soften a grader, and must not refuse one that blames the work instead.
+    for cause in ("spec_ambiguity", "real_unmet_work", "grader_wrong_on_approved_work"):
+        assert RC.legality(_cause_row("u", "backlog/4026", cause, "0" * 40),
+                           repo=world["repo"])["legal"] is True
+
+
+def test_clause_3_every_gated_corpus_row_reproduces_its_own_check():
+    """The acceptance line "a named example from the corpus reproduces under its stated
+    proving command in the committed tree", applied to every gated row: the loader's
+    verdict is the row's own claim, re-derived from the git objects it names, and the
+    commit each row was graded at is still a reachable object."""
+    if not RC.ARTIFACT_LEDGER.exists():
+        pytest.skip(f"the promotion ledger the corpus cites is not on this machine: "
+                    f"{RC.ARTIFACT_LEDGER}")
+    gated = [r for r in RC.load_committed_corpus() if r["cause_class"] in RC.GATED_CAUSES]
+    assert len(gated) >= 2, f"the corpus needs gated rows, got {len(gated)}"
+    for row in gated:
+        leg = RC.legality(row)
+        assert leg["legal"] is True, f"{row['case_id']}: {leg['why']}"
+        assert RC.commit_reachable(
+            RC.LIVE_ROOT, RC.evidence_fields(row["contrary_evidence"])["graded_commit"]), row
+
+
+def test_clause_4_the_counts_sum_and_each_class_is_populated_or_said_empty(tmp_path):
+    """#4026 clause 4: each of the five named classes has >=1 row that resolves, or the
+    corpus records that class as explicitly empty, and the per-cause counts sum to the row
+    count with the `unknown` count stated as its own number."""
+    if not RC.ARTIFACT_LEDGER.exists():
+        pytest.skip(f"the promotion ledger the corpus cites is not on this machine: "
+                    f"{RC.ARTIFACT_LEDGER}")
+    rows = RC.load_committed_corpus()
+    s = RC.summarize(rows)
+    assert s["counts_sum"] == s["rows"] == len(rows)
+    assert s["counts_sum_matches_rows"] is True
+    assert s["unknown"] == s["by_cause"][RC.UNKNOWN]["count"] < s["rows"]
+    assert sum(v["count"] for v in s["by_cause"].values()) == len(rows)
+    for cause in RC.CAUSE_CLASSES:
+        assert s["by_cause"][cause]["count"] >= 1, (
+            f"{cause} ships populated; an empty class must be reported in classes_empty")
+        assert cause not in s["classes_empty"]
+    assert str(s["modal_cause_count"]) in s["modal_cause_sentence"]
+    assert any(ch.isdigit() for ch in s["modal_cause_sentence"])
+    assert s["modal_cause"] in RC.CAUSE_CLASSES
+    assert "NOTICED" in s["survivor_bias_note"]
+    # The empty path: an all-`unknown` corpus reports all five named classes as empty
+    # findings rather than dropping the keys, and its counts still sum.
+    only_unknown = [_cause_row("u", "backlog/4026", RC.UNKNOWN, "")]
+    s2 = RC.summarize(only_unknown)
+    assert s2["classes_empty"] == list(RC.CAUSE_CLASSES)
+    assert s2["counts_sum_matches_rows"] is True and s2["unknown"] == 1
+    rendered = RC.render_counts(only_unknown)
+    assert rendered.count("EMPTY") == len(RC.CAUSE_CLASSES), rendered
+
+
+def _calibrate_case(fx, cause=None, **kw):
+    p = RT.write_fixture(fixture_dir=fx, **kw)
+    if cause:
+        d = json.loads(p.read_text())
+        d["cause_class"] = cause
+        p.write_text(json.dumps(d), encoding="utf-8")
+    return p
+
+
+def test_clause_5_calibrate_prints_per_cause_lines_and_keeps_the_exit_code(
+        world, tmp_path, monkeypatch, capsys):
+    """#4026 clause 5: `calibrate` prints one per-cause agreement line for every cause
+    class present, keeps `<ok>/<n> agree` as the LAST line with unchanged meaning — it
+    still counts every case, cause-labelled or not — and `main(["calibrate", ...])` under
+    a stub grader returns 1 when any case disagrees and 0 when all agree. That exit-code
+    contract was pinned by no node in this file before #4026, and nothing here makes the
+    grader easier to satisfy: the same stubbed grader output yields 0 or 1 purely on the
+    fixture's own expectation."""
+    fx = tmp_path / "fx"
+    _calibrate_case(fx, cause="grader_defect", name="labelled", round_id="SM_9",
+                    expect_kind="retry", expect_unmet=[2], ledger=world["ledger"],
+                    note="#4026 per-cause case")
+    _calibrate_case(fx, name="plain", round_id="SM_9", expect_kind="retry",
+                    expect_unmet=[2], ledger=world["ledger"], note="unlabelled case")
+    monkeypatch.setattr(RT, "FIXTURE_DIR", fx)
+
+    def agrees(**kw):
+        obj = _met()
+        obj["clauses"][1]["verdict"] = "unmet"
+        return dict(obj, kind="retry", error="", session_id="stub", prechecks=[])
+
+    def disagrees(**kw):
+        return dict(_met(), kind="pass", error="", session_id="stub", prechecks=[])
+
+    monkeypatch.setattr(RT, "grade_commit", agrees)
+    assert RT.main(["calibrate"]) == 0, "all cases agree, so the exit code is 0"
+    out = capsys.readouterr().out.rstrip("\n").splitlines()
+    assert out[-1] == "2/2 agree", out[-1]
+    assert "cause grader_defect: 1/1 agree" in out
+    assert "cause unlabelled: 1/1 agree" in out, "an unlabelled case is counted, not dropped"
+
+    monkeypatch.setattr(RT, "grade_commit", disagrees)
+    assert RT.main(["calibrate"]) == 1, "one disagreement must still exit 1"
+    out = capsys.readouterr().out.rstrip("\n").splitlines()
+    assert out[-1] == "0/2 agree", "the aggregate still counts every case, labelled or not"
+    assert "cause grader_defect: 0/1 agree" in out
+    assert not any(ln.startswith("cause unknown:") for ln in out), (
+        "a case with no label is `unlabelled`, never folded into the corpus's `unknown`")
+
+
+def test_clause_5_no_cases_at_all_is_still_not_agreement(tmp_path, monkeypatch, capsys):
+    """The exit-code contract's second half, which a softer reading would lose: `calibrate`
+    over zero cases returns 1, exactly as it did before this section."""
+    monkeypatch.setattr(RT, "FIXTURE_DIR", tmp_path / "no-cases-here")
+    assert RT.main(["calibrate"]) == 1
+    assert capsys.readouterr().out.rstrip("\n").splitlines()[-1] == "0/0 agree"
