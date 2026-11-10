@@ -194,7 +194,7 @@ def test_unreadable_settings_keep_today(tree, monkeypatch):
     # what #4027's pruned arm exists to deviate from. Garbage in that key cannot reach a number
     # through it either, same as the other three.
     assert s == {"descriptions": False, "budget_chars": 12000, "max_description_chars": 100,
-                 "advertise_top_n": None}
+                 "advertise_top_n": None, "chat_scope": "all"}
     CONFIG["skills"]["index"]["advertise_top_n"] = "seven"
     assert pb._skills_index_settings()["advertise_top_n"] is None
     monkeypatch.setitem(CONFIG, "prefetch", {"skills": {"push": "no"}})
@@ -248,40 +248,132 @@ def test_advertise_top_n_prunes_the_index_and_nothing_else(tree):
         pb._skill_rank_counts = real
 
 
-def test_rank_counts_join_offers_loads_and_reads(tree, monkeypatch):
-    """The rank is offers + loaded + loaded_by_read over 30 days, cached for the
-    UTC day, and a telemetry failure is an empty rank (alphabetical), never an
-    exception into the prompt."""
+def test_rank_counts_join_offers_loads_and_reads_over_chat_sessions_only(tree, monkeypatch):
+    """The rank is offers + loaded + loaded_by_read over 30 days, read from CHAT
+    sessions only (2026-11-09: 97% of offers were worker traffic)."""
     import app.skill_telemetry as tel
 
-    calls = []
+    seen = {}
 
-    def fake(root, days):
-        calls.append(days)
+    def fake(root, days, *, include=None):
+        seen["days"] = days
+        seen["include"] = include
         return {"skills": {"a": {"offers": 3, "loaded": 1}},
                 "loaded_by_read": {"a": 2, "b": 4}}
 
     monkeypatch.setattr(tel, "skill_injection_counts", fake)
+    assert pb._compute_skill_rank_counts() == {"a": 6, "b": 4}
+    assert seen["days"] == 30
+    assert seen["include"]("20261109_101500") is True                  # a chat id
+    assert seen["include"]("20261109_101500_autotriage_0fa8") is False  # a worker run
+
+
+def test_the_rank_is_never_computed_on_the_callers_thread(tree, monkeypatch, tmp_path):
+    """2026-11-09: the scan ran inline in the synchronous prompt build (13.2 s, on the
+    event loop). Now a call returns at once — yesterday's persisted rank, or {} — and
+    one background refresh per day computes, persists and publishes today's."""
+    import threading
+
+    import app.paths as paths
+
+    monkeypatch.setattr(paths, "SKILLS_INDEX_RANK_PATH", tmp_path / "rank.json")
+    (tmp_path / "rank.json").write_text(json.dumps({"date": "2000-01-01", "counts": {"old": 1}}))
+    gate = threading.Event()
+    calls = []
+
+    def slow():
+        calls.append(1)
+        gate.wait(5)
+        return {"new": 7}
+
+    monkeypatch.setattr(pb, "_compute_skill_rank_counts", slow)
+    pb._rank_cache.clear()
+    pb._rank_refresh_started.clear()
+    try:
+        assert _REAL_RANK() == {"old": 1}, "a call waited for the scan"
+        assert _REAL_RANK() == {"old": 1}
+        gate.set()
+        for t in threading.enumerate():
+            if t.name == "skills-index-rank":
+                t.join(5)
+        assert calls == [1], "more than one refresh started in a day"
+        assert _REAL_RANK() == {"new": 7}
+        stored = json.loads((tmp_path / "rank.json").read_text())
+        assert stored["counts"] == {"new": 7} and stored["date"] != "2000-01-01"
+        # Another process that day reads the file instead of scanning again.
+        pb._rank_cache.clear()
+        assert _REAL_RANK() == {"new": 7} and calls == [1]
+    finally:
+        gate.set()
+        pb._rank_cache.clear()
+        pb._rank_refresh_started.clear()
+
+
+def test_a_failed_refresh_keeps_the_previous_rank(tree, monkeypatch, tmp_path):
+    import app.paths as paths
+
+    monkeypatch.setattr(paths, "SKILLS_INDEX_RANK_PATH", tmp_path / "rank.json")
+
+    def boom():
+        raise OSError("event log unreadable")
+
+    monkeypatch.setattr(pb, "_compute_skill_rank_counts", boom)
     pb._rank_cache.clear()
     try:
-        assert _REAL_RANK() == {"a": 6, "b": 4}
-        assert _REAL_RANK() == {"a": 6, "b": 4}
-        assert calls == [30], "the scan ran more than once in a day"
-
-        def boom(root, days):
-            raise OSError("event log unreadable")
-
-        monkeypatch.setattr(tel, "skill_injection_counts", boom)
-        pb._rank_cache.clear()
-        assert _REAL_RANK() == {}
+        pb._refresh_skill_rank("2099-01-01", {"kept": 2})
+        assert pb._rank_cache == {"2099-01-01": {"kept": 2}}
+        assert not (tmp_path / "rank.json").exists()
     finally:
         pb._rank_cache.clear()
+
+
+def test_chat_scope_discoverable_hides_task_bound_skills_from_chat_only(tree, monkeypatch):
+    """`skills.index.chat_scope: discoverable` (2026-11-09): a chat prompt leaves out
+    the skills an autonomy task binds by name and those whose `surface:` omits chat,
+    and says how many in one tail line; a worker prompt still lists every skill;
+    `all` (the default) is today's index exactly."""
+    _skill(tree, "chatty", "Use when chatting.")
+    _skill(tree, "nightly-job", "Use when the nightly job runs.")
+    d = tree / "worker-only"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\ndescription: Use when a worker.\nsurface: [worker]\n---\nB\n")
+    monkeypatch.setattr(pb, "autonomy_bound_skill_names", lambda: {"nightly-job"})
+    _set_index(descriptions=True)
+
+    default = pb._load_skills_index()
+    assert "nightly-job" in default and "more skills" not in default
+
+    _set_index(chat_scope="discoverable")
+    chat = pb._load_skills_index()
+    assert "- chatty — Use when chatting." in chat
+    assert "nightly-job" not in chat and "worker-only" not in chat
+    assert chat.endswith(pb._skills_index_tail(2))
+    assert len(chat) <= 12000
+
+    for platform in ("worker", "autonomy"):
+        assert pb._load_skills_index(platform=platform) == default
+    names_only = pb._load_skills_index(descriptions=False)
+    assert names_only == "Available skills: chatty\n" + pb._skills_index_tail(2)
+
+
+def test_autonomy_bound_skill_names_reads_task_front_matter(tmp_path, monkeypatch):
+    import app.data_root as data_root
+
+    auto = tmp_path / "vault" / "autonomy"
+    auto.mkdir(parents=True)
+    (auto / "a.md").write_text("---\nskill_name: slug-one\n---\n")
+    (auto / "b.md").write_text("---\nskill_path: ~/obsidian/skills/slug-two/SKILL.md\n---\n")
+    (auto / "c.md").write_text("---\nskill_name: null\n---\n")
+    monkeypatch.setattr(data_root, "vault_root", lambda: tmp_path / "vault")
+    assert pb.autonomy_bound_skill_names() == {"slug-one", "slug-two"}
 
 
 def test_the_eval_offers_both_arms_and_scores_the_right_skill():
     import run_prefetch_cost_eval as ev
 
-    assert {ev.ARM_DESC_PUSH, ev.ARM_DESC_PULL} <= set(ev.ARMS)
+    assert {ev.ARM_DESC_PUSH, ev.ARM_DESC_PULL, ev.ARM_SCOPED, ev.ARM_NO_INDEX} <= set(ev.ARMS)
+    assert ev.SYSTEM_VARIANTS[ev.ARM_SCOPED]["chat_scope"] == "discoverable"
+    assert ev.SYSTEM_VARIANTS[ev.ARM_NO_INDEX]["index"] is False
     assert ev.ARM_DESC_PUSH not in ev.DEFAULT_ARMS   # a bare run is still #562's
     assert ev.SYSTEM_VARIANTS[ev.ARM_DESC_PULL] == {"descriptions": True, "push": False}
     rendered = prefetch._format_context([(9.0, {"name": "alpha", "raw": "a"})], [],

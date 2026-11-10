@@ -156,6 +156,97 @@ def djev_rerank_arm(k: int = 16, chars: int = 400, pool: str = "injectable") -> 
     return arm
 
 
+#: 2026-11-09 review, finding 4: fuse a cosine over each skill's `name: description`
+#: into the lexical score. NOT the 2026-09-14 "geometric" arm Alan dropped (pure
+#: embedding similarity at a 0.62 floor, recall@5 0.6863 vs lexical 0.7451): the
+#: lexical score still leads, the cosine is added to it, and the `rerank` pool cannot
+#: admit a skill the lexical gate refused, so the #311 precision control is untouched
+#: in that pool by construction. The embedder is `app.qwen3_embed` (CPU, ~150 ms per
+#: query measured 2026-11-09) — a per-turn cost a production leg would pay.
+EMBED_INSTRUCT = ("Instruct: Given a user's request to an assistant, retrieve the skill "
+                  "whose procedure handles it\nQuery: ")
+EMBED_STATS: dict = {"latency_ms": []}
+
+
+def skill_embed_text(skill: dict) -> str:
+    """What the embedding arm embeds per skill: the index line, name and description."""
+    desc = " ".join(str(skill.get("description") or "").split())
+    return f"{skill.get('name', '').replace('-', ' ')}: {desc}"
+
+
+def skill_embeddings(skills: list[dict]) -> dict:
+    """`{name: unit vector}`, cached by text hash under the eval data root."""
+    import hashlib
+
+    import numpy as np
+
+    from app.paths import DATA_ROOT
+    from app.qwen3_embed import embed_query
+
+    cache_path = DATA_ROOT / "eval" / "skill-embed-cache.json"
+    try:
+        cache = json.loads(cache_path.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    out, dirty = {}, False
+    for sk in skills:
+        text = skill_embed_text(sk)
+        key = hashlib.sha1(text.encode()).hexdigest()
+        if key not in cache:
+            cache[key] = [round(float(x), 6) for x in embed_query(text)]
+            dirty = True
+        out[sk["name"]] = np.asarray(cache[key], dtype="float32")
+    if dirty:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache))
+    return out
+
+
+def embed_fusion_arm(weight: float, pool: str = "rerank", floor: float = 0.6,
+                     k: int = 16) -> Arm:
+    """Lexical score + `weight` x 10 x cosine, over a candidate pool.
+
+    `pool="rerank"`: the lexical top-`k` offers, re-ordered by the fused score, kept
+    only where the production injection gate passes them — so the arm can move the
+    order (hit@1, MRR) and pull a gated skill up from below rank 5, never name a
+    skill on a turn the lexical gate names nothing for. `pool="admit"`: additionally
+    admits any skill whose cosine reaches `floor`, the recall-for-precision trade.
+    """
+    import time as _t
+
+    import numpy as np
+
+    from app import prefetch
+    from app.qwen3_embed import embed_query
+
+    state: dict = {}
+
+    def vecs():
+        if "v" not in state:
+            skills = prefetch._get_skills_cached()
+            state["skills"] = {s["name"]: s for s in skills}
+            state["v"] = skill_embeddings(skills)
+        return state["v"]
+
+    def arm(turn: str) -> list[str]:
+        v = vecs()
+        t0 = _t.perf_counter()
+        q = np.asarray(embed_query(EMBED_INSTRUCT + turn[:1500]), dtype="float32")
+        EMBED_STATS["latency_ms"].append((_t.perf_counter() - t0) * 1000)
+        cos = {n: float(vec @ q) for n, vec in v.items()}
+        scored = prefetch._search_skills(prefetch._query_tokens(turn))
+        gate = {sk["name"] for _, sk in prefetch._injectable_skills(scored)}
+        lex = {sk["name"]: sc for sc, sk in scored[:k]}
+        cands = set(lex)
+        if pool == "admit":
+            admitted = {n for n, c in cos.items() if c >= floor}
+            cands |= admitted
+            gate |= admitted
+        fused = sorted(cands, key=lambda n: -(lex.get(n, 0.0) + weight * 10 * cos[n]))
+        return [n for n in fused if n in gate][:K]
+    return arm
+
+
 def paired(base: dict, arm: dict, metric: str) -> dict | None:
     """Paired bootstrap of `arm - base` on one per-turn metric (eval/stats.py)."""
     from eval.stats import paired_bootstrap_ci
@@ -274,6 +365,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rerank-k", type=int, default=16)
     ap.add_argument("--rerank-chars", type=int, default=400)
     ap.add_argument("--rerank-pool", default="injectable", choices=("injectable", "offers"))
+    ap.add_argument("--embed-fusion", default="",
+                    help="2026-11-09: comma-separated weights, one embedding-fusion "
+                         "arm per weight and pool")
+    ap.add_argument("--embed-pools", default="rerank,admit")
+    ap.add_argument("--embed-floor", type=float, default=0.6)
     args = ap.parse_args(argv)
 
     records = load_records()
@@ -313,6 +409,12 @@ def main(argv: list[str] | None = None) -> int:
                 djev_rerank_arm(k=args.rerank_k, chars=args.rerank_chars,
                                 pool=args.rerank_pool),
                 args.pseudo_queries or None, pq_w, args.pq_mode))
+    if args.embed_fusion:
+        for pool in [p for p in args.embed_pools.split(",") if p]:
+            for w in [float(x) for x in args.embed_fusion.split(",") if x.strip()]:
+                tag = f"_f{args.embed_floor:g}" if pool == "admit" else ""
+                extra[f"embed_{pool}_w{w:g}{tag}"] = score(
+                    records, embed_fusion_arm(w, pool=pool, floor=args.embed_floor))
     for name, r in extra.items():
         print(line(name, r))
         r["vs_lexical"] = {m: paired(lex, r, m) for m in ("recall", "hit1", "rr", "named")}
@@ -328,6 +430,12 @@ def main(argv: list[str] | None = None) -> int:
             "p50": round(lat[len(lat) // 2], 1), "p90": round(lat[int(len(lat) * 0.9)], 1),
             "max": round(lat[-1], 1)}
         print(f"djev rerank latency: {report['rerank_latency_ms']}")
+    if EMBED_STATS["latency_ms"]:
+        lat = sorted(EMBED_STATS["latency_ms"])
+        report["embed_query_latency_ms"] = {
+            "calls": len(lat), "p50": round(lat[len(lat) // 2], 1),
+            "p90": round(lat[int(len(lat) * 0.9)], 1), "max": round(lat[-1], 1)}
+        print(f"embed query latency: {report['embed_query_latency_ms']}")
 
     rc = 0
     base_file = baseline_path()

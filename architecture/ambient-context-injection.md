@@ -27,9 +27,9 @@ passing ones, so the figure ages rather than reassures:
 `tests/test_session_queue.py` 18, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
 `tests/test_session_doc_claims.py` 15 (54 across those four), and
-`tests/test_prefetch.py` 100 — four arrived with #3081, the subliminal `notes`
+`tests/test_prefetch.py` 101 — four arrived with #3081, the subliminal `notes`
 badge for `<next-session-notes>` and the guards around it, and three more with
-#3471, which made a badge require its marker to open a line. Those five are the
+#3471, which made a badge require its marker to open a line (and one with the 2026-11-09 skills review's plan-mode pin). Those five are the
 mechanism's surface, and
 `tests/test_ambient_decision_turn_scope.py`, which came in with #2599, is a sixth
 that pins the decision store rather than the queue. Another file

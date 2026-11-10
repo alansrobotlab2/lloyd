@@ -497,3 +497,11 @@ ENTITY_GRAPH_LAYOUT_PATH = DATA_ROOT / "mc-entity-graph-layout.json"
 # cited line, which is also where `ENTITY_GRAPH_LAYOUT_PATH` above already sits: the tail
 # of this module is the append-only end.
 BEHAVIOUR_EXHIBIT_DIR = DATA_ROOT / "eval" / "behaviour-exhibit"
+
+# The prompt index's daily skill rank (chat sessions' 30-day skill use), written by
+# a background refresh in `app.prompt_builder` so no prompt build ever pays the
+# event-log scan, and shared by every process that builds a prompt that day.
+SKILLS_INDEX_RANK_PATH = PIPELINE_DIR / "skills-index-rank.json"
+# Per-skill `name: description` embeddings for the chat matcher's fusion leg
+# (`app.skill_embed_rank`), keyed by text hash; regenerable, pruned to live skills.
+SKILL_EMBED_CACHE_PATH = PIPELINE_DIR / "skill-embeddings.json"

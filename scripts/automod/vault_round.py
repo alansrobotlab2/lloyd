@@ -725,8 +725,8 @@ def validate(paths: list[str], session_id: "str | None" = None) -> tuple[list[st
         errors.extend(f"skills/{r['skill']}/SKILL.md: skill activation: {r['reason']}"
                       for r in skill_activation_findings(paths) if r.get("would_refuse"))
     if not errors and SKILL_BODY_ENFORCE:
-        errors.extend(f"skills/{r['skill']}/SKILL.md: skill body-line ceiling: {r['reason']}"
-                      for r in skill_body_findings(paths))
+        errors.extend(f"skills/{r['skill']}/SKILL.md: {r.get('gate', 'skill body-line ceiling')}: {r['reason']}"  # noqa: E501
+                      for r in skill_body_findings(paths) + skill_contract_findings(paths))
     return errors + _bench_card_assertion_errors(buckets['validated'], session_id), buckets
 
 
@@ -2695,6 +2695,100 @@ def main(argv=None) -> int:
     except VaultRoundError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
         return 1
+
+
+# ── The skill authoring contract on a landing's diff (2026-11-09 review) ──────
+#
+# Two rules, judged on what THIS landing changes, never on what a skill already was
+# (the delta principle the code gate uses for pyflakes and tsc), so an untouched
+# defect elsewhere never blocks a round and a small fix to an old, long skill lands:
+#
+#   * description: a new skill needs one and an edit may not remove one; a NEW or LENGTHENED
+#     one must fit the index's clip (`skills.index.max_description_chars`) — the
+#     index is how a chat finds a skill, and a clipped description is cut mid-clause;
+#   * body size: a NEW body, or one this landing GROWS, may not exceed
+#     `SKILL_BODY_CHAR_CAP` characters. The autonomy and worker prompts splice the
+#     whole file in and the chat injector cuts at 6,000, so past the cap the fix is
+#     the spill pattern (`## Files in this skill` + sibling files), which the reason
+#     names. Characters, not lines, because lines did not order cost
+#     (`architecture/skills.md`: 88 lines embedded 25,856 chars, 107 lines 9,977).
+#
+# This is a separate rule from #2334's ruling (no library-wide LINE ceiling, a
+# moving p90); it was asked for in the 2026-11-09 review, measures characters and
+# refuses only growth. `SKILL_CONTRACT_ENFORCE = False` turns both rules off.
+SKILL_CONTRACT_ENFORCE = True
+SKILL_BODY_CHAR_CAP = 12_000
+
+
+def _skill_desc_and_body(text: str | None) -> tuple[str | None, int]:
+    """`(description folded to one line or None, body chars)` of a SKILL.md text."""
+    if text is None:
+        return None, 0
+    from agent_mcp.skills import _parse_frontmatter
+
+    fm, body = _parse_frontmatter(text)
+    desc = " ".join(str(fm.get("description") or "").split()) if isinstance(fm, dict) else ""
+    return desc, len(body)
+
+
+def _index_description_cap() -> int:
+    try:
+        from app.prompt_builder import _skills_index_settings
+
+        return int(_skills_index_settings()["max_description_chars"])
+    except Exception:  # noqa: BLE001
+        return 100
+
+
+def skill_contract_findings(paths: list[str]) -> list[dict]:
+    """One refusing row per touched `skills/<slug>/SKILL.md` that breaks the contract.
+
+    Compared against `HEAD:` of the vault, so only what this landing changes is
+    judged. A deleted file yields nothing. Never raises.
+    """
+    if not SKILL_CONTRACT_ENFORCE:
+        return []
+    slugs = sorted({p.split("/")[1] for p in paths
+                    if p.startswith("skills/") and p.endswith("/SKILL.md")
+                    and p.count("/") == 2})
+    rows: list[dict] = []
+    cap = _index_description_cap()
+    for slug in slugs:
+        rel = f"skills/{slug}/SKILL.md"
+        try:
+            f = VAULT / rel
+            if not f.exists():
+                continue
+            new_desc, new_body = _skill_desc_and_body(
+                f.read_text(encoding="utf-8", errors="replace"))
+            head = _git("show", f"HEAD:{rel}")
+            old_desc, old_body = _skill_desc_and_body(
+                head.stdout if head.returncode == 0 else None)
+        except Exception:  # noqa: BLE001 — unmeasurable is not a refusal
+            continue
+        if not new_desc and (old_desc is None or old_desc):   # created bare, or emptied
+            rows.append({"skill": slug, "gate": "skill description", "would_refuse": True,
+                         "reason": "the front matter has no description, so the index "
+                                   "can only name this skill; add one sentence saying "
+                                   "what it does and when to use it"})
+        elif len(new_desc) > cap and (old_desc is None or len(new_desc) > len(old_desc)):
+            rows.append({"skill": slug, "gate": "skill description", "would_refuse": True,
+                         "description_chars": len(new_desc), "cap": cap,
+                         "reason": f"the description is {len(new_desc)} chars and the "
+                                   f"index shows {cap}; this landing "
+                                   f"{'adds' if old_desc is None else 'lengthens'} it, so "
+                                   f"cut it to one sentence of what it does and when to "
+                                   f"use it, at most {cap} chars"})
+        if new_body > SKILL_BODY_CHAR_CAP and (old_desc is None or new_body > old_body):
+            rows.append({"skill": slug, "gate": "skill body size", "would_refuse": True,
+                         "body_chars": new_body, "cap": SKILL_BODY_CHAR_CAP,
+                         "reason": f"the body is {new_body:,} chars, past "
+                                   f"{SKILL_BODY_CHAR_CAP:,}, and this landing "
+                                   f"{'creates' if old_desc is None else 'grows'} it; "
+                                   f"keep the procedure and its hard rules in SKILL.md, "
+                                   f"move reference sections into sibling .md files and "
+                                   f"list them under `## Files in this skill`"})
+    return rows
 
 
 if __name__ == "__main__":

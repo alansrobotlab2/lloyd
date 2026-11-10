@@ -70,6 +70,10 @@ def _scratch_vault(tmp_path, monkeypatch, *, mock_loaders: bool):
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
     if mock_loaders:
         monkeypatch.setattr(V, "loader_errors", lambda paths: [])
+    # The skill authoring contract (2026-11-09) is its own question, pinned in
+    # tests/test_vault_round_skill_gate.py; fixture runbooks here are new files
+    # carrying a live skill's (long) description, which it would rightly refuse.
+    monkeypatch.setattr(V, "SKILL_CONTRACT_ENFORCE", False)
     return r
 
 

@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from agent_mcp.skills import iter_active_skills, skill_roots
+from agent_mcp.skills import find_active_skill, iter_active_skills
 
 router = APIRouter()
 
@@ -54,15 +54,16 @@ async def get_skills():
 
 @router.get("/api/skill-content")
 async def get_skill_content(name: str):
-    """Read SKILL.md content for a skill.
+    """Read SKILL.md content for a live skill.
 
-    Resolved through `skill_roots()` — the list this page was built from — so the
-    page cannot offer a skill its own content endpoint then 404s on. Those two used
-    to be different walks of different lists.
+    Resolved through `find_active_skill` — the walker's own by-name lookup — so
+    the page cannot offer a skill its content endpoint then 404s on, and the
+    endpoint cannot serve one the page would not list: a name that leaves a root
+    (`../.archived/<x>`, `../../…`) or a quarantined skill is a 404. Until the
+    2026-11-09 review this joined `name` onto each root unchecked.
     """
-    for root in skill_roots():
-        skill_file = root / name / "SKILL.md"
-        if skill_file.is_file():
-            return JSONResponse({"name": name,
-                                 "content": skill_file.read_text(encoding="utf-8")})
-    raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
+    active = find_active_skill(name)
+    if active is None:
+        raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
+    return JSONResponse({"name": active.name,
+                         "content": active.skill_file.read_text(encoding="utf-8")})

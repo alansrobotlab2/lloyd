@@ -28,6 +28,11 @@ are skipped):
 
   desc_push    `skills.index.descriptions: true` (the index says what each
                skill is for) with today's body injection — the rendered turn;
+  scoped       (2026-11-09) desc_push with `skills.index.chat_scope:
+               discoverable`: skills an autonomy task binds by name are left out
+               of the chat index, behind one `skills_search` tail line;
+  no_index     (2026-11-09) desc_push with no `<available_skills>` block at all —
+               prefetch's injection and `skills_search` carry discovery alone;
   desc_pull    the same index with `prefetch.skills.push: false` and its note
                ("load it with skills_read(name)"), and the turn with its
                `<skill>` section removed — exactly what `_format_context`
@@ -118,8 +123,10 @@ ARM_DESC_PULL = "desc_pull"
 #: knowledge/video-summaries/more-skills-worse-agents.md — has never been testable here, and
 #: `skills-index-2026-09-25.md` is not evidence about it either way. (#4027.)
 ARM_INJECTED_PRUNED = "injected_pruned"
+ARM_SCOPED = "scoped"
+ARM_NO_INDEX = "no_index"
 ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA, ARM_DESC_PUSH, ARM_DESC_PULL,
-        ARM_INJECTED_PRUNED)
+        ARM_INJECTED_PRUNED, ARM_SCOPED, ARM_NO_INDEX)
 #: What a bare run does: the #562 arms. The P5 arms are asked for by name.
 DEFAULT_ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA)
 #: Arms whose prompt is the injected rendering minus these sections.
@@ -128,7 +135,10 @@ ABLATIONS = {ARM_NO_SKILL: ("skill",), ARM_DESC_PULL: ("skill",)}
 #: under (`skills.index.descriptions`, `prefetch.skills.push`). Absent = the
 #: production prompt as config.yaml builds it.
 SYSTEM_VARIANTS = {ARM_DESC_PUSH: {"descriptions": True, "push": True},
-                   ARM_DESC_PULL: {"descriptions": True, "push": False}}
+                   ARM_DESC_PULL: {"descriptions": True, "push": False},
+                   ARM_SCOPED: {"descriptions": True, "push": True,
+                                "chat_scope": "discoverable"},
+                   ARM_NO_INDEX: {"descriptions": True, "push": True, "index": False}}
 
 #: How many skills the pruned arm advertises. Chosen against the 51 labelled turns of
 #: eval/skill_match_queries.yaml rather than by taste: at N=140 the set splits 42 turns whose
@@ -315,12 +325,13 @@ def system_prompt_for(arm: str) -> str:
         index = dict(saved[0] or {})
         if variant is not None:
             index["descriptions"] = variant["descriptions"]
+            index["chat_scope"] = variant.get("chat_scope", "all")
         if extra is not None:
             index.update(extra)
         skills["index"] = index
         if variant is not None:
             prefetch_cfg["skills"] = dict(saved[1] or {}, push=variant["push"])
-        return build_system_prompt()
+        return build_system_prompt(include_skills_index=(variant or {}).get("index", True))
     finally:
         for block, key, old in ((skills, "index", saved[0]), (prefetch_cfg, "skills", saved[1])):
             if old is None:
@@ -467,7 +478,9 @@ def summarize(records: list[dict]) -> dict:
                                # #4027: b − a is what a smaller advertised set BUYS in prefill;
                                # paired with the tail rate, because the saving is only a saving
                                # if the tail was reachable anyway.
-                               ("pruned_minus_injected", ARM_INJECTED, ARM_INJECTED_PRUNED)):
+                               ("pruned_minus_injected", ARM_INJECTED, ARM_INJECTED_PRUNED),
+                               ("scoped_minus_desc_push", ARM_DESC_PUSH, ARM_SCOPED),
+                               ("no_index_minus_desc_push", ARM_DESC_PUSH, ARM_NO_INDEX)):
         if a_arm not in arms or b_arm not in arms:
             continue
         c = {}
@@ -487,6 +500,12 @@ def summarize(records: list[dict]) -> dict:
     if a:
         out["pull_lost_vs_push"] = sum(1 for x, y in zip(a, b) if x and not y)
         out["pull_gained_vs_push"] = sum(1 for x, y in zip(a, b) if y and not x)
+    # 2026-11-09: the same guard for the two index-size arms.
+    for arm, key in ((ARM_SCOPED, "scoped"), (ARM_NO_INDEX, "no_index")):
+        a, b = _paired(records, ARM_DESC_PUSH, arm, "right_skill_reached")
+        if a:
+            out[f"{key}_lost_vs_push"] = sum(1 for x, y in zip(a, b) if x and not y)
+            out[f"{key}_gained_vs_push"] = sum(1 for x, y in zip(a, b) if y and not x)
 
     # Marginal value per injected token: prefill the block removed downstream,
     # per token it cost up front. > 0 pays for itself in prefill alone.

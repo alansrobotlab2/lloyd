@@ -2834,7 +2834,7 @@ def _load_skill_content(skill_name: str) -> Optional[str]:
 
     A value containing / or ending in .md is a path and nothing else: it is read as
     given, and a miss there is terminal (None) — that value is never re-read as a
-    slug. Anything else is a slug at ~/obsidian/skills/<slug>/SKILL.md.
+    slug. Anything else is a slug, found by `agent_mcp.skills.find_active_skill`.
     """
     skill_name = str(skill_name or "").strip()
     if not skill_name or skill_name.lower() in ("null", "none"):
@@ -2851,14 +2851,14 @@ def _load_skill_content(skill_name: str) -> Optional[str]:
         # A path miss is terminal: this returns None, it never retries as a slug
         return None
 
-    # Treat as slug: ~/obsidian/skills/<slug>/SKILL.md
-    expanded = vault_root() / "skills" / skill_name / "SKILL.md"
-    if expanded.exists():
-        try:
-            return expanded.read_text(encoding="utf-8")
-        except Exception:
-            return None
-    return None
+    # A slug (~/obsidian/skills/<slug>, or any configured root) goes through the walker's
+    # by-name lookup (2026-11-09): archive and `status:` quarantine skipped, `../x` refused.
+    from agent_mcp.skills import SKILLS_DIRS, find_active_skill
+    active = find_active_skill(skill_name, roots=[*SKILLS_DIRS, vault_root() / "skills"])
+    try:
+        return active.skill_file.read_text(encoding="utf-8") if active else None
+    except Exception:
+        return None
 
 
 def _build_task_prompt(task: dict, skill_content: str) -> str:

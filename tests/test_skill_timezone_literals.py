@@ -514,6 +514,9 @@ def scratch_vault(tmp_path, monkeypatch):
 
     monkeypatch.setattr(vault_round, "VAULT", tmp_path)
     monkeypatch.setattr(vault_round, "loader_errors", lambda paths: [])
+    # The authoring contract (2026-11-09) is pinned in test_vault_round_skill_gate.py;
+    # these scratch skills are bare on purpose.
+    monkeypatch.setattr(vault_round, "SKILL_CONTRACT_ENFORCE", False)
     return tmp_path
 
 

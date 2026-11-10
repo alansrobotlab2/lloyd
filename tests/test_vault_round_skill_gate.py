@@ -611,3 +611,45 @@ def test_the_enforce_comment_names_the_doc_by_the_path_this_file_resolves():
             "the vault copy now carries the SIZE ruling too, so the comment's claim "
             "that only the repo copy does is stale: rewrite the comment, do not delete it")
 
+
+
+# ── 2026-11-09 review: the authoring contract, judged on the landing's delta ──
+
+def _write(vault, slug, desc, body="# body\n"):
+    d = vault / "skills" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    fm = "---\nname: x\n" + (f"description: {desc}\n" if desc is not None else "") + "---\n"
+    (d / "SKILL.md").write_text(fm + body)
+    return f"skills/{slug}/SKILL.md"
+
+
+def test_contract_refuses_a_new_long_description_and_a_missing_one(vault):
+    long = "Use when " + "x" * 120
+    rows = V.skill_contract_findings([_write(vault, "new-long", long),
+                                      _write(vault, "no-desc", None),
+                                      _write(vault, "fine", "Use when fine.")])
+    by = {(r["skill"], r["gate"]) for r in rows}
+    assert by == {("new-long", "skill description"), ("no-desc", "skill description")}
+    assert all(r["would_refuse"] for r in rows)
+
+
+def test_contract_judges_growth_only(vault):
+    """An already-long description or body that this landing does not lengthen lands;
+    one that it lengthens is refused — the delta principle."""
+    long = "Use when " + "y" * 120
+    big = "# body\n" + ("line of procedure text\n" * 700)          # ~16k chars
+    rel = _write(vault, "old-long", long, big)
+    git(vault, "add", "-A"); git(vault, "commit", "-q", "-m", "seed")
+    _write(vault, "old-long", long[:-5], big[:-500])                   # shorter both ways
+    assert V.skill_contract_findings([rel]) == []
+    _write(vault, "old-long", long + " more", big + "more text\n")     # longer both ways
+    gates = {r["gate"] for r in V.skill_contract_findings([rel])}
+    assert gates == {"skill description", "skill body size"}
+
+
+def test_contract_refusal_reaches_validate_and_can_be_switched_off(vault, monkeypatch):
+    rel = _write(vault, "brand-new", "Use when " + "z" * 150)
+    errors, _ = V.validate([rel])
+    assert any("skill description" in e and "brand-new" in e for e in errors), errors
+    monkeypatch.setattr(V, "SKILL_CONTRACT_ENFORCE", False)
+    assert V.skill_contract_findings([rel]) == []

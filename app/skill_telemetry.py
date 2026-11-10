@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable, Optional
 
 #: Event type `prefetch.SKILL_MATCH_EVENT` writes — one row per reported offer.
 #: Duplicated as a literal rather than imported from `prefetch` because
@@ -71,7 +72,8 @@ __all__ = ["SKILL_MATCH_EVENT", "DEFAULT_DAYS", "TOOL_CALL_EVENT",
 _SUFFIX = ".events.jsonl"
 
 
-def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
+def skill_injection_counts(root, days: int = DEFAULT_DAYS, *,
+                           include: Optional[Callable[[str], bool]] = None) -> dict:
     """Per-skill offer / loaded / ignored counts over the last `days` days.
 
     `root` is a directory of `<session_id>.events.jsonl` — `app.paths.
@@ -119,6 +121,17 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
     the number that separates "never offered" from "offered at 3.1 and never
     rendered" — the first is dead, the second is a threshold one step away.
 
+    `include(session_id)` narrows the read to the sessions it accepts — the
+    prompt index ranks on chat sessions only (2026-11-09 review: 97% of offers
+    came from worker sessions, so a whole-store rank handed the index's
+    descriptions to scheduled-task skills nobody discovers by reading it).
+
+    Cost (2026-11-09: 13.2 s over 22.5k logs, run on the event loop by the
+    prompt build). A file last modified before `since` cannot hold a row inside
+    the window and is not opened, and a complete line naming neither event this
+    reader counts is passed over without a JSON parse. A line that does not end
+    in `}` is still parsed, so a torn tail is still counted in `skipped`.
+
     `sessions` counts distinct session ids, the closest thing the event log has
     to a turn count: an event row carries no turn or message id and one session
     runs many prefetched turns, so this is a floor on sessions rather than a
@@ -146,13 +159,24 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
     # there was. A caller printing "over the last N days" needs the second, because
     # the two differ for as long as the store is shallower than the window (#1815).
     first_counted: datetime | None = None
+    since_ts = since.timestamp()
     for path in sorted(Path(root).glob(f"*{_SUFFIX}")):
         session_id = path.name[: -len(_SUFFIX)]
+        if include is not None and not include(session_id):
+            continue
+        try:
+            if path.stat().st_mtime < since_ts:
+                continue        # nothing written since `since`: no row can be in the window
+        except OSError:
+            continue
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.rstrip("\n").strip()
                 if not line:
                     continue
+                if (line.endswith("}") and SKILL_MATCH_EVENT not in line
+                        and SKILLS_READ_TOOL not in line):
+                    continue    # a whole row of another event type
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:

@@ -424,3 +424,21 @@ def test_loaded_by_read_counts_skills_read_calls_in_the_window(tmp_path):
     assert res["loaded_by_read"] == {"alpha": 2}
     assert res["reads"] == 2
     assert res["skills"] == {} and res["no_telemetry"] is True
+
+
+def test_include_narrows_the_read_and_stale_files_are_not_opened(tmp_path):
+    """2026-11-09: `include` selects sessions (the index ranks chat only), and a file
+    last written before the window cannot hold a row in it, so it is not read."""
+    import os
+
+    _seed(tmp_path, "20261109_101500", [_match("chatty", 4.0, True)])
+    _seed(tmp_path, "20261109_101500_autotriage_0fa8", [_match("workery", 4.0, True)])
+    _seed(tmp_path, "oldchat", [_match("stale", 4.0, True, ts=_stamp(days=1))])
+    old = tmp_path / "oldchat.events.jsonl"
+    long_ago = (datetime.now(timezone.utc) - timedelta(days=40)).timestamp()
+    os.utime(old, (long_ago, long_ago))
+
+    everything = skill_injection_counts(tmp_path, 7)
+    assert set(everything["skills"]) == {"chatty", "workery"}, "a stale-mtime file was read"
+    chat = skill_injection_counts(tmp_path, 7, include=lambda sid: "_autotriage_" not in sid)
+    assert set(chat["skills"]) == {"chatty"}

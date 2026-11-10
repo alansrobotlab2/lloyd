@@ -400,3 +400,98 @@ def test_skill_lint_still_boots_when_invoked_as_the_nightly_invokes_it(tmp_path)
     assert "ModuleNotFoundError" not in proc.stderr
     assert "Totals:" in proc.stdout, proc.stdout[-1000:]
     assert (tmp_path / "obsidian" / "autonomy" / "skill-lint-report.md").exists()
+
+
+# ── by-name lookup: one rule for skills_read, the content route, autonomy ─────
+
+@pytest.mark.parametrize("name", ["../root-a/.archived/x", ".archived", "a/b", "..",
+                                  "", "x" * 200, None, "alpha/../beta"])
+def test_a_name_that_could_leave_a_root_is_refused_everywhere(skill_tree, name):
+    """2026-11-09 review: `skills_read`, `GET /api/skill-content` and the autonomy
+    loader each joined the caller's string onto a root unchecked, so a `../` name
+    served the archive (or any SKILL.md on the box)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.routers.skills import get_skill_content
+
+    assert skills_mod.valid_skill_name(name) is False
+    assert skills_mod.find_active_skill(name) is None
+    if isinstance(name, str) and name:
+        out = json.loads(skills_mod._skills_read({"name": name}))
+        assert "error" in out and "content" not in out
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(get_skill_content(name))
+        assert exc.value.status_code == 404
+
+
+def test_find_active_skill_agrees_with_the_walker(skill_tree):
+    """Every walked skill is found by name, at the walked directory; the archive and
+    a quarantined skill are not; first root wins for a shared name."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.routers.skills import get_skill_content
+
+    for active in _walked():
+        found = skills_mod.find_active_skill(active.name)
+        assert found is not None and found.directory == active.directory
+    assert skills_mod.find_active_skill("retired") is None
+    assert skills_mod.find_active_skill("x") is None
+    assert skills_mod.find_active_skill("shared").frontmatter["description"] == "Root A wins."
+    assert json.loads(skills_mod._skills_read({"name": "retired"}))["error"]
+    with pytest.raises(HTTPException):
+        asyncio.run(get_skill_content("retired"))
+    body = json.loads(asyncio.run(get_skill_content("alpha")).body)
+    assert "BODY of alpha." in body["content"]
+
+
+def test_the_loaded_skill_cache_is_shared_and_follows_edits(skill_tree, monkeypatch):
+    """`skills_search` and prefetch read one cache, rebuilt when a SKILL.md moves."""
+    from app import prefetch
+
+    monkeypatch.setattr(skills_mod, "SKILL_CACHE_CHECK_S", 0.0)
+    skills_mod.reset_skill_cache()
+    try:
+        first = skills_mod.load_skills_cached()
+        assert prefetch._get_skills_cached() is first
+        assert {s["name"] for s in first} == {a.name for a in _walked()}
+        _skill(skill_tree / "root-a" / "gamma", description="Use when gamma.")
+        assert "gamma" in {s["name"] for s in skills_mod.load_skills_cached()}
+        hits = json.loads(skills_mod._skills_search({"query": "gamma"}))["results"]
+        assert [h["name"] for h in hits] == ["gamma"]
+    finally:
+        skills_mod.reset_skill_cache()
+
+
+def test_front_matter_is_parsed_once_per_file_version(skill_tree, monkeypatch):
+    """The prompt build walks the library every turn; a parse per unchanged file per
+    build was ~150 ms on the event loop."""
+    calls = []
+    real = skills_mod._parse_frontmatter
+    monkeypatch.setattr(skills_mod, "_parse_frontmatter",
+                        lambda c, source="": calls.append(source) or real(c, source))
+    skills_mod._FRONTMATTER_CACHE.clear()
+    _walked()
+    n = len(calls)
+    assert n > 0
+    _walked()
+    assert len(calls) == n, "an unchanged file was re-parsed"
+    target = skill_tree / "root-a" / "alpha" / "SKILL.md"
+    target.write_text(target.read_text().replace("Use when alpha.", "Use when ALPHA, edited."))
+    names = {a.name: a for a in _walked()}
+    assert names["alpha"].frontmatter["description"] == "Use when ALPHA, edited."
+
+
+def test_an_autonomy_task_resolves_its_skill_through_the_walker(skill_tree, monkeypatch):
+    """A slug is found in any root, a quarantined or archived skill does not run,
+    and a `../` slug is refused rather than joined onto the vault."""
+    from app import autonomy
+
+    assert "BODY of beta." in autonomy._load_skill_content("beta")       # second root
+    assert "Root A wins." in autonomy._load_skill_content("shared")
+    assert autonomy._load_skill_content("retired") is None                # quarantined
+    assert autonomy._load_skill_content("x") is None                      # archive
+    assert autonomy._load_skill_content("..") is None

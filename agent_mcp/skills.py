@@ -4,7 +4,7 @@ Lloyd MCP Server: Skills — search and read skill definitions.
 
 Tools: skills_search, skills_read
 
-Skills live in directories under ~/obsidian/skills and ~/lloyd/skills.
+Skills live under ~/obsidian/skills, plus any root config.yaml skills.directories adds.
 Each skill is a folder containing a SKILL.md with YAML frontmatter
 (name, description, category, tags) followed by the skill body.
 """
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 #: every surface instead of only the two that happened to read it (#1294).
 _BUILTIN_SKILL_DIRS = [
     vault_root() / "skills",
-    Path(__file__).parent.parent / "skills",
+    # `<repo>/skills` sat here until 2026-11-09; it never existed on this box.
 ]
 
 
@@ -176,6 +176,58 @@ class ActiveSkill(NamedTuple):
         return self.directory / "SKILL.md"
 
 
+#: What a skill name may look like when it arrives from a caller. Every live
+#: directory name is kebab-case; this is looser (case, `_` and `.` allowed) so it
+#: refuses only what can step outside a root — a `/`, a leading dot, a `..` —
+#: and never a real skill. `skills_read`, `GET /api/skill-content` and the
+#: autonomy loader all joined the caller's string onto a root unchecked, so
+#: `../.archived/<x>` served a retired skill and a deeper `../` any SKILL.md on
+#: the box.
+_SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def valid_skill_name(name: object) -> bool:
+    """Whether `name` is a single directory name that cannot leave a skills root."""
+    return (isinstance(name, str) and _SKILL_NAME_RE.fullmatch(name) is not None
+            and ".." not in name)
+
+
+# (realpath) -> ((mtime_ns, size), frontmatter). Every prompt build walks the whole
+# library, and parsing ~200 YAML blocks per build cost ~150 ms on the event loop
+# for an answer that changes only when a file does.
+_FRONTMATTER_CACHE: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
+def _frontmatter_of(skill_file: Path, source: str = "") -> dict:
+    """`skill_file`'s parsed front matter, re-parsed only when its stat moves.
+
+    An unreadable file is `{}` (and not cached), the same answer the walker gave
+    before the cache. Callers must not mutate the returned dict.
+    """
+    try:
+        st = skill_file.stat()
+    except OSError:
+        return {}
+    key = (st.st_mtime_ns, st.st_size)
+    path = str(skill_file)
+    hit = _FRONTMATTER_CACHE.get(path)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    try:
+        content = skill_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    fm, _body = _parse_frontmatter(content, source=source)
+    if not isinstance(fm, dict):
+        fm = {}
+    _FRONTMATTER_CACHE[path] = (key, fm)
+    return fm
+
+
+def _is_quarantine_status(fm: dict) -> bool:
+    return str(fm.get("status", "") or "").strip().lower() in _QUARANTINE_STATUSES
+
+
 def is_quarantined_skill_file(skill_file: Path) -> bool:
     """Whether the skill at `skill_file` has pulled itself out of circulation.
 
@@ -188,12 +240,9 @@ def is_quarantined_skill_file(skill_file: Path) -> bool:
     A missing or unreadable file answers `False`: that is damage, not retirement,
     and `skill_load_defect` is the function that says which.
     """
-    try:
-        content = skill_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    if not skill_file.is_file():
         return False
-    status = str(_parse_frontmatter(content)[0].get("status", "") or "").strip().lower()
-    return status in _QUARANTINE_STATUSES
+    return _is_quarantine_status(_frontmatter_of(skill_file))
 
 
 def skill_roots(overlay: Optional[Path] = None,
@@ -247,17 +296,35 @@ def iter_active_skills(overlay: Optional[Path] = None,
             skill_file = entry / "SKILL.md"
             if not skill_file.is_file():
                 continue
-            try:
-                content = skill_file.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                content = ""
-            fm, _body = _parse_frontmatter(
-                content, source=f"skill {entry.name!r} ({skill_file})")
-            status = str(fm.get("status", "") or "").strip().lower()
-            if status in _QUARANTINE_STATUSES:
+            fm = _frontmatter_of(skill_file, source=f"skill {entry.name!r} ({skill_file})")
+            if _is_quarantine_status(fm):
                 continue
             seen.add(entry.name)
             yield ActiveSkill(name=entry.name, directory=entry, frontmatter=fm)
+
+
+def find_active_skill(name: str, overlay: Optional[Path] = None,
+                      roots: Optional[list[Path]] = None) -> Optional[ActiveSkill]:
+    """The live skill called `name`, by the walker's rules, or None.
+
+    The lookup every by-name reader uses — `skills_read`, the Skills page's
+    content route, an autonomy task's `skill_name` — so none of them can serve a
+    skill the walker would not list: a name that could leave a root is refused,
+    a dot-directory is the archive, a quarantined copy is skipped (and, exactly as
+    in `iter_active_skills`, a later root's copy of the same name may then win).
+    """
+    if not valid_skill_name(name):
+        return None
+    for skills_dir in skill_roots(overlay, roots):
+        entry = skills_dir / name
+        skill_file = entry / "SKILL.md"
+        if not skill_file.is_file():
+            continue
+        fm = _frontmatter_of(skill_file, source=f"skill {name!r} ({skill_file})")
+        if _is_quarantine_status(fm):
+            continue
+        return ActiveSkill(name=name, directory=entry, frontmatter=fm)
+    return None
 
 
 def skill_load_defect(skill_dir: Path) -> Optional[str]:
@@ -307,6 +374,78 @@ def _iter_skills():
         skill = _load_skill(active.directory)
         if skill:
             yield skill
+
+
+# ── The loaded-skill cache, shared by every process that scores skills ────────
+#
+# The list is rebuilt only when a SKILL.md changes on disk. A signature of
+# (root, dir name, SKILL.md mtime) over the walked roots costs ~1-2 ms for ~200
+# entries and is re-checked at most every `SKILL_CACHE_CHECK_S`, so edits show
+# up within seconds and an unchanged tree never pays the ~140 ms reload (+ the
+# one-off tokenization memo, `_skill_token_sets`). This lived in `app.prefetch`
+# alone until the 2026-11-09 review, so the aggregator's `skills_search` re-read
+# and re-tokenized all ~2.3 MB of skills on every call.
+
+SKILL_CACHE_CHECK_S = 15.0
+_skill_cache: list[dict] = []
+_skill_cache_sig: tuple = ()
+_skill_cache_checked: float = 0.0
+_skill_cache_lock = threading.Lock()
+
+
+def skills_signature() -> tuple:
+    """(root, name, SKILL.md mtime_ns) for every non-dot directory under the roots."""
+    import os
+
+    sig = []
+    for d in skill_roots():
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.name.startswith(".") or not e.is_dir():
+                        continue
+                    try:
+                        mt = os.stat(os.path.join(e.path, "SKILL.md")).st_mtime_ns
+                    except OSError:
+                        mt = -1
+                    sig.append((str(d), e.name, mt))
+        except OSError:
+            continue
+    sig.sort()
+    return tuple(sig)
+
+
+def load_skills_cached() -> list[dict]:
+    """Every live skill as a loaded dict, rebuilt only when the tree changed.
+
+    The dicts are shared between callers and carry the `_tok` / `_pq` memos;
+    a caller must not mutate their public fields.
+    """
+    import time
+
+    global _skill_cache, _skill_cache_sig, _skill_cache_checked
+    now = time.monotonic()
+    if _skill_cache and now - _skill_cache_checked < SKILL_CACHE_CHECK_S:
+        return _skill_cache
+    with _skill_cache_lock:
+        now = time.monotonic()
+        if _skill_cache and now - _skill_cache_checked < SKILL_CACHE_CHECK_S:
+            return _skill_cache
+        sig = skills_signature()
+        if sig != _skill_cache_sig or not _skill_cache:
+            _skill_cache = list(_iter_skills())
+            _skill_cache_sig = sig
+        _skill_cache_checked = now
+        return _skill_cache
+
+
+def reset_skill_cache() -> None:
+    """Forget the loaded list, so the next `load_skills_cached` re-walks (tests)."""
+    global _skill_cache, _skill_cache_sig, _skill_cache_checked
+    with _skill_cache_lock:
+        _skill_cache = []
+        _skill_cache_sig = ()
+        _skill_cache_checked = 0.0
 
 
 # Suffixes we collapse for matching. "systems" → "system", "services" → "service",
@@ -607,7 +746,7 @@ def _skills_search(params: dict) -> str:
     query_tokens = _query_tokens(query)
 
     scored = []
-    for skill in _iter_skills():
+    for skill in load_skills_cached():
         score = _score_skill(skill, query_tokens, require_metadata_hit=True)
         if score > 0:
             scored.append((score, skill))
@@ -636,11 +775,13 @@ def _skills_read(params: dict) -> str:
     name = params.get("name", "").strip()
     if not name:
         return json.dumps({"error": "name is required"})
-    for skills_dir in SKILLS_DIRS:
-        skill_dir = skills_dir / name
-        skill = _load_skill(skill_dir)
-        if skill:
-            return json.dumps({"name": skill["name"], "content": skill["raw"]})
+    if not valid_skill_name(name):
+        return json.dumps({"error": f"Not a skill name: {name!r} — pass the bare "
+                                    "directory name skills_search returned"})
+    active = find_active_skill(name)
+    skill = _load_skill(active.directory) if active else None
+    if skill:
+        return json.dumps({"name": skill["name"], "content": skill["raw"]})
     return json.dumps({"error": f"Skill not found: {name}"})
 
 

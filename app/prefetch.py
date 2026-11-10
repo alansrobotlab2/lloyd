@@ -26,7 +26,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
-from agent_mcp.skills import (SKILLS_DIRS, _iter_skills, _score_skill, _query_tokens,
+from agent_mcp.skills import (_score_skill, _query_tokens, load_skills_cached,
                               pseudo_query_index)
 from agent_mcp._shared import _ENTITY_STOPWORDS
 from agent_mcp.facts import (
@@ -36,7 +36,7 @@ from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
 from app.prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
 from app.event_log import log_event
-from app.sessions_io import ambient_clock_stamp
+from app.sessions_io import ambient_clock_stamp, is_background_session_name
 # The next-session channel (#1516). The drain itself is imported inside
 # `_prefetch_prepare` beside the ambient one; the two caps are imported here
 # because this module is the only place text gets charged before it reaches a
@@ -454,54 +454,16 @@ def _get_session_focus(session_id: str | None) -> SessionFocus | None:
 
 # ── Skill cache ───────────────────────────────────────────────────────────────
 #
-# The skill list is rebuilt only when a SKILL.md changes on disk. A
-# signature of (dir name, SKILL.md mtime) over both skill roots costs ~1-2ms
-# for ~280 entries and is re-checked at most every _SKILL_CACHE_CHECK_S, so
-# edits show up within seconds and unchanged trees never pay the ~140ms
-# reload (+ the one-off tokenization memo, see skills._skill_token_sets).
-
-_skill_cache: list[dict] = []
-_skill_cache_sig: tuple = ()
-_skill_cache_checked: float = 0.0
-_SKILL_CACHE_CHECK_S = 15.0
-_skill_cache_lock = threading.Lock()
-_SKILL_CACHE_TTL = _SKILL_CACHE_CHECK_S  # legacy name, kept for callers/docs
-
-
-def _skills_signature() -> tuple:
-    sig = []
-    for d in SKILLS_DIRS:
-        try:
-            with os.scandir(d) as it:
-                for e in it:
-                    if e.name.startswith(".") or not e.is_dir():
-                        continue
-                    try:
-                        mt = os.stat(os.path.join(e.path, "SKILL.md")).st_mtime_ns
-                    except OSError:
-                        mt = -1
-                    sig.append((e.name, mt))
-        except OSError:
-            continue
-    sig.sort()
-    return tuple(sig)
-
+# The cache itself lives in `agent_mcp.skills` (one per process, shared with
+# `skills_search`); see `load_skills_cached` there for the signature rule.
 
 def _get_skills_cached() -> list[dict]:
-    global _skill_cache, _skill_cache_sig, _skill_cache_checked
-    now = time.monotonic()
-    if _skill_cache and now - _skill_cache_checked < _SKILL_CACHE_CHECK_S:
-        return _skill_cache
-    with _skill_cache_lock:
-        now = time.monotonic()
-        if _skill_cache and now - _skill_cache_checked < _SKILL_CACHE_CHECK_S:
-            return _skill_cache
-        sig = _skills_signature()
-        if sig != _skill_cache_sig or not _skill_cache:
-            _skill_cache = list(_iter_skills())
-            _skill_cache_sig = sig
-        _skill_cache_checked = now
-        return _skill_cache
+    """The shared loaded-skill cache (`agent_mcp.skills.load_skills_cached`).
+
+    Kept as this module's name because tests and the eval runners patch it to
+    hand `_search_skills` a controlled inventory.
+    """
+    return load_skills_cached()
 
 
 # ── Backlog index cache ───────────────────────────────────────────────────────
@@ -643,6 +605,60 @@ def _search_skills(query_tokens: set[str],
             scored.append((score, skill))
     scored.sort(key=lambda x: -x[0])
     return scored
+
+
+#: Plan B. The skill a plan-mode turn is always handed, whatever the user typed.
+PLAN_MODE_SKILL = "plan-mode-authoring"
+
+
+def _pin_skill(scored: list[tuple[float, dict]], name: str,
+               skills: list[dict] | None = None) -> list[tuple[float, dict]]:
+    """`scored` with skill `name` moved to the top at an injectable score.
+
+    How plan mode binds `PLAN_MODE_SKILL` since the 2026-11-09 review. It used to
+    add synthetic tokens (`plan`, `mode`, `authoring`, …) to the user's query,
+    which reached the right skill by steering the scorer — and inflated every
+    other skill with a `plan` or `mode` in its metadata, so the second slot's
+    excerpt went to whichever planning-adjacent skill shared a word with the
+    bait rather than to what the message was about. Pinning leaves the user's
+    own tokens to choose everything after slot one. The pinned score is the
+    larger of its own score and the top score (at least `SKILL_THRESHOLD_FIRST`),
+    so the rendered `score=` and the telemetry row never claim less than it was
+    given. A name not in the live inventory leaves `scored` unchanged.
+    """
+    skill = next((s for s in (_get_skills_cached() if skills is None else skills)
+                  if s.get("name") == name), None)
+    if skill is None:
+        logger.debug("prefetch: pinned skill %r is not live; nothing pinned", name)
+        return scored
+    own = next((sc for sc, s in scored if s.get("name") == name), 0.0)
+    top = scored[0][0] if scored else 0.0
+    rest = [(sc, s) for sc, s in scored if s.get("name") != name]
+    return [(max(own, top, SKILL_THRESHOLD_FIRST), skill)] + rest
+
+
+def _search_skills_for_turn(query_tokens: set[str], text: str,
+                            session_id: str | None) -> list[tuple[float, dict]]:
+    """The skills leg as a turn runs it: `_search_skills`, then — for a chat
+    session with `skills.embed_fusion` on — the embedding re-order of its top
+    offers (`app.skill_embed_rank`, 2026-11-09). Scores stay lexical, so the
+    injection gate and the telemetry are unchanged; only the order can move, and
+    a late or failed embed is lexical order. Worker sessions skip it: the
+    evidence is user turns, and workers are most of the traffic.
+    """
+    scored = _search_skills(query_tokens)
+    if session_id and is_background_session_name(session_id):
+        return scored
+    try:
+        from app.skill_embed_rank import rerank, settings
+
+        cfg = settings()
+        if not cfg:
+            return scored
+        return rerank(text, scored, _get_skills_cached(), cfg)
+    except Exception as exc:  # noqa: BLE001 — the lexical order is always an answer
+        logger.debug("prefetch: skill embed fusion skipped (%s)", exc)
+        return scored
 
 
 def _injectable_skills(scored: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
@@ -1552,21 +1568,6 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
     """
     query_tokens = _query_tokens(text)
 
-    # Plan B — synthetic skill-match tokens. When the session is in
-    # plan_mode, augment the query with tokens that match plan-mode-authoring
-    # (and the related `plan` / `writing-plans` skills) so the playbook
-    # for drafting a high-quality plan auto-loads as <context> regardless
-    # of what the user actually typed. Same shape as the natural query
-    # tokens — the matcher doesn't need to know they're synthetic.
-    if plan_mode:
-        # `plan-mode-authoring` tags include `plan-mode` and `planning`;
-        # name tokenizes to {plan, mode, authoring}. Adding these matches
-        # it strongly (name 3.0× + tags 1.5×).
-        query_tokens = query_tokens | {
-            "plan", "mode", "authoring", "planning",
-            "plan-mode", "plan-mode-authoring",
-        }
-
     # Run skill, fact, vault, session, and backlog-ref search in parallel
     skills_result: list[tuple[float, dict]] = []
     facts_result: list[str] = []
@@ -1588,7 +1589,7 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
         # running in a daemon-like pool that GCs after their threads finish.
         budget_s = PREFETCH_BUDGET_MS / 1000.0
         pool = ThreadPoolExecutor(max_workers=6)
-        f_skills = pool.submit(_search_skills, query_tokens)
+        f_skills = pool.submit(_search_skills_for_turn, query_tokens, text, session_id)
         f_facts = pool.submit(_search_facts, text)
         f_vault_lex = pool.submit(_search_vault_lex_and_stash, text, focus,
                                   t0 + VAULT_LEX_STRAGGLE_MAX_S)
@@ -1697,6 +1698,9 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
     # `_search_skills` before #435, so what lands in the prompt is unchanged —
     # and `injection_plan` is the subset of it actually rendered, which is also
     # what the telemetry marks `landed`.
+    # Plan B: in plan mode the drafting playbook is bound, not matched (below).
+    if plan_mode and len(text.strip()) >= MIN_MESSAGE_LEN:
+        skills_result = _pin_skill(skills_result, PLAN_MODE_SKILL)
     injectable = _injectable_skills(skills_result)
     injection_plan = _skill_injection_plan(injectable)
 

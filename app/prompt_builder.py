@@ -9,8 +9,10 @@ Combines:
 """
 
 import datetime
+import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -565,7 +567,7 @@ def build_system_prompt(
         components["memories"] = f"<memory>\n{memories}\n</memory>"
 
     if include_skills_index:
-        skills = _load_skills_index(overlay)
+        skills = _load_skills_index(overlay, platform=platform)
         if skills:
             components["skills_index"] = (
                 f"{SKILLS_OPEN_TAG}\n{skills}\n{SKILLS_CLOSE_TAG}\n"
@@ -1194,6 +1196,13 @@ SKILLS_CLOSE_TAG = "</available_skills>"
 #: The ranking window. `skill_telemetry.DEFAULT_DAYS` today; restated so a change
 #: to that reader's default does not silently re-rank the prompt.
 SKILLS_INDEX_RANK_DAYS = 30
+#: `skills.index.chat_scope`. `all` is every live skill (today's index, byte for
+#: byte). `discoverable` leaves out of a chat prompt the skills a chat cannot
+#: usefully discover: those an autonomy task binds by name, and those whose front
+#: matter says `surface:` without `chat`. Worker and autonomy prompts always get
+#: the full list. The hidden count is said in one tail line pointing at
+#: `skills_search`, so nothing becomes unreachable — only unadvertised.
+SKILLS_INDEX_CHAT_SCOPES = ("all", "discoverable")
 
 _SKILLS_INDEX_PUSH_NOTE = (
     "Note: relevant skill content is automatically injected into each "
@@ -1217,7 +1226,8 @@ def _skills_index_settings() -> dict:
            # None = advertise every active skill, which is what production sends and what
            # `_skills_index_lines` has always done (#4027). An int is the eval's pruned arm:
            # only that many skills, highest rank first, get an index line at all.
-           "advertise_top_n": None}
+           "advertise_top_n": None,
+           "chat_scope": "all"}
     try:
         from app.config import CONFIG
 
@@ -1227,6 +1237,8 @@ def _skills_index_settings() -> dict:
     if not isinstance(cfg, dict):
         return out
     out["descriptions"] = cfg.get("descriptions") is True
+    if cfg.get("chat_scope") in SKILLS_INDEX_CHAT_SCOPES:
+        out["chat_scope"] = cfg["chat_scope"]
     for key in ("budget_chars", "max_description_chars"):
         val = cfg.get(key)
         if isinstance(val, int) and not isinstance(val, bool) and val > 0:
@@ -1368,38 +1380,96 @@ def clip_skill_description(desc: str, max_chars: int) -> str:
 
 
 _rank_cache: dict[str, dict[str, int]] = {}   # UTC date -> {skill: use count}
+_rank_refresh_lock = threading.Lock()
+_rank_refresh_started: set[str] = set()       # UTC dates a refresh was started for
+
+
+def _compute_skill_rank_counts() -> dict[str, int]:
+    """Per-skill 30-day use (offers + loaded + loaded_by_read) in CHAT sessions.
+
+    Synchronous and uncached — the background refresh's body, never called on a
+    request path. Chat only (2026-11-09 review): 97% of offers came from worker
+    sessions, so a whole-store rank spent the description budget on
+    scheduled-task skills (retention-sweep, queue-health-check, …) that reach
+    their task by name and are never discovered by reading this index.
+    """
+    from app.paths import EVENT_LOGS_DIR
+    from app.sessions_io import is_background_session_name
+    from app.skill_telemetry import skill_injection_counts
+
+    res = skill_injection_counts(EVENT_LOGS_DIR, SKILLS_INDEX_RANK_DAYS,
+                                 include=lambda sid: not is_background_session_name(sid))
+    counts: dict[str, int] = {}
+    for name, row in (res.get("skills") or {}).items():
+        counts[name] = int(row.get("offers", 0)) + int(row.get("loaded", 0))
+    for name, n in (res.get("loaded_by_read") or {}).items():
+        counts[name] = counts.get(name, 0) + int(n)
+    return counts
+
+
+def _read_rank_file() -> tuple[str | None, dict[str, int]]:
+    """`(utc date, counts)` from the persisted rank, or `(None, {})`."""
+    try:
+        from app.paths import SKILLS_INDEX_RANK_PATH
+
+        data = json.loads(SKILLS_INDEX_RANK_PATH.read_text(encoding="utf-8"))
+        counts = {str(k): int(v) for k, v in (data.get("counts") or {}).items()}
+        return str(data.get("date") or "") or None, counts
+    except Exception:  # noqa: BLE001 — absent or damaged is "no rank yet"
+        return None, {}
+
+
+def _refresh_skill_rank(today: str, previous: dict[str, int]) -> None:
+    """Background body: scan, persist, publish. A failure keeps `previous` for the day."""
+    try:
+        counts = _compute_skill_rank_counts()
+    except Exception as exc:  # noqa: BLE001 — a rank is never worth a prompt
+        logger.warning("skills index: telemetry rank unavailable (%s); keeping the "
+                       "previous rank for %s", exc, today)
+        counts = previous
+    else:
+        try:
+            from app.paths import SKILLS_INDEX_RANK_PATH
+
+            SKILLS_INDEX_RANK_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = SKILLS_INDEX_RANK_PATH.with_name(
+                f".{SKILLS_INDEX_RANK_PATH.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"date": today, "counts": counts}), encoding="utf-8")
+            os.replace(tmp, SKILLS_INDEX_RANK_PATH)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skills index: could not persist the rank (%s)", exc)
+    _rank_cache.clear()
+    _rank_cache[today] = counts
 
 
 def _skill_rank_counts() -> dict[str, int]:
-    """Per-skill 30-day use (offers + loaded + loaded_by_read), cached per UTC day.
+    """The index's rank for today, never computed on the caller's thread.
 
-    The scan reads every event log in the window (~0.8 s on 2026-09-24), so it
-    runs once a day per process, not once per turn — which is also the cadence
-    the rank is allowed to move the prefix at. Any failure is `{}`: every skill
-    ties at zero and the rank falls back to alphabetical, the same answer as a
-    window with no telemetry.
+    The scan used to run inline, once per UTC day per process, inside the
+    synchronous `build_turn_options` an async route calls — measured at 13.2 s
+    over 22.5k event logs on 2026-11-09, a stall of every request on the first
+    turn after midnight and after every restart. Now: today's rank from memory,
+    else from `SKILLS_INDEX_RANK_PATH` when another process (or an earlier life of
+    this one) already computed it; otherwise a background refresh is started and
+    the last persisted rank (or `{}`, alphabetical) answers until it lands. The
+    prefix therefore still moves at most once a day per process: from the
+    previous rank to today's, when the refresh finishes.
     """
     today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     cached = _rank_cache.get(today)
     if cached is not None:
         return cached
-    counts: dict[str, int] = {}
-    try:
-        from app.paths import EVENT_LOGS_DIR
-        from app.skill_telemetry import skill_injection_counts
-
-        res = skill_injection_counts(EVENT_LOGS_DIR, SKILLS_INDEX_RANK_DAYS)
-        for name, row in (res.get("skills") or {}).items():
-            counts[name] = int(row.get("offers", 0)) + int(row.get("loaded", 0))
-        for name, n in (res.get("loaded_by_read") or {}).items():
-            counts[name] = counts.get(name, 0) + int(n)
-    except Exception as exc:  # noqa: BLE001 — a rank is never worth a prompt
-        logger.warning("skills index: telemetry rank unavailable (%s); "
-                       "descriptions go to the alphabetical head", exc)
-        counts = {}
-    _rank_cache.clear()
-    _rank_cache[today] = counts
-    return counts
+    stored_date, stored = _read_rank_file()
+    if stored_date == today:
+        _rank_cache.clear()
+        _rank_cache[today] = stored
+        return stored
+    with _rank_refresh_lock:
+        if today not in _rank_refresh_started:
+            _rank_refresh_started.add(today)
+            threading.Thread(target=_refresh_skill_rank, args=(today, stored),
+                             name="skills-index-rank", daemon=True).start()
+    return stored
 
 
 def _skills_index_lines(active, counts: dict[str, int] | None, *,
@@ -1445,9 +1515,56 @@ def _skills_index_lines(active, counts: dict[str, int] | None, *,
 _READ_CONFIG = object()
 
 
+def autonomy_bound_skill_names() -> set[str]:
+    """Skills an autonomy task names in `skill_name` / `skill_path`, any task state.
+
+    Read off `<vault>/autonomy/*.md` front matter through the walker's per-file
+    cache, so it costs a stat per task file per build. A path value counts as the
+    directory holding its `SKILL.md`. Any failure is the empty set: nothing hidden.
+    """
+    from agent_mcp.skills import _frontmatter_of
+    from app.data_root import vault_root as _vault_root
+
+    names: set[str] = set()
+    try:
+        for task_file in sorted((_vault_root() / "autonomy").glob("*.md")):
+            fm = _frontmatter_of(task_file)
+            for key in ("skill_name", "skill_path"):
+                val = str(fm.get(key) or "").strip()
+                if not val or val.lower() in ("null", "none"):
+                    continue
+                if "/" in val or val.endswith(".md"):
+                    p = Path(val.replace("~", str(Path.home())))
+                    val = (p.parent if p.name == "SKILL.md" else p).name
+                names.add(val)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("skills index: autonomy bindings unreadable (%s)", exc)
+        return set()
+    return names
+
+
+def _hidden_from_chat(skill, bound: set[str]) -> bool:
+    """Whether `discoverable` scope leaves `skill` out of a chat prompt's index."""
+    if skill.name in bound:
+        return True
+    fm = skill.frontmatter if isinstance(skill.frontmatter, dict) else {}
+    surface = fm.get("surface")
+    if surface is None:
+        return False
+    items = surface if isinstance(surface, list) else [surface]
+    return "chat" not in {str(x).strip().lower() for x in items}
+
+
+def _skills_index_tail(hidden: int) -> str:
+    return (f"(+{hidden} more skills, used by scheduled tasks and workers, are not "
+            "listed; skills_search finds any skill by keyword.)")
+
+
 def _load_skills_index(overlay: Path | None = None, *,
                        descriptions: bool | None = None,
-                       advertise_top_n: "int | None | object" = _READ_CONFIG) -> str | None:
+                       advertise_top_n: "int | None | object" = _READ_CONFIG,
+                       platform: str = "",
+                       chat_scope: str | None = None) -> str | None:
     """Build the advertised skill index from skill directories (overlay first).
 
     The set is the single walker's (#1294). This function used to do its own
@@ -1456,8 +1573,10 @@ def _load_skills_index(overlay: Path | None = None, *,
     to print 189, 187 and 194 about one vault — the model being told a set that no
     human-facing surface agreed with.
 
-    `descriptions` overrides `skills.index.descriptions` (None reads config). Off
-    is the names-only line exactly as it has always been rendered.
+    `descriptions` overrides `skills.index.descriptions` and `chat_scope`
+    `skills.index.chat_scope` (None reads config). Off / `all` is the index exactly
+    as it has always been rendered. `platform` decides whether the chat scope
+    applies: a worker or autonomy prompt always lists every live skill.
 
     `advertise_top_n` overrides `skills.index.advertise_top_n`; the `...` default
     reads config, because `None` is a meaningful config value there ("advertise
@@ -1466,6 +1585,8 @@ def _load_skills_index(overlay: Path | None = None, *,
     everything would let a pruned arm be measured against an unpruned one. See
     `_skills_index_lines` for what a pruned set is and is not (#4027).
     """
+    from app.sessions_io import NON_USER_PLATFORMS
+
     active = list(iter_active_skills(overlay=overlay, roots=_skill_walk_roots()))
     if not active:
         return None
@@ -1483,8 +1604,19 @@ def _load_skills_index(overlay: Path | None = None, *,
         keep = set(sorted((a.name for a in active),
                           key=lambda n: (-int(counts.get(n, 0)), n))[:advertise_top_n])
         active = [a for a in active if a.name in keep]
+    scope = chat_scope if chat_scope in SKILLS_INDEX_CHAT_SCOPES else settings["chat_scope"]
+    tail = ""
+    if scope == "discoverable" and platform not in NON_USER_PLATFORMS:
+        bound = autonomy_bound_skill_names()
+        shown = [a for a in active if not _hidden_from_chat(a, bound)]
+        if shown and len(shown) < len(active):
+            tail = _skills_index_tail(len(active) - len(shown))
+            active = shown
     if not descriptions:
-        return "Available skills: " + ", ".join(sorted(a.name for a in active))
-    return "\n".join(_skills_index_lines(
-        active, counts,
-        budget=settings["budget_chars"], max_desc=settings["max_description_chars"]))
+        text = "Available skills: " + ", ".join(sorted(a.name for a in active))
+    else:
+        text = "\n".join(_skills_index_lines(
+            active, counts,
+            budget=settings["budget_chars"] - (len(tail) + 1 if tail else 0),
+            max_desc=settings["max_description_chars"]))
+    return text + ("\n" + tail if tail else "")

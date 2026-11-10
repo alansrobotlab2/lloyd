@@ -315,6 +315,23 @@ def _memory_entries_unstamped_in_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_skill_embed_fusion_in_tests(monkeypatch):
+    """`skills.embed_fusion` is on in production (2026-11-09) and its first chat
+    turn loads ~2.5 GB of embedder weights and spends a minute embedding the
+    library in a background thread. A test that drives prefetch would do that in
+    the test process, under xdist once per worker. Held off here; the tests that
+    exercise the leg (`tests/test_skill_embed_rank.py`) set it and fake the model.
+    """
+    try:
+        from app import config
+    except Exception:
+        return
+    skills_cfg = dict(config.CONFIG.get("skills") or {})
+    skills_cfg["embed_fusion"] = {**(skills_cfg.get("embed_fusion") or {}), "enabled": False}
+    monkeypatch.setitem(config.CONFIG, "skills", skills_cfg)
+
+
+@pytest.fixture(autouse=True)
 def _no_desktop_or_journal_alerts_in_tests(monkeypatch):
     """The other two channels that reach the room from a test process.
 

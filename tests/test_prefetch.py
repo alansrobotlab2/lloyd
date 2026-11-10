@@ -1927,3 +1927,24 @@ def test_facts_rank_mode_reads_config_and_defaults_to_confidence(monkeypatch):
     assert prefetch._facts_rank_mode() == "confidence"
     monkeypatch.setitem(cfg.CONFIG, "prefetch", {})
     assert prefetch._facts_rank_mode() == "confidence"
+
+
+def test_plan_mode_pins_its_playbook_without_steering_the_scorer(monkeypatch):
+    """2026-11-09 review: plan mode binds `PLAN_MODE_SKILL` by name. It used to add
+    `plan`/`mode`/`authoring` to the query, which also lifted every skill sharing
+    those words — here `mode-switcher` would have outscored the user's own match
+    for the second slot."""
+    playbook = _skm_skill(prefetch.PLAN_MODE_SKILL)
+    bait = _skm_skill("mode-switcher", desc="plan mode planning authoring")
+    real = _skm_skill("widget-frobnicator", desc="widget calibration frobnicator")
+    monkeypatch.setattr(prefetch, "_get_skills_cached", lambda: [playbook, bait, real])
+
+    scored = prefetch._search_skills(prefetch._query_tokens(_SKM_QUERY))
+    pinned = prefetch._pin_skill(scored, prefetch.PLAN_MODE_SKILL)
+
+    assert [sk["name"] for _, sk in pinned] == [prefetch.PLAN_MODE_SKILL, "widget-frobnicator"]
+    assert pinned[0][0] >= max(prefetch.SKILL_THRESHOLD_FIRST, scored[0][0])
+    plan = prefetch._skill_injection_plan(prefetch._injectable_skills(pinned))
+    assert plan[0][1]["name"] == prefetch.PLAN_MODE_SKILL and plan[0][2] == "body"
+    # A pinned name that is not live changes nothing.
+    assert prefetch._pin_skill(scored, "no-such-skill") == scored

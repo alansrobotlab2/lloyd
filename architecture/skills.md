@@ -45,7 +45,7 @@ still turns up in the vault, in old skills and in `nightly-skills-management`.
 |----------|------------|
 | `~/obsidian/skills/` | the library — advertised count = live dirs minus the `status:` quarantine, re-derived per build; `GET /api/skills` answers it at any moment and no count of it is transcribed on this page (the ruling below, 2026-10-07) |
 | `~/obsidian/skills/.archived/` | retired skills, kept on disk and in git |
-| `~/lloyd/skills/` | second root, configured everywhere, **does not exist** |
+| `~/lloyd/skills/` | historical second root — never existed; dropped from code and `config.yaml` 2026-11-09 |
 
 **One definition of where skills live, since #1294.** `agent_mcp.skills.SKILLS_DIRS`
 is the pair the code ships unioned with `config.yaml skills.directories` — built-in
@@ -64,10 +64,20 @@ anchored to the *repo* location, which inside an automod worktree resolved to
 built in a round advertised **no skills at all** while the Skills page listed the
 live vault.
 
-`~/lloyd/skills/` has never existed on this box. It is harmless — every reader
-skips a missing directory — but it means the second root is not a tested path
-against the live config; it is tested against a temp tree instead
+`~/lloyd/skills/` never existed on this box, so it was never a tested path against
+the live config; the 2026-11-09 review dropped it from `_BUILTIN_SKILL_DIRS` and
+`skills.directories`. A tracked root is one `skills.directories` line away, and
+the multi-root rules are still tested against a temp tree
 (`tests/test_skills_single_walk.py`).
+
+**Every by-name read goes through `find_active_skill`** (2026-11-09). `skills_read`,
+`GET /api/skill-content` and the autonomy loader each used to join the caller's
+string onto a root unchecked, so `../.archived/<x>` served a retired skill and a
+deeper `../` any `SKILL.md` on the box. `valid_skill_name` refuses a `/`, a leading
+dot or a `..`; the lookup then applies the walker's own rules — dot-dirs skipped,
+quarantine honoured, first root wins. Front matter is parsed once per file version
+(`_frontmatter_of`, keyed on mtime and size), so the per-build walk no longer
+re-parses ~200 YAML blocks.
 
 **Retirement is by directory, or by frontmatter, and the walker enforces both.** It
 skips dot-prefixed directories and any skill whose `status:` is in
@@ -91,7 +101,7 @@ mechanisms rather than one with options.
 
 ### 1. The index, in the system prompt
 
-`prompt_builder._load_skills_index` (`app/prompt_builder.py:1448`) walks an optional
+`prompt_builder._load_skills_index` (`app/prompt_builder.py:1563`) walks an optional
 overlay root (`<overlay>/skills`, when `LLOYD_OVERLAY_DIR` is set — the
 autoresearch bench runner passes one; what it may put there is bounded by
 `_canonical_prompt_paths()` in `scripts/autoresearch/common.py`, today
@@ -120,6 +130,36 @@ Available skills (name — what it is for):
 Note: relevant skill content is automatically injected into each
 user message as <context> when matched.
 ```
+
+**The rank is chat use, computed off the request path** (2026-11-09).
+`_skill_rank_counts` used to scan every event log inline, once per UTC day per
+process, inside the synchronous `build_turn_options` an async route calls — 13.2 s
+over 22.5k logs when measured, a stall of every request on the first turn after
+midnight and after every restart. Now a call never scans: it answers from memory,
+else from `SKILLS_INDEX_RANK_PATH` (`_pipeline/skills-index-rank.json`, written by
+whichever process refreshed first that day), else starts one background refresh and
+answers with the last persisted rank until it lands. The refresh reads chat
+sessions only (`include=` on `skill_injection_counts`, which also skips files not
+written inside the window and lines naming neither counted event): 97% of offers
+were worker traffic, so a whole-store rank spent the description budget on
+scheduled-task skills (`retention-sweep`, `queue-health-check`, …) that reach their
+task by name.
+
+**`skills.index.chat_scope`** (2026-11-09, `all` by default, which renders the
+index exactly as before). `discoverable` leaves out of a *chat* prompt every skill
+an autonomy task binds by `skill_name`/`skill_path` (`autonomy_bound_skill_names`,
+read off the task front matter) and every skill whose front matter says `surface:`
+without `chat`, and ends the list with one line naming the hidden count and
+`skills_search`. Worker and autonomy prompts always list every live skill, so the
+prewarmed worker head does not change. Nothing becomes unreachable — prefetch still
+scores every skill, `skills_read` and `skills_search` still serve them — it is only
+unadvertised. The arm that decides it is `scoped` in
+`eval/run_prefetch_cost_eval.py`, beside `no_index` (no `<available_skills>` block
+at all), both read against `desc_push`. **Measured 2026-11-09, kept at `all`**
+(`eval/measurements/skills-index-scope-2026-11-09.md`): `scoped` reached the right
+skill exactly as often and saved 96 prefix tokens, because the description budget
+re-spends what the hidden names free; `no_index` saved ~2.9k and lost the right skill
+on 3 of 51 turns, gaining none.
 
 Its size is measured per build, not quoted here: the skills index is one of the
 named components in the `PROMPT_BUDGET` line `log_prompt_size` writes once per
@@ -198,12 +238,36 @@ Two performance properties are load-bearing. Token sets are memoized on the
 cached skill dict (`_skill_token_sets`, `:388`) — re-tokenizing ~1.5 MB of
 bodies cost ~83 ms of GIL-held CPU on *every* turn and starved the other
 prefetch legs; it is ~1 ms now. And the skill list is rebuilt only when a
-`SKILL.md` mtime changes, checked at most every 15 s (`_skills_signature`,
-`:470`).
+`SKILL.md` mtime changes, checked at most every 15 s (`agent_mcp.skills.load_skills_cached`,
+one cache per process shared by prefetch and `skills_search` since 2026-11-09 — the
+aggregator's search used to re-read the whole library per call).
 
-`_stem` (`agent_mcp/skills.py:319`) is a single-suffix plural collapse, not a real stemmer, and
+**Chat turns re-order the lexical offers by meaning** (2026-11-09,
+`app/skill_embed_rank.py`, `skills.embed_fusion`). The name weight above is why
+retrieval came to depend on naming; the fusion leg adds a cosine between the turn and
+each skill's `name: description` (Qwen3-Embedding-0.6B on CPU, the `app.qwen3_embed`
+forward pass) to the lexical score of the top 16 offers and sorts them by the sum.
+It re-orders and never admits: scores stay lexical, so the injection gate, the
+rendered `score=` and the telemetry are unchanged, and a skill with no metadata hit
+still scores 0. Measured on the gold set at weight 2: hit@1 0.510 → 0.686, recall@5
+0.677 → 0.755, expected-empty named 15/24 both, robust to instruction wording and a
+split-half check (`eval/measurements/skill-embed-fusion-2026-11-09.md`). The cost is
+~150 ms CPU per chat turn under a 200 ms deadline (late = lexical order) and ~2.5 GB
+RSS, loaded on the first chat turn; vectors build once in the background and are
+cached by text hash (`SKILL_EMBED_CACHE_PATH`). Worker sessions skip it. This is not
+the 2026-09-14 "geometric" arm, which replaced the lexical score with similarity and
+admitted on a 0.62 floor — the `admit` pool in the eval reproduces why that lost.
+
+`_stem` (`agent_mcp/skills.py:458`) is a single-suffix plural collapse, not a real stemmer, and
 exists for one logged failure: "full systems check" picked `claude-sdk-check`
 over `system-health-check` because "systems" ≠ "system".
+
+**Plan mode binds its playbook by name.** A plan-mode turn is always handed
+`plan-mode-authoring` (`prefetch.PLAN_MODE_SKILL`) in the body slot, pinned by
+`_pin_skill` at no less than the top score. Until 2026-11-09 it got there by adding
+`plan`/`mode`/`authoring` tokens to the user's query, which also lifted every skill
+with those words in its metadata into the excerpt slot; the user's own tokens now
+choose everything after slot one.
 
 This surface is **chat-path only**. `app/autonomy.py` builds its own prompt and
 never calls prefetch, so a scheduled task gets its skill from surface 4
@@ -303,7 +367,7 @@ a deliver in both registration orders.
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
 `skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:2832`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
-`~/obsidian/skills/<slug>/SKILL.md`; the body is pasted into the task prompt
+a slug (see below); the body is pasted into the task prompt
 under "Follow the skill instructions below" (`:2863`).
 
 A task with neither is unrunnable, and says so once per task id rather than
@@ -311,9 +375,11 @@ silently dead-lettering (`:2549-2559`). `hold_reason` reports it as `"no skill"`
 (`:2711`). Both fields are in `_parse_task_file`'s `fallback_fields` (`:154`), so a task
 file that needed the degraded parser does not lose its skill binding.
 
-Note this path reads the file directly — it does **not** go through
-`agent_mcp.skills._load_skill`, so it is the one surface a `status:` quarantine
-does not reach.
+A slug resolves through `agent_mcp.skills.find_active_skill` over every configured
+root (then `<vault>/skills`), so since 2026-11-09 a `status:` quarantine reaches this
+surface too: a task bound to a retired skill reports "Skill not found" rather than
+running it. All 53 live bindings resolved to active skills when this changed. A
+path-valued `skill_path` is still read as given.
 
 ## The MCP tools
 
@@ -548,8 +614,17 @@ loaders are actually run against the change:
    whose front matter broke is a skill nobody can find.
 2. The system prompt must still build (`build_system_prompt()` returning ≥ 500
    chars), and **each touched skill must still load** — through
-   `agent_mcp.skills.skill_load_defect` (def `agent_mcp/skills.py:263`, called
+   `agent_mcp.skills.skill_load_defect` (def `agent_mcp/skills.py:330`, called
    at `scripts/automod/vault_round.py:209`), not `_load_skill`.
+
+3. **The authoring contract** (2026-11-09, `skill_contract_findings`,
+   `SKILL_CONTRACT_ENFORCE`): a touched skill must keep a description; a new or
+   lengthened description must fit the index's clip (`max_description_chars`); and a
+   new body, or one the landing grows, may not pass `SKILL_BODY_CHAR_CAP` (12,000
+   chars, twice the chat injector's cut) — the refusal names the spill pattern below.
+   Both rules judge growth against the vault's `HEAD`, so a fix to an old, long skill
+   still lands. This is not #2334's library-wide line ceiling, which stays ruled NO:
+   it counts characters, the measure that orders embed cost, and refuses only growth.
 
 Scoped to the diff on purpose: a pre-existing broken file elsewhere in the
 vault must not block every round — the same delta principle as pyflakes and tsc
@@ -621,6 +696,8 @@ contract, and discard pre-2026-09-04 tool-failure candidates from the era when
 no tool set `isError`.
 
 ## Review log
+
+- 2026-11-09 — **architecture and code review of discovery and retrieval.** Findings and what landed: (1) the index's usage rank scanned every event log inline in the synchronous prompt build — 13.2 s on the event loop once per UTC day per process — now a background refresh with a persisted rank, and the scan skips stale files and unrelated lines (~2 s); (2) the rank counted worker traffic (97% of offers), so descriptions went to task-bound skills — it now counts chat sessions; (3) `skills.index.chat_scope: discoverable` drops the 53 task-bound skills from chat prompts behind one `skills_search` line — measured and kept off (`scoped` changed nothing, `no_index` lost the right skill on 3 of 51 turns; `eval/measurements/skills-index-scope-2026-11-09.md`); (4) chat turns re-order lexical offers by an embedding cosine (hit@1 0.510 → 0.686, `eval/measurements/skill-embed-fusion-2026-11-09.md`); (5) vault landings enforce a growth-only authoring contract (description present and within the index clip, body under 12,000 chars); (6) `find_active_skill` closes a `../` traversal in `skills_read`, `/api/skill-content` and the autonomy loader and brings quarantine to autonomy, one loaded-skill cache serves prefetch and `skills_search`, front matter is parsed once per file version, the never-existing `~/lloyd/skills` root is gone, and plan mode pins its playbook instead of steering the scorer with synthetic tokens.
 
 - 2026-10-20 — **drift pass.** Library counts (194/189/193) and the named five `status: archived` skills are **removed rather than re-transcribed**, per this page's own 2026-10-07 ruling that no library count is quoted here; the archived set and the advertised count are grep/`GET /api/skills` re-derivations and had drifted (measured 2026-10-20: 210 live dirs, 201 advertised, 9 `status: archived`). *The index* was the biggest stale section: `skills.index.descriptions` has been **on** since 2026-09-25 (P5 desc_push eval), so the index renders a header + one line per skill with usage-rank-granted, 12,000-char-budget descriptions inside the `<available_skills>` wrap — no longer the "names only, 189 / 4,028 chars" line. `_is_quarantined_skill` is now an **alias** of the walker's `is_quarantined_skill_file` and the ImportError fallback with its hardcoded quarantine set this doc still described has been **deliberately deleted** (a test now asserts `prompt_builder` holds no second list); the check pays the real front-matter parse per skill per build, killing the "2,000-char head read" sentence. `skill_lint` reports **nine** categories (MISSING_SCRIPT, INJECTION_PATTERN #677, DEAD_SYSTEMD_UNIT #1580 added) and DUPLICATE's trust cell derives per run (#2451). The Mission Control tab counts through the walker, not around it. ~20 drifted `file:line` refs re-pointed (`autonomy.py` grew ~3× since the last pass: e.g. `:1651→:4635`, `:1838→:4937`); the "no skill" resolution, `_load_skill_content:2818`, `_parse_frontmatter:96`, `_load_skills_index:1258`, `log_prompt_size:73`, thresholds/weights, the seven phantom-tool exemptions, the config-key-absent dispatch state and tasks #70/#83's schedules all re-verified true. Filed #3074 (`_load_skill_content`'s comment promises a slug fall-through its `return None` does not take).
 

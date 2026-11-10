@@ -1706,7 +1706,6 @@ youtube:
 skills:
   directories:
   - ~/obsidian/skills
-  - ~/lloyd/skills
   # P5: the system prompt's skill index. descriptions: false is today's
   # names-only line, byte for byte. On, the 30-day most-used skills get a
   # `— description` clipped at max_description_chars while the whole index
@@ -1714,10 +1713,26 @@ skills:
   # eval/run_prefetch_cost_eval.py --arms injected,desc_push,desc_pull.
   # On since 2026-09-25 (eval/measurements/skills-index-2026-09-25.md: desc_push
   # reached the right skill as often as today with the same judge score).
+  # chat_scope (absent = all): `discoverable` leaves skills an autonomy task binds
+  # by name (and `surface:` without chat) out of chat prompts' index behind one
+  # skills_search line; worker/autonomy prompts keep the full list. Decided by the
+  # `scoped` / `no_index` arms of eval/run_prefetch_cost_eval.py: kept at all
+  # (eval/measurements/skills-index-scope-2026-11-09.md: scoped changed nothing,
+  # no_index lost the right skill on 3 of 51 turns).
   index:
     descriptions: true
     budget_chars: 12000
     max_description_chars: 100
+  # 2026-11-09 review: chat turns re-order the lexical top-k skill offers by a
+  # Qwen3-Embedding cosine over each skill's `name: description` (scores and the
+  # injection gate stay lexical; a late embed is lexical order). hit@1 0.510 -> 0.686
+  # on eval/skill_match_queries.yaml, expected-empty unchanged:
+  # eval/measurements/skill-embed-fusion-2026-11-09.md. ~2.5 GB RSS, ~150 ms CPU/turn.
+  embed_fusion:
+    enabled: true
+    weight: 2.0
+    k: 16
+    wait_ms: 200
 # P5 pull arm: push: false stops injecting a matched skill's body into the
 # turn's <context> (offers are still logged) and the index note says to load
 # skills with skills_read. true is today's behaviour. Stays true: desc_pull lost
