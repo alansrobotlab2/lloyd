@@ -576,6 +576,29 @@ def _score_skill(skill: dict, query_tokens: set[str],
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
 
+#: Why a zero-result `skills_search` has to say so out loud (#4028).
+#:
+#: The handler below scores with `require_metadata_hit=True`, so a skill whose
+#: name, description, tags and indexed pseudo-query phrases all miss answers
+#: `0.0` (`_score_skill`, `:568-569`) no matter what its body says — a body-only
+#: match is unreachable here. Measured 2026-11-09 over the live corpus: of 862
+#: tokens that occur in some skill's body and in none of its metadata, 80 queried
+#: one at a time returned `total == 0` for 75, and the other 5 surfaced only
+#: *other* skills whose metadata matched. So a bare `{"total": 0}` is a number
+#: from a search that never ran over bodies, and the caller most likely to
+#: misread it is the one who trusted the old description that promised body
+#: search: they conclude no skill covers the task. The tool description is the
+#: other half of the fix and cannot carry it alone, because the caller holding a
+#: null result is holding the payload, not the catalog.
+ZERO_RESULT_REASON = (
+    "No skill matched, and that is not evidence that none covers the task. "
+    "skills_search scores a skill only when the query hits its metadata — the "
+    "name, description, tags or indexed pseudo-query phrases; body prose ranks "
+    "and excerpts a skill that already matched and never qualifies one on its "
+    "own. Rephrase using words that appear in a skill's name or description."
+)
+
+
 def _skills_search(params: dict) -> str:
     query = params.get("query", "").strip()
     if not query:
@@ -602,7 +625,11 @@ def _skills_search(params: dict) -> str:
             "score": round(score, 2),
         })
 
-    return json.dumps({"query": query, "results": results, "total": len(scored)})
+    payload = {"query": query, "results": results, "total": len(scored)}
+    if not scored:
+        # Never a silent miss: the caller is told WHICH search returned nothing.
+        payload["zero_result_reason"] = ZERO_RESULT_REASON
+    return json.dumps(payload)
 
 
 def _skills_read(params: dict) -> str:
@@ -624,9 +651,10 @@ async def list_tools():
         Tool(
             name="skills_search",
             description=(
-                "Search available skills by keyword. Searches skill names, descriptions, "
-                "tags, and body content. Returns ranked results with name, description, "
-                "and a body excerpt. Use this to discover which skill to apply to a task."
+                "Use to find which skill applies when the index missed one. "
+                "Only metadata qualifies a skill — name, description, tags or "
+                "indexed queries; body prose only excerpts a hit. On total 0, "
+                "see zero_result_reason."
             ),
             inputSchema={
                 "type": "object",
