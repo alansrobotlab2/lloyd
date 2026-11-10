@@ -156,12 +156,22 @@ REGISTERED_TOOLS: frozenset[str] = frozenset({
     "research_propose",
     "research_stats",
     "session_inject_context",
+    "session_read",
     "session_recall",
     "skills_read",
     "skills_search",
     "tasks_create",
     "tasks_list",
     "tasks_update",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_overview",
     "vault_read",
     "vault_recall",
@@ -171,4 +181,4 @@ REGISTERED_TOOLS: frozenset[str] = frozenset({
 
 #: How many names the snapshot carries, for a drift message that does
 #: not have to import the set to state a count.
-REGISTERED_TOOL_COUNT = 147
+REGISTERED_TOOL_COUNT = 157

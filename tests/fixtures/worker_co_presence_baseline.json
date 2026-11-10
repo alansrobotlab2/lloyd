@@ -23,7 +23,7 @@
   "systemctl state change (restart/stop a unit)"
  ],
  "durable_write_definition": "side_effecting(name) \u222a {Write, Edit, vault_write, automod_vault_land} minus READ_ONLY and the turn-state names (Scratchpad, recall_observation); NOT tool_tier(name) >= 1, which is true for all 147 pool names and would report every source, and NOT durable_external() = TIER2 \u222a TIER3, which excludes Write and vault_write and so cannot see the pilot's own pair. Bash is excluded by name: its tier is the command string, so this definition cannot see it and does not pretend to \u2014 where that question is answered is the published `bash_held` field on every row, and for the most-protected fleet the named list `untrusted_ingest_sources_with_unmeasured_bash` below. A row's `co_present` is NOT a statement about Bash (#3202, owed entry 3 of #2932).",
- "pool": 147,
+ "pool": 157,
  "sources": {
   "arch-review": {
    "bash_held": true,
@@ -45,7 +45,16 @@
     "grant_list",
     "grant_revoke",
     "session_inject_context",
-    "tasks_create"
+    "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments"
    ],
    "egress_reads": [
     "browser_navigate",
@@ -75,7 +84,16 @@
       "grant_list",
       "grant_revoke",
       "session_inject_context",
-      "tasks_create"
+      "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments"
      ],
      "egress_reads": [
       "browser_navigate",
@@ -87,7 +105,7 @@
       "http_fetch",
       "http_search"
      ],
-     "reachable": 90
+     "reachable": 100
     }
    },
    "narrowing": {
@@ -126,6 +144,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -173,6 +200,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -193,7 +229,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -232,6 +268,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -279,6 +324,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -299,7 +353,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -338,6 +392,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -385,6 +448,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -405,7 +477,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -474,6 +546,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -521,6 +602,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -541,7 +631,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -600,6 +690,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -647,6 +746,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -667,7 +775,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -708,6 +816,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -755,6 +872,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -775,7 +901,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -858,6 +984,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -905,6 +1040,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -925,7 +1069,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -964,6 +1108,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -1011,6 +1164,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -1031,7 +1193,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
@@ -1070,6 +1232,15 @@
     "research_propose",
     "session_inject_context",
     "tasks_create",
+    "tb_batchGetMessageHeaders",
+    "tb_createVirtualFolder",
+    "tb_deleteVirtualFolder",
+    "tb_dryRunCompose",
+    "tb_getMessageHeaders",
+    "tb_listVirtualFolders",
+    "tb_refreshCalendar",
+    "tb_refreshFolder",
+    "tb_searchAttachments",
     "vault_write"
    ],
    "egress_reads": [
@@ -1117,6 +1288,15 @@
       "research_propose",
       "session_inject_context",
       "tasks_create",
+      "tb_batchGetMessageHeaders",
+      "tb_createVirtualFolder",
+      "tb_deleteVirtualFolder",
+      "tb_dryRunCompose",
+      "tb_getMessageHeaders",
+      "tb_listVirtualFolders",
+      "tb_refreshCalendar",
+      "tb_refreshFolder",
+      "tb_searchAttachments",
       "vault_write"
      ],
      "egress_reads": [
@@ -1137,7 +1317,7 @@
       "http_request",
       "http_search"
      ],
-     "reachable": 118
+     "reachable": 128
     }
    },
    "narrowing": {
