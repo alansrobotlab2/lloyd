@@ -14,13 +14,18 @@ over those seams, attach the control in this codebase that answers each one, and
 publish the threats with no control as the open set. [[authority-surfaces]]
 already inventories the guards in the order an action meets them and
 [[guard-coverage]] publishes the union of what none of them sees. Neither states
-the other half: **what is being attacked**. Without that, fifteen rungs — the
-ladder has grown by three since this page was written, and
-[[authority-surfaces]] counts them in its own completeness paragraph — cannot be
-ranked, a security backlog item cannot be shown to answer a
+the other half: **what is being attacked**. Without that, the rungs of the ladder
+in [[authority-surfaces]] cannot be ranked, a security backlog item cannot be shown
+to answer a
 threat, and the next argument about whether a rail is too broad (#2269's
 `Bash` narrowing, which shipped and was reverted) is settled by intuition plus a
 broken canary again.
+
+This page states no rung count, and does not need one. #4046 is the record of a
+count that rotted twice here, and the ladder gains a row every time a guard is
+filed, so the number is derived from that table by `tests/test_threat_model_doc.py`
+on every suite run — which is also where the claim that every rung has a seam over
+it is now checked.
 
 Shape of what follows: a boundary map derived from chokepoints in the tree, a
 threat table over it, an open set, and a retrospective that scores the model
@@ -89,14 +94,14 @@ prompt cannot be access control — is for.
 | id | Seam | What crosses | Who authorizes | Chokepoint |
 |---|---|---|---|---|
 | B1 | external text → turn context | fetched pages, API bodies, transcripts, search results | the model's judgement, plus a destination table | `agent_mcp/egress.py`, `agent_mcp/http_tools.py` |
-| B2 | vault text → turn context | prefetched notes, skills excerpts, facts, backlog rows | the subliminal matcher's relevance score | `app/prefetch.py:1015` |
+| B2 | vault text → turn context | prefetched notes, skills excerpts, facts, backlog rows | the subliminal matcher's relevance score, and `app/harness/capabilities.py`'s per-source ceiling, which decides whether the lane the note can reach is even allowed to hold the tool the injection aims at (T-17) | `app/prefetch.py:1015` |
 | B3 | loaded memory → every system prompt | `MEMORY.md`, `USER.md`, the identity file | whatever the last writer did | `app/prompt_builder.py:927`, `app/prompt_surface.py` |
 | B4 | skill body → instruction | a `SKILL.md` delivered as a dispatch marker | the skill's own name and its front matter | `app/harness/skill_dispatch.py:276` |
 | B5 | tool result → next turn's input | every tool's own output, including a subprocess's stdout | nothing: results are trusted as authored | `agent_mcp/_injection_probe.py:121` (records) |
-| B6 | model output → shell | an argv string | the deny table, twice | `app/harness/safety.py:417`, `agent_mcp/main.py:531` |
-| B7 | model output → filesystem and vault | a path plus bytes | one constant, three lanes | `app/harness/protected_paths.py::write_deny_reason` |
-| B8 | model output → the network | a URL, a body, a header | a destination table that **records rather than refuses** on this box: `harness.egress_policy.enforce` is set `false` at `~/lloyd/config.yaml:806`, so the allow-list half of `egress.guard` never runs and every lane answers from `_is_private_host` instead — one resolving predicate for all of them since #2584, which retired the text-matching copy the HTTP lane carried | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526` |
-| B9 | an unattended session → the tool surface | every tool call from a worker or a round | two tuples and the session's platform | `app/tool_bans.py:23` |
+| B6 | model output → shell | an argv string | three deciders, not one: the deny table, twice; the kernel's bind the argv then runs inside, which **is absent by design when bwrap cannot build a namespace** (T-42); and the effect ledger's verdict on what the call will have *done*, which is a second decision on a call the first two already let through | `app/harness/safety.py:417`, `agent_mcp/main.py:531`, `agent_mcp/_path_sandbox.py`, `agent_mcp/_tool_effects.py` |
+| B7 | model output → filesystem and vault | a path plus bytes | one constant, three lanes — and the constant is a Python function: a shell's redirection does not call it, it meets the kernel's bind, which is B6's row, is a second decider of the same question, and is off by design when the namespace cannot be built (T-42) | `app/harness/protected_paths.py::write_deny_reason` |
+| B8 | model output → the network | a URL, a body, a header | a destination table that **records rather than refuses** on this box: `harness.egress_policy.enforce` is set `false` at `~/lloyd/config.yaml:806`, so the allow-list half of `egress.guard` never runs and every lane answers from `_is_private_host` instead — one resolving predicate for all of them since #2584, which retired the text-matching copy the HTTP lane carried. The second decider is upstream of the address: `app/harness/capabilities.py`'s `durable_external` decides, from the source that armed the run, whether it may hold a browser profile at all (T-19) | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526`, `app/harness/capabilities.py` |
+| B9 | an unattended session → the tool surface | every tool call from a worker or a round | two tuples and the session's platform — a floor, not a ceiling. Below it a declared capability set can only narrow what the platform allowed (`app/harness/capabilities.py`: the declared set, then expand subtracts every standing ban, and a widened declaration is not an error), and a source can narrow it again with a deny the tuples do not mention — which is what `workers/sources/arch_review.py` does for a review session, `DISALLOWED` taking the `automod_*` verbs and the write-and-schedule tools away from a job whose whole unit is reading a diff (T-43) | `app/tool_bans.py:23`, `app/harness/capabilities.py`, `workers/sources/arch_review.py` |
 | B10 | a grant → authority | a scope predicate, an expiry, a quota | a human at Mission Control, or a task file's front matter | `agent_mcp/builtin_grants.py`, `app/harness/policy.py:1374` |
 | B11 | an automod round → live `main` | a diff, then a restart of the running system | the gate ladder and the guardian | `scripts/automod/spec.py::check_scope`, `Gate.run` at `scripts/automod/gate.py:2584` |
 | B12 | scheduler → a worker turn | a queue row, and the turn it becomes | the queue's own due-gates | `workers/queue.py`, `claim_next()` |
@@ -123,8 +128,8 @@ appears in this table: those threats are in the next one.
 
 | id | B | Class | Capability | Control |
 |---|---|---|---|---|
-| T-01 | B6 | T | A turn destroys a protected tree with one shell command | `app/harness/safety.py:417` |
-| T-02 | B6 | T | A turn truncates or overwrites a sacred file without deleting it | `app/harness/safety.py:417` |
+| T-01 | B6 | T | A turn destroys a protected tree with one shell command | `app/harness/safety.py:417`, and the bind under the argv: `agent_mcp/_path_sandbox.py` — which is the decider that answers this threat when the string guard is the one that let it through, and which is absent by design when the namespace cannot be built (T-42) |
+| T-02 | B6 | T | A turn truncates or overwrites a sacred file without deleting it | `app/harness/safety.py:417`, `agent_mcp/_path_sandbox.py` |
 | T-03 | B6 | T | A turn runs a denied shape on a path that never installed the hook | `agent_mcp/main.py:531` |
 | T-04 | B6 | E | A turn reaches a protected root through a symlink pointing into one | `app/harness/protected_paths.py::protected_write_roots` |
 | T-05 | B7 | T | A turn writes into a protected root through the generic file lane | `agent_mcp/builtin_fs.py:239` |
@@ -139,9 +144,9 @@ appears in this table: those threats are in the next one.
 | T-14 | B4 | S | A skill named to collide with a real one is delivered instead of it | `app/harness/skill_dispatch.py:212` |
 | T-15 | B1 | inject | Prose from a fetched page instructs the turn that fetched it | `agent_mcp/_injection_probe.py:121` |
 | T-16 | B5 | inject | A tool result's own content instructs the next turn | `agent_mcp/_injection_probe.py:52` |
-| T-17 | B2 | inject | A vault note's text is matched as relevant and then obeyed | `app/prefetch.py:1015` |
-| T-18 | B1 | E | Fetched content points the browser at a loopback or private address | `egress._is_private_host` — one resolving predicate since #2584, which retired the text-only copy the HTTP lane used to carry. `browser.py`'s `_host_block_reason`, `http_fetch` and `http_request` all call it, each hop of a redirect chain included, and `egress.floor_reason` answers from it too, so arming `enforce` adds the allow-list rather than changing this answer |
-| T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` — the measurement, not the gate: its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, false here, so the table holds zero denies (#2580). Re-checked live 2026-11-11 at this head: `/api/dashboard`'s `network.by_decision` over a full 7-day window is `allow 711 / deny 0 / grant-required 8`, with `window_clamped_to_hours` null — so the zero is an unarmed branch, not an unlooked window |
+| T-17 | B2 | inject | A vault note's text is matched as relevant and then obeyed | `app/prefetch.py:1015` is the only decider that runs *at the seam*; upstream of it `app/harness/capabilities.py` answers a different question — `SOURCE_CAPABILITIES` maps a source id to the tools its runs may hold, so the lane a prefetched note can reach is a lane already barred from the verbs the note would ask for, and an over-broad declaration re-narrows rather than erroring |
+| T-18 | B1 | E | Fetched content points the browser at a loopback or private address | `egress._is_private_host` — one resolving predicate since #2584, which retired the text-only copy the HTTP lane used to carry. `agent_mcp/browser.py`'s `_host_block_reason`, `http_fetch` and `http_request` all call it, each hop of a redirect chain included, and `egress.floor_reason` answers from it too, so arming `enforce` adds the allow-list rather than changing this answer. The browser answers a second question the destination table cannot: `_enforce_landing` re-checks where the navigation actually came to rest and blanks the page when a redirect, a meta-refresh or a script put a private host in front of the model, and its loopback rule is stricter than the policy's |
+| T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` — the measurement, not the gate: its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, false here, so the table holds zero denies (#2580). Re-checked live 2026-11-11 at this head: `/api/dashboard`'s `network.by_decision` over a full 7-day window is `allow 711 / deny 0 / grant-required 8`, with `window_clamped_to_hours` null — so the zero is an unarmed branch, not an unlooked window. `app/harness/capabilities.py` is the one control on this row that refuses instead of recording, and it refuses upstream of the address: a source listed in `UNTRUSTED_INGEST_SOURCES` has its declared tier-2/3 durable-external tools — the browser and the messaging verbs — taken out of the ceiling its own runs are given, so the population most likely to be instructed to send something somewhere is the population that cannot hold the sender, whatever `enforce` eventually says |
 | T-20 | B8 | I | A credential rides out inside a request body the model composed | `app/harness/outbound_content.py:526` |
 | T-21 | B17 | chain | A turn installs a package nobody reviewed | `app/harness/supply_chain.py:421` |
 | T-22 | B17 | chain | A skill's installer pulls arbitrary code through a channel the matcher does not read | `eval/supply-chain/` |
@@ -164,6 +169,9 @@ appears in this table: those threats are in the next one.
 | T-39 | B19 | D | A guard refuses work that only describes an action, and the refusal is the damage | `app/harness/denial_journal.py` |
 | T-40 | B19 | D | A guard's measurement set includes the machinery it is measuring | `app/config.py` |
 | T-41 | B6 | M2A | A believable wrong answer becomes a command, because nothing checks the call against the task | `app/harness/action_review.py:103` |
+| T-42 | B6 | D | The bind that would have made the string guard's judgement moot cannot be built, so the command runs unsandboxed and the guard that did see the redirect is left alone with it | `agent_mcp/_path_sandbox.py` — the trade is deliberate, and it is the shape of the trade that belongs on this map: `_unshare_flags` refuses to pretend a subset of the namespaces works, `_should_fallback` answers "build failed, `bwrap` missing, or an opt-out" by running the command anyway, `_build_argv` then re-invokes with no `bwrap` in the argv at all, and `app/harness/protected_paths.py::protected_shell_ro_paths` is what decided which trees the bind would have covered. What witnesses the trade is one `fallback: true` on the `protected_path_sandbox` key at `/state` (#2109) plus `describe_launch` in the launch log — a breadcrumb, not a second decider |
+| T-43 | B9 | E | A job whose unit of work is reading a diff is dispatched holding the verbs that land a diff, and nothing in the standing bans would have caught it | `workers/sources/arch_review.py`'s `DISALLOWED`, handed to `envelope_for` as `extra_disallowed` by the shared worker turn path (`workers/sources/_common.py`): the `automod_*` verbs plus the write and schedule tools, and a deny a source carries itself rather than one `app/tool_bans.py` knows about — which is why the row's own rule is that the list must stay a superset of layer 6, and why the ceiling is the seam: a declared set narrower than the floor is narrowed by `expand`, never widened past it |
+| T-44 | B6 | D | A call whose outcome the caller was never told is retried, and the retry fires an effect that already landed — the send, the write, the fact | `agent_mcp/_tool_effects.py` — authority keyed on the effect rather than on the argv, which is why it is a second decision and not a second copy of the first: one row per (tool, canonical arguments, scope) claimed before dispatch, so the `unknown` state is the only record that survives being cancelled mid-call, and `Claim.may_dispatch` replays a stored result for an effect already `ok` and refuses outright when the state is still `unknown` (#544). The deny table at `app/harness/safety.py::check_bash_command` never sees this decision, and cannot: it answers a question about one command string |
 
 T-41 is what [[guard-coverage]] §8 already states as fact: every guard standing
 between an injected instruction and a call refuses on *shape*, and none asks
@@ -171,6 +179,21 @@ whether the call is the one the job asked for. Its control cell names the record
 that exists rather than a control that decides — the capability is live, and the
 answer to it on this box is a measurement, which is why `warn` was removed from
 that set instead of being kept.
+
+T-42, T-43 and T-44 are #4046's, and each is the threat over a rung of the ladder
+that this page had no seam for: row 5, the bind under the shell; row 7, the
+capability ceiling; row 9, effect authority; row 14, a deny list one source carries
+itself. None of the four needed a new boundary row — each is a decision taken on a
+crossing the map already drew, which is the point the rewritten authority cells make
+by naming more than one decider where they used to name one. The provenance is worth
+stating exactly, because the obvious story is false: rows 9 and 14 were in the ladder
+before this map was drawn, so they were **omitted at authoring**, not overtaken; only
+rows 5 and 7 postdate it. And the ceiling had never been named here at all: B9
+credited two tuples and a platform, which is the floor, so the ladder row's actual
+claim — that a tool is unreachable because nobody declared it rather than because
+someone listed it, and that the refusal leaves no deny-list entry to read back — had
+no threat over it. A boundary whose authority cell names one decider reads as settled;
+that is how four rungs stayed off this map without anyone deciding to leave them off.
 
 ## Open holes
 
@@ -296,7 +319,15 @@ negative here is the honest deliverable, and this page will take it.
 - **A second model.** Every boundary here overlaps a row of [[authority-surfaces]]
   or a section of [[guard-coverage]]. Where this page and those two disagree, the
   other two are the inventory of what runs and this one is a reading of it: they
-  win about the machine, this one wins about the threat.
+  win about the machine, this one wins about the threat. The overlap is now asserted
+  in the direction that broke, too:
+  `test_every_ladder_row_that_names_a_module_is_a_seam_this_map_cites` reads the
+  ladder's own table and refuses a row whose module no seam or threat on this map
+  credits, so a round that files a guard and does not revisit this page goes red
+  rather than leaving the sentence above true-by-habit. A row that names no module —
+  row 15, whose decider is a section of [[vault-protection]] — is skipped, not
+  failed: whether a prose section owes a chokepoint-derived seam is this doc's owner's
+  call, and #4046 left it open rather than answer it by construction.
 - **The ATLAS mapping in full.** STRIDE covers the six rows whose class letter is
   one of S/T/R/I/D/E; the five ATLAS-shaped classes are named in the table header
   and not formally cross-walked to technique ids, which a next reader should do if
@@ -346,6 +377,26 @@ negative here is the honest deliverable, and this page will take it.
   in `shadow`, `app/config.py` still boots-checks exactly two guard modes so
   O-05's "two guards and no others" stands, and skill delivery still has no
   provenance check, so O-01 is still open.
+- **2026-11-11 — #4046, the four rungs this map had no seam for.** The premise came
+  from a derived check, not a reading: parse the Module column of the ladder table,
+  grep each module against this page. It failed on exactly rows 5, 7, 9 and 14, and
+  a fifth — row 11, `agent_mcp/browser.py` — failed for a different reason worth
+  separating: the page credited it as a bare ``browser.py`` span, which the sibling
+  path node cannot grade because a citation without a directory cannot be resolved.
+  Fixed by qualifying the span and by crediting the landing re-check row 11 is
+  actually for. The four real ones were folded into the boundaries that already own
+  their crossings rather than given rows of their own: B6 now names the bind and the
+  effect ledger beside the deny table, B7 says out loud that its constant is a Python
+  function a shell never calls, B8 names the per-source ceiling above the address,
+  B9 says its two tuples are a floor and that a source can carry a deny the tuples do
+  not know about, and B2 names the ceiling too because a prefetched note arrives in a
+  lane that may already be barred from the verbs it would ask for. Three threats
+  (T-42, T-43, T-44), each with a cited decider, and the control cells of T-01, T-02,
+  T-17, T-18 and T-19 now credit the deciders they were answering with all along. What
+  the diff does not do is add a boundary: nineteen rows, none of them bare, because
+  `test_no_mapped_seam_is_bare_every_boundary_carries_a_threat_row` now refuses a seam
+  nobody threatens. The intro lost its rung count for the same reason the arithmetic
+  lost its manual re-count — a stated number is a number nobody re-runs.
 
 
 

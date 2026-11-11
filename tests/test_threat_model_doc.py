@@ -10,6 +10,21 @@ sentence — and each extractor is shown able to fail on text this file writes, 
 `test_the_four_extractors_are_shown_able_to_fail`, because a regex that matched
 nothing looks exactly like a doc with nothing wrong.
 
+Since #4046 the extraction reaches a second doc. `architecture/threat-model.md`
+claims in its own not-cover bullet that "Every boundary here overlaps a row of
+[[authority-surfaces]]", and that where the two disagree the ladder "wins about
+the machine" — a one-directional claim, and the direction that broke was the
+unpinned one: four ladder rows named a module that no row of this map's
+Boundaries or Threats tables cited at all (`agent_mcp/_path_sandbox.py`,
+`app/harness/capabilities.py`, `agent_mcp/_tool_effects.py`,
+`workers/sources/arch_review.py`), and a fifth (`agent_mcp/browser.py`) was
+credited only by a bare ``browser.py`` span in a control cell — a spelling the
+sibling path node cannot grade, because a citation has to carry a directory to be
+resolvable. So the ladder's own table is now an input:
+`test_every_ladder_row_that_names_a_module_is_a_seam_this_map_cites` derives the
+row set from `architecture/authority-surfaces.md` instead of a hand-kept list,
+because a second definition of a set is wrong within a week.
+
 What is deliberately NOT pinned here, and why:
 
   * **Whether a cited control resolves on disk.** `architecture/threat-model.md`
@@ -28,7 +43,11 @@ What is deliberately NOT pinned here, and why:
   * **The size of the incident set or the coverage counts.** Both come out of
     the rows. Only the 25-threat floor is a constant, because it is the
     acceptance clause, and the second constant is the two-word miss vocabulary
-    the same clause fixes.
+    the same clause fixes. Since #4046 a third exists and it is a floor on the
+    instrument, not on the doc: how many ladder rows must name a module before
+    the overlap node counts as having read the ladder at all. The ladder's row
+    count itself is never a constant here — the node derives it from
+    `architecture/authority-surfaces.md`, which is the point of #4046.
 """
 
 from __future__ import annotations
@@ -136,6 +155,146 @@ def incident_rows() -> list[tuple[str, list[str]]]:
     rows = _rows(body, "I-")
     assert rows, "the Retrospective section parsed to zero incident rows"
     return rows
+
+
+# --------------------------------------------------------------------------- #
+# #4046 — the ladder, and the two docs' overlap
+# --------------------------------------------------------------------------- #
+
+#: The second doc, and the set this map claims to rank. Read from disk on every
+#: call like `_text()`, so a gate running in a worktree grades the worktree's
+#: copy of both and never the live checkout's.
+LADDER_DOC = ROOT / "architecture" / "authority-surfaces.md"
+
+#: The ladder's own heading, matched as a prefix the way `_section` allows: the
+#: real heading is "The ladder, in the order an action meets it", and the comma
+#: clause is prose that a rewriter may edit without moving the table.
+LADDER_HEADING = "The ladder"
+
+#: How many ladder rows have to name a `.py` module for the overlap node to count
+#: as having read the ladder. Fourteen of fifteen do today; the floor is here so
+#: the node cannot go green over an empty intersection if the Module column ever
+#: turns to prose, which is the failure mode this file exists to refuse.
+MIN_LADDER_ROWS_WITH_A_MODULE = 10
+
+#: The four surfaces #4046 put on the map. Each has to be answered by a threat
+#: row naming its decider, not merely mentioned in a cell: a seam with nothing
+#: over it is a seam nothing prioritises, which is the intro's whole argument for
+#: drawing the map before ranking the ladder.
+SURFACES_WITH_A_DECIDER_TO_MODEL = (
+    "agent_mcp/_path_sandbox.py",      # ladder row 5 — the kernel's bind
+    "app/harness/capabilities.py",     # ladder row 7 — the capability ceiling
+    "agent_mcp/_tool_effects.py",      # ladder row 9 — the effect ledger
+    "workers/sources/arch_review.py",  # ladder row 14 — a job-scoped deny
+)
+
+#: A ladder row is numbered, not id-prefixed, so `_ROW` cannot see it:
+#: `| 7 | Surface | Module | Question it answers |`.
+_LADDER_ROW = re.compile(r"^\|\s*(?P<n>\d{1,2})\s*\|\s*(?P<rest>.*?)\s*\|\s*$",
+                         re.MULTILINE)
+
+#: A module named inside a Module cell. The directory is required, so row 1's
+#: vault path (`~/obsidian/lloyd/SOUL.md`) and row 15's prose pointer
+#: (`architecture/vault-protection.md` §2) do not match, and neither does a bare
+#: `safety.py` in prose — the rule is about the module a row *names*.
+_LADDER_MODULE = re.compile(
+    r"[A-Za-z0-9_.\-]*(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+\.py")
+
+_NUMBER = (r"\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven"
+           r"|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen"
+           r"|nineteen|twenty")
+
+#: A rung count in prose, in either word order: "fifteen rungs", "rungs: fifteen".
+_RUNG_COUNT = re.compile(
+    rf"\b(?P<n>{_NUMBER})\s+(?P<unit>rungs?)\b"
+    rf"|\b(?P<unit2>rungs?)[\s:—–-]{{1,4}}(?P<n2>{_NUMBER})\b",
+    re.IGNORECASE)
+
+_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+          "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+          "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+          "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+          "twenty": 20}
+
+
+def _ladder_text() -> str:
+    assert LADDER_DOC.exists(), (
+        f"{LADDER_DOC} is not on disk — the map has nothing left to rank")
+    return LADDER_DOC.read_text(encoding="utf-8")
+
+
+def ladder_rows(text: str | None = None) -> list[tuple[int, list[str]]]:
+    """`(row number, cells)` for every row of the ladder table. `cells` is
+    `[Surface, Module, Question]`. The row numbers are asserted contiguous
+    because a table that stopped parsing mid-way would otherwise look like a
+    shorter ladder, and a shorter ladder silently excuses rows from the overlap
+    check."""
+    body = _section(_ladder_text() if text is None else text, LADDER_HEADING)
+    out = []
+    for m in _LADDER_ROW.finditer(body):
+        cells = [c.strip() for c in m.group("rest").split("|")]
+        while cells and cells[-1] == "":
+            cells.pop()
+        assert len(cells) >= 3, (
+            f"ladder row {m.group('n')} parsed to {len(cells)} cells; the table is "
+            "id, Surface, Module, Question")
+        out.append((int(m.group("n")), cells))
+    assert out, "the ladder table parsed to zero rows"
+    nums = [n for n, _ in out]
+    assert nums == list(range(1, len(nums) + 1)), (
+        f"ladder rows are {nums}, not a contiguous 1..{len(nums)} — a row went "
+        "unread, and an unread row is an unchecked seam")
+    return out
+
+
+def ladder_module_rows(text: str | None = None) -> list[tuple[int, list[str]]]:
+    """`(row number, [modules])` for the rows that name at least one `.py` module.
+
+    Rows naming none are skipped rather than failed: row 15's Module cell points
+    at `architecture/vault-protection.md` §2, a prose section, and demanding a
+    chokepoint-derived seam for it would grade a scope decision the map's owner
+    owes (#4046's owed note), not drift. Whether a multi-module row is satisfied
+    by one citation is the other edge, and it is answered the same way the map
+    is drawn — B16 cites `app/desktop_lease.py` and not `app/routers/desktop.py`,
+    so one hit names the row's seam and the row passes.
+    """
+    rows = [(n, sorted(set(_LADDER_MODULE.findall(cells[1]))))
+            for n, cells in ladder_rows(text) if len(cells) > 1]
+    named = [(n, mods) for n, mods in rows if mods]
+    assert named, (
+        "no ladder row names a `.py` module, so the overlap node is reading an "
+        "empty set — which is what this assert exists to make loud")
+    return named
+
+
+def ladder_row_count() -> int:
+    return len(ladder_rows())
+
+
+def map_citation_text() -> str:
+    """The Boundaries and Threats tables' rows, joined. Section prose is excluded
+    on purpose: a module named in a paragraph is not a seam being named, and the
+    claim under test is about the map."""
+    lines = []
+    for heading, prefix in ((BOUNDARIES, "B"), (THREATS, "T-")):
+        for m in _ROW.finditer(_section(_text(), heading)):
+            if m.group("id").startswith(prefix):
+                lines.append(m.group(0))
+    assert len(lines) >= MIN_THREATS, (
+        f"the two tables parsed to {len(lines)} rows, below the {MIN_THREATS} "
+        f"threat floor this file already enforces — the extraction broke, the doc "
+        "did not shrink")
+    return "\n".join(lines)
+
+
+def uncited_ladder_rows(ladder_text: str | None = None,
+                        map_text: str | None = None) -> list[tuple[int, list[str]]]:
+    """Ladder rows whose every named module is absent from the map's tables.
+    Takes text so the vacuity node can hand it a ladder of its own."""
+    cited = map_citation_text() if map_text is None else map_text
+    return [(n, mods) for n, mods in ladder_module_rows(ladder_text)
+            if not any(mod in cited for mod in mods)]
+
 
 
 # --------------------------------------------------------------------------- #
@@ -338,6 +497,159 @@ def test_each_incident_row_names_a_source_a_reader_can_go_and_read():
 
 
 # --------------------------------------------------------------------------- #
+# #4046 — the overlap, in the direction that broke
+# --------------------------------------------------------------------------- #
+
+def test_every_ladder_row_that_names_a_module_is_a_seam_this_map_cites():
+    """Clause 1: a rung of the ladder with no decider in this map is a red node.
+
+    The map's not-cover bullet says every boundary here overlaps a row of
+    [[authority-surfaces]] and that the ladder wins "about the machine"; four rows
+    said otherwise, and nothing read the two docs against each other to notice.
+    The row set is derived from the ladder's own table, so the node goes red when
+    a ladder row is filed and the map is not revisited — which is the standing
+    obligation #4046 is taking on, and the reason the message names the fix rather
+    than a count.
+
+    Both edges of the rule are asserted as properties of the table rather than as
+    row numbers, because a row inserted tomorrow moves every number after it: at
+    least one row names more than one module (row 13 today — B16 cites
+    `app/desktop_lease.py` and not `app/routers/desktop.py`, so one hit names the
+    row's seam and the row passes), and at least one names none (row 15, whose
+    Module cell is `architecture/vault-protection.md` §2, prose, which is skipped
+    rather than failed — whether it deserves a seam of its own is the scope call
+    the item owes, not a drift this node can see).
+    """
+    named = ladder_module_rows()
+    assert len(named) >= MIN_LADDER_ROWS_WITH_A_MODULE, (
+        f"only {len(named)} ladder rows name a module, below the "
+        f"{MIN_LADDER_ROWS_WITH_A_MODULE} this node will read — a Module column "
+        "that turned to prose would otherwise make the overlap check green over "
+        "an empty set")
+    assert any(len(mods) > 1 for _, mods in named), (
+        "no ladder row names more than one `.py` module, so the one-hit rule the "
+        "map depends on is no longer exercised by anything and would silently "
+        "start demanding every module a row mentions")
+    assert len(ladder_rows()) > len(named), (
+        "every ladder row now names a `.py` module, so the skip that lets a row "
+        "point at a prose section has stopped being exercised — re-check that the "
+        "skip is still the rule before trusting a green node")
+
+    uncited = uncited_ladder_rows()
+    assert not uncited, (
+        f"{len(uncited)} ladder row(s) name a module that no row of this map's "
+        f"Boundaries or Threats tables cites: {uncited}. Either name the decider "
+        "on the boundary row that owns the crossing (that is what B6, B7, B8 and "
+        "B9 do now) or add a boundary row — and if you add one, "
+        "`test_no_mapped_seam_is_bare_every_boundary_carries_a_threat_row` wants a "
+        "threat over it, because a seam nobody threatens is a seam nobody ranks")
+
+
+def test_no_mapped_seam_is_bare_every_boundary_carries_a_threat_row():
+    """Clause 2: no row of the map may be a caption.
+
+    Already true of B1-B19 at the head #4046 opened on, which is what makes it
+    free to pin — and it is the node that stops a next round from adding a seam to
+    look complete and nothing over it to make it rankable.
+    """
+    named = boundaries()
+    covered = {cells[0] for _, cells in (threat_rows() + open_rows()) if cells}
+    bare = sorted(named - covered, key=lambda b: int(b[1:]))
+    assert not bare, (
+        f"{bare} are rows of the Boundaries table that no threat and no open hole "
+        "is stated over. The Boundaries preamble makes a seam a boundary because "
+        "code authorizes a crossing there; if nothing crosses it in the "
+        "enumeration, the row is describing the tree without modelling it")
+
+    probe = _rows("| T-96 | B99 | T | a capability comfortably over the length "
+                  "this file's shape rule demands for a threat | "
+                  "`app/harness/safety.py` |\n", "T-")
+    assert probe and probe[0][1][0] == "B99" and "B99" not in named, (
+        "the boundary-cell extraction or the boundary set no longer distinguishes "
+        "a covered seam from an invented one, so the assert above passes on "
+        "anything")
+
+
+def test_each_surface_4046_added_to_the_map_is_answered_by_a_cited_control():
+    """Clause 3: each of the four surfaces is a control somebody credits.
+
+    Naming a module in an authority cell puts it on the map; the overlap node
+    checks that much for every row of the ladder. This node is the narrower claim
+    #4046 is actually about — that a seam is answered by a decider, which in this
+    doc's shape means the module appears in a Threats row's Control cell, where
+    the file's `_CITED` rule (and the sibling file's resolution node) can be
+    pointed at it. A seam named only in prose is a seam whose threat is still
+    scored as covered by whatever the row used to credit.
+    """
+    rows = threat_rows()
+    by_id = dict(rows)
+    for mod in SURFACES_WITH_A_DECIDER_TO_MODEL:
+        carriers = [rid for rid, cells in rows if cells and mod in cells[-1]]
+        assert carriers, (
+            f"{mod} is on the map as a decider but no Threats row credits it as a "
+            "control, so the threat over that seam is still being answered by the "
+            "control that was there before it existed — which is the exact error "
+            "#4046 is about: B6 credited 'the deny table, twice' while a second "
+            "decision ran on the same call, and B7 credited a Python path check "
+            "while the shell's kernel bind was the one that could be off")
+        for rid in carriers:
+            control = by_id[rid][-1]
+            assert control != NO_CONTROL, (
+                f"{rid} credits {mod} and also marks itself uncited: an open hole "
+                "belongs under its own heading")
+            assert _CITED.search(control), (
+                f"{rid}'s control cell cites {mod} in passing but carries no "
+                f"citation of the shape the rule requires: {control!r}")
+
+
+def _intro_text() -> str:
+    """Everything before the first `## ` — front matter, title, intro.
+
+    Scoped this way on purpose: the Review log is entitled to say "fifteen rows,
+    not twelve" about the tree it measured on its own date, and a rule that
+    silenced that would be a rule rewriting dated records to match today.
+    """
+    text = _text()
+    m = re.search(r"^## ", text, re.MULTILINE)
+    assert m, "the doc has no `## ` heading, so an intro-scoped rule has no edge"
+    return text[:m.start()]
+
+
+def test_the_intro_states_no_rung_count_the_ladder_does_not_agree_with():
+    """Clause 4: a stated count in an intro is a number nobody re-runs.
+
+    The pointer half of the fix shipped in `1b704b04`, which replaced "eleven
+    rungs — now twelve" with a correct "fifteen" and a link to the doc that counts
+    them. A correct number is still a second definition of a set, and the ladder
+    grows by a row every time a guard is filed; so the intro states no count and
+    the derivation lives here, where it is recomputed on every suite run.
+    """
+    derived = ladder_row_count()
+    intro = _intro_text()
+    for hit in _RUNG_COUNT.finditer(intro):
+        token = (hit.group("n") or hit.group("n2")).lower()
+        stated = int(token) if token.isdigit() else _WORDS[token]
+        assert stated == derived, (
+            f"the intro states {stated} rungs; `architecture/authority-surfaces.md`"
+            f" has {derived} rows. Name no count, or name the one the ladder "
+            "derives — the sentence is not the measurement, this node is")
+
+    # Vacuity, in both directions the node could go quietly green: an extractor
+    # blind to the shape, and a comparison that can no longer disagree.
+    seen = _RUNG_COUNT.search("the ladder is **fifteen rungs** wide")
+    assert seen and (seen.group("n") or "").lower() == "fifteen", (
+        "the rung-count extractor no longer sees 'fifteen rungs', the exact "
+        "wording this round removed, so the loop above is grading an empty set")
+    reversed_ = _RUNG_COUNT.search("the ladder is rungs: sixteen wide")
+    assert reversed_ and (reversed_.group("n2") or "").lower() == "sixteen", (
+        "the extractor misses the reverse order ('rungs: sixteen'), which is how "
+        "a reworded intro would hide a count from this node")
+    assert _WORDS["sixteen"] != derived, (
+        f"the probe count has collided with the derived ladder length {derived}, "
+        "so the comparison above can no longer be shown to refuse anything")
+
+
+# --------------------------------------------------------------------------- #
 # vacuity controls
 # --------------------------------------------------------------------------- #
 
@@ -396,3 +708,49 @@ def test_the_doc_declares_the_two_things_it_cannot_promise(tmp_path):
         assert needle in text, (
             f"the retrospective no longer carries {needle!r}: without it the "
             "coverage number is a number with no stated inflation")
+
+
+def test_the_ladder_overlap_extractor_is_shown_able_to_fail():
+    """Clause 5: the overlap node can object, on a ladder this file writes.
+
+    Four rows, one per way the extraction could go quietly green: a module the map
+    cites, a module it does not, a row naming no module at all (which must be
+    skipped, not failed — a dead skip and a dead check look identical from a green
+    node), and a row naming two modules where only one is cited (which must pass,
+    or the node starts demanding citations the map has never owed).
+    """
+    fake = """## The ladder, in the order an action meets it
+
+| # | Surface | Module | Question it answers |
+|---|---|---|---|
+| 1 | A seam | `app/tool_bans.py` | what may a turn call at all |
+| 2 | Another seam | `app/harness/no_such_seam_zzz.py` | what else may it call |
+| 3 | Prose only | `architecture/vault-protection.md` §2 | what rewrites the vault registration |
+| 4 | Two modules | `app/desktop_lease.py`, `app/routers/desktop.py` | may it act on the desktop |
+"""
+    named = dict(ladder_module_rows(fake))
+    assert sorted(named) == [1, 2, 4], (
+        f"the ladder extractor returned rows {sorted(named)} for a table holding "
+        "three module-naming rows and one prose row: the skip, the numbering or "
+        "the module pattern has drifted, and a row the extractor cannot see is a "
+        "row it can never fail")
+    assert named[4] == ["app/desktop_lease.py", "app/routers/desktop.py"], (
+        f"row 4's modules extracted as {named[4]}, so the multi-module case the "
+        "one-hit rule exists for is not being exercised")
+
+    cited = ("| B9 | an unattended session → the tool surface | calls | tuples | "
+             "`app/tool_bans.py:23` |\n"
+             "| B16 | an act → the desktop | a click | a lease | "
+             "`app/desktop_lease.py:123` |\n")
+    uncited = uncited_ladder_rows(fake, map_text=cited)
+    assert [n for n, _ in uncited] == [2], (
+        f"against a map citing only B9 and B16 the uncited rows should be exactly "
+        f"[2], got {[n for n, _ in uncited]} — either the prose row was demanded a "
+        "seam (the skip is dead) or an uncited module read as cited (the check is "
+        "dead)")
+
+    real = map_citation_text()
+    assert "B19 is the seam every other row assumes away" not in real, (
+        "the citation surface grew past the two tables into the Boundaries "
+        "section's own prose, where any module named in a paragraph would count "
+        "as a seam being named")
