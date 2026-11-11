@@ -260,6 +260,21 @@ def main() -> int:
             if entry.get("error"):
                 print(f"  ! {entry['entity']}: {entry['error']}")
                 continue
+            # #3820: the entity line this loop never had. The AGGREGATE fraction
+            # already printed above, and the per-entity numbers have been in the
+            # record since #3007 — but a hub scanned at 0.6% of its facts with no
+            # actions to report printed NOTHING per entity, so the only thing on
+            # the screen about that entity was its `contradictions: 0` in the
+            # record, which reads as a clean verdict. `0 < checked < facts_total`
+            # is the partial case; a fully scanned entity prints no line (its
+            # fraction is not a caveat), and a refused one is already reported by
+            # the `refused=N` aggregate, whose scope this line does not have.
+            checked, total = entry.get("checked", 0), entry.get("facts_total", 0)
+            if 0 < checked < total:
+                print(f"  ~ {entry['entity']} scanned {checked} of {total} facts:"
+                      f" contradictions={entry.get('contradictions', 0)}"
+                      f" near-duplicates={entry.get('near_duplicates', 0)}"
+                      f" actions={entry.get('planned', 0)}")
             for action in entry.get("actions", []):
                 flag = ("expired" if action.get("applied") else
                         "would expire" if action.get("planned") else

@@ -105,7 +105,8 @@ from agent_mcp.facts import (
     _contradiction_trace,
     _detect_contradictions_sync,
 )
-from agent_mcp.retrieval import get_facts_sync as _get_facts_sync
+from agent_mcp.retrieval import (
+    FACT_GODNODE_THRESHOLD, get_facts_sync as _get_facts_sync)
 from app.kg_store import StoreUnavailable as _StoreUnavailable, store as _store
 
 logger = logging.getLogger("lloyd.improvement")
@@ -1707,6 +1708,25 @@ def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
 #: category-sized piece, and it cannot cross a category boundary.
 SCAN_ENTITY = "entity"
 SCAN_BY_CATEGORY = "by_category"
+#: A third answer to the same refusal, reached only by a corrections-sourced
+#: signal whose own `evidence` names one of the entity's categories: the detector
+#: runs on that category's facts and nothing else (#3820). The partition above
+#: answers a correction with whichever categories happen to sit under the bound —
+#: measured on the live tree, `decision` (35), `capability` (36) and `overview`
+#: (17) of `Lloyd`'s 5,831 facts, and none of the seven categories a human
+#: correction is written about — so a hub row reading `contradictions: 0` was a
+#: verdict about facts the correction never touched. This scope is a precision
+#: change, not a coverage one: it reads FEWER facts than the partition and reads
+#: the ones the operator named. The bound is untouched either way — the same
+#: check in `_detect_contradictions_sync` still refuses a piece over
+#: `FACT_GODNODE_THRESHOLD`, so a correction naming a category that is itself over
+#: the bound is answered by that SAME category narrowed to the correction's own
+#: keywords, capped at the threshold and named in `corrections_filter` (#4067).
+#: Only when there is nothing to narrow with — no category resolved, no
+#: discriminating word in the line, or none of them carried by any fact in it —
+#: does the row fall back to the partition, and then `scan_scope_fallback` says
+#: which of the three it was.
+SCAN_CORRECTIONS_EVIDENCE = "corrections_evidence"
 
 #: The category a fact row lands in when it carries none. Same default
 #: `facts.py::_get_all_facts` gives a row it groups for display, so the
@@ -1732,8 +1752,44 @@ def _facts_by_category(facts: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
-def _rescan_by_category(entity: str, facts_view: list[dict]) -> dict:
+def _rescan_by_category(entity: str, facts_view: list[dict],
+                        focus_category: str | None = None,
+                        focus_keywords: list[str] | None = None) -> dict:
     """Apply the remedy the refusal itself names, once per category.
+
+    `focus_category` (#3820) narrows the remedy to ONE category — the one a
+    correction's own words named — and every other category goes down the same
+    skip-and-name path the bound already forces: counted into `facts_excluded`,
+    listed in `categories_skipped`, never scanned. It is one function rather than
+    a second one because the denominator has to come from one place: #3007 landed
+    `facts_excluded` off `groups[category]`, the very list whose refusal produced
+    the name beside it, and a narrowed scan that computed its own exclusion some
+    other way would publish a coverage figure that disagreed with its own category
+    names while both looked plausible. With a focus set, `categories_skipped`
+    stops meaning only "over the bound" and starts meaning "not this scan's
+    scope", and `scan_scope` plus `corrections_category` on the plan say which of
+    the two a row is. `focus_refused` is True when the focused category was itself
+    refused by the bound, which is the caller's signal to fall back to the whole
+    partition rather than report a scan of nothing.
+
+    `focus_keywords` (#4067) narrows WITHIN the focused category: the detector sees
+    only that category's facts whose own text carries one of the correction's
+    keywords, so a correction about a category too big to scan is answered by the
+    facts it was about rather than by the partition's under-bound leftovers. The
+    slice is capped at `FACT_GODNODE_THRESHOLD` rows — the number the detector
+    refuses above — and `focus_filter` names the keywords, plus the cap when it
+    bit, so a keyword-filtered row can never be read as a whole-category scan. A
+    filter that matches no fact at all scans nothing and sets
+    `focus_matched_nothing`, which is the caller's signal to fall back: an empty
+    slice reported as scanned would be the did-not-measure-read-as-measured-zero
+    this module keeps having to unlearn.
+
+    What a focus does NOT change is the denominator: the entity's other
+    categories are excluded, not forgotten, so `facts_total` (derived downstream
+    as `checked + facts_excluded`) is still the entity's full fact count and a hub
+    read at the narrowed scope cannot publish 100% coverage. That is the exact
+    false green #3007 exists to prevent, and it is why narrowing reduces what is
+    DETECTED and never what is COUNTED.
 
     `_detect_contradictions_sync` ends its refusal with "Pass a narrower
     `category`" (#1251). No caller ever had: `plan_entity` scanned at the coarsest
@@ -1778,8 +1834,37 @@ def _rescan_by_category(entity: str, facts_view: list[dict]) -> dict:
     contradictions: list[dict] = []
     checked = 0
     excluded = 0
+    focus_refused = False
+    focus_matched_nothing = False
+    focus_filter: str | None = None
     for category in sorted(groups):
-        piece = _detect_contradictions_sync(entity, category, facts=groups[category])
+        if focus_category is not None and category != focus_category:
+            # Out of scope, not over the bound: set aside and counted, exactly as
+            # a refusal sets a category aside, because the number that matters to
+            # a later reader is how many of the entity's facts this scan did NOT
+            # compare (#3007). `scan_scope` names this reason; the category list
+            # stays the same kind of list.
+            skipped.append(category)
+            excluded += len(groups[category])
+            continue
+        piece_facts = groups[category]
+        if focus_keywords:
+            # Narrowed within the focused category, not across the entity: the
+            # correction named `state`, `state` is over the bound, and these are
+            # the rows of `state` its own words reach (#4067).
+            piece_facts, focus_filter = _keyword_slice(piece_facts, focus_keywords)
+            if not piece_facts:
+                # Nothing in the category carries any of the keywords. Running the
+                # detector on an empty list would put this category into
+                # `categories_scanned` with `checked: 0` — a scan that reads as
+                # having compared the correction's facts and found them clean,
+                # which is the exact false green the fallback path exists to
+                # avoid. Set it aside unscanned and let the caller say why.
+                skipped.append(category)
+                excluded += len(groups[category])
+                focus_matched_nothing = True
+                continue
+        piece = _detect_contradictions_sync(entity, category, facts=piece_facts)
         if piece.get("refused"):
             # The size is read off `groups[category]` — the very list whose refusal
             # produced the name two lines below — and not off a file listing or the
@@ -1791,17 +1876,265 @@ def _rescan_by_category(entity: str, facts_view: list[dict]) -> dict:
             # construction, since the bound is what refused it.
             skipped.append(category)
             excluded += len(groups[category])
+            focus_refused = (category == focus_category)
             continue
         contradictions.extend(piece.get("contradictions", []))
         checked += piece.get("checked", 0)
+        # Facts of THIS category the keyword filter set aside (#4067). Counted from
+        # the same `groups[category]` the scan sizes everything else from, and
+        # against the detector's own `checked`, so `facts_total` = `checked` +
+        # `facts_excluded` stays the entity's full size through a narrowed AND a
+        # filtered scan: 4 facts compared out of a 132-fact hub is a 4/132 row,
+        # never a 4/4 one. For an unfiltered scan this term is 0 by construction.
+        excluded += len(groups[category]) - piece.get("checked", 0)
         scanned.append(category)
     return {"entity": entity, "category": None, "contradictions": contradictions,
             "checked": checked, "refused": not scanned,
             "categories_scanned": scanned, "categories_skipped": skipped,
-            "facts_excluded": excluded}
+            "facts_excluded": excluded, "focus_category": focus_category,
+            "focus_refused": focus_refused,
+            "focus_filter": focus_filter,
+            "focus_matched_nothing": focus_matched_nothing}
 
 
-def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
+_NON_WORD_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _evidence_words(text: str) -> str:
+    """Lowercased text with every run of non-alphanumerics collapsed to a space.
+
+    The evidence and the category names go through the SAME normaliser, so a
+    hyphenated category (`session-extracted`) is matchable, and so is a correction
+    that points at a category the way an operator actually points at one — by its
+    file (`Lloyd-state.md`) or its path-ish spelling. Splitting on the hyphen
+    instead would answer both of those with nothing.
+    """
+    return _NON_WORD_RE.sub(" ", (text or "").lower()).strip()
+
+
+def _category_from_evidence(evidence: str, groups: dict[str, list[dict]]) -> str | None:
+    """The one category of THIS entity that `evidence` names, or None.
+
+    The candidates are the entity's own categories as the read grouped them
+    (`_facts_by_category`, the same partition the scan walks), never a listing of
+    `FACTS_ROOT/<entity>/*.md`: an evidence string naming a category the entity
+    does not carry resolves to nothing here and takes the documented fallback,
+    rather than aiming the scan at an empty slice and reading it as a clean
+    verdict on the correction.
+
+    The match is a whole word, and the longest name wins (`session-extracted`
+    before a bare `session` would ever be considered, ties by name), so
+    `preference` and `state` in one sentence pick the more specific of the two
+    that are actually present.
+
+    This is deliberately literal, and it is therefore wrong in one direction in
+    the ordinary prose of a correction: "the state of the index is wrong" names
+    the word `state`, and this resolver reports `state`. What that can cost is
+    which slice the detector compared, and nothing more — an expiry still needs
+    the pair-level basis #701 and #2078 require, and `corrections_category` on the
+    record row names the scope it picked, so the reviewer sees the scope that was
+    used and can reject it. The failure mode of the alternative — resolve nothing,
+    scan whichever small files happen to exist — is the live condition this
+    (#3820) was filed for.
+    """
+    text = _evidence_words(evidence)
+    if not text:
+        return None
+    candidates = [(_evidence_words(category), category) for category in groups]
+    hits = [(len(needle), name) for needle, name in candidates
+            if needle and re.search(rf"(?:^|\s){re.escape(needle)}(?:\s|$)", text)]
+    if not hits:
+        return None
+    longest = max(needle_len for needle_len, _ in hits)
+    return min(name for needle_len, name in hits if needle_len == longest)
+
+
+#: Words a correction uses ABOUT the record rather than about the world. The
+#: entity is already the scan's scope, the category is already the slice, and every
+#: correction in the log says something is wrong. Left in, each of these matches
+#: every fact in the file — the entity name above all, since the rows conventionally
+#: repeat it — and a filter that selects an entire over-bound category is the
+#: partition with extra steps and a bound that silently bites (#4067 clause 3).
+_EVIDENCE_NON_DISCRIMINATORS = frozenset({
+    "fact", "facts", "row", "rows", "entry", "entries", "note", "notes",
+    "file", "files", "log", "logs", "line", "lines", "key", "keys",
+    "wrong", "incorrect", "inaccurate", "stale", "outdated", "obsolete",
+    "correct", "right", "fixed", "update", "updates", "updated", "record",
+    "records", "recorded", "says", "said", "say", "tell", "told", "shows",
+    "show", "shown", "reads", "read", "reading", "memory", "memories",
+    "correction", "corrections", "applied", "apply", "applies", "unapplied",
+    "booked", "listed", "list", "lists", "still", "also", "just", "only",
+    "ever", "never", "always", "now", "then", "here", "there", "where",
+    "when", "why", "how", "which", "what", "that", "this", "these", "those",
+    "the", "and", "are", "was", "were", "been", "being", "have", "has",
+    "had", "will", "would", "should", "could", "does", "did", "done",
+    "with", "from", "before", "after", "about", "because", "while",
+    "into", "onto", "over", "under", "again", "true", "false", "none",
+    "null", "one", "two", "three", "first", "second", "next", "previous",
+})
+
+#: How many keywords the filter may carry. The evidence is one heading's words;
+#: past this the filter is the sentence again and the slice is everything it can
+#: possibly touch.
+MAX_FILTER_KEYWORDS = 8
+
+#: A keyword shorter than this is a fragment or an initial, and whole-word
+#: matching on it selects facts by spelling rather than by subject.
+_MIN_KEYWORD_LEN = 3
+
+
+def _keywords_from_evidence(evidence: str, *, entity: str,
+                            category: str) -> list[str]:
+    """The correction's own discriminating words, in order of appearance.
+
+    These are matched whole-word against FACT text, so a usable keyword has to be
+    a word a fact could carry. Dropped: the entity's name and the category's name
+    (both are the scope this scan is already inside, and every row in the slice
+    repeats them — keeping the entity name would select a whole over-bound category
+    and make the cap, not the correction, decide what got compared), everything in
+    `_EVIDENCE_NON_DISCRIMINATORS`, every run of digits, and anything under
+    `_MIN_KEYWORD_LEN`. For "HUBW event facts about the mqtt broker handshake are
+    wrong" that leaves mqtt, broker, handshake.
+
+    A line made only of dropped words yields nothing, and the caller reports the
+    over-bound category it then is instead of scanning the whole file — see
+    `_scoped_retry`.
+    """
+    skip = set(_EVIDENCE_NON_DISCRIMINATORS)
+    skip.update({_evidence_words(entity), _evidence_words(category)})
+    taken: list[str] = []
+    for word in _evidence_words(evidence).split():
+        if len(word) < _MIN_KEYWORD_LEN or word.isdigit() or word in skip:
+            continue
+        if word in taken:
+            continue
+        taken.append(word)
+        if len(taken) >= MAX_FILTER_KEYWORDS:
+            break
+    return taken
+
+
+def _keyword_slice(facts: list[dict],
+                   keywords: list[str]) -> tuple[list[dict], str]:
+    """The facts whose own text carries a keyword, capped at the scan bound.
+
+    Ranked by how many keywords a row carries so the cap keeps the rows the
+    correction spoke to most directly, with the row's normalised text and then its
+    position as tie-breakers — a stable order, because the same tree has to yield
+    the same record when a reader re-derives it. The cap is
+    `FACT_GODNODE_THRESHOLD`, the number `_detect_contradictions_sync` refuses
+    above, so the slice handed over is always one the detector will accept: the
+    bound is respected by construction rather than discovered by a refusal.
+
+    Returns the kept rows and the note that names the filter —
+    `keywords:mqtt,broker,handshake`, with `;bounded_at_50_of_56` appended when the
+    cap actually cut. The suffix is the point of returning a note at all: a row
+    that dropped 6 matching facts has to say so beside the number it scanned,
+    the same way `facts_excluded` says it beside the total.
+    """
+    scored: list[tuple[int, str, int, dict]] = []
+    for position, fact in enumerate(facts):
+        text = _evidence_words(str(fact.get("fact") or ""))
+        hits = sum(1 for keyword in keywords
+                   if re.search(rf"(?:^|\s){re.escape(keyword)}(?:\s|$)", text))
+        if hits:
+            scored.append((-hits, text, position, fact))
+    scored.sort(key=lambda row: (row[0], row[1], row[2]))
+    kept = [row[3] for row in scored[:FACT_GODNODE_THRESHOLD]]
+    note = "keywords:" + ",".join(keywords)
+    if len(scored) > FACT_GODNODE_THRESHOLD:
+        note += f";bounded_at_{FACT_GODNODE_THRESHOLD}_of_{len(scored)}"
+    return kept, note
+
+
+def _scoped_retry(entity: str, facts_view: list[dict],
+                  signal: dict | None) -> dict:
+    """Answer an over-bound entity at the scope ITS OWN signal implies (#3820).
+
+    `plan_entity` chose a scan purely from the detector's refusal, so an entity
+    reached by a human correction was checked against whichever of its categories
+    sat under the bound — on the live `Lloyd` hub, `decision`, `capability` and
+    `overview`, 35 of 5,831 facts, while the seven categories a correction names
+    were all skipped for size. The correction's text was already on the signal
+    (`evidence`, from `read_correction_signals`) and nothing read it.
+
+    Four outcomes, and the record distinguishes all four:
+
+      * evidence names a category the entity has, and that category is under the
+        bound → scan it alone. `category` names it, `scan_scope` becomes
+        `corrections_evidence`, and every other category is excluded and counted
+        so `facts_total` is still the entity's size (clause 2).
+      * evidence names a category the entity has but the bound will not scan whole
+        (on the live `Lloyd` hub `state` runs to tens of thousands of lines) →
+        scan THAT category's facts whose own text carries the correction's
+        keywords, capped at the bound, and name both the category and the filter
+        (`filter`) (#4067 clause 3). This is the case the live nightly sits in:
+        the correction reached the hub, named a category, and the pass answered it
+        with 35 facts from three files the correction never mentioned.
+      * the category is over the bound AND the narrowing yields nothing to compare
+        — no discriminating word in the line, or none carried by any fact in the
+        category → fall back to the partition and record which of the two it was,
+        naming the category that was tried.
+      * evidence names no category at all — the live signal of 2026-11-11, whose
+        evidence is a sentence about the memory system → same fallback, different
+        reason.
+
+    What the fallbacks share is that none of them is silent: `fallback` is set
+    whenever the narrowed scan did not run, so a scope-resolution miss reads as a
+    recorded fallback rather than as an entity that was checked and found clean.
+
+    A drift-sourced or caller-named signal has nothing to resolve and gets the
+    partition with `fallback: None`: this is the corrections leg's scoping rule,
+    not a new behaviour for every signal.
+    """
+    category: str | None = None
+    fallback: str | None = None
+    retry: dict | None = None
+    keyword_filter: str | None = None
+    if signal and signal.get("source") == "corrections":
+        evidence = str(signal.get("evidence") or "")
+        category = _category_from_evidence(evidence, _facts_by_category(facts_view))
+        if category is None:
+            fallback = "corrections_evidence_names_no_category"
+        else:
+            attempt = _rescan_by_category(entity, facts_view, focus_category=category)
+            if attempt["categories_scanned"]:
+                retry = attempt
+            else:
+                # The category is over the bound, so the whole-file focus read
+                # nothing. The answer is the same category narrowed to the
+                # correction's words, not the partition's under-bound leftovers.
+                # `retry` is left as None through this branch: the failed focus
+                # scanned nothing, and handing it to `plan_entity` as the answer
+                # would skip the partition and publish the godnode refusal for an
+                # entity whose small categories are still scannable.
+                keywords = _keywords_from_evidence(evidence, entity=entity,
+                                                   category=category)
+                narrowed = (_rescan_by_category(entity, facts_view,
+                                                focus_category=category,
+                                                focus_keywords=keywords)
+                            if keywords else None)
+                if narrowed is not None and narrowed["categories_scanned"]:
+                    retry = narrowed
+                    keyword_filter = narrowed["focus_filter"]
+                else:
+                    # Nothing to narrow with, or nothing the narrowing kept: the
+                    # partition answers and the reason names which miss it was.
+                    # `category` goes back to None so `corrections_category` keeps
+                    # meaning "the category this scan compared", never "the
+                    # category an evidence string resembled".
+                    fallback = (f"corrections_keywords_matched_no_facts:{category}"
+                                if narrowed is not None
+                                else f"corrections_category_over_bound:{category}")
+                    category = None
+    if retry is None:
+        retry = _rescan_by_category(entity, facts_view)
+    return {"retry": retry, "category": category, "fallback": fallback,
+            "filter": keyword_filter}
+
+
+def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY,
+                signal: dict | None = None) -> dict:
     """Decide what — if anything — to change about one entity's facts.
 
     Reads through the same `_get_facts_sync` the recall path uses, so the plan
@@ -1811,6 +2144,16 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     (`app.fact_ids.next_fact_id`), so one id is one fact in this view and
     several facts on disk. The detector is handed that same list instead of
     re-reading, so what gets judged and what gets written come from one read.
+
+    `signal` (#3820) is what changed an over-bound entity's scan from a function
+    of its SIZE alone into a function of why it was visited. The planner used to
+    see only a name, so an entity reached by a human correction was answered by
+    whichever of its category files happened to sit under the bound — the live
+    `Lloyd` hub's `decision`, `capability` and `overview`, 35 of 5,831 facts — and
+    the correction's own words, which were on the signal all along, were never
+    read. Passing it changes one decision (which slice answers a refusal) and no
+    rule about what may be done with the result; omit it, and the plan is exactly
+    what this function produced before.
 
     Two rules decide whether a classified pair becomes an action (#701). Only a
     pair the detector classified as opposing terms is eligible —
@@ -1866,8 +2209,24 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     # skipped, so `facts_total` below equals `checked` and the whole-scan row is
     # visibly the 100% case a partial row is measured against (#3007).
     facts_excluded = 0
+    # Scope decided by the signal that produced this entity, and the reason it
+    # was not, when it was not (#3820). `corrections_category` is the category the
+    # scan actually compared at the corrections scope — never a category an
+    # evidence string merely resembled — and `scan_scope_fallback` names why the
+    # narrowed scan did not run, so a resolution miss is a recorded fallback and
+    # not a silent return to the partition.
+    corrections_category: str | None = None
+    scan_scope_fallback: str | None = None
+    # And, when the category itself was too big to scan, how it was narrowed
+    # (#4067): the keywords and the cap, so `corrections_category: event` beside
+    # `checked: 4` cannot be read as "all of event was compared".
+    corrections_filter: str | None = None
     if detection.get("refused"):
-        retry = _rescan_by_category(entity, facts_view)
+        scoped = _scoped_retry(entity, facts_view, signal)
+        retry = scoped["retry"]
+        corrections_category = scoped["category"]
+        scan_scope_fallback = scoped["fallback"]
+        corrections_filter = scoped["filter"]
         if not retry["categories_scanned"]:
             # Every category is itself above the bound: the godnode shape the
             # threshold exists for. The entity-level refusal stands exactly as it
@@ -1889,6 +2248,14 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
                     "scan_scope": SCAN_ENTITY,
                     "categories_scanned": [], "categories_skipped": [],
                     "facts_excluded": refused_size, "facts_total": refused_size,
+                    # No category was compared, so there is no category to name —
+                    # but the reason the narrowed scan did not run is still what a
+                    # reader needs next to `refused: True`, which is otherwise
+                    # byte-identical to the same refusal on a night nobody filed a
+                    # correction (#702's shape again).
+                    "corrections_category": None,
+                    "corrections_filter": None,
+                    "scan_scope_fallback": scan_scope_fallback,
                     "before_active": _active_count(entity),
                     "skipped_reason": detection.get("hint", "entity too large to scan")}
         # Some part of the entity was scanned. `refused` stays False for it and
@@ -1896,7 +2263,13 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
         # partial — never as the whole-entity refusal it replaced, and never as a
         # complete scan whose pair count is a coverage claim.
         detection = retry
-        scan_scope = SCAN_BY_CATEGORY
+        # The scope name says which of the two remedies answered the refusal, and
+        # it is derived from the same variable that names the category, so
+        # `scan_scope: corrections_evidence` and a null `corrections_category`
+        # cannot be published together by a future edit that sets one and forgets
+        # the other.
+        scan_scope = (SCAN_CORRECTIONS_EVIDENCE if corrections_category
+                      else SCAN_BY_CATEGORY)
         categories_scanned = retry["categories_scanned"]
         categories_skipped = retry["categories_skipped"]
         facts_excluded = retry["facts_excluded"]
@@ -2138,7 +2511,20 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             # found clean. `before_active` beside it is the index's own count and a
             # different reader of a different tree — deliberately not this total.
             "facts_excluded": facts_excluded,
-            "facts_total": detection.get("checked", 0) + facts_excluded}
+            "facts_total": detection.get("checked", 0) + facts_excluded,
+            # How much of the entity the scan covered is `scan_scope`'s half of
+            # this; #3820 adds which facts it was aimed at. Both are needed
+            # because a corrections-sourced row can now be small AND pointed: 12
+            # facts of a 132-fact hub, chosen by the correction rather than by
+            # file size, which is a different claim from the partition's 22 of 132
+            # and reads as such in the record.
+            "corrections_category": corrections_category,
+            # Set only when the named category was over the bound and the scan was
+            # its keyword-filtered slice: `keywords:mqtt,broker` or
+            # `keywords:mqtt;bounded_at_50_of_56`. Null for an unfiltered scan, so
+            # a row is either whole-category or says how it was cut.
+            "corrections_filter": corrections_filter,
+            "scan_scope_fallback": scan_scope_fallback}
 
 
 # ── applying a plan (through the existing writers) ───────────────────────────
@@ -2649,7 +3035,13 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
     for signal in signals:
         entity = signal["entity"]
         try:
-            plan = plan_entity(entity)
+            # The signal travels with the entity (#3820): the only thing that can
+            # scope a scan on an over-bound entity to the facts a human correction
+            # named is the correction itself, and until now the planner saw the
+            # entity's name and nothing else, so it chose the scan purely from the
+            # detector's refusal. A caller-named entity (`--entity`) passes None and
+            # gets the same whole-entity-then-partition path it always got.
+            plan = plan_entity(entity, signal=signal)
         except Exception as exc:  # noqa: BLE001 - one bad entity must not stop the run
             per_entity.append({"entity": entity, "error": str(exc)})
             continue
@@ -2694,6 +3086,25 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                  # ambiguous, which is the one thing it cannot afford.
                  "scan_scope": plan.get("scan_scope"),
                  "categories_skipped": plan.get("categories_skipped", []),
+                 # #3820: which slice a corrections signal was checked against,
+                 # and why not, so the human-feedback half of the pass is readable
+                 # from the record alone. `corrections_category` is the ONE
+                 # category the detector compared when the correction's own
+                 # evidence resolved to it; null when it did not, including when
+                 # the evidence named a category the bound will not scan — that
+                 # case names the category inside the reason instead, so this key
+                 # never claims a scan that did not happen.
+                 # `scan_scope_fallback` is the reason the narrowed scan did not
+                 # run, and it is what distinguishes "the correction's facts were
+                 # compared" from "the correction was routed to whichever small
+                 # files existed", which is the condition this item was filed for.
+                 "corrections_category": plan.get("corrections_category"),
+                 # #4067: how a named category was cut down to what the correction
+                 # could actually reach. `corrections_category` names the file and
+                 # this names the slice of it, so a 4-of-57 read on a 57-fact
+                 # category of a 132-fact hub is legible from the row alone.
+                 "corrections_filter": plan.get("corrections_filter"),
+                 "scan_scope_fallback": plan.get("scan_scope_fallback"),
                  # The loop's own denominator, before its writes. `pairs_after`
                  # is measured the same way after them.
                  "pairs_before": plan.get("pairs_before", 0),
@@ -2746,7 +3157,13 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
             # `pairs_before`, after the writes. Only where something was applied:
             # a pass that wrote nothing changed nothing, and re-planning every
             # entity would double the pass for a number it can predict.
-            entry["pairs_after"] = (plan_entity(entity).get("pairs_before", 0)
+            # Re-planned with the SAME signal (#3820), because the re-plan has to
+            # be measured at the scope `pairs_before` was measured at: #1941
+            # already condemned a delta whose two sides had different scopes, and
+            # a corrections-narrowed `pairs_before` (12 facts of a hub) beside a
+            # partition-scope `pairs_after` (22) would print a pair-count move that
+            # is the scope changing and nothing else.
+            entry["pairs_after"] = (plan_entity(entity, signal=signal).get("pairs_before", 0)
                                     if entry["taken"] else entry["pairs_before"])
         else:
             # A plan-mode pass that reports only a count is not a plan. List

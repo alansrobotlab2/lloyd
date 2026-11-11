@@ -2121,6 +2121,511 @@ def test_run_with_no_signals_changes_nothing(world):
     assert _active(st) == 1
 
 
+# ── #3820: a corrections signal's own evidence scopes the scan on a hub ──────
+#
+# The nightly pass reads the corrections logs and gets exactly one signal a
+# night, always on the entity `Lloyd`, which carries 5,831 facts. The whole-entity
+# scan refuses it (`FACT_GODNODE_THRESHOLD`, #1251), the by-category retry skips
+# every category over the bound (#3007 publishes that count as `facts_excluded`),
+# and what is left scanned on the live tree is `decision` (35), `capability` (36)
+# and `overview` (17) — 35 of 5,831 = 0.6% for the row that ran, and precisely
+# none of the seven categories a human correction is written about (`state`,
+# `goal`, `event`, `general`, `preference`, `relationship`, `session-extracted`).
+# Records 2026-10-30 → 11-05 each read `corr_signals=1 acts=0` on that row, with
+# `checked` pinned at 35 while `facts_total` grew 5,493 → 5,831.
+#
+# The signal has always carried the text to scope on — `evidence`, built at
+# `agent_mcp/fact_improvement.py` from the correction's own line — and the scan
+# path never read it. These nodes pin that a corrections signal naming one of the
+# entity's own categories is checked against THAT category's facts, that narrowing
+# the scan never shrinks the denominator #3007 landed, that evidence naming no
+# category falls back to the old path and says so in the record, that a
+# partially-scanned entity now prints its fraction per entity on stdout, and that
+# none of this touches the bound or expires anything.
+#
+# #4067 lands that commit and closes the gap it deliberately left open. Its
+# `_scoped_retry` gave up the moment the named category was itself over the bound:
+# it wrote the category into the fallback REASON, set the category back to None and
+# took the plain partition — so a correction naming `state`, the live case, was
+# still answered out of three other files. Measured on the tree this round was cut
+# from, `~/lloyd-data/_pipeline/improvement/20261111-220008-dryrun.json`
+# `per_entity[0]`: entity `Lloyd`, signal `corrections`, `scan_scope by_category`,
+# `checked 35` of `facts_total 6056` (0.58%), `facts_excluded 6021`, seven
+# `categories_skipped`, `contradictions 0`, `actions []` — and neither
+# `corrections_category` nor `scan_scope_fallback` present at all, so the row names
+# neither what it compared nor why not.
+#
+# The added nodes pin that an over-bound named category is narrowed to the
+# correction's OWN keywords instead of falling back (#4067 clause 3), that the
+# narrowing is capped at `FACT_GODNODE_THRESHOLD` and says so when it cuts, that a
+# narrowing matching no fact is a recorded fallback and never an empty slice
+# reported as a scan, and that a whole-scan row keeps `checked == facts_total` over
+# SEVERAL facts, so the CLI's partial-scan line cannot be satisfied by a 1-of-1
+# fixture (#4067 clauses 4 and 5).
+
+#: `facts_total` for `_hub_with_scannable_state`: 12 + 10 + 57 + 53.
+_HUB_TOTAL = 132
+
+
+def _hub_with_scannable_state(facts_root, entity):
+    """An entity the whole-entity scan refuses, holding two scannable categories.
+
+    `state` (12 rows) carries the detector's token-overlap class — two rows
+    phrased alike, which the loop reports and never deletes (see
+    `test_a_near_duplicate_pair_is_reported_not_deleted`) — plus ten filler rows
+    that pair with nothing. `decision` (10 rows) is filler only. `event` (57) and
+    `goal` (53) are each over the bound, so neither is ever scanned.
+
+    The two scannable categories are the point. A hub with only ONE would report
+    the same `checked` whether or not the scope was narrowed, and a test on it
+    could not tell the narrowed scan from the partition. Here the whole-entity
+    refusal is answered by the partition at 22 facts (`decision` + `state`), while
+    a correction naming `state` is answerable at 12 — so `checked` says which of
+    the two scans ran, and `facts_total` says the entity's size either way.
+    """
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, entity, "state", [
+        {"fact": f"{entity} transcripts were extracted from the video with the VTT parser.",
+         "created_at": _days_ago(20), "confidence": 0.9},
+        {"fact": f"{entity} transcripts were extracted from the video with the parser.",
+         "created_at": _days_ago(19), "confidence": 0.9},
+        *_filler(entity, 10),
+    ])
+    _write_facts(facts_root, entity, "decision", _filler(entity, 10))
+    _write_facts(facts_root, entity, "event", _filler(entity, BOUND + 7))
+    _write_facts(facts_root, entity, "goal", _filler(entity, BOUND + 3))
+
+
+def _corrections_heading(path, date, text):
+    """One `memory/corrections.md` entry: a dated heading carrying `text`.
+
+    The live log's shape (`## 2026-05-08 14:37 PDT — Tool calls without
+    ToolSearch schema loading`), because the reader hands the scan path whatever
+    the heading's own words were — so the words are the input this feature reads.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# Corrections Log\n\n## {date} 07:00 PDT — {text}\n\n",
+                    encoding="utf-8")
+    return path
+
+
+def test_a_corrections_signal_naming_a_category_scans_that_category(world):
+    """#4067 clause 1 (carried from #3820): the corrections leg checks the category
+    the correction names, and the record says which category that was.
+
+    The correction below names `state`. The partition would have answered this
+    entity at 22 facts across `decision` and `state`; the corrections-scope scan
+    answers it at the 12 facts of `state` alone and names the category on the
+    record row, so `contradictions: 0` on a hub reads as a verdict about the
+    category the operator corrected rather than about whichever files happened to
+    sit under the bound.
+    """
+    facts_root, st, vault_root = world
+    _hub_with_scannable_state(facts_root, "HUBX")
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "memory" / "corrections.md", _ago(1),
+                         "HUBX state facts are wrong")
+
+    # The premise, on the reader's own output: this is a corrections signal, and
+    # its `evidence` is the heading's words, which name the category. Without this
+    # the scan-scope assertions below could be reached by any source at all.
+    signals = fi.collect_signals(sources=("corrections",), limit=10)
+    assert [(s["entity"], s["source"]) for s in signals] == [("HUBX", "corrections")], signals
+    assert "state" in signals[0]["evidence"], signals[0]
+
+    rec = fi.run_improvement(sources=("corrections",), limit=10)
+    entry = _persisted_record(rec)["per_entity"][0]
+    assert entry["entity"] == "HUBX" and entry["signal"] == "corrections", entry
+    assert entry["scan_scope"] == "corrections_evidence", entry
+    assert entry["corrections_category"] == "state", entry
+    assert entry["scan_scope_fallback"] is None, entry
+    assert entry["checked"] == 12, entry
+    assert entry["categories_skipped"] == ["decision", "event", "goal"], entry
+    # The scan really ran on those 12 facts rather than reading nothing: the
+    # near-duplicate pair lives in `state`, and it is the only pair in the entity
+    # the detector can find.
+    assert entry["contradictions"] == 1 and entry["near_duplicates"] == 1, entry
+    assert entry["pairs_before"] == 1, entry
+
+
+def test_narrowing_the_corrections_scan_never_shrinks_the_denominator(world):
+    """#4067 clause 4 (carried from #3820): a hub read at the narrowed scope still
+    publishes the whole entity's fact count, so a 12-of-132 read cannot publish 100%
+    coverage. The filtered arm of the same clause — a scan narrowed twice over, by
+    category and then by keyword — is in
+    `test_an_over_bound_category_named_by_a_correction_is_scanned_by_its_keywords`.
+
+    The same tree is run twice — once reached by a correction naming `state`,
+    once by an explicit `--entity`-style signal, which is not corrections-sourced
+    and so takes the partition. `checked` differs (12 against 22) and proves the
+    two scans ran; `facts_total` is identical at 132 and proves neither one moved
+    the denominator. That is the trap #3007 was landed for: `facts_total` is
+    derived as `checked + facts_excluded`, so a narrowing that carried only the
+    bound's refusals would publish 12 of 12 — a hub read at 9% reporting itself
+    whole.
+    """
+    facts_root, st, vault_root = world
+    _hub_with_scannable_state(facts_root, "HUBX")
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "memory" / "corrections.md", _ago(1),
+                         "HUBX state facts are wrong")
+
+    narrowed = _persisted_record(
+        fi.run_improvement(sources=("corrections",), limit=10))["per_entity"][0]
+    partition = _persisted_record(
+        fi.run_improvement(entities=["HUBX"]))["per_entity"][0]
+
+    assert (narrowed["scan_scope"], partition["scan_scope"]) == \
+        ("corrections_evidence", "by_category"), (narrowed, partition)
+    assert (narrowed["checked"], partition["checked"]) == (12, 22), (narrowed, partition)
+    assert narrowed["facts_total"] == partition["facts_total"] == _HUB_TOTAL, \
+        (narrowed, partition)
+    assert narrowed["checked"] + narrowed["facts_excluded"] == _HUB_TOTAL, narrowed
+    assert narrowed["facts_excluded"] == _HUB_TOTAL - 12 == 120, narrowed
+    # The excluded facts are named, not just counted: `decision` is set aside
+    # because the scope was narrowed, not because it was over the bound, and the
+    # names carry the same 120 either way.
+    assert set(narrowed["categories_skipped"]) == {"decision", "event", "goal"}, narrowed
+
+
+def test_corrections_evidence_naming_no_category_falls_back_and_says_so(world):
+    """#4067 clause 2 (carried from #3820): a scope-resolution miss must not scan
+    nothing and print a clean zero.
+
+    Tonight's live signal is exactly this shape — its evidence is `2026-10-30
+    Lloyd's memory system (Lloyd)**: an applied-check booked "unapplied ×N" …`,
+    which names no category at all. The pass therefore has to fall back to the
+    entity-level refusal plus the partition and record that it did, rather than
+    resolve to nothing, scan nothing, and leave `contradictions: 0` standing as
+    the answer to a human correction.
+
+    The second entity pins the other miss, and under #4067 it needs stating
+    precisely: the evidence DOES name `event`, and `event` is over the bound, so the
+    whole-category focus reads nothing; and the line's only other words are the
+    entity's own name plus boilerplate about facts being wrong, every one of which
+    is scope rather than subject (`_keywords_from_evidence` drops them), so there is
+    nothing to narrow `event` WITH. The fallback therefore stands, with the category
+    named in the reason. An over-bound category whose correction DOES carry a
+    discriminating word is the #4067 case and takes the keyword-filtered scan
+    instead — see `test_an_over_bound_category_named_by_a_correction_is_scanned_by_its_keywords`.
+    """
+    facts_root, st, vault_root = world
+    _hub_with_scannable_state(facts_root, "HUBY")
+    _hub_with_scannable_state(facts_root, "HUBZ")
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "memory" / "corrections.md", _ago(1),
+                         "HUBY service status was wrong")
+    _corrections_heading(vault_root / "lloyd" / "MEMORY.md", _ago(1),
+                         "HUBZ event facts are wrong")
+
+    entries = {e["entity"]: e for e in _persisted_record(
+        fi.run_improvement(sources=("corrections",), limit=10))["per_entity"]}
+    assert set(entries) == {"HUBY", "HUBZ"}, entries
+
+    unresolved = entries["HUBY"]
+    assert unresolved["signal"] == "corrections", unresolved
+    assert unresolved["scan_scope"] == "by_category", unresolved
+    assert unresolved["corrections_category"] is None, unresolved
+    assert unresolved["scan_scope_fallback"] == \
+        "corrections_evidence_names_no_category", unresolved
+    # Not a zero-scan: the partition still read the two under-bound categories.
+    assert unresolved["checked"] == 22 and unresolved["facts_total"] == _HUB_TOTAL, \
+        unresolved
+
+    over_bound = entries["HUBZ"]
+    assert over_bound["scan_scope"] == "by_category", over_bound
+    assert over_bound["corrections_category"] is None, over_bound
+    assert over_bound["scan_scope_fallback"] == \
+        "corrections_category_over_bound:event", over_bound
+    assert over_bound["checked"] == 22 and over_bound["facts_total"] == _HUB_TOTAL, \
+        over_bound
+
+
+def _hub_with_over_bound_event(facts_root, entity):
+    """The same 132-fact hub, with the detectable pair in an OVER-bound category.
+
+    `_hub_with_scannable_state` puts its pair in `state` (12 rows), a category a
+    focused scan can read whole, so that fixture never brings the bound into play
+    and cannot pin #4067. Here the pair lives in `event` (4 real rows plus 53
+    filler = 57, over `FACT_GODNODE_THRESHOLD`), and the only route the detector
+    has to it is a keyword filter inside `event`: the partition skips the category
+    for size, and the whole-entity scan refuses the entity.
+
+    `state` (12) and `decision` (10) stay under the bound so a fallback still has
+    something to scan, and `goal` (53) stays over it so a fallback row remains a
+    partial one. Total is `_HUB_TOTAL` again: 57 + 12 + 10 + 53.
+    """
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD as BOUND
+    _write_facts(facts_root, entity, "event", [
+        {"fact": f"{entity} mqtt broker handshake retried after the controller reboot sequence.",
+         "created_at": _days_ago(20), "confidence": 0.9},
+        {"fact": f"{entity} mqtt broker handshake retried after the reboot sequence.",
+         "created_at": _days_ago(19), "confidence": 0.9},
+        {"fact": f"{entity} mqtt broker TLS fingerprint pinned for the plant gateway.",
+         "created_at": _days_ago(18), "confidence": 0.9},
+        {"fact": f"{entity} handshake timeout default documented for the orphaned session.",
+         "created_at": _days_ago(17), "confidence": 0.9},
+        *_filler(entity, 53),
+    ])
+    _write_facts(facts_root, entity, "state", _filler(entity, 12))
+    _write_facts(facts_root, entity, "decision", _filler(entity, 10))
+    _write_facts(facts_root, entity, "goal", _filler(entity, BOUND + 3))
+
+
+def _mqtt_filler(prefix, n, days=20):
+    """`n` facts that all carry the word `mqtt` and pair with nothing.
+
+    `_filler` with `marker` swapped for the keyword, so every row matches the
+    filter while any two of them sit 2 shared tokens out of 8 (0.25, against the
+    detector's 0.6 trigger). That is what makes the cap observable: 56 rows the
+    filter wants against a bound of 50, with no pair to read the count off.
+    """
+    return [{"fact": f"{prefix} mqtt zts{i} qlu{i} vex{i} wray{i} yron{i} zura{i}",
+             "created_at": _days_ago(days), "confidence": 0.9}
+            for i in range(n)]
+
+
+def test_an_over_bound_category_named_by_a_correction_is_scanned_by_its_keywords(world):
+    """#4067 clause 3: a correction about a category too big to scan gets THAT
+    category's facts, narrowed to the correction's own words.
+
+    `fef15430` stopped one step short of this: it wrote the category into the
+    fallback REASON, set it back to None and took the plain partition — so on the
+    live hub the answer to a correction about `state` was 35 facts of `decision`,
+    `capability` and `overview`, 0.58% of the entity, and `contradictions: 0`. The
+    pair below lives in `event`, over the bound, so the partition reads 22 facts and
+    reports nothing; the narrowed scan reads the 4 facts of `event` that carry mqtt,
+    broker or handshake, and finds it.
+
+    `facts_total` stays 132 with 128 excluded: narrowing inside a category reduces
+    what is COMPARED and never what is COUNTED (#3007). The row names the category
+    and the filter, and names no fallback, because it did not need one.
+    """
+    facts_root, st, vault_root = world
+    _hub_with_over_bound_event(facts_root, "HUBW")
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "memory" / "corrections.md", _ago(1),
+                         "HUBW event facts about the mqtt broker handshake are wrong")
+
+    # The premise, measured through the same path a fallback takes: `event` is
+    # skipped for size, so without the filter this entity answers a correction
+    # about `event` with zero pairs and a clean-looking row.
+    plain = fi.plan_entity("HUBW")
+    assert plain["scan_scope"] == "by_category", plain
+    assert set(plain["categories_skipped"]) == {"event", "goal"}, plain
+    assert (plain["checked"], plain["facts_total"]) == (22, _HUB_TOTAL), plain
+    assert plain["contradictions"] == 0, plain
+
+    entry = _persisted_record(
+        fi.run_improvement(sources=("corrections",), limit=10))["per_entity"][0]
+    assert entry["entity"] == "HUBW" and entry["signal"] == "corrections", entry
+    assert entry["scan_scope"] == "corrections_evidence", entry
+    assert entry["corrections_category"] == "event", entry
+    assert entry["corrections_filter"] == "keywords:mqtt,broker,handshake", entry
+    assert entry["scan_scope_fallback"] is None, entry
+    # The nightly's own check, on one row: a corrections scan names the category it
+    # compared or names why it did not. This one does the first, so it may leave the
+    # second empty.
+    assert entry["corrections_category"] or entry["scan_scope_fallback"], entry
+    # 4 of the category's 57 rows, and no cap involved: the entity's own name is
+    # not a keyword (every row carries it), so the filter selects what the
+    # correction named rather than all of `event` plus a truncation.
+    assert entry["checked"] == 4, entry
+    assert entry["facts_total"] == _HUB_TOTAL, entry
+    assert entry["facts_excluded"] == _HUB_TOTAL - 4 == 128, entry
+    assert set(entry["categories_skipped"]) == {"decision", "goal", "state"}, entry
+    # The scan reached the pair the partition could not: the token-overlap class,
+    # reported and never deleted.
+    assert entry["contradictions"] == 1 and entry["near_duplicates"] == 1, entry
+    assert entry["pairs_before"] == 1, entry
+    assert entry["actions"] == [] and entry["planned"] == 0, entry
+
+
+def test_a_keyword_filtered_scan_stops_at_the_bound_and_names_the_cap(world):
+    """#4067 clause 3, the bounded half: more matching facts than the threshold
+    means the scan compares the threshold's worth and says that it did.
+
+    `_keyword_slice` could hand the detector all 56 rows mentioning `mqtt` — which
+    is how this pass got here, since the detector refuses a piece over
+    `FACT_GODNODE_THRESHOLD`. It caps at the threshold instead and appends
+    `;bounded_at_50_of_56` to the filter, because a row reading `event, 50 facts`
+    is a claim about 50 of 57 matching facts in a 132-fact entity and has to read
+    that way. The 6 matches the cap dropped are in `facts_excluded`, not in a
+    footnote: 82 of 132 excluded, so `facts_total` is still the entity's size.
+    """
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "HUBQ", "event", [
+        *_mqtt_filler("HUBQ", FACT_GODNODE_THRESHOLD + 6),
+        {"fact": "HUBQ audit ledger rebuilt from the raw export.",
+         "created_at": _days_ago(15), "confidence": 0.9},
+    ])
+    _write_facts(facts_root, "HUBQ", "state", _filler("HUBQ", 12))
+    _write_facts(facts_root, "HUBQ", "decision", _filler("HUBQ", 10))
+    _write_facts(facts_root, "HUBQ", "goal",
+                 _filler("HUBQ", FACT_GODNODE_THRESHOLD + 3))
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "memory" / "corrections.md", _ago(1),
+                         "HUBQ event facts about the mqtt link are wrong")
+
+    entry = _persisted_record(
+        fi.run_improvement(sources=("corrections",), limit=10))["per_entity"][0]
+    assert entry["scan_scope"] == "corrections_evidence", entry
+    assert entry["corrections_category"] == "event", entry
+    assert entry["corrections_filter"] == \
+        "keywords:mqtt,link;bounded_at_50_of_56", entry
+    assert entry["scan_scope_fallback"] is None, entry
+    assert entry["checked"] == FACT_GODNODE_THRESHOLD == 50, entry
+    assert entry["facts_total"] == _HUB_TOTAL, entry
+    assert entry["facts_excluded"] == _HUB_TOTAL - 50 == 82, entry
+    # Nothing paired in the kept slice, and that 0 is a property of `_mqtt_filler`
+    # (0.25 apart against a 0.6 trigger), not a clean verdict on the entity — the
+    # `facts_excluded` above is what keeps it from reading as one.
+    assert entry["contradictions"] == 0, entry
+
+
+def test_a_keyword_filter_matching_no_fact_falls_back_and_says_so(world):
+    """#4067 clause 3's negative arm: a narrowing that finds nothing is a recorded
+    fallback, never an empty scan reported as a scan.
+
+    This correction names `event`, which is over the bound, and carries a real
+    discriminating word — `canary` — that no fact in `event` contains. The filter
+    selects zero rows. Passing an empty slice to the detector would put `event` in
+    `categories_scanned` with `checked: 0` and publish `contradictions: 0` as the
+    answer to a human correction: the did-not-measure-read-as-measured-zero error
+    #3007 named, arriving through the new door. The partition answers instead, at
+    22 facts, and the reason says which category was tried and that its filter
+    matched nothing.
+    """
+    facts_root, st, vault_root = world
+    _hub_with_scannable_state(facts_root, "HUBV")  # `event` = 57 filler rows
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "memory" / "corrections.md", _ago(1),
+                         "HUBV event facts about the canary rollout are wrong")
+
+    entry = _persisted_record(
+        fi.run_improvement(sources=("corrections",), limit=10))["per_entity"][0]
+    assert entry["scan_scope"] == "by_category", entry
+    assert entry["corrections_category"] is None, entry
+    assert entry["corrections_filter"] is None, entry
+    assert entry["scan_scope_fallback"] == \
+        "corrections_keywords_matched_no_facts:event", entry
+    assert entry["corrections_category"] or entry["scan_scope_fallback"], entry
+    # A fallback is a scan at the partition's scope, not a zero-scan.
+    assert entry["checked"] == 22 and entry["facts_total"] == _HUB_TOTAL, entry
+
+
+def test_stdout_says_checked_of_facts_total_for_a_partially_scanned_entity(
+        world, capsys, monkeypatch):
+    """#4067 clause 5 (and #3820's): the aggregate fraction already prints, so the
+    number that hid the dead corrections leg was the per-entity one. `scripts/memory/
+    fact-improvement.py` printed a per-entity line only for an error, an action or
+    a halt — an entity scanned at 0.6% with no actions printed nothing per entity,
+    and `contradictions: 0` in the record read as a clean verdict on the same
+    screen. Now the fraction goes on the entity's own line, beside its
+    contradiction and action counts.
+
+    The other half is the NEGATIVE arm, and #4067 is the reason it is a fixture of
+    SEVERAL facts rather than one: the line fires only on `0 < checked < facts_total`,
+    so a whole-scan entity must print nothing — its fraction is not a caveat, and a
+    row that read "4 of 4 facts" would dress a complete scan up as a partial one.
+    With one fact in `WHOLE` a CLI that printed the fraction for a whole scan could
+    still pass on `"scanned 1 of 1 facts" not in out` by accident of wording, so
+    `WHOLE` carries four facts, and the record row beside it pins `checked ==
+    facts_total` at the same four (#4067 clause 4's whole-scan arm).
+    """
+    facts_root, st, _ = world
+    _hub_with_scannable_state(facts_root, "PARTIAL")
+    _write_facts(facts_root, "WHOLE", "state", _filler("WHOLE", 4))
+    _reindex(st, facts_root)
+
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_3820",
+                                                  _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli_3820"] = cli
+    spec.loader.exec_module(cli)
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--entity", "PARTIAL"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    line = next((ln for ln in out.splitlines() if "PARTIAL" in ln and " of " in ln), "")
+    assert "~ PARTIAL scanned 22 of 132 facts" in line, out
+    assert "contradictions=" in line and "actions=" in line, line
+
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--entity", "WHOLE"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "~ WHOLE" not in out, out
+    assert "scanned 4 of 4 facts" not in out, out
+    assert " of 4 facts" not in out, out
+
+    # The same four facts, on the record rather than the screen: a whole-scan row
+    # keeps `checked == facts_total` over several facts, which is what makes the
+    # partial row's fraction a fraction OF something (#3007's denominator, and
+    # #4067 clause 4's whole-scan arm). `scan_scope: entity` says no narrowing ran,
+    # so `corrections_category` and its filter have nothing to say.
+    whole = _persisted_record(fi.run_improvement(entities=["WHOLE"]))["per_entity"][0]
+    assert whole["scan_scope"] == "entity", whole
+    assert whole["checked"] == whole["facts_total"] == 4, whole
+    assert whole["facts_excluded"] == 0, whole
+    assert whole["corrections_category"] is None, whole
+    assert whole["corrections_filter"] is None, whole
+
+
+def test_a_narrowed_corrections_scan_expires_nothing_and_the_bound_unchanged(world):
+    """#4067 clause 4 (carried from #3820): the scope change weakens no gate.
+
+    `FACT_GODNODE_THRESHOLD` is the n² guard #1251 and #2078 exist to respect, so
+    it is pinned at its value rather than trusted to stay, and an APPLY pass whose
+    scan was narrowed by a correction is asserted to leave every one of the
+    entity's 132 facts standing: narrowing which facts are READ is not a basis to
+    retire any, and the pair the narrowed scan does find is the token-overlap
+    class the loop has always reported and never deleted. The second half runs the
+    same guard over the KEYWORD-FILTERED scan #4067 adds, which is this clause's new
+    write surface: a filter that compares 4 facts of one category, and a cap that
+    can compare only 50, are bounds on COMPARISONS and never a licence to write.
+    """
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD
+    facts_root, st, vault_root = world
+    _hub_with_scannable_state(facts_root, "HUBX")
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "memory" / "corrections.md", _ago(1),
+                         "HUBX state facts are wrong")
+
+    assert FACT_GODNODE_THRESHOLD == 50, FACT_GODNODE_THRESHOLD
+
+    rec = fi.run_improvement(apply=True, sources=("corrections",), limit=10)
+    entry = _persisted_record(rec)["per_entity"][0]
+    assert entry["scan_scope"] == "corrections_evidence", entry
+    assert entry["actions"] == [], entry
+    assert entry["planned"] == 0 and entry["taken"] == 0, entry
+    assert rec["actions_planned"] == 0 and rec["actions_taken"] == 0, rec
+    assert rec["delta_active"] == 0, rec
+    assert _active(st, "HUBX") == _HUB_TOTAL, _active(st, "HUBX")
+
+    # The same guard over the filtered scan. `HUBW`'s correction names `event`,
+    # which is over the bound, so this APPLY pass compares the 4 facts the keyword
+    # filter selected out of that category's 57 and none of the other 128 — and
+    # still retires nothing, because a scan that reads less is not a scan that
+    # earned the right to write more.
+    _hub_with_over_bound_event(facts_root, "HUBW")
+    _reindex(st, facts_root)
+    _corrections_heading(vault_root / "lloyd" / "MEMORY.md", _ago(1),
+                         "HUBW event facts about the mqtt broker handshake are wrong")
+
+    filtered = fi.run_improvement(apply=True, sources=("corrections",), limit=10)
+    rows = {e["entity"]: e for e in _persisted_record(filtered)["per_entity"]}
+    assert set(rows) == {"HUBX", "HUBW"}, rows
+    hubw = rows["HUBW"]
+    assert hubw["corrections_category"] == "event", hubw
+    assert hubw["corrections_filter"] == "keywords:mqtt,broker,handshake", hubw
+    assert hubw["checked"] == 4 and hubw["facts_total"] == _HUB_TOTAL, hubw
+    assert hubw["actions"] == [] and hubw["planned"] == 0 and hubw["taken"] == 0, hubw
+    assert filtered["actions_planned"] == 0 and filtered["actions_taken"] == 0, filtered
+    assert filtered["delta_active"] == 0, filtered
+    assert _active(st, "HUBW") == _HUB_TOTAL, _active(st, "HUBW")
+
+
 # ── #2078: a keyword-opposition match is a screen, not an authority ──────────
 #
 # #701's owed ruling: `opposing_terms:<a>/<b>` is a required screen and never

@@ -105,12 +105,77 @@ only be read as a quiet tree. What the
 partition cannot do is pair a fact with one in a *different* category, which is why
 it runs only on the refusal path: an entity at or under the bound is still scanned
 whole, and an entity that reaches the retry had nothing scanned at all before. The
-plan and the record therefore carry `scan_scope` (`entity` / `by_category`),
+plan and the record therefore carry `scan_scope` (`entity` / `by_category` /
+`corrections_evidence`),
 `categories_skipped`, and the fact denominator `facts_excluded` and `facts_total` —
 after #1251, `refused: false` no longer means "scanned whole", and only those three
 say which it was. A refused entity is the one shape where `checked` is not
 coverage: it is the size of the read that was never scanned, so the plan counts it
 as excluded and nothing as scanned.
+
+**2026-11-05 (#3820): a corrections signal is now checked against the category its
+own evidence names, and the record says which.** `scan_scope` gained
+`corrections_evidence`: a signal sourced from the correction logs whose `evidence`
+names one of the entity's own categories is scanned against THAT category alone,
+because the partition above answers a hub with whichever of its files happen to sit
+under the bound — measured on the live `Lloyd` hub, `decision` (35), `capability`
+(36) and `overview` (17) of 5,831 facts, which is why records 2026-10-30 through
+11-05 each read one corrections signal, `checked=35`, `acts=0`, while the seven
+categories a correction is actually written about (`state`, `goal`, `event`,
+`general`, `preference`, `relationship`, `session-extracted`) were every night among
+the skipped. Evidence that names no category falls back to the partition and records
+`scan_scope_fallback` (`corrections_evidence_names_no_category`) rather than scanning
+nothing and printing a clean zero — which was the live shape then, since that night's
+evidence is a sentence about the memory system. Evidence naming a category the bound
+will not scan fell back too; **#4067, below, is what changed that limb**, and its
+reason `corrections_category_over_bound:<c>` survives for the case where there is
+nothing to narrow with. Narrowing is a
+change to what is DETECTED and never to what is COUNTED: the excluded categories
+still count, so `facts_total` stays the entity's size and a hub read at 12 facts
+cannot publish 100% coverage (#3007's trap, and the reason the narrowed scan is the
+same `_rescan_by_category` with a `focus_category` rather than a second scanner).
+Two more things are now true that were not: a plan re-measured after its writes is
+re-planned with the same signal, so `pairs_before` and `pairs_after` cannot be two
+scopes; and a partially-scanned entity prints a per-entity `scanned N of M facts`
+line on stdout beside its contradiction and action counts, where before #3820 the
+only figure printed was the run's aggregate fraction and a 0.6% scan said nothing
+per entity at all. The bound itself is untouched at 50, and a narrowed scan creates
+no new authority to expire anything — every action still needs the #701 and #2078
+bases, which are properties of the pair the scan found, not of how it was chosen.
+
+**2026-11-11 (#4067): an over-bound named category is now narrowed to the
+correction's own words instead of falling back, and the record says what it kept.**
+#3820 stopped one step short of the live case: the correction reaches the `Lloyd` hub
+naming a category that is itself over `FACT_GODNODE_THRESHOLD` (`state`, `event`,
+`goal`), and `fef15430` answered that by moving the category into the fallback
+reason and scanning the partition anyway. Measured on the tree this row is written
+against, `~/lloyd-data/_pipeline/improvement/20261111-220008-dryrun.json`
+`per_entity[0]`: `signal corrections`, `scan_scope by_category`, `checked 35` of
+`facts_total 6056` (0.58%), `facts_excluded 6021`, seven `categories_skipped`,
+`actions []`, and **neither `corrections_category` nor `scan_scope_fallback` present
+at all** — a row that names neither what it compared nor why it did not. So a
+corrections row now satisfies `corrections_category or scan_scope_fallback`: one or
+the other is always named, and an entity scanned whole names neither because it
+needed neither.
+
+When the named category is over the bound, `_keywords_from_evidence` takes the
+correction's discriminating words and `_keyword_slice` keeps that category's facts
+whose own text carries one of them, ranked by how many it carries and **capped at the
+same 50 the detector refuses above**, so the bound is respected by construction rather
+than discovered by a refusal. The dropped words are the point: the entity's name, the
+category's name, and record-boilerplate (`facts`, `wrong`, `stale`, `memory`,
+`correction`, `_EVIDENCE_NON_DISCRIMINATORS`) are the scope this scan is already
+inside, not its subject — every row in the file carries them, so keeping the entity
+name would select the whole over-bound category and let the cap, not the correction,
+decide what got compared. What survives goes on the row as `corrections_filter`:
+`keywords:mqtt,broker`, with `;bounded_at_50_of_56` appended when the cap cut, because
+a row reading `event, 50 facts` is a claim about 50 of 57 matching facts in a
+6,056-fact hub. A narrowing that matches no fact at all is `scan_scope_fallback:
+corrections_keywords_matched_no_facts:<c>` and never an empty slice reported as a
+scan — `checked: 0` beside a clean 0 is the #3007 error arriving through the new
+door. `facts_total` is still `checked + facts_excluded` and still the entity's size:
+the filtered-out facts join `facts_excluded`, so 4 compared of a 132-fact fixture is a
+4/132 row and never a 4/4 one, and the bound stays at 50.
 
 The denominator of that fraction is `facts_total` alone, and the `before_active`
 sitting beside it on the same row is not a second denominator to reconcile it
