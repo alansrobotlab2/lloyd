@@ -2441,10 +2441,25 @@ workers:
     # files findings as `arch-review` drafts (tag `spawned-by-review`:
     # merged at write time, expired at 30 d, NOT quarantined — a review
     # finding is exactly the kind of claim single triage should judge) and
-    # edits the one doc in place; a group only inside its own section. The
-    # source reverts every other write in this repo and in the vault's
-    # skills/ and autonomy/, throws away a diff that breaks its bounds, and
-    # commits the doc to main itself — the model never runs git.
+    # edits the one doc in place; a group only inside its own section, and it
+    # commits the doc to main itself — the model never runs git. Every other
+    # write the turn made is reverted by the sweep, whose coverage is the
+    # constant `VAULT_UNSWEPT_PREFIXES` in `workers/sources/arch_review.py`: this
+    # repo plus the whole vault EXCEPT the prefixes that constant exempts (today
+    # `backlog/` alone), so a stray write into `knowledge/`, `memory/`, `plans/`
+    # or a daily note goes back to HEAD exactly like one into the checkout. The
+    # coverage is the constant's, not a list of directories in this comment —
+    # naming what is exempt is what keeps this true for a vault area added next
+    # month (#709).
+    # A vault `autonomy/` path is the one stray that is NOT reverted: that tree is
+    # the autonomy scheduler's own bookkeeping, so `revert_strays` reports the path
+    # (`SCHEDULER_OWNED_VAULT_PREFIXES`, action `kept (scheduler-owned)`) and
+    # leaves it, because checking out a task file un-runs a finished run and
+    # re-arms the task.
+    # A diff that breaks its bounds loses the COMMIT, not the correction:
+    # `keep_rejected` copies the edited doc into the state dir and re-queues the
+    # unit in `REJECT_REST_SECONDS` (up to `MAX_REJECT_REQUEUES` times) instead of
+    # waiting out the 30-day cadence (#3338).
     # State: ~/.local/state/lloyd-automod/arch_review.json.
     arch-review:
       enabled: true
