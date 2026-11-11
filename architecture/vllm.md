@@ -274,11 +274,11 @@ Three numbering schemes on this box, and only two of them agree:
 
 | `nvidia-smi` | PCI | `/dev/nvidiaN` | Card | Serves |
 |---|---|---|---|---|
-| 0 | 01:00.0 | `/dev/nvidia3` | RTX 3090 | Qwen3-TTS (`agent-tts`), the voice worker (`lloyd-agent-worker`), qmd (`agent-qmd-daemon`) |
+| 0 | 01:00.0 | `/dev/nvidia3` | RTX 3090 | the voice worker (`lloyd-agent-worker`) and the desktop |
 | 1 | 41:00.0 | `/dev/nvidia2` | RTX PRO 6000 | **this engine** (`agent-llm-primary`, pinned in its launcher, not its conf) |
 | 2 | 42:00.0 | `/dev/nvidia4` | RTX 3090 | djev (`agent-djev.conf`, `GPU=2`) |
 | 3 | 61:00.0 | `/dev/nvidia0` | RTX 3090 | the omni TTS (`agent-tts-omni`, pinned by GPU UUID, not index) |
-| 4 | 62:00.0 | `/dev/nvidia1` | RTX 3090 | nothing pins it |
+| 4 | 62:00.0 | `/dev/nvidia1` | RTX 3090 | qmd (`agent-qmd-daemon`, `agent-qmd-watcher`), since 2026-11-10 |
 
 The node column is `/proc/driver/nvidia/gpus/<pci>/information`'s `Device
 Minor:`, read on the box 2026-10-21. Rows 2–4 are new here and were overdue:

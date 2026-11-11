@@ -38,11 +38,11 @@ every launcher that sets it calls it mandatory.
 Every program that touches a GPU does set it, but **not in one place**, and
 this doc claimed otherwise until 2026-09-11 ("in every program's
 environment") — worth correcting rather than dropping, because the wrong
-half is exactly the half you would check. Five programs set it in the
-supervisord `environment=`: `agent-tts`, `agent-tts-omni`,
-`lloyd-agent-worker`, `agent-qmd-daemon`, `agent-qmd-watcher`. That list was
-four until 2026-10-09 added `agent-tts-omni.conf`, and the sentence still said
-*four* a week later — a count in prose is worth no more than the drop-in
+half is exactly the half you would check. Four programs set it in the
+supervisord `environment=`: `agent-tts-omni`, `lloyd-agent-worker`,
+`agent-qmd-daemon`, `agent-qmd-watcher`. That list was four until 2026-10-09
+added `agent-tts-omni.conf`, and the sentence still said *four* a week later;
+it was five until 2026-11-10 retired the vendored TTS server. A count in prose is worth no more than the drop-in
 directory it was read out of, which is why
 `tests/test_infrastructure_gpu_inventory.py` reads the confs rather than this
 line. The four engine launchers export it themselves —
@@ -52,9 +52,10 @@ line), `start-secondary.sh` (taking the conf's
 `agent-services/bin/gpu-mem.sh` — see the preflight in `architecture/djev.md`),
 `agent-services/bin/start-qwen3-tts.sh` and `agent-services/bin/start-qwen3-tts-omni.sh`. **Neither LLM program
 names it in `environment=` at all**, so a `supervisorctl` dump of the primary's
-environment shows no pin and the pin is nonetheless there. `agent-tts` is the
-one pinned twice, in both places, to the same device; `agent-tts-omni` is the
-one pinned by **card UUID** rather than by index, in both places too.
+environment shows no pin and the pin is nonetheless there. The retired
+vendored TTS server was pinned twice, in both places, to the same device;
+`agent-tts-omni` is the one pinned by **card UUID** rather than by index, in
+both places too.
 
 Read the launcher, not only its header: until 2026-09-24 (#1447)
 `start-qwen3-tts.sh` said "(GPU 1)" on line 4 while exporting
@@ -65,11 +66,11 @@ servers is answering for voice — and the header now says so;
 
 | GPU | Hardware | VRAM | Serves |
 |---|---|---|---|
-| 0 | RTX 3090 | 24 GB | Qwen3-TTS on the vendored server (`agent-tts`, `:8090`) — the **fallback** engine since 2026-10-09, still autostarted and still pinned here, so its row stays even though voice answers from GPU 3; the LiveKit voice worker, qmd embeddings (`agent-qmd-daemon`, `agent-qmd-watcher`) |
+| 0 | RTX 3090 | 24 GB | the desktop, and the LiveKit voice worker (`lloyd-agent-worker`). Until 2026-11-10 it also held the vendored TTS server (`:8090`, the fallback since 2026-10-09, now retired to `supervisor/retired/agent-tts.conf`) and qmd, which moved to GPU 4 |
 | 1 | RTX PRO 6000 Blackwell | 96 GB | the primary LLM, vLLM (`agent-llm-primary`) |
 | 2 | RTX 3090 | 24 GB | djev, DiffusionGemma on vLLM (`agent-djev`) at `GPU_UTIL=0.97` since 2026-09-20 — or the secondary LLM, llama.cpp (`agent-llm-secondary`, ~21.7 GB) if that slot is re-armed; never both, see [[djev]]. A third conf (`agent-decider`, `GPU="2"`) names this card too and has nothing that arms it — #2713 |
 | 3 | RTX 3090 | 24 GB | Qwen3-TTS 1.7B on vLLM-Omni (`agent-tts-omni`, `:8093`) — the TTS the voice path actually uses since 2026-10-09, UUID-pinned to this card by both its conf and its launcher; its two `VLLM::StageEngineCoreProc` stages are the ~9.6 GB resident here, see [[voice]] |
-| 4 | RTX 3090 | 24 GB | **nothing pinned to it** — no `conf.d` program names this card and no compute app holds it. Added 2026-10-07 alongside GPU 3, and written out rather than left off, so a reader never has to choose between "spare card" and "the doc lost a row" |
+| 4 | RTX 3090 | 24 GB | qmd: the daemon's embedding model and reranker (`agent-qmd-daemon`, `:8181`) and the watcher's re-embeds (`agent-qmd-watcher`), both on this card since 2026-11-10. On GPU 0 the watcher's embed could not fit beside the desktop and two TTS servers. Added 2026-10-07 alongside GPU 3, and spare until then |
 
 The two cards added on 2026-10-07 are index 3 and 4, and by model alone they are
 indistinguishable from 0 and 2: the PCI bus id that separates them is in
@@ -97,7 +98,6 @@ check, and those checks are the only reason this table can be trusted.
 | `primary` | 8096 | vLLM, venv `vllm-flash-next-main-1110` | Qwen3.8-Flash-Next NVFP4, FP8 KV | `agent-llm-primary` |
 | `secondary` | 8091 | llama.cpp `llama-server`, `--parallel 1` | Qwen3.6-35B-A3B UD-Q3_K_XL | `agent-llm-secondary` |
 | — | 8010 + 8011 | vLLM (`.venvs/vllm-djev`) with a structured-decision server in front | DiffusionGemma 26B-A4B NVFP4 | `agent-djev` |
-| — | 8090 | Qwen3-TTS (`.venvs/qwen3-tts`) | cloned voice `clone:dave_cullen` | `agent-tts` |
 
 The djev row has no alias on purpose: it is not in `models:`, nothing routes a
 *turn* there and `resolve_model_alias` has never heard of it — `config.yaml`'s
@@ -275,13 +275,18 @@ by name, because that is still the slice whose pressure kills.
 | `agent-llm-secondary` | 8091 | llama-server, Qwen3.6-35B-A3B — **disarmed** since 2026-09-20 (`secondary_enabled: false`), which is why GPU 2 answers for djev | `bin/start-secondary.sh` |
 | `agent-djev` | 8010 + 8011 | DiffusionGemma 26B-A4B on vLLM, with the structured-decision server on 8011; the GPU-2 tenant that is switched on (`djev.enabled: true`) | `agent-services/bin/start-djev.sh` |
 | `agent-decider` | 8012 | a third GPU-2 tenant that is only a conf and a launcher: no config flag, absent from `app/llm_slots.py`, so nothing can arm it and the two-flags rule does not cover it (#2713) | `agent-services/bin/start-decider.sh` |
-| `agent-tts` | 8090 | Qwen3-TTS API on the vendored server — the fallback voice engine since 2026-10-09 (GPU 0) | `bin/start-qwen3-tts.sh` |
 | `agent-tts-omni` | 8093 | Qwen3-TTS 1.7B Base on vLLM-Omni — the TTS voice mode uses since 2026-10-09 (GPU 3, UUID-pinned); two engines, so `/health` answers only at the end of a ~2.5 min boot | `bin/start-qwen3-tts-omni.sh` |
 | `agent-livekit-server` | 7880 | LiveKit SFU; signal/WS bind `0.0.0.0` (`conf/livekit.yaml` `bind_addresses`) and it is the **advertised ICE address** (`rtc.node_ip`) that resolves to the Tailscale address at boot | `bin/start-livekit-server.sh` |
 | `lloyd-agent-worker` | 8501 | the LiveKit voice agent: STT, TTS shaping, wake word (8501 is the loopback wake-miss diagnostic rig) | `agent-services/livekit_worker.py` |
 | `agent-qmd-daemon` | 8181 | qmd vector search over the vault (the fork in `~/lloyd/qmd`) | `node qmd/dist/cli/qmd.js mcp --http` |
 | `agent-qmd-watcher` | — | re-embeds on vault change | `scripts/qmd-watcher.sh` |
 | `agent-obsidian-sync` | — | headless Obsidian Sync | `bin/start-obsidian-sync.sh` |
+
+The vendored Qwen3-TTS server (`agent-tts`, `:8090`) is not in this table: it was
+retired on 2026-11-10. Its conf sits in `agent-services/supervisor/retired/`,
+outside the `conf.d/*.conf` include, and the note at the end of that file says how to
+bring it back; its launcher, `bin/start-qwen3-tts.sh`, is kept for that.
+The guardian's voice watch is `agent-tts-omni` (`policy.TTS_PROGRAM`).
 
 The process group is `lloyd-mc`; address the three as
 `lloyd-mc:lloyd-backend` etc. — supervisord's XML-RPC name resolution
@@ -598,7 +603,6 @@ voice *change*. So a voice change needs the guardian re-staged
 | 8010 / 8011 | djev — vLLM's OpenAI surface and `/metrics`, and the structured-decision server in front of it. `scripts/service_health_check.py` probes **8011**, not 8010: an open 8011 means the whole stack came up, an open 8010 during a cold boot does not |
 | 8012 | the unarmed `agent-decider` slot (#2713) — listed so a reader who finds it listening knows who put it there |
 | 8080 | backend |
-| 8090 | Qwen3-TTS on the vendored server (`agent-tts`) — the fallback voice engine |
 | 8091 | secondary LLM |
 | 8093 | Qwen3-TTS on vLLM-Omni (`agent-tts-omni`) — the TTS voice mode actually speaks through |
 | 8096 | primary LLM |

@@ -52,7 +52,9 @@ _INFRA_SERVICES = {
     "agent-djev":           ("djev (DiffusionGemma)", 8011),
     "agent-qmd-daemon":     ("QMD Daemon",      8181),
     "agent-qmd-watcher":    ("QMD Watcher",     None),
-    "agent-tts":            ("TTS",             None),
+    # The TTS voice speaks through (vLLM-Omni, :8093). Was the vendored `agent-tts`
+    # until 2026-11-10, a month after it stopped speaking anything; retired then.
+    "agent-tts-omni":       ("TTS",             8093),
     "agent-livekit-server": ("LiveKit Server",  7880),
     "lloyd-agent-worker":   ("Voice Worker",    None),
 }

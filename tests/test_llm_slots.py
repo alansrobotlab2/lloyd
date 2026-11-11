@@ -341,7 +341,8 @@ def test_only_the_model_rows_are_derived_and_every_other_literal_stands(monkeypa
     assert infra["agent-qmd-daemon"][1] == 8181
     assert infra["agent-livekit-server"][1] == 7880
     assert infra["agent-qmd-watcher"][1] is None
-    assert infra["agent-tts"][1] is None
+    assert infra["agent-tts-omni"][1] == 8093
+    assert "agent-tts" not in infra   # retired 2026-11-10
     assert infra["lloyd-agent-worker"][1] is None
     assert lloyd["lloyd-backend"] == ("Lloyd Backend", 8080)
     assert lloyd["lloyd-frontend"] == ("Lloyd Frontend", 5173)

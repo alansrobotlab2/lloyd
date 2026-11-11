@@ -45,7 +45,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "agent-services" / "bin" / "start-qwen3-tts.sh"
-CONF = ROOT / "agent-services" / "supervisor" / "conf.d" / "agent-tts.conf"
+# Retired 2026-11-10: the conf moved out of conf.d/ so supervisord no longer loads it;
+# the launcher it names is still the one to bring the vendored server back with.
+CONF = ROOT / "agent-services" / "supervisor" / "retired" / "agent-tts.conf"
 
 #: The knob. Its two homes are asserted below: the launcher's default and the
 #: supervisor conf's override.

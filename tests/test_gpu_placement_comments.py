@@ -209,10 +209,10 @@ def test_the_derivation_reads_the_environment_line_not_its_prose():
 
 def test_the_map_covers_the_cards_this_box_has_tenants_on():
     """#1447's second half, still unverified when #2698 was filed: the map read
-    `GPU 0 / GPU 1 / GPU 2` and nothing else. Card 4 is absent on purpose — no conf
-    pins it, and `architecture/index.md` says so in words — so the map's set is the
-    cards with a pinned tenant, and it grows only when a conf names a new one."""
-    assert sorted(_map_rows()) == ["0", "1", "2", "3"], sorted(_map_rows())
+    `GPU 0 / GPU 1 / GPU 2` and nothing else. The map's set is the cards with a pinned
+    tenant, and it grows only when a conf names a new one — card 4 joined on 2026-11-10,
+    when qmd moved there."""
+    assert sorted(_map_rows()) == ["0", "1", "2", "3", "4"], sorted(_map_rows())
 
 
 def test_the_gpu_3_row_names_the_voice_tts_and_when_it_arrived():

@@ -673,9 +673,9 @@ class Guardian:
     def _url_for(self, program: str) -> str | None:
         """The endpoint that says whether this program is SERVING, not started.
 
-        `agent-tts` gets one for two reasons #2256 turns on. State cannot be its health
-        signal: the process is RUNNING for about four minutes before :8090 answers
-        anything at all (`agent-tts.conf:24-26`), so "the supervisor says it is up" and
+        The synthesiser (`policy.TTS_PROGRAM`) gets one for two reasons #2256 turns on.
+        State cannot be its health signal: the process is RUNNING for minutes before its
+        port answers anything at all (`policy.BOOT_GRACE`), so "the supervisor says it is up" and
         "the box can speak" are different claims about it — and a recovery has to be
         confirmed by the second, not the first, which is `#1816`'s rule applied to a new
         program. It is also what lets the tick see a port that stopped answering while
@@ -686,7 +686,7 @@ class Guardian:
             return self.backend_url
         if program.endswith("lloyd-mcp"):
             return self.mcp_url
-        if program == "agent-tts":
+        if program == policy.TTS_PROGRAM:
             return policy.TTS_HEALTH_URL
         return None
 
@@ -927,7 +927,7 @@ class Guardian:
         set a rollback moves, and this program is deliberately not in it (see the
         `policy.RECOVERABLE_INFRA` comment). What it does share with that path is the
         rule it ends on — a supervisor state is not health, so a restart counts only
-        once :8090 answers (`supervisor.py`'s docstring says the same about the
+        once `policy.TTS_HEALTH_URL` answers (`supervisor.py`'s docstring says the same about the
         backend). Stop-then-start rather than `restartctl` because a FATAL or a wedged
         RUNNING process answers neither, and the box's own 2026-10-05 lesson is that a
         process supervisord has *stopped* stays stopped until someone owns it.
@@ -1001,7 +1001,7 @@ class Guardian:
         # here — so two confirmations of a box that cannot speak lock the guardian out
         # of the only alert route it has AND advance the replay cursor over the
         # swallowed alert, while the alert it does send tells a human to run
-        # `supervisorctl start agent-tts`.
+        # `supervisorctl start <policy.TTS_PROGRAM>`.
         #
         # The voice is the caller's config when it has one — the same dict
         # `_recover_infra` reads off `voiceconfig` for every alert — and the guardian
@@ -1020,7 +1020,7 @@ class Guardian:
 
     def evaluate_liveness(self, snap: dict) -> tuple[bool, str]:
         # The Services tab's GPU switch: what it stopped is stopped on purpose,
-        # and `agent-tts` must not be "recovered" behind it (`app/gpu_power.py`).
+        # and the synthesiser must not be "recovered" behind it (`app/gpu_power.py`).
         gpu_off = speak.gpu_off_programs(getattr(self, "gdir", None))
         for program in self.programs:
             info = snap["procs"].get(program)
@@ -1150,7 +1150,7 @@ class Guardian:
 
     def probe_streaks_open(self) -> list[str]:
         """Every probe failure streak still running on a program a promotion
-        restarts, named for the log. `agent-tts` is not one: the GPU switch
+        restarts, named for the log. The synthesiser is not one: the GPU switch
         stops it for hours, and its refusals say nothing about the tree."""
         open_ = [f"{name}:{program}={n}"
                  for name, counts in (("refused", getattr(self, "probe_fail", {})),

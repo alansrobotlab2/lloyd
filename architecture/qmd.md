@@ -9,7 +9,7 @@ date: 2026-10-22
 qmd (upstream `tobi/qmd`) indexes markdown into SQLite and answers hybrid
 queries: BM25 over an FTS5 table, cosine over chunk embeddings, fused, optionally
 cross-encoder reranked. Lloyd runs **one build of it**, a fork, as a long-lived
-daemon on GPU 0. This doc is qmd itself: the fork, the daemon, the index and its
+daemon on GPU 4 (GPU 0 until 2026-11-10). This doc is qmd itself: the fork, the daemon, the index and its
 config, the API Lloyd depends on, the jobs that keep it healthy, and how it
 fails. How `vault_recall` *uses* it — the pool, djev ranking, the gold set and
 every measured change — is `architecture/retrieval.md`.
@@ -63,7 +63,7 @@ and `db52729`) in §8, the 2026-09-24 cache fix (`d01b049`) in §9, and the
 
 ```
 supervisord program agent-qmd-daemon
-  /usr/bin/node ~/lloyd/qmd/dist/cli/qmd.js mcp --http --port 8181      (GPU 0)
+  /usr/bin/node ~/lloyd/qmd/dist/cli/qmd.js mcp --http --port 8181      (GPU 4)
   index  ~/.cache/qmd/index.sqlite        (the default index name, "index")
   config ~/.config/qmd/index.yml          (collections + models)
   REST   POST /query, GET /health          MCP  /mcp
@@ -450,8 +450,8 @@ pin's copy against the live file with the same per-collection rows it emits for 
 tracked template, tagged `pair: pin/live` and recommending `retake_pin`, since the
 template re-sync cannot reconcile that pair; until #3158 that job published
 `in_sync: true` over exactly this drift because the pin's file was in nobody's compared
-set. Report-only like template drift, and it never moves that job's exit code. A pin shares GPU 0 with
-production; the regression runner's pins ran 42% of wall time on 2026-09-21 and
+set. Report-only like template drift, and it never moves that job's exit code. A pin shares qmd's card with
+production (it takes the daemon conf's environment, so GPU 4 since 2026-11-10); the regression runner's pins ran 42% of wall time on 2026-09-21 and
 slowed production's reranks ~1.8×. Experiments use their own index name and port
 (`reap_stale` matches only its own), and prepared snapshots (a re-embedded or
 re-titled copy) are served by patching `snapshot()` — the pattern
@@ -480,9 +480,10 @@ the build rather than the setting is what changed.
 - **Any write to the index** used to force a full blocking rebuild of the
   in-memory vector index on the next query (+0.85 s, ~1 s at 37k vectors); since the incremental
   refresh it is ~165 ms for a small change.
-- **Measurement traps** — do not time qmd while something else owns GPU 0, and
-  read `meta.phases` and `nvidia-smi` before believing a number: a TTS restart runs a ~4 min compile that pins GPU 0 and
-  makes qmd read 4× slow; an eval pin on GPU 0 does the same to production;
+- **Measurement traps** — do not time qmd while something else owns its card (GPU 4
+  since 2026-11-10; before that GPU 0, shared with the desktop and the TTS), and
+  read `meta.phases` and `nvidia-smi` before believing a number: on GPU 0 a TTS restart ran a ~4 min compile
+  that made qmd read 4× slow; an eval pin on qmd's card does the same to production;
   repeated query text is answered from the rerank cache in ~0.1–0.25 s (a fresh
   cross-encoder recall of the same shape: ~7 s cold, ~4 s rerank), and since
   #1366 that hit survives watcher cycles until the nightly cleanup (§2, §5) — so

@@ -40,12 +40,12 @@ which is why each half can be restarted, or break, on its own.
 | `agent-livekit-server` | 7880 (+7881 TCP, 50000–50100 UDP) | the LiveKit SFU binary. Never reads TTS config | `agent-services/bin/start-livekit-server.sh` |
 | `lloyd-agent-worker` | 8501 (loopback, diag only) | `agent-services/livekit_worker.py` + `agent-services/voice/` — hearing, the gate, streaming TTS | supervisord runs it directly |
 | `agent-tts-omni` | 8093 | Qwen3-TTS 1.7B Base on vLLM-Omni, OpenAI-shaped `/v1/audio/speech` — the server voice uses since 2026-10-09 (GPU 3) | `agent-services/bin/start-qwen3-tts-omni.sh` |
-| `agent-tts` | 8090 | the same model on the vendored transformers server (GPU 0) — the previous engine, kept as the fallback | `agent-services/bin/start-qwen3-tts.sh` |
 | `lloyd-mc:lloyd-backend` | 8080 | `/api/voice/*`, `/api/livekit/token`, the turn itself | `server.py` |
 | `lloyd-mc:lloyd-frontend` | 5173 | Vite: proxies `/api` to the backend and `/livekit` to the SFU | `npm --prefix web run dev` |
 
-The worker and the fallback TTS engine are pinned to **GPU 0** (the desktop
-3090) by `CUDA_VISIBLE_DEVICES` in their supervisord programs — see
+The worker is pinned to **GPU 0** (the desktop 3090) by `CUDA_VISIBLE_DEVICES`
+in its supervisord program — the vendored TTS server (`agent-tts`, `:8090`) shared
+that card as the fallback until it was retired on 2026-11-10 — see
 [[infrastructure]] for why the worker must stay off GPU 1 — and the TTS server
 voice actually uses runs on **GPU 3**, one of the two 3090s added 2026-10-07,
 pinned by UUID. Every model the
@@ -1176,7 +1176,9 @@ next thing the user says is still heard.
 - **A TTS failure is not heard** (C4). A clause is logged as heard only when
   frames were pushed; the primary TTS gets `first_byte_timeout_s` (3 s) and a
   `chunk_gap_timeout_s` (5 s) between chunks, and a clause that produced no
-  frames is retried once on `livekit.tts.fallback_url` (the vendored `:8090`).
+  frames is retried once on `livekit.tts.fallback_url` (the vendored `:8090`;
+  empty since that server was retired 2026-11-10, so such a clause is logged
+  "not heard").
   Before, a hung `:8093` request held the whole reply for the 30 s read
   timeout and was then recorded as said.
 - **A tool turn says what it is doing** (2026-09-24). The turn that prompted
@@ -1416,9 +1418,13 @@ Three things about the switch are easy to get wrong:
   child's PATH (the venv's `bin`; the launcher puts it there) or the talker's
   compile dies with `FileNotFoundError`.
 
-`agent-tts` on :8090 keeps running as the fallback (`livekit.tts.api_url` is
-the switch; a worker restart and a guardian re-stage follow it). The rest of
-this section describes that server.
+`agent-tts` on :8090 was the fallback until 2026-11-10, when it was retired: its
+conf moved to `agent-services/supervisor/retired/` (the note at the end of that
+file says how to bring it back), `livekit.tts.fallback_url` was emptied, and the
+guardian's voice watch moved to `agent-tts-omni` (`policy.TTS_PROGRAM`) — it had
+been watching only the server that no longer spoke. No worker log from 2026-10-24
+on shows a fallback retry. The rest of this section describes that server, for
+the day it comes back.
 
 `agent-tts` is a **vendored checkout** of
 `github.com/groxaxo/Qwen3-TTS-Openai-Fastapi` at

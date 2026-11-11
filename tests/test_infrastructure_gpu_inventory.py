@@ -39,8 +39,8 @@ omni TTS. `6ed8753c` (2026-10-14, "arch-review: doc:infrastructure — stale")
 added the `agent-djev` and `agent-decider` program rows and their `8010 / 8011`
 and `8012` port rows — 100 insertions in one file with **no test file**, which is
 the unpinned hand-edit this item is about: the symptom fixed, the mechanism
-untouched. So the expected set is now derived from `conf.d/` itself (the 14
-`[program:…]` files, not `lloyd-mc.conf`, which is a `[group:…]`), the serving
+untouched. So the expected set is now derived from `conf.d/` itself (the 13
+`[program:…]` files — 14 until `agent-tts` was retired to `supervisor/retired/` on 2026-11-10 —, not `lloyd-mc.conf`, which is a `[group:…]`), the serving
 ports from those confs' `environment=…PORT=…` (8010, 8011, 8012, 8091 — not
 `VLLM_PORT=`, which is 5300/5310, an internal vLLM port no §Ports row carries),
 and the port rows are read as cells, because `| 7880 / 7881 |`,
@@ -259,25 +259,30 @@ def test_gpu_3_row_names_the_omni_tts_the_voice_path_uses():
     assert since.group(1) in row, f"the GPU 3 row is undated: {row!r}"
 
 
-def test_gpu_0_row_keeps_agent_tts_as_the_fallback_engine():
-    """The GPU 0 row was never wrong — `agent-tts` is pinned there and still
-    runs as the fallback. Adding GPU 3 must not delete it."""
-    pins = _cuda_pins()
-    assert pins["agent-tts"] == "0", f"agent-tts moved off GPU 0: {pins['agent-tts']!r}"
-    row = " | ".join(_gpus_rows()[0])
-    assert "agent-tts" in row, f"the GPU 0 row lost the fallback engine: {row!r}"
-    assert "fallback" in row.lower(), (
-        f"the GPU 0 row does not say the engine it names is the fallback: {row!r}")
+def test_the_retired_vendored_tts_is_not_a_tenant_anywhere():
+    """`agent-tts` (the vendored :8090 server) was retired 2026-11-10: its conf moved to
+    `supervisor/retired/`, outside the `conf.d/*.conf` include. Until then this node
+    pinned the opposite — that GPU 0's row kept naming it as the fallback. Now no conf
+    may pin it, and a GPU row that mentions it must say it is retired."""
+    assert "agent-tts" not in _cuda_pins(), "agent-tts is back in conf.d"
+    assert (CONF_DIR.parent / "retired" / "agent-tts.conf").is_file()
+    for i, cells in _gpus_rows().items():
+        row = " | ".join(cells)
+        if "agent-tts`" in row or ":8090" in row:
+            assert "retired" in row, f"GPU {i} row names the vendored TTS as live: {row!r}"
 
 
 # --- clause 3: GPU 4 says so in words -------------------------------------
 
-def test_gpu_4_row_says_in_words_that_nothing_is_pinned_to_it():
+def test_gpu_4_row_names_both_qmd_programs_the_confs_pin_there():
+    """GPU 4 was "nothing pinned" from 2026-10-07 to 2026-11-10; qmd's daemon and
+    watcher moved there that day. The row must name both, and both confs must pin 4."""
     row = " | ".join(_gpus_rows()[4])
-    assert re.search(r"\bnothing\b", row, re.I), (
-        f"the GPU 4 row does not say in words that nothing runs here: {row!r}")
-    assert re.search(r"pin", row, re.I), (
-        f"the GPU 4 row does not say anything is *unpinned*: {row!r}")
+    pins = _cuda_pins()
+    for prog in ("agent-qmd-daemon", "agent-qmd-watcher"):
+        assert pins.get(prog) == "4", (prog, pins.get(prog))
+        assert prog in row, f"the GPU 4 row does not name {prog}: {row!r}"
+    assert not re.search(r"\bnothing pinned\b", row, re.I), row
     # Derived from the tree: which indices do the confs actually pin? A UUID pin
     # names a card, not an index, so it is attributed through the launcher that
     # carries it — and only agent-tts-omni pins by UUID on this box.
@@ -288,15 +293,13 @@ def test_gpu_4_row_says_in_words_that_nothing_is_pinned_to_it():
     assert re.search(r"GPU 3\b", launcher), (
         "the omni launcher no longer names the card it UUID-pins, so the UUID "
         "pin can no longer be attributed and this check needs a new source")
-    assert "4" not in [v for v in pins.values() if v.isdigit()], (
-        f"a conf pins index 4 ({pins}), so the GPU 4 row's wording is now wrong")
 
 
 # --- clause 4: the CUDA_DEVICE_ORDER prose --------------------------------
 
 def test_gpus_prose_names_every_conf_that_sets_cuda_device_order():
     confs = _confs_setting("CUDA_DEVICE_ORDER")
-    assert len(confs) >= 5, sorted(confs)
+    assert len(confs) >= 4, sorted(confs)
     prose = _section(INFRA.read_text(encoding="utf-8"), "## GPUs")
     sentence = [s for s in re.split(r"(?<=[.!])\s+", prose) if "programs set it" in s]
     assert len(sentence) == 1, f"the prose has {len(sentence)} 'programs set it' sentences"
@@ -304,9 +307,9 @@ def test_gpus_prose_names_every_conf_that_sets_cuda_device_order():
     assert listed == confs, (
         f"§GPUs names {sorted(listed)} as the confs that set CUDA_DEVICE_ORDER; "
         f"the tree has {sorted(confs)} — new: {sorted(confs - listed)}")
-    assert re.search(r"\b(Five|five)\b", sentence[0]), (
+    word = {4: "Four", 5: "Five", 6: "Six"}[len(confs)]
+    assert re.search(rf"\b({word}|{word.lower()})\b", sentence[0]), (
         f"the sentence still counts itself wrong: {sentence[0]!r}")
-    assert "Four programs set it" not in prose
 
 
 # --- clause 5: the omni TTS in the program and port tables ----------------
@@ -379,7 +382,7 @@ def _conf_programs() -> dict[str, str]:
     """{program name: conf filename} for every `[program:…]` header in conf.d/.
 
     Read from section headers, not filenames, because the two are not the same
-    set today: 15 `*.conf`, 14 programs, and the file that is not a program is
+    set today: 14 `*.conf`, 13 programs, and the file that is not a program is
     `lloyd-mc.conf`.
     """
     found: dict[str, str] = {}
@@ -509,19 +512,19 @@ def _ports_the_program_table_credits(text: str) -> dict[str, set[str]]:
 def test_every_program_conf_d_declares_has_a_row_in_the_process_management_table():
     """§Process management is written against the confs, not the other way round.
 
-    The expected set is the 14 `[program:…]` headers in `conf.d/`, so adding a
-    15th conf and forgetting the doc is the failure this catches — the exact
+    The expected set is the 13 `[program:…]` headers in `conf.d/`, so adding a
+    14th conf and forgetting the doc is the failure this catches — the exact
     shape of `6ed8753c`, which added `agent-djev` and `agent-decider` to the
     table 100 insertions after the confs existed, with no test in the commit.
     `lloyd-mc.conf` contributes nothing because it declares no program: it is
     `[group:lloyd-mc]`, and all three of its members have confs of their own,
     which the loop below re-checks rather than assumes. Row count and program
-    count are then tied exactly, so the green is "14 names, 14 rows", not "some
+    count are then tied exactly, so the green is "13 names, 13 rows", not "some
     rows parsed".
     """
     programs, groups = _conf_programs(), _conf_groups()
-    assert len(programs) == 14, (
-        f"conf.d declares {len(programs)} programs, not the 14 this node's "
+    assert len(programs) == 13, (
+        f"conf.d declares {len(programs)} programs, not the 13 this node's "
         "docstring and the module docstring name. Count them again with "
         "`grep -l '^\\[program:' agent-services/supervisor/conf.d/*.conf | wc -l`, "
         "write the row the new program is missing, then update the number in both "
@@ -1176,7 +1179,9 @@ def test_every_index_map_row_with_a_tenant_names_a_program_pinned_to_that_card()
     assert _card_pin("agent-llm-primary") == "1"
     assert _card_pin("agent-tts-omni") == "3"
     assert _card_pin("agent-djev") == "2"
-    assert "agent-qmd-daemon" in _named_programs(rows[0]["serves"], declared)
+    # qmd moved off card 0 on 2026-11-10; the worker is what stays there.
+    assert "agent-qmd-daemon" in _named_programs(rows[4]["serves"], declared)
+    assert "lloyd-agent-worker" in _named_programs(rows[0]["serves"], declared)
 
 
 def test_the_pin_derivation_reads_the_launcher_and_the_uuid_not_just_the_conf():
@@ -1223,16 +1228,18 @@ def test_a_row_says_nothing_pins_its_card_exactly_when_no_conf_pins_that_index()
 def test_the_unowned_card_check_follows_the_confs_and_not_a_hardcoded_four():
     """The unowned set is derived, and proved from both directions.
 
-    Today exactly one card of the five has no pin, and its row says so in words; the
-    day that changes, the row has to change with it. Feeding the check a tenant on
-    card 4, and then removing the primary's from card 1, shows it moves with the map
-    instead of with the number 4.
+    Since 2026-11-10 every card has a pin (qmd took card 4, the last spare), so no row
+    may say otherwise; the day a card loses its last pin, its row has to say so.
+    Splicing "nothing pins it" into card 4's row while qmd still pins it, and then
+    removing the primary's pin from card 1, shows the check moves with the map
+    instead of with a remembered spare-card number.
     """
     rows, owned = _index_map_rows(), _card_ownership()
     says = [i for i, r in sorted(rows.items()) if _NOTHING_PINNED.search(r["serves"])]
     unowned = [i for i in sorted(rows) if str(i) not in owned]
     assert says == unowned, (says, unowned, sorted(owned))
-    gained = _ownership_wording_problems(rows, {**owned, "4": {"agent-tts"}})
+    spare_claim = {**rows, 4: {**rows[4], "serves": "nothing pins it"}}
+    gained = _ownership_wording_problems(spare_claim, owned)
     assert len(gained) == 1 and gained[0].startswith("index 4:"), gained
     lost = _ownership_wording_problems(
         rows, {k: v for k, v in owned.items() if k != "1"})

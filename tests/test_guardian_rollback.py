@@ -1775,7 +1775,7 @@ def _tts_recovery_guardian(tmp_path, monkeypatch, *, endpoint_answers, restarts_
         repo=str(tmp_path), state=str(tmp_path / "state"),
         guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
         backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
-        programs="agent-tts", interval=5.0,
+        programs="agent-tts-omni", interval=5.0,
     )
     g = G.Guardian(args)
     sup = _TtsSup(restarts_ok=restarts_ok)
@@ -1814,10 +1814,10 @@ def test_a_down_synthesiser_is_restarted_and_confirmed_by_its_endpoint(tmp_path,
     speech half is pinned in `tests/test_guardian_tts_speech_probe.py`."""
     g, sup, waited = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
 
-    ok, detail = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    ok, detail = g.recover_service("agent-tts-omni", "agent-tts-omni: STOPPED")
 
     assert ok is True, detail
-    assert sup.starts() == ["agent-tts"], sup.snapshot()
+    assert sup.starts() == ["agent-tts-omni"], sup.snapshot()
     assert waited["url"] == policy.TTS_HEALTH_URL, waited
     assert waited["timeout_total"] >= 240.0, (
         f"a four-minute model compile needs a real budget, got "
@@ -1834,9 +1834,9 @@ def test_the_recovery_is_scoped_to_the_voice_channel(tmp_path, monkeypatch):
     the room went quiet."""
     g, sup, _ = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
 
-    assert g.recover_service("agent-tts", "agent-tts: STOPPED")[0] is True
+    assert g.recover_service("agent-tts-omni", "agent-tts-omni: STOPPED")[0] is True
     touched = {program for _verb, program in sup.calls}
-    assert touched == {"agent-tts"}, (
+    assert touched == {"agent-tts-omni"}, (
         f"recovery reached outside the voice channel: {sup.snapshot()}")
     assert not (touched & set(policy.RESTART_ORDER)), sup.snapshot()
 
@@ -1847,10 +1847,10 @@ def test_the_recovery_wait_is_announced_in_the_heartbeat_before_it_begins(tmp_pa
     reader looks — `heartbeat.json`, in the row before the silence."""
     g, _sup, _waited = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
 
-    assert g.recover_service("agent-tts", "agent-tts: STOPPED")[0] is True
+    assert g.recover_service("agent-tts-omni", "agent-tts-omni: STOPPED")[0] is True
     assert g.heartbeats, "nothing was written to heartbeat.json before the blocking wait"
     state, extra = g.heartbeats[0]
-    assert "agent-tts" in state or "agent-tts" in repr(extra), (state, extra)
+    assert "agent-tts-omni" in state or "agent-tts-omni" in repr(extra), (state, extra)
 
 
 def test_a_restart_that_never_serves_is_reported_failed_and_then_refused(tmp_path,
@@ -1863,20 +1863,20 @@ def test_a_restart_that_never_serves_is_reported_failed_and_then_refused(tmp_pat
     flap count is real: the third attempt is the one flap protection refuses."""
     g, sup, _ = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=False)
 
-    ok, detail = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    ok, detail = g.recover_service("agent-tts-omni", "agent-tts-omni: STOPPED")
     assert ok is False, detail
 
     events = [ev.get("event") for ev in gstate.read_events(g.state.ledger)]
     assert events.count("service_recovery") == 1, events
 
-    ok2, detail2 = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    ok2, detail2 = g.recover_service("agent-tts-omni", "agent-tts-omni: STOPPED")
     assert ok2 is False, detail2
-    assert sup.starts().count("agent-tts") == 2, (
+    assert sup.starts().count("agent-tts-omni") == 2, (
         f"the second attempt was refused while inside the bound: {sup.snapshot()}")
 
-    ok3, detail3 = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    ok3, detail3 = g.recover_service("agent-tts-omni", "agent-tts-omni: STOPPED")
     assert ok3 is False, detail3
-    assert sup.starts().count("agent-tts") == 2, (
+    assert sup.starts().count("agent-tts-omni") == 2, (
         f"a third restart ran despite the bound: {sup.snapshot()}")
     assert str(policy.FLAP_HALT_AFTER) in detail3, detail3
     assert "rollback" in detail3.lower() or "supervisorctl" in detail3.lower(), (
@@ -1890,13 +1890,13 @@ def test_the_dispatch_announces_both_outcomes_of_a_recovery_attempt(tmp_path, mo
     and one that could not be brought back is an error with `needs_human=True` — because
     the route that would have said it out loud is the thing that is down."""
     up, _sup_up, _w = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
-    assert up._recover_infra("agent-tts: STOPPED, last stop 900s ago") == "recovered"
-    assert any("Recovered: agent-tts" in a["title"] for a in up.alerts), up.alerts
+    assert up._recover_infra("agent-tts-omni: STOPPED, last stop 900s ago") == "recovered"
+    assert any("Recovered: agent-tts-omni" in a["title"] for a in up.alerts), up.alerts
 
     down, _sup_dn, _w2 = _tts_recovery_guardian(tmp_path / "d", monkeypatch,
                                                endpoint_answers=False)
-    assert down._recover_infra("agent-tts: STOPPED, last stop 900s ago") == "needs_human"
-    assert any(a["level"] == "error" and "agent-tts" in a["title"] for a in down.alerts), \
+    assert down._recover_infra("agent-tts-omni: STOPPED, last stop 900s ago") == "needs_human"
+    assert any(a["level"] == "error" and "agent-tts-omni" in a["title"] for a in down.alerts), \
         down.alerts
     assert any(a.get("needs_human") is True for a in down.alerts), (
         "a guardian whose speech route is dead cannot hear its own alert: the failure "
@@ -1910,7 +1910,7 @@ def test_a_refused_spawn_is_reported_as_a_spawn_error_not_a_dead_port(tmp_path,
     g, _sup, waited = _tts_recovery_guardian(tmp_path, monkeypatch,
                                             endpoint_answers=False, restarts_ok=False)
 
-    ok, detail = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    ok, detail = g.recover_service("agent-tts-omni", "agent-tts-omni: STOPPED")
     assert ok is False
     assert waited.get("url") is None, (
         f"supervisord refused the spawn, so :8090 must not be probed at all: a wait "
@@ -1938,7 +1938,7 @@ def test_a_voice_outage_is_never_evidence_about_the_promoted_tree(tmp_path, monk
     monkeypatch.setattr(g, "collect", lambda: {
         "now": time.time(), "supervisord": "ok", "procs": {}, "probes": {}})
     monkeypatch.setattr(g, "evaluate_liveness",
-                        lambda snap: (True, "agent-tts: STOPPED, last stop 900s ago"))
+                        lambda snap: (True, "agent-tts-omni: STOPPED, last stop 900s ago"))
     rolled: list = []
     def _record_rollback(*a):
         rolled.append(a)
@@ -1955,7 +1955,7 @@ def test_a_voice_outage_is_never_evidence_about_the_promoted_tree(tmp_path, monk
     out = g.tick()
 
     assert rolled == [], f"a voice outage was blamed on the tree: {rolled}"
-    assert sup.starts() == ["agent-tts"], sup.snapshot()
+    assert sup.starts() == ["agent-tts-omni"], sup.snapshot()
     assert out == "recovered", (
         f"`_recover_infra` returns `recovered` or `needs_human`, so any other value "
         f"means a restart whose outcome nobody recorded: {out!r}")

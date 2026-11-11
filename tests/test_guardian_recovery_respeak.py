@@ -109,16 +109,16 @@ LOST_2 = "Info. Alerts: agent-supervisord unreachable."
 #: What `recover_service` returns as its detail: no trailing period, because the alert
 #: template inside `_recover_infra` adds the one (`Restarted; {detail}.`), so the
 #: strings below are the values it is handed, not the sentence it writes.
-DETAIL = "started; http://127.0.0.1:8090/health answering"
+DETAIL = "started; http://127.0.0.1:8093/health answering"
 
 #: The liveness reason `_recover_infra` is handed. No trailing period either, for the
 #: same reason as `DETAIL`: the template adds it, and the live ALERT.md row of
 #: 2026-10-05T18:14:20-07:00 ends each sentence with exactly one.
-REASON = "agent-tts: STOPPED without an intentional stop"
+REASON = "agent-tts-omni: STOPPED without an intentional stop"
 
 #: Today's body, byte for byte, as the `self.alert(...)` call inside it writes it at `f63bdf2b` — the
 #: live `ALERT.md` row named above carries this text.
-BASE_BODY = f"agent-tts was {REASON}.\nRestarted; {DETAIL}."
+BASE_BODY = f"agent-tts-omni was {REASON}.\nRestarted; {DETAIL}."
 
 
 def _guardian(tmp_path, monkeypatch):
@@ -130,7 +130,7 @@ def _guardian(tmp_path, monkeypatch):
         repo=str(tmp_path), state=str(tmp_path / "state"),
         guardian_state=str(tmp_path / "gdir"), supervisor_sock="/nonexistent",
         backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1/health",
-        programs="agent-tts", interval=5.0,
+        programs="agent-tts-omni", interval=5.0,
     )
     g = G.Guardian(args)
     g.alerts: list = []
@@ -195,7 +195,7 @@ def test_the_recovery_alert_names_the_alerts_the_outage_swallowed(tmp_path, monk
 
     assert len(g.alerts) == 1, g.alerts
     alert = g.alerts[0]
-    assert alert["title"] == "Recovered: agent-tts", alert
+    assert alert["title"] == "Recovered: agent-tts-omni", alert
     assert "2 spoken alerts did not reach the speakers" in alert["body"], alert["body"]
     # The pre-existing sentences are still there in the same order: the loss is added to
     # the report, never replaces it.
@@ -247,19 +247,19 @@ def test_only_the_first_body_line_is_spoken():
     `utterance_for` that read the whole body would start playing multi-line alert bodies —
     every newline in every guardian report — and would have to answer to this node first.
     """
-    body = ("agent-tts was agent-tts: STOPPED without an intentional stop.\n"
-            "Restarted; started; http://127.0.0.1:8090/health answering.\n"
+    body = ("agent-tts-omni was agent-tts-omni: STOPPED without an intentional stop.\n"
+            "Restarted; started; http://127.0.0.1:8093/health answering.\n"
             "2 spoken alerts did not reach the speakers during the outage and are being "
             "said again.")
 
-    composed = speak.utterance_for("info", "Recovered: agent-tts", body)
+    composed = speak.utterance_for("info", "Recovered: agent-tts-omni", body)
 
-    assert "Recovered: agent-tts" in composed, composed
-    assert "agent-tts was agent-tts: STOPPED without an intentional stop." in composed, composed
+    assert "Recovered: agent-tts-omni" in composed, composed
+    assert "agent-tts-omni was agent-tts-omni: STOPPED without an intentional stop." in composed, composed
     assert "2 spoken alerts did not reach the speakers" not in composed, (
         f"the loss sentence reached the spoken utterance, so the split this round's "
         f"wording depends on has moved: {composed!r}")
-    assert "http://127.0.0.1:8090" not in composed, (
+    assert "http://127.0.0.1:8093" not in composed, (
         "the second line is not spoken either; if it ever is, a URL is being read aloud "
         f"and the answer to that is _speakable's job, not this node's: {composed!r}")
 
@@ -516,7 +516,7 @@ def test_a_second_recovery_over_the_same_burst_dispatches_nothing(tmp_path, monk
     """
     g = _guardian(tmp_path, monkeypatch)
     rec = _lose(g.gdir, LOST, LOST_2)
-    reason = "agent-tts: STOPPED without an intentional stop."
+    reason = "agent-tts-omni: STOPPED without an intentional stop."
 
     g._recover_infra(reason)
     first = [_worker_text(a) for a in g.spawned]
@@ -666,7 +666,7 @@ def test_a_recovery_with_no_loss_record_is_worded_exactly_as_before(tmp_path, mo
         "recovered"
 
     assert len(g.alerts) == 1, g.alerts
-    assert g.alerts[0]["title"] == "Recovered: agent-tts", g.alerts
+    assert g.alerts[0]["title"] == "Recovered: agent-tts-omni", g.alerts
     assert g.alerts[0]["body"] == BASE_BODY, g.alerts[0]["body"]
     assert [_worker_text(a) for a in g.spawned] == [], g.spawned
 
@@ -1151,7 +1151,7 @@ def test_a_stale_burst_is_not_reported_as_this_recovery_s_loss(tmp_path, monkeyp
 
     assert g._recover_infra(REASON) == "recovered"
     assert len(g.alerts) == 1, g.alerts
-    assert g.alerts[0]["title"] == "Recovered: agent-tts", g.alerts
+    assert g.alerts[0]["title"] == "Recovered: agent-tts-omni", g.alerts
     assert g.alerts[0]["body"] == BASE_BODY, (
         f"an aged burst leaked into a recovery that had none: {g.alerts[0]['body']!r}")
     assert [_worker_text(a) for a in g.spawned] == [], g.spawned

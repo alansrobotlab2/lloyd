@@ -1162,7 +1162,7 @@ The knob is `TTS_LAZY_LOAD`, and its default lives in the launcher, not the conf
 `agent-services/bin/start-qwen3-tts.sh` carries
 `export TTS_LAZY_LOAD="${TTS_LAZY_LOAD:-false}"` so a hand-run of the script boots
 eagerly too. The override is the `environment=` line of
-`agent-services/supervisor/conf.d/agent-tts.conf` (`TTS_LAZY_LOAD="false"`), which
+`agent-services/supervisor/retired/agent-tts.conf` (`TTS_LAZY_LOAD="false"`; retired 2026-11-10, not loaded), which
 supervisor exports into the script before bash runs it — so that line, not the
 launcher's default, is where an operator sets it back to lazy.
 
@@ -1390,8 +1390,7 @@ lsup reread && lsup update
 | `lloyd-mc:lloyd-mcp` | 8500 | `.venvs/lloyd/bin/python -m agent_mcp.main` | yes |
 | `lloyd-agent-worker` | — | `.venvs/lloyd/bin/python agent-services/livekit_worker.py` | yes |
 | `agent-livekit-server` | 7880 | `bin/start-livekit-server.sh` | yes |
-| `agent-tts` | 8090 | `bin/start-qwen3-tts.sh` on GPU 0 | yes |
-| `agent-qmd-daemon` | 8181 | `node ~/lloyd/qmd/dist/cli/qmd.js mcp --http` — **the fork**, on GPU 0 | yes |
+| `agent-qmd-daemon` | 8181 | `node ~/lloyd/qmd/dist/cli/qmd.js mcp --http` — **the fork**, on GPU 4 | yes |
 | `agent-qmd-watcher` | — | `scripts/qmd-watcher.sh` (inotify → reindex) | yes |
 | `agent-obsidian-sync` | — | `bin/start-obsidian-sync.sh` (`ob sync --continuous`) | yes |
 

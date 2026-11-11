@@ -4314,11 +4314,11 @@ def test_a_persisted_supervisor_state_in_the_body_is_given_its_age(tmp_path, mon
 
 import policy  # noqa: E402  (GUARDIAN_DIR is on sys.path above)
 
-TTS = "agent-tts"
+TTS = policy.TTS_PROGRAM
 
 
 def _tts_proc(state: str, started: float, now: float,
-              name: str = "agent-tts", group: str = "agent-tts") -> dict:
+              name: str = TTS, group: str = TTS) -> dict:
     """One program's row, shaped like `getAllProcessInfo` output the way every other
     node in this file shapes it.
 
@@ -4465,9 +4465,9 @@ def test_the_control_the_pin_needs_is_that_a_narrower_watch_sees_nothing(tmp_pat
 
 
 def test_a_synthesiser_that_is_compiling_is_not_yet_down(tmp_path, monkeypatch):
-    """The grace the new row has to carry: `agent-tts.conf:24-26` says :8090 does
-    not answer `/health` for about four minutes after the process is RUNNING,
-    because the model compiles inside uvicorn's lifespan.
+    """The grace the new row has to carry: the synthesiser does not answer `/health`
+    for minutes after the process is RUNNING (~2.5 min for agent-tts-omni, about four
+    for the vendored agent-tts this was written against, retired 2026-11-10).
 
     With `DEFAULT_BOOT_GRACE` (30s) and `PROBE_FAIL_STREAK` (3 x 5s) a cold boot
     would be judged down and restarted roughly four minutes before it can serve,

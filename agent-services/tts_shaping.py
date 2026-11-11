@@ -1,7 +1,7 @@
 """Output shaping for the cloned TTS voice on the LiveKit path.
 
 Two corrections, both applied to the PCM stream `livekit_worker` receives from
-the Qwen3-TTS server at :8090, both stateful across chunks within a single
+the Qwen3-TTS server (`livekit.tts.api_url`), both stateful across chunks within a single
 utterance and reset between utterances.
 
 **PresenceEQ** — the Qwen3-TTS 12 Hz speech tokenizer rolls its output off

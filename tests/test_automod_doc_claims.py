@@ -2070,7 +2070,7 @@ def test_part8_says_where_the_lazy_load_knob_is_defined_and_where_it_is_overridd
     override.
     """
     launcher = (ROOT / "agent-services" / "bin" / "start-qwen3-tts.sh").read_text(encoding="utf-8")
-    conf = (ROOT / "agent-services" / "supervisor" / "conf.d" / "agent-tts.conf").read_text(
+    conf = (ROOT / "agent-services" / "supervisor" / "retired" / "agent-tts.conf").read_text(
         encoding="utf-8")
     definition = 'export TTS_LAZY_LOAD="${TTS_LAZY_LOAD:-false}"'
     assert definition in launcher, (
@@ -2112,7 +2112,7 @@ def test_part8_says_where_the_lazy_load_knob_is_defined_and_where_it_is_overridd
 # it is not a boot window — while "~75 s" stays unrefuted, because compile time is
 # not measurable from the logs.
 
-TTS_CONF = ROOT / "agent-services" / "supervisor" / "conf.d" / "agent-tts.conf"
+TTS_CONF = ROOT / "agent-services" / "supervisor" / "retired" / "agent-tts.conf"
 
 #: Phrases that read as an open to-do. Each is a way of writing "somebody still owes
 #: this edit", which is the ask #1446 and #2147 both refused.

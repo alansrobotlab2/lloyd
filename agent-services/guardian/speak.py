@@ -82,7 +82,7 @@ except Exception:                       # standalone / test import
 # with no synced config still speaks in the right voice.
 DEFAULTS: dict = {
     # vLLM-Omni on GPU 3 since 2026-10-09 (voice.md "The TTS server"); the
-    # vendored server stays on :8090 as the fallback. `sync-voice-config.py`
+    # vendored :8090 server was retired 2026-11-10. `sync-voice-config.py`
     # overrides this from config.yaml at stage time.
     "api_url": "http://127.0.0.1:8093",
     "model": "qwen3-tts",

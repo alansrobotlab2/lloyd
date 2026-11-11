@@ -59,7 +59,7 @@ GPU_PROGRAMS = (
     "agent-decider",
     "agent-qmd-daemon",
     "agent-qmd-watcher",
-    "agent-tts",
+    "agent-tts",          # retired 2026-11-10 (not loaded); kept so a revert needs no edit here
     "agent-tts-omni",
     "lloyd-agent-worker",
 )

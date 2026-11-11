@@ -162,7 +162,7 @@ def _live_cfg() -> dict:
     built-in defaults.
     """
     cal = _calib()["configured_voice"]
-    return {"api_url": "http://127.0.0.1:8090", "model": cal["model"], "voice": cal["voice"],
+    return {"api_url": "http://127.0.0.1:8093", "model": cal["model"], "voice": cal["voice"],
             "sample_rate": cal["sample_rate"], "max_audio_seconds": 60.0,
             "synth_timeout": 60.0, "synth_wall_clock": 90.0, "max_chars": 240,
             "quiet_hours": {"enabled": False, "start": 23, "end": 7, "allow_critical": False}}
@@ -324,7 +324,7 @@ g._beat = lambda: None
 g._recent_recoveries = lambda program: 0
 # Only the alert-routing arms need these; setting them always costs nothing and keeps the
 # two modes driving one object rather than two fixtures that can drift apart.
-g.programs = ("agent-tts",)
+g.programs = ("agent-tts-omni",)
 g.interval = 5.0
 g.liveness_fail_streak = 1
 g.alerts = []
@@ -348,7 +348,7 @@ if SC["mode"] == "infra":
 else:
     _recoverable = None
     try:
-        ok, detail = g.recover_service("agent-tts", SC["reason"])
+        ok, detail = g.recover_service("agent-tts-omni", SC["reason"])
     except Exception as exc:                                   # noqa: BLE001
         ok, detail = "CRASHED", f"{type(exc).__name__}: {exc}"
 
@@ -387,7 +387,7 @@ def _child(tmp_path: Path, speech: str = "good", *, health: str = "ok", mode: st
         "voice_cfg": cfg, "speech": speech, "health": health, "mode": mode,
         "bodies": [{"name": k, "seconds": v[0], "rms": v[1]} for k, v in bodies.items()],
         "reason": "synth failures (URLError: [Errno 111] Connection refused)",
-        "live_reason": "agent-tts: STOPPED without an intentional stop.",
+        "live_reason": "agent-tts-omni: STOPPED without an intentional stop.",
         "loss_texts": (["Landed: 3b7db4e2", "Rolled back: memory/kg.sqlite"]
                        if seed_loss else []),
     }
@@ -769,14 +769,14 @@ def test_a_recovery_refused_by_speech_alerts_a_human_and_writes_no_recovered_row
     branch at all.
     """
     r = _child(tmp_path, "http", mode="infra", seed_loss=True)
-    assert r["recoverable"] == ["agent-tts"], r["recoverable"]
+    assert r["recoverable"] == ["agent-tts-omni"], r["recoverable"]
     assert r["loss"] and r["loss"]["occurrences"] == 2, r["loss"]
     assert r["ok"] == "needs_human", r
     assert len(r["alerts"]) == 1, r["alerts"]
     alert = r["alerts"][0]
     assert alert["level"] == "error", alert
     assert alert["needs_human"] is True, alert
-    assert alert["title"] == "Voice alert channel cannot be recovered: agent-tts", alert
+    assert alert["title"] == "Voice alert channel cannot be recovered: agent-tts-omni", alert
     assert "cannot speak" in alert["body"], alert["body"]
     assert not [a for a in r["alerts"] if a["title"].startswith("Recovered:")], r["alerts"]
     assert "said again" not in alert["body"], alert["body"]
@@ -798,7 +798,7 @@ def test_a_recovery_confirmed_by_speech_is_still_said_as_recovered(tmp_path):
     assert len(r["alerts"]) == 1, r["alerts"]
     alert = r["alerts"][0]
     assert alert["level"] == "info", alert
-    assert alert["title"] == "Recovered: agent-tts", alert
+    assert alert["title"] == "Recovered: agent-tts-omni", alert
     assert "needs_human" not in alert, alert
     assert f"{cal['seconds']:.2f}s" in alert["body"], alert["body"]
     assert "said again" in alert["body"], alert["body"]

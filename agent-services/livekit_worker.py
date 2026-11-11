@@ -242,7 +242,7 @@ class TTSStreamer:
         #: Tried once for a clause the primary could not speak — an HTTP error,
         #: or no audio within `first_byte_timeout_s` (2026-11-09 review, C4:
         #: a failed clause was logged as spoken and the listener heard a hole).
-        #: The vendored server (agent-tts, :8090) serves the same clone.
+        #: Empty since 2026-11-10 (the vendored :8090 server was retired).
         self.fallback_url = (tts_cfg.get("fallback_url") or "").rstrip("/")
         self.first_byte_timeout_s = float(tts_cfg.get("first_byte_timeout_s", 3.0))
         #: Longest gap between two chunks of one clause before it is given up

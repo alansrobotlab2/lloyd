@@ -18,12 +18,14 @@ TICK_SECONDS = 5.0
 BOOT_GRACE = {
     "lloyd-mc:lloyd-backend": 45.0,
     "lloyd-mc:lloyd-mcp": 30.0,
-    # The synthesiser compiles inside uvicorn's lifespan, so :8090 answers no
-    # request at all for about four minutes after supervisord reports it RUNNING —
-    # `agent-services/supervisor/conf.d/agent-tts.conf:24-26` says so in its own
-    # comment. Without a grace of its own it would fall to DEFAULT_BOOT_GRACE (30s)
-    # and be judged down, and restarted, every cold boot long before it can serve.
-    "agent-tts": 360.0,
+    # The synthesiser answers /health only once its engines are up: ~2.5 min for
+    # agent-tts-omni (`agent-tts-omni.conf`'s own comment), and up to ~4.6 min for
+    # the vendored agent-tts this grace was sized for (retired 2026-11-10, kept at
+    # `supervisor/retired/`). Without a grace of its own it would fall to
+    # DEFAULT_BOOT_GRACE (30s) and be judged down, and restarted, every cold boot
+    # long before it can serve. Kept at 360s so a revert to the vendored server
+    # needs only TTS_PROGRAM and TTS_HEALTH_URL changed.
+    "agent-tts-omni": 360.0,
 }
 DEFAULT_BOOT_GRACE = 30.0
 
@@ -103,9 +105,14 @@ CRASH_LOOP_WINDOW_SECONDS = 180.0
 # server does not justify rewriting history, and there was an `ADVISORY` tuple
 # here that named it and that nothing ever read — a knob an operator would
 # reasonably think was doing something.
-WATCHED = ("lloyd-mc:lloyd-backend", "lloyd-mc:lloyd-mcp", "agent-tts")
+#: The synthesiser every spoken alert goes through. `agent-tts-omni` (:8093) since
+#: 2026-11-10; until then this watch pointed at the vendored `agent-tts` (:8090),
+#: which had stopped speaking anything on 2026-10-09, so the engine that did speak was
+#: watched by nobody but supervisord's autorestart.
+TTS_PROGRAM = "agent-tts-omni"
+WATCHED = ("lloyd-mc:lloyd-backend", "lloyd-mc:lloyd-mcp", TTS_PROGRAM)
 
-# `agent-tts` is watched but is NOT in `RESTART_ORDER`, and that asymmetry is the
+# The synthesiser (`TTS_PROGRAM`) is watched but is NOT in `RESTART_ORDER`, and that asymmetry is the
 # whole point of listing it here rather than appending it to the tuple below.
 #
 # Until #2256 the synthesiser was in neither tuple, so nothing read its supervisord
@@ -117,8 +124,8 @@ WATCHED = ("lloyd-mc:lloyd-backend", "lloyd-mc:lloyd-mcp", "agent-tts")
 #
 # It stays out of `RESTART_ORDER` because that tuple is what a rollback stops and
 # starts, and `guardian.tick` treats a liveness failure as evidence about the
-# PROMOTED CODE. `agent-tts` runs from `agent-services/services/tts/qwen3-tts/`,
-# which is untracked in git (see the versioning-gap memory line), so a land cannot
+# PROMOTED CODE. The synthesiser's engine is not in git (vLLM-Omni in its own venv;
+# before it, the vendored `agent-services/services/tts/qwen3-tts/`), so a land cannot
 # break it — and a dead voice channel must never become a reason to revert a
 # landing. `RECOVERABLE_INFRA` below is what keeps those two facts in one place.
 RESTART_ORDER = ("lloyd-mc:lloyd-mcp", "lloyd-mc:lloyd-backend")
@@ -128,16 +135,15 @@ RESTART_ORDER = ("lloyd-mc:lloyd-mcp", "lloyd-mc:lloyd-backend")
 #: route is never offered one. Add a program here only when a landing cannot plausibly
 #: have caused the outage.
 #:
-#: For `agent-tts` the premise is that the code it SERVES is not in git: `git ls-files
-#: agent-services/services/tts/qwen3-tts | wc -l` answers 0 — the vendored upstream
-#: server that the process actually runs is untracked, versioned only by
-#: `qwen3-tts-upstream-commit.txt` and a local patch — while the same command on `app`
-#: answers over a hundred for the backend. What IS tracked is its launcher,
-#: `agent-services/bin/start-qwen3-tts.sh`; a landing that wrecked that would leave
-#: `agent-tts` in BACKOFF/FATAL, and the recovery path's failed-restart alert names the
+#: For the synthesiser the premise is that the code it SERVES is not in git: vLLM-Omni
+#: runs from its own venv, untracked, as the vendored server it replaced did
+#: (`git ls-files agent-services/services/tts/qwen3-tts | wc -l` answers 0), while the
+#: same command on `app` answers over a hundred for the backend. What IS tracked is its
+#: launcher, `agent-services/bin/start-qwen3-tts-omni.sh`; a landing that wrecked that
+#: would leave it in BACKOFF/FATAL, and the recovery path's failed-restart alert names the
 #: supervisor state for a human to judge, rather than the guardian silently reverting an
 #: unrelated landing because the room went quiet.
-RECOVERABLE_INFRA = ("agent-tts",)
+RECOVERABLE_INFRA = (TTS_PROGRAM,)
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
 #: The name a caller overrides the backend's address with. It joins
@@ -172,18 +178,18 @@ def backend_health_url() -> str:
 
 BACKEND_HEALTH_URL = backend_health_url()
 MCP_HEALTH_URL = "http://127.0.0.1:8500/health"
-# The synthesiser. Not a /health of the same shape: this one answers
-# `{"status": "healthy"}` where backend and aggregator answer `"ok"`, and
-# `{"status": "initializing"}` while it warms — see `probes.ok_statuses_for`.
-TTS_HEALTH_URL = "http://127.0.0.1:8090/health"
+# The synthesiser (`TTS_PROGRAM`). Not a /health of the same shape: it answers
+# `{"status": "healthy"}` where backend and aggregator answer `"ok"` — vLLM-Omni on
+# :8093 the same as the vendored server on :8090 did — see `probes.ok_statuses_for`.
+TTS_HEALTH_URL = "http://127.0.0.1:8093/health"
 # Generous: this is how long a BUSY event loop may take to answer, not how
 # long a healthy one does (measured at 0.37ms).
 PROBE_TIMEOUT_SECONDS = 10.0
 HEALTH_WAIT_MCP = 60.0
 HEALTH_WAIT_BACKEND = 90.0
-# How long a recovered `agent-tts` gets to answer :8090 before the recovery is
-# called failed: the four-minute cold compile plus slack, for the same reason as
-# `BOOT_GRACE["agent-tts"]`. The tick is blocked while this waits, which is what
+# How long a recovered synthesiser gets to answer `TTS_HEALTH_URL` before the
+# recovery is called failed: the slowest cold boot plus slack, for the same reason
+# as `BOOT_GRACE[TTS_PROGRAM]`. The tick is blocked while this waits, which is what
 # `on_tick=self._beat` is for — the unit's `WatchdogSec` is 90s.
 HEALTH_WAIT_TTS = 420.0
 
