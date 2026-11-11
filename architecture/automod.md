@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, automod]
 type: reference
 status: implemented
-date: 2026-10-12
+date: 2026-11-11
 ---
 
 # Automod: self-modification with automatic rollback
@@ -165,8 +165,9 @@ detached.
 
 ### 3.2 Unattended
 
-Two worker sources, off by default, chained so that implementation can never
-start from an unverified premise:
+Two worker sources — a source defaults to off in `workers/pool.py` and
+`config.yaml` enables both, so on this box the loop is running, not parked —
+chained so that implementation can never start from an unverified premise:
 
 - **`autotriage`** records a verdict with evidence. It takes a *cluster* from
   `clusters.json` before it takes a single item (§3.2c); failing that, one
@@ -4118,10 +4119,15 @@ than the one this prevents.
   diff (a list is one leaf); and the diff is refused if any path sits under a
   `CONFIG_DENIED_KEYS` prefix — `mcp_servers`, `models`, `model`,
   `subagents`, `server`, `services`, `guardian`, `automod.enabled`,
-  `automod.landing`, `workers.enabled`, `workers.slots` and
-  `knowledge_graph.write_gate` (#2344, fenced 2026-10-08) — the
+  `automod.landing`, `workers.enabled`, `workers.slots`,
+  `knowledge_graph.write_gate` (#2344, fenced 2026-10-08) and
+  `discord.home_channel` / `discord.owner_id` (#3472, fenced 2026-10-30) — the
   config half of what `PROTECTED_GLOBS` is for code: the lock-out, the
-  rollback path, the engine's identity, the loop editing its own budget. Also
+  rollback path, the engine's identity, the loop editing its own budget. The
+  undotted entries of that tuple are additionally derived into
+  `CONFIG_DENIED_BLOCKS` (#3472), so a denied block cannot be re-introduced one
+  level down as an added or removed node — `automod.guardian` is under no denied
+  prefix and was admitted until that lane existed. Also
   refused: a changed leaf named in `CONFIG_DENIED_LEAVES` anywhere in the tree
   (`base_url`, `url`, `host`, `port`, `expect_model`, `device`, `devices`,
   `gpu`, `cuda_visible_devices`, `token`, `api_key`, `password`, `secret`), a
@@ -4515,3 +4521,27 @@ from `denied.json` first).
   (`gate.py`'s docstring numbers the ladder without its two conditional rungs, so
   `drill` is 9 there and twelfth in `Gate.run`; the doc must not cite a rung by
   number while two numberings exist).
+
+- **2026-11-11 — `current`.** Whole-document pass at `e32dc299`. Swept every
+  backticked path in the file (161 distinct): every full-path mention resolves,
+  and the only non-resolving ones are bare basenames whose directory the
+  surrounding text names (`promote.py`, `gate.py`, `MEMORY.md`) and two
+  illustrative placeholders in a worked example (`app/x.py:164`,
+  `scripts/a.py:224`) — the `path.ext:N-M` line-citation spelling was retired
+  for these docs on 2026-10-25 (`855c4865`, #3292), so those numbers are not
+  claims about the tree. The `spec.py` fence
+  tuples, the `round` subcommand set, the `Gate.run` ladder (`gate.py:2584`), and
+  the live `/api/workers/health` and `/api/autonomy/health` at `days=7` —
+  `window_clamped_to_hours` and `oldest_input` are both null on each, so those
+  are genuine 7-day spans. The mechanism described is still what runs. Corrected
+  in place: §3.2 called the two worker sources "off by default", which is the
+  code default and has not been the box's state since the loop was switched on —
+  `workers/pool.py` defaults a source off, `config.yaml` carries `enabled: true`
+  for both, and rounds are landing as this pass runs; §10's `CONFIG_DENIED_KEYS`
+  list stopped at `knowledge_graph.write_gate` and so omitted `discord.home_channel`
+  and `discord.owner_id` plus the derived `CONFIG_DENIED_BLOCKS` lane, all three
+  landed 2026-10-30 (`1a82618d`, #3472). Filed: #4060 (the #1037 ruling that
+  exempts `~/.local/state/lloyd-automod/rounds/` from the retention sweep states
+  825 dirs / 24 MB; measured 2026-11-11 it is 2,634 dirs / 134 MB — 1,211 of them
+  from October and 347 from its first eleven days — so the exemption's stated
+  basis is 3× stale).
