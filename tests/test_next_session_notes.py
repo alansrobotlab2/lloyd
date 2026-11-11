@@ -184,7 +184,8 @@ AMBIENT_LOGGER = "lloyd-mcp.ambient"
 PRODUCER = "nightly:reflection"
 
 
-def _note_door(monkeypatch, priority: str) -> tuple[dict, list[str]]:
+def _note_door(monkeypatch, priority: str,
+               extra: dict | None = None) -> tuple[dict, list[str]]:
     """Fire `session_inject_context` as a 03:00 producer does; return its own
     answer and the endpoints it crossed.
 
@@ -192,6 +193,11 @@ def _note_door(monkeypatch, priority: str) -> tuple[dict, list[str]]:
     condition under which #2600 says a loud tier is silently downgraded. From there
     it is the real handler POSTing to the real router into the real store, so a
     payload that misdescribed the door still had to write the note to be read here.
+
+    `extra` carries any further argument a producer might send (`ttl_seconds`, in
+    the nodes below) exactly as the MCP call would carry it, so the field is traced
+    through the handler and the router to the stored row rather than asserted at the
+    door it enters.
     """
     from agent_mcp import ambient as A
 
@@ -209,9 +215,9 @@ def _note_door(monkeypatch, priority: str) -> tuple[dict, list[str]]:
 
     monkeypatch.setattr(A, "_get_json", fake_get_json)
     monkeypatch.setattr(A, "_post_json", fake_post_json)
-    out = asyncio.run(A._tool_session_inject_context({
-        "source": PRODUCER, "summary": NOTE, "priority": priority,
-    }))
+    args = {"source": PRODUCER, "summary": NOTE, "priority": priority}
+    args.update(extra or {})
+    out = asyncio.run(A._tool_session_inject_context(args))
     return json.loads(out.content[0].text), asked
 
 
@@ -336,6 +342,115 @@ def test_the_tool_description_tells_the_producer_the_loud_tiers_can_stay_quiet(
     for field in advertised:
         assert field in reported, (
             f"description advertises `{field}`; the downgraded payload has no such key")
+
+
+# ── #4053: the ttl field tells the truth about the door it also reaches ────────
+#
+# `ttl_seconds` was advertised as applying "Only … to priority=ambient", and the same
+# sentence carried a second false half: a flat "Default 3600", which is the prefetch
+# door's number and not the note door's. With no session resolving, the handler forwards the producer's own
+# value (`agent_mcp/ambient.py`, the `if not session_id:` branch) through
+# `/api/next-session-note` to `write_next_session_note`, which applies it against
+# `NEXT_SESSION_NOTE_TTL_SECONDS` — 24 h, not 3600 s — so a nightly pass that sent a
+# long ttl believing the field inert at a loud tier got a note outliving every
+# sibling in a store that holds five (`NEXT_SESSION_NOTE_CAP`), where one long-lived
+# note evicts the arrivals behind it. The schema is what a producer reads before it
+# fires, so the sentence is the surface; the row is the proof. Both are asserted
+# here, the description off the live `Tool` object rather than the source text.
+
+def test_the_ttl_field_description_prices_both_doors_it_buys():
+    """#4053 clause 1: the advertised field description says what the two doors do.
+
+    Absence and presence are both graded, because the defect was a sentence as much
+    as a number: `"Only applies to priority=ambient"` excluded a door the same handler
+    honours the value on, and `"Default 3600"` named only the prefetch door's default.
+    What replaces them names both (3600 s on the prefetch queue, 24 h on the note) and
+    what a `0` buys.
+
+    That last clause is why "never expires" is asserted absent as well. The store does
+    have a permanence sentinel (`expires_at == 0.0`), but no producer reaches it
+    through this tool: the note branch maps `0` to `None` and the prefetch branch to
+    3600, so advertising permanence would be the same species of defect one line over
+    — a payload describing something the tree does not do.
+    """
+    from agent_mcp import ambient as A
+
+    tools = {t.name: t for t in asyncio.run(A.list_tools())}
+    described = tools["session_inject_context"].input_schema["properties"][
+        "ttl_seconds"]["description"]
+    flat = " ".join(described.split())
+    lower = flat.lower()
+
+    assert "only applies to priority=ambient" not in lower, flat
+    assert "only applies to ambient" not in lower, flat
+    assert "never expires" not in lower, flat
+    assert "both doors honour it" in lower, flat
+    assert "3600" in flat, flat
+    assert "24 h" in flat, flat
+    assert "next-session" in lower, flat
+    assert "0 selects that door's default" in flat, flat
+
+
+@pytest.mark.parametrize("sent,expected_age", [
+    ({"ttl_seconds": 120}, 120),
+    ({}, 86_400),
+    ({"ttl_seconds": 0}, 86_400),
+])
+def test_the_note_door_honours_the_ttl_the_producer_sent(monkeypatch, _scratch_store,
+                                                         sent, expected_age):
+    """#4053 clause 2: the value a producer sends decides the note's deadline.
+
+    The field is not decorative on this door and never was, which is the fact the
+    retired sentence denied. The three cases are the whole producer contract in one
+    row: an explicit 120 lands 120 s out, and both ways of asking for the default —
+    omitting the field, or sending the `0` that the handler rewrites to `None` — land
+    86 400 s out, the note door's own day, not the queue's hour.
+
+    The age is read off the stored row, not off the tool's echo, because the claim
+    under test is about what the store will do to the note at drain time.
+    """
+    reported, asked = _note_door(monkeypatch, "ambient", extra=sent)
+
+    assert reported["ok"] is True, reported
+    assert "/api/next-session-note" in asked, asked
+    stored = json.loads(_scratch_store.read_text())["notes"]
+    assert len(stored) == 1, stored
+    age = stored[0]["expires_at"] - stored[0]["enqueued_at"]
+    assert age == expected_age, (
+        f"ttl_seconds={sent.get('ttl_seconds', '<omitted>')} stored a note {age}s out, "
+        f"expected {expected_age}s")
+
+
+def test_a_producer_zero_never_buys_permanence_through_the_tool(monkeypatch,
+                                                                _scratch_store):
+    """#4053's other end: permanence is the store's, not the tool's, and the two doors
+    stay apart on purpose.
+
+    `write_next_session_note` treats `ttl_seconds=0` as "no deadline" and writes
+    `expires_at = 0.0`, the ambient queue's sentinel. A caller that POSTs that `0`
+    straight to `/api/next-session-note` really does get a note that waits until it is
+    drained or evicted. `session_inject_context` deliberately does not pass it through:
+    it converts `0` to `None`, so the tool's producers get the 24 h default like
+    everyone else. Forwarding the `0` — the obvious "unify the two doors" edit — would
+    hand every producer that passed `0` meaning "your default" an immortal note in a
+    five-entry store, and this node is what goes red if that happens.
+    """
+    client = _client()
+    direct = client.post("/api/next-session-note",
+                         json={"source": "nightly:direct", "summary": NOTE,
+                               "ttl_seconds": 0})
+    assert direct.status_code == 200, direct.text
+    posted = json.loads(_scratch_store.read_text())["notes"]
+    assert len(posted) == 1 and posted[0]["expires_at"] == 0.0, posted
+
+    reported, _ = _note_door(monkeypatch, "ambient", extra={"ttl_seconds": 0})
+    assert reported["ok"] is True, reported
+    via_tool = [n for n in json.loads(_scratch_store.read_text())["notes"]
+                if n["source"] == PRODUCER]
+    assert len(via_tool) == 1, via_tool
+    assert via_tool[0]["expires_at"] - via_tool[0]["enqueued_at"] == 86_400, (
+        "the tool forwarded a producer's 0 to the note door, which is the split #4053 "
+        "documents rather than closes")
 
 
 # ── clause 2: delivered as appended context, never as a system-prompt change ──

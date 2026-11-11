@@ -88,7 +88,7 @@ async def list_tools():
                 "properties": {
                     "source": {
                         "type": "string",
-                        "description": "Stable producer identifier, e.g. 'autonomy:task-42' or 'pipeline:research-117'. Appears in the context envelope so the agent knows what fired it.",
+                        "description": "Stable producer identifier, e.g. 'autonomy:task-42' or 'pipeline:research-117'. Appears in the context envelope.",
                     },
                     "summary": {
                         "type": "string",
@@ -96,7 +96,7 @@ async def list_tools():
                     },
                     "content": {
                         "type": "string",
-                        "description": "Optional fuller body. Rendered nested under the summary. Keep under ~800 chars or it'll be truncated.",
+                        "description": "Optional fuller body, nested under the summary. Keep under ~800 chars or it's truncated.",
                         "default": "",
                     },
                     "priority": {
@@ -107,12 +107,17 @@ async def list_tools():
                     },
                     "dedup_key": {
                         "type": "string",
-                        "description": "Collapse multiple firings into one. Default = source. Same producer re-firing replaces its previous unsent entry.",
+                        "description": "Collapse multiple firings into one. Default = source; a re-fire replaces the unsent entry.",
                         "default": "",
                     },
+                    # Both numbers in the description below are the handler's own: the
+                    # no-session branch maps a passed 0 to None — which the note store
+                    # reads as its 24 h default — and the prefetch path maps it to 3600,
+                    # so permanence is unreachable through this tool however the field is
+                    # spelled (#4053; `tests/test_next_session_notes.py` pins each half).
                     "ttl_seconds": {
                         "type": "integer",
-                        "description": "Drop the entry if the user hasn't engaged this many seconds later. Default 3600. Only applies to priority=ambient.",
+                        "description": "Drop the entry if the user hasn't engaged this many seconds later. Both doors honour it: 3600 s default on the prefetch door, 24 h on the next-session door; 0 selects that door's default.",
                         "default": 3600,
                     },
                     "session_id": {
@@ -138,9 +143,7 @@ async def list_tools():
                 "  shown to the user, tagged as ambient-sourced. Only needed if you want "
                 "  to explicitly log the decision; the default if you just reply is also "
                 "  to surface.\n\n"
-                "Server rejects the call if the current turn is not ambient. The "
-                "session_id is embedded in the ambient envelope you received — copy it "
-                "from there."
+                "Server rejects the call if the current turn is not ambient."
             ),
             inputSchema={
                 "type": "object",
