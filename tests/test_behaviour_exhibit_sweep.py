@@ -37,6 +37,28 @@ import ast  # noqa: E402  # clause 5: the no-hard-coded-bar check reads the modu
 
 NOW = datetime(2026, 11, 4, 12, 0, 0, tzinfo=timezone.utc)
 
+#: The clock `main()` reads, for the two nodes whose subject IS `main()`.
+#:
+#: Every other node here passes an explicit `now=` into `sweep`, so its window, its
+#: artifact day and its baseline are frozen against `NOW` above and are permanent. A node
+#: that drives `main()` cannot freeze it: no `main` in `app/` takes a `now` argument (none
+#: does — `app/tool_quality.py:938` is the same shape), and the whole subject of those
+#: nodes is the scheduled invocation
+#: `.venvs/lloyd/bin/python -m app.behaviour_exhibit --days 7`, which windows on file mtime
+#: against the REAL clock and names its artifact from the REAL day. So their fixtures have
+#: to be stamped on that same clock. Stamping them at the frozen `NOW` instead is what made
+#: #4065's two nodes red on 2026-11-11 with the reader unchanged: `write_session`'s default
+#: `age_days=0` put the transcript's mtime seven days outside a seven-day window, the sweep
+#: read `files_read: 0`, and a plumbing pin had turned into a countdown. A fixture that has
+#: to read as recent traffic to the code under test is stamped recent by that code's clock,
+#: never by a constant — and `LIVE_DAY`/`YESTERDAY_DAY` are how a node names the artifact
+#: file the run really writes instead of the day it happened to be authored on.
+LIVE = datetime.now(timezone.utc)
+YESTERDAY = LIVE - timedelta(days=1)
+LIVE_DAY = LIVE.strftime("%Y-%m-%d")
+YESTERDAY_DAY = YESTERDAY.strftime("%Y-%m-%d")
+LIVE_STAMP = LIVE.strftime("%Y%m%d_%H%M%S")
+
 
 def _tc(name, args):
     return {"id": f"c-{name}-{abs(hash(json.dumps(args, sort_keys=True)))}",
@@ -709,8 +731,14 @@ def test_the_command_line_entry_point_sweeps_writes_and_reports(tmp_path, capsys
     `command` field that is a template rather than a record is how a run becomes unrepeatable,
     and pins the `--check` half, which is the only thing standing between a dead `source`
     pointer and a green-looking run.
+
+    The fixture is stamped on `LIVE`, not on the frozen `NOW` (#4065): `--days 7` alone
+    windows on file mtime against the wall clock `main()` reads, so a transcript stamped at
+    a constant leaves the window exactly seven days after that constant and the node becomes
+    a countdown — the failure this node was red for. The day the artifact is NAMED by comes
+    from that same clock, so the assertion below reads `LIVE_DAY` rather than a date.
     """
-    write_session(tmp_path, "20261103_100000_cli_l1", captioned_turn())
+    write_session(tmp_path, f"{LIVE_STAMP}_cli_l1", captioned_turn(), mtime=LIVE)
     out = tmp_path / "store"
     registry = registry_path(tmp_path)
     monkeypatch.setattr(sys, "argv", [
@@ -721,7 +749,18 @@ def test_the_command_line_entry_point_sweeps_writes_and_reports(tmp_path, capsys
     assert "corpus:" in printed and "tool-call-caption-present" in printed, printed
     written = sorted(out.glob("behaviour-exhibit-*.jsonl"))
     assert len(written) == 1, f"the default out path is a store directory: {out}"
+    assert written[0].name == f"behaviour-exhibit-{LIVE_DAY}.jsonl", (
+        f"the artifact is named for a day other than the one the sweep's clock is on "
+        f"({LIVE_DAY}): {written[0].name}")
     art = json.loads(written[0].read_text(encoding="utf-8"))
+    # The admission itself, not just its consequence in `sessions`: at #4065's base the run
+    # printed a full artifact over an EMPTY corpus, which is how an instrument that reads
+    # nothing can pass a node that only counts rows. `--days` alone is the mtime clock, so
+    # the mode is pinned too — a mode flip would move the window's meaning under this node.
+    assert art["window_mode"] == "mtime", art["window_mode"]
+    assert art["corpus"]["files_read"] == 1, (
+        f"the mtime window refused the fixture stamped on the live clock — the reader is "
+        f"dating files by something other than the clock `main` runs on: {art['corpus']}")
     assert art["corpus"]["sessions"] == 1, art["corpus"]
     assert "behaviour_exhibit --sessions-dir" in art["command"], art["command"]
     assert "--days 7" in art["command"], "the recorded command is a template, not this run"
@@ -1459,6 +1498,13 @@ def test_a_run_with_no_out_flag_writes_the_named_store_and_reports_movement(tmp_
     `out_dir()` returning the constant the index reads (clause 1, in service of clause 2).
     The second invocation then has to find yesterday's file as its baseline, and must not
     find today's own.
+
+    Both days are read off `LIVE`, the clock `main()` runs on, and the fixture transcript is
+    stamped on it too (#4065). Written against the frozen `NOW` they were a date, not a
+    relation: on 2026-11-11 the transcript's mtime fell outside the seven-day mtime window,
+    the sweep scored an empty corpus, and this node went red with the reader unchanged — the
+    day names are computed now, so "yesterday's artifact is the baseline" and "retention has
+    not eaten the 1-day-old baseline" stay the claims they state on every day they run.
     """
     import app.paths as p
 
@@ -1467,32 +1513,88 @@ def test_a_run_with_no_out_flag_writes_the_named_store_and_reports_movement(tmp_
     # Stamped as a harness run on purpose: an unstamped record is `unattributed`,
     # which would leave the worker denominator empty and the report with the
     # "no rate" branch instead of a comparison line.
-    write_session(tmp_path, "20261106_100000_main_aaaa", captioned_turn(),
-                  source="autonomy-task:24")
+    write_session(tmp_path, f"{LIVE_STAMP}_main_aaaa", captioned_turn(),
+                  source="autonomy-task:24", mtime=LIVE)
     assert BE.out_dir() == store, "out_dir() must resolve the constant at call time"
 
     assert BE.main(["--sessions-dir", str(tmp_path), "--days", "7"]) == 0
     first_run = capsys.readouterr().out
     written = sorted(q.name for q in store.iterdir())
     assert len(written) == 1 and written[0].startswith("behaviour-exhibit-"), written
+    assert written[0] == f"behaviour-exhibit-{LIVE_DAY}.jsonl", (
+        f"the default store got an artifact named for a day other than the sweep's own "
+        f"({LIVE_DAY}): {written}")
     assert f"wrote {store / written[0]}" in first_run, first_run
     assert "first reading" in first_run, (
         "an empty store is a first reading and the report must say so\n" + first_run)
 
-    _write_artifact(store, _mart(LIVE_PRIOR_ROWS, "2026-11-06T06:00:00+00:00"),
-                    day="2026-11-06")
+    _write_artifact(store, _mart(LIVE_PRIOR_ROWS, f"{YESTERDAY_DAY}T06:00:00+00:00"),
+                    day=YESTERDAY_DAY)
     assert BE.main(["--sessions-dir", str(tmp_path), "--days", "7"]) == 0
     second_run = capsys.readouterr().out
-    assert "movement vs behaviour-exhibit-2026-11-06.jsonl" in second_run, second_run
+    assert f"movement vs behaviour-exhibit-{YESTERDAY_DAY}.jsonl" in second_run, second_run
     assert "Wilson half-width" in second_run, second_run
     mv = second_run.split("movement vs ")[1].split("wrote ")[0]
     assert written[0] not in mv, (
         "the run compared itself against the artifact it had just written, which is how "
         f"two runs of one night read as a behaviour change: {mv}")
-    assert mv.startswith("behaviour-exhibit-2026-11-06.jsonl"), mv
-    assert (store / "behaviour-exhibit-2026-11-06.jsonl").exists(), (
+    assert mv.startswith(f"behaviour-exhibit-{YESTERDAY_DAY}.jsonl"), mv
+    assert (store / f"behaviour-exhibit-{YESTERDAY_DAY}.jsonl").exists(), (
         "retention must not have eaten the 1-day-old baseline: without it the next run "
         "has nothing to compare against either")
+
+
+def test_a_node_that_drives_main_never_stamps_its_fixtures_on_the_frozen_clock():
+    """#4065's trap, refused structurally: a `--days` run through `main` over a `NOW`-stamped
+    transcript is not a red test, it is a red test with a seven-day fuse.
+
+    The two nodes above went red at base `d86b67ef` with no diff present because
+    `write_session`'s default `age_days=0` stamps a file's mtime at the frozen `NOW`
+    (2026-11-04T12:00Z) while `--days 7` alone windows on mtime against the wall clock
+    `main()` reads: on 2026-11-11 the cutoff was 7.02 days before the fixture, the sweep
+    admitted 1 candidate and read 0 files, and a node about plumbing had quietly become a
+    countdown. Freezing `main()` is not on the table — its subject is the scheduled
+    invocation, and no `main` in `app/` takes a `now` to freeze it with — so the discipline
+    is that a node driving `main()` with `--days` stamps its fixtures on `LIVE`.
+
+    The rule is checked on the AST rather than by a comment because that is the shape of the
+    failure: a node added tomorrow that forgets this passes the day it is written and fails
+    a week later, with the reader innocent. Every other node in this file may keep `NOW`,
+    because every other node passes `now=NOW` into `sweep` and so windows against the same
+    frozen instant its fixtures are stamped at — this node only refuses the ones that
+    cannot.
+    """
+    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+    offenders = []
+    for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef)
+               and n.name.startswith("test_")]:
+        drives_main = any(isinstance(c, ast.Call)
+                          and getattr(c.func, "attr", "") == "main"
+                          for c in ast.walk(fn))
+        names_days = any(isinstance(c, ast.Constant) and c.value == "--days"
+                         for c in ast.walk(fn))
+        if not (drives_main and names_days):
+            continue
+        for c in ast.walk(fn):
+            if not (isinstance(c, ast.Call)
+                    and getattr(c.func, "id", "") == "write_session"):
+                continue
+            kw = {k.arg: k.value for k in c.keywords}
+            stamped_live = any(isinstance(n, ast.Name) and n.id.startswith("LIVE")
+                               for n in ast.walk(kw.get("mtime") or ast.Pass()))
+            if not stamped_live:
+                sid = (c.args[1] if isinstance(c.args, list) and len(c.args) > 1
+                       else c.args[0] if c.args else None)
+                sid_txt = (sid.value if isinstance(sid, ast.Constant)
+                           else "f-string fixture" if isinstance(sid, ast.JoinedStr)
+                           else "?")
+                offenders.append(f"{fn.name}: write_session({sid_txt!r}) has no "
+                                 "`mtime=LIVE`, so it ages out of `main`'s `--days` window "
+                                 "seven days after `NOW`")
+    assert offenders == [], (
+        "a node that drives `main()` with `--days` must stamp its fixtures on the clock "
+        "`main()` windows on — see the two nodes above and #4065:\n"
+        + "\n".join(offenders))
 
 
 # ── #3886 clause 3: the sweep is scheduled ────────────────────────────────────
