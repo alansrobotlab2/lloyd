@@ -46,7 +46,7 @@
 # SIZE ESCALATES BY PROMPT LENGTH ONLY. `PREEMPT_LOAD_PROMPT_WORDS` (default
 # 20000, the probe's own) is the knob. Never `MAX_NUM_SEQS`, never
 # `KV_CACHE_MEMORY_BYTES`: the first is the 8 sequences sharing the pool, the
-# second IS the pool (15032385536 bytes = 844,969 tokens), and a run that
+# second IS the pool (15569256448 bytes = 840,330 tokens), and a run that
 # reached a preemption against a shrunk pool would be measuring a pool no
 # operator armed. The probe records `peak kv_cache_usage_perc` on both outcomes
 # and this step echoes it either way, so a run that stayed under the line is

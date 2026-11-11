@@ -42,7 +42,7 @@ supervisord as `agent-llm-primary`. The live command line, verbatim:
   --async-scheduling
   --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3
   --speculative-config {"method": "mtp", "num_speculative_tokens": 3}
-  --kv-cache-memory-bytes 15032385536
+  --kv-cache-memory-bytes 15569256448
   --limit-mm-per-prompt {"image": 20, "video": 0, "audio": 0}
   --mm-processor-kwargs {"max_pixels": 2119936}
   --max-num-batched-tokens 4096
@@ -93,7 +93,7 @@ substring-matches at boot.
 
 **The load-bearing values live in supervisord's `environment=`, not in the
 launcher.** `agent-llm-primary.conf` carries `VLLM_VENV`, `KV_CACHE_DTYPE=fp8`,
-`MAX_NUM_BATCHED_TOKENS=4096`, `KV_CACHE_MEMORY_BYTES=15032385536` (§3) **and
+`MAX_NUM_BATCHED_TOKENS=4096`, `KV_CACHE_MEMORY_BYTES=15569256448` (§3) **and
 `LANGUAGE_MODEL_ONLY=0` with `MM_IMAGES_PER_PROMPT=20`** — the launcher's own
 default is `1`, text-only, so a conf that loses those last two boots a
 perfectly healthy engine that refuses every screenshot while
@@ -344,9 +344,9 @@ Booted 2026-09-10 (`e35ab2b`). Live `vllm:cache_config_info`:
 | label | value |
 |---|---|
 | `cache_dtype` | `fp8` |
-| `kv_cache_size_tokens` | **692,263** (BF16 held 398,175 — ×1.74); **844,969** since 2026-09-15 at `KV_CACHE_MEMORY_BYTES` 14.0 GiB in the program's conf (3.22× at 262k; GPU 1 has nothing else resident and read 5.9 GiB free at the 4096 chunk, so 14.0 leaves ~3.3 GiB) |
+| `kv_cache_size_tokens` | **692,263** (BF16 held 398,175 — ×1.74); **844,969** from 2026-09-15 at `KV_CACHE_MEMORY_BYTES` 14.0 GiB in the program's conf (3.22× at 262k; GPU 1 has nothing else resident and read 5.9 GiB free at the 4096 chunk, so 14.0 leaves ~3.3 GiB); the -1110 build packs fewer tokens into the same bytes (813,381 at 14.0 GiB), so since 2026-11-10 the conf carries 14.5 GiB: **840,330** (3.21×), and a 251,635-token cold prefill peaked at 94,426 of 97,887 MiB (3,461 MiB free) |
 | `block_size` / `mamba_block_size` | **3200** (BF16 used 1600) |
-| `kv_cache_memory_bytes` | 15,032,385,536 (14.0 GiB, pinned explicitly in the program's `environment=` since 2026-09-15; the launcher's own default is still 11.5 GiB) |
+| `kv_cache_memory_bytes` | 15,569,256,448 (14.5 GiB since 2026-11-10; 14.0 GiB from 2026-09-15; pinned explicitly in the program's `environment=`; the launcher's own default is still 11.5 GiB) |
 | `kv_cache_max_concurrency` | 2.64 at 11.5 GiB, 3.22 at 14.0 — the pool holds ~3 full-length contexts |
 | `enable_prefix_caching` | `True` |
 | `mamba_cache_mode` | `align` |
@@ -451,7 +451,7 @@ Three things about it are worth not rediscovering:
   needs a few hundred distinct decisions; until then it stays opt-in.
 
 Capacity and cost, if it is turned on: ~845k tokens at the 14.0 GiB the conf
-carries since 2026-09-15 (the YaRN boot *reports* 940,884 from the same memory
+carried from 2026-09-15 (~840k at 14.5 GiB on the -1110 build) (the YaRN boot *reports* 940,884 from the same memory
 and block size — unexplained). On `dff1bde` a 480k prefill peaks at 95.4 GiB
 with 2.4 GiB free, so the production budget is safe to full length, and
 prefill is 26 s at 300k, 35 s at 400k, 43 s at 480k (61/74/129 s on the 09-10
@@ -478,7 +478,7 @@ Every knob is an environment variable the launcher reads, so an arm is one
 | `MODEL_DIR` | the NVFP4 checkpoint | default | the YaRN shadow is the alternative |
 | `MAX_NUM_SEQS` | `8` | default | |
 | `GPU_MEMORY_UTILIZATION` | `0.9345` | default | the headroom is vLLM's own prefill scratch, not the desktop's |
-| `KV_CACHE_MEMORY_BYTES` | `12348030976` | **`15032385536`** | pinned rather than derived; raised to 14.0 GiB 2026-09-15 |
+| `KV_CACHE_MEMORY_BYTES` | `12348030976` | **`15569256448`** | pinned rather than derived; raised to 14.0 GiB 2026-09-15, to 14.5 GiB 2026-11-10 (the -1110 build's pool per byte is 3.7% smaller) |
 | `MTP_ENABLED` / `MTP_TOKENS` | `1` / `3` | default | multi-token prediction, k=3 |
 | `GDN_PREFILL_BACKEND` | `flashinfer` | default | |
 | `FLASHINFER_AUTOTUNE` | `0` | default | |
