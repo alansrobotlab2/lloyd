@@ -4387,7 +4387,7 @@ def _external_ask_phrases(span: str) -> list[str]:
 def _external_ask_prose(spans: dict[str, str]) -> dict[str, list[str]]:
     """`{span: [phrase, ...]}` for every banned phrase still standing in `spans`.
 
-    A span with none is NOT reported: §10 has fourteen bullets and #2912's uncounted-day
+    A span with none is NOT reported: §10 has sixteen bullets and #2912's uncounted-day
     paragraph is inside the section slice, so listing untouched spans would make the
     failure message unreadable and invite fixing prose that was never wrong.
     """
@@ -4760,10 +4760,24 @@ def _bar_bullet() -> str:
     return _bullet_at(_BAR_HEADING)
 
 
-# #3341: the day the committed family most recently cleared. `TENTH_EXTRACT` is its
-# bytes — "tenth" is its position in the family, "newest" its place in the page's
-# argument — and the two phrases mean the same day until a later one clears.
-_NEWEST_HEADING = "- **2026-10-23 is the newest day"
+# The heading of the §10 bullet that headlines the newest clearing day. #3341 wrote it for
+# `TENTH_EXTRACT` — "tenth" is a day's position in the family, "newest" its place in the
+# page's argument — and the two phrases meant the same day until 2026-11-10 cleared it
+# (#4051, taking the headline from 2026-10-23 under #3693's DISPLACE ruling). Where the
+# headline moves, this constant moves with it and `_NEWEST_CLEARING_DAY` above: the
+# displacement node then re-binds the day it leaves, which is #1918's rule.
+_NEWEST_HEADING = "- **2026-11-10 is the newest day"
+
+# The 2026-10-23 bullet, which held the headline between #3101 and #4051. It is no longer a
+# newest-day bullet, so it has no place in `_headline_paragraphs` and is reached by its own
+# heading: what is graded in it now is the re-bound (#1918's rule, #3341 clause 4's shape)
+# and the pinned pool it still cites.
+_DISPLACED_2026_10_23_HEADING = "- **2026-10-23 cleared all four acceptance-bar criteria"
+
+# The day #3693 ruled into the page on 2026-11-07 and which #4051's commit landed. Named as
+# a constant because three nodes ask "how many §10 bullets carry this day", and a literal
+# typed twice is a literal that can drift.
+_RULED_DISPLACED_DAY = "2026-10-28"
 
 
 def _newest_bullet() -> str:
@@ -4941,7 +4955,7 @@ def test_the_bar_bullet_keeps_the_counted_reading_and_names_a_later_clearing_day
         "the bar bullet's close no longer names 2026-10-23, the newest counted "
         "clearing day, so the bar and the headline disagree about which day is newest")
     for span, where in ((bar, "the bar bullet"), (ninth_p, "the 2026-10-09 bullet"),
-                        (_newest_bullet(), "the 2026-10-23 bullet")):
+                        (_newest_bullet(), "the newest-day bullet")):
         hits = re.findall(r"\b(first|second|third|fourth|fifth|sixth)\s+(counted\s+)?day\b",
                           span)
         assert not hits, (
@@ -5848,7 +5862,7 @@ def _sha_of_page_record(page: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §10's newest bar-clearing day: 2026-10-23 (#3341)
+# §10's newest bar-clearing day: 2026-11-10 (#4051, after #3341 then #3693)
 # ─────────────────────────────────────────────────────────────────────────────
 # owed-check's owed entry on #3101 asked, as counted on 2026-10-21, "whether a
 # newer day should displace 2026-10-09 as the headline: … none after 10-09 clears
@@ -5856,7 +5870,10 @@ def _sha_of_page_record(page: str) -> str:
 # (a), (b), (c) and (d). This block does the two jobs #1918's rule prescribes for a
 # moved headline — move it to the date with its window-end bound, and re-bind the
 # day it displaces so that day's own superlative does not sit on the page turned
-# false — while everything already graded stays put: the counted reading, the
+# false. The headline has moved twice since: 2026-10-23 took it from 2026-10-09 under
+# #3101's DISPLACE ruling, and 2026-11-10 took it under #3693's, which #4051 landed
+# together with the fixture that made the sweep's maximum 2026-11-10. While everything
+# already graded stays put: the counted reading, the
 # filing-condition set, 2026-09-25's four marks, and the sha-pinned bullets.
 #
 # Every figure is re-derived from the committed extract at the gate `config.yaml`
@@ -5864,13 +5881,16 @@ def _sha_of_page_record(page: str) -> str:
 _NEWEST_PERDAY_MISSES = 97               # §6.1's per-day baseline, pinned above
 _NEWEST_PERDAY_TOK = 10_300_000
 _NEWEST_PERDAY_TOK_M = "10.3M"          # how §6.1 writes that budget
-_NEWEST_CLEARING_DAY = "2026-10-23"
+_NEWEST_CLEARING_DAY = "2026-11-10"
 # The bound both "newest" claims on the page are counted through: the newest day the
-# daily job has produced an extract for. A day with no extract (2026-10-24 has none
-# committed) is neither counted nor listed, exactly as 2026-09-24 was not listed.
+# daily job has produced an extract for AND that this file has committed. A day with no
+# committed extract (2026-10-24 has none, and 2026-11-11 is still being served) is
+# neither counted nor listed, exactly as 2026-09-24 was not listed.
 # One definition, because two would let the comments diverge the first time either is
-# edited while the second assignment silently wins.
-_COUNTED_THROUGH = "2026-10-24"
+# edited while the second assignment silently wins. `test_the_pending_ruling_hold_is_
+# empty_and_the_headline_is_the_sweeps_newest_day` re-derives this from the committed
+# family, so it cannot be widened by hand.
+_COUNTED_THROUGH = "2026-11-10"
 _NEWEST_HEADING_RE = re.compile(r"newest day,? as counted through (\d{4}-\d\d-\d\d)")
 
 #: Days that clear all four criteria on their committed bytes whose displacement of the
@@ -5888,7 +5908,18 @@ _NEWEST_HEADING_RE = re.compile(r"newest day,? as counted through (\d{4}-\d\d-\d
 #: empties it, and until then `test_the_displaced_headline_is_re_bound_and_the_superlative_is_
 #: never_stale` still fails on any OTHER day that clears the bar, which is the #1918 tripwire
 #: doing its job one day behind the data rather than not at all.
-_UNRULED_CLEARING_DAYS = {"2026-10-28"}
+#:
+#: EMPTY as of #4051, which is the round that landed #3693's 2026-11-07 DISPLACE ruling: the
+#: day the hold named now has its own §10 bullet (clause 5 of that item), and the headline moved
+#: to 2026-11-10 in the same commit that emptied this set. The two halves cannot be done apart:
+#: committing a fourteenth extract while 2026-10-28 stayed named fails the `max(unruled) ==
+#: _NEWEST_CLEARING_DAY` check below (the sweep's maximum becomes 2026-11-10 the moment the file
+#: lands, and the held day is excluded from `unruled`), and emptying the set without moving the
+#: headline fails it the other way. That is the self-enforcing shape #3693's entry-3 ruling
+#: asked for, and it is why an entry belongs here only while a ruling is genuinely pending.
+#: An entry is added only when a day clears the bar and the displacement is owed-check's to
+#: rule, never as a way to make a new extract green.
+_UNRULED_CLEARING_DAYS: set[str] = set()
 
 
 def _clears_all_four(path: Path, gate: float) -> bool:
@@ -5972,175 +6003,220 @@ def _headline_paragraphs() -> list[tuple[str, str]]:
 
 
 def test_the_newest_clearing_day_is_headlined_with_all_four_criterion_figures(
-        tenth_raw, tenth, cfg):
-    """§10 gains exactly one new top-level bullet, and every number in it is the
-    derivation's, not the prose's (#3341, clause 1).
+        fourteenth_raw, fourteenth, cfg):
+    """§10's last top-level bullet is the newest clearing day, and every number in it is
+    the derivation's, not the prose's (#3341's rule, exercised on 2026-11-10 by #4051).
 
     The four criteria are named in the same breath as the figures that satisfy them,
-    because the claim being made is not "a day happened" but "this day closes the
-    bar": (a) no chat turn carries a miss, (b) both daily budgets, (c) KV p50 under
-    the gate, (d) nothing counted against the bar among the two-request windows.
+    because the claim being made is not "a day happened" but "this day closes the bar":
+    (a) no chat turn carries a miss, (b) both daily budgets, (c) KV p50 under the gate,
+    (d) nothing counted against the bar among the two-request windows.
 
-    It also pins the two things a re-derivation could silently lose. The chat
-    sentence must state its OWN denominator ("of 3 chat turns"): the same node shape
-    that reads "0 of 3" off 2026-10-09's "0 of 13" reads a true sentence off the
-    wrong day. And the trigger-(ii) sentence must carry its subject, because a bare
-    "3 windows" is answerable by the 10-15 bullet's "3 windows" as easily as by this
-    day's 3 of 2,391.
+    It also pins the two things a re-derivation could silently lose. The chat sentence
+    must state its OWN denominator ("of the day's 10 chat turns"): the same node shape
+    that reads "0 of 3" off 2026-10-09's "0 of 13" reads a true sentence off the wrong
+    day. And this day's (d) sentence must say the bar was TOUCHED — one window under it,
+    excluded as a cold admission — because 2026-10-28's bullet two above reports a zero
+    under the bar that nothing reached, and a headline saying only "0 counted against"
+    would be answerable by a day that never met the bar at all.
     """
-    assert tenth["pool_tokens"] is None  # the pool is NOT the derivation's; next node
-    assert tenth_raw["window"][0] == "2026-10-23", (
-        f"the tenth extract is the window {tenth_raw['window']!r}, so these figures "
+    assert fourteenth_raw["window"] == ["2026-11-10", "2026-11-11"], (
+        f"the fourteenth extract is the window {fourteenth_raw['window']!r}, so these figures "
         "are being pinned against the wrong day")
     # The gate is config.yaml's, not a literal this file could keep current by accident.
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
-    assert tenth["chat_turns"] == 3 and tenth["chat_turns_with_misses"] == 0, (
-        f"(a) is now {tenth['chat_turns_with_misses']} of {tenth['chat_turns']} chat "
-        "turns with a miss, and the bullet states 0 of 3")
-    assert tenth["misses"] == 79 and tenth["reprefill_tokens"] == 8_482_836, (
-        f"(b) is now {tenth['misses']:,} misses / {tenth['reprefill_tokens']:,} tokens")
-    assert tenth["misses"] <= _NEWEST_PERDAY_MISSES and \
-        tenth["reprefill_tokens"] <= _NEWEST_PERDAY_TOK, (
-        "2026-10-23 no longer clears (b), so it is not a clearing day and the "
-        "headline belongs somewhere else")
-    assert tenth["kv_p50"] < gate and round(tenth["kv_p50"], 3) == 0.16, (
-        f"(c) is now kv_p50 {tenth['kv_p50']:.3f} against the {gate} gate")
-    assert tenth["two_request_windows"] == 2391, (
-        f"there are now {tenth['two_request_windows']:,} two-request windows")
-    assert tenth["two_request_under_stall"] == 3 and \
-        tenth["two_request_under_stall_cold_in_flight"] == 2 and \
-        tenth["two_request_under_stall_cold_prefill"] == 1 and \
-        tenth["two_request_under_stall_not_cold"] == 0, (
-        "(d) is no longer 3 under-stall windows of which 2 are cold in "
-        "flight and 1 a cold prefill, leaving 0 counted against")
-    assert tenth["turns"] == 496 and tenth["measured"] == 496 and \
-        tenth["turns_with_misses"] == 35, (
-        f"the day is now {tenth['measured']} measured of {tenth['turns']} turns with "
-        f"{tenth['turns_with_misses']} carrying the misses")
+    assert fourteenth["pool_tokens"] == 844_969, (
+        "the newest day's pool is no longer MEASURED inside its own window, so the bullet's "
+        "'measured, not pinned' claim is false — the pinned case is 2026-10-23's, which "
+        "test_the_displaced_clearing_day_bullet_keeps_its_pinned_pool grades separately")
+    assert fourteenth["chat_turns"] == 10 and fourteenth["chat_turns_with_misses"] == 0, (
+        f"(a) is now {fourteenth['chat_turns_with_misses']} of {fourteenth['chat_turns']} chat "
+        "turns with a miss, and the bullet states 0 of 10")
+    assert fourteenth["misses"] == 15 and fourteenth["reprefill_tokens"] == 1_794_137, (
+        f"(b) is now {fourteenth['misses']:,} misses / {fourteenth['reprefill_tokens']:,} tokens")
+    assert fourteenth["misses"] <= _NEWEST_PERDAY_MISSES and \
+        fourteenth["reprefill_tokens"] <= _NEWEST_PERDAY_TOK, (
+        "2026-11-10 no longer clears (b), so it is not a clearing day and the headline belongs "
+        "somewhere else")
+    assert fourteenth["kv_p50"] < gate and round(fourteenth["kv_p50"], 3) == 0.251, (
+        f"(c) is now kv_p50 {fourteenth['kv_p50']:.3f} against the {gate} gate")
+    assert fourteenth["two_request_windows"] == 1364, (
+        f"there are now {fourteenth['two_request_windows']:,} two-request windows")
+    assert fourteenth["two_request_tok_s_min"] == 0.0, (
+        f"the slowest two-request window is now {fourteenth['two_request_tok_s_min']} tok/s, so "
+        "the sentence that quotes a stall at 0.0 quotes a window that is no longer there")
+    assert fourteenth["two_request_under_stall"] == 1 and \
+        fourteenth["two_request_under_stall_cold_in_flight"] == 1 and \
+        fourteenth["two_request_under_stall_cold_prefill"] == 0 and \
+        fourteenth["two_request_under_stall_cold_admission"] == 1 and \
+        fourteenth["two_request_under_stall_not_cold"] == 0, (
+        "the (d) split is no longer 1 under the bar, 1 cold in flight, 0 cold prefill, "
+        f"0 counted: {[(k, v) for k, v in fourteenth.items() if k.startswith('two_request_u')]}")
+    assert fourteenth["turns"] == 63 and fourteenth["measured"] == 63 and \
+        fourteenth["turns_with_misses"] == 7, (
+        f"the population sentence is now {fourteenth['measured']} of {fourteenth['turns']} "
+        f"turns with {fourteenth['turns_with_misses']} carrying the misses")
 
     para = _newest_bullet()
-    # (1) Exactly ONE new top-level bullet, and it is the page's last day count.
-    date_bullets = _date_bullets()
-    assert date_bullets, (
-        "§10 enumerates no date-headed bullets at all, so this scan is vacuous and a "
-        "count of 1 from it would prove nothing — the positive control is enumeration")
-    assert sum(1 for d, b in date_bullets
-               if b.startswith("- 2026-10-23 is the newest day")) == 1, (
-        "§10 does not carry exactly one date-headed bullet headlining 2026-10-23, so "
-        "the page either repeats the newest-day claim or states it nowhere")
-    assert _headline_paragraphs()[-1] == (_NEWEST_CLEARING_DAY, para), (
-        "the newest-clearing-day bullet is not §10's last day count, so a reader meets "
-        "a stale headline after the current one")
-
-    # (2) The claim itself: newest, counted through a bound, all four criteria.
-    assert "newest day" in para, "the bullet no longer claims to be the newest"
-    m = re.search(r"newest day,? as counted through (\d{4}-\d\d-\d\d)", para)
-    assert m, (
-        "the newest-day claim carries no window-end bound, so it is a bare superlative "
-        "again — #1918's rule is the date the counter had reached, in the sentence")
-    assert m.group(1) == _COUNTED_THROUGH, (
-        f"the bullet is counted through {m.group(1)}, but the newest extract the daily "
-        f"job has produced is {_COUNTED_THROUGH}")
-    assert "clears all four criteria" in para or "four acceptance-bar criteria hold" in para, (
-        "the bullet never says which bar the day clears")
-
-    # (3) Every figure, with the comparison that makes (b) a claim rather than a count.
-    assert "0 of the day's 3 chat turns" in para, (
-        "the chat sentence lost its own denominator; a bare '0' is what 2026-10-09's "
-        "'0 of 13' also satisfies, so the wrong day could answer this claim")
-    assert "79 misses" in para and "8,482,836" in para, "the (b) figures are not stated"
-    # One decimal, because that is the precision the page renders, and the leftover
-    # half of the budget is what (b) is actually a claim about.
-    _miss_pct = 100 * tenth['misses'] / _NEWEST_PERDAY_MISSES
-    _tok_pct = 100 * tenth['reprefill_tokens'] / _NEWEST_PERDAY_TOK
-    assert f"{_miss_pct:.1f}% of the misses" in para and f"{_tok_pct:.1f}% of the tokens" in para, (
-        f"the (b) figures lost their comparison to §6.1's budget (the day is "
-        f"{_miss_pct:.1f}% of its misses and {_tok_pct:.1f}% of its tokens): §6.1 says "
-        "over-budget is not rare, so a bare count is the claim this page avoids making")
-    assert f"{100 - _tok_pct:.1f}% of the token budget left" in para, (
-        f"the page no longer states the margin ({100 - _tok_pct:.1f}% of the token "
-        "budget), which is the difference between clearing a budget and trending down "
-        "to it — the distinction #1919's ruling turns on")
-    assert "§6.1" in para and "10.3M" in para, (
-        "the percentages are stated against no named budget, so a reader cannot check "
-        "them without leaving the bullet")
-    assert "0.160" in para, "(c)'s figure is not stated to three decimals as derived"
-    assert "2,391" in para, "(d)'s denominator is not stated"
-    assert "2 with a cold engine still loading the model in flight" in para \
-        and "1 sitting on a cold prefill" in para, (
-        "the (d) sentence lost the cold causes, which are the whole reason 3 windows "
-        "under the stall bar are not 3 windows counted against it")
-    assert "0 counted against" in para, (
-        "(d) is the criterion about what counts AGAINST the bar, and the bullet must "
-        "state that number, not merely the raw 3")
-    assert "496 turns" in para and "35 turns" in para, (
-        "the day's shape (measured of total, and how many turns carry the misses) is "
-        "what tells a reader 79 misses is 79 spread over 35 turns and not 79 in one")
-    assert _NEWEST_PERDAY_TOK_M in para, (
-        f"the comparison lost §6.1's {_NEWEST_PERDAY_TOK_M} budget, so the "
-        "percentage has no denominator")
+    assert fourteenth["misses"] / _NEWEST_PERDAY_MISSES == pytest.approx(0.155, abs=0.001) \
+        and fourteenth["reprefill_tokens"] / _NEWEST_PERDAY_TOK == \
+        pytest.approx(0.174, abs=0.001), (
+        f"the (b) ratios are {fourteenth['misses'] / _NEWEST_PERDAY_MISSES:.4f} and "
+        f"{fourteenth['reprefill_tokens'] / _NEWEST_PERDAY_TOK:.4f}, not the 15.5% and 17.4% "
+        "the bullet states, so the percentages are prose again")
+    for want, why in (
+        (f"of the day's {fourteenth['chat_turns']} chat turns",
+         "the (a) denominator is not stated as this day's own chat population — the #3341 "
+         "clause this assert exists for, and the reason a bare '0 misses on chat turns' is "
+         "not enough"),
+        ("all four acceptance-bar criteria hold", "the bullet does not claim all four criteria"),
+        ("newest day", "the bullet is not the headline any more"),
+        (f"as counted through {_COUNTED_THROUGH}",
+         f"the headline carries no bound matching `_COUNTED_THROUGH` ({_COUNTED_THROUGH})"),
+        (f"{fourteenth['misses']} misses",
+         "the miss count is absent from the sentence that cites it"),
+        (f"{fourteenth['reprefill_tokens']:,} re-prefilled", "the token total is absent"),
+        (f"{fourteenth['misses'] / _NEWEST_PERDAY_MISSES:.1%} of the misses",
+         "the (b) miss ratio against §6.1's per-day budget is not derived into the sentence"),
+        (f"{fourteenth['reprefill_tokens'] / _NEWEST_PERDAY_TOK:.1%} of the tokens",
+         "the (b) token ratio is not derived into the sentence"),
+        (f"{100 - fourteenth['reprefill_tokens'] / _NEWEST_PERDAY_TOK * 100:.1f}%"
+         " of the token budget",
+         "the budget LEFT is not stated as the complement of the ratio asserted above, which "
+         "is how a sentence gets to name two halves of a budget that add to 118%"),
+        (_NEWEST_PERDAY_TOK_M, f"§6.1's budget is not named as {_NEWEST_PERDAY_TOK_M}"),
+        (f"KV p50 {fourteenth['kv_p50']:.3f}", "(c)'s figure is absent"),
+        (f"{fourteenth['kv_samples']:,} in-window engine status lines",
+         "(c)'s sample count is absent, or is quoted from the extract's stored rows rather "
+         "than derive's in-window recount — the pair #3691, #3692 and #3694 name"),
+        (f"{fourteenth['two_request_under_stall']} of {fourteenth['two_request_windows']:,} "
+         "two-request windows",
+         "the (d) subject and denominator are not in the sentence together"),
+        ("cold admission, 0 counted against — so (d) holds on the ruled exclusion "
+         "AND was exercised",
+         "(d) does not state both the counted-against figure the split derives and that the "
+         "bar was TOUCHED, which is the difference between this day's excluded window and "
+         "2026-10-28's unexercised zero"),
+        ("at 0.0 tok/s", "the stalled window's own throughput is absent, so the sentence "
+                         "cannot be checked against the 15 tok/s bar"),
+        (f"{fourteenth['turns']} turns, {fourteenth['measured']} measured, "
+         f"{fourteenth['turns_with_misses']} turns",
+         "the population sentence is absent"),
+        ("measured, not pinned",
+         "the pool sentence does not say which kind of provenance this is — the distinction "
+         "this family has been wrong about twice"),
+        (f"{fourteenth['pool_tokens']:,}", "the measured pool figure is absent"),
+    ):
+        assert want in para, f"{why}. Looking for {want!r} in:\n{para[:1800]}"
+    # (1) The (a) denominator has to be THIS day's number, not just any number. The
+    # substitution that actually gets made is a neighbour's: the 2026-10-09 bullet states
+    # 9 chat turns and the 2026-10-28 bullet states 1, and either reads plausibly here.
+    assert "0 of the day's 10 chat turns" in para
+    for wrong in ("0 of the day's 9 chat turns", "0 of the day's 1 chat turn",
+                  "0 of the day's 3 chat turns", "0 of the day's 23 chat turns"):
+        assert wrong not in para, (
+            f"the headline carries {_NEWEST_CLEARING_DAY}'s (a) claim with another day's chat "
+            f"population ({wrong})")
+    # (2) §10's (d) wording must name the bar the count was taken against, and which cold
+    # arm the excluded window fell in — derive publishes both arms and summarising one
+    # away is how a 0/0 becomes a "3 excluded".
+    assert "under the bar's 15 tok/s" in para, (
+        "the (d) sentence names the count but not the bar it was measured against")
+    assert "classifies as a cold engine still loading the model in flight" in para, (
+        "(d) does not name WHICH cold arm the excluded window fell in, so the split derive "
+        "publishes is summarised rather than reported")
+    assert "and not as a cold prefill" in para, (
+        "(d) omits the zero half of the split, which is the half that says the other cold "
+        "arm was tested and came back empty")
+    # (3) Both percentages have to sit beside the budget they are fractions of.
+    assert f"{_NEWEST_PERDAY_MISSES} and {_NEWEST_PERDAY_TOK_M}" in para, (
+        f"the comparison lost §6.1's per-day {_NEWEST_PERDAY_MISSES} and "
+        f"{_NEWEST_PERDAY_TOK_M}, so the percentage has no denominator")
     # (4) The two sentences that stop this day being read as a ruling.
     assert "not a ruling" in para and "settles nothing" in para and "four marks" in para, (
-        "the bullet does not say that a day clearing the bar settles nothing: that is "
-        "the sentence every prior clearing-day bullet carries, and it is the one that "
-        "keeps a new day from being read as the flip it is not")
+        "the bullet does not say that a day clearing the bar settles nothing: that is the "
+        "sentence every prior clearing-day bullet carries, and it is the one that keeps a "
+        "new day from being read as the flip it is not")
     # Pinned to this page's wording rather than the 2026-10-15 bullet's ("the filing
     # condition remains the four days named above"), because the sentence here is the
     # stronger one: it states WHY the set is unmoved, not just that it is.
     assert "the filing-condition evidence set is unmoved" in para \
         and "the paragraphs above still count four days" in para, (
-        "the bullet no longer states that the filing-condition set is unmoved, which "
-        "is the graded quantity a new clearing day is most often mistaken for — and "
-        "this bullet's whole case for that is `derive`'s 0 chat turns with a miss")
+        "the bullet no longer states that the filing-condition set is unmoved, which is the "
+        "graded quantity a new clearing day is most often mistaken for — and this bullet's "
+        "whole case for that is `derive`'s 0 chat turns with a miss")
+    # (5) The clause #4051 adds to the #3341 contract: a headline that names a build
+    # version is naming something its extract cannot produce. 2026-11-10 is the last day
+    # served by the pre-upgrade engine, so the temptation is specific and recent.
+    bad = [v for v in ("rc1.dev", "ga98247ab4", "g8f2ba935a", "a98247ab4db6") if v in para]
+    assert not bad, (
+        f"the headline names a vLLM build ({bad}) that the committed extract cannot produce; "
+        "the page's own convention is that which build served a day is not a figure `derive` "
+        "publishes, so the bullet states none")
 
 
-def test_the_newest_clearing_day_pool_is_pinned_and_derive_reports_none(
-        tenth_raw, tenth, cfg):
-    """The 844,969 figure comes from `NO_BOOT_POOL`, and that is a different kind of
-    fact from every other number in the bullet (#3341, clause 2).
+def test_the_displaced_clearing_day_bullet_keeps_its_pinned_pool(cfg):
+    """The 2026-10-23 bullet's 844,969 comes from `NO_BOOT_POOL`, and that is a different
+    kind of fact from every other number in it (#3341, clause 2 — inherited by #4051, which
+    moved the headline and left this bullet standing).
 
-    `derive` returns `pool_tokens = None` for this day: the extract is the daily
-    job's own output and carries no boot line, so the engine's capacity is simply
-    absent from its bytes. The pool the bullet states is therefore taken from a
-    `vllm serve` banner — and the page has been wrong about that exact number before,
-    which is why #3101 pinned the banner lines into this file's sibling fixture.
-    Asserting `pool_tokens is None` is the point: it is what records that the bullet's
-    pool figure CANNOT be re-derived from the extract, so if the pinned boot line ever
-    stops matching the page has no live source for its own capacity claim.
+    `derive` returns `pool_tokens = None` for 2026-10-23: the extract is the daily job's
+    own output and carries no boot line, so the engine's capacity is simply absent from its
+    bytes. The pool that bullet states is therefore taken from a `vllm serve` banner — and
+    the page has been wrong about that exact number before, which is why #3101 pinned the
+    banner lines into this file. Asserting `pool_tokens is None` is the point: it records
+    that the figure CANNOT be re-derived from the extract, so if the pinned boot line ever
+    stops matching, the page has no live source for its own capacity claim.
+
+    The contrast this node exists to keep honest is the one #4051 introduces: 2026-11-10's
+    bullet, directly below, states the SAME 844,969 as a MEASURED pool because a boot line
+    fell inside its window. Two bullets, one number, two kinds of provenance — and a reader
+    who cannot tell which is which cannot check either.
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
+    tenth = W.derive(json.loads(TENTH_EXTRACT.read_text(encoding="utf-8")), gate=gate)
     assert tenth["pool_tokens"] is None, (
-        f"`derive` now reports pool_tokens {tenth['pool_tokens']!r} for 2026-10-23; "
-        "this node's reason for pinning the pool separately dies with it — if the "
-        "extract carries the pool, cite the extract instead of NO_BOOT_POOL")
+        f"`derive` now reports pool_tokens {tenth['pool_tokens']!r} for 2026-10-23; this "
+        "node's reason for pinning the pool separately dies with it — if the extract carries "
+        "the pool, cite the extract instead of NO_BOOT_POOL")
     assert NO_BOOT_POOL.get("2026-10-23") == 844_969, (
-        f"`NO_BOOT_POOL` now says {NO_BOOT_POOL.get('2026-10-23')!r} tokens for "
-        "2026-10-23, so the provenance the bullet cites no longer supports 844,969")
-    para = _newest_bullet()
-    # The bullet's OWN clause, not the quoted banner. `"844,969 tokens" in para` is
-    # answered by the boot line on its own, so it would stay green on a bullet that
-    # pasted a banner and never stated the day's pool; this demands the clause that
-    # puts the number into the free-pool arithmetic and says where it came from.
-    assert "so the 844,969 the free-pool arithmetic divides by comes from the pinned " \
-           "provenance beside `NO_BOOT_POOL`" in para, (
-        "the bullet no longer states 844,969 as the pool it divides by and names "
-        "NO_BOOT_POOL as its source. Every other number in the paragraph is derived "
-        "from the extract and this one is not — the distinction a re-boot has to be "
-        "able to check, and the reason this node exists")
+        f"`NO_BOOT_POOL` now says {NO_BOOT_POOL.get('2026-10-23')!r} tokens for 2026-10-23, so "
+        "the provenance the bullet cites no longer supports 844,969")
+    para = _bullet_at(_DISPLACED_2026_10_23_HEADING)
+    # The bullet's OWN clause, not the quoted banner. `"844,969 tokens" in para` is answered
+    # by the boot line on its own, so it would stay green on a bullet that pasted a banner
+    # and never stated the day's pool; this demands the clause that puts the number into the
+    # free-pool arithmetic and says where it came from.
+    assert "the 844,969 the free-pool arithmetic divides by comes from the pinned provenance " \
+           "beside `NO_BOOT_POOL`" in para, (
+        "the bullet no longer states 844,969 as the pool it divides by and names NO_BOOT_POOL "
+        "as its source. Every other number in the paragraph is derived from the extract and "
+        "this one is not — the distinction a re-boot has to be able to check, and the reason "
+        "this node exists")
     # And the sentence saying WHY the figure needs a second source at all. The
-    # `pool_tokens is None` assert above is the same fact from the derivation side;
-    # without this one the provenance reads as decoration and a reader has no way to
-    # learn that this figure, unlike its eleven neighbours, cannot be re-derived.
+    # `pool_tokens is None` assert above is the same fact from the derivation side; without
+    # this one the provenance reads as decoration and a reader has no way to learn that this
+    # figure, unlike its eleven neighbours, cannot be re-derived.
     assert "`derive` reports no measured pool for the window at all" in para, (
-        "the bullet states a pool figure without saying derive reports none for the "
-        "window, so nothing on the page marks 844,969 as the one number a reader "
-        "cannot check against the extract")
+        "the bullet states a pool figure without saying derive reports none for the window, so "
+        "nothing on the page marks 844,969 as the one number a reader cannot check against the "
+        "extract")
     assert "GPU KV cache size: 844,969 tokens" in para, (
-        "the bullet names the provenance but not the boot line it pins, so the reader "
-        "cannot check the number against the banner it came from")
-
+        "the bullet names the provenance but not the boot line it pins, so the reader cannot "
+        "check the number against the banner it came from")
+    # The control that makes the two-kinds-of-provenance distinction load-bearing: the
+    # newest day's bullet states the same figure and says the opposite, and it is right —
+    # its own extract carries the boot. If these two sentences ever converge, one of the
+    # two days has been re-cut and this is where it shows.
+    newest = _newest_bullet()
+    assert "measured, not pinned" in newest and "844,969" in newest, (
+        "the newest bullet no longer claims a measured pool beside the same 844,969, so this "
+        "node's contrast has one side and a reader cannot compare the two provenances")
+    assert "844,969" in para and "measured, not pinned" not in para, (
+        "the pinned-pool bullet now also claims a measured pool: either the extract gained a "
+        "boot line — see the assert above — or the sentence was copied from its neighbour")
 
 def test_the_displaced_headline_is_re_bound_and_the_superlative_is_never_stale(
         ninth_raw, ninth, cfg):
@@ -6155,16 +6231,16 @@ def test_the_displaced_headline_is_re_bound_and_the_superlative_is_never_stale(
     extracts is what makes "2026-10-23 is the newest" a derived statement rather than
     this file's opinion, and it is the check that catches the next displacement.
 
-    Since #3693 the sweep and the headline may disagree by exactly the days
-    `_UNRULED_CLEARING_DAYS` names — today 2026-10-28, which clears all four on its bytes
-    at ONE chat turn while the page still headlines 2026-10-23's three. That gap is not
-    this file deciding the question: naming the newest all-four day is owed-check's under
-    #3101's owed entry, and committing the fixture is what makes the question answerable
-    from git before the log rotation deletes the evidence for it. The two asserts either
-    side of the sweep keep the hold narrow — a clearing day outside the set fails the
-    headline compare, a held day that stops clearing fails the containment compare — so
-    the page runs one named day behind its data under an owner, never silently behind
-    whatever extracts happen to land.
+    The sweep and the headline may disagree by exactly the days `_UNRULED_CLEARING_DAYS`
+    names, and that set is EMPTY as of #4051, so today the sweep's newest clearing day and
+    the page's headline are the same day. The hold exists because naming the newest all-four
+    day is owed-check's to rule (#3101's owed entry, §10's own close) and not this file's to
+    decide by arithmetic: 2026-10-28 sat under #3693's ruling from 2026-11-07 until #4051
+    landed that ruling, and while it did the page ran one named day behind its data — with an
+    owner, not silently behind whatever extracts happened to land. The two asserts either side
+    of the sweep keep the hold narrow: a clearing day outside the set fails the headline
+    compare, and a held day that stops clearing fails the containment compare, so an entry
+    cannot outlive the ruling it names and cannot be opened to excuse a stale headline.
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
@@ -6230,7 +6306,8 @@ def test_the_displaced_headline_is_re_bound_and_the_superlative_is_never_stale(
         f"criteria at the {gate} gate, so the headline this block pins is false")
     # #3693: which day the page HEADLINES is owed-check's ruling (§10's own close, #3101's
     # owed entry), so `_UNRULED_CLEARING_DAYS` is allowed to sit between this sweep and the
-    # headline — for the days named there and for no others. The tripwire is intact: a day
+    # headline — for the days named there and for no others, and it names none today.
+    # The tripwire is intact: a day
     # outside the set that clears the bar still fails the `max` below, and a held day that
     # stops clearing it fails the line after, so the hold cannot quietly become the rule.
     unruled = [d for d in clearing if d not in _UNRULED_CLEARING_DAYS]
@@ -6547,9 +6624,17 @@ def test_the_eleventh_paragraph_states_the_ruled_stance_and_moves_only_the_evide
         "2026-10-25 now clears all four acceptance-bar criteria, so it would be a bar-day "
         "bullet and not only a filing-condition day — the paragraph's 'no pass/fail mark' "
         "sentence and the newest-clearing-day bound both need re-writing, not this node")
+    # The 10-23 heading is checked as #4051 re-bound it: the superlative left that bullet when
+    # 2026-11-10 took the headline, so pinning the pre-displacement wording here would make
+    # this node fight clause 4 of #4051. What stays pinned is the bound it keeps.
+    # Matched on the collapsed page, as every other anchor in this file is: #4051 re-bound
+    # the 10-23 heading, and the new wording wraps across two source lines, so a raw
+    # substring test would be a test of the reflow rather than of the heading.
+    flat_page = " ".join(page.split())
     for head in ("- **2026-10-09 is the newest day, as counted through 2026-10-19",
-                 "- **2026-10-23 is the newest day, as counted through 2026-10-24"):
-        assert head in page, f"the bar-day bullet {head!r} lost its heading in this diff"
+                 _DISPLACED_2026_10_23_HEADING):
+        assert " ".join(head.split()) in flat_page, (
+            f"the bar-day bullet {head!r} lost its heading in this diff")
     assert _NEWEST_CLEARING_DAY in page and "2026-10-25 is the newest day" not in page, (
         "the newest-clearing-day bound moved onto 2026-10-25, which does not clear all four "
         "criteria; this item's day is a record and must not re-bound the acceptance bar")
@@ -6724,18 +6809,18 @@ def twelfth(twelfth_raw, cfg) -> dict:
 def _twelfth_paragraph() -> str:
     """The twelfth day's §10 bullet, from its own heading to the end of §10.
 
-    Found rather than numbered, and bounded by the section rather than by the next
-    heading: every anchor below it moves by the paragraph's length each time a day is
-    added, which is the rot #2852 and #3271 each had to repair once. The node itself
-    pins that this bullet is the LAST thing in §10, so the slice cannot silently widen
-    or narrow when the next day is appended below it.
+    Found rather than numbered, and bounded by the NEXT top-level bullet rather than by the
+    end of the section: every anchor below it moves by the paragraph's length each time a day
+    is added, which is the rot #2852 and #3271 each had to repair once. #4051 is why the bound
+    moved — §10 now ends on the 2026-10-28 and 2026-11-10 bullets, so slicing to the end of the
+    section would grade those days' prose as this day's. The external-ask sentence this slice
+    still carries is inside the twelfth bullet's own continuation lines, which is why shortening
+    the slice loses nothing.
     """
     s10 = _section(10)
     start = s10.index("**The twelfth tracked day")
-    assert s10.rindex("- **") == start - 2, (
-        "the twelfth day's bullet is no longer the last thing in §10, so slicing this "
-        "paragraph to the end of the section would hand the grader someone else's prose")
-    return s10[start:]
+    nxt = s10.find("- **", start + 4)
+    return s10[start:nxt] if nxt != -1 else s10[start:]
 
 
 def _flat(text: str) -> str:
@@ -7347,9 +7432,9 @@ def test_the_thirteenth_pinned_pool_is_the_quoted_boot_that_served_the_day(thirt
         "counts those days is graded against")
 
 
-def test_the_thirteenth_extract_moves_no_graded_reading_and_no_page_sentence(cfg):
-    """#3693 clause 5: naming a thirteenth reading moves no reading the suite already grades,
-    and puts no sentence about this day into §10.
+def test_the_thirteenth_extract_moves_no_graded_reading(cfg):
+    """#3693 clause 5, as #4051 landed it: naming a thirteenth reading moves no reading the
+    suite already grades, and its §10 sentence stays inside its own bullet.
 
     Three things stay exactly where they were. The 2026-09-25 counted reading and its (a)–(d)
     bullets are byte-for-byte what they were — a round that adds a fixture for a different day
@@ -7358,14 +7443,17 @@ def test_the_thirteenth_extract_moves_no_graded_reading_and_no_page_sentence(cfg
     filing condition to act on. And the family grows by exactly one extract, every day still
     carried once, so the sweeps that enumerate it see the new day rather than tripping over it.
 
-    The fourth is the one that could have been smuggled in by arithmetic. The sweep over the
-    committed family now clears the bar latest on 2026-10-28, and §10 still headlines
-    2026-10-23; that gap is held open by `_UNRULED_CLEARING_DAYS` and by nothing else, so this
-    node pins both halves of it — the page's newest-clearing-day bullet is still the 10-23 one,
-    and §10 carries no 10-28 sentence at all. Naming the newest all-four day is owed-check's to
-    rule (#3101's owed entry), and #3271 wrote the sentence this assert exists to enforce: a
-    round that committed the fixture and re-cut §10 in the same diff would have made an
-    editorial decision by arithmetic.
+    The fourth is the one that was open to be smuggled in by arithmetic, and #4051 is the round
+    that closed it. The sweep over the committed family cleared the bar latest on 2026-10-28, and
+    while that day sat under #3693's ruling the gap between the sweep and the page was held open
+    by `_UNRULED_CLEARING_DAYS` and by nothing else. #3271 wrote the sentence that rule exists to
+    enforce — a round must not make the editorial decision by committing a fixture and re-cutting
+    §10 in the same diff, which was true while the ruling was owed — and #3693's `owed_settled`
+    entry then RULED the displacement, which is what lifts it. So this node pins the landed shape
+    instead: the hold is empty, the sweep's maximum and the page's headline are the same day, and
+    the ruled day's figures appear in exactly one §10 bullet, which the placement node counts. The
+    decision is no longer being made by arithmetic; it is being executed under a named ruling, and
+    the asserts below are what make an unexecuted or over-reach version of it fail.
     """
     gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
     page = _section(10)
@@ -7379,38 +7467,492 @@ def test_the_thirteenth_extract_moves_no_graded_reading_and_no_page_sentence(cfg
 
     days = _qualifying_days(gate)
     assert days == COUNTED_DAYS, (
-        f"the evidence set moved to {days}: 2026-10-28 was expected to join no set, and every "
-        "paragraph that counts these days is graded against this list")
+        f"the evidence set moved to {days}: a tracked day that clears the acceptance bar was "
+        "expected to join no set, and every paragraph that counts these days is graded "
+        "against this list")
 
     extracts = _tracked_extracts()
     assert THIRTEENTH_EXTRACT in extracts, (
         "the family no longer enumerates this day, so the sweeps that read the evidence set "
         "cannot see it — which is the same silence as not committing it")
-    assert len(extracts) == 13, (
-        f"the tracked family holds {len(extracts)} extracts, not the thirteen this item makes "
-        "it; the count is pinned so a second day smuggled into this diff is noticed here")
+    assert len(extracts) == 14, (
+        f"the tracked family holds {len(extracts)} extracts, not the fourteen #4051 makes it; "
+        "the count is pinned so a second day smuggled into a diff is noticed here")
     windows = [json.loads(p.read_text(encoding="utf-8"))["window"][0] for p in extracts]
     assert windows == sorted(windows) and len(set(windows)) == len(windows), (
         f"the tracked extracts no longer carry one day each in order: {windows}")
-    assert windows[-2:] == ["2026-10-28", "2026-10-29"], (
-        f"the newest two tracked days are {windows[-2:]}, so the day #3693 committed is not "
-        "second-newest as the block above assumes")
+    assert windows[-2:] == ["2026-10-29", "2026-11-10"], (
+        f"the newest two tracked days are {windows[-2:]}, so the day #4051 committed is not the "
+        "newest of the family as the block below assumes")
 
     clearing = _committed_clearing_days(gate)
-    assert clearing == ["2026-09-25", "2026-10-09", "2026-10-23", "2026-10-28"], (
+    assert clearing == ["2026-09-25", "2026-10-09", "2026-10-23", "2026-10-28", "2026-11-10"], (
         f"the sweep now clears the bar on {clearing}; the pending-ruling hold names "
         f"{sorted(_UNRULED_CLEARING_DAYS)}, and anything else in that list is a headline the "
         "page has not caught up with and nobody has ruled on")
-    assert _UNRULED_CLEARING_DAYS == {"2026-10-28"}, (
+    assert _UNRULED_CLEARING_DAYS == set(), (
         "the hold grew. Each day in it is an editorial question this file is declining to "
-        "answer for owed-check; a second entry means two rulings are pending and the page's "
-        "headline is no longer derived from anything")
+        "answer for owed-check; an entry means a ruling is pending and the page's headline is "
+        "no longer derived from anything")
 
     assert _NEWEST_HEADING in page, (
-        "§10 no longer carries the 2026-10-23 newest-day bullet while the committed family's "
-        "newest clearing day is held for a ruling: the headline has moved without the hold "
-        "being emptied, which is the drift #1918 exists to stop")
-    assert "2026-10-28" not in page, (
-        "§10 carries a 2026-10-28 sentence while owed-check's ruling is still pending: name "
-        "the ruling on #3693's owed entry, land the bullet in its own diff, and empty "
-        "`_UNRULED_CLEARING_DAYS` in that same commit")
+        "§10 no longer carries the 2026-11-10 newest-day bullet while the committed family's "
+        "newest clearing day is 2026-11-10 and nothing is held for a ruling: the sweep and the "
+        "page have drifted apart, which is the drift #1918 exists to stop")
+    para = _bullet_at(_NEWEST_HEADING)
+    assert _RULED_DISPLACED_DAY not in para, (
+        f"the newest-day bullet names {_RULED_DISPLACED_DAY}: the ruled day's figures belong in "
+        "its own bullet, where the placement node can count how many times the page carries "
+        "them, not folded into the headline's sentence")
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The fourteenth committed extract: 2026-11-10 (#4051)
+# ─────────────────────────────────────────────────────────────────────────────
+# The day the standing daily job counted at `config.yaml`'s gate and §10 had never seen:
+# 2026-11-10 clears (a), (b), (c) and (d) on a chat population of 10, and it is the last
+# full UTC day served start to finish by the engine that also served 2026-09-25,
+# 2026-10-09, 2026-10-23, 2026-10-28 and 2026-10-29 — the upgrade booted after the window
+# closed, so from 2026-11-11 the bar's opening clause ("for the fleet as it runs today")
+# names a different pool. That is why this day is committed rather than quoted from the
+# job's directory: it is the hinge of the counted lineage, and the tape that produced it
+# rotates.
+#
+# #3693's 2026-11-07 DISPLACE ruling is the other half of this commit. It ruled
+# 2026-10-28 into the page and said the diff "must empty `_UNRULED_CLEARING_DAYS` in the
+# same commit that re-cuts §10, making the work self-enforcing and impossible to
+# half-land." Both halves are here, and the tripwire below is what makes the
+# "impossible" part true: 13 `_committed_clearing_days` entries plus this file makes the
+# sweep's maximum 2026-11-10, so a round that lands the fixture and leaves either the
+# hold or the headline where they were fails `max(unruled) == _NEWEST_CLEARING_DAY`.
+FOURTEENTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-11-10.json"
+
+#: The sha256 of the extract the standing daily job wrote on 2026-11-11 00:30:45 box-local,
+#: copied out of `~/lloyd-data/vllm-prefix-miss/` by #4051's round without re-running
+#: `extract()`. Byte identity against the job's own file is asserted below while this box
+#: holds it; this digest is the half that survives the box and the rotation.
+FOURTEENTH_JOB_SHA = ("257084bdd343da3204ff7a1fbb45d7c1921bc792e613420ad2483bb99e2908df")
+
+#: `derive`'s in-window status-line count for this day, against the 2,374 rows the extract
+#: itself carries. Two numbers by construction, not two spellings of one: `extract` fills
+#: `kv_samples` over an hour of lookback before `t0` plus one interval after `t1`, `derive`
+#: recounts inside the window. #3691, #3692 and #3694 are the family's record of what
+#: happens when the pair is subtracted across artifacts, and §10's sentence names which
+#: side it quotes.
+FOURTEENTH_KV_SAMPLES = 2193
+FOURTEENTH_RAW_KV_ROWS = 2374
+
+
+@pytest.fixture(scope="module")
+def fourteenth_raw() -> dict:
+    """2026-11-10 00:00 → 2026-11-11 00:00 UTC, as the standing daily job cut it on 11-11."""
+    return json.loads(FOURTEENTH_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def fourteenth(fourteenth_raw, cfg) -> dict:
+    """The same bytes through `derive`, at the gate `config.yaml` carries.
+
+    `NO_BOOT_POOL` is not applied and cannot be: this window contains a boot line, so
+    `derive` reads the pool out of the extract itself. That makes 2026-11-10 the first
+    day since 2026-10-09 whose free-pool arithmetic divides by a reading rather than by a
+    quoted banner — the distinction §10 states in the sentence that says so.
+    """
+    return W.derive(fourteenth_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def test_the_fourteenth_extract_is_committed_and_matches_the_daily_job_byte_for_byte(
+        fourteenth_raw):
+    """#4051 clause 1: the day is on disk, tracked by git, canonical in shape, and
+    byte-identical to the copy the standing daily job wrote.
+
+    Byte identity is asked of the job's file rather than of a re-run of `--write-extract`,
+    for the reason the family has repeated since #2248: what is worth pinning is that
+    nobody re-cut the numbers between the job that found the day and the round that
+    committed it. A re-run would have survived today — the day's lines sit in `.log` and
+    `.log.1` against an 11-file rotation whose oldest member is 2026-10-27 — and would say
+    nothing about the interval this clause guards. The digest below is the half that
+    survives the rotation; roughly eleven days of counting remain before these lines leave
+    the tape, and after that the committed bytes are the only copy of the reading.
+    """
+    assert fourteenth_raw["window"] == ["2026-11-10", "2026-11-11"], (
+        "the committed day is not the [2026-11-10, 2026-11-11) UTC window the item quotes")
+    assert fourteenth_raw["year"] == 2026, (
+        f"the extract's `year` is {fourteenth_raw['year']!r}, so the epoch rows and the "
+        "window strings are being read on different calendars")
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(FOURTEENTH_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{FOURTEENTH_EXTRACT.name} is on disk but not in git; `tests/fixtures/.gitignore` "
+        "negates this family on purpose, so an untracked extract is a day whose evidence "
+        "dies with the rotation that produced it — the whole reason §10 could not be "
+        "re-cut from the job's directory")
+    raw = FOURTEENTH_EXTRACT.read_text(encoding="utf-8")
+    assert raw.endswith("\n") and not raw.endswith("\n\n")
+    assert raw == json.dumps(fourteenth_raw, separators=(",", ":")) + "\n", (
+        f"{FOURTEENTH_EXTRACT.name} is not byte-for-byte what `--write-extract` writes for "
+        "the rows it holds, so the committed reading has been edited by hand")
+    assert len(raw.splitlines()) == 1, (
+        "the extract is one compact line; a multi-line fixture would make every figure in "
+        "it diffable by hand")
+    assert len(FOURTEENTH_EXTRACT.read_bytes()) == 63_723, (
+        "the committed extract is no longer the 63,723 bytes the item quotes as the live "
+        "extract's size, so the byte-identity claim in the item and the file in the tree "
+        "are describing different readings")
+    assert hashlib.sha256(FOURTEENTH_EXTRACT.read_bytes()).hexdigest() == FOURTEENTH_JOB_SHA, (
+        "the committed day is no longer the bytes the daily job wrote; re-deriving a day and "
+        "committing it is the re-cut this clause exists to catch")
+    daily = DAILY_EXTRACT_DIR / FOURTEENTH_EXTRACT.name
+    if not daily.exists():
+        pytest.skip(f"the daily job has written no {daily}; the living copy is the second "
+                    "half of this identity and only the job can produce it — the digest and "
+                    "the byte count above still pin which bytes the job wrote")
+    assert daily.read_bytes() == FOURTEENTH_EXTRACT.read_bytes(), (
+        "the committed day differs from the job's bytes, and the gap between the two is the "
+        "unauditable one: someone re-cut the day between finding it and committing it")
+
+
+def test_the_fourteenth_figures_are_derived_from_the_committed_bytes_at_the_config_gate(
+        fourteenth, fourteenth_raw, cfg):
+    """#4051 clause 1's second half: every figure §10's newest bullet quotes is `derive` on
+    the COMMITTED bytes at `config.yaml`'s gate, so the readings belong to the tree and not
+    to the item that asked for them.
+
+    The four criteria's inputs, each from the key §10 grades it against: (a) `chat_turns`
+    and `chat_turns_with_misses`; (b) `misses` and `reprefill_tokens` against §6.1's per-day
+    97 and 10.3M — 0.15x and 0.17x of budget, which the ratios below compute here rather
+    than remember; (c) `kv_p50` against the gate; (d) the two-request split, including the
+    arm the one under-bar window fell in. The pool is the one figure whose provenance this
+    family has twice got wrong, so both sides of it are pinned: the extract carries a boot
+    line, `derive` reports it, and it is the same 844,969 the pinned provenance carries for
+    the days that booted nothing.
+
+    The row counts are pinned as a PAIR because the two artifacts reuse the names: the
+    extract's `kv_samples` is 2,374 stored rows including an hour of lookback, and
+    `derive`'s `kv_samples` is the 2,193 inside the window. On 2026-11-09 the same pair is
+    6,298 against 6,002 while the miss counts differ too — 119 event rows against 121
+    per-turn misses — which is the shape #3691, #3692 and #3694 were filed over. A node
+    that asserted the two are always equal would have been falsified by the next day; this
+    one pins that they are different here and that only the `usage.db` side is additive.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
+    assert fourteenth["turns"] == 63 and fourteenth["measured"] == 63, (
+        f"the day is {fourteenth['measured']} measured of {fourteenth['turns']} turns")
+    assert len(fourteenth_raw["turns"]) == 63, (
+        f"the extract holds {len(fourteenth_raw['turns'])} turn rows against derive's "
+        f"{fourteenth['turns']}, so the population sentence has two sources")
+    assert fourteenth["chat_turns"] == 10 and fourteenth["chat_turns_with_misses"] == 0, (
+        f"(a) is now {fourteenth['chat_turns_with_misses']} of {fourteenth['chat_turns']}")
+    assert fourteenth["misses"] == 15 and fourteenth["reprefill_tokens"] == 1_794_137, (
+        f"(b) is {fourteenth['misses']:,} misses / {fourteenth['reprefill_tokens']:,} tokens")
+    assert fourteenth["misses"] / _NEWEST_PERDAY_MISSES == pytest.approx(0.155, abs=0.001), (
+        f"the miss load is {fourteenth['misses'] / _NEWEST_PERDAY_MISSES:.4f} of §6.1's "
+        "per-day 97, not the 0.15x the bullet and the item both quote")
+    assert fourteenth["reprefill_tokens"] / _NEWEST_PERDAY_TOK == \
+        pytest.approx(0.174, abs=0.001), (
+        f"the token load is {fourteenth['reprefill_tokens'] / _NEWEST_PERDAY_TOK:.4f} of "
+        "§6.1's 10.3M, not the 0.17x the item quotes")
+    assert fourteenth["turns_with_misses"] == 7 and fourteenth["worst_turn_tokens"] == 504_514, (
+        f"the load mix moved: {fourteenth['turns_with_misses']} turns carry the misses, worst "
+        f"{fourteenth['worst_turn_tokens']:,}")
+    assert fourteenth["by_kind"] == {"autocode": [14, 1_652_066], "review": [1, 142_071]}, (
+        f"the by-kind split is {fourteenth['by_kind']}, so the 15 misses are no longer 14 "
+        "autocode and 1 review as the item quotes them")
+    assert fourteenth["kv_samples"] == FOURTEENTH_KV_SAMPLES, (
+        f"derive counts {fourteenth['kv_samples']} in-window status lines, not the "
+        f"{FOURTEENTH_KV_SAMPLES} §10 quotes for (c)")
+    assert len(fourteenth_raw["kv_samples"]) == FOURTEENTH_RAW_KV_ROWS, (
+        f"the extract stores {len(fourteenth_raw['kv_samples'])} rows, not the "
+        f"{FOURTEENTH_RAW_KV_ROWS} the naming caution names — so the sentence that says "
+        "'not the 2,374 rows the extract stores' is quoting a number that moved")
+    assert fourteenth["kv_samples"] < len(fourteenth_raw["kv_samples"]), (
+        "derive's in-window count is no longer smaller than the stored rows, so the two "
+        "names have converged or the lookback stopped being a lookback — either way the "
+        "pair §10 names has to be re-read before it is quoted")
+    assert fourteenth["miss_events"] == len(fourteenth_raw["misses"]) == fourteenth["misses"], (
+        f"the miss side of the pair is {fourteenth['miss_events']} event rows / "
+        f"{len(fourteenth_raw['misses'])} stored / {fourteenth['misses']} per-turn sum: equal "
+        "on this day, unequal on 2026-11-09, and the bullet has to say which one it quotes")
+    assert fourteenth["kv_p50"] < gate and round(fourteenth["kv_p50"], 3) == 0.251, (
+        f"(c) is kv_p50 {fourteenth['kv_p50']:.3f} against the {gate} gate")
+    assert round(fourteenth["kv_p90"], 3) == 0.435 and fourteenth["kv_max"] == 0.725, (
+        f"the tail moved: p90 {fourteenth['kv_p90']}, max {fourteenth['kv_max']}")
+    assert fourteenth["two_request_windows"] == 1364, (
+        f"(d)'s denominator is {fourteenth['two_request_windows']:,} windows")
+    assert round(fourteenth["two_request_tok_s_p50"], 1) == 2514.9, (
+        f"the median combined throughput is {fourteenth['two_request_tok_s_p50']} tok/s")
+    assert fourteenth["two_request_tok_s_min"] == 0.0, (
+        f"the slowest window is {fourteenth['two_request_tok_s_min']} tok/s, so the 0.0 the "
+        "bullet quotes is no longer the day's minimum")
+    assert fourteenth["two_request_under_stall"] == 1, (
+        f"{fourteenth['two_request_under_stall']} windows sit under the 15 tok/s bar")
+    assert fourteenth["two_request_under_stall_cold_in_flight"] == 1 and \
+        fourteenth["two_request_under_stall_cold_prefill"] == 0 and \
+        fourteenth["two_request_under_stall_cold_admission"] == 1 and \
+        fourteenth["two_request_under_stall_not_cold"] == 0, (
+        "the excluded window is no longer classified as a cold admission in flight with "
+        "nothing on the cold-prefill arm, so (d) was not exercised the way §10 says it was")
+    assert fourteenth["pool_tokens"] == 844_969 and \
+        fourteenth_raw["pool_tokens"] == [844_969], (
+        f"the pool is {fourteenth['pool_tokens']!r} from {fourteenth_raw['pool_tokens']!r}: "
+        "this day's bullet claims a MEASURED pool, and `NO_BOOT_POOL` is not consulted for "
+        "it — if the extract lost its boot line the claim is false, not merely unfounded")
+    assert fourteenth["pool_tokens"] == NO_BOOT_POOL["2026-10-23"], (
+        f"the measured pool ({fourteenth['pool_tokens']:,}) is no longer the figure pinned "
+        "for the no-boot days, so the two provenances §10 contrasts in one sentence are "
+        "different numbers and the sentence needs re-writing, not re-typing")
+    assert fourteenth["misses_with_gap"] == 15 and \
+        fourteenth["misses_gap_churned_free_pool"] == 9 and \
+        fourteenth["misses_gap_over_gate"] == 5 and fourteenth["misses_gap_over_90"] == 0, (
+        f"the gap split moved: {fourteenth['misses_with_gap']} joined, "
+        f"{fourteenth['misses_gap_churned_free_pool']} churned, "
+        f"{fourteenth['misses_gap_over_gate']} at or over the gate, "
+        f"{fourteenth['misses_gap_over_90']} over p90")
+    events = _gap_events(fourteenth_raw, gate)
+    assert len(events) == fourteenth["misses_with_gap"], (
+        f"the per-event walk joined {len(events)} events against derive's "
+        f"{fourteenth['misses_with_gap']}, so the walk has drifted from the aggregate")
+    assert sum(1 for e in events if e["churn"]) == fourteenth["misses_gap_churned_free_pool"], (
+        "the walk's churn tally no longer matches derive's aggregate on a day whose pool was "
+        "read out of the window — the arithmetic this family quotes as measured")
+    assert sum(1 for e in events if e["peak"] >= gate) == fourteenth["misses_gap_over_gate"], (
+        "the walk's gate-level tally no longer matches derive's aggregate")
+    # `_gap_events` names an event by its kind and iteration, not by turn id, so the chat
+    # half of (a) is checked on the row's own kind column rather than by joining to turns.
+    chat_rows = [t for t in fourteenth_raw["turns"] if t[1] == "chat"]
+    assert len(chat_rows) == fourteenth["chat_turns"], (
+        f"{len(chat_rows)} chat rows in the extract against derive's chat_turns "
+        f"{fourteenth['chat_turns']} — the denominator (a) is quoted on")
+    assert not [t for t in chat_rows if t[2]] and not [e for e in events if e["kind"] == "chat"], (
+        "a chat turn now carries a miss on this day, which is criterion (a) failing and "
+        "would take the headline with it")
+
+
+def test_the_pending_ruling_hold_is_empty_and_the_headline_is_the_sweeps_newest_day(cfg):
+    """#4051 clause 2: `_UNRULED_CLEARING_DAYS` is empty, and `_NEWEST_CLEARING_DAY` is the
+    sweep's own maximum over the fourteen committed extracts — so nothing on the page is a
+    headline that only this file believes in.
+
+    The hold existed to refuse an editorial decision #3101 assigned to owed-check. #3693's
+    2026-11-07 `owed_settled` entry ruled DISPLACE, and entry 3 of that ruling is what this
+    node enforces: the diff that lands the ruling "must empty `_UNRULED_CLEARING_DAYS` in
+    the same commit that re-cuts §10, making the work self-enforcing and impossible to
+    half-land." The two controls below are that sentence made executable. Both half-states
+    are computed from the SAME derived clearing list, so neither can be talked past by
+    editing a constant: committing a fourteenth extract while the hold still names
+    2026-10-28 fails, and emptying the hold while the headline stays on 2026-10-23 fails.
+
+    `_COUNTED_THROUGH` is pinned to the newest committed extract rather than to the newest
+    clearing day, because those are different quantities — a day with an extract that fails
+    the bar moves the bound and not the headline, which is exactly what §6.1's per-day
+    budget and §10's bound are for.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
+    clearing = _committed_clearing_days(gate)
+    extracts = _tracked_extracts()
+    windows = sorted(json.loads(p.read_text(encoding="utf-8"))["window"][0] for p in extracts)
+
+    assert _UNRULED_CLEARING_DAYS == set(), (
+        f"the hold names {sorted(_UNRULED_CLEARING_DAYS)} again. Every day in it is a "
+        "displacement owed-check has not ruled; if a new extract cleared the bar and this "
+        "file is declining to call it, say so in the item that owns the ruling — do not add "
+        "an entry to make a fixture green")
+    unruled = [d for d in clearing if d not in _UNRULED_CLEARING_DAYS]
+    assert unruled, "every clearing day is held for a ruling, so the sweep has no answer left"
+    assert max(unruled) == _NEWEST_CLEARING_DAY == max(clearing), (
+        f"the sweep's newest clearing day is {max(clearing)} and the page headlines "
+        f"{_NEWEST_CLEARING_DAY}: that gap is a headline nobody ruled on. It is the #1918 "
+        "tripwire, and it is the check that will fire again the first day after this one "
+        "that clears on the upgraded engine")
+    assert _COUNTED_THROUGH == windows[-1], (
+        f"`_COUNTED_THROUGH` is {_COUNTED_THROUGH} while the newest committed extract is "
+        f"{windows[-1]}, so the bound both newest-day sentences carry is not the count they "
+        "claim to have been counted through")
+    assert _NEWEST_CLEARING_DAY in clearing, (
+        f"{_NEWEST_CLEARING_DAY} does not clear all four on its own bytes, so it cannot be "
+        "the headline whatever the sweep's maximum is")
+
+    # Control A — the fixture lands, the ruling does not. The hold keeps 2026-10-28, and a
+    # page that still headlines 2026-10-23 (the value before this round) is compared against
+    # the same derived maximum this commit moved.
+    held = {"2026-10-28"}
+    unruled_a = [d for d in clearing if d not in held]
+    assert max(unruled_a) != "2026-10-23", (
+        "a fourteenth extract landed without emptying the hold and the tripwire did not "
+        f"notice: max of {unruled_a} still reads 2026-10-23")
+    # Control B — the ruling lands, the fixture does not. Emptying the hold against a family
+    # that has not gained the day cannot produce the headline this commit claims.
+    pre_cut = [d for d in clearing if d < _NEWEST_CLEARING_DAY]
+    assert max(pre_cut) != _NEWEST_CLEARING_DAY, (
+        "the hold was emptied without the extract and the comparison still agrees with the "
+        "headline, so this node is not the check it claims to be")
+    # Control C — the tripwire is still a tripwire after the hold is empty: the next day
+    # that clears moves the maximum out from under a headline nobody re-cut.
+    assert max(clearing + ["2026-11-11"]) != _NEWEST_CLEARING_DAY, (
+        "adding a later clearing day leaves the comparison alone, so the sweep is not "
+        "reading the family and the next displacement will be silent")
+
+
+def test_the_displaced_2026_10_23_bullet_names_its_displacer_and_drops_the_superlative():
+    """#4051 clause 4: the day the headline left keeps its own dated bound, names the day
+    that took it, and stops claiming the superlative — and the set of §10 paragraphs that
+    still claim it is exactly {2026-10-09, 2026-11-10}.
+
+    #1918's rule is that a displaced headline is re-bound, not deleted: a dated pass stays
+    true when the set grows, while an unbounded superlative turns false the day a better
+    measurement lands. 2026-10-23's bound is therefore untouched at 2026-10-24 — the pass it
+    was counted on — and what changes is its verb. This node pins all three moves together,
+    because the failure mode is a bullet that keeps the bound AND the superlative and reads
+    as though nothing happened.
+
+    The exact-set assert is the one that catches the third shape: a page that gains a new
+    newest-day bullet and forgets to re-bind the old one carries two live superlatives, and
+    each of them is true-looking on its own.
+    """
+    para = _bullet_at(_DISPLACED_2026_10_23_HEADING)
+    assert "as counted through 2026-10-24" in para, (
+        "the displaced bullet lost the bound it was counted through; #1918 makes an expired "
+        "bound as wrong as an unbounded superlative, and the bound here is the difference")
+    assert _NEWEST_CLEARING_DAY in para, (
+        f"the displaced bullet does not name {_NEWEST_CLEARING_DAY} as the day that took the "
+        "headline, so a reader of that bullet alone still has the page's old shape")
+    assert "displaced it" in para, (
+        "the displaced bullet names the newer day without saying which way the relation "
+        "runs, which is how a re-bind becomes a second headline")
+    assert "newest" not in para, (
+        "the displaced bullet still uses the superlative: with 2026-11-10 on the page this "
+        "sentence is false as written, and it is the exact drift #1918 exists to catch")
+    m = re.search(r"criteria as counted through (\d{4}-\d\d-\d\d)", para)
+    assert m and m.group(1) == "2026-10-24", (
+        f"the re-bound day's own bound reads {m.group(1) if m else None!r}; the 2026-10-23 "
+        "pass was counted through 2026-10-24 and moving it here would be re-writing history "
+        "to fit the present")
+    assert _COUNTED_THROUGH not in para or "2026-10-24" in para, (
+        "the displaced bullet adopted the page's current bound, which is the superlative "
+        "smuggled back in as a date")
+
+    claimers = sorted(day for day, body in _headline_paragraphs() if "newest day" in body)
+    assert claimers == ["2026-10-09", _NEWEST_CLEARING_DAY], (
+        f"the §10 paragraphs that claim the newest-day superlative are {claimers}, not "
+        "exactly 2026-10-09 and the headline: a second live claim is a false sentence with a "
+        "green rail on it, and a missing one means a bound was rewritten instead of kept")
+    ninth = _ninth_bullet()
+    assert _NEWEST_CLEARING_DAY in ninth and _COUNTED_THROUGH in ninth, (
+        f"the 2026-10-09 pointer no longer names {_NEWEST_CLEARING_DAY} with the bound "
+        f"{_COUNTED_THROUGH}, so the page's older claim points at a day that is not the "
+        "newest and carries no date either")
+    assert "no longer the page's headline" in ninth, (
+        "the 2026-10-09 bullet no longer says its own bound has stopped being the page's "
+        "headline, which is the sentence that keeps its dated claim from being read as live")
+    # Controls: the two shapes a re-bind can collapse into. Both are computed from the page
+    # so a re-worded bullet that satisfies the asserts above by accident still fails here.
+    assert "newest day" in _newest_bullet(), (
+        "the newest bullet does not use the superlative at all, so the exact-set assert "
+        "above is comparing one paragraph and a date is headlines nowhere")
+    assert "newest day" not in para, (
+        "the control sees the displaced bullet inside the claimers, so the exact-set assert "
+        "is not filtering on the wording it names")
+
+
+def test_section_10_carries_exactly_one_2026_10_28_bullet_and_its_stall_test_is_unexercised(
+        thirteenth, cfg):
+    """#4051 clause 5: #3693's DISPLACE ruling is on the page once, in one bullet, in the
+    right place, with the one figure that makes it a different kind of day stated rather
+    than smoothed over.
+
+    The figure is (d). Every other clearing day on this page had windows under the 15 tok/s
+    bar and excluded them as cold admissions; 2026-10-28's slowest of 636 two-request
+    windows is 41.3 tok/s, so NOTHING reached the bar and `derive`'s 0 is a population with
+    nothing in it. A bullet that reported that 0 the way 2026-10-23 reports its excluded
+    three would credit this day with withstanding a test it was never given — the exact
+    confusion the family has been filed over twice, in the other direction.
+
+    One bullet, not two, and before the headline: the day is older than 2026-11-10 and the
+    page orders its days. Scattering its figures into the newest bullet would make the
+    count of paragraphs carrying them uncountable, which is why the asserts below count
+    bullets that merely MENTION the day as well as the one that headlines it.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert gate == 0.60, f"config.yaml's `kv_gate.max_kv_usage` moved to {gate}"
+    raw = DOC.read_text(encoding="utf-8")
+    sec = re.search(r"^## 10\. .*?(?=^## )", raw, re.M | re.S).group(0)
+    heads = [m.start() for m in re.finditer(r"^- ", sec, re.M)]
+    assert heads, "§10 has no top-level bullets, so there is nothing to count"
+    bullets = [" ".join(sec[h:(heads[i + 1] if i + 1 < len(heads) else len(sec))].split())
+               .replace("**", "")
+               for i, h in enumerate(heads)]
+    naming = [i for i, b in enumerate(bullets) if _RULED_DISPLACED_DAY in b]
+    assert len(naming) == 1, (
+        f"{len(naming)} §10 bullets mention {_RULED_DISPLACED_DAY} ({naming}); the ruled day "
+        "belongs in exactly one, or its figures have leaked into a neighbour and no node can "
+        "count them any more")
+    para = bullets[naming[0]]
+    head = _NEWEST_HEADING.replace("**", "")  # the bullets below have their ** stripped
+    newest_at = [i for i, b in enumerate(bullets) if b.startswith(head)]
+    assert newest_at and naming[0] < newest_at[0], (
+        f"the {_RULED_DISPLACED_DAY} bullet sits at {naming[0]} and the newest-day bullet at "
+        f"{newest_at[:1]}: §10 orders its days, and a ruled day that lands after the "
+        "headline reads as a later measurement")
+
+    assert thirteenth["chat_turns"] == 1 and thirteenth["chat_turns_with_misses"] == 0, (
+        f"(a) is now {thirteenth['chat_turns_with_misses']} of {thirteenth['chat_turns']}")
+    assert thirteenth["turns"] == 267 and thirteenth["measured"] == 267 and \
+        thirteenth["turns_with_misses"] == 2, (
+        f"the population is {thirteenth['measured']} of {thirteenth['turns']} with "
+        f"{thirteenth['turns_with_misses']} carrying misses")
+    assert thirteenth["misses"] == 6 and thirteenth["reprefill_tokens"] == 624_225, (
+        f"(b) is {thirteenth['misses']} misses / {thirteenth['reprefill_tokens']:,} tokens")
+    assert thirteenth["kv_p50"] < gate and round(thirteenth["kv_p50"], 3) == 0.121, (
+        f"(c) is kv_p50 {thirteenth['kv_p50']:.3f}")
+    assert thirteenth["two_request_windows"] == 636, (
+        f"(d)'s denominator is {thirteenth['two_request_windows']} windows")
+    assert round(thirteenth["two_request_tok_s_min"], 1) == 41.3, (
+        f"the slowest window is {thirteenth['two_request_tok_s_min']} tok/s — the figure that "
+        "makes this day's (d) unexercised is the one the bullet has to quote")
+    assert thirteenth["two_request_under_stall"] == 0, (
+        f"{thirteenth['two_request_under_stall']} windows now sit under the 15 tok/s bar, so "
+        "this day's (d) has been exercised and the bullet's whole point needs re-writing")
+    assert thirteenth["pool_tokens"] is None, (
+        f"derive reports pool_tokens {thirteenth['pool_tokens']!r} for 2026-10-28, so the "
+        "pinned denominator below is redundant and the bullet should cite the extract")
+
+    for want, why in (
+        ("clears all four acceptance-bar criteria", "the bullet does not say the day clears"),
+        ("ONE chat turn", "the population that made the day a ruling question is unstated"),
+        ("0 of the day's 1 chat turn", "(a)'s denominator is not this day's own"),
+        ("6 misses and 624,225 re-prefilled", "(b)'s figures are absent"),
+        (f"{thirteenth['misses'] / _NEWEST_PERDAY_MISSES:.1%} of the misses",
+         "the miss ratio against §6.1's per-day budget is not derived into the sentence"),
+        (f"{thirteenth['reprefill_tokens'] / _NEWEST_PERDAY_TOK:.1%} of the tokens",
+         "the token ratio is not derived into the sentence"),
+        (_NEWEST_PERDAY_TOK_M, f"§6.1's budget is not named as {_NEWEST_PERDAY_TOK_M}"),
+        (f"KV p50 {thirteenth['kv_p50']:.3f}", "(c)'s figure is absent"),
+        ("was never asked of this day",
+         "(d) does not say the bar was never reached, which is the ruling's own point"),
+        ("(d) is UNEXERCISED",
+         "(d) is not called unexercised, the word the item's clause uses"),
+        ("the slowest of its 636 two-request windows is 41.3 tok/s against the bar's "
+         "15 tok/s", "the day's own (d) evidence is absent"),
+        ("267 turns, 267 measured, 2 turns", "the population sentence is absent"),
+        ("pinned rather than measured", "the pool's provenance is not distinguished"),
+        ("no measured pool for the window at all",
+         "the bullet states a pool without saying derive reports none"),
+        (f"{NO_BOOT_POOL[_RULED_DISPLACED_DAY]:,}",
+         f"the pinned pool ({NO_BOOT_POOL[_RULED_DISPLACED_DAY]:,}) is absent"),
+        ("DISPLACE", "the ruling that put this day on the page is not named"),
+        ("#3693", "the item the ruling belongs to is not named"),
+        ("_UNRULED_CLEARING_DAYS", "the bullet does not say its own landing emptied the hold"),
+    ):
+        assert want in para, f"{why}. Looking for {want!r} in:\n{para[:1800]}"
+    assert "newest day" not in para, (
+        "the ruled day claims the superlative outright, which belongs to 2026-11-10 under "
+        "the ruling this bullet cites")
+    assert f"{NO_BOOT_POOL[_RULED_DISPLACED_DAY]:,}" in para and \
+        "measured, not pinned" not in para, (
+        "the ruled day claims a measured pool: either its extract gained a boot line — see "
+        "the derive assert above — or the newest bullet's sentence was copied backwards")

@@ -1282,9 +1282,10 @@ has still not been run as of 2026-09-11.
   vLLM#57032 comment is not to be posted, and no counted day re-opens it.
 - **2026-10-09 is the newest day, as counted through 2026-10-19, on which all
   four acceptance-bar criteria hold.** That bound is no longer the page's
-  headline: 2026-10-23 clears all four as counted through 2026-10-24, one bullet
-  below, and what follows re-derives this day's own figures unchanged rather than
-  restating them from memory. Derived by
+  headline: 2026-11-10 clears all four as counted through 2026-11-10 — 2026-10-23
+  held that claim before it, as counted through 2026-10-24 — and what follows
+  re-derives this day's own figures unchanged rather than restating them from
+  memory. Derived by
   `scripts.vllm_prefix_miss_window.derive` over the extract committed as
   `tests/fixtures/vllm_prefix_miss_2026-10-09.json`, byte-identical to the
   standing daily job's copy, at the gate `config.yaml` carries (0.60): 0 of the
@@ -1308,8 +1309,9 @@ has still not been run as of 2026-09-11.
   the same four on the daily job's copy, which is not in the tree, so this page
   states no figure for it and headlines it nowhere.
 
-- **2026-10-23 is the newest day, as counted through 2026-10-24, on which all
-  four acceptance-bar criteria hold.** Derived by
+- **2026-10-23 cleared all four acceptance-bar criteria as counted through
+  2026-10-24, and held the page's headline until 2026-11-10 displaced it.**
+  Derived by
   `scripts.vllm_prefix_miss_window.derive` over the extract committed as
   `tests/fixtures/vllm_prefix_miss_2026-10-23.json`, byte-identical to the
   standing daily job's copy, at the gate `config.yaml` carries (0.60): 0 of the
@@ -1341,7 +1343,9 @@ has still not been run as of 2026-09-11.
   Of the days between the two counted ones, the standing daily job's copies for
   2026-10-20, 2026-10-21, 2026-10-22 and 2026-10-24 clear none of the four;
   those copies are not in the tree, so this page states no figure for them and
-  the bound is a counting one, owed-check's to move with the next extract. Clearing
+  the bound was a counting one, owed-check's to move with the next extract. It
+  moved on 2026-11-11, when #3693's DISPLACE ruling landed and 2026-11-10 took the
+  headline in the bullet that closes this section. Clearing
   the bar is a measurement, not a ruling, and this day settles nothing by itself:
   owed-check still owes the flip its ≥7 days of real ticks clearing both numbers and
   the `autocode.status_pipeline` / `close_on_settle` handover decision carried from
@@ -1493,6 +1497,72 @@ has still not been run as of 2026-09-11.
   exactly as 2026-09-28's was. This page asserts no upstream filing, comment or ask for it,
   and none is owed: #2250 dropped the vLLM#57032 comment on 2026-10-12 and ruled that a
   further counted day does not re-open it.
+
+- **2026-10-28 clears all four acceptance-bar criteria on ONE chat turn, which is why
+  it sat under a ruling rather than landing as a headline.** Derived by
+  `scripts.vllm_prefix_miss_window.derive` over the extract committed as
+  `tests/fixtures/vllm_prefix_miss_2026-10-28.json`, byte-identical to the standing
+  daily job's copy, at the gate `config.yaml` carries (0.60): 0 of the day's 1 chat
+  turn carries a prefix miss, so (a) holds over a population thinner than
+  2026-10-23's 3 and thinner than the 4 whose chat count this section called a
+  handful in refusing 2026-09-23; 6 misses and 624,225 re-prefilled tokens against
+  §6.1's per-day 97 and 10.3M, which is 6.2% of the misses and 6.1% of the tokens, so
+  (b) holds with 93.9% of the token budget left; KV p50 0.121, so (c) holds with
+  room; and (d) was **never asked of this day**: the slowest of its 636 two-request
+  windows is 41.3 tok/s against the bar's 15 tok/s, so no window reaches the bar and
+  (d) is UNEXERCISED — the 0 `derive` reports under it is a population with nothing in
+  it, not a day that withstood the stall test. The day is 267 turns, 267 measured, 2 turns carrying the
+  6 misses, and its pool is pinned rather than measured: `derive` reports no measured
+  pool for the window at all, and the **844,969** the free-pool arithmetic divides by
+  comes from the pinned provenance beside `NO_BOOT_POOL`, whose quoted boot line
+  served this day from before the window opened. What this bullet is: owed-check's
+  `owed_settled` ruling on #3693 of 2026-11-07 ruled this day **DISPLACE**, lifting the
+  deferral that had kept it out of the section, and the diff that lands it empties
+  `_UNRULED_CLEARING_DAYS` in the same commit so the ruling cannot be half-landed.
+  What it is not: a second newest-day claim. #3693's own entry-1 ruling is why a
+  single chat turn does not un-clear the day — the bar's only population requirement
+  is non-zero chat, and inventing a larger floor now would fit a bar to its own
+  measurement — and the page states this day's thin load beside that, not instead of
+  it. Clearing the bar is a measurement, not a ruling, and this day settles nothing by
+  itself: the four marks made against 2026-09-25 are unmoved, and `derive` gives 0
+  chat turns with a miss, so the accepted-loss filing condition has nothing to fire on
+  here.
+
+- **2026-11-10 is the newest day, as counted through 2026-11-10, on which all four
+  acceptance-bar criteria hold.** Derived by `scripts.vllm_prefix_miss_window.derive`
+  over the extract committed as `tests/fixtures/vllm_prefix_miss_2026-11-10.json`,
+  byte-identical to the standing daily job's copy, at the gate `config.yaml` carries
+  (0.60): 0 of the day's 10 chat turns carries a prefix miss, and 10 is the thickest
+  chat population of any day this section counts the bar on except 2026-09-25's 23 —
+  thicker than 2026-10-09's 9 and 2026-10-23's 3 — so (a) holds over a population a
+  person can point at rather than over zero of zero. 15 misses and
+  1,794,137 re-prefilled tokens against §6.1's per-day 97 and 10.3M, which is 15.5% of
+  the misses and 17.4% of the tokens, so (b) holds with 82.6% of the token budget
+  left, and this page calls that a quiet day that clears rather than a busy one: the
+  thinness is the load — 63 turns against 2026-10-23's 496 and 2026-10-09's 406 — and
+  not the chat population. KV p50 0.251, so (c) holds with room, over 2,193 in-window
+  engine status lines (`derive`'s in-window count, not the 2,374 rows the extract
+  stores, which carry an hour of lookback before the window opens). And 1 of 1,364
+  two-request windows runs under the bar's 15 tok/s — at 0.0 tok/s, which `derive`
+  classifies as a cold engine still loading the model in flight and not as a cold
+  prefill, excluded as a cold admission, **0 counted against** — so (d) holds on the
+  ruled exclusion AND was exercised: the bar was touched once, which is more than a
+  zero with nothing under it can claim. The day is 63 turns, 63 measured, 7 turns
+  carrying the 15 misses, worst turn 504,514 re-prefilled tokens. Its pool is
+  **measured, not pinned**: one `GPU KV cache size:` line falls inside the window at
+  **844,969** tokens — the size 2026-10-09 measured inside its own window and the size
+  pinned beside `NO_BOOT_POOL` for every day whose window booted nothing — so the free-pool
+  arithmetic divides by a reading: 9 of the day's 15 gap-joined misses churned the
+  free pool and 5 ran with a gap peak at or over the gate. Which build served the day
+  is not a figure the extract can produce, so this page names none. What this day does
+  not do is replace anything: 2026-09-25 stays the counted reading the four criteria
+  are marked against, and the filing-condition evidence set is unmoved — `derive` gives
+  0 chat turns with a miss, so no event on 2026-11-10 meets the accepted-loss filing
+  condition and the paragraphs above still count four days. Clearing the bar is a
+  measurement, not a ruling, and this day settles nothing by itself: owed-check still
+  owes the flip its ≥7 days of real ticks clearing both numbers and the
+  `autocode.status_pipeline` / `close_on_settle` handover decision carried from #3089,
+  and a better day moves none of the four marks made against 2026-09-25.
 ## 11. Found on the way
 
 - **Direct worker turns ignore every `harness.*` key.**
