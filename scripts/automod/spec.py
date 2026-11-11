@@ -313,6 +313,43 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # test_the_admission_changes_no_verdict_but_the_two_paths_it_grants.
     "chrome-extension/dist/sidepanel.html",
     "chrome-extension/dist/assets/**",
+    # #4037 / #4029 (2026-11-11): the decider installer, one verbatim file and NOT the
+    # directory. The round that needed it was deleting it: #4029 removes the agent-decider
+    # experiment, and that round's rung 0 refused one path — `paths outside the writable
+    # set: ['agent-services/setup/setup-decider.sh']`, bucket `unlisted` — while the same
+    # rung put the launcher and the unit its diff also deleted in the `protected` bucket,
+    # where a round may take them by paying the drill. So the two files the loop already
+    # governs were in scope and the third was not, and what rung 0 answers an `unlisted`
+    # path with is "leave it out and report it under `human_paths`" — the route that filed
+    # #4037, not a way to finish #4029. Admitted for a reason the nine agent-services
+    # entries above do not share: nothing here is to be edited, only removed. The script
+    # prepares a `.venvs/vllm-decider` and two checkpoints for that experiment, is called
+    # by neither `setup-all.sh` nor `install-services.sh` (`git grep -c 'setup-decider' --
+    # agent-services/setup/` returns nothing), and so is inert — the cost is 303 stale
+    # lines that would rebuild a venv for a program that no longer exists: #4029 landed its
+    # launcher and its supervisor unit at main's tip before this round opened, which makes
+    # this file the last tracked part of the experiment, and it also discharged the one
+    # ordering rule the item carried — the launcher used to die with three lines telling a
+    # person to `run setup/setup-decider.sh`, and deleting this file under it would have
+    # left that instruction pointing at nothing. It points at nothing now because the
+    # launcher is gone, not because anything here arranged it;
+    # tests/test_automod_spec.py's test_no_code_left_in_the_tree_points_at_the_installer
+    # re-reads that state on every run.
+    # What is NOT admitted is the directory: `git ls-files agent-services/setup/` is 35
+    # tracked paths at this round's base, 34 of them `unlisted`, and 33 stay that way
+    # beside this line and #2779's installer — `setup-all.sh`, `setup-djev.sh`,
+    # `setup-llm.sh`, the vendored `patches/*.patch` and the version pins all included.
+    # #1376 clause 1 prices a `setup/**` spelling at exactly those 34 unnamed admissions;
+    # this one moves a single classification, 79 tracked `agent-services/` paths still
+    # `unlisted` at the base against 78 with it, against the floor of 70 that rail is
+    # sized on. What this entry does NOT buy is the deletion itself: rung 0 grades with
+    # the `spec` the detached gate process imported from the live tree, so a widening
+    # never binds for its own round, and the `git rm` belongs to the round after this one
+    # lands — the round that follows has nothing left to wait for, and a person running the
+    # two commands by hand is the cheaper route the item itself says so in.
+    # tests/test_automod_spec.py's #4037 section pins both halves, including the comment
+    # you are reading.
+    "agent-services/setup/setup-decider.sh",
 )
 
 PROTECTED_GLOBS: tuple[str, ...] = (

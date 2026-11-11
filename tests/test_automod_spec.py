@@ -1492,17 +1492,26 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # this pin cannot list them, because they are admitted but not yet tracked: the grant
     # lands in this file's tree and the bytes land in #3252's, so `allowed_after`, which is
     # a verdict over `corpus` = the index, does not contain them. The set below is therefore
-    # the six pinned names plus `expected_allowed_model_paths()`, which is empty until
+    # the pinned names above plus `expected_allowed_model_paths()`, which is empty until
     # #3252's blob is committed and is exactly those three afterwards. That is the whole
     # point of splitting a grant from the commit it authorises, and it is why
     # `test_the_grant_moves_exactly_the_three_admitted_verdicts_in_a_fresh_interpreter`
     # asks the question of the three paths directly rather than of the index.
+    # #4037 added the tenth name, `agent-services/setup/setup-decider.sh`, the same way a
+    # tenth time: one verbatim path, and this round's own node
+    # `test_the_decider_installer_grant_admits_one_exact_path_and_nothing_else` is the
+    # legality check called with the entry shipped. Unlike the nine before it, the grant is
+    # the whole edit and no byte of the named file changes — the path is admitted so that
+    # the round after this one can delete it. `pre` still strips only TTS_PATCH, so the
+    # before/after diff this node computes stays exactly one path: the installer entry is
+    # in both tuples.
     assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py",
                              QMD_TEMPLATE, VOICE_TIMELINE,
                              "agent-services/setup/install-services.sh",
-                             "agent-services/scripts/qmd-watcher.sh"} \
+                             "agent-services/scripts/qmd-watcher.sh",
+                             "agent-services/setup/setup-decider.sh"} \
             | set(expected_allowed_model_paths()), (
-        f"the named grants over tracked agent-services paths are the six names this "
+        f"the named grants over tracked agent-services paths are the seven names this "
         f"node pins plus whichever of the #3258 turn-1-mini grant is in the index "
         f"({expected_allowed_model_paths()}); found {sorted(allowed_after)}. A new "
         f"verbatim grant is a legitimate edit — add its path to this pin (unless it is "
@@ -2101,6 +2110,23 @@ INSTALL_SERVICES = "agent-services/setup/install-services.sh"
 #: `agent-services/setup/` would admit it; this entry must not.
 SETUP_PROBE = "agent-services/setup/probe.sh"
 
+#: The tenth name to join `ALLOWED_GLOBS`, granted by #4037 so that the round AFTER it can
+#: delete the file: #4029 removes the agent-decider experiment, and rung 0 refused this one
+#: path of that deletion as `unlisted` while permitting the launcher and the unit in the
+#: same diff from the `protected` bucket. Declared here rather than in the #4037 section at
+#: the foot of this file because the #2779 node below is the second admitted member of this
+#: directory and has to name it — its "nothing else in `setup/` moved" assertion is about
+#: every setup file except the two that were granted, by name, and not about a wildcard that
+#: might have quietly reached a third. See the #4037 section for the rails this grant owns.
+SETUP_DECIDER = "agent-services/setup/setup-decider.sh"
+
+#: The two `setup/` files a round may put in a diff, each admitted by name and neither of
+#: them by a directory: #2779's user-unit installer and #4037's decider installer. The rails
+#: below subtract this set rather than one path, and the setup-tree assertion compares
+#: against it whole — a third file that quietly became writable has to show up as an extra
+#: member of `setup_allowed`, not vanish into a helper's filter.
+SETUP_GRANTS = sorted([INSTALL_SERVICES, SETUP_DECIDER])
+
 #: The diff #2774's next round commits: the nine `changed_paths` copied out of the
 #: refused round's `gate.json`, verbatim, installer first. Rung 0 classifies a whole
 #: changed set, so what has to hold is the nine verdicts together — the same
@@ -2120,15 +2146,18 @@ INSTALL_SERVICES_DIFF = [
 
 
 def tracked_setup_siblings() -> list[str]:
-    """Every tracked `agent-services/setup/` file except the granted one.
+    """Every tracked `agent-services/setup/` file except the two granted ones.
 
     Read from the index at call time, as the voice section's helper does: a setup
     script added tomorrow is exactly what a directory grant would reach, so the
     sibling set has to grow with the tree for the "nothing else moved" assertions
-    below to mean anything. 33 files at this round's base.
+    below to mean anything. 33 files at this round's base — 35 tracked in the
+    directory, minus #2779's installer and #4037's decider installer, both named in
+    `SETUP_GRANTS` rather than absorbed here, and both accounted for by name in the
+    setup-tree assertion at the foot of the node below.
     """
     return sorted(p for p in tracked_agent_services_paths()
-                  if p.startswith("agent-services/setup/") and p != INSTALL_SERVICES)
+                  if p.startswith("agent-services/setup/") and p not in SETUP_GRANTS)
 
 
 def test_the_installer_grant_admits_one_exact_path_and_nothing_else():
@@ -2140,14 +2169,16 @@ def test_the_installer_grant_admits_one_exact_path_and_nothing_else():
     `agent-services/setup/install-services.sh` was refused for. The `_match` half is
     what makes this a test of the clause rather than of a literal written beside it:
     an entry spelled `agent-services/setup/**` satisfies `classify` on the installer
-    AND admits its 33 tracked siblings plus `probe.sh`, because `fnmatch`'s `*`
-    crosses `/` and the matcher rung 0 uses is `spec._match`. Asking the tuple which
-    entries reach the path turns that red while leaving `classify` green. The rail is
+    AND admits every other tracked file in that directory plus `probe.sh`, because
+    `fnmatch`'s `*` crosses `/` and the matcher rung 0 uses is `spec._match`. Asking
+    the tuple which entries reach the path turns that red while leaving `classify`
+    green. The rail is
     called rather than restated — a restatement would keep passing if it were ever
     refactored away — and the floors are denominator controls: 33 siblings is the
-    `setup/` directory minus this grant, and 70 is what the #1376 rail is sized on,
-    79 tracked `agent-services/` paths still classify `unlisted` with this grant
-    shipped against the 80 measured at the round's base.
+    `setup/` directory's 35 tracked files minus this grant and #4037's, and 70 is what
+    the #1376 rail is sized on, against the 78 tracked `agent-services/` paths that
+    still classify `unlisted` in this tree — 79 before #4037 named the decider installer
+    beside this one, 80 at the base this node was written on.
     """
     assert INSTALL_SERVICES in spec.ALLOWED_GLOBS
     assert spec.classify(INSTALL_SERVICES) == "allowed"
@@ -2169,7 +2200,7 @@ def test_the_installer_grant_admits_one_exact_path_and_nothing_else():
         f"grant, against the 33 at this round's base — the sibling assertions below "
         f"would be guarding almost nothing")
     assert [p for p in siblings if spec.classify(p) == "unlisted"] == siblings, (
-        "a setup file became writable as collateral of the #2779 grant: "
+        "a setup file became writable as collateral of a grant that names one file: "
         f"{[p for p in siblings if spec.classify(p) != 'unlisted']}")
     assert SETUP_PROBE in AGENT_SERVICES_GLOB_PROBES
     assert spec.classify(SETUP_PROBE) == "unlisted", (
@@ -2179,9 +2210,11 @@ def test_the_installer_grant_admits_one_exact_path_and_nothing_else():
     setup_allowed = sorted(p for p in corpus
                            if p.startswith("agent-services/setup/")
                            and spec.classify(p) == "allowed")
-    assert setup_allowed == [INSTALL_SERVICES], (
-        f"the writable set inside the setup tree is {setup_allowed}, not the one "
-        f"file #2779 named")
+    assert setup_allowed == SETUP_GRANTS, (
+        f"the writable set inside the setup tree is {setup_allowed}, not the two files "
+        f"#2779 and #4037 each named by path ({SETUP_GRANTS}). A third member is either "
+        f"a directory grant or a verbatim one no rail here was told about; a missing one "
+        f"is a grant that stopped binding")
     unlisted = [p for p in tracked_agent_services_paths()
                 if spec.classify(p) == "unlisted"]
     assert len(unlisted) >= 70, (
@@ -4027,3 +4060,433 @@ def test_the_routed_listener_and_the_tracked_bundle_ship_the_flag_together():
         f"the source builds {built_in_src} focus-session message and the tracked bundle "
         f"{built_in_bundle}: source and shipped bytes moved apart, and either direction of "
         "that disagreement ships the same dead button")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# #4037: the decider installer grant — one path, so the round AFTER this can delete it
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# #4029 removes the agent-decider experiment. Its implementation round put all three of
+# the experiment's files in one diff and rung 0 refused exactly one of them: `paths
+# outside the writable set: ['agent-services/setup/setup-decider.sh']`, bucket `unlisted`,
+# while the same rung's buckets put the launcher and the supervisor confs in `protected`,
+# where a round may delete them by paying the guardian drill. So the files the loop
+# already governs were in scope and the one it had never named was not — and the answer
+# rung 0 gives for an `unlisted` path is "leave it out and report it under `human_paths`",
+# which is a routing instruction, not a way to finish the job. That report is #4037.
+#
+# The item's own text concluded "not the shape of a round fix", on the grounds that a
+# round could only get the file by widening its own writable set. That conclusion is false
+# on this tree and this section is where it stays false: `spec.classify` answers `protected`
+# for `scripts/automod/spec.py` and `check_scope` accepts a protected path with the drill,
+# so a round may edit the tuple — the nine agent-services grants above are that route,
+# taken nine times, `19aa8a11` being the one that admitted #2779's installer from this same
+# directory. What no round may do is widen the set and spend the widening on itself: rung 0
+# runs in the process the gate spawns against the live tree, so the entry binds for the
+# next round. Two rounds, then, and this is the first — the grant, with no deletion
+# attached, because a deletion in this diff would be the bundled widening the scope check
+# exists to refuse.
+#
+# What this section does and does not settle. The item carried an ordering rule — the
+# deletion must not land before #4029's launcher stops telling people to `run
+# setup/setup-decider.sh`, or that instruction points at a missing script — and that rule
+# discharged itself while the item was open: #4029 landed its launcher and its supervisor
+# unit at main's tip shortly before this round opened, so `git ls-files | grep -i decider`
+# answers with this one path and `test_no_code_left_in_the_tree_points_at_the_installer`
+# below re-reads that every run rather than trusting the sentence. What the grant still does
+# not settle is the deletion, which belongs to the next round for the process reason above,
+# and whether a person runs the `git rm` by hand instead — the cheaper route, which
+# #4037's own text offers and nothing here forbids.
+#
+# Clause map:
+#   1  `test_the_decider_installer_grant_admits_one_exact_path_and_nothing_else` — the two
+#      verdicts rung 0 refused to give, `allowed` and `in scope`, no drill.
+#   2  same node (every setup sibling still `unlisted`, the three named siblings, the
+#      installer still `allowed`) + `test_the_grant_adds_one_entry_and_edits_no_other`.
+#   3  `test_the_decider_grant_moves_exactly_one_classification` (the aggregate floor) +
+#      `test_the_grant_adds_one_entry_and_edits_no_other` and
+#      `test_a_setup_directory_grant_would_admit_every_sibling` (no wildcard).
+#   4  `test_the_decider_installer_grant_carries_its_reason_beside_the_entry`.
+#   ordering `test_no_code_left_in_the_tree_points_at_the_installer` — the sequencing
+#      condition the item carried, re-measured over the index instead of remembered.
+#   seam `test_the_deletion_diff_clears_rung_0_in_a_fresh_interpreter` — the process kind
+#      rung 0 actually is, and the reason this grant cannot pay for its own deletion.
+
+#: The diff the follow-on round presents: the deletion by path, and the two allowed files
+#: it will carry with it — the architecture note that still describes the installer in the
+#: present tense, and a test file. Rung 0 judges a whole changed set, so this is the set
+#: that has to clear, and the installer alone is only half of what the next round asks.
+DECIDER_DELETION_DIFF = [
+    SETUP_DECIDER,
+    "architecture/djev.md",
+    "tests/test_automod_spec.py",
+]
+
+#: Siblings #4037's clause 2 names, out of the 33 the helper returns. A loop over all 33
+#: would be the stronger claim and this file already makes it; these three are the ones a
+#: reader is told to check, so they are checked by name and reported by name.
+NAMED_UNLISTED_SETUP_SIBLINGS = (
+    "agent-services/setup/setup-all.sh",
+    "agent-services/setup/setup-djev.sh",
+    "agent-services/setup/setup-llm.sh",
+)
+
+#: Every tracked file that names the installer's path, pinned as a set rather than as a
+#: floor: `architecture/djev.md` in prose (its tense is a human clause landing after the
+#: deletion), and the two files that carry this grant — `scripts/automod/spec.py` and this
+#: one — name the path by holding the entry. The installer is NOT in the list because its own
+#: 303 lines never spell their own filename, which the node below checks as its own claim;
+#: it is also why an absence of grep hits around this file is a coverage gap and not a clean
+#: bill of health. Anything else that names the path is a caller.
+NAMING_THE_INSTALLER = [
+    "architecture/djev.md",
+    "scripts/automod/spec.py",
+    "tests/test_automod_spec.py",
+]
+
+#: `ALLOWED_GLOBS` exactly as committed before #4037, in tuple order. The only way to say
+#: "gains one entry, none edited, none removed, none reordered" is to name the 30 that were
+#: already there.
+ALLOWED_GLOBS_BEFORE_4037: tuple[str, ...] = (
+    "app/**",
+    "agent_mcp/**",
+    "workers/**",
+    "eval/**",
+    "tests/**",
+    "scripts/**",
+    "architecture/**",
+    "server.py",
+    "requirements.txt",
+    "requirements.lock",
+    "requirements-dev.txt",
+    "CLAUDE.md",
+    "README.md",
+    "SETUP.md",
+    "agent-services/livekit_worker.py",
+    "agent-services/services/tts/qwen3-tts-local.patch",
+    "agent-services/conf/qmd-index.yml",
+    "agent-services/voice/timeline.py",
+    "agent-services/setup/install-services.sh",
+    "agent-services/scripts/qmd-watcher.sh",
+    "agent-services/models/turn-1-mini/onnx/turn-1-mini.step.onnx",
+    "agent-services/models/turn-1-mini/LICENSE",
+    "agent-services/models/turn-1-mini/NOTICE",
+    "web/src/**",
+    "web/index.html",
+    "web/public/**",
+    "chrome-extension/src/background/service-worker.ts",
+    "chrome-extension/dist/service-worker.js",
+    "chrome-extension/dist/sidepanel.html",
+    "chrome-extension/dist/assets/**",
+)
+
+
+def test_the_decider_installer_grant_admits_one_exact_path_and_nothing_else():
+    """#4037 clauses 1 and 2: the verdict rung 0 owed #4029, from an entry that
+    reaches one file, with every sibling of that file still refused.
+
+    The first four assertions are the pair of answers the refusal was missing —
+    `classify` says `allowed`, `check_scope` says `in scope` — plus the two that say what
+    kind of writable this is: the path is bucketed `allowed`, not `protected`, so the
+    follow-on round pays the tests rung and no guardian drill, and the file is genuinely in
+    the index, which is the only set a `git rm` can act on. The `_match` half is what keeps
+    this a test of the clause rather than of a literal beside it: `agent-services/setup/**`
+    would satisfy `classify` on this path exactly as well, and take the directory with it,
+    so asking the tuple which entries reach the path is the question that distinguishes the
+    two. The rail is called rather than restated, and the floors are denominator controls:
+    33 siblings is the directory's 35 tracked files minus the two grants, and 78 tracked
+    `agent-services/` paths are still `unlisted` in this tree against that rail's floor of
+    70.
+    """
+    assert SETUP_DECIDER in spec.ALLOWED_GLOBS
+    assert spec.classify(SETUP_DECIDER) == "allowed", (
+        f"#4037's grant does not bind: classify says {spec.classify(SETUP_DECIDER)}, so "
+        f"the deletion round is refused before its first rung again")
+    ok, why, buckets = spec.check_scope([SETUP_DECIDER])
+    assert (ok, why) == (True, "in scope"), (
+        f"check_scope still refuses the granted path: ok={ok}, why={why!r}, "
+        f"buckets={ {k: v for k, v in buckets.items() if v} }")
+    assert buckets["allowed"] == [SETUP_DECIDER] and not buckets["unlisted"], buckets
+    assert spec.requires_drill([SETUP_DECIDER]) is False, (
+        "the installer landed in PROTECTED_GLOBS, so #4029's deletion round would pay a "
+        "guardian drill to remove a file no supervisor owns any more")
+    assert SETUP_DECIDER in tracked_agent_services_paths(), (
+        f"{SETUP_DECIDER} is not tracked, so admitting it grants nothing a `git rm` can "
+        f"actually do — the grant would be a permission over a path no diff can carry")
+    reaching = [g for g in spec.ALLOWED_GLOBS if spec._match(SETUP_DECIDER, (g,))]
+    assert reaching == [SETUP_DECIDER], (
+        f"the installer is admitted by {reaching}: only a verbatim entry is legal under "
+        f"#1376 clause 1, and anything wider here reaches its siblings too")
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    assert agent_services_paths_admitted_without_being_named() == []
+    siblings = tracked_setup_siblings()
+    assert len(siblings) >= 33, (
+        f"only {len(siblings)} tracked files share the setup directory with the two "
+        f"grants, against the 33 at this round's base — the sibling assertions below would "
+        f"be guarding almost nothing")
+    assert [p for p in siblings if spec.classify(p) == "unlisted"] == siblings, (
+        "a setup file became writable as collateral of a grant that names one file: "
+        f"{[p for p in siblings if spec.classify(p) != 'unlisted']}")
+    for named in NAMED_UNLISTED_SETUP_SIBLINGS:
+        assert named in siblings, f"{named} is not in the sibling set, so it is unpinned"
+        assert spec.classify(named) == "unlisted", (
+            f"{named} became writable beside the grant. #4037 grants one script to be "
+            f"deleted and says in its own text that the directory stays out")
+    assert spec.classify(INSTALL_SERVICES) == "allowed", (
+        "#2779's installer stopped being allowed — #4037 adds an entry and edits none")
+    assert spec.classify(SETUP_PROBE) == "unlisted", (
+        "the seeded setup probe became writable, which is the harm a directory grant does "
+        "and this one must not")
+    corpus = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    assert sorted(p for p in corpus
+                  if p.startswith("agent-services/setup/")
+                  and spec.classify(p) == "allowed") == SETUP_GRANTS, (
+        "the writable set inside the setup tree is not the two files granted by name")
+
+
+def test_the_grant_adds_one_entry_and_edits_no_other():
+    """#4037 clauses 2 and 3: the tuple gained one string and nothing else happened.
+
+    Every verdict-level rail in this section asks what the tuple now permits; none of them
+    can see the edit itself, so an entry that was edited rather than added — a `**` slipped
+    onto a neighbour, a sibling's name swapped for this one — would pass them all while
+    quietly moving authority off a path #2779 or #2278 granted. This node pins the edit
+    against the 30 shipped entries by name and order: the live tuple is those 30, in that
+    order, plus exactly one copy of `SETUP_DECIDER`, which contains no `*`. A future grant
+    appends beside this one and has to extend the snapshot: that is the pin working, not a
+    test in the way, and the message says so rather than leaving the next author to guess.
+    """
+    shipped = tuple(spec.ALLOWED_GLOBS)
+    assert shipped.count(SETUP_DECIDER) == 1, (
+        f"the tuple holds {shipped.count(SETUP_DECIDER)} copies of the granted path; a "
+        f"duplicate is how a grant survives its own deletion round")
+    dupes = sorted({g for g in shipped if shipped.count(g) > 1})
+    assert not dupes, (
+        f"{dupes} appear more than once in ALLOWED_GLOBS, so the tuple is no longer a "
+        f"readable list of the grants the loop holds")
+    assert len(shipped) == len(ALLOWED_GLOBS_BEFORE_4037) + 1, (
+        f"{len(shipped)} entries against the {len(ALLOWED_GLOBS_BEFORE_4037)} shipped "
+        f"before #4037 plus this one: the grant was asked to add exactly one string")
+    assert tuple(g for g in shipped if g != SETUP_DECIDER) == ALLOWED_GLOBS_BEFORE_4037, (
+        f"stripping this grant does not reproduce the pre-#4037 tuple, so an existing entry "
+        f"was edited, removed or reordered — the 30-entry snapshot names what was expected "
+        f"and the live tuple, minus one, is {tuple(g for g in shipped if g != SETUP_DECIDER)}")
+    assert "*" not in SETUP_DECIDER, (
+        f"{SETUP_DECIDER!r} is not a verbatim path; #1376 clause 1 refuses a wildcard here "
+        f"because fnmatch's `*` crosses `/`")
+    assert not [g for g in shipped if "*" in g and "setup" in g], (
+        "a wildcard over the setup tree joined the tuple beside this grant, which is the "
+        "spelling #1376 clause 1 and #4037's own text both refuse")
+
+
+def test_the_decider_grant_moves_exactly_one_classification(monkeypatch):
+    """#4037 clause 3: one path changes verdict, and the aggregate floor holds.
+
+    Both sides computed from the same helper over `git ls-files agent-services`, because
+    the claim "the directory stays unlisted" is a statement about two trees: the tuple with
+    this entry and the tuple without it. Measured at this round's base, 79 tracked
+    `agent-services/` paths classify `unlisted` on the `pre` side and 78 on the shipped
+    side — the item quotes 75 → 74, which is the figure inside the #1376 rail's own failure
+    message, measured at the two older bases it names; the margin is the same one entry and
+    the rail is a floor of 70, not an equality, so what is pinned here is the delta and the
+    floor rather than a tree count that moves whenever a launcher is added.
+    """
+    corpus = tracked_agent_services_paths()
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != SETUP_DECIDER)
+    assert len(pre) == len(ALLOWED_GLOBS_AS_SHIPPED) - 1, (
+        "the pre-grant reconstruction is not one entry narrower, so the delta this node "
+        "computes is not this grant's")
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", pre)
+    before = {p: spec.classify(p) for p in corpus}
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+    after = {p: spec.classify(p) for p in corpus}
+    moved = sorted(p for p in corpus if before[p] != after[p])
+    assert moved == [SETUP_DECIDER], (
+        f"{len(moved)} tracked agent-services paths changed verdict with this one entry: "
+        f"{moved[:8]}{' …' if len(moved) > 8 else ''}")
+    assert (before[SETUP_DECIDER], after[SETUP_DECIDER]) == ("unlisted", "allowed")
+    before_unlisted = sum(1 for v in before.values() if v == "unlisted")
+    after_unlisted = sum(1 for v in after.values() if v == "unlisted")
+    assert after_unlisted == before_unlisted - 1, (
+        f"{before_unlisted} unlisted before this entry and {after_unlisted} after: one "
+        f"named path was supposed to move, and the rest of the tree is supposed to hold")
+    assert after_unlisted >= 70, (
+        f"{after_unlisted} tracked agent-services paths still unlisted, below the 70 the "
+        f"#1376 rail is sized on (79 at this round's base, 78 with this entry)")
+
+
+def test_a_setup_directory_grant_would_admit_every_sibling(monkeypatch):
+    """The harm half of clause 3: the `setup/**` spelling, executed against the rail.
+
+    #4037's action-2 asks for exactly this — `agent-services/setup/**` added as "a
+    deliberate policy change" — and it is illegal here on #1376 clause 1, which prices a
+    directory grant at every file it stops naming. Running the spelling is the only way to
+    show the rail refuses it rather than merely disliking the look of it: the same
+    `classify` answers `allowed` for the installer under both spellings, so the difference
+    is invisible to every node that asks about one path. Violations are named rather than
+    counted so the message says which files a directory grant would have handed over: every
+    tracked setup file but #2779's, which stays allowed because it is still named verbatim,
+    plus `agent-services/setup/probe.sh`, which exists only as this probe.
+    """
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != SETUP_DECIDER)
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS",
+                        pre + ("agent-services/setup/**",))
+    expected = sorted(
+        {p for p in tracked_agent_services_paths()
+         if p.startswith("agent-services/setup/") and p != INSTALL_SERVICES}
+        | {SETUP_PROBE})
+    assert len(expected) >= 35, (
+        f"only {len(expected)} paths would be admitted unnamed, against the 35 (34 tracked "
+        f"siblings plus the probe) measured at this round's base — the assertion below is "
+        f"guarding almost nothing")
+    violations = agent_services_paths_admitted_without_being_named()
+    assert violations == expected, (
+        f"the directory spelling admits {len(violations)} unnamed paths; expected "
+        f"{len(expected)}: {violations[:8]}{' …' if len(violations) > 8 else ''}")
+    assert spec.classify(SETUP_DECIDER) == "allowed", (
+        "classify cannot tell the two spellings apart even under the directory grant, "
+        "which is the whole reason this section asks the question of the tuple")
+
+
+def test_the_decider_installer_grant_carries_its_reason_beside_the_entry():
+    """#4037 clause 4: the new grant's comment says why, read by this node.
+
+    Same walk as #2779's rail — up from the entry line over the contiguous comment — and
+    the same four things a reader needs to audit the line without phoning an author: the
+    item that filed this grant and the item whose deletion needs it, the refusal in rung 0's
+    own words, and the thing the grant does not admit. That fourth is what clause 4 asks
+    for in prose and what the harm node above prices in files, so the phrase checked here
+    is "NOT admitted is the directory", the shape #2779 set; the sibling names are checked
+    because a reader who distrusts the sentence should be able to go and `git ls-files`
+    three specific paths. No sha or branch name, for the #2344 reason the other rails give:
+    this comment outlives the round that writes it and the branch it is written on.
+    """
+    import re
+
+    src = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text().splitlines()
+    entry = f'    "{SETUP_DECIDER}",'
+    assert src.count(entry) == 1, (
+        f"expected the grant exactly once in spec.py's ALLOWED_GLOBS, found "
+        f"{src.count(entry)}")
+    block: list[str] = []
+    j = src.index(entry) - 1
+    while j >= 0 and (src[j].lstrip().startswith("#") or not src[j].strip()):
+        block.append(src[j])
+        j -= 1
+    comment = " ".join(reversed(block))
+    prose = " ".join(ln.strip().lstrip("#").strip() for ln in reversed(block))
+    prose = re.sub(r"\s+", " ", prose)
+    assert "#4037" in prose and "#4029" in prose, (
+        f"the grant does not name both the item that filed it and the deletion it unblocks: "
+        f"{comment!r}")
+    assert "outside the writable set" in prose and "unlisted" in prose, (
+        f"the grant does not quote the rung-0 refusal it exists to clear, which is the "
+        f"evidence that the cost of this line was ever paid: {comment!r}")
+    assert "NOT admitted is the directory" in prose, (
+        f"the grant does not say what it leaves out, in the words the other grants use: "
+        f"{comment!r}")
+    # The comment names the directory once and its siblings by basename — the shape #2779's
+    # comment uses, which lists `setup-all.sh` rather than repeating the prefix three times.
+    # So the auditable pair is the prefix in prose and each basename in prose; a reader who
+    # distrusts the sentence concatenates them and goes and asks `classify`.
+    assert "agent-services/setup/" in prose, (
+        f"the reason says paths stay out without naming which directory they are in: "
+        f"{comment!r}")
+    for sibling in NAMED_UNLISTED_SETUP_SIBLINGS:
+        basename = sibling.rsplit("/", 1)[1]
+        assert basename in prose, (
+            f"the comment does not name {sibling} among the paths that stay out, so the "
+            f"claim '33 stay that way' cannot be checked without re-listing the directory: "
+            f"{comment!r}")
+    assert "33" in prose and "35" in prose, (
+        f"the comment gives no measurable denominator for what stays unlisted, so a later "
+        f"reader cannot tell whether the claim still holds: {comment!r}")
+    stray = re.search(r"\b(?:automod/|[0-9a-f]{7,40})\b", prose)
+    assert stray is None, (
+        f"the reason cites {stray.group(0)!r} — a sha or branch name goes stale the moment "
+        f"the ref is pruned, so the reason has to name an item and a refusal instead: "
+        f"{comment!r}")
+
+
+def test_the_deletion_diff_clears_rung_0_in_a_fresh_interpreter():
+    """The payoff, asked of the process kind rung 0 is — and the reason the deletion
+    is a second round and not this one.
+
+    Everything above runs inside pytest, whose `spec` came through this file's import, and
+    one monkeypatching node has already rewritten that module attribute in-process. Rung 0
+    is a different process: `round.py` spawns the gate with `cwd=LIVE_ROOT` and
+    `gate.py:134` imports `spec` there, so the tuple that binds is the one the live tree
+    holds at the moment the gate starts. Handing a child the deletion set therefore proves
+    two separate things, and both are asserted: that an interpreter reading the committed
+    bytes from disk agrees with this process on the verdict (two readings of one leaked
+    tuple would otherwise agree vacuously), and that the set #4029's next round presents —
+    the deletion plus the two allowed files it travels with — clears scope as a whole with
+    no path left in `unlisted` and no drill attached. What it cannot prove is the thing the
+    same line of code proves about this round: a widening never binds for its own gate, so
+    this diff is the grant, and the `git rm` that the grant exists for is a later commit
+    graded by the tree this one leaves behind.
+    """
+    probe = (
+        "from scripts.automod import spec; "
+        "import sys; "
+        "print(spec.classify(sys.argv[1])); "
+        "ok, why, buckets = spec.check_scope(sys.argv[1:]); "
+        "print(ok, why, sorted(buckets['allowed']), sorted(buckets['unlisted']), "
+        "sorted(buckets['protected'])); "
+        "print(spec.requires_drill(sys.argv[1:]))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe, *DECIDER_DELETION_DIFF],
+                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == spec.classify(SETUP_DECIDER) == "allowed", out.stdout
+    assert lines[1] == (f"True in scope {sorted(DECIDER_DELETION_DIFF)} [] []"), \
+        (lines[1], DECIDER_DELETION_DIFF)
+    assert lines[2] == "False", out.stdout
+    ok, why, buckets = spec.check_scope(DECIDER_DELETION_DIFF)
+    assert (ok, why) == (True, "in scope"), (ok, why, buckets)
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+
+
+def test_no_code_left_in_the_tree_points_at_the_installer():
+    """The ordering condition #4037 carried, re-measured over the index every run.
+
+    The item that filed this grant also carried a sequencing rule: the launcher died with
+    three `die "… run setup/setup-decider.sh"` lines, so deleting the installer first would
+    have left a working error message pointing at a missing file. That rule is not this
+    diff's work, and it is not something to carry in prose either — a carried-forward
+    "still owed" is the least-verified sentence in the system, and in this case it stopped
+    being true while the item sat open: #4029 landed its launcher and its supervisor unit at
+    main's tip shortly before this round opened, which is what makes the installer the last
+    tracked piece of the experiment. So both halves are asked of git here, not of the
+    sentence above: the index holds this one decider path, and no tracked file outside a
+    named exemption still tells anyone to run it. A new caller lands as an unexpected member
+    of `named`, and until someone explains it the deletion round's premise is refused, which
+    is the point of measuring rather than remembering. The exemptions are readable by eye:
+    the architecture note names it in prose until the tense is corrected after the deletion
+    (a human clause, already logged on #4029), and the two files that hold this grant name it
+    by holding the entry. The installer is absent from the list and that absence is asserted
+    rather than assumed — its own body never spells its filename, which is precisely why the
+    item's own "who references this file" grep came back wrong, and why the caller check has
+    to ask git and not a reading of the script.
+    """
+    tracked = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                             capture_output=True, text=True, timeout=120).stdout.split()
+    deciders = sorted(p for p in tracked if "decider" in p.lower())
+    assert deciders == [SETUP_DECIDER], (
+        f"{deciders} are tracked under any decider name; the expectation is the installer "
+        f"alone, because #4029's landing took the launcher and the unit and this section "
+        f"grants only the leftover")
+    out = subprocess.run(["git", "grep", "-l", "setup-decider", "--", "."],
+                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert out.returncode in (0, 1), out.stderr  # 1 is git's honest "no matches"
+    named = sorted(out.stdout.split())
+    assert named == sorted(NAMING_THE_INSTALLER), (
+        f"{named} name the installer; expected the architecture note and the two files "
+        f"that carry this grant. A shell script or a supervisor conf in that list is a "
+        f"caller, and a caller makes the deletion a behaviour change rather than a cleanup")
+    body = (REPO_ROOT / SETUP_DECIDER).read_text()
+    assert "setup-decider" not in body, (
+        "the installer now spells its own filename, so the caller check above stopped "
+        "being a full census of who names this path and would silently count this file as "
+        "a caller if it were removed from the exemption list")
