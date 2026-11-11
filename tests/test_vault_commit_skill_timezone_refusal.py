@@ -617,3 +617,45 @@ def test_the_matcher_is_quiet_when_no_staged_path_is_under_skills(tmp_path):
 
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "[]", r.stdout
+
+
+def test_the_land_rail_reads_the_same_matcher_and_states_no_rule_of_its_own():
+    """#4069 clause 4: one rule, both doors, and this file is the proof of both halves.
+
+    #3881's clause-3 rule was that a second enforcement point may not restate the rule
+    that the first one owns, because the two drift and the drift is invisible from either
+    side. #4069 opens the second door (`scripts/automod/vault_round.py::land()`, which has
+    its own `git add`/`git commit` and never calls `vault-commit.sh`) with the SAME
+    reader, so the rule now has to hold of this door too. Checked the way
+    `test_land_and_the_wrapper_read_one_matcher_module` checks it:
+
+    * `vault_round.py` names `skill_timezone_findings` — the rung is wired, not copied;
+    * it states ZERO clock-pattern hits, measured over the whole module: the `date +…`
+      form, an unquoted `$(` expansion, and the two bare timezone abbreviations. Those
+      counts are stated as numbers because a grep that can match zero by accident is the
+      instrument the whole file exists to avoid;
+    * `scripts/skill_timezone.py` is untouched by this round, so there is exactly one
+      source of patterns in the system.
+
+    The counts are on the whole module, not on the rung's lines: the restatement risk is a
+    property of the file that lands the check, and a future edit that hoists a pattern
+    beside the imports still has to fail here.
+    """
+    vault_round = (REPO / "scripts" / "automod" / "vault_round.py").read_text(
+        encoding="utf-8")
+    skill_timezone = (REPO / "scripts" / "skill_timezone.py").read_text(encoding="utf-8")
+
+    assert "skill_timezone_findings" in vault_round, (
+        "the land rail must IMPORT the matcher the bash door shells out to; a copy of its "
+        "logic is the drift #3881 clause 3 exists to prevent")
+    assert "skill_timezone_findings.py" in MODULE.name
+    for date_form in ("date +", "$("):
+        assert vault_round.count(date_form) == 0, (
+            f"vault_round.py states {date_form!r} {vault_round.count(date_form)} time(s); "
+            "the clock patterns belong to scripts/skill_timezone.py alone")
+    for abbr in ("PST", "PDT"):
+        assert vault_round.count(abbr) <= 1, (
+            f"{abbr} appears {vault_round.count(abbr)} time(s) in vault_round.py; one is "
+            "allowed for prose about why the zone matters, a pattern would be a restatement")
+    assert "PST" in skill_timezone and "date +" in skill_timezone, (
+        "the single source of the patterns must be the module both doors read")

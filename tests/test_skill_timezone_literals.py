@@ -1077,3 +1077,53 @@ def test_no_citation_in_this_file_points_at_a_vault_line_number():
             f"the fixture shape {shape!r} has left this file, and with it the regression "
             "the #2454 exemption exists to catch"
         )
+
+
+def test_the_land_rail_still_judges_a_skill_whole_and_no_detail_file(scratch_vault):
+    """#4069 clause 3: the whole-body rail is UNCHANGED, and so is its scope.
+
+    #4069 adds a second, diff-relative clock rung to `land()` over every `.md` under
+    `skills/`. That addition is only safe if this one stayed exactly as it was, and two
+    opposite failures are possible, so both are pinned here:
+
+    * **weakened** — the rail stops judging a body it is handed. The violation below sits
+      at line 9 of a `SKILL.md` and the round touched nothing about that line; the rail
+      reads the whole file, so it still refuses. A body-scanning rail that had been quietly
+      rewired to judge only a diff would report a clean answer for this file and would look
+      exactly like a clean vault.
+    * **widened** — the rail starts judging detail files. The 2026-11-11 owed-check ruling
+      says no: line 110 of `step-1-and-commit-detail.md` is still live, so a whole-body
+      scan over detail files would refuse every round touching that file. The identical
+      violation in
+      an identical-shaped detail path must still answer `[]` here; it is the NEW
+      diff-relative rung's job (pinned at the door in `tests/test_automod_vault_round.py`),
+      and keeping the two scopes distinct is what lets both exist.
+
+    The numbers are computed, not asserted blind: line 9 is where this fixture puts it.
+    """
+    from scripts.automod import vault_round
+
+    # The flagged shape this file already uses for a sinner: the rule needs a
+    # displayed-time TOKEN beside the abbreviation, so `### Session 09:14 PDT` reads clean
+    # and `### Session HH:MM PDT` does not. Measured, not assumed — a fixture that plants a
+    # line the rule does not flag makes this node pass for the wrong reason.
+    bad = "### Session HH:MM PDT — Triage\n"
+    body = ("---\nname: wholistic\n---\n# Wholistic\n\n"
+            "Prose the round came here to change.\n\n" + bad)
+    skill = _scratch_skill(scratch_vault, "wholistic", body)
+    hits = vault_round.skill_timezone_errors([skill])
+    assert len(hits) == 1, hits
+    assert skill in hits[0] and "skill clock literal" in hits[0], hits[0]
+    line_no = int(hits[0].split("line ")[1].split(":")[0])
+    assert line_no == body.split("\n").index(bad.rstrip("\n")) + 1 == 8, (line_no, hits[0])
+    assert "PDT" in hits[0], hits[0]
+
+    detail_rel = "skills/wholistic/step-1-and-commit-detail.md"
+    (scratch_vault / detail_rel).write_text(
+        "---\nname: wholistic\ntype: note\n---\n# Step 1\n\n"
+        "Prose the round came here to change.\n\n" + bad, encoding="utf-8")
+    assert vault_round.skill_timezone_errors([detail_rel]) == [], \
+        "widening the whole-body rail to detail files is the #3881 ruling broken"
+    # And the same call, both paths at once: the SKILL.md still refuses on its own merits.
+    assert vault_round.skill_timezone_errors([skill, detail_rel]) == hits, \
+        "adding a detail path to the call must not dilute the SKILL.md refusal"

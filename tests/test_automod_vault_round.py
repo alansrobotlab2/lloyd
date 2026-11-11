@@ -10375,3 +10375,201 @@ def test_the_mislabel_note_never_becomes_a_verdict_shortfall(vault, items, monke
     # The return itself, read directly: the abstention with no clause rows and no
     # landing clauses is the exact input this item's mixed land hands the gate.
     assert V._vault_verdict_shortfall(662, "skipped", [], []) == ""
+
+
+# ── #4069: the skill clock-literal rail at this door, over EVERY .md under skills/ ──
+#
+# `scripts/util/vault-commit.sh` has refused a commit whose OWN added lines put a
+# wrong-zone clock into a skill template since #3881, and this door — `land()`, which
+# has its own `git add` and its own `git commit` and never calls that wrapper — has not.
+# The land rail's clock check, `skill_timezone_errors`, selects
+# `p.startswith("skills/") and p.endswith("/SKILL.md")`, so a detail file inside a skill
+# directory never reaches it. Measured at the base of this round: `skill_timezone_errors`
+# given the path of a detail file that carries a live violation returns `[]`, and
+# `git log -S'skill_timezone_findings' -- scripts/automod/vault_round.py` returns 0
+# commits, so no round had ever put the diff-relative matcher behind this door. The live
+# vault carries 1 violation in 294 `.md` files under `skills/` (dot-dirs excluded,
+# measured 2026-11-11): `skills/nightly-reflection-knowledge-write/`
+# `step-1-and-commit-detail.md` line 110, which is a detail file and therefore invisible
+# to this door, to `tests/test_skill_timezone_literals.py`'s `_active_skills()`, and to
+# the vault git hook (whose one `pre-commit` filters `knowledge/*.md` and reads only the
+# front-matter `type`). A guard on one of two write surfaces is not a guard (#2468).
+#
+# Widening `skill_timezone_errors` to detail files is what the #3881 owed-check ruling
+# forbids while line 110 is live — it is a whole-body scan, so it would refuse every
+# round touching that file. Diff-relativity is the only shape this door can take first,
+# and `scripts/util/skill_timezone_findings.py` is already that shape and already runs at
+# the other door: one rule, both doors, exactly as `SCF` (#3236), `LSF` (#3589) and `OTF`
+# (#3545) are read here.
+
+#: The violating line, in the shape the vault really carries it at
+#: `skills/nightly-reflection-knowledge-write/step-1-and-commit-detail.md`:110 — a
+#: `vault-commit.sh` subject interpolated with a LOCAL `date`. Its UTC twin is the fix.
+CLOCK_BAD = ('LLOYD_JOB=nightly-reflection-knowledge-write '
+             '~/lloyd/scripts/util/vault-commit.sh '
+             '"nightly: knowledge write $(date +%Y-%m-%d)" -- memory/ lloyd/')
+
+#: The same line with the two letters the fix adds. Only the flag differs, so a rail
+#: that cannot tell the two apart cannot survive these nodes.
+CLOCK_GOOD = CLOCK_BAD.replace("$(date +%Y-%m-%d)", "$(date -u +%Y-%m-%d)")
+
+#: Body of a skill detail file for these nodes. `CLOCK_BAD` sits at line 9 — a number no
+#: assertion hard-codes, because each one computes it from this body.
+def _detail_body(clock_line: str | None, intro: str = "Prose the writer may land.") -> str:
+    lines = ["---", "name: foo", "type: note", "---", "# Step 1", "", intro, ""]
+    if clock_line is not None:
+        lines.append(clock_line)
+    return "\n".join(lines) + "\n"
+
+
+def _line_of(body: str, needle: str) -> int:
+    """The 1-based line a needle sits on in `body` — asserted, never assumed."""
+    hits = [i + 1 for i, ln in enumerate(body.split("\n")) if needle in ln]
+    assert len(hits) == 1, (needle, hits)
+    return hits[0]
+
+
+def test_land_refuses_a_clock_literal_it_added_to_a_skill_detail_file(vault, capsys):
+    """#4069 clause 1: the same class, refused at this door, naming what to edit.
+
+    The detail file is new in this land, so every line in it is this commit's doing.
+    Two things are asserted before the raise, because both are the hole: the land rail's
+    own whole-body scan answers `[]` for this path (its selector is `*/SKILL.md`, which
+    is the asymmetry #3881 recorded and could not close from the bash side), and the file
+    is not in `skills/*/SKILL.md` at all. After the raise: the refusal names the path,
+    the line number inside that file, and the UTC spelling that fixes it; the path is out
+    of the index, because `git commit` commits the index and a refused line left there
+    becomes the NEXT landing's line (#3545's reasoning); the bytes stay on disk; and the
+    ledger row says so with `ok: false`.
+    """
+    body = _detail_body(CLOCK_BAD)
+    bad_line = _line_of(body, CLOCK_BAD)
+    detail = _stage_text(vault, "skills/foo/step-1-and-commit-detail.md", body)
+    assert V.skill_timezone_errors([detail]) == [], \
+        "the whole-body rail judging a detail file would be the #3881 ruling broken"
+
+    with pytest.raises(V.VaultRoundError) as e:
+        V.land([detail], "nightly: knowledge write 2026-11-11")
+    msg = str(e.value)
+    assert detail in msg and f"line {bad_line}" in msg, msg
+    assert "$(date -u +" in msg, "a refusal that cannot name the remedy is not actionable"
+    err = capsys.readouterr().err
+    assert "SKILL CLOCK LITERAL REFUSED" in err and detail in err, err
+
+    assert detail not in _tracked_paths(vault), "a refusal must not leave the line staged"
+    assert CLOCK_BAD in (vault / detail).read_text(encoding="utf-8"), \
+        "refusing a line into a commit does not delete the writer's bytes"
+    ev = _events("vault_land")[-1]
+    assert ev["ok"] is False and ev["skill_clock_refusals"] == [detail], ev
+    assert ev["errors"] and "SKILL CLOCK LITERAL REFUSED" in ev["errors"][0], ev
+    assert ev["reverted"] == [], "the writer's bytes are never checked over"
+    assert ev["review"] == "skipped" and "clock literal" in ev["review_reason"], ev
+
+
+def test_land_commits_a_detail_file_it_rewords_around_an_older_clock_literal(vault):
+    """#4069 clause 2, the anti-wedge: a pre-image line is context, not this land's doing.
+
+    The violation enters through another door — a plain commit, which is how the live
+    one got in — and this land rewords a DIFFERENT line of the same file. That is exactly
+    the round the #3881 ruling says a whole-body widening would refuse, and it is the
+    nightly's own shape: `nightly-reflection-knowledge-write` edits that file every night
+    it runs, so a rail that refused it would freeze the writer that maintains the skills
+    tree on somebody else's line (#2245's stranded-snapshot failure mode). The commit must
+    go through AND the untouched violating line must still be in the file afterwards: a
+    rail that "fixed" it by rewriting the body would be a door editing prose it was not
+    asked to edit.
+    """
+    rel = "skills/foo/step-1-and-commit-detail.md"
+    plant = _detail_body(CLOCK_BAD)
+    (vault / rel).write_text(plant, encoding="utf-8")
+    _rc_commit(vault, "plant a pre-image violation through another door")
+
+    reworded = plant.replace("Prose the writer may land.",
+                             "Prose the writer REWORDED in this land.")
+    (vault / rel).write_text(reworded, encoding="utf-8")
+    out = V.land([rel], "reword the intro of a skill detail file")
+
+    assert out["ok"] is True, out["errors"]
+    assert rel in _head_paths(vault), _head_paths(vault)
+    assert CLOCK_BAD in (vault / rel).read_text(encoding="utf-8"), \
+        "the rail must leave a line it did not write exactly as it found it"
+    assert "REWORDED" in (vault / rel).read_text(encoding="utf-8")
+    assert _events("vault_land")[-1]["ok"] is True, _events("vault_land")[-1]
+
+
+def test_land_lands_a_skill_detail_file_whose_clock_line_is_utc(vault):
+    """The healthy twin of clause 1's node: two characters, and the land goes through.
+
+    `CLOCK_GOOD` differs from `CLOCK_BAD` only by `-u`, so a rail that refused it would be
+    refusing the fix the rule itself prescribes — and the vault fix owed on #4069 clause 4
+    is precisely that edit to `step-1-and-commit-detail.md:110`. If this node ever fails,
+    the vault half of the item cannot land either.
+    """
+    detail = _stage_text(vault, "skills/foo/step-1-and-commit-detail.md",
+                         _detail_body(CLOCK_GOOD))
+    out = V.land([detail], "nightly: knowledge write 2026-11-11 (UTC subject)")
+
+    assert out["ok"] is True, out["errors"]
+    assert detail in _head_paths(vault), _head_paths(vault)
+    assert _events("vault_land")[-1]["ok"] is True, _events("vault_land")[-1]
+
+
+def test_land_still_refuses_a_clock_line_a_skill_body_holds_outside_its_diff(vault):
+    """#4069 clause 3, at this door: the whole-body rail is untouched and still first.
+
+    `CLOCK_BAD` is planted by a plain commit and this land rewords an UNRELATED line of
+    the same `SKILL.md`, so the violating line is not in this diff at all. `land()` must
+    still refuse it, by the whole-body rail and in that rail's words
+    (`skill_timezone_errors` prefixes `skill clock literal:`) — not by the new
+    diff-relative one, whose text is `SKILL CLOCK LITERAL REFUSED` and which is asserted
+    absent. That ordering is the proof nothing was weakened or replaced: the pre-existing
+    line is refused here because a SKILL.md is whole-body-governed, and the same line in a
+    detail file is not, which is the asymmetry the #3881 ruling keeps until line 110 is
+    fixed.
+    """
+    rel = "skills/foo/SKILL.md"
+    # The live shape, which the rule flags; `### Session 09:14 PDT` would NOT, because the
+    # rule wants a displayed-time TOKEN beside the abbreviation, and a fixture planted with
+    # an unflagged line makes this node pass by never having had anything to refuse.
+    plant = f"---\nname: foo\n---\n# foo\n\n{CLOCK_BAD}\n"
+    (vault / rel).write_text(plant, encoding="utf-8")
+    _rc_commit(vault, "plant a whole-body violation in a SKILL.md")
+
+    (vault / rel).write_text(plant.replace("# foo\n", "# foo (reworded here)\n"),
+                            encoding="utf-8")
+    with pytest.raises(V.VaultRoundError) as e:
+        V.land([rel], "reword a heading beside an old clock line")
+    msg = str(e.value)
+    assert rel in msg and "skill clock literal" in msg, msg
+    assert "SKILL CLOCK LITERAL REFUSED" not in msg, \
+        "the diff-relative rung must not be what answers a whole-body violation"
+
+
+def test_land_commits_and_says_so_when_the_clock_check_cannot_look(vault, capsys,
+                                                                   monkeypatch):
+    """#4069 clause 5: an unread check is neither a pass nor a wedge.
+
+    `skill_timezone_findings.findings` answers the triple `(records, lines, why_unread)`,
+    and a non-empty `why_unread` means it did not run at all — the matcher's own exit-code
+    policy is 3, never 0 and never 1, because a 1 from a crash would refuse every commit
+    and a 0 from a blind check would look exactly like a clean vault. This door takes the
+    same polarity in the other direction: it COMMITS (a landing that cannot land because
+    its instrument is missing is the failure mode `SCF`/`LSF`/`OTF` each document for
+    themselves) and it says so out loud on stderr, so the next reader cannot file the
+    silence as a clean scan.
+    """
+    monkeypatch.setattr(
+        V.STF, "findings",
+        lambda _v: ([], [], "skill clock-literal check unavailable: no rule module at "
+                            "/nonexistent/scripts/skill_timezone.py"))
+    detail = _stage_text(vault, "skills/foo/step-1-and-commit-detail.md",
+                         _detail_body(CLOCK_GOOD))
+    out = V.land([detail], "add a clean skill detail file with an unread clock check")
+
+    assert out["ok"] is True, out["errors"]
+    assert detail in _head_paths(vault), _head_paths(vault)
+    err = capsys.readouterr().err
+    assert "clock-literal check unavailable" in err, err
+    assert "landing without it" in err, \
+        "an unread check must never be laundered into a clean zero"
+    assert _events("vault_land")[-1]["ok"] is True, _events("vault_land")[-1]

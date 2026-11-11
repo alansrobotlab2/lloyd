@@ -792,6 +792,24 @@ except ImportError:  # pragma: no cover - only if the namespace portion fails
     OTF = _ilu3.module_from_spec(_otf_spec)
     _otf_spec.loader.exec_module(OTF)  # type: ignore[union-attr]
 
+# #4069: the skill clock-literal matcher, read as ONE module with
+# `scripts/util/vault-commit.sh`, which shells out to the same file. The two doors this
+# round unifies are `vault-commit.sh`, which has refused since #3881, and `land()` below,
+# which has its own `git add` and its own `git commit` and never calls the wrapper — so
+# since #3881 a skill template could get a fresh local clock into the vault by taking this
+# door instead of that one. #3881's clause-3 rule is that a second enforcement point may
+# not RESTATE the rule the first one owns, because the two drift and the drift is invisible
+# from either side; the counts that prove this module states none of the patterns are
+# pinned in `tests/test_vault_commit_skill_timezone_refusal.py`.
+try:
+    from scripts.util import skill_timezone_findings as STF
+except ImportError:  # pragma: no cover - only if the namespace portion fails
+    import importlib.util as _ilu4
+    _stf_path = Path(__file__).resolve().parents[1] / "util" / "skill_timezone_findings.py"
+    _stf_spec = _ilu4.spec_from_file_location("skill_timezone_findings", _stf_path)
+    STF = _ilu4.module_from_spec(_stf_spec)
+    _stf_spec.loader.exec_module(STF)  # type: ignore[union-attr]
+
 #: #2437/#3146: the four front-matter fields a run writes into its own task file —
 #: `app/autonomy.py` stamps `last_run`/`last_attempt`/`updated` at every completion
 #: and `next_run` from `_next_run_after`. None is in `SCHEDULE_STATE_FIELDS`: that
@@ -2310,6 +2328,65 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                                          "line and no disposition row (#3545)",
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError(" | ".join(orphan_lines))
+    # The #4069 skill clock-literal rung. Placed HERE, with the other index-reading
+    # rungs — after the `git add` above and before the commit below — because
+    # `STF.findings` reads `git diff --cached` and `git show :<path>`, and `validate()`
+    # ran before anything was staged: a rung wired there would have answered `[]` at
+    # every land, which is the worst shape a check can have, a green that has never
+    # looked at a byte.
+    #
+    # `paths` is deliberately NOT an argument here, whatever the shape of the caller's
+    # list suggests. `land()`'s commit carries no pathspec, so the index IS what ships,
+    # and the matcher's own scope (every `.md` under `skills/`, dot-dirs excluded) judges
+    # exactly that content. A file this round never staged is not in `git diff --cached`
+    # and is not judged, so dirty-unstaged skill files cannot wedge this land.
+    #
+    # And it is DIFFERENT-relative, which is what makes it safe to open this door at all
+    # while a violation is live in the vault: `skills/nightly-reflection-knowledge-write/`
+    # `step-1-and-commit-detail.md` line 110 carries one today, and the 2026-11-11
+    # owed-check ruling forbids widening `skill_timezone_errors` — whole-body, above —
+    # to detail files while it stands, because that would refuse every round touching
+    # that file. A line this commit did not write is context and is not refused, so the
+    # nightly can keep rewording that very file; the fix is two characters, and the
+    # matcher names them in its own words below rather than this module restating them.
+    clock_records, clock_lines, clock_unread = STF.findings(VAULT)
+    if clock_unread:
+        # Said out loud, exactly as the strand and orphan rungs say theirs. This door
+        # commits anyway: a landing blocked by its own missing instrument is the failure
+        # mode each of `SCF`, `LSF` and `OTF` documents, and the matcher's own exit code
+        # for this state is 3 — never 0, because a blind read is not a clean read, and
+        # never 1, because that is the code a real refusal answers to.
+        print(f"vault_round.py: {clock_unread} — landing without it", file=sys.stderr,
+              flush=True)
+    if clock_lines:
+        for line in clock_lines:
+            print(line, file=sys.stderr, flush=True)
+        clock_paths = sorted({r["path"] for r in clock_records})
+        _git("reset", "-q", "--", *clock_paths)
+        clock_head = (
+            f"SKILL CLOCK LITERAL REFUSED: {len(clock_lines)} added line(s) in "
+            f"{len(clock_paths)} file(s) state a clock in the wrong zone, in "
+            f"{', '.join(clock_paths[:3])}{' (and more)' if len(clock_paths) > 3 else ''}. "
+            "The matcher's line for each follows, and its patterns are "
+            "scripts/skill_timezone.py's alone — this module states none of them. "
+            "Fix the named line in place and re-land. #3820/#3881/#4069")
+        S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                        "paths": norm, "errors": [clock_head] + clock_lines[:10],
+                        # Keyed by PATH like `orphan_topic_refusals`: what this rail
+                        # refuses is a file, and the caller has to be able to grep its
+                        # own path out of the row. The per-line findings ride along so
+                        # the durable row carries the line numbers too — this door's
+                        # stderr goes wherever the caller's does, and for an autonomy
+                        # task that is one run record.
+                        "skill_clock_refusals": clock_paths,
+                        "skill_clock_findings": clock_records[:10],
+                        "reverted": [],
+                        "review": "skipped",
+                        "review_reason": "skill clock literal: a .md under skills/ is "
+                                         "added or modified with a line whose template "
+                                         "states a clock in the wrong zone (#4069)",
+                        **({"session_id": session_id} if session_id else {})})
+        raise VaultRoundError(" | ".join([clock_head] + clock_lines))
     # The #2381 witness rung, on the door #2381 did not rung it on (#2520). Exactly
     # here, and not a line later: `index_blobs` reads `git diff --cached`, and the
     # index still holds these bytes only until the commit moves HEAD under it. The
