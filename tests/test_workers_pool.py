@@ -3605,8 +3605,11 @@ async def test_a_timed_out_run_stores_the_kind_too(q, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _backdate(q, item_id: int, seconds: int) -> None:
+def _backdate(q, item_id: int, seconds: int) -> datetime:
     """Age a row by `seconds`, the way a held pool ages one without trying.
+
+    Returns the `enqueued_at` this wrote, so the caller can freeze the claim clock
+    to the instant the row is exactly `seconds` old — see `_freeze_claim_clock`.
 
     Composed in Python, not with SQLite's `strftime(... '%f' ...)`: SQLite's `%f` is
     `SS.SSS`, not microseconds, so that route stores something like
@@ -3614,10 +3617,46 @@ def _backdate(q, item_id: int, seconds: int) -> None:
     test publishes nothing for a stamp it cannot read, so a helper that mangles the
     format fails as a missing key and reads as an implementation bug.
     """
-    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)) \
-        .isoformat().replace("+00:00", "Z")
+    born = datetime.now(timezone.utc) - timedelta(seconds=seconds)
     with q._connect() as c:
-        c.execute("UPDATE queue SET enqueued_at = ? WHERE id = ?", (stamp, item_id))
+        c.execute("UPDATE queue SET enqueued_at = ? WHERE id = ?",
+                  (born.isoformat().replace("+00:00", "Z"), item_id))
+    return born
+
+
+def _freeze_claim_clock(monkeypatch, at: datetime) -> None:
+    """Pin every stamp `claim_next` writes to one instant.
+
+    Without it an expected age is a difference of two wall-clock readings, and the
+    second one is whenever the pool happened to get to the row. `_drain_one` gives
+    the claim a 60-second deadline, and the gate runs eight of these processes on
+    one box, so the gap is not zero: measured 2026-11-11, a 1.5 s gap between
+    stamping `enqueued_at` and the claim publishes 87738 where the node asserts
+    87737. Freezing makes the expected age the difference of two stamps THIS file
+    wrote, which is what `tests/test_workers_queue.py` already does for the same
+    field.
+    """
+    from workers import queue as queue_mod
+
+    monkeypatch.setattr(queue_mod, "_now_iso", lambda: at.isoformat())
+
+
+def _unreadable_enqueued_at(q, item_id: int) -> None:
+    """Give the row a stamp no parser accepts, which is the row's other failure.
+
+    `enqueued_at` is a plain TEXT column, so a writer outside this module can put
+    anything in it. The published answer must then be absence, not 0.
+    """
+    with q._connect() as c:
+        c.execute("UPDATE queue SET enqueued_at = ? WHERE id = ?",
+                  ("yesterday-ish", item_id))
+
+
+def _run_record_front_matter(path) -> dict:
+    """The front matter of one run record, parsed the way a reader parses it."""
+    import yaml
+
+    return yaml.safe_load(path.read_text(encoding="utf-8").split("---")[1])
 
 
 async def test_a_run_row_carries_the_age_of_the_row_that_produced_it(q, monkeypatch):
@@ -3633,13 +3672,16 @@ async def test_a_run_row_carries_the_age_of_the_row_that_produced_it(q, monkeypa
 
     This is the boundary the field has to cross: the pool holds the claimed item,
     `WorkQueue.record_run` writes the row, and no source is in the loop to pass the
-    number on. 87737 s is that claim's age exactly.
+    number on. 87737 s is that claim's age exactly — and because "exactly" is only
+    measurable against a frozen claim clock, the node freezes one rather than
+    trusting when the pool got around to the row.
     """
     async def execute(item):
         return {"status": "success", "summary": "cycle ran"}
 
     item_id = q.enqueue("s", "task", payload={"task_id": "38"})
-    _backdate(q, item_id, 87737)
+    born = _backdate(q, item_id, 87737)
+    _freeze_claim_clock(monkeypatch, born + timedelta(seconds=87737))
 
     runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
 
@@ -3659,13 +3701,16 @@ async def test_the_death_row_of_a_stale_run_keeps_its_age_beside_failure_kind(
     claimed 12 h 12 m 17 s after it was enqueued (43937 s). `failure_kind: infra` on
     its own reads as "the engine hiccuped"; with the age it reads as an
     already-dead cycle's run dying late. The two keys are only useful together, and
-    the exception arm is the one where a spread order can silently drop one.
+    the exception arm is the one where a spread order can silently drop one. The
+    claim clock is frozen so the asserted 43937 is this file's arithmetic, not a
+    race with the pool.
     """
     async def execute(item):
         raise RuntimeError("StreamStalledError: no token for 1200s")
 
     item_id = q.enqueue("s", "task", payload={"task_id": "42"})
-    _backdate(q, item_id, 43937)
+    born = _backdate(q, item_id, 43937)
+    _freeze_claim_clock(monkeypatch, born + timedelta(seconds=43937))
 
     runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
 
@@ -3674,3 +3719,102 @@ async def test_the_death_row_of_a_stale_run_keeps_its_age_beside_failure_kind(
     assert "failure_kind" in meta, "the death arm stopped naming how the run died"
     assert meta["queue_age_seconds"] == 43937, (
         f"`**death` shadowed the age: {meta.get('queue_age_seconds')!r}")
+
+
+async def test_the_bound_age_reaches_the_run_record_across_the_pools_task(
+        q, monkeypatch, tmp_path):
+    """The record is written three frames away, inside the task `wait_for` creates.
+
+    `_bind_queue_age` runs in the worker coroutine (`workers/pool.py:2062`); the
+    source's `execute` runs one line later INSIDE the task `asyncio.wait_for` makes,
+    and `app.autonomy.run_task`'s `_records_trigger` decorator reads `RUN_QUEUE_AGE`
+    from there, three frames deeper still. A `ContextVar` set before that hop is
+    visible inside the task's copied context, while a set made inside never comes
+    back out — so the whole run-record half of #4035 rests on that one asymmetry, and
+    nothing in the tree crossed it before this node: the run-record file's nodes bind
+    the variable in the same coroutine that reads it, which passes whatever order the
+    pool binds in.
+
+    Everything here is the real thing — a real claimed row, the pool's real binder,
+    the pool's real `wait_for`, the real decorator, the real writer — with only the
+    model turn absent. 87737 s is task #38's claim at 2026-11-11T06:23:11Z against a
+    row enqueued 2026-11-10T06:00:54Z.
+    """
+    from app import autonomy
+
+    written: list = []
+
+    async def execute(item):
+        @autonomy._records_trigger
+        async def run_body():
+            return autonomy._write_run_record(
+                task_id=38, run_id="run_38_20261111_062311", status="success",
+                started_at="2026-11-11T06:23:11Z",
+                completed_at="2026-11-11T06:35:11Z", duration_seconds=720.0,
+                summary="nightly cycle", body="## Response\n\nok\n")
+
+        written.append(await run_body())
+        return {"status": "success", "summary": "cycle ran"}
+
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+    item_id = q.enqueue("s", "task", payload={"task_id": "38"})
+    born = _backdate(q, item_id, 87737)
+    _freeze_claim_clock(monkeypatch, born + timedelta(seconds=87737))
+
+    await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+
+    assert written and written[0] is not None, (
+        "the run body never got as far as a readable record, so it proves nothing "
+        "about what it wrote")
+    fm = _run_record_front_matter(written[0])
+    assert fm["queue_age_seconds"] == 87737, (
+        "the age bound in the worker coroutine did not survive into the task the "
+        f"source's body ran inside: {fm.get('queue_age_seconds')!r}")
+    assert "trigger" in fm, (
+        "`_records_trigger` seeds `trigger` and `queue_age_seconds` from one read of "
+        f"one dict, so a record with neither names the hop as missing, not the age: "
+        f"{sorted(fm)!r}")
+
+
+async def test_an_unreadable_claim_stamp_reaches_the_record_with_no_age_key(
+        q, monkeypatch, tmp_path):
+    """Absence crosses the same hop, and the sibling key proves the block landed.
+
+    `_bind_queue_age` binds `None` for a row whose `enqueued_at` it cannot read, the
+    decorator seeds that `None`, and `_write_run_record` skips a `None` value — so the
+    record says nothing about the wait instead of publishing 0, which is the reading
+    "claimed the instant it was enqueued" and the one a stale row must never be filed
+    into. Same shape as the node above with only the stamp changed: that pair is one
+    test of the mechanism and one of the value.
+    """
+    from app import autonomy
+
+    written: list = []
+
+    async def execute(item):
+        @autonomy._records_trigger
+        async def run_body():
+            return autonomy._write_run_record(
+                task_id=100, run_id="run_100_20261111_090059", status="success",
+                started_at="2026-11-11T09:00:59Z",
+                completed_at="2026-11-11T09:12:59Z", duration_seconds=720.0,
+                summary="nightly cycle", body="## Response\n\nok\n")
+
+        written.append(await run_body())
+        return {"status": "success", "summary": "cycle ran"}
+
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+    item_id = q.enqueue("s", "task", payload={"task_id": "100"})
+    _unreadable_enqueued_at(q, item_id)
+
+    runs = await _drain_one(q, monkeypatch,
+                            SimpleNamespace(NAME="s", execute=execute))
+
+    assert written and written[0] is not None, "no record, so nothing to weigh"
+    fm = _run_record_front_matter(written[0])
+    assert "queue_age_seconds" not in fm, (
+        f"an unreadable stamp published an age: {fm['queue_age_seconds']!r}")
+    assert "trigger" in fm, (
+        "the age must be the only thing the unreadable stamp took away")
+    assert "queue_age_seconds" not in json.loads(runs[0]["meta_json"]), (
+        "the run row and the run record disagree about a row that cannot be read")
