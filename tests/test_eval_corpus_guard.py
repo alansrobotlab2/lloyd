@@ -4892,8 +4892,17 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: `documents_error(err)` fallback to `write_json`'s error payload, an executable line, and
 #: left this value at `618a4b23` — which is why the re-stamp node went red on a tree whose
 #: only eval change since was prose. It moves here, in the shape the node instructs; the
-#: projection at `15bc6fc5` is byte-identical to HEAD (1,980 executable lines, zero moved).
-RUN_EVAL_CODE_ANCHOR = "15bc6fc5"
+#: projection at `15bc6fc5` was byte-identical to that tree (1,980 executable lines, zero
+#: moved). #4050 moved it a third time, by exactly one line: the refused `ceiling` node
+#: gained a `remediation` — the labeler invocation and who may run it — beside every null
+#: `ceiling.kind`. The counts are deliberately unchanged (1,980 executable lines, 2,735
+#: total) because `architecture/` cites this file by absolute line number three times, one
+#: of them content-checked by
+#: `tests/test_eval_scorer.py::test_the_doc_s_citation_still_lands_on_the_conjunction`;
+#: `tests/test_eval_ceiling_fields.py::test_the_harness_stays_line_count_neutral_for_cited_prose`
+#: now pins all three. The anchor names `fa88f11f`, the commit carrying the field, whose
+#: projection is byte-identical to this tree.
+RUN_EVAL_CODE_ANCHOR = "fa88f11f"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because

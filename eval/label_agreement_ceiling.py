@@ -1357,6 +1357,58 @@ def newest_artifact(directory: Path | str | None = None) -> Path | None:
     return files[-1] if files else None
 
 
+#: The invocation that re-bases the ceiling (#4050). Spelled with an `<engine>`
+#: placeholder rather than a chosen engine on purpose: `--engine` has no default because
+#: "which model produced the ceiling changes what the number means", so naming one here
+#: would pre-empt the one decision the run is reserved for. `eval/run_eval.py` renders
+#: this same constant into a refused baseline's `ceiling.remediation.command`, so the
+#: refusal a person reads in a log and the field a job reads cannot drift apart.
+LABELER_REMEDIATION_COMMAND = (
+    "cd ~/lloyd && .venvs/lloyd/bin/python eval/label_agreement_ceiling.py "
+    "--engine <engine>")
+
+#: Who may run it, in the words the report emits. The skill is what reserves the act:
+#: `skills/retrieval-eval/SKILL.md` Step 2b says the labeler is "a deliberate,
+#: person-authorised act", because it rewrites the artifact every baseline in the window
+#: divides by — so a ceiling that moves because a different model answered the same menu
+#: is a re-based benchmark, not another night's measurement. Without this half the
+#: remediation reads as a nightly step that got skipped, which is an invitation for the
+#: very job the refusal is stopping to run it.
+LABELER_AUTHORISATION = (
+    "person-authorised, not the nightly's to take: it chooses an engine (no default on "
+    "purpose) and rewrites the artifact every baseline in the window divides by, so it "
+    "re-bases the benchmark rather than measuring another night — "
+    "skills/retrieval-eval/SKILL.md Step 2b")
+
+
+def ceiling_remediation() -> dict:
+    """The `summary.overall.ceiling.remediation` node, for every state that refused.
+
+    What a reader of the BASELINE alone was missing (#4050). Each ceiling refusal ends in
+    an imperative — "re-run the labeler", "pass --allow-stub-ceiling" — and a file opened
+    days later cannot act on an imperative: the invocation is not guessable, because
+    `--engine` has no default on purpose, and nothing said who may run it. That matters
+    because the act is reserved: `skills/retrieval-eval/SKILL.md` Step 2b calls the
+    labeler "a deliberate, person-authorised act", since it rewrites the artifact every
+    baseline in the window divides by — a ceiling that moves because a different engine
+    answered the same menu is a re-based benchmark, not another night's measurement. So
+    the command and its owner travel as two named fields a job can branch on, while the
+    refusal's `kind` stays null: naming the fix changes what a reader can DO about a
+    refusal, never whether its ceiling is believed.
+
+    Built here rather than in `eval/run_eval.py` because the command is this module's own
+    surface — `argparse` refuses to run without `--engine` — and because that file's line
+    numbers are cited by `architecture/` prose (`autonomy-jobs.md` for the knob
+    conjunction, `measurement.md` for the baseline directory, `retrieval.md` for the
+    corpus provenance block), one of them pinned by
+    `tests/test_eval_scorer.py::test_the_doc_s_citation_still_lands_on_the_conjunction`.
+    `tests/test_eval_ceiling_fields.py::test_the_harness_stays_line_count_neutral_for_cited_prose`
+    holds the line numbers a third of that prose cites.
+    """
+    return {"command": LABELER_REMEDIATION_COMMAND,
+            "authorisation": LABELER_AUTHORISATION}
+
+
 class ArtifactRefused(RuntimeError):
     """Raised for every reason an artifact must not become tonight's ceiling, with
     the reason as the message so the caller can put it in `ceiling_reason`."""
@@ -1381,7 +1433,7 @@ def load_artifact(path: Path | str | None = None, *, directory: Path | str | Non
         raise ArtifactRefused(
             f"no label-agreement artifact under "
             f"{directory or default_out_dir()}; run "
-            f"`python eval/label_agreement_ceiling.py --engine <engine>`")
+            f"`{LABELER_REMEDIATION_COMMAND}`")
     try:
         art = json.loads(Path(p).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1394,10 +1446,15 @@ def load_artifact(path: Path | str | None = None, *, directory: Path | str | Non
             f"measured ceiling — pass --allow-stub-ceiling to use it anyway")
     want = (art.get("corpus") or {}).get("labels_sha256")
     if expect_labels_sha256 and want and want != expect_labels_sha256:
+        # The diagnosis and the fix in one string (#4050). The refusal has been correct
+        # since 2026-11-10 and still not actionable: it ended at "re-run the labeler",
+        # which names an act, in a log line, to a reader who cannot know the invocation
+        # — `--engine` has no default — or that running it is not their step to take.
+        # The two fingerprints stay: they ARE the diagnosis.
         raise ArtifactRefused(
             f"the gold labels moved since {p} (artifact labels_sha256 {want}, "
             f"corpus {expect_labels_sha256}); the ceiling describes labels that no "
-            f"longer exist — re-run the labeler")
+            f"longer exist — re-run the labeler: `{LABELER_REMEDIATION_COMMAND}`")
     recomputed = agreement(art)
     stored = art.get("agreement") or {}
     for key in ("entity_label_agreement", "doc_label_agreement"):

@@ -1280,6 +1280,67 @@ def test_the_stub_artifact_is_still_refused_by_default_under_print(tmp_path, mon
     assert "stub" in out and "NO CEILING" in out
 
 
+def test_print_with_moved_gold_still_refuses_and_names_the_fix(tmp_path, monkeypatch,
+                                                               capsys):
+    """Clause 3 of #4050: naming the command must not soften the refusal.
+
+    The gate exists so a nightly cannot divide tonight's score by labels that no longer
+    exist. `9b028e9` re-pointed 22 gold entity names with the query ids untouched, so the
+    id join a trend audit relies on cannot see it and this fingerprint check is the only
+    thing standing between the two. The state pinned here is production's as of
+    2026-11-10, when commit `15bc6fc5` restored five checkout-doc queries (81 → 86) and
+    moved the corpus labels under the 2026-10-14 artifact: exit 2, both fingerprints on
+    stdout, the remediation named beside them — and `--no-labels-sha-check` still the ONLY
+    flag that reads an old ceiling, since `--allow-stub-ceiling` is a different door and
+    must not open this one.
+    """
+    import yaml
+    art, queries, _ = _run(tmp_path)
+    art_file = _artifact_file(tmp_path, art)
+    before = art_file.read_bytes()
+    moved = json.loads(json.dumps(queries))
+    moved[0]["expect_entities"] = ["Inner Voice"]
+    moved_path = tmp_path / "queries-moved.yaml"
+    moved_path.write_text(yaml.safe_dump({"queries": moved}, sort_keys=False),
+                          encoding="utf-8")
+    corpus_sha = lac.labels_sha256(moved)
+    assert corpus_sha != art["corpus"]["labels_sha256"], (
+        "the fixture must actually re-point a gold label")
+    assert [q["id"] for q in moved] == [q["id"] for q in queries], (
+        "`9b028e9`'s shape: the ids a trend audit joins on do not change, which is why "
+        "the labels fingerprint is the guard")
+
+    argv = ["eval/label_agreement_ceiling.py", "--print", "--artifact", str(art_file),
+            "--corpus", str(moved_path), "--allow-stub-ceiling"]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert lac.main() == 2, (
+        "naming the fix is not a downgrade to a warning: a nightly that reads this must "
+        "still stop rather than divide")
+    out = capsys.readouterr().out
+    assert "NO CEILING: the gold labels moved" in out, (
+        "the gold-moved refusal, raised even though --allow-stub-ceiling was passed: "
+        "one flag per door, and that flag opens the stub door only")
+    assert art["corpus"]["labels_sha256"] in out and corpus_sha in out, (
+        "both fingerprints, or the reader cannot tell which side of the division moved")
+    assert "eval/label_agreement_ceiling.py --engine" in out, (
+        "clause 1's remediation reaches the CLI a person actually runs, not just the "
+        "loader's exception")
+    assert art_file.read_bytes() == before, "--print labels nothing and writes nothing"
+
+    # …and the reading route stays open: the SAME argv plus `--no-labels-sha-check`
+    # prints the old ceiling. Together with the exit 2 above that is what "the only
+    # route" means — neither an accidental second door nor a closed one.
+    monkeypatch.setattr(sys, "argv", argv + ["--no-labels-sha-check"])
+    assert lac.main() == 0, (
+        "`--no-labels-sha-check` is documented for reading an old ceiling beside a "
+        "re-pointed corpus; tightening the refusal must not seal it")
+    out2 = capsys.readouterr().out
+    assert art["ceiling"]["kind"] in out2, (
+        "the old ceiling prints, labelled with its own kind, and `NO CEILING` does not")
+    assert "NO CEILING" not in out2
+    assert art_file.read_bytes() == before
+
+
 def test_the_real_corpus_denominators_are_the_ones_this_file_quotes():
     """Clause 2's numbers, checked against the corpus file itself rather than against
     a count this file's own prose remembers.

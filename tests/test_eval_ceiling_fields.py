@@ -711,6 +711,86 @@ def test_stale_labels_are_refused(tmp_path, monkeypatch):
     assert "labels" in fields["ceiling"]["reason"].lower()
 
 
+def test_the_gold_moved_refusal_names_the_command_that_re_bases_it(tmp_path, monkeypatch):
+    """Clause 1 of #4050: the diagnosis and the fix have to travel in one string.
+
+    Production has been in exactly this state since commit `15bc6fc5` restored five
+    checkout-doc queries (81 → 86) on 2026-11-10 and so moved the corpus labels under
+    the 2026-10-14 artifact: `--print` exits 2 and every `*_normalized` is null. The
+    refusal was right and still useless to a reader — it ended at "re-run the labeler",
+    which names an act without naming the invocation that performs it, and the
+    invocation is not obvious because `--engine` has no default on purpose. Both
+    fingerprints stay in the message: the whole diagnosis is that two sets of labels are
+    in question, and the reader has to be able to tell which side of the division moved.
+    """
+    art = _synthetic_artifact(entity_labels="moved")
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    corpus_sha = lac.labels_sha256(_synth_corpus())
+    with pytest.raises(lac.ArtifactRefused) as exc:
+        lac.load_artifact(expect_labels_sha256=corpus_sha)
+    msg = str(exc.value)
+    assert "the gold labels moved" in msg, (
+        "the refusal's own words are what a nightly log gets grepped for")
+    assert "deadbeefdeadbeef" in msg and corpus_sha in msg, (
+        "artifact-side and corpus-side fingerprint, both — one number cannot say which "
+        "side moved")
+    assert lac.LABELER_REMEDIATION_COMMAND in msg, (
+        "the fix travels with the refusal, so one log line is enough to act on")
+    assert "eval/label_agreement_ceiling.py --engine" in msg, (
+        "clause 1 names the engine argument explicitly: without it the command cannot "
+        "run, because the labeler refuses to choose an engine for you")
+
+
+def test_a_refused_ceiling_carries_a_person_authorised_remediation(tmp_path, monkeypatch):
+    """Clause 2 of #4050: a reader of the BASELINE alone must learn both what would fix
+    it and that the fix is not theirs to run.
+
+    The 2026-11-10 witness baseline says `ceiling.kind = null` and its reason ends
+    "— re-run the labeler", and that is all a reader of the file gets: the same words as
+    every other ceiling refusal, with nothing machine-readable to tell a person the
+    invocation is `eval/label_agreement_ceiling.py --engine <engine>` or to tell a job
+    that running it is not its step. The field is structured rather than prose bolted
+    onto the reason, so a reader can branch on it; `kind` stays null, because naming the
+    fix must not turn the refusal into a warning.
+    """
+    art = _synthetic_artifact(entity_labels="moved")
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    fields = ev.ceiling_context(_synth_corpus())
+    assert fields["ceiling"]["kind"] is None, (
+        "a ceiling whose labels no longer exist stays refused")
+    remediation = fields["ceiling"]["remediation"]
+    assert remediation, "the refused node must carry the fix, not only the diagnosis"
+    assert remediation["command"] == lac.LABELER_REMEDIATION_COMMAND
+    assert "eval/label_agreement_ceiling.py --engine" in remediation["command"], (
+        "with the engine argument, which is the half that has no default")
+    authority = remediation["authorisation"].lower()
+    assert "person" in authority and "nightly" in authority, (
+        "the field has to say WHO may run it, or it reads as a nightly step that simply "
+        "got skipped")
+
+    # …and through the writer, because the baseline file is what the next reader
+    # actually opens: `summarize` → `json.dump` → re-read is the same boundary
+    # `test_a_measured_ceiling_survives_the_json_round_trip_into_summary_overall`
+    # pins for the measured state.
+    queries = _synth_corpus()
+    records = [dict(r, id=q["id"]) for r, q in
+               zip(_printed_records(len(queries), 2), queries)]
+    summary = ev.summarize(records)
+    summary["overall"].update(fields)
+    path = tmp_path / "nightly-refused.json"
+    path.write_text(json.dumps({"summary": summary}), encoding="utf-8")
+    o = json.loads(path.read_text(encoding="utf-8"))["summary"]["overall"]
+    assert o["ceiling"]["kind"] is None
+    assert o["ceiling"]["remediation"]["command"] == lac.LABELER_REMEDIATION_COMMAND, (
+        "a remediation that exists only in the in-process dict never reaches the reader "
+        "this item is about")
+    for metric in METRICS:
+        assert o[f"{metric}_normalized"] is None, (
+            f"{metric} gained a ratio from a ceiling that was refused")
+
+
 def test_a_stub_artifact_is_refused(tmp_path, monkeypatch):
     """The instrument's own guard at the reporter boundary: a nightly that inherited a
     stub artifact would print a fabricated ceiling as tonight's measurement."""
@@ -1590,3 +1670,92 @@ def test_predating_the_builder_key_cannot_blank_the_agreement(tmp_path, monkeypa
     for metric in METRICS:
         assert after[f"{metric}_normalized"] == before[f"{metric}_normalized"], metric
         assert after[f"{metric}_ceiling_kind"] == before[f"{metric}_ceiling_kind"], metric
+
+
+# ── #4050: the refused node's coverage, and the line numbers `architecture/` cites ──
+
+#: Every `eval/run_eval.py:N` citation `architecture/*.md` makes, with the fragment each
+#: one is standing in for. The numbers were written against a 2,735-line file —
+#: `git show 15bc6fc5:eval/run_eval.py | wc -l` and `git show 116e25df:… | wc -l` are both
+#: 2,735 — and `tests/test_eval_scorer.py::test_the_doc_s_citation_still_lands_on_the_conjunction`
+#: already content-checks the first. This file's own change is the second writer to that
+#: file, so the same property is asserted here for the whole set.
+CITED_PROSE_LINES: list[tuple[int, str]] = [
+    (122, "def _corpus_provenance"),        # architecture/retrieval.md:87
+    (2478, '"matches_production_defaults": ('),  # architecture/autonomy-jobs.md:1236
+    (2716, "EVAL_BASELINES_DIR"),           # architecture/measurement.md:38
+]
+
+
+def test_the_harness_stays_line_count_neutral_for_cited_prose():
+    """#4050: naming the fix in the REPORT must not move a line `architecture/` cites.
+
+    The first shape of this change added fifteen lines to `eval/run_eval.py` — a docstring
+    and a three-line dict entry — and the suite went red on
+    `test_the_doc_s_citation_still_lands_on_the_conjunction`, because
+    `architecture/autonomy-jobs.md:1236` cites `eval/run_eval.py:2478` for the knob
+    conjunction and 2478 had become `djev_rerank`. The doc bucket is not editable from a
+    `code` round, so the cheaper and better instrument is the code: the refused `ceiling`
+    node gains its `remediation` in one changed line, and the prose that carries the
+    rationale lives in `eval/label_agreement_ceiling.py`, the module that owns the
+    command. A round that genuinely has to move the harness re-numbers the citations in
+    `architecture/` AND this list, in the commit that does it.
+    """
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2735, (
+        f"eval/run_eval.py is {len(lines)} lines, not the 2,735 every `architecture/` "
+        "line citation was written against — re-number architecture/*.md and this "
+        "assertion together, or make the change line-neutral like #4050's")
+    for n, fragment in CITED_PROSE_LINES:
+        assert fragment in lines[n - 1], (
+            f"architecture/ cites eval/run_eval.py:{n} for {fragment!r} and that line "
+            f"reads {lines[n - 1]!r}")
+
+
+def test_every_refused_ceiling_node_names_the_invocation_and_its_owner(tmp_path, monkeypatch):
+    """Clause 2's coverage, across the refusals rather than only the one in production.
+
+    `ceiling_context` funnels every `ArtifactRefused` through `_ceiling_absent_fields`, and
+    the refusals differ in what a reader must DO next: no artifact on the box at all, a gold
+    that moved under an artifact that exists, and a stub artifact that must not be read as a
+    measurement. The last is the interesting one — its own fix is the `--allow-stub-ceiling`
+    flag, so a node naming only the labeler command would send a reader to re-label when the
+    real choice is a deliberate one-off exemption. All three carry the same command and the
+    same statement of who may run it, and `kind` is null in all three: naming the fix does
+    not promote a refused ceiling.
+    """
+    corpus = _synth_corpus()
+
+    # 1. No artifact at all: an empty directory behind OUT_DIR_ENV.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(empty))
+    states = {"no artifact": ev.ceiling_context(corpus)}
+
+    # 2. The gold moved under an artifact that exists.
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    _write(_synthetic_artifact(entity_labels="moved"), moved)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(moved))
+    states["gold moved"] = ev.ceiling_context(corpus)
+
+    # 3. A stub artifact, and the run does not claim the exemption.
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    _write(_synthetic_artifact(kind="stub"), stub)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(stub))
+    states["stub read as a measurement"] = ev.ceiling_context(corpus)
+
+    for name, got in states.items():
+        assert got["ceiling"]["kind"] is None, f"{name} produced a ceiling"
+        rem = got["ceiling"]["remediation"]
+        assert rem and rem["command"] == lac.LABELER_REMEDIATION_COMMAND, (
+            f"{name}: a baseline reader with no way to find the fix")
+        assert "eval/label_agreement_ceiling.py --engine" in rem["command"], (
+            f"{name}: the command without its engine argument cannot be run")
+        assert "person" in rem["authorisation"].lower(), (
+            f"{name}: a remediation that does not say who may run it reads as a nightly "
+            "step that got skipped")
+    # The stub refusal still points at its own flag as well: the remediation node is in
+    # addition to that reason, never instead of it.
+    assert "allow-stub-ceiling" in states["stub read as a measurement"]["ceiling"]["reason"]

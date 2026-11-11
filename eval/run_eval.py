@@ -1608,7 +1608,7 @@ def _ceiling_absent_fields(reason: str) -> dict:
         "label_agreement": {"entity_label_agreement": None,
                             "doc_label_agreement": None, "labeler": None,
                             "artifact": None, "reason": reason},
-        "ceiling": {"kind": None, "reason": reason},
+        "ceiling": {"kind": None, "reason": reason, "remediation": lac.ceiling_remediation()},
     }
     for metric in CI_METRICS:
         fields[f"{metric}_normalized"] = None
