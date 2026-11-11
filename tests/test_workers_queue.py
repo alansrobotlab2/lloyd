@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from workers.queue import QueueItem, WorkQueue, new_run_id
+from workers.queue import QueueItem, WorkQueue, new_run_id, queue_age_meta
 
 
 @pytest.fixture
@@ -2988,3 +2988,119 @@ def test_the_pool_forwards_a_reference_it_did_not_invent():
     assert named["artifact_path"] == "round:SM_20261109_084155"
     assert attested["artifact_path"] == NO_ARTIFACT
     assert silent["artifact_path"] == ""
+
+
+# ---------------------------------------------------------------------------
+# How old the row was when it was handed out (#4035)
+# ---------------------------------------------------------------------------
+
+
+def _freeze_claim_clock(monkeypatch, at: datetime) -> None:
+    """Pin every stamp `claim_next` writes to one instant.
+
+    An expected age is then the difference of two stamps this file wrote, not of
+    two readings of a wall clock that keeps ticking while the gate runs eight of
+    these processes on one box.
+    """
+    from workers import queue as queue_mod
+
+    monkeypatch.setattr(queue_mod, "_now_iso", lambda: at.isoformat())
+
+
+def test_a_claimed_row_publishes_its_age_in_whole_seconds(q, monkeypatch):
+    """A replay of a dead cycle has to say so on the row that ran it.
+
+    The worker pool sat under a `person` hold from 2026-11-10T03:59:26Z to
+    2026-11-11T06:23:09Z, and every `scheduled-task` row enqueued during it stayed
+    `queued` and was claimed after the release. Task #38's row went in at
+    2026-11-10T06:00:54Z and was claimed at 2026-11-11T06:23:11Z — 24 h 22 m, older
+    than that task's own `frequency: daily` period — and nothing on the row or in
+    its run record distinguished it from a run claimed the instant it was enqueued.
+    The number a reader needs is `enqueued_at` to `claimed_at`, and `claim_next` is
+    the one place holding both at the moment they stop being a guess.
+
+    7200 s (2 h), not the incident's 24 h 22 m: this node is about the arithmetic
+    and the field's existence, and the frozen clock makes the expected value exact.
+    The incident's magnitude is what `test_workers_pool.py`'s dispatch node weighs.
+    """
+    item_id = q.enqueue("scheduled-task", "task", payload={"task_id": "38"})
+    born = datetime.fromisoformat(_enqueued_at(q, item_id))
+    _freeze_claim_clock(monkeypatch, born + timedelta(seconds=7200))
+
+    item = q.claim_next("worker-1")
+
+    assert item.id == item_id
+    assert item.queue_age_seconds == 7200, (
+        "the claimed row does not carry the whole-second gap between its own "
+        f"`enqueued_at` and the `claimed_at` this claim stamped: "
+        f"{item.queue_age_seconds!r}")
+    assert item.to_dict()["queue_age_seconds"] == 7200, (
+        "the age is on the object but not on the dict the read projections serialise")
+
+
+def test_an_unparseable_enqueued_at_yields_no_age_rather_than_a_fresh_row(q):
+    """No value, never zero.
+
+    `enqueued_at` is a plain TEXT column and this module's own `_iso_or_none`
+    exists because a stamp some other writer chose is any shape at all. An age of
+    `0` reads as "claimed the instant it was enqueued" — the one reading that would
+    make a 22 h stale row look like the freshest work in the pool — so an unreadable
+    stamp publishes nothing. And the row is still claimed: publishing an age is not
+    a reason to stop dispatching, which is the whole option (b) bargain.
+    """
+    item_id = q.enqueue("scheduled-task", "task", payload={"task_id": "100"})
+    _restamp_enqueued_at(q, item_id, "yesterday-ish")
+
+    item = q.claim_next("worker-1")
+
+    assert item.id == item_id, "an unparseable stamp must not stop the row being claimed"
+    assert item.queue_age_seconds is None, (
+        f"an unreadable `enqueued_at` published an age: {item.queue_age_seconds!r}")
+
+
+def test_the_published_age_reaches_the_run_row_meta_json(q, monkeypatch):
+    """`runs.meta_json` answers the question with a query, no markdown parse.
+
+    The run record is the human-facing half; `workers/fleet_watchdog.py`, the
+    chain's own report and every cost join read the `runs` table. Both halves have
+    to carry one number, so the key name is minted once here, beside the field it
+    reads, and the three `record_run` arms in `workers/pool.py` merge that one
+    dict. 34254 s is the item's own 9 h 30 m 54 s case: task #40's row, enqueued
+    2026-11-10T21:14:12Z and claimed 2026-11-11T06:45:06Z.
+    """
+    item_id = q.enqueue("scheduled-task", "task", payload={"task_id": "40"})
+    born = datetime.fromisoformat(_enqueued_at(q, item_id))
+    claim_stamp = born + timedelta(seconds=34254)
+    _freeze_claim_clock(monkeypatch, claim_stamp)
+    item = q.claim_next("worker-1")
+    run_id = new_run_id("scheduled-task")
+
+    q.mark_running(item.id, run_id)
+    q.record_run(run_id=run_id, queue_id=item.id, source="scheduled-task",
+                 status="success", started_at=claim_stamp.isoformat(),
+                 completed_at=claim_stamp.isoformat(), duration_seconds=12.0,
+                 summary="ok",
+                 meta_json=json.dumps({"session_ids": [], **queue_age_meta(item)}))
+
+    meta = json.loads(q.list_runs("scheduled-task")[0]["meta_json"])
+    assert meta["queue_age_seconds"] == 34254, (
+        "the age did not survive into the run row's meta_json: "
+        f"{meta.get('queue_age_seconds')!r}")
+    assert queue_age_meta(q.get(item_id)) == {"queue_age_seconds": 34254}, (
+        "the number the pool publishes is not the number the row itself reports "
+        "when re-read after the run")
+
+
+def test_a_row_with_no_age_to_publish_adds_no_key_to_the_run_meta(q):
+    """Absence and zero stay two different answers on the run row as well.
+
+    A run that was not dispatched from a queue row, or whose row's stamp cannot be
+    read, must not land in the same bucket as a row claimed the instant it was
+    enqueued — that bucket is the healthy one.
+    """
+    item_id = q.enqueue("owed-check", "board", payload={})
+    _restamp_enqueued_at(q, item_id, "yesterday-ish")
+    item = q.claim_next("worker-1")
+
+    assert queue_age_meta(item) == {}, (
+        f"an unreadable stamp contributed a key: {queue_age_meta(item)!r}")

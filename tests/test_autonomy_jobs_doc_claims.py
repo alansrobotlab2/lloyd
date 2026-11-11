@@ -8576,3 +8576,116 @@ def test_the_tier_rows_still_count_their_own_ids_with_109_in_the_report_only_row
     assert "#109" not in rows["Writes durable state unattended"][0], (
         "#109 was promoted into the unattended-writer row on the strength of a read-back. "
         "The filing test is the reason it is not there")
+
+
+# ---------------------------------------------------------------------------
+# The published queue age (#4035)
+# ---------------------------------------------------------------------------
+
+_QUEUE_AGE_HEADING = "### A `scheduled-task` row says how old it was"
+
+#: What the subsection must say, as the phrases a reader would look for. Each is
+#: one of the four things the item asked the document to state, so a paraphrase
+#: that drops one of them fails here rather than passing on vibes.
+_QUEUE_AGE_CLAUSES = {
+    "names the field a reader uses": ("queue_age_seconds",),
+    "says the age is stamped at claim": ("claimed_at", "enqueued_at"),
+    "says a late row is neither dropped nor re-stamped": (
+        "neither dropped nor re-stamped",),
+    "says an absent age is not a zero": ("never `0`",),
+    "keeps `in_window` from being read as staleness": (
+        "`in_window` is not staleness",),
+}
+
+
+def _queue_age_section() -> str:
+    text = _text()
+    start = text.find(_QUEUE_AGE_HEADING)
+    assert start != -1, (
+        f"§Watch the machinery no longer holds the heading {_QUEUE_AGE_HEADING!r} "
+        "— the queue age has nowhere documented to live")
+    rest = text[start:]
+    end = rest.find("\n## ", 1)
+    return rest[:end] if end != -1 else rest
+
+
+def test_the_doc_states_the_queue_age_as_published_and_never_acted_on():
+    """The behaviour is "publish", and only the document says so.
+
+    The code cannot: a reader standing at `claim_next` sees a field with no
+    predicate on it and has to decide whether that is an omission or a decision.
+    `enqueued_at` additionally belongs to the #2496 aging credit and to the
+    starving-queue wait, so the reason it must not be rewritten at claim only
+    exists in prose. This grades that prose against the three sentences it has to
+    contain, and against the source it describes.
+    """
+    section = _flat(_queue_age_section())
+
+    def missing(text: str) -> list[str]:
+        return [f"{what} (missing {phrase!r})"
+                for what, phrases in _QUEUE_AGE_CLAUSES.items()
+                for phrase in phrases if phrase not in text]
+
+    assert missing(section) == [], "; ".join(missing(section))
+
+    queue_src = (ROOT / "workers" / "queue.py").read_text()
+    pool_src = (ROOT / "workers" / "pool.py").read_text()
+    autonomy_src = (ROOT / "app" / "autonomy.py").read_text()
+
+    assert queue_src.count("queue_age_seconds=") == 1, (
+        "the subsection describes one derived field, but the queue computes it in "
+        f"{queue_src.count('queue_age_seconds=')} places")
+    assert pool_src.count("**queue_age_meta(item)") == 3, (
+        "the subsection says the pool publishes the age on the run row; it writes "
+        f"run rows in 3 arms and publishes from "
+        f"{pool_src.count('**queue_age_meta(item)')} of them")
+    assert "RUN_QUEUE_AGE" in autonomy_src, (
+        "the subsection says the age reaches the run record's dispatch block; "
+        "app/autonomy.py no longer carries the contextvar that carries it")
+
+    # The false greens: a subsection that keeps its shape but loses any one of the
+    # five statements must fail, not pass on the strength of the other four. The
+    # rewrite removes EVERY occurrence, because the field is named four times and a
+    # control that blanks one of them proves nothing about the check.
+    for what, phrases in _QUEUE_AGE_CLAUSES.items():
+        rewritten = section.replace(phrases[0], "the age")
+        assert phrases[0] not in rewritten, (
+            f"the control for {what} did not remove {phrases[0]!r}, so it proved "
+            "nothing")
+        assert missing(rewritten), (
+            f"a subsection that dropped its statement of {what} still passed")
+
+
+def test_a_claim_of_no_age_predicate_holds_in_the_code_the_doc_describes():
+    """`claim_next` publishes and decides nothing — no `if` on the age.
+
+    The subsection's load-bearing sentence is that the verdict is nothing. That is
+    a claim about the executable body of `claim_next`, not about its prose, so it is
+    checked after the docstring is removed: the docstring is where the field name
+    legitimately appears, and a grep over the whole function would pass whether or
+    not a predicate existed.
+    """
+    import ast
+
+    src = (ROOT / "workers" / "queue.py").read_text()
+    tree = ast.parse(src)
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "claim_next"), None)
+    assert fn is not None, "workers/queue.py no longer defines claim_next"
+    doc = ast.get_docstring(fn)
+    assert doc, "claim_next lost the docstring that explains the published age"
+
+    # Line numbers, not `body.replace(docstring, "")`: what `get_docstring` returns
+    # is the parsed value, and the source literal is not that byte sequence (it is
+    # escaped and re-wrapped), so a text replacement silently removes nothing and the
+    # docstring's own mention of the field then reads as a predicate.
+    lines = src.splitlines(keepends=True)
+    first = fn.body[0]
+    is_doc = isinstance(first, ast.Expr) and isinstance(
+        getattr(first, "value", None), ast.Constant) and isinstance(
+        first.value.value, str)
+    start = (first.end_lineno if is_doc else first.lineno) - 1
+    executable = "".join(lines[start:fn.end_lineno])
+    assert "queue_age_seconds" not in executable, (
+        "the document states the age is published rather than acted on, but "
+        "claim_next's own body now reads the field")

@@ -609,3 +609,106 @@ def test_the_report_still_exits_two_and_still_prints_the_marker():
     assert src.index("alarms = _alarms(") < src.index("emit_exit_sentinel("), (
         "the marker is emitted before the alarms are computed, so it can only "
         "ever report a code the rails did not set")
+
+
+# ── how old the queue row was, on the record the run leaves (#4035) ────────────
+#
+# `trigger` and `in_window` say WHO dispatched a run and WHETHER the local hour sat
+# in the task's preferred hours. Neither says how long the queue row waited, and
+# those are three different questions about one dispatch. During the `person` hold
+# of 2026-11-10T03:59:26Z → 2026-11-11T06:23:09Z every `scheduled-task` row
+# enqueued during the hold stayed `queued` and was claimed hours after its cycle had
+# passed — task #38's row was claimed 24 h 22 m 17 s (87,737 s) after it was
+# enqueued, task #42's 12 h 12 m 17 s (43,937 s) after — so the 2026-11-10 nightly
+# cycle executed on 2026-11-11 while its own report bounded `data_range` by
+# today's clock. Read that record today and it looks like a normal nightly run.
+#
+# These nodes go through `_records_trigger`, the decorator `run_task` carries,
+# because the value's whole journey is that decorator into the front matter: the
+# pool binds the claimed item's age to `RUN_QUEUE_AGE`, the decorator seeds it into
+# `_ACTIVE_RUN`, and `_write_run_record` merges what it finds there.
+#
+# "Beside" is about the same front matter, not about line order: the block is
+# rendered by `yaml.dump`, which sorts keys, so `in_window`, `queue_age_seconds` and
+# `trigger` land alphabetically however they are seeded.
+
+def _front_matter(path) -> dict:
+    import yaml
+    text = path.read_text(encoding="utf-8")
+    return yaml.safe_load(text.split("---")[1])
+
+
+def _record_written_under_a_dispatch(aut, monkeypatch, *, trigger: str,
+                                     queue_age, task_id: int = 38,
+                                     run_id: str = "run_38_20261111_062311"):
+    """Write one record through the dispatch path, with no engine and no task file.
+
+    `_records_trigger` seeds the dict `_write_run_record` merges, and `run_task`
+    adds `in_window` to that same dict once the task file is parsed; the mutation
+    below is that line, and only that line, reproduced here so the three dispatch
+    keys can be weighed in one front matter without stubbing a whole run.
+    """
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", aut / "runs")
+    trigger_token = autonomy.RUN_TRIGGER.set(trigger)
+    age_token = autonomy.RUN_QUEUE_AGE.set(queue_age)
+
+    async def go():
+        active = autonomy._ACTIVE_RUN.get()
+        active["in_window"] = False
+        return autonomy._write_run_record(
+            task_id=task_id, run_id=run_id, status="success",
+            started_at="2026-11-11T06:23:11Z", completed_at="2026-11-11T06:35:11Z",
+            duration_seconds=720.0, summary="nightly cycle", body="## Response\n\nok\n")
+
+    import asyncio
+    try:
+        return _front_matter(asyncio.run(autonomy._records_trigger(go)()))
+    finally:
+        autonomy.RUN_QUEUE_AGE.reset(age_token)
+        autonomy.RUN_TRIGGER.reset(trigger_token)
+
+
+def test_a_dispatch_from_a_queue_row_publishes_how_old_that_row_was(aut, monkeypatch):
+    """The record of a replayed cycle has to be able to say it was a replay.
+
+    87,737 s is #38's claim on 2026-11-11T06:23:11Z against a row enqueued
+    2026-11-10T06:00:54Z — longer than that task's own `frequency: daily` period,
+    which is the fact the record could not previously carry. `trigger: scheduler`
+    and `in_window: false` were both on it and neither distinguishes it from a
+    same-cycle run: `in_window` is a preferred-hours test on the hour the run
+    STARTED, so a fresh row outside the window reads the same way and a stale row
+    inside it reads clean.
+    """
+    fm = _record_written_under_a_dispatch(aut, monkeypatch, trigger="scheduler",
+                                          queue_age=87737)
+
+    assert fm["queue_age_seconds"] == 87737, (
+        f"the record does not say how long its queue row waited: "
+        f"{fm.get('queue_age_seconds')!r}")
+    assert fm["trigger"] == "scheduler" and fm["in_window"] is False, (
+        "the age did not land in the same front matter as the two dispatch keys it "
+        f"belongs beside: {sorted(fm)!r}")
+    assert "queue_age_seconds" in fm and fm["queue_age_seconds"] != fm.get(
+        "duration_seconds"), "the age is its own measurement, not the run's length"
+
+
+def test_a_run_with_no_queue_row_omits_the_age_instead_of_claiming_zero(
+        aut, monkeypatch):
+    """Absence and zero are two different answers, and only one of them is true.
+
+    `0` would say "claimed the instant it was enqueued" about a run that came from
+    `trigger: manual`, or from a row whose `enqueued_at` this module cannot parse.
+    `_write_run_record` already holds that line for `extra` keys and for the whole
+    of `_ACTIVE_RUN` — a key whose value is `None` is not written at all — and this
+    is the same rule with a second key on it, so a reader cannot tell a healthy
+    same-cycle claim from a run that was never in the queue.
+    """
+    fm = _record_written_under_a_dispatch(aut, monkeypatch, trigger="manual",
+                                          queue_age=None, task_id=39,
+                                          run_id="run_39_20261111_064429")
+
+    assert "queue_age_seconds" not in fm, (
+        f"a run with nothing to publish wrote a value: {fm['queue_age_seconds']!r}")
+    assert fm["trigger"] == "manual", (
+        "the omission must be the age alone — the dispatch keys the record always "
+        "carried are still owed")

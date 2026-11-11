@@ -1694,6 +1694,47 @@ nothing called it for six weeks, and #94 exists because `skill_lint` covers SKIL
 only and the groundskeeper covers wikilinks, so nothing at all resolved the
 backticked cites that every prompt in this system leans on.
 
+### A `scheduled-task` row says how old it was, and nothing acts on that
+
+`WorkQueue.claim_next` stamps `claimed_at` and hands the row to a worker. The row now
+comes out carrying **`queue_age_seconds`** — whole seconds from its own `enqueued_at`
+to that stamp — and `workers/pool.py` publishes the same number twice more: into the
+run row's `meta_json`, and into the run record's front matter, where it lands in the
+dispatch block with `trigger` and `in_window`. #102 and #106 read `workers.db`, so the
+store is where a claim's age is worth having for a fleet question; the record is where
+one run's reader sees it.
+
+**Published, not enforced: a late row is neither dropped nor re-stamped.** The verdict
+on the number is deliberately nothing. `claim_next` is one path shared by every source
+— `owed-check`, `session-distill`, `board-steward`, `bench-mine`, `autocode` — and a
+`scheduled-task` row is the only kind whose task file declares a period it could be
+late against, while `frequency` lives in vault front matter the queue has no code to
+read. Dropping is a ruling waiting on two measurements: how many rows a period bound
+would have killed, and whether `sources/scheduled_task.enqueue_if_due` re-enqueues a
+dropped row whose task is still due — if it does not, a drop loses a nightly and is
+worse than a late run. Re-stamping `enqueued_at` at claim is ruled out and stays ruled
+out: that column is the input to the priority-aging credit #2496 exists to provide and
+to the starving-queue wait #102's watchdog alarm reads, so rewriting it at claim would
+erase the evidence of the very hold that made the row late and hand a day-old row the
+freshness of a new one.
+
+The incident that asked for the field is the `person` hold of 2026-11-10T03:59:26Z →
+2026-11-11T06:23:09Z. Rows enqueued while the pool was held stayed `queued` and were
+claimed after the release: task #38's row was taken 24 h 22 m 17 s (87,737 s) after it
+was enqueued, task #42's 12 h 12 m 17 s (43,937 s) after, task #40's 9 h 30 m 54 s
+(34,254 s) after. All three tasks are `frequency: daily`, so the 2026-11-10 nightly
+cycle executed on 2026-11-11 — and the records those runs left read as ordinary
+nightlies, `trigger: scheduler` among them.
+
+**`in_window` is not staleness and must not be read as it.** It tests the local hour
+the run *started* against the task's `preferred_hours`, so a row claimed the instant it
+was enqueued can be out of window and a row two days old can be in it: a run can be
+late for two unrelated reasons, and only `queue_age_seconds` separates them. An absent
+`queue_age_seconds` means the run was not dispatched from a queue row, or the row's
+stamp could not be parsed — it is never `0`, because `0` asserts the row was claimed
+the moment it appeared, which is the healthiest thing the field can say and not
+something an unreadable timestamp gets to claim.
+
 ---
 
 ## What the fleet actually costs

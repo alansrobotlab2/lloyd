@@ -4363,6 +4363,28 @@ RUN_TRIGGER: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
 _ACTIVE_RUN: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "autonomy_active_run", default=None)
 
+# How old the queue row was when the pool claimed it, recorded on the run as
+# `queue_age_seconds` (#4035). The worker pool binds it around a claimed job the
+# way it binds `current_run_sessions` — a per-source hand-off would mean seventeen
+# executors each remembering to pass the number on, and `trigger` (#1437) is what
+# that bargain produced: 0 of 43 run records carried a field naming what dispatched
+# them, on a slip that pinned two nightly chains for two cycles.
+#
+# The number is `claimed_at - enqueued_at`, whole seconds, and a run that was not
+# dispatched from a queue row leaves it ABSENT rather than writing a 0. That
+# distinction is the whole content of the field: a `person` hold of 2026-11-10 left
+# task #38's row claimed 24 h 22 m after it was enqueued — older than the task's own
+# `frequency: daily` period — so the 2026-11-10 nightly cycle executed on
+# 2026-11-11, and its report's headline had to bound a `data_range` by today's clock
+# while the dispatch intent was yesterday's. Nothing else on the record said so.
+#
+# `in_window` above is NOT this and must not be read as this: it is a
+# `preferred_hours` test on the local hour the run started, so a row claimed the
+# instant it was enqueued can be `in_window: false`, and a row two days stale can be
+# `in_window: true`. Two unrelated reasons a run happened when it happened.
+RUN_QUEUE_AGE: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar(
+    "autonomy_run_queue_age", default=None)
+
 
 
 def max_retries_budget(task: dict) -> int:
@@ -4485,10 +4507,20 @@ def run_trigger(name: str):
 
 
 def _records_trigger(fn):
-    """Scope the run's trigger to exactly one `run_task` call."""
+    """Scope the run's dispatch context to exactly one `run_task` call.
+
+    Both keys here describe HOW the run got here, not what it did: `trigger` names
+    who asked, and `queue_age_seconds` how long the queue row it came from had been
+    waiting (`RUN_QUEUE_AGE`, #4035). A `None` age is filtered out by
+    `_write_run_record`, so a run with no queue row publishes no key instead of a 0
+    that would read as an instant claim. Both land before `in_window`, which
+    `run_task` stamps once the task file is parsed, so the three dispatch keys sit
+    adjacent in the front matter in that order.
+    """
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
-        token = _ACTIVE_RUN.set({"trigger": RUN_TRIGGER.get() or "direct"})
+        token = _ACTIVE_RUN.set({"trigger": RUN_TRIGGER.get() or "direct",
+                                 "queue_age_seconds": RUN_QUEUE_AGE.get()})
         try:
             return await fn(*args, **kwargs)
         finally:

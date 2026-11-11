@@ -30,7 +30,7 @@ from app.harness.policy import current_effect_scope, current_scope
 from app.sessions_io import current_run_sessions, current_run_turns
 from workers.dispatch_watch import OK_WM_KEY
 from workers.evidence import gaps_key, verify_bundle
-from workers.queue import (WorkQueue, QueueItem, get_queue, new_run_id,
+from workers.queue import (WorkQueue, QueueItem, get_queue, new_run_id, queue_age_meta,
                            shorten_summary)
 
 logger = logging.getLogger("lloyd-workers.pool")
@@ -505,6 +505,42 @@ current_task_verdict: contextvars.ContextVar[bool] = contextvars.ContextVar(
 def mark_task_verdict() -> None:
     """Called by a source that has just recorded this attempt's task-file verdict."""
     current_task_verdict.set(True)
+
+
+#: Publish the claimed row's age to the run record the source's own `run_task`
+#: writes (#4035).
+#:
+#: The pool is the only party holding both ends: it has the `QueueItem` with its
+#: `queue_age_seconds`, and it is the caller of the source that ends inside
+#: `app.autonomy.run_task`, which is where the run record's front matter is built.
+#: A ContextVar is how the other two per-run facts cross that same gap —
+#: `current_run_sessions` (#534's transcript attribution) and `current_run_turns`
+#: (#2087) — and the reason is the same one those two record: the value belongs to
+#: the claimed job, and a contract that depends on every executor passing it back
+#: is a contract #1437 already measured at 0 of 43 run records carrying a `trigger`.
+#:
+#: `None` is a real value here, meaning "this row's age is not knowable", and
+#: `run_task` omits the key rather than writing 0 — see `queue_age_meta`.
+def _bind_queue_age(item: QueueItem):
+    """Bind the claimed item's age; returns what `_unbind_queue_age` takes.
+
+    The import is defensive for the reason `_death_meta` gives: an unimportable
+    `app.autonomy` outranks nothing here, but it must not kill the worker loop
+    either, because the sources that do not touch autonomy have a run to finish.
+    """
+    try:
+        from app.autonomy import RUN_QUEUE_AGE
+    except Exception as e:  # noqa: BLE001 — no run record beats no dispatch
+        logger.error("Cannot bind the queue age for %s/%s: app.autonomy is "
+                     "unimportable (%s)", item.source, item.kind, e)
+        return None
+    return (RUN_QUEUE_AGE, RUN_QUEUE_AGE.set(item.queue_age_seconds))
+
+
+def _unbind_queue_age(bound) -> None:
+    """Drop the binding so the next claim on this worker task cannot read it."""
+    if bound is not None:
+        bound[0].reset(bound[1])
 
 
 async def _death_meta(item: QueueItem, source: Any, exc: BaseException, *,
@@ -2015,6 +2051,15 @@ class WorkerPool:
             # verdict being read as the next item's — the pool reuses this task
             # for every claim it makes.
             verdict_token = current_task_verdict.set(False)
+            # #4035: how old this row was when this claim took it, bound for the
+            # record the job writes three frames away. A held pool leaves a row
+            # `queued` for hours — task #38's row was claimed 24 h 22 m after it was
+            # enqueued, past its own daily period — and the run that replayed that
+            # dead cycle looked identical to a same-cycle one. The pool never acts on
+            # the number: the row is dispatched either way, and dropping or
+            # re-stamping a late row is exactly what `queue.py` explains must not
+            # happen at claim.
+            age_bound = _bind_queue_age(item)
             try:
                 result = await asyncio.wait_for(source.execute(item), timeout=max_duration)
                 duration = time.monotonic() - started_perf
@@ -2025,9 +2070,15 @@ class WorkerPool:
                 # whole timed-out run up to max_attempts times before the
                 # scheduler's own cooldown is ever consulted.
                 norm = normalize_result(item, result)
+                # `queue_age_meta` (#4035) puts how long the row waited on the run
+                # row, where the watchdog and the chain's report read it; the spread
+                # sits after the source's own meta because the pool measured the
+                # number and a source could only ever guess it. It spreads to nothing
+                # when the age is not knowable, so absence stays absence.
                 norm["meta"] = {**norm["meta"],
                                 "session_ids": list(current_run_sessions.get() or []),
-                                "scratchpad": _scratchpad_meta()}
+                                "scratchpad": _scratchpad_meta(),
+                                **queue_age_meta(item)}
                 # After the merge, and it is the order that carries clause 5:
                 # `norm["meta"]` may already hold a `num_turns` the source
                 # reported for itself, and that one stays.
@@ -2169,7 +2220,13 @@ class WorkerPool:
                             # died is the comparison the item's whole hypothesis
                             # rests on, and this branch is where that run's row is
                             # written.
-                            "scratchpad": _scratchpad_meta()})),
+                            "scratchpad": _scratchpad_meta(),
+                            # #4035. A stale row that then overran is the pair a
+                            # reader has to tell apart from a same-cycle run that
+                            # hung, and `pool_timeout` alone cannot: both say the run
+                            # died at the cap. The age is the only other number on
+                            # the row that separates them.
+                            **queue_age_meta(item)})),
                     )
                 )
                 new_state = await asyncio.to_thread(
@@ -2228,6 +2285,15 @@ class WorkerPool:
                             # artifact the item is about: a week of a task dying
                             # every minute was a NULL in `meta_json` that no
                             # reader grouped on.
+                            #
+                            # #4035's age goes BEFORE `death`, unlike the other two
+                            # arms: `death` is deliberately last here, so a source
+                            # that names its own failure metadata keeps it, and the
+                            # age rides in underneath that. Task #42's death in this
+                            # item's incident was exactly a `StreamStalledError` at
+                            # 1260.4 s on a row 12 h stale — the two numbers together
+                            # are what make that run readable.
+                            **queue_age_meta(item),
                             **death})),
                     )
                 )
@@ -2241,6 +2307,10 @@ class WorkerPool:
                 current_run_sessions.reset(sessions_token)
                 current_run_turns.reset(turns_token)
                 current_task_verdict.reset(verdict_token)
+                # The pool reuses this task for every claim it makes, so an age left
+                # bound would be read as the NEXT item's — and a retry of a stale row
+                # would then publish the previous row's wait.
+                _unbind_queue_age(age_bound)
                 self._in_flight.pop(item.id, None)
                 await self._repoll_on_complete(source)
 

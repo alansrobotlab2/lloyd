@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from workers import dispatch_watch
 from workers.pool import WorkerPool, normalize_result
@@ -3598,3 +3598,79 @@ async def test_a_timed_out_run_stores_the_kind_too(q, monkeypatch):
     assert "max_duration_seconds=1" in runs[0]["summary"]
     assert runs[0]["kind"] == "paper", (
         "the timeout arm's row lost the kind its item was claimed under")
+
+
+# ---------------------------------------------------------------------------
+# How old the claimed row was, published on the run row (#4035)
+# ---------------------------------------------------------------------------
+
+
+def _backdate(q, item_id: int, seconds: int) -> None:
+    """Age a row by `seconds`, the way a held pool ages one without trying.
+
+    Composed in Python, not with SQLite's `strftime(... '%f' ...)`: SQLite's `%f` is
+    `SS.SSS`, not microseconds, so that route stores something like
+    `2026-11-10T14:56:27.27.657Z`, which is no timestamp at all. The field under
+    test publishes nothing for a stamp it cannot read, so a helper that mangles the
+    format fails as a missing key and reads as an implementation bug.
+    """
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)) \
+        .isoformat().replace("+00:00", "Z")
+    with q._connect() as c:
+        c.execute("UPDATE queue SET enqueued_at = ? WHERE id = ?", (stamp, item_id))
+
+
+async def test_a_run_row_carries_the_age_of_the_row_that_produced_it(q, monkeypatch):
+    """A replay of a dead cycle has to be readable in the runs table.
+
+    The `person` hold of 2026-11-10T03:59:26Z → 2026-11-11T06:23:09Z left every
+    `scheduled-task` row enqueued during it sitting `queued`, and the release
+    claimed them hours later: task #38's row went in at 2026-11-10T06:00:54Z and was
+    taken at 2026-11-11T06:23:11Z — 24 h 22 m 17 s, older than that task's own
+    `frequency: daily` period — so the 2026-11-10 nightly cycle ran on 2026-11-11.
+    The run row said nothing about it: `meta_json` held `session_ids`, `scratchpad`
+    and `num_turns`, and every one of those describes the run, not the dispatch.
+
+    This is the boundary the field has to cross: the pool holds the claimed item,
+    `WorkQueue.record_run` writes the row, and no source is in the loop to pass the
+    number on. 87737 s is that claim's age exactly.
+    """
+    async def execute(item):
+        return {"status": "success", "summary": "cycle ran"}
+
+    item_id = q.enqueue("s", "task", payload={"task_id": "38"})
+    _backdate(q, item_id, 87737)
+
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta["queue_age_seconds"] == 87737, (
+        "the run row does not say how long its queue row waited: "
+        f"{meta.get('queue_age_seconds')!r}")
+    assert {"session_ids", "scratchpad"} <= set(meta), (
+        "the age arrived but the keys the row always had did not")
+
+
+async def test_the_death_row_of_a_stale_run_keeps_its_age_beside_failure_kind(
+        q, monkeypatch):
+    """The arm that spreads `**death` last must not lose the age.
+
+    Task #42 died of `StreamStalledError` at 1260.4 s of its 1800 s cap on a row
+    claimed 12 h 12 m 17 s after it was enqueued (43937 s). `failure_kind: infra` on
+    its own reads as "the engine hiccuped"; with the age it reads as an
+    already-dead cycle's run dying late. The two keys are only useful together, and
+    the exception arm is the one where a spread order can silently drop one.
+    """
+    async def execute(item):
+        raise RuntimeError("StreamStalledError: no token for 1200s")
+
+    item_id = q.enqueue("s", "task", payload={"task_id": "42"})
+    _backdate(q, item_id, 43937)
+
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta["exception"] == "RuntimeError"
+    assert "failure_kind" in meta, "the death arm stopped naming how the run died"
+    assert meta["queue_age_seconds"] == 43937, (
+        f"`**death` shadowed the age: {meta.get('queue_age_seconds')!r}")

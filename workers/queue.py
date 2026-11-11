@@ -575,6 +575,51 @@ def _iso_seconds_between(start_iso: str, end_iso: str) -> float:
     return max(0.0, (end - start).total_seconds())
 
 
+#: #4035 — how long a row sat in the queue before a worker took it.
+#:
+#: A `scheduled-task` row is created for ONE cycle of its task's cadence, but
+#: nothing retires it while it waits, so a row created for yesterday is claimed
+#: exactly like a row created for this one. Measured on the live store: task #38's
+#: row was enqueued 2026-11-10T06:00:54Z and claimed 2026-11-11T06:23:11Z —
+#: 24 h 22 m, older than the task's own `frequency: daily` period — during the
+#: 26 h `person` hold of 2026-11-10, and 4 of the 400 most recent claims in the 14
+#: days to 2026-11-11 crossed their own period. The pool's aggregate age readers
+#: (`pending_wait_by_source`, `fleet_watchdog._queue_starving`) already weigh
+#: `enqueued_at`, but against a multiple of `max_duration` and never attached to
+#: the run that a stale row went on to produce: the run record could not tell a
+#: same-cycle run from a replay of a dead cycle.
+#:
+#: **The verdict is published, not acted on** — the row is neither dropped nor
+#: re-stamped at claim. Dropping needs a frequency the queue cannot read
+#: (`frequency` lives in the vault task front matter, and `claim_next` is shared by
+#: every source, most of which has no period at all), and it is only safe once
+#: someone has measured that `sources/scheduled_task.enqueue_if_due` re-enqueues a
+#: dropped row whose task is still due — if it does not, a drop silently loses a
+#: nightly, which is worse than a late run. Re-stamping is not on the table at all:
+#: `enqueued_at` is the input to the priority-aging credit (`_effective_priority_sql`,
+#: written for #2496's starved row) and to the starving-queue alarm, so rewriting it
+#: at claim would erase the starvation evidence of the same hold that produced the
+#: stale row and hand a day-old row the freshness of a new one.
+#:
+#: Whole seconds, floored at 0 for the same clock-skew reason
+#: `_iso_seconds_between` floors, and **`None` when either stamp cannot be read** —
+#: never 0. `0` is a claim that the row was claimed the instant it was enqueued,
+#: which is the healthiest reading available, and an unreadable TEXT column must not
+#: be allowed to earn it. An absent value and a zero stay two different answers all
+#: the way into `runs.meta_json` and the run record's front matter.
+def _queue_age_seconds(enqueued_at: Any, claimed_at: Any) -> Optional[int]:
+    """Whole seconds between one row's `enqueued_at` and its `claimed_at`.
+
+    `None` — not 0 — when either stamp is missing or unparseable. See the note
+    above for why the absence is the point.
+    """
+    born = _iso_or_none(enqueued_at)
+    claimed = _iso_or_none(claimed_at)
+    if born is None or claimed is None:
+        return None
+    return max(0, int((claimed - born).total_seconds()))
+
+
 def _loads_or_none(raw: Any) -> Optional[dict]:
     """Parse a JSON column, tolerating NULL and anything unparseable.
 
@@ -608,6 +653,11 @@ class QueueItem:
     not_before: Optional[str] = None
     triaged_at: Optional[str] = None
     triage: Optional[dict] = None
+    #: Derived, never a column: the row's own `enqueued_at` to its own
+    #: `claimed_at`, as of whenever the row was last read. `None` until the row has
+    #: a claimable pair of readable stamps — see `_queue_age_seconds` for why that
+    #: is `None` and not 0, and why the number is published rather than enforced.
+    queue_age_seconds: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "QueueItem":
@@ -628,6 +678,7 @@ class QueueItem:
             not_before=(row["not_before"] if "not_before" in row.keys() else None),
             triaged_at=(row["triaged_at"] if "triaged_at" in row.keys() else None),
             triage=(_loads_or_none(row["triage_json"]) if "triage_json" in row.keys() else None),
+            queue_age_seconds=_queue_age_seconds(row["enqueued_at"], row["claimed_at"]),
         )
 
     def to_dict(self) -> dict:
@@ -647,7 +698,28 @@ class QueueItem:
             "error": self.error,
             "triaged_at": self.triaged_at,
             "triage": self.triage,
+            "queue_age_seconds": self.queue_age_seconds,
         }
+
+
+def queue_age_meta(item: QueueItem) -> dict:
+    """The `runs.meta_json` keys that say how old `item` was when it was claimed.
+
+    One key, minted beside the field it reads, because the pool writes a run row
+    from THREE places — the success arm, the overrun arm and the exception arm —
+    and a key spelled three times is a key one of those arms eventually drops. The
+    same argument settled `session_ids` (#2087) and `kind` (#3526): the pool is the
+    only writer holding a `QueueItem`, so the value has to come from here rather
+    than from seventeen sources remembering to return it.
+
+    Empty dict when there is no age to publish, so an unreadable stamp (or a row
+    with no claim at all) leaves the key ABSENT rather than writing a 0 that reads
+    as "claimed the instant it was enqueued" — the healthy bucket, and the one a
+    22 h stale row must not be filed into.
+    """
+    if item.queue_age_seconds is None:
+        return {}
+    return {"queue_age_seconds": item.queue_age_seconds}
 
 
 class WorkQueue:
@@ -913,6 +985,23 @@ class WorkQueue:
         priority-55 rows in twenty minutes (#2496). Below one `AGING_PERIOD_HOURS`
         nothing changes, and no row is rewritten to age it — the curve, the floor
         and the measurement behind both are on the constants.
+
+        **The row comes out carrying how long it waited, and nothing here acts on
+        it.** `QueueItem.queue_age_seconds` is `claimed_at - enqueued_at` in whole
+        seconds, published so a run can be told apart from a replay of a cycle that
+        already passed: a `person` hold of 2026-11-10 left task #38's row claimed
+        24 h 22 m after it was enqueued, past that task's own daily period, with
+        nothing on the run to say so. No predicate here reads that number. A
+        frequency bound would need the task file, which lives in the vault and is
+        invisible to a queue shared by sources that have no period at all, and
+        dropping a late row is only safe once someone measures that
+        `sources/scheduled_task.enqueue_if_due` re-enqueues one whose task is still
+        due. Re-stamping `enqueued_at` is worse than either: it is the input to the
+        aging credit above AND to `pending_wait_by_source`, so a rewrite at claim
+        time deletes the starvation evidence of the very hold that made the row
+        late. `_queue_age_seconds` and `queue_age_meta` carry the detail; the field
+        reaches `runs.meta_json` and the run record's front matter through
+        `workers/pool.py`.
 
         **A row already at the ceiling is not handed to a worker; it is
         poisoned, with the cap named in its `error`.** The claim is where the
