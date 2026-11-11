@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, security, threat-model, stride, atlas, trust-boundaries]
 type: reference
 status: implemented
-date: 2026-10-11
+date: 2026-11-11
 ---
 
 # Lloyd — threat model: the boundaries, the threats over them, and what they predicted
@@ -14,8 +14,10 @@ over those seams, attach the control in this codebase that answers each one, and
 publish the threats with no control as the open set. [[authority-surfaces]]
 already inventories the guards in the order an action meets them and
 [[guard-coverage]] publishes the union of what none of them sees. Neither states
-the other half: **what is being attacked**. Without that, eleven rungs — now
-twelve — cannot be ranked, a security backlog item cannot be shown to answer a
+the other half: **what is being attacked**. Without that, fifteen rungs — the
+ladder has grown by three since this page was written, and
+[[authority-surfaces]] counts them in its own completeness paragraph — cannot be
+ranked, a security backlog item cannot be shown to answer a
 threat, and the next argument about whether a rail is too broad (#2269's
 `Bash` narrowing, which shipped and was reverted) is settled by intuition plus a
 broken canary again.
@@ -32,10 +34,14 @@ home, so a cell pointing at `~/lloyd-data/...` is graded rather than waved
 through. What it still cannot do is tell a live pointer from a sentence that
 names an absent path on purpose: that is what the exemption list in that file is,
 per doc and per citation, with a reason and a node refusing an entry no doc still
-makes. A line anchor is only
-checked to be shorter than its file, which is how two cells in this very table
-pointed at `main()` and at a grant function until the 2026-10-11 pass re-anchored
-them (#2583).
+makes. A line anchor is no longer
+checked only to be shorter than its file: since #2583 the node asks that the line
+fall inside a definition the file actually defines, and since #3047 that a citation
+whose sentence names a symbol lands inside *that* symbol's span. This doc's table
+cells name a path and never an identifier, so containment alone decides them and
+they sit outside the `NAMED_SYMBOL_RAIL_DOCS` opt-in (#3580) — which is exactly how
+the two cells that once pointed at `main()` and at a grant function (#2583) could
+drift again without reddening anything, and two of them have (#4045).
 
 ## How this model was built, and the one way it lies
 
@@ -83,13 +89,13 @@ prompt cannot be access control — is for.
 | id | Seam | What crosses | Who authorizes | Chokepoint |
 |---|---|---|---|---|
 | B1 | external text → turn context | fetched pages, API bodies, transcripts, search results | the model's judgement, plus a destination table | `agent_mcp/egress.py`, `agent_mcp/http_tools.py` |
-| B2 | vault text → turn context | prefetched notes, skills excerpts, facts, backlog rows | the subliminal matcher's relevance score | `app/prefetch.py:1941` |
+| B2 | vault text → turn context | prefetched notes, skills excerpts, facts, backlog rows | the subliminal matcher's relevance score | `app/prefetch.py:1015` |
 | B3 | loaded memory → every system prompt | `MEMORY.md`, `USER.md`, the identity file | whatever the last writer did | `app/prompt_builder.py:927`, `app/prompt_surface.py` |
 | B4 | skill body → instruction | a `SKILL.md` delivered as a dispatch marker | the skill's own name and its front matter | `app/harness/skill_dispatch.py:276` |
 | B5 | tool result → next turn's input | every tool's own output, including a subprocess's stdout | nothing: results are trusted as authored | `agent_mcp/_injection_probe.py:121` (records) |
 | B6 | model output → shell | an argv string | the deny table, twice | `app/harness/safety.py:417`, `agent_mcp/main.py:531` |
 | B7 | model output → filesystem and vault | a path plus bytes | one constant, three lanes | `app/harness/protected_paths.py::write_deny_reason` |
-| B8 | model output → the network | a URL, a body, a header | a destination table that **records rather than refuses** on this box: `harness.egress_policy.enforce` is set `false` at `~/lloyd/config.yaml:712`, so the allow-list half of `egress.guard` never runs and every lane answers from `_is_private_host` instead — one resolving predicate for all of them since #2584, which retired the text-matching copy the HTTP lane carried | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526` |
+| B8 | model output → the network | a URL, a body, a header | a destination table that **records rather than refuses** on this box: `harness.egress_policy.enforce` is set `false` at `~/lloyd/config.yaml:806`, so the allow-list half of `egress.guard` never runs and every lane answers from `_is_private_host` instead — one resolving predicate for all of them since #2584, which retired the text-matching copy the HTTP lane carried | `agent_mcp/egress.py`, `app/harness/outbound_content.py:526` |
 | B9 | an unattended session → the tool surface | every tool call from a worker or a round | two tuples and the session's platform | `app/tool_bans.py:23` |
 | B10 | a grant → authority | a scope predicate, an expiry, a quota | a human at Mission Control, or a task file's front matter | `agent_mcp/builtin_grants.py`, `app/harness/policy.py:1374` |
 | B11 | an automod round → live `main` | a diff, then a restart of the running system | the gate ladder and the guardian | `scripts/automod/spec.py::check_scope`, `scripts/automod/gate.py:3553` |
@@ -133,9 +139,9 @@ appears in this table: those threats are in the next one.
 | T-14 | B4 | S | A skill named to collide with a real one is delivered instead of it | `app/harness/skill_dispatch.py:212` |
 | T-15 | B1 | inject | Prose from a fetched page instructs the turn that fetched it | `agent_mcp/_injection_probe.py:121` |
 | T-16 | B5 | inject | A tool result's own content instructs the next turn | `agent_mcp/_injection_probe.py:52` |
-| T-17 | B2 | inject | A vault note's text is matched as relevant and then obeyed | `app/prefetch.py:1941` |
+| T-17 | B2 | inject | A vault note's text is matched as relevant and then obeyed | `app/prefetch.py:1015` |
 | T-18 | B1 | E | Fetched content points the browser at a loopback or private address | `egress._is_private_host` — one resolving predicate since #2584, which retired the text-only copy the HTTP lane used to carry. `browser.py`'s `_host_block_reason`, `http_fetch` and `http_request` all call it, each hop of a redirect chain included, and `egress.floor_reason` answers from it too, so arming `enforce` adds the allow-list rather than changing this answer |
-| T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` — the measurement, not the gate: its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, false here, so the table holds zero denies (#2580) |
+| T-19 | B8 | I | Data leaves to a destination the policy never named | `agent_mcp/egress.py` — the measurement, not the gate: its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, false here, so the table holds zero denies (#2580). Re-checked live 2026-11-11 at this head: `/api/dashboard`'s `network.by_decision` over a full 7-day window is `allow 711 / deny 0 / grant-required 8`, with `window_clamped_to_hours` null — so the zero is an unarmed branch, not an unlooked window |
 | T-20 | B8 | I | A credential rides out inside a request body the model composed | `app/harness/outbound_content.py:526` |
 | T-21 | B17 | chain | A turn installs a package nobody reviewed | `app/harness/supply_chain.py:421` |
 | T-22 | B17 | chain | A skill's installer pulls arbitrary code through a channel the matcher does not read | `eval/supply-chain/` |
@@ -264,9 +270,13 @@ negative here is the honest deliverable, and this page will take it.
   future round, not this page).
 - **Whether a cited control still exists, or a `#NNNN` is still open.**
   Path and line resolution is `tests/test_architecture_coverage_doc_claims.py`'s
-  job for this doc — the same node's five-doc scope is #2582, and its line check
-  is a length comparison, not a symbol one, which is #2583. It is not the same
-  check for the rest of this directory. Neither file re-derives a prose figure:
+  job, and #2582 shipped: that node now reads every top-level `architecture/*.md`,
+  so this doc is inside the sweep rather than excepted from it, and the sentence
+  claiming a five-doc scope here was the false half of a disagreement with the
+  intro. Its line check is a span check (#2583, #3047), not a length comparison —
+  but a cell in this table names a path and no identifier, so containment alone
+  grades it and a number that drifted into a neighbouring definition of the right
+  file stays green (#4045). Neither file re-derives a prose figure:
   the retrospective headline is recomputed from its rows, but the `1 of 13`
   independent-coverage number and every count in the review log are checked by a
   human reading the table, which is where they will drift. Backlog liveness is
@@ -313,6 +323,29 @@ negative here is the honest deliverable, and this page will take it.
   `memory_*` verbs, retired 2026-09-23. The intro and the not-cover bullet both
   claimed path resolution ran "as for every other doc in this directory": it
   covers five of thirty-six (#2582), and neither file re-derives a prose count.
+- **2026-11-11 — `stale` (arch-review, whole-doc unit).** The map's mechanisms all
+  still run, but five statements about the tree around them had moved. The intro
+  and the not-cover bullet disagreed with each other about the path node's scope,
+  and #2582 has since shipped — the node reads every top-level
+  `architecture/*.md`, so the "five-doc scope / not the same check for the rest of
+  this directory" sentence was the false side and is gone. Both places also still
+  said a line anchor is checked only for length (#2583), which is now a span check
+  with a named-symbol half (#3047): true for no cell in this table, whose
+  identifier-free citations are graded by containment and sit outside the #3580
+  rail: B2 and T-17 had slid onto `drop_sections`, an ablation helper, and are
+  re-pointed at the relevance gate that decides the row's authority; two gate
+  anchors drifted into the wrong definitions entirely and are filed (#4045, with
+  #4046 for four authority surfaces the ladder grew since this map was drawn and
+  #4047 for #3846's credential substitution, an egress control armed while
+  `enforce` is off). The B8 config anchor had drifted by ninety-four lines and the
+  flag is still false there; the guard ladder this page asks to rank is fifteen
+  rows, not twelve; T-19's zero is now a dated live witness rather than a bare
+  claim. What held: all 19 boundaries, 41 threats and 13 incident sources resolve,
+  the arithmetic still sums to 7 predicted / 6 missed (5 absent-boundary),
+  #2584's single resolving predicate is what every lane calls, both recorders run
+  in `shadow`, `app/config.py` still boots-checks exactly two guard modes so
+  O-05's "two guards and no others" stands, and skill delivery still has no
+  provenance check, so O-01 is still open.
 
 
 
