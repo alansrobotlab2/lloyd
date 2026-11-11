@@ -39,11 +39,11 @@ UNCHANGED = {
     "eval/engine_output/corpus.yaml":
         "b880e4716d17316e7a6e21c138aea93ba32e5e9ec891faaa96814c987ad1063f",
     "eval/engine_output/floor.json":
-        "f0c5a718e0f4e433a80eb8ab7758e941214d57bd3d5d9dc267bed8a0bd8fc02e",
+        "1038ce4e83430e49056bafe482aa826677b79a5b840a6889b9339bf6070f0305",
     "eval/engine_output/floor-0924-dff1bde.json":
         "b0df625cfe01112045c1061f364296261bb55ff12fd24556c23102767bd76ba9",
-    "eval/engine_output/idle/20261012T041722Z_idle1012-5.json":
-        "a8e9aab16186567720d8e12fb81313b002ff10c5710e73ecc9192c851fe46e57",
+    "eval/engine_output/idle/20261111T020805Z_idle1110-5.json":
+        "281e12732c9a20d3e351973ed72403dd9442c6a9d8004c4de5e8add31af58a1b",
 }
 
 #: What each stub arm answers, per corpus prompt id: (tool name, RAW argument STRING).

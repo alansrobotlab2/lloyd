@@ -715,7 +715,7 @@ def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
     (root / ".venvs/lloyd/bin").mkdir(parents=True, exist_ok=True)
     (root / "eval/engine_output/idle").mkdir(parents=True, exist_ok=True)
     (tmp_path / "tmpdir").mkdir(parents=True, exist_ok=True)
-    (root / "eval/engine_output/idle/20261012T041722Z_idle1012-5.json").write_text("{}\n")
+    (root / "eval/engine_output/idle/20261111T020805Z_idle1110-5.json").write_text("{}\n")
     payload = tmp_path / "cmp-payload.json"
     if cmp_payload is None:
         payload.write_text("not json at all\n", encoding="utf-8")
@@ -1058,7 +1058,7 @@ def test_the_canary_persists_one_verdict_line_naming_the_worst_prompt(tmp_path):
     assert v["arm"] == "fp8kv", v
     assert (v["run_rc"], v["compare_rc"]) == (0, 1), v
     assert v["decision"] == "past-floor", v
-    assert v["reference"] == str(root / "eval/engine_output/idle/20261012T041722Z_idle1012-5.json"), v
+    assert v["reference"] == str(root / "eval/engine_output/idle/20261111T020805Z_idle1110-5.json"), v
     assert v["record"] == "/tmp/arm-record.json", v
     assert v["diverged"] == CANARY_PAYLOAD_DIVERGED["diverged"], v
 
@@ -1402,7 +1402,7 @@ def test_the_conf_offers_only_a_revert_target_that_is_on_the_box():
     if not REVERT_VENV.is_dir():
         pytest.skip(f"{REVERT_VENV} is not on this machine")
     # The serving pin is untouched by any of this.
-    assert _conf_env()["VLLM_VENV"].endswith("/.venvs/vllm-flash-next-main-1012")
+    assert _conf_env()["VLLM_VENV"].endswith("/.venvs/vllm-flash-next-main-1110")
 
 
 def test_the_launcher_fallback_default_names_a_venv_that_exists():
@@ -1429,7 +1429,7 @@ def test_the_header_names_the_venvs_that_are_actually_installed():
     assert re.search(r"^# Venv:.*setup-vllm-flash-next-main\.sh", header, re.M), \
         "the header still points at the absent worker build's setup script as the "\
         "venv of record"
-    for name in ("vllm-flash-next-main-1012", "vllm-flash-next-main"):
+    for name in ("vllm-flash-next-main-1110", "vllm-flash-next-main-1012", "vllm-flash-next-main"):
         assert f".venvs/{name}" in header, \
             f"the header does not name the installed FP8 build {name}"
 

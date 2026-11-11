@@ -27,7 +27,7 @@ One process, launched by `agent-services/bin/start-qwen38-flash-next.sh` under
 supervisord as `agent-llm-primary`. The live command line, verbatim:
 
 ```
-.venvs/vllm-flash-next-main-1012/bin/python -m vllm.entrypoints.cli.main serve
+.venvs/vllm-flash-next-main-1110/bin/python -m vllm.entrypoints.cli.main serve
                agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4
   --served-model-name Qwen3.8-Flash-Next-nvfp4 primary
   --port 8096 --host 127.0.0.1 --trust-remote-code
@@ -123,10 +123,11 @@ carries the slot table and the identity probe in full.)
   `expect_kv_pool_tokens_min` are the same idea one level down (§3.1).
 - **The venvs it adapts to.** `start-qwen38-flash-next.sh` reads whichever
   `VLLM_VENV` names and changes the PLE spelling, the fp8 guard and the module
-  path accordingly. Two exist on this box today: `vllm-flash-next-main-1012`
+  path accordingly. Three exist on this box today: `vllm-flash-next-main-1110`
   (vLLM main, UVA offload — what `agent-llm-primary.conf` serves, a main build
-  since 2026-09-10, this venv since 10-12) and `vllm-flash-next-main` (the
-  09-17 `dff1bde` build, the revert target). The third one the script can speak
+  since 2026-09-10, this venv since 11-10), `vllm-flash-next-main-1012` (the
+  10-12 `a98247ab` build, the first revert target) and `vllm-flash-next-main` (the
+  09-17 `dff1bde` build). The third one the script can speak
   — the PLE-offload-worker build `vllm-qwen38-flash-next`, which is also its
   fallback default — has been deleted, so the two-venv branch is currently
   reachable only by rebuilding it (#3136).
@@ -364,9 +365,9 @@ the MTP drafter accepts fewer tokens through an e4m3 cache. The step time
 itself is unchanged. Quality sat at the noise floor.
 
 **The venv guard.** `start-qwen38-flash-next.sh` refuses `KV_CACHE_DTYPE=fp8`
-on a venv whose QSA kernel has no fp8 path (it greps for `IS_FP8` in
-`qsa.py`), rather than booting BF16 quietly. That refusal is why
-`VLLM_VENV=.venvs/vllm-flash-next-main-1012` and `KV_CACHE_DTYPE=fp8` must travel
+on a venv whose QSA kernel has no fp8 path (it greps for `IS_FP8` or, since
+the 11-10 build, `is_fp8` in `qsa.py`), rather than booting BF16 quietly. That refusal is why
+`VLLM_VENV=.venvs/vllm-flash-next-main-1110` and `KV_CACHE_DTYPE=fp8` must travel
 together.
 
 ### 3.1 Pinned and asserted, twice, from two sources
@@ -469,7 +470,7 @@ Every knob is an environment variable the launcher reads, so an arm is one
 
 | Knob | Default | Production | Notes |
 |---|---|---|---|
-| `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main-1012`** | the BF16 worker build vs the FP8 main build (dated per rebuild; the undated path is the 09-17 revert target). The default names a venv that no longer exists (§1, #3136) |
+| `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main-1110`** | the BF16 worker build vs the FP8 main build (dated per rebuild; `-1012` is the first revert target, the undated path the 09-17 build). The default names a venv that no longer exists (§1, #3136) |
 | `KV_CACHE_DTYPE` | *(empty = BF16)* | **`fp8`** | §3 |
 | `MAX_NUM_BATCHED_TOKENS` | *(empty = vLLM's 8192)* | **`4096`** | §5.1 |
 | `LONG_PREFILL_TOKEN_THRESHOLD` | *(empty = off)* | **`2048`** | §5.2: a long prefill's share of each step while another request is eligible |

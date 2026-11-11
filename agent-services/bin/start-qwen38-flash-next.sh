@@ -74,10 +74,13 @@ set -euo pipefail
 #   Stock `pip install vllm` has the qwen4_exp model but NO offload, and without
 #   offload this checkpoint needs ~170 GiB of VRAM.
 #
-# WHAT IS ON THE BOX (since the 2026-10-12 rebuild)
-#   serving  ~/lloyd/.venvs/vllm-flash-next-main-1012  setup-vllm-flash-next-main.sh
-#           vLLM main @ a98247ab4db6, what the supervisor conf pins as
-#           VLLM_VENV and what production boots from today.
+# WHAT IS ON THE BOX (since the 2026-11-10 rebuild)
+#   serving  ~/lloyd/.venvs/vllm-flash-next-main-1110  setup-vllm-flash-next-main.sh
+#           vLLM main @ 8f2ba935a5cb (torch 2.14, FlashInfer 0.7.3), what the
+#           supervisor conf pins as VLLM_VENV and what production boots from.
+#   previous ~/lloyd/.venvs/vllm-flash-next-main-1012  setup-vllm-flash-next-main.sh
+#           vLLM main @ a98247ab4db6, served 2026-10-12 -> 11-10; the first
+#           revert target (the conf's VLLM_VENV line, then `round restart`).
 #   revert   ~/lloyd/.venvs/vllm-flash-next-main       setup-vllm-flash-next-main.sh
 #           vLLM main @ dff1bde84dd6 (built 2026-09-17): UVA PLE offload
 #           (#54371 — the GPU reads the pinned host table directly, so no
@@ -213,7 +216,7 @@ fi
 # the conf's own header describes — so this is the line a rollback actually
 # runs. It is the undated FP8 build, which setup-vllm-flash-next-main.sh
 # rebuilds in place and which is the conf's named revert target; deliberately NOT
-# the dated -1012 path, because a fallback naming a dated build silently rots at
+# a dated path (-1012, -1110), because a fallback naming a dated build silently rots at
 # the next rebuild. It used to name the BF16 worker build
 # .venvs/vllm-qwen38-flash-next, which is not installed on this box: the
 # documented recovery ended at "vLLM venv not found" with nothing underneath
@@ -606,7 +609,9 @@ else
   AB_ARGS+=(--no-enable-flashinfer-autotune)
 fi
 if [[ -n "$KV_CACHE_DTYPE" ]]; then
-  if [[ "$KV_CACHE_DTYPE" == fp8* ]] && ! grep -qs "IS_FP8" "$VLLM_VENV"/lib/python*/site-packages/vllm/models/qwen4_exp/nvidia/ops/qsa.py; then
+  # The fp8 switch is an `IS_FP8` constexpr through the 10-12 build and an
+  # `is_fp8` argument since vLLM's 11-09 QSA rewrite (#66512); either is the path.
+  if [[ "$KV_CACHE_DTYPE" == fp8* ]] && ! grep -qsE '\bIS_FP8\b|\bis_fp8\b' "$VLLM_VENV"/lib/python*/site-packages/vllm/models/qwen4_exp/nvidia/ops/qsa.py; then
     echo "ERROR: KV_CACHE_DTYPE=$KV_CACHE_DTYPE but $VLLM_VENV's QSA kernel has no fp8 path (PR #55557)."
     echo "  The FP8-capable build is the one the supervisord conf pins as VLLM_VENV:"
     echo "  agent-services/supervisor/conf.d/agent-llm-primary.conf (setup-vllm-flash-next-main.sh builds it)."

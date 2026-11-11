@@ -400,8 +400,9 @@ Two other model-specific venvs exist and are only needed if you run those models
 | `vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash draft |
 | `vllm-qwen3.8` | nightly | **Qwen3.8-27B-NVFP4 (live primary)** |
 | `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload worker) — **not installed**: deleted, and still the default `VLLM_VENV` in `flash-next-gdn-sm12x-patch.py` and in `start-secondary.sh`; rebuild with `setup-vllm-qwen38-flash-next.sh` before pointing anything at it |
-| `vllm-flash-next-main-1012` | main @ `a98247ab4db6` + PDL patch | **live primary** since 2026-10-12: the same checkpoint on vLLM main, UVA PLE offload, FP8 KV cache, FlashInfer 0.7.0.post1 with prebuilt cubins |
-| `vllm-flash-next-main` | main @ `dff1bde84dd6` + PDL patch | the 09-17 build, served 2026-09-17 → 10-12; **revert target** |
+| `vllm-flash-next-main-1110` | main @ `8f2ba935a5cb` + PDL patch | **live primary** since 2026-11-10: the same checkpoint on vLLM main, UVA PLE offload, FP8 KV cache, torch 2.14, FlashInfer 0.7.3 with prebuilt cubins + JIT cache |
+| `vllm-flash-next-main-1012` | main @ `a98247ab4db6` + PDL patch | served 2026-10-12 → 11-10; **first revert target** |
+| `vllm-flash-next-main` | main @ `dff1bde84dd6` + PDL patch | the 09-17 build, served 2026-09-17 → 10-12; older revert target, the launcher's fallback default |
 | `vllm-djev` | `0.29.1rc1.dev347+gdee37d891` + a 9-file overlay | **djev** since 2026-09-20: DiffusionGemma 26B-A4B NVFP4 structured reads on GPU 2 |
 
 ### `vllm-djev` — DiffusionGemma structured decisions (GPU 2)
@@ -500,13 +501,20 @@ offload) instead and paused #53899 in its favour, so a plain wheel of main now
 serves this checkpoint on one card — that is the next venv. This one stays
 buildable as the known-good fallback the start script boots by default.
 
-### `vllm-flash-next-main-1012` — the same model on vLLM main, with FP8 KV
+### `vllm-flash-next-main-1110` — the same model on vLLM main, with FP8 KV
 
 ```bash
-bash agent-services/setup/setup-vllm-flash-next-main.sh   # builds .venvs/vllm-flash-next-main-1012
+bash agent-services/setup/setup-vllm-flash-next-main.sh   # builds .venvs/vllm-flash-next-main-1110
 ```
 
-vLLM main at `a98247ab4db6` (2026-10-10; the wheel calls itself
+**Rebuilt 2026-11-10** at `8f2ba935a5cb` (2026-11-09, `0.33.0rc1.dev1148+g8f2ba935a`;
+torch 2.14.0, FlashInfer 0.7.3, transformers 5.22.2). The script's header lists what it
+brings this card; two upstream renames were absorbed (the PDL patch now lands in
+`common/qsa_indexer.py`, and the fp8 marker the setup script and the launcher grep for
+is `IS_FP8` or `is_fp8`). The 10-12 build described below stays at
+`.venvs/vllm-flash-next-main-1012` as the first revert target.
+
+The 10-12 build: vLLM main at `a98247ab4db6` (2026-10-10; the wheel calls itself
 `0.31.1rc1.dev260+ga98247ab4` and that string must be quoted exactly), a
 per-commit wheel keyed by full SHA — the `nightly` index rolls daily and would
 not have this build next week. Rebuilt 2026-10-12 from `dff1bde84dd6` (the
@@ -567,7 +575,7 @@ Serving it is the same start script with the venv pointed at it, and FP8 is a
 second knob:
 
 ```bash
-VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main-1012 KV_CACHE_DTYPE=fp8 bash agent-services/bin/start-qwen38-flash-next.sh
+VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main-1110 KV_CACHE_DTYPE=fp8 bash agent-services/bin/start-qwen38-flash-next.sh
 ```
 
 The script detects which offload implementation the venv carries and adapts

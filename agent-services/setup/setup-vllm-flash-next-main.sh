@@ -2,9 +2,9 @@
 set -euo pipefail
 # vLLM *main* venv for Inferact/Qwen3.8-Flash-Next-NVFP4, with FP8 KV cache.
 #
-#   venv:  ~/lloyd/.venvs/vllm-flash-next-main-1012 (dated: a rebuild goes to a
+#   venv:  ~/lloyd/.venvs/vllm-flash-next-main-1110 (dated: a rebuild goes to a
 #          new path and the previous build stays as the revert target)
-#   start: VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main-1012 bin/start-qwen38-flash-next.sh
+#   start: VLLM_VENV=~/lloyd/.venvs/vllm-flash-next-main-1110 bin/start-qwen38-flash-next.sh
 #   model: setup/setup-qwen38-flash-next.sh (same checkpoint as the offload venv)
 #
 # WHY A SECOND VENV FOR THE SAME MODEL
@@ -62,7 +62,7 @@ set -euo pipefail
 #   health on first boot, 265 s on the second. supervisord's startsecs for
 #   agent-llm-primary must cover the cold case (see the .conf).
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main-1012}"
+VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main-1110}"
 
 # Per-commit wheel index, keyed by full SHA — the `nightly` index rolls daily
 # and would not have this build next week.
@@ -110,8 +110,34 @@ VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-flash-next-main-1012}"
 # .venvs/vllm-flash-next-main as the revert target:
 #   BASE_SHA=dff1bde84dd6e34a49c150116d0f212507280910
 #   VLLM_PIN=0.2.1.dev19+gdff1bde84
-BASE_SHA="a98247ab4db686ee03c66d5feb3c761e52a2f8ab"
-VLLM_PIN="0.31.1rc1.dev260+ga98247ab4"
+#
+# REBUILT 2026-11-10 at 8f2ba935a5cb (main, 2026-11-09, the last commit touching
+# vllm/models/qwen4_exp at the time; inside v0.34.0rc0), 2,251 commits past the
+# 10-12 pin. What it brings this card (sm_120, TP=1, NVFP4, FP8 KV, UVA PLE):
+#   #61601  PLE short conv exports internal prefill checkpoints, so a prefill
+#           crossing its last cacheable block runs in one step (with #60050's
+#           FlashInfer GDN checkpoints; TTFT -17..-23% upstream at 8k prompts)
+#   #62027  Qwen3 tool arguments stream incrementally (12 KB call 2.1 s -> 11 ms);
+#           #64675 closed parameters parsed once
+#   #61976  BUGFIX running requests keep scheduling after a priority self-preemption
+#   #62560  BUGFIX MRV2 sampler warmed after graph capture (memory growth under load)
+#   #65619  one QSA top-k buffer for all layers (~0.37 GiB at a 4096 chunk)
+#   #60490  QSA indexer prefill workspace reserved at profiling
+#   #61821  bias in the SM120 NVFP4 CUTLASS GEMM epilogue
+#   #59958  opt-in --engram-config '{"disk_offload": true}' (not used here yet)
+# Moved, handled in this script: _metadata_launch_pdl() common/qsa_cache.py ->
+# common/qsa_indexer.py, and Qwen4ExpQSAFlashAttentionBackend -> Qwen4ExpQSABackend
+# (#64110). The sm_120 PDL bug is still not fixed upstream (`major >= 9`).
+# Not reaching this card: #66512/#64898 (sm_100/103 kernels), #65812 (this
+# checkpoint carries no K/V scales). torch 2.13 -> 2.14, FlashInfer
+# 0.7.0.post1 -> 0.7.3, transformers cap < 5.23, all with the wheel.
+#
+# Previous pin, the build this slot served 2026-10-12 -> 2026-11-10, kept at
+# .venvs/vllm-flash-next-main-1012 as the revert target:
+#   BASE_SHA=a98247ab4db686ee03c66d5feb3c761e52a2f8ab
+#   VLLM_PIN=0.31.1rc1.dev260+ga98247ab4
+BASE_SHA="8f2ba935a5cb82f5fc231eea6b687a87443e88a6"
+VLLM_PIN="0.33.0rc1.dev1148+g8f2ba935a"
 
 echo "=== vLLM main venv for Qwen3.8-Flash-Next (UVA PLE offload + FP8 KV) ==="
 if [[ ! -x /opt/cuda/bin/nvcc ]]; then
@@ -155,7 +181,7 @@ echo "site-packages: $SP"
 
 echo ""
 echo "=== 2/3 Patching sm_120 PDL hang in the QSA metadata kernel ==="
-QSA="$SP/vllm/models/qwen4_exp/common/qsa_cache.py"
+QSA="$SP/vllm/models/qwen4_exp/common/qsa_indexer.py"  # qsa_cache.py before #64110
 if grep -q "LLOYD_PDL_SM120_PATCH" "$QSA"; then
     echo "  already patched"
 else
@@ -193,10 +219,12 @@ echo "=== 3/3 FP8 main KV cache on the QSA path (PR #55557, merged) ==="
 # refuses fp8, the launcher's own guard fires four minutes in, and the slot
 # falls back to a BF16 pool 1.74x smaller than the one production asserts.
 # Fail here instead, in 10 ms.
-if grep -q "IS_FP8" "$SP/vllm/models/qwen4_exp/nvidia/ops/qsa.py"; then
-    echo "  ok  wheel carries the fp8 QSA kernel path (IS_FP8)"
+# The marker is the kernel's fp8 switch: an `IS_FP8` constexpr up to 10-12, an
+# `is_fp8` argument since the 11-09 rewrite (#66512 split qsa_fp8.py out).
+if grep -qE "\bIS_FP8\b|\bis_fp8\b" "$SP/vllm/models/qwen4_exp/nvidia/ops/qsa.py"; then
+    echo "  ok  wheel carries the fp8 QSA kernel path (IS_FP8 / is_fp8)"
 else
-    echo "  ERROR: this wheel has no IS_FP8 path in vllm/models/qwen4_exp/nvidia/ops/qsa.py."
+    echo "  ERROR: this wheel has no IS_FP8/is_fp8 path in vllm/models/qwen4_exp/nvidia/ops/qsa.py."
     echo "         BASE_SHA ($BASE_SHA) predates the merge of PR #55557"
     echo "         (dff1bde84dd6, 2026-09-16). Move the pin forward, or restore the"
     echo "         overlay from the version of this script at git 4a3ac77."
@@ -230,14 +258,14 @@ try:
     print("PLE offload:  EngramConfig present (UVA path, #54371)")
 except Exception as e:
     fail.append(f"EngramConfig missing: {e}")
-from vllm.models.qwen4_exp.common import qsa_cache
-if "LLOYD_PDL_SM120_PATCH" not in inspect.getsource(qsa_cache._metadata_launch_pdl):
+from vllm.models.qwen4_exp.common import qsa_indexer
+if "LLOYD_PDL_SM120_PATCH" not in inspect.getsource(qsa_indexer._metadata_launch_pdl):
     fail.append("sm_120 PDL patch missing — long prompts will hang")
 else:
-    print(f"sm_120 PDL:   patched (_metadata_launch_pdl() -> {qsa_cache._metadata_launch_pdl()})")
+    print(f"sm_120 PDL:   patched (_metadata_launch_pdl() -> {qsa_indexer._metadata_launch_pdl()})")
 import vllm.models.qwen4_exp.nvidia.model  # noqa: F401  package import order (circular import otherwise)
 from vllm.models.qwen4_exp.nvidia import qsa
-dts = qsa.Qwen4ExpQSAFlashAttentionBackend.supported_kv_cache_dtypes
+dts = qsa.Qwen4ExpQSABackend.supported_kv_cache_dtypes
 if "fp8" not in dts:
     fail.append(f"QSA backend does not advertise fp8 KV: {dts}")
 else:

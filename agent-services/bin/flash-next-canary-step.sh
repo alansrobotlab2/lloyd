@@ -55,7 +55,7 @@ ROOT="${ARM_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # those, and the tiered floor is leave-one-out clean at 0 of 90 on exactly these
 # records. Override ENGINE_OUTPUT_REF after a rebaseline.
 ENGINE_OUTPUT_PROBE="${ENGINE_OUTPUT_PROBE:-$ROOT/eval/engine_output_probe.py}"
-ENGINE_OUTPUT_REF="${ENGINE_OUTPUT_REF:-$ROOT/eval/engine_output/idle/20261012T041722Z_idle1012-5.json}"
+ENGINE_OUTPUT_REF="${ENGINE_OUTPUT_REF:-$ROOT/eval/engine_output/idle/20261111T020805Z_idle1110-5.json}"
 
 # --- #3188: the tool-call leg. Its own seam, resolving under the SAME $ROOT. --------------
 # The prose leg above can only ever measure prose tokens: it posts {prompt, temperature:0,

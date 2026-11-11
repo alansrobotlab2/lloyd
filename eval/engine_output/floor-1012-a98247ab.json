@@ -1,0 +1,257 @@
+{
+ "schema": 1,
+ "kind": "engine_output_floor",
+ "made": "2026-10-12T04:17:29+00:00",
+ "runs": [
+  "idle1012-5",
+  "idle1012-4",
+  "idle1012-3",
+  "idle1012-2",
+  "idle1012-1"
+ ],
+ "n_runs": 5,
+ "corpus_sha256": "b880e4716d17316e7a6e21c138aea93ba32e5e9ec891faaa96814c987ad1063f",
+ "engine": {
+  "base_url": "http://127.0.0.1:8096",
+  "venv": "/home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main-1012",
+  "vllm_version": "0.31.1rc1.dev260+ga98247ab4",
+  "served_model": "Qwen3.8-Flash-Next-nvfp4",
+  "model_root": "/home/alansrobotlab/lloyd/agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4",
+  "kv_cache_dtype": "fp8",
+  "kv_cache_size_tokens": 844969,
+  "block_size": 3200,
+  "mamba_cache_mode": "align",
+  "cache_config_published": true
+ },
+ "params": {
+  "temperature": 0,
+  "logprobs": 1,
+  "model": "primary",
+  "cache_salt": "none"
+ },
+ "summary": {
+  "prompts": 21,
+  "prompts_bitwise_reproducible": 14,
+  "prompts_token_reproducible": 16,
+  "agreement_min": 0.0,
+  "median_lp_delta_max": 0.4160548374056816,
+  "token_lp_delta_max": 0.4344845116138458
+ },
+ "cache_salt_modes": [
+  "none"
+ ],
+ "jitter_margin": 3.5,
+ "jitter_loo_worst_ratio": 2.7762,
+ "prompts": {
+  "short_capital": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "short_count": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "short_python": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "short_json": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "short_sql": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "short_prose": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "short_german": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "short_arith": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "chat_haiku": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "chat_explain": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "sys_restart": {
+   "agreement_min": 0.047619047619047616,
+   "median_lp_delta_max": 0.3417927622795105,
+   "token_lp_delta_max": 0.37437528371810913,
+   "first_divergence_min": 2,
+   "pairs_same_tokens": 0,
+   "pairs_bitwise": 0,
+   "pairs": 10,
+   "tier": "jitter"
+  },
+  "sys_rule_lookup": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.00032463866227772087,
+   "token_lp_delta_max": 0.09384772181510925,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 0,
+   "pairs": 10,
+   "tier": "jitter"
+  },
+  "sys_missing_file": {
+   "agreement_min": 0.03225806451612903,
+   "median_lp_delta_max": 0.4160548374056816,
+   "token_lp_delta_max": 0.4344845116138458,
+   "first_divergence_min": 1,
+   "pairs_same_tokens": 3,
+   "pairs_bitwise": 0,
+   "pairs": 10,
+   "tier": "jitter"
+  },
+  "sys_summary": {
+   "agreement_min": 0.0,
+   "median_lp_delta_max": 0.16417299211025238,
+   "token_lp_delta_max": 0.39851778745651245,
+   "first_divergence_min": 0,
+   "pairs_same_tokens": 1,
+   "pairs_bitwise": 0,
+   "pairs": 10,
+   "tier": "jitter"
+  },
+  "sys_count": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.003971694270148873,
+   "token_lp_delta_max": 0.04981902241706848,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 0,
+   "pairs": 10,
+   "tier": "jitter"
+  },
+  "tool_bash_disk": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "tool_read_file": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "tool_fetch": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "tool_none_needed": {
+   "agreement_min": 1.0,
+   "median_lp_delta_max": 0.0,
+   "token_lp_delta_max": 0.0,
+   "first_divergence_min": null,
+   "pairs_same_tokens": 10,
+   "pairs_bitwise": 10,
+   "pairs": 10,
+   "tier": "exact"
+  },
+  "long_needle": {
+   "agreement_min": 0.45,
+   "median_lp_delta_max": 0.0001545917839393951,
+   "token_lp_delta_max": 0.20419812202453613,
+   "first_divergence_min": 9,
+   "pairs_same_tokens": 4,
+   "pairs_bitwise": 0,
+   "pairs": 10,
+   "tier": "jitter"
+  },
+  "long_continue": {
+   "agreement_min": 0.5416666666666666,
+   "median_lp_delta_max": 0.0029250633087940514,
+   "token_lp_delta_max": 0.2677174434065819,
+   "first_divergence_min": 26,
+   "pairs_same_tokens": 3,
+   "pairs_bitwise": 0,
+   "pairs": 10,
+   "tier": "jitter"
+  }
+ }
+}

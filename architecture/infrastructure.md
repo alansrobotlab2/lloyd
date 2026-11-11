@@ -25,7 +25,7 @@ what to back up); this is the running shape.
 | Automod worktrees | `~/lloyd-work/SM_<stamp>/`, cut from live `main` per round |
 | Vault | `~/obsidian` (Obsidian Sync, headless via `agent-obsidian-sync`) |
 | Secrets | `.env` (gitignored), expanded into `config.yaml` `${VAR}` placeholders at boot |
-| Python venvs | `.venvs/lloyd` (backend, aggregator, voice worker), `vllm-flash-next-main-1012` (primary, served), `vllm-flash-next-main` (the 09-17 build, revert target), `vllm-djev` (djev's engine), `vllm-omni` (the voice TTS's), `qwen3-tts`. Two more are named by launchers and **not installed**: `vllm-qwen38-flash-next` and `vllm-qwen3.8` — see §Model slots |
+| Python venvs | `.venvs/lloyd` (backend, aggregator, voice worker), `vllm-flash-next-main-1110` (primary, served), `vllm-flash-next-main-1012` (the 10-12 build, first revert target), `vllm-flash-next-main` (the 09-17 build), `vllm-djev` (djev's engine), `vllm-omni` (the voice TTS's), `qwen3-tts`. Two more are named by launchers and **not installed**: `vllm-qwen38-flash-next` and `vllm-qwen3.8` — see §Model slots |
 | State outside the repo | `~/.local/state/lloyd-automod/` (ledger, rounds, clusters), `~/.local/state/lloyd-guardian/` (pinned guardian snapshot), `~/.local/share/<channel>/` (youtube `seen.json`) |
 
 ## GPUs
@@ -94,7 +94,7 @@ check, and those checks are the only reason this table can be trusted.
 
 | Alias | Port | Engine | Model | Program |
 |---|---|---|---|---|
-| `primary` | 8096 | vLLM, venv `vllm-flash-next-main-1012` | Qwen3.8-Flash-Next NVFP4, FP8 KV | `agent-llm-primary` |
+| `primary` | 8096 | vLLM, venv `vllm-flash-next-main-1110` | Qwen3.8-Flash-Next NVFP4, FP8 KV | `agent-llm-primary` |
 | `secondary` | 8091 | llama.cpp `llama-server`, `--parallel 1` | Qwen3.6-35B-A3B UD-Q3_K_XL | `agent-llm-secondary` |
 | — | 8010 + 8011 | vLLM (`.venvs/vllm-djev`) with a structured-decision server in front | DiffusionGemma 26B-A4B NVFP4 | `agent-djev` |
 | — | 8090 | Qwen3-TTS (`.venvs/qwen3-tts`) | cloned voice `clone:dave_cullen` | `agent-tts` |
@@ -168,11 +168,11 @@ that dropped `LANGUAGE_MODEL_ONLY=0` (#1420, [[desktop]]).
 ever reports; restarting a slot is precisely the operation that would have
 swapped the model in the first place.
 
-Two venvs **on this box** can serve the primary's model family, which is why
+Three venvs **on this box** can serve the primary's model family, which is why
 `VLLM_VENV` is pinned in the conf rather than left to the launcher:
-`vllm-flash-next-main-1012` (what the program names) and the undated
-`vllm-flash-next-main`, the 09-17 build kept as the revert target with the same
-fp8 QSA path. The launcher's *own* fallback default
+`vllm-flash-next-main-1110` (what the program names), `vllm-flash-next-main-1012`
+(the 10-12 build, first revert target) and the undated `vllm-flash-next-main`,
+the 09-17 build, all with the same fp8 QSA path. The launcher's *own* fallback default
 (`agent-services/bin/start-qwen38-flash-next.sh`) is `.venvs/vllm-qwen38-flash-next`, and a
 dropped `VLLM_VENV` still does not reach BF16 — it exits 1 one check earlier, at
 the venv-exists guard `:239-243`, because that venv is no longer installed; had
