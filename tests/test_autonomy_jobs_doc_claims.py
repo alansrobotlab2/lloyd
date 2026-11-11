@@ -8640,7 +8640,7 @@ def test_the_doc_states_the_queue_age_as_published_and_never_acted_on():
         f"run rows in 3 arms and publishes from "
         f"{pool_src.count('**queue_age_meta(item)')} of them")
     assert "RUN_QUEUE_AGE" in autonomy_src, (
-        "the subsection says the age reaches the run record's dispatch block; "
+        "the subsection says the age reaches the run record's front matter; "
         "app/autonomy.py no longer carries the contextvar that carries it")
 
     # The false greens: a subsection that keeps its shape but loses any one of the
@@ -8689,3 +8689,86 @@ def test_a_claim_of_no_age_predicate_holds_in_the_code_the_doc_describes():
     assert "queue_age_seconds" not in executable, (
         "the document states the age is published rather than acted on, but "
         "claim_next's own body now reads the field")
+
+
+#: Words the subsection may not use about the record's front matter. Each asserts a
+#: position the renderer does not preserve, or a sibling key that is not always there.
+_PLACEMENT_LIES = ("dispatch block", "sit adjacent", "lands before")
+
+
+def test_the_age_is_documented_as_a_key_to_look_up_not_a_position_to_find():
+    """Where the age sits in a record is decided by `yaml.dump` and by one `if`.
+
+    The subsection used to send a reader to "the dispatch block with `trigger` and
+    `in_window`", and `app/autonomy.py`'s `_records_trigger` said the three keys "sit
+    adjacent in the front matter in that order". Neither is true, and a reader who
+    believed them mis-reads the field:
+
+    * `_write_run_record` renders the front matter with `yaml.dump(fm, ...)`, whose
+      default sorts keys, so `in_window`, `queue_age_seconds` and `trigger` come out
+      alphabetically however `run_task` seeds them;
+    * `run_task` stamps `in_window` only under `_effective_preferred_hours(task)`, so a
+      task with `preferred_hours: []` publishes no `in_window` at all —
+      `run_78_20261111_172730.md` (task 78, `preferred_hours: []`, completed
+      2026-11-11T17:45:40Z) carries `queue_age_seconds: 1` and `trigger: scheduler`
+      and no `in_window`, while `run_38_20261111_062311.md` (task #38, which declares
+      hours) carries `in_window: true`.
+
+    So "the age is missing because `in_window` is missing" is a reading the document
+    must not invite, and `in_window` is already documented as a different question.
+    """
+    section = _flat(_queue_age_section())
+
+    lies = [lie for lie in _PLACEMENT_LIES if lie in section]
+    assert lies == [], (
+        f"the subsection claims a placement the renderer does not produce: {lies}; "
+        "the age is looked up by key name")
+    assert "sorts keys" in section, (
+        "the subsection does not say why key order in the record means nothing")
+    assert "`preferred_hours`" in section, (
+        "the subsection does not say that `in_window` is absent for a task with no "
+        "preferred hours, which is the common case, not the exception")
+
+    # The prose is only half the claim: both mechanisms have to still be the ones the
+    # subsection describes, or the corrected sentence goes stale the way the old one did.
+    autonomy_src = (ROOT / "app" / "autonomy.py").read_text()
+    assert "yaml.dump(fm, default_flow_style=False)" in autonomy_src, (
+        "`_write_run_record` no longer renders the front matter with a sorting dump, "
+        "so the subsection's 'sorts keys' sentence needs re-reading")
+    guarded = [ln.strip() for ln in autonomy_src.splitlines()
+               if 'active["in_window"]' in ln]
+    assert guarded == ['active["in_window"] = _is_preferred_hour(task)'], (
+        f"the single `in_window` stamp the subsection describes is now something else: "
+        f"{guarded}")
+    guard_lines = [ln.strip() for ln in autonomy_src.splitlines()
+                   if "_effective_preferred_hours(task)" in ln and ln.strip().startswith("if")]
+    assert any("active is not None" in g for g in guard_lines), (
+        "`in_window` is no longer written behind a preferred-hours guard, so it really "
+        "would be present on every record and the subsection overstates the absence")
+
+    # The same claim in the code's own words: `_records_trigger` is where a maintainer
+    # reads how these keys travel, and it carried the adjacency lie too.
+    doc = _decorator_docstring("_records_trigger", autonomy_src)
+    assert "sorted" in doc or "sorts" in doc, (
+        "`_records_trigger` no longer says the front matter's keys come out sorted")
+    assert "`preferred_hours`" in doc, (
+        "`_records_trigger` no longer says `in_window` is conditional on preferred hours")
+    doc_lies = [lie for lie in _PLACEMENT_LIES if lie in doc]
+    if "adjacent" in doc:
+        doc_lies.append("`adjacent`")
+    assert doc_lies == [], (
+        "`_records_trigger` claims the dispatch keys are positioned, which `yaml.dump` "
+        f"contradicts: {doc_lies}")
+
+
+def _decorator_docstring(name: str, src: str) -> str:
+    """The docstring of a module-level function in `app/autonomy.py`'s source."""
+    import ast
+
+    tree = ast.parse(src)
+    fn = next((n for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name == name), None)
+    assert fn is not None, f"app/autonomy.py no longer defines {name}"
+    doc = ast.get_docstring(fn)
+    assert doc, f"{name} lost the docstring that describes the dispatch keys"
+    return doc

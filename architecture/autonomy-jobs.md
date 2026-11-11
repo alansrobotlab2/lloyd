@@ -1699,10 +1699,15 @@ backticked cites that every prompt in this system leans on.
 `WorkQueue.claim_next` stamps `claimed_at` and hands the row to a worker. The row now
 comes out carrying **`queue_age_seconds`** — whole seconds from its own `enqueued_at`
 to that stamp — and `workers/pool.py` publishes the same number twice more: into the
-run row's `meta_json`, and into the run record's front matter, where it lands in the
-dispatch block with `trigger` and `in_window`. #102 and #106 read `workers.db`, so the
-store is where a claim's age is worth having for a fleet question; the record is where
-one run's reader sees it.
+run row's `meta_json`, and into the run record's front matter. Nothing in that front
+matter is a block to look for: `_write_run_record` renders it with `yaml.dump`, which
+sorts keys, so `in_window`, `queue_age_seconds` and `trigger` arrive alphabetically
+however they were seeded — and `in_window` is absent altogether for a task whose
+`preferred_hours` are empty (`run_78_20261111_172730.md` carries `queue_age_seconds: 1`
+and `trigger: scheduler`, and no `in_window`). The age is read **by name**, never by
+position beside its two siblings. #102 and #106 read `workers.db`, so the store is where
+a claim's age is worth having for a fleet question; the record is where one run's reader
+sees it.
 
 **Published, not enforced: a late row is neither dropped nor re-stamped.** The verdict
 on the number is deliberately nothing. `claim_next` is one path shared by every source

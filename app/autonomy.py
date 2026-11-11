@@ -4513,9 +4513,11 @@ def _records_trigger(fn):
     who asked, and `queue_age_seconds` how long the queue row it came from had been
     waiting (`RUN_QUEUE_AGE`, #4035). A `None` age is filtered out by
     `_write_run_record`, so a run with no queue row publishes no key instead of a 0
-    that would read as an instant claim. Both land before `in_window`, which
-    `run_task` stamps once the task file is parsed, so the three dispatch keys sit
-    adjacent in the front matter in that order.
+    that would read as an instant claim. `run_task` adds `in_window` to this same dict
+    afterwards, and only under its `_effective_preferred_hours(task)` guard, so a task
+    with no `preferred_hours` publishes no `in_window` at all; and the record's keys
+    come out sorted, because `_write_run_record` renders the front matter with
+    `yaml.dump`. Nothing here is positional — the three are read by name.
     """
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
