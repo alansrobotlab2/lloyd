@@ -4888,7 +4888,12 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: compares the file against itself by a different name: if the round's commit was rebased
 #: on the way to `main`, the value below names the pre-rebase object, which still resolves
 #: and still holds the same bytes — `63d46756` was itself such a name for its first weeks.
-RUN_EVAL_CODE_ANCHOR = "618a4b23"
+#: The harness moved a second time since: `15bc6fc5` ("information reach") added the
+#: `documents_error(err)` fallback to `write_json`'s error payload, an executable line, and
+#: left this value at `618a4b23` — which is why the re-stamp node went red on a tree whose
+#: only eval change since was prose. It moves here, in the shape the node instructs; the
+#: projection at `15bc6fc5` is byte-identical to HEAD (1,980 executable lines, zero moved).
+RUN_EVAL_CODE_ANCHOR = "15bc6fc5"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because

@@ -2159,13 +2159,17 @@ def test_the_band_section_says_the_band_is_off_and_names_the_way_back_on():
     measurements that made it unmeetable, and can still be switched back on from here.
 
     The numbers are what a reader needs to decide not to re-enable it by reflex, so
-    they are pinned with their denominators, and one denominator is checked against the
-    file it counts rather than taken from the prose: `eval/vault_recall_queries.yaml`
-    has 81 queries today, and prose claiming a different pool size is a stale claim
-    about the probe set, not a style choice. The other denominator — the band's 15
-    endpoints — is a live-store figure and is checked by the probe in the skill's own
-    band section, not here: a unit test that read the production graph would fail on
-    someone else's landing rather than on this diff.
+    they are pinned with their denominators, and the denominator is taken from the file
+    it counts, never from a literal here: `eval/vault_recall_queries.yaml` grew 81 -> 86
+    at `15bc6fc5`, and this node used the literal `81` in BOTH the sentence filter and
+    the cross-check below, which on an 86-query corpus asks the page for a pool size the
+    file no longer has and then rejects the number the page correctly names — a node no
+    prose can satisfy. So the filter is the file's own count, and what a stale claim now
+    means is a different pool size stated as if it were the current one: history is
+    allowed, and has to say "then". The other denominator — the band's 15 endpoints — is
+    a live-store figure and is checked by the probe in the skill's own band section, not
+    here: a unit test that read the production graph would fail on someone else's landing
+    rather than on this diff.
     """
     band = _flat(_skill_section_lines(_skill_text(), "#### The 0.70"))
     sentences = re.split(r"(?<=[.!?]) +", band)
@@ -2174,15 +2178,29 @@ def test_the_band_section_says_the_band_is_off_and_names_the_way_back_on():
     assert "not enabled in the nightly" in band.lower(), (
         f"the band section never says the nightly is not running it: {band}")
 
-    # (clause 2, half 2) measurement one: 0 of the 81 eval queries bridgeable.
-    bridge = [s for s in sentences if re.search(r"\b0 of the 81\b", s)]
-    assert bridge, f"the band section states no '0 of the 81 queries' measurement: {band}"
-    assert "both endpoints" in bridge[0].lower() and "gold" in bridge[0].lower(), bridge[0]
+    # (clause 2, half 2) measurement one: 0 of the probe set's queries bridge a band
+    # edge. `pool` is the count the file itself reports, so the page has to carry the
+    # pool the eval suite actually holds; on 2026-11-11 that is 86.
     eval_yaml = Path(__file__).resolve().parents[1] / "eval" / "vault_recall_queries.yaml"
-    quoted = int(re.search(r"0 of the (\d+)\b", bridge[0]).group(1))
-    assert quoted == len(_eval_queries(eval_yaml)), (
-        f"the prose quotes a {quoted}-query probe set; {eval_yaml} has "
-        f"{len(_eval_queries(eval_yaml))}")
+    pool = len(_eval_queries(eval_yaml))
+    quoted = [int(m) for m in re.findall(r"\b0 of the (\d+)[- ]quer", band)]
+    assert quoted, f"the band section states no '0 of the N queries' measurement: {band}"
+    bridge = [s for s in sentences
+              if re.search(rf"\b0 of the {pool}[- ]quer", s)]
+    assert bridge, (
+        f"the band section states no measurement over the {pool}-query pool the eval file "
+        f"has — it quotes {quoted} instead, which is a stale claim about the probe set: "
+        f"{band}")
+    assert "both endpoints" in bridge[0].lower() and "gold" in bridge[0].lower(), bridge[0]
+    # A figure that is not the pool's size must announce itself as history, or a reader
+    # weighs a retired pool against the current one. This is what `81` has to look like
+    # now the corpus is 86, and it is the assertion that keeps the fix above from turning
+    # into "any denominator passes".
+    for stale in [q for q in quoted if q != pool]:
+        marked = [s for s in sentences if re.search(rf"\b0 of the {stale}[- ]quer", s)]
+        assert all("then" in s.lower() for s in marked), (
+            f"the band section states a {stale}-query pool without saying it is the pool "
+            f"of that date, so it reads as the current one: {marked}")
 
     # (clause 2, half 3) measurement two: 0 band endpoints are a gold entity name. The
     # apostrophe class is open because the vault's own typography is mixed.
