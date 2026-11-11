@@ -262,6 +262,21 @@ REJECT_REST_SECONDS = 4 * 86400
 #: elapsed anyway, and still never land the doc. After this many, the ordinary
 #: cadence is back in force.
 MAX_REJECT_REQUEUES = 2
+#: How many keeper files ONE unit may leave standing in EITHER keeper dir above.
+#: Both writers save a whole copy of the doc — a conflict keeper is a fresh file
+#: per HEAD move, a rejected keeper one per unit per day — and nothing else ever
+#: collects them: the dirs live in `scripts.automod.state.STATE_DIR`, outside the
+#: retention sweep's `DATA_ROOT`, and the live box carried a 54,303-byte conflict
+#: keeper of 2026-09-27 that no reader had opened. `MAX_REJECT_REQUEUES` bounds a
+#: refusal STREAK, not the store, and a month's interval starts a new one. So the
+#: bound sits at the writer (`_prune_keepers`), and it is ONE constant for both
+#: dirs because they are the same mistake twice. Aged by mtime, not by the row:
+#: `_rest_fields` drops `doc_rejected` on the next pass that did not lose an edit,
+#: so a keeper file routinely outlives the row that named it. Three rather than
+#: one, because the keeper's whole purpose is that a human can read what the
+#: review wanted, and one copy cannot say whether the rail is refusing the same
+#: hunk over and over.
+MAX_KEPT_PER_UNIT = 3
 _GIT_TIMEOUT = 60
 
 #: Worktrees an `execute` in THIS process is using. Both the tick that sweeps
@@ -1660,8 +1675,56 @@ def store_pending(unit: str, rel: str, content: bytes, base_blob: str, message: 
             "base_blob": base_blob}
 
 
+def _prune_keepers(d: Path, unit: str, written: Path) -> None:
+    """Delete all but the newest `MAX_KEPT_PER_UNIT` of this unit's keepers in `d`.
+
+    Scoped twice over, because this deletes files in the automod state dir and
+    nothing here is a garbage collector: only inside the keeper directory the
+    write just went into (this unit's keepers in the SIBLING keeper dir are not
+    candidates), and only over names beginning `<safe unit>-` (so another unit's
+    keepers, a stray file, and the directory itself survive). The file just
+    written is never a candidate — a keeper whose reported path the bookkeeping
+    then deleted is worse than no keeper — so the newest few of the rest stand
+    beside it, `MAX_KEPT_PER_UNIT` files for the unit in total.
+
+    Best-effort by construction: every `OSError` is swallowed here. A prune that
+    cannot run leaves the store one file over the bound with the keep still
+    reported, rather than turning a keep into a failure or a refused edit into a
+    different outcome — the same rule `keep_rejected` already applies to its own
+    write, where `""` means nothing was kept and the refusal stands anyway.
+    """
+    limit = MAX_KEPT_PER_UNIT
+    prefix = f"{_safe_name(unit)}-"
+    try:
+        siblings = [p for p in d.iterdir()
+                    if p.name.startswith(prefix) and p != written and p.is_file()]
+    except OSError:
+        return
+    excess = len(siblings) - max(limit - 1, 0)
+    if excess <= 0:
+        return
+    dated = []
+    for p in siblings:
+        try:
+            dated.append((p.stat().st_mtime, p.name, p))
+        except OSError:
+            continue  # an unreadable age is not evidence that a file is old
+    dated.sort()  # oldest mtime first, name breaking a same-second tie
+    for _mtime, _name, p in dated[:excess]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 def keep_conflict(unit: str, content: bytes) -> str:
-    """Save the content of a review whose live doc moved, for a human to read."""
+    """Save the content of a review whose live doc moved, for a human to read.
+
+    One file per event, and `promote` moves production's HEAD constantly while a
+    review is in flight, so the writer bounds it: at most `MAX_KEPT_PER_UNIT`
+    files per unit in this dir, oldest mtime first (`_prune_keepers`). A prune
+    that fails never changes what this returns.
+    """
     d = _state_subdir(CONFLICT_DIRNAME)
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{_safe_name(unit)}-{int(time.time())}.md"
@@ -1669,6 +1732,7 @@ def keep_conflict(unit: str, content: bytes) -> str:
         path.write_bytes(content)
     except OSError:
         return ""
+    _prune_keepers(d, unit, path)
     return str(path)
 
 
@@ -1684,6 +1748,10 @@ def keep_rejected(unit: str, root: Path, rel: str) -> str:
 
     A refusal never depends on this write succeeding: `""` means nothing was
     kept, and the summary says so rather than naming a file that is not there.
+    Nor does it depend on the bookkeeping afterwards: the same
+    `MAX_KEPT_PER_UNIT` bound that `keep_conflict` carries is applied here
+    (`_prune_keepers`, oldest mtime first) and a prune that fails leaves the
+    store one file over the bound with the refusal exactly as it was.
     """
     try:
         content = (root / rel).read_bytes()
@@ -1697,6 +1765,7 @@ def keep_rejected(unit: str, root: Path, rel: str) -> str:
         path.write_bytes(content)
     except OSError:
         return ""
+    _prune_keepers(d, unit, path)
     return str(path)
 
 

@@ -180,10 +180,12 @@ defence there, not the second one.
    obeying it. A whole-doc unit still reads "of the doc", which for it is the
    truth.
    What a bound refuses is the **commit**, not the correction: since #3338
-   `keep_rejected` copies the edited file into the state dir and the row names
-   it (`doc_rejected`, `reject_streak`), and §1's shortened rest brings the unit
-   back to re-derive the edit rather than waiting out a month for a mistake the
-   rail caused.
+   `keep_rejected` copies the edited file into the `arch-review-rejected` keeper
+   dir (`REJECTED_DIRNAME`) under the automod state root, where one unit leaves at
+   most 3 files (`MAX_KEPT_PER_UNIT`, the writer dropping the oldest by mtime), and
+   the row names it (`doc_rejected`, `reject_streak`), and §1's shortened rest
+   brings the unit back to re-derive the edit rather than waiting out a month for a
+   mistake the rail caused.
    A front matter block that no longer opens the file is refused outright: the
    vault indexes on it.
 3. **A group edits only its own section.** `git diff -U0` gives old-side hunks;
@@ -222,8 +224,9 @@ defence there, not the second one.
    one `git commit -m … -- <doc>` with a pathspec and no `git add`. Live HEAD
    having moved for other files is fine; the doc having moved is a
    `commit_conflict`: never an overwrite, recorded on the event and the state
-   row, and the reviewed content kept under `arch-review-conflicts/` for a
-   human to read. A drain or the lock **defers**: the content goes to
+   row, and the reviewed content kept under `arch-review-conflicts/`, where one
+   unit leaves at most 3 files (`MAX_KEPT_PER_UNIT`, the writer dropping the
+   oldest by mtime), for a human to read. A drain or the lock **defers**: the content goes to
    `arch-review-pending/<unit>.md` with `pending_commit {rel, message,
    content_path, base_blob}`, live stays clean, and the next tick commits it
    under the same conflict rule. A pending row from before #1462 (only

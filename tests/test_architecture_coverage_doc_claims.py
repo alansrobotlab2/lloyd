@@ -895,8 +895,14 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
       "here, not a pointer to the module"
   ),
   'arch-review-conflicts/':
-   ("generated: the gate's per-round conflict reports, written"
-    'under the runtime root by a run and swept with the round'),
+   ("generated: keep_conflict in workers/sources/arch_review.py copies the whole "
+    "reviewed doc into this dir under the automod state root whenever live HEAD "
+    "moves under a review — one file per unit per conflict, kept for a human to "
+    "read — and that same writer prunes it back to MAX_KEPT_PER_UNIT files for the "
+    "unit, oldest mtime first. Nothing outside that module removes them: the dir is "
+    "outside the data root the groundskeeper retention rules cover, and the round "
+    "that produced one is long gone before anyone reads it"),
+
   'pending-research/':
    ('generated: the vault staging directory the research worker'
     'fills while a sweep is in flight and empties when the note'
@@ -1401,7 +1407,12 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: the invented path `automod.md`'s own review-log sweep quotes — §4.5's worked-example
 #: placeholder, admitted for the same reason `app/x.py:164` is (#4061) — and the list is
 #: now 110 exemptions across 29 docs — other-tree 43, generated 34, historical 33 — with
-#: NONE of them `stale:`.
+#: NONE of them `stale:`. #4058 moved no count here and is worth the sentence anyway: it
+#: rewrote the `generated:` reason on `arch-review-conflicts/`, which had the arch-review
+#: keepers as the gate's per-round reports "swept with the round" — nothing of the sort,
+#: `keep_conflict` writes them by unit and prunes them itself — and the page now names the
+#: other keeper, the `arch-review-rejected` dir, by its constant rather than by a new
+#: path-shaped citation, so a store the size rail counts gained no debt row.
 #: The ruling, from that owed-check: `stale` STAYS an admitted kind, and this ceiling — not
 #: the kind list — is the rail. Deleting the kind was refused for a reason worth keeping
 #: beside the number, because it is the rail's own text: the failure message of
@@ -13280,3 +13291,59 @@ def test_the_page_keeps_the_two_rulings_that_bound_that_measurement():
         "the page does not say what the measurement cannot decide")
     assert "eval/summary_length_repetition_run.py" in block, (
         "the page names no command to re-measure by — the whole point of #3200's guard")
+
+
+def test_both_arch_review_keeper_dirs_state_their_bound_where_they_state_the_keeping():
+    """#4058: an unbounded keeper stays invisible exactly as long as a rationale says it is bounded.
+
+    Each keeper saves a WHOLE copy of the doc — `keep_conflict` one file per unit
+    per HEAD move, `keep_rejected` one per unit per day — under the automod state
+    root, which is outside the data root the groundskeeper retention rules cover, so
+    nothing else ever removes them. The live box still carries `arch-review-conflicts/
+    group-workers-jobs-Intake-1790569732.md`, 54,303 bytes, written 2026-09-27 and never
+    read. What let that read as accounted for was this module's own exemption for the
+    dir, which said the keepers were "swept with the round" — wrong about the writer (the
+    gate writes none of them; `keep_conflict` does, keyed by unit, not by round id) and
+    wrong about the collector (nothing swept them then, and the 45-day-old file is the
+    proof).
+
+    So the bound is graded as prose here: the number in the SAME sentence as the dir, for
+    both keeper dirs, and the number is the one the writers enforce. And the reason names
+    the writer that prunes, with no wording left standing that a round or a gate takes the
+    files back — a rationale that does that is what let the store grow.
+    """
+    from workers.sources import arch_review as AR
+
+    assert AR.MAX_KEPT_PER_UNIT == 3, (
+        "both keeper sentences on the page are written for the number 3, so the constant "
+        "moved without the prose — the drift this node exists to catch")
+    bound = f"at most {AR.MAX_KEPT_PER_UNIT} files"
+    flat_text = _flat(_text("arch-review.md"))
+    sentences = _sentences(flat_text)
+    # The two keepers are cited in the two spellings the page already admits: the
+    # conflicts dir by its path-shaped citation, which carries the exemption this
+    # round corrected, and the rejected dir by its backticked name — the page names
+    # the store without adding a path row that resolves under none of the four roots.
+    # Both are matched by their opening backtick, so re-spelling one of them is a
+    # retraction this node sees.
+    for dirname in ("arch-review-conflicts", "arch-review-rejected"):
+        marker = f"`{dirname}"
+        naming = [s for s in sentences if marker in s]
+        assert naming, f"architecture/arch-review.md no longer names {marker} at all"
+        unbounded = [s for s in naming if bound not in s]
+        assert not unbounded, (
+            f"{len(unbounded)} of the {len(naming)} sentences naming {marker} state no "
+            "bound: the keeping and its limit have to be one sentence, or a reader who "
+            "stops at 'kept for a human to read' has been told the content is kept forever")
+    assert "REJECTED_DIRNAME" in flat_text, (
+        "the rejected keeper is named only by its store spelling, so the page must also "
+        "give the constant a reader can find in workers/sources/arch_review.py")
+
+    reason = _flat(PATH_CITATION_EXEMPTIONS["arch-review.md"]["arch-review-conflicts/"])
+    for word in ("swept", "sweep"):
+        assert word not in reason.lower(), (
+            "the exemption again explains the store away by saying something sweeps it "
+            f"away — nothing does, the writer prunes: {reason}")
+    assert "keep_conflict" in reason and "prune" in reason.lower(), (
+        "the exemption must name the writer that owns the dir and the pruning that bounds "
+        f"it, not a round that never touched it: {reason}")

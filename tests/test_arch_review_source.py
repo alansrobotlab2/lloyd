@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 import subprocess
 import time
@@ -1559,6 +1560,208 @@ async def test_a_refused_edit_reaches_neither_live_nor_the_committer(tree, monke
     A.save_state(state)
     assert _git(tree["repo"], "rev-parse", "HEAD") == head
     assert doc.read_text() == before, "and still byte-identical after a tick ran"
+
+
+# ── 6h. the two keepers bound themselves at the writer (#4058) ───────────────
+#
+# `keep_conflict` names a NEW file per event (`<unit>-<epoch>.md`, two call
+# sites) and `keep_rejected` one per unit per day (`<unit>-<UTC date>.md`), and
+# each holds a WHOLE copy of the doc. Nothing collected either kind: the live box
+# carries `arch-review-conflicts/group-workers-jobs-Intake-1790569732.md`,
+# 54,303 bytes, written 2026-09-27 and never read since. `MAX_REJECT_REQUEUES`
+# caps a refusal STREAK — a month's interval starts a new one — and the conflicts
+# keeper has no throttle at all while `promote` moves production's HEAD
+# constantly. So the bound goes where the writes are: `MAX_KEPT_PER_UNIT` files
+# per unit per keeper dir, oldest mtime first. Not a retention-sweep row, because
+# both dirs live under `scripts.automod.state.STATE_DIR`, outside the sweep's
+# `DATA_ROOT`, and the provenance that could age them is transient —
+# `_rest_fields` drops `doc_rejected` from the row on the next pass that did not
+# lose an edit, so a keeper file routinely outlives the row that named it and
+# mtime is the only durable age.
+
+
+def _keepers(d: Path, unit: str) -> list[str]:
+    """This unit's keeper FILES in `d`, by name (a missing dir holds none). Files
+    only, so a directory left standing under a keeper's name — which the prune
+    must never touch — is visible to the test that seeds one rather than
+    silently counting toward the bound."""
+    if not d.is_dir():
+        return []
+    return sorted(p.name for p in d.iterdir()
+                  if p.is_file() and p.name.startswith(f"{A._safe_name(unit)}-"))
+
+
+def _seed_keeper(d: Path, name: str, days_ago: float) -> Path:
+    """An existing keeper file, its mtime aged so the prune's order is the
+    test's and not the order the files happened to be written in."""
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(f"seeded keeper {name}\n")
+    old = time.time() - days_ago * 86400
+    os.utime(p, (old, old))
+    return p
+
+
+def _refuse_unlinks_of(dirs: list[Path], unit: str, monkeypatch) -> None:
+    """Make `Path.unlink` raise for this unit's keepers in `dirs`, and ONLY
+    there — so the prune meets a real `OSError` while every other cleanup the
+    turn does (worktree teardown, pending-file removal) still works."""
+    real = Path.unlink
+    prefix = f"{A._safe_name(unit)}-"
+
+    def boom(self, *args, **kwargs):
+        if self.parent in dirs and self.name.startswith(prefix):
+            raise OSError("disk refused the unlink")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", boom)
+
+
+def test_keep_conflict_leaves_three_per_unit_oldest_mtime_first(tree):
+    """Clause 1: four conflict keepers for one unit leave three, the file just
+    written always among them, the oldest mtime the one that went."""
+    unit = "group:workers-jobs:Dispatch"
+    d = tree["state"] / A.CONFLICT_DIRNAME
+    aged = [_seed_keeper(d, f"group-workers-jobs-Dispatch-{1700000000 + i}.md", days)
+            for i, days in enumerate((40, 30, 20))]
+
+    kept = Path(A.keep_conflict(unit, b"the review wanted this\n"))
+
+    assert kept.parent == d and kept.exists()
+    left = _keepers(d, unit)
+    assert len(left) == A.MAX_KEPT_PER_UNIT == 3, left
+    assert kept.name in left, "the file just written is never the one pruned"
+    assert aged[0].name not in left, "40 days on: the oldest mtime is what goes"
+    assert {aged[1].name, aged[2].name} <= set(left), "the two newer keepers stay"
+    assert "the review wanted this" in kept.read_text()
+
+
+def test_keep_rejected_leaves_three_per_unit_oldest_mtime_first(tree):
+    """Clause 2, the refused-doc half: the same rule over the date-named
+    keepers, which is the only thing that bounds a unit whose refusals are
+    months apart — the date name already deduped within a day."""
+    unit = "group:workers-jobs:Dispatch"
+    d = tree["state"] / A.REJECTED_DIRNAME
+    aged = [_seed_keeper(d, f"group-workers-jobs-Dispatch-2026-09-{10 + i}.md", days)
+            for i, days in enumerate((60, 45, 30))]
+    doc = tree["arch"] / "workers-jobs.md"
+    doc.write_text(doc.read_text().replace("Mining body one.", "Mining body ONE."))
+
+    kept = Path(A.keep_rejected(unit, tree["repo"], "architecture/workers-jobs.md"))
+
+    assert kept.parent == d and kept.exists()
+    assert kept.name == f"group-workers-jobs-Dispatch-{_today()}.md", kept.name
+    left = _keepers(d, unit)
+    assert len(left) == A.MAX_KEPT_PER_UNIT == 3, left
+    assert aged[0].name not in left, "the 60-day-old keeper is the one that went"
+    assert {aged[1].name, aged[2].name} <= set(left)
+    assert "Mining body ONE." in kept.read_text(), "the correction itself survives"
+
+
+def test_one_module_constant_bounds_both_keepers(tree, monkeypatch):
+    """Clause 2's 'one shared constant': both keepers read `MAX_KEPT_PER_UNIT`
+    when they run, so tuning it moves both stores together. Two per-keeper
+    numbers would leave one dir unbounded the moment somebody tuned the other."""
+    monkeypatch.setattr(A, "MAX_KEPT_PER_UNIT", 1)
+    unit = "doc:memory"
+    for dirname in (A.CONFLICT_DIRNAME, A.REJECTED_DIRNAME):
+        _seed_keeper(tree["state"] / dirname, f"doc-memory-{1234567}.md", 5)
+
+    kept_conflict = Path(A.keep_conflict(unit, b"c\n"))
+    kept_rejected = Path(A.keep_rejected(unit, tree["repo"], "architecture/memory.md"))
+
+    assert _keepers(tree["state"] / A.CONFLICT_DIRNAME, unit) == [kept_conflict.name]
+    assert _keepers(tree["state"] / A.REJECTED_DIRNAME, unit) == [kept_rejected.name]
+
+
+def test_the_prune_reaches_only_that_units_keepers_in_that_dir(tree):
+    """Clause 3's scoping: the deletions are bounded to the keeper directory the
+    write just went into, and to names beginning `<safe unit>-`. Another unit's
+    keepers, this unit's keepers in the SIBLING keeper dir, a file that is not a
+    keeper, a directory named like one, and the store root all stand."""
+    unit, other = "doc:memory", "doc:voice"
+    cdir = tree["state"] / A.CONFLICT_DIRNAME
+    rdir = tree["state"] / A.REJECTED_DIRNAME
+    mine = [_seed_keeper(cdir, f"{A._safe_name(unit)}-{3000 + i}.md", 40 - 10 * i)
+            for i in range(3)]
+    foreign = [_seed_keeper(cdir, f"{A._safe_name(other)}-{2000 + i}.md", i + 1)
+               for i in range(4)]
+    siblings = [_seed_keeper(rdir, f"{A._safe_name(unit)}-{4000 + i}.md", i + 1)
+                for i in range(4)]
+    stranger = _seed_keeper(cdir, "unrelated-stray.md", 9)
+    not_a_file = cdir / f"{A._safe_name(unit)}-a-directory-named-like-one.md"
+    not_a_file.mkdir()
+    root_children = {p.name for p in tree["state"].iterdir()}
+
+    kept = Path(A.keep_conflict(unit, b"one more whole copy\n"))
+
+    left = _keepers(cdir, unit)
+    assert len(left) == A.MAX_KEPT_PER_UNIT == 3 and kept.name in left, left
+    assert mine[0].name not in left, "the oldest of this unit's four was the one that went"
+    assert all(p.exists() for p in foreign), "another unit's keepers in the SAME dir survive"
+    assert all(p.exists() for p in siblings), \
+        "this unit's keepers in the OTHER keeper dir survive: the prune is scoped to the dir it wrote"
+    assert stranger.exists(), "a name not starting with the unit's safe name survives"
+    assert not_a_file.is_dir(), "a directory named like a keeper is never unlinked"
+    assert len(_keepers(rdir, unit)) == 4, "and the sibling dir still holds all four"
+    assert cdir.is_dir() and tree["state"].is_dir(), "the keeper dir and the store root stand"
+    assert {p.name for p in tree["state"].iterdir()} == root_children, \
+        "no sibling store was created or removed"
+
+
+def test_a_refused_unlink_leaves_the_keep_and_its_path(tree, monkeypatch):
+    """Clause 3's failure arm at the writers: an `OSError` from the prune changes
+    neither keeper's return value nor what is on disk — the store goes one file
+    over the bound and the run still names a file that exists, exactly as
+    `keep_rejected` already treats a failed WRITE.
+
+    The refusals are injected into the CONFLICTS dir only, so the same test
+    carries its own control: the rejected keeper, whose unlinks are not injected,
+    does come back down to three. Were it four as well, the four in the conflicts
+    dir would be evidence of no prune at all rather than of a refused one."""
+    unit = "doc:memory"
+    cdir = tree["state"] / A.CONFLICT_DIRNAME
+    rdir = tree["state"] / A.REJECTED_DIRNAME
+    for i in range(3):
+        _seed_keeper(cdir, f"doc-memory-{5000 + i}.md", 30 - i)
+        _seed_keeper(rdir, f"doc-memory-2026-08-{10 + i}.md", 30 - i)
+    _refuse_unlinks_of([cdir], unit, monkeypatch)
+
+    kept = Path(A.keep_conflict(unit, b"content that must survive\n"))
+    assert kept.exists() and "content that must survive" in kept.read_text()
+    assert len(_keepers(cdir, unit)) == 4, "one over the bound: a failed prune is best-effort"
+
+    kept_rejected = A.keep_rejected(unit, tree["repo"], "architecture/memory.md")
+    assert kept_rejected == str(rdir / f"doc-memory-{_today()}.md"), kept_rejected
+    assert Path(kept_rejected).exists(), "the refused-doc keeper keeps, prune or no prune"
+    left = _keepers(rdir, unit)
+    assert len(left) == 3 == A.MAX_KEPT_PER_UNIT, left
+    assert f"doc-memory-{_today()}.md" in left and "doc-memory-2026-08-10.md" not in left, \
+        "the control pruned: so four in the conflicts dir is a refused unlink, not an absent prune"
+
+
+async def test_a_refusal_is_unmoved_by_a_refused_prune(tree, monkeypatch):
+    """Clause 3's other edge, end to end: a bound that refuses an edit does not
+    become a different outcome because its bookkeeping failed. The refusal never
+    depended on the keeper write (#3338) and it does not depend on the prune
+    either — every field §6g's first test asserts is the same here."""
+    doc = tree["arch"] / "workers-jobs.md"
+    rdir = tree["state"] / A.REJECTED_DIRNAME
+    for i in range(3):
+        _seed_keeper(rdir, f"group-workers-jobs-Dispatch-2026-09-0{i + 1}.md", 50 - i)
+    _refuse_unlinks_of([rdir], "group:workers-jobs:Dispatch", monkeypatch)
+
+    out = await _run_group(tree, monkeypatch,
+                           _edit(doc, "Mining body one.", "Mining body ONE."))
+
+    reason = out["meta"]["doc_update_rejected"]
+    assert "falls outside section" in reason, "the bound still refuses, with the same words"
+    kept = out["meta"]["doc_update_kept"]
+    assert "Mining body ONE." in Path(kept).read_text(), "and the correction still survives"
+    assert out["summary"].count("doc edit rejected") == 1, "the summary is unchanged"
+    assert kept in out["summary"], "and still names the file it wrote"
+    assert A.load_state()["group:workers-jobs:Dispatch"]["doc_rejected"]["kept"] == kept
+    assert len(_keepers(rdir, "group:workers-jobs:Dispatch")) == 4, "over the bound, and unbothered"
 
 
 def test_a_refused_unit_is_offered_first_not_last():
