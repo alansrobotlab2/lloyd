@@ -956,16 +956,6 @@ def test_weighted_neighbors_in_is_the_mirror_of_out(world):
     assert retrieval.graph_weighted_neighbors(["A"], top_k=5, direction="in") == []
 
 
-def test_graph_expand_entities_honours_direction(world):
-    _, st = world
-    st.edges.add({"source": "A", "target": "B", "type": "uses", "confidence": 1.0}, origin="t")
-
-    assert retrieval.graph_expand_entities(["A"], direction="out") == ["B"]
-    assert retrieval.graph_expand_entities(["B"], direction="out") == []
-    assert retrieval.graph_expand_entities(["B"], direction="in") == ["A"]
-    assert retrieval.graph_expand_entities(["A"], direction="in") == []
-
-
 def test_direction_is_consistent_across_hops(world):
     """A → B → C. A directed multi-hop walk never reverses mid-path: `out` from
     A gets both, `out` from B gets only C (not back to A), `in` from C gets
@@ -1012,9 +1002,6 @@ def test_symmetric_types_are_excluded_from_a_directed_query(world):
     assert both == {f"Dir_{i}" for i in range(len(directional))} | {
         f"Sym_{i}" for i in range(len(SYMMETRIC_TYPES))
     }
-    assert set(retrieval.graph_expand_entities(["Hub"], direction="in")) == {
-        f"Dir_{i}" for i in range(len(directional))
-    }
 
 
 def test_symmetric_neighbours_survive_under_the_default(world):
@@ -1028,8 +1015,6 @@ def test_symmetric_neighbours_survive_under_the_default(world):
     default = retrieval.graph_weighted_neighbors(["A"], top_k=5)
     assert set(_names(default)) == {"Symmetric", "Directional"}
     assert default == retrieval.graph_weighted_neighbors(["A"], top_k=5, direction="both")
-    assert set(retrieval.graph_expand_entities(["A"])) == {"Symmetric", "Directional"}
-    assert retrieval.graph_expand_entities(["A"], direction="both") == retrieval.graph_expand_entities(["A"])
 
 
 def test_direction_filters_edges_but_not_scoring(world):
@@ -1052,8 +1037,6 @@ def test_bad_direction_raises_instead_of_going_symmetric(world):
     st.edges.add({"source": "A", "target": "B", "type": "uses", "confidence": 1.0}, origin="t")
     with pytest.raises(ValueError):
         retrieval.graph_weighted_neighbors(["A"], direction="incoming")
-    with pytest.raises(ValueError):
-        retrieval.graph_expand_entities(["A"], direction="sideways")
 
 
 def test_direction_case_is_normalised(world):

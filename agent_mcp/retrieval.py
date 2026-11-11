@@ -7,8 +7,8 @@ Owns the pieces both `agent_mcp.facts` (the fact tools) and
     - Entity extraction from a query (extract_entities_from_query)
     - A read view of the edge graph (load_relationships), which since the
       2026-09 migration lives in app.kg_store, not a JSON file
-    - Entity-to-entity graph traversal + weighted expansion
-      (graph_expand_entities / graph_weighted_neighbors)
+    - Entity-to-entity weighted graph expansion
+      (graph_weighted_neighbors)
     - Query-aware fact reading and ranking
       (get_facts_sync / fact_query_tokens / fact_matches_tokens / fact_score)
 
@@ -80,7 +80,7 @@ _DEFAULT_EDGE_WEIGHT = 0.3  # unknown types fall back to same weight as mentions
 #
 # Used by `_directed_neighbor()` to decide which edges a directed query may
 # filter on. Traversal never filters on this set by itself — see the `direction`
-# docstrings on `graph_expand_entities` / `graph_weighted_neighbors`.
+# docstring on `graph_weighted_neighbors`.
 DIRECTIONAL_EDGE_TYPES: frozenset[str] = frozenset({
     "uses",
     "part_of",
@@ -873,44 +873,6 @@ def _directed_neighbor(entity: str, edge: dict, direction: str) -> Optional[str]
     if direction == "out":
         return tgt if src == entity else None
     return src if tgt == entity else None
-
-
-def graph_expand_entities(
-    seed_entities: list[str],
-    hops: int = 1,
-    direction: Literal["both", "out", "in"] = "both",
-) -> list[str]:
-    """Expand a set of seed entities via relationship graph traversal.
-
-    `direction` ("both" default | "out" | "in") selects which edges the walk
-    may cross; see `_directed_neighbor` for the exact contract, including the
-    deliberate exclusion of symmetric edge types from directed walks.
-    Direction is applied per hop, consistently: `out` follows source→target at
-    every hop, never reversing mid-path. `hops` and the seed-exclusion rule
-    are unaffected.
-    """
-    if not seed_entities:
-        return []
-    direction = _check_direction(direction)
-    try:
-        adj = store().edges.adjacency()
-    except StoreUnavailable:
-        return []
-    seed_set = set(seed_entities)
-    expanded: set[str] = set()
-    current = set(seed_entities)
-    for _ in range(hops):
-        next_layer = set()
-        for entity in current:
-            for edge in adj.get(entity, ()):
-                neighbor = _directed_neighbor(entity, edge, direction)
-                if neighbor is None:
-                    continue
-                if neighbor not in seed_set and neighbor not in expanded:
-                    next_layer.add(neighbor)
-        expanded.update(next_layer)
-        current = next_layer
-    return list(expanded)
 
 
 def graph_weighted_neighbors(

@@ -81,8 +81,8 @@ def test_degree_and_ci_degree(store):
 def test_graph_expansion_walks_both_directions(store):
     store.edges.add(_edge("A", "B"), origin="test")
     store.edges.add(_edge("C", "B"), origin="test")
-    assert sorted(retrieval.graph_expand_entities(["A"], hops=1)) == ["B"]
-    assert sorted(retrieval.graph_expand_entities(["A"], hops=2)) == ["B", "C"]
+    assert [n for n, _ in retrieval.graph_weighted_neighbors(["A"], hops=1)] == ["B"]
+    assert sorted(n for n, _ in retrieval.graph_weighted_neighbors(["A"], hops=2)) == ["B", "C"]
 
 
 def test_weighted_neighbors_prefer_typed_edges(store):
@@ -96,7 +96,6 @@ def test_weighted_neighbors_prefer_typed_edges(store):
 def test_expired_edges_are_not_traversed(store):
     i = store.edges.add(_edge("A", "B"), origin="test")
     store.edges.expire(i, "test")
-    assert retrieval.graph_expand_entities(["A"]) == []
     assert retrieval.graph_weighted_neighbors(["A"]) == []
     assert retrieval.get_entity_edge_counts() == {}
 
@@ -119,7 +118,6 @@ def test_ranking_paths_degrade_on_an_unreadable_store(broken_store):
     a corrupt store costs ranking quality, not a failed recall."""
     assert retrieval._edge_counts_or_empty() == {}
     assert retrieval._edge_counts_or_empty(ci=True) == {}
-    assert retrieval.graph_expand_entities(["A"]) == []
     assert retrieval.graph_weighted_neighbors(["A"]) == []
 
 
