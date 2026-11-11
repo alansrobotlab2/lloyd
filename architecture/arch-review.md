@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers, automod]
 type: reference
 status: implemented
-date: 2026-10-12
+date: 2026-11-11
 ---
 
 # arch-review — the pass that keeps these docs honest
@@ -21,7 +21,7 @@ So what survives of each is the commit's parent — for those five,
 `git show b94be171^:architecture/<slug>.md`. An [[index]] lists what is left,
 and its Retired section names every one of them. Nothing
 kept it honest from there. Three `tests/test_*_doc_claims.py` pinned numbers in
-three of them (23 such files now, over more than twice as many docs);
+three of them (27 such files as of 2026-11-11, over more than twice as many docs);
 `agent_mcp/memory_ops.py:12` (module retired in `ed78a3a9`) cited a doc that no
 longer existed; the measured tables in [[autonomy-jobs]] and [[workers-jobs]] are
 snapshots of one afternoon. A doc that has drifted is worse than no doc,
@@ -54,7 +54,9 @@ gitignore — five archived docs were still tracked when this landed, and a doc
 retired *for being wrong* is the one review with no possible value.
 
 The groups are hand-kept in `workers.sources.arch-review.groups`, one string
-per functional group (11 today), because the two jobs docs group the unattended
+per functional group (12 today — eight of them sections of
+[[autonomy-jobs]], since `c4547c74` added §Watch the machinery on 2026-10-16),
+because the two jobs docs group the unattended
 fleet by what its members are *for*. A function is a review unit of its own:
 who may write, which consumer does not exist, which edges cross groups, which
 defect three members share. One session over an 824-line doc answers none of
@@ -69,11 +71,18 @@ whenever a member does, so matching the whole line would make every regroup a
 `section_missing`. A `###` subheading and a `---` rule inside a section belong
 to it; only a level-2 heading ends it.
 
-**Cadence is age and nothing else.** Never-reviewed first, then oldest
+**Cadence is age, plus one exception.** Never-reviewed first, then oldest
 `last_reviewed_at`, docs before groups on a tie. A unit rests
 `review_interval_days` (30) after a review; `max_attempts` (3) consecutive
-failures park it for `retry_spacing_seconds` (6 h). There is no churn trigger
-and no backoff — the picklist is read from disk at call time, and at
+failures park it for `retry_spacing_seconds` (6 h). **The exception is #3338:**
+a unit whose last doc edit a bound refused carries `due_again_at` — a 4-day rest
+(`REJECT_REST_SECONDS`, module-level, no config key) instead of the 30-day one —
+and `_due_key` sorts it ahead of every age-ordered row, including the
+never-reviewed ones, so the correction is re-derived weeks after the refusal
+rather than a month after it; at the third refusal
+(`MAX_REJECT_REQUEUES`, 2) the field is dropped and ordinary cadence governs,
+because a third failure was not a stale anchor. There is no churn
+trigger and no backoff — the picklist is read from disk at call time, and at
 `daily_max: 4` a board this size is a first pass in its unit-count divided by
 four, and a review a month per unit after that. No count of
 units is restated in prose for the same reason: the first one that was went
@@ -83,7 +92,10 @@ is what survives the state file being deleted.
 
 State is `~/.local/state/lloyd-automod/arch_review.json`, one row per unit:
 `last_reviewed_at`, `reviewed_commit`, `verdict`, `filed`, `attempts`,
-`last_attempt_at`, `last_error`, `pending_commit`, `commit_conflict`.
+`last_attempt_at`, `last_error`, `pending_commit`, `commit_conflict`, plus
+`grouping` and `section_missing` once a group has reported them and
+`doc_rejected`, `reject_streak` and `due_again_at` once a bound has refused its
+doc edit.
 
 ## 2. A review edits a scratch checkout, and four rails decide what reaches live
 
@@ -104,9 +116,14 @@ in-memory set, so a restart empties it together with the turns it described.
 
 What the turn may not
 use is a **deny-list over the whole chat toolbox**, not a grant list:
-`workers/sources/_common.py:1198` says outright that a worker
-session "is handed exactly the toolbox a chat gets", and `DISALLOWED`
-subtracts from that. It names `Write` (the doc exists — a new file is either
+`workers/sources/_common.py:1205` says outright that `extra_disallowed` is *the
+caller's tool control on this path*, on top of what the endpoint now applies by
+the session's own platform — since #709 the endpoint withholds the loop drivers
+from every non-user platform except `autocode` before any source asks, so
+`DISALLOWED` is the remainder. What the last pass of this doc quoted from that
+paragraph — a worker session "is handed exactly the toolbox a chat gets",
+`automod_start` included — is its *history* clause now ("Until #709 nothing in
+that endpoint read `platform`"), and the anchor had moved twice. It names `Write` (the doc exists — a new file is either
 a finding to file or a stray write), `Task` (a subagent's writes land on the
 parent's turn, after the diff was measured), `vault_write`, the automod tools,
 the autonomy writers, `http_request`, `graph_refresh` and the mutating half of
@@ -162,6 +179,11 @@ defence there, not the second one.
    2026-09-12→10-12 ledger had been told the file instead and lost the pass for
    obeying it. A whole-doc unit still reads "of the doc", which for it is the
    truth.
+   What a bound refuses is the **commit**, not the correction: since #3338
+   `keep_rejected` copies the edited file into the state dir and the row names
+   it (`doc_rejected`, `reject_streak`), and §1's shortened rest brings the unit
+   back to re-derive the edit rather than waiting out a month for a mistake the
+   rail caused.
    A front matter block that no longer opens the file is refused outright: the
    vault indexes on it.
 3. **A group edits only its own section.** `git diff -U0` gives old-side hunks;
@@ -169,7 +191,7 @@ defence there, not the second one.
    `start <= L <= end`, while a change `@@ -L,n` covers `L..L+n-1` and is inside
    when `start+1 <= L` and `L+n-1 <= end` — so the heading line is never
    editable. Zero context is load-bearing: with context a one-line edit reports
-   a hunk reaching three lines into the neighbour, and seven groups sharing
+   a hunk reaching three lines into the neighbour, and the eight groups sharing
    [[autonomy-jobs]] would reject each other constantly.
 4. **The source commits onto live, the model never runs `git` — one half by
    blob check, the other by `app/harness/live_git_writes.py::check_live_git_writes`
@@ -302,9 +324,12 @@ is the one that stops the tick.
 `scripts/automod/scorecard.py` row 12: units reviewed by kind, doc edits
 committed against edits rejected, ids filed/merged/appended, stray writes
 reverted, and the verdict histogram. `rejected` is the number to watch — it
-counts turns whose doc edit was thrown away for breaking a bound, which is the
-only way this job spends a whole session and produces nothing, and a rate that
+counts turns whose doc edit a bound refused, which is the
+only way this job spends a whole session without a commit, and a rate that
 stops being near zero means a bound is wrong rather than that the model is.
+Since #3338 the refusal is no longer a blank: the findings stand, the refused
+edit is kept where §2 rail 2 says, and the unit is re-queued in 4 days, so the
+row reads "nothing reached `main` this pass", not "nothing was learned".
 
 The ledger event is `arch_review` in `promotions.jsonl`, one per completed
 review.
@@ -390,3 +415,23 @@ Kill switch: `workers.sources.arch-review.enabled`.
   are now module constants beside `_FM_RULE_DOC`/`_FM_RULE_GROUP` (#1686), which is
   where #913's half-fix should have put them: it moved the denominator and left the
   sentence, and the ledger spent five of eleven group runs on the difference.
+- 2026-11-11 — **stale**. The mechanism and all four rails still run, and every
+  config key, the scorecard row, the deny-list and `check_live_git_writes`
+  check out; what moved is one cadence rule, one citation, and three counts.
+  #3338 (`b377bea5`, 2026-10-25) made the bound's refusal a keep-and-re-queue —
+  `keep_rejected` into the state dir, `doc_rejected`/`reject_streak`/`due_again_at`
+  on the row, a 4-day rest sorted ahead of the age-ordered rows, twice — so
+  §1's "**Cadence is age and nothing else**", rail 2's silence about what the
+  bound discards, and §5's "thrown away … produces nothing" were each one pass
+  behind, and §1's row list was missing the three fields. `c4547c74` (2026-10-16,
+  #2806) added §Watch the machinery, so the hand-kept groups are 12 and eight
+  share [[autonomy-jobs]], not 11 and seven — the same rot #2605 was about, now
+  in the module's own docstring, filed. The `_common.py` anchor had moved again
+  and the sentence it carries is now the paragraph's *Until #709…* history
+  clause; re-pointed to `:1205`, in the unnamed shape the corpus's
+  `NAMED_SYMBOL_UNNAMED_CEILING` counts (naming the enclosing definition there
+  drops the fallback population to 190 against a ceiling of 191 and refuses the
+  tree). Corpus counts re-measured: 36 top-level docs and `ARCH_DOC_SURFACE`
+  still agrees, 27 `tests/test_*_doc_claims.py` files, and the state file holds
+  one row — `doc:recall-research-2026-09-24` — that the picklist no longer
+  offers. Filed #4056, #4057, #4058, #4059.
