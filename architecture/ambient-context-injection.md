@@ -2,7 +2,7 @@
 segment: architecture
 type: architecture
 status: implemented
-date: 2026-10-12
+date: 2026-11-11
 tags: [ambient,architecture,autonomy,context-injection,lloyd,mcp]
 
 ---
@@ -56,12 +56,16 @@ if no session resolves, `priority` no longer selects an endpoint. Since #1516 an
 unaddressable producer falls through to the file-backed **next-session channel**
 whatever it asked for (`agent_mcp/ambient.py` → `POST
 /api/next-session-note`), so a 03:00 pass with no session to name still leaves its
-signal for the morning. Two consequences the table below does not show: an
-unresolvable `notable` or `urgent` is delivered as a passive note, with no agent
-turn, no `ambient_decide` gate and no breadcrumb while the response says
-`ok=true` (filed, #2600); and the note channel is drained by *any* turn that runs
-prefetch, including a worker's, which consumes the note for the human who was
-meant to receive it (#2598).
+signal for the morning. Two consequences the table below does not show, and both
+were settled on 2026-10-12 rather than left open: an unresolvable `notable` or
+`urgent` is still delivered as a passive note — no agent turn, no `ambient_decide`
+gate, no breadcrumb — but since #2600 landed (`4e458397`) `ok=true` can no longer
+be read as "a turn ran": the payload answers `mechanism: "next-session"` and
+`downgraded_from: <the tier asked for>`, and taking that door for a loud tier
+emits one `logger.warning` naming the producer source. And the note channel *was*
+drained by any turn that runs prefetch, worker included, consuming the note meant
+for the human; #2598 put a user-session gate on that drain, so a machine turn now
+leaves the note standing — see "A worker session is nobody" below.
 
 | Priority | Cost | Mechanism | When the agent sees it |
 |----------|------|-----------|------------------------|
@@ -72,12 +76,13 @@ meant to receive it (#2598).
 **Key invariant:** producers declare *intent*, not mechanism. They never need to think about turn queues or what a turn costs.
 
 The cheap tier is still sold as costing nothing, but the exact phrase "zero SDK
-cost" is not in `agent_mcp/ambient.py` — it is the first line of the
-`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1408`).
-The tool description a producer actually reads says the signal is queued "at no
-cost" (`agent_mcp/ambient.py:65`) and the module docstring says "cheap prefetch
-drain (no SDK turn)" (`:11`); this page attributed the wording to the wrong file
-until 2026-10-12. Either way it is a fossil of the claude-agent-sdk
+cost" is not in `agent_mcp/ambient.py` — it is a line part-way into the
+`/api/sessions/{id}/inject-prefetch` docstring (`app/routers/sessions.py:1413`),
+whose blunter first line says "(no SDK turn)". The tool description a producer
+actually reads says the signal is queued "at no cost" (`agent_mcp/ambient.py:78`)
+and the module docstring says "cheap prefetch drain (no SDK turn)" (`:11`); this
+page attributed the wording to the wrong file until 2026-10-12, and by 2026-11-11
+both pointers sat lines short of where the phrases now sit. Either way it is a fossil of the claude-agent-sdk
 era: the in-process harness replaced the SDK, so the expensive tiers now cost a
 `run_query` turn against the local vLLM engine rather than a subprocess. The
 economics the tiers were built around are unchanged — one is free and two are
@@ -153,7 +158,12 @@ instant — no measurement, no stamp, rather than a 1969 date offered as evidenc
 ### Key Properties
 
 - **Dedup by `dedup_key`** — same key re-firing replaces the previous unsent entry (newest wins). Default `dedup_key = source`.
-- **TTL** — entries carry `expires_at`, from `ttl_seconds` (default 3600, and the ambient tier only). Expiry is evaluated on **both** doors, so reclaiming a signal never depends on a turn arriving for the session it was queued against. `enqueue_ambient_prefetch` (`app/sessions_io.py:633`) purges that session's dead entries before it stores the new one, names each casualty's `source` in `dropped`, refuses a signal that was already expired at the moment it was written, and releases the session's key whenever the purge empties it; `drain_ambient_prefetch` (`app/sessions_io.py:704`) keeps its own filter as defence in depth, because an entry can pass its deadline while it waits rather than at write — and names each casualty in the log, since a path that drops a signal without a trace is how #910 stayed invisible. What `expires_at == 0.0` means is **no deadline**, not the epoch — every caller that omits `ttl_seconds` gets that value, so a purge that read it as "already expired" would silently delete nearly every ambient signal in the system and still report a clean queue. `tests/test_ambient_prefetch_retention.py` pins both halves of that boundary: expiry-on-write, key release through every door (a dead signal into an empty session, purge-to-empty, drain-to-empty, cap eviction), the drain's overflow re-insert and its logged drop of a signal that expired while it waited, that drain driven through its only production caller `prefetch._prefetch_prepare` rather than called directly, the `DELETE` and `/inject-prefetch` routes, and this page's own `app/sessions_io.py:<line>` citations (`test_the_pages_line_citations_point_at_the_functions_they_name`), since a stale pointer reads as a discovered defect. What the page said before, and what was wrong with it, is in the 2026-09-20 review-log entry below — and the three sentences that read as current but described the old tree are pinned absent by `test_the_architecture_page_describes_the_retention_that_shipped`, which is the machine-readable version of that entry.
+- **TTL** — entries carry `expires_at`, from `ttl_seconds` (default 3600 on the
+  two session doors). The note door honours the same field against its own 24 h
+  default, so the tool schema's "Only applies to priority=ambient" is false on the
+  path #2600 made explicit, and `ttl_seconds: 0` there means *never expires* rather
+  than the queue's 3600 — filed, do not "close the split" by forwarding the 0.
+  Expiry is evaluated on **both** doors, so reclaiming a signal never depends on a turn arriving for the session it was queued against. `enqueue_ambient_prefetch` (`app/sessions_io.py:633`) purges that session's dead entries before it stores the new one, names each casualty's `source` in `dropped`, refuses a signal that was already expired at the moment it was written, and releases the session's key whenever the purge empties it; `drain_ambient_prefetch` (`app/sessions_io.py:704`) keeps its own filter as defence in depth, because an entry can pass its deadline while it waits rather than at write — and names each casualty in the log, since a path that drops a signal without a trace is how #910 stayed invisible. What `expires_at == 0.0` means is **no deadline**, not the epoch — every caller that omits `ttl_seconds` gets that value, so a purge that read it as "already expired" would silently delete nearly every ambient signal in the system and still report a clean queue. `tests/test_ambient_prefetch_retention.py` pins both halves of that boundary: expiry-on-write, key release through every door (a dead signal into an empty session, purge-to-empty, drain-to-empty, cap eviction), the drain's overflow re-insert and its logged drop of a signal that expired while it waited, that drain driven through its only production caller `prefetch._prefetch_prepare` rather than called directly, the `DELETE` and `/inject-prefetch` routes, and this page's own `app/sessions_io.py:<line>` citations (`test_the_pages_line_citations_point_at_the_functions_they_name`), since a stale pointer reads as a discovered defect. What the page said before, and what was wrong with it, is in the 2026-09-20 review-log entry below — and the three sentences that read as current but described the old tree are pinned absent by `test_the_architecture_page_describes_the_retention_that_shipped`, which is the machine-readable version of that entry.
 - **Two caps, and they answer different questions.** `AMBIENT_PREFETCH_CAP = 5`
   bounds what a session may *hold*: the oldest is evicted on enqueue.
   `AMBIENT_PREFETCH_DRAIN_MAX = 3` bounds what one turn may *see*: the drain
@@ -356,8 +366,11 @@ through the chat path for the Inner-Voice reason this section already names, and
 worker turn between the overnight write and the first human turn read the brief
 into a transcript nobody reads and left the store empty. The consumer end now
 applies the same deny-list the doors apply: `sessions_io.is_user_session` over the
-draining turn's own session JSON, read once in `_prefetch_prepare` beside the
-plan-mode flag it also answers. Being a deny-list is the part that keeps delivery
+draining turn's own session JSON, read in `_prefetch_prepare` and shared with the
+plan-mode fallback — at most once per turn, and since #3082 not at all on a turn
+that needs neither answer (the caller passed `plan_mode`, and a cheap peek of the
+notes store says nothing is waiting; a peek that fails counts as one that may hold
+a note). Being a deny-list is the part that keeps delivery
 working — a session with no JSON on disk, a platform the list has never heard of,
 or no session id at all still drains and still receives the note; `platform`
 values a human reads (`mission-control`, `browser`) are not in the list, and
@@ -632,3 +645,29 @@ mode has no reason to block it.
   log at all, and one real nightly pass checked through the route rather than the file.
   The #2598 motive the item carried — a worker turn eating the note — was already closed
   by the gate two entries above and is not what this door is for.
+- 2026-11-11 — reviewed against `bd892691` (status: **stale**, corrected in place). The
+  mechanism is intact — caps 5 / 3 / 3, `AMBIENT_SUMMARY_MAX = 240` beside the 800-char
+  content cut, the note store's 720 / 2000 / cap-5 / 24 h, `ambient_clock_stamp` as the
+  only formatter, the deferred 0.5 s cancel, the decision read before the cancelled path
+  and scoped by `turn_id`, the deny-list on both doors and on the drain,
+  `ambient_decide` in `PLAN_MODE_ALWAYS_ALLOWED` and in `baseline_tools` with
+  `tool_search.enabled: false` in config and in the live override — and the page's
+  collected counts were re-run with `--collect-only -q` at the same numbers this page
+  already carries. What had gone stale is four sentences: the Core Concept note still
+  read as open defects the two things the 2026-10-12 pass filed and that round closed —
+  #2600 landed as `4e458397`, so the note door now names its own downgrade
+  (`mechanism`, `downgraded_from`, one warning naming the source) while `ok=true` stays,
+  and #2598's gate means the drain is no longer taken by a worker turn — and #3082
+  (`744a1527`) made the session-JSON read inside `_prefetch_prepare` conditional on a
+  peek of the notes store, so "read once" is now "at most once, sometimes not at all".
+  Two line pointers had drifted the same way the 2026-10-12 entry already records for
+  other pointers: the "zero SDK cost" phrase no longer sits where this page said it did,
+  and neither does the tool description's "at no cost". Both are corrected above to the
+  lines they name today. Two findings filed from this pass, both about a producer being told a signal
+  landed when the tree decided otherwise: **#4053** (the advertised `ttl_seconds`
+  sentence is false on the note door — the page's own TTL bullet repeated it), and
+  **#4054** (`session_inject_context`
+  returns `ok=true` for a `notable`/`urgent` whose queued turn was just evicted by
+  `AMBIENT_QUEUE_CAP` or collapsed by its own `dedup_key`, because `dropped` survives
+  only inside the nested `server_response` and no log line names it — the #910 shape on
+  the tier this page spent most of its life fixing on the other door).
