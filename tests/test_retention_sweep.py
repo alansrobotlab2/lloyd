@@ -12145,3 +12145,110 @@ def test_main_prints_the_index_residue_line_as_the_twenty_seventh_store(rs, caps
     rs.main()
     applied = [l for l in capsys.readouterr().out.splitlines() if "kg index residue" in l]
     assert applied and "no store yet" in applied[0], applied
+
+
+# ── #4039: the fold's `.decisions` arm — green from invariance, not tolerance ─────
+#
+# The third partition of one class. #3650 ruled the `.draft.triaged` / `.draft.pool` step
+# tolerable and #3725 made `.up_next.*` fold-invariant by widening the reader; `board_decisions`
+# was the last `board_health` input still reading ONE file, so filing an item's pool-ENTRY row
+# while its in-window RE-ENTRY row stayed live made the fold re-count that re-entry as a fresh
+# promotion attributed to `unrecorded`. On the live store the proof refused with seven keys all
+# under `.decisions` (`.decisions.promotions.count` 292 → 295) and the store sat unbounded at
+# 31,035,309 bytes with nothing in the suite noticing. The remedy is #3725's remedy — a merged
+# read — because the staged `-neutral` rotation already sits in the ledger's parent dir
+# precisely so `state.ledger_archives()` globs it, and a reader that does not glob can never
+# be satisfied by staging.
+
+#: An item with an old pool ENTRY and a younger re-entry of it: the pair whose
+#: whole point is that the first row is a fold candidate and the second is not.
+_DECISIONS_ITEM = 9904039
+
+
+def _decisions_fold_rows(now: float) -> list[str]:
+    """Row 0 is a terminal `backlog_triage` confirm 45 days on — past
+    `LEDGER_ARCHIVE_AGE_DAYS` = 14, outside `WINDOW_DAYS` = 7, and with no `round_id`, so
+    `_archive_plan`'s newest-of-round keeper spares nothing and it is a candidate every day
+    from here. Row 1 is the re-entry that always stays live: `phase: started` is the SOLE
+    producer of the `unrecorded` decider in `board_decisions`, so a fold that forgets row 0
+    does not merely add a promotion, it attributes one to nobody."""
+    return [
+        _fold_row(now - _OLD * 86400, event="backlog_triage", item_id=_DECISIONS_ITEM,
+                  verdict="confirmed", verdict_source="structured", surface="code",
+                  acceptance="The clause the round must satisfy."),
+        _fold_row(now - _YOUNG * 86400, event="backlog_implement",
+                  item_id=_DECISIONS_ITEM, phase="started", round_id="SM_4039_REENTRY"),
+    ]
+
+
+def test_a_fold_of_a_pool_entry_row_leaves_the_decisions_figures_alone(rs, tmp_path,
+                                                                      capsys):
+    """Clause 4 of #4039: with the merged read in place the fold lands, and the shipped
+    neutrality proof is what says so.
+
+    One store, one board, one `now`, both modes of the real entry point, and the real probe:
+    the no-`health=` branch of `sweep_promotions_ledger` is `board_health` itself, so nothing
+    in here paraphrases the gate. A fixture holding an item's 45-day-old pool entry and its
+    5-day-old re-entry has to come back `refused is None` with the entry row archived — where
+    at base the same fixture returned `REFUSED (board_health() changed at .decisions.per_day,
+    .decisions.promotions.by_decider.unrecorded, .decisions.promotions.count, …)`, the refusal
+    that has the live store unbounded.
+
+    `moved == 1` and the archived line being the entry row are asserted on both modes so the
+    green cannot come from a fixture with nothing to fold, and the dry run still writes
+    nothing: the proof stages its candidate rows into a throwaway `-neutral` rotation, which
+    is itself a rotation the widened reader now sees — that is the whole mechanism, and it is
+    why the staged file has to be gone afterwards (`#3612`'s rule, which this re-pins for the
+    new arm rather than resting on the draft-arm node's copy of it)."""
+    now = time.time()
+    # Empty on purpose. `.decisions` is replayed from ledger rows, so an item file here
+    # could only move a `draft` arm count, and those two are the keys #3650 tolerates —
+    # keeping the board empty means the only keys this proof could report are `.decisions`.
+    board = tmp_path / "board"
+    board.mkdir()
+    rows = _write_ledger(rs, [*_decisions_fold_rows(now),
+                              _fold_row(now - _YOUNG * 86400, round_id="SM_4039_YOUNG")])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+
+    dry = rs.sweep_promotions_ledger(False, now, backlog_dir=board)
+    dry_line = rs._ledger_line(dry)
+    assert dry["refused"] is None, dry_line
+    assert "REFUSED" not in dry_line, dry_line
+    assert dry["moved"] == 1, dry_line
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, "a dry run rewrote the live file"
+    assert not _archives(rs), "the staged -neutral rotation survived a dry run"
+
+    applied = rs.sweep_promotions_ledger(True, now, backlog_dir=board)
+    applied_line = rs._ledger_line(applied)
+    assert applied["refused"] is None, applied_line
+    assert "REFUSED" not in applied_line, applied_line
+    assert applied["moved"] == 1, applied_line
+    assert sorted(_archived(rs)) == sorted([rows[0]]), (
+        f"the fold did not file the pool-entry row it exists to file: "
+        f"{[l[:120] for l in _archived(rs)]}")
+    assert _live_lines(rs) == rows[1:], [_l[:120] for _l in _live_lines(rs)]
+    assert not [p.name for p in _archives(rs) if "-neutral." in p.name], (
+        "the staged proof archive outlived the fold: the next run would answer for rows the "
+        "live file holds too")
+    capsys.readouterr()
+
+
+def test_the_neutrality_tolerance_still_excuses_no_decisions_path(rs):
+    """Clause 5 of #4039: the fold's green comes from invariance, not from tolerance.
+
+    #3612 shipped the neutrality gate with no exceptions and #3650 granted exactly two, by
+    exact path. Widening this set to `.decisions.*` would have made the refusal disappear the
+    same afternoon — and it is the option the item explicitly rules out, because a fold could
+    then silently re-attribute somebody's triage or gate decision to `unrecorded` in the
+    dashboard's decision panel, which is a different claim from the one-step draft-arm counting
+    #3650 accepted. So the set is pinned by equality (that pin is this file's existing
+    `test_the_neutrality_gate_excuses_only_the_two_draft_arm_counts`, re-asserted here because
+    THIS is the change that would have been tempted to move it), and the shape the temptation
+    took is named: no tolerated path may start with `.decisions`."""
+    assert rs.LEDGER_NEUTRALITY_TOLERATED_KEYS == frozenset({".draft.triaged",
+                                                             ".draft.pool"})
+    assert not [k for k in rs.LEDGER_NEUTRALITY_TOLERATED_KEYS
+                if k.startswith(".decisions")], rs.LEDGER_NEUTRALITY_TOLERATED_KEYS
+    for key in (".decisions.promotions.count", ".decisions.per_day",
+                ".decisions.promotions.by_decider.unrecorded"):
+        assert key not in rs.LEDGER_NEUTRALITY_TOLERATED_KEYS, key

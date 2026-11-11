@@ -8,7 +8,9 @@ counts composition, #76 counts run health; a decider that promotes the wrong
 item every day, on time and without errors, read the same as one deciding well.
 
 This is a join over the automod ledger, read once
-(`backlog._ledger_rows`), with the board files only as a last resort:
+(`backlog._ledger_rows_merged` — the live file PLUS the
+`promotions-archive-<YYYYMM>.jsonl.gz` rotations beside it, #4039), with the board
+files only as a last resort:
 
 * **Promotions.** Every entry of an item into the implement pool (`up_next`,
   or `in_progress` reached without passing through it), attributed to the
@@ -44,6 +46,7 @@ are not set here; they need a week of traffic and a person.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -106,6 +109,80 @@ def _day(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
 
 
+def _replay_rows(ledger: Path) -> list[dict]:
+    """The rows the replay may see: the live ledger PLUS the rotations beside it, each
+    distinct row exactly once.
+
+    Two rules, both of them about the retention sweep's fold, and both learned the hard
+    way. #3612 widened the readers `board_health` is built from to the
+    `promotions-archive-<YYYYMM>.jsonl.gz` rotations so a verdict outlives
+    `LEDGER_ARCHIVE_AGE_DAYS = 14`; #3650 tolerated the two `draft` arm counts that
+    remained, and #3725 (#3024's `attempted` set) made the `up_next` arm fold-invariant
+    the same way. This module was the third arm of that one class and the last reader
+    `board_health` builds with no archive arm at all, so the fold was refusing on this box
+    at 2026-11-11T07:59Z over a 31,035,309-byte store: `REFUSED (board_health() changed
+    at .decisions.per_day, .decisions.promotions.by_decider.unrecorded,
+    .decisions.promotions.count, .decisions.promotions.outcome.done_rate,
+    .decisions.promotions.outcome.promotions)` — seven moved keys, every one under
+    `.decisions`, with `.decisions.promotions.count` at 292 → 295,
+    `by_decider.unrecorded` ABSENT → 3, and `.decisions.window` identical on both sides.
+    The mechanism is `enter()`'s no-op guard below — a row that only the live file knows
+    about is what keeps an item's open pool ENTRY remembered, so filing that row makes
+    the item's later, in-window re-entry look like a FRESH promotion, and since a
+    `backlog_implement`/`started` row carries no decider it is attributed to
+    `unrecorded`, the bucket that means "a person in Mission Control, or autonomy #35
+    writing through the MCP store". A fold that re-attributes somebody's decision to
+    nobody is exactly what the neutrality gate exists to refuse.
+
+    The rows come from `backlog._ledger_rows_merged` (`state.ledger_rows_merged`), which
+    already keeps #1204's one-read-per-cycle property per file — each file goes through
+    `ledger_rows` on its own path, so `ledger_read_count` stays at 1 for each. This
+    function adds the one thing that reader deliberately does not do: a dedupe pass.
+    `ledger_rows_merged` says a row in BOTH files "appears twice; every consumer here
+    resolves by last-wins or by `max(ts)`, which are both idempotent in a duplicate".
+    A replay of a state machine is neither: `retire()` below appends to `retirements`
+    unconditionally, and so does every `signals.append`, so a row the replay sees twice
+    double-counts a retirement and steps `.retire_reopen.retired` — a set-membership
+    reader could not have said so, and this one can.
+
+    How far that reaches, measured rather than assumed. Both files together hold 79,600
+    rows over a copy of the live store taken 2026-11-11T07:59Z (19,223 live + 60,377 in
+    the two rotations) and NONE of them is byte-identical to another, so the pass
+    collapses nothing on this box today. It is also bounded today for a second reason:
+    the only rows the fold can leave in both files are ≥ `LEDGER_ARCHIVE_AGE_DAYS` = 14
+    days old and `WINDOW_DAYS` = 7, so a fold-produced duplicate is outside the window by
+    construction and cannot move a windowed figure — the live diff moved no
+    `retire_reopen` key. What the pass buys is the state where that stops holding: any
+    rotation that carries a row the live file also carries, from a crash between the
+    archive append and the live rewrite or from anything else that writes a rotation.
+    `tests/test_board_health_archive_aware.py` drives that state with the rows IN window,
+    because that is the only state in which the claim is checkable at all.
+
+    The key is the row's own canonical JSON, not a projection of a few fields. A row that
+    appears twice is ONE event the loop wrote to disk twice, and the only claim that
+    collapses it without also collapsing two genuinely distinct events is "these two rows
+    carry the same fields". A `(ts, event, item_id)` key would merge a `confirmed` and a
+    `rejected` triage of one item stamped in the same second — a different defect wearing
+    the same fix.
+
+    Cost, measured 2026-11-11 on dicts of this shape: ~300 ms for 60,000 rows, against
+    the ~1.5 s the merged decode of a store that size already costs
+    (`state.ledger_rows_merged`'s own measurement, and the figure the owed-check job is
+    asked to price). It is a per-call cost, unlike the decode, which the row cache
+    absorbs — so it is paid once per `board_health()` (once a minute at
+    `_SCORECARD_TTL_S` for the dashboard, twice per fold proof for the sweep).
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for d in B._ledger_rows_merged(ledger):
+        key = json.dumps(d, sort_keys=True, separators=(",", ":"), default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
 def board_decisions(ledger: Path, *, items: list | None = None, now: float | None = None,
                     days: int = WINDOW_DAYS, min_promotions: int = MIN_PROMOTIONS) -> dict:
     """The full reading for `days` ending `now`. `items` (the board, any
@@ -115,7 +192,7 @@ def board_decisions(ledger: Path, *, items: list | None = None, now: float | Non
     since = now - days * 86400
     # `board_steward` and `backlog_sweep` rows are about many items and carry
     # no `item_id`, so the filter is on the clock only.
-    rows = sorted((d for d in B._ledger_rows(ledger) if isinstance(d.get("ts"), (int, float))),
+    rows = sorted((d for d in _replay_rows(ledger) if isinstance(d.get("ts"), (int, float))),
                   key=lambda d: float(d["ts"]))
     board = {int(i.id): i for i in (items or [])}
 
