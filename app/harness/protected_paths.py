@@ -135,8 +135,8 @@ def protected_roots() -> list[Root]:
 # `home = ~/.local/share/uv/python/cpython-<ver>-linux-x86_64-gnu/bin`, and
 # `.venvs/lloyd/bin/python` is a symlink into it, so realpath-first — the rule
 # that lets a round write its own worktree — judged a write to that interpreter
-# by where it *points*, outside the set, and allowed it. All five venvs
-# (lloyd, qwen3-tts, vllm-decider, vllm-djev, vllm-flash-next-main) link the one
+# by where it *points*, outside the set, and allowed it. All four
+# (lloyd, qwen3-tts, vllm-djev, vllm-flash-next-main) link the one
 # binary, so that single allowed write was every service's interpreter at once.
 # The entry stops at `uv/python` on purpose: `~/.local/share/uv/tools/supervisor`
 # is a different uv tree, and automod's own promotion path execs

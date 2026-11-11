@@ -359,10 +359,10 @@ _GROUP_MEMBERS = re.compile(r"^programs=(.+)$", re.M)
 #: are harvested as served ports and `VLLM_PORT` is filtered out by name below.
 _ENV_PORT = re.compile(r'\b([A-Z_]*PORT)="(\d+)"')
 #: Ports a conf sets for a process it *starts* rather than serves. `VLLM_PORT` is
-#: an env vLLM reads for its own socket — 5300 under djev, 5310 under the decider —
-#: and neither appears in either table: `grep -n "5300\|5310"
-#: architecture/infrastructure.md` lands on one Review-log line and no row, because
-#: nothing connects to them. This set is a name list, so the node below derives the
+#: an env vLLM reads for its own socket — 5300 under djev, and on this box only
+#: that one since #4029 took the decider's conf, which carried 5310, out of the tree
+#: — and it appears in neither table: `grep -n "5300" architecture/infrastructure.md`
+#: lands on one Review-log line and no row, because nothing connects to it. This set is a name list, so the node below derives the
 #: exclusion's safety instead of trusting it: an excluded port must not be one the
 #: program table itself credits to a program.
 _INTERNAL_PORT_KEYS = frozenset({"VLLM_PORT"})
@@ -382,7 +382,8 @@ def _conf_programs() -> dict[str, str]:
     """{program name: conf filename} for every `[program:…]` header in conf.d/.
 
     Read from section headers, not filenames, because the two are not the same
-    set today: 14 `*.conf`, 13 programs, and the file that is not a program is
+    set today: 13 `*.conf`, 12 programs (one conf fewer since #4029 deleted
+    `agent-decider.conf` on 2026-11-11), and the file that is not a program is
     `lloyd-mc.conf`.
     """
     found: dict[str, str] = {}
@@ -441,10 +442,10 @@ def _conf_ports() -> dict[str, tuple[str, str]]:
     """{port: (conf filename, environment key)} for every `…PORT="…"` in conf.d.
 
     `PORT=` is the port a launcher binds: `PORT="${PORT:-8010}"` and
-    `STRUCTURED_PORT="${STRUCTURED_PORT:-8011}"` in `start-djev.sh`,
-    `PORT="${PORT:-8012}"` in `start-decider.sh`, and `PORT="8091"` handed to
-    `start-secondary.sh`. Today: 8010, 8011, 8012, 8091 served, plus 5300 and 5310
-    under `VLLM_PORT=`.
+    `STRUCTURED_PORT="${STRUCTURED_PORT:-8011}"` in `start-djev.sh`, and
+    `PORT="8091"` handed to `start-secondary.sh`. Today: 8010, 8011 and 8091 served,
+    plus 5300 under `VLLM_PORT=`. `agent-decider.conf`'s 8012 and 5310 went with the
+    unit (#4029, 2026-11-11).
     """
     seen: dict[str, list[tuple[str, str]]] = {}
     for path in sorted(CONF_DIR.glob("*.conf")):
@@ -523,8 +524,8 @@ def test_every_program_conf_d_declares_has_a_row_in_the_process_management_table
     rows parsed".
     """
     programs, groups = _conf_programs(), _conf_groups()
-    assert len(programs) == 13, (
-        f"conf.d declares {len(programs)} programs, not the 13 this node's "
+    assert len(programs) == 12, (
+        f"conf.d declares {len(programs)} programs, not the 12 this node's "
         "docstring and the module docstring name. Count them again with "
         "`grep -l '^\\[program:' agent-services/supervisor/conf.d/*.conf | wc -l`, "
         "write the row the new program is missing, then update the number in both "
@@ -913,10 +914,12 @@ def _card_ownership() -> dict[str, set[str]]:
 def _named_programs(serves: str, declared: set[str]) -> set[str]:
     """The conf.d programs a Serves cell names, by their own backticked tokens.
 
-    One-directional on purpose: card 2 has three programs pinned to it and its row
-    names one, so a cell may name a subset and must never name a name the tree does
-    not have. A token that is spelled like a program (`agent-…`, `lloyd-…`) and is
-    not declared therefore raises — that is how a row goes on advertising a program
+    One-directional on purpose: a cell may name a SUBSET of what is pinned to its card
+    — measured on this tree, card 4 pins two programs and its row names one, and card 2
+    has named both of its two since #4029 took `agent-decider.conf` out (three before
+    that, which is why this asymmetry was written) — but it must never name a name the
+    tree does not have. A token that is spelled like a program (`agent-…`, `lloyd-…`) and
+    is not declared therefore raises — that is how a row goes on advertising a program
     that has been deleted.
     """
     out: set[str] = set()
@@ -1210,19 +1213,21 @@ def test_the_pin_derivation_reads_the_launcher_and_the_uuid_not_just_the_conf():
 def test_a_row_says_nothing_pins_its_card_exactly_when_no_conf_pins_that_index():
     """The Serves cells and conf.d agree about which cards have no tenant.
 
-    One direction only, on purpose: `agent-decider` and `agent-llm-secondary` both pin
-    card 2 and neither is named in its row — the row names the tenant that answers,
-    not every process that allocates. Demanding all of them would fail a correct doc,
-    which is the mistake the item's original wording made.
+    One direction only, on purpose: `agent-llm-secondary` pins card 2 and is not
+    named in its row — the row names the tenant that answers, not every process
+    that allocates. Demanding all of them would fail a correct doc, which is the
+    mistake the item's original wording made. The card's tenant set was three until
+    #4029 deleted `agent-decider.conf` on 2026-11-11; the equality below is the two
+    left.
     """
     rows, owned = _index_map_rows(), _card_ownership()
     problems = _ownership_wording_problems(rows, owned)
     assert not problems, "; ".join(problems)
     named_on_two = _named_programs(rows[2]["serves"], set(_conf_programs()))
     assert named_on_two == {"agent-djev"}, named_on_two
-    assert {"agent-decider", "agent-llm-secondary"} <= owned["2"], owned["2"]
+    assert owned["2"] == {"agent-djev", "agent-llm-secondary"}, owned["2"]
     assert not _ownership_wording_problems(rows, owned), (
-        "card 2 names one of its three tenants and the check demanded all three")
+        "card 2 names one of its two tenants and the check demanded both")
 
 
 def test_the_unowned_card_check_follows_the_confs_and_not_a_hardcoded_four():

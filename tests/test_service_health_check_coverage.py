@@ -325,8 +325,7 @@ def test_a_running_program_in_the_switched_off_set_still_gets_a_row(monkeypatch)
 @pytest.mark.parametrize("off", [
     # The set `_switched_off()` can actually return: `app/llm_slots` derives it from
     # config.yaml's optional GPU-2 slots, and every name in it is optional.
-    {"agent-llm-secondary", "agent-decider", "agent-voice-mcp",
-     "agent-voice-mode", "agent-tts"},
+    {"agent-llm-secondary", "agent-voice-mcp", "agent-voice-mode", "agent-tts"},
     {"agent-tts"},
     set(),
 ])

@@ -277,9 +277,6 @@ observed:
     - "agent-services/bin/start-cosyvoice-tts.sh: names venv(s) ['cosyvoice'] from a file `scope` does\
       \ not list, so the claim is narrower than the launchers \u2014 either the launcher belongs in SCOPE_FILES\
       \ or its venv belongs to nothing that runs"
-    - "agent-services/bin/start-decider.sh: names venv(s) ['vllm-decider'] from a file `scope` does not\
-      \ list, so the claim is narrower than the launchers \u2014 either the launcher belongs in SCOPE_FILES\
-      \ or its venv belongs to nothing that runs"
     - "agent-services/bin/start-fish-speech.sh: names venv(s) ['fish-speech'] from a file `scope` does\
       \ not list, so the claim is narrower than the launchers \u2014 either the launcher belongs in SCOPE_FILES\
       \ or its venv belongs to nothing that runs"

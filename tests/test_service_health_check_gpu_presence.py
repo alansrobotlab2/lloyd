@@ -104,12 +104,12 @@ def test_two_programs_resolving_to_one_card_by_different_spellings_is_red():
 
 
 def test_programs_sharing_one_card_under_the_same_spelling_stay_advisory():
-    """The negative control that keeps clause 4 honest. Three programs write
-    `GPU="2"` on this fleet today as a declared either/or between the djev, decider
-    and llama.cpp slots, and a check that called that an outage would report red on
-    a healthy box every day — and then stop being read."""
+    """The negative control that keeps clause 4 honest. Two programs write `GPU="2"`
+    on this fleet as a declared either/or between the djev and llama.cpp slots (the
+    third, `agent-decider`, left the tree with #4029 on 2026-11-11), and a check that
+    called that an outage would report red on a healthy box every day — and then
+    stop being read."""
     rows = _run({"agent-djev": {("index", 0)},
-                 "agent-decider": {("index", 0)},
                  "agent-llm-secondary": {("index", 0)}})
     shared = _named(rows, "shared-pin")
     assert len(shared) == 1, rows
@@ -117,7 +117,8 @@ def test_programs_sharing_one_card_under_the_same_spelling_stay_advisory():
     assert row["verdict"] == "shared-pin", row
     assert row["advisory"] is True, row
     assert row not in shc._scored_rows(rows), "an advisory row is not arithmetic"
-    assert "agent-djev" in row["status"] and "agent-decider" in row["status"], row["status"]
+    assert "agent-djev" in row["status"] and "agent-llm-secondary" in row["status"], \
+        row["status"]
     assert _graded(rows) == [], f"a declared either/or must never go red: {rows}"
 
 

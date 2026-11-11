@@ -56,7 +56,6 @@ GPU_PROGRAMS = (
     "agent-llm-primary",
     "agent-llm-secondary",
     "agent-djev",
-    "agent-decider",
     "agent-qmd-daemon",
     "agent-qmd-watcher",
     "agent-tts",          # retired 2026-11-10 (not loaded); kept so a revert needs no edit here

@@ -1690,7 +1690,8 @@ fits a bidirectional model but needs attention read out of the vLLM patch.
 
 [Mapika/decider](https://github.com/Mapika/decider) models answer the same `POST /v1/systemone` request shape as djev, with a
 different readout: the prompt ends at `Answer: (` and the answer is the softmax of the option-letter logits at one position,
-at the checkpoint's fitted temperature. No diffusion, no canvas. Two are staged, both Qwen3.5 hybrids (Gated DeltaNet +
+at the checkpoint's fitted temperature. No diffusion, no canvas. Two were staged for the bake-off below, both
+Qwen3.5 hybrids (Gated DeltaNet +
 every fourth layer full attention):
 
 | | decider-35b-a3b v1 | decider-4b v2.1 |
@@ -1706,12 +1707,15 @@ every fourth layer full attention):
 sealed accuracy, against 31.5% for the 35B, so the repo's own tables favour the 35B and the independent board does not. Nothing here assumes either beats
 djev on Lloyd's traffic; the recall eval decides.
 
-- **Setup** `agent-services/setup/setup-decider.sh [--variant 35b|4b|4b-v2|all]`: one venv `.venvs/vllm-decider` (vLLM 0.29.0,
-  decider-ai 1.5.0 `--no-deps`, upstream's install), each checkpoint pinned by Hub revision under `agent-services/llm/models/`.
-  Step 5 checks the card through `nvidia-smi` and NVML only — a CUDA context on a GPU 2 that djev holds is an OOM.
-- **Launch** `VARIANT=35b|4b|4b-v2 agent-services/bin/start-decider.sh` → `:8012`, program `agent-decider` (`VARIANT=` in its
-  `environment=`, `autostart=false`, no config flag, unknown to the boot reconcile). GPU 2 holds one tenant: stop djev first.
-  The launcher's header carries both 24 GiB budgets.
+- **Nothing of the candidate can run, and one file of it is still in the tree.** Its
+  supervisor unit and engine launcher came out on 2026-11-11 (#4029). Its installer,
+  `agent-services/setup/setup-decider.sh`, survived only because `agent-services/setup/`
+  is outside an automod round's writable set — nothing supervises `:8012` any more, so it
+  is a script with no program to prepare, and a rebuild that runs it would build a venv
+  for a service that does not exist. No checkpoint was ever installed on this box. The
+  bake-off below is the surviving record, alongside
+  `eval/measurements/reasoningbank-2026-09-25.md` and
+  `eval/measurements/retrieval-card-2026-09-25.md`.
 - **Bake-off, 2026-09-25** (`eval/djev/bakeoff.py`, results under `~/lloyd-data/eval/djev/bakeoff-2026-09-25/`): identical
   requests, one at a time, on GPU 2. Recall = 86 frozen pools of the gold set, top 20; JevBench = its 231 public items and
   its own scoring; voice = the 46 addressee cases at 0.7.

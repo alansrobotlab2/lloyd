@@ -581,10 +581,11 @@ def test_the_declaration_is_read_from_the_named_program_s_own_section(tmp_path, 
 
     One file, two programs. `agent-watched-unit`'s section declares `autostart=true`;
     `agent-candidate-unit`'s section carries only a COMMENT that mentions
-    `autostart=false` — which is what conf.d/agent-decider.conf does above its own
-    section, in the header line beginning `; autostart=false for the same reason as
-    agent-djev`. (#2948 grew that header by 19 lines, so the look-alike is named by its
-    text rather than by the line number that moved with it.) So neither another
+    `autostart=false` — which is what conf.d/agent-decider.conf did above its own
+    section until #4029 deleted it on 2026-11-11, in the header line beginning
+    `; autostart=false for the same reason as agent-djev`. (#2948 grew that header by
+    19 lines, so the look-alike is named by its text rather than by the line number
+    that moved with it, and the fixture here carries that shape forward.) So neither another
     program's declaration nor a line of prose may excuse
     this one: only a `key=value` inside the named section counts.
     """
@@ -650,40 +651,6 @@ def test_another_key_mentioning_autostart_is_not_the_declaration(tmp_path, monke
     assert not row.get("advisory"), \
         f"another key's value excused the program: {row}"
     assert row["healthy"] is False, row
-
-
-def test_the_parser_reads_the_real_candidate_unit_it_was_written_for():
-    """The real file, not a fixture shaped like it.
-
-    Every other test in this section writes a throwaway unit, which proves the rule
-    but not that the rule meets the box. The unit this item is about carries its
-    look-alike in `agent-services/supervisor/conf.d/agent-decider.conf` — a header
-    comment beginning `; autostart=false for the same reason as agent-djev`, well above
-    the `[program:agent-decider]` header — and its real declaration as the
-    `autostart=false` key inside that section. All three were cited by line number until
-    #2948 added 19 comment lines to that header, and nothing in the tree computes a
-    number: they are named by their text now so the next comment edit cannot rot them.
-    A parser that choked on that shape would keep the suite green and quietly never
-    fire, which is the failure this test exists to prevent.
-
-    It asserts the tracked file's current declaration, so it also fails if someone
-    switches the candidate on at boot without noticing that the health report's
-    wording is now wrong — at which point the expectation and the live run move
-    together, deliberately.
-    """
-    text = (ROOT / "agent-services" / "supervisor" / "conf.d"
-            / "agent-decider.conf").read_text()
-
-    assert _load_module()._section_autostart(text, "agent-decider") == "false", \
-        "the tracked unit's own declaration stopped being readable"
-    # The comment alone must not be what carries it: strip the section's real line and
-    # the prose stays prose.
-    stripped = "\n".join(ln for ln in text.splitlines()
-                         if ln.strip() != "autostart=false")
-    assert _load_module()._section_autostart(stripped, "agent-decider") is None, \
-        "the header comment alone excused the program"
-    # And a different program's section in the same file is not this one's declaration.
-    assert _load_module()._section_autostart(text, "agent-some-other-program") is None
 
 
 def test_a_missing_conf_d_leaves_a_stopped_unit_a_fault(tmp_path, monkeypatch):
@@ -845,8 +812,8 @@ def _isolated(mod, tmp_path):
     declare `autostart=false`. `_default_run` builds its own units tree for exactly
     this reason; these nodes do the same thing in-process. Applied to the nodes added
     below, not retro-fitted to the exit-3 node above, whose advisory-row assertion
-    depends on this box's real `agent-decider.conf` — isolating it there would change
-    the verdict it is pinning rather than the fixture it reads.
+    depends on this box's real conf.d — isolating it there would change the verdict
+    it is pinning rather than the fixture it reads.
     """
     units = tmp_path / "sup"
     units.mkdir(parents=True, exist_ok=True)
@@ -876,7 +843,8 @@ def test_a_declared_service_answered_exit_3_is_graded_by_its_state_word(
         tmp_path, monkeypatch):
     """Clause 4 on the call site the six DECLARED rows use: `check_service`, rc 3.
 
-    `agent-decider` and `agent-llm-secondary` are STOPPED as this box's steady state,
+    `agent-llm-secondary` is STOPPED as this box's steady state, and until #4029 took
+    `agent-decider.conf` out on 2026-11-11 so was that candidate unit; both
     so `status <name>` exits 3 while printing a usable state line. The item rules out
     both directions of exit-code grading — `rc == 0` is not health, and `rc != 0` is
     not unreadability — so the state word has to reach the status, and no `unverified`

@@ -427,11 +427,12 @@ def _needles(path: Path) -> list[str]:
     The fifth shape — the BARE stem, which is how an autonomy task's prose names a script it
     runs ("run `run_djev_name_prior_probe` weekly") — is included only when the stem contains an
     underscore. Measured on the live tree with the bare stem always included: `eval/stats.py`
-    came back called by 136 files, among them `agent-services/bin/start-decider.sh` and three
-    unrelated autonomy tasks, because the word "stats" appears in all of them. A needle that
-    matches too much manufactures callers, which is #2609's mistake — an 8-char prefix loose
-    enough to match every other candidate — in a new costume, and here it would have quietly
-    converted orphans into scheduled jobs. `stats`, `memory` and `alpha` are words;
+    came back called by 136 files, among them the decider's launcher (a unit #4029 has since
+    removed) and three unrelated autonomy tasks, because the word "stats" appears in all of
+    them — the callers are incidental to the count, which is what the rule rests on. A needle
+    that matches too much manufactures callers, which is #2609's mistake — an 8-char prefix
+    loose enough to match every other candidate — in a new costume, and here it would have
+    quietly converted orphans into scheduled jobs. `stats`, `memory` and `alpha` are words;
     `djev_name_prior_probe` and `prefetch_calibration` are module names.
     """
     stem = path.stem

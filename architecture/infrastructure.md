@@ -68,7 +68,7 @@ servers is answering for voice — and the header now says so;
 |---|---|---|---|
 | 0 | RTX 3090 | 24 GB | the desktop, and the LiveKit voice worker (`lloyd-agent-worker`). Until 2026-11-10 it also held the vendored TTS server (`:8090`, the fallback since 2026-10-09, now retired to `supervisor/retired/agent-tts.conf`) and qmd, which moved to GPU 4 |
 | 1 | RTX PRO 6000 Blackwell | 96 GB | the primary LLM, vLLM (`agent-llm-primary`) |
-| 2 | RTX 3090 | 24 GB | djev, DiffusionGemma on vLLM (`agent-djev`) at `GPU_UTIL=0.97` since 2026-09-20 — or the secondary LLM, llama.cpp (`agent-llm-secondary`, ~21.7 GB) if that slot is re-armed; never both, see [[djev]]. A third conf (`agent-decider`, `GPU="2"`) names this card too and has nothing that arms it — #2713 |
+| 2 | RTX 3090 | 24 GB | djev, DiffusionGemma on vLLM (`agent-djev`) at `GPU_UTIL=0.97` since 2026-09-20 — or the secondary LLM, llama.cpp (`agent-llm-secondary`, ~21.7 GB) if that slot is re-armed; never both, see [[djev]]. A third conf pinned this card until #4029 removed it on 2026-11-11 |
 | 3 | RTX 3090 | 24 GB | Qwen3-TTS 1.7B on vLLM-Omni (`agent-tts-omni`, `:8093`) — the TTS the voice path actually uses since 2026-10-09, UUID-pinned to this card by both its conf and its launcher; its two `VLLM::StageEngineCoreProc` stages are the ~9.6 GB resident here, see [[voice]] |
 | 4 | RTX 3090 | 24 GB | qmd: the daemon's embedding model and reranker (`agent-qmd-daemon`, `:8181`) and the watcher's re-embeds (`agent-qmd-watcher`), both on this card since 2026-11-10. On GPU 0 the watcher's embed could not fit beside the desktop and two TTS servers. Added 2026-10-07 alongside GPU 3, and spare until then |
 
@@ -274,7 +274,6 @@ by name, because that is still the slice whose pressure kills.
 | `agent-llm-primary` | 8096 | vLLM, Qwen3.8-Flash-Next, FP8 KV | `bin/start-qwen38-flash-next.sh` |
 | `agent-llm-secondary` | 8091 | llama-server, Qwen3.6-35B-A3B — **disarmed** since 2026-09-20 (`secondary_enabled: false`), which is why GPU 2 answers for djev | `bin/start-secondary.sh` |
 | `agent-djev` | 8010 + 8011 | DiffusionGemma 26B-A4B on vLLM, with the structured-decision server on 8011; the GPU-2 tenant that is switched on (`djev.enabled: true`) | `agent-services/bin/start-djev.sh` |
-| `agent-decider` | 8012 | a third GPU-2 tenant that is only a conf and a launcher: no config flag, absent from `app/llm_slots.py`, so nothing can arm it and the two-flags rule does not cover it (#2713) | `agent-services/bin/start-decider.sh` |
 | `agent-tts-omni` | 8093 | Qwen3-TTS 1.7B Base on vLLM-Omni — the TTS voice mode uses since 2026-10-09 (GPU 3, UUID-pinned); two engines, so `/health` answers only at the end of a ~2.5 min boot | `bin/start-qwen3-tts-omni.sh` |
 | `agent-livekit-server` | 7880 | LiveKit SFU; signal/WS bind `0.0.0.0` (`conf/livekit.yaml` `bind_addresses`) and it is the **advertised ICE address** (`rtc.node_ip`) that resolves to the Tailscale address at boot | `bin/start-livekit-server.sh` |
 | `lloyd-agent-worker` | 8501 | the LiveKit voice agent: STT, TTS shaping, wake word (8501 is the loopback wake-miss diagnostic rig) | `agent-services/livekit_worker.py` |
@@ -601,7 +600,6 @@ voice *change*. So a voice change needs the guardian re-staged
 | 5173 | Vite (TLS) |
 | 7880 / 7881 | LiveKit — signal HTTP and its TCP fallback (`conf/livekit.yaml`: `bind_addresses: [0.0.0.0]`, `rtc.tcp_port: 7881`) |
 | 8010 / 8011 | djev — vLLM's OpenAI surface and `/metrics`, and the structured-decision server in front of it. `scripts/service_health_check.py` probes **8011**, not 8010: an open 8011 means the whole stack came up, an open 8010 during a cold boot does not |
-| 8012 | the unarmed `agent-decider` slot (#2713) — listed so a reader who finds it listening knows who put it there |
 | 8080 | backend |
 | 8091 | secondary LLM |
 | 8093 | Qwen3-TTS on vLLM-Omni (`agent-tts-omni`) — the TTS voice mode actually speaks through |
