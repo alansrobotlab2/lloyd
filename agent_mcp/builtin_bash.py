@@ -54,6 +54,18 @@ under the data root gets that table's real columns on one more line, read off th
 store at that instant (`_bash_schema_hint`, #2703). It adds nothing when the table
 or store cannot be recovered, and it opens every store read-only.
 
+A foreground command whose pipeline reported success while its FIRST component
+failed gets one loud line after the output (`app/harness/bash_pipeline.py`,
+#4049). bash reports a pipeline's LAST component's status, so `pytest -q | tail`
+on a red suite is a green tool result today; the wrapper that recovers the
+component status re-exits with the status the command already had, so the reported
+`rc`, the `[exit code: N]` suffix and `is_error` are unchanged by it, and the note
+is strictly additive. Its reach is narrow by construction and the line says so:
+the FIRST component of the LAST pipeline only — a mid-stage failure, an earlier
+pipeline in the same command, a producer killed by SIGPIPE (141), and any command
+the shape check declines to wrap (no top-level `|`, a heredoc, an unbalanced
+quote) are not detected.
+
 Background mode (``run_in_background=true``) spawns the command with
 stdout/stderr redirected to a file under ``~/lloyd-data/_pipeline/tasks/``,
 returns the task id and output path immediately, and lets the harness
@@ -81,7 +93,7 @@ from agent_mcp._shared import get_bound_session, text_result
 # #3846: the child's environment is credential-filtered at every spawn site.
 # `app.harness` is imported from `agent_mcp` elsewhere too (`capabilities` at
 # `_resource_ceiling.py`), so this is not a new layering edge.
-from app.harness import credential_store
+from app.harness import bash_pipeline, credential_store
 
 logger = logging.getLogger("lloyd-builtin-bash")
 
@@ -198,6 +210,31 @@ def _effective_cwd(cwd: str | None) -> str | None:
 
 
 async def _bash(args: dict[str, Any]) -> str:
+    """Run one shell command and return the text the model reads.
+
+    Three things happen to the command string here, in this order: the safety
+    gate has already run upstream (`app/harness/safety.py`, twice, and not in
+    this module), the masked-pipeline capture may be appended to it
+    (`app/harness/bash_pipeline.py`, #4049), and the result may gain one of the
+    appended notes described in this file's docstring.
+
+    **The masked-pipeline note is additive, and its reach is narrow.** A
+    foreground command with a top-level `|` is run with three extra lines
+    appended — one assignment command capturing `$PIPESTATUS` and `$?`, one
+    marker line, and `exit $__lloyd_rc` — and when the overall status is 0 while
+    the FIRST component of the LAST pipeline exited non-zero and not 141, one
+    line is appended after the output. Nothing else: the reported `rc`, the
+    `[exit code: N]` suffix, the `is_error` flag and every byte of the command's
+    own output are what they were before the wrapper existed. Not detected, and
+    the emitted line says so itself: a failure in a middle stage of `a | b | c`,
+    an earlier pipeline in a multi-command script, a producer killed by SIGPIPE
+    (141), a command with no top-level `|`, a command containing a here-document,
+    and a background spawn — all of which are reported exactly as today, which is
+    to say silently. Widening coverage past element 0 of the last pipeline needs
+    a braced array spelling that survives the env-substitution pass, and there is
+    none: `${PIPESTATUS[@]}` and `${PIPESTATUS[*]}` both arrive empty (#2953,
+    measured again on this box 2026-11-11).
+    """
     command = args.get("command", "")
     if not command or not isinstance(command, str):
         return json.dumps({"error": "command (string) is required"})
@@ -272,6 +309,20 @@ async def _bash(args: dict[str, Any]) -> str:
                                         background=False)
     _rpc.current_parent.set(rpc_parent)
 
+    # #4049: the masked-pipeline capture, composed only on the cheap shape check
+    # (`app/harness/bash_pipeline.py`) and only for a foreground spawn — a
+    # background command returns above, before this line, and its result is a file
+    # the model reads back rather than a result this function can annotate.
+    #
+    # `exec_command` is what reaches the shell; `command` stays the caller's text
+    # for every other reader in this function — the `.py` edit snapshot, the schema
+    # hint, the stray-path note and the timeout payload all describe what was
+    # asked for, not what was appended to it. The wrapper re-exits with the status
+    # the command already had, so `proc.returncode` is still the only status this
+    # tool reports on.
+    wrapped = bash_pipeline.capture_wrapper(command)
+    exec_command = command if wrapped is None else wrapped
+
     try:
         # start_new_session=True puts the shell (and everything it
         # spawns — pipes, valgrind, child binaries) into its own process
@@ -293,7 +344,7 @@ async def _bash(args: dict[str, Any]) -> str:
             # the box's own resources while a grader waits, and the item scopes the
             # ceiling to "bench/eval arms included".
             sb_argv, ceiling_report = _resource_ceiling.apply(
-                _tool_sandbox.bwrap_argv(command, cwd))
+                _tool_sandbox.bwrap_argv(exec_command, cwd))
             proc = await asyncio.create_subprocess_exec(
                 *sb_argv,
                 stdout=asyncio.subprocess.PIPE,
@@ -322,8 +373,8 @@ async def _bash(args: dict[str, Any]) -> str:
             # shell `create_subprocess_shell` was already running). Fail-open:
             # `wrap` returns a bare spawn plus False when bwrap cannot build,
             # and says so on the log and on `/state`.
-            sb_argv, sb_enforced = await asyncio.to_thread(_path_sandbox.wrap, command,
-                                                           cwd)
+            sb_argv, sb_enforced = await asyncio.to_thread(_path_sandbox.wrap,
+                                                           exec_command, cwd)
             # #2578: outside the path sandbox's argv, so the command keeps bwrap's
             # read-only binds AND gets a bound on what its subtree may consume. The
             # ceiling is the other half of what this module's docstring says it is for:
@@ -386,6 +437,21 @@ async def _bash(args: dict[str, Any]) -> str:
         raise
 
     output = stdout.decode("utf-8", errors="replace") if stdout else ""
+
+    # #4049: peel the capture's marker off the tail BEFORE the truncation check, so
+    # the bytes that decide truncation, the bytes the model reads and the `(no
+    # output)` substitution are the ones the command wrote — the three appended
+    # lines contribute nothing to any of them. `captured_status` is the FIRST
+    # component's status; a marker that reports an overall status other than the
+    # one the spawn actually returned is discarded rather than trusted, because a
+    # wrapper that cannot reproduce the real status has no business commenting on
+    # it, and this tool's every verdict is `proc.returncode`.
+    captured_status: int | None = None
+    if wrapped is not None:
+        output, captured_status, captured_rc = bash_pipeline.split_marker(output)
+        if captured_rc != (proc.returncode if proc.returncode is not None else -1):
+            captured_status = None
+
     truncated = False
     if len(output) > OUTPUT_TRUNCATE_CHARS:
         output = output[:OUTPUT_TRUNCATE_CHARS] + "\n[... output truncated ...]"
@@ -434,6 +500,18 @@ async def _bash(args: dict[str, Any]) -> str:
         output = output if output else "(no output)"
     if ceiling_note:
         output = f"{output}\n{ceiling_note}"
+    # #4049: the one loud line, and only where a success was reported. A command
+    # that exited non-zero already carries `[exit code: N]` and `is_error`, and this
+    # note deliberately never joins it — that is what keeps the whole instrument
+    # additive and every non-zero result byte-identical to the one it would have
+    # returned yesterday. `_bash_failed` is NOT set here: an error flag flipped by a
+    # note would be the semantics change this round's goal rules out, and the rate
+    # in `app/tool_quality.py` is what decides whether it ever should be (#4049
+    # step 5). The line names its own reach, so a clean reading cannot be mistaken
+    # for a covered command.
+    masked_note = bash_pipeline.masked_note_for(captured_status, rc)
+    if masked_note:
+        output = f"{output}\n{masked_note}"
     return await _with_edit_diagnostics(output, snap)
 
 

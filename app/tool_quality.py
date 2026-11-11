@@ -8,10 +8,25 @@ those, and that is the shape this box has been cut by more than once:
 result as a broken query and changed what it did next, and the standing class
 rule "a 0-hit grep needs a positive control, and a grep against a path that does
 not exist returns 0" (2026-09-16/17) is prose nobody can enforce because nobody
-could see the rate. This module turns that prose into a number. It counts two
-things over calls that carry **no error flag** — a zero-result answer, and a
-call whose every argument was null — per tool, per day, each printed beside its
+could see the rate. This module turns that prose into a number. It counts three
+things over calls that carry **no error flag** — a zero-result answer, a call
+whose every argument was null, and a Bash call whose pipeline reported success
+while its first component failed — per tool, per day, each printed beside its
 denominator.
+
+**The third counter is #4049's rate, and it is the reason the note exists.**
+`app/harness/bash_pipeline.py` appends one line to a Bash result whose overall
+exit status was 0 while the first component of its last pipeline exited non-zero;
+this module counts, per tool, how many non-error calls took a command with a
+top-level `|` (`with_pipe`) and how many of those came back carrying that note
+(`masked`), printed as `masked / with_pipe` beside the corpus call total. Two
+decisions are settled by that number and by nothing else — whether the SIGPIPE (141)
+whitelist can shrink, and whether the exit status should ever flip at all — so
+until a week of rows exists the instrument is deliberately mute about both.
+`with_pipe` is the denominator rather than `calls` because the rate that matters
+is "of the pipelines that could have masked something, how many did", and Bash is
+this box's busiest tool by an order of magnitude: a rate over every Bash call
+would be a small number over a huge N and read as clean.
 
 **Report-only.** Nothing is gated on these rates, and nothing here should ever
 be wired as a gate: a zero-result is frequently the *correct* answer (a grep
@@ -74,7 +89,10 @@ from app.atomic_io import atomic_write_text
 #: The schema tag of the emitted row set, so a later reader of a dated file
 #: knows which invariants produced it. Bump it only in a way that keeps the old
 #: files readable — retention is 30 days, so both shapes coexist for a month.
-SCHEMA = 1
+#: 1 → 2 on 2026-11-11 added the two #4049 counts: a reader of a schema-1 file
+#: finds those keys absent, which is exactly what they mean — the detector did not
+#: exist that day.
+SCHEMA = 2
 
 #: What `Grep` and `Glob` return for a zero hit (`agent_mcp/builtin_fs.py`).
 #: Twelve characters, so it is *not* empty by length and not empty by
@@ -88,10 +106,16 @@ NO_MATCHES = "(no matches)"
 #: answer with nothing.
 ZERO_RESULT_RE = re.compile(r"^\(.* completed with no output\)$")
 
-#: The five fields one per-tool row carries. Kept to these so a reader of the
+#: The seven fields one per-tool row carries. Kept to these so a reader of the
 #: emitted JSON can tell a count from a rate at a glance: counts are integers,
 #: and every rate is added by the sweep as a `*_rate` string (see `rate`).
-ROW_KEYS = ("tool", "calls", "empty", "degenerate_args", "degenerate_errored")
+#: `with_pipe` and `masked` are #4049's pair: the non-error calls whose command
+#: took a top-level `|`, and the subset of those whose result carries the
+#: masked-pipeline note. `masked` is a subset of `with_pipe` by construction —
+#: only a command the tool wrapped can be annotated — while `empty` and
+#: `degenerate_args` are related to neither.
+ROW_KEYS = ("tool", "calls", "empty", "degenerate_args", "degenerate_errored",
+            "with_pipe", "masked")
 
 #: How far back a sweep reads. Seven days is the window the triage measurement of
 #: the corpus was taken over (4,446 session files, 91,904 tool calls), so the
@@ -183,6 +207,58 @@ def _is_nullish(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
 
 
+def _command_argument(call: dict) -> "str | None":
+    """The `command` string a call was made with, or None when it has none.
+
+    Read out of `function.arguments`, which is the JSON string the model produced
+    — the same row `is_degenerate_arguments` reads. It is the caller's text, not
+    the wrapped one: the masked-pipeline capture is appended inside the tool
+    (`agent_mcp/builtin_bash.py`), well after the call row was persisted, so what
+    is on disk here is exactly the string the tool's own shape check saw.
+    """
+    function = call.get("function")
+    raw = function.get("arguments") if isinstance(function, dict) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        args = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(args, dict):
+        return None
+    command = args.get("command")
+    return command if isinstance(command, str) else None
+
+
+def command_takes_a_pipe(call: dict) -> bool:
+    """True when this call's command has a top-level `|` — the #4049 denominator.
+
+    Delegates the test to `app.harness.bash_pipeline.has_top_level_pipe`, the same
+    function the tool consults before composing its capture. That is the whole
+    point of the shared module: a second spelling of "does this command pipe" is a
+    denominator that silently stops describing the wrapped population, and the rate
+    would then be a number about nothing. It is imported inside the call the way
+    `transcript_paths` imports the sidecar rule, so this module's import surface
+    stays stdlib plus `atomic_io` for the once-a-day CLI.
+    """
+    from app.harness.bash_pipeline import has_top_level_pipe
+
+    command = _command_argument(call)
+    return command is not None and has_top_level_pipe(command)
+
+
+def is_masked_pipeline(result: dict) -> bool:
+    """True when an unflagged Bash result came back carrying #4049's note.
+
+    Again delegated: `MASKED_NOTE_PREFIX` is defined once, next to the line the
+    tool emits, so the emitted wording and the count cannot drift apart across two
+    files. Substring rather than parse — the sweep needs only that the tool fired.
+    """
+    from app.harness.bash_pipeline import is_masked_result
+
+    return is_masked_result(result_text(result))
+
+
 def is_degenerate_arguments(call: dict) -> bool:
     """True when every argument in the call is null, empty or absent.
 
@@ -244,7 +320,7 @@ def classify_transcript(doc: Any) -> "dict[str, dict]":
     """Per-tool quality rows for one session-transcript document. Pure.
 
     Returns `{tool: {"tool", "calls", "empty", "degenerate_args",
-    "degenerate_errored"}}` (`ROW_KEYS`), where:
+    "degenerate_errored", "with_pipe", "masked"}}` (`ROW_KEYS`), where:
 
     * `calls` counts a call only when its paired `role="tool"` row is present
       and NOT error-flagged. A call with no result row is a call whose result was
@@ -261,6 +337,14 @@ def classify_transcript(doc: Any) -> "dict[str, dict]":
       argument-shape rejection the harness already reported must not also show up
       as a success-coded defect — but they are kept as a count so the exclusion
       is visible rather than a silent subtraction.
+    * `with_pipe` counts the unflagged calls whose command took a top-level `|`
+      (`command_takes_a_pipe`). Every tool that takes no `command` argument is 0
+      here by construction, and so is its `masked` — a `0 / 0` on a `Grep` row is
+      "not applicable", never "clean".
+    * `masked` counts the pipelined calls whose result carries the note
+      #4049's instrument appends (`is_masked_pipeline`). It is incremented only
+      inside the `with_pipe` branch, so the numerator can never exceed its own
+      denominator and `masked / with_pipe` cannot read above 100%.
 
     A call id seen twice in one transcript counts once (see `_result_index`).
     """
@@ -305,6 +389,14 @@ def classify_transcript(doc: Any) -> "dict[str, dict]":
                 counted_row["empty"] += 1
             if degenerate:
                 counted_row["degenerate_args"] += 1
+            # #4049: nested on purpose. `masked` is only ever incremented for a
+            # call that could have been masked in the first place, so the pair
+            # `masked / with_pipe` is a rate over the population the tool wrapped
+            # and the numerator cannot escape its denominator.
+            if command_takes_a_pipe(call):
+                counted_row["with_pipe"] += 1
+                if is_masked_pipeline(result):
+                    counted_row["masked"] += 1
     return out
 
 
@@ -327,11 +419,21 @@ def merge_rows(target: "dict[str, dict]",
 #: these numbers has a broken detector, not a clean corpus. That is the standing
 #: class rule — "a 0-hit grep needs a positive control" — applied to the
 #: instrument itself.
+#:
+#: The `Bash` row is #4049's control and it is the only place the masked-pipeline
+#: counter is proven to fire: `with_pipe: 2, masked: 1` is one designed masked
+#: failure, one pipelined call that carried no note (the false-positive control),
+#: and one call with no pipeline at all, which must not reach either count. A
+#: detector that stopped matching the note reads `masked: 0` here and fails the
+#: self-check on every day's row set, so a corpus of zeroes can never arrive
+#: without the evidence that the instrument is still wired up.
 CONTROL_EXPECTED: "dict[str, dict]" = {
+    "Bash": {"tool": "Bash", "calls": 3, "empty": 0, "degenerate_args": 0,
+             "degenerate_errored": 0, "with_pipe": 2, "masked": 1},
     "Grep": {"tool": "Grep", "calls": 5, "empty": 2, "degenerate_args": 1,
-             "degenerate_errored": 0},
+             "degenerate_errored": 0, "with_pipe": 0, "masked": 0},
     "Read": {"tool": "Read", "calls": 2, "empty": 1, "degenerate_args": 0,
-             "degenerate_errored": 1},
+             "degenerate_errored": 1, "with_pipe": 0, "masked": 0},
 }
 
 
@@ -367,10 +469,10 @@ def _seed(call_id: str, tool: str, args: dict, text: str, *,
 def control_transcript() -> dict:
     """A seeded transcript with a known number of every failure this counts.
 
-    Eight rows: five `Grep` calls and three `Read` calls, two rows per call.
-    Designed so that each of the three emptiness tests, and both argument
-    branches, has its own row that must fire — and each also has a row beside it
-    that must NOT:
+    Eleven calls — five `Grep`, three `Read`, three `Bash` — two rows per call.
+    Designed so that each of the three emptiness tests, both argument branches,
+    and the masked-pipeline counter has its own row that must fire — and each also
+    has a row beside it that must NOT:
 
     * `Grep` 1 — `"(no matches)"` with `raw_chars` 12: the zero hit a length
       test cannot see. `Grep` 2 — a real match list: the non-empty control.
@@ -388,7 +490,18 @@ def control_transcript() -> dict:
     * `Read` 3 — arguments `{"file_path": null, "offset": "", "limit": null}`
       with `is_error: true`: an argument rejection the error surface already
       reports, so it lands in `degenerate_errored` and not in the rate.
+    * `Bash` 1 — `pytest -q 2>&1 | tail -3` coming back with a passing-looking
+      tail AND #4049's note, built with the tool's own `masked_note(1)` rather than
+      a copy of its wording: this is the one designed masked failure, and the row
+      that fails if the note and the counter are ever edited apart.
+    * `Bash` 2 — `git show HEAD | head -20` with an ordinary result: pipelined, so
+      it is in the denominator, and clean, so it must not be counted. This is the
+      row that makes `1 / 2` instead of `2 / 2`.
+    * `Bash` 3 — `git status --short`: no pipeline at all, the reason `with_pipe`
+      is 2 and not 3. A tool that never pipes must not dilute the rate.
     """
+    from app.harness.bash_pipeline import masked_note
+
     messages: list[dict] = []
     messages += _seed("call_g1", "Grep",
                       {"pattern": "NoSymbolAnywhere", "path": "~/lloyd"},
@@ -421,6 +534,19 @@ def control_transcript() -> dict:
                       "Error: file_path is required",
                       result_stats={"result_chars": 27, "raw_chars": 27,
                                     "is_error": True})
+    # ── #4049: the masked-pipeline control, one call per branch of the pair ──
+    # The note is produced by `masked_note`, the very function the tool calls, so
+    # this fixture can never drift from the line it is meant to detect; the only
+    # way this row stops counting is a detector that no longer recognises the note.
+    messages += _seed("call_b1", "Bash",
+                      {"command": "pytest -q 2>&1 | tail -3"},
+                      "3 passed in 4.21s\n" + masked_note(1))
+    messages += _seed("call_b2", "Bash",
+                      {"command": "git show HEAD | head -20"},
+                      "commit 9f2c1ab\n    Surface masked pipeline failures\n")
+    messages += _seed("call_b3", "Bash",
+                      {"command": "git status --short"},
+                      " M app/tool_quality.py\n")
     return {"session_id": "tool-quality-self-check", "messages": messages}
 
 
@@ -438,7 +564,11 @@ def self_check() -> dict:
               for tool, row in sorted(rows.items())}
     rates = {tool: {"empty": rate(row["empty"], row["calls"]),
                     "degenerate_args": rate(row["degenerate_args"],
-                                            row["calls"])}
+                                            row["calls"]),
+                    # Over `with_pipe`, not `calls`: the same denominator the live
+                    # rows use, so the control block beside a day of zeroes reads
+                    # `1 / 2` in the units a reader is already looking at.
+                    "masked": rate(row["masked"], row["with_pipe"])}
              for tool, row in sorted(actual.items())}
     return {"expected": {tool: {key: CONTROL_EXPECTED[tool][key]
                                 for key in ROW_KEYS}
@@ -471,6 +601,11 @@ def tool_rows(rows: "dict[str, dict]", *,
     rate to state, and a table that prints `0 / 0` reads as a measurement of
     nothing. The sweep reports those tools separately (see `sweep`) so their
     `degenerate_errored` count is not lost by being un-rateable.
+
+    `masked_rate` is over `with_pipe` rather than `calls` — of the calls that could
+    have masked a failure, how many did — so a tool that takes no `command`
+    argument prints `0 / 0` there, and that means *not applicable* rather than
+    *clean*. Only `Bash` can produce a non-zero denominator today.
     """
     out: list[dict] = []
     for tool in sorted(rows, key=lambda t: (-rows[t]["empty"],
@@ -481,6 +616,7 @@ def tool_rows(rows: "dict[str, dict]", *,
         row["empty_rate"] = rate(row["empty"], row["calls"])
         row["degenerate_args_rate"] = rate(row["degenerate_args"],
                                            row["calls"])
+        row["masked_rate"] = rate(row["masked"], row["with_pipe"])
         out.append(row)
     return out
 
@@ -667,6 +803,12 @@ def sweep(*, sessions_dir: "Path | str | None" = None,
     total_degenerate = sum(row["degenerate_args"] for row in rows.values())
     total_degenerate_errored = sum(row["degenerate_errored"]
                                    for row in rows.values())
+    # #4049: the pipelined population and the masked subset of it. Summed over
+    # every tool because only `Bash` can move either number — every other tool
+    # takes no `command` argument, so its `with_pipe` is 0 by construction and the
+    # corpus pair IS the Bash pair. `format_report` prints them as one `k / N`.
+    total_with_pipe = sum(row["with_pipe"] for row in rows.values())
+    total_masked = sum(row["masked"] for row in rows.values())
     # Tools with no non-error call at all: no denominator, so no rate, and they
     # are NOT in `tools` (see `tool_rows`). `degenerate_errored` is the one thing
     # the classifier keeps about them, and naming the tool is what makes the
@@ -692,10 +834,13 @@ def sweep(*, sessions_dir: "Path | str | None" = None,
             "total_empty": total_empty,
             "total_degenerate_args": total_degenerate,
             "total_degenerate_errored": total_degenerate_errored,
+            "total_with_pipe": total_with_pipe,
+            "total_masked_pipeline": total_masked,
         },
         "corpus_rates": {
             "empty": rate(total_empty, total_calls),
             "degenerate_args": rate(total_degenerate, total_calls),
+            "masked_pipeline": rate(total_masked, total_with_pipe),
         },
         # The instrument's own positive control, in the file every day, so a day
         # of zeroes always arrives with the evidence that zero is a measurement
@@ -738,6 +883,12 @@ def format_report(report: dict, *, top: int = 5) -> str:
     # or is the corpus empty" — and the reason it never appears as a bare `0`.
     empty_corpus = ("" if corpus["total_calls"]
                     else "   (no non-error call in this corpus)")
+    # #4049's own line: the masked count over the pipelined population, printed
+    # beside the corpus call total it was taken from. A window in which nothing was
+    # masked prints `0 / 412` — a measurement — and a window with no pipelined call
+    # at all says so rather than showing a rate that would read as clean.
+    no_pipes = ("" if corpus["total_with_pipe"]
+                else "   (no pipelined call in this corpus)")
     lines = [
         f"tool-quality {report['date']}  window {report['window']['from']}"
         f" .. {report['window']['through']}"
@@ -749,18 +900,30 @@ def format_report(report: dict, *, top: int = 5) -> str:
         f"all-null-argument rate: {report['corpus_rates']['degenerate_args']}   "
         f"all-null-argument calls that errored (excluded): "
         f"{corpus['total_degenerate_errored']}{empty_corpus}",
+        f"masked pipeline failures (Bash): "
+        f"{report['corpus_rates']['masked_pipeline']}   of "
+        f"{corpus['total_with_pipe']} pipelined call(s), corpus total "
+        f"{corpus['total_calls']} call(s){no_pipes}",
         f"self-check: {'ok' if report['self_check']['ok'] else 'FAILED'} "
         + "  ".join(f"{tool} empty {row['empty']}"
                     for tool, row in report["self_check"]["rates"].items()),
+        # The masked control beside the masked rate, so a `0 / 412` from the corpus
+        # always arrives with the number that proves the detector fires.
+        "masked control: " + ("  ".join(
+            f"{tool} {rate(row['masked'], row['with_pipe'])}"
+            for tool, row in sorted(report["self_check"]["actual"].items())
+            if row["with_pipe"]) or "(no pipelined control call)"),
     ]
     rows = report["tools"]
     shown = rows if top <= 0 else rows[:top]
     lines.append(f"tools shown: {len(shown)} of {len(rows)}"
                  f"{' (top by empty count)' if top > 0 else ''}")
-    lines.append(f"{'tool':<26} {'empty':>12} {'null-args':>12}")
+    lines.append(f"{'tool':<26} {'empty':>12} {'null-args':>12} "
+                 f"{'masked/pipes':>14}")
     for row in shown:
         lines.append(f"{row['tool']:<26} {row['empty_rate']:>12} "
-                     f"{row['degenerate_args_rate']:>12}")
+                     f"{row['degenerate_args_rate']:>12} "
+                     f"{row['masked_rate']:>14}")
     for row in report["tools_without_success_calls"]:
         lines.append(f"{row['tool']:<26} no non-error call "
                      f"(all-null-arg errored {row['degenerate_errored']})")

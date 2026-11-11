@@ -142,14 +142,17 @@ def corpus(tmp_path: Path):
 
 
 # ───────────────── clause 1: the classifier and its denominator ──────────────
-def test_classifier_rows_carry_exactly_the_five_named_fields():
-    """One transcript in, per-tool rows out, with the five clause fields.
+def test_classifier_rows_carry_exactly_the_seven_named_fields():
+    """One transcript in, per-tool rows out, with the named fields and nothing else.
 
     `classify_transcript` is pure over one document — no clock, no filesystem —
-    and a row carries `tool`, `calls`, `empty`, `degenerate_args` and
-    `degenerate_errored` and nothing else. A sixth count here would be a number no
-    clause asked for, which a reader of the emitted JSON could mistake for a rate:
-    every rate is added later by the sweep, in `k / N` form.
+    and a row carries `tool`, `calls`, `empty`, `degenerate_args`,
+    `degenerate_errored`, `with_pipe` and `masked` and nothing else. An eighth count
+    here would be a number no clause asked for, which a reader of the emitted JSON
+    could mistake for a rate: every rate is added later by the sweep, in `k / N`
+    form. The last two are #4049's pair — the pipelined denominator and the masked
+    numerator — and a call whose tool takes no `command` argument is 0 in both, so
+    these two `Grep`/`Read` rows carry them as zeroes rather than as missing keys.
     """
     rows = tq.classify_transcript(doc(
         call_row("c1", "Grep", {"pattern": "zz"}),
@@ -161,9 +164,11 @@ def test_classifier_rows_carry_exactly_the_five_named_fields():
     for row in rows.values():
         assert set(row) == set(tq.ROW_KEYS)
     assert rows["Grep"] == {"tool": "Grep", "calls": 1, "empty": 1,
-                            "degenerate_args": 0, "degenerate_errored": 0}
+                            "degenerate_args": 0, "degenerate_errored": 0,
+                            "with_pipe": 0, "masked": 0}
     assert rows["Read"] == {"tool": "Read", "calls": 1, "empty": 0,
-                            "degenerate_args": 0, "degenerate_errored": 0}
+                            "degenerate_args": 0, "degenerate_errored": 0,
+                            "with_pipe": 0, "masked": 0}
 
 
 def test_an_error_flagged_call_is_out_of_calls_and_out_of_every_numerator():
@@ -191,7 +196,8 @@ def test_an_error_flagged_call_is_out_of_calls_and_out_of_every_numerator():
                    err_stats("Error: command is required")),
     ))
     assert rows["Bash"] == {"tool": "Bash", "calls": 2, "empty": 1,
-                            "degenerate_args": 0, "degenerate_errored": 1}
+                            "degenerate_args": 0, "degenerate_errored": 1,
+                            "with_pipe": 0, "masked": 0}
 
 
 def test_a_call_with_no_result_row_is_not_counted_at_all():
@@ -210,7 +216,8 @@ def test_a_call_with_no_result_row_is_not_counted_at_all():
                    ok_stats("app/paths.py:1: x\n")),
     ))
     assert rows == {"Grep": {"tool": "Grep", "calls": 1, "empty": 0,
-                             "degenerate_args": 0, "degenerate_errored": 0}}
+                             "degenerate_args": 0, "degenerate_errored": 0,
+                             "with_pipe": 0, "masked": 0}}
 
 
 def test_one_call_id_counts_once_even_if_its_call_row_is_written_twice():
@@ -317,8 +324,9 @@ def test_a_marker_row_with_result_chars_31_and_no_raw_chars_is_counted_end_to_en
     report = tq.sweep(sessions_dir=sessions, out_dir=store, days=7, today=DAY)
     assert report["tools"] == [{
         "tool": "Read", "calls": 1, "empty": 1, "degenerate_args": 0,
-        "degenerate_errored": 0, "empty_rate": "1 / 1",
-        "degenerate_args_rate": "0 / 1"}]
+        "degenerate_errored": 0, "with_pipe": 0, "masked": 0,
+        "empty_rate": "1 / 1", "degenerate_args_rate": "0 / 1",
+        "masked_rate": "0 / 0"}]
 
 
 def test_the_control_carries_every_vocabulary_row_it_claims_to():
@@ -356,17 +364,43 @@ def test_the_control_carries_every_vocabulary_row_it_claims_to():
     errored_null_args = by_id["call_r3"]
     assert errored_null_args["stats"]["is_error"] is True
 
+    # ── #4049: the masked-pipeline rows, pinned the same way ──
+    # The note on `call_b1` is built by `masked_note`, the very function the Bash
+    # tool calls, so this is the seam that fails if the emitted wording and the
+    # counter's prefix are ever edited apart — the drift that would leave every
+    # future row reading `0 / N` while the instrument was still firing.
+    from app.harness import bash_pipeline
+
+    document = tq.control_transcript()
+    calls = {call["call_id"]: call
+             for row in document["messages"] if row.get("role") == "assistant"
+             for call in row.get("tool_calls", [])}
+    assert tq.command_takes_a_pipe(calls["call_b1"]) is True
+    assert tq.command_takes_a_pipe(calls["call_b2"]) is True
+    assert tq.command_takes_a_pipe(calls["call_b3"]) is False
+    masked_text = tq.result_text(by_id["call_b1"])
+    assert bash_pipeline.masked_note(1) in masked_text
+    assert tq.is_masked_pipeline(by_id["call_b1"]) is True
+    assert tq.is_masked_pipeline(by_id["call_b2"]) is False
+    assert tq.is_masked_pipeline(by_id["call_b3"]) is False
+
 
 def test_the_seeded_two_of_five_and_one_null_argument_case_reports_exactly(corpus):
     """The item's own seeded case, through the sweep and back out of the file.
 
     A transcript seeded with five `Grep` calls of which exactly two returned
     nothing — one of those five carrying all-null arguments — plus three `Read`
-    calls including one all-null-argument call that errored. Written as a session
-    file, swept, and re-read from the dated JSON, `Grep` must read `2 / 5` empty
-    and `1 / 5` all-null-arguments: not `2 / 6` (an errored call in the
-    denominator), not `3 / 5` (an errored empty in the numerator), not `1 / 5`
-    empty (a dropped marker row).
+    calls including one all-null-argument call that errored, plus the three `Bash`
+    calls #4049 added. Written as a session file, swept, and re-read from the dated
+    JSON, `Grep` must read `2 / 5` empty and `1 / 5` all-null-arguments: not `2 / 6`
+    (an errored call in the denominator), not `3 / 5` (an errored empty in the
+    numerator), not `1 / 5` empty (a dropped marker row).
+
+    The `Bash` row is the #4049 half: exactly ONE masked failure out of TWO
+    pipelined calls — one call that carried the note, one clean pipe beside it, and
+    one command with no pipeline at all, which is why the denominator is 2 and not
+    3. Re-read from the dated JSON, not from the classifier's memory, so the whole
+    emit-and-reread path is covered.
     """
     sessions, store = corpus
     write_session(sessions, "20261006_000000_chat_seeded.json",
@@ -381,8 +415,17 @@ def test_the_seeded_two_of_five_and_one_null_argument_case_reports_exactly(corpu
     assert (grep["degenerate_args"], grep["degenerate_args_rate"]) == (1, "1 / 5")
     read = next(row for row in written["tools"] if row["tool"] == "Read")
     assert (read["empty"], read["calls"], read["degenerate_errored"]) == (1, 2, 1)
-    assert written["corpus"]["total_calls"] == 7
+    # 5 Grep + 2 Read (the third errored) + 3 Bash = 10 unflagged calls.
+    assert written["corpus"]["total_calls"] == 10
     assert written["self_check"]["ok"] is True
+
+    bash = next(row for row in written["tools"] if row["tool"] == "Bash")
+    assert (bash["with_pipe"], bash["masked"], bash["masked_rate"]) == (2, 1,
+                                                                       "1 / 2")
+    # The corpus pair is the Bash pair, because no other tool takes a `command`.
+    assert written["corpus"]["total_with_pipe"] == 2
+    assert written["corpus"]["total_masked_pipeline"] == 1
+    assert written["corpus_rates"]["masked_pipeline"] == "1 / 2"
 
 
 def test_the_self_check_fires_now_and_fails_loudly_if_the_detector_stops(
@@ -399,14 +442,22 @@ def test_the_self_check_fires_now_and_fails_loudly_if_the_detector_stops(
     assert check["ok"] is True
     assert check["actual"] == check["expected"]
     assert check["rates"]["Grep"] == {"empty": "2 / 5",
-                                      "degenerate_args": "1 / 5"}
+                                      "degenerate_args": "1 / 5",
+                                      "masked": "0 / 0"}
+    # The masked control reads 1 / 2 — one designed failure, one clean pipe. This is
+    # the number that has to survive every future edit of the note's wording.
+    assert check["rates"]["Bash"] == {"empty": "0 / 3",
+                                      "degenerate_args": "0 / 3",
+                                      "masked": "1 / 2"}
+    assert check["actual"]["Bash"]["masked"] == 1
 
     monkeypatch.setattr(tq, "is_zero_result", lambda row: False)
     broken = tq.self_check()
     assert broken["ok"] is False
     assert broken["actual"]["Grep"] == {"tool": "Grep", "calls": 5, "empty": 0,
                                         "degenerate_args": 1,
-                                        "degenerate_errored": 0}
+                                        "degenerate_errored": 0,
+                                        "with_pipe": 0, "masked": 0}
     assert broken["rates"]["Grep"]["empty"] == "0 / 5"
 
 
@@ -465,7 +516,8 @@ def test_an_all_null_argument_call_that_errored_lands_in_degenerate_errored():
                    err_stats("Error: file_path is required")),
     ))
     assert rows["Read"] == {"tool": "Read", "calls": 0, "empty": 0,
-                            "degenerate_args": 0, "degenerate_errored": 1}
+                            "degenerate_args": 0, "degenerate_errored": 1,
+                            "with_pipe": 0, "masked": 0}
 
 
 # ──────────── clause 4: every rate beside its denominator ────────────────────
@@ -507,15 +559,21 @@ def test_every_emitted_and_printed_rate_is_k_over_N(corpus):
     assert by_tool["Glob"]["degenerate_args_rate"] == "0 / 3"
     assert by_tool["Grep"]["empty_rate"] == "2 / 4"
     assert report["corpus_rates"] == {"empty": "2 / 7",
-                                      "degenerate_args": "0 / 7"}
+                                      "degenerate_args": "0 / 7",
+                                      "masked_pipeline": "0 / 0"}
 
     printed = tq.format_report(report, top=0).splitlines()
     glob_line = next(line for line in printed if line.startswith("Glob"))
     grep_line = next(line for line in printed if line.startswith("Grep"))
     for line in (glob_line, grep_line):
         assert re.search(r"\d+ / \d+\s+\d+ / \d+$", line), line
-    assert glob_line.rstrip().endswith("0 / 3")
+    # Three columns now — empty, null-args, masked/pipes — so the clean tool's
+    # `0 / 3` is no longer the last pair on its line. Each pair is still `k / N`:
+    # the empty column, then the masked column over a zero pipe denominator, which
+    # for a tool that takes no `command` argument means NOT APPLICABLE, not clean.
     assert "0 / 3" in glob_line and "2 / 4" in grep_line
+    assert re.search(r"\s0 / 3\s+0 / 3\s+0 / 0$", glob_line), glob_line
+    assert "masked pipeline failures (Bash): 0 / 0" in "\n".join(printed)
 
 
 def test_a_tool_with_no_non_error_call_gets_no_rate_row_but_is_still_named(corpus):
@@ -579,8 +637,75 @@ def test_the_emitted_row_set_states_the_corpus_it_measured(corpus):
         # tests/test_session_sidecar_denominators.py.
         "files_sidecar_in_dir": 0,
         "total_calls": 2, "total_empty": 1, "total_degenerate_args": 0,
-        "total_degenerate_errored": 0}
+        "total_degenerate_errored": 0,
+        # #4049's pair travels with them. Both tools here are `Glob`, which takes no
+        # `command`, so the pipelined population is genuinely zero — which is why the
+        # printed form says "(no pipelined call in this corpus)" beside its `0 / 0`
+        # instead of letting that read as a clean measurement.
+        "total_with_pipe": 0, "total_masked_pipeline": 0}
     assert report["corpus_rates"]["empty"] == "1 / 2"
+    assert report["corpus_rates"]["masked_pipeline"] == "0 / 0"
+
+
+# ─────────── #4049 clause 5: the masked rate beside its denominator ───────────
+def test_a_clean_window_prints_zero_over_its_pipelined_denominator_not_a_bare_zero(
+        corpus):
+    """`0 / 3` for a window that masked nothing — the shape a reader can use.
+
+    Four `Bash` calls, three of them pipelines that came back clean (their first
+    component succeeded and none carries the note), one with no pipeline at all. The
+    corpus line must read `0 / 3` — the masked count over the pipelined population,
+    printed in the same breath as the corpus call total — because a bare `0` cannot
+    answer the only question a zero raises: was there anything to mask? The fourth
+    call is what keeps the denominator at three rather than four, so the line cannot
+    be a restatement of `total_calls`.
+    """
+    sessions, store = corpus
+    write_session(sessions, "20261006_000000_chat_cleanpipes.json", doc(
+        call_row("p1", "Bash", {"command": "pytest -q 2>&1 | tail -3"}),
+        result_row("p1", "3 passed in 4.21s\n", ok_stats("3 passed in 4.21s\n")),
+        call_row("p2", "Bash", {"command": "git show HEAD | head -20"}),
+        result_row("p2", "commit 9f2c1ab\n", ok_stats("commit 9f2c1ab\n")),
+        call_row("p3", "Bash", {"command": "ls /etc | head -2"}),
+        result_row("p3", "passwd\nshadow\n", ok_stats("passwd\nshadow\n")),
+        call_row("p4", "Bash", {"command": "git status --short"}),
+        result_row("p4", " M app/tool_quality.py\n",
+                   ok_stats(" M app/tool_quality.py\n")),
+    ))
+    report = tq.sweep(sessions_dir=sessions, out_dir=store, days=7, today=DAY)
+    assert report["corpus"]["total_with_pipe"] == 3
+    assert report["corpus"]["total_masked_pipeline"] == 0
+    assert report["corpus_rates"]["masked_pipeline"] == "0 / 3"
+
+    printed = tq.format_report(report, top=5)
+    masked_line = next(line for line in printed.splitlines()
+                       if line.startswith("masked pipeline failures (Bash)"))
+    assert "0 / 3" in masked_line
+    # Beside the corpus total, on the same line, so the zero and its denominator
+    # cannot be read apart.
+    assert "corpus total 4 call(s)" in masked_line
+    assert "(no pipelined call in this corpus)" not in masked_line
+
+
+def test_a_corpus_with_no_pipelined_call_says_so_beside_its_zero_over_zero(corpus):
+    """`0 / 0` plus the words that make it mean *not applicable*.
+
+    A window of `Grep` calls only: no tool took a `command`, so the pipelined
+    population is empty. The rate cannot be hidden — a missing line reads as a clean
+    day too — so it prints `0 / 0` and states that the corpus held no pipelined call
+    at all.
+    """
+    sessions, store = corpus
+    write_session(sessions, "20261006_000000_chat_nopipes.json", doc(
+        call_row("g1", "Grep", {"pattern": "zz"}),
+        result_row("g1", "(no matches)", ok_stats("(no matches)")),
+    ))
+    report = tq.sweep(sessions_dir=sessions, out_dir=store, days=7, today=DAY)
+    printed = tq.format_report(report, top=5)
+    masked_line = next(line for line in printed.splitlines()
+                       if line.startswith("masked pipeline failures (Bash)"))
+    assert "0 / 0" in masked_line
+    assert "(no pipelined call in this corpus)" in masked_line
 
 
 # ────────── clause 5: read-only, one dated file, self-pruning store ──────────
@@ -751,7 +876,7 @@ def test_no_duration_is_read_from_a_transcript():
     1599/1599 call/result pairs in the 40 newest session JSONs share a timestamp,
     and `app/harness/loop.py:3230`'s `duration_ms` is dropped by both persistence
     paths. So no duration is computable here, and a row seeded with a `duration_ms`
-    key must still produce no timing signal: same five fields, no `instant` in
+    key must still produce no timing signal: the same seven fields, no `instant` in
     `ROW_KEYS`, no `is_instant_return` to import. Emitting that field is a
     dispatch-side change on a harness write path and its own round.
     """
@@ -762,7 +887,8 @@ def test_no_duration_is_read_from_a_transcript():
     )
     rows = tq.classify_transcript(document)
     assert rows["Grep"] == {"tool": "Grep", "calls": 1, "empty": 0,
-                            "degenerate_args": 0, "degenerate_errored": 0}
+                            "degenerate_args": 0, "degenerate_errored": 0,
+                            "with_pipe": 0, "masked": 0}
     assert "instant" not in tq.ROW_KEYS
     assert not hasattr(tq, "is_instant_return")
     assert not any("instant" in key or "duration" in key
