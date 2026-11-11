@@ -4530,10 +4530,16 @@ from `denied.json` first).
   `scripts/a.py:224`) — the `path.ext:N-M` line-citation spelling was retired
   for these docs on 2026-10-25 (`855c4865`, #3292), so those numbers are not
   claims about the tree. The `spec.py` fence
-  tuples, the `round` subcommand set, the `Gate.run` ladder (`gate.py:2584`), and
-  the live `/api/workers/health` and `/api/autonomy/health` at `days=7` —
+  tuples, the `round` subcommand set, the rung ladder in
+  `Gate.run` (`scripts/automod/gate.py:2584`), and the live
+  `/api/workers/health` and `/api/autonomy/health` at `days=7` —
   `window_clamped_to_hours` and `oldest_input` are both null on each, so those
-  are genuine 7-day spans. The mechanism described is still what runs. Corrected
+  are genuine 7-day spans. The `Gate.run` ladder's number was re-typed the same
+  day under #4061: a line number on a bare basename is read by no check at all, so
+  it now rides a slash-bearing path whose own sentence names `Gate.run`; the two
+  illustrative placeholders above stay exactly as written and are admitted by name
+  in the exemption list of `tests/test_architecture_coverage_doc_claims.py`.
+  The mechanism described is still what runs. Corrected
   in place: §3.2 called the two worker sources "off by default", which is the
   code default and has not been the box's state since the loop was switched on —
   `workers/pool.py` defaults a source off, `config.yaml` carries `enabled: true`

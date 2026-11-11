@@ -918,6 +918,11 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
    ("generated: graphify's own output directory, written by a hand"
     'run or a cadence job and left unanchored on purpose'
     '(automod.md:2088)'),
+  'scripts/a.py:224':
+   ("historical: the 2026-11-11 review-log sweep of the doc's own"
+    "backticked paths quotes the invented path §4.5's worked example"
+    'writes, beside the admitted `app/x.py:164` (#4061); the dated'
+    'bullet is the record of what that sweep measured, not a pointer'),
  },
  'autonomy-jobs.md': {
   '_archived/':
@@ -1392,6 +1397,11 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: -L` on the line below names `24228136` and nobody since, so the bound has not moved in
 #: the 93 commits landed since it was cut. No run count is quoted here because the ledger
 #: cannot produce one: a `promotions.jsonl` gate row has no field marking a full-suite run.
+#: Re-measured 2026-11-11, the day the list gained its one entry since #3297: the span is
+#: the invented path `automod.md`'s own review-log sweep quotes — §4.5's worked-example
+#: placeholder, admitted for the same reason `app/x.py:164` is (#4061) — and the list is
+#: now 110 exemptions across 29 docs — other-tree 43, generated 34, historical 33 — with
+#: NONE of them `stale:`.
 #: The ruling, from that owed-check: `stale` STAYS an admitted kind, and this ceiling — not
 #: the kind list — is the rail. Deleting the kind was refused for a reason worth keeping
 #: beside the number, because it is the rail's own text: the failure message of
@@ -3587,6 +3597,56 @@ def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():
                            "that is what records the shrink."), report[-200:]
     assert "lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit" in msg, msg[-600:]
     test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
+
+
+#: The anchor #4061 re-typed out of the unreadable `gate.py:2584` spelling, and the
+#: definition the rewritten sentence names beside it.
+GATE_LADDER_SPAN = "scripts/automod/gate.py:2584"
+GATE_LADDER_SYMBOL = "run"
+
+
+def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
+    """#4061: the re-pointed ladder number has to be READ, and read by its symbol.
+
+    The 2026-11-11 `doc:automod` pass wrote the rung ladder's line as
+    ``(`gate.py:2584`)``, and `cited_citations` drops any path with no directory to
+    resolve — so that number read as checked and never was, which is the spelling
+    `test_the_corpus_writes_no_line_citation_a_rail_cannot_read` refuses. Typing the
+    directory in front of the basename is necessary and not enough: `_symbol_before`
+    admits a named symbol only across `_SYMBOL_GAP`'s punctuation, so the wording the
+    prose wanted one word away from it — "the `Gate.run` ladder
+    (`scripts/automod/gate.py:2584`)" — leaves the anchor unnamed, the containment
+    fallback decides it, and `unnamed_anchor_rows` gains a 192nd row against
+    `NAMED_SYMBOL_UNNAMED_CEILING` (191): a fresh red node in the very file the fix
+    was for. Both wordings were measured this round, and they come back
+    `mode: "unnamed"` and `mode: "named"` respectively.
+
+    So the doc's sentence has to carry the symbol, and no other node says so: the
+    resolution node asks only that the file have that many lines, the span rule
+    accepts any enclosing definition, and the ceiling counts the bounded population
+    without naming which anchor joined it. All three claims are asked of the live doc
+    here, and the failure mode is demonstrated on text this file writes.
+    """
+    text = _text("automod.md")
+    graded, mis = anchor_span_report(text)
+    assert GATE_LADDER_SPAN in [span for span, _hit, _line in graded], (
+        f"{GATE_LADDER_SPAN} is not in the span rule's graded set — a line number "
+        "the extractor never returns is one no reader can check (#4061)")
+    assert GATE_LADDER_SPAN not in mis, (
+        f"the span rule objects to {GATE_LADDER_SPAN}: the number no longer lands "
+        f"inside `{GATE_LADDER_SYMBOL}`'s definition, so re-point it rather than "
+        "drop the line")
+    assert named_symbol(text, GATE_LADDER_SPAN) == GATE_LADDER_SYMBOL, (
+        "the citing sentence stopped naming the definition its anchor points at, so "
+        "the anchor falls back to containment and grows the bounded ungraded "
+        f"population past {NAMED_SYMBOL_UNNAMED_CEILING}")
+    rows = [r for r in fallback_decision(text) if r["span"] == GATE_LADDER_SPAN]
+    assert len(rows) == 1 and rows[0]["mode"] == "named", rows
+
+    spaced = "the `Gate.run` ladder (`scripts/automod/gate.py:2584`)"
+    assert named_symbol(spaced, GATE_LADDER_SPAN) is None, (
+        "_SYMBOL_GAP no longer refuses a word between the symbol and its anchor, so "
+        "the spaced wording above is not the failure this node demonstrates")
 
 
 def test_a_bare_line_anchor_is_graded_and_a_port_never_is():
