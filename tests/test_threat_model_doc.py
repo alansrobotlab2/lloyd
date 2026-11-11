@@ -210,6 +210,39 @@ def test_every_modelled_threat_carries_a_control_citation_or_a_backlog_id():
             "a code-span path nor a #NNNN backlog id")
 
 
+def test_the_gate_self_edit_row_states_the_control_that_actually_exists():
+    """#4045 clause 5: T-24's control column has to describe the check that runs.
+
+    The row cited one gate.py line number and nothing else, which reads as "the gate
+    refuses a diff that touches the gate". Nothing on this tree does that:
+    `check_scope` puts `scripts/automod/**` in `PROTECTED_GLOBS`, and protected paths
+    are permitted by the scope check — what they do is turn on the rollback `drill`
+    rung — while `git grep` over `scripts/automod/` and `app/` finds no refusal of a
+    self-editing diff at all. So the honest cell names what is really between a round
+    and its own gate: the protected-scope classification, the drill rung it switches
+    on, the second reader, and a person. A row that claims a refusal nobody wrote is
+    the failure mode this whole doc exists to catch — a threat scored as covered
+    because the model described a control that does not exist.
+    """
+    cells = dict(threat_rows())["T-24"]
+    control = cells[-1]
+    assert cells[0] == "B11", (
+        f"T-24 now sits on boundary {cells[0]!r}; the round→`main` seam is B11 and "
+        "the control below is that seam's")
+    assert "nothing refuses" in control, (
+        f"T-24's control is {control!r}: it has to say plainly that no scope check "
+        "refuses a diff touching the gate, which is the false implication the row "
+        "used to carry")
+    for part in ("protected", "drill", "rung_review", "person"):
+        assert part in control, (
+            f"T-24's control omits {part!r} — the real chain is protected scope -> "
+            "the drill rung -> the review rung -> a person, and dropping a link is "
+            f"how the row goes back to reading like a refusal: {control!r}")
+    assert _CITED.search(control), (
+        f"T-24 lost its control citation, which the row-shape rule above requires: "
+        f"{control!r}")
+
+
 def test_the_open_set_is_where_the_uncited_threats_live_and_is_not_empty():
     """Clause 1's parenthesis, from both sides.
 

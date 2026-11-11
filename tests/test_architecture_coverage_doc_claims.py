@@ -2598,23 +2598,27 @@ NAMED_SYMBOL_UNNAMED_FLOOR = 0
 #: outside the rail is still graded by containment alone until #3580's scope call
 #: is made, but the population that leaves ungraded is now counted, so a new bare
 #: `path:NNN` citation reddens the suite instead of widening the pile. Measured
-#: 2026-11-02 at 372d0aad: 192 `fallback_decision` rows whose `mode` is not
-#: `"named"` — 166 distinct `path:NNN` spans across 23 of the 36 docs; the remaining
+#: 2026-11-11 at 0309f72f: 188 `fallback_decision` rows whose `mode` is not
+#: `"named"` — 163 distinct `path:NNN` spans across 23 of the 36 docs; the remaining
 #: 13 contribute none, the rail doc `measurement.md` among them. Per doc, descending:
 #:
-#:   threat-model.md 42, autonomy-jobs.md 19, context-window.md 18,
+#:   threat-model.md 39, autonomy-jobs.md 19, context-window.md 18,
 #:   workers-jobs.md 18, guard-coverage.md 14, skills.md 14, djev.md 10,
 #:   tools.md 10, ambient-context-injection.md 7, autonomy.md 6,
 #:   background-runs.md 4, memory.md 4, research-pipeline.md 4, vllm.md 4,
-#:   editing-safeguards.md 3, retrieval.md 3, arch-review.md 2,
-#:   authority-surfaces.md 2, automod.md 2, qmd.md 2, testing.md 2,
+#:   editing-safeguards.md 3, arch-review.md 2, authority-surfaces.md 2,
+#:   automod.md 2, qmd.md 2, retrieval.md 2, testing.md 2,
 #:   browser-side-panel.md 1, mission-control.md 1
 #:
 #: The bound is one-way: re-typing an anchor so its sentence names the enclosing
 #: definition is the only way to move it, and doing that means lowering this
 #: number in the same commit that cleared the anchor.
 #: `test_the_fallback_anchor_ceiling_is_shown_able_to_bite` is what re-measures it.
-NAMED_SYMBOL_UNNAMED_CEILING = 191
+#: #4045 is the first commit to move it from the 2026-11-02 measurement: three
+#: `threat-model.md` anchors that pointed at xdist worker sizing and at a lock
+#: release now name `check_scope`, `run` and `rung_review`, which is 42 -> 39 for
+#: that doc and 191 -> 188 for the corpus.
+NAMED_SYMBOL_UNNAMED_CEILING = 188
 
 
 def fallback_decision(text: str) -> list[dict]:
@@ -3658,6 +3662,91 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
     assert named_symbol(spaced, GATE_LADDER_SPAN) is None, (
         "_SYMBOL_GAP no longer refuses a word between the symbol and its anchor, so "
         "the spaced wording above is not the failure this node demonstrates")
+
+
+#: #4045: the three `threat-model.md` anchors that were re-pointed at the definition
+#: deciding the capability their row names, each with the symbol the cell must name.
+THREAT_AUTOMOD_ANCHORS = (
+    ("scripts/automod/spec.py:715", "check_scope"),     # what classifies the diff
+    (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
+    ("scripts/automod/gate.py:4244", "rung_review"),    # the second reader
+)
+
+#: The numbers those rows carried, which sit in definitions unrelated to them.
+STALE_THREAT_ANCHORS = ("scripts/automod/gate.py:3553", "scripts/automod/gate.py:2648")
+
+
+def test_the_two_automod_threat_rows_are_anchored_on_the_definitions_that_decide_them():
+    """#4045: T-24 and T-25 must cite what actually decides the capability.
+
+    Both rows carried a `scripts/automod/gate.py` number that had drifted far from the
+    mechanism in the row: T-24's `:3553` is a line inside `_test_workers`, which sizes
+    pytest-xdist workers, and T-25's `:2648` is `self._canary_lock.release()` in
+    `Gate.run`'s teardown. They graded green the whole time because a table cell names
+    a path and never a symbol, so `fallback_decision` decided both by containment — and
+    containment inside a 3,131-line `class Gate` is a verdict no line of it can fail. The boundary row B11 repeated T-24's number beside `spec.py::check_scope`.
+
+    Re-pointing the numbers is necessary and not enough: containment is still green for
+    a correct-looking wrong line, so each new cell names its definition inside
+    `_SYMBOL_GAP`'s window and this node asks `fallback_decision` for
+    `mode: "named"` on all three. That is the #3652 mechanism applied to three anchors,
+    NOT the rail — `threat-model.md` stays off `NAMED_SYMBOL_RAIL_DOCS`, because #3580's
+    2026-11-01 owed-check refused the corpus-wide rail, so the doc's other 39 anchors
+    remain containment-graded and the corpus moves 191 -> 188 with these three.
+    """
+    text = _text("threat-model.md")
+    for stale in STALE_THREAT_ANCHORS:
+        assert stale not in text, (
+            f"`{stale}` is cited again; that line belongs to "
+            "an unrelated definition, which is what made both rows unreadable (#4045)")
+
+    graded, mis = anchor_span_report(text)
+    graded_spans = [span for span, _hit, _line in graded]
+    rows = fallback_decision(text)
+    for span, symbol in THREAT_AUTOMOD_ANCHORS:
+        assert f"`{span}`" in text, (
+            f"threat-model.md no longer cites `{span}`; the automod rows have to keep "
+            "an anchor on the definition that decides the capability they name")
+        # Per OCCURRENCE, not per span: `named_symbol` and `fallback_decision` union
+        # `_symbol_before` across every citation of a span, and `gate.py:4244` is cited
+        # by both automod rows — so a span-level read lets T-25 drop its symbol while
+        # T-24 still names it and the row that drifted once drifts again green. Each
+        # cell carries its own name, so each cell is asked for it.
+        named_at = [_symbol_before(text[max(0, i - 90):i])
+                    for i in _occurrences(text, span)]
+        assert named_at and all(n == symbol for n in named_at), (
+            f"{span} is cited {len(named_at)} time(s) naming {named_at}; every one of "
+            f"them has to name `{symbol}` inside `_SYMBOL_GAP`'s window before the "
+            "number, or that cell falls back to containment and can drift again the "
+            "way T-24 did (#4045)")
+        assert span in graded_spans, (
+            f"{span} is not in the span rule's graded set — a line the extractor "
+            "never returns is one no reader can check")
+        assert span not in mis, (
+            f"the span rule objects to {span}: the number no longer lands inside "
+            f"`{symbol}`'s definition, so re-point it rather than drop the line")
+        hit = [r for r in rows if r["span"] == span]
+        assert hit and all(r["mode"] == "named" for r in hit), (
+            f"{span} is decided by containment ({hit}), which is exactly the verdict "
+            "that let a worker-sizing line stand in for a self-edit control")
+
+    # Clause 3, mechanically: no anchor in the doc lands on a line of the code that
+    # made the stale ones wrong — the xdist worker sizer, or the canary lock release.
+    in_workers = [r["span"] for r in rows if "_test_workers" in r["enclosing"]]
+    assert in_workers == [], (
+        f"{in_workers} resolves inside `_test_workers`, the xdist worker sizer T-24 "
+        "was pointing at")
+    on_lock = []
+    for r in rows:
+        src = ROOT / r["file"]
+        if not src.is_file():
+            continue
+        lines = src.read_text(errors="replace").splitlines()
+        if r["line"] <= len(lines) and "_canary_lock" in lines[r["line"] - 1]:
+            on_lock.append(r["span"])
+    assert on_lock == [], (
+        f"{on_lock} lands on a canary-lock line inside `Gate.run`'s teardown, the "
+        "block T-25 was pointing at")
 
 
 def test_a_bare_line_anchor_is_graded_and_a_port_never_is():
