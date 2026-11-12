@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -1820,3 +1821,477 @@ def test_the_skill_that_runs_the_sweep_quotes_the_command_it_must_not_extend():
     for ln in fenced:
         for bad in ("--out", "--sessions-dir", "--registry", "--max-files", "--check"):
             assert bad not in ln, f"{bad} is in the skill's step-1 command: {ln}"
+
+
+# ── #4074: the candidate route — replay a check that does not exist yet ───────────
+#
+# Every node below scores a predicate that is NOT in the registry, is NOT in git's index,
+# and names NO live `file:line`. Those three refusals are the registry's own anti-drift
+# guards, and they are precisely what made a pre-flight impossible: `load_registry`
+# (`app/behaviour_exhibit.py:162` `require_in_git_index`, `:187` `resolve_source`) will not
+# open a spec of that shape, and `DETECTORS_IMPL` keys a detector to a committed id — so the
+# only way to learn a candidate's firing rate used to be to build the check first. The nodes
+# pin both halves: the candidate route scores it, and the registry route still refuses the
+# same bytes for the same two reasons.
+#
+# A candidate spec outside the checkout, whose `source` is prose about a rule that does not
+# exist yet. `trigger` is the predicate: `call_name`/`arg_regex` on one persisted tool call,
+# `message_regex`/`final_text_regex` on the turn, `all`/`any`/`not` to combine, `then` for
+# ordering (leaf A on some call i, leaf B on some call j > i).
+#: A transcript with one Edit call, so a predicate about Edit has something to find.
+def edit_turn(path="/home/alansrobotlab/obsidian/knowledge/old.md"):
+    return [{"role": "user", "content": "restore that file"},
+            _msg("", [_tc("Edit", {"file_path": path, "old_string": "a",
+                                   "new_string": "b"})]),
+            _msg("restored it")]
+
+
+def candidate_file(tmp_path, *, sid="cand", id="edit-after-rollback",
+                   source="proposed: the rule #777 asks for; no code implements it yet",
+                   population="user", trigger='call_name: Edit',
+                   representability=("a vault-land rollback followed by a Write of the same "
+                                     "path IS a call pair inside one turn, so the recorded "
+                                     "transcripts can show it"),
+                   description="a replayable candidate"):
+    """One candidate spec on disk, built by `yaml.safe_dump` and not by string surgery.
+
+    `trigger` is the one YAML fragment a caller varies, and it stays a fragment because the
+    nodes read it as the predicate they are pinning. Dumping the rest is not cosmetics: the
+    default `source` contains a colon, and a hand-spliced `source: {source}` template lands
+    as `source: proposed: the rule …`, which YAML refuses to parse — a fixture that cannot
+    be read tests nothing about whether the guards refuse it.
+    """
+    p = Path(tmp_path) / f"{sid}.yaml"
+    p.write_text(yaml.safe_dump(
+        {"id": id, "source": source, "population": population,
+         "description": description, "representability": representability,
+         "trigger": yaml.safe_load(trigger)}, sort_keys=False), encoding="utf-8")
+    return p
+
+
+def planted_file(tmp_path, *, sid="planted", tool="Edit", n=1, path="/tmp/x.md"):
+    """A planted-violating transcript: one turn, `n` calls of `tool`, in transcript shape.
+
+    `path` is a knob because a predicate may constrain the argument as well as the tool: the
+    control has to plant the violation the predicate actually describes, or the node measures
+    its own fixture instead of the instrument.
+    """
+    msgs = [{"role": "user", "content": "do the thing"}]
+    for _ in range(n):
+        msgs.append(_msg("", [_tc(tool, {"file_path": path, "content": "x"})]))
+    msgs.append(_msg("done"))
+    p = Path(tmp_path) / f"{sid}.json"
+    p.write_text(json.dumps({"name": "planted violation", "session_id": sid,
+                             "messages": msgs, "expect_matches": 1}), encoding="utf-8")
+    return p
+
+
+def replay(tmp_path, candidate, *, planted=None, corpus=None, cache=None, extra=()):
+    """Drive the CLI, not the function: the exit code is part of the contract."""
+    argv = ["--candidate", str(candidate), "--sessions-dir",
+            str(Path(corpus) if corpus else tmp_path), "--cache-dir",
+            str(Path(cache) if cache else Path(tmp_path) / "cache"),
+            "--emit-report", str(Path(tmp_path) / "report.json"), *extra]
+    if planted:
+        argv += ["--planted-control", str(planted)]
+    rc = BE.main(argv)
+    return rc, json.loads((Path(tmp_path) / "report.json").read_text(encoding="utf-8"))
+
+
+def test_a_candidate_spec_outside_the_index_with_a_freetext_source_scores_and_exits_0(tmp_path):
+    """Clause 1. The two guards `load_registry` enforces must not refuse a pre-flight.
+
+    The spec sits in a pytest tmp dir (outside the checkout, so git has no index entry for
+    it) and its `source` is a sentence, not a `file:line` a `resolve_source` could open. The
+    corpus is three transcripts, one of which has an Edit call. `main` exits 0 — a check
+    scoring zero hits exits 0 too; only an unusable instrument exits non-zero — and the
+    report publishes what the two guards would have said as fields rather than refusals.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    write_session(corpus, "20261103_100000_a1b2c3", edit_turn(),
+                  platform="mission-control")
+    write_session(corpus, "20261103_100001_b2c3d4", captioned_turn(),
+                  platform="mission-control")
+    write_session(corpus, "20261102_100002_c3d4e5", captioned_turn(), gzipped=True,
+                  age_days=3, platform="mission-control")
+    rc, rep = replay(tmp_path, candidate_file(tmp_path),
+                     planted=planted_file(tmp_path), corpus=corpus)
+    assert rc == 0, "a candidate the registry route would refuse must still exit 0"
+    cand = rep["candidate"]
+    assert cand["in_git_index"] == "outside-checkout", cand
+    assert cand["source_resolves"] is False, (
+        "a candidate's source is prose about a check that does not exist yet; the report "
+        f"claims it resolved to a live line: {cand['source']!r}")
+    assert cand["path"].endswith("cand.yaml")
+    assert rep["status"] == "measured", rep["status"]
+    assert rep["units_scanned"] == 3 and rep["matches"] == 1, rep
+
+
+def test_the_registry_route_still_refuses_the_same_bytes_on_both_guards(tmp_path):
+    """The bypass is narrow. The two guards `load_registry` applies still refuse this shape.
+
+    `require_in_git_index` is asked about a path INSIDE the checkout that git does not
+    track — the shape of a candidate a round wrote next to the code — and `resolve_source`
+    about the candidate's own free-text `source`. Both raise `ValueError`, and the spec that
+    raises them is then scored without complaint by `load_candidate`. If either guard ever
+    stopped raising, `load_registry` would be scoring untracked specs with unlocatable
+    sources and this node is the alarm.
+    """
+    inside = BE.REPO_ROOT / "tests" / "_4074_untracked_candidate_spec.yaml"
+    with pytest.raises(ValueError, match="NOT in git's index"):
+        BE.require_in_git_index(inside)
+    spec = candidate_file(tmp_path)
+    with pytest.raises(ValueError, match=r"not a `path:line` pointer"):
+        BE.resolve_source(yaml.safe_load(spec.read_text(encoding="utf-8"))["source"])
+    loaded = BE.load_candidate(spec)
+    assert loaded["id"] == "edit-after-rollback", (
+        "the candidate route is the half that must accept the shape both guards refuse")
+
+
+def test_a_candidate_predicates_must_be_stated_and_an_unknown_key_refuses(tmp_path):
+    """A predicate that cannot be compiled is refused at exit 2, not scored as never-true.
+
+    A silently-dropped clause would print a firing rate for a check nobody wrote, so an
+    unknown node key, an empty `any` list and a `then` that is not two leaves each raise by
+    name rather than degrading to a predicate that matches nothing.
+    """
+    for bad, why in (('unknown_key: Edit', "not a predicate this grammar knows"),
+                     ('any: []', "non-empty list"),
+                     ('then: [{call_name: Edit}]', "exactly two")):
+        spec = candidate_file(tmp_path, sid=f"bad{abs(hash(bad)) % 999}", trigger=bad)
+        with pytest.raises(ValueError, match=why):
+            BE.load_candidate(spec)
+
+
+def test_per_population_rates_and_up_to_twenty_samples_with_session_and_turn(tmp_path):
+    """Clause 2. `user` and `worker` get their OWN denominators, and every sample is findable.
+
+    Three user transcripts with an Edit and one worker transcript with an Edit: one pooled
+    number would hide that the predicate fires on a quarter of the worker turns and a third
+    of the user turns, so the report splits them and the printed rows show each denominator.
+    Twenty-five further matching turns pin the sample cap: `matches` keeps counting past it,
+    only the published list is capped.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    for sid, plat in (("20261103_100000_a1b2c3", "mission-control"),
+                      ("20261103_100001_b2c3d4", "mission-control"),
+                      ("20261103_100002_c3d4e5", "mission-control"),
+                      ("20261103_100003_autonomy_w1", "autonomy")):
+        write_session(corpus, sid, edit_turn(), platform=plat)
+    for i in range(25):
+        write_session(corpus, f"20261103_1100{i:02d}_ee{i:04d}", edit_turn(),
+                      platform="mission-control")
+    rc, rep = replay(tmp_path, candidate_file(tmp_path),
+                     planted=planted_file(tmp_path), corpus=corpus)
+    assert rc == 0
+    per = rep["by_population"]
+    assert per["user"]["units_scanned"] == 28 and per["user"]["matches"] == 28, per["user"]
+    assert per["worker"]["units_scanned"] == 1 and per["worker"]["matches"] == 1, per["worker"]
+    assert per["user"]["firing_rate"] == 1.0 and per["worker"]["firing_rate"] == 1.0
+    assert rep["units_scanned"] == 29 and rep["matches"] == 29
+    assert rep["firing_rate"] == round(29 / 29, 6)
+    for pop, want_sid in (("user", "20261103_100000_a1b2c3"),
+                          ("worker", "20261103_100003_autonomy_w1")):
+        samples = per[pop]["samples"]
+        assert 0 < len(samples) <= BE.SAMPLE_CAP, (
+            f"{pop} published {len(samples)} samples; the cap is {BE.SAMPLE_CAP}")
+        for s in samples:
+            assert s["session_id"] and isinstance(s["turn_index"], int), s
+        assert want_sid in {s["session_id"] for s in samples}, (
+            f"{pop}'s seeded session is missing from its own sample list")
+    text = BE.render_candidate(rep)
+    for frag in ("units", "rate=1.000000", "user ", "worker ", "turn 0"):
+        assert frag in text, f"{frag!r} missing from:\n{text}"
+
+
+def test_a_candidate_that_matches_nothing_prints_not_instrumentable_and_no_rate(tmp_path):
+    """Clause 2, second half. A 0% firing rate would read as harmless; this prints a refusal.
+
+    The predicate names `Write` and the corpus contains only `Edit` calls, so nothing can
+    match. `firing_rate` is None (not 0.0), the status is `not_instrumentable`, and the
+    printed report carries the refusal plus the `tree=` stamp and NOT one `rate=` token — a
+    later reader grepping the transcript for a number must find none.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    write_session(corpus, "20261103_100000_a1b2c3", edit_turn(),
+                  platform="mission-control")
+    rc, rep = replay(tmp_path, candidate_file(tmp_path, trigger="call_name: Write"),
+                     planted=planted_file(tmp_path, tool="Write"), corpus=corpus)
+    assert rc == 0, "an uninstrumentable candidate is a finding, not an instrument failure"
+    assert rep["status"].startswith("not_instrumentable"), rep["status"]
+    assert rep["firing_rate"] is None, rep["firing_rate"]
+    for cell in rep["by_population"].values():
+        assert cell["firing_rate"] is None
+    text = BE.render_candidate(rep)
+    assert "not_instrumentable" in text and "tree=" in text, text
+    assert "rate=" not in text, f"a refusal printed a rate anyway:\n{text}"
+    assert "representability" in text
+
+
+def test_the_tree_stamp_says_which_checkout_the_replay_ran_in(tmp_path, monkeypatch):
+    """The same report from two trees is two different claims, so it says which one.
+
+    A round prints this from its worktree, over that worktree's own module. `live` is a
+    checkout whose `.git` is a directory; a linked worktree's `.git` is a file. Both stamps
+    are produced by relabelling `REPO_ROOT`, because the point of the field is that a reader
+    can tell the two apart without knowing which process printed the line.
+    """
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / ".git").mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: somewhere\n", encoding="utf-8")
+    monkeypatch.setattr(BE, "REPO_ROOT", live)
+    assert BE.tree_stamp() == "live"
+    monkeypatch.setattr(BE, "REPO_ROOT", wt)
+    assert BE.tree_stamp() == "worktree"
+
+
+def test_the_cache_answers_an_unchanged_fingerprint_and_a_moved_one_forces_a_rescan(tmp_path):
+    """Clause 3. The same fingerprint re-answers from the cache; ANY change re-scans.
+
+    Run one scans and writes a cache entry. Run two over byte-identical transcripts reports
+    the same units/matches/rate with `transcripts_read: 0`, which is the observable
+    difference between reading the cache and reading the corpus again. Then the corpus
+    MOVES — one more session lands, which is what the nightly writer does between two
+    rounds — the fingerprint changes, the key moves, and the fresh scan counts the new
+    transcript rather than replaying the old numbers.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    cache = tmp_path / "cache"
+    write_session(corpus, "20261103_100000_a1b2c3", edit_turn(),
+                  platform="mission-control")
+    spec, planted = candidate_file(tmp_path), planted_file(tmp_path)
+
+    rc1, r1 = replay(tmp_path, spec, planted=planted, corpus=corpus, cache=cache)
+    assert rc1 == 0 and r1["cache"]["hit"] is False and r1["cache"]["written"] is True
+    assert r1["corpus"]["transcripts_read"] == 1
+    fp1 = r1["corpus"]["fingerprint"]
+    assert fp1.startswith("sha256:")
+
+    rc2, r2 = replay(tmp_path, spec, planted=planted, corpus=corpus, cache=cache)
+    assert r2["cache"]["hit"] is True, "an unchanged corpus re-scanned the transcripts"
+    assert r2["corpus"]["fingerprint"] == fp1
+    assert r2["corpus"]["transcripts_read"] == 0, (
+        "the report says it read the corpus, so the cache is not what answered")
+    for key in ("units_scanned", "matches", "firing_rate"):
+        assert r2[key] == r1[key], f"{key} moved on a cached re-run: {r1[key]} → {r2[key]}"
+
+    write_session(corpus, "20261103_100005_ffff00", edit_turn(),
+                  platform="mission-control")
+    rc3, r3 = replay(tmp_path, spec, planted=planted, corpus=corpus, cache=cache)
+    assert r3["corpus"]["fingerprint"] != fp1, "adding a transcript left the fingerprint alone"
+    assert r3["cache"]["hit"] is False, "a moved corpus answered from the stale cache entry"
+    assert r3["units_scanned"] == 2 and r3["matches"] == 2, r3
+
+    rc4, r4 = replay(tmp_path, spec, planted=planted, corpus=corpus, cache=cache)
+    assert r4["cache"]["hit"] is True and r4["units_scanned"] == 2
+
+
+def test_a_different_predicate_over_an_unchanged_corpus_does_not_read_the_others_cache(tmp_path):
+    """The cache key is (corpus, predicate, control), not the corpus alone.
+
+    Two candidates replayed over one unchanged corpus would otherwise answer each other out
+    of one file — a wrong number that arrives faster than a right one. Editing the planted
+    control moves the key too, so a control cannot be rewritten to make a stale scan look
+    re-verified.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    write_session(corpus, "20261103_100000_a1b2c3", edit_turn(),
+                  platform="mission-control")
+    cache = tmp_path / "cache"
+    _, first = replay(tmp_path, candidate_file(tmp_path, sid="a", id="one"),
+                      planted=planted_file(tmp_path), corpus=corpus, cache=cache)
+    _, second = replay(tmp_path, candidate_file(tmp_path, sid="b", id="two",
+                                                trigger="call_name: Read"),
+                       planted=planted_file(tmp_path, tool="Read"),
+                       corpus=corpus, cache=cache)
+    assert first["corpus"]["fingerprint"] == second["corpus"]["fingerprint"]
+    assert second["cache"]["hit"] is False, (
+        "a second predicate was answered from the first predicate's cache entry")
+    assert second["matches"] == 0 and second["units_scanned"] == 1
+
+
+def test_a_planted_control_that_does_not_fire_is_an_instrument_failure_with_no_rate(tmp_path):
+    """Clause 4. 'Every new check has to fail once on purpose' is a precondition, not a footnote.
+
+    The corpus HAS matching turns, so the rate would be computable and tempting — but the
+    planted transcript plants a `Write` while the predicate looks for an `Edit`, so the
+    instrument just proved it cannot catch a violation handed to it. The report publishes
+    `instrument failure`, no `firing_rate`, and `main` exits 1.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    write_session(corpus, "20261103_100000_a1b2c3", edit_turn(),
+                  platform="mission-control")
+    rc, rep = replay(tmp_path, candidate_file(tmp_path),
+                     planted=planted_file(tmp_path, tool="Write"), corpus=corpus)
+    assert rc == 1, "an instrument failure must not exit 0"
+    assert rep["matches"] == 1, "the corpus did contain a match; the rate is withheld anyway"
+    assert rep["firing_rate"] is None
+    assert rep["status"].startswith("instrument failure"), rep["status"]
+    assert rep["planted_control"]["ok"] is False
+    assert rep["planted_control"]["status"] == "DID NOT FIRE"
+    text = BE.render_candidate(rep)
+    assert "DID NOT FIRE" in text and "rate=" not in text, text
+
+
+def test_a_candidate_with_no_planted_control_at_all_publishes_no_rate(tmp_path):
+    """Clause 4, first half. The rate is published ONLY beside a planted-control result.
+
+    Same corpus, same predicate, same 1-in-1 match as the measured node above — and no
+    `--planted-control`. The numbers exist and are withheld: publishing them would let a
+    round carry a firing rate that no control ever vouched for.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    write_session(corpus, "20261103_100000_a1b2c3", edit_turn(),
+                  platform="mission-control")
+    rc, rep = replay(tmp_path, candidate_file(tmp_path), corpus=corpus)
+    assert rc == 1
+    assert rep["planted_control"]["supplied"] is False
+    assert rep["status"].startswith("instrument failure: no planted-violating transcript"), \
+        rep["status"]
+    assert rep["firing_rate"] is None and rep["matches"] == 1
+
+
+def test_the_ordering_predicate_fires_on_the_pair_and_not_on_either_call_alone(tmp_path):
+    """`then` is the one ordering primitive, and it is what a #777-class check needs.
+
+    The named class: a vault-land rollback deletes a file its own verdict created, and a
+    replayed exact-once Write resurrects it — a rollback followed by the write, in that
+    order. The fixture holds three turns: the pair in order (matches), the pair REVERSED
+    (must not match — the write happened before anything was deleted), and a turn with only
+    the second call. A predicate that ignored order would match all three and report a rate
+    three times too high.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    pair = ('then:\n'
+            '- arg_regex: {key: file_path, pattern: "knowledge/"}\n'
+            '- call_name: Write')
+    rollback_then_write = [
+        {"role": "user", "content": "land it"},
+        _msg("", [_tc("automod_vault_rollback",
+                      {"file_path": "/home/alansrobotlab/obsidian/knowledge/old.md"}),
+                  _tc("Write", {"file_path": "/home/alansrobotlab/obsidian/knowledge/new.md",
+                                "content": "x"})]),
+        _msg("done")]
+    write_then_rollback = [
+        {"role": "user", "content": "land it"},
+        _msg("", [_tc("Write", {"file_path": "/home/alansrobotlab/obsidian/knowledge/new.md",
+                                "content": "x"}),
+                  _tc("automod_vault_rollback",
+                      {"file_path": "/home/alansrobotlab/obsidian/knowledge/old.md"})]),
+        _msg("done")]
+    write_alone = [
+        {"role": "user", "content": "land it"},
+        _msg("", [_tc("Write", {"file_path": "/home/alansrobotlab/obsidian/knowledge/new.md",
+                                "content": "x"})]),
+        _msg("done")]
+    write_session(corpus, "20261103_100000_a1b2c3", rollback_then_write,
+                  platform="mission-control")
+    write_session(corpus, "20261103_100001_b2c3d4", write_then_rollback,
+                  platform="mission-control")
+    write_session(corpus, "20261103_100002_c3d4e5", write_alone,
+                  platform="mission-control")
+    planted = Path(tmp_path) / "planted.json"
+    planted.write_text(json.dumps({"session_id": "planted", "messages": rollback_then_write,
+                                   "expect_matches": 1}), encoding="utf-8")
+    rc, rep = replay(tmp_path, candidate_file(tmp_path, trigger=pair), planted=planted,
+                     corpus=corpus)
+    assert rc == 0, rep["status"]
+    assert rep["units_scanned"] == 3 and rep["matches"] == 1, (
+        "an ordering predicate that also matched the reversed pair and the lone write would "
+        f"report {rep['matches']} matches here")
+    assert [s["session_id"] for s in rep["by_population"]["user"]["samples"]] == \
+        ["20261103_100000_a1b2c3"]
+
+
+def test_several_call_keys_constrain_ONE_call_not_two_different_calls(tmp_path):
+    """`call_name` plus `arg_regex` is one tool call with two properties.
+
+    The corpus holds a turn that Edits a vault path and a turn that Writes a /tmp path. A
+    predicate for "a Write into the vault" must match NEITHER. Reading the two keys as two
+    independent clauses would match both turns and report 2/2 — the exact shape that turns a
+    pre-flight into an assurance it never earned, which is why this is a leaf-level
+    conjunction and not an `all:` of two leaves.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    write_session(corpus, "20261103_100000_a1b2c3",
+                  edit_turn("/home/alansrobotlab/obsidian/knowledge/a.md"),
+                  platform="mission-control")
+    write_session(corpus, "20261103_100001_b2c3d4",
+                  [{"role": "user", "content": "scratch it"},
+                   _msg("", [_tc("Write", {"file_path": "/tmp/scratch.md", "content": "x"})]),
+                   _msg("done")],
+                  platform="mission-control")
+    spec = candidate_file(
+        tmp_path,
+        trigger="call_name: Write\narg_regex: {key: file_path, pattern: obsidian}")
+    rc, rep = replay(tmp_path, spec,
+                     planted=planted_file(tmp_path, tool="Write",
+                                          path="/home/alansrobotlab/obsidian/k/p.md"),
+                     corpus=corpus)
+    assert rc == 0, rep["status"]
+    assert rep["planted_control"]["ok"] is True, (
+        "the control plants the violation the predicate describes; if it does not fire, "
+        "the withheld rate below is about the fixture")
+    assert rep["units_scanned"] == 2 and rep["matches"] == 0, (
+        "the two keys were read as two calls: the vault Edit and the /tmp Write each "
+        f"matched one half, giving {rep['matches']} matches")
+    assert rep["status"].startswith("not_instrumentable")
+
+
+def test_a_node_that_mixes_call_level_and_turn_level_keys_refuses(tmp_path):
+    """Conjunction is scoped to one level. `call_name` + `message_regex` is ambiguous —
+    does the turn's message have to belong to the call? — so it refuses and says why rather
+    than quietly picking a reading."""
+    spec = candidate_file(tmp_path, sid="mixed",
+                          trigger="call_name: Write\nmessage_regex: done")
+    with pytest.raises(ValueError, match="mixes levels"):
+        BE.load_candidate(spec)
+
+
+def test_a_sample_shows_the_turns_calls_and_reservoir_reaches_past_the_oldest_week(tmp_path):
+    """Two defects the first real run showed, pinned.
+
+    (a) A candidate about `Write` matched turns that OPEN with `Bash`; printing only the
+    opening call made every sample read like a false positive, so each sample now carries the
+    turn's call names. (b) 60 matching turns laid down one per day over two months produced a
+    sample list of the twenty oldest — a reader would have taken late September for the shape
+    of the corpus. The seeded reservoir spans the scan instead, while staying re-derivable.
+    """
+    corpus = tmp_path / "sessions"
+    corpus.mkdir()
+    for i in range(60):
+        day = f"2026090{1 + i % 9}"          # nine distinct days, cycling across the range
+        msgs = [{"role": "user", "content": "check it"}]
+        msgs.append(_msg("", [_tc("Bash", {"command": f"ls -la /tmp/{i}"}),
+                              _tc("Write", {"file_path": f"/tmp/out{i}.md",
+                                            "content": "x"})]))
+        msgs.append(_msg("done"))
+        write_session(corpus, f"{day}_1200{i:02d}_rr{i:04d}", msgs,
+                      platform="mission-control")
+    rc, rep = replay(tmp_path, candidate_file(tmp_path, trigger="call_name: Write"),
+                     planted=planted_file(tmp_path, tool="Write"), corpus=corpus)
+    assert rc == 0 and rep["units_scanned"] == 60 and rep["matches"] == 60
+    samples = rep["by_population"]["user"]["samples"]
+    assert len(samples) == BE.SAMPLE_CAP == 20
+    for s in samples:
+        # `_tool_short` normalises to the lower-cased short name, as everywhere else.
+        assert "write" in s["calls"], (
+            f"the sample for a Write candidate does not show the Write: {s}")
+        assert s["calls"][0] == "bash", "the fixture stopped exercising the opening call"
+    days = {s["file"].split("_")[0] for s in samples}
+    assert len(days) >= 5, (
+        f"20 samples drawn from 60 turns spread over 9 days landed on {sorted(days)} — the "
+        "sample is scan order again, not a sample")
+    assert rep["sample_rule"].startswith("up to 20 per population, reservoir-sampled")

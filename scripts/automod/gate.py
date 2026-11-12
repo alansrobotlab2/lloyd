@@ -273,15 +273,86 @@ class GateReport:
     rungs: list[RungResult] = field(default_factory=list)
     ok: bool = False
     venv: str | None = None
+    #: #4074 — what a pre-flight firing-rate replay said about a check this round proposes,
+    #: or the literal `"absent"` when the round ran none. A field, never a rung: it changes
+    #: no verdict by design, until the ~10-qualifying-round refusal bar is ruled on.
+    pre_replay: "dict | str" = "absent"
 
     def to_dict(self) -> dict:
         return {
             "round_id": self.round_id, "base": self.base, "head": self.head,
             "ok": self.ok, "changed_paths": self.changed_paths, "venv": self.venv,
+            "pre_replay": self.pre_replay,
             "rungs": [{"name": r.name, "ok": r.ok, "detail": r.detail,
                        "seconds": round(r.seconds, 2), **({"data": r.data} if r.data else {})}
                       for r in self.rungs],
         }
+
+
+#: #4074 — the file a pre-flight firing-rate replay writes inside a round's directory:
+#:
+#:     .venvs/lloyd/bin/python -m app.behaviour_exhibit --candidate SPEC.yaml \
+#:         --planted-control TRACE.json --emit-report <ROUNDS_DIR>/<round_id>/pre_replay.json
+#:
+#: The round directory rather than the worktree because the worktree is what the scope
+#: check enumerates: an untracked artifact in there is a diff line the round did not author,
+#: and one in `~/.local/state/lloyd-automod/rounds/<id>/` is a round record, which is what
+#: this is. Nothing writes it for you — a round that wants the block runs the replay.
+PRE_REPLAY_FILE = "pre_replay.json"
+
+#: The six things the round record owes a reader about a pre-flight: which predicate was
+#: replayed, over which corpus, how much of it, how often it would have fired, whether it
+#: can catch a violation when handed one, and whether the corpus could show the failure at
+#: all. Anything longer lives in the emitted report, which sits beside `gate.json`.
+PRE_REPLAY_FIELDS = ("predicate_path", "corpus_fingerprint", "units_scanned",
+                     "firing_rate", "planted_control", "representability")
+
+
+def pre_replay_block(round_id: str, *, rounds_dir: "Path | None" = None) -> "dict | str":
+    """Read this round's pre-flight report, or say there was none. Never raises.
+
+    A report this cannot parse is reported as `unreadable: …` rather than folded into
+    `"absent"`, because those are different claims: one says nobody ran a pre-flight, the
+    other says somebody ran one and the harness lost its evidence. The value is a
+    projection, not the artifact — `gate.json` is copied at landing and then deleted with
+    the worktree, so it carries the six figures and their status, and the full sample list
+    stays in `pre_replay.json` beside it.
+
+    It is read at report time and consulted by no rung, which is the whole of #4074 step 5:
+    publish the rate beside the verdict for ten qualifying rounds before anyone is allowed
+    to refuse on it.
+    """
+    path = (Path(rounds_dir) if rounds_dir is not None else S.ROUNDS_DIR) / round_id / PRE_REPLAY_FILE
+    if not path.is_file():
+        return "absent"
+    try:
+        rep = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(rep, dict):
+            raise ValueError(f"expected a mapping, got {type(rep).__name__}")
+    except (OSError, ValueError) as exc:
+        return f"unreadable: {type(exc).__name__}: {exc}"
+    cand = rep.get("candidate") or {}
+    cor = rep.get("corpus") or {}
+    ctl = rep.get("planted_control") or {}
+    return {
+        "predicate_path": cand.get("path"),
+        "candidate_id": cand.get("id"),
+        "in_git_index": cand.get("in_git_index"),
+        "source": cand.get("source"),
+        "corpus_fingerprint": cor.get("fingerprint"),
+        "units_scanned": rep.get("units_scanned"),
+        "matches": rep.get("matches"),
+        "firing_rate": rep.get("firing_rate"),
+        "status": rep.get("status"),
+        "planted_control": {"ok": ctl.get("ok"), "status": ctl.get("status"),
+                            "traces": ctl.get("traces") or []},
+        "representability": cand.get("representability"),
+        "tree": rep.get("tree"),
+        "cache_hit": (rep.get("cache") or {}).get("hit"),
+        "measured_at": rep.get("measured_at"),
+        "report_path": str(path),
+        "gated_on": None,
+    }
 
 
 def _run(cmd: list[str], cwd: Path | None = None, env: dict | None = None,
@@ -2632,6 +2703,11 @@ class Gate:
         finally:
             # Recorded before the rest of the teardown, while the paths this round
             # wrote are still the freshest thing in the tree.
+            # The pre-flight block goes on in the SAME finally, so a round that stopped at
+            # `static` still records whether it replayed a proposed check — a field that
+            # only appeared on green gates would be missing on exactly the rounds whose
+            # check was most worth measuring. Reading it changes no verdict (#4074 step 5).
+            self.report.pre_replay = pre_replay_block(self.round_id)
             self.end_live_strays()
             # A gate that stopped before the review rung judged nothing: the
             # prefetch leaves no event and spends no attempt.

@@ -4531,7 +4531,7 @@ from `denied.json` first).
   for these docs on 2026-10-25 (`855c4865`, #3292), so those numbers are not
   claims about the tree. The `spec.py` fence
   tuples, the `round` subcommand set, the rung ladder in
-  `Gate.run` (`scripts/automod/gate.py:2584`), and the live
+  `Gate.run` (`scripts/automod/gate.py:2618`), and the live
   `/api/workers/health` and `/api/autonomy/health` at `days=7` —
   `window_clamped_to_hours` and `oldest_input` are both null on each, so those
   are genuine 7-day spans. The `Gate.run` ladder's number was re-typed the same

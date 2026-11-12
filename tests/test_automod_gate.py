@@ -4930,3 +4930,187 @@ def test_the_prose_consumer_detail_is_clipped_to_the_rung_detail_cap(
     # bounded shape (MAX_HITS_LISTED, pinned in test_automod_prose_consumers.py),
     # so clipping the sentence never hides a hit from the fixer reading `data`.
     assert G.PC.MAX_HITS_LISTED > 0
+
+
+# ── #4074: the round record carries the pre-flight's firing-rate result ───────────
+#
+# The process boundary is the round directory. A round's CLI writes
+# `<ROUNDS_DIR>/<round_id>/pre_replay.json` (the exhibit module's `--emit-report`), and the
+# gate — a separate process, launched minutes later from a different tree — has to carry it
+# into `gate.json`. So these nodes write that file the way the CLI writes it and drive the
+# REAL `Gate.run()` over a ladder whose rungs are stubbed. `_StubGate` above will not do
+# here: it replaces `run()` wholesale, and where the block is LOADED is exactly what is
+# under test. `to_dict()` runs for real in every node — it is the function whose output IS
+# the artifact.
+#
+# The load-bearing half of the clause is the verdict assertion in each node. #4074 step 5 is
+# report-only for the first ten qualifying rounds, so a pre-flight — even one saying
+# "instrument failure" — must leave every rung verdict exactly as it was. A block that also
+# gated would quietly become an eleventh rung whose bar nobody has set.
+
+
+class _StubLock:
+    """The machine locks, stubbed: this node is not about two gates queueing."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def acquire_wait(self, *a, **k):
+        return None
+
+    def release(self):
+        return None
+
+
+def _pre_replay_doc() -> dict:
+    """One pre-flight report, in the shape `--emit-report` writes."""
+    return {
+        "schema": 1, "kind": "pre_replay", "item": "#4074",
+        "measured_at": "2026-11-11T15:00:00+00:00", "tree": "worktree",
+        "candidate": {
+            "path": "/tmp/4074/candidate-edit-after-rollback.yaml",
+            "id": "edit-after-rollback", "in_git_index": "outside-checkout",
+            "source": "proposed: the rule #777 asks for; no code implements it yet",
+            "representability": "a rollback followed by a Write IS a call pair inside one "
+                                "turn, so the recorded transcripts can show it",
+            "trigger": {"call_name": "Write"}},
+        "corpus": {"sessions_dir": "/home/alansrobotlab/lloyd-data/sessions",
+                   "fingerprint": "sha256:aaaabbbbccccdddd1111222233334444",
+                   "files_scanned": 21512,
+                   "window": {"mode": "whole corpus, no window"}},
+        "cache": {"hit": False, "key": "pre-replay-deadbeef.json"},
+        "planted_control": {"supplied": True, "ok": True, "status": "fired",
+                            "traces": [{"name": "planted violation", "matched": 1,
+                                        "expected_matches": 1, "ok": True}]},
+        "units_scanned": 214512, "matches": 1204, "firing_rate": 0.005613,
+        "status": "measured",
+    }
+
+
+def _write_pre_replay(tmp_path, doc, *, round_id="SM_TEST", raw=None):
+    """Land a pre-flight report in the round directory. `raw` writes the bytes verbatim, for
+    the node whose subject is an artifact that cannot be parsed."""
+    d = tmp_path / "rounds" / round_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / G.PRE_REPLAY_FILE).write_text(
+        raw if raw is not None else json.dumps(doc), encoding="utf-8")
+
+
+def _run_the_real_ladder(live_repo, monkeypatch, tmp_path, *, fail=None):
+    """The real `Gate.run()`, every rung stubbed, rounds dir pointed at `tmp_path/rounds`.
+
+    `fail` names one rung that fails instead, for the node about a red round still recording
+    the block. Only the rungs and the review prefetch are stubbed; the driver,
+    `pre_replay_block` and `to_dict()` are the production code paths.
+    """
+    monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
+    monkeypatch.setattr(G.S, "ROUNDS_DIR", tmp_path / "rounds")
+    monkeypatch.setattr(G.S, "Lock", _StubLock)
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    g = G.Gate("SM_TEST", live_repo, base, live_root=live_repo)
+    monkeypatch.setattr(g, "_start_review_prefetch", lambda: None)
+    for name in RUNGS:
+        outcome = (dict(ALL_PASS)[name] if name != fail
+                   else (False, "stubbed failure", {}))
+        monkeypatch.setattr(g, f"rung_{name}", lambda o=outcome: o)
+    return g.run().to_dict()
+
+
+def test_a_round_that_ran_a_pre_flight_records_its_block_without_touching_a_verdict(
+        live_repo, monkeypatch, tmp_path):
+    """Clause 5, first half: all six figures present, and the ladder's verdicts unchanged.
+
+    `predicate_path`, `corpus_fingerprint`, `units_scanned`, `firing_rate`,
+    `planted_control` and `representability` are the six the round record owes a reader.
+    Every stub rung stays ok, `ok` stays True, and the rung list is the same fifteen names in
+    the same order: the block rides alongside them and changes none of them.
+    """
+    _write_pre_replay(tmp_path, _pre_replay_doc())
+    rep = _run_the_real_ladder(live_repo, monkeypatch, tmp_path)
+    block = rep["pre_replay"]
+    assert isinstance(block, dict), f"a round that ran one must not read as: {block!r}"
+    for key in ("predicate_path", "corpus_fingerprint", "units_scanned", "firing_rate",
+                "planted_control", "representability"):
+        assert key in block, f"gate.json's pre_replay block is missing {key}"
+    assert block["predicate_path"].endswith("candidate-edit-after-rollback.yaml")
+    assert block["corpus_fingerprint"] == "sha256:aaaabbbbccccdddd1111222233334444"
+    assert block["units_scanned"] == 214512 and block["firing_rate"] == 0.005613
+    assert block["planted_control"]["ok"] is True
+    assert block["planted_control"]["status"] == "fired"
+    assert block["representability"].startswith("a rollback followed by a Write")
+    assert block["gated_on"] is None, "a report-only block must not claim a bar"
+    assert rep["ok"] is True
+    assert [r["name"] for r in rep["rungs"]] == list(RUNGS)
+    assert all(r["ok"] for r in rep["rungs"])
+
+
+def test_a_round_that_ran_no_pre_flight_records_absent_with_the_verdicts_unchanged(
+        live_repo, monkeypatch, tmp_path):
+    """Clause 5, second half: the field is never missing, so an absent block is a fact about
+    the round and not an artifact of the reader. The empty rounds dir is the common case —
+    every round that touches no new check lands here."""
+    (tmp_path / "rounds").mkdir(parents=True)
+    rep = _run_the_real_ladder(live_repo, monkeypatch, tmp_path)
+    assert rep["pre_replay"] == "absent", rep["pre_replay"]
+    assert rep["ok"] is True
+    assert [r["name"] for r in rep["rungs"]] == list(RUNGS)
+    assert all(r["ok"] for r in rep["rungs"])
+
+
+def test_an_instrument_failure_in_the_block_still_changes_no_rung_verdict(live_repo,
+                                                                         monkeypatch,
+                                                                         tmp_path):
+    """The refusal-shaped case is the one a gate would be tempted to act on. It does not.
+
+    Same ladder, a report whose planted control did not fire — the shape the exhibit module
+    exits 1 on and publishes no rate for. The block records it verbatim (`firing_rate` None,
+    `status` instrument failure) and the round still passes every stub rung, with `gated_on`
+    None. Whether that shape should ever refuse a round is the ~10-qualifying-round ruling
+    #4074 defers; no round gets to make it early.
+    """
+    doc = _pre_replay_doc()
+    doc.update(matches=0, firing_rate=None,
+               status="instrument failure: the planted violation did NOT fire")
+    doc["planted_control"] = {"supplied": True, "ok": False, "status": "DID NOT FIRE",
+                              "traces": [{"name": "planted violation", "matched": 0,
+                                          "expected_matches": 1, "ok": False}]}
+    _write_pre_replay(tmp_path, doc)
+    rep = _run_the_real_ladder(live_repo, monkeypatch, tmp_path)
+    block = rep["pre_replay"]
+    assert block["firing_rate"] is None and block["planted_control"]["ok"] is False
+    assert block["status"].startswith("instrument failure")
+    assert block["gated_on"] is None
+    assert rep["ok"] is True and all(r["ok"] for r in rep["rungs"])
+
+
+def test_a_pre_flight_report_that_cannot_be_read_is_recorded_as_unreadable(live_repo,
+                                                                          monkeypatch,
+                                                                          tmp_path):
+    """Lost evidence is not the same claim as no evidence.
+
+    Truncated JSON in the round directory becomes `unreadable: …`, never `"absent"`. A round
+    that ran a pre-flight whose artifact was mangled must not be filed as a round that ran
+    none, or the ten-round tally the refusal bar is going to need is quietly short by one.
+    """
+    _write_pre_replay(tmp_path, None, raw='{"schema": 1, "can')
+    rep = _run_the_real_ladder(live_repo, monkeypatch, tmp_path)
+    assert str(rep["pre_replay"]).startswith("unreadable:"), rep["pre_replay"]
+    assert rep["ok"] is True
+
+
+def test_the_block_is_recorded_even_when_a_rung_stopped_the_ladder(live_repo, monkeypatch,
+                                                                   tmp_path):
+    """A field that only appeared on green gates would be missing on the rounds that most
+    need it.
+
+    `static` fails, and `run` short-circuits into its `finally` — which is where the block is
+    loaded, beside the stray-path record, for the same reason: a red round is the round whose
+    evidence a later reader goes looking for.
+    """
+    _write_pre_replay(tmp_path, _pre_replay_doc())
+    rep = _run_the_real_ladder(live_repo, monkeypatch, tmp_path, fail="static")
+    assert rep["ok"] is False
+    assert [r["name"] for r in rep["rungs"]] == ["preflight", "vet", "code_rules",
+                                                 "recovery", "static"]
+    assert isinstance(rep["pre_replay"], dict)
+    assert rep["pre_replay"]["units_scanned"] == 214512

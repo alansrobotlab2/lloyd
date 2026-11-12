@@ -3410,7 +3410,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
     seeded = text.replace("eval/run_eval.py:2716", "eval/run_eval.py:2055")
-    seeded = seeded.replace("scripts/automod/gate.py:3435", "scripts/automod/gate.py:1590")
+    seeded = seeded.replace("scripts/automod/gate.py:3511", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2055", "scripts/automod/gate.py:1590"], (
@@ -3428,8 +3428,9 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 #: #3770 inserted the chrome-bundle provenance node into `gate.py` above that rung.
 #: Kept as a constant because the negative control needs the *previous* number, not a
 #: number invented for the control: it is the one value the rail refused for real.
-#: 3043 then; 3064 since preflight's clean-worktree check moved `rung_pyright` down 21.
-_PRE_3770_PROMPT_SURFACE_ANCHOR = 3064
+#: 3043 then; 3064 since preflight's clean-worktree check moved `rung_pyright` down 21;
+#: 3140 since #4074's `pre_replay` loader moved the whole file below line 330 down 76.
+_PRE_3770_PROMPT_SURFACE_ANCHOR = 3140
 
 
 def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
@@ -3615,8 +3616,9 @@ def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():
 
 
 #: The anchor #4061 re-typed out of the unreadable `gate.py:2584` spelling, and the
-#: definition the rewritten sentence names beside it.
-GATE_LADDER_SPAN = "scripts/automod/gate.py:2584"
+#: definition the rewritten sentence names beside it. 2584 until #4074 put the
+#: `pre_replay` field and its loader into `gate.py` above `run` and moved it down 34.
+GATE_LADDER_SPAN = "scripts/automod/gate.py:2618"
 GATE_LADDER_SYMBOL = "run"
 
 
@@ -3658,7 +3660,7 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
     rows = [r for r in fallback_decision(text) if r["span"] == GATE_LADDER_SPAN]
     assert len(rows) == 1 and rows[0]["mode"] == "named", rows
 
-    spaced = "the `Gate.run` ladder (`scripts/automod/gate.py:2584`)"
+    spaced = f"the `Gate.run` ladder (`{GATE_LADDER_SPAN}`)"
     assert named_symbol(spaced, GATE_LADDER_SPAN) is None, (
         "_SYMBOL_GAP no longer refuses a word between the symbol and its anchor, so "
         "the spaced wording above is not the failure this node demonstrates")
@@ -3669,7 +3671,7 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
 THREAT_AUTOMOD_ANCHORS = (
     ("scripts/automod/spec.py:715", "check_scope"),     # what classifies the diff
     (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
-    ("scripts/automod/gate.py:4244", "rung_review"),    # the second reader
+    ("scripts/automod/gate.py:4320", "rung_review"),    # the second reader
 )
 
 #: The numbers those rows carried, which sit in definitions unrelated to them.

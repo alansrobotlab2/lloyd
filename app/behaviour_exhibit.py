@@ -80,6 +80,7 @@ import gzip
 import hashlib
 import json
 import math
+import random
 import re
 import subprocess
 import sys
@@ -1710,6 +1711,668 @@ def prune_store(dir_: Path, *, now: "datetime | None" = None,
     return out
 
 
+# ── the candidate route: score a check that does not exist yet (#4074) ─────
+#
+# Buykin's rule, the half this module has never been able to serve: before you build a
+# check, replay its rule over the recorded corpus and publish the rate it WOULD have had.
+# `sweep` cannot do that, and the three entry conditions #4074 names are all load-bearing
+# guards that refuse a candidate on purpose: `require_in_git_index` (the tracked registry
+# must be tracked), `resolve_source` (a spec must point at a line that exists), and
+# `DETECTORS_IMPL` keyed by behaviour id (so scoring a new predicate means committing it).
+# Each is right about the registry and fatal for a pre-flight: a check that does not exist
+# yet has no line to point at and no commit to be in. This route therefore bypasses all
+# three, and only all three, for one artifact at a time.
+#
+# WHAT THE RATE IS. `firing_rate` = matched units / scanned units over the recorded corpus,
+# where the unit is the same `Turn` the registry route scores. A low rate is a description
+# of the corpus, never a verdict on the check: the recorded sessions are the runs that
+# happened, not a sample of the runs that matter. That is why `representability` is a
+# required field of a candidate spec and is printed beside the number, and why a predicate
+# that matches NOTHING prints `not_instrumentable` rather than 0.0000 — the second reads as
+# "harmless", the first says the corpus cannot answer the question.
+#
+# THE CONTROL IS NOT OPTIONAL, and it is the same rule `CONTROL_TRACES` already enforces
+# for a registered behaviour ("every new check has to fail once on purpose"): a candidate's
+# numbers are published ONLY beside the result of a planted-violating transcript supplied
+# with it. A candidate with no planted control, or one whose control does not fire, is an
+# instrument failure and gets no rate at all — a predicate that cannot catch a violation
+# you hand it has no business being trusted to catch one in history.
+
+#: Required of a candidate spec. The same shape as `REQUIRED_FIELDS` minus the two fields
+#: this route exists to make unnecessary: a `detector` id into `DETECTORS_IMPL` (the
+#: predicate is IN the spec, as `trigger`), and a resolvable `source`. `source` is still
+#: required — it says which standing rule the proposed check would govern — but it is
+#: published verbatim and never resolved, which is exactly what makes a pre-flight possible.
+#: `representability` is required because the number without it is a false assurance.
+CANDIDATE_REQUIRED = ("id", "source", "trigger", "population", "representability")
+
+#: The whole predicate grammar, in full. A node is a one-key mapping; unparseable or
+#: unknown keys RAISE rather than being ignored, because a report that quietly dropped a
+#: clause would print a firing rate for a predicate nobody wrote. Call-level leaves test one
+#: persisted tool call (`call_name`, `arg_regex`); turn-level nodes test the turn
+#: (`message_regex`, `final_text_regex`, `all`/`any`/`not`, and `then` for order).
+#:
+#: What it CANNOT say is also published, not hidden: there is no arithmetic over arguments,
+#: no cross-turn state, and nothing about a message's ROLE beyond its own text. A candidate
+#: whose failure mode needs those is not rejected — it says so in `representability`, and
+#: `not_instrumentable` is then the honest answer rather than a 0% that reads as clean.
+PREDICATE_KEYS = ("call_name", "arg_regex", "message_regex", "final_text_regex",
+                  "all", "any", "not", "then")
+CALL_KEYS = ("call_name", "arg_regex")
+
+#: Match samples published per population. The item's number: up to 20, each with the
+#: session id and the turn index inside it, so a reader can open the exact trace and check
+#: the match by hand. The rate is 20× cheaper to publish than to verify, and a sample a
+#: reader cannot find is not evidence.
+SAMPLE_CAP = 20
+
+#: The reservoir's seed. Fixed so the sample list a round published is re-derivable from the
+#: same corpus by anyone who runs the same command; named for the item that asked for it.
+SAMPLE_SEED = 4074
+
+
+def _re(pattern: object, where: str) -> "re.Pattern":
+    """A compiled regex, or a refusal that names the node it came from."""
+    rx = str(pattern or "")
+    try:
+        return re.compile(rx)
+    except re.error as exc:
+        raise ValueError(f"{where}: pattern {rx!r} does not compile ({exc})") from exc
+
+
+def _compile_call(node: dict, *, where: str):
+    """A predicate over ONE `(name, args)` pair, from a call-level node.
+
+    One key, or several keys drawn from `CALL_KEYS` — and several mean the SAME call has to
+    satisfy every one of them. That conjunction is what the #777 class needs: "a `Write`
+    whose `file_path` is under the vault" is one call with two properties, and spreading the
+    same demand over `all: [{call_name: …}, {arg_regex: …}]` would ask two independent calls
+    instead and fire on a turn that wrote one file and named a different tool.
+    """
+    if not isinstance(node, dict) or not node:
+        raise ValueError(
+            f"{where}: a call-level predicate is a non-empty mapping of {CALL_KEYS}, got "
+            f"{node!r}")
+    stray = [k for k in node if k not in CALL_KEYS]
+    if stray:
+        raise ValueError(
+            f"{where}: {sorted(stray)} is not a call-level predicate; that level takes "
+            f"{CALL_KEYS} (a turn-level node belongs directly under `trigger:`, not inside "
+            f"`then:`)")
+    parts = []
+    for key, val in node.items():
+        if key == "call_name":
+            names = val if isinstance(val, list) else [val]
+            short = {_tool_short(n) for n in names if str(n or "").strip()}
+            if not short:
+                raise ValueError(f"{where}.call_name names no tool: {val!r}")
+            parts.append(lambda name, args, s=short: _tool_short(name) in s)
+        else:  # arg_regex
+            if not isinstance(val, dict) or not val.get("key") or "pattern" not in val:
+                raise ValueError(
+                    f"{where}.arg_regex wants {{key:, pattern:}}, got {val!r}")
+            rx = _re(val["pattern"], f"{where}.arg_regex")
+            arg = str(val["key"])
+
+            def _one(_name: str, args: dict, rx=rx, arg=arg) -> bool:
+                v = args.get(arg)
+                text = (v if isinstance(v, str)
+                        else json.dumps(v) if isinstance(v, (list, dict)) else None)
+                return text is not None and bool(rx.search(text))
+            parts.append(_one)
+
+    def _all(name: str, args: dict) -> bool:
+        return all(p(name, args) for p in parts)
+    return _all
+
+
+def compile_predicate(node: dict, *, where: str = "trigger") -> "Any":
+    """Compile a candidate's `trigger` into a function of one `Turn` returning bool.
+
+    Raises `ValueError` naming the offending node for a non-mapping, a mapping that mixes
+    call-level and turn-level keys, an unknown key, an empty `all`/`any` list, a `then` that
+    is not exactly two call-level leaves, or a pattern that does not compile. `then` is the
+    one ordering primitive: leaf A on some call i and leaf B on some call j > i, which is
+    what a "did the thing AFTER the thing it should have" check needs and what a set of `any`
+    clauses cannot express.
+    """
+    if not isinstance(node, dict) or not node:
+        raise ValueError(
+            f"{where}: a predicate node is a mapping keyed by {PREDICATE_KEYS}, got {node!r}")
+    keys = set(node)
+    if not keys <= set(PREDICATE_KEYS):
+        raise ValueError(
+            f"{where}: {sorted(keys - set(PREDICATE_KEYS))} is not a predicate this grammar "
+            f"knows; it takes {PREDICATE_KEYS}")
+    if keys <= set(CALL_KEYS):
+        # One key, or several that all constrain the SAME call.
+        cp = _compile_call(node, where=where)
+        return lambda turn: any(cp(n, a) for n, a, _r in turn.calls)
+    if len(node) != 1:
+        raise ValueError(
+            f"{where}: only {CALL_KEYS} may be combined on one node (they constrain one "
+            f"call); {sorted(keys)} mixes levels, so say which you mean with `all:` or "
+            f"`any:`")
+    (key, val), = node.items()
+    if key == "message_regex":
+        rx = _re(val, f"{where}.message_regex")
+        return lambda turn: any(rx.search(str(m.get("content") or ""))
+                               for m in turn.messages)
+    if key == "final_text_regex":
+        rx = _re(val, f"{where}.final_text_regex")
+        return lambda turn: bool(rx.search(turn.final_text))
+    if key in ("all", "any"):
+        if not isinstance(val, list) or not val:
+            raise ValueError(f"{where}.{key} wants a non-empty list of nodes, got {val!r}")
+        subs = [compile_predicate(x, where=f"{where}.{key}[{i}]")
+                for i, x in enumerate(val)]
+        if key == "all":
+            return lambda turn: all(p(turn) for p in subs)
+        return lambda turn: any(p(turn) for p in subs)
+    if key == "not":
+        sub = compile_predicate(val, where=f"{where}.not")
+        return lambda turn: not sub(turn)
+    if key == "then":
+        if not isinstance(val, list) or len(val) != 2:
+            raise ValueError(
+                f"{where}.then wants exactly two call-level leaves (before, after), got "
+                f"{val!r}")
+        before = _compile_call(val[0], where=f"{where}.then[0]")
+        after = _compile_call(val[1], where=f"{where}.then[1]")
+
+        def _seq(turn: Turn) -> bool:
+            calls = turn.calls
+            for i in range(len(calls)):
+                n_i, a_i, _r_i = calls[i]
+                if not before(n_i, a_i):
+                    continue
+                for j in range(i + 1, len(calls)):
+                    n_j, a_j, _r_j = calls[j]
+                    if after(n_j, a_j):
+                        return True
+            return False
+        return _seq
+    raise ValueError(
+        f"{where}: {key!r} is not a predicate this grammar knows; it takes "
+        f"{PREDICATE_KEYS}")
+
+
+def tree_stamp() -> str:
+    """`live` or `worktree` — which checkout this replay ran in, judged by git's own layout.
+
+    A linked worktree's `.git` is a FILE pointing at the main checkout's `.git/worktrees/…`;
+    a primary checkout's is a DIRECTORY. The field matters because a rate printed by a
+    round's CLI is produced by that round's WORKING module: a round that changes this file
+    and then replays a candidate is measuring its own edit, and after a promotion the live
+    tree and the round's branch diverge. Same number, two different claims, and a reader
+    cannot tell them apart without this. It is a stamp, not a safety property — see
+    `architecture/stale-code-execution-surface.md`.
+    """
+    return "worktree" if (REPO_ROOT / ".git").is_file() else "live"
+
+
+def git_index_state(path: "Path | str") -> str:
+    """`tracked`, `untracked` or `outside-checkout` — published, never enforced.
+
+    The candidate route scores a spec that is deliberately NOT in the index (clause 1), so
+    the guard `require_in_git_index` exists for cannot run here. It is not dropped silently:
+    its answer becomes a field on the report, so an artifact that would have been refused is
+    visibly one. `outside-checkout` is the `/tmp` case, where git has no opinion — the same
+    reading `require_in_git_index` gives by returning early rather than asserting.
+    """
+    resolved = Path(path).resolve()
+    try:
+        rel = resolved.relative_to(REPO_ROOT)
+    except ValueError:
+        return "outside-checkout"
+    try:
+        proc = subprocess.run(["git", "-C", str(REPO_ROOT), "ls-files", "--error-unmatch",
+                               str(rel)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return "untracked"
+    return "tracked" if proc.returncode == 0 else "untracked"
+
+
+def load_candidate(path: "Path | str") -> "dict[str, Any]":
+    """A candidate spec: like a registry spec, minus the two guards a pre-flight cannot pass.
+
+    Requires `CANDIDATE_REQUIRED`, a `trigger` node that compiles, and a `population` in
+    `POPULATIONS`. Does NOT call `require_in_git_index` (the candidate is not the tracked
+    registry and is not supposed to be) and does NOT call `resolve_source` (the check does
+    not exist yet, so there is no line to point at). Both refusals are recorded on the
+    report as `in_git_index` and `source_resolves`, so the bypass is auditable rather than
+    implicit — and an unparseable predicate still raises, because a check that cannot be
+    stated is not a candidate, it is a wish.
+    """
+    p = Path(path)
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"candidate spec {p} cannot be read: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"candidate spec {p} is not valid YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"candidate spec {p}: expected a mapping of {CANDIDATE_REQUIRED}")
+    missing = [f for f in CANDIDATE_REQUIRED
+               if f not in raw or not str(raw[f] or "").strip()]
+    if missing:
+        raise ValueError(
+            f"candidate spec {p} is missing {missing}: `trigger` is the predicate to replay, "
+            "`representability` is the line that says whether the corpus could show the "
+            "failure at all, and a rate without it is a false assurance")
+    if raw["population"] not in POPULATIONS:
+        raise ValueError(
+            f"candidate {raw['id']!r} names population {raw['population']!r}, which is not "
+            f"one of {POPULATIONS}")
+    compile_predicate(raw["trigger"])
+    return raw
+
+
+def corpus_fingerprint(paths: "Iterable[Path]", *, sessions_dir: "Path | str") -> str:
+    """A cheap, stable identity for exactly which transcripts a scan covered.
+
+    `(name, size, mtime_ns)` per file, plus the total count and the directory, hashed. No
+    transcript is opened: the retention sweep rewrites `x.json` into `x.json.gz` (different
+    name), a new session changes the count, and an edited or truncated file changes size —
+    every one of those moves the digest, which is what clause 3 requires of it. The count is
+    hashed FIRST so a file that vanished between listing and stat cannot reproduce the
+    previous digest by being absent from the loop.
+    """
+    h = hashlib.sha256()
+    ps = sorted(paths, key=lambda q: q.name)
+    h.update(f"dir={Path(sessions_dir)}\ncount={len(ps)}\n".encode("utf-8"))
+    for p in ps:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        h.update(f"{p.name}\t{st.st_size}\t{st.st_mtime_ns}\n".encode("utf-8"))
+    return "sha256:" + h.hexdigest()[:32]
+
+
+def candidate_corpus(sessions_dir: "Path | None" = None, *, since: "str | None" = None,
+                     until: "str | None" = None,
+                     max_files: int = 0) -> "dict[str, Any]":
+    """The transcripts a candidate is replayed over, with their fingerprint.
+
+    The WHOLE session store by default — plain and gzipped, sidecars excluded — because a
+    pre-flight that silently measured the last month would report yesterday's corpus as
+    history, which is the exact risk #4074 names (retention compresses at ~30 days). A date
+    window is available for cost, and it windows on CONTENT date (`content_date`), never on
+    mtime, for the reason #3885 recorded: a `.gz` file's mtime is the day it was packed.
+    """
+    d = session_dir(sessions_dir)
+    a, b = parse_ts(since), parse_ts(until)
+    bad = [name for name, raw in (("--since", since), ("--until", until))
+           if raw is not None and parse_ts(raw) is None]
+    if bad:
+        raise ValueError(f"{' and '.join(bad)} is not an ISO date or datetime")
+    if a is not None and b is not None and b <= a:
+        raise ValueError(f"--until {b.isoformat()} is not after --since {a.isoformat()}")
+    every = sorted(list(d.glob("*.json")) + list(d.glob("*.json.gz")))
+    sidecars = [p for p in every if not is_transcript_path(p)]
+    paths = [p for p in every if is_transcript_path(p)]
+    if a is not None or b is not None:
+        paths = [p for p in paths if (Window("content", 0, a, b)).admits(content_date(p))]
+    files_truncated = 0
+    if max_files and len(paths) > max_files:
+        files_truncated = len(paths) - max_files
+        paths = paths[:max_files]
+    return {"paths": paths, "dir": d,
+            "fingerprint": corpus_fingerprint(paths, sessions_dir=d),
+            "plain": sum(1 for p in paths if not p.name.endswith(".gz")),
+            "gzipped": sum(1 for p in paths if p.name.endswith(".gz")),
+            "sidecars_skipped": len(sidecars), "files_truncated": files_truncated,
+            "window": ({"since": a.isoformat(timespec="seconds") if a else None,
+                        "until": b.isoformat(timespec="seconds") if b else None,
+                        "mode": ("content date" if (a or b) else "whole corpus, no window")}
+                       )}
+
+
+def _turn_excerpt(turn: Turn) -> str:
+    """A short, findable excerpt of a matching turn, for the sample list.
+
+    Deliberately NOT a claim about which clause of the predicate matched — the compiled
+    predicate returns a bool and this function reads the turn again, so for a `not:` node
+    the excerpt shows the turn's first call rather than the thing that was absent. It is
+    here so a reader can locate the trace; the predicate's own text is the claim.
+    """
+    for name, args, _raw in turn.calls:
+        paths = _paths_named(args)
+        if paths:
+            return f"{name} {paths[0]}"[:160]
+        for k in ("command", "query", "pattern", "topic", "text"):
+            v = args.get(k)
+            if isinstance(v, str) and v.strip():
+                return f"{name} {v.strip()}"[:160]
+        return str(name)[:160]
+    return (turn.final_text or "").strip().replace("\n", " ")[:160] or "(no calls, no text)"
+
+
+def replay_planted_control(pred: "Any", path: "Path | str") -> "dict[str, Any]":
+    """Run the predicate over a planted-violating transcript: must fire, or the check fails.
+
+    Accepts one trace (`{name?, messages, expect_matches?}`) or `{traces: [...]}`. Each
+    trace's `messages` is fed through the SAME `turns_of` the corpus goes through, so a
+    planted trace is scored by the identical path a real session is — a control that
+    bypassed normalisation would prove nothing about production. `expect_matches` defaults
+    to 1: the rule is only "fail once on purpose", and over-specifying the count here would
+    turn a smoke control into a fixture with all the fragility of the registry's
+    `expected_n`/`expected_k` and none of its committed status.
+    """
+    p = Path(path)
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"planted control {p} cannot be read: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"planted control {p} is not JSON: {exc}") from exc
+    traces = doc.get("traces") if isinstance(doc, dict) and doc.get("traces") else [doc]
+    if not isinstance(traces, list) or not traces:
+        raise ValueError(f"planted control {p}: `traces` is empty — the control must exist")
+    rows = []
+    for i, tr in enumerate(traces):
+        if not isinstance(tr, dict) or not isinstance(tr.get("messages"), list):
+            raise ValueError(
+                f"planted control {p}: trace {i} needs a `messages` list in transcript shape")
+        want = int(tr.get("expect_matches", 1) or 1)
+        sid = str(tr.get("session_id") or f"planted-{i}")
+        matched = 0
+        for idx, turn in enumerate(turns_of({"session_id": sid, "messages": tr["messages"]})):
+            if pred(turn):
+                matched += 1
+        rows.append({"name": str(tr.get("name") or f"planted-{i}"),
+                     "expected_matches": want, "matched": matched,
+                     "ok": matched >= want})
+    return {"supplied": True, "path": str(p), "traces": rows,
+            "ok": all(r["ok"] for r in rows),
+            "status": ("fired" if all(r["ok"] for r in rows) else "DID NOT FIRE")}
+
+
+def _scan_corpus(pred: "Any", paths: "list[Path]") -> "dict[str, Any]":
+    """One pass of the predicate over the transcripts: the numbers the cache holds.
+
+    Samples are kept by Algorithm R over a fixed seed, not as "the first N". Paths arrive in
+    sorted order, which is oldest-name-first, so the first N would all come from the same
+    September week and a reader would take that for the shape of the whole corpus; a seeded
+    reservoir spans it instead and stays reproducible for a given fingerprint. Each sample
+    carries the turn's CALL NAMES, not just its first call: a candidate about `Write`
+    routinely matches a turn that OPENS with something else, and a sample that prints only
+    the opening call reads as a false positive when it is not.
+    """
+    rng = random.Random(SAMPLE_SEED)
+    units = 0
+    unreadable = 0
+    cells = {p: [0, 0] for p in MEASURED_POPULATIONS}
+    samples: "dict[str, list[dict[str, Any]]]" = {p: [] for p in MEASURED_POPULATIONS}
+    seen = {p: 0 for p in MEASURED_POPULATIONS}
+    for path in paths:
+        doc = read_transcript(path)
+        if doc is None:
+            unreadable += 1
+            continue
+        for idx, turn in enumerate(turns_of(doc)):
+            units += 1
+            cell = cells[turn.population]
+            cell[0] += 1
+            if pred(turn):
+                cell[1] += 1
+                sample = {"session_id": turn.session_id, "turn_index": idx,
+                          "file": path.name, "ts": turn.ts,
+                          "calls": [_tool_short(n) for n, _a, _r in turn.calls][:8],
+                          "excerpt": _turn_excerpt(turn)}
+                seen[turn.population] += 1
+                pool = samples[turn.population]
+                if len(pool) < SAMPLE_CAP:
+                    pool.append(sample)
+                else:
+                    j = rng.randrange(seen[turn.population])
+                    if j < SAMPLE_CAP:
+                        pool[j] = sample
+    return {"units_scanned": units, "unreadable": unreadable,
+            "cells": {k: list(v) for k, v in cells.items()},
+            "samples": {k: list(v) for k, v in samples.items()},
+            "sample_rule": (f"up to {SAMPLE_CAP} per population, reservoir-sampled over the "
+                            f"whole scan (seed {SAMPLE_SEED}), not the first N in scan order")}
+
+
+def candidate_cache_path(cache_dir_: "Path | str", fingerprint: str, spec_sha: str,
+                         planted_sha: "str | None") -> Path:
+    """The cache slot for one (corpus, predicate, control) triple.
+
+    The corpus fingerprint alone would be the wrong key: two candidates replayed over an
+    unchanged corpus would answer each other out of one file, which is a wrong number that
+    arrives faster than a right one. The planted control's bytes are in too, so editing the
+    control cannot make a stale scan look re-verified.
+    """
+    key = hashlib.sha256(f"{fingerprint}\n{spec_sha}\n{planted_sha}\n".encode()).hexdigest()
+    return Path(cache_dir_) / f"pre-replay-{key[:32]}.json"
+
+
+def candidate_report(spec: dict, *, candidate_path: Path, scanned: dict, fingerprint: str,
+                     corpus: dict, control: "dict[str, Any] | None", cache: dict,
+                     spec_sha: str, now: "datetime | None" = None,
+                     command: "str | None" = None) -> "dict[str, Any]":
+    """Assemble the pre-flight report. This is where the two refusals live.
+
+    `not_instrumentable` when the predicate matched nothing, and `instrument failure` when
+    the planted control is missing or did not fire — and in BOTH cases `firing_rate` is
+    `None`, because the number is the thing that must not survive either condition. A 0%
+    firing rate reads as "harmless" to every later reader; an instrument that cannot catch a
+    violation handed to it has no measurement to publish at all.
+    """
+    cells = scanned["cells"]
+    samples = scanned["samples"]
+    units = int(scanned["units_scanned"])
+    matches = sum(v[1] for v in cells.values())
+    per = {}
+    for pop in MEASURED_POPULATIONS:
+        n, k = cells[pop]
+        per[pop] = {"units_scanned": n, "matches": k,
+                    "firing_rate": (round(k / n, 6) if n else None),
+                    "samples": samples[pop],
+                    "status": ("measured" if n else
+                               "no units of this population in the window")}
+    declared = str(spec["population"])
+    if control is None or not control.get("ok"):
+        status = ("instrument failure: " + (
+            "no planted-violating transcript was supplied — a candidate's rate is published "
+            "only beside the result of a control that must fail once on purpose"
+            if control is None else
+            "the planted violation did NOT fire, so this predicate cannot catch the thing it "
+            "claims to catch and has no historical rate to report"))
+        rate = None
+    elif matches == 0:
+        status = "not_instrumentable: the predicate matched nothing in the recorded corpus"
+        rate = None
+    else:
+        status = "measured"
+        rate = round(matches / units, 6) if units else None
+    if rate is None:
+        # A refusal is report-wide, so it reaches the per-population cells too. `0/7` is
+        # arithmetically 0.0 and a later reader sums cells into a rate the same way; the
+        # branch the report took must not be reconstructable as a number from its halves.
+        # The counts stay — the counts are what `not_instrumentable` is evidence OF.
+        for cell in per.values():
+            cell["firing_rate"] = None
+            if cell["units_scanned"]:
+                cell["status"] = "withheld: the report publishes no rate this run"
+    return {
+        "schema": 1, "kind": "pre_replay", "item": "#4074",
+        "measured_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
+        "command": command or "",
+        "tree": tree_stamp(),
+        "tree_evidence": ("REPO_ROOT/.git is a FILE (a linked git worktree — a round's "
+                          "checkout)" if tree_stamp() == "worktree" else
+                          "REPO_ROOT/.git is a DIRECTORY (the live checkout)"),
+        "candidate": {
+            "path": str(candidate_path), "id": str(spec["id"]),
+            "source": str(spec["source"]),
+            "population": declared,
+            "representability": str(spec["representability"]),
+            "trigger": spec["trigger"], "sha256": spec_sha,
+            # The two guards the registry route enforces and this route cannot: published
+            # as answers rather than applied as refusals (#4074 clause 1).
+            "in_git_index": git_index_state(candidate_path),
+            "source_resolves": _source_resolves(str(spec["source"])),
+        },
+        "corpus": {"sessions_dir": str(corpus["dir"]), "fingerprint": fingerprint,
+                   "files_scanned": len(corpus["paths"]),
+                   "plain": corpus["plain"], "gzipped": corpus["gzipped"],
+                   "sidecars_skipped": corpus["sidecars_skipped"],
+                   "files_truncated": corpus["files_truncated"],
+                   "unreadable": scanned["unreadable"],
+                   "transcripts_read": (0 if cache.get("hit") else len(corpus["paths"])),
+                   "window": corpus["window"],
+                   "unit": "one user turn and everything the agent did before the next one "
+                           "(`Turn`) — the same unit the registry route scores"},
+        "cache": cache,
+        "planted_control": (control or {"supplied": False, "status": "NOT SUPPLIED",
+                                        "ok": False, "traces": []}),
+        "units_scanned": units, "matches": matches, "firing_rate": rate,
+        "by_population": per,
+        "sample_rule": str(scanned.get("sample_rule", "")),
+        "status": status,
+        "gated_on": None,
+        "note": ("report-only (#4074 step 5): no gate rung verdict reads this block, and "
+                 "the refusal bar is a ruling that needs ~10 qualifying rounds of published "
+                 "rates; the firing rate describes the recorded corpus, not the check's "
+                 "soundness — see candidate.representability"),
+    }
+
+
+def _source_resolves(source: str) -> bool:
+    """Would `resolve_source` accept this string? Asked, not enforced.
+
+    A candidate's source is expected NOT to resolve — that is the entry condition the
+    pre-flight exists to serve — so the registry's guard is turned into a published field.
+    Anything other than a clean True is reported False with no exception, including a
+    pointer to a file that exists but has shrunk.
+    """
+    try:
+        resolve_source(source)
+        return True
+    except Exception:  # noqa: BLE001 - by design: the failure IS the answer
+        return False
+
+
+def replay_candidate(candidate: "Path | str", *, planted_control: "Path | str | None" = None,
+                     sessions_dir: "Path | None" = None, since: "str | None" = None,
+                     until: "str | None" = None, max_files: int = 0,
+                     cache_dir: "Path | str | None" = None, use_cache: bool = True,
+                     now: "datetime | None" = None,
+                     command: "str | None" = None) -> "dict[str, Any]":
+    """Replay a proposed check over the recorded corpus and report its firing rate.
+
+    Offline, CPU-only, deterministic, no model call and no GPU. Costs one corpus scan per
+    (corpus, predicate, control) triple, and the cache is what bounds that cost: a second
+    run over an unchanged fingerprint answers from the cache entry with
+    `corpus.transcripts_read: 0` rather than re-reading 21k transcripts, while ANY change to
+    the fingerprint moves the key and forces a fresh scan — a cache that could be beaten by
+    a stale key would replay old numbers as a fresh measurement.
+    """
+    t0 = datetime.now(timezone.utc)
+    cp = Path(candidate)
+    spec = load_candidate(cp)
+    pred = compile_predicate(spec["trigger"])
+    spec_sha = hashlib.sha256(cp.read_bytes()).hexdigest()
+    planted_sha = (hashlib.sha256(Path(planted_control).read_bytes()).hexdigest()
+                   if planted_control else None)
+    control = (replay_planted_control(pred, planted_control)
+               if planted_control else None)
+    corpus = candidate_corpus(sessions_dir, since=since, until=until, max_files=max_files)
+    cdir = Path(cache_dir) if cache_dir else (out_dir() / "candidate-cache")
+    cpath = candidate_cache_path(cdir, corpus["fingerprint"], spec_sha, planted_sha)
+    cache = {"hit": False, "key": cpath.name, "path": str(cpath), "written": False,
+             "dir": str(cdir)}
+    scanned: "dict[str, Any] | None" = None
+    if use_cache and cpath.is_file():
+        try:
+            cached = json.loads(cpath.read_text(encoding="utf-8"))
+            scanned = cached["scan"]
+            cache.update(hit=True, cached_at=cached.get("cached_at"),
+                         scanned_at=cached.get("scanned_at"))
+        except (OSError, ValueError, KeyError):
+            scanned = None      # a cache entry that cannot be read is simply no cache
+    if scanned is None:
+        scanned = _scan_corpus(pred, corpus["paths"])
+        if use_cache:
+            cdir.mkdir(parents=True, exist_ok=True)
+            cpath.write_text(json.dumps(
+                {"schema": 1, "cached_at": (now or datetime.now(timezone.utc)
+                                            ).isoformat(timespec="seconds"),
+                                 "scanned_at": (now or datetime.now(timezone.utc)
+                                                ).isoformat(timespec="seconds"),
+                                 "fingerprint": corpus["fingerprint"],
+                                 "candidate_sha256": spec_sha,
+                                 "planted_sha256": planted_sha,
+                                 "scan": scanned}, indent=2), encoding="utf-8")
+            cache["written"] = True
+    rep = candidate_report(spec, candidate_path=cp, scanned=scanned,
+                           fingerprint=corpus["fingerprint"], corpus=corpus,
+                           control=control, cache=cache, spec_sha=spec_sha, now=now,
+                           command=command)
+    rep["corpus"]["scan_seconds"] = round(
+        (datetime.now(timezone.utc) - t0).total_seconds(), 2)
+    return rep
+
+
+def render_candidate(report: dict) -> str:
+    """The printed report. No rate survives a failed control or an empty trigger.
+
+    The printed form is what a human reads in a round's transcript, so the two refusals
+    print the refusal and NOTHING that could be mistaken for a number: the
+    `not_instrumentable` branch and the `instrument failure` branch carry no `rate=` token
+    at all, and both carry the `tree=live|worktree` stamp, because a report printed from a
+    round's worktree over that worktree's own module is a different claim from one printed
+    from the live checkout.
+    """
+    c = report["candidate"]
+    cor = report["corpus"]
+    ctl = report["planted_control"]
+    tree = f"tree={report['tree']}"
+    L = [f"pre-replay #4074 — candidate {c['id']}  ({tree})",
+         f"  spec        {c['path']}  sha256:{c['sha256'][:12]}"
+         f"  in_git_index={c['in_git_index']}  source_resolves={c['source_resolves']}",
+         f"  source      {c['source']}",
+         f"  corpus      fingerprint={cor['fingerprint']}  files={cor['files_scanned']}"
+         f" ({cor['plain']} plain + {cor['gzipped']} gzipped)  "
+         f"window={cor['window']['mode']}",
+         f"  cache       {'HIT (transcripts not re-read)' if report['cache']['hit'] else 'miss'}"
+         f"  key={report['cache']['key']}",
+         f"  control     {ctl['status']}"
+         + ("" if ctl.get("supplied") else " — nothing supplied")]
+    for t in ctl.get("traces") or []:
+        L.append(f"                [{'ok' if t['ok'] else 'FAIL'}] {t['name']}: "
+                 f"matched {t['matched']} (needs {t['expected_matches']})")
+    L.append(f"  units       {report['units_scanned']} turns scanned")
+    if report.get("firing_rate") is None:
+        L.append(f"  matches     {report['matches']} in {report['units_scanned']} units — "
+                 f"{report['status']}, so no firing rate is published for this candidate "
+                 f"({tree})")
+        L.append("                a zero here is not a low rate: the corpus cannot show "
+                 "what this predicate looks for, which is a statement about the corpus and "
+                 "the predicate, never about the check's soundness")
+    else:
+        L.append(f"  matches     {report['matches']} — firing rate="
+                 f"{report['firing_rate']:.6f} ({report['firing_rate'] * 100:.4f}%)")
+        for pop in ("user", "worker", "unattributed"):
+            cell = report["by_population"][pop]
+            if cell["units_scanned"] == 0 and pop == "unattributed":
+                continue
+            L.append(f"    {pop:<12} {cell['matches']}/{cell['units_scanned']}"
+                     f"  rate=" + (f"{cell['firing_rate']:.6f}"
+                                   if cell["firing_rate"] is not None
+                                   else "none: " + cell["status"]))
+            for s in cell["samples"]:
+                L.append(f"      {s['session_id']} turn {s['turn_index']}  "
+                         f"[{','.join(s['calls'])}]  {s['excerpt']}")
+    L.append(f"  status      {report['status']}")
+    L.append(f"  representability  {c['representability']}")
+    L.append("  " + report["note"])
+    return "\n".join(L)
+
+
 def main(argv: "list[str] | None" = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--days", type=int, default=7,
@@ -1736,7 +2399,59 @@ def main(argv: "list[str] | None" = None) -> int:
                          "before it is merged); defaults to the tracked registry")
     ap.add_argument("--check", action="store_true",
                     help="run the registry check and the controls, sweep nothing")
+    # ── the candidate route (#4074) ───────────────────────────────────────────
+    ap.add_argument("--candidate", default=None, metavar="SPEC.yaml",
+                    help="replay a PROPOSED predicate over the recorded corpus before "
+                         "building it: a spec outside the tracked registry, not required to "
+                         "be in git's index, whose `source` is free text")
+    ap.add_argument("--planted-control", dest="planted_control", default=None,
+                    metavar="TRACE.json",
+                    help="a planted-violating transcript the predicate MUST fire on; a "
+                         "candidate without one publishes no firing rate")
+    ap.add_argument("--emit-report", dest="emit_report", default=None, metavar="PATH",
+                    help="write the JSON report here — an automod round writes it to "
+                         "<rounds>/SM_…/pre_replay.json, which is the file the gate copies "
+                         "into gate.json's `pre_replay` block")
+    ap.add_argument("--cache-dir", dest="cache_dir", default=None,
+                    help="where the fingerprint cache lives; defaults to the registered "
+                         "store's candidate-cache/ subdirectory")
+    ap.add_argument("--no-cache", dest="no_cache", action="store_true",
+                    help="always re-scan, and do not write a cache entry")
     args = ap.parse_args(argv)
+
+    if args.candidate:
+        # The candidate route answers with its own exit codes and touches nothing else:
+        # 0 = a rate was published (or the trigger simply never fired), 1 = the planted
+        # control is missing or did not fire (an instrument failure: the candidate is
+        # unusable until it can catch a violation handed to it), 2 = the spec cannot be
+        # read, stated, or compiled. It never loads the registry, so neither of the
+        # registry's two entry guards — git index, resolvable `source` — can refuse it.
+        try:
+            rep = replay_candidate(Path(args.candidate),
+                                   planted_control=(Path(args.planted_control)
+                                                    if args.planted_control else None),
+                                   sessions_dir=(Path(args.sessions_dir)
+                                                 if args.sessions_dir else None),
+                                   since=args.since, until=args.until,
+                                   max_files=args.max_files,
+                                   cache_dir=(Path(args.cache_dir) if args.cache_dir
+                                              else None),
+                                   use_cache=not args.no_cache,
+                                   command=" ".join(
+                                       [".venvs/lloyd/bin/python", "-m",
+                                        "app.behaviour_exhibit",
+                                        *(argv if argv is not None else sys.argv[1:])]))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.emit_report:
+            dest = Path(args.emit_report)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+        print(render_candidate(rep))
+        if args.emit_report:
+            print(f"wrote {args.emit_report}")
+        return 0 if rep["planted_control"]["ok"] else 1
 
     if args.check:
         controls = run_controls(Path(args.registry) if args.registry else None)
