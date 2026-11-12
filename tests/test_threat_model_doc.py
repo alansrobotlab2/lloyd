@@ -754,3 +754,122 @@ def test_the_ladder_overlap_extractor_is_shown_able_to_fail():
         "the citation surface grew past the two tables into the Boundaries "
         "section's own prose, where any module named in a paragraph would count "
         "as a seam being named")
+
+
+# --------------------------------------------------------------------------- #
+# 4. the credential-escape rows name the control that acts on the bytes (#4047)
+# --------------------------------------------------------------------------- #
+
+#: Both rows are matched on their capability text, not their id or line number:
+#: #4047 was filed because line numbers in this doc move under it (`1b704b04`
+#: shifted every anchor in it by 6 the day it landed), and an id is only stable
+#: until somebody retires a row.
+_CREDENTIAL_BODY = "A credential rides out inside a request body the model composed"
+_CREDENTIAL_VAULT = "A vault write copies a credential into a file the sync client pushes"
+
+#: Cells of a Threats row, by the column order the table header declares: the row
+#: id is returned separately, so `cells` is [B, Class, Capability, Control].
+_CAPABILITY, _CONTROL = 2, -1
+
+#: The line count of `architecture/threat-model.md` at the commit that added this
+#: node. The doc is cited by line number from inside this file — the gate-self-edit
+#: node above reads "`architecture/threat-model.md`:166-173 of the doc itself" — and
+#: the #4047 fix is a substitution of three cells that leaves the file at 402 lines.
+_DOC_LINES = 402
+
+
+def _credential_rows(needles, want):
+    """The one Threats row whose capability contains `needle`, so a cell can be
+    graded without naming a line number that the next arch-review will move."""
+    hits = [(rid, cells) for rid, cells in threat_rows()
+            if any(n in cells[_CAPABILITY] for n in needles)]
+    assert len(hits) == want, (
+        f"expected {want} row matching {needles!r}, found {[r for r, _ in hits]}")
+    return hits[0]
+
+
+def test_the_credential_escape_rows_name_the_substitution_and_its_limit():
+    """Clauses 1-3: the two rows that model credential escape have to name the
+    control that decides which credential bytes reach the wire, and T-20 has to
+    state that control's limit in words a reader can act on.
+
+    Both cells cited `app/harness/outbound_content.py:526` — `redact`, whose one
+    caller in the tree is `outbound_content.py:604`, the findings scanner — so the
+    map pointed a credential-escape reader at a text redactor for ledger excerpts
+    that never sees a request, while the control #3846 (`a092f430`, 2026-11-06) put
+    *inside* `egress.guard` was named nowhere in the file except the review note
+    that deferred this fix. That is the failure mode this file exists for: prose
+    carrying a fact about the code that nothing re-derives.
+
+    The limit is the other half of the point, and the reason clause 2 is a test
+    rather than a nicer sentence. `substitute_headers`
+    (`app/harness/credential_store.py:376`) is that module's only substitution
+    function, it is reached from `agent_mcp/http_tools.py:549` alone, and
+    `agent_mcp/http_tools.py:576` sends `body.encode()` past it — so this row's
+    capability is half covered. A cell that cites the substitution WITHOUT the
+    limit reads as closed and nobody goes to check, which is worse than the wrong
+    citation it replaces.
+    """
+    _, t20_cells = _credential_rows([_CREDENTIAL_BODY], 1)
+    t20 = t20_cells[_CONTROL]
+    assert "agent_mcp/egress.py" in t20, (
+        "T-20 names no egress control at all; the substitution #3846 added inside "
+        "`guard` is what acts on a credential's bytes")
+    assert "placeholder" in t20 and "bound" in t20, (
+        f"T-20 names egress without the substitution's mechanism: {t20}")
+    assert "enforce" in t20, (
+        "T-20 does not say the substitution is armed whether or not "
+        "`harness.egress_policy.enforce` is true — the distinction T-19 rests on")
+    assert "header" in t20.lower() and "only" in t20.lower(), (
+        f"T-20 states the control but not its scope: {t20}")
+    assert "unsubstituted" in t20.lower(), (
+        "T-20 no longer says a model-composed BODY leaves unsubstituted, which is "
+        "the half of this capability that no control closes")
+    assert "outbound_content.py:580" in t20, (
+        "T-20 stopped citing the module's outbound-payload control")
+    assert "**Partial" in t20, (
+        "T-20 is no longer marked a partial cell, so a reader takes the citation as "
+        "covering the capability the row names")
+
+    _, t08_cells = _credential_rows([_CREDENTIAL_VAULT], 1)
+    t08 = t08_cells[_CONTROL]
+    assert "agent_mcp/egress.py" in t08, (
+        "T-08 credits no egress control, so a marked credential that does leave over "
+        "a guarded lane is still credited to the scanner that only recorded it")
+    assert "outbound_content.py:580" in t08, (
+        "T-08 cites `redact` again, or lost the payload control beside the substitution")
+
+    for rid, cells in ((t20_cells[_CAPABILITY], t20_cells),
+                       (t08_cells[_CAPABILITY], t08_cells)):
+        assert "outbound_content.py:526" not in cells[_CONTROL], (
+            f"{rid[:40]}!r cites the findings-excerpt redactor as a control span again "
+            f"rather than naming it in prose: {cells[_CONTROL]}")
+
+
+def test_the_credential_edits_stayed_inside_their_cells():
+    """Clause 5's half that no resolution suite can see: proving a citation POINTS
+    at code says nothing about whether the edit that added it stayed inside its
+    cell.
+
+    The mechanism is recorded twice in `agent_mcp/http_tools.py`'s own comment
+    (`:536` on 2026-10-31, `:549` on 2026-11-06): a witness anchor is graded by
+    re-running a `git grep` and comparing the PRINTED line numbers, so one added
+    line silently invalidates every citation that quotes a number — including this
+    file's own, which quotes `:166-173` of this doc. The #4047 fix rewrote three
+    cells and left the file at 402 lines.
+
+    The count is a proxy for the one thing the rest of this file cannot see: the
+    row count, which the nodes above check against the 25/3 id sets, cannot move
+    when a cell grows. So a doc edit that spills a cell over extra lines passes
+    every other node here and is caught here or not at all.
+    """
+    assert len(DOC.read_text(encoding="utf-8").splitlines()) == _DOC_LINES, (
+        "the doc's line count moved, so any citation quoting a line number inside it "
+        "— including this file's `:166-173` — now points somewhere else; re-point "
+        "those, then update `_DOC_LINES`")
+    for rid in ("T-08", "T-20"):
+        cells = _credential_rows(
+            [_CREDENTIAL_BODY] if rid == "T-20" else [_CREDENTIAL_VAULT], 1)[1]
+        assert cells[_CAPABILITY].startswith("A ") and cells[_CONTROL], (
+            f"{rid} no longer parses as a four-column row, so the edit spilled out "
+            "of its cell")

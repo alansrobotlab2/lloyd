@@ -13438,3 +13438,85 @@ def test_both_arch_review_keeper_dirs_state_their_bound_where_they_state_the_kee
     assert "keep_conflict" in reason and "prune" in reason.lower(), (
         "the exemption must name the writer that owns the dir and the pruning that bounds "
         f"it, not a round that never touched it: {reason}")
+
+
+# ---------------------------------------------------------------------------
+# #4047: B8's authority cell carries both halves of the egress seam #3846 split.
+#
+# `agent_mcp/egress.py:882` reads `enforced = enforce_on()` and every DENY branch
+# is gated on it — `:896` (`enforced and not host`), `:899` (the private-host
+# floor), `:904`, with `_decide` reached only from the `enforced or attended_here`
+# branch at `:906`. So with `harness.egress_policy.enforce: false` (still live at
+# `config.yaml:806`) the destination axis records and never refuses, which is what
+# T-19's zero-deny week measured and what B8's cell said. What it did not say is
+# the other half: the credential swap at `:997` —
+# `credential_store.substitute_headers(headers, destination)` — consults nothing,
+# and `app/harness/credential_store.py:380-386` spells the split out: "with
+# `enforce` off this module only decides which bytes go on the wire." A row that
+# flattens the seam to "records rather than refuses" reads as nothing happening on
+# this boundary, which is exactly backwards for the one control that fills in a
+# real secret for a bound destination.
+# ---------------------------------------------------------------------------
+
+#: B8's cells, by the boundary table's column order: flow, artefacts, who
+#: authorizes, controls. The cell this node grades is the third of those.
+_B8_AUTHORIZES = -2
+
+
+def _threat_model_boundary_rows():
+    """The Boundaries table of `architecture/threat-model.md`, through the extractor
+    that already grades it in `tests/test_threat_model_doc.py`.
+
+    Loaded from the file rather than imported as `tests.…`: the two files are
+    siblings that pytest loads independently, and a re-implemented splitter here
+    would be a second parser of a table whose whole value is that one reader sees
+    it the way another does. Same reason this suite loads the hyphenated scripts by
+    path instead of importing them.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_threat_model_doc_extractors", str(ROOT / "tests/test_threat_model_doc.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # `_rows(_section(...), "B")`, not the sibling's `boundaries()`: that one
+    # returns the SET of ids, which is enough to grade coverage and cannot show
+    # what a cell says.
+    return mod._rows(mod._section(mod._text(), mod.BOUNDARIES), "B")
+
+
+def test_b8_carries_the_disarmed_refusal_and_the_armed_credential_swap():
+    """Clause 4: B8's "Who authorizes" cell states both halves of the current
+    state, because the sentence that was true of the whole seam is now true of one
+    half of it.
+
+    The failure this pins is a flattening, not a typo: "a destination table that
+    records rather than refuses on this box" was correct while it described the
+    only decider on the row, and after #3846 (`a092f430`, 2026-11-06) it describes
+    the refusal half while the content half of the same `guard` call runs
+    unconditionally. A reader weighing whether a credential can reach an unbound
+    host on this box reads the flattened version and concludes the row is inert.
+
+    Asserted on words a reader can act on rather than on a citation, because the
+    cell already cited `agent_mcp/egress.py` before the fix — a citation-only
+    check would have passed the old sentence. The paired halves: the flag, the
+    refusal it disarms, the swap, and the fact that the swap does not consult it.
+    """
+    cells = dict(_threat_model_boundary_rows())["B8"]
+    who = cells[_B8_AUTHORIZES]
+    assert "records rather than refuses" in who, (
+        "the cell lost the wording the refusal half genuinely still carries on this "
+        "box — `enforce` is false, so nothing refuses")
+    assert "enforce" in who and "`false`" in who, (
+        "the cell no longer names the flag that disarms the destination axis")
+    assert "#3846" in who, (
+        "the cell does not say the seam was split, so its single verdict still "
+        "reads as covering the whole row")
+    assert "armed" in who and ("guard" in who or "swap" in who), (
+        "the cell still flattens the seam: the destination-keyed credential swap "
+        f"inside `guard` is armed whatever `enforce` says: {who[:200]}")
+    assert "credential_store.py::substitute_headers" in who and "placeholder" in who, (
+        "the armed half is named without the function and the mechanism, so a "
+        "reader cannot go and read the decider")
+    assert "outbound_content.py:526" not in cells[-1], (
+        "B8's controls column cites `redact` — the findings-excerpt text redactor — "
+        "as this boundary's outbound-content control again")
