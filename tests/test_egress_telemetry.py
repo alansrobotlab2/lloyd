@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import re
 import sqlite3
 
 import pytest
@@ -79,7 +80,7 @@ def rows(db) -> list[sqlite3.Row]:
     try:
         return list(conn.execute(
             "SELECT tool, destination, host, decision, session_id, worker_source,"
-            " task_id, scope, reason, at, credentials FROM egress_events"
+            " task_id, scope, reason, at, credentials, via FROM egress_events"
             " ORDER BY id"))
     except sqlite3.OperationalError:
         return []
@@ -609,3 +610,126 @@ def test_the_substitution_state_survives_the_aggregators_state_route(db, monkeyp
     # without parentheses — what matters is that the route runs THIS function and not a
     # hand-assembled dict that would have to be updated by hand whenever a flag is added.
     assert "egress.status" in route[0], route[0]
+
+
+# ── #4044 clause 1: the second observer's rows are distinguishable ────────────
+#
+# `egress_events` records what the fleet contacted. Until #4044 every row came from a
+# call through one of the four guarded tools, so the table needed no way to say who
+# observed it — and the moment a Bash child's destinations start arriving, a blended
+# table would let an arm that cannot see Node's `fetch` be quoted as if it were the arm
+# that never misses. So `via` has to exist, has to survive the live store's migration,
+# and has to stay `tool` for the four tools whose figures already have readers.
+
+def test_the_four_guarded_tools_write_their_rows_under_the_tool_via(socket, db,
+                                                                    monkeypatch):
+    """All four guarded tools, one node, every row `via='tool'`.
+
+    The four are driven through their own entry points rather than through `guard`
+    directly, because the clause is about the tools: an argument default in `guard`
+    would satisfy a call-site test while a tool that grew its own `_record` call would
+    not. The browser call runs under enforcement so it is refused before Chromium, which
+    is how the existing node keeps a real launcher out of the suite; a refusal is still a
+    row the tool wrote, and its `via` is what is under test here, not its decision.
+    """
+    monkeypatch.setattr(egress, "config",
+                        lambda: {"telemetry": True, "enforce": True, "allow": [],
+                                 "retention_days": 90})
+    monkeypatch.setattr(egress, "_effect_scope", lambda: "item:telemetry:4044")
+    monkeypatch.setenv("LLOYD_BROWSER_BLOCK_PRIVATE", "0")
+    asyncio.run(browser_module._browser_navigate("https://watch.example.org/video"))
+
+    monkeypatch.setattr(egress, "config",
+                        lambda: {"telemetry": True, "enforce": False, "allow": [],
+                                 "retention_days": 90})
+    http_tools._http_fetch("https://fetch.example.org/x", "markdown")
+    http_tools._http_request("POST", "http://api.internal-lab.test:8080/ingest",
+                             body='{"k":1}')
+
+    class FakeDDGS:
+        def text(self, query, max_results=5):
+            return iter([{"title": "t", "href": "https://found.example/x",
+                          "body": "b"}])
+
+    import ddgs
+    monkeypatch.setattr(ddgs, "DDGS", FakeDDGS)
+    http_tools._http_search("anything", 3)
+
+    found = rows(db)
+    assert [r["tool"] for r in found] == [
+        "browser_navigate", "http_fetch", "http_request", "http_search"], found
+    assert all(r["via"] == egress.VIA_TOOL for r in found), \
+        [(r["tool"], r["via"]) for r in found]
+    assert egress.VIA_TOOL == "tool", (
+        "'tool' is the value the migration back-fills every pre-#4044 row with; renaming "
+        "the constant would rewrite the meaning of 4,879 existing rows")
+
+
+def test_a_store_that_predates_the_via_column_is_migrated_and_its_rows_stay_tool_rows(
+        tmp_path, monkeypatch):
+    """The live store's exact shape as at 2026-11-11: `credentials` present, `via` absent.
+
+    This is the clause that cannot be satisfied by editing the CREATE string — the store
+    the arm lands into already has rows and `CREATE TABLE IF NOT EXISTS` will not touch
+    it. Getting this wrong is invisible in the worst way: `_record` fails open, the tools
+    keep working, and the destination table simply stops growing, which reads as a quiet
+    network rather than a broken writer.
+
+    Two things are asserted, and they are different claims. The new row arriving proves
+    the ALTER ran before the INSERT. The OLD row reading back as `via='tool'` proves the
+    back-fill is correct without an UPDATE pass, because every pre-#4044 row was written
+    by a guarded tool — so the column default is the history, not a guess about it.
+    """
+    db = tmp_path / "legacy.db"
+    monkeypatch.setenv("LLOYD_EGRESS_DB", str(db))
+    monkeypatch.setattr(egress, "config",
+                        lambda: {"telemetry": True, "enforce": False, "allow": [],
+                                 "retention_days": 90})
+    monkeypatch.setattr(egress, "_init_done", set())
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE egress_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL,
+          tool TEXT NOT NULL, destination TEXT NOT NULL, host TEXT NOT NULL,
+          decision TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '',
+          session_id TEXT NOT NULL DEFAULT '', worker_source TEXT NOT NULL DEFAULT '',
+          task_id TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+          credentials TEXT NOT NULL DEFAULT '');
+        INSERT INTO egress_events (at, tool, destination, host, decision)
+          VALUES ('2026-10-04T00:00:00+00:00','http_fetch','https://old.example','old.example','allow');
+    """)
+    conn.commit()
+    conn.close()
+
+    egress.guard("http_fetch", "https://migrate.example/x")
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        live = list(conn.execute(
+            "SELECT via, credentials, destination FROM egress_events ORDER BY id"))
+    finally:
+        conn.close()
+    assert len(live) == 2, "the new row was lost — the fail-open branch swallowed it"
+    assert [r["via"] for r in live] == ["tool", "tool"], \
+        [(r["via"], r["destination"]) for r in live]
+    assert live[0]["credentials"] == "", "the pre-existing row must not be rewritten"
+
+
+def test_the_via_column_is_registered_in_both_the_schema_and_the_migration():
+    """The two places a column can exist, both checked by name.
+
+    A column added to `_SCHEMA` alone breaks every existing store; one added to
+    `_MIGRATIONS` alone is absent from a fresh database — and a fresh database is what CI
+    and every new box get, so that half fails on the way IN rather than the way out. The
+    default is asserted too, in both spellings: `'tool'` is what makes the back-fill
+    correct, so a `via TEXT` with no default would leave the existing rows NULL and make
+    the tool figures silently exclude them.
+    """
+    assert "via" in {name for name, _ in egress._MIGRATIONS}, egress._MIGRATIONS
+    schema_default = re.search(r"via\s+TEXT NOT NULL DEFAULT '([a-z_]+)'",
+                               egress._SCHEMA)
+    assert schema_default and schema_default.group(1) == egress.VIA_TOOL, \
+        egress._SCHEMA
+    alter = dict(egress._MIGRATIONS)["via"]
+    assert "DEFAULT 'tool'" in alter, alter

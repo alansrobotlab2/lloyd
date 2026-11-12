@@ -1235,3 +1235,189 @@ def test_the_shipped_posture_stays_unarmed_and_this_fix_does_not_arm_it():
     assert policy_cfg.get("enforce") is False, policy_cfg
     assert egress.enforce_on() is False, "the floor would run too, so this test's "\
         "claim that the lane refusal is the live answer would be false"
+
+
+# ── the per-via split (#4044): every figure carries its own arm ───────────────
+#
+# The report is what a human arms `harness.egress_policy.enforce` from, and until #4044
+# it could only ever have been built from the four guarded tools. `agent_mcp/
+# _bash_egress_proxy.py` adds a second observer whose blind spot is different by
+# construction — an env-var proxy is advisory, so Node's native `fetch`, Go binaries and
+# a raw TCP or SSH connect never appear in it. Blended, a quiet Bash count would read as
+# "the children contacted nothing" and would be quoted at an arming decision as though it
+# were the same measurement as the tool lane's. So each figure below states which arm it
+# came from, and the tool figures stay tool-only: the numbers `would_deny`, `total` and
+# `per_destination` already publish keep the meaning they had before the second observer
+# existed, which is what makes a report from before and after #4044 comparable.
+
+BASH_ONLY_HOST = "telemetry-beacon.example"
+
+
+def _bash_row(host: str = BASH_ONLY_HOST, **over) -> None:
+    """One row as the Bash recorder writes it: the arm's `via`, decision `allow`.
+
+    Written through `_record` rather than through the proxy so this section tests the
+    report's arithmetic alone; the recorder's own behaviour — including that it has no
+    denial in it — is pinned in `tests/test_bash_egress_proxy.py`.
+    """
+    egress._record(tool="bash", destination=f"https://{host}", host=host,
+                   decision=egress.DECISION_ALLOW, scope="", session_id="",
+                   worker_source="", task_id="", reason="", at=NOW,
+                   via=egress.VIA_BASH_PROXY, **over)
+
+
+def test_the_per_via_split_publishes_two_arms_while_the_tool_figures_stay_tool_only(
+        db, monkeypatch):
+    """One off-list and one allow-listed tool row, plus one Bash row for an off-list
+    host: the headline figures are 2 rows / 1 would-deny, and the split shows 2 and 1.
+
+    The Bash row is for a host the tool lane never visited, so every tool figure has to
+    be unchanged by its presence. That is the clause: `total`, `by_decision`,
+    `per_destination` and `per_scope` keep counting only `via='tool'`, and the Bash arm's
+    number exists solely in `per_via` — so an `enforce` decision can be taken on a number
+    whose denominator is the arm that could actually have refused.
+    """
+    policy_on(monkeypatch, enforce=False,
+              allow=[{"host": LISTED_HOST, "reason": "docs, reviewed"}])
+    monkeypatch.setattr(egress, "_effect_scope", lambda: "item:domain-research:99")
+
+    egress.guard("http_fetch", UNKNOWN_URL)      # off-list, unattended, unenforced
+    egress.guard("http_fetch", LISTED_URL)       # covered by the entry above
+    _bash_row()
+    report = egress.network_report()
+
+    assert report["total"] == 2, report["total"]
+    assert report["by_decision"] == {egress.DECISION_ALLOW: 2,
+                                     egress.DECISION_DENY: 0,
+                                     egress.DECISION_GRANT: 0}, report["by_decision"]
+    assert report["would_deny"] == 1, (
+        "the Bash row is for an off-list host too — counting it would double the number "
+        "an enforce decision is armed from, on the strength of an arm that refuses "
+        "nothing")
+    assert BASH_ONLY_HOST not in {r["host"] for r in report["per_destination"]}, \
+        report["per_destination"]
+    assert [r["count"] for r in report["per_destination"]] == [1, 1], \
+        report["per_destination"]
+    # The Bash row was written with an empty scope, so a leak into `per_scope` would
+    # show as a second row named `(interactive/unscoped)` — the shape that would make a
+    # child's destination look like an interactive operator's tool call.
+    assert [r["scope"] for r in report["per_scope"]] == [WORKER_SCOPE], \
+        report["per_scope"]
+
+    by_via = {v["via"]: v for v in report["per_via"]}
+    assert by_via[egress.VIA_TOOL]["count"] == 2, report["per_via"]
+    assert by_via[egress.VIA_BASH_PROXY]["count"] == 1, report["per_via"]
+    assert by_via[egress.VIA_BASH_PROXY]["distinct_hosts"] == 1, report["per_via"]
+    assert by_via[egress.VIA_BASH_PROXY]["denies"] == 0, (
+        "the arm's own denial count is not zero, which is the shape that would let a "
+        "Bash destination read as a refusal")
+    assert all("would_deny" not in v for v in report["per_via"]), (
+        "`would_deny` is a coverage figure over the tool lane and lives at the top "
+        "level; per-via it invites a reader to treat one arm's blind spot as a verdict")
+
+
+def test_a_bash_row_cannot_inflate_what_enforcing_would_have_refused(db, monkeypatch):
+    """With enforcement armed, the same off-list host reached both ways contributes ONE
+    `would_deny`, not two.
+
+    `would_deny` is the figure named beside the arming decision (#3549 put it there for
+    exactly that reason). Under enforcement the tool lane's row is a real `deny`; the
+    Bash arm's row for the same host stays `allow` whatever the posture says, and neither
+    may leak into the other's count — a denominator that doubled because a second
+    observer watched the same destination would make the fleet look twice as exposed as
+    it is.
+    """
+    policy_on(monkeypatch, enforce=True,
+              allow=[{"host": LISTED_HOST, "reason": "docs, reviewed"}])
+    monkeypatch.setattr(egress, "_effect_scope", lambda: "item:domain-research:99")
+
+    egress.guard("http_fetch", UNKNOWN_URL)      # refused, under enforcement
+    _bash_row(host=UNKNOWN_HOST)                 # the child reaches the same host
+    report = egress.network_report()
+
+    assert report["would_deny"] == 1, report
+    assert report["total"] == 1, report["total"]
+    decisions = {r["decision"] for r in table_rows(db)}
+    assert egress.DECISION_DENY in decisions, "the tool row should be a real denial"
+    assert report["by_decision"][egress.DECISION_DENY] == 1, report["by_decision"]
+    by_via = {v["via"]: v for v in report["per_via"]}
+    assert by_via[egress.VIA_BASH_PROXY]["count"] == 1, report["per_via"]
+    assert by_via[egress.VIA_BASH_PROXY]["denies"] == 0, (
+        "a Bash row denied under enforcement — the arm has no refusal in it")
+    assert by_via[egress.VIA_TOOL]["denies"] == 1, (
+        "the tool lane's own denial is missing, so the split would understate what "
+        "arming actually refuses")
+
+
+def test_the_per_via_split_survives_the_report_window(db, monkeypatch):
+    """The split is windowed like every other figure, so a stale arm's rows cannot be
+    quoted as the current denominator.
+
+    Same trap #3247 closed for `per_source`: a row's `at` is a UTC ISO string, so the
+    filter has to compare like with like — and a window that silently ignored `via` would
+    mix months.
+    """
+    policy_on(monkeypatch, enforce=False)
+    old = NOW - dt.timedelta(days=40)
+    egress._record(tool="bash", destination=f"https://{BASH_ONLY_HOST}",
+                   host=BASH_ONLY_HOST, decision=egress.DECISION_ALLOW, scope="",
+                   session_id="", worker_source="", task_id="", reason="", at=old,
+                   via=egress.VIA_BASH_PROXY)
+    egress.guard("http_fetch", LISTED_URL)
+
+    wide = {v["via"]: v["count"] for v in egress.network_report(days=90)["per_via"]}
+    week = {v["via"]: v["count"] for v in egress.network_report(days=7)["per_via"]}
+
+    assert wide == {egress.VIA_BASH_PROXY: 1, egress.VIA_TOOL: 1}, wide
+    assert week == {egress.VIA_TOOL: 1}, (
+        f"a 40-day-old Bash row is inside a 7-day window: {week}")
+
+
+def test_status_publishes_exactly_the_three_flags_it_shipped_with(db, monkeypatch):
+    """`status()` grows no key for the new arm.
+
+    That payload is what the injection canary stamps its A/B arm from and what the
+    dashboard reads as the guard's posture; the recorder's state travels with the
+    inventory instead, in `network_report()`'s `policy` block beside the `per_via` split
+    it is the denominator of. This node is what stops a later author — including a future
+    round of this own — from "helpfully" publishing `bash_record` in both places, which
+    would read as a fourth thing the guard does.
+    """
+    policy_on(monkeypatch, enforce=False)
+
+    assert sorted(egress.status()) == ["credential_substitution", "enforce",
+                                       "telemetry"], egress.status()
+    # And the arm's state is published where the inventory is, so the split and the
+    # flag that produced it are read in one place.
+    report = egress.network_report()
+    assert "bash_record" not in egress.status()
+    assert report["policy"]["bash_record"] is False, report["policy"]
+
+
+def test_the_bash_record_flag_ships_off_and_parses_like_the_two_flags_beside_it(
+        db, monkeypatch):
+    """The shipped posture: no Bash child is pointed at a recorder, and a string value
+    cannot come up as armed.
+
+    The parse half is not decoration — `enforce` had to be fixed for exactly this
+    (#1965): a quoted `"off"` coerced with `bool()` came up as enforcement. The arm is a
+    behaviour change on every Bash child in the fleet, so it inherits the same rule
+    rather than a fresh one, and the shipped file is asserted rather than the default in
+    case a later commit flips it without reading this node.
+    """
+    from app.config import CONFIG
+
+    policy_cfg = (CONFIG.get("harness") or {}).get("egress_policy") or {}
+    assert policy_cfg.get("bash_record") is False, policy_cfg
+    assert egress.bash_record_on() is False, (
+        "the shipped posture proxies every Bash child's traffic")
+
+    for text in ("off", "false", "no", "0"):
+        monkeypatch.setattr(egress, "config", lambda t=text: {
+            "telemetry": True, "enforce": False, "bash_record": t, "allow": [],
+            "retention_days": 90})
+        assert egress.bash_record_on() is False, f"{text!r} came up as armed"
+    monkeypatch.setattr(egress, "config", lambda: {
+        "telemetry": True, "enforce": False, "bash_record": True, "allow": [],
+        "retention_days": 90})
+    assert egress.bash_record_on() is True

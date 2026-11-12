@@ -122,6 +122,14 @@ DECISION_GRANT = "grant-required"
 #: the day one of the two spellings is edited.
 _LOOPBACK_ALLOWANCE = "loopback allowance"
 
+#: The one spelling of "this figure counts the four guarded tools, in this window".
+#: Every headline number in `network_report` and `_flip_counts` uses it, and it is a
+#: constant for the reason `_LOOPBACK_ALLOWANCE` is: a predicate spelled six times is
+#: a predicate one of which will be edited alone, and the figure that then quietly
+#: includes a second arm is the one an `enforce` decision gets taken on. Takes two
+#: bind parameters in this order: the window's `since`, then `VIA_TOOL`.
+_SINCE_TOOL = "at>=? AND via=?"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS egress_events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,7 +146,16 @@ CREATE TABLE IF NOT EXISTS egress_events (
   -- #3846: which credential, if any, the gate swapped into this call, and whether
   -- it did. Empty means the call carried no vaulted placeholder. The value is never
   -- stored — only the name — so this table stays safe to read from a dashboard.
-  credentials   TEXT NOT NULL DEFAULT ''
+  credentials   TEXT NOT NULL DEFAULT '',
+  -- #4044: which instrument observed the row. 'tool' is a call through one of the
+  -- four guarded tools, where the destination was in the tool's own arguments;
+  -- 'bash_proxy' is a destination a Bash child reached out-of-trace, observed by the
+  -- recording proxy. The split exists because the two arms have different coverage
+  -- (an env-var proxy is advisory — see VIA_BASH_PROXY's note) and an arming
+  -- decision read off a blended count would silently carry one arm's blind spot into
+  -- the other arm's figure. Every pre-#4044 row is a tool row, so the default is the
+  -- answer for the whole existing table.
+  via           TEXT NOT NULL DEFAULT 'tool'
 );
 CREATE INDEX IF NOT EXISTS egress_events_at_idx ON egress_events(at);
 CREATE INDEX IF NOT EXISTS egress_events_host_idx ON egress_events(host, at);
@@ -153,11 +170,41 @@ CREATE INDEX IF NOT EXISTS egress_events_scope_idx ON egress_events(scope, at);
 _MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("credentials", "ALTER TABLE egress_events ADD COLUMN credentials"
                     " TEXT NOT NULL DEFAULT ''"),
+    # #4044: the live store has thousands of rows and no `via`, and every one of them
+    # was written by a guarded tool call. The default is therefore both the back-fill
+    # and the answer for the existing population — which is why the figure in
+    # `network_report` can keep saying "the four tools" after the ALTER without a
+    # separate UPDATE pass.
+    ("via", "ALTER TABLE egress_events ADD COLUMN via TEXT NOT NULL DEFAULT 'tool'"),
 )
+
+#: The `via` value for a row observed on a call through one of `EGRESS_TOOLS`: the
+#: destination was in the tool's own arguments and `guard` saw it.
+VIA_TOOL = "tool"
+
+#: The `via` value for a destination observed on the Bash child's path (#4044). This
+#: arm is NOT a boundary and must never be described as one: it works by putting a
+#: loopback proxy in the child's environment, and an env-var proxy is advisory — curl,
+#: wget, requests/httpx, pip, yt-dlp and git-over-https honour it, while Node's native
+#: fetch, Go binaries and a raw TCP or SSH connect do not. So a quiet table means "no
+#: client that reads these variables reached anything", not "the child contacted
+#: nothing". And the arm refuses nothing by construction: its one decision value is
+#: `DECISION_ALLOW`, whatever `enforce` says, because the same injection that makes a
+#: destination visible also makes the recorder a failure point on every unattended
+#: command that runs curl, and a recording arm that can break a run is an outage
+#: nobody asked for.
+VIA_BASH_PROXY = "bash_proxy"
+
 
 _DEFAULTS = {
     "telemetry": True,
     "enforce": False,
+    # #4044: the Bash recording arm. Ships OFF, and stays off until a week of real
+    # traffic has been read — the injection puts a process this box owns onto the
+    # path of every unattended `curl`, and some clients error out on a proxy variable
+    # they cannot reach. The port it binds is never a config key: see
+    # `_bash_egress_proxy.start_lease`, which binds an ephemeral loopback port in code.
+    "bash_record": False,
     "allow": [],
     "retention_days": 90,
 }
@@ -251,6 +298,29 @@ def enforce_on() -> bool:
     post-landing decisions). Telemetry runs with it off. The config value is
     parsed by `_config_flag`, never `bool()`-coerced."""
     return _env_flag("LLOYD_EGRESS_ENFORCE", _config_flag("enforce"))
+
+
+def bash_record_on() -> bool:
+    """The #4044 Bash recording arm: **default off**, and read the same parsed way
+    as the other two flags.
+
+    Two things this flag does NOT do, stated because both are the mistake a later
+    reader will be tempted by.
+
+    It does not enforce. `enforce_on()` is the only switch that refuses anything, and
+    a Bash-via row is written `allow` whatever that one says — see
+    `VIA_BASH_PROXY`. Flipping `enforce` does not arm this, and flipping this does not
+    arm that; the arm that records Bash destinations and the decision to act on them
+    are separate calls with separate owners (#2702/#2787's ruling, not this one).
+
+    It does not publish itself. `status()` stays three flags, because that payload is
+    what the injection canary stamps its A/B arm from and a fourth key there would be
+    read as a fourth thing the *guard* does. The arm's own state travels with the
+    inventory instead, in `network_report()`'s `policy` block, beside the `per_via`
+    split it is the denominator of.
+    """
+    return _env_flag("LLOYD_EGRESS_BASH_RECORD", _config_flag("bash_record"))
+
 
 
 # ── destinations ────────────────────────────────────────────────────────────
@@ -967,24 +1037,62 @@ def _session_id() -> str:
 
 def _record(*, tool: str, destination: str, host: str, decision: str,
             scope: str, session_id: str, worker_source: str, task_id: str,
-            reason: str, at: datetime, credentials: str = "") -> None:
-    """Write the row, or lose it quietly. See the module docstring on fail-open."""
+            reason: str, at: datetime, credentials: str = "",
+            via: str = VIA_TOOL) -> None:
+    """Write the row, or lose it quietly. See the module docstring on fail-open.
+
+    `via` defaults to `VIA_TOOL`, which is what every call from `guard` gets: the four
+    tool lanes are the population this table had before #4044, and the default is what
+    keeps their rows byte-identical to the ones already in the live store.
+    """
     try:
         conn = _connect()
         try:
             _ensure(conn)
             conn.execute(
                 f"INSERT INTO {TABLE} (at, tool, destination, host, decision,"
-                " scope, session_id, worker_source, task_id, reason, credentials)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " scope, session_id, worker_source, task_id, reason, credentials,"
+                " via)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (_iso(at), tool, destination, host, decision, scope,
                  session_id or "", worker_source or "", task_id or "",
-                 (reason or "")[:500], (credentials or "")[:200]))
+                 (reason or "")[:500], (credentials or "")[:200],
+                 via or VIA_TOOL))
             _maybe_prune(conn, now=time.monotonic())
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 — telemetry never bricks a fetch
         logger.warning("egress: could not record %s → %s (%s)", tool, destination, exc)
+
+
+def record_bash_destination(*, destination: str, host: str, scope: str,
+                            session_id: str = "", worker_source: str = "",
+                            task_id: str = "", at: "datetime | None" = None,
+                            reason: str = "bash proxy record") -> None:
+    """The sanctioned writer for the #4044 Bash arm: one destination, one row, `via`
+    naming the arm, and no decision other than `allow`.
+
+    This is the ONLY route by which a Bash destination becomes a row, and it exists
+    rather than letting the recorder open its own `INSERT` for the same three reasons
+    the four-tool lane goes through `guard`: the `host`/`destination` pair is written
+    by the module that owns their vocabulary, the migration-before-insert order in
+    `_ensure` is not bypassed, and there is exactly one place that can put a `deny` on
+    a Bash-via row — which is nowhere, because this function has no branch that
+    computes one. It takes no `enforce` reading at all, so a process running with
+    `LLOYD_EGRESS_ENFORCE=1` writes the same value here as one without it.
+
+    `scope` is the **spawning turn's** grant scope, resolved by the caller at the
+    spawn site through `scope_context()` — the same string `_child_grant_scope` keys a
+    credential grant to — and carried down the proxy's own book, not looked up when
+    the request arrives. A recorder thread has no turn context to read, so an arm that
+    resolved scope at request time would attribute every Bash destination on the box
+    to whatever turn happened to be in flight when the accept ran.
+    """
+    _record(tool="bash", destination=destination, host=host,
+            decision=DECISION_ALLOW, scope=scope, session_id=session_id,
+            worker_source=worker_source, task_id=task_id, reason=reason,
+            at=at or _now(), via=VIA_BASH_PROXY)
+
 
 
 async def aguard(tool: str, url: str = "", *, host: str = "",
@@ -1071,10 +1179,15 @@ def _flip_counts(conn: sqlite3.Connection, *, since: str, at: datetime,
     totals: dict[str, int] = {}
     would: dict[str, int] = {}
     floors: dict[str, int] = {}
+    # `_SINCE_TOOL`, for the same reason `network_report` uses it: this is the figure
+    # named beside `would_deny` in the arming report, and a Bash-via row observed by an
+    # arm that refuses nothing has no business in a count of what refusing would cost.
+    # It belongs to `per_via` instead.
     for r in conn.execute(
             f"SELECT host, scope, decision, worker_source, reason, COUNT(*) AS n"  # noqa: S608 — TABLE is a module constant
-            f" FROM {TABLE} WHERE at>=?"
-            " GROUP BY host, scope, decision, worker_source, reason", (since,)):
+            f" FROM {TABLE} WHERE {_SINCE_TOOL}"
+            " GROUP BY host, scope, decision, worker_source, reason",
+            (since, VIA_TOOL)):
         host = str(r["host"])
         source = str(r["worker_source"] or "")
         n = int(r["n"])
@@ -1124,6 +1237,16 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
     as zeros in the no-database report for the same reason `total` is: a key that exists
     only when there are rows reads as "nothing would be refused" rather than "nothing was
     recorded", which is the one misreading that could arm enforcement on a false clean.
+
+    #4044: every figure here except `per_via` counts `via='tool'` rows only — the four
+    guarded tools, which is the population the figures meant before the Bash arm
+    existed and what an arming reader is choosing a policy for. `per_via` is the
+    separate key that carries the other arms, so a Bash destination is never mistaken
+    for a tool call and never silently joins a figure whose coverage it does not
+    share. The reason it is a key of its own rather than a filter the caller can pass
+    is the failure it exists to prevent: an operator deciding whether to arm `enforce`
+    reads the headline numbers, and a denominator that silently grew a second arm is
+    the number they then arm on.
     """
     since = _iso(_now() - timedelta(days=float(days)))
     path = db_path()
@@ -1131,7 +1254,7 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
         "window_days": float(days), "since": since, "total": 0,
         "distinct_hosts": 0, "by_decision": {DECISION_ALLOW: 0, DECISION_DENY: 0,
                                              DECISION_GRANT: 0},
-        "per_destination": [], "per_scope": [],
+        "per_destination": [], "per_scope": [], "per_via": [],
         "would_deny": 0, "floor_refused": 0, "per_source": [],
         # `database_present` is the zero denominator named beside the zero
         # numerator: `total: 0` with a database means no call was made in the
@@ -1140,6 +1263,7 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
         # idle box, which is the reading that lets it stay broken.
         "database": str(path), "database_present": path.exists(),
         "policy": {"telemetry": telemetry_on(), "enforce": enforce_on(),
+                   "bash_record": bash_record_on(),
                    "allow_entries": len(allow_entries()),
                    "permanent_allow_entries": count_permanent_entries()},
     }
@@ -1149,14 +1273,15 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
     try:
         _ensure(conn)
         total = int(conn.execute(
-            f"SELECT COUNT(*) FROM {TABLE} WHERE at>=?", (since,)).fetchone()[0])
+            f"SELECT COUNT(*) FROM {TABLE} WHERE {_SINCE_TOOL}",
+            (since, VIA_TOOL)).fetchone()[0])
         hosts = int(conn.execute(
-            f"SELECT COUNT(DISTINCT host) FROM {TABLE} WHERE at>=?",
-            (since,)).fetchone()[0])
+            f"SELECT COUNT(DISTINCT host) FROM {TABLE} WHERE {_SINCE_TOOL}",
+            (since, VIA_TOOL)).fetchone()[0])
         by_decision = {DECISION_ALLOW: 0, DECISION_DENY: 0, DECISION_GRANT: 0}
         for row in conn.execute(
-                f"SELECT decision, COUNT(*) AS n FROM {TABLE} WHERE at>=?"
-                " GROUP BY decision", (since,)):
+                f"SELECT decision, COUNT(*) AS n FROM {TABLE} WHERE {_SINCE_TOOL}"
+                " GROUP BY decision", (since, VIA_TOOL)):
             if row["decision"] in by_decision:
                 by_decision[row["decision"]] = int(row["n"])
         per_destination = [
@@ -1169,9 +1294,9 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
                 f" SUM(decision='{DECISION_DENY}') AS denied,"
                 f" SUM(decision='{DECISION_GRANT}') AS grant_required,"
                 " COUNT(DISTINCT CASE WHEN scope<>'' THEN scope END) AS scopes,"
-                f" MAX(at) AS last_at FROM {TABLE} WHERE at>=?"
+                f" MAX(at) AS last_at FROM {TABLE} WHERE {_SINCE_TOOL}"
                 " GROUP BY destination, host ORDER BY n DESC LIMIT ?",
-                (since, limit))]
+                (since, VIA_TOOL, limit))]
         per_scope = [
             {"scope": r["scope"] or "(interactive/unscoped)",
              "total": int(r["n"]), "denied": int(r["denied"]),
@@ -1181,16 +1306,56 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
                 f"SELECT scope, COUNT(*) AS n,"
                 f" SUM(decision='{DECISION_DENY}') AS denied,"
                 f" SUM(decision='{DECISION_GRANT}') AS grant_required,"
-                f" COUNT(DISTINCT host) AS hosts FROM {TABLE} WHERE at>=?"
+                f" COUNT(DISTINCT host) AS hosts FROM {TABLE} WHERE {_SINCE_TOOL}"
                 " GROUP BY scope ORDER BY n DESC LIMIT ?",
-                (since, limit))]
+                (since, VIA_TOOL, limit))]
+        # The one query over the whole table, and the only place a Bash-via row is
+        # counted at all. `distinct_hosts` per via is the arm's own denominator: the
+        # figure that says what coverage the arm has, rather than the figure an
+        # arming decision is taken from.
+        # Per-arm attribution, one grouped query, capped per arm the same way the
+        # destination table is. A child can be handed a granted credential by
+        # `_child_grant_scope`, so the question "did a scope that held real secrets
+        # reach a host nobody listed" is answered from this key and no other.
+        scopes_by_via: dict[str, list[dict]] = {}
+        for r in conn.execute(
+                f"SELECT via, scope, COUNT(*) AS n FROM {TABLE}"  # noqa: S608
+                " WHERE at>=? GROUP BY via, scope ORDER BY n DESC", (since,)):
+            bucket = scopes_by_via.setdefault(str(r["via"] or ""), [])
+            if len(bucket) < int(limit):
+                bucket.append({"scope": str(r["scope"] or ""), "count": int(r["n"])})
+        per_via = [
+            {"via": str(r["via"] or ""), "count": int(r["n"]),
+             "distinct_hosts": int(r["hosts"]), "denies": int(r["denies"] or 0),
+             "last_at": r["last_at"],
+             # The arm's own attribution, per `via` rather than fleet-wide. `per_scope`
+             # below is deliberately tool-only, so without this key there would be no
+             # way to answer "which run's child reached this" from the sanctioned
+             # accessor at all — the scope a Bash row carries would exist only under a
+             # raw SELECT, which is precisely the state that makes an inventory
+             # unauditable by the thing that publishes it.
+             "scopes": scopes_by_via.get(str(r["via"] or ""), [])}
+            for r in conn.execute(
+                # `denies` travels with the arm's own count because it is the arm's own
+                # posture: the Bash recorder writes `allow` whatever `enforce` says (see
+                # `VIA_BASH_PROXY`), so a row with a denial under that `via` is not a
+                # finding about traffic, it is a bug in the recorder — and a reader of
+                # this key should be able to rule that out without opening the store.
+                f"SELECT via, COUNT(*) AS n, COUNT(DISTINCT host) AS hosts,"  # noqa: S608
+                " MAX(at) AS last_at,"
+                " SUM(CASE WHEN decision=? THEN 1 ELSE 0 END) AS denies"
+                f" FROM {TABLE} WHERE at>=?"
+                " GROUP BY via ORDER BY n DESC LIMIT ?",
+                (DECISION_DENY, since, max(2, int(limit))))]
         return {
             "window_days": float(days), "since": since, "total": total,
             "distinct_hosts": hosts, "by_decision": by_decision,
             "per_destination": per_destination, "per_scope": per_scope,
+            "per_via": per_via,
             **_flip_counts(conn, since=since, at=_now(), limit=limit),
             "database": str(path), "database_present": True,
             "policy": {"telemetry": telemetry_on(), "enforce": enforce_on(),
+                       "bash_record": bash_record_on(),
                        "allow_entries": len(allow_entries()),
                        "permanent_allow_entries": count_permanent_entries()},
         }
@@ -1199,6 +1364,7 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
         return {**empty, "error": f"{type(exc).__name__}: {exc}"}
     finally:
         conn.close()
+
 
 
 def decision_count_for_host(host: str, decision: str = DECISION_DENY, *,

@@ -1071,6 +1071,14 @@ def _network() -> dict[str, Any]:
     destination table without the flag's state is a list of outcomes with no
     cause attached to any of them. Blocking on sqlite, so it is gathered through
     `_to_thread` like every other section that opens a file.
+
+    `per_via` is the reason the headline figures cannot be read as one measurement
+    (#4044): `total`, `per_destination`, `per_scope` and `would_deny` count the four
+    guarded tools, and the Bash recorder's rows arrive under `via='bash_proxy'` with a
+    coverage blind spot of their own — an env-var proxy is advisory, so Node's native
+    `fetch`, Go binaries and a raw TCP connect never appear in it. The arming decision
+    for `harness.egress_policy.enforce` is taken on the tool figures; the Bash arm's
+    count is the denominator of what recording Bash has actually caught.
     """
     from agent_mcp import egress
 

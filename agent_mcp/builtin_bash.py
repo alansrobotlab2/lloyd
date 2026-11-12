@@ -86,9 +86,9 @@ from typing import Any
 
 from mcp.types import Tool
 
-from agent_mcp import (_bash_edit_diagnostics, _bash_schema_hint, _bash_tree_strays,
-                       _path_sandbox, _resource_ceiling, _rpc, _task_registry,
-                       _tool_sandbox)
+from agent_mcp import (_bash_edit_diagnostics, _bash_egress_proxy, _bash_schema_hint,
+                       _bash_tree_strays, _path_sandbox, _resource_ceiling, _rpc,
+                       _task_registry, _tool_sandbox)
 from agent_mcp._shared import get_bound_session, text_result
 # #3846: the child's environment is credential-filtered at every spawn site.
 # `app.harness` is imported from `agent_mcp` elsewhere too (`capabilities` at
@@ -639,7 +639,8 @@ def _child_grant_scope() -> str:
 
 
 def _vault_for_child(env: dict[str, str] | None) -> dict[str, str]:
-    """Replace every vaulted credential in a spawn env with a placeholder (#3846).
+    """The environment a Bash child is handed, with the two rules that must never be
+    per-site: #3846's credential placeholders and #4044's egress recorder.
 
     Called at all three spawn sites — sandboxed foreground, plain foreground, and
     background — because a guard that lives on one of two write surfaces is not a
@@ -655,8 +656,48 @@ def _vault_for_child(env: dict[str, str] | None) -> dict[str, str]:
     here: a static node counts every occurrence of that command in this file, and
     its zero is what pins the argv living in one module — the same reason
     `_merge_session_id`'s comment spells it out.)
+
+    The recorder rides here for the same reason the vault pass does, and it is applied
+    after it so a proxy variable can never be mistaken for a vaulted name. Both rules
+    are per-turn, and the recorder's own answer is `{}` whenever the flag is off (the
+    shipped default) or the session is a sandboxed bench or eval arm — in which case
+    what the child receives is byte-identical to what it received before this existed.
+    The name still says "vault" because #3846's structural node counts THIS name at
+    three call sites; renaming it would move that invariant without moving the check, and
+    the recorder's rule is applied INSIDE it rather than as a wrapper at the three
+    spawns for the same reason — `tests/test_bash_egress_proxy.py` re-runs that node's
+    count and then proves the body composes `_egress_proxy_for_child`, which is what
+    makes "all three spawn sites" one countable fact instead of three places a future
+    edit can get wrong.
     """
-    return credential_store.vaulted_env(env, scope=_child_grant_scope())
+    return _egress_proxy_for_child(
+        credential_store.vaulted_env(env, scope=_child_grant_scope()))
+
+
+def _egress_proxy_for_child(env: "dict[str, str] | None") -> dict[str, str]:
+    """Add the #4044 recording proxy's variables, or change nothing at all.
+
+    No key is added unless `_bash_egress_proxy.proxy_env_for_turn()` answered with
+    variables, and it answers `{}` whenever `harness.egress_policy.bash_record` is off
+    (the shipped default) or the turn is a sandboxed bench or eval arm. That shape —
+    return the argument when there is nothing to add — is the whole flag-off guarantee,
+    and it is asserted as a key-by-key comparison on a real child in
+    `tests/test_bash_egress_proxy.py` rather than as a claim about a config default. The
+    fleet's `curl` health checks are the reason #2269's Bash narrowing got reverted, so
+    "off means the child's environment is yesterday's" has to be a measured property of
+    the spawn, not a reading of a YAML file.
+    """
+    # Materialise first, add second. A `None` arrives meaning "inherit `os.environ`" and
+    # must never leave as `None` — #3768's trap, which `_vault_for_child`'s docstring
+    # carries (`credential_store.vaulted_env`, the other builder on this path, has the same
+    # `dict | None` signature for the same reason). The flag-off branch therefore returns a
+    # copy rather than its argument: one dict, and a signature that cannot hand `None` to
+    # `create_subprocess_exec` from either branch.
+    base = dict(os.environ) if env is None else dict(env)
+    extra = _bash_egress_proxy.proxy_env_for_turn()
+    if extra:
+        base.update(extra)
+    return base
 
 
 async def _spawn_background(command: str, description: str, cwd: str | None = None,

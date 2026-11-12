@@ -1087,6 +1087,14 @@ def test_the_network_section_reports_the_policy_that_produced_the_rows(egress_db
 
     `permanent_allow_entries` is the count the item's acceptance asks to be
     reported rather than hidden, so it is a field and not an absence of ones.
+
+    `bash_record` is in the dict because #4044 made it part of the cause: an
+    `allow` row recorded while the Bash arm was off and one recorded while it was on
+    describe different inventories, and the whole point of the block is that the flag
+    state travels with the figures. Here the config names no `bash_record` at all, so
+    the value is the shipped default `False` — which is what the assertion pins: the
+    arm that records a destination and the arm that acts on one are two flags, and
+    `enforce: True` in this same dict must not be read as having turned the recorder on.
     """
     from agent_mcp import egress
 
@@ -1100,7 +1108,7 @@ def test_the_network_section_reports_the_policy_that_produced_the_rows(egress_db
     policy = dash._network()["policy"]
 
     assert policy == {"telemetry": True, "enforce": True, "allow_entries": 2,
-                      "permanent_allow_entries": 1}
+                      "permanent_allow_entries": 1, "bash_record": False}
 
 
 def test_the_network_section_names_its_zero_denominator(egress_db):
