@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, autonomy]
 type: reference
 status: implemented
-date: 2026-10-12
+date: 2026-11-12
 ---
 
 # The autonomy jobs
@@ -1083,7 +1083,7 @@ beyond its own output", or #90's row contradicts its own Role cell.
 | ID | Freq | Writes? | Role |
 |----|------|---------|---|
 | #81 | daily | yes | Prune orphaned qmd embedding chunks, backfill pending embeddings |
-| #79 | daily | yes | Retention over the 24 stores it now bounds: delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
+| #79 | daily | yes | Retention over the 28 stores it now bounds (24 on 2026-10-27; re-derive with `scripts/groundskeeper/retention-sweep.py` run without `--apply`, which prints one report line per store — 28 lines measured 2026-11-12): delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
 | #90 | daily | own series only | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
@@ -1192,7 +1192,7 @@ the only monitor in the fleet with authority to act on what it finds.
 | ID | Freq | Watches | Role |
 |----|------|---------|---|
 | #60 | daily | the graph | Knowledge Health Report: god entities (>20 facts), thin (<2), orphans, stale facts, contamination, near-duplicates, provenance coverage |
-| #82 | daily | retrieval | 81-query retrieval eval (measured 2026-10-26; grew from n=20 at `98fa216b`) against production's recall defaults; records the trend |
+| #82 | daily | retrieval | 86-query retrieval eval (the yaml's 2026-11-12 count, `yaml.safe_load(open('eval/vault_recall_queries.yaml'))['queries']`; 81 measured 2026-10-26, grew from n=20 at `98fa216b`) against production's recall defaults; records the trend |
 | #70 | weekly | the skills library | `skill-lint`, advisory — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
 | #36 | daily | the vault | **Retired 2026-09-23 (#1012)** — the row and the id stay because the group tables pin each other; its task file is in `_archived/` and nothing dispatches it. Read the groundskeeper queue and report counts, health score, and whether the timer ran — the queue and its write ledger are deleted now too (retention-sweep store 10, `d24c7ecd` #1574), so there is nothing left to read |
 | #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; reports the poisoned and quarantined rows the queue sweep has already triaged, and pauses failing tasks |
@@ -1511,8 +1511,11 @@ landed in the directory on 2026-10-18 and 2026-10-19 (their own `created:` stamp
 are `2026-10-18T07:42:00Z` and `2026-10-19T01:40:00Z`) and entered these tables on
 2026-10-19 because the nightly skills-management Pre-Flight named the omission — the
 fourth time the directory ran ahead of the two tables, and the moment #2895's
-filing-time report was built to speak at. Both are `status: draft`, so neither is
-armed; the rows record what a filed task file names, which is how #98 and #100 are
+filing-time report was built to speak at. #102 is `status: draft` and has never run
+(`select count(*) from runs where task_id=102` over `~/lloyd-data/workers.db` was 0 on
+2026-11-12) while #103 has been armed and has run twice (2 rows, newest
+2026-11-06T16:25:57Z, same query and date); the rows record what a filed task file names,
+which is how #98 and #100 are
 already listed here. Their tiers split, and the split is the tier table's own
 question — may it write while nobody is watching — not the size of what it leaves:
 #102 publishes its own measurement table and trial rows under `eval/measurements/`
@@ -1536,10 +1539,10 @@ tier. #3012 is where that reading was taken and where both rows were written.
 | #101 | daily | gate-to-land lag daily record (`gate-to-land-lag-daily-record`, #2858): join the newest passing `gate` row to the `promoted` row of the same `round_id` and append the day's lag distribution | `~/.local/state/lloyd-automod/promotions.jsonl` *and every* `promotions-archive-YYYYMM.jsonl.gz` beside it — 26,798 of the 47,767 ledger rows are archived (measured 2026-10-15), so a reader taking only the live file described under 60 % of the corpus and reported the shorter lag — through `scripts/maintenance/gate_to_land_lag.py --record`, and `--record` is the only flag the skill permits (`--state-dir` moves both sides off the live state dir, `--json` deletes the report lines a later reader checks) | exactly one JSON row appended to `gate_to_land_lag.jsonl` inside `~/.local/state/lloyd-automod/`, dated by its own `generated_at` and holding `p50`/`p90`/`p99` in seconds over the round count in `n` — the file #100's publisher reads as its eighth instrument, `gate_to_land_lag`, since #3541 landed it there on 2026-10-30 (its first row is `2026-10-22T08:01:57+00:00`; `wc -l < ~/.local/state/lloyd-automod/gate_to_land_lag.jsonl` re-derives the streak), and the lag reaches the published index through that read alone, never from a copy of this journal — whose receipt is the printed `recorded → <path>` line because `main()` returns 0 with or without the flag; every p50 travels with the `n` it is computed over, so a thin week cannot read as a tight one | never edit, truncate, re-sort or re-stamp the promotion ledger or this journal, never re-run the day to move a number, never a second copy of the command in one turn; `identity_refuse_count` stays `null` because this reader joins only `gate`/`promoted` rows, and a moved-tree trend belongs to a human ruling on the #2859 chase |
 | #102 | weekly | Find-all arms run (`find-all-arms-run`, #2962): drive the retrieval-phrasing A/B to completion and publish its table | the engine lock `~/.local/state/lloyd-automod/primary.lock`, waited on with a bounded timeout instead of `flock -n`'s silent exit, plus the four gold counts it re-derives before spending any engine time | `eval/measurements/find-all-<UTC-date>/trials.jsonl` and the published `eval/measurements/find-all-<UTC-date>.md` — the only artefact in this group that lands inside the checkout, left uncommitted as every measurement under `eval/measurements/` is | report the run's result from the turn that launched it: the driver runs 1.5-2.5 h against the pool's 3570 s cap and is started with `setsid nohup` precisely so it outlives the session, so the table is read on the next fire and never promised by this one |
 | #103 | weekly | Code rules census (`code-rules-census-weekly`, #2995 from #2810): one whole-tree pass of the shipped content rules, through the one command the skill gives with nothing added to it | every tracked `.py` the census scans (1397 scanned of 1397 tracked on the 2026-10-19 dry run) against the rules in `scripts/automod/code_rules.toml`, with the allowlist, the suppression markers and each rule's own `covered X of Y` counted beside the hits — the denominators are the only thing a month-old row cannot reconstruct | one dated row `~/lloyd-data/_pipeline/code-rules-census/code-rules-census-<UTC-date>.json`, at most one per UTC day, **and one backlog item whenever the census has hits** — filing runs only after `write_row`'s `O_EXCL` claim is taken, so the day that writes the row is the day that files, and a run that cannot claim it files nothing and prints the filing the existing row already carries (#3257, which fixed the reverse order: `file_hits` used to run first and a same-day retry opened a second item for one signature) | pass `--no-file`, `--out`, `--tree`, `--rules-path` or `--backlog-dir`, each of which moves the measurement or the filing somewhere the next reader will not look; a second run in one UTC day is harmless now but never useful — it writes no row, so a signature the tree gained after the first run lands in no row and waits for the next pass |
-| #105 | weekly | Check-health census weekly record (`check-health-census-weekly`, #3633) — the one row in this table whose Freq cell is the cadence its MODULE ships (`check_health_census.CADENCE`) rather than its task file's `frequency:`, which still reads `daily`; moving that field is a #724 dispatch-affecting write no unattended round may make, so the one line is owed as #3782, and the task is `draft` so the field arms nothing either way | the `--record` command its own `command:` names — no window flag, because the window is the module's own `WINDOW_DAYS` of 90 and no flag sets it — driving the `check_health_census` module over the automod ledger, its two monthly archives and the named eval arms, plus a caller census of the eval scripts naming their orphans | appends one dated row a week to `check_health_census.jsonl` outside the repo — a passes/fails-over-n and a mean/median rung duration per gate rung and per eval arm, and a vacuity verdict (alive / vacuous / not injectable) for every zero-fail check at or above its floor; report-only — it never retires, disables or weakens a check, which is the bound its own description states |
+| #105 | weekly | Check-health census weekly record (`check-health-census-weekly`, #3633) — the one row in this table whose Freq cell is the cadence its MODULE ships (`check_health_census.CADENCE`) rather than its task file's `frequency:`; the module remains the graded source because it is the artifact the cadence executes at, not because the field is frozen — the file has read `frequency: weekly` since #3782 closed it (measured 2026-11-12), the two agreeing for the first time | the `--record` command its own `command:` names — no window flag, because the window is the module's own `WINDOW_DAYS` of 90 and no flag sets it — driving the `check_health_census` module over the automod ledger, its two monthly archives and the named eval arms, plus a caller census of the eval scripts naming their orphans | appends one dated row a week to `check_health_census.jsonl` outside the repo — a passes/fails-over-n and a mean/median rung duration per gate rung and per eval arm, and a vacuity verdict (alive / vacuous / not injectable) for every zero-fail check at or above its floor; report-only — it never retires, disables or weakens a check, which is the bound its own description states |
 | #106 | daily | Published-maxima probe daily record (`published-maxima-probe-daily-record`, #3456) | the ONE unflagged call `scripts/maintenance/published_maxima_probe.py` (#3037's recorder, shipped in `621192c4`, carried by `bc171709`, with no caller until now), which re-derives the era-D paired-check population from `promotions.jsonl` **and every `promotions-archive-*.jsonl.gz` beside it** and compares each arm's ledger max against the paired-check constant published in the repo | appends one dated row a day to `published-maxima.jsonl` outside the repo — `ts`, `n`, both medians, both maxima, `over_bound_count` and the two published constants — and its alarm is strict upward equality with **no margin**, because the 25 % #3304 asked for is the bug being refused: at publication `905.3` sat 21.97 % under the ledger's 1,035.3 and `401.3` 16.02 % under 477.9, so a 25 % rule reads GREEN across 283 ms of real drift; report-only — it never re-publishes a constant, never touches the promotion gate (the live guard stays `over_budget()` in `workers/sources/automod_regression.py`) and takes no action on a red row, because the row is appended before the alarm is evaluated so a non-zero exit *is* a landed row |
 | #107 | daily | scheduled-ceiling flip-gate daily record (`scheduled-ceiling-flip-gate-daily-record`, #3416 from #3195's owed entry): run the gate once and append the reading | the one command the skill gives — `python -m scripts.maintenance.scheduled_ceiling_flip_gate --record` — which reads the scheduler's own ceiling ledger and answers the single licensed question #2670 set: may the declared 33-name `scheduled-task` ceiling be flipped from SHADOW to `enforce`. Which ledger it reads is resolved by `readings_path()` following `LLOYD_SCHEDULED_CEILING_LEDGER`, **not** by the `--ledger` flag, and the per-name would-strip rates are over the row total — a denominator that moves with every turn and with the flip itself, which is why a PASS is not recomputable once `enforce` rows start landing; the script makes no model call | exactly one dated JSON row appended to `~/lloyd-data/scheduling/flip-gate-readings.jsonl` by `--record` — both verdicts, the row total and the `failures` table verbatim — appended *before* `main()` decides the exit code, so a FAIL is recorded exactly as a PASS is, and that file is the artefact the enforce-flip round is expected to read; `--record` is the only flag this cadence may pass, and until it existed the file held one hand-run row from 2026-10-23 | never add `--ledger`, which redirects the ledger the gate *reads* but not the destination the reading is written to, so a reading taken from a `/tmp` copy is filed beside that copy and deleted with it; never re-run a red reading, because exit 1 is the day's measurement and the row is already on disk — a retry is a second row for one day, and the literal `failed because` belongs to an append that did not happen and to nothing else; never edit the ledger or the readings file, file a backlog item, open a round, or license the flip, which is Alan's call and not this cadence's |
-| #109 | daily | Behaviour-exhibit daily sweep (`behaviour-exhibit-daily`, #3886 from #3749's owed measurement; filed `status: draft`, arming is a one-line human flip): run `python -m app.behaviour_exhibit --days 7` exactly once and report the movement block verbatim | session transcripts under `~/lloyd-data/sessions`, windowed on `st_mtime >= cutoff` over the worker population only, with the store's own earlier dated artifact as the comparison base | one dated `behaviour-exhibit-YYYY-MM-DD.jsonl` in `app.paths.BEHAVIOUR_EXHIBIT_DIR`, and nothing else — it prunes its own artifacts past `RETENTION_DAYS = 30` as it writes, and #100's instrument index scores the `behaviour_exhibit` arm from that store at `cadence_days: 1` with no `hand_run_by_ruling` exception, so a day with no artifact prints `missing or stale: behaviour_exhibit` in the index headline. That the index scores the arm is not what places the row, though: #109 files nothing in the vault or the queue for another job or a person to act on | never add `--out`, `--sessions-dir`, `--registry`, `--max-files`: the first writes an artifact the index cannot resolve through the constant, the other three change what is measured while the report still reads as the corpus; never substitute the tracked witness under `eval/measurements/behaviour-exhibit/` as the baseline, whose `measured_at` is a different run of the same night, 346 situations apart in the caption denominator |
+| #109 | daily | Behaviour-exhibit daily sweep (`behaviour-exhibit-daily`, #3886 from #3749's owed measurement; `status: draft` at filing, armed since — 3 rows as of 2026-11-12 (`select count(*), max(started_at) from runs where task_id='109'` over `~/lloyd-data/workers.db` → 3, newest 2026-11-12T20:12:55Z)): run `python -m app.behaviour_exhibit --days 7` exactly once and report the movement block verbatim | session transcripts under `~/lloyd-data/sessions`, windowed on `st_mtime >= cutoff` over the worker population only, with the store's own earlier dated artifact as the comparison base | one dated `behaviour-exhibit-YYYY-MM-DD.jsonl` in `app.paths.BEHAVIOUR_EXHIBIT_DIR`, and nothing else — it prunes its own artifacts past `RETENTION_DAYS = 30` as it writes, and #100's instrument index scores the `behaviour_exhibit` arm from that store at `cadence_days: 1` with no `hand_run_by_ruling` exception, so a day with no artifact prints `missing or stale: behaviour_exhibit` in the index headline. That the index scores the arm is not what places the row, though: #109 files nothing in the vault or the queue for another job or a person to act on | never add `--out`, `--sessions-dir`, `--registry`, `--max-files`: the first writes an artifact the index cannot resolve through the constant, the other three change what is measured while the report still reads as the corpus; never substitute the tracked witness under `eval/measurements/behaviour-exhibit/` as the baseline, whose `measured_at` is a different run of the same night, 346 situations apart in the caption denominator |
 
 #105 check-health census weekly record joined on 2026-10-31, and unlike every row above it
 it arrived because the two tables were *read* rather than because a job was filed: its
@@ -1564,10 +1567,14 @@ never advertised, so the line the scheduler hands a run exited 2 in argparse rat
 journaling a row (the window is the module's own `WINDOW_DAYS`), while its `description`
 — one of the two things a run is actually
 delivered — named the journal with hyphens, a file that has never existed on this box.
-The fourth is still open: `frequency: daily`, which contradicts the skill slug, the
-`name:` and this table's own Freq cell, and moves only by a human hand because the #724
-rail refuses the write unattended (#3782). While the task is `draft` none of it
-dispatches, which is the only reason the last three sat unnoticed since 2026-10-31.
+The fourth is closed: the file read `frequency: daily` against a skill slug, a `name:`
+and a Freq cell that all said weekly, and moved only by a human hand because the #724
+rail refuses the write unattended — #3782 landed it, and `grep '^frequency:'
+~/obsidian/autonomy/105-check-health-census-weekly.md` prints `weekly` on 2026-11-12, so
+`CADENCE`, the slug and the field agree. The task is still `draft` and has still never
+run (`select count(*) from runs where task_id=105` over `~/lloyd-data/workers.db` was 0
+on 2026-11-12), which is why the last three errors sat unnoticed since 2026-10-31: nothing
+dispatched to find them.
 
 Twelve of the sixteen carry an `acceptance.objective_checks` block naming `Write` and
 `Edit` in its `tool_not_called` list, so their read-only bound is checked by the
@@ -1644,10 +1651,11 @@ each one looks like an outage from the run record alone:
   never that the run was fast. Task #91 declares no `acceptance.objective_checks`,
   so that field is currently the only thing in the fleet watching its margin.
 - **#99 belongs to this group by its authority, not by its report.** Filed
-  2026-10-16 and still `status: draft` with zero rows in `runs` — #2797 closed
-  `done` on 2026-10-16 listing the one-line `status` flip as *still owed*, so the
-  live owner of that flip is #2796's owed list and not a closed item; it is the same
-  standing human decision that holds #98 (`draft`, also zero runs) — it re-runs the
+  2026-10-16, armed since, and it has run: `select count(*), max(started_at) from runs
+  where task_id='99'` over `~/lloyd-data/workers.db` was 3 rows, newest
+  2026-11-05T16:02:20Z, on 2026-11-12 — the one-line `status` flip #2797 owed on
+  2026-10-16 landed, so the standing human decision that still holds #98 (`draft`, also
+  0 rows on 2026-11-12) no longer holds this one; it re-runs the
   observed
   supply-chain inventory offline and can file a backlog item when the
   missed-advisory count moves,
@@ -2088,3 +2096,28 @@ decide what gets worked on next.
   next task. Whether the report should ever withhold a filing is a decision no round
   can take for itself, and #3012 hands it to the owed-check pass with the next
   filing as the trigger.
+
+- **2026-11-12 — `stale`, corrected in place.** The eight configured groups still
+  match their headings, and `tests/test_autonomy_jobs_doc_claims.py` is green at
+  `6531d1a3` unmodified (193 nodes). What rotted is the arming and measurement layer:
+  **#99** ("still `status: draft` with zero rows in `runs`") is `up_next` with 3 runs
+  newest 2026-11-05T16:02:20Z, **#109** ("filed `status: draft`, arming is a one-line
+  human flip") is `up_next` with 3 runs newest 2026-11-12T20:12:55Z, **#103** is armed
+  with 2 runs where the §Watch prose said "both are `status: draft`, so neither is
+  armed", and **#105**'s fourth error — `frequency: daily` held by the #724 rail, owed
+  as #3782 — landed: the file reads `weekly` and agrees with `CADENCE` and the slug, so
+  the row's rationale became "the module is graded because it is what the cadence
+  executes at", not "the field is frozen". Two measured counts moved: #79 bounds **28**
+  stores (24 on 2026-10-27), counted as `retention-sweep.py`'s own report lines run
+  without `--apply`, and #82's gold set is **86** queries (81 on 2026-10-26). Filed:
+  **#4094** (the wiring diagram draws ten of the twelve real `depends_on` edges and
+  §The wiring still counts 29 of 39 against the route's 53 tasks with 12 parents — the
+  doc's numbers are pinned by `test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once`,
+  so the two move together in code); **#4095** (the `Depends on` claims disagree with
+  the files in both directions: #82's file declares `depends_on: 81` while §Bound
+  entropy says it declares nothing, and #107's row asserts `depends_on: 106` while its
+  file declares no such field); **#4096** (nothing checks a row's arming/run-status
+  prose against the file and `workers.db`, which is how all four of the stale sentences
+  above stayed green); **#4097** (`WATCH_JOBS[105]`'s frozen-field comment and
+  `test_watch_105_cadence_is_the_module_not_its_frozen_field`'s docstring still describe
+  a field that has moved).
