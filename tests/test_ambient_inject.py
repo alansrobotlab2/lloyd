@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,9 @@ from fastapi.testclient import TestClient
 
 from app import sessions_io as sio
 from app.date_fidelity import find_contradictory_dates, refusal_detail
+from app.routers import messages as msg_mod
 from app.routers import sessions as R
+from app.sessions_io import SessionTurn
 
 SKILL = Path.home() / "obsidian" / "skills" / "morning-brief-and-triage" / "SKILL.md"
 
@@ -434,6 +437,157 @@ def test_the_producer_sees_the_refusal_as_a_failure(client, monkeypatch):
         assert result["ok"] is False, priority
         assert result["status"] == 400, priority
         assert "Fri Sept 19" in json.dumps(result["server_response"]), priority
+
+
+# --- the producer's end of the seam, part two: what its call displaced (#4054) --
+# `enqueue_turn` throws a queued ambient away in two ways — the
+# `AMBIENT_QUEUE_CAP` drop and the `dedup_key` collapse — and until #4054 the only
+# trace of either in the producer's own answer was turn ids nested under
+# `server_response`, sitting beside a headline `ok: true`. The nodes below drive
+# the real MCP tool against the real `/inject` route with the real queue policy,
+# so what they assert on is the casualty the real policy chose.
+
+async def _consumer_that_holds_its_slot(session_id: str) -> None:
+    """Stand in for the per-session consumer: take the slot, pop nothing.
+
+    The consumer is what removes queued ambients from the tier, so a real one
+    would race the depth these nodes depend on — and whatever it pops goes to
+    `_run_turn`, which dispatches a real model turn. Nothing in this file owns
+    that, so no test here lets it run; `_run_turn` is pinned to raise below so a
+    leak becomes a red test rather than a model call.
+    """
+    await asyncio.Event().wait()
+
+
+async def _run_turn_must_not_be_reached(*args, **kwargs):
+    raise AssertionError("an ambient turn reached _run_turn; no test here owns a model call")
+
+
+async def _stub_ambient_turn(session_id: str, text: str, *, dedup_key: str | None = None,
+                             priority: str = "notable", source: str = "producer",
+                             summary: str = "") -> SessionTurn:
+    """A queued ambient shaped like `build_ambient_turn`'s output, minus its model work.
+
+    The real builder assembles the model options and prompt envelope, which needs a
+    snapshot on disk and a configured endpoint; neither is what these nodes are
+    about. What they need is the type `enqueue_turn` consumes — a `SessionTurn` —
+    carrying the two payload keys the eviction policies read: `dedup_key`, which a
+    collapse matches on, and `producer_source`, which the eviction record names.
+    """
+    payload = {"text": text, "priority": priority, "producer_source": source,
+               "summary": summary}
+    if dedup_key:
+        payload["dedup_key"] = dedup_key
+    return SessionTurn(turn_id=uuid.uuid4().hex[:12], source="ambient",
+                       session_id=session_id, payload=payload,
+                       enqueued_at=datetime.datetime.now())
+
+
+@pytest.fixture
+def turn_tier(client, monkeypatch):
+    """The live `/inject` route with a turn tier that keeps what it is given.
+
+    Yields `session_id -> [turn ids queued, oldest first]`. Requests cross into
+    the TestClient's portal loop, which is where the queue's lock is first used,
+    so the tier is read back without taking that lock — the held consumer pops
+    nothing, so nothing is mutating it to read.
+    """
+    monkeypatch.setattr(msg_mod, "_session_consumer", _consumer_that_holds_its_slot)
+    monkeypatch.setattr(msg_mod, "_run_turn", _run_turn_must_not_be_reached)
+    monkeypatch.setattr(msg_mod, "build_ambient_turn", _stub_ambient_turn)
+
+    def queued(session_id: str) -> list[str]:
+        q = sio._session_queues.get(session_id)
+        return [] if q is None else [t.turn_id for t in q.pending_ambient]
+
+    return queued
+
+
+def _bridge_producer(client, monkeypatch) -> None:
+    """Point `session_inject_context`'s HTTP at the live router in this process."""
+    from agent_mcp import ambient
+
+    async def fake_post_json(path, body, timeout=10.0):
+        r = client.post(path, json=body)
+        try:
+            return r.status_code, r.json()
+        except ValueError:
+            return r.status_code, {"detail": r.text}
+
+    monkeypatch.setattr(ambient, "_post_json", fake_post_json)
+
+
+async def _drive_producer(args: dict) -> dict:
+    """Call the MCP tool the way a producer does and return the JSON it hands back."""
+    from agent_mcp import ambient
+    out = await ambient._tool_session_inject_context(args)
+    assert out.is_error is False, [b.text for b in out.content]
+    return json.loads(out.content[0].text)
+
+
+def test_a_cap_eviction_is_named_at_the_top_of_the_producers_own_result(client, turn_tier, monkeypatch):
+    """#4054 clauses 3 and 4, cap half: a fourth signal displaces the first one.
+
+    Three signals are queued first — `AMBIENT_QUEUE_CAP`, the documented maximum
+    depth — and then a fourth arrives as a producer's own call. The queue policy is
+    not stubbed, so the casualty below is the one the cap itself chose: the oldest
+    queued signal. The producer whose arrival caused it is still delivered, and the
+    key is at the top level, where a model reads it, not only nested in the body.
+    """
+    _bridge_producer(client, monkeypatch)
+    sio._session_queues.pop("human", None)
+
+    seeds = [client.post("/api/sessions/human/inject",
+                         json={"text": DATE_FREE, "source": f"autonomy:seed-{i}",
+                               "priority": "notable"})
+             for i in range(sio.AMBIENT_QUEUE_CAP)]
+    assert [r.status_code for r in seeds] == [200] * sio.AMBIENT_QUEUE_CAP, \
+        [r.text for r in seeds]
+    seeded = [r.json()["turn_id"] for r in seeds]
+    assert turn_tier("human") == seeded, "the tier did not fill to the cap"
+
+    producer = asyncio.run(_drive_producer({
+        "source": "autonomy:task-42", "summary": "Brief + Triage",
+        "priority": "notable", "session_id": "human"}))
+
+    assert producer["ok"] is True, producer
+    assert producer["mechanism"] == "turn", producer
+    assert producer["dropped_turns"] == [seeded[0]], producer
+    assert producer["server_response"]["dropped"] == [seeded[0]], producer
+    assert producer["server_response"]["turn_id"] not in producer["dropped_turns"], producer
+    # Delivered, and the tier is back at the cap: the two later seeds plus this one.
+    assert turn_tier("human") == seeded[1:] + [producer["server_response"]["turn_id"]]
+
+
+def test_a_refire_that_supersedes_its_own_queued_signal_still_reports_success(client, turn_tier, monkeypatch):
+    """#4054 clauses 3 and 4, dedup half: newest-wins has to keep succeeding.
+
+    `dedup_key` defaults to `source`, so one producer injecting twice is exactly the
+    documented collapse: the first queued signal retires and the second runs. Both
+    halves of this item are in that one answer — the retirement named at the top
+    level, and the call that caused it still `ok: true`, because flipping it to a
+    failure would report a delivered signal as a broken one and make every
+    legitimate re-fire look like an outage.
+    """
+    _bridge_producer(client, monkeypatch)
+    sio._session_queues.pop("human", None)
+
+    call = {"source": "autonomy:morning-brief", "summary": "Brief + Triage",
+            "priority": "notable", "session_id": "human"}
+    first, second = asyncio.run(_drive_producer(call)), asyncio.run(_drive_producer(call))
+
+    assert first["ok"] is True, first
+    # Nothing was displaced by the first signal — the key had nothing queued under
+    # it and one turn of AMBIENT_QUEUE_CAP were in the tier — so the key is absent
+    # rather than an empty list: a producer must not have to tell "nothing
+    # displaced" apart from "the server reported nothing".
+    assert "dropped_turns" not in first, first
+
+    assert second["ok"] is True, second
+    assert second["server_response"]["deduped"] is True, second
+    assert second["dropped_turns"] == [first["server_response"]["turn_id"]], second
+    assert second["server_response"]["turn_id"] not in second["dropped_turns"], second
+    assert turn_tier("human") == [second["server_response"]["turn_id"]]
 
 
 # --- clauses 2 and 3: the skill half of the same contract ---------------------

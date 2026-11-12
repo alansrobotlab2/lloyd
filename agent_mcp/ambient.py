@@ -297,6 +297,27 @@ async def _tool_session_inject_context(args: dict) -> list[TextContent]:
         "mechanism": "prefetch" if priority == "ambient" else "turn",
         "server_response": body,
     }
+
+    # Which previously-queued signals this call displaced (#4054). The turn tier
+    # reports them in `body["dropped"]`, but nested under `server_response` among
+    # opaque turn ids, next to a headline `ok: true` — a producer reading its own
+    # result sees a success and nothing else. Lifting the list to the top level
+    # makes it readable without changing the verdict: `ok` stays the answer to
+    # "did MY signal get queued", which the eviction does not contradict. The
+    # caller's own turn is never its own casualty (the cap pops the oldest of what
+    # was already there, and a dedup casualty is the same producer's superseded
+    # firing), so reporting a displacement as a failure would make every legitimate
+    # re-fire look broken — report, do not delete, per #2600.
+    #
+    # The turn mechanism only. On the prefetch door `dropped` holds `source`
+    # strings rather than turn ids and that route already logs and returns its
+    # casualties; a key named `dropped_turns` there would be a false claim about
+    # the element type.
+    if priority != "ambient" and isinstance(body, dict):
+        displaced = body.get("dropped") or []
+        if displaced:
+            result["dropped_turns"] = displaced
+
     return text_result(json.dumps(result))
 
 

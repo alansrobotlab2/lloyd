@@ -11,11 +11,16 @@ Covers Phases 1–3:
 - #909: the two-tier drain — `DELETE /api/sessions/{id}` empties both
         queues and a queued user turn never reaches `_run_turn`, while
         `/cancel?drain_pending=true` stays ambient-only
+- #4054: every ambient the cap or a `dedup_key` collision throws away leaves
+        one log record naming its turn id, which policy took it, and the
+        `producer_source` that fired it
 
 Run: .venvs/lloyd/bin/python -m tests.test_session_queue
 """
 import asyncio
+import contextlib
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -91,6 +96,82 @@ async def _enqueue(session_id: str, turn: SessionTurn):
         turn,
         consumer_factory=lambda: msg_mod._session_consumer(session_id),
     )
+
+
+async def _take_nothing():
+    """A consumer factory that pops nothing, so the ambient tier just accumulates.
+
+    The two policies under test — the cap and the `dedup_key` collapse — run
+    inside `enqueue_turn`, before any consumer gets a turn of the event loop. A
+    real consumer would drain the tier between assertions and make the depth a
+    race; this makes it a fact.
+    """
+    return None
+
+
+async def _enqueue_idle(session_id: str, turn: SessionTurn):
+    return await enqueue_turn(session_id, turn, consumer_factory=_take_nothing)
+
+
+def _ambient_turn(label: str, producer: str | None = None,
+                  dedup_key: str | None = None) -> SessionTurn:
+    """An ambient turn shaped like the ones the producer doors actually build.
+
+    `producer` lands under `payload["producer_source"]`, the key
+    `build_ambient_turn` writes. `producer=None` reproduces the shape of a turn
+    built without that builder at all — the compaction flush — whose payload
+    names no producer for the eviction record to carry.
+    """
+    payload: dict = {"label": label}
+    if producer is not None:
+        payload["producer_source"] = producer
+    if dedup_key is not None:
+        payload["dedup_key"] = dedup_key
+    return SessionTurn(
+        turn_id=uuid.uuid4().hex[:8],
+        source="ambient",
+        payload=payload,
+        enqueued_at=datetime.now(),
+    )
+
+
+class _RecordCollector(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _collect_sessions_io_logs():
+    """Every record `sessions_io` emits while the block runs.
+
+    The handler goes on the module's own logger and its level is pinned for the
+    duration, because `lloyd-server` inherits the interpreter's WARNING default
+    when nothing has configured logging — and an assertion that "no casualty was
+    logged" would then pass for a reason that has nothing to do with the code.
+    The logger is shared by the whole server, so every assertion below selects
+    records by a turn id this test created.
+    """
+    collector = _RecordCollector()
+    log = sessions_io.logger
+    previous_level = log.level
+    log.addHandler(collector)
+    log.setLevel(logging.INFO)
+    try:
+        yield collector
+    finally:
+        log.removeHandler(collector)
+        log.setLevel(previous_level)
+
+
+async def _let_tasks_settle():
+    """Run the no-op consumer tasks created above to completion, so no test
+    leaves a pending task behind in the shared loop."""
+    for _ in range(3):
+        await asyncio.sleep(0)
 
 
 async def test_serial_execution():
@@ -350,6 +431,100 @@ async def test_ambient_dedup_collapse():
     if ev: ev.set()
     await asyncio.wait_for(running.done.wait(), timeout=3)
     print("OK dedup: same dedup_key collapsed, newest kept")
+
+
+async def test_a_cap_eviction_logs_the_casualty_the_cap_and_the_producer():
+    """#4054 clause 1: the cap's victim leaves exactly one backend record.
+
+    Three facts per record: which turn went, that it was the cap that took it
+    (not a `dedup_key` collapse), and whose signal it was. Two casualties are
+    evicted here on purpose — the first carries no `producer_source`, the shape
+    of a turn the compaction flush queued, and must still get a record with the
+    explicit unknown marker rather than an empty producer slot; the second names
+    its producer outright.
+    """
+    session_id = "test-session-cap-log"
+    _session_queues.pop(session_id, None)
+
+    flush_shaped = _ambient_turn("oldest")                  # no producer_source
+    named = _ambient_turn("next", producer="autonomy:task-42")
+    fillers = [_ambient_turn(f"filler{i}") for i in range(AMBIENT_QUEUE_CAP - 1)]
+    overflow = _ambient_turn("overflow")
+
+    with _collect_sessions_io_logs() as seen:
+        results = [await _enqueue_idle(session_id, t)
+                   for t in [flush_shaped, named, *fillers, overflow]]
+        await _let_tasks_settle()
+
+    # The two evictions the arithmetic must produce: the tier reaches
+    # AMBIENT_QUEUE_CAP + 1 on each of the last two enqueues.
+    assert results[AMBIENT_QUEUE_CAP]["dropped"] == [flush_shaped.turn_id], results
+    assert results[AMBIENT_QUEUE_CAP + 1]["dropped"] == [named.turn_id], results
+    assert get_queue_state(session_id)["pending_ambient"] == AMBIENT_QUEUE_CAP
+
+    for label, turn, producer in (("flush-shaped", flush_shaped, sessions_io.UNKNOWN_PRODUCER),
+                                  ("named", named, "autonomy:task-42")):
+        records = [m for m in seen.messages if turn.turn_id in m]
+        assert len(records) == 1, (
+            f"{label}: expected exactly one record naming {turn.turn_id}, got "
+            f"{len(records)}: {records}")
+        msg = records[0]
+        assert "cap eviction" in msg, f"{label}: record does not blame the cap: {msg}"
+        assert "dedup collision" not in msg, f"{label}: blames dedup for a cap drop: {msg}"
+        assert (f"{AMBIENT_QUEUE_CAP + 1} queued ambients over "
+                f"AMBIENT_QUEUE_CAP={AMBIENT_QUEUE_CAP}") in msg, msg
+        assert producer in msg, f"{label}: producer not named ({producer!r}) in: {msg}"
+
+    # The cap never sacrifices the turn that triggered it: the signal whose
+    # arrival caused an eviction is always the one that stays queued.
+    for i, res in enumerate(results):
+        assert res["turn_id"] not in res["dropped"], (
+            f"enqueue {i} reported its own turn as dropped: {res}")
+
+    print("OK cap log: 2 evictions, each logged once with turn id, cap and producer")
+
+
+async def test_a_dedup_collapse_logs_the_casualty_as_a_collision_not_a_cap_drop():
+    """#4054 clause 2: a collapsed signal leaves one record, and it says why.
+
+    "Dropped" is one word for two different policies, and they mean different
+    things to whoever reads it: a cap eviction says the session was too busy, a
+    collision says this producer re-fired while its own earlier signal was still
+    waiting. So the record has to name the collision and must not read as the
+    cap, alongside the casualty's turn id and its `producer_source`.
+    """
+    session_id = "test-session-dedup-log"
+    _session_queues.pop(session_id, None)
+
+    superseded = _ambient_turn("v1", producer="autonomy:task-99", dedup_key="K1")
+    newer = _ambient_turn("v2", producer="autonomy:task-99", dedup_key="K1")
+
+    with _collect_sessions_io_logs() as seen:
+        first = await _enqueue_idle(session_id, superseded)
+        second = await _enqueue_idle(session_id, newer)
+        await _let_tasks_settle()
+
+    assert first["dropped"] == [], f"the first enqueue dropped something: {first}"
+    assert second["deduped"] is True, second
+    assert second["dropped"] == [superseded.turn_id], second
+    assert second["turn_id"] not in second["dropped"], (
+        f"the collapsing call reported its own turn as dropped: {second}")
+
+    records = [m for m in seen.messages if superseded.turn_id in m]
+    assert len(records) == 1, (
+        f"expected exactly one record naming {superseded.turn_id}, got "
+        f"{len(records)}: {records}")
+    msg = records[0]
+    assert "dedup collision" in msg, f"record does not name the collision: {msg}"
+    assert "cap eviction" not in msg, f"record blames the cap for a collision: {msg}"
+    assert "dedup_key=K1" in msg, f"the key that collided is absent: {msg}"
+    assert "autonomy:task-99" in msg, f"producer not named: {msg}"
+    assert sessions_io.UNKNOWN_PRODUCER not in msg, (
+        f"a payload that names its producer logged the unknown marker: {msg}")
+    # Nothing here was over the cap: one queued signal, then its replacement.
+    assert not [m for m in seen.messages if "cap eviction" in m], seen.messages
+
+    print("OK dedup log: 1 collision, logged once with turn id, key and producer")
 
 
 async def test_queue_state_event_emitted():
@@ -766,6 +941,8 @@ async def main():
     await test_drain_pending_ambient_only()
     await test_ambient_queue_cap()
     await test_ambient_dedup_collapse()
+    await test_a_cap_eviction_logs_the_casualty_the_cap_and_the_producer()
+    await test_a_dedup_collapse_logs_the_casualty_as_a_collision_not_a_cap_drop()
     await test_queue_state_event_emitted()
     await test_delete_session_leaves_nothing_queued_in_either_tier()
     await test_a_queued_user_turn_never_reaches_run_turn_after_delete()

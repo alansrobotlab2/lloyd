@@ -264,7 +264,7 @@ inner_voice:
     # invisible to the report: load_sessions selects solely on the stored
     # inner_voice_ab stamp. The window was not empty. It held 29 mission-control
     # sessions and not one carried a stamp, because the sole assignment call sits in
-    # _save_session_meta (app/sessions_io.py:1396), reached only on that function's
+    # _save_session_meta (app/sessions_io.py:1451), reached only on that function's
     # create branch, while every chat the API creates is minted by create_session
     # (app/sessions_io.py:398), which never reaches it. So an arm is never written on
     # the path chats actually take, and a window armed as this one was enrols nobody

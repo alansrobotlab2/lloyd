@@ -22,11 +22,11 @@ are named by file, not by count: `tests/test_session_queue.py` and
 `tests/test_active_session_resolution.py` over the queue and the resolver,
 `tests/test_ambient_prefetch_retention.py` and `tests/test_session_doc_claims.py`
 over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
-Re-measured 2026-11-01 by `--collect-only -q` on each file — collected nodes, not
+Re-measured 2026-11-11 by `--collect-only -q` on each file — collected nodes, not
 passing ones, so the figure ages rather than reassures:
-`tests/test_session_queue.py` 18, `tests/test_active_session_resolution.py` 5,
+`tests/test_session_queue.py` 20, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
-`tests/test_session_doc_claims.py` 15 (54 across those four), and
+`tests/test_session_doc_claims.py` 15 (56 across those four), and
 `tests/test_prefetch.py` 101 — four arrived with #3081, the subliminal `notes`
 badge for `<next-session-notes>` and the guards around it, and three more with
 #3471, which made a badge require its marker to open a line (and one with the 2026-11-09 skills review's plan-mode pin). Those five are the
@@ -222,7 +222,12 @@ Producer
       # queue position, so the clock shown is the clock it was enqueued at.
 
   → Enqueued on the SessionQueue's ambient tier (from #296): dedup_key collapses
-    a queued duplicate, and AMBIENT_QUEUE_CAP = 3 drops the oldest beyond it
+    a queued duplicate, and AMBIENT_QUEUE_CAP = 3 drops the oldest beyond it.
+    A casualty of either is a signal some producer already believes it delivered,
+    so it leaves one `lloyd-server` log record naming its turn id, which policy
+    took it and its `producer_source`; on the `session_inject_context` door the
+    ids also surface as a top-level `dropped_turns`, while `ok=true` stays — the
+    caller's own turn is never its own casualty (#4054)
   → Queue consumer picks it up when no user turn is pending or running
 
                     ... turn runs ...
@@ -289,7 +294,7 @@ If the user sends a message while an ambient turn is running or queued:
   `AMBIENT_QUEUE_CAP` eviction.
 
 User turns always win, and `/cancel` never drops one: `drain_pending`'s
-`source=None` default means "ambient only" (`app/sessions_io.py:1142`), which
+`source=None` default means "ambient only" (`app/sessions_io.py:1197`), which
 is what `drain_pending=true` on that route relies on. Draining the user tier is
 the explicit `source="all"` sentinel — both tiers, ambient then user, summed
 count — and `DELETE /api/sessions/{id}` is its only caller
@@ -316,7 +321,7 @@ the branch is reachable, through `"all"`. Fixed by #909.
 | `_ambient_decisions` | `dict[session_id, dict]` | What `ambient_decide` recorded, stamped with the deciding turn's `turn_id` and handed back by `take_ambient_decision(session_id, turn_id)` to that turn alone — the pop is the one place the slot is read, so an entry left behind by a turn that never reached its `result` event is discarded and logged rather than spent on the session's next ambient turn (#2599) |
 | `SessionQueue.pending_ambient` | `deque[SessionTurn]` | Mechanism 2's tier, popped only when `pending_user` is empty |
 | `AMBIENT_PREFETCH_CAP` / `AMBIENT_PREFETCH_DRAIN_MAX` | `5` / `3` | Hold cap and per-turn cap |
-| `AMBIENT_QUEUE_CAP` | `3` | Queued ambient *turns* per session; oldest evicted |
+| `AMBIENT_QUEUE_CAP` | `3` | Queued ambient *turns* per session; oldest evicted, and every eviction — this cap's or a `dedup_key` collapse's — logged with the casualty's turn id, the policy and its `producer_source`, plus a top-level `dropped_turns` on the `session_inject_context` answer (#4054) |
 | *not here:* `app/next_session_notes.py` | file-backed, cap 5, TTL 24 h | The third store this subsystem writes to, and the only one that survives a restart: `~/lloyd-data/next-session-notes.json` (#1516). Its own caps (`NEXT_SESSION_NOTE_CAP`, `..._SUMMARY_MAX`, `..._CONTENT_MAX`) and its own no-deadline sentinel rule are declared and tested there — a second copy of either, here or in the queue module, is the defect |
 
 ### Endpoints (`app/routers/sessions.py`)
@@ -672,3 +677,36 @@ mode has no reason to block it.
   `AMBIENT_QUEUE_CAP` or collapsed by its own `dedup_key`, because `dropped` survives
   only inside the nested `server_response` and no log line names it — the #910 shape on
   the tier this page spent most of its life fixing on the other door).
+- 2026-11-11 — #4054 closed that sentence's mechanism. Both turn-tier policies now
+  leave a trace: `enqueue_turn` emits one `lloyd-server` record per casualty, naming
+  the dropped turn's id, which policy took it (`cap eviction` versus `dedup`
+  collision, because the two mean different things to whoever reads the line) and
+  the producer carried in `payload["producer_source"]` — a literal
+  `<unknown-producer>` (`sessions_io.UNKNOWN_PRODUCER`) for a turn assembled without
+  `build_ambient_turn`,
+  which is the compaction flush, and `turn.source` is never blamed for it because that
+  field is the tier, not the producer. `session_inject_context` lifts the body's `dropped` to a
+  top-level `dropped_turns` and leaves `ok=true` standing: the caller's own turn is
+  never its own casualty — the append lands at the tier's right end and the cap
+  `popleft()`s, and a dedup casualty shares the caller's key, which defaults to its
+  `source`, so it is that producer's superseded firing, which is what newest-wins
+  promises. Reported, not deleted, on #2600's precedent. The log record is the
+  load-bearing half and the MCP key the small one, because the two producers that
+  discard `enqueue_ambient`'s return value outright — the Inner Voice follow-up and
+  the compaction flush — never see any response at all. Pinned in
+  `tests/test_session_queue.py` (one record per policy, naming id, policy and
+  producer) and `tests/test_ambient_inject.py` (a fourth signal at the cap names the
+  oldest at the tool's top level, a re-fire names the signal it superseded, and
+  neither turns a delivered turn into a failure). What the eviction line actually
+  fires on across live sessions is owed after landing: until this round nothing
+  logged, so no frequency claim either way was measurable. The 55 lines this added to
+  `app/sessions_io.py` sit between `drain_ambient_prefetch` and `drain_pending`, so
+  every `app/sessions_io.py:<N>` pointer below them in this repository moved by 55 and
+  was re-pointed in the same commit — `drain_pending` `1142`→`1197` here, and the
+  `_save_session_meta` arm (`1393`→`1448`, `1396`→`1451`, `1363`→`1418`, `1394`→`1449`)
+  across `architecture/inner-voice.md`, `architecture/background-runs.md`,
+  `config.yaml`, `scripts/iv_ab_report.py` and `tests/test_iv_measurement.py`, which
+  pin those numbers. Line-number pointers into a file are shared state: a round that
+  inserts anywhere above one of them owes that re-point, and the two graded nodes
+  (`test_iv_measurement.py`, `test_background_runs_doc_claims.py`) go red on the diff
+  that forgets it.

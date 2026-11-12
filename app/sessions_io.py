@@ -974,8 +974,38 @@ def get_queue_state(session_id: str) -> dict[str, Any]:
     }
 
 
+#: What an eviction record says for a queued ambient whose payload names no
+#: producer. `build_ambient_turn` sets `producer_source`; the compaction-flush turn
+#: is built by `build_flush_turn` and never passes through it, so a casualty can
+#: legitimately have no producer to name. A record that simply omitted the field
+#: would read as a formatting bug; an explicit marker says "unknown", which is the
+#: fact.
+UNKNOWN_PRODUCER = "<unknown-producer>"
+
+
+def _ambient_producer_name(turn: SessionTurn) -> str:
+    """The producer named in this turn's payload, or `UNKNOWN_PRODUCER`.
+
+    Reads `payload["producer_source"]` and nothing else: `turn.source` is the
+    *tier* (`"ambient"` — `SessionTurn`), so logging it as the producer would
+    blame the queue for a signal some background job fired.
+    """
+    payload = turn.payload if isinstance(turn.payload, dict) else {}
+    named = payload.get("producer_source")
+    if isinstance(named, str) and named.strip():
+        return named.strip()
+    return UNKNOWN_PRODUCER
+
+
 # Max queued ambient turns per session. Producers can spam —
 # drop the oldest beyond this cap so the queue doesn't grow unbounded.
+#
+# Neither this cap nor the dedup collapse below may throw a signal away in
+# silence: both are a signal that died with its producer still believing it was
+# queued, which is the #910 shape this queue's own page names ("a signal that
+# dies without a trace is how this defect stayed invisible"). Each casualty gets
+# one log record below, carrying the three facts the prefetch drain's drop log
+# carries — which turn, which policy, which producer (#4054).
 AMBIENT_QUEUE_CAP = 3
 
 
@@ -994,6 +1024,17 @@ async def enqueue_turn(session_id: str, turn: SessionTurn, consumer_factory) -> 
         entry is dropped so producers can spam safely).
       - Queue is capped at `AMBIENT_QUEUE_CAP`; oldest ambient is
         dropped when the cap is exceeded.
+
+    Both policies throw away a signal some producer already believes it
+    delivered, and in the caller's own dict the only trace is a turn id in
+    `dropped` — invisible to the two producers that discard this return value
+    entirely (`app/routers/messages.py`'s Inner Voice follow-up and the
+    compaction flush). So every casualty is also logged here, one record each,
+    naming its turn id, which policy took it, and its `producer_source` (#4054).
+    A casualty is never the turn this call is enqueueing: the append below puts
+    that turn at the right end of the tier and the cap loop pops the left end,
+    and a dedup casualty always shares the caller's key — the same producer's
+    superseded firing, which is what "newest wins" means.
 
     Returns: turn_id, source, preempted, dropped (list of dropped turn_ids
     from dedup+cap), dedup (bool).
@@ -1025,18 +1066,32 @@ async def enqueue_turn(session_id: str, turn: SessionTurn, consumer_factory) -> 
                         t.done.set()
                         dropped.append(t.turn_id)
                         deduped = True
+                        logger.info(
+                            "ambient queue: dedup collision — dropped queued turn "
+                            "%s (session %s, dedup_key=%s); the newer signal wins, so "
+                            "this one never runs. producer_source=%s",
+                            t.turn_id, session_id, dedup_key, _ambient_producer_name(t),
+                        )
                     else:
                         keep.append(t)
                 q.pending_ambient = keep
             q.pending_ambient.append(turn)
             # Cap: drop oldest until within limit.
             while len(q.pending_ambient) > AMBIENT_QUEUE_CAP:
+                depth_before_eviction = len(q.pending_ambient)
                 old = q.pending_ambient.popleft()
                 old.preempted = True
                 try: old.events.put_nowait(None)
                 except Exception: pass
                 old.done.set()
                 dropped.append(old.turn_id)
+                logger.info(
+                    "ambient queue: cap eviction — dropped queued turn %s "
+                    "(session %s, %d queued ambients over AMBIENT_QUEUE_CAP=%d); "
+                    "the oldest goes, so this one never runs. producer_source=%s",
+                    old.turn_id, session_id, depth_before_eviction,
+                    AMBIENT_QUEUE_CAP, _ambient_producer_name(old),
+                )
         if q.consumer_task is None or q.consumer_task.done():
             q.consumer_task = asyncio.create_task(consumer_factory())
     # Broadcast state to the currently-running turn's subscribers so they

@@ -399,7 +399,7 @@ head in `sessions/`: no four-part id on live data carries a human platform at
 all, and **no writer records a member's departure** — the sweep gzips and never
 deletes, nothing rewrites the `platform` of an *existing* session
 (`_save_session_meta` stamps it only in its create branch,
-`app/sessions_io.py:1363`). Two in-tree routes remove a transcript, and
+`app/sessions_io.py:1418`). Two in-tree routes remove a transcript, and
 what separates them is everything around the unlink: `DELETE
 /api/sessions/{session_id}` (`app/routers/sessions.py:1158`) cancels the current
 turn, drains the queued turns in **both** tiers, discards the session's ambient
