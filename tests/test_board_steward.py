@@ -5835,3 +5835,378 @@ def test_a_tick_that_moved_nothing_says_so_rather_than_leaving_the_column_empty(
     assert out["artifact_path"] != "", (
         "an empty string here is the unsaid case again — the whole point of the token "
         "is that attested-nothing and unsaid are two values, not two readings of one")
+
+
+# --------------------------------------------------------------------------------------
+# #4080 — a move whose note cites a round its item has never run is not a judgement about
+# that item. The row this is filed on: the tick at 2026-11-12T00:30:46Z proposed
+# `{item_id: 3024, status: in_progress}` with a note about round SM_20261111_233110, which
+# belongs to #4074, and #3024 was scored as disagreeing with the state machine about its
+# own status. Four clauses: never written even with `apply` on, abstained out of both
+# `disagree` and `judged`, a real policy disagreement still counted, and #3547's flag gate
+# unchanged for a `none` item.
+# --------------------------------------------------------------------------------------
+
+#: A round id in the shape `scripts.automod.state` mints. #4's, in these nodes.
+OWNED_ROUND = "SM_20261010_010203"
+
+
+def test_a_move_citing_a_round_its_item_never_ran_is_never_written_even_with_apply_on(
+        board, monkeypatch):
+    """Clause 1 end to end: the citation gates the WRITE, on an `apply: true` tick.
+
+    #4 owns `SM_20261010_010203` — its `backlog_implement` row names it — and #8 owns no
+    round at all, so #8's flag is `none` and nothing else on the board could stop it.
+    Two moves, one tick, `apply: true` (a status write, which is the only thing #3024 was
+    spared by: the disagreeing tick ran with `apply: false`, so a dry run hid the fact
+    that a move about the wrong row would have been written to the board):
+
+      #8  proposed `in_progress` with a note citing #4's round. #8 owns no round, so the
+          citation is #3024's exactly: prose about one row, booked on another. It must
+          not reach the front matter.
+      #7  proposed `in_progress` with no round cited, flag `none`. Written, which is what
+          makes #8's refusal a refusal: the same writer, the same tick, the same flag,
+          one withheld and one applied.
+    """
+    from scripts.automod import state as S
+    from workers import board_disagreement as D
+    _ten_item_board(board)
+    _promotion(S.LEDGER_PATH, 4, OWNED_ROUND, "d" * 40, settle=True, base=1)
+    # Unmeasured window: this node rules a write, it does not open a disagreement item
+    # on the live board off a fixture tick's disagreement (#3089's bar is the gate).
+    monkeypatch.setattr(D, "window_now",
+                        lambda **kw: _window7(judged=10, agree=10, disagree=0, rate=1.0))
+
+    out = _tick_with_moves(board, monkeypatch, [
+        {"item_id": 8, "status": "in_progress",
+         "note": f"round {OWNED_ROUND} is under observation; held"},
+        {"item_id": 7, "status": "in_progress", "note": "ready: acceptance recorded"},
+    ])
+    assert out["status"] == "success", out
+
+    row = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "board_steward"][-1]
+    assert _load(board, 8).status == "up_next", (
+        "#8's front matter was rewritten on the strength of a round it has never run")
+    assert _load(board, 7).status == "in_progress", (
+        "the un-cited move was withheld too, so #8 proves nothing about a refusal")
+    assert [m["item_id"] for m in row["applied"]] == [7]
+    assert row["agreement"]["misbound"] == [8]
+    assert [m["item_id"] for m in row["moves"]] == [8, 7], (
+        "the proposal itself stays in the row: this is a withheld write, not a move "
+        "the steward never made")
+    assert "1 mis-bound to another item's round" in out["summary"], out["summary"]
+
+
+def test_the_ownership_behind_the_citation_is_read_from_the_ledger_and_nowhere_else(
+        tmp_path):
+    """Clause 1's boundary: what is caught, and the four shapes that are not.
+
+    The detector is one predicate over the same map `unfinished_rounds` reads at
+    `board_steward.py:717` to name an item's rounds on the board line, so this node
+    pins the reading and not just the outcome: an item the ledger gives a round is
+    never caught citing it, and an item it gives none is caught with an empty set
+    because there is no round it could own.
+
+    Four shapes stay uncaught, and each is a decision rather than an accident:
+
+      * a note that cites a round the item DOES own — the legitimate case, and the
+        one the board line itself renders ("round=… is in flight");
+      * a note with no round id in it, including a missing `note`, which
+        `parse_steward` defaults to `""` — the gate is about a claim specific enough
+        to falsify and about nothing else;
+      * a token that is not the shape, `SM_2026_1010_01020`: `state.make_round_id`
+        is `SM_` plus `%Y%m%d_%H%M%S`, so 8 digits and 6, and a near-miss is prose;
+      * two ids where one is owned: `cited <= owned` is the predicate, so naming a
+        round of yours alongside one that is not theirs is still caught.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _promotion(led, 4, OWNED_ROUND, "d" * 40, settle=True, base=1)
+    cite = lambda iid, note: [{"item_id": iid, "status": "in_progress", "note": note}]
+
+    assert W.misbound_moves(cite(4, f"round {OWNED_ROUND} is under observation"),
+                            led) == set(), "an item owns the round it cites"
+    assert W.misbound_moves(cite(8, f"round {OWNED_ROUND} is under observation"),
+                            led) == {8}, "#3024's shape: a citation of another row's round"
+    assert W.misbound_moves(cite(8, "no round cited, just judgement"), led) == set()
+    assert W.misbound_moves([{"item_id": 8, "status": "in_progress"}], led) == set(), \
+        "an omitted note is an empty one, and an empty one cites nothing"
+    assert W.misbound_moves(cite(8, "round SM_2026_1010_01020 is in flight"), led) == set(), \
+        "a token that is not the minted shape is prose, not a citation"
+    assert W.misbound_moves(cite(8, f"rounds {OWNED_ROUND} and SM_9 both open"),
+                            led) == {8}, (
+        "one owned citation must not launder a foreign one: the predicate is a subset, "
+        "not an intersection")
+    # The authority is `implement_history`, and #4's ownership is one row: deleting it
+    # takes #4 with the rest of them, which is the accepted cost the function's
+    # docstring names — a round that has written no `backlog_implement` row cannot be
+    # cited without an abstention, whether or not it is real.
+    bare = tmp_path / "bare.jsonl"
+    _led(bare, event="promoted", round_id=OWNED_ROUND, commit="d" * 40, ts=2)
+    assert W.misbound_moves(cite(4, f"round {OWNED_ROUND} is under observation"),
+                            bare) == {4}, (
+        "a `promoted` row alone does not make the round the item's: the map is the one "
+        "the board line reads, so an item absent from it is an item with no rounds")
+
+
+def test_a_mis_bound_move_is_abstained_out_of_disagree_and_out_of_judged(board,
+                                                                        monkeypatch):
+    """Clause 2: the abstention leaves the score's numerator AND its denominator.
+
+    Three moves, one tick, `apply: false` (what ships today). `expected` is the machine
+    the disagreeing tick faced: #7 and #8 both held at `up_next` where they sit, #9 held
+    at `up_next` too.
+
+      #7  proposes `up_next` — agrees.
+      #8  proposes `in_progress` citing #4's round — mis-bound, abstained.
+      #9  proposes `draft` where the machine wants `up_next` — a real disagreement, and
+          the control that keeps clause 2 from being clause 3 in disguise.
+
+    Three numbers, all computed by this one `agreement()` over one `expected`:
+
+      scored WITH a ledger (what ships after this change): `disagree` [9] only,
+        `judged` 2, `rate` 0.5.
+      scored WITHOUT one (what the code did before it): `disagree` [8, 9], `judged` 3,
+        `rate` one third. #3024 sat in that list and in that denominator, and
+        `judgement_aggregate` sums both into the figure that decides the `apply` flip.
+      the same tick with the mis-bound move NEVER SENT: `judged` 2, `rate` 0.5 — equal to
+        the shipped case, which is what "leaving `rate` unchanged by it" means, stated as
+        arithmetic instead of asserted.
+
+    `no_opinion` and `missed` keep it out too: both are built from the surviving moves,
+    so a row cannot be reported as a row the steward failed to address.
+    """
+    from scripts.automod import state as S
+    from scripts.automod import backlog as B
+    from workers import board_disagreement as D
+    from workers.sources import _common as C
+    _ten_item_board(board)
+    led = S.LEDGER_PATH
+    _promotion(led, 4, OWNED_ROUND, "d" * 40, settle=True, base=1)
+    # An unmeasured window, so this tick's disagreement files nothing (#3089's bar):
+    # these nodes score a tick, they do not open an item on the live board.
+    monkeypatch.setattr(D, "window_now",
+                        lambda **kw: _window7(judged=10, agree=10, disagree=0, rate=1.0))
+    expected = {7: ("up_next", "ready: confirmed with an acceptance"),
+                8: ("up_next", "unconfirmed, held"),
+                9: ("up_next", "already in the pool")}
+    current = {7: "up_next", 8: "up_next", 9: "up_next"}
+    monkeypatch.setattr(B, "desired_statuses", lambda *a, **k: dict(expected))
+    moves = [{"item_id": 7, "status": "up_next", "note": "ready, leave it"},
+             {"item_id": 8, "status": "in_progress",
+              "note": f"round {OWNED_ROUND} is under observation; held"},
+             {"item_id": 9, "status": "draft", "note": "umbrella, park it"}]
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": moves, "next_pick": 0, "next_pick_reason": "",
+                               "summary": "one held, one parked, one mis-bound"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "success", out
+    row = [e for e in S.read_events(path=led) if e.get("event") == "board_steward"][-1]
+    agree = row["agreement"]
+
+    assert agree["misbound"] == [8]
+    assert agree["disagree"] == [9], "the mis-bound id is still inside the disagreement"
+    assert agree["judged"] == 2 and agree["rate"] == pytest.approx(0.5)
+    assert 8 not in agree["no_opinion"] and 8 not in agree["missed"], (
+        "the abstention has to reach the two lists built from the surviving moves, or "
+        "the row is still scored, just scored as a gap instead of as a disagreement")
+    assert agree["stale"] == [], "the two abstentions stay separate lists"
+    assert agree["disagree_sides"] == [{"item_id": 9, "status": "up_next",
+                                        "why": "already in the pool"}], (
+        "the machine's half is recorded for the disagreement that remains, and for no "
+        "other id — a side for an abstained row would put it back in the disagreement")
+    assert [m["item_id"] for m in row["moves"]] == [7, 8, 9], (
+        "the ledger event keeps the proposal and the abstention beside it; publishing "
+        "the abstention is the point, so neither half may be dropped")
+    assert "1 mis-bound to another item's round" in out["summary"], out["summary"]
+
+    before = W.agreement(moves, expected, current)
+    assert before["disagree"] == [8, 9] and before["misbound"] == [], \
+        "without a ledger the check cannot run, which is the pre-change score exactly"
+    assert before["judged"] == 3 and before["rate"] == pytest.approx(1 / 3), \
+        "#3024's own arithmetic: 3 judged, one third, on a move that was never about it"
+    assert agree["rate"] > before["rate"], (
+        "abstaining the row must RAISE the rate, since the pre-change code was "
+        "depressing it with a decision nobody made about this item")
+
+    never_sent = W.agreement([m for m in moves if m["item_id"] != 8], expected, current,
+                             ledger=led)
+    assert (never_sent["judged"], never_sent["rate"]) == (agree["judged"], agree["rate"]), \
+        "the tick must score exactly as it would have with the mis-bound move absent"
+
+
+def test_a_genuine_policy_disagreement_still_counts_after_the_mis_bound_abstention(
+        board, monkeypatch):
+    """Clause 3: the abstention is narrow, and a real disagreement still costs the rate.
+
+    Same board, same machine, one tick with the mis-bound move REMOVED and the genuine
+    one kept — #9 proposed `draft` where `desired_statuses` holds `up_next`. It lands in
+    `disagree`, it is in `judged`, and `rate` is 0.0 against the 1.0 of the tick that
+    proposed only its agreeing move. Those two numbers in the same node are what clause 3
+    claims: an abstention that also swallowed a policy disagreement would keep `judged`
+    at 1 and `rate` at 1.0 here, and the whole instrument would quietly stop measuring
+    the thing it exists to measure.
+    """
+    from scripts.automod import state as S
+    from scripts.automod import backlog as B
+    from workers import board_disagreement as D
+    _ten_item_board(board)
+    _promotion(S.LEDGER_PATH, 4, OWNED_ROUND, "d" * 40, settle=True, base=1)
+    monkeypatch.setattr(D, "window_now",
+                        lambda **kw: _window7(judged=10, agree=10, disagree=0, rate=1.0))
+    expected = {7: ("up_next", "ready: confirmed with an acceptance"),
+                9: ("up_next", "already in the pool")}
+    current = {7: "up_next", 9: "up_next"}
+    monkeypatch.setattr(B, "desired_statuses", lambda *a, **k: dict(expected))
+
+    policy = W.agreement([{"item_id": 9, "status": "draft", "note": "umbrella, park it"}],
+                         expected, current, ledger=S.LEDGER_PATH)
+    only_agreement = W.agreement([{"item_id": 7, "status": "up_next",
+                                   "note": "ready, leave it"}],
+                                 expected, current, ledger=S.LEDGER_PATH)
+
+    assert policy["disagree"] == [9] and policy["agree"] == []
+    assert policy["judged"] == 1, "a policy disagreement that is not counted is clause 3 " \
+                                  "inverted: the instrument would measure nothing"
+    assert policy["misbound"] == [] and policy["stale"] == [], \
+        "nothing about this move cites a round and nothing moved mid-tick"
+    assert policy["rate"] == 0.0 and only_agreement["rate"] == 1.0, (
+        f"a real disagreement must LOWER the rate: {policy['rate']} against "
+        f"{only_agreement['rate']}")
+
+
+def test_the_new_gate_leaves_what_the_round_flag_gate_refuses_alone(board, monkeypatch):
+    """Clause 4: #3547's write gate is not widened, and the two refusals stay named apart.
+
+    `move_contradicts_flag` returns False for `flag == "none"` on purpose, and the reason
+    is a window: a round that has opened but not yet written its `backlog_implement` row
+    reads `none`, so refusing `in_progress` then would stop a legitimate claim. That
+    predicate is not one character different after this round, and this node is the
+    witness on both sides of the seam:
+
+      * the predicate itself, `in_progress` on a `none` item whose note cites a round, and
+        the same move with no note at all — False on both.
+      * the attribution on a real tick: #8's withheld move arrives with `suppressed`
+        EMPTY and `misbound` holding it, which is only true because the flag gate let it
+        through and the citation gate is the sole thing that stopped it. Fold the new
+        refusal into `suppressed` and this node goes red, which is the difference between
+        two gates and one gate pretending to be two.
+    """
+    from scripts.automod import state as S
+    _ten_item_board(board)
+    _promotion(S.LEDGER_PATH, 4, OWNED_ROUND, "d" * 40, settle=True, base=1)
+
+    for note in (f"round {OWNED_ROUND} is in flight", ""):
+        assert W.move_contradicts_flag({"item_id": 8, "status": "in_progress",
+                                        "note": note}, "none") is False, (
+            "the flag gate grew a second condition, which is the widening #3547's "
+            "reason for the `none` arm was written to prevent")
+    assert W.move_contradicts_flag({"item_id": 4, "status": "draft", "note": "park it"},
+                                   "round_in_flight") is True, \
+        "the arm that DOES refuse is still refusing"
+
+    # The attribution on a real `apply: true` tick. #8's flag is `none` — its only
+    # ledger row is #4's promotion, which names no round of #8's — so the flag gate
+    # passes it, `suppressed` is empty, and the sole thing standing between that move
+    # and the front matter is the citation gate. A `suppressed` list holding #8 would
+    # mean the two refusals had been merged into one number.
+    from workers import board_disagreement as D
+    monkeypatch.setattr(D, "window_now",
+                        lambda **kw: _window7(judged=10, agree=10, disagree=0, rate=1.0))
+    _tick_with_moves(board, monkeypatch, [
+        {"item_id": 8, "status": "in_progress",
+         "note": f"round {OWNED_ROUND} is under observation; held"}])
+    row = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "board_steward"][-1]
+
+    assert row["suppressed"] == [], (
+        "the flag gate took the refusal, which is the widening clause 4 forbids")
+    assert row["agreement"]["misbound"] == [8] and row["applied"] == []
+    assert _load(board, 8).status == "up_next"
+
+
+def test_both_abstentions_are_published_in_the_same_block_and_the_same_row(board,
+                                                                          monkeypatch,
+                                                                          tmp_path):
+    """#4080 clause 2, end to end: the two abstentions coexist in one tick.
+
+    #3752's `stale` and #4080's `misbound` are separate predicates — a row can be
+    abstained by one and not the other — so a block carrying both is a claim that the
+    same `agreement()` call published both lists and that the ledger row carried them.
+    A tick with only one of them would still pass if the second list were overwritten
+    by the first, or if the writer picked one key.
+
+    One turn, three moves, `apply: true`, and #10 has a ledger row of its own after the
+    table read:
+
+      #7   proposed `up_next`, the machine wants `up_next` — agrees, and is the only
+           thing left in `judged`, so `rate` is 1.0 over exactly one scored decision.
+      #8   proposed `in_progress` citing round SM_20261010_010203, which #4 owns —
+           mis-bound (#4080), and its front matter is untouched.
+      #10  proposed `up_next` where the machine wants `draft`, and a `backlog_triage`
+           row for it lands DURING the turn, stamped after the table read — stale
+           (#3752), so it leaves `disagree` for the reason it has always left for.
+
+    #8 is mis-bound and NOT stale (it owns no row after the read); #10 is stale and NOT
+    mis-bound (its note cites no round). Neither list may absorb the other's id, and the
+    one thing `missed` does NOT do is lose #10: that list asks whether the steward
+    proposed the status the machine wants, which is a question about the answer, not
+    about the freshness of the table — so it keeps counting the stale row, unchanged by
+    this round, while #8 stays out of it (a move was made about #8, so this tick cannot
+    claim the steward skipped it).
+    """
+    from scripts.automod import backlog as B
+    from scripts.automod import state as S
+    from workers import board_disagreement as D
+    from workers.sources import _common as C
+    _ten_item_board(board)
+    led = S.LEDGER_PATH
+    _promotion(led, 4, OWNED_ROUND, "d" * 40, settle=True, base=1)
+    monkeypatch.setattr(D, "window_now",
+                        lambda **kw: _window7(judged=10, agree=10, disagree=0, rate=1.0))
+    expected = {7: ("up_next", "ready: confirmed with an acceptance"),
+                8: ("up_next", "unconfirmed, held"),
+                10: ("draft", "triage stale (>72h)")}
+    monkeypatch.setattr(B, "desired_statuses", lambda *a, **k: dict(expected))
+    moves = [{"item_id": 7, "status": "up_next", "note": "ready, leave it"},
+             {"item_id": 8, "status": "in_progress",
+              "note": f"round {OWNED_ROUND} is under observation; held"},
+             {"item_id": 10, "status": "up_next", "note": "looks ready to me"}]
+
+    async def turn(prompt, **kw):
+        # #10's ruling lands mid-turn, stamped ahead of the instant the tick read the
+        # table — the row that makes the disagreement stale rather than real.
+        _ev(event="backlog_triage", item_id=10, verdict="confirmed",
+            acceptance="a check exists",
+            created_at=(datetime.now(timezone.utc)
+                        + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": moves, "next_pick": 0, "next_pick_reason": "",
+                               "summary": "one agree, one mis-bound, one stale"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": True})))
+    assert out["status"] == "success", out
+    row = [e for e in S.read_events(path=led) if e.get("event") == "board_steward"][-1]
+    agree = row["agreement"]
+
+    assert agree["stale"] == [10] and agree["misbound"] == [8], agree
+    assert agree["disagree"] == [] and agree["agree"] == [7]
+    assert agree["judged"] == 1 and agree["rate"] == pytest.approx(1.0), \
+        "with both abstentions out, one scored decision is left and it agreed"
+    assert agree["missed"] == [10] and 8 not in agree["missed"], agree
+    assert agree["disagree_sides"] == [], \
+        "no disagreement survived to have a side recorded"
+    # Published once, in one place: the `agreement` block inside the event is the copy
+    # `board_disagreement` sums, and it is where `stale` has always lived. A second,
+    # flat copy of the same list beside `suppressed` was considered and rejected — two
+    # writers of one measurement is the drift this file keeps having to fix.
+    assert row["agreement"]["misbound"] == [8] == out["meta"]["agreement"]["misbound"], (
+        "the event's block and the run meta have to carry the same abstention; the row "
+        "is the copy a later reader sums")
+    assert _load(board, 8).status == "up_next", (
+        "the mis-bound move was written on an applied tick, which is clause 1 undone")
+    assert "1 abstained (the board moved mid-tick)" in out["summary"], out["summary"]
+    assert "1 mis-bound to another item's round" in out["summary"], out["summary"]

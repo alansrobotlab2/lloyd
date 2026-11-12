@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -968,6 +969,64 @@ def split_writable(moves: list[dict], flags: dict[int, str]) -> tuple[list[dict]
     return writable, suppressed
 
 
+#: The shape of a round id as `scripts.automod.state` mints it: `SM_` and a UTC
+#: date-time. A note that names one is making a claim about ONE specific round, and
+#: unlike "the round is stuck" that claim is checkable against the ledger — which is
+#: the whole of #4080: the check is mechanical because the citation is a token, not
+#: because anything about the prose had to be understood.
+_ROUND_CITATION = re.compile(r"SM_\d{8}_\d{6}")
+
+
+def misbound_moves(moves: list[dict], ledger: Path) -> set[int]:
+    """The moves whose own note names a round the item does not own, by item id.
+
+    #4080's row is the case: the tick at 2026-11-12T00:30:46Z proposed
+    `{item_id: 3024, status: in_progress}` with a note citing round
+    `SM_20261111_233110`, and the ledger's own `round_start` and
+    `backlog_implement phase=finished` rows put that round on #4074. That tick's
+    `summary` field says "#4074 held at in_progress on round_in_flight" — the prose
+    reasoned about 4074 and the move was booked on 3024. So this is not the steward
+    disagreeing with the state machine about #3024; it is a move about an item the
+    model never wrote the id of, and #3024 was scored as disagreeing anyway.
+
+    The authority for "owns" is `implement_history`, the same map
+    `unfinished_rounds` reads at :717 to name an item's rounds on the board line:
+    `{item_id: [backlog_implement rows]}`, so a round the item has ever run appears
+    with its `round_id` and a round it has never run does not appear at all. One map,
+    read the same way by the line the steward reasons over and by the gate — two
+    readers of two different ownership rules would eventually disagree about whose
+    round a citation is, and only one of them would be on the write path.
+
+    What the check does NOT do is read the prose for intent. Two consequences are
+    accepted deliberately, and both are published rather than silent:
+
+    * A move with no round id in its note is never caught here, so a steward that
+      says "round is in flight" without naming it keeps its old behaviour. This gate
+      is about a claim specific enough to falsify and nothing else.
+    * `implement_history` is written when the implement TURN starts, so during the
+      window between a round opening and its `backlog_implement` row a citation of
+      that round reads as foreign and the move is abstained. It cannot arise from the
+      board line, which renders a round only for an item `implement_history` names
+      (:716-719 skips an item with no round ids at all), so it needs the model to
+      quote a round out of its event history — and the cost is a withheld write plus
+      one published abstention, which is the conservative direction for a board a
+      person can still rule by hand.
+
+    A `note` the reply never filled in is empty, not missing-proof: `parse_steward`
+    defaults it to "", so an omitted note cites nothing and is not caught.
+    """
+    from scripts.automod import backlog as B
+    owned = {iid: {str(r.get("round_id") or "") for r in (rows or [])
+                   if r.get("round_id")}
+             for iid, rows in B.implement_history(ledger).items()}
+    out: set[int] = set()
+    for m in moves:
+        cited = set(_ROUND_CITATION.findall(str(m.get("note") or "")))
+        if cited and not cited <= owned.get(int(m["item_id"]), set()):
+            out.add(int(m["item_id"]))
+    return out
+
+
 def item_refs(ledger: Path) -> dict[str, int]:
     """Every ref a round-bearing row may name a round by → the item it belongs to.
 
@@ -1363,6 +1422,14 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     either absent the counts are exactly what they were before the guard, which
     is what every existing caller and test depends on.
 
+    `ledger` carries a SECOND job, and it needs no instant to do it: #4080's
+    mis-bound check reads `implement_history` from that same file to find a move
+    whose note cites a round the move's own item has never run, and abstains it into
+    `misbound` (see `misbound_moves`). It is gated on `ledger` alone, so a caller
+    that passes no ledger scores exactly as it did before this check existed — which
+    is why every existing node in `tests/test_board_steward.py` that calls this with
+    no ledger is unaffected.
+
     `expected` is `desired_statuses(...)`: `{item_id: (status, why[, needs_human])}`
     for every item the machine has an opinion about. Three counts, kept
     separate because they mean different things: moves that agree, moves the
@@ -1379,6 +1446,20 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     `test_the_recorded_side_is_not_rendered_into_the_prompt_or_the_board_line` is what
     holds the record to it now that this block carries the answer at all.
     """
+    # #4080: a move whose own note names a round its item has never run is not a
+    # judgement about that item, so it is abstained BEFORE any list is built — unlike
+    # `stale` below, which can only ever remove a disagreement. The distinction is
+    # what the two abstentions do to `agree`: a stale id scored against a board that
+    # has since moved, so its agreement is still the steward's own answer and stays
+    # credited; a mis-bound move was never about this item, so crediting or blaming it
+    # here would book a decision the model did not make about this row. `judged` loses
+    # it too, which is the point: #4080's row sat in `disagree` AND in `judged` and
+    # moved the instrument that decides the `apply` flip (judged >= 50 AND
+    # rate >= 0.90) on a move that could not have been written at all.
+    misbound = sorted(misbound_moves(moves, ledger)) if ledger is not None else []
+    mb = set(misbound)
+    if mb:
+        moves = [m for m in moves if int(m["item_id"]) not in mb]
     proposed = {m["item_id"]: m["status"] for m in moves}
     agree = [i for i, s in proposed.items() if i in expected and expected[i][0] == s]
     # Two different things the first dry-run counted as one. `disagree` is
@@ -1427,12 +1508,18 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
                        "why": str(expected[i][1]) if len(expected[i]) > 1 else ""}
                       for i in sorted(disagree)]
     no_opinion = [i for i, s in proposed.items() if i not in expected]
+    # A mis-bound id is out of `missed` as well as out of `disagree`: the steward DID
+    # address the item, with a move it wrote for a different row, and "the steward
+    # never proposed for it" is a claim this tick cannot make. `machine_moves` keeps
+    # counting it, because that number describes the board and not the answer.
     missed = [i for i, want in expected.items()
-              if current.get(i) != want[0] and proposed.get(i) != want[0]]
+              if current.get(i) != want[0] and proposed.get(i) != want[0]
+              and i not in mb]
     machine_moves = [i for i, want in expected.items() if current.get(i) != want[0]]
     # Rate over the decisions BOTH sides made: the machine's pending moves and
     # the steward's moves on items the machine has an opinion about.
-    judged = (set(machine_moves) | {i for i in proposed if i in expected}) - set(stale)
+    judged = ((set(machine_moves) | {i for i in proposed if i in expected})
+              - set(stale) - mb)
     # No rate over an empty judged set (#1688). It used to read 1.0, and 76 of
     # 93 live ticks judged nothing, so the record the `apply` flip is judged
     # from read "agreement 100%" four ticks in five. `judged` is the count the
@@ -1448,6 +1535,13 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
             # tell an abstention from a steward that stopped disagreeing, so the
             # count rides in the same block the aggregate reads.
             "stale": stale,
+            # #4080: the second abstention, published on the same terms and in the same
+            # block, because it has the same job — a reader of the aggregate has to be
+            # able to tell a disagreement that was ruled away from one that was never
+            # scored. It also names the moves the write gate refused for a reason the
+            # `suppressed` list does not carry: those were refused by `round_flag`,
+            # these by a citation of someone else's round.
+            "misbound": misbound,
             # beside the id lists, so the machine's half of a disagreement reaches the
             # `board_steward` event and `meta_json` with the tick's own numbers (#3677)
             "disagree_sides": disagree_sides,
@@ -1652,6 +1746,16 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # suppressed move stays in the tick's disagreement exactly as proposed.
     flags = {i.id: round_flag(round_state.get(i.id)) for i in shown}
     writable, suppressed = split_writable(parsed["moves"], flags)
+    # #4080: the second gate on the write, and it reads the SAME measurement the score
+    # just used rather than re-deriving the ownership rule next door — a second reader
+    # of `implement_history` on the write path would be free to disagree with the one
+    # on the score path, and the two would have to be reconciled by an incident. So the
+    # id is abstained by `agreement` and this line only declines to write what the score
+    # already refused to count. `agree["misbound"]` is empty whenever no ledger reached
+    # `agreement`, and `execute` always passes one, so the two can never drift.
+    misbound = set(agree["misbound"])
+    if misbound:
+        writable = [m for m in writable if int(m["item_id"]) not in misbound]
 
     applied: list[dict] = []
     if apply:
@@ -1731,7 +1835,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # way into `runs.summary` with 77 of 154 rows already stopping at exactly 500.
     abstained = (f", {len(agree['stale'])} abstained (the board moved mid-tick)"
                  if agree["stale"] else "")
-    counts = (f"{len(parsed['moves'])} move(s) {verb}{refused}{abstained}, agreement "
+    # #4080's abstention, on the same terms as the one above: only on the tick where it
+    # happened, and worded so it cannot be read as the `round_flag` refusal beside it —
+    # that one is an item whose own round is open, this one is a move whose note cites
+    # somebody else's round, and the board's reader has to tell them apart.
+    misbound_said = (f", {len(agree['misbound'])} mis-bound to another item's round"
+                     if agree["misbound"] else "")
+    counts = (f"{len(parsed['moves'])} move(s) {verb}{refused}{abstained}"
+              f"{misbound_said}, agreement "
               f"{rate} ({len(agree['agree'])} agree, "
               f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
               f"where the machine abstains, {len(agree['missed'])} missed); "
