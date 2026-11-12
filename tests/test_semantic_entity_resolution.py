@@ -817,18 +817,54 @@ def test_skill_states_the_measured_pool_limit_and_timeout():
         assert stale not in text, f"skill still carries {stale!r}"
 
 
+def test_the_slice_recipe_rates_are_dated_in_their_own_section():
+    """#4079: the date belongs where the rates are quoted, not merely somewhere.
+
+    The node above searches the whole file, so it goes red only when NO
+    `Measured 20dd-dd-dd` survives anywhere in it. That is what caught #4064's
+    spill (vault dcd902193): it moved the 2026-09-26 census and the three dated
+    s/pair rows into `measured-history.md`, and after it the whole-file search
+    found nothing at all. But the property it removed from the body was narrower
+    than the property that node checks — the slice recipe divides by ~0.5 s/pair
+    idle, 1.4-2.3 at light load and 7-11 under saturation, and after the spill
+    those three figures sat in §Bound the slice by seconds of the task window
+    with no date beside them. A future spill that keeps one dated sentence
+    elsewhere and strips the section's would keep the node above green and
+    re-undate the rates, which is the rot #1560 named: "the next reader cannot
+    tell a current figure from a stale one". So pin it at the section, which is
+    where #4079 restored it.
+    """
+    assert VAULT_SKILL.exists(), (
+        f"{VAULT_SKILL} is absent; #4079 is a claim about that file")
+    text = VAULT_SKILL.read_text(encoding="utf-8")
+    heading = "### Bound the slice by seconds of the task window"
+    assert heading in text, (
+        "the throughput section was renamed or moved, so the date pinned here has "
+        "no home and the rates are quoted somewhere else now")
+    section = re.split(r"\n#{2,3} ", text.split(heading, 1)[1], 1)[0]
+    for rate in ("~0.5", "1.4-2.3", "7-11"):
+        assert rate in section, (
+            f"{rate} s/pair is no longer quoted in the section that carries its "
+            "measurement date, so this node no longer covers it")
+    assert re.search(r"Measured 20\d\d-\d\d-\d\d", section), (
+        "the per-pair rates are quoted with no measurement date in their own "
+        "section, so a reader cannot tell a current rate from a stale one (#4079)")
+
+
 def test_the_skill_contract_tests_are_never_excluded_from_the_run():
     """#1569 clause 2: green had to come from the fix, not from stepping around it.
 
     These tests read `~/obsidian` directly, so they are the one place a live
     claim about the skill gets checked. They are NOT excluded by the gate's
-    marker today — collected 58 equals selected 58 for this file — and that is
-    what this pins: if a future red is answered by marking a node `live_vault`,
-    the run goes green with the contract never read. So: no skip/xfail marker on
-    any of these nodes, and none marked `live_vault`.
+    marker today — collected 80 equals selected 80 for this file, measured on
+    #4079's base 0cf01ac9 — and that is what this pins: if a future red is
+    answered by marking a node `live_vault`, the run goes green with the contract
+    never read. So: no skip/xfail marker on any of these nodes, and none marked
+    `live_vault`.
     """
     src = Path(__file__).read_text(encoding="utf-8")
     for name in ("test_skill_states_the_measured_pool_limit_and_timeout",
+                 "test_the_slice_recipe_rates_are_dated_in_their_own_section",
                  "test_skill_says_propose_only_and_drops_the_shrinking_pool_claim",
                  "test_skill_says_the_dated_files_are_per_date_not_per_invocation"):
         m = re.search(r"((?:@[^\n]*\n)*)def " + name, src)
