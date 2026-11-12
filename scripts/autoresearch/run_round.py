@@ -1669,7 +1669,7 @@ async def run(
     for t in traces:
         task_by_id = {tk.get("id"): tk for tk in tasks}
         task = task_by_id.get(t["task_id"]) or {}
-        score = judge_trace(task, t, rubric_model=model, rubric_mode=rubric_mode)
+        score = await asyncio.to_thread(judge_trace, task, t, rubric_model=model, rubric_mode=rubric_mode)
         scored_traces.append({**t, "_task": task, "_score": score})
         trial_row = trial_ledger_row(rid, t, score)
         trial_rows.append(trial_row)
@@ -1788,7 +1788,7 @@ async def run(
     # Second-pass judge + promotion on the winner
     promotion_result: dict[str, Any] | None = None
     if best_variant and best_summary and best_overlay:
-        promotion_result = promote(cfg, best_variant, best_overlay, best_summary, baseline_summary, dry_run=dry_run)
+        promotion_result = await _off_loop(promote, cfg, best_variant, best_overlay, best_summary, baseline_summary, dry_run=dry_run)
 
     # #1099, Alan's sign-off on #429's out-of-scope clause: a beyond-noise decline is
     # no longer only reported, it undoes the promotion that caused it — through
@@ -1796,7 +1796,7 @@ async def run(
     # uses, refuses any canonical file that changed after the promotion landed, and
     # never restores one promotion twice. Nothing here waits for a human; nothing here
     # copies a prompt file by hand. A `--dry-run` round never restores either.
-    restore_outcome = None if deadline_stopped else auto_restore.restore_for_decline(
+    restore_outcome = None if deadline_stopped else await _off_loop(auto_restore.restore_for_decline,
         cfg, rid, comparison, prior_promotion, dry_run=dry_run,
     )
 
@@ -2127,7 +2127,37 @@ def main() -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+async def _off_loop(fn, *args, **kwargs):
+    """`fn(*args, **kwargs)` on a worker thread; a cancellation waits for it to end.
+
+    `run` executes on the backend's event loop (`workers/sources/autoresearch.py`),
+    and `promote` / `restore_for_decline` can reach `vault_round.land`, whose guard
+    probe runs a pytest suite for up to `vault_guards.PROBE_BUDGET_CEILING_S`
+    (900 s). Called inline they froze the whole backend for that long — /health,
+    chat, Mission Control — which is what py-spy caught on 2026-11-12: MainThread in
+    `vault_guards._run_selection`'s `communicate()` under `restore_for_decline`.
+
+    A thread cannot be stopped, so when the pool's `wait_for` cancels this
+    coroutine the call is allowed to finish before the cancellation goes on: the
+    job keeps its slot until the promotion or rollback it started has landed or
+    refused, exactly as when the frozen loop could not deliver the timeout at all.
+    """
+    fut = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        while not fut.done():
+            try:
+                await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                continue
+            except Exception:  # noqa: BLE001 — its outcome is moot; we are cancelled
+                break
+        raise
+
+
 if __name__ == "__main__":
     # Support: `python -m scripts.autoresearch.run_round` from /home/alansrobotlab/lloyd
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     main()
+

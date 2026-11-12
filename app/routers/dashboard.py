@@ -962,8 +962,8 @@ def _backlog() -> dict[str, Any]:
     # `test_a_scan_slower_than_its_ttl_is_still_fresh_when_it_lands` pin the two
     # halves of that with a health half slower than the walk's TTL, which reddens
     # on the old order without any stopwatch.
-    health = _cached("backlog_health", _SCORECARD_TTL_S,
-                     lambda: _backlog_health(backlog_dir))
+    health = _cached_swr("backlog_health", _SCORECARD_TTL_S,
+                         lambda: _backlog_health(backlog_dir))
     out = _cached("backlog", _VAULT_SCAN_TTL_S, _scan)
     return {**out, "health": health}
 
@@ -1013,7 +1013,7 @@ def _automod() -> dict[str, Any]:
                 "current": {"round_id": current.get("round_id"), "state": current.get("state")},
                 "halted": bool(S.is_halted()), "broken": bool(S.is_broken())}
 
-    out = dict(_cached("automod", _SCORECARD_TTL_S, _scan))
+    out = dict(_cached_swr("automod", _SCORECARD_TTL_S, _scan))
     out["pending_restart"] = _pending_restart()
     return out
 
@@ -1230,3 +1230,63 @@ def _backlog_health(backlog_dir) -> dict[str, Any] | None:  # noqa: F811
         return board_health_offload.run(S.LEDGER_PATH, backlog_dir)
     except Exception:
         return None
+
+
+# ── Stale-while-revalidate for the slow 60 s halves ─────────────────────────
+#
+# `_cached` recomputes on the request that finds the entry expired, and every
+# section is awaited before the response goes out, so the slowest expired entry
+# sets the whole page's render time. On 2026-11-12 `board_health` measured
+# 13.99 s per call (4,026 item files, 26.2 MB ledger) and a cold `scorecard.
+# compute` 5.76 s, both on `_SCORECARD_TTL_S`. Opening the page after it had
+# not been polled for a minute — first visit, or a tab coming back from hidden,
+# which stops the poll — always landed on that path: "Loading dashboard…" for
+# ~14 s. With the page open, one poll a minute stalled the same way.
+#
+# `_cached_swr` serves an expired entry as it is and recomputes it on a
+# background thread, one refresh per key at a time; the next poll after the
+# refresh lands gets the new value. An EMPTY entry still computes inline, as
+# `_cached` does: a backend that just booted has nothing to serve, and the cold
+# tests in `tests/test_dashboard_cold_render.py` time exactly that path. A
+# refresh only writes back over the entry it was started from, so a cache
+# cleared (or recomputed inline) meanwhile is never overwritten by an older
+# scan. Appended here rather than beside `_cached` to keep the line anchors
+# other docs cite into this module where they are; the call sites look the
+# name up at call time.
+
+import threading as _threading
+
+_refreshing: set[str] = set()
+_refreshing_lock = _threading.Lock()
+
+
+def _cached_swr(key: str, ttl: float, fn) -> Any:
+    """`_cached`, except an expired entry is served stale and refreshed off-request."""
+    hit = _cache.get(key)
+    if hit is None:
+        return _cached(key, ttl, fn)
+    if time.monotonic() - hit[0] >= ttl:
+        _refresh_in_background(key, hit, fn)
+    return hit[1]
+
+
+def _refresh_in_background(key: str, hit: tuple[float, Any], fn) -> bool:
+    """Start one refresh of `key` unless one is already running. True if started."""
+    with _refreshing_lock:
+        if key in _refreshing:
+            return False
+        _refreshing.add(key)
+
+    def _run() -> None:
+        try:
+            value = fn()
+            if _cache.get(key) is hit:
+                _cache[key] = (time.monotonic(), value)
+        except Exception as exc:  # noqa: BLE001 — the stale value stays served
+            logger.warning("dashboard refresh of %r failed: %s", key, exc)
+        finally:
+            with _refreshing_lock:
+                _refreshing.discard(key)
+
+    _threading.Thread(target=_run, name=f"dashboard-refresh-{key}", daemon=True).start()
+    return True

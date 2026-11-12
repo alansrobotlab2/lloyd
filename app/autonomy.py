@@ -1473,12 +1473,12 @@ def _newest_run_record(task_id, *, want_status: Optional[str] = None,
         return "", None, ""
     newest = None
     for path in paths:
-        try:
-            parts = path.read_text(encoding="utf-8").split("---\n", 2)
-            if len(parts) < 2:
-                continue
-            fm = yaml.safe_load(parts[1])
-        except (OSError, ValueError, yaml.YAMLError):
+        # One parse per record per (mtime_ns, size), through libyaml — the read
+        # rule and the skipped errors are unchanged, inside `_run_record_fm` at
+        # the end of this module. 2026-11-12: ~1,000 records re-parsed with the
+        # pure-Python loader on every pass cost the dashboard ~2 s per 10 s.
+        fm = _run_record_fm(path)
+        if fm is None:
             continue
         if not isinstance(fm, dict) or not isinstance(fm.get("status"), str):
             continue
@@ -6245,3 +6245,50 @@ def _id_from_filename(task: dict, path: Path) -> dict:
         "`scripts/autonomy/validate_tasks.py` does not see the task in its id map.",
         path.name, task["id"])
     return task
+
+
+# ── Run-record front matter, memoised ───────────────────────────────────────
+#
+# `_newest_run_record` walks every `run_*.md` of a task, and `hold_reason` asks
+# it for every task on every dashboard pass (`_VAULT_SCAN_TTL_S`, 10 s) and every
+# dispatch tick. Profiled 2026-11-12: 1,002 records across 42 tasks, 4.4 s of a
+# 4.9 s `_autonomy` pass in `yaml.safe_load` — the pure-Python loader, and no
+# cache, though a record is written once and never again. Kept per path on
+# (mtime_ns, size), signature taken BEFORE the read (`app.frontmatter.FM_MEMO`
+# explains that order), parsed with libyaml where it is built. The read rule is
+# the one `_newest_run_record` always had — an unanchored split on "---\n" — so
+# no record changes verdict; None means "skip it", exactly the old `continue`s.
+
+try:
+    _RunRecordLoader = yaml.CSafeLoader  # type: ignore[attr-defined]
+except AttributeError:  # pragma: no cover
+    _RunRecordLoader = yaml.SafeLoader
+
+_RUN_RECORD_MEMO: dict[str, tuple[tuple[int, int], object]] = {}
+_RUN_RECORD_MEMO_MAX = 50_000
+
+
+def _run_record_fm(path):
+    """The parsed front matter of one run record, or None when it must be skipped."""
+    key = str(path)
+    try:
+        st = os.stat(path)
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None
+    if sig is not None:
+        hit = _RUN_RECORD_MEMO.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    try:
+        parts = path.read_text(encoding="utf-8").split("---\n", 2)
+        if len(parts) < 2:
+            return None
+        fm = yaml.load(parts[1], Loader=_RunRecordLoader)
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    if sig is not None:
+        if len(_RUN_RECORD_MEMO) >= _RUN_RECORD_MEMO_MAX:
+            _RUN_RECORD_MEMO.clear()
+        _RUN_RECORD_MEMO[key] = (sig, fm)
+    return fm
