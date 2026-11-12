@@ -1713,15 +1713,85 @@ sees it.
 on the number is deliberately nothing. `claim_next` is one path shared by every source
 — `owed-check`, `session-distill`, `board-steward`, `bench-mine`, `autocode` — and a
 `scheduled-task` row is the only kind whose task file declares a period it could be
-late against, while `frequency` lives in vault front matter the queue has no code to
-read. Dropping is a ruling waiting on two measurements: how many rows a period bound
-would have killed, and whether `sources/scheduled_task.enqueue_if_due` re-enqueues a
-dropped row whose task is still due — if it does not, a drop loses a nightly and is
-worse than a late run. Re-stamping `enqueued_at` at claim is ruled out and stays ruled
-out: that column is the input to the priority-aging credit #2496 exists to provide and
-to the starving-queue wait #102's watchdog alarm reads, so rewriting it at claim would
-erase the evidence of the very hold that made the row late and hand a day-old row the
-freshness of a new one.
+late against, while `frequency` lives in vault front matter `WorkQueue` has no code to
+read; the resolver that does read it, `app/autonomy._frequency_interval_seconds`, sits
+one layer up beside the due-ness gate. **Whether to drop a row that has blown its
+period is settled, and the answer is no.** The owed-check ruling of 2026-11-11
+(2026-11-11T23:34:59Z, artifact `20261111_152708_owedcheck_e0e9`, settling #4035 — the
+round whose owed entry filed this paragraph's rewrite as #4077) reads *do not drop a
+stale scheduled-task row at claim*: publish-only, commit `afbfc76d`, the field with no
+predicate on it, is settled, and neither a period-bound drop nor a claim-time skip is to
+be built. Re-stamping `enqueued_at` at claim is ruled out and stays ruled out: that
+column is the input to the priority-aging credit #2496 exists to provide and to the
+starving-queue wait #102's watchdog alarm reads, so rewriting it at claim would erase
+the evidence of the very hold that made the row late and hand a day-old row the
+freshness of a new one. What follows is what the no-drop ruling was measured on, kept
+here so the question is not filed a fourth time.
+
+**The two counts, each with the bound that produces it.** Over the 30 days
+`2026-10-12`..`2026-11-11`, **4 of 1,150** claimed `scheduled-task` rows were taken
+more than 24 h (86,400 s) after they were enqueued, the worst by **26 h 49 m** —
+96,557 s, task #30. **5 of 1,150** were claimed later than their task's own declared
+period — the uniform bound misses that row and the declared-period one catches it. The
+fifth is queue row 13508: task #24 at 7 h 03 m (25,437 s) against the period its
+`runs_per_day: 6` declares, and from a separate starvation day (2026-10-21) rather than
+the hold recorded below. The two figures differ by exactly that one row, so neither may
+be quoted without the bound that produced it. Both arms come off `workers.db`:
+
+```sql
+WITH st AS (SELECT id, json_extract(payload_json,'$.task_id') tid,
+            CAST((julianday(claimed_at)-julianday(enqueued_at))*86400 AS INTEGER) age_s
+       FROM queue
+      WHERE source='scheduled-task' AND claimed_at IS NOT NULL
+        AND date(enqueued_at) BETWEEN '2026-10-12' AND '2026-11-11')
+SELECT count(*), sum(age_s > 86400), max(age_s) FROM st;   -- 1150 | 4 | 96557
+```
+
+The declared-period arm is the same `age_s` compared row by row against each task's own
+period: `86400 / runs_per_day` where the task file declares one, otherwise the
+`frequency` word resolved by `_frequency_interval_seconds` — `runs_per_day` first,
+which is why #24's period is 4 h and not the 24 h its `frequency: 6x-daily` could be
+read as. No `weekly` row in the window reaches 86,400 s, so the uniform bound neither
+over- nor under-counts the weekly tasks and only #24 separates the two arms. The `CAST`
+truncates, so a row at exactly 24 h reads as under the bound; no row in the window sits
+closer than 437 s to that line (nearest below #109 at 85,963 s, nearest above #38 at
+87,736 s), so the boundary is not what decides the count. **1,150 is a retention
+horizon, not a standing population**: the groundskeeper deletes terminal `queue` rows
+past `QUEUE_MAX_AGE_DAYS = 30`, so the readable window is always "the last 30 days" and
+both figures are a dated reading of a rolling window, never a standing rate. All five
+rows are `state=completed, attempts=1, error=''` with no `not_before` — starvation
+behind a held pool, not deferral and not a retry. `runs.meta_json` cannot answer this
+question at all: measured 2026-11-11 it carries `queue_age_seconds` on 104 of 13,980 run
+rows, every one stamped at or after 2026-11-11T16:07:44Z — so the queue table is the
+only instrument, and "count it over >=7 days of run metadata" is a question that should
+not be asked again.
+
+**A drop would suppress nothing except the evidence.** `scheduled_task.enqueue_if_due`
+runs on this source's 60 s sweep (`interval_seconds: 60`, on a scheduler loop whose own
+tick is 60 s as well), keyed on `dedup_key = scheduled-task:<id>`. `WorkQueue.enqueue`
+coalesces only against a live row — `queued`, `claimed`, `running` — a terminal holder's
+key is nulled to admit the new row and `mark_completed` releases it too, and due-ness is
+computed from `last_run`, which dropping a row never writes. So the 60 s sweep
+re-enqueues a still-due task within the minute, and the drop's entire effect is that the
+replacement row carries a fresh `enqueued_at` and publishes age ~0: the re-stamp this
+paragraph ruled out above, reached by another route with the hold evidence destroyed.
+Nothing is saved, because the run was going to happen anyway.
+
+The one place a drop does bite is the place it looks harmless. `preferred_hours` is an
+enqueue gate — `_is_task_due` refuses a windowed task outside its window before a row
+ever exists — so past a closed window nothing re-enqueues at all, and the only
+authorisation to run then is the #2552 lost-occurrence grant, `window_catch_up_row`,
+whose record only a witnessed global block can write. Drop a row whose window has shut
+and the occurrence is gone unless the #2552 ledger already carries a grant for it. That
+is the loss mode, and for this exact population it is not hypothetical: three of the
+four rows over 24 h belong to tasks with a real one-hour window (#30 at hour 20, #38 and
+#79 at hour 22) and only #24 declares none.
+
+**Revisit trigger.** The ruling is bounded to that population, not eternal. It reopens
+above **~5 % of scheduled-task rows past their period over 30 days** — the reading above
+is 0.35 % on the 24 h bound and 0.43 % on the declared one — or on a measured dead input
+reaching a dependent chain. If a bound is ever built it is a claim-time skip that
+*records* the skip; never a silent drop.
 
 The incident that asked for the field is the `person` hold of 2026-11-10T03:59:26Z →
 2026-11-11T06:23:09Z. Rows enqueued while the pool was held stayed `queued` and were

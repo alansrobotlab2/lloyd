@@ -8772,3 +8772,318 @@ def _decorator_docstring(name: str, src: str) -> str:
     doc = ast.get_docstring(fn)
     assert doc, f"{name} lost the docstring that describes the dispatch keys"
     return doc
+
+
+# ---------------------------------------------------------------------------
+# The drop question is closed: #4035's ruling, its numbers, and its bounds (#4077)
+# ---------------------------------------------------------------------------
+
+#: Prose the dispatch-age section may not use about the drop question now that #4035's
+#: owed-check ruling settled it. `waiting on` is the wording #4077 was filed against: a
+#: paragraph that still says the decision awaits a measurement is a paragraph every
+#: later reader re-files, which is how one question reached its fourth filing.
+_DROP_QUESTION_LIES = ("waiting on", "awaiting", "still open", "yet to be decided")
+
+#: What §"A `scheduled-task` row says how old it was" must state about the drop
+#: question, as (what it owes, [phrases]). Each key is one of the clauses #4077 was
+#: accepted on, so a paraphrase that quietly loses one fails under that clause's own
+#: name rather than as an unexplained substring.
+_DROP_RULING_CLAUSES: dict[str, tuple[str, ...]] = {
+    "the ruling, as a ruling": ("do not drop a stale scheduled-task row at claim",),
+    "the date and artifact it was ruled on": (
+        "2026-11-11", "20261111_152708_owedcheck_e0e9"),
+    "that publish-only is the settled state": ("publish-only", "afbfc76d"),
+    "the count on the 24 h bound": ("4 of 1,150",),
+    "the count on the declared-period bound": ("5 of 1,150",),
+    "the worst row, with its task": ("26 h 49 m", "96,557 s", "task #30"),
+    "the SQL that re-derives both arms": (
+        "julianday(claimed_at)", "julianday(enqueued_at)", "source='scheduled-task'",
+        "claimed_at IS NOT NULL"),
+    "where a declared period comes from": (
+        "_frequency_interval_seconds", "runs_per_day"),
+    "that 1,150 is a retention horizon, not a rate": (
+        "QUEUE_MAX_AGE_DAYS", "rolling window"),
+    "that a drop is no suppression": (
+        "60 s sweep", "re-enqueues a still-due task", "mark_completed", "age ~0"),
+    "the closed-window loss mode": ("enqueue gate", "#2552", "window_catch_up_row"),
+    "the revisit trigger": (
+        "~5", "0.35", "0.43", "records the skip", "never a silent drop"),
+}
+
+#: The four rows #4077 measured as claimed more than 24 h after enqueue, as
+#: `(task_id, age at claim)`, with the fifth row that is past its OWN period but inside
+#: 24 h, and the four near-misses. Ages are the live readings (queue 22231, 22235,
+#: 22236, 22234 and 13508) so the fixture's shape is the population the SQL was run
+#: over rather than an invention.
+_LATE_ROWS_24H = ((30, 96557), (79, 90974), (24, 88212), (38, 87736))
+_PAST_PERIOD_ONLY = ((24, 25437),)
+_NEAR_MISS_ROWS = ((109, 85963), (97, 80659), (101, 80651), (100, 80639))
+
+#: Each of those tasks' schedule as its front matter declares it. Fed to the
+#: scheduler's own resolver instead of being hand-mapped to seconds, because
+#: "`runs_per_day` first, else `frequency`" is precisely the rule that makes #24's
+#: period 4 h and not 24 h, and a hand-map would be assuming the conclusion.
+_LATE_ROW_SCHEDULES = {
+    30: {"frequency": "daily"},
+    79: {"frequency": "daily"},
+    38: {"frequency": "daily"},
+    24: {"frequency": "6x-daily", "runs_per_day": 6},
+    109: {"frequency": "daily"},
+    97: {"frequency": "daily"},
+    101: {"frequency": "daily"},
+    100: {"frequency": "daily"},
+}
+
+
+def _queue_age_db(rows: list[tuple[int, int]]):
+    """An in-memory `queue` holding `(task_id, age_seconds)` at production stamps.
+
+    The stamps are the ISO-with-offset shape `workers.db` actually stores, so the SQL
+    the document publishes is graded against the format a reader pastes it into.
+    """
+    import sqlite3
+    from datetime import timedelta
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE queue (id INTEGER PRIMARY KEY, source TEXT, kind TEXT,"
+        " payload_json TEXT, dedup_key TEXT, state TEXT, enqueued_at TEXT,"
+        " claimed_at TEXT)")
+    base = datetime(2026, 10, 20, 0, 0, 0, tzinfo=timezone.utc)
+    for tid, age in rows:
+        conn.execute(
+            "INSERT INTO queue (source, kind, payload_json, state, enqueued_at,"
+            " claimed_at) VALUES ('scheduled-task', 'task', ?, 'completed', ?, ?)",
+            (json.dumps({"task_id": tid}),
+             base.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+             (base + timedelta(seconds=age)).strftime("%Y-%m-%dT%H:%M:%S+00:00")))
+    conn.commit()
+    return conn
+
+
+def test_the_drop_ruling_is_recorded_as_settled_with_both_arms_rederivable():
+    """§dispatch age reports #4035's no-drop ruling, and its numbers survive a re-run.
+
+    The owed-check ruling of 2026-11-11 settled that a stale `scheduled-task` row is NOT
+    dropped at claim. #4077 exists because the paragraph still said the decision was
+    waiting on two measurements — the shape that gets a settled question filed again —
+    and because its headline figure was about to be written down attached to the wrong
+    bound. So this grades three things the code cannot say for itself:
+
+    * that the paragraph reports a dated decision, not an open question. Hence
+      ``_DROP_QUESTION_LIES``: "still awaiting data" reads green to every other check.
+    * that each count travels with the bound that produces it. The two arms differ by
+      exactly one row — #24 at 7 h 03 m against the 4 h period its ``runs_per_day: 6``
+      declares — so "4 … past their declared period" is false by one row while looking
+      entirely plausible. The sentence-level check is what forbids it, and the fixture
+      below demonstrates the one-row gap rather than asserting it.
+    * that the published SQL still computes the published figures. Those figures are a
+      dated reading of a 30-day rolling window (the groundskeeper prunes terminal
+      ``queue`` rows at ``QUEUE_MAX_AGE_DAYS = 30``), so no node here may open the live
+      ``workers.db`` and freeze them — this file's standing rule against pinned run
+      counts. What IS checkable pre-landing is the arithmetic: the fixture rebuilds the
+      documented population (four late rows, the declared-period-only row, four
+      near-misses, 1,141 ordinary rows) plus one unclaimed row, one non-`scheduled-task`
+      row and one out-of-window row, each older than every late row, and runs the
+      paragraph's own fenced SQL over it. Drop any of the three filters from that SQL
+      and the total or the arm count moves at once.
+
+    What no pre-landing node can check is named on #4077 as owed, not as met: whether
+    the live window still reads 4 and 5 once thirty more days of traffic have passed.
+    """
+    from app.autonomy import FREQUENCY_INTERVALS, _frequency_interval_seconds
+
+    raw = _queue_age_section()
+    # `**` is emphasis in the doc and noise in a phrase match; the SQL fence is taken
+    # from `raw` because `count(*)` is the one place a stripped asterisk would matter.
+    section = _flat(raw).replace("*", "")
+
+    def missing(text: str) -> list[str]:
+        return [what for what, phrases in _DROP_RULING_CLAUSES.items()
+                if any(p not in text for p in phrases)]
+
+    def lies(text: str) -> list[str]:
+        return [lie for lie in _DROP_QUESTION_LIES if lie in text]
+
+    def bound_errors(text: str) -> list[str]:
+        """Every way the two counts can be present but mis-bound."""
+        out: list[str] = []
+        counts = re.findall(r"(\d+) of 1,150", text)
+        if counts != ["4", "5"]:
+            out.append(f"the two arms must appear as `4 of 1,150` then `5 of 1,150`; "
+                       f"found {counts}")
+        for sentence in re.split(r"(?<=[.!?]) +", text):
+            if "declared period" in sentence:
+                attached = re.findall(r"(\d+) of 1,150", sentence)
+                if attached and attached != ["5"]:
+                    out.append(f"a count other than 5 sits in the sentence about the "
+                               f"declared period: {attached} — {sentence[:140]}")
+        arm_a = [s for s in re.split(r"(?<=[.!?]) +", text) if "4 of 1,150" in s]
+        if arm_a and not ("24 h" in arm_a[0] and "86,400" in arm_a[0]):
+            out.append("the 24 h-bound count does not name its bound in the same "
+                       f"sentence, so a later reader can only re-attach it: {arm_a[0][:140]}")
+        return out
+
+    assert missing(section) == [], "; ".join(missing(section))
+    assert lies(section) == [], (
+        f"the paragraph still words the drop question as unsettled: {lies(section)}")
+    assert bound_errors(section) == [], "; ".join(bound_errors(section))
+
+    # --- the published SQL, run -------------------------------------------
+    fence = re.search(r"```sql\n(.*?)\n```", raw, re.S)
+    assert fence, (
+        "the paragraph publishes its counts but no longer publishes the SQL that "
+        "re-derives them, which is the half that keeps a dated figure from rotting")
+    sql = fence.group(1)
+    stated = re.search(r"--\s*(\d[\d,]*)\s*\|\s*(\d+)\s*\|\s*(\d+)", sql)
+    assert stated, (
+        "the published SQL carries no `-- total | arm | max` row, so nothing shows it "
+        "was ever run rather than written")
+    stated_total, stated_arm, stated_max = (int(g.replace(",", ""))
+                                            for g in stated.groups())
+    assert (stated_total, stated_arm, stated_max) == (1150, 4, 96557), (
+        f"the SQL's own comment says {stated.groups()}, which is not the pair the "
+        "paragraph states in prose (4 of 1,150; max 96,557 s)")
+
+    population = (list(_LATE_ROWS_24H) + list(_PAST_PERIOD_ONLY)
+                  + list(_NEAR_MISS_ROWS)
+                  + [(30, (i % 900) + 1) for i in range(1141)])
+    assert len(population) == 1150, (
+        f"the fixture holds {len(population)} claimable rows, not the 1,150 the "
+        "paragraph publishes — it is no longer the population that figure describes")
+    conn = _queue_age_db(population)
+    for smuggled in (
+        # Each of these is older than every late row and must still be excluded, so
+        # each of the paragraph's three filters has something to lose.
+        ("session-distill", '{"task_id": 30}', "completed",
+         "2026-10-20T00:00:00+00:00", "2026-10-23T00:00:00+00:00"),
+        ("scheduled-task", '{"task_id": 30}', "queued",
+         "2026-10-20T00:00:00+00:00", None),
+        ("scheduled-task", '{"task_id": 30}', "completed",
+         "2026-09-01T00:00:00+00:00", "2026-09-05T00:00:00+00:00"),
+    ):
+        conn.execute(
+            "INSERT INTO queue (source, kind, payload_json, state, enqueued_at,"
+            " claimed_at) VALUES (?, 'task', ?, ?, ?, ?)", smuggled)
+
+    total, arm_a, worst = conn.execute(sql).fetchone()
+    assert (total, arm_a) == (stated_total, stated_arm), (
+        f"the paragraph's SQL run over the population it describes returns "
+        f"{total} rows / {arm_a} past 24 h, not the published "
+        f"{stated_total} / {stated_arm}")
+    # julianday is a float and `CAST` truncates, so a 96,557 s age can read 96,556;
+    # that is the paragraph's own sentence about the boundary, not a bug here.
+    assert abs(worst - stated_max) <= 1, (
+        f"the published maximum is {stated_max} s but the SQL's max over that "
+        f"population is {worst} s — more than julianday's truncation explains")
+
+    for label, mutated in (
+        ("the `source` filter", sql.replace("WHERE source='scheduled-task' AND", "WHERE")),
+        ("the `claimed_at IS NOT NULL` filter",
+         sql.replace("AND claimed_at IS NOT NULL", "")),
+        # The predicate only, not the rest of the line: the closing `)` of the CTE sits
+        # on the same line, and taking it too produces a syntax error, not a wider count.
+        ("the dated window",
+         re.sub(r"AND date\(enqueued_at\) BETWEEN '[^']*' AND '[^']*'", "", sql)),
+    ):
+        assert mutated != sql, f"the control for {label} removed nothing and proved nothing"
+        m_total, m_arm, _ = conn.execute(mutated).fetchone()
+        assert (m_total, m_arm) != (stated_total, stated_arm), (
+            f"removing {label} left the published figures intact, so the fixture never "
+            "tested it and the counts are not the filtered ones the paragraph claims")
+
+    # --- the declared-period arm, taken from the scheduler's own resolver ----
+    assert FREQUENCY_INTERVALS["daily"] == 86400
+    assert _frequency_interval_seconds({"frequency": "6x-daily", "runs_per_day": 6}) == 14400.0, (
+        "#24's period is no longer 4 h, so the one-row gap between the paragraph's two "
+        "arms has moved and its wording needs re-reading")
+    past_period = [tid for tid, age in population
+                   if age > _frequency_interval_seconds(_LATE_ROW_SCHEDULES[tid])]
+    assert len(past_period) == 5 and past_period.count(24) == 2, (
+        f"the declared-period arm over the documented population is "
+        f"{sorted(past_period)}, not the five rows (the four late ones plus #24 at "
+        "7 h 03 m) that make the paragraph's `5 of 1,150`")
+    assert 109 not in past_period, (
+        "#109's 85,963 s row now counts as past its period, so the near-miss the "
+        "paragraph cites as the closest row under the bound is inside it")
+    # The trap in one line: `6x-daily` is NOT a key of FREQUENCY_INTERVALS — only
+    # `runs_per_day` gives #24 a period at all — so a reader who maps every unrecognised
+    # frequency to a day gets 4 and calls it the declared-period arm. That is the exact
+    # one-row error #4077 exists to keep out of the doc.
+    naive = [tid for tid, age in population
+             if age > (FREQUENCY_INTERVALS.get(_LATE_ROW_SCHEDULES[tid]["frequency"])
+                       or 86400.0)]
+    assert len(naive) == 4, (
+        f"a hand-map that reads an unrecognised frequency as a day gives {len(naive)} "
+        "past-period rows, not 4, so this fixture no longer demonstrates the one-row "
+        "error the paragraph's wording forbids")
+    assert sorted(past_period) != sorted(naive), (
+        "the resolver arm and the hand-map arm now agree, so the paragraph's two "
+        "figures are no longer two different measurements")
+
+    edge = _queue_age_db([(30, 86395), (30, 86405)])
+    edge_total, edge_arm, _ = edge.execute(sql).fetchone()
+    assert (edge_total, edge_arm) == (2, 1), (
+        f"`sum(age_s > 86400)` over a 86,395 s row and a 86,405 s row gave "
+        f"{edge_arm} of {edge_total}, so 'more than 24 h' is not what the SQL computes")
+
+    # --- the mechanisms the paragraph leans on, still in the code -----------
+    sweep = (ROOT / "scripts" / "groundskeeper" / "retention-sweep.py").read_text()
+    horizon = re.search(r"^QUEUE_MAX_AGE_DAYS = (\d+)$", sweep, re.M)
+    assert horizon and horizon.group(1) == "30", (
+        "the paragraph calls 1,150 a 30-day retention horizon, but the sweep's "
+        f"QUEUE_MAX_AGE_DAYS is {horizon.group(1) if horizon else 'absent'}")
+    assert "QUEUE_MAX_AGE_DAYS = 30" in section, (
+        "the paragraph names the horizon without its value, which is the form a reader "
+        "cannot check against the sweep")
+
+    cfg = (ROOT / "config.yaml").read_text().splitlines()
+    start = cfg.index("    scheduled-task:")
+    assert any(re.match(r"^\s+interval_seconds: 60$", ln) for ln in cfg[start:start + 12]), (
+        "the paragraph's 'no suppression' argument is that the sweep re-enqueues within "
+        "a minute; `scheduled-task` no longer declares `interval_seconds: 60`")
+    pool = (ROOT / "workers" / "pool.py").read_text()
+    loop_body = pool.split("async def _scheduler_loop", 1)[1].split("\n    async def ", 1)[0]
+    assert re.search(r"^\s+interval = 60$", loop_body, re.M), (
+        "the scheduler loop's own tick is no longer 60 s, which bounds how fast a "
+        "re-enqueue can arrive whatever the source's interval says")
+    q = (ROOT / "workers" / "queue.py").read_text()
+    assert 'if existing["state"] in ("queued", "claimed", "running"):' in q, (
+        "`enqueue` no longer coalesces only against live rows, so a dropped row could "
+        "be suppressed by its own terminal predecessor — the paragraph's central claim")
+    assert "UPDATE queue SET dedup_key = NULL WHERE id = ?" in q, (
+        "a terminal row no longer releases its dedup key on insert, so the re-enqueue "
+        "the paragraph promises would coalesce into nothing")
+    assert "SET state='completed', completed_at=?, error=NULL, dedup_key=NULL WHERE id=?" in q, (
+        "`mark_completed` no longer releases the dedup key either")
+    assert ("(source, kind, priority, payload_json, dedup_key, state, enqueued_at)" in q
+            and "(source, kind, priority, payload_json, dedup_key, _now_iso())" in q), (
+        "an insert no longer stamps its own `enqueued_at` from the clock, which is the "
+        "half of the argument that makes a drop the re-stamp this section rules out")
+    aut = (ROOT / "app" / "autonomy.py").read_text()
+    assert "def window_catch_up_row(" in aut, (
+        "the #2552 grant the paragraph makes the sole authorisation past a closed "
+        "window is gone, so a drop past a window is a plain loss")
+    due_body = aut.split("def _is_task_due", 1)[1].split("\ndef ", 1)[0]
+    assert "_is_preferred_hour(task)" in due_body, (
+        "`preferred_hours` is no longer an enqueue gate, so the loss mode the "
+        "paragraph singles out is no longer the loss mode")
+
+    # --- false-green controls ----------------------------------------------
+    for what, phrases in _DROP_RULING_CLAUSES.items():
+        rewritten = section.replace(phrases[0], "the number")
+        assert phrases[0] not in rewritten, (
+            f"the control for {what} removed nothing, so it proved nothing")
+        assert missing(rewritten), f"a paragraph that dropped {what} still passed"
+
+    reopened = section.replace(
+        "do not drop a stale scheduled-task row at claim",
+        "a ruling waiting on two measurements")
+    assert reopened != section, "the control rewrote a sentence that is no longer there"
+    assert lies(reopened), (
+        "a paragraph that put the question back into the open still passed")
+
+    mis_bound = section.replace("5 of 1,150", "4 of 1,150")
+    assert bound_errors(mis_bound), (
+        "attaching the figure 4 to the declared period — the one-row error #4077 was "
+        "filed to prevent — passed the bounds check")
