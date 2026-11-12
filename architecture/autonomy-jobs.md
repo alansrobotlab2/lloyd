@@ -232,7 +232,7 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:2912` in that module, pinned by
+  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:3112` in that module, pinned by
   `tests/test_worker_evidence.py`) — 7 of the 23 jobs that write durable state
   unattended. #53 Documentation Digester joined on 2026-10-09 (#2482), the first
   widening since #902 scoped the pilot to the reflection chain: that job's run of
@@ -589,7 +589,7 @@ sessions it wrote into one dated JSONL per day. #81 QMD Index Maintenance is hel
 out by that same ruling: what it would claim is the qmd embedding index's own
 state, which none of the four check kinds can read —
 `EVIDENCE_PILOT_TASK_IDS = frozenset({24, 38, 39, 40, 42, 53, 56})`
-(`app/autonomy.py:2912`, not inside the verifier's own file, and pinned there by
+(`app/autonomy.py:3112`, not inside the verifier's own file, and pinned there by
 `tests/test_worker_evidence.py:686`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this

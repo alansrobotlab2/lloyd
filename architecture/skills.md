@@ -365,10 +365,10 @@ a deliver in both registration orders.
 ### 4. Autonomy, by name
 
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
-`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:2832`) resolves a
+`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:3032`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
 a slug (see below); the body is pasted into the task prompt
-under "Follow the skill instructions below" (`:2863`).
+under "Follow the skill instructions below" (`:3077`).
 
 A task with neither is unrunnable, and says so once per task id rather than
 silently dead-lettering (`:2549-2559`). `hold_reason` reports it as `"no skill"`

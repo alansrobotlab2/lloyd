@@ -1395,3 +1395,58 @@ def test_a_hold_that_names_its_clock_beats_the_completed_cycle_claim(
         "waiting on #38 (inside its 36 h stale_bypass window: "
         "#38 ran 27.5 h ago)"), "the completed-cycle claim overrode a real hold"
     assert due(aut, b[42], owed, now) is False
+
+
+# ── #4088 clause 4: an improved upstream must not loosen the #1296 guard ─────
+#
+# #4088 releases the in-period refusal when the UPSTREAM improved after the
+# dependent's newest success. Clause 4 is the other half of that sentence, and it
+# is the half a re-drive implementation most easily breaks: in a HEALTHY chain the
+# producer finished BEFORE the consumer, so the guard must keep refusing exactly
+# as it did. The instant below is the live 2026-09-28 chain measured for #1739 —
+# #38 at 05:05:31Z, #42's record `run_42_20260928_050613` at 05:13:15Z, probed at
+# 09:32Z — with #38 declaring an `output_artifact` that IS on disk, so the only
+# thing standing between this dependent and a re-dispatch is the ORDER of the two
+# completions. Delete that order test and this one goes red; delete the artifact
+# and it would pass for the wrong reason.
+
+def test_an_upstream_that_ran_before_its_dependent_still_cannot_re_drive_it(
+        aut, monkeypatch, tmp_path, caplog):
+    """#4088 clause 4. The #1296 duplicate-dispatch guard still refuses."""
+    caplog.set_level("INFO", logger="lloyd-autonomy")
+    art = tmp_path / "signals-latest.md"
+    art.write_text("x" * 4096)
+    board = [task(38, hours=NIGHT, last=Z(28, 5, 5, 31),
+                  output_artifact=str(art)),
+             task(42, hours=NIGHT, dep=38, last=RUNS_COMPLETED_0928[42][1],
+                  stale_bypass_hours=36)]
+    b = by_id(board)
+    _record(aut, 38, "run_38_20260928_050531", Z(28, 5, 5, 31))
+    _record(aut, 42, RUNS_COMPLETED_0928[42][0], RUNS_COMPLETED_0928[42][1])
+    now = at(aut, monkeypatch, PROBE_0928)
+
+    # Positive controls: the guard is REACHED and the artifact condition of the
+    # re-drive is satisfied, so the refusal below is the order and nothing else.
+    assert aut._already_ran_this_period(b[42], now=now) == (
+        RUNS_COMPLETED_0928[42][0])
+    assert aut._upstream_artifact_on_disk(b[38], Z(28, 5, 5, 31), now) == str(art)
+    assert aut._upstream_output_fresh(b[42], b[38], Z(28, 5, 5, 31), now) is True
+
+    assert aut._consumer_redrive(b[42], board, now) is None, (
+        "#38 finished 7m44s BEFORE #42 — a healthy cycle is not a recovery")
+    assert due(aut, b[42], board, now) is False
+    assert reason(aut, b[42], board, now) == aut.RUN_SUCCESS_HOLD
+
+    # The reverted-stamp shape, which is #1296 itself: the dependent's FILE says
+    # it ran yesterday, so the stamp comparison can no longer answer, and what
+    # stands between this dispatch and a second one 27 s after the first is the
+    # comparison of the two RUN RECORDS. #38's success is still the older one.
+    b[42]["last_run"] = Z(27, 5, 0).isoformat()
+    assert aut._already_ran_this_period(b[42], now=now) == (
+        RUNS_COMPLETED_0928[42][0])
+    assert aut._consumer_redrive(b[42], board, now) is None, (
+        "the reverted stamp must not turn a healthy upstream into an improved one")
+    assert due(aut, b[42], board, now) is False
+    assert reason(aut, b[42], board, now) == aut.RUN_SUCCESS_HOLD
+
+    assert [r.getMessage() for r in caplog.records if "RE-DRIVEN" in r.getMessage()] == []

@@ -2002,6 +2002,47 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
     return _dependency_refusal(task, all_tasks, now=now, _seen=_seen) is None
 
 
+def _upstream_output_fresh(task: dict, dep_task: dict,
+                           dep_last_run: datetime.datetime,
+                           now: datetime.datetime) -> bool:
+    """Is the upstream's last run the input THIS cycle's dependent should consume?
+
+    THE FRESHNESS RULE, one definition for the dependency gate and for the #4088
+    consumer re-drive, because the two ask the same question of the same file: is
+    this the artifact the dependent is waiting for, or is it last cycle's?
+
+    The dependency must have completed within the current scheduling cycle (half
+    this task's interval), not just "since my last run". Without this, yesterday's
+    upstream run satisfies the gate and the nightly pipelines settle into a stable
+    inverted order where downstream tasks always consume day-old upstream
+    artifacts (observed June 2026: reflection ran 39→38/40→42, trajectory ran 57
+    before 56).
+
+    `or 86400.0` is defensive only. Both production callers of the dependency gate
+    exclude a None interval before reaching here — `_is_task_due` returns False
+    (and warns once) and `hold_reason` returns "no frequency" — so a task whose
+    frequency is outside FREQUENCY_INTERVALS meets this line only by a direct
+    call, where it is judged against a day's 12 h half-window rather than crashing
+    (#815; tests/test_autonomy_dependency_fail_closed.py pins it).
+    `_consumer_redrive` is the one caller that can arrive with no interval at all,
+    and it is answered the same way.
+
+    WINDOWS FIRST (#1437 Defect B). When both tasks declare a window and the
+    dependent runs daily or slower, freshness is a fact of the two windows, not of
+    an hour count: `_window_dependency_fresh` asks whether the upstream still owes
+    a run before the dependent's current window closes. `interval / 2` straddled
+    the window whenever the dependent's opened before its upstream's — safe in the
+    healthy chain needed a bound over 21.9 h, releasing after a slip needed one
+    under 21.0 h — so no `stale_bypass_hours` could serve both. The bypass stays an
+    explicit override in the caller; the ordinary chain no longer needs it.
+    """
+    interval = _frequency_interval_seconds(task) or 86400.0
+    fresh = _window_dependency_fresh(task, dep_task, dep_last_run, now)
+    if fresh is None:
+        fresh = (now - dep_last_run).total_seconds() <= interval / 2
+    return fresh
+
+
 def _dependency_refusal(task: dict, all_tasks: list[dict], *,
                         now: Optional[datetime.datetime] = None,
                         _seen: frozenset = frozenset(),
@@ -2092,32 +2133,11 @@ def _dependency_refusal(task: dict, all_tasks: list[dict], *,
         # Never succeeded — still eligible for a stale bypass.
         return _bypass_decision(task, dep_task, None, now, all_tasks, _seen,
                                 _explain)
-    # Freshness gate: the dependency must have completed within the current
-    # scheduling cycle (half this task's interval), not just "since my last
-    # run". Without this, yesterday's upstream run satisfies the gate and the
-    # nightly pipelines settle into a stable inverted order where downstream
-    # tasks always consume day-old upstream artifacts (observed June 2026:
-    # reflection ran 39→38/40→42, trajectory ran 57 before 56).
-    # `or 86400.0` is defensive only. Both production callers exclude a None
-    # interval before reaching this gate — `_is_task_due` returns False (and
-    # warns once) and `hold_reason` returns "no frequency" — so a task whose
-    # frequency is outside FREQUENCY_INTERVALS meets this line only by a direct
-    # call, where it is judged against a day's 12 h half-window rather than
-    # crashing (#815; tests/test_autonomy_dependency_fail_closed.py pins it).
-    #
-    # WINDOWS FIRST (#1437 Defect B). When both tasks declare a window and the
-    # dependent runs daily or slower, freshness is a fact of the two windows,
-    # not of an hour count: `_window_dependency_fresh` asks whether the
-    # upstream still owes a run before the dependent's current window closes.
-    # `interval / 2` straddled the window whenever the dependent's opened
-    # before its upstream's — safe in the healthy chain needed a bound over
-    # 21.9 h, releasing after a slip needed one under 21.0 h — so no
-    # `stale_bypass_hours` could serve both. The bypass stays an explicit
-    # override below; the ordinary chain no longer needs it.
-    interval = _frequency_interval_seconds(task) or 86400.0
-    fresh = _window_dependency_fresh(task, dep_task, dep_last_run, now)
-    if fresh is None:
-        fresh = (now - dep_last_run).total_seconds() <= interval / 2
+    # Freshness gate: is THIS cycle's upstream output on hand? The rule and its
+    # whole history moved verbatim into `_upstream_output_fresh`, so the #4088
+    # consumer re-drive is bounded by the same sentence and not by a second copy
+    # of it that could drift.
+    fresh = _upstream_output_fresh(task, dep_task, dep_last_run, now)
     if not fresh:
         # Not fresh: this cycle's input is not on hand, so the only question left
         # is the owner's — has the upstream gone longer without a success than the
@@ -2547,6 +2567,160 @@ def _resolve_catch_up(task: dict, now: datetime.datetime, injected):
     return window_catch_up_row(task, now=now)
 
 
+# ── A period re-opened by an improved upstream (#4088) ──────────────────────
+# A chain link that REFUSES its input still records a success and still stamps
+# `last_run`, so both of this module's independent refusals — the elapsed gate on
+# the stamp and `_already_ran_this_period` on the run record — then hold it for the
+# rest of its period. That is correct for a link that consumed the cycle and wrong
+# for one that consumed nothing, and nothing in the scheduler can tell the two
+# apart from the record: on 2026-11-11 #42 died at 06:23Z, #39 refused the
+# incomplete handoff at 06:44:29Z (`run_39_20261111_064429.md`, `status: success`,
+# `stop_reason: stop`, over a note headed "Verdict: handoff REFUSED"), #42's retry
+# completed the SAME handoff at 12:49:46Z — 10 min 14 s before #39's 13:00Z window
+# closed — and #39 never ran again. The 40,189-byte recovered artifact was read by nobody: the
+# next cycle's #39 consumed the fresh 11-12 handoff and the orphan stayed on disk.
+#
+# `_cap_out_gap` does not cover it either: it is reached only from the
+# `stop_reason == "max_turns"` branch, so a refusal that stopped normally never
+# consulted #39's own `artifact_complete_marker`, never incremented
+# `failure_count`, and armed no cooldown, retry or auto-disable. The recovery half
+# of the chain had no owner, and the drop was silent — `grep -ac "inside this
+# task's period"` across three rotated logs is 0, 0, 0, because the elapsed gate
+# returns False with no message at all.
+
+#: Re-drive traces already emitted, keyed on (dependent, upstream, upstream run
+#: id) — which is exactly the identity of "one re-drive per upstream success", so
+#: a dispatch that keeps answering `due` for the same improved artifact (the pool
+#: held, a queue row pending) is one line and not 1,440 a day. One key per
+#: (dependent, upstream) is kept: the newest upstream success replaces its own
+#: predecessor's entry, so the ledger cannot grow with uptime.
+_redrive_traced: dict = {}
+
+#: `_is_task_due` asks the re-drive question at the first gate that refuses and
+#: carries the answer to the second, because both refusals are keyed on the same
+#: success. `None` is an answer; this is "not asked yet" — the same distinction
+#: `_CATCH_UP_UNSET` exists for (#870).
+_REDIVE_UNASKED = object()
+
+
+def _consumer_redrive(task: dict, all_tasks: list[dict],
+                      now: datetime.datetime) -> Optional[dict]:
+    """May this task re-enter a period its own last success already closed?
+
+    None when the period stays closed; a trace dict naming the upstream, the
+    upstream's improved run id and the artifact when it may not. The state this
+    exists for is #4088's: a producer that died, a consumer that refused the
+    incomplete artifact and recorded success doing so, then a producer that
+    recovered the SAME artifact inside the consumer's own window.
+
+    Four conditions, in the order that costs least:
+
+    * the task has a `depends_on` whose task file answers it and DECLARES an
+      `output_artifact`. A producer that declares no artifact hands its consumer
+      nothing to re-consume, so its recovery is not a reason to re-run one.
+    * that upstream's completion stamp is newer than this task's own. A
+      front-matter read and no disk, and every tick of every healthy chain fails
+      it — in a healthy chain the producer finished BEFORE the consumer.
+    * the upstream's newest SUCCESS run record is newer than this task's newest
+      success. The run records are the authority here, not the stamps: a stamp a
+      vault sweep reverted is the #1296 failure, and a verdict keyed on it would
+      inherit that corruption. This is also the whole of the "one re-drive per
+      upstream success" bound — the moment the re-driven run records its own
+      success, this task's newest success is the newer one and the answer is None
+      forever after, however many ticks read the unchanged upstream record.
+    * the artifact is on disk (`_upstream_artifact_on_disk`, the same reader the
+      fail-forward bypass uses) AND the upstream's success is inside the freshness
+      rule the dependency gate already applies (`_upstream_output_fresh`: the two
+      windows, else `interval / 2`). An upstream success older than that bound is
+      next cycle's input, not this cycle's, and re-driving on it would dispatch a
+      consumer onto an artifact the gate itself has called stale.
+
+    Read-only, and called only where a gate is about to refuse a dispatch, so the
+    two run-record walks and the one stat are paid by an anomaly, never by a
+    healthy tick. The returned dict is the subject of the single log line
+    `_trace_consumer_redrive` emits; it carries no authority of its own.
+    """
+    dep_id = task.get("depends_on")
+    if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
+        return None
+    dep_id = str(dep_id).strip()
+    dep_task = None
+    for t in all_tasks:
+        if str(t.get("id", "")).strip() == dep_id:
+            dep_task = t
+            break
+    if not dep_task or not str(dep_task.get("output_artifact") or "").strip():
+        return None
+    dep_stamp = _parse_iso(dep_task.get("last_run"))
+    my_stamp = _parse_iso(task.get("last_run"))
+    if not dep_stamp or not my_stamp or dep_stamp <= my_stamp:
+        return None
+    dep_success, dep_run_id = newest_successful_run(dep_id)
+    if dep_success is None:
+        return None
+    my_success, _mine = newest_successful_run(task.get("id"))
+    if my_success is not None and dep_success <= my_success:
+        return None
+    if not _upstream_output_fresh(task, dep_task, dep_success, now):
+        return None
+    artifact = _upstream_artifact_on_disk(dep_task, dep_success, now)
+    if not artifact:
+        return None
+    return {"upstream_id": dep_id,
+            "upstream_run_id": dep_run_id,
+            "upstream_success": dep_success,
+            "dependent_success": my_success,
+            "artifact": artifact}
+
+
+def _run_record_hold(task: dict, all_tasks: list[dict], *,
+                     now: datetime.datetime) -> bool:
+    """Is the #1296 run-record hold standing, or has an improved upstream lifted it?
+
+    `hold_reason` and `_is_task_due` answer this of one predicate (#870), so the
+    board cannot print "already ran this period" for a dispatch the scheduler is
+    about to make. The re-drive is asked only after the run record actually
+    refuses, which is the only place it can matter.
+    """
+    if not _already_ran_this_period(task, now=now):
+        return False
+    return _consumer_redrive(task, all_tasks, now) is None
+
+
+def _trace_consumer_redrive(task: dict, trace: dict) -> None:
+    """The one durable line saying a closed period was re-opened (#4088).
+
+    Before this the drop left nothing: the elapsed gate returns False silently and
+    the #1296 INFO line fires only for a task everything else already called due,
+    so a cycle lost to an orphaned artifact looked exactly like a night with
+    nothing to do. The line names all three things a reader needs to reconstruct
+    the incident — which link re-entered its period, WHICH upstream run improved,
+    and the artifact it is now going to consume — because "the recovery was read by
+    nobody" is only fixable by someone who can see the recovery happened.
+
+    Deduplicated on the upstream run id for the reason every other ledger in this
+    module exists: the scheduler re-answers this every 60 s tick, and a line that
+    prints 1,440 times a day is read by nobody.
+    """
+    key = (str(task.get("id", "")), str(trace["upstream_id"]),
+           str(trace["upstream_run_id"]))
+    for stale in [k for k in _redrive_traced if k[:2] == key[:2] and k != key]:
+        _redrive_traced.pop(stale)
+    if _redrive_traced.get(key):
+        return
+    _redrive_traced[key] = True
+    logger.info(
+        "Task #%s (%s): RE-DRIVEN inside its own period — upstream #%s improved "
+        "after this task's newest success (%s) with run %s completed %s, and its "
+        "declared output_artifact %s is on disk inside the freshness rule. The "
+        "in-period refusal is released once per upstream success (#4088).",
+        task.get("id"), task.get("name"), trace["upstream_id"],
+        trace["dependent_success"].isoformat() if trace["dependent_success"]
+        else "never",
+        trace["upstream_run_id"], trace["upstream_success"].isoformat(),
+        trace["artifact"])
+
+
 def _is_task_due(task: dict, all_tasks: list[dict], *,
                  now: Optional[datetime.datetime] = None,
                  window_catch_up=_CATCH_UP_UNSET) -> bool:
@@ -2587,6 +2761,12 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
                 sorted(FREQUENCY_INTERVALS))
         return False
     last_run = _parse_iso(task.get("last_run"))
+    # `_REDIVE_UNASKED` until a gate actually refuses. Both refusals below are
+    # keyed on the same last success, so the #4088 question is asked once and
+    # applies to both: releasing one and not the other is a release that still
+    # refuses the dispatch, which is what this item's jointly-worded clauses are
+    # about (the elapsed gate alone was the 2026-11-11 blocker, silent).
+    redrive = _REDIVE_UNASKED
     if last_run:
         # last_run is a COMPLETION time, so due-time drifts later by the run's
         # own duration every cycle. For a task pinned to a one-hour window that
@@ -2596,7 +2776,15 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
         # belonged to, so one out-of-window run cannot cost it the next window
         # (#1437 Defect B, `_elapsed_due_at`).
         if now < _elapsed_due_at(task, last_run):
-            return False
+            # The one thing that re-opens a period this task's own run already
+            # satisfied is its upstream producing something NEW after that run
+            # (#4088). Nothing else gets a vote, and the refusal stays exactly as
+            # silent as it has always been for every task the predicate answers
+            # None — which is every tick of every healthy chain, where the
+            # producer finished before the consumer.
+            redrive = _consumer_redrive(task, all_tasks, now)
+            if redrive is None:
+                return False
     # The infra ceiling (#1085), ABOVE the retry cooldown on purpose: a task
     # that just crossed it is inside both, and the cooldown would win the
     # explanation while being the weaker claim — 600 s against a whole period.
@@ -2640,11 +2828,18 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
     # refuses to run (#1296, and the #870/#558 pair this file keeps citing).
     ran_id = _already_ran_this_period(task, now=now)
     if ran_id:
-        logger.info(
-            "Task #%s (%s): not due — run record %s reports `status: success` "
-            "inside this task's period, whatever `last_run` (%r) says",
-            task.get("id"), task.get("name"), ran_id, task.get("last_run"))
-        return False
+        if redrive is _REDIVE_UNASKED:
+            # The elapsed gate passed, so this arm is the refusal and it is keyed
+            # on the same success the elapsed gate would have been asked about.
+            redrive = _consumer_redrive(task, all_tasks, now)
+        if redrive is None:
+            logger.info(
+                "Task #%s (%s): not due — run record %s reports `status: success` "
+                "inside this task's period, whatever `last_run` (%r) says",
+                task.get("id"), task.get("name"), ran_id, task.get("last_run"))
+            return False
+    if redrive is not _REDIVE_UNASKED and redrive is not None:
+        _trace_consumer_redrive(task, redrive)
     return True
 
 
@@ -2755,16 +2950,17 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
         # `run_39_20260928_080049`, `run_40_20260928_090013`) and the board, the
         # dashboard and the stall path all printed `waiting on #38` / `#42` / `#39`
         # for them — the identical string a link gated by a dead upstream prints,
-        # and the sentence #1737 was filed from. `_already_ran_this_period` is the
-        # only predicate in this function that reads the second, independent
-        # account, so for an undescribed hold it is asked here rather than after.
+        # and the sentence #1737 was filed from. `_run_record_hold` — that
+        # #1296 account, less a #4088 re-drive — is the only predicate in this
+        # function that reads the second, independent account, so for an
+        # undescribed hold it is asked here rather than after.
         # A refusal that DOES describe its clock is untouched: a dependent that
         # ran while its upstream still owes the cycle, inside its declared bound,
         # is genuinely waiting, and naming the clock is the point (#1538).
         # `_is_task_due`'s order does NOT move with this — there the run-record
         # scan is last because it is the only gate that pays a disk read and
         # dispatch is not served by a better sentence (#1296).
-        if not refusal and _already_ran_this_period(task, now=now):
+        if not refusal and _run_record_hold(task, all_tasks, now=now):
             return RUN_SUCCESS_HOLD
         return (f"waiting on #{task.get('depends_on')}"
                 + (f" ({refusal})" if refusal else ""))
@@ -2779,12 +2975,16 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
         # Authorised: fall THROUGH to the run-record gate below, exactly as
         # `_is_task_due` does. Returning None here would paint green a dispatch
         # the run-record gate is about to refuse, and that pairing is #1296.
-    # Same helper, same position in the order, so the board never paints green a
-    # dispatch the scheduler is refusing. This is the state a reverted stamp
-    # leaves behind: `last_run` a day stale, the window open, and the run record
-    # saying the job already ran — which a person has to be able to SEE, or it
-    # reads as a scheduler that silently skipped a night (#1296).
-    if _already_ran_this_period(task, now=now):
+    # Same predicate, same position in the order, so the board never paints green
+    # a dispatch the scheduler is refusing — nor refuses one it is making. This is
+    # the state a reverted stamp leaves behind: `last_run` a day stale, the window
+    # open, and the run record saying the job already ran — which a person has to
+    # be able to SEE, or it reads as a scheduler that silently skipped a night
+    # (#1296). `_run_record_hold` is `_already_ran_this_period` minus the #4088
+    # lift, so a board that still says `already ran this period` over an improved
+    # upstream would be the #870 disagreement all over again, one tick before
+    # dispatch consumed the artifact the board claimed was already consumed.
+    if _run_record_hold(task, all_tasks, now=now):
         return RUN_SUCCESS_HOLD
     return None
 
