@@ -1983,11 +1983,14 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 27, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 28, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "27 unbounded-growth stores" in text, (
-        "the skill's description states a store count other than 22")
-    assert "27 in all" in text, "the skill's body states a store count other than 27"
+    # "28 stores", not "28 unbounded-growth stores": the 28th store is held by ruling and
+    # measured, so the skill's description bounds 27 of the 28 and a phrase that said
+    # otherwise would be a count paid for with a falsehood (#4060).
+    assert "28 stores" in text, (
+        "the skill's description states a store count other than 28")
+    assert "28 in all" in text, "the skill's body states a store count other than 28"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2176,7 +2179,14 @@ def test_the_table_guard_refuses_a_row_short_and_a_row_long(rs, _store_report):
 #: the first is what the worker is told the sweep bounds, the second is the
 #: instruction it obeys when it writes its report.
 _STORE_CLAIM_PATTERNS = (
-    re.compile(r"(\w+) stores are bounded"),
+    # "are bounded" OR "are reported", because #4060 added a store the sweep does NOT
+    # bound: `~/.local/state/lloyd-automod/rounds/` is held by a ruling and only
+    # measured, so a task whose description said "28 stores are bounded" would be false
+    # prose graded by a guard that only ever wanted the COUNT. Widening the verb costs the
+    # guard nothing it was checking — it still demands a stated count and still compares
+    # that count to the lines the sweep prints — and refusing to widen it would have
+    # pushed a wrong word into the operator's own procedure.
+    re.compile(r"(\w+) stores are (?:bounded|reported)"),
     re.compile(r"Report all\s+(\w+) lines"),
 )
 #: The literal that opens the hand-written enumeration, and the word that closes it.
@@ -2213,6 +2223,11 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # file saying "27 unbounded-growth stores" is graded against the 27 lines the sweep
                       # prints rather than raising `unrecognised store-count numeral`.
                       "27": 27,
+                      # #4060 added the twenty-eighth store (the HELD `rounds/` store, which
+                      # the sweep reports and does not bound), so a vault file saying
+                      # "28 unbounded-growth stores" is graded against the 28 lines the sweep
+                      # prints rather than raising `unrecognised store-count numeral`.
+                      "28": 28,
                       "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
@@ -2268,12 +2283,14 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    # #3499 added the twenty-fifth store line (the dated semantic-* recordings) and #3789
-    # the twenty-sixth (the guard-refusal journal under `safety/`), so the census this guard
-    # compares prose against moved from 24 to 25 to 26.
-    assert len(_store_report) == 27, (
-        f"the sweep prints {len(_store_report)} store lines, not the 27 its report "
-        f"has had since #3951 added the kg index residue store: {_store_report}")
+    # #3499 added the twenty-fifth store line (the dated semantic-* recordings), #3789 the
+    # twenty-sixth (the guard-refusal journal under `safety/`), #3951 the twenty-seventh (the
+    # kg index residue) and #4060 the twenty-eighth (the HELD `rounds/` store, which is a
+    # line the sweep reports and never bounds), so the census this guard compares prose
+    # against moved from 24 to 25 to 26 to 27 to 28.
+    assert len(_store_report) == 28, (
+        f"the sweep prints {len(_store_report)} store lines, not the 28 its report "
+        f"has had since #4060 added the held rounds store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2323,7 +2340,12 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
                                                   # #3951 store 27: its line ends in the
                                                   # dry-run parenthetical or a bracketed
                                                   # name list, never a freed word.
-                                                  "kg index residue",
+                                                  # #4060 store 28 joins for #2862's reason:
+                                                  # its line has no delete verb in either
+                                                  # mode, and it ends in the reopen-bound
+                                                  # tail — the one store on this list a
+                                                  # ruling forbids deleting at all.
+                                                  "kg index residue", ROUNDS_STORE_LABEL,
                                                                   prov_line,
                                                                   turn_line,
                                                                   pytest_line,
@@ -2423,7 +2445,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_three_stores_and_o
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 24, f"a refusal run should report twenty-four stores: {report}"
+    assert len(report) == 25, f"a refusal run should report twenty-five stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2635,7 +2657,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 27, (
+    assert len(items) == len(_store_report) == 28, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2744,7 +2766,14 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     assert "groundskeeper" in label.lower(), (
         f"store {number} prints as groundskeeper but the description's item "
         f"{number + 1} is {label!r}")
-    item_text = description.split(f"{number} ")[1].split(f"{number + 1} ")[0]
+    # Anchored on the enumeration rather than on the first `"{number} "` anywhere in the
+    # description: #4060's 28th store made the opening state the count, and the `8` inside
+    # `28 stores are reported` is the same two characters this extractor was hunting for, so
+    # an unanchored split handed this node the front matter and reported item 8 missing.
+    _region = description[description.index(_STORE_ORDER_ANCHOR) + len(_STORE_ORDER_ANCHOR):]
+    _m = re.search(rf"(?:^|; ){number}\s+(.*?)(?=; {number + 1}\s)", _region, re.S)
+    assert _m, f"item {number} is not in the description's enumeration: {_region[:120]}"
+    item_text = _m.group(1)
     assert "groundskeeper-queue.json" in item_text, item_text
     assert "groundskeeper-writes.jsonl" in item_text, item_text
     assert "GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS" in item_text, item_text
@@ -4030,12 +4059,23 @@ def test_an_automod_rung_refuses_outside_the_production_checkout(rs, automod, ca
 
 def test_the_state_dirs_the_ruling_keeps_are_never_touched(rs, automod, monkeypatch):
     """The kept half of the ruling, in one line of code and one of test: the
-    `lloyd-automod/rounds` state dirs (24 MB, 914 of them) are NOT a store.
+    `lloyd-automod/rounds` state dirs are held indefinitely, and as of 2026-11-11 they
+    measure 2,662 dirs / 136 MB (`du -sh`; 119,369,436 B of files = 44,842 B/dir).
+
+    That measurement is the reason this node exists in two halves now. #1037's ruling is
+    unchanged — nothing here deletes, and `STATE_ROUNDS_REOPEN_DIRS` (10000 dirs) and
+    `STATE_ROUNDS_REOPEN_MB` (500 MB) are bounds on RE-ASKING the ruling, not on deleting,
+    and the store is 3.8x and 4.4x below them respectively — but a hold quoted against an
+    undated figure stops being checkable, and this docstring carried one of its own: a
+    dirs count that disagreed with the one in the script's comment, and both of them stale
+    (#4060). The dated form, plus the sibling node
+    `test_the_new_rounds_report_arm_deletes_nothing_even_backdated_with_a_settled_row`,
+    is what keeps the two halves saying the same thing.
 
     Nothing in this module writes there, so the only meaningful assertion is that an
     `--apply` which reclaims everything else walks past them. It is here because the
     cheapest way to satisfy a retention ticket is to point the sweep at every directory
-    with a round id in its name, and the 24 MB it would free is the evidence a refused
+    with a round id in its name, and the bytes it would free are the evidence a refused
     round left behind — the same reason the branch arm holds unreachable tips.
     """
     _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
@@ -4052,6 +4092,319 @@ def test_the_state_dirs_the_ruling_keeps_are_never_touched(rs, automod, monkeypa
         "the worktree home should have been reclaimed; it is not the state dir")
     assert (kept / "gate.json").is_file(), (
         "the sweep reached into the state dirs the ruling keeps indefinitely")
+
+
+# --------------------------------------------------------------------------------------
+# #4060: the held rounds store gets measured, priced, and printed — and still deletes
+# nothing. The five clauses below are the item's, in its order.
+#
+# WHY THESE FIVE AND NOT AN AGING RULE: the 2026-09-27 delegated ruling
+# (`autonomy/_owed-human.md`, "keep state rounds/ dirs indefinitely") stands, so a round
+# has no authority to delete a state dir and no clause here asks it to. What the round
+# does have authority over is the hold's OWN CLAIMS: they were a prose figure with no date
+# and no bound, in a store adding ~1,200 dirs a month, which is the carried-forward-count
+# failure class in the shape the branch store already fixed (#3013's
+# `BRANCH_UNREACHABLE_REOPEN_TIPS` / `_GIT_MB`: a dated measurement plus the two numbers at
+# which the decision is re-asked, printed on the same line as the measurement).
+# --------------------------------------------------------------------------------------
+
+#: How the exemption paragraph is found: its opening text, minus the figure that used to
+#: sit in it. #4060 removes that figure, so an anchor quoting it would be an anchor that
+#: only matches the stale file — the same mistake as pinning a test to the number under
+#: review, in the other direction.
+ROUNDS_EXEMPTION_ANCHOR = "`~/.local/state/lloyd-automod/rounds/` is deliberately NOT a"
+
+#: The three stale figures #4060 clause 2 retires. Each is assembled from two literals
+#: because a scan that bans a string cannot itself contain it: the node asserting a file
+#: says none of these words would fail its own assertion, and a suite full of
+#: self-referential red is how a fix gets reverted rather than read.
+ROUNDS_STALE_FIGURES = ("8" + "25 dirs",
+                        "9" + "14 of them",
+                        "2" + "4 MB")
+
+#: The line's label, as the report prints it and as `_store_label` cuts it.
+ROUNDS_STORE_LABEL = "lloyd-automod/rounds/ dirs"
+
+
+def _rounds_exemption_paragraph(src: str) -> str:
+    """The comment paragraph that exempts the state rounds, from its anchor to the blank
+    line that closes it — the text #4060 clause 2 grades.
+
+    Slice-to-blank-line rather than "the whole comment block", because the block continues
+    into the `~/.lloyd-cache` rationale and the `#: Reclaim …` constant docs below it, and
+    a claim about the EXEMPTION has to be checkable against the exemption alone. A missing
+    anchor is an assertion, not a silent empty slice: paragraph-rewriting is exactly the
+    edit that would otherwise delete the pinned text and stay green.
+    """
+    start = src.find(ROUNDS_EXEMPTION_ANCHOR)
+    assert start >= 0, (
+        f"nothing in the script opens with {ROUNDS_EXEMPTION_ANCHOR!r} — the exemption "
+        f"paragraph has been rewritten or moved, and #4060's clauses have no subject")
+    end = src.find("\n\n", start)
+    assert end > start, "the exemption paragraph runs to the end of the file"
+    return src[start:end]
+
+
+def _rounds_pinned_docstring() -> str:
+    """The docstring of the node that pins the hold — the SECOND place #4060 clause 2
+    found a stale figure, and the one a comment-only fix would have left behind.
+
+    Read off the live function object, so a rewording that keeps the name is still graded
+    and a rename is caught by the name lookup failing, not by an absent grep hit.
+    """
+    doc = test_the_state_dirs_the_ruling_keeps_are_never_touched.__doc__
+    assert doc, "the node that pins the hold has no docstring to state its figures in"
+    return doc
+
+
+def _seed_rounds_dirs(rs, n: int, *, file_bytes: int = 0) -> list:
+    """`n` plausible round state dirs under the redirected store, each with the two files
+    a closed round really leaves (`gate.json`, `run_spec.yaml`).
+
+    Sizes are settable because the printed MB has to be derived from a measured byte count
+    and not from a constant: a seeded 3 MiB store printing something other than 3.0 MB
+    proves the line is reciting a number rather than reporting one.
+    """
+    dirs = []
+    for i in range(n):
+        d = rs.AUTOMOD_STATE_ROUNDS / f"SM_20261112_05{i:02}00"
+        d.mkdir(parents=True)
+        (d / "gate.json").write_text("{}")
+        spec = d / "run_spec.yaml"
+        spec.write_text("x" * file_bytes)
+        dirs.append(d)
+    return dirs
+
+
+def _rounds_line(out: str) -> str:
+    """The one `rounds/` line a run printed — and exactly one, because the exemption and
+    the report arm must not become two places that print the store's size at each other."""
+    return _store_line(out, ROUNDS_STORE_LABEL)
+
+
+def test_the_rounds_hold_carries_two_reopen_bounds_beside_the_exemption_paragraph(rs):
+    """Clause 1: a directory-count bound and an MB bound, as constants, sitting beside the
+    exemption paragraph the way the branch pair sits beside the branch hold.
+
+    "Beside" is graded structurally, not by a line number: the two definitions land after
+    `BRANCH_UNREACHABLE_REOPEN_GIT_MB` and before `MAIN_REF`, which is the block the
+    exemption paragraph's own prose points into, so moving either pair away from the other
+    is a red node rather than a quiet drift. And the paragraph must NAME both constants —
+    a bound defined at the top of a 5,700-line file and unmentioned where the exemption is
+    read is a bound nobody applies.
+
+    The two figures are not interchangeable and the node says why in the one place a
+    reader learns them: dirs is primary because this store's cost is directory entries and
+    inodes (the parent directory entry alone measured 95,868 B), while the MB bound is the
+    repo-pays-for-it argument borrowed at the branch pair's value on purpose — at
+    44,842 B/dir the two are the same measurement read twice (10,000 dirs is 427 MB, under
+    the 500 MB line), which is what keeps a slow byte-only creep from reopening a hold
+    nobody is arguing about.
+    """
+    assert isinstance(rs.STATE_ROUNDS_REOPEN_DIRS, int) and rs.STATE_ROUNDS_REOPEN_DIRS > 0
+    assert isinstance(rs.STATE_ROUNDS_REOPEN_MB, int) and rs.STATE_ROUNDS_REOPEN_MB > 0
+    src = _SCRIPT.read_text(encoding="utf-8")
+
+    for name in ("STATE_ROUNDS_REOPEN_DIRS", "STATE_ROUNDS_REOPEN_MB"):
+        assert name in _rounds_exemption_paragraph(src), (
+            f"the exemption paragraph never names {name}, so the reader who reaches the "
+            f"hold has no way to learn what would re-ask it")
+
+    branch_pair = src.find("BRANCH_UNREACHABLE_REOPEN_GIT_MB = ")
+    assert branch_pair >= 0, "the branch reopen pair has moved; 'beside it' has no meaning"
+    for name, value in (("STATE_ROUNDS_REOPEN_DIRS", rs.STATE_ROUNDS_REOPEN_DIRS),
+                        ("STATE_ROUNDS_REOPEN_MB", rs.STATE_ROUNDS_REOPEN_MB)):
+        at = src.find(f"\n{name} = ")
+        assert at > branch_pair, (
+            f"{name} is not defined after the branch pair it is modelled on")
+        assert f" = {value}" in src[at:at + 40], f"{name} = {value} is not what is defined"
+    assert src.find("\nSTATE_ROUNDS_REOPEN_DIRS = ") < src.find('\nMAIN_REF = "main"'), (
+        "the rounds bounds must stay inside the automod constants block, before MAIN_REF")
+
+    para = " ".join(_rounds_exemption_paragraph(src).split())
+    assert "indefinitely" in para, "the paragraph no longer states the hold it exempts"
+    assert "NOT a store" in para, (
+        "the paragraph must keep saying the store is exempt, or a later widening pass "
+        "reads the two bounds as a policy and starts deleting")
+
+
+def test_the_exemption_and_the_node_that_pins_it_carry_no_undated_figure(rs):
+    """Clause 2: the exemption paragraph and the docstring of the node that pins the hold
+    state no stale figure, and both state a dated measurement with both reopen bounds.
+
+    The stale figures are the three the item and its triage found: the dirs count the
+    comment carried, the different dirs count this file's own docstring carried, and the MB
+    figure the two shared. Two of the three lived in prose nobody re-ran, and they
+    DISAGREED with each other, which is the whole argument for dating a number instead of
+    correcting it — a corrected undated figure is the same landmine with a fresh coat.
+
+    "A dated measurement" is graded as a date pattern plus the word for what was measured,
+    not as one hard-coded string: the point is that the next reader can tell WHEN the
+    figure was true and re-take it, and a node that pinned the literal would be the third
+    stale copy of the thing it is auditing.
+    """
+    src = _SCRIPT.read_text(encoding="utf-8")
+    targets = {"the exemption paragraph": _rounds_exemption_paragraph(src),
+               "test_the_state_dirs_the_ruling_keeps_are_never_touched's docstring":
+                   _rounds_pinned_docstring()}
+
+    for where, text in targets.items():
+        flat = " ".join(text.split())
+        for stale in ROUNDS_STALE_FIGURES:
+            assert stale not in flat, (
+                f"{where} still states the retired figure {stale!r}")
+        m = re.search(r"20\d\d-\d\d-\d\d", flat)
+        assert m, f"{where} states a measurement with no date beside it: {flat[:160]}"
+        # Figures are compared with thousands separators removed: `10,000` and `10000` are
+        # one number wearing a display convention, and a node that required the bare form
+        # would be editing prose typography under a clause about retention policy.
+        digits = flat.replace(",", "")
+        assert "2662 dirs" in digits and "136 MB" in digits, (
+            f"{where} does not carry the 2026-11-11 measurement it says it re-took "
+            f"({m.group(0)})")
+        for bound in (f"{rs.STATE_ROUNDS_REOPEN_DIRS} dirs",
+                      f"{rs.STATE_ROUNDS_REOPEN_MB} MB"):
+            assert bound in digits, (
+                f"{where} states the measurement but not the reopen bound {bound!r}")
+
+    # And the whole file, both sides: the paragraph and this docstring are the two copies
+    # the item names, but a third copy somewhere else in either file is the same bug, and
+    # the only reason the item missed one is that nothing ever scanned for it.
+    for where, text in (("scripts/groundskeeper/retention-sweep.py", src),
+                        ("tests/test_retention_sweep.py",
+                         Path(__file__).resolve().read_text(encoding="utf-8"))):
+        for stale in ROUNDS_STALE_FIGURES:
+            assert stale not in text, (
+                f"{where} contains the retired figure {stale!r} somewhere this node has no "
+                f"clause for — delete the copy or name it in the clause")
+
+
+def test_the_rounds_line_reports_the_live_count_and_both_bounds_in_both_modes(
+        rs, monkeypatch, capsys):
+    """Clause 3: one line for the store, printing the live directory count, the size in MB
+    and both reopen bounds — byte-identical in dry-run and `--apply`.
+
+    Three separate claims, pinned together because the clause states them together:
+    * the count and the bytes are MEASURED — 3 seeded dirs and a seeded 3 MiB print `3` and
+      `3.0 MB`, and monkeypatching the two constants moves both figures on the line, so
+      neither is a literal the line recites;
+    * both bounds appear on it, which is what makes the line the report of a hold rather
+      than a count an operator has to interpret against a comment;
+    * dry and apply print the SAME sentence. Every other store line changes its verb
+      between modes (`would delete` / `deleted`); this one must not, because a
+      `would delete` in either mode would tell the operator that the weekly `--apply` is
+      coming for the forensic record of every refused round. Task #79's report is what a
+      human approves the delete from, so this is the boundary the clause exists to hold.
+    """
+    _seed_rounds_dirs(rs, 3, file_bytes=1024 * 1024)
+
+    dry = _canary_run(rs, monkeypatch, capsys, apply=False)
+    applied = _canary_run(rs, monkeypatch, capsys, apply=True)
+    line, applied_line = _rounds_line(dry), _rounds_line(applied)
+    assert line == applied_line, (
+        "the rounds line changed between modes; a held store has no verb to conjugate")
+
+    assert f"{ROUNDS_STORE_LABEL}: 3 kept" in line, line
+    assert "3.0 MB" in line, f"the printed MB is not the measured 3 MiB: {line}"
+    assert f"{rs.STATE_ROUNDS_REOPEN_DIRS} dirs" in line, line
+    assert f"{rs.STATE_ROUNDS_REOPEN_MB} MB" in line, line
+    assert "nothing deleted" in line, line
+
+    stated_dirs, stated_mb = rs.STATE_ROUNDS_REOPEN_DIRS, rs.STATE_ROUNDS_REOPEN_MB
+    monkeypatch.setattr(rs, "STATE_ROUNDS_REOPEN_DIRS", stated_dirs + 1)
+    monkeypatch.setattr(rs, "STATE_ROUNDS_REOPEN_MB", stated_mb + 1)
+    moved = _rounds_line(_canary_run(rs, monkeypatch, capsys, apply=False))
+    assert f"{stated_dirs + 1} dirs" in moved and f"{stated_mb + 1} MB" in moved, (
+        f"the bounds are hardcoded, not read from the constants: {moved}")
+    assert f"{stated_dirs} dirs" not in moved, f"the dir bound is hardcoded: {moved}"
+    assert f"or {stated_mb} MB" not in moved, f"the MB bound is hardcoded: {moved}"
+
+
+def test_the_rounds_measure_rung_reads_only_and_says_skip_rather_than_zero(rs):
+    """The measurement half of the hold: no delete on any surface, and an unreadable store
+    says `SKIPPED` where an absent one says `0`.
+
+    The no-delete scan is the canary arm's (`test_the_canary_rung_reaches_no_delete_and_repor
+    ts_a_skip_rather_than_a_zero`), name list included, because "it only measures" is a
+    claim about every path this module can take to a filesystem, not about the three verbs
+    the author happened to think of. `shutil.rmtree` is in the banlist for the same
+    reason: the deletion helper in this file is a method call, and a rung that reached it
+    would read as clean to a scan that only looks for `os.remove`.
+
+    The skip/zero split matters more here than in a delete store. Every delete store
+    refuses to act on a skip, so a misread costs one week's reclaim; here a zero is the
+    ANSWER that keeps the hold cheap, and an unreadable directory arriving as `0 kept`
+    would be a 2,662-dir store reporting itself as free forever.
+    """
+    co = inspect.getsource(rs.measure_state_rounds) + inspect.getsource(rs._state_rounds_line)
+    for banned in ("os.remove", "os.unlink", "os.rmdir", "shutil.rmtree", "shutil.move",
+                   "pathlib.Path.unlink", "Path.unlink", ".write_text", ".touch(",
+                   "mkdir", "open(", ".mkdir", ".rename(", ".replace("):
+        assert banned not in co, (
+            f"the rounds report arm reaches a mutating call ({banned!r}); it measures")
+    assert "apply" not in inspect.signature(rs.measure_state_rounds).parameters, (
+        "a rung that takes `apply` advertises a delete this store's ruling forbids")
+
+    gone = rs.AUTOMOD_STATE_ROUNDS / "absent"
+    assert rs.measure_state_rounds(gone) == {"dirs": 0, "bytes": 0, "skip": ""}, (
+        "an absent store must read as zero, which is the honest answer on a box that has "
+        "never run the loop")
+
+    unreadable = rs.AUTOMOD_STATE_ROUNDS / "locked"
+    unreadable.mkdir(parents=True)
+    (unreadable / "SM_20261112_050100").mkdir()
+    unreadable.chmod(0o000)
+    try:
+        got = rs.measure_state_rounds(unreadable)
+        assert got["skip"], f"an unreadable store read as {got}, not as a skip"
+        assert "SKIPPED" in rs._state_rounds_line(got), got
+    finally:
+        unreadable.chmod(0o755)
+
+
+
+
+
+def test_the_new_rounds_report_arm_deletes_nothing_even_backdated_with_a_settled_row(
+        rs, automod, monkeypatch, capsys):
+    """Clause 4: a 400-day-old round dir with a SETTLED ledger row still exists, with its
+    `gate.json`, after a full `--apply`.
+
+    This is clause 4 because clause 3 is the risk. The old exemption said "not a store" and
+    was enforced by nothing but that sentence; the new one says "a store we measure and
+    report", and the difference between a reported store and a bounded one in this file is
+    one `sweep_*` call. So the proof is the strongest `--apply` the suite can stage: the
+    tree declared production, the round backdated well past `WORKTREE_DIR_MAX_AGE_DAYS`, a
+    landed row in the ledger naming it — every precondition that removes a `~/lloyd-work`
+    home — and then the assertion that the state dir, its `gate.json` AND its
+    `run_spec.yaml` are untouched, beside the assertion that the worktree home WAS
+    reclaimed. A node that only checked the state dir could be green because nothing ran at
+    all; the worktree half is what makes the silence mean something.
+
+    The full `main()` is the boundary, not `sweep_automod_worktrees`: the report arm lives
+    in `main()`, and a delete introduced by the arm rather than by the rung would otherwise
+    walk past this node.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    rid = "SM_20260910_104045"
+    kept = rs.AUTOMOD_STATE_ROUNDS / rid
+    kept.mkdir(parents=True)
+    (kept / "gate.json").write_text('{"verdict": "refused"}')
+    (kept / "run_spec.yaml").write_text("goal: x\n")
+    before = {p.name: p.read_text() for p in kept.iterdir()}
+    _backdate(kept, 400)
+    _settle(rs, rid, 400)
+    _workdir(rs, rid)
+
+    out = _canary_run(rs, monkeypatch, capsys, apply=True)
+
+    assert not (rs.AUTOMOD_WORK_ROOT / rid).exists(), (
+        "the --apply did not run the reclaim, so this node would prove nothing about "
+        "what it left alone")
+    assert kept.is_dir(), f"the re-measured hold silently became a store: {rid} is gone"
+    assert {p.name: p.read_text() for p in kept.iterdir()} == before, (
+        "the report arm changed a held round's records")
+    assert f"{ROUNDS_STORE_LABEL}: 1 kept" in _rounds_line(out), out
 
 
 # --------------------------------------------------------------------------------------
@@ -7825,8 +8178,14 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
-    assert "27 unbounded-growth stores" in front, front[:200]
-    assert "27 in all" in text, "the skill's body states a count other than 27"
+    # The count, not the phrase: #4060's 28th store is held rather than bounded, so the
+    # description reads "28 stores, 27 unbounded-growth stores it bounds and one held by
+    # ruling", and a node that pinned the old contiguous wording would be grading
+    # typography while the thing it is for — does the skill count what the sweep prints —
+    # went ungraded. The count itself is checked against the printed lines by the
+    # table-row node and by `test_the_task_description_names_every_store_the_sweep_prints`.
+    assert "28 stores" in front, front[:200]
+    assert "28 in all" in text, "the skill's body states a count other than 28"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -8943,16 +9302,17 @@ def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prin
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 27, f"a production run prints 27 store lines: {lines}"
-    # #3499 appended the memory-graph store below it and #3789 the safety-denial store below
-    # that, so this line sits seven from the end.
-    assert lines[-8].split(":")[0].strip().startswith("injection-canary corpus"), lines[-8]
+    assert len(lines) == 28, f"a production run prints 28 store lines: {lines}"
+    # #3499 appended the memory-graph store below it, #3789 the safety-denial store below
+    # that, #3951 the kg index residue and #4060 the held rounds store, so this line sits
+    # eight from the end.
+    assert lines[-9].split(":")[0].strip().startswith("injection-canary corpus"), lines[-9]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 24, (
-        f"a refused run prints twenty-four store lines plus the refusal: {refused}")
-    assert refused[-8].split(":")[0].strip().startswith("injection-canary corpus"), refused[-8]
+    assert len(refused) == 25, (
+        f"a refused run prints twenty-five store lines plus the refusal: {refused}")
+    assert refused[-9].split(":")[0].strip().startswith("injection-canary corpus"), refused[-9]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -9181,12 +9541,12 @@ def test_the_ceiling_sample_store_prints_sixth_last_and_survives_the_refusal(rs,
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 27, f"a production run prints 27 store lines: {report}"
-    assert report[-7].split(":")[0].strip().startswith("ceiling sample rows"), report[-7]
+    assert len(report) == 28, f"a production run prints 28 store lines: {report}"
+    assert report[-8].split(":")[0].strip().startswith("ceiling sample rows"), report[-8]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 24, f"a refused run prints twenty-four store lines: {refused}"
-    assert refused[-7].split(":")[0].strip().startswith("ceiling sample rows"), refused[-7]
+    assert len(refused) == 25, f"a refused run prints twenty-five store lines: {refused}"
+    assert refused[-8].split(":")[0].strip().startswith("ceiling sample rows"), refused[-8]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -9379,12 +9739,12 @@ def test_the_capture_store_prints_fifth_last_and_survives_the_refusal(rs, monkey
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 27, f"a production run prints 27 store lines: {report}"
-    assert report[-6].split(":")[0].strip().startswith("canary tool-call captures"), report[-6]
+    assert len(report) == 28, f"a production run prints 28 store lines: {report}"
+    assert report[-7].split(":")[0].strip().startswith("canary tool-call captures"), report[-7]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 24, f"a refused run prints twenty-four store lines: {refused}"
-    assert refused[-6].split(":")[0].strip().startswith("canary tool-call captures"), refused[-6]
+    assert len(refused) == 25, f"a refused run prints twenty-five store lines: {refused}"
+    assert refused[-7].split(":")[0].strip().startswith("canary tool-call captures"), refused[-7]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -10188,16 +10548,16 @@ def test_the_temp_store_line_prints_third_last_and_survives_the_refusal(rs, monk
     # "one candidate" rather than "the one candidate was held because it is the newest".
     monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 27, f"a production run prints 27 store lines: {report}"
-    last = report[-4]
+    assert len(report) == 28, f"a production run prints 28 store lines: {report}"
+    last = report[-5]
     assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
     assert "1 would delete" in last, last
     assert "inode(s) candidate" in last, last
     assert victim.is_dir(), "the dry run deleted"
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 24, f"a refused run prints twenty-four store lines: {refused}"
-    assert refused[-4].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-4]
+    assert len(refused) == 25, f"a refused run prints twenty-five store lines: {refused}"
+    assert refused[-5].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-5]
 
 
 def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
@@ -10519,10 +10879,11 @@ def test_the_memory_graph_horizon_is_one_constant_quoted_in_the_store_and_regist
     # #3789 appended the safety-denial store below it. What that clause was for — the store is
     # registered and prints in the appended tail, not inserted among items 1-24 — is unchanged,
     # so the position moves to second-to-last and the reason stays on the line.
-    assert lines.index(mg[0]) == len(lines) - 3, (
-        "the store does not print third-to-last, the slot #3499's append left it in once "
-        "#3789 appended the safety-denial store and #3951 the kg index residue store below "
-        "it: task 79's numbered enumeration is matched to these lines positionally")
+    assert lines.index(mg[0]) == len(lines) - 4, (
+        "the store does not print fourth-to-last, the slot #3499's append left it in once "
+        "#3789 appended the safety-denial store, #3951 the kg index residue store and #4060 "
+        "the held rounds store below it: task 79's numbered enumeration is matched to these "
+        "lines positionally")
 
 
 def test_an_absent_memory_graph_directory_reports_itself_as_absent_and_is_not_created(rs):
@@ -12123,9 +12484,10 @@ def test_main_prints_the_index_residue_line_as_the_twenty_seventh_store(rs, caps
     run reaches it at all — the seam a report is read from is `main()`'s stdout. Both of
     the new constants are redirected by `rs` to a store that is not there, so the expected
     line is the absent one, and its presence is what proves the call is wired: an arm that
-    is never invoked prints no line and drops the report to 26. Appended rather than
+    is never invoked prints no line and drops the report to 27. Appended rather than
     inserted, which is what keeps items 1-26 of task 79's enumeration where the positional
-    guard reads them (#2862, inherited through #3499 and #3789).
+    guard reads them (#2862, inherited through #3499, #3789 and #3951); #4060's held-rounds
+    line sits below this one, which is why this store prints second-to-last and not last.
     """
     argv = ["retention-sweep"]
     monkeypatch.setattr(sys, "argv", argv)
@@ -12136,10 +12498,12 @@ def test_main_prints_the_index_residue_line_as_the_twenty_seventh_store(rs, caps
     lines = _store_report_lines(capsys.readouterr().out)
     kg = [l for l in lines if "kg index residue" in l]
     assert len(kg) == 1, f"expected exactly one index-residue line in {lines}"
-    assert kg[0] == lines[-1], (
-        f"the store was not printed last, so the positional enumeration moved: {lines[-3:]}")
+    # #4060 appended the held-rounds line below this one, so the kg line is second-to-last
+    # now — still the 27th store, and still behind every line task 79 enumerates positionally.
+    assert kg[0] == lines[-2], (
+        f"the store is not second-to-last, so the positional enumeration moved: {lines[-3:]}")
     assert "no store yet" in kg[0], kg[0]
-    assert len(lines) == 27, f"a run prints {len(lines)} store lines: {lines}"
+    assert len(lines) == 28, f"a run prints {len(lines)} store lines: {lines}"
 
     argv.append("--apply")
     rs.main()

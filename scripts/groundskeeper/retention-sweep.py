@@ -1408,9 +1408,29 @@ def sweep_groundskeeper_queue(apply: bool, now: float) -> tuple[int, int]:
 #                              and outside a resume nothing has ever deleted one.
 #                              Measured: 226 branches at triage, 82 at filing.
 #
-# `~/.local/state/lloyd-automod/rounds/` (825 dirs / 24 MB) is deliberately NOT a
-# store here: #1037's ruling keeps the state dirs indefinitely, so `AUTOMOD_STATE_ROUNDS`
-# exists only so a test can point at the place and prove an `--apply` left it standing.
+# `~/.local/state/lloyd-automod/rounds/` is deliberately NOT a store here: #1037's
+# ruling keeps the state dirs indefinitely, so `AUTOMOD_STATE_ROUNDS` exists only so a
+# test can point at the place and prove an `--apply` left it standing. For its first two
+# months the paragraph asserted instead an UNDATED count, #1644's triage figure, which was
+# already stale the month it was written and is now the wrong order of magnitude; #4060's
+# filing carries it, and this paragraph deliberately does not, because an undated figure
+# that is wrong is how an exemption stops being checkable.
+#
+# Re-measured 2026-11-11 with `ls ~/.local/state/lloyd-automod/rounds/ | wc -l` and `du -sh`:
+# 2,662 dirs / 136 MB (119,369,436 B of files under it = 44,842 B/dir; the gap to `du` is
+# the directory entries and block rounding, which is the cost that actually matters
+# here — the parent directory entry alone is 95,868 B), oldest `SM_20260906_174939`, the
+# loop's first day. It is not flattening: `grep -c` over the listing answers 1,211 for
+# `SM_202610` and 347 for `SM_202611` in eleven days, so the store turns over the whole of
+# that retired count every four weeks, which is how it came to sit at 3.2x it on dirs and
+# 5.6x on bytes by the day it was re-measured (#4060). So the hold now carries the shape
+# the branch hold below already carries rather than a bare number:
+# `STATE_ROUNDS_REOPEN_DIRS` (10,000 dirs, ~3.8x the count above) and
+# `STATE_ROUNDS_REOPEN_MB` (500 MB, taken at the branch hold's figure deliberately) are the
+# two measurements at which keeping-indefinitely is re-asked, `measure_state_rounds` takes
+# them every sweep, and the weekly line prints the live count and bytes beside both bounds.
+# Nothing deletes at either figure — this is a held store that is finally being measured,
+# not a store that was bounded.
 
 #: Reclaim a settled round's `~/lloyd-work/<round_id>/` directory this many days after
 #: that round's newest ledger event (#1037's ruling, as recorded on #1644).
@@ -1495,6 +1515,26 @@ BRANCH_UNREACHABLE_REOPEN_TIPS = 1000
 #: measurement that reopens the question: it says the hold is costing the repo itself,
 #: which is the only price the 90 d figure was ever standing in for.
 BRANCH_UNREACHABLE_REOPEN_GIT_MB = 500
+#: Round state dirs above which #1037's keep-indefinitely decision is reopened for
+#: measurement, not for an opinion — the same construction as the two bounds above, for
+#: the same reason: a hold with no number beside it is re-litigated by whoever notices it
+#: first, and a hold with a dated-but-unbounded number is re-litigated by the store.
+#:
+#: 2,662 dirs at the 2026-11-11 re-measurement, adding ~1,200 a month, so 10,000 is ~3.8x
+#: headroom — about six years at the October rate. It is the PRIMARY bound of the pair
+#: because what this store costs is directory entries and inodes, not bytes: the parent
+#: directory entry measured 95,868 B and each round costs ~43 KB of file bytes, so a byte
+#: figure alone is the wrong instrument for it (#4060's whole complaint).
+STATE_ROUNDS_REOPEN_DIRS = 10000
+#: State rounds above this many MB is the other measurement that reopens the question: the
+#: price-the-repo-pays argument again, and deliberately the SAME figure as
+#: `BRANCH_UNREACHABLE_REOPEN_GIT_MB`, because at the 44,842 B/dir the store measures today
+#: the two bounds are one measurement read twice — 10,000 dirs x 44,842 B = 427 MB, under
+#: the 500 MB line — so neither can be passed without the other in sight. MB here is
+#: 1,048,576 B over FILE bytes (`_bytes_under`), which reads 113.8 where `du -sh` reads 136
+#: at the same instant: the file measure is the smaller of the two, so a `du` re-check at
+#: the bound is the honest one, and the dir bound above is the one that carries the hold.
+STATE_ROUNDS_REOPEN_MB = 500
 #: The ref a branch tip must be an ancestor of to count as landed.
 MAIN_REF = "main"
 #: Round ids are `SM_<YYYYMMDD>_<HHMMSS>`; the prefix also covers the `SM_TEST`,
@@ -1677,8 +1717,10 @@ def _current_round(current: Path) -> str | None:
 def _bytes_under(dir: Path) -> int:
     """Total file size under `dir`, following no symlink and never raising.
 
-    Only ever called on directories this rung has already decided to remove, so the
-    walk is bounded by what a reclaim was going to delete anyway.
+    Called on directories a rung has already decided to remove — the walk is bounded by
+    what a reclaim was going to delete anyway — and on one store it only measures:
+    `measure_state_rounds` below, which walks the held `rounds/` dirs to print their size
+    and never hands the number to a delete.
     """
     total = 0
     for root, _dirs, files in os.walk(dir):
@@ -2302,6 +2344,70 @@ def _branch_line(b: dict) -> str:
             f"{b['deleted']} deleted (kept: {', '.join(kept)}) "
             f"— the delete question reopens only above {BRANCH_UNREACHABLE_REOPEN_TIPS} "
             f"held tips or a .git above {BRANCH_UNREACHABLE_REOPEN_GIT_MB} MB")
+
+
+# ---------------------------------------------------------------------------
+# The fourth thing the loop leaves outside the data root, and the one it keeps
+# ---------------------------------------------------------------------------
+#
+# `rounds/<id>/` is the store the section above exempts (#1037's ruling). It gets a rung
+# because an exemption priced against an undated figure is an exemption nobody can re-check
+# — the count that paragraph carried was stale before it shipped, and the sweep is the only
+# component on this box that ever looks at the directory. What this rung does with the
+# measurement is PRINT it, against the two reopen bounds in that section. It deletes
+# nothing, in either mode, at either bound.
+
+
+def measure_state_rounds(dir: Path | None = None) -> dict:
+    """Count the loop's `rounds/<id>/` state dirs and the bytes under them. READ ONLY.
+
+    The store is held indefinitely by #1037's ruling, so there is no window to apply and
+    no `apply` parameter to take: taking one would advertise a delete this rung cannot
+    perform, which is the shape #1837's retraction class is about. The two numbers returned
+    are compared against `STATE_ROUNDS_REOPEN_DIRS` and `STATE_ROUNDS_REOPEN_MB` on the
+    report line, and that comparison is the entire fate of the measurement.
+
+    `dirs` counts TOP-LEVEL entries, because that is the count the exemption was priced
+    against (`ls rounds/ | wc -l`) and the count a directory-entry cost is a function of;
+    a round's own nesting (`home/lloyd/…`) shows up in `bytes` and not in `dirs`. A
+    missing directory is `0 dirs` rather than a raise — the honest answer for a box where
+    the loop has never run, and the same answer an empty store gives. An UNREADABLE one is
+    `skip`, because a count that failed to read and a count of nothing arrive as the same
+    zero and only one of them means the hold is cheap.
+    """
+    root = Path(dir if dir is not None else AUTOMOD_STATE_ROUNDS)
+    out = {"dirs": 0, "bytes": 0, "skip": ""}
+    if not root.is_dir():
+        return out
+    try:
+        out["dirs"] = sum(1 for entry in root.iterdir()
+                          if entry.is_dir() and not entry.is_symlink())
+    except OSError as exc:
+        out["skip"] = f"SKIPPED ({root} unreadable: {exc})"
+        return out
+    out["bytes"] = _bytes_under(root)
+    return out
+
+
+def _state_rounds_line(m: dict) -> str:
+    """One report line for the held `rounds/` store, identical in both modes.
+
+    There is no verb to change, because there is no delete: the same sentence comes out of
+    a dry run and an `--apply`, which is what makes the line readable as the state of the
+    hold rather than as a proposal an operator is approving. The count and the size are
+    THIS run's measurement, and the two numbers after them are the constants that decide
+    whether the hold is re-asked, so a reader of the weekly report learns both what the
+    store is and what would change the answer — the pair the branch line above prints and
+    this store, until #4060, printed neither.
+    """
+    if m["skip"]:
+        return (f"  lloyd-automod/rounds/ dirs: {m['skip']} — nothing deleted, "
+                f"nothing measured")
+    mb = m["bytes"] / 1024 / 1024
+    return (f"  lloyd-automod/rounds/ dirs: {m['dirs']} kept, {mb:.1f} MB — held "
+            f"indefinitely by #1037's ruling, nothing deleted here; the hold reopens "
+            f"only above {STATE_ROUNDS_REOPEN_DIRS} dirs or "
+            f"{STATE_ROUNDS_REOPEN_MB} MB")
 
 
 # ── 13. promotions ledger — archive the rows the loop no longer reads ──────────
@@ -5565,6 +5671,17 @@ def main() -> int:
     # enumeration where the positional guard reads them — #2862's reason, inherited
     # through #2924, #3188, #3209, #3379, #3499 and #3789 — and this line is the 27th.
     print(_kg_index_residue(KG_FACTS_ROOT, KG_DB_PATH, apply=args.apply)[0])
+    # Store 28 (#4060), printed LAST and outside the refusal guard like the eight lines
+    # above it. It is the one store of the 28 that is HELD rather than bounded: #1037's
+    # ruling keeps these dirs, so the arm measures them and prints the two reopen bounds,
+    # and the guard that stops a round's worktree from deleting the live repository's refs
+    # has nothing to decline here because this arm deletes nothing from any tree — which is
+    # also why the line survives a refused run, where the three automod rungs collapse into
+    # one sentence and the reader still needs to know what the held store is doing.
+    # Appending rather than inserting keeps items 1-27 of task 79's enumeration where the
+    # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
+    # #3379, #3499, #3789 and #3951 — and this line is the 28th.
+    print(_state_rounds_line(measure_state_rounds()))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

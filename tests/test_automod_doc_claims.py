@@ -3125,3 +3125,58 @@ def test_setup_md_and_the_voice_asset_table_say_the_detector_arrives_with_the_cl
     with pytest.raises(AssertionError) as missing:
         _assert_setup_names_the_detector(RETIRED_SETUP_PROSE)
     assert DETECTOR_PATH in str(missing.value), str(missing.value)
+
+
+# ── #4060: §11's `rounds/<id>/` row must carry the ruling that exempts it ─────
+#
+# §11 has named the `rounds/<id>/` directory since `412a8012` (2026-09-11), and it named
+# nothing else about it: `1037` occurred in this document only in the Review log, and
+# `retention`, `exempt`, `sweep` and `groundskeeper` returned nothing across §10-§13. So a
+# reader of the state table learned that the loop keeps per-round state, learned nothing
+# about whether anything may ever clear it, and had no way to discover that a ruling keeps
+# it or that the weekly sweep now re-measures it against two figures. The row is where the
+# ruling becomes findable; this node is what stops the row going back to a bare file list.
+
+def _sweep_constants():
+    """The sweep's two reopen bounds, read from the module rather than carried here.
+
+    A doc node that compared the prose against numbers written into this test file would
+    be two copies of a bound going stale together — which is the #4060 defect, one file
+    away. Loading the script is how `tests/test_retention_sweep.py` reads it too.
+    """
+    import importlib.util
+
+    script = ROOT / "scripts" / "groundskeeper" / "retention-sweep.py"
+    spec = importlib.util.spec_from_file_location("rs_4060_doc", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.STATE_ROUNDS_REOPEN_DIRS, mod.STATE_ROUNDS_REOPEN_MB
+
+
+def test_section_11_names_the_ruling_and_both_reopen_bounds_beside_the_rounds_row():
+    """Clause 5: the exemption is readable from the state table, not only from the log."""
+    import re as _re
+
+    text = DOC.read_text(encoding="utf-8")
+    assert "## 11. State" in text and "\n## 12" in text, "§11 lost its heading or its end"
+    section = text.split("## 11. State", 1)[1].split("\n## 12", 1)[0]
+
+    rows = [ln for ln in section.splitlines() if ln.startswith("| `rounds/<id>/`")]
+    assert len(rows) == 1, f"§11 must carry exactly one rounds row, found {len(rows)}"
+    flat = " ".join(rows[0].split())
+
+    dirs_bound, mb_bound = _sweep_constants()
+    for needle in ("#1037", "groundskeeper retention sweep", "store 28",
+                   "STATE_ROUNDS_REOPEN_DIRS", "STATE_ROUNDS_REOPEN_MB",
+                   f"({dirs_bound:,} dirs)", f"({mb_bound} MB)",
+                   "never a licence to delete"):
+        assert needle in flat, (
+            f"the §11 rounds row no longer states {needle!r}, so the ruling that exempts "
+            f"this store is not findable from the state table: {flat[:200]}...")
+
+    assert _re.search(r"20\d\d-\d\d-\d\d", flat), (
+        "the row states a measurement with no date beside it, which is the form #4060 "
+        "was filed against")
+    assert "825" not in flat and "24 MB" not in flat, (
+        f"the retired figure is back in the row, and a retired number loose in a live "
+        f"table is a number a skimming reader takes for current: {flat[:200]}...")
