@@ -1101,8 +1101,9 @@ will be reverted and recorded as a defect.
 
 Your diff is bounded and the bound is enforced after the turn: more than \
 {max_delta_lines} changed lines, {shrink_bound}, a broken front matter block, \
-or {section_bound_hint} — and the whole doc edit is thrown away, while your \
-filed items survive. Stay well inside it.
+or {section_bound_hint} — and a broken bound refuses the commit while your \
+filed items survive, with the edited doc kept in the state dir for a human to \
+read. Stay well inside it.
 
 Every file you write other than that one doc is reverted after the turn — \
 anywhere in this checkout, and anywhere in the vault except `backlog/`, \
@@ -1193,8 +1194,9 @@ _FM_RULE_GROUP = """\
   - Leave the front matter block (the `---` block opening the file) alone: it is \
 another unit's text, and the whole-doc review of `{slug}.md` is what owns and \
 refreshes its `date:` field. Every front-matter line sits above your section, so \
-a hunk there falls outside your lines and the bound throws the entire correction \
-pass away, your in-section corrections included."""
+a hunk there falls outside your lines and the bound refuses the whole commit — \
+your in-section corrections with it — and the edited doc is kept in the state dir \
+for a human to read, never landed."""
 
 #: Step 4's shrink sentence, and — like the front-matter bullet above it — it
 #: cannot be one shared sentence (#2603). `check_doc_bound` divides a group's
@@ -1366,15 +1368,22 @@ def revert_strays(repo: Path, before: set[str], after: set[str],
 
 def check_doc_bound(root: Path, rel: str, *, max_delta_lines: int, max_shrink_pct: int,
                     allow_shrink: bool, section: tuple[int, int] | None) -> tuple[bool, str]:
-    """`(changed, reason)` — `reason` non-empty means throw the edit away.
+    """`(changed, reason)` — a non-empty `reason` refuses the **commit**. The
+    correction itself survives: `keep_rejected` writes the edited doc into the
+    state dir for a human to read and books the streak that shortens the unit's
+    re-queue (#3338), so a bound costs the turn its landing, never its work.
 
     Four bounds, and each one is a different way a review could do harm:
     a diff far larger than a correction pass (a rewrite); a large deletion
     (the doc gutted rather than corrected — allowed for `superseded` and
     `aspirational`, where a banner over a body nobody should trust is the
     point); a destroyed front matter block (the vault indexes on it); and, for
-    a group, a hunk outside its own section (seven groups share one file and
-    must not re-open each other's text).
+    a group, a hunk outside its own section (the groups of one jobs doc share a
+    file and must not re-open each other's text — how many of them there are is
+    derived from the doc's own headings by `tests/test_autonomy_jobs_doc_claims.py`
+    against `groups:` in `config.yaml`, which is why no count belongs here: the
+    one that used to sit in this paragraph was falsified by a commit that never
+    touched this file).
     """
     added, deleted = _numstat(root, rel)
     if added == 0 and deleted == 0:

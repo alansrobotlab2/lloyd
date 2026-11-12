@@ -2249,10 +2249,16 @@ _MODULE_SRC = inspect.getsource(A)
 
 
 def _module_prose() -> str:
-    """Module docstring plus every comment and docstring, newlines folded to
-    spaces, so a sentence wrapped over four `#:` lines is matched as the sentence
-    it is and not as whichever fragment its author happened to break the line at."""
-    return " ".join(_MODULE_SRC.split())
+    """Module docstring plus every comment and docstring, continuations unwrapped
+    and whitespace folded to single spaces, so a sentence is matched as the sentence
+    it is and not as whichever fragment its author happened to break the line at.
+    BOTH wrap styles have to be unwrapped and only one of them is obvious: a `#:`
+    comment breaks on a real newline, which `str.split()` sees, while a prompt
+    literal breaks on a backslash continuation, which leaves a bare `\\` standing
+    between the two halves. #4056's first attempt banned a sentence that the module
+    writes only in the second style, and the ban passed over it; the node below
+    carries the witness that keeps this true."""
+    return " ".join(_MODULE_SRC.replace("\\\n", " ").split())
 
 
 def _archive_absent_in_this_checkout() -> None:
@@ -2340,6 +2346,145 @@ def test_the_archive_comment_states_the_future_rglob_reason_not_a_fake_one():
     assert control.returncode == 1, (
         "git reports a tracked architecture doc as ignored, so the probe above was not "
         f"answering this question: {control.stdout!r}")
+
+
+# ── 9a2. #4056: the bound's prose about itself must not outlive the code ─────
+
+#: The sentences this module may never say again (#4056). A tuple, so the loop and
+#: the failure message read one list; matched against the folded module text, which
+#: is what `_module_prose()` guarantees about the wrapping. Why each one died is the
+#: ban node's own docstring, not a comment beside the constant.
+_BANNED_BOUND_PROSE = (
+    "seven groups",
+    "throw the edit away",
+    "the whole doc edit is thrown away",
+    "throws the entire correction pass away",
+)
+
+#: A group count written into prose, however it is spelled. The count is the rot:
+#: the rail's severity was argued from "seven", so a reader weighing whether the
+#: section bound may be relaxed is handed a roster that stopped matching
+#: `groups:` six weeks before they read it. `tests/test_autonomy_jobs_doc_claims.py`
+#: derives the set from the doc's own headings through `find_section`/`heading_key`,
+#: so prose has no business restating it — and no test here types the number either.
+_TYPED_GROUP_COUNT = re.compile(
+    r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+    r"fourteen|fifteen|\d+)\s+groups\b", re.IGNORECASE)
+
+
+def test_the_module_never_claims_a_bound_throws_the_work_away_or_counts_the_groups():
+    """Clause 4: the ban lives in ONE node, reading the module's own text through
+    `_module_prose()` — `inspect.getsource`, so docstrings, `#:` comments and the
+    prompt string literals are all in scope, and no count of the corpus or the
+    roster is restated in prose. Three sentences about the doc bound fell behind
+    the code and stayed there a month because nothing read them back, and the dates
+    are the point: `f80c9d00` (2026-09-11) wrote all three; `c4547c74` (#2806,
+    2026-10-16) named an eighth `autonomy-jobs:` unit in `groups:` — Ingest,
+    Distil, Build the graph, Canonicalize, Queue the work, Bound entropy, Measure,
+    Watch the machinery — which made `seven groups` false; `b377bea5` (#3338,
+    2026-10-25) added `keep_rejected`, which keeps a bound-refused doc in the state
+    dir and re-queues the unit on the shortened rest, which made every `thrown
+    away` claim false, because what a bound refuses is the COMMIT. A false reason
+    on a working rail is what makes the next reader weigh relaxing it (#2605's
+    class), and it is why `test_the_module_never_claims_the_archive_is_still_tracked`
+    next door holds the same kind of ban.
+
+    The fold is part of the claim, not an implementation detail: this module writes
+    its prompt literals with backslash continuations, so a ban that folded only
+    real newlines passed over #4056's own example sentence — `the bound throws the
+    entire correction \\` + newline + `pass away` — while reporting success. The
+    two asserts marked WRAP CONTROL are what make that shape fail loudly here
+    instead of silently."""
+    prose = _module_prose()
+    # WRAP CONTROL 1: the wrapped shape exists in the module at all, so control 2
+    # is testing a live hazard and not a phrase nobody ever wrapped. (Deliberately
+    # not "no backslash survives the fold": the module's regex literals are full of
+    # legitimate escapes, and an instrument that fires on those is unread noise.)
+    assert "\\\n" in _MODULE_SRC, (
+        "nothing in this module is written across a continuation any more, so the "
+        "witness below proves nothing — replace it with a phrase that is wrapped")
+    # WRAP CONTROL 2: the witness is a live sentence this module writes ACROSS a
+    # continuation (`... refuses the commit while your \\` then `filed items
+    # survive ...`), so it is only findable because the unwrapping works — the
+    # exact shape the ban has to survive.
+    assert "a broken bound refuses the commit while your filed items survive" in prose, (
+        "the fold no longer joins a prompt literal written across backslash "
+        "continuations, so this ban could be dodged by re-wrapping the sentence")
+    for banned in _BANNED_BOUND_PROSE:
+        assert banned not in prose, (
+            f"the module claims {banned!r} again. `keep_rejected` has kept every "
+            "bound-refused doc in the state dir since #3338, and the group roster "
+            "is derived from the doc's own headings by "
+            "tests/test_autonomy_jobs_doc_claims.py, not from a remembered count")
+    m = _TYPED_GROUP_COUNT.search(prose)
+    assert m is None, (
+        f"the module types a group count ({m.group(0)!r}) into prose again: "
+        "`c4547c74` (#2806) made 'seven groups' false the day it named an eighth "
+        "`autonomy-jobs:` unit and nothing noticed for a month")
+
+
+def test_check_doc_bound_s_own_prose_names_the_keeper_and_not_a_count():
+    """Clauses 1 and 2, read out of the function's live `__doc__` rather than a
+    re-typed copy of it: the summary line has to say what a non-empty `reason`
+    actually takes (the commit) and who keeps the work (`keep_rejected`), and the
+    section rail has to be argued from the shared file rather than from a number
+    of groups."""
+    raw = A.check_doc_bound.__doc__ or ""
+    # Scope the next three asserts to the summary paragraph by name, not by an
+    # index that silently widens: `split("\n\n")[0]` becomes the WHOLE docstring
+    # the day somebody deletes the blank line, and a body that merely mentions a
+    # keeper would then satisfy a claim about the first line.
+    head, sep, rest = raw.partition("\n\n")
+    assert sep and rest.strip(), (
+        "the docstring has no summary paragraph separated from its body, so a "
+        f"summary assert here cannot be told from a body assert: {raw[:120]!r}")
+    summary = " ".join(head.split())
+    assert "keep_rejected" in summary, (
+        f"the summary line does not name what keeps the edit: {summary!r}")
+    assert "commit" in summary and "refus" in summary, (
+        f"a non-empty `reason` refuses the commit, not the work: {summary!r}")
+    assert "state dir" in summary, (
+        f"and it has to say where the content goes instead: {summary!r}")
+    body = " ".join(raw.split())
+    assert ("the groups of one jobs doc share a file and must not re-open each "
+            "other's text") in body, (
+        "clause 1: the section rail is argued from the file the groups share")
+    assert "tests/test_autonomy_jobs_doc_claims.py" in body, (
+        "clause 1: and it names the pass that derives the group set, which is why "
+        "no count belongs here")
+    # The count that IS accurate stays: the function implements four rails (delta
+    # cap, shrink cap, front-matter destruction, out-of-section hunk), and a
+    # sweep that deleted this one would leave the paragraph with no shape at all.
+    assert "Four bounds" in body, "the four rails are not a group count"
+
+
+@pytest.mark.parametrize("shape", ["doc", "group"])
+def test_every_prompt_shape_says_the_commit_is_refused_and_the_content_kept(tree, shape):
+    """Clause 3: the two places the false claim reached a *model* — step 4's bound
+    sentence, handed to every unit, and `_FM_RULE_GROUP`'s front-matter bullet,
+    handed to every group. Both are built through `build_prompt`, the same call
+    `execute` makes, so editing the docstring while leaving the shipped prompt
+    lying cannot pass, and the bound's own interpolated terms have to survive the
+    rewrite or the prompt stops describing the rail it is enforcing."""
+    unit = "workers-jobs" if shape == "group" else "memory"
+    p = _joined(_prompt_for(tree, unit, shape,
+                            **({"name": "Dispatch"} if shape == "group" else {})))
+    assert "a broken bound refuses the commit" in p, (
+        "step 4 must say what the bound refuses, and it is the commit")
+    assert "kept in the state dir" in p, (
+        "and what becomes of the correction instead")
+    assert "your filed items survive" in p, "the filing half of the sentence stands"
+    assert "400 changed lines" in p, "`{max_delta_lines}` is still interpolated"
+    assert "Stay well inside it." in p, "and the bound still asks for margin"
+    if shape == "group":
+        assert "any hunk outside your section" in p, "`{section_bound_hint}` for a group"
+        assert "your section is lines" in p, "`{shrink_bound}` still quotes the base"
+        assert "the bound refuses the whole commit" in p, (
+            "_FM_RULE_GROUP says the same thing the rail does")
+        assert "falls outside your lines" in p, (
+            "#1686's bullet still names the consequence, or the instruction comes back")
+    for banned in _BANNED_BOUND_PROSE:
+        assert banned not in p, f"the shipped prompt still claims {banned!r}"
 
 
 # ── 9b. the turn's OWN live writes are reverted, off its change ledger ───────
