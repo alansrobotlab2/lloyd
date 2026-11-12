@@ -694,6 +694,13 @@ def append_verdict(rec: dict, path: Path = VERDICT_CACHE) -> None:
         f.write(json.dumps(rec) + "\n")
 
 
+#: How many `.bak` files a rewrite this module owns keeps. One name, because the
+#: verdict cache compactor and the durable proposal record back up with the same two
+#: steps and must not drift to two different depths while pretending to be one
+#: discipline (#4063).
+VERDICT_CACHE_KEEP_BACKUPS = 5
+
+
 def _sweep_prune_old_backups():
     """The sweep's `prune_old_backups`, loaded on demand (hyphenated filename).
 
@@ -708,7 +715,8 @@ def _sweep_prune_old_backups():
     return mod.prune_old_backups
 
 
-def compact_verdict_cache(path: Path = VERDICT_CACHE, keep: int = 5) -> dict:
+def compact_verdict_cache(path: Path = VERDICT_CACHE,
+                          keep: int = VERDICT_CACHE_KEEP_BACKUPS) -> dict:
     """Rewrite the verdict cache keeping the newest row per unordered pair (#746).
 
     `append_verdict` only ever appends and `load_verdict_cache` reads the whole
@@ -1230,6 +1238,46 @@ def downgrade_outgrown_merges(rows: list[dict],
     return downgraded, reasons
 
 
+def _back_up_durable_record(path: Path) -> Path | None:
+    """Copy the OUTGOING durable record to `<name>.<UTC stamp>.bak` beside it, then
+    prune the rotation — the two steps `compact_verdict_cache` takes before its own
+    replace, applied here for the same reason (#4063).
+
+    `emit_proposals` replaces the cumulative record with `os.replace`, and since
+    #3758 that rewrite is not content-preserving: `downgrade_outgrown_merges` re-asks
+    the guard against the LIVE fact store and flips a stored row's `action` from
+    `merge` to `alias_only`. That field decides whether a destructive merge reaches a
+    human's review list, and the only number that reports it is
+    `outgrown_merge_rows` — how many, never which. The 2026-11-11 weekly run (#67)
+    counted 3 and the record it wrote carries `stale_guard_reason` on 2, because
+    `merge_proposals` replaces a re-emitted row wholesale; the third row's previous
+    `action` existed in no other artifact, since the file that held it had just been
+    replaced in place. The same asymmetry is visible in the data directory itself:
+    `compact_verdict_cache` had left 5 `.bak` files there and this record had left
+    zero.
+
+    No copy means no revert path either. The groundskeeper's `sweep_memory_graph`
+    holds `semantic-proposals-cumulative.jsonl` BY NAME and ages only the dated files,
+    so nothing outside this module keeps a version of it, and restoring
+    `~/.lloyd-data-snapshots` would answer "what was this row" only by also reverting
+    every proposal merged since. A no-op when the record does not exist yet: a first
+    write has nothing to back up, and raising there would take the proposal write down
+    with it (#1410's rebuild path). The rotation is handed to the sweep's own
+    `prune_old_backups` — the function `compact_verdict_cache` calls, with the keep
+    count it uses — because the groundskeeper ruling is that the writer owns its
+    rotation and two owners for one rotation is a bug, so this new `.bak` pattern
+    needs no sweep edit and must not be given one.
+    """
+    if not path.exists():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    bak = path.with_name(f"{path.name}.{stamp}.bak")
+    shutil.copy2(path, bak)
+    prune = _sweep_prune_old_backups()
+    prune(path, keep=VERDICT_CACHE_KEEP_BACKUPS)
+    return bak
+
+
 def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
                    latest: Path, now_iso: str | None = None,
                    neighbors: dict[str, set[str]] | None = None) -> dict:
@@ -1298,6 +1346,14 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
     with run_log.open("a") as f:
         for rec in proposals:
             f.write(json.dumps(rec) + "\n")
+    # The replace below retires the outgoing record, and since #3758 it is not a
+    # content-preserving rewrite: `downgrade_outgrown_merges` may have flipped a stored
+    # row's `action` from `merge` to `alias_only` on the strength of a live store count
+    # nobody else recorded. Copy what is being replaced so that decision stays readable
+    # in bytes, and let the sweep's own rotation bound how many copies that costs. Here,
+    # not at the top of the function, because it is the replace that needs a witness and
+    # nothing between the two touches `cumulative` (#4063).
+    _back_up_durable_record(cumulative)
     tmp = cumulative.with_name(cumulative.name + ".tmp")
     with tmp.open("w") as f:
         for rec in merged:

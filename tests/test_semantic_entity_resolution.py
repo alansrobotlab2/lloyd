@@ -26,6 +26,7 @@ loader, not through a mock of either.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import re
 import subprocess
@@ -2019,3 +2020,285 @@ def test_the_run_report_counts_the_outgrown_rows_and_is_quiet_at_zero(
         f"the block printed on a run whose every merge row still passes: {out}")
     held = [r for r in _record_rows(seeded) if r["action"] == "merge"]
     assert held, "the quiet run held no merge row at all, so its silence proved nothing"
+
+
+# ---------------------------------------------------------------------------
+# #4063 — the record re-check now EDITS rows, so the file it edits needs the
+# revert path the neighbouring rewrite already has.
+#
+# `emit_proposals` refreshed `semantic-proposals-cumulative.jsonl` with
+# `tmp.replace(cumulative)` and took no copy of the outgoing file, while
+# `compact_verdict_cache` in the same module copies to `<name>.<stamp>.bak` and
+# prunes via the sweep's `prune_old_backups` before its own replace. That
+# asymmetry was cosmetic until #3758 made the record re-check mutate stored rows:
+# `downgrade_outgrown_merges` flips `action` from `merge` to `alias_only` and adds
+# `stale_guard_reason`, so one rewrite can now quietly redecide a proposal a human
+# may already be reading. The 2026-11-11 weekly run (#67) counted 3 such rows and
+# the record it wrote carries the marker on 2 of them; the third row's previous
+# `action` existed only in the file that rewrite replaced, and the count of it in
+# `autonomy-runs/67/run_67_20261111_112602.md` never says WHICH pair.
+#
+# The ask is the discipline the file already uses, not a new mechanism: copy the
+# outgoing record, then hand the rotation to the sweep's own `prune_old_backups`.
+# The guard, the marker, the dated file and the `latest` link are unchanged, so
+# clause 4 pins exactly that: the backup is the only difference this makes.
+# ---------------------------------------------------------------------------
+
+#: Same name shape `compact_verdict_cache` writes and `prune_old_backups` globs:
+#: `<name>.<UTC stamp>.bak`.
+CUM_BAK_RE = re.compile(
+    r"^semantic-proposals-cumulative\.jsonl\.(\d{8}T\d{6}Z)\.bak$")
+
+
+def _cum_baks(tmp_path):
+    return sorted(tmp_path.glob("semantic-proposals-cumulative.jsonl*.bak"))
+
+
+def _clock(instant):
+    """A stand-in for the `datetime` CLASS the emitter imports, whose `now()` always
+    reads one fixed prebuilt instant.
+
+    The caller builds `instant` from the REAL class and passes it in, rather than
+    having this helper read `ser.datetime` itself: the whole point of the caller is to
+    replace that name, so by the second loop iteration `ser.datetime` is a previous
+    `_Clock` and building an instant from it is `_Clock(2026, 11, 12, ...)`. Naive is
+    enough on purpose — the emitter calls `now(timezone.utc)` and only ever
+    `strftime`s the result, so what is being controlled is the printed second, not a
+    comparison. Controlling it is the point: two invocations of one date must not
+    collide on one backup name (#3122's calibrate-then-slice recipe calls the emitter
+    several times in one run, so the stamp has to reach the second)."""
+
+    class _Clock:
+        @staticmethod
+        def now(_tz=None):
+            return instant
+
+        @staticmethod
+        def strptime(text, fmt):
+            return instant.strptime(text, fmt)
+
+    return _Clock
+
+
+def test_a_refreshed_record_is_copied_out_first_so_the_flip_is_readable_backwards(
+        tmp_path, monkeypatch):
+    """Clause 1: the outgoing content is copied to `<name>.<UTC-stamp>.bak` BEFORE
+    the replace, so the row the re-check flipped can be read as it stood.
+
+    The outgrown row is seeded, not emitted — #3758's own shape: this run never
+    judged `Best-of <- Best-of-N`, the store grew underneath it — so the ONLY
+    artifact that can still show `action: merge` for that pair is the copy this
+    call takes. Asserted against the exact bytes the record held before the call,
+    because a copy made after the replace would be the new file and would prove
+    nothing; and the name carries a UTC stamp to the second, so several
+    invocations of one date (the skill's calibrate-then-slice recipe, #3122) get
+    distinct files instead of overwriting each other.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: OUTGROWN_FACTS.get(e, 0))
+    dated, cumulative, latest = _paths(tmp_path)
+    _seed_record(cumulative, [
+        _stored_row("Best-of", "Best-of-N", "2026-10-21T00:00:00+00:00")])
+    before = cumulative.read_bytes()
+
+    counts = ser.emit_proposals(
+        [_proposal("Qwen3-TTS", "qwen 3 tts", 0.9, action="alias_only")],
+        run_log=dated, cumulative=cumulative, latest=latest, neighbors={})
+
+    assert counts["outgrown_merge_rows"] == 1, counts
+    baks = _cum_baks(tmp_path)
+    assert len(baks) == 1, f"one rewrite, one backup: {[b.name for b in baks]}"
+    stamp = CUM_BAK_RE.match(baks[0].name)
+    assert stamp, f"the name is not <name>.<UTC-stamp>.bak: {baks[0].name}"
+    ser.datetime.strptime(stamp.group(1), "%Y%m%dT%H%M%SZ")  # raises if not an instant
+    assert baks[0].parent == tmp_path, "the copy belongs beside the record it copies"
+    assert baks[0].read_bytes() == before, (
+        "the backup is not the OUTGOING record, so a downgrade cannot be read "
+        "backwards from it")
+    held = {r["canonical"]: r for r in _record_rows(baks[0])}
+    assert held["Best-of"]["action"] == "merge", held["Best-of"]
+    assert "stale_guard_reason" not in held["Best-of"], held["Best-of"]
+    # The live record moved, which is what makes the copy worth having.
+    now = {r["canonical"]: r for r in _record_rows(cumulative)}
+    assert now["Best-of"]["action"] == "alias_only", now["Best-of"]
+
+
+def test_six_refreshes_leave_five_backups_pruned_by_the_sweep_own_function(
+        tmp_path, monkeypatch):
+    """Clause 2: the rotation is bounded by the sweep's `prune_old_backups` — the
+    function `compact_verdict_cache` calls — and not by a second copy of pruning.
+
+    Two halves, because the cheap way to pass this clause is a private keep-5 loop
+    that behaves identically until somebody changes the sweep's rule and only one
+    of the two files follows. Behavioural: six successive writes leave 5 `.bak`,
+    the newest kept and the oldest gone. Routing: the spy replaces
+    `_sweep_prune_old_backups` — the loader that hands `compact_verdict_cache` its
+    pruner — delegates to the function that loader really returns, and asserts
+    every call named the cumulative record with the verdict cache's keep count. A
+    local prune leaves the spy uncalled, and before that assertion is read the spy
+    itself is shown to be the sweep's function, so neither half can be satisfied
+    by a copy of the pruning logic.
+
+    Two things are pinned rather than depended upon, because both would otherwise
+    rot this test into a tautology: the copy preserves mtime, since
+    `prune_old_backups` orders on mtime and not on name; and the six writes get
+    six distinct stamps, since six same-named copies are ONE file and would show
+    up as a rotation that pruned four.
+    """
+    import os
+    import shutil
+
+    monkeypatch.setattr(ser, "count_facts", lambda e: OUTGROWN_FACTS.get(e, 0))
+    dated, cumulative, latest = _paths(tmp_path)
+    _seed_record(cumulative, [
+        _stored_row("Jason", "Jason Ma", "2026-09-30T00:00:00+00:00")])
+    # The sweep is imported by path by both this file and the module's own loader,
+    # so the pruner this spy delegates to is a function read off the script file in
+    # THIS checkout — the same definition the loader resolves, not a copy of it.
+    _spec = importlib.util.spec_from_file_location(
+        "_4063_sweep_behind_the_loader",
+        str(Path(inspect.getsourcefile(ser)).parent / "entity-resolution-sweep.py"))
+    _sweep = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_sweep)          # the sweep module THIS repo holds
+    real_prune = _sweep.prune_old_backups
+
+    def _loader_says_the_sweep_function():
+        return real_prune
+
+    monkeypatch.setattr(ser, "_sweep_prune_old_backups", _loader_says_the_sweep_function)
+    seen: list[tuple[str, int]] = []
+
+    def _spy_prune(path, keep=3, pattern=None):
+        seen.append((Path(path).name, keep))
+        return real_prune(path, keep=keep, pattern=pattern)
+
+    monkeypatch.setattr(ser, "_sweep_prune_old_backups", lambda: _spy_prune)
+    # Pin 1: the emitter and the cache compactor share ONE pruner route, so the spy
+    # above is watching the rotation it claims to watch. Resolved through
+    # `_sweep_prune_old_backups` rather than named, so this stays true when the
+    # loader is itself faked by another node (#3744's test does the same thing).
+    assert "_sweep_prune_old_backups()" in inspect.getsource(ser.compact_verdict_cache), (
+        "`compact_verdict_cache` no longer reaches the sweep's pruner through the "
+        "shared loader, so a keep count of 5 here is not the sweep's rule")
+    assert "prune_old_backups" in inspect.getsource(ser._sweep_prune_old_backups), (
+        "the shared loader no longer loads the sweep's pruner")
+    assert real_prune.__module__ == _sweep.__name__ and real_prune.__name__ == "prune_old_backups"
+    # Pin 2: the sweep orders the rotation by the two files' mtimes, so the mtime
+    # spacing below is doing real work rather than decorating the assertion.
+    _real_copy2 = shutil.copy2
+
+    def _pin_mtime(src, dst, *a, **kw):
+        out = _real_copy2(src, dst, *a, **kw)
+        assert Path(dst).stat().st_mtime == Path(src).stat().st_mtime, (
+            f"the copy of {src} did not preserve its mtime, and `prune_old_backups` "
+            "orders the rotation on mtime alone — with every copy sharing the "
+            "copying second, `keep=5` would delete five arbitrary backups")
+        return out
+
+    monkeypatch.setattr(ser.shutil, "copy2", _pin_mtime)
+
+    real_dt = ser.datetime                    # the real class, before it is replaced
+    created: list[Path] = []
+    for i in range(6):
+        # One distinct second per invocation, so six writes get six names, and one
+        # distinct mtime per record, so the sweep's sort has a strict order to work
+        # with instead of whatever the disk clock happened to read.
+        monkeypatch.setattr(ser, "datetime",
+                            _clock(real_dt(2026, 11, 12, 3, 0, i * 3)))
+        os.utime(cumulative, (1_700_000_000 + i * 60, 1_700_000_000 + i * 60))
+        ser.emit_proposals(
+            [_proposal(f"Issue-{i}", f"issue {i} variant", 0.9, action="alias_only")],
+            run_log=dated, cumulative=cumulative, latest=latest, neighbors={})
+        fresh = [b for b in _cum_baks(tmp_path) if b not in created]
+        assert len(fresh) == 1, (
+            f"write {i} left {len(fresh)} new backups, not one: "
+            f"{[b.name for b in _cum_baks(tmp_path)]}")
+        created += fresh
+
+    assert len({c.name for c in created}) == 6, (
+        "two writes shared a backup name, so the count below is counting copies of "
+        f"one file: {[c.name for c in created]}")
+    survivors = _cum_baks(tmp_path)
+    assert len(survivors) == 5, (
+        f"the rotation kept {len(survivors)}, not the five the verdict cache keeps: "
+        f"{[b.name for b in survivors]}")
+    assert set(survivors) <= set(created), "the rotation produced a file it never wrote"
+    assert created[0] not in survivors, (
+        "the oldest backup survived while a newer one went, which is not a rotation")
+    assert created[-1] in survivors, "the newest content must always be kept"
+    assert seen and all(path == "semantic-proposals-cumulative.jsonl"
+                        for path, _ in seen), (
+        f"the rotation pruned something other than the cumulative record: {seen}")
+    assert {keep for _, keep in seen} == {5}, (
+        f"the rotation is not the verdict cache's keep count: {seen}")
+
+
+def test_the_first_write_of_a_record_backs_up_nothing_and_a_later_one_does(tmp_path):
+    """Clause 3: no record means nothing to back up, and the copy is not a
+    by-product of the graph re-check.
+
+    The first half is #1410's path: a missing record is merged into as an empty one
+    and the run reports a rebuild, so a backup step that assumed the file exists
+    would raise inside the emitter and take the proposal write with it — asserted
+    as no `.bak` of any kind AND a returned count. The second half is the
+    graph-free caller: the ~15 existing call sites pass `neighbors=None`, so
+    `downgrade_outgrown_merges` never runs there, and the point is that the copy is
+    a property of the WRITE, not of the re-check. The second write backs the first
+    one up even though no row moved, which is what makes a stray rewrite by any
+    future caller auditable too.
+    """
+    dated, cumulative, latest = _paths(tmp_path)
+
+    first = ser.emit_proposals(
+        [_proposal("Qwen3-TTS", "qwen 3 tts", 0.9, action="alias_only")],
+        run_log=dated, cumulative=cumulative, latest=latest)
+    assert first["cumulative"] == 1, first
+    assert list(tmp_path.glob("*.bak")) == [], (
+        "the first write of a record that did not exist took a backup of nothing")
+
+    second = ser.emit_proposals(
+        [_proposal("Isaac Lab", "IsaacLab", 0.91)],
+        run_log=dated, cumulative=cumulative, latest=latest)  # neighbors=None
+    assert second["outgrown_merge_rows"] == 0, second
+    baks = _cum_baks(tmp_path)
+    assert len(baks) == 1, (
+        "a graph-free refresh — no guard re-asked, no row moved — took no copy of "
+        f"the record it replaced: {[b.name for b in baks]}")
+    assert {r["canonical"] for r in _record_rows(baks[0])} == {"Qwen3-TTS"}
+
+
+def test_the_backup_is_the_only_difference_a_refresh_makes(tmp_path, monkeypatch):
+    """Clause 4: dated rows, the `latest` target and the returned counts are the
+    values they already had — the copy adds a file and changes nothing else.
+
+    Every number here is the value the base commit produces for this input,
+    restated rather than derived from the code under test, so an implementation
+    that wrote the dated file differently, re-pointed `latest`, or grew the
+    returned counts to make the backup visible fails here. The sweep reads through
+    `latest` (#744's contract), so a re-pointed link would widen a reviewer's
+    queue with nothing in this file noticing — hence the queue is read back through
+    the loader, not just the link.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: OUTGROWN_FACTS.get(e, 0))
+    dated, cumulative, latest = _paths(tmp_path)
+    _seed_record(cumulative, [
+        _stored_row("Jason", "Jason Ma", "2026-09-30T00:00:00+00:00")])
+
+    counts = ser.emit_proposals(
+        [_proposal("Qwen3-TTS", "qwen 3 tts", 0.9, action="alias_only"),
+         _proposal("Isaac Lab", "IsaacLab", 0.91)],
+        run_log=dated, cumulative=cumulative, latest=latest, neighbors={})
+
+    assert counts["run"] == 2, counts
+    assert counts["cumulative"] == 3, counts
+    assert counts["multi_canonical_variants"] == 0, counts
+    assert counts["outgrown_merge_rows"] == 0, counts
+    assert counts["reset"] is False and counts["reset_from"] == 1, counts
+    assert ".bak" not in str(counts), (
+        "the returned counts grew a field for the backup, so every caller of this "
+        f"function sees a shape it was not written for: {counts}")
+    assert [json.loads(l)["canonical"] for l in
+            dated.read_text().splitlines()] == ["Qwen3-TTS", "Isaac Lab"]
+    assert str(latest.readlink()) == cumulative.name, (
+        "the reviewer's path stopped naming the cumulative record")
+    assert {r["canonical"] for r in sweep.load_semantic_proposals(tmp_path)} == {
+        "Jason", "Qwen3-TTS", "Isaac Lab"}, "the queue a human reads changed"
