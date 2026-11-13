@@ -35,8 +35,78 @@ from workers.queue import (WorkQueue, QueueItem, get_queue, new_run_id, queue_ag
 
 logger = logging.getLogger("lloyd-workers.pool")
 
-# Fallback when a source has no max_duration_seconds in config.
+# Fallback when a source has no readable max_duration_seconds in config. Read it
+# through `source_max_duration_seconds`, never by spelling this number at a call
+# site — that is what #4103 is about.
 _DEFAULT_MAX_DURATION_SECONDS = 900
+
+#: The run-record key saying THIS run's cap was that fallback and not a number in
+#: config (#4103). Written only when the fallback fired: the instrument over the
+#: field is `meta_json LIKE '%duration_cap_fallback%'`, and a key on every run
+#: would make "config was fine" and "config was broken" one query result again —
+#: the rule `_bind_step_count` and `normalize_result`'s `round_id` lift both hold
+#: to.
+CAP_FALLBACK_META_KEY = "duration_cap_fallback"
+#: Every token `source_max_duration_seconds` can return as its reason. A config
+#: state not on this list is a state nobody has considered.
+CAP_FALLBACK_REASONS = ("config_unreadable", "block_absent", "key_absent",
+                        "value_invalid")
+
+
+def source_max_duration_seconds(source: str) -> tuple[int, Optional[str]]:
+    """THE reader of `workers.sources.<source>.max_duration_seconds`: `(cap, reason)`.
+
+    #4103. Before this function the cap was read twice, with two different
+    fallbacks: the pool's own read here, and a second literal of 1800 in
+    `workers/sources/scheduled_task.py` while config.yaml shipped 3600 for that
+    source. So ONE missing key gave a task-side deadline of `min(declared, 1800 -
+    30)` = 1770 s under a pool timer that killed at 900 — the pool winning the
+    race, which `architecture/autonomy.md` ("Two timeouts, and the thirty seconds
+    between them") records as 309 cancelled runs and 96.9 GPU-hours. Asking the
+    source to pass a cap it guessed is what made two numbers possible; a source
+    now asks THIS function what the pool is about to enforce, so no config state
+    can hand the two timers different values.
+
+    `(cap_seconds, None)` when the number came from config;
+    `(_DEFAULT_MAX_DURATION_SECONDS, <token>)` when it did not, with the token out
+    of `CAP_FALLBACK_REASONS` naming which way the key failed — no source block, no
+    key, a value that is not a positive integer, or a config store that raised on
+    read. A caller carries that token into its WARNING and into the run row
+    (`CAP_FALLBACK_META_KEY`), so a fleet-wide halving is visible on the row rather
+    than reading as a run that timed out on its own.
+
+    900 is the fallback for the whole fleet, including `scheduled-task`, whose
+    configured cap is 3600. The 1800 in `workers/fleet_watchdog.py`
+    (`DEFAULT_MAX_DURATION_SECONDS`) is not a cap and stays there deliberately:
+    that reader weighs the oldest claimable item against it to decide whether
+    dispatch is starving, and a 900-or-zero reading there would call ordinary
+    queued work starving.
+    """
+    try:
+        from workers.sources import get_sources_config
+        cfg = get_sources_config()
+    except Exception as e:  # noqa: BLE001 — a cap must be returned either way
+        logger.warning("max_duration_seconds for source %s unreadable from config (%s: "
+                       "%s) — applying the pool fallback %ds", source,
+                       type(e).__name__, e, _DEFAULT_MAX_DURATION_SECONDS)
+        return _DEFAULT_MAX_DURATION_SECONDS, "config_unreadable"
+
+    block = cfg.get(source) if isinstance(cfg, dict) else None
+    if not isinstance(block, dict):
+        return _DEFAULT_MAX_DURATION_SECONDS, "block_absent"
+    raw = block.get("max_duration_seconds")
+    if raw is None:
+        return _DEFAULT_MAX_DURATION_SECONDS, "key_absent"
+    try:
+        cap = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_DURATION_SECONDS, "value_invalid"
+    if cap <= 0:
+        # A zero or negative cap would hand `asyncio.wait_for` a timeout that
+        # kills every item of the source instantly — a config typo taking the
+        # source down. The fallback is the safer wrong number, and it says so.
+        return _DEFAULT_MAX_DURATION_SECONDS, "value_invalid"
+    return cap, None
 
 # The statuses a run record may carry. `skipped` is not a failure and not a
 # success: it means the source looked and there was nothing to do.
@@ -2013,9 +2083,19 @@ class WorkerPool:
                 "worker": worker_id,
             }
 
-            cfg_all = get_sources_config()
-            src_cfg_item = cfg_all.get(item.source, {}) if isinstance(cfg_all, dict) else {}
-            max_duration = int(src_cfg_item.get("max_duration_seconds", _DEFAULT_MAX_DURATION_SECONDS))
+            # The one read of this item's wall-clock cap (#4103) — the same call
+            # `scheduled_task.execute` makes to size `run_task`'s own deadline, so
+            # the two timers cannot be built from different numbers.
+            max_duration, cap_fallback = source_max_duration_seconds(item.source)
+            if cap_fallback:
+                logger.warning(
+                    "[%s] no readable max_duration_seconds for source %s (%s) — capping "
+                    "this run at the pool fallback %ds. Every source whose block lost the "
+                    "key gets this same number, which is why it is also written to the run "
+                    "row as %r: a halved fleet budget must not read as a week of tasks that "
+                    "all timed out early (#4103).",
+                    worker_id, item.source, cap_fallback, max_duration,
+                    CAP_FALLBACK_META_KEY)
             logger.info("[%s] running %s/%s (id=%d) run_id=%s timeout=%ds",
                         worker_id, item.source, item.kind, item.id, run_id, max_duration)
 
@@ -2079,6 +2159,13 @@ class WorkerPool:
                                 "session_ids": list(current_run_sessions.get() or []),
                                 "scratchpad": _scratchpad_meta(),
                                 **queue_age_meta(item)}
+                # #4103, and it goes LAST for the same reason `queue_age_meta` does:
+                # the pool is the side that enforced the cap, so what it enforced
+                # outranks what a source believed. A source that already named the
+                # fallback keeps the same token either way — both read the same
+                # `source_max_duration_seconds` — so this never contradicts it.
+                if cap_fallback:
+                    norm["meta"][CAP_FALLBACK_META_KEY] = cap_fallback
                 # After the merge, and it is the order that carries clause 5:
                 # `norm["meta"]` may already hold a `num_turns` the source
                 # reported for itself, and that one stays.
@@ -2214,6 +2301,15 @@ class WorkerPool:
                         meta_json=json.dumps(_bind_step_count({
                             "pool_timeout": True,
                             "max_duration_seconds": max_duration,
+                            # #4103, and this is the arm that matters for it: the
+                            # row a person reads after a kill. `max_duration_seconds`
+                            # alone cannot say whether that cap came from config or
+                            # from the pool's fallback — the difference between "this
+                            # task wants a longer budget" and "the fleet lost its cap
+                            # and every source is being cut at 900". Absent, as ever,
+                            # when the number came from config.
+                            **({CAP_FALLBACK_META_KEY: cap_fallback}
+                               if cap_fallback else {}),
                             "session_ids": list(current_run_sessions.get() or []),
                             # A run killed at its cap is the population #1554 is
                             # about: how much it had externalised by the moment it

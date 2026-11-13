@@ -2126,10 +2126,8 @@ def test_the_failure_ledger_block_in_config_yaml_cites_code_not_line_numbers():
          "async def _scheduler_pass"),
         ("workers/pool.py", 'int(src_cfg.get("interval_seconds", 3600))',
          'int(src_cfg.get("interval_seconds", 3600))'),
-        ("workers/pool.py",
-         'int(src_cfg_item.get("max_duration_seconds", _DEFAULT_MAX_DURATION_SECONDS))',
-         'int(src_cfg_item.get("max_duration_seconds", '
-         '_DEFAULT_MAX_DURATION_SECONDS))'),
+        ("workers/pool.py", "source_max_duration_seconds",
+         "def source_max_duration_seconds(source: str)"),
         ("workers/sources/failure_ledger.py",
          'interval = float(src_cfg.get("min_interval_seconds"',
          'interval = float(src_cfg.get("min_interval_seconds", '
@@ -3123,8 +3121,8 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     source's `last_sweep` unconditionally after `sweep_and_dispatch` returns, so it
     is the sweep's clock and says nothing about dispatch — 0 `failure_dispatches` rows
     sat against it at 2026-10-30T00:28Z. The pool's `last_enqueue_check`
-    (`workers/pool.py:1782`) is stamped on every ask and `last_enqueue_ok`
-    (`workers/pool.py:1793`) on a clean return only; `enqueue_if_due` returns early
+    (`workers/pool.py:1852`) is stamped on every ask and `last_enqueue_ok`
+    (`workers/pool.py:1863`) on a clean return only; `enqueue_if_due` returns early
     inside `min_interval_seconds` (`workers/sources/failure_ledger.py:250`) and that
     early return is clean, so the pair advances once per hourly ask whether or not the
     source swept. The retired paragraph quoted `last_enqueue_ok` as 'a pass completes
@@ -3210,11 +3208,11 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     # claims about the tree, and a doc-claims file that only greps the doc grades
     # prose against prose.
     pool = (ROOT / "workers" / "pool.py").read_text(encoding="utf-8").splitlines()
-    assert "last_enqueue_check" in pool[1781], (
-        f"workers/pool.py:1782 no longer stamps the pool's attempt key ({pool[1781]!r}) "
+    assert "last_enqueue_check" in pool[1851], (
+        f"workers/pool.py:1852 no longer stamps the pool's attempt key ({pool[1851]!r}) "
         "while §6 cites that line for it")
-    assert "OK_WM_KEY" in pool[1792], (
-        f"workers/pool.py:1793 no longer stamps the clean-return key ({pool[1792]!r})")
+    assert "OK_WM_KEY" in pool[1862], (
+        f"workers/pool.py:1863 no longer stamps the clean-return key ({pool[1862]!r})")
     src = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
         encoding="utf-8").splitlines()
     assert "WATERMARK_LAST_SWEEP" in src[273], (
@@ -5041,3 +5039,100 @@ def test_the_paper_kind_passage_says_the_two_halves_are_one_health_row(tmp_path)
         "the groups do not add up to the row's own total, so 'one row for both halves' is a "
         f"row of {rollup['total']} reading a partition of "
         f"{sum(v['total'] for v in rollup['by_kind'].values())}")
+
+
+# ---------------------------------------------------------------------------
+# #4103 — the cap's fallback number, stated once, in the docs and in the code
+# ---------------------------------------------------------------------------
+
+_SEC_TIMEOUTS = "## Two timeouts, and the thirty seconds between them"
+
+
+def _plain_sentences(text: str) -> list[str]:
+    """Sentences of prose with the whitespace flattened and issue ids removed.
+
+    Issue numbers are three- and four-digit integers, and this node's whole job is to
+    read integers in prose, so `#4103` has to stop being one before the numbers are
+    weighed.
+    """
+    flat = re.sub(r"#\d+", "", " ".join(text.split()))
+    return [s for s in re.split(r"(?<=[.!?])\s+", flat) if s]
+
+
+def test_the_cap_fallback_is_one_number_across_both_docs_and_the_code():
+    """Clause 5: the two docs and `workers/pool.py` state the SAME fallback, or they lie.
+
+    Before #4103 they could not have agreed, because the code did not: the config map
+    in `architecture/workers.md` said the pool's `wait_for` cap was "900 if absent"
+    while `scheduled_task.execute` sized the run's own deadline from a second default
+    of 1800 under a configured 3600 — one missing key put a 1770 s inner deadline under
+    a 900 s kill, and `architecture/autonomy.md` counts what that race cost as 309
+    cancelled runs with no run record and 96.9 GPU-hours. So this grades the
+    AGREEMENT between three surfaces that each carry the number: the constant, the
+    config-map comment, and the timeout section's prose. The number is read out of the
+    code rather than written again here, because a doc that restates a constant goes
+    stale silently the day the constant moves — which is exactly how the 900/1800 pair
+    survived a year of both docs being right about their own half.
+    """
+    from workers import pool as worker_pool
+
+    fallback = worker_pool._DEFAULT_MAX_DURATION_SECONDS
+    assert fallback == 900, (
+        f"`workers/pool.py` now falls back to {fallback}, so every sentence below and "
+        "the halving arithmetic in architecture/autonomy.md have to be re-read, not "
+        "re-run")
+
+    # --- workers.md §6's config-map line: names the constant, states its number, and
+    # offers no second number. The retired form was `(900 if absent)`, which was true
+    # of the pool and only the pool, while the source that sized the run kept 1800.
+    cfg_lines = (ARCH / "workers.md").read_text(encoding="utf-8").splitlines()
+    at = [k for k, ln in enumerate(cfg_lines)
+          if ln.lstrip().startswith("max_duration_seconds:")]
+    assert at, "architecture/workers.md's config map lost its max_duration_seconds line"
+    entry = " ".join(cfg_lines[at[0]:at[0] + 4])
+    assert "_DEFAULT_MAX_DURATION_SECONDS" in entry, (
+        f"the config-map comment names a fallback without naming where it lives: {entry!r} "
+        "— a number with no address is how the two readers stopped agreeing")
+    assert str(fallback) in entry, (
+        f"the config-map comment states a fallback other than the code's {fallback}: "
+        f"{entry!r}")
+    assert "1800" not in entry and "900 if absent" not in entry, (
+        f"the split is back in the config map: {entry!r}")
+
+    # --- autonomy.md's timeout section: one fallback, and every other number in a
+    # sentence about the fallback has to be a carve-out that says so in that sentence.
+    auton = (ARCH / "autonomy.md").read_text(encoding="utf-8")
+    assert _SEC_TIMEOUTS in auton, "the timeout section left architecture/autonomy.md"
+    start = auton.index(_SEC_TIMEOUTS)
+    sec = auton[start:auton.index("\n## ", start + 1)]
+    flat = " ".join(sec.split())
+    assert f"one fallback number, {fallback}" in flat, (
+        f"the timeout section no longer states the single fallback of {fallback} in "
+        "those words, so a reader cannot tell it from the retired two-number form")
+    assert worker_pool.CAP_FALLBACK_META_KEY in sec, (
+        f"the section does not name the instrument that makes a halved cap legible "
+        f"(`{worker_pool.CAP_FALLBACK_META_KEY}`), which is half of what #4103 was for")
+    for reason in worker_pool.CAP_FALLBACK_REASONS:
+        assert reason in sec, (
+            f"the section omits the fallback reason `{reason}`, so the four ways the "
+            "key can fail are no longer distinguishable from the doc")
+    for sent in _plain_sentences(sec):
+        if "fallback" not in sent:
+            continue
+        nums = [n for n in re.findall(r"\b\d{3,4}\b", sent) if n != str(fallback)]
+        for n in nums:
+            assert ("fleet_watchdog" in sent or "deep_research" in sent), (
+                f"a sentence about the fallback states {n} beside {fallback} without "
+                f"naming which carve-out it belongs to: {sent!r} — that is the "
+                "900-versus-1800 shape #4103 removed")
+
+    # --- and the code behind the doc: exactly one source module still defaults the
+    # key to a literal of its own, and it is the one the round ruled on and did not
+    # take. A second module appearing here would put the doc's claim false.
+    second_readers = subprocess.run(
+        ["git", "grep", "-l", r'get("max_duration_seconds", [0-9]', "--", "workers/"],
+        cwd=ROOT, capture_output=True, text=True).stdout.split()
+    assert second_readers == ["workers/sources/deep_research.py"], (
+        f"modules still default `max_duration_seconds` to a literal: {second_readers}. "
+        "architecture/autonomy.md says `deep_research.py` is the only one — either the "
+        "doc or the tree is now wrong (#4103)")

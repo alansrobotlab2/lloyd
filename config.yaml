@@ -2686,8 +2686,10 @@ workers:
       interval_seconds: 3600
       min_interval_seconds: 86400
       max_inflight: 1
-      # Wall-clock bound on the one turn: `workers/pool.py` reads it as
-      # `int(src_cfg_item.get("max_duration_seconds", _DEFAULT_MAX_DURATION_SECONDS))`.
+      # Wall-clock bound on the one turn. Its one reader is
+      # `workers/pool.py`'s `source_max_duration_seconds` (#4103): a block that omits
+      # the key, or whose value is not a positive integer, falls back to that module's
+      # `_DEFAULT_MAX_DURATION_SECONDS` (900) and names the fallback on the run row.
       # It investigates ≤20 ledger rows, one window of `git log`, and writes a few
       # paragraphs.
       max_duration_seconds: 900

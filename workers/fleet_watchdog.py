@@ -84,7 +84,12 @@ logger = logging.getLogger("lloyd-workers.fleet_watchdog")
 NAME = "scheduled-task"
 #: The fallback the dispatch tick applied before the split (`src_cfg.get(
 #: "max_duration_seconds", 1800)`), kept rather than trusted from the live config so
-#: a missing block reads as the old default instead of as zero.
+#: a missing block reads as the old default instead of as zero. NOT the pool's cap:
+#: #4103 unified THAT to one reader (`workers/pool.py::source_max_duration_seconds`,
+#: whose fallback is 900) and deliberately left this number out of it — this one only
+#: weighs the oldest claimable item against a ceiling to decide whether dispatch is
+#: starving, so inheriting 900, or 0 from a missing block, would call ordinary queued
+#: work starving. `tests/test_fleet_watchdog.py` pins the behaviour that depends on it.
 DEFAULT_MAX_DURATION_SECONDS = 1800
 
 # Stall alarm: a task overdue by more than this multiple of its interval (with its

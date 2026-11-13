@@ -818,7 +818,9 @@ workers:
       enabled: true
       interval_seconds: 1800    # how often enqueue_if_due is called
       max_inflight: 1           # concurrent items from this source
-      max_duration_seconds: 3600  # the pool's wait_for cap (900 if absent)
+      max_duration_seconds: 3600  # the pool's wait_for cap; unreadable ⇒ the one
+                                  # fallback of 900 (`_DEFAULT_MAX_DURATION_SECONDS`),
+                                  # named on the run row — #4103
       priority: 55              # optional; defaults to the source's own
       inner_voice: true         # session-backed sources only; see §4
 ```

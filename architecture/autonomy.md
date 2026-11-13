@@ -556,9 +556,32 @@ So `run_task` derives `max(60, min(declared, cap − 30))`
 (`_POOL_TIMEOUT_MARGIN`) and the task handler always wins.
 `tests/test_autonomy_timeout.py` pins the pair, including that the margin is a
 positive number of seconds and that a short cap still leaves working time. The
-sibling constant on the session-backed worker path,
-`_common.POOL_TIMEOUT_MARGIN_SECONDS`, is 60 — deliberately wider, because that
-path has an HTTP call to make on its way out.
+**cap itself has had one reader since #4103**:
+`workers/pool.py::source_max_duration_seconds` returns `(seconds, reason)`, the
+pool hands those seconds to its `wait_for`, and `scheduled_task.execute` asks the
+same call what to size `run_task`'s deadline under — so no config state can put a
+longer deadline under a shorter kill again. There is **one fallback number, 900**
+(`workers/pool.py` `_DEFAULT_MAX_DURATION_SECONDS`) for the cap the pool enforces on
+**every** source, and when it fires the run says so: a WARNING naming the reason, and
+`meta.duration_cap_fallback` on the run row carrying `key_absent`, `block_absent`,
+`value_invalid` or `config_unreadable` — on the arm where the source returned AND on
+the arm where the pool's timer killed it. Absent means the cap came from config: a
+fleet-wide halving has to be legible on the rows, or it reads as a week of tasks
+that each timed out early.
+`tests/test_workers_pool.py::test_no_config_state_puts_the_two_timers_in_the_same_order`
+runs all five states and asserts the derived deadline stays strictly under the cap
+the pool enforces; its `key_absent` row used to be 1770 under a 900 kill.
+`workers/fleet_watchdog.py`'s `DEFAULT_MAX_DURATION_SECONDS` (1800) is **not** this
+cap and stays where it is: that reader only weighs the oldest claimable item against
+the number to decide whether dispatch is starving, and a fallback of 900 — or 0,
+which is what reading a missing block naively yields — would call ordinary queued
+work starving. One second reader of the key is still standing and is not this
+incident: `workers/sources/deep_research.py` defaults its own copy to 1800 for
+`turn_timeout_for`, a value its config block also ships, so the two agree today and
+there is no inner/outer pair to race — folding it into the accessor is the ruling
+owed after #4103, not a defect in it. The sibling constant on the session-backed worker path,
+`_common.POOL_TIMEOUT_MARGIN_SECONDS`, is 60 — deliberately wider, because that path
+has an HTTP call to make on its way out.
 
 **A `CancelledError` is not an exception.** The pool cancels through
 `wait_for`, and `CancelledError` is a `BaseException`, so neither the timeout
@@ -1252,7 +1275,9 @@ it. See `architecture/knowledge-graph.md`.
   `scripts/memory/conversation_relations.py`, which gates on nothing and parses the
   front matter itself — and deleted a duplicated `## Review log` heading stranded
   mid-list. Filed: #4102 (a code comment naming five key-less task files where six
-  exist), #4103 (`execute`'s second default of 1800 for `max_duration_seconds`, half
-  the configured 3600), #4104 (#105's missing `parked:` declaration), #4105
+  exist), #4104 (#105's missing `parked:` declaration), #4105
   (`conversation_relations.py`'s private task-file parse, whose fallback is the #420
-  pin).
+  pin). #4103, filed in the same pass — `execute`'s second default of 1800 for
+  `max_duration_seconds`, half the configured 3600 and a third number from the pool's
+  own 900 — is closed: the cap has one reader now, and *Two timeouts, and the thirty
+  seconds between them* above carries what replaced it.

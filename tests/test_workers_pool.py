@@ -3818,3 +3818,176 @@ async def test_an_unreadable_claim_stamp_reaches_the_record_with_no_age_key(
         "the age must be the only thing the unreadable stamp took away")
     assert "queue_age_seconds" not in json.loads(runs[0]["meta_json"]), (
         "the run row and the run record disagree about a row that cannot be read")
+
+
+# ---------------------------------------------------------------------------
+# #4103 — one cap, read once, and the fallback visible on the row
+#
+# The pair this replaces: `workers/pool.py` enforced 900 on a missing
+# `max_duration_seconds` while `scheduled_task.execute` sized `run_task`'s own
+# deadline from a second default of 1800, under a configured 3600. A missing key
+# therefore gave an inner 1770 s under an outer 900 s kill — the pool winning by
+# 870 s, which `architecture/autonomy.md` ("Two timeouts, and the thirty seconds
+# between them") records as 309 cancelled runs with no run record and 96.9
+# GPU-hours. The caps are now one call:
+# `workers.pool.source_max_duration_seconds`.
+# ---------------------------------------------------------------------------
+
+import workers.pool as worker_pool  # noqa: E402  (section-local: the accessor this pins)
+from tests.test_workers_sources import CAP_STATES, _cap_handed_to_run_task
+
+
+def _config_that_raises():
+    """The fifth state: the config store itself is unreadable."""
+    raise RuntimeError("config.yaml could not be read")
+
+
+#: The four states of the contract, plus the reader that raises. A state absent
+#: from this table is a state in which the two timers have never been compared.
+POOL_CAP_STATES = [*CAP_STATES,
+                   ("config-unreadable", _config_that_raises, 900, "config_unreadable")]
+
+
+def _task_side_timeout(declared: int, cap: int) -> int:
+    """`max(60, min(declared, cap - 30))` — the expression inside `app.autonomy.run_task`.
+
+    A copy, not an import, for the reason `tests/test_autonomy_timeout.py` states:
+    the expression is inline in `run_task`, which needs the whole harness to invoke,
+    and that file pins the expression itself. What THIS node pins is which cap the
+    expression is fed, and what the pool would have done at the same moment.
+    """
+    from app import autonomy
+    return max(60, min(declared, int(cap) - autonomy._POOL_TIMEOUT_MARGIN))
+
+
+@pytest.mark.parametrize("state,src_cfg,want_cap,want_reason", POOL_CAP_STATES,
+                         ids=[s[0] for s in POOL_CAP_STATES])
+def test_no_config_state_puts_the_two_timers_in_the_same_order(
+        monkeypatch, tmp_path, state, src_cfg, want_cap, want_reason):
+    """Clause 2: the task-side deadline sits strictly inside the pool's kill, every state.
+
+    Equal caps is what caused the 309 lost runs; the pair this round replaced was
+    WORSE than equal, because the inner timer was the longer one and the pool's
+    cancel landed 870 s early with no handler left to write a record. Both figures
+    are production's own — the inner from the kwarg `scheduled_task.execute`
+    actually passes, the outer from `source_max_duration_seconds`, which is the value
+    `WorkerPool._worker_loop` hands to `asyncio.wait_for`. `declared=7200` is the
+    longer-than-the-cap case, where the cap is the only thing deciding the figure.
+    """
+    handed, _out = _cap_handed_to_run_task(monkeypatch, tmp_path, src_cfg)
+    enforced, reason = worker_pool.source_max_duration_seconds("scheduled-task")
+    inner = _task_side_timeout(declared=7200, cap=handed)
+
+    assert handed == enforced == want_cap, (
+        f"{state}: `execute` sized the run from {handed} s while the pool would kill at "
+        f"{enforced} s (both expected {want_cap} s) — the pool wins, `run_task`'s handler "
+        "never runs, and no run record is written")
+    assert reason == want_reason, f"{state}: fallback reason {reason!r}, expected {want_reason!r}"
+    assert inner < enforced, (
+        f"{state}: a task-side timeout of {inner} s is not strictly under the pool's "
+        f"{enforced} s cap, so the pool cancels `run_task` before its own handler runs")
+    assert inner == (3570 if want_cap == 3600 else 870), (
+        f"{state}: the effective task-side timeout moved to {inner} s, which is the "
+        "number architecture/autonomy.md states for this state")
+
+
+@pytest.mark.parametrize("state,src_cfg,want_cap,want_reason", CAP_STATES,
+                         ids=[s[0] for s in CAP_STATES])
+def test_the_handed_cap_leaves_room_under_the_timer_the_pool_actually_reads(
+        monkeypatch, tmp_path, state, src_cfg, want_cap, want_reason):
+    """Clause 2's numeric falsifier: the pair, measured with no new symbol in sight.
+
+    The table above fails at base only with an `ImportError` about
+    `source_max_duration_seconds`, which says the accessor is missing and not that
+    the two timers disagreed — a rename of the accessor would blind it. This node
+    therefore reads the OUTER cap the way `WorkerPool._worker_loop` read it before
+    #4103 (the retired expression, spelled out below, deliberately not imported) and
+    weighs the inner deadline against it. At base the `key-absent-from-block` row
+    gives 1800 handed against 900 enforced — `max(60, min(7200, 1800 − 30))` = 1770 s
+    of task under a 900 s kill — and fails with those numbers. After, every row's
+    inner figure is the configured-or-fallback cap minus 30, strictly inside.
+    """
+    handed, _out = _cap_handed_to_run_task(monkeypatch, tmp_path, src_cfg)
+
+    # The retired outer read, verbatim, so this node cannot be satisfied by a function
+    # name: it is a claim about the number, not about who computed it.
+    block = src_cfg.get("scheduled-task", {}) if isinstance(src_cfg, dict) else {}
+    try:
+        outer = int(block.get("max_duration_seconds",
+                              worker_pool._DEFAULT_MAX_DURATION_SECONDS))
+    except (TypeError, ValueError):
+        # The retired read raised HERE, and the pool's outer try/except turned that
+        # raise into a `failed` item before the source ran at all — a config typo
+        # taking the source down, with no run record either. The accessor falls back
+        # instead, so all that is left to weigh on this row is the fallback's room.
+        outer = worker_pool._DEFAULT_MAX_DURATION_SECONDS
+    inner = _task_side_timeout(declared=7200, cap=handed)
+
+    assert inner < outer, (
+        f"{state}: `execute` sized the run from {handed} s (effective {inner} s) while the "
+        f"pool's own read of the same key gives {outer} s — the pool cancels `run_task` "
+        f"{inner - outer} s before its handler runs, and the run leaves no record behind")
+    assert handed == want_cap, (
+        f"{state}: the cap handed to `run_task` is {handed}, expected {want_cap}")
+
+
+async def test_a_run_sized_by_the_fallback_cap_carries_it_on_the_row(q, monkeypatch,
+                                                                    caplog, tmp_path):
+    """Clause 4, across the real seam: `runs.meta_json` holds the token, and only when the fallback fired.
+
+    A source's return dict is not the record — `normalize_result` and the pool's own
+    merge write the row — so this runs one item through a real pool and reads the
+    stored row back, the way the `round_id` node above pins its own crossing. The
+    contrast half is what keeps the instrument readable: on a block that names the
+    cap the key must be ABSENT, or every healthy run carries it and "the fleet lost
+    its cap" is once again indistinguishable from a normal week.
+    """
+    async def execute(item):
+        return {"summary": "ran under a cap that was not in config"}
+
+    q.enqueue("s", "k")
+    with caplog.at_level(logging.WARNING, logger="lloyd-workers.pool"):
+        runs = await _drain_one(q, monkeypatch,
+                               SimpleNamespace(NAME="s", execute=execute),
+                               cfg={"enabled": True})   # block present, key gone
+
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta.get(worker_pool.CAP_FALLBACK_META_KEY) == "key_absent", (
+        f"the row does not say its {worker_pool._DEFAULT_MAX_DURATION_SECONDS} s cap "
+        f"was a fallback, so a halved budget reads as a task that timed out early: {meta}")
+    assert "no readable max_duration_seconds for source s" in caplog.text, (
+        f"the pool enforced the fallback without warning: {caplog.text}")
+
+    q2 = WorkQueue(tmp_path / "workers-cap-named.db")
+    q2.enqueue("s", "k")
+    runs2 = await _drain_one(q2, monkeypatch, SimpleNamespace(NAME="s", execute=execute),
+                             cfg={"max_duration_seconds": 30})
+    meta2 = json.loads(runs2[0]["meta_json"])
+    assert worker_pool.CAP_FALLBACK_META_KEY not in meta2, (
+        f"a run whose cap came from config still names a fallback: {meta2}")
+
+
+async def test_a_run_killed_under_a_fallback_cap_names_the_fallback(q, monkeypatch):
+    """The timeout arm — the row a person actually reads after a kill.
+
+    `max_duration_seconds` alone on that row cannot say whether the cap that killed
+    the run was configured or guessed, which is the difference between "this task
+    wants a longer budget" and "every source in the fleet is being cut at the pool
+    fallback". No test may wait the 900 s the fallback is, so the constant is patched
+    to 1 s: the state under test (the cap is the fallback, not config) is unchanged,
+    only its size.
+    """
+    monkeypatch.setattr(worker_pool, "_DEFAULT_MAX_DURATION_SECONDS", 1)
+
+    async def execute(item):
+        await asyncio.sleep(30)
+
+    q.enqueue("s", "k", payload={"task_id": 7})
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute),
+                            cfg={"enabled": True})
+
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta["pool_timeout"] is True and meta["max_duration_seconds"] == 1, meta
+    assert meta.get(worker_pool.CAP_FALLBACK_META_KEY) == "key_absent", (
+        f"a run killed at a guessed cap left no trace of it being guessed: {meta}")
+    assert "TimeoutError" in runs[0]["summary"], runs[0]["summary"]

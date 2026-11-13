@@ -566,12 +566,23 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     # Pass the pool's cap so run_task can keep its own timeout strictly under it
     # and always win the race (otherwise the pool cancels it and no run record
-    # is written at all).
-    try:
-        from workers.sources import get_sources_config
-        max_dur = int(get_sources_config().get(NAME, {}).get("max_duration_seconds", 1800))
-    except Exception:
-        max_dur = 1800
+    # is written at all). ONE reader, and it is the pool's: `execute` asks
+    # `workers.pool.source_max_duration_seconds` what that `asyncio.wait_for` is
+    # about to enforce, so the inner deadline and the outer kill cannot be built
+    # from different numbers for the same config state. What this replaced was a
+    # second default of 1800 next to the pool's 900 under a configured 3600: one
+    # missing key put a 1770 s task-side deadline under a 900 s kill, the pool won
+    # the race, and the run wrote no record — the death `architecture/autonomy.md`
+    # ("Two timeouts, and the thirty seconds between them") counts as 309 runs and
+    # 96.9 GPU-hours (#4103).
+    from workers.pool import CAP_FALLBACK_META_KEY, source_max_duration_seconds
+    max_dur, cap_fallback = source_max_duration_seconds(NAME)
+    if cap_fallback:
+        logger.warning("#%s: no readable max_duration_seconds for %s (%s) — sizing this "
+                       "run's own deadline under the pool fallback %ds rather than a "
+                       "configured cap, and naming the fallback on the run row as %r so a "
+                       "fleet-wide halving is not read as a week of early timeouts",
+                       task_id, NAME, cap_fallback, max_dur, CAP_FALLBACK_META_KEY)
     with run_trigger("scheduler"):
         result = await run_task(int(task_id), max_duration=max_dur)
     # From here the task file has this attempt's verdict and the retry budget
@@ -661,4 +672,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # absence keeps meaning "no script reported a nonzero exit".
     if result.get("script_alarm"):
         out["meta"] = {**out["meta"], "script_alarm": result["script_alarm"]}
+    # #4103 — a third lift onto this hand-written whitelist, for the reason the two
+    # above give: `meta` is the only field `normalize_result` carries into
+    # `runs.meta_json`, so a cap that came from the pool's fallback rather than from
+    # config is a fact about the run that dies here if it is not named. Written only
+    # when the fallback fired, so absence keeps meaning "the cap was read from
+    # config"; the pool stamps the same token from the same accessor on the arm where
+    # ITS timer killed the run, where there is no return dict to lift from.
+    if cap_fallback:
+        out["meta"] = {**out["meta"], CAP_FALLBACK_META_KEY: cap_fallback}
     return out

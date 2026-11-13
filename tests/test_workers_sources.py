@@ -3731,3 +3731,170 @@ def test_an_unreadable_config_fails_open_rather_than_refusing_every_pin(
     asyncio.run(ST.enqueue_if_due(q, {"max_duration_seconds": 1800}))
     assert {r.payload.get("task_id") for r in q.list_items(source=ST.NAME)} == {563}, (
         "the refusal paused the fleet on a config the gate could not read")
+
+
+# ---------------------------------------------------------------------------
+# #4103 — one number for the wall-clock cap, and the fallback names itself
+#
+# `execute` read `max_duration_seconds` a second time with a default of its own
+# (1800) while `workers/pool.py` read the same key with a default of 900 under a
+# configured 3600. One missing key therefore produced a task-side deadline of
+# `min(declared, 1800 - 30)` = 1770 s under a pool timer that killed at 900: the
+# pool won the race and cancelled `run_task` before its own handler could write a
+# run record, which `architecture/autonomy.md` ("Two timeouts, and the thirty
+# seconds between them") counts as 309 runs and 96.9 GPU-hours. `execute` now asks
+# the pool's own accessor for the number. The four states below are the four ways
+# the key can fail to be a number; each has to hand BOTH timers the same one, and
+# the three that fall back have to say so on the row that ran under it.
+# ---------------------------------------------------------------------------
+
+#: (state, the `workers.sources` mapping, the cap BOTH timers must use, reason)
+CAP_STATES = [
+    ("key-present", {"scheduled-task": {"max_duration_seconds": 3600}}, 3600, None),
+    ("key-absent-from-block", {"scheduled-task": {"enabled": True}}, 900,
+     "key_absent"),
+    ("block-absent", {"session-distill": {"max_duration_seconds": 600}}, 900,
+     "block_absent"),
+    ("value-unparseable", {"scheduled-task": {"max_duration_seconds": "1h"}}, 900,
+     "value_invalid"),
+]
+
+
+def _cap_handed_to_run_task(monkeypatch, tmp_path, src_cfg):
+    """`scheduled_task.execute` under one config state → (cap handed, dict returned).
+
+    The same seams the `sched` fixture stubs — health probe, `run_task`, the task
+    file, the notifier, the data root — plus `get_sources_config`, which is what
+    turns this into a table over CONFIG rather than over code paths: every source
+    module reads that one function, and the pool does too. `run_task` is a recorder
+    because the number under test IS the kwarg it is handed.
+
+    `src_cfg` is the `workers.sources` mapping, or a zero-arg callable, which is how
+    the `config-unreadable` state is produced: a reader that raises is a state of the
+    table like any other, and `tests/test_workers_pool.py` runs it.
+    """
+    from workers.sources import scheduled_task as ST
+    from app import paths
+    seen: list = []
+
+    def _record_run_task(task_id, *, max_duration=None):
+        seen.append(max_duration)
+        return asyncio.sleep(0, _scheduled_result())
+
+    monkeypatch.setattr(ST, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(ST, "_model_health_url", lambda m: "http://stub/health")
+    monkeypatch.setattr("app.autonomy.run_task", _record_run_task)
+    monkeypatch.setattr("app.autonomy._find_task_file", lambda tid: None)
+    monkeypatch.setattr("app.discord_notify._discord_notify_task_complete",
+                        lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path)
+    reader = src_cfg if callable(src_cfg) else (lambda: src_cfg)
+    monkeypatch.setattr("workers.sources.get_sources_config", reader, raising=False)
+    out = asyncio.run(ST.execute(_item({"task_id": 77})))
+    assert len(seen) == 1, f"run_task was called {len(seen)} times, not once"
+    return seen[0], out
+
+
+@pytest.mark.parametrize("state,src_cfg,want_cap,want_reason", CAP_STATES,
+                         ids=[s[0] for s in CAP_STATES])
+def test_execute_hands_run_task_exactly_the_cap_the_pool_will_enforce(
+        monkeypatch, tmp_path, state, src_cfg, want_cap, want_reason):
+    """Clause 1: one accessor, so one number, for every way the key can go missing.
+
+    Both sides are read the way production reads them — the inner figure is the
+    kwarg `execute` actually passes to `run_task`, the outer is
+    `workers.pool.source_max_duration_seconds`, which is the value
+    `WorkerPool._worker_loop` hands to `asyncio.wait_for`. Before this round the
+    `key-absent-from-block` row gave 1770 under a 900 kill, which is the pool
+    winning and the run record never being written.
+    """
+    from workers.sources import scheduled_task as ST
+
+    # Measured before the accessor is reached, so a regression that reintroduces a
+    # second reader fails with the two numbers in the message rather than with an
+    # import error about the one that is missing.
+    handed, _out = _cap_handed_to_run_task(monkeypatch, tmp_path, src_cfg)
+    from workers.pool import source_max_duration_seconds
+    enforced, reason = source_max_duration_seconds(ST.NAME)
+
+    assert handed == enforced == want_cap, (
+        f"{state}: the task-side cap {handed} and the pool's wait_for cap {enforced} "
+        f"disagree — the pool then wins the race, cancels `run_task` mid-flight, and no "
+        f"run record is written at all (expected {want_cap} for both)")
+    assert reason == want_reason, (
+        f"{state}: the accessor reported the fallback reason {reason!r}, expected "
+        f"{want_reason!r}")
+
+
+def test_the_source_no_longer_reads_the_cap_key_at_all():
+    """Clause 1's structural half: there is no second default left in the module to drift.
+
+    Comparing today's two numbers is a test of today's constants. A pasted-back
+    `.get("max_duration_seconds", <literal>)` re-opens the whole class #2640 was
+    filed for on `max_retries` — every reader defaulting the field to its own
+    literal — and would sail through a table that only checks agreement.
+    """
+    from workers.sources import scheduled_task as ST
+
+    body = inspect.getsource(ST)
+    assert '"max_duration_seconds"' not in body, (
+        "scheduled_task.py reads `max_duration_seconds` again: that key belongs to "
+        "the pool's accessor, and a second reader of it is what #4103 removed")
+    assert "source_max_duration_seconds" in body, (
+        "the source stopped asking the pool what cap that pool is about to enforce, "
+        "so the two timers are once again sized independently")
+
+
+def test_the_shipped_config_still_sizes_the_run_at_the_configured_3600(
+        monkeypatch, tmp_path, caplog):
+    """Clause 3: a well-formed config moves nothing — not a number, not a log line, not a key.
+
+    This is the row that has to stay boring. Every healthy run in the fleet reads
+    the shipped `config.yaml`, so a change here would have cost the fleet budget to
+    fix a state that never happens. 3600 in, 3600 out, no fallback anywhere.
+    """
+    from workers.pool import CAP_FALLBACK_META_KEY
+
+    shipped = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8"))
+    src_cfg = shipped["workers"]["sources"]
+    assert src_cfg["scheduled-task"]["max_duration_seconds"] == 3600, (
+        "config.yaml no longer ships 3600 for `scheduled-task`, so this node's numbers "
+        "and the sentence in architecture/autonomy.md that cites it are both stale")
+
+    with caplog.at_level(logging.WARNING):
+        handed, out = _cap_handed_to_run_task(monkeypatch, tmp_path, src_cfg)
+
+    assert handed == 3600, f"the healthy path moved: run_task got {handed}, not 3600"
+    assert CAP_FALLBACK_META_KEY not in out["meta"], (
+        f"the healthy run's row names a fallback it did not use: {out['meta']}")
+    assert "max_duration_seconds" not in caplog.text, (
+        f"the healthy path warned about the cap, which means the fallback is firing "
+        f"on a well-formed config: {caplog.text}")
+
+
+@pytest.mark.parametrize("state,src_cfg,want_cap,want_reason",
+                         [s for s in CAP_STATES if s[3]],
+                         ids=[s[0] for s in CAP_STATES if s[3]])
+def test_a_fallback_cap_names_itself_in_the_log_and_on_the_run_row(
+        monkeypatch, tmp_path, caplog, state, src_cfg, want_cap, want_reason):
+    """Clause 4: the halving has to be legible on the row that suffered it.
+
+    Both halves are pinned because either one alone is unreadable later: a WARNING
+    nobody archived is not a record, and a `meta` key nobody warned about is a
+    mystery string on a row. `runs.meta_json` is reached because
+    `pool.normalize_result` copies this `meta` verbatim — the crossing through the
+    pool, including the arm where the pool's own timer did the killing, is pinned in
+    `tests/test_workers_pool.py`.
+    """
+    from workers.pool import CAP_FALLBACK_META_KEY
+
+    with caplog.at_level(logging.WARNING, logger="lloyd-workers.scheduled_task"):
+        handed, out = _cap_handed_to_run_task(monkeypatch, tmp_path, src_cfg)
+
+    assert handed == want_cap, f"{state}: cap {handed}, expected {want_cap}"
+    assert out["meta"].get(CAP_FALLBACK_META_KEY) == want_reason, (
+        f"{state}: the run row says nothing about where its {want_cap} s cap came from, "
+        f"so a fleet-wide halving reads as a task that timed out early: {out['meta']}")
+    assert want_reason in caplog.text, (
+        f"{state}: no WARNING named the fallback that produced this cap")
