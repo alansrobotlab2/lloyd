@@ -7,6 +7,7 @@ under `file_path`. It extracted 7 pairs across 19 trajectory files, autonomy
 task #51 exited 0 on 4 MB of unreadable input, and the watermark advanced past
 every day it had been blind to. Each test below names the #420 clause it pins.
 """
+import ast
 import copy
 import importlib.util
 import json
@@ -692,24 +693,93 @@ def _write(dir_path: Path, name: str, front_matter: str) -> Path:
     return p
 
 
+def _called_names(node: ast.AST) -> set:
+    """Names of every function called under `node`, bare or attribute spelling."""
+    names = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            names.add(sub.func.id if isinstance(sub.func, ast.Name)
+                      else getattr(sub.func, "attr", ""))
+    return names
+
+
+def _top_level_func(tree: ast.AST, name: str) -> ast.FunctionDef:
+    fn = next((n for n in tree.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name == name), None)
+    assert fn is not None, f"the module no longer defines a top-level `{name}`"
+    return fn
+
+
 def test_the_module_carries_no_private_fork_of_the_task_reader(cr):
-    """Clauses 1+2, structurally: the two lines that made this module its own
-    reader are gone, and the two shared ones are the ones it calls.
+    """Clauses 1+2, structurally: the two shared readers are really CALLED, and no
+    private fork of either survives anywhere in the module.
 
     The behavioural tests below are the real proof; this one is what keeps a later
-    "just parse it inline here" from re-opening the gap unnoticed, and it is the
-    test form of the verify command the item names (`git grep 'split(' `
-    `scripts/memory/conversation_relations.py` for the `split('---'` form)."""
+    "just parse it inline here" from re-opening the gap unnoticed. It reads the
+    module through `ast` because the version #4105 first landed with asserted only
+    that the strings `autonomy_task_files` and `_parse_task_file` appear in the
+    source — and both appear in this module's own docstrings, as the prose at
+    scripts/memory/conversation_relations.py:555 and :594. Deleting the two calls
+    and leaving every word of that prose kept all four of those asserts green, so
+    the test that exists to guard the clause pinned nothing (round
+    SM_20261113_022549 review advisory, same shape as the `returned_constants`
+    finding recorded on the item).
+
+    Positive, as `ast.Call` nodes — which prose cannot produce: `_task_files()`
+    calls `autonomy_task_files()`, `_task_model_alias()` enumerates through
+    `_task_files()`, and `_model_pin()` calls `_parse_task_file()`. Negative, across
+    the whole module: no call takes a string literal beginning `---` (the fence
+    slice `text.split("---", 2)` and any synonym of it — `partition`, `strip`,
+    `removeprefix`, all of which the spelling-specific grep missed), and no call
+    globs `*.md`, the enumeration `_TASK_NAME_RE` exists to own. The module does
+    glob `*.jsonl`, for trajectories, so the ban is on the task-file pattern rather
+    than on globbing.
+    """
     src = SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=str(SCRIPT))
+
+    assert "autonomy_task_files" in _called_names(_top_level_func(tree, "_task_files")), \
+        "clause 1: `_task_files()` must CALL the shared gated enumeration " \
+        "`app.routers.autonomy.autonomy_task_files()` — a docstring naming it is " \
+        "not a read through it"
+    assert "_task_files" in _called_names(_top_level_func(tree, "_task_model_alias")), \
+        "clause 1: `_task_model_alias()` must obtain its candidates from that " \
+        "gated enumeration, so `_TASK_NAME_RE` decides what is scanned"
+    assert "_parse_task_file" in _called_names(_top_level_func(tree, "_model_pin")), \
+        "clause 2: the `model:` value must come from the shared graduated reader " \
+        "`app.autonomy._parse_task_file()` — a docstring naming it is not a read " \
+        "through it"
+
+    fence_calls, md_globs = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func.id if isinstance(node.func, ast.Name) \
+            else getattr(node.func, "attr", "")
+        for arg in [k.value for k in node.keywords] + list(node.args):
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                continue
+            if arg.value.startswith("---"):
+                fence_calls.append(f"line {node.lineno}: {callee}({arg.value!r})")
+            if callee in ("glob", "rglob") and "*.md" in arg.value:
+                md_globs.append(f"line {node.lineno}: {callee}({arg.value!r})")
+    assert not fence_calls, \
+        "clause 2: front matter must come from `app.autonomy._parse_task_file`, " \
+        f"not a `---` slice — found {fence_calls}"
+    assert not md_globs, \
+        "clause 1: `autonomy_task_files()` is the one enumeration of the task " \
+        f"directory — found {md_globs}"
+
+    # The item's own verify command, in test form: these two spellings are what
+    # `git grep 'split(' scripts/memory/conversation_relations.py` is asked to
+    # return nothing for. Subsumed by the AST walk above, kept because they are the
+    # literal form of the check a human re-runs.
     assert "AUTONOMY_DIR.glob" not in src, "the module must not enumerate the " \
         "autonomy dir itself — `autonomy_task_files()` is the one enumeration"
     for spelling in ('split("---"', "split('---'"):
         assert spelling not in src, f"front matter must come from " \
             f"`app.autonomy._parse_task_file`, not a {spelling} slice"
-    assert "autonomy_task_files" in src, "enumeration must go through the shared " \
-        "name-gated reader (`_TASK_NAME_RE` decides what is scanned)"
-    assert "_parse_task_file" in src, "the `model:` value must come from the " \
-        "shared graduated-recovery reader"
 
 
 def test_a_non_task_note_naming_the_skill_is_not_read_at_all(cr, tmp_path, monkeypatch):
