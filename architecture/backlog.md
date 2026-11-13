@@ -18,7 +18,7 @@ summary: The markdown kanban at ~/obsidian/backlog/ — one file per task, a
   four-word status vocabulary shared by five readers, the four backlog_* MCP
   tools, write-time dedupe, and the tags the unattended loop writes on itself.
 type: reference
-date: 2026-10-13
+date: 2026-11-12
 status: implemented
 
 ---
@@ -27,9 +27,12 @@ status: implemented
 
 Markdown kanban at `~/obsidian/backlog/`, read and written by the
 [[tools|MCP tools server]], the Mission Control board, the guardian, and the
-unattended triage/implement loop. 2,592 task files on 2026-10-13 (the dashboard's
-own count): 2,583 on the `lloyd` board, 7 `alfie` (robot firmware), 2 `personal`,
-and only 12 of the whole board open. Every other board name the 2026-09-13 census
+unattended triage/implement loop — plus the board steward, which proposes statuses
+and writes them only with `apply: true`, and `workers/board_disagreement.py`,
+which files the steward's disagreements (see **The tags the loop writes on
+itself**). 4,047 task files on 2026-11-12 (the dashboard's own count): 4,037 on
+the `lloyd` board, 7 `alfie` (robot firmware), 3 `personal`, with 50 of the whole
+board open. Every other board name the 2026-09-13 census
 recorded (`Architecture`, `backlog`, `default`) is gone — the writers refuse those
 names now (see `app/backlog_boards.py` in **Frontmatter** below). The directory
 also holds files that are not tasks — `verdict-log-2026-09.md`, and a `data/`
@@ -105,9 +108,12 @@ way. #287 (`review`) and #304 (`closed`) sat in that gap from April 2026 until
 nothing migrated what was already on disk.
 
 - `PIPELINE_STATUSES` — `draft`, `up_next`, `in_progress`, `done`. Live counts
-  (2026-10-13, `GET /api/dashboard` → `backlog.by_status`): 6 / 0 / 6 / 2,580.
-  The 2026-09-13 census was 456 / 68 / 0 / 432; the board has since been settled
-  and swept rather than emptied by hand.
+  (2026-11-12, `GET /api/dashboard` → `backlog.by_status`): 16 / 32 / 2 / 3,997.
+  The 2026-10-13 reading was 6 / 0 / 6 / 2,580 and the 2026-09-13 census 456 / 68
+  / 0 / 432; the board has since been settled and swept rather than emptied by
+  hand; the corpus grew by 1,455 files over that month and the open count is 50
+  against 12, of which `board_health` reads 28 as self-spawned — bounded by the
+  sweep (3 unswept, 42 swept, 13 parked) rather than by expiry.
 - `CLOSED_ALIASES` — `closed`, `cancelled`, `wontfix`. Exactly the non-`done`
   members of the set `dashboard._BACKLOG_CLOSED` has carried all along, which
   is the tree's only record that those words ever meant anything. Inventing
@@ -215,9 +221,9 @@ actually on disk:
 | `position` | int | `id * 1000` at creation; the board's manual ordering. |
 | `type` / `segment` | string | Both `backlog`. OKF conformance — see below. |
 | `activity_log` | list | The audit trail. See "The activity log". |
-| `parent` | int | The item this one was split from or found while implementing. Persisted from the prose first line by the clustering pass. 430 items (317 on 2026-09-13). |
-| `group` | int | The umbrella a member was folded into (tag `grouped`). 38 items (140 on 2026-09-13: umbrella-folding went off for the sweep on 2026-09-15 and back on the next day, and folded members were unfolded). |
-| `members` | list[int] | The items an umbrella consolidates (tag `umbrella`). 75 items (53 on 2026-09-13). |
+| `parent` | int | The item this one was split from or found while implementing. Persisted from the prose first line by the clustering pass. 443 items (430 on 2026-10-13, 317 on 2026-09-13). |
+| `group` | int | The umbrella a member was folded into (tag `grouped`). 40 items on 2026-11-12 (38 on 2026-10-13, 140 on 2026-09-13: umbrella-folding went off for the sweep on 2026-09-15 and back on the next day, and folded members were unfolded). |
+| `members` | list[int] | The items an umbrella consolidates (tag `umbrella`). 16 items on 2026-11-12, down from 75 on 2026-10-13 (53 on 2026-09-13) — the umbrella count is 0 open on the board today, so consolidation is a key on closed history rather than live grouping. |
 | `duplicate_of` | int | Written by a group triage's `duplicate_of` verdict. |
 | `acceptance_clauses` | list | The contract the review rung holds a round to, on the item and not only in the ledger — a human editing them here is editing what the grader enforces. |
 | `human_clauses` | list | What a person must do before the item closes. Kept apart so no round is asked to fake an audit. |
@@ -265,6 +271,7 @@ behind a fifteen-line helper. `tests/test_backlog_tags_shape.py` pins it.
 | `spawned-by-triage` / `spawned-by-autocode` | This loop filed this item. Two earlier spellings — `spawned-by-autoimplement`, `spawned-by-selfmod` — are still **read** (`SPAWN_TAGS`), because quarantine that stopped recognising an old tag would re-admit every item carrying it to the triage pool at once. Write the newest. |
 | `spawned-by-review` / `youtube-eval` | The other two producers of loop output: the architecture reviewer (`workers/sources/arch_review.py`) and the YouTube channel digest (`workers/sources/youtube_digest.py`). Three readers, three deliberately different sets (`scripts/automod/backlog.py`): merge at write time keys on the `spawned-by-` **prefix** plus `youtube-eval`; quarantine reads `QUARANTINE_TAGS`, the union of `SPAWN_TAGS` and `EVAL_SPAWN_TAGS`; expiry and the scorecard gauge read `LOOP_SPAWN_TAGS`, the union of all three. A review finding is therefore bounded by expiry but **not** quarantined — it describes the tree as of one commit and single triage is exactly the pass that should decide whether it still holds, whereas an eval written against today's profile cannot answer the staleness question. The prefix rule is there because the enumeration is only ever the mints someone thought of in advance: measured 2026-09-17, 43 of 412 open loop-tagged items were rejected by it and the gauge undercounted the loop's own output by 10 %. |
 | `swept` / `parked` | Written by the autotriage **sweep** (`workers.sources.autotriage.sweep: true`, `sweep_batch: 8`, `select_sweep_batch`/`record_sweep_verdicts`): one pass that reads every open item once and ranks it (`worth`, `size`) instead of expiring it. Both tags are expiry-exempt; `parked` is also its own bucket in `board_health`'s `draft` partition. Group and single triage yield to the sweep while `unswept` is non-zero. |
+| `board-steward-disagreement` | **A loop producer this page did not name until 2026-11-12.** `workers/sources/board_steward.py` (config source `board-steward`, every 900 s) reads the open board and *proposes* a status per item; it writes through `_apply_status` like any other loop writer **only when `apply: true`**, and production runs `apply: false`, so the four-writer list above is true under that flag and false without it. `workers/board_disagreement.py` runs after it and files one `draft` item per disagreement — the steward moved an item while the automod ledger holds no matching `status_move` row, or the move could not be applied (`no_ledger` / `unapplied` / `ambiguous` / `unreadable`; 5 a tick, `MAX_NEW_ITEMS`). Those items carry **no** `spawned-by-*` tag, so `LOOP_SPAWN_TAGS` never selects them and the 30-day cap that bounds every other loop producer does not bound them → filed. |
 | `umbrella` | A consolidation item that carries `members`. Never merged by write-time dedupe. |
 | `grouped` | Folded into an umbrella; out of both pools until that umbrella lands. |
 | `blocker` | The one finding an implement round may still file as its own item. Never merged. While the item it blocks is open it is *live*: triaged first, never quarantined, held or expired (see **Blockers** below). |
@@ -464,8 +471,8 @@ knowing even though the first is now empty on this board. **(a) Broken YAML.**
 Nine items on the lloyd board (478, 519, 520, 525, 787, 866, 918, 971, 981 as of
 2026-09-13) had an `activity_log` entry with an unterminated quote. All nine are
 repaired: a strict `yaml.safe_load` of each task file's front matter, cut by the
-anchored rule below, raises on **0** of the 2,592 task files (measured
-2026-10-13). **(b) A parser that cut the
+anchored rule below, raises on **0** of the 4,047 task files (re-counted
+2026-11-12). **(b) A parser that cut the
 block in the wrong place**, which is the one that was still biting in 2026-09: all
 three readers split `(front matter, body)` with `content.split("---", 2)`, so an
 item whose activity log *quotes that expression* was cut inside the quoted scalar,
@@ -700,13 +707,18 @@ tag-vocabulary maintenance, since no query-time consumer reads these strings.
 ## QMD integration
 
 - **Collection:** `backlog` → `/home/alansrobotlab/obsidian/backlog`, pattern
-  `**/*.md`, in `~/.config/qmd/index.yml`. `**` is recursive and the tasks are
-  flat, so the `backlog/data/` witnesses are embedded too — and the two readers
-  that turn a hit's path back into an item id (`backlog_similar`'s `_QMD_ID_RE`,
-  `scripts/automod/cluster.py`'s basename match) accept a date-stamped witness
-  like `2026-09-30.components-witness.md` as task **#2026**, which is how a
-  similarity score from a file that is not a task can become a merge target
-  → #2657.
+  `**/*.md`, in `~/.config/qmd/index.yml`; 124 witness files under
+  `backlog/data/` sat embedded beside the tasks on 2026-11-12 (39 on 2026-10-13).
+  `**` is recursive, so their text still reaches every query — what no longer
+  reaches anything is their **path**: `app/backlog_paths.py::backlog_hit_id` is
+  now the one hit→id rule and it takes an id only from a direct child of the
+  collection root, so a date-stamped witness like
+  `2026-09-30.components-witness.md` yields no id, no score and no vector slot
+  (see **Storage**). Before #2657 the two readers each had a rule of their own —
+  `backlog_similar`'s `_QMD_ID_RE`, whose `(?:^|/)` anchor matched any component,
+  and `scripts/automod/cluster.py`'s basename match, which throws away the
+  directory that says a row is not a task — and both read such a witness as task
+  **#2026**, spending a merge slot on a file that is not an item.
 - The directory is *also* inside the whole-vault `subliminal` collection, which
   is how backlog items reach pre-call context retrieval — see [[subliminal]].
 - **Reachable from:** `vault_search` and `vault_recall`, which fan out over
@@ -733,11 +745,13 @@ is in the `board_health` docstring and is not repeated here: this page said "199
 triageable, 94 quarantined, 87 of 88 `up_next` `ready`" and the module says ~200
 triageable, 93 quarantined and 42 of 88 `ready` — one measured table, and the
 module is where it was measured, so read it there. What the partition is for is
-unchanged. Measured 2026-10-13: `by_status` 6 `draft` / 0 `up_next` / 6
-`in_progress`, and `board_health`'s draft buckets on a read a minute later were
-3 pool + 3 quarantined + 1 parked — the count moved under the loop, which is what
-a 12-item board looks like when the pool is live rather than the instrument being
-wrong.
+unchanged. Measured 2026-11-12: `by_status` 16 `draft` / 32 `up_next` / 2
+`in_progress`, and `board_health` on a read minutes later partitions those 16 as
+4 pool + 1 quarantined + 11 triaged (no grouped, held, parked or needs-human
+left), with `up_next` at 32 singles, 28 never-attempted and 25 ready / 7 unready.
+A month earlier the whole board was 12 open; it is 50 now, and the draft bucket
+is still small because the pool and the sweep bound it (3 unswept, 42 swept, 0
+parked), not because the instrument is wrong.
 
 - `draft` is a **partition**, by precedence grouped > needs-human > held (a
   confirmation waiting for implement-pool room, `held_confirmations`) > **parked**
@@ -768,12 +782,28 @@ wrong.
   `self_spawned_open`, `closed_needs_human` and `landed_items_7d`. A reader
   written against the four old keys reads these as missing rather than new.
 
-It reads every item file and the ledger several times (~2 s on the live board),
-so the dashboard caches it for 60 s apart from the 10 s vault scan, and a
-failure costs `health` only — it becomes `null` and `by_status` is unchanged.
+It reads every item file and asks the ledger many filtered questions, and that
+is no longer cheap: **12.81 s** measured 2026-11-05 over 3,760 item files and a
+30.4 MB ledger, **13.99 s** over 4,026 files on 2026-11-12. (The "~2 s" this page
+carried, like the 0.40 s still in `board_health`'s own docstring, was a board of
+~1,100 files — see the filed item.) Two things follow. On production data the
+call runs in a **child process** (`app/board_health_offload`, `TIMEOUT_S = 120`),
+because the thread that used to run it held the GIL against the event loop:
+py-spy put 47 % of the backend's samples inside it on 2026-11-05 and `/health`
+stalled for up to 5 s; in a child the same CPU is spent on another core and the
+event loop's calls are untouched. Tests, the gate and a worktree's own data root
+still run it in-process, where the fixtures that patch its inputs can reach it.
+And its 60 s (`_SCORECARD_TTL_S`) entry is served **stale-while-revalidate**
+(`_cached_swr`): an expired value is returned as it is while a background thread
+recomputes it, so `health` can be *older* than 60 s — that is the point, since a
+page opened after a minute idle used to pay the full 14 s inline. A refresh that
+*returns* `None` is what nulls `health` (an offload failure does); one that
+**raises** leaves the previous value served, so a stalled refresh is invisible on
+the panel rather than an obvious `null`. A failure still costs `by_status`
+nothing.
 `all_items`/`open_items` take `backlog_dir` for readers like this one that
 resolve the vault at call time: `BACKLOG_DIR` is bound at import.
-It is TTL-cached for 10 s — the board is 1,100+ markdown files. The sibling
+It is TTL-cached for 10 s — the board is 4,047 markdown task files. The sibling
 routes `GET /api/backlog/tasks` and `GET /api/backlog/boards` do not use that TTL:
 they share `_backlog_scan()`, a per-file cache keyed on `(mtime_ns, size)` whose
 entries outlive a request, so a cold call is one parse pass and a warm call
@@ -800,16 +830,40 @@ most active is the worst possible reading of "bounded".
   nothing else, so a tag is the one change the log does not narrate, and a save
   that posts the status it already has (`TaskModal` posts the whole form on every
   edit) records no move at all.
-- All operations are file-based, with no lock and no atomic replace anywhere in
-  the five writers — concurrency is "last writer wins on a whole file"
-  (#891). It is survivable only because writes are small, rare and
-  append-shaped. "Nothing rewrites a file it could not parse" is the intent, and
-  since #1020 it holds at every writer that parses and re-dumps (`save_task`,
-  `_reject_broken_fm`, and `scripts/automod/backlog.py::_unparsed_guard`, called by
-  eight writers there — `update_frontmatter`, `_apply_status`, `note_item`,
-  `tag_item`, `record_verdict`, `close_landed`, `reopen_reverted_landings` and
-  `amend_clause`) rather than being the exception it was when this page was last
-  reviewed.
+- Every write is still a whole-file replace of one item, but since **#3036** it
+  is a **locked and atomic** one; "no lock and no atomic replace anywhere in the
+  five writers" (#891) is what this page claimed until 2026-11-12 and is now
+  false. `app/backlog_write.py::write_item` is the store's only fence-and-dump
+  path: the caller must already hold `app/atomic_io.commit_lock` (an flock under
+  `LOGS_DIR/locks`, keyed on the target's realpath — deliberately *not*
+  `locked_file`'s sibling `<name>.lock`, which would drop a stray file inside the
+  tracked vault), and `write_item` then re-reads the file **inside** that
+  critical section, merges back any `activity_log` row on disk the caller's dict
+  does not carry (`APPEND_ONLY_KEYS`), and replaces the file with
+  `atomic_io.atomic_write_text` — temp in `LOCK_DIR/tmp`, `fsync` before the
+  rename — so a reader sees the old inode or the new one, never a prefix. Both
+  halves were live bugs: separate lanes (the MCP tool, the board route, the
+  automod reconciler, the promote finalizer) rebuilt one item from a stale parse
+  and silently erased each other's keys while the ledger still recorded the move
+  that had been dropped, and `Path.write_text`'s `O_TRUNC` let a concurrent
+  reader — `_backlog_scan`, `load_task`, `open_items` — take an empty file or a
+  cut that ends inside a quoted scalar, which parses as `_yaml_broken` and is a
+  permanent 409 on that item. The lock is **advisory**, so it only excludes
+  writers that take it — which is why the primitive refuses a `lock` argument
+  that is not the one this path resolves to, and why
+  `tests/test_backlog_write_lock.py` parses every writer named in its `SITES`
+  list and fails one whose `write_item` call has slipped outside its locked
+  block. A lock timeout raises rather than skipping the move: a writer that
+  quietly skipped would leave the board and the ledger disagreeing.
+- "Nothing rewrites a file it could not parse" is a second, older guard and it
+  still holds: `save_task` returns False on `_yaml_broken`,
+  `app/routers/backlog.py::_reject_broken_fm` raises 409, and
+  `scripts/automod/backlog.py::_unparsed_guard` runs at eight writers —
+  `update_frontmatter`, `_apply_status`, `note_item`, `tag_item`,
+  `record_verdict`, `close_landed`, `reopen_reverted_landings` and
+  `amend_clause`. `write_item`'s own re-read refuses the same shape, because a
+  primitive that reads bytes it did not ask for must refuse for the same reason
+  the lanes do (#1020).
 
 ## Migration history
 
@@ -886,3 +940,30 @@ in #220 and in the vault's 2026-03 daily notes.
   and `cluster.py`), #2658 (the review prompt's retired `needs-human` promise),
   #2659 (`board_id` still positional over names found on disk, so a hand-edited
   board renumbers the rest).
+- 2026-11-12 — **stale.** The structural half still holds; three claims about
+  what the writers do had passed. "No lock and no atomic replace anywhere in the
+  five writers" (#891) is false since **#3036** — every writer now fences on
+  `app/atomic_io.commit_lock` (an flock in `LOGS_DIR/locks`, keyed on the
+  target's realpath, deliberately not `locked_file`'s sibling `.lock`) and
+  replaces through `app/backlog_write.write_item` +
+  `app/atomic_io.atomic_write_text`, which re-reads inside the lock, merges back
+  any `activity_log` row the caller's dict dropped, and renames an `fsync`d temp;
+  `tests/test_backlog_write_lock.py` parses each `SITES` writer for the block.
+  The `backlog` collection's hit→id bug (#2657) is closed — `backlog_similar` and
+  `cluster.py` no longer carry their own rule, `app/backlog_paths.backlog_hit_id`
+  is the one, and it takes an id only from a direct child, so `backlog/data/*`
+  can no longer reach a decision (its text is still embedded: 124 witnesses, up
+  from 39). And `board_health` costs **13.99 s over 4,026 files**, not "~2 s",
+  which is why it runs in a child process on production data (`TIMEOUT_S = 120`)
+  and why the dashboard's 60 s entry is now served stale-while-revalidate — a
+  raising refresh keeps the previous value instead of nulling `health`. Refreshed
+  the measured tables (4,047 task files, `by_status` 16/32/2/3,997, 50 open, the
+  key census 443/40/16, the live `board_health` reading), and named the loop
+  producer the page never had: `workers/sources/board_steward.py` (proposes;
+  writes only under `apply: true`, off today) and
+  `workers/board_disagreement.py`, whose `board-steward-disagreement` items carry
+  no `spawned-by-*` tag and so sit outside the spawn-expiry set entirely. Filed:
+  #4111 (that expiry hole), #4112 (the 0.40 s / "~700+ files" figures still in
+  `board_health_offload.py` and `backlog_evidence.py`, which sized `TIMEOUT_S`),
+  #4113 (the guardian's `task-update` close path, which this page's Access rules
+  denies exists).
