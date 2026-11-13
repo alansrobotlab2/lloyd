@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers, autonomy, inner-voice, sessions]
 type: reference
 status: implemented
-date: 2026-10-13
+date: 2026-11-12
 ---
 
 # Background runs: recorded always, observed on request
@@ -328,8 +328,11 @@ listing:
   For that shape the name is the whole decision, not a hint. That is safe only
   while nothing that creates a *user* session mints a four-part id, and
   `test_no_user_session_creator_mints_a_background_shaped_id` pins it at the
-  creators: exactly three `session_id = f"..."` mints in the swept packages,
-  two in the chat router and one in `POST /api/sessions/create`, both three-part.
+  creators: exactly two `session_id = f"..."` mints in the swept packages, one in
+  the chat router and one in `POST /api/sessions/create`, both three-part. The
+  second chat-router mint went out with the synchronous `POST /api/message` that
+  housed it (deleted 2026-09-24, P13.4-6), and the pin is a *count* of chat-shaped
+  mints, so a third creator reddens it instead of being absorbed by shape.
   `tests/test_api_contracts.py` checks the create endpoint end to end.
 - **Three-part ids are parsed and judged by `is_conversation_session`.** A
   chat-shaped name carrying a platform off the allow-list is still excluded — the
@@ -370,10 +373,14 @@ listing:
   *parsing* reads in proportion to the directory: the ceiling caps the half whose
   membership the name cannot settle, membership is never capped. Be honest about
   what that leaves open — the four-part half is opened uncapped by design, one 2 KB
-  head each, and that head is now the bulk of the cost: measured 2026-10-13 over
-  `sessions/`, **10,514 four-part files, 20.3 MiB, 153 ms per walk**, against the
-  55 ms over 3,854 files the endpoint's own comment still quotes from 2026-09-21,
-  and `BackgroundPage.tsx` polls it every 10 s (#2646).
+  head each, and that head is now the bulk of the cost: measured 2026-11-12 over
+  `sessions/`, **11,349 four-part files, 23.1 MiB of heads, 138 ms per walk**. The
+  endpoint's own comment now carries a dated reading of its own (2026-10-16: 86
+  chat-shaped files of 10,169, 125 ms for 10,083 heads) rather than the September
+  figure this page said on 2026-10-13 it *still* quoted, and the walk has run on
+  `asyncio.to_thread` since 2026-10-16, so it no longer blocks the loop it costs;
+  what it does is occupy a worker thread for that span on every poll, and
+  `BackgroundPage.tsx` polls every 10 s (#2646).
   Budgeting *reads* rather
   than *reach* is what makes this hold on live data instead of only in a test: a rule
   bounded by a scan window silently stops applying to everything older than the
@@ -497,7 +504,16 @@ and VACUUM would take an exclusive lock on a WAL database the pool is writing. T
 sibling `queue` table is pruned on the same horizon since #1466: rows in a terminal
 state (`completed`, `poisoned`, `quarantined`) older than 30 days
 (`QUEUE_MAX_AGE_DAYS`) are deleted, and a live row (`queued`, `claimed`, `running`)
-never is, whatever its age.
+never is, whatever its age. One file in that `*.json` glob is **not** a session:
+`app.harness.microcompact`'s reduction sidecar, `<sid>.microcompact-reduced.json`
+(#3815), named off its head's id, so it reads as a chat-shaped file on the 90-day
+conversation window while the 4-part head it describes goes at 30.
+`microcompact.is_reduction_sidecar` — `sessions_io.is_session_head` for the app —
+is the one rule every counter and reporter applies, the sweep restates it
+stdlib-only for the same reason it restates the platform tuple, and a sidecar is
+archived only *beside* a head the sweep is archiving, never on its own age; a
+head removed by hand therefore leaves its sidecar with nothing left to collect
+it (§8's two routes, filed alongside this review).
 
 ---
 
@@ -675,10 +691,17 @@ installs:
   the deterministic turn guards, because that is where the turn id exists and
   every kind passes through it.
 
-**It denies nothing a worker does today.** Tier 1 is everything unclassified —
-`Bash`, `Edit`, `Write`, `Read`, `backlog_write_task`, `vault_write` all pass —
-because a gate that guesses wrong denies real work. What it gates is email,
-calendar, contacts, tasks and `autonomy_delete_task`.
+**It denies almost nothing a worker does today.** Tier 1 is everything
+unclassified — `Edit`, `Write`, `Read`, `backlog_write_task`, `vault_write` all
+pass — because a gate that guesses wrong denies real work. What it gates is
+email, calendar, contacts, tasks, and the scheduler **both ways**:
+`autonomy_delete_task` is tier 3 and `autonomy_write_task` tier 2 (#724,
+2026-09-20), because rewriting whether and when every task in the fleet runs is
+reachable from every source. `Bash` is in neither list *by name*: from #740
+(2026-09-24) `policy.tool_tier` asks `safety.bash_command_tier`, which answers
+tier 2 for a durable-external command **string** (`systemctl restart`,
+`supervisorctl stop` and the rest of `_DURABLE_EXTERNAL_PATTERNS`) and tier 1
+for everything else — so the name passes, and that shape is gated.
 
 **It is therefore not vault protection.** When this was written only
 `app/harness/safety.py`'s destructive-Bash patterns stood between an
@@ -752,7 +775,7 @@ archived until 90 days of inactivity.
 
 | what | why |
 |---|---|
-| ~~autoresearch bench trials~~ **moved out of this table** | This row was the page's most consequential lie. `run_bench_sdk` used to persist nothing — "session quarantine", pinned by `test_trials_do_not_write_session_files`, a test that no longer exists. `4abc079a` (2026-09-14, the vault-protection landing) inverted it, because the two vault wipes this page exists to learn from were caused by trials that, by design, left no transcript naming a single command they ran. What is quarantined now is the *machine*: the trial's session id is one `agent_mcp/_tool_sandbox.py` recognises (read-only bwrap Bash, non-`readOnlyHint` tools refused), `require_tool_sandbox` refuses to start a trial without it, and **every trial is recorded** through `record_events` into a `platform: worker`, `source: bench` session — 1,590 of them live on 2026-10-13 plus 424 `source: bench-mine`, 19% of the directory's live `.json` (#2648). The 2,544 / 24% first filed here counted the 960 `*.tool-results` spill directories as sessions. It still stays out of `messages._run_turn`: no prefetch, no post-session capture, no titler, no ambient producers. |
+| ~~autoresearch bench trials~~ **moved out of this table** | This row was the page's most consequential lie. `run_bench_sdk` used to persist nothing — "session quarantine", pinned by `test_trials_do_not_write_session_files`, a test that no longer exists. `4abc079a` (2026-09-14, the vault-protection landing) inverted it, because the two vault wipes this page exists to learn from were caused by trials that, by design, left no transcript naming a single command they ran. What is quarantined now is the *machine* and, since #3403 (2026-10-30), the **state**: the trial's session id is one `agent_mcp/_tool_sandbox.py` recognises (read-only bwrap Bash, and non-`readOnlyHint` tools refused *unless the write scope is open*), `require_tool_sandbox` refuses to start a trial without it, and the state a granted trial writes is a disposable copy — `STATEFUL_TOOLS` (`memory_add`, `backlog_write_task`, …) stays disabled for every trial until the task names the ones it needs in `LLOYD_BENCH_WRITE_SCOPE`, and `_tool_sandbox.state_is_copied()` is False unless **both** the data root and the vault read as non-production, so the grant is keyed to the copy and the ban is never lifted from the house. And **every trial is recorded** through `record_events` into a `platform: worker`, `source: bench` session — 1,590 of them live on 2026-10-13 plus 424 `source: bench-mine`, 19% of the directory's live `.json` (#2648). The 2,544 / 24% first filed here counted the 960 `*.tool-results` spill directories as sessions. It still stays out of `messages._run_turn`: no prefetch, no post-session capture, no titler, no ambient producers. |
 | `_common.run_prompt_with_run_state` (#529) | Keeps its own per-step `state-trace.ndjson`, and has no single transcript to persist because each step's transcript is deliberately dropped. Nothing in production calls it yet. |
 | `automod-regression` | Runs its eval arms as subprocesses; there is no agent turn. |
 
@@ -846,9 +869,9 @@ round that ran it and for nothing else.
   the true one.
 - The Background tab builds 150 rows, but membership is not windowed by a scan
   count: the 600 ceiling bounds only the reads of chat-shaped names, while every
-  four-part file is opened for a 2 KB head on every 10 s poll — 10,514 reads and
-  153 ms per walk on 2026-10-13, which is the limit that actually bites (§8,
-  #2646).
+  four-part file is opened for a 2 KB head on every 10 s poll — 11,349 reads and
+  138 ms per walk on 2026-11-12 (10,514 and 153 ms on 2026-10-13), which is the
+  limit that actually bites (§8, #2646).
 - `workers.db` prunes `runs` at 30 d **and** the terminal `queue` rows at 30 d
   (`QUEUE_MAX_AGE_DAYS`, #1466); a live `queued`/`claimed`/`running` row is
   never deleted whatever its age (§8). This section used to say `queue` was
@@ -930,3 +953,23 @@ round that ran it and for nothing else.
   `20260909_1538xx_autonomy_*` ids are reattributed to ordinary `worker` runs
   archived on the machine age, since all 42 archived four-part files on the box
   report `platform: worker`. The entry above is left exactly as filed.
+- 2026-11-12 — **stale**. Re-checked every path, count, config key and named test
+  against `ddaffa9aa7fd`, plus the live route and the live store. The mechanism
+  sections all still hold — recorder, transcript shaper, the two predicates, the
+  two joins, per-job observation, the one turn-options builder, the tab's two
+  panels — and `tests/test_background_runs_doc_claims.py` now re-derives most of
+  the §8/§11/§12 figures, which is why so little moved. Five statements had: §8
+  still counted three `session_id = f"..."` mints where the pin has been two since
+  the synchronous route went (P13.4-6), still reported the endpoint's comment as
+  carrying a September timing the 2026-10-16 comment replaced, said nothing
+  about the reduction sidecar now sharing `sessions/*.json` (#3815), and predated
+  `asyncio.to_thread` on the collector; §10's gated set omitted
+  `autonomy_write_task` (#724) and the per-command-string Bash tier (#740) while
+  claiming the gate denies nothing; §12 still said only the *machine* is
+  quarantined from a bench trial, when #3403 put the state behind a disposable
+  copy with a scoped write grant keyed to that copy. §8/§13's walk census
+  re-measured: 11,349 four-part files, 138 ms. Filed #4108 (the Sources panel
+  drops `window_clamped_to_hours`, so a clamped rollup renders as a full 7 days),
+  #4109 (a reduction sidecar whose head is removed by hand has no collector) and
+  #4110 (neither transcript-removing route leaves a record — the missing witness
+  §8 can only report the absence of).
