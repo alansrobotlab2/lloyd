@@ -22,12 +22,14 @@ are named by file, not by count: `tests/test_session_queue.py` and
 `tests/test_active_session_resolution.py` over the queue and the resolver,
 `tests/test_ambient_prefetch_retention.py` and `tests/test_session_doc_claims.py`
 over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
-Re-measured 2026-11-11 by `--collect-only -q` on each file — collected nodes, not
+Re-measured 2026-11-12 by `--collect-only -q` on each file — collected nodes, not
 passing ones, so the figure ages rather than reassures:
 `tests/test_session_queue.py` 20, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
 `tests/test_session_doc_claims.py` 15 (56 across those four), and
-`tests/test_prefetch.py` 101 — four arrived with #3081, the subliminal `notes`
+`tests/test_prefetch.py` 107 — six arrived with #4032, which pinned which query the
+facts and skills legs receive on a short follow-up under the off-by-default
+`prefetch.followup.focus_legs` key; four had arrived with #3081, the subliminal `notes`
 badge for `<next-session-notes>` and the guards around it, and three more with
 #3471, which made a badge require its marker to open a line (and one with the 2026-11-09 skills review's plan-mode pin). Those five are the
 mechanism's surface, and

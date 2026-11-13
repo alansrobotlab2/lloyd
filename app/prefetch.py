@@ -308,6 +308,14 @@ FOCUS_MIN_WEIGHT = 0.3          # minimum weight to include a keyword
 FOCUS_EXTRACT_INTERVAL = 5      # extract secondary-model topics every N turns
 FOCUS_MAX_SESSIONS = 50         # max tracked sessions (LRU eviction)
 
+#: #4032. A message with fewer content words than this gives the facts and
+#: skills legs nothing topical to match on, so with
+#: `prefetch.followup.focus_legs` on they are searched with the focus-enriched
+#: query instead of the raw message. Counted by `_extract_focus_keywords`, the
+#: module's own noise-filtered count, so "and what about the other one?" is one
+#: content word (`other`), not six.
+FOLLOWUP_MAX_CONTENT_WORDS = 8
+
 # Noise words for focus keyword extraction, tuned for conversational
 # messages rather than search queries.
 _FOCUS_NOISE = {
@@ -530,6 +538,69 @@ def _get_session_focus(session_id: str | None) -> SessionFocus | None:
         if focus is None:
             focus = _session_focus[session_id] = SessionFocus()
         return focus
+
+
+# ── Short follow-ups: which query the facts and skills legs get (#4032) ───────
+#
+# The vault legs have searched the conversation focus since the tracker existed:
+# `SessionFocus.enrich_query` and `SessionFocus.lex_subqueries` are read by
+# `_search_vault`, `_search_vault_lex` and `_search_vault_hybrid_and_stash`, and
+# by no other production path. The facts and skills legs were still handed the raw
+# message, and on a short follow-up
+# that is not merely thin — measured 2026-11-11 over a two-turn prefix about the
+# qmd daemon, the follow-up "and what about the other one?" reduces the entire
+# skills-leg query to the token `other`, while the facts leg's fuzzy entity
+# matcher returns seven near-matches for the word "one" (`Checkmate-in-One`,
+# `Capital One`, `Shantanu`) against the focus-enriched form's
+# `qmd daemon` (5.5) and `QMD` (5.15). So the facts leg does not come back empty
+# on a follow-up; it comes back wrong, and there is no score floor between the
+# match and the rendered `<facts>` block (`_search_fact_records`).
+#
+# The switch below is the experiment, and it ships OFF: until the A/B over
+# `eval/prefetch_followup_queries.yaml` is recorded
+# (`eval/run_prefetch_followup_eval.py --arms raw,focus`), a turn sends exactly
+# the query strings it sends today.
+
+
+def followup_focus_legs_enabled() -> bool:
+    """`prefetch.followup.focus_legs` (#4032). Default, failure and junk: False.
+
+    Fail-closed on purpose — this is an unmeasured experiment on the retrieval
+    path, so a typo in `config.yaml` must not silently turn it on.
+    """
+    try:
+        from app.config import CONFIG
+
+        val = (((CONFIG.get("prefetch") or {}).get("followup") or {})
+               .get("focus_legs", False))
+    except Exception:  # noqa: BLE001
+        return False
+    if isinstance(val, str):
+        return val.strip().lower() in ("true", "on", "yes", "1")
+    return val is True
+
+
+def _facts_skills_query(text: str, focus: SessionFocus | None) -> str:
+    """The query the facts and skills legs search for this turn (#4032).
+
+    With `prefetch.followup.focus_legs` off — the shipped default — this returns
+    `text` unchanged, so the query strings a turn sends are exactly today's.
+    With it on, a follow-up of fewer than `FOLLOWUP_MAX_CONTENT_WORDS` content
+    words gets `focus.enrich_query(text)`: the prior-turn keywords and topics the
+    vault legs already search. A message with no focus tracker to ask, or one
+    long enough to carry its own topic, is left alone.
+
+    Only these two legs take it. `_search_recent_sessions` fires on a temporal
+    regex over the literal message and scores recent session titles, and
+    `_search_backlog_refs` extracts `#NNN` task ids out of it; neither is a topic
+    search, so appended keywords would move both without asking the topic
+    anything.
+    """
+    if focus is None or not followup_focus_legs_enabled():
+        return text
+    if len(_extract_focus_keywords(text)) >= FOLLOWUP_MAX_CONTENT_WORDS:
+        return text
+    return focus.enrich_query(text)
 
 
 # ── Skill cache ───────────────────────────────────────────────────────────────
@@ -1657,7 +1728,11 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
     tracker arrives already resolved from `_prefetch_prepare`, which is why the
     turn's identity had to be threaded this far rather than re-read here.
     """
-    query_tokens = _query_tokens(text)
+    # The query the facts and skills legs search (#4032). `text` on every turn
+    # until `prefetch.followup.focus_legs` is turned on and the turn is a short
+    # follow-up, so the strings below are byte-identical to today's by default.
+    leg_query = _facts_skills_query(text, focus)
+    query_tokens = _query_tokens(leg_query)
 
     # Run skill, fact, vault, session, and backlog-ref search in parallel
     skills_result: list[tuple[float, dict]] = []
@@ -1681,8 +1756,8 @@ def _prefetch_run(text: str, ambient_entries: list, notes: list,
         # running in a daemon-like pool that GCs after their threads finish.
         budget_s = PREFETCH_BUDGET_MS / 1000.0
         pool = ThreadPoolExecutor(max_workers=6)
-        f_skills = pool.submit(_tracked, _search_skills_for_turn, query_tokens, text, session_id)
-        f_facts = pool.submit(_tracked, _search_facts, text)
+        f_skills = pool.submit(_tracked, _search_skills_for_turn, query_tokens, leg_query, session_id)
+        f_facts = pool.submit(_tracked, _search_facts, leg_query)
         f_vault_lex = pool.submit(_tracked, _search_vault_lex_and_stash, text, focus,
                                   t0 + VAULT_LEX_STRAGGLE_MAX_S)
         f_vault_hybrid = pool.submit(_tracked, _search_vault_hybrid_and_stash, text, focus, f_vault_lex)

@@ -1948,3 +1948,172 @@ def test_plan_mode_pins_its_playbook_without_steering_the_scorer(monkeypatch):
     assert plan[0][1]["name"] == prefetch.PLAN_MODE_SKILL and plan[0][2] == "body"
     # A pinned name that is not live changes nothing.
     assert prefetch._pin_skill(scored, "no-such-skill") == scored
+
+
+# ── #4032: which query the facts and skills legs get on a short follow-up ─────
+#
+# The vault legs have always searched the conversation focus; the facts and
+# skills legs were handed the raw message, and the recent-sessions and backlog
+# legs still are. `prefetch.followup.focus_legs` is the switch under which the
+# first two take the enriched query instead, and it ships off — so the tests
+# below pin BOTH sides: with the key off, a turn must send exactly the strings it
+# sent before this change existed, and with it on, only two of the four legs may
+# see anything new.
+
+_FU_PREFIX = "the qmd collection daemon keeps timing out on the vault sweep"
+_FU_FOLLOWUP = "and what about the other one?"
+_FU_LONG = ("why did the vault indexer fall behind and how do I re-run the "
+            "qmd collection sweep")
+
+
+def _fu_leg_queries(monkeypatch, focus, text=_FU_FOLLOWUP):
+    """Run the blocking half of prefetch with every search leg stubbed.
+
+    Returns the query string each of the four non-vault legs was handed, plus the
+    token set the skills leg got. The legs are the seam: what they receive is what
+    the turn actually searched, whatever the switch says.
+    """
+    seen: dict[str, object] = {}
+
+    def spy(leg: str, position: int):
+        def f(*args, **kwargs):
+            seen[leg] = args[position] if len(args) > position else None
+            if leg == "skills":
+                seen["skills_tokens"] = args[0]
+            return []
+        return f
+
+    monkeypatch.setattr(prefetch, "_search_facts", spy("facts", 0))
+    monkeypatch.setattr(prefetch, "_search_skills_for_turn", spy("skills", 1))
+    monkeypatch.setattr(prefetch, "_search_recent_sessions", spy("sessions", 0))
+    monkeypatch.setattr(prefetch, "_search_backlog_refs", spy("backlog", 0))
+    monkeypatch.setattr(prefetch, "_search_vault_lex_and_stash", spy("vault_lex", 0))
+    monkeypatch.setattr(prefetch, "_search_vault_hybrid_and_stash", spy("vault_hybrid", 0))
+    # want_vault=False, so the retrieval-journal submit never fires.
+    prefetch._prefetch_run(text, [], [], focus, False, session_id="fu4032")
+    assert {"facts", "skills", "sessions", "backlog"} <= set(seen), (
+        f"a leg was never called, so it was never measured: {sorted(seen)}")
+    return seen
+
+
+def _fu_focus():
+    focus = prefetch.SessionFocus()
+    focus.update(_FU_PREFIX)
+    return focus
+
+
+def test_followup_focus_key_ships_off_in_the_shipped_config(monkeypatch):
+    """`config.yaml` says false, and so does the code with no key at all.
+
+    The item's acceptance is that today's behaviour is byte-identical until the
+    A/B is recorded, so the default is a claim about the shipped file, not just
+    about a `False` in the source.
+    """
+    import yaml as _yaml
+
+    shipped = _yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    assert shipped["prefetch"]["followup"]["focus_legs"] is False
+
+    # And the code default agrees, so a config that never mentions the key cannot
+    # turn the experiment on by accident.
+    import app.config as cfg
+
+    monkeypatch.delitem(cfg.CONFIG, "prefetch", raising=False)
+    assert prefetch.followup_focus_legs_enabled() is False
+
+
+def test_followup_focus_key_off_sends_every_non_vault_leg_the_raw_text(monkeypatch):
+    """The shipped default: all four non-vault legs get exactly this turn's text.
+
+    This is the byte-identical clause. Not one of the four may see a keyword the
+    user did not type, and the skills leg's token set is still the one built from
+    the message alone.
+    """
+    import app.config as cfg
+
+    monkeypatch.delitem(cfg.CONFIG, "prefetch", raising=False)
+    assert prefetch.followup_focus_legs_enabled() is False
+
+    seen = _fu_leg_queries(monkeypatch, _fu_focus())
+    assert seen["facts"] == _FU_FOLLOWUP
+    assert seen["skills"] == _FU_FOLLOWUP
+    assert seen["sessions"] == _FU_FOLLOWUP
+    assert seen["backlog"] == _FU_FOLLOWUP
+    # The skills leg's other input is a query token set; it too must come from the
+    # message alone, not from the enriched string.
+    assert seen["skills_tokens"] == prefetch._query_tokens(_FU_FOLLOWUP)
+    # And the vault legs are unaffected either way.
+    assert seen["vault_lex"] == _FU_FOLLOWUP
+    assert seen["vault_hybrid"] == _FU_FOLLOWUP
+
+
+def test_followup_focus_key_on_enriches_facts_and_skills_only(monkeypatch):
+    """Key on, one content word of message: two legs gain the prefix, two do not.
+
+    `_search_recent_sessions` fires on a temporal regex over the literal message
+    and `_search_backlog_refs` extracts `#NNN` ids out of it, so the enrichment
+    stays off both of them even when the switch is on.
+    """
+    import app.config as cfg
+
+    monkeypatch.setitem(cfg.CONFIG, "prefetch", {"followup": {"focus_legs": True}})
+    assert prefetch.followup_focus_legs_enabled() is True
+    n_words = len(prefetch._extract_focus_keywords(_FU_FOLLOWUP))
+    assert n_words < prefetch.FOLLOWUP_MAX_CONTENT_WORDS, (
+        f"the fixture is no longer a short follow-up: {n_words} content words")
+
+    seen = _fu_leg_queries(monkeypatch, _fu_focus())
+    for leg in ("facts", "skills"):
+        query = seen[leg]
+        assert query.startswith(_FU_FOLLOWUP), (
+            f"{leg}: the turn's own words must stay in the query, got {query!r}")
+        assert "qmd" in query and "daemon" in query, (
+            f"{leg}: the previous turn's keywords did not reach it: {query!r}")
+    assert seen["skills_tokens"] == prefetch._query_tokens(seen["skills"])
+    assert seen["sessions"] == _FU_FOLLOWUP, "the sessions leg gained focus"
+    assert seen["backlog"] == _FU_FOLLOWUP, "the backlog leg gained focus"
+
+
+def test_followup_focus_key_on_leaves_a_long_message_alone(monkeypatch):
+    """The other half of the gate: eight content words carry their own topic."""
+    import app.config as cfg
+
+    monkeypatch.setitem(cfg.CONFIG, "prefetch", {"followup": {"focus_legs": True}})
+    assert len(prefetch._extract_focus_keywords(_FU_LONG)) >= prefetch.FOLLOWUP_MAX_CONTENT_WORDS
+    seen = _fu_leg_queries(monkeypatch, _fu_focus(), text=_FU_LONG)
+    assert seen["facts"] == _FU_LONG
+    assert seen["skills"] == _FU_LONG
+    assert seen["skills_tokens"] == prefetch._query_tokens(_FU_LONG)
+
+
+def test_followup_focus_query_survives_a_broken_config(monkeypatch):
+    """Junk and a failing read both answer off — never on, never a raised error."""
+    import app.config as cfg
+
+    for junk in ("yes", "on", "1", "true", True):
+        monkeypatch.setitem(cfg.CONFIG, "prefetch", {"followup": {"focus_legs": junk}})
+        assert prefetch.followup_focus_legs_enabled() is (
+            junk in ("yes", "on", "1", "true", True))
+    for junk in ("maybe", "off", 0, None, {"a": 1}):
+        monkeypatch.setitem(cfg.CONFIG, "prefetch", {"followup": {"focus_legs": junk}})
+        assert prefetch.followup_focus_legs_enabled() is False, junk
+    monkeypatch.setitem(cfg.CONFIG, "prefetch", "not-a-mapping")
+    assert prefetch.followup_focus_legs_enabled() is False
+
+    class _Boom:
+        def get(self, *a, **k):
+            raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(cfg, "CONFIG", _Boom())
+    assert prefetch.followup_focus_legs_enabled() is False
+    # And the chooser falls back to the raw text rather than raising into the leg.
+    assert prefetch._facts_skills_query(_FU_FOLLOWUP, _fu_focus()) == _FU_FOLLOWUP
+
+
+def test_followup_focus_query_needs_a_focus_tracker_to_enrich(monkeypatch):
+    """No tracker (a worker session, or the LRU having evicted it): raw text."""
+    import app.config as cfg
+
+    monkeypatch.setitem(cfg.CONFIG, "prefetch", {"followup": {"focus_legs": True}})
+    assert prefetch._facts_skills_query(_FU_FOLLOWUP, None) == _FU_FOLLOWUP

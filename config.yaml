@@ -1785,6 +1785,17 @@ prefetch:
   # the parallel facts worker. eval/measurements/lloydmemeval-2026-09-25.md.
   facts:
     rank: relevance
+  # #4032: on a SHORT follow-up (fewer than app.prefetch.FOLLOWUP_MAX_CONTENT_WORDS
+  # = 8 noise-filtered content words) hand the facts and skills legs the same
+  # focus-enriched query the two vault legs have always searched, so "and what
+  # about the other one?" is searched with the previous turns' keywords instead of
+  # the token `other`. The recent-sessions and backlog legs keep the raw message
+  # either way. OFF: the A/B is not run yet. `eval/run_prefetch_followup_eval.py
+  # --arms raw,focus` over `eval/prefetch_followup_queries.yaml` decides, and those
+  # numbers land in eval/measurements/prefetch-followup-<date>.md. With this false
+  # a turn queries both legs with its own text, byte-identical to before.
+  followup:
+    focus_legs: false
 # #1456: the focus extractor's topic phrases merged into the vault_recall TOOL
 # (never prefetch). off | facts | full; the code default is off. Alone, "facts"
 # measured fact_entity_recall +0.083 [+0.030, +0.152] on the pinned 86-query dev

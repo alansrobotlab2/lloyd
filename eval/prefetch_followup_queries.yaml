@@ -1,0 +1,189 @@
+# Multi-turn prefetch gold set (#4032) — short follow-ups whose referent is in the
+# prior turn, scored under two arms: `raw` (each leg gets the message, as today)
+# and `focus` (the facts and skills legs get `SessionFocus.enrich_query(text)`,
+# the query the vault legs already search).
+#
+# `follow_up` values are verbatim user turns lifted from this box's transcripts
+# (the `source:` field is the session file under `lloyd-data/sessions/`); the
+# qmd case is the probe recorded in backlog item #4032's triage, written out as a
+# case so the acceptance check and the gold set use the same input. Nothing here
+# is invented prose: the prefixes are what actually preceded the follow-up.
+#
+# Schema, validated on every record by `load_cases` in
+# eval/run_prefetch_followup_eval.py and pinned by tests/test_prefetch_followup_eval.py:
+#   id                    unique string
+#   source                where the pair came from
+#   prefix                >=1 prior USER turns, most recent last. The harness feeds
+#                         these to its own `SessionFocus` in order — it never reads
+#                         live session state, because prefetch's focus tracker is
+#                         in-memory per session with LRU eviction at 50 sessions
+#                         and is lost on restart. That tracker is fed the USER's
+#                         messages, never the assistant's, so a follow-up pointing
+#                         at something only the model said is out of the focus
+#                         arm's reach BY CONSTRUCTION, not by a bad ranking. The
+#                         cases whose comments say "ceiling case" are exactly that:
+#                         they can show the enrichment did not hurt, never a gain.
+#   follow_up             the turn under test. 10-60 characters (a message under
+#                         app.prefetch.MIN_MESSAGE_LEN = 10 reaches no leg at all,
+#                         so such a case would score a path that never runs) and
+#                         fewer than app.prefetch.FOLLOWUP_MAX_CONTENT_WORDS = 8
+#                         content words counted by `_extract_focus_keywords`, the
+#                         module's own noise-filtered count — the regime where the
+#                         focus arm fires at all.
+#   expect_entities       facts-arm gold: names (checked case-insensitively, as a
+#                         substring of the rendered <facts> block) that should be
+#                         in the block. Omit for cases with no fact target.
+#   expect_skills         skills-arm gold: skill slugs that should be in the
+#                         returned list. Omit for cases with no skill target.
+#   facts_must_be_empty   the correct answer for the facts leg is NO block. The
+#                         item asks for these on purpose: on a follow-up the facts
+#                         leg does not come back empty, it comes back WRONG
+#                         (`_extract_entities_from_query` fuzzy-matches the word
+#                         "one" onto Checkmate-in-One / Capital One / Shantanu at
+#                         scores 0.25-0.53, and there is no score floor before the
+#                         block is rendered), so a set that only measures hit rate
+#                         would score that as a wash.
+#   skills_must_be_empty  same for the skills leg: no skill should be offered.
+#   note                  why the case is here / what it is meant to catch
+#
+# A case with neither an expectation nor a must-be-empty flag is a loader error:
+# it would be scored by neither measure.
+
+cases:
+  - id: qmd-daemon-other-one
+    source: "backlog #4032 triage probe (2026-11-11) — the acceptance check for this item"
+    prefix:
+      - "the qmd collection daemon keeps timing out on the vault-derived sweep"
+      - "why is the qmd daemon still restarting every few minutes"
+    follow_up: "and what about the other one?"
+    expect_entities: ["qmd daemon", "QMD"]
+    expect_skills: ["qmd-index-maintenance", "qmd-collection-management"]
+    note: >-
+      The filed case. Raw arm: `_query_tokens` reduces the whole skills-leg query
+      to `other`, and the facts leg's fuzzy matcher answers with seven near-misses
+      for the word "one". Focus arm: `qmd daemon` (5.5) and `QMD` (5.15).
+
+  - id: automod-why-cant-a-round-land-them
+    source: "20260928_171625_ivb293.json"
+    prefix:
+      - "hey lets take a look at automod.  why are there 16 lloyd backlog items still in draft?"
+    follow_up: "so... why can't a round land them?"
+    expect_entities: ["automod"]
+    expect_skills: ["automod-landability-triage"]
+    note: >-
+      `them` is the backlog items, `a round` is the automod round; the follow-up
+      names no subsystem, so only the prefix says what is being asked about.
+
+  - id: agent-decider-file-a-backlog-item
+    source: "20261109_181624_ivd095.json"
+    prefix:
+      - "Full systems check, please."
+      - "lets remove all the agent-decider stuff.  that was set up simply to test different versions of jev and is no longer needed.  and is confusing you."
+    follow_up: "file a backlog item to take it out"
+    expect_skills: ["backlog-as-handoff"]
+    note: >-
+      `it` is the agent-decider setup from the previous turn. The skills leg's raw
+      tokens are file/backlog/item/take/out — the verb phrase of a handoff, with
+      nothing about the subject.
+
+  - id: tts-toast-lets-queue-it-up
+    source: "20261006_084228_ivc4df.json"
+    prefix:
+      - "lets create a lloyd backlog item to remove tts from all toasts in automod"
+    follow_up: "lets queue it up right now"
+    expect_entities: ["TTS"]
+    note: >-
+      One content word (`queue`) against a prefix that carries the whole subject
+      (tts, toasts, automod, backlog).
+
+  - id: duplexcascade-apply-to-our-model
+    source: "20261012_084648_iv8081.json"
+    prefix:
+      - "pull the youtube transcript and give me the highlights\nhttps://www.youtube.com/watch?v=shJLycXjhVY"
+      - "so he applied duplexcascade to the 35b model?"
+    follow_up: "so could we apply this to our llm primary model?"
+    expect_skills: ["local-llm-gotchas"]
+    note: >-
+      Two turns deep: `this` is the technique from the turn before last, which a
+      one-turn window still has and a raw query does not.
+
+  - id: more-skills-capture-this-in-the-vault
+    source: "20261109_161053_ivfaf9.json"
+    prefix:
+      - "pull the youtube transcript and give me the highlights\nhttps://www.youtube.com/watch?v=45-qbcAeUbM"
+    follow_up: "capture this in the vault please."
+    expect_skills: ["memory-capture"]
+    note: >-
+      `this` is the digest of the video in the prefix; the follow-up alone is a
+      verb and a destination.
+
+  - id: vault-already-captured
+    source: "20261106_082517_iv6881.json"
+    prefix:
+      - "pull the youtube transcript and give me the highlights\nhttps://www.youtube.com/watch?v=4yaNxPU9pxI"
+    follow_up: "is this captured in the vault already?"
+    expect_skills: ["vault-search-automate"]
+    note: >-
+      The same shape as the capture case but asking whether it is already filed —
+      a search, not a write.
+
+  - id: implementations-to-review-on-github
+    source: "20260925_071328_iva886.json"
+    prefix:
+      - "pull the youtube transcript and give me the highlights\nhttps://www.youtube.com/watch?v=wgZQGxdjbGM"
+    follow_up: "are there any implementations to review?  github>"
+    expect_skills: ["github-code-review"]
+    note: >-
+      Alan's typed turn verbatim, spacing and stray `>` included. The referent is
+      the video's project; the raw query has the venue (`github`) but not the work,
+      and neither do the prefix's own words (pull, youtube, transcript, highlights)
+      — the work was named by the model. Ceiling case: it measures that the added
+      words do not push `github-code-review` out, not a gain.
+
+  - id: pull-the-paper-and-read-it
+    source: "20261001_083229_ivaf6c.json"
+    prefix:
+      - "pull the youtube transcript and give me the highlights\nhttps://www.youtube.com/watch?v=4GIFaeCtEio"
+    follow_up: "lets pull the paper and read it directly."
+    expect_skills: ["arxiv", "paper-digest"]
+    note: >-
+      `the paper` is whichever paper the video was about, and the arXiv id reached
+      the conversation through the transcript — the model's side, which
+      `SessionFocus` never sees. So neither arm can reach `arxiv` or
+      `paper-digest`: this is a ceiling case. What it does measure is that the
+      prefix words the focus arm adds do not knock `youtube-transcript`, which
+      both arms can match, out of the top 3.
+
+  - id: capture-this-in-the-vault-1023
+    source: "20261023_092310_iv9905.json"
+    prefix:
+      - "pull the youtube transcript and give me the highlights\nhttps://www.youtube.com/watch?v=StDAmjuQOE4"
+    follow_up: "lets capture this in the vault"
+    expect_skills: ["obsidian"]
+    note: >-
+      A second capture-shaped follow-up from a different session, so the skills arm
+      is not scored on one phrasing.
+
+  - id: leave-it-empty
+    source: "20261010_075246_iv7cce.json (prefix is the turn that actually preceded it: an inner-voice stop message, which reaches prefetch as a user turn)"
+    prefix:
+      - "Stop: you have issued 3 near-identical queries for json_extract, enqueued_at, payload_json, task_id. This guard compares the calls you issue, not what they returned, so look at those outputs yourself."
+    follow_up: "Hey Greasy, out. Leave it. Leave it."
+    facts_must_be_empty: true
+    skills_must_be_empty: true
+    note: >-
+      A speech-recognition aside at a person, not a request. Nothing here should be
+      looked up in either leg, in either arm. This is the case that measures whether
+      enrichment imports false positives along with the topic.
+
+  - id: nascent-you-know-empty
+    source: "20261029_092125_iv1da3.json"
+    prefix:
+      - "Scott. Thank you. Yeah."
+      - "Yeah, he found it."
+    follow_up: "so anyways it's still that's a nascent you know"
+    facts_must_be_empty: true
+    note: >-
+      Half-finished speech from a voice session with a prefix that is itself
+      content-free. The facts leg has no entity to select, so a non-empty
+      `<facts>` block on either arm is a fuzzy false positive.
