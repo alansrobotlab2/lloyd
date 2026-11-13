@@ -63,7 +63,7 @@ extension, the idler daemon):
 | `agent_mcp/autonomy.py` | eight `autonomy_*` MCP tools |
 | `app/routers/dashboard.py::_autonomy` | the overdue/held split on Mission Control |
 | `app/routers/mc_ui.py::_summarize_autonomy` | the tab summary the agent reads |
-| `scripts/memory/conversation_relations.py::resolve_llm_target` | #51's Stage-2 model pin, read out of the task file that names it — the one reader that neither gates on `_TASK_NAME_RE` nor parses through the graduated reader: `AUTONOMY_DIR.glob("*.md")` and `text.split("---", 2)` |
+| `scripts/memory/conversation_relations.py::resolve_llm_target` | #51's Stage-2 model pin, read out of the task file that names it. Until #4105 this was the one reader that carried neither guard — it globbed the directory itself and split the text on the fence; it now asks `app.routers.autonomy.autonomy_task_files()` for the enumeration and `app.autonomy._parse_task_file` for the value, so `_TASK_NAME_RE` and the graduated recovery come with the read, and the module holds no path to the directory at all. A file that names the skill but yields no pin is a **stop**, not a fallback: `LlmTargetUnresolved` with a WARNING, because the constants it used to return silently ARE the #420 pin |
 
 **The rule is one sentence, and it is written down in three shapes.** A task file is
 named `NN-slug.md`, so the config block and the stray reports in that directory are not
@@ -1166,7 +1166,7 @@ config.yaml at all**, present only in the automod canary's generated config:
 |---|---|
 | `inner_voice: false` | **live** — the fleet default for the observer; a task's own `inner_voice:` beats it |
 | `ticker_enabled` | **live** — default true; `false` skips the startup stuck-task recovery (the automod canary sets it) |
-| `task_dir: ~/obsidian/autonomy` | dead — no reader reads the key. Each one derives `vault_root() / "autonomy"` (`app/autonomy.py:82`, `app/routers/autonomy.py:32`, `agent_mcp/autonomy.py:53`, `scripts/memory/conversation_relations.py:54`), so since the runtime-state rule what relocates the fleet is `$LLOYD_VAULT_ROOT`, not this key |
+| `task_dir: ~/obsidian/autonomy` | dead — no reader reads the key. Each one derives `vault_root() / "autonomy"` (`app/autonomy.py:82`, `app/routers/autonomy.py:32`, `agent_mcp/autonomy.py:53`), so since the runtime-state rule what relocates the fleet is `$LLOYD_VAULT_ROOT`, not this key. `scripts/memory/conversation_relations.py` carried a fourth derivation of it until #4105 asked the router for the enumeration instead |
 | `tick_interval: 60` | dead — the real cadence is `workers.sources.scheduled-task.interval_seconds`, which is also 60 |
 | `enabled: true` | dead — nothing reads it; the live switch is the source's own `enabled` |
 

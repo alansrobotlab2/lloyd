@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import re
 import sys
 import urllib.request
@@ -51,18 +52,49 @@ RELATIONS_INDEX = PIPELINE_DIR / "relations-index.json"
 #: very rows the writer produces.
 EDGE_ORIGIN = "conversation"
 LLOYD_SESSIONS = SESSIONS_DIR
-AUTONOMY_DIR = vault_root() / "autonomy"
 
-# The skill_name of the autonomy task that runs this script. Its frontmatter is
-# where the Stage-2 model decision lives — see resolve_llm_target().
+# This script used to hold its own path to `~/obsidian/autonomy` and glob it. It does
+# not decide what a task file is any more — see `_task_files` (#4105) — so the path is
+# gone, and with it the second enumeration of a directory the scheduler already owns.
 TASK_SKILL_NAME = "conversation-relation-linking"
 
-# Fallback only. These used to be THE endpoint and THE model: a hardcoded
+#: Matches a `skill_name: <this skill>` line in a file whose front matter produced no
+#: record at all — the one case where the bytes have to speak for the field, because
+#: the shared reader's recovery pass could not. The leading whitespace class is why
+#: it can: an indented, YAML-rejected `skill_name:` is exactly what loses the field in
+#: recovery while leaving the declaration in the file.
+_SKILL_NAME_LINE_RE = re.compile(
+    r"^[ \t]*skill_name:[ \t]*['\"]?" + re.escape(TASK_SKILL_NAME) + r"['\"]?[ \t]*$",
+    re.MULTILINE)
+
+logger = logging.getLogger("conversation_relations")
+
+# Fallback only, and reachable on exactly one path: no autonomy task file names
+# TASK_SKILL_NAME at all. These used to be THE endpoint and THE model: a hardcoded
 # :8096/primary that no config could move, so Stage 2 always spent its
 # MAX_CLASSIFY_PER_RUN batch on the contended RTX PRO 6000 even though task #51
-# was deliberately moved to the secondary slot on the idle 3090 (#420).
+# was deliberately moved to the secondary slot on the idle 3090 (#420). Every other
+# way of getting here is now `LlmTargetUnresolved` (#4105).
 LLM_ENDPOINT = "http://127.0.0.1:8096/v1/chat/completions"
 LLM_MODEL = "primary"
+
+
+class LlmTargetUnresolved(RuntimeError):
+    """Stage 2's LLM target could not be resolved, so the run must not proceed.
+
+    Raised in place of the `LLM_ENDPOINT`/`LLM_MODEL` constants whenever a task file
+    DOES name this script's skill and the pin it decides cannot be honoured: no
+    readable `model:`, two files that disagree, an unimportable `app.config`, or an
+    alias config.yaml holds no base URL for. Those constants ARE the :8096/primary
+    configuration #420 was filed against, so reaching them by failing to read the
+    file that decides the pin is a misroute, not a fallback — one Stage 2 used to
+    commit with no log line at all, at up to MAX_CLASSIFY_PER_RUN requests a run,
+    while the board showed task #51 succeeding (#4105).
+    """
+
+    #: What the tests read to state the invariant out loud: this error never hands
+    #: back the constants. An unresolved target is a stop, by construction.
+    returned_constants = False
 
 # Vault segments that are valid relationship endpoints
 VAULT_SEGMENTS = {
@@ -517,6 +549,93 @@ def extract_conversation_context(
     return context[:max_chars] if context else None
 
 
+def _task_files() -> list[Path]:
+    """The autonomy task files, as decided by the scheduler's own name gate.
+
+    `app.routers.autonomy.autonomy_task_files()` is the one enumeration of that
+    directory: `_TASK_NAME_RE` (`\\d+-`) keeps out `_config.md`, the reports and the
+    prose notes — four of which sat inside the unfiltered glob of every `.md` file
+    this replaces, parsed as though they were tasks (#4105). Importing the router is
+    the point rather than copying the regex: a gate that must be re-typed at each
+    reader is a gate that drifts, which is why #1692 made the MCP reader import it
+    too.
+
+    Not being able to enumerate is not a licence for the fallback: the module cannot
+    then prove that no file names the skill, so it says so and stops.
+    """
+    try:
+        from app.routers.autonomy import autonomy_task_files
+    except Exception as exc:  # ImportError, or anything the router does at import
+        logger.warning("Cannot load the shared autonomy task reader (%s: %s); this "
+                       "run cannot tell whether a task file names skill %r, so it "
+                       "refuses the %s@%s fallback instead of assuming none does",
+                       type(exc).__name__, exc, TASK_SKILL_NAME, LLM_MODEL,
+                       LLM_ENDPOINT)
+        raise LlmTargetUnresolved(
+            f"autonomy task enumeration unavailable ({exc})") from exc
+    return autonomy_task_files()
+
+
+def _names_skill_raw(text: str) -> bool:
+    """Do this file's own bytes declare `skill_name: <TASK_SKILL_NAME>`?
+
+    Consulted only for a file whose front matter the shared reader could not hand
+    back a record for — see `_model_pin`. That is the one hole neither guard closes
+    on its own: YAML damaged enough that even the recovery pass lost `skill_name`
+    is invisible to a structured read, so the module would conclude "no file names
+    the skill" and take the constants — the same silent misroute one layer down.
+    """
+    return bool(_SKILL_NAME_LINE_RE.search(text))
+
+
+def _model_pin(path: Path) -> tuple[bool, Optional[str]]:
+    """`(names_this_skill, model_pin)` for one autonomy task file.
+
+    The read is the scheduler's: `app.autonomy._parse_task_file`, which takes the
+    front matter through `parse_frontmatter_text` with `AUTONOMY_TASK_FIELDS` —
+    plain YAML, then the orphaned-tags repair, then per-field regex recovery marked
+    `_yaml_broken`. That is the graduated reader #1014 made mandatory precisely
+    because a degraded file must come back *degraded*, still dispatchable, with its
+    fields recovered; the hand-rolled fence slice and `startswith(...)` line scan
+    this module used to do was the one path that could read such a file's pin wrong
+    while the scheduler went on running the task happily (#4105). It also reads a
+    quoted or commented value as the value instead of as the string around it.
+
+    Three answers about who this file is, in that order: a record that names this
+    skill names it; a record that names a different skill is not ours and the bytes
+    do not get to argue; a file whose front matter produced no usable record at all
+    (`None`, or `_yaml_broken` with the recovery pass having lost `skill_name` too)
+    is settled by `_names_skill_raw`, because that is the one shape where "the reader
+    found no skill_name" and "this file names no skill" are different facts, and the
+    difference is what decides whether the constants get used.
+
+    A file that cannot be opened at all warns: its pin is not being read either, and
+    silence is what made the last version of this function unsafe.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("Cannot read autonomy task file %s (%s): its model pin is not "
+                       "being read either", path, exc)
+        return False, None
+    from app.autonomy import _parse_task_file
+    fm = _parse_task_file(path)
+    record = fm if isinstance(fm, dict) else {}
+    declared = str(record.get("skill_name") or "").strip().strip("'\"")
+    if declared == TASK_SKILL_NAME:
+        pass                                   # the record says so itself
+    elif declared:
+        return False, None                     # it names some other skill; believe it
+    elif record.get("_yaml_broken") or not record:
+        if not _names_skill_raw(text):
+            return False, None                 # damaged AND silent about the skill
+    else:
+        return False, None                     # well-formed record, no skill_name
+    model = record.get("model")
+    model = str(model).strip() if model is not None else ""
+    return True, (model or None)
+
+
 def _task_model_alias() -> Optional[str]:
     """The `model:` declared by the autonomy task that runs this script.
 
@@ -526,28 +645,52 @@ def _task_model_alias() -> Optional[str]:
     this script, which asked :8096 by constant. The decision belongs to the task
     file; this reads it (#420). #937 owns the disagreement between #51's
     frontmatter and its activity log; whichever way that lands, this follows it.
+
+    The first version read it by globbing the directory and splitting on `---`, which
+    made the read itself the one thing standing between Stage 2 and the constants
+    (#4105). Three guards now come with it: the shared name gate decides what is
+    scanned (`_task_files`), the shared graduated reader produces the value
+    (`_model_pin`), and a file that names the skill without yielding a pin RAISES
+    rather than returning None — because None means "fall through to the constants",
+    which is the misroute #420 was filed against. `None` here now means one thing
+    only: no task file names the skill at all.
+
+    Several files may name the skill (a fork, a note that matches `\\d+-` and copied
+    the field). One of them carrying the pin while the others carry none answers it —
+    a note has no decision to make. Two that disagree do not, because filename sort
+    order is not a decision procedure and one of the two answers is the contended GPU.
     """
-    try:
-        task_files = sorted(AUTONOMY_DIR.glob("*.md"))
-    except OSError:
+    naming: list[str] = []
+    pins: list[str] = []
+    for path in _task_files():
+        names, model = _model_pin(path)
+        if not names:
+            continue
+        naming.append(path.name)
+        if model:
+            pins.append(model)
+    if not naming:
         return None
-    for f in task_files:
-        try:
-            text = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            continue
-        skill = model = None
-        for line in parts[1].splitlines():
-            if line.startswith("skill_name:"):
-                skill = line.split(":", 1)[1].strip().strip("'\"")
-            elif line.startswith("model:"):
-                model = line.split(":", 1)[1].strip().strip("'\"")
-        if skill == TASK_SKILL_NAME:
-            return model or None
-    return None
+    distinct = sorted(set(pins))
+    if len(distinct) == 1:
+        return distinct[0]
+    where = ", ".join(sorted(naming))
+    if not distinct:
+        logger.warning(
+            "%s names skill %r but no readable `model:` pin was found in it; the "
+            "%s@%s fallback is the misroute #420 was filed against, so Stage 2 stops "
+            "here instead of using it (#4105)", where, TASK_SKILL_NAME, LLM_MODEL,
+            LLM_ENDPOINT)
+        raise LlmTargetUnresolved(
+            f"{where}: task file names {TASK_SKILL_NAME!r} with no readable `model:`")
+    logger.warning(
+        "%s name skill %r and disagree on the Stage-2 model pin (%s); refusing to "
+        "choose by filename sort order, since one of these answers is the contended "
+        "primary slot #420 was filed against (#4105)", where, TASK_SKILL_NAME,
+        ", ".join(sorted(set(pins))))
+    raise LlmTargetUnresolved(
+        f"{where}: disagreeing `model:` pins for {TASK_SKILL_NAME!r}: "
+        f"{', '.join(sorted(set(pins)))}")
 
 
 def resolve_llm_target(model_alias: Optional[str] = None) -> tuple[str, str]:
@@ -556,8 +699,14 @@ def resolve_llm_target(model_alias: Optional[str] = None) -> tuple[str, str]:
     The alias comes from the task frontmatter (or an explicit argument) and the
     base_url comes from `models:` via app.config, so moving the task between the
     primary and secondary slots moves Stage 2 with it instead of leaving a port
-    baked into the script. Only when that resolution finds nothing do these fall
-    back to the module constants.
+    baked into the script.
+
+    The module constants are the answer on exactly one path: `_task_model_alias()`
+    found no task file naming the skill. Every other way of coming up empty — the
+    file is there and unreadable, `app.config` cannot be imported, the alias has no
+    base URL — raises `LlmTargetUnresolved` with a warning. Those three used to
+    return `LLM_ENDPOINT, LLM_MODEL` silently (#4105), which is how a config the
+    script could not read became a decision to use :8096/primary.
     """
     alias = model_alias or _task_model_alias()
     if alias:
@@ -565,14 +714,25 @@ def resolve_llm_target(model_alias: Optional[str] = None) -> tuple[str, str]:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
         try:
             from app.config import MODEL_CONFIGS, resolve_model_alias
-        except Exception:
-            return LLM_ENDPOINT, LLM_MODEL
+        except Exception as exc:
+            logger.warning("Cannot import app.config to place model alias %r (%s: %s); "
+                           "refusing the %s@%s fallback, because an alias this script "
+                           "cannot resolve is not the same fact as having no alias "
+                           "(#4105)", alias, type(exc).__name__, exc, LLM_MODEL,
+                           LLM_ENDPOINT)
+            raise LlmTargetUnresolved(
+                f"app.config unavailable for alias {alias!r}: {exc}") from exc
         alias = resolve_model_alias(alias)  # honours secondary_enabled=false
         cfg = MODEL_CONFIGS.get(alias) or {}
         base = (cfg.get("base_url")
                 or (cfg.get("env") or {}).get("ANTHROPIC_BASE_URL") or "")
         if base:
             return base.rstrip("/") + "/v1/chat/completions", alias
+        logger.warning(
+            "Model alias %r has no base_url in config.yaml, so config cannot place it; "
+            "refusing the %s@%s fallback, which is the configuration #420 was filed "
+            "against (#4105)", alias, LLM_MODEL, LLM_ENDPOINT)
+        raise LlmTargetUnresolved(f"alias {alias!r} has no base_url in config.yaml")
     return LLM_ENDPOINT, LLM_MODEL
 
 

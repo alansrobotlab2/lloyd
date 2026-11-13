@@ -503,6 +503,38 @@ def _task_file(dir_path: Path, model: str) -> Path:
     return f
 
 
+def _seed_autonomy_dir(monkeypatch, adir: Path) -> Path:
+    """Point the SHARED task-file enumeration at a seed directory (#4105).
+
+    `_task_model_alias()` no longer enumerates the autonomy directory itself: it
+    asks `app.routers.autonomy.autonomy_task_files()`, which is the one gated
+    enumeration of that directory (`_TASK_NAME_RE` decides what counts as a task
+    file). That function is rooted at *its* module's `_AUTONOMY_DIR`, so a seed
+    that patched the script's old private `AUTONOMY_DIR` global would seed a path
+    nothing reads any more — and the test would then be reading the real
+    `~/obsidian/autonomy` while appearing to read a fixture.
+    """
+    adir.mkdir(parents=True, exist_ok=True)
+    import app.routers.autonomy as autonomy_router
+    monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", adir)
+    return adir
+
+
+def _enable_secondary_slot(monkeypatch) -> None:
+    """Pin `secondary_enabled` ON for a test whose subject is a secondary pin
+    travelling all the way to an endpoint.
+
+    `resolve_model_alias` rewrites `secondary` onto primary while the live config has
+    the slot off, so inheriting production config would make the assert below about a
+    config leaf instead of about the reader. Same reason
+    `test_endpoint_follows_the_task_model_declaration` pins it; the false case stays
+    with `test_disabled_secondary_alias_moves_with_the_switch`.
+    """
+    from app import config as app_config
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", True)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
+
+
 def _config_endpoint(alias: str) -> str:
     """The endpoint config.yaml declares for an alias, read straight from the
     parsed config — the contract under test, so these assertions track the file
@@ -538,7 +570,7 @@ def test_endpoint_follows_the_task_model_declaration(cr, tmp_path, monkeypatch):
     monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
     adir = tmp_path / "autonomy"
     _task_file(adir, "secondary")
-    monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
+    _seed_autonomy_dir(monkeypatch, adir)
     endpoint, model = cr.resolve_llm_target()
     assert model == "secondary"
     assert endpoint == _config_endpoint("secondary")
@@ -556,7 +588,7 @@ def test_disabled_secondary_alias_moves_with_the_switch(cr, tmp_path, monkeypatc
     from app import config as app_config
     adir = tmp_path / "autonomy"
     _task_file(adir, "secondary")
-    monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
+    _seed_autonomy_dir(monkeypatch, adir)
     monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", False)
     monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
     endpoint, model = cr.resolve_llm_target()
@@ -564,8 +596,30 @@ def test_disabled_secondary_alias_moves_with_the_switch(cr, tmp_path, monkeypatc
 
 
 def test_endpoint_falls_back_to_the_constant_without_a_task_file(cr, tmp_path, monkeypatch):
-    monkeypatch.setattr(cr, "AUTONOMY_DIR", tmp_path / "missing")
+    """Clause 5 (#4105): the constants stay reachable on exactly ONE path — no
+    task file names the skill at all, either because the directory is not there
+    or because every gated file denies it. A file that DOES name the skill and
+    cannot be read is not this path; see
+    `test_an_unreadable_pin_warns_and_refuses_the_constant`.
+
+    The pair is also pinned against config: `_config_endpoint("primary")` is
+    byte-identical to `LLM_ENDPOINT`, which is why falling back here is benign
+    today. If config's primary slot ever moves off :8096 this assert says so in
+    the same breath as the fallback it just distinguished.
+    """
+    _seed_autonomy_dir(monkeypatch, tmp_path / "missing")
     assert cr.resolve_llm_target() == (cr.LLM_ENDPOINT, cr.LLM_MODEL)
+    assert (cr.LLM_ENDPOINT, cr.LLM_MODEL) == (_config_endpoint("primary"), "primary")
+
+    # A gated task file that names a DIFFERENT skill is still "no task file names
+    # the skill": the fallback must not become unreachable just because the
+    # directory is full of other people's tasks.
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    (adir / "77-some-other-task.md").write_text(
+        "---\nskill_name: some-other-skill\nmodel: secondary\n---\n\n# body\n",
+        encoding="utf-8")
+    assert cr.resolve_llm_target() == (cr.LLM_ENDPOINT, cr.LLM_MODEL)
+    assert cr._task_model_alias() is None
 
 
 def test_stage2_posts_to_the_resolved_endpoint(cr, tmp_path, monkeypatch):
@@ -602,7 +656,7 @@ def test_stage2_posts_to_the_resolved_endpoint(cr, tmp_path, monkeypatch):
     monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=True)
     adir = tmp_path / "autonomy"
     _task_file(adir, "secondary")
-    monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
+    _seed_autonomy_dir(monkeypatch, adir)
     # urllib.request is process-global, so the fake is installed only around the
     # call itself and the assertions run after the context has restored it.
     with monkeypatch.context() as ctx:
@@ -613,6 +667,322 @@ def test_stage2_posts_to_the_resolved_endpoint(cr, tmp_path, monkeypatch):
     assert captured["url"] != cr.LLM_ENDPOINT
     assert captured["body"]["model"] == "secondary"
     assert out["type"] == "supersedes"
+
+
+# ── #4105: the pin is read through the scheduler's reader, or the run stops ───
+#
+# `scripts/memory/conversation_relations.py` was the one reader of
+# `~/obsidian/autonomy/` that gated on neither the task filename nor the shared
+# front matter loader: it globbed every `*.md` and did `text.split("---", 2)` plus
+# a `startswith("model:")` line scan. Both halves were load-bearing in the same
+# way, because the only thing between Stage 2 and the module constants — the
+# :8096/primary configuration #420 was filed against — was that hand-rolled parse
+# succeeding on #51's file. The scheduler dispatches a #1014-degraded task happily
+# (`_parse_task_file` recovers it, `skill_name` and `model` included, marked
+# `_yaml_broken`), so a degraded #51 is a live task whose pin a naive scan can read
+# wrong while the board shows the run as a success. The triage measured both paths
+# side by side and the resolved tuple was byte-identical to the constants, so the
+# defect is a missing guard plus a missing alert, not a live mispin — and that is
+# exactly why it needs the alert: the divergence it would cause is #937's open
+# question about moving the pin off primary.
+
+def _write(dir_path: Path, name: str, front_matter: str) -> Path:
+    p = dir_path / name
+    p.write_text(f"---\n{front_matter}---\n\n# body\n", encoding="utf-8")
+    return p
+
+
+def test_the_module_carries_no_private_fork_of_the_task_reader(cr):
+    """Clauses 1+2, structurally: the two lines that made this module its own
+    reader are gone, and the two shared ones are the ones it calls.
+
+    The behavioural tests below are the real proof; this one is what keeps a later
+    "just parse it inline here" from re-opening the gap unnoticed, and it is the
+    test form of the verify command the item names (`git grep 'split(' `
+    `scripts/memory/conversation_relations.py` for the `split('---'` form)."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "AUTONOMY_DIR.glob" not in src, "the module must not enumerate the " \
+        "autonomy dir itself — `autonomy_task_files()` is the one enumeration"
+    for spelling in ('split("---"', "split('---'"):
+        assert spelling not in src, f"front matter must come from " \
+            f"`app.autonomy._parse_task_file`, not a {spelling} slice"
+    assert "autonomy_task_files" in src, "enumeration must go through the shared " \
+        "name-gated reader (`_TASK_NAME_RE` decides what is scanned)"
+    assert "_parse_task_file" in src, "the `model:` value must come from the " \
+        "shared graduated-recovery reader"
+
+
+def test_a_non_task_note_naming_the_skill_is_not_read_at_all(cr, tmp_path, monkeypatch):
+    """Clause 1, behaviourally: `_TASK_NAME_RE` decides what is scanned.
+
+    `-co-access-report.md` carries the skill_name AND a competing pin, and sorts
+    before `51-` (only a leading punctuation mark sorts below a digit, which is
+    why the decoy is spelled that way). The old unfiltered glob read it, and since
+    the old loop returned at the first `skill_name:` match its pin would have won.
+    A leading-hyphen name is what the shared gate rejects; a digit-prefixed prose
+    note passes the gate, and that case is the one the next test pins.
+    """
+    _enable_secondary_slot(monkeypatch)
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _task_file(adir, "secondary")
+    _write(adir, "-co-access-report.md",
+           "skill_name: conversation-relation-linking\nmodel: tertiary-should-not-be-read\n")
+    assert cr._task_model_alias() == "secondary"
+    assert cr.resolve_llm_target() == (_config_endpoint("secondary"), "secondary")
+
+
+def test_a_gated_note_naming_the_skill_without_a_pin_does_not_suppress_51s(
+        cr, tmp_path, monkeypatch):
+    """Clause 3: the decoy is a note that the name gate cannot exclude.
+
+    `10-co-access-notes.md` matches `\\d+-` like any task file, sorts before `51-`,
+    and declares this script's skill_name with no `model:` of its own. The old
+    scan stopped at the first skill_name match — `return model or None` sits
+    INSIDE the loop — so this file suppressed #51's pin outright rather than
+    merely shadowing it, and Stage 2 dropped to the constants.
+    """
+    _enable_secondary_slot(monkeypatch)
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _task_file(adir, "secondary")
+    _write(adir, "10-co-access-notes.md",
+           "skill_name: conversation-relation-linking\nstatus: draft\n")
+    assert cr._task_model_alias() == "secondary"
+    assert cr.resolve_llm_target() == (_config_endpoint("secondary"), "secondary")
+
+
+def test_the_pin_survives_the_shapes_a_line_scan_reads_wrong(cr, tmp_path, monkeypatch):
+    """Clause 2: the value comes from the shared reader, not from splitting the
+    line on `:`.
+
+    Two real shapes. (a) A quoted value with a trailing comment: the old scan's
+    `.strip().strip("'\\"")` stripped the leading quote and kept everything after
+    it, yielding `secondary"   # moved to the 3090` where YAML gives `secondary`.
+    (b) The #1014 corruption itself — an inline `tags:` list followed by an
+    orphaned block item, which is what corrupted 34 of 40 task files on 2026-05-28
+    and made the scheduler's own reader mandatory. `parse_frontmatter_text`
+    recovers (b) through its repair pass or its `AUTONOMY_TASK_FIELDS` regex
+    fallback; this module has no opinion about how, only that it is not its own.
+    """
+    _enable_secondary_slot(monkeypatch)
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _write(adir, "51-conversation-relation-linking.md",
+           "name: Conversation Relation Linking\n"
+           "skill_name: conversation-relation-linking\n"
+           'model: "secondary"   # moved to the 3090 (#420)\n')
+    assert cr._task_model_alias() == "secondary"
+
+    _write(adir, "51-conversation-relation-linking.md",
+           "name: Conversation Relation Linking\n"
+           "skill_name: conversation-relation-linking\n"
+           "tags: [conversation, kg]\n"
+           "  - orphaned-block-item\n"
+           "model: secondary\n")
+    assert cr._task_model_alias() == "secondary"
+    assert cr.resolve_llm_target()[0] == _config_endpoint("secondary")
+
+
+def test_an_unreadable_pin_warns_and_refuses_the_constant(cr, tmp_path, monkeypatch,
+                                                          caplog):
+    """Clause 4: found-but-unreadable is a stop, not a fallback.
+
+    #51's file is there and names the skill, but no `model:` can be read from it.
+    Before #4105 that path returned `LLM_ENDPOINT, LLM_MODEL` with no log line at
+    all — the item's scan of lines 500-600 for `log|warn|print` hit only prose
+    inside a docstring — so Stage 2 ran its whole MAX_CLASSIFY_PER_RUN batch on the
+    contended primary while the board showed #51 succeeding. Both halves are
+    asserted: a WARNING naming the file, and no returned pair.
+    """
+    import logging
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _write(adir, "51-conversation-relation-linking.md",
+           "name: Conversation Relation Linking\n"
+           "skill_name: conversation-relation-linking\n"
+           "status: up_next\n")
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(cr.LlmTargetUnresolved) as held:
+            cr.resolve_llm_target()
+
+    assert held.value.returned_constants is False
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "the fallback must not be silent — that silence IS the defect"
+    assert any("51-conversation-relation-linking.md" in m for m in warnings), warnings
+    assert any("model:" in m for m in warnings), warnings
+
+
+def test_a_file_too_broken_to_parse_still_cannot_reach_the_constant(
+        cr, tmp_path, monkeypatch, caplog):
+    """The hole the name gate and the shared reader both leave open, closed.
+
+    Front matter damaged past recovery — `parse_frontmatter_text` ends at its regex
+    pass, whose field patterns are anchored at column 0, so an indented `skill_name:`
+    is lost from the record while remaining in the file. The structured read then says
+    "this file names no skill", which is the same conclusion as "no file names the
+    skill", and the constants get the run. The module's one raw read is for exactly
+    this: a damaged record whose bytes still declare the skill_name counts as
+    found-but-unreadable, which is what clause 4 is about.
+    """
+    import logging
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _write(adir, "51-conversation-relation-linking.md",
+           "name: Conversation Relation Linking\n"
+           "tags: [conversation, kg]\n"
+           "  - orphaned-block-item\n"
+           "  skill_name: conversation-relation-linking\n"
+           "  model: secondary\n")
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(cr.LlmTargetUnresolved):
+            cr.resolve_llm_target()
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, warnings
+    assert any("51-conversation-relation-linking.md" in m for m in warnings), warnings
+
+
+def test_two_gated_files_naming_the_skill_and_disagreeing_stop_the_run(
+        cr, tmp_path, monkeypatch, caplog):
+    """Ambiguity is a third unreadable-pin, not a coin flip on filename order.
+
+    The old code resolved this by `sorted()` — `10-` beat `51-` by two characters
+    of ASCII. Refusing is the only answer that cannot silently pick the contended
+    GPU.
+    """
+    import logging
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _task_file(adir, "secondary")
+    _write(adir, "10-forked-task-file.md",
+           "skill_name: conversation-relation-linking\nmodel: primary\n")
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(cr.LlmTargetUnresolved):
+            cr.resolve_llm_target()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_an_alias_config_cannot_place_warns_instead_of_defaulting(cr, tmp_path,
+                                                                 monkeypatch, caplog):
+    """The second silent exit the triage named: `:569` swallowed ANY exception from
+    `from app.config import …` and returned the constants, so an unimportable
+    config put Stage 2 on :8096/primary with no signal at all, independent of any
+    damaged task file.
+    """
+    import logging
+    import types
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _task_file(adir, "secondary")
+    # A stand-in module that imports but carries neither name: the shape a broken
+    # or half-built config module actually has.
+    monkeypatch.setitem(sys.modules, "app.config", types.ModuleType("app.config"))
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(cr.LlmTargetUnresolved):
+            cr.resolve_llm_target()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_an_alias_with_no_base_url_warns_instead_of_defaulting(cr, tmp_path,
+                                                              monkeypatch, caplog):
+    """The third: an alias config declares no base for — `cfg.get("base_url") or
+    … or ""` fell through the `if base:` and landed on the constants. An alias the
+    config cannot place is a misroute waiting for the port to move, so it stops."""
+    import logging
+    from app import config as app_config
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _task_file(adir, "primary")
+    monkeypatch.setattr(app_config, "MODEL_CONFIGS", {"primary": {}}, raising=True)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(cr.LlmTargetUnresolved):
+            cr.resolve_llm_target()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_stage2_stops_before_the_batch_when_the_pin_is_unreadable(cr, tmp_path,
+                                                                 monkeypatch, caplog):
+    """The process seam: the autonomy scheduler spawns this script, so for #4105 the
+    alert that reaches a human IS the exit status — and the thing being prevented is
+    a whole MAX_CLASSIFY_PER_RUN batch posted to the contended primary while the board
+    records the task as a success.
+
+    So the stop has to survive the journey from `resolve_llm_target()` out through
+    `cmd_classify()` (`_capturing_llm` cannot be used to check this: it patches
+    `resolve_llm_target`, and the resolver is the subject here), and no request may
+    leave the process. Both are asserted: nothing reached `urlopen`, and the raise
+    arrived.
+    """
+    import logging
+    calls: list[str] = []
+
+    def no_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        raise AssertionError("Stage 2 must not open a request on an unreadable pin")
+
+    monkeypatch.setattr(cr.urllib.request, "urlopen", no_urlopen)
+
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _write(adir, "51-conversation-relation-linking.md",
+           "skill_name: conversation-relation-linking\nstatus: up_next\n")
+    key = "20260922_010101_sess"
+    _session_file(tmp_path, _asked("how should I review this diff?"),
+                  _skills_read("codebase-inspection"),
+                  _skills_read("requesting-code-review", call_id="call_2"),
+                  _answered("both are relevant"), key=key)
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    props = tmp_path / "proposals.json"
+    props.write_text(json.dumps(
+        {"watermark": {}, "stats": {}, "proposals": [
+            _needle_test_proposal("skills/codebase-inspection/SKILL.md",
+                                 "skills/requesting-code-review/SKILL.md", key)]}),
+        encoding="utf-8")
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(cr.LlmTargetUnresolved):
+            cr.cmd_classify()
+
+    assert calls == [], f"Stage 2 opened requests on an unreadable pin: {calls}"
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_an_unusable_enumeration_warns_instead_of_assuming_no_task_file(
+        cr, tmp_path, monkeypatch, caplog):
+    """`_task_files()` cannot enumerate → the module cannot prove no file names the
+    skill, which is not the same fact as no file naming it. The old code's
+    `except OSError: return None` conflated the two and took the constants.
+    """
+    import logging
+    import types
+    adir = _seed_autonomy_dir(monkeypatch, tmp_path / "autonomy")
+    _task_file(adir, "secondary")
+    monkeypatch.setitem(sys.modules, "app.routers.autonomy",
+                        types.ModuleType("app.routers.autonomy"))
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(cr.LlmTargetUnresolved):
+            cr.resolve_llm_target()
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_the_live_task_file_routes_through_config_not_the_constant(cr):
+    """Clause 5's other half: for the real tree, the resolved endpoint is what
+    config says for the alias #51 really declares — unchanged from today, and
+    unchanged whenever #937 moves the pin, because neither value is written here.
+
+    Deliberately unpatched: this is the side-by-side probe the item's verify step
+    asks for, run against `~/obsidian/autonomy` as it stands.
+    """
+    from app import config as app_config
+    from app.autonomy import _find_task_file, _parse_task_file
+
+    path = _find_task_file(51)
+    assert path is not None, "#51's task file is gone; the probe has no subject"
+    declared = str(_parse_task_file(path)["model"])
+    alias = app_config.resolve_model_alias(declared)
+
+    # The reader is really reading: a pin this returns is the file's, not a None
+    # that would have fallen through to the constants unnoticed.
+    assert cr._task_model_alias() == declared
+    assert cr.resolve_llm_target() == (_config_endpoint(alias), alias)
 
 
 # ── #1039: a skill doc is verifiable by the bare name its session carries ─────
@@ -996,7 +1366,7 @@ def test_stage2_posts_the_rescued_window_over_a_real_socket(cr, tmp_path, monkey
                             f"http://127.0.0.1:{server.server_address[1]}")
         adir = tmp_path / "autonomy"
         _task_file(adir, "primary")
-        monkeypatch.setattr(cr, "AUTONOMY_DIR", adir)
+        _seed_autonomy_dir(monkeypatch, adir)
 
         _session_file(tmp_path,
                       _asked("how should I review this diff?"),
