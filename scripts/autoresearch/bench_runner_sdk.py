@@ -668,6 +668,7 @@ def build_options(
     stateful_admitted: list[str] | None = None,
     strip_description_tools: list[str] | None = None,
     visible_tools_capture: list[dict[str, Any]] | None = None,
+    base_url: str = "",
 ) -> Any:
     """Build the `RunOptions` for one trial.
 
@@ -704,6 +705,13 @@ def build_options(
     as a witness — the arm's own claim about what was advertised is worth
     nothing unless the array the model was handed says the same — and every
     other caller leaves it `None`, which is how it stayed for #529's callers.
+
+    `base_url` (#4128) is the arm seam a precision comparison needs: an engine
+    booted on a spare port for one run and gone the next has no `models:` entry in
+    config.yaml, so there is no alias to resolve and the caller names the endpoint
+    instead. Empty — every caller before #4128 — leaves the line that resolved the
+    endpoint before this parameter existed, byte for byte: the resolved model's own
+    `ANTHROPIC_BASE_URL`, else the last-resort literal below.
     """
     from app.config import _get_model_env, _resolve_model_name
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
@@ -778,7 +786,10 @@ def build_options(
 
     return RunOptions(
         model=resolved,
-        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
+        # An explicit endpoint wins over the config entry (#4128); with none passed
+        # in, the expression below is the one that has been here since #427.
+        base_url=(base_url
+                  or model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096")),
         system_prompt=system_prompt,
         max_turns=max_agent_turns,
         mcp_servers=_get_mcp_servers(),
@@ -1007,6 +1018,7 @@ async def run_trial(
     system_append: str = "",
     writes_into: Path | str | None = None,
     tool_visibility: Any = None,
+    base_url: str = "",
 ) -> dict[str, Any]:
     """One (variant × task) trial through the harness. Returns a trace.
 
@@ -1031,6 +1043,15 @@ async def run_trial(
     will be graded. It exists so a zero `bench_probe_count` on the real corpus
     is provable as "no trial probed" rather than "the detector never fires" —
     set it only from a caller that means it, never from a task file.
+
+    `base_url` (#4128) names the endpoint a trial talks to when the engine is not
+    a config.yaml model — the second weight format of a precision arm, up on a
+    spare port for one suite run. It goes to `build_options` and nowhere else; the
+    `model` string stays the served id sent in the request body. Every trial now
+    also records `user_turn`, the prompt it dispatched, because the missing-argument
+    checks (#4128) grade whether a tool argument's value appears in what the *user*
+    said, and a trace that kept only `final_text` could not answer that in either
+    direction — the reply that invents a value contains the value it invented.
     """
     task_id = task.get("id") or task.get("_path", "?")
     prompt = task.get("prompt") or task.get("_body") or ""
@@ -1106,6 +1127,12 @@ async def run_trial(
     trace: dict[str, Any] = {
         "variant_id": variant_id,
         "task_id": task_id,
+        # The prompt as dispatched, probe appendage included: the text a tool
+        # argument has to be found in for `no_invented_required_arg` to call it
+        # grounded (#4128). Recorded on every trace, not only on a trial that
+        # declares those checks, so a row re-scored a month later can be graded
+        # without the caller still having the task file to hand.
+        "user_turn": prompt,
         "task_category": task.get("category", "unknown"),
         "harness": HARNESS,
         "tool_trace_authoritative": True,
@@ -1255,6 +1282,10 @@ async def run_trial(
         # default really was the default.
         strip_description_tools=(vis_names if vis_mode == "name_only" else None),
         visible_tools_capture=captured_tools,
+        # #4128: forwarded, not re-derived. An arm engine named by endpoint has no
+        # config alias, and a call site that dropped this would send every arm trial
+        # to whatever `models.default` points at while the report named the arm.
+        base_url=base_url,
     )
     # Read back off what was built rather than restating the pin (#427). A pin
     # that is later changed, or overridden by a caller, then shows up in the

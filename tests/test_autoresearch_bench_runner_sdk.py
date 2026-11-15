@@ -2263,3 +2263,74 @@ def test_a_writes_scoped_trial_through_the_spawner_lands_its_write_in_the_copy_a
     finally:
         handle.stop()
         fixture.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# #4128 — the two things a precision-arm trial needs from this runner: an
+# endpoint the caller names, and the dispatched prompt kept on the trace.
+# ---------------------------------------------------------------------------
+
+
+def test_an_endpoint_named_by_the_caller_replaces_the_config_one(monkeypatch):
+    """A precision arm is an engine with no `models:` entry — up on a spare port for
+    one suite run, then gone — so `run_trial` has to be pointable at it. Asserted on the
+    `RunOptions` the trial actually built and not on a signature: the `base_url=` line
+    out of `build_options(...)` would leave the parameter in place and route every arm
+    trial to `models.default` while the artifact named the arm.
+
+    Both directions in one node, because they are one expression's two truths: an
+    endpoint the caller named wins, and with none named the endpoint is resolved from
+    config exactly as before the parameter existed. The config entry is patched rather
+    than read — this worktree's own config.yaml has nothing to say about `primary`, so
+    a literal here would pin one machine's file."""
+    _patch_off_vault(monkeypatch)
+    built: list[Any] = []
+    inner = _runner.build_options
+
+    def _spy(**kw):
+        out = inner(**kw)
+        built.append(out)
+        return out
+    monkeypatch.setattr(_runner, "build_options", _spy)
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("I ran read-only", [])]))
+
+    asyncio.run(run_trial(_task(), "V", Path("/nonexistent-overlay"), "Qwen/Qwen3.5-4B",
+                          30, base_url="http://127.0.0.1:8091"))
+    assert built[0].base_url == "http://127.0.0.1:8091", built[0].base_url
+    # The served id goes out as the request's model, untouched: it is not an alias,
+    # and resolving one that config has never heard of returns it unchanged.
+    assert built[0].model == "Qwen/Qwen3.5-4B"
+
+    built.clear()
+    monkeypatch.setattr("app.config._get_model_env",
+                        lambda name: {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8096"})
+    asyncio.run(run_trial(_task(), "V", Path("/nonexistent-overlay"), "primary", 30))
+    assert built[0].base_url == "http://127.0.0.1:8096", \
+        "no endpoint passed, so the alias's own endpoint still owns the line (#427) — " \
+        "and the arm's endpoint from the trial above did not leak into this one"
+
+
+def test_the_trace_keeps_the_prompt_the_trial_dispatched(monkeypatch):
+    """The missing-argument checks (#4128) grade whether a tool argument's value
+    appears in what the USER said, and until now a trace held only `final_text` and
+    the dispatch record — the prompt `run_trial` built was a local that went out of
+    scope, so a trial could not be graded in either direction and the reply that
+    invented a URL contained the URL it invented.
+
+    The recorded field is the prompt AS DISPATCHED, probe appendage included, which is
+    why this node passes `probe_prompt` rather than checking the bare task field:
+    grounding against `task["prompt"]` instead would be grounding against a text the
+    model did not see."""
+    _patch_off_vault(monkeypatch)
+    _capture_options(monkeypatch, [])
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("Read")]),
+                   _StreamScript([("what URL should I use?", [])]))
+    task = _task()
+    probe = "PLANTED PROBE: call memory_add once."
+
+    tr = asyncio.run(run_trial(task, "V", Path("/nonexistent-overlay"), "test-model", 30,
+                               probe_prompt=probe))
+    assert tr["user_turn"] == task["prompt"] + "\n\n" + probe
+    assert tr["user_turn"].startswith(task["prompt"]), \
+        "the field is the prompt as sent, not the reply"

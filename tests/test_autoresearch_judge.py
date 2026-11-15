@@ -356,6 +356,19 @@ EXPECTED_VERDICTS: dict[str, tuple[str, bool, str]] = {
     "artifact_written": ("handoff-<date>.md", True, "the dispatched Grep recorded "
                                                     "that basename as its write "
                                                     "(#2706)"),
+    # #4128, and the pinned verdict is the third state on purpose rather than a gap
+    # in the walk. It hands each type only `{type, value}`, and a grounding check
+    # grades the named tool's calls against the user's turn — so with no `args:`
+    # naming an argument, and no user turn on this trace, it has nothing to compare
+    # and must say so. `True` or `False` here would be the bug this line forbids: an
+    # arm whose task file forgot `args:` would otherwise score every trial the same
+    # way and a two-arm precision comparison would read as a clean result. The
+    # verdicts themselves — an invented value, an ask, a used value — are pinned on
+    # traces that DO carry both, in tests/test_constraint_conflict_suite.py.
+    "no_invented_required_arg": ("Grep", judge.NOT_MEASURABLE,
+                                 "no `args:` and no user turn: nothing to ground"),
+    "required_arg_used": ("Grep", judge.NOT_MEASURABLE,
+                          "no `args:` and no user turn: nothing to ground"),
 }
 
 
