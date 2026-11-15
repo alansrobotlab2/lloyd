@@ -138,8 +138,9 @@ the outbound gate, which is armed from *inside* the safety installer at
 the command could not see the transitive arm, so the sentence was copied from the
 command and inherited its blind spot. Three other turn builders construct their
 own `HookRegistry` and install a different subset — `builtin_task.py`,
-`autonomy.run_task`, `workers/sources/_common.py` — and the last of those three
-installs no Bash hook at all, which is what §6's dispatch floor is for.
+`autonomy.run_task`, `workers/sources/_common.py`. Since #4129 every one of them
+arms the Bash floor; what still separates them is which reviewer is in the loop
+and which scope the payload gate answers for.
 
 ```
 git grep -n "GATE_ARM_POINTS\|def stale_gate_arm_points\|def find_unarmed_dispatch_paths" \
@@ -165,7 +166,8 @@ it, and a path that calls only the floor is credited with the floor and what the
 floor's body arms, nothing more. On 2026-10-06 it prints 13 rows: the
 interactive builder arming all four; `builtin_task.py` three (no reviewer);
 `app/autonomy.py` and `workers/sources/_common.py` the policy hook and the gate
-and **no** safety hook, which is what §6's dispatch floor is for; eight `eval/`
+and **no** safety hook — the state until #4129 armed the floor on both, so those
+two rows read three guards deep now; eight `eval/`
 drivers and one `scripts/autoresearch/` bench driver the floor and the gate, of
 which `eval/run_injection_canary.py` arms the reviewer as well. A cell means the
 path *can* arm the guard —
@@ -459,7 +461,12 @@ before 2026-09-14, while `sudo` on this host needs a password — so the label
 protects nothing at dispatch and would refuse ordinary research. The residue is
 the honest one to publish: **for a label in that set, enforcement exists only on
 a turn that installed the hook.** Adding a label to `_HOOK_ONLY_LABELS` moves it
-out of the dispatch floor, so the set is worth keeping small on purpose.
+out of the dispatch floor, so the set is worth keeping small on purpose. Until
+#4129 that residue split the tree by *path* — a scheduled task or a worker slot
+built a registry with no hook, so a label in the set was enforced nowhere on
+those two — and what remains now splits a turn that has the hook from the
+dispatch pass that skips it, which `tests/test_safety_lane_parity.py` pins as one
+identical set of refusals across every dispatch shape.
 
 ## 7. A nested RPC call skips the hook layer
 

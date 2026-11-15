@@ -780,8 +780,8 @@ GATE_ARM_POINTS: tuple[str, ...] = (
     "app/harness/safety.py",                       # the floor every turn takes
     "agent_mcp/builtin_task.py",                   # Task subagent turns
     "app/routers/turn_options.py",                 # every chat/ambient/flush/voice turn (P13.4)
-    "app/autonomy.py",                             # autonomy task turns
-    "workers/sources/_common.py",                  # every worker slot (worker + task)
+    "app/autonomy.py",                             # autonomy task turns (#4129 floor)
+    "workers/sources/_common.py",                  # every worker slot (#4129 floor)
     "scripts/autoresearch/bench_runner_sdk.py",    # the scored bench path
     "eval/run_preserve_thinking_eval.py",          # live eval, real MCP tools
     "eval/run_tool_choice_eval.py",                # live eval, real MCP tools
@@ -1439,11 +1439,15 @@ def install_outbound_content_gate(
 
     `scope` names whose authority this turn is borrowing, exactly as
     `install_policy_hook` takes it; omit it and the callback reads
-    `policy.current_scope`, which the worker pool and the autonomy runner bind
-    per job. The gate is armed by `install_default_safety_hook` for every turn
-    that installs the default floor, and explicitly at the two dispatch paths
-    (`autonomy.run_task`, `workers/sources/_common.py`) that build a registry
-    without it — `GATE_ARM_POINTS` is the list, and it is pinned by a test.
+    `policy.current_scope`, which the worker pool binds per job. The gate is
+    armed by `install_default_safety_hook`, and since #4129 every dispatch path
+    installs that floor — including `autonomy.run_task` and
+    `workers/sources/_common.py`, which used to call this installer on their own
+    registry instead. `GATE_ARM_POINTS` is the roster, pinned by a test. The
+    autonomy runner hands its `autonomy-task:<id>` to the floor rather than
+    leaving it to the contextvar, because the pool is the only binder of that
+    variable and a scheduled task started through the MCP tool or the HTTP route
+    never passes through the pool.
 
     Like the policy hook, this callback *denies* rather than raises:
     `HookRegistry.fire_pre_tool_use` treats a raising callback as a pass,

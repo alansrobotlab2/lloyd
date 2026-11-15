@@ -130,10 +130,10 @@ _HARD_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 
 # Labels the aggregator does not enforce at dispatch. `\bsudo\b` matches the
-# word inside grep/echo text, and the paths that never installed this hook
-# (autonomy.run_task, run_prompt_on_primary) ran seven such commands harmlessly
-# before 2026-09-14 — while sudo itself needs a password on this host, so the
-# rule protects nothing there. The hook keeps it for the turns that had it.
+# word inside grep/echo text, and the two paths that built a registry without
+# this floor ran seven such commands harmlessly before #4129 armed it on both
+# of them — while sudo needs a password on this host, so the rule protects
+# nothing there. The floor still refuses it everywhere; only dispatch skips it.
 _HOOK_ONLY_LABELS = frozenset({"sudo"})
 
 
@@ -478,8 +478,8 @@ def check_bash_command(command: str, cwd: str | None = None, *,
 
     This is the only definition: the harness PreToolUse hook calls it, and so
     does the aggregator's `call_tool` for every Bash dispatch (`at_dispatch`),
-    whatever hooks the caller installed (`agent_mcp/main.py`). Until then the
-    autonomy and direct worker paths installed no safety hook at all.
+    whatever hooks the caller installed (`agent_mcp/main.py`). Since #4129 every
+    dispatch path installs that hook too, so this pass backs a floor up.
     """
     if not command or not isinstance(command, str):
         return None
@@ -635,21 +635,21 @@ async def _safety_pretool_cb(
     }
 
 
-def install_default_safety_hook(hooks: HookRegistry) -> None:
+def install_default_safety_hook(hooks: HookRegistry, *,
+                                scope: str | None = None) -> None:
     """Install the default destructive-Bash deny hook on a HookRegistry.
 
-    Call this for every primary turn (IV-on or IV-off). Idempotent in
-    practice because each turn builds a fresh `HookRegistry`.
+    Call this for every primary turn (IV-on or IV-off). Since #4129 the two
+    dispatch paths that built a registry without it (`autonomy.run_task`,
+    `workers/sources/_common.py`) call it too, so no path arms the payload
+    gate and not this floor. Idempotent in practice because each turn
+    builds a fresh `HookRegistry`.
 
-    Also arms the outbound content gate (#1136) on the same registry, because
-    this is the one installer every production turn already calls and the gate
-    is a sibling guard, not a fourth convention: Bash shape and payload
-    content are the two halves of "should this call happen", and a path that
-    installs one and not the other is what #869 is about. The gate takes no
-    scope here — it falls back to `policy.current_scope`, which the worker
-    pool and the autonomy runner bind per job, and it is armed explicitly
-    with a scope at the two dispatch paths that build a registry without this
-    floor (`autonomy.run_task`, `workers/sources/_common.py`).
+    Also arms the outbound content gate (#1136) on the same registry, once:
+    a path that called `install_outbound_content_gate` itself would scan one
+    tool call twice. `scope` names whose authority this turn borrows, as
+    `install_policy_hook` takes it; omitted, the gate reads the
+    `policy.current_scope` contextvar, which only the worker pool binds.
     """
     hooks.add_pre_tool_use(None, _safety_pretool_cb, fail_closed=True)
-    install_outbound_content_gate(hooks)
+    install_outbound_content_gate(hooks, scope=scope)

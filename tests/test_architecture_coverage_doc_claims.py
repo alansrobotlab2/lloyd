@@ -7602,8 +7602,12 @@ def test_guard_coverage_names_the_matrix_script_and_states_what_it_prints():
 
     matrix = G.guard_arm_matrix(ROOT)
     assert all(matrix["app/routers/turn_options.py"].values())
+    # Since #4129 both dispatch paths arm the floor, so each row reads the same
+    # three guards deep as the worker builder's: the floor, the grant gate, and the
+    # payload gate the floor's body arms. Only the reviewer is missing, because none
+    # of the three reaches a turn with no person reading it.
     for rel in ("app/autonomy.py", "workers/sources/_common.py"):
-        assert matrix[rel] == {"safety": False, "policy": True,
+        assert matrix[rel] == {"safety": True, "policy": True,
                                "outbound_content": True, "action_review": False}, (
             f"{rel} no longer arms what the page says it arms: {matrix[rel]}")
     assert matrix["agent_mcp/builtin_task.py"]["action_review"] is False

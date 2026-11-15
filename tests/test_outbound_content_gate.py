@@ -17,7 +17,7 @@ among 2,826 transcripts, so a person accepts this corpus in place of that
 measurement; inventing a real sent set is not this round's call.
 
 Counts quoted in prose are counts asserted here: 5 rules (3 deny, 2 report),
-9 arm points, 11 benign payloads.
+14 arm points, 11 benign payloads.
 """
 
 from __future__ import annotations
@@ -1145,6 +1145,153 @@ def test_the_gate_is_installed_on_the_default_safety_floor():
     # ...and the Bash floor is intact: adding a guard must not displace one.
     assert _decision(_fire(hooks, "Bash",
                            {"command": "echo hi"})) == "allow"
+
+
+def _pre_names(hooks: HookRegistry) -> list[str]:
+    """The registered PreToolUse callbacks, in the order `fire_pre_tool_use` walks."""
+    return [cb.__name__ for _matcher, cb in hooks._pre]
+
+
+def _ledger_rows() -> list[dict]:
+    path = Path(OC.findings_path())
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _rearmed(shape: str) -> HookRegistry:
+    """A registry built the way one production dispatch path builds one.
+
+    `"autonomy"` is `app/autonomy.py`'s task-turn registry: the floor carrying
+    that task's grant scope, then the grant gate. `"worker"` is
+    `workers/sources/_common.py`'s slot: the floor with no scope, because the pool
+    binds `policy.current_scope` per job, then the grant gate. Both armed the
+    outbound content gate a second time by hand until #4129; both take it from the
+    floor alone now.
+
+    No `install_turn_guards` and no `install_secret_read_deny`: neither arms this
+    gate, and the turn guards deny a `report`-shaped call for their own reason,
+    which would land in the reason string the assertions below read.
+
+    This is a hand-written replica, so nothing here would notice `app/autonomy.py`
+    stop arming the floor or drop its scope. Two nodes in
+    `tests/test_safety_lane_parity.py` read the two production files instead —
+    `test_each_direct_turn_builder_arms_the_floor_before_the_grant_gate` and
+    `test_the_autonomy_armed_site_carries_its_own_grant_scope` — and those are the
+    pins that fail when the wiring in the real files changes; the assertions here
+    are only ever about a registry this function assembled.
+    """
+    from app.harness.policy import install_policy_hook
+    hooks = HookRegistry()
+    install_default_safety_hook(
+        hooks, scope=(AUTONOMY if shape == "autonomy" else None))
+    install_policy_hook(hooks)
+    return hooks
+
+
+def test_each_rearmed_path_registers_the_content_gate_exactly_once():
+    """#4129 clause 2: arming the floor must not double-arm #1136's gate.
+
+    Both direct dispatch paths called `install_outbound_content_gate` themselves
+    because neither reached the floor; both arm the floor now, and the floor arms
+    the gate. `HookRegistry.add_pre_tool_use` only appends — `self._pre.append(...)`
+    with no de-duplication — so a change that added the floor and left the explicit
+    call in place would register the callback twice on both paths. Measured as the
+    callback list on a registry built the way each of them builds one: one
+    registration, with the destructive-Bash floor ahead of it.
+    """
+    for shape in ("autonomy", "worker"):
+        pre = _pre_names(_rearmed(shape))
+        assert pre.count("_content_pretool_cb") == 1, (
+            f"the {shape} path armed the content gate {pre.count('_content_pretool_cb')}"
+            " times; the floor registers it, so a path that also calls "
+            "install_outbound_content_gate scans one tool call twice")
+        assert pre.index("_safety_pretool_cb") < pre.index("_content_pretool_cb"), (
+            f"the {shape} path answers the payload gate before the destructive-Bash "
+            "floor, which is the order no other shape uses")
+
+
+def test_one_refused_send_is_attributed_to_one_scope_on_each_rearmed_path():
+    """One refusal, one scope name in the ledger — and a note on what this
+    cannot see, because the first version of this node claimed it could.
+
+    What it shows: the re-armed registry denies, and the row it leaves carries one
+    scope. `record_findings` writes from inside the callback, so a call denied
+    under two different scopes would put both names in the file, and this is the
+    artifact-side reading of the identity question clause 3 is about.
+
+    What it cannot show, and the claim this node used to make: a duplicate
+    registration is invisible in the ledger, because
+    `HookRegistry.fire_pre_tool_use` walks in order and returns at the first deny
+    (`app/harness/hooks.py:268-270`) — the second copy of `_content_pretool_cb`
+    never runs and never records. Measured against a registry with the gate armed
+    twice on purpose, this send still leaves one row. The double registration is
+    witnessed only by the registration count in
+    `test_a_rearmed_dispatch_registry_registers_the_gate_once_per_tool_call`.
+    """
+    for shape in ("autonomy", "worker"):
+        # A fresh ledger per send, so the other shape's row cannot be read as a
+        # second record of this one.
+        Path(OC.findings_path()).unlink(missing_ok=True)
+        # Two mechanisms, one attributed identity each — which is the point. The
+        # autonomy shape names its scope in the arming call; the worker shape arms
+        # unscoped and takes it from the contextvar the pool binds per job
+        # (`workers/pool.py`: `current_scope.set(grant_scope_for(item))`), bound
+        # here the same way. Unbound, the callback would report the module default
+        # and the row would prove nothing.
+        # No scope is bound for either shape here. The autonomy one does not need
+        # it (the floor carries the name), and binding it for the worker one would
+        # assert a claim this node has no business making — the pool's per-job
+        # binding is `workers/pool.py`'s own behaviour, already pinned by
+        # `test_the_gate_takes_the_contextvar_scope_when_none_is_passed` and by the
+        # worker row of the registration-count node above.
+        out = _fire(_rearmed(shape), "email_send",
+                    DENY_PAYLOADS["private-key-material"])
+        assert _decision(out) == "deny", (
+            f"the {shape} registry let a credential-bearing send out, so the row "
+            "below is not measuring a refusal")
+        rows = _ledger_rows()
+        assert len(rows) == 1, (
+            f"one refused send on the {shape} path left {len(rows)} ledger rows, "
+            "which means something recorded it more than once")
+        assert rows[0].get("denied") is True, rows[0]
+        if shape == "autonomy":
+            # Only the autonomy row is asserted by name, and only because nothing
+            # supplied a scope here: `autonomy-task:9001` can appear in that row
+            # solely because the floor carried it. The worker row would name the
+            # module default unless the pool's contextvar were bound first, and
+            # that binding is the pool's behaviour, pinned elsewhere.
+            assert rows[0].get("scope") == AUTONOMY, rows[0]
+
+
+def test_the_autonomy_gates_refusal_still_answers_for_its_own_task():
+    """#4129 clause 3: the re-arm must not change which identity the gate names.
+
+    The autonomy runner armed the gate with its `grant_scope` explicitly, and no
+    autonomy entry point binds `policy.current_scope` — the scheduler, the MCP tool
+    and the HTTP route all reach `run_task` outside the pool's binding. Had the
+    floor simply replaced that scoped call with its own unscoped arming, the gate
+    would have gone on answering for the contextvar on the one path where a leak has
+    no reviewer, undoing #1136's scope discipline with nothing red. So the fire
+    binds a different scope — the value an outer job would leave behind — and the
+    refusal must still name the task.
+
+    The worker half is the opposite contract: it passes no scope, because the pool
+    does bind the variable, and there the contextvar *is* the right answer.
+    """
+    out = _fire(_rearmed("autonomy"), "email_send",
+                DENY_PAYLOADS["private-key-material"], scope=CHAT)
+    assert _decision(out) == "deny", out
+    assert _ledger_rows()[0]["scope"] == AUTONOMY, (
+        f"the refusal answered for {_ledger_rows()[0]['scope']!r}, not for the task: "
+        "the floor's gate fell back to a contextvar no autonomy entry point binds")
+
+    _fire(_rearmed("worker"), "email_send",
+          DENY_PAYLOADS["private-key-material"], scope=WORKER)
+    assert _ledger_rows()[1]["scope"] == WORKER, (
+        "an unscoped arm stopped reading the per-job binding, so worker refusals are "
+        "now attributed to the wrong identity")
 
 
 @pytest.mark.parametrize("rel", list(OC.PACKAGE_ROOTS))

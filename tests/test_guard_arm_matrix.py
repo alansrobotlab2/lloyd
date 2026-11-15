@@ -73,8 +73,12 @@ def test_a_floor_only_path_is_not_credited_with_a_guard_it_never_reaches():
     assert floor_only, "no floor-only path on this tree; the negative is untested"
     for rel in floor_only:
         assert "install_policy_hook(" not in (ROOT / rel).read_text(encoding="utf-8")
-    # And the worker builder, which installs no Bash hook, is not handed one.
-    assert matrix["workers/sources/_common.py"]["safety"] is False
+    # And the worker builder, which armed the grant gate and not the Bash floor
+    # until #4129 armed the floor on it too. Both cells now read `True`, and this
+    # is where a change that stopped arming either of them goes red: the reading
+    # comes from the installer bodies, so a wrapper that stopped reaching the floor
+    # would flip this cell without any file being renamed.
+    assert matrix["workers/sources/_common.py"]["safety"] is True
     assert matrix["workers/sources/_common.py"]["policy"] is True
 
 

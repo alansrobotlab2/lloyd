@@ -715,18 +715,18 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     # nothing at all gated the durable-external surface. The grant gate takes
     # its scope from `policy.current_scope`, which the pool binds per job.
     #
-    # The outbound content gate (#1136) is armed on the same registry, and like
-    # the grant gate above it takes its scope from `policy.current_scope`, which
-    # the pool binds to `grant_scope_for(item)` around every job
-    # (`workers/pool.py:688`). Passing a scope here would invent a second
-    # spelling of the same string and could only drift from the one the grant
-    # gate is already using.
-    from app.harness import HookRegistry
-    from app.harness.outbound_content import install_outbound_content_gate
+    # #4129 arms the destructive-Bash floor first, so the catastrophic lane
+    # answers before the grant gate. This was the second path that skipped it:
+    # the dispatch pass covers every hard-deny label except those in
+    # `_HOOK_ONLY_LABELS`. #1136's content gate comes from that same call — a
+    # second registration would scan one tool call twice — and like the grant
+    # gate it takes its scope from `policy.current_scope`, which the pool binds
+    # per job to `grant_scope_for(item)`; passing one here could only drift.
+    from app.harness import HookRegistry, install_default_safety_hook
     from app.harness.policy import install_policy_hook
     hooks = HookRegistry()
+    install_default_safety_hook(hooks)
     install_policy_hook(hooks)
-    install_outbound_content_gate(hooks)
     # The deterministic senses: a direct worker turn is exactly where a stall
     # or a search loop has nobody watching. `app/harness/turn_guards.py`.
     from app.harness.turn_guards import install_turn_guards

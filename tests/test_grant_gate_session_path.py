@@ -306,6 +306,36 @@ def test_the_same_registry_set_also_arms_the_outbound_content_gate():
         dispatch_registry_sites_files() | {FLOOR_MODULE}), GATE_ARM_POINTS
 
 
+# The two dispatch paths that build a registry for a turn nobody is watching.
+# Same reason the roster above exists: an installer called twice is a guard
+# doubled and an installer called nowhere is a guard missing, and both read the
+# same way to a reader who is not counting.
+DIRECT_TURN_BUILDER_FILES = ("app/autonomy.py", "workers/sources/_common.py")
+
+
+@pytest.mark.parametrize("rel,call", (
+    ("app/autonomy.py", "install_default_safety_hook(task_hooks, scope=grant_scope)"),
+    ("workers/sources/_common.py", "install_default_safety_hook(hooks)"),
+))
+def test_each_direct_turn_builder_arms_the_bash_floor_exactly_once(rel, call):
+    """#4129 clause 1, in the pin-count idiom the two tests above use.
+
+    `install_default_safety_hook`'s own docstring says to call it for every
+    primary turn, and until #4129 neither of these files did: each carried the
+    grant gate and the payload gate with no destructive-Bash lane on its registry,
+    so a label in `_HOOK_ONLY_LABELS` was enforced nowhere on an unattended turn.
+    Counted, not grepped for presence — `HookRegistry.add_pre_tool_use` only
+    appends, so a second call registers a second callback and the payload gate the
+    floor arms fires twice per tool call.
+    """
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / rel).read_text(encoding="utf-8")
+    assert text.count(call) == 1, f"{rel} does not arm the floor exactly once"
+    assert text.count("install_default_safety_hook(") == 1, (
+        f"{rel} names the floor installer more than once: the arming site above is "
+        "the only one, and a second one double-arms the gate it carries")
+
+
 # ── The automod ban, by platform (#709) ────────────────────────────────
 
 from workers.sources._common import WORKER_AUTOMOD_BAN  # noqa: E402

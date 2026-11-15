@@ -5162,7 +5162,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # here matters because the manual and HTTP entry points skip the
         # scheduler's load-time check entirely.
         from app.harness import HookRegistry
-        from app.harness.outbound_content import install_outbound_content_gate
+        from app.harness.safety import install_default_safety_hook
         from app.harness.policy import (
             GRANT_MINT_TOOL, GrantError, default_store, install_policy_hook,
             sync_task_grants, validate_task_grants,
@@ -5201,13 +5201,13 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             GRANT_MINT_TOOL, f"mcp__lloyd-mcp__{GRANT_MINT_TOOL}"]
 
         task_hooks = HookRegistry()
+        # #4129 arms the destructive-Bash floor here, above `install_policy_hook`
+        # so the catastrophic lane answers first, as `turn_options.py` orders it.
+        # The same call brings #1136's content gate, armed with this task's own
+        # scope: a scheduled run has no reviewer, and no autonomy entry point
+        # binds `policy.current_scope`. It replaces this file's own gate arm.
+        install_default_safety_hook(task_hooks, scope=grant_scope)
         install_policy_hook(task_hooks, scope=grant_scope)
-        # #1136 — the sibling guard on the same registry. Armed with the task's
-        # own scope rather than the contextvar default, because a scheduled
-        # task is the path where a leak has no reviewer: the grant gate is
-        # already armed with `grant_scope` two lines above, and a content gate
-        # that read a different scope would be a second convention.
-        install_outbound_content_gate(task_hooks, scope=grant_scope)
         # The deterministic senses (stall rescue, repetition, failure
         # payloads), which the observer's opt-in used to gate. The session and
         # turn ids are read off the options the loop binds.
@@ -5220,9 +5220,9 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # widened by this job's OWN live grant rows — read through
         # `capabilities.live_grant_names(default_store(), grant_scope)`, after
         # `sync_task_grants` materialized the ones its file declares. The scope is
-        # the same string `install_policy_hook` and `install_outbound_content_gate`
-        # were armed with above, so the ceiling, the grant gate and the content
-        # gate all answer for one identity rather than three spellings of it.
+        # the same string `install_policy_hook` takes and the floor hands the
+        # content gate, so the ceiling, the grant gate and the content gate all
+        # answer for one identity rather than three spellings of it.
         #
         # Shadow mode — the default, and what ships — leaves `allowed_tools` as
         # None, which is what the harness means by "no allow-list": the dispatch
