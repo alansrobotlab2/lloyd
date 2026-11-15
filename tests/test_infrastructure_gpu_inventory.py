@@ -312,6 +312,247 @@ def test_gpus_prose_names_every_conf_that_sets_cuda_device_order():
         f"the sentence still counts itself wrong: {sentence[0]!r}")
 
 
+# --- clause 4b (#4146): the LAUNCHER half of that same sentence --------------
+#
+# The node above grades one of the two halves of §GPUs' own sentence — "Every program
+# that touches a GPU does set it, but **not in one place**". It reads
+# `_confs_setting("CUDA_DEVICE_ORDER")`, which globs `conf.d/*.conf` alone, so the
+# paragraph's other list, the launchers that export the pin themselves, was graded by
+# nobody: `git grep -n GPUs -- tests/` finds no launcher roster check at all. That is the
+# half with the sharper edge, because `agent-djev.conf` sets no `environment=` pin — for
+# GPU 2's live tenant `agent-services/bin/start-djev.sh:266-267` is the only pin that
+# exists — and the doc that calls itself the roster named it nowhere until `f13db02b`,
+# while naming `agent-services/bin/start-qwen3-tts.sh`, whose conf had moved to
+# `supervisor/retired/agent-tts.conf` on 2026-11-10. That commit fixed both halves of the
+# sentence by hand, which is the pattern this file exists to end: symptom corrected,
+# mechanism untouched. So the expected set below comes from the tree, in both
+# directions, and the fix's own wording can now rot the way its subject did.
+
+#: A backticked launcher script in prose. §GPUs spells the same launcher two ways —
+#: `` `agent-services/bin/start-djev.sh` `` and bare `` `start-djev.sh` `` — so the key is
+#: the basename. The conf node's `` `([a-z0-9-]+)` `` matches neither spelling, because
+#: `/` and `.` are outside that class: it would grade this roster by matching nothing,
+#: which is why the last node below proves the gap rather than assuming the new class.
+_SH_MENTION = re.compile(r"`([A-Za-z0-9_./+-]*\.sh)`")
+#: The pin, not a mention of it. 45 of the 63 scripts under `agent-services/bin` carry
+#: the string `CUDA_DEVICE_ORDER` somewhere and 32 of them export it; a reader who takes
+#: the wider class is handed a 45-name roster no paragraph can hold, and one who takes
+#: `grep -l` over the whole directory gets that instead of a roster at all.
+_EXPORTS_DEVICE_ORDER = re.compile(r"^\s*export\s+CUDA_DEVICE_ORDER\b", re.M)
+#: The only spelling of "this launcher is not live" the prose is allowed. Conf retirement
+#: marks itself — `supervisor/retired/` is outside the `CONF_D` glob, which is how that
+#: count went 5 → 4 without a word changing — but `bin/*.sh` is never moved, so a retired
+#: program's launcher stays on disk still exporting the pin and the doc has to say so.
+RETIRED_MARKER = "retired"
+#: §GPUs counts its live launchers in words, exactly as the conf node checks Four/Five/Six
+#: above. Extend this map rather than rewording the prose: the count is the check.
+_COUNT_WORDS = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five",
+                6: "Six", 7: "Seven", 8: "Eight", 9: "Nine", 10: "Ten"}
+
+
+def _conf_execd_launchers(conf_dir: Path = CONF_D) -> dict[str, list[str]]:
+    """`{launcher basename: [conf stems]}` for every script a conf's `command=` runs.
+
+    Read with `_LAUNCHER_SCRIPT`, the same expression `_launcher_of` uses for the card map,
+    so both halves of the GPU-pin story harvest confs identically. Six launchers are exec'd
+    this way today, one per conf; the other confs exec an engine directly, which is why
+    this is one side of an intersection and not the roster.
+    """
+    out: dict[str, list[str]] = {}
+    for conf in sorted(conf_dir.glob("*.conf")):
+        m = _LAUNCHER_SCRIPT.search(conf.read_text(encoding="utf-8"))
+        if m:
+            out.setdefault(m.group(1), []).append(conf.stem)
+    assert out, f"no conf under {conf_dir.name}/ execs a script — the extraction is broken"
+    return out
+
+
+def _launchers_exporting() -> set[str]:
+    """Launchers under `agent-services/bin` that export the device-order pin."""
+    out = {p.name for p in LAUNCHER_DIR.glob("*.sh")
+           if _EXPORTS_DEVICE_ORDER.search(p.read_text(encoding="utf-8"))}
+    assert out, "no launcher exports CUDA_DEVICE_ORDER — the extraction is broken"
+    return out
+
+
+def _retired_launchers_in_tree() -> set[str]:
+    """Launchers a **retired** conf still names, which are on disk and still pin.
+
+    The tree-derived half of the retired case, so the marker is never tested against a
+    launcher this file invented: `supervisor/retired/*.conf` is outside `CONF_D`, and
+    `agent-tts.conf:2` there still execs its launcher, which still exports the pin.
+    """
+    retired_dir = CONF_DIR.parent / "retired"
+    out = {m.group(1) for conf in sorted(retired_dir.glob("*.conf"))
+           if (m := _LAUNCHER_SCRIPT.search(conf.read_text(encoding="utf-8")))
+           and m.group(1) in _launchers_exporting()}
+    assert out, (
+        "no conf under supervisor/retired/ names a launcher that pins CUDA_DEVICE_ORDER, so "
+        "the retired-launcher case these nodes exist for has left the tree — re-measure "
+        "before assuming the marker convention is still exercised")
+    return out
+
+
+def _live_launcher_roster() -> set[str]:
+    """The launchers §GPUs must name as live: a conf execs them AND they pin the order.
+
+    The intersection is the mechanism, not a nicety. 32 launchers export the pin and 6 are
+    conf-exec'd; only the 4 in both are programs supervisord starts on this box. Without
+    the exec side the expected set is a 32-name list no paragraph carries; without the
+    export side it demands `start-livekit-server.sh` and `start-obsidian-sync.sh`, which
+    pin no card and no order and are named nowhere in §GPUs.
+    """
+    out = set(_conf_execd_launchers()) & _launchers_exporting()
+    assert out, "nothing is both conf-exec'd and pinning — the extraction is broken"
+    assert len(out) in _COUNT_WORDS, (
+        f"the live launcher roster has {len(out)} members and the prose counts them in "
+        f"words; extend _COUNT_WORDS rather than drop the count check")
+    return out
+
+
+def _launcher_mentions(body: str) -> dict[str, list[str]]:
+    """`{launcher basename: [sentences naming it]}` across one section's prose.
+
+    Basename keys are the normalisation the two spellings need: kept apart, the same
+    launcher is two roster entries and a name spelled only the other way looks missing.
+    """
+    out: dict[str, list[str]] = {}
+    for sentence in re.split(r"(?<=[.!])\s+", body):
+        for raw in _SH_MENTION.findall(sentence):
+            out.setdefault(raw.rsplit("/", 1)[-1], []).append(sentence)
+    return out
+
+
+def _launchers_missing_from(body: str, roster: set[str] | None = None) -> list[str]:
+    """Roster members `body` does not name. Split out so a seeded negative can call it."""
+    roster = _live_launcher_roster() if roster is None else roster
+    return sorted(roster - set(_launcher_mentions(body)))
+
+
+def _unmarked_retired_launchers(body: str) -> list[str]:
+    """Launchers `body` presents as in the roster while no conf execs them and the
+    sentence says nothing about being retired. Empty is the only passable answer.
+
+    Scoped to launchers that export the pin, because that is what being in this roster
+    claims: it is why `agent-services/bin/gpu-mem.sh`, backticked in the very same
+    sentence as a live launcher, is not demanded here — it is a helper that pins nothing,
+    and the node below proves that rather than relying on the regex missing it.
+    """
+    exporting = _launchers_exporting()
+    roster = _live_launcher_roster()
+    return sorted(name for name, sentences in _launcher_mentions(body).items()
+                  if name in exporting and name not in roster
+                  and not any(RETIRED_MARKER in s.lower() for s in sentences))
+
+
+def test_gpus_prose_names_every_conf_execd_launcher_that_pins_the_device_order():
+    """#4146 clauses 1 and 2: every live launcher is named, and the count word agrees.
+
+    The expected set is derived at run time — conf `command=` ∩ launcher
+    `export CUDA_DEVICE_ORDER` — so no launcher name is written into this file as an
+    expectation, and the day a fifth launcher enters the tree the prose goes red twice:
+    once for the missing name, once because the sentence still counts four.
+    """
+    roster = _live_launcher_roster()
+    prose = _section(INFRA.read_text(encoding="utf-8"), "## GPUs")
+    missing = _launchers_missing_from(prose, roster)
+    assert not missing, (
+        f"§GPUs's launcher sentence omits {missing}, which a conf.d `command=` execs and "
+        f"which exports CUDA_DEVICE_ORDER itself — the tree has {sorted(roster)}; the doc "
+        f"names {sorted(set(_launcher_mentions(prose)))}")
+    sentence = [s for s in re.split(r"(?<=[.!])\s+", prose) if "launchers export it" in s]
+    assert len(sentence) == 1, (
+        f"the prose has {len(sentence)} 'launchers export it' sentences, so the count "
+        "check below has nothing to grade — this is the same selector shape the conf node "
+        "uses above and a rewording has to move both")
+    word = _COUNT_WORDS[len(roster)]
+    assert re.search(rf"\b({word}|{word.lower()})\b", sentence[0]), (
+        f"§GPUs counts {len(roster)} live launchers and the sentence does not say "
+        f"{word!r}: {sentence[0]!r}")
+
+
+def test_a_launcher_the_prose_names_that_no_conf_execs_must_be_marked_retired():
+    """#4146 clause 3, the converse: an unnamed-by-no-conf launcher needs the marker.
+
+    The bug this half exists for is the second case, not the first — §GPUs kept
+    `start-qwen3-tts.sh` in the live list after its conf left `conf.d/` on 2026-11-10, so
+    the roster asserted a pin for a program nothing starts. A launcher kept on disk for a
+    possible return is legitimate and is allowed for out loud: today's prose says
+    "The **retired** vendored server's … exports it too, for the day it comes back", and
+    that word is what `RETIRED_MARKER` reads. A launcher the prose simply stops naming
+    passes too, which is why this node asks only about names that are present.
+    """
+    prose = _section(INFRA.read_text(encoding="utf-8"), "## GPUs")
+    unmarked = _unmarked_retired_launchers(prose)
+    assert not unmarked, (
+        f"§GPUs names {unmarked} in the CUDA_DEVICE_ORDER roster, but no conf.d `command=` "
+        "execs them and no sentence naming them says 'retired' — either mark them retired "
+        "or take them out of the live list; the tree says these are the retired ones: "
+        f"{sorted(_retired_launchers_in_tree())}")
+
+
+def test_the_launcher_extractor_normalizes_spellings_and_can_report_a_missing_name():
+    """Clause 4: the extractor must be able to fail, and must fail on a real gap.
+
+    Three ways this node would otherwise read green while grading nothing, each checked:
+
+    1. Two spellings of one launcher counted as two rosters. §GPUs names one of the live
+       four both ways today, so the collapsed key count is compared against the raw token
+       count rather than asserted in prose.
+    2. A helper named in the same sentence — `gpu-mem.sh`, the VRAM probe the secondary
+       reads before it execs — treated as a roster member, or ignored because a regex
+       never saw it. It is demanded in neither direction, and that is shown by it being
+       extracted and then excluded on the facts.
+    3. The old conf-node regex matching nothing and reporting agreement, which is the
+       failure `test_the_row_harvester_can_report_a_missing_card` guards against for the
+       tables. So one live name is deleted from the section and the seed is required to
+       come back missing, and the retired marker is deleted and the tree's retired
+       launcher is required to come back unmarked.
+    """
+    prose = _section(INFRA.read_text(encoding="utf-8"), "## GPUs")
+    roster = _live_launcher_roster()
+    raw = _SH_MENTION.findall(prose)
+    full = {t.rsplit("/", 1)[-1] for t in raw if "/" in t}
+    bare = {t for t in raw if "/" not in t}
+    assert full & bare & roster, (
+        f"no live launcher is named both as `agent-services/bin/<name>.sh` and bare "
+        f"(full {sorted(full)}, bare {sorted(bare)}), so the normalisation below is "
+        "untested rather than correct")
+    assert len(_launcher_mentions(prose)) == len({t.rsplit('/', 1)[-1] for t in raw}), (
+        "the mention map and the raw tokens disagree on how many launchers the section "
+        "names, so the two spellings did not collapse to one key")
+
+    helper = "gpu-mem.sh"
+    assert helper in _launcher_mentions(prose), (
+        f"the extractor never saw `{helper}`, so 'ignores the helper' below is the regex "
+        "matching nothing and not a decision about the tree")
+    assert (LAUNCHER_DIR / helper).is_file(), f"{helper} is not in the tree any more"
+    assert helper not in _launchers_exporting(), (
+        f"{helper} now exports CUDA_DEVICE_ORDER, so it is a roster candidate and the "
+        "exclusion asserted here is no longer a fact about a helper")
+    assert helper not in _conf_execd_launchers(), (
+        f"a conf now execs {helper}, so it is conf-side live and belongs in the roster")
+
+    sentence = [s for s in re.split(r"(?<=[.!])\s+", prose) if "launchers export it" in s][0]
+    assert not (set(re.findall(r"`([a-z0-9-]+)`", sentence)) & roster), (
+        "the conf node's `([a-z0-9-]+)` now matches a launcher name, so the claim above "
+        "that a new extractor was needed has stopped being true — re-read it")
+
+    gone = sorted(roster)[0]
+    gutted = re.sub(rf"`[A-Za-z0-9_./+-]*{re.escape(gone)}`", "`<dropped>`", prose)
+    assert _launchers_missing_from(gutted, roster) == [gone], (
+        f"deleting every mention of {gone} did not make the roster node report it missing, "
+        "so that node passes on a section with no launcher named in it at all")
+
+    unmarked = _unmarked_retired_launchers(prose.replace(RETIRED_MARKER, "kept"))
+    assert unmarked == sorted(_retired_launchers_in_tree() & set(_launcher_mentions(prose))), (
+        f"stripping the retired marker from §GPUs left {unmarked} unmarked, which is not "
+        "the tree's own retired set — the converse node is grading something else")
+    assert unmarked, (
+        "removing every 'retired' from §GPUs changed nothing, so no launcher the prose "
+        "names actually depends on the marker and clause 3 is unpinned")
+
+
 # --- clause 5: the omni TTS in the program and port tables ----------------
 
 def test_process_and_ports_tables_record_the_omni_tts():
