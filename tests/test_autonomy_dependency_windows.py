@@ -85,6 +85,13 @@ def reason(aut, t, board, now):
     return aut.hold_reason(t, board, now=now)
 
 
+#: #4135's pass-level hold, spelled once here because two nodes in this file and more
+#: in another assert it: the sentence `hold_reason` prints for a dependent whose
+#: upstream this very dispatch pass is starting.
+_STARTING_38 = ("waiting on #38 (this dispatch pass is starting #38, which will write "
+                "its output; this dependent dispatches next pass)")
+
+
 def _upstream_due(aut, up, up_last, board, now, seen):
     """The in-window "the upstream dispatches this very tick" prediction, with
     the dependent already in `seen` exactly as the gate calls it."""
@@ -432,8 +439,22 @@ def test_the_bound_releases_the_dependent_inside_the_shared_window(
     # not `waiting on #38`.
     assert due(aut, b[38], board, now) is True
     assert 38.47 < (now - Z(23, 14, 31, 42)).total_seconds() / 3600 < 38.48
-    assert reason(aut, b[42], board, now) is None
-    assert due(aut, b[42], board, now) is True, (
+    # #4135 amended this pair and nothing else in this fixture. The bound still
+    # releases at 38.47 h past a 36 h bound with the artifact on disk — but not into the
+    # pass that is starting #38, whose run is what would overwrite that artifact. #42
+    # goes out one pass later, held by a sentence that names the upstream. #1538's
+    # ruling is untouched: with #38 out of the pass, at the same instant and the same
+    # artifact, the release is immediate and unheld, which is the only thing that
+    # node ever asserted about the bound itself.
+    assert reason(aut, b[42], board, now) == _STARTING_38, reason(aut, b[42], board, now)
+    assert due(aut, b[42], board, now) is False, (
+        "#42 was dispatchable in the pass that is starting #38 — the 182 ms pair, whose "
+        "whole run sat inside #38's and whose handoff said the input was ABSENT")
+    parked = [dict(b[38], status="paused"), b[42]]
+    assert reason(aut, b[42], parked, now) is None, (
+        "the bound stopped releasing at 38.47 h: #4135 suppressed it instead of "
+        "deferring the dispatch (#1538)")
+    assert due(aut, b[42], parked, now) is True, (
         "#42 was held at this instant for four cycles with failure_count 0")
     # What that rule was genuinely for is still held: an upstream RUNNING is an
     # artifact in progress, and no bound forwards onto one.
@@ -474,8 +495,20 @@ def test_the_same_upstream_still_holds_the_dependent_inside_the_bound(
     now = at(aut, monkeypatch, Z(26, 8, 0))      # 01:00 local
     assert (now - Z(24, 19, 0)).total_seconds() / 3600 == 37.0
     assert due(aut, b[38], board, now) is True
-    assert reason(aut, b[42], board, now) is None
-    assert due(aut, b[42], board, now) is True
+    # #4135 amended this pair and nothing else in this fixture: the bound still
+    # releases at 37.0 h, but not INTO the pass that is starting #38. #42 goes out one
+    # pass later, held by a sentence that names the upstream. #1538's ruling is intact
+    # — with #38 out of the pass, at the same 37.0 h and the same unwritten output, the
+    # release is immediate and unheld. #4135 defers one dispatch; it does not suppress
+    # a bound.
+    assert reason(aut, b[42], board, now) == _STARTING_38, reason(aut, b[42], board, now)
+    assert due(aut, b[42], board, now) is False, (
+        "#42 was dispatchable in the pass that is starting #38 — the 182 ms pair")
+    parked = [dict(b[38], status="paused"), b[42]]
+    assert reason(aut, b[42], parked, now) is None, (
+        "the bound stopped releasing at 37.0 h: #4135 suppressed it instead of "
+        "deferring the dispatch (#1538)")
+    assert due(aut, b[42], parked, now) is True
 
 
 def test_the_override_still_forwards_when_the_upstream_will_not_run(

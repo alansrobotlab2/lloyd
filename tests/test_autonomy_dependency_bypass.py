@@ -285,7 +285,9 @@ def test_a_dependent_past_the_grace_horizon_dispatches_without_its_input(
     """Clause 2 across the seam dispatch actually reads: `get_due_tasks()`.
 
     Same fixture, one variable — the upstream's age. At 59.9 h (inside the grace)
-    #39 is out of the dispatch set; at 61 h it is in it. Asserting only the
+    #39 is out of the dispatch set; at 61 h it is in it, once #4135's pass rule has
+    no upstream to defer (the upstream parked out of the pass), and out again with
+    #42 back `up_next` and due in the same pass. Asserting only the
     predicate would not show a dependent leaving the set dispatch consumes, and a
     green predicate on a fixture whose dependent was never due would prove nothing
     either, so the held case here is the positive control.
@@ -297,10 +299,25 @@ def test_a_dependent_past_the_grace_horizon_dispatches_without_its_input(
     assert 39 not in _due_ids(), (
         "#39 dispatched inside the grace horizon, so the 61 h assertion below "
         "would pass on a fixture that never held it")
-    _chain(aut, tmp_path, up_last=PIN - dt.timedelta(hours=61))
+    # #4135 moved this one line, and only this one. With #42 `up_next` and 61 h quiet
+    # it is dispatch-due in THIS pass, and a dependent the bypass released no longer
+    # starts in the same pass as the upstream whose input it would consume nothing of,
+    # so the release is now asserted with the upstream out of the pass — which is also
+    # what a dead upstream looks like to the gate, whose own sentence for that state is
+    # `status 'paused', which dispatch does not run`. Same 61 h upstream, same 36 h
+    # bound, same absent handoff: what #1551 pinned is that the missing file stops
+    # holding the dependent forever, and that is still the thing being asserted here.
+    tmpl = _chain(aut, tmp_path, up_last=PIN - dt.timedelta(hours=61))
+    write_task(aut, 42, status="paused",
+               last_run=(PIN - dt.timedelta(hours=61)).isoformat(),
+               output_artifact=tmpl)
     assert 39 in _due_ids(), (
         "#39 is still absent from the dispatch set 25 h past its declared 36 h "
         "bound: the missing handoff is holding it forever (#1551)")
+    _chain(aut, tmp_path, up_last=PIN - dt.timedelta(hours=61))
+    assert 39 not in _due_ids(), (
+        "#4135: #42 is back to `up_next` and due in this pass, so its released "
+        "dependent belongs to the next one")
 
 
 def test_the_no_input_release_warns_and_is_not_the_hold_warning(aut, tmp_path,
@@ -469,3 +486,172 @@ def test_every_production_caller_names_itself():
                       ("app/routers/autonomy.py", "api"),
                       ("agent_mcp/autonomy.py", "mcp")):
         assert f'run_trigger("{name}")' in (root / rel).read_text(), rel
+
+
+
+# ── #4135: a bypass must not release a dependent the same pass its upstream starts ──
+# Both nightly reflection jobs came off a 46 h 43 m operator hold on 2026-11-15 and
+# were dispatched in ONE scheduler tick: #38 at 03:58:40.328609Z, #42 at
+# 03:58:40.510792Z — 182 ms apart, #42's whole 683 s run inside #38's 852 s. #42
+# declares `depends_on: 38` and `stale_bypass_hours: 36`, and #38's last run was
+# 93.8 h old, so the bound forwarded #42 past an upstream that was STARTING. #42's
+# handoff then stated "This cycle's signal report is ABSENT" at 04:09:40Z about a
+# report #38 finished writing 170 s later at 04:12:30Z, and the fresh 27,170-byte
+# report was read by nobody in that cycle. The same shape occurred on 2026-11-11,
+# 471 ms apart.
+#
+# `_dependency_bypassed` already refuses to forward past an upstream that is
+# `in_progress`, and #1538 made a parked upstream hold. Neither can fire here:
+# `status: in_progress` is written by `run_task`, which the pool reaches only after
+# the due list is built, so inside a pass the upstream's file still says `up_next`.
+# The rule below is the dispatch pass observing its own work, and it applies only to
+# a dependent the bypass ALONE released.
+
+
+def _released(aut, tmp_path):
+    """#42 → #39 with #39's 36 h bound PAST and its 24 h artifact grace past: the
+    upstream 61 h quiet, the dependent 2 days quiet, both `up_next`, both `daily`.
+
+    61 h and not the section's 50.7 h because #1551's grace horizon holds a dependent
+    on its absent handoff until bound + 24 h, and a fixture the GATE is holding has no
+    bypass for this rule to hold — the vacuity #1538 was filed about. The release here
+    is `stale_bypass_hours` and nothing else, which the assertions below re-check
+    rather than assume.
+    """
+    return _chain(aut, tmp_path, up_last=PIN - dt.timedelta(hours=61))
+
+
+def test_a_released_dependent_is_not_dispatched_the_pass_its_upstream_starts(aut, tmp_path):
+    """Clause 1: in one pass, with both due and the bound long past, the upstream
+    goes and the dependent does not.
+
+    The gate's own verdict is asserted FIRST, because `get_due_tasks()` returning
+    `[42]` would also be what a fixture whose dependent was never due looks like, and
+    that green proves nothing about a hold.
+    """
+    _released(aut, tmp_path)
+    tasks = board(aut, 42, 39)
+    assert aut._is_dependency_met(tasks[1], tasks, now=PIN) is True, (
+        "#39's 36 h bound is 25 h past: if the gate is not releasing here there is "
+        "no bypass for the pass-level hold to hold, and this test proves nothing")
+
+    due = sorted(int(t["id"]) for t in aut.get_due_tasks(now=PIN))
+    assert due == [42], (
+        f"one pass dispatched both the upstream and the dependent its own "
+        f"stale_bypass_hours had released: {due}")
+
+
+def test_the_pass_hold_expires_with_the_pass_and_not_with_the_period(aut, tmp_path):
+    """Clause 4: the hold is one pass long. Both ways an upstream leaves the pass's
+    due set are pinned, because the incident's own recovery needed the second one.
+
+    (a) The upstream is parked out of dispatch — which is what the 46 h 43 m hold on
+    the reflection chain looked like from the gate's side, and what #1538 made a
+    parked upstream hold for. The dependent is returned at that same instant, with no
+    hold left to explain.
+    (b) The upstream's run for this period COMPLETED: `last_run` five minutes ago,
+    exactly what `run_task` stamps on the way out. The dependent is dispatched again
+    in the very next pass, unheld — so the rule that exists to stop #42 running
+    inside #38 does not also cost the chain a day.
+    """
+    _released(aut, tmp_path)
+    assert 39 not in [int(t["id"]) for t in aut.get_due_tasks(now=PIN)]
+
+    write_task(aut, 42, status="paused", last_run=(PIN - dt.timedelta(hours=61)).isoformat(),
+               output_artifact=str(tmp_path / "reflection" / "knowledge-handoff-{date}.md"))
+    tasks = board(aut, 42, 39)
+    assert [int(t["id"]) for t in aut.get_due_tasks(now=PIN)] == [39], (
+        "the upstream is out of this pass and the dependent is still held — the hold "
+        "lasted a period, not a pass")
+    assert aut.hold_reason(tasks[1], tasks, now=PIN) is None
+
+    write_task(aut, 42, status="up_next",
+               last_run=(PIN - dt.timedelta(minutes=5)).isoformat())
+    tasks = board(aut, 42, 39)
+    assert [int(t["id"]) for t in aut.get_due_tasks(now=PIN)] == [39], (
+        "the upstream's run completed and the dependent was still not dispatched")
+    assert aut.hold_reason(tasks[1], tasks, now=PIN) is None, (
+        "the pass hold did not expire with the pass: the dependent is describing a "
+        "tick that is already over")
+
+
+def test_the_pass_hold_reaches_the_watchdog_as_a_hold_and_not_a_stalled_cycle(aut, tmp_path):
+    """Clause 2 across the process boundary the alarm actually crosses.
+
+    #1739's complaint was an alarm that said `waiting on #38` while pointing at
+    nothing; the watchdog's route (`fleet_watchdog._next_run_stalled`, which builds
+    `hold` from `autonomy.hold_reason`) is where a hold becomes a sentence. A
+    dependent held because this pass is starting its upstream must arrive there
+    SAYING so, and must not be the kind of entry that reads as a cycle dispatch
+    silently skipped.
+
+    Both rows carry `next_run` two days back, so the alarm's own bound admits them
+    whatever the hold says: #2 is the held dependent and #7 is an unrelated task
+    nothing holds, which is the control that keeps `hold` being non-empty from being
+    an artefact of the alarm reporting nobody.
+    """
+    from workers.queue import WorkQueue
+    import workers.fleet_watchdog as fw
+
+    _released(aut, tmp_path)
+    two_days = (PIN - dt.timedelta(days=2)).isoformat()
+    # #42 keeps the 61 h run record `_released` gave it: `write_task` re-writes the
+    # whole file from its own base dict, so a call naming only `next_run` would drop
+    # `last_run` and turn the upstream into a never-ran one — which is the branch
+    # #4135 deliberately does NOT hold, and the assertion below would read as a hole
+    # in the rule instead of a hole in the fixture.
+    write_task(aut, 39, depends_on=42, stale_bypass_hours=36, last_run=two_days,
+               next_run=two_days)
+    write_task(aut, 7, last_run=two_days, next_run=two_days)
+
+    due = [int(t["id"]) for t in aut.get_due_tasks(now=PIN)]
+    tasks = board(aut, 42, 39)
+    held = aut.hold_reason(tasks[1], tasks, now=PIN)
+    assert 39 not in due and held is not None, (
+        f"the pair disagrees with itself: due={due}, hold={held!r} — a held task "
+        f"dispatch is about to run, or a dispatchable one the board calls held (#870)")
+    assert held == ("waiting on #42 (this dispatch pass is starting #42, which will "
+                    "write its output; this dependent dispatches next pass)"), held
+
+    stalled = {int(e["id"]): e for e in fw._next_run_stalled(
+        WorkQueue(tmp_path / "alert.db"))}
+    assert 39 in stalled and stalled[39]["hold"] == held, (
+        f"the alarm did not carry dispatch's own reason for #39: {stalled.get(39)}")
+    assert 7 in stalled and not stalled[7]["hold"], (
+        f"the control row is not reporting an unheld task, so the assertion above "
+        f"is vacuous: {stalled.get(7)}")
+    assert "42" in fw._nextrun_alert_message([stalled[39]]), fw._nextrun_alert_message(
+        [stalled[39]])
+
+
+def test_the_pass_hold_leaves_alone_everything_it_did_not_release(aut, tmp_path):
+    """Three answers this rule must NOT change, each one a dispatch a lazier rule
+    would have taken away.
+
+    (a) A dependent declaring no `stale_bypass_hours` is released by nothing, so it
+    waits on the gate and prints the bare string it always printed.
+    (b) A dependent inside its declared bound likewise — #4135 does not lengthen or
+    shorten a bound, and #1538's inside-the-window sentence still wins.
+    (c) A `depends_on` cycle terminates: #48 and #49 naming each other produce an
+    answer, not a RecursionError, because `_seen` is threaded through the recursive
+    `_is_task_due` call the way `_dependency_refusal` threads its own.
+    """
+    write_task(aut, 48, last_run=(PIN - dt.timedelta(hours=61)).isoformat())
+    write_task(aut, 49, depends_on=48, last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    tasks = board(aut, 48, 49)
+    assert aut._is_dependency_met(tasks[1], tasks, now=PIN) is False
+    assert aut.hold_reason(tasks[1], tasks, now=PIN) == "waiting on #48"
+    assert [int(t["id"]) for t in aut.get_due_tasks(now=PIN)] == [48]
+
+    write_task(aut, 49, depends_on=48, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    write_task(aut, 48, last_run=(PIN - dt.timedelta(hours=20)).isoformat())
+    tasks = board(aut, 48, 49)
+    assert aut.hold_reason(tasks[1], tasks, now=PIN) == (
+        "waiting on #48 (inside its 36 h stale_bypass window: #48 ran 20.0 h ago)")
+    assert "dispatch pass" not in aut.hold_reason(tasks[1], tasks, now=PIN)
+
+    write_task(aut, 48, depends_on=49, last_run=(PIN - dt.timedelta(hours=61)).isoformat())
+    write_task(aut, 49, depends_on=48, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    assert len([int(t["id"]) for t in aut.get_due_tasks(now=PIN)]) <= 2

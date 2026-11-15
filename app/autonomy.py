@@ -2721,9 +2721,161 @@ def _trace_consumer_redrive(task: dict, trace: dict) -> None:
         trace["artifact"])
 
 
+#: The hold #4135 adds: the dependency gate RELEASED this dependent — by
+#: `stale_bypass_hours` and by nothing else — and the upstream whose input it
+#: would forward past is being dispatched by this very pass. Deliberately not
+#: `waiting on #N`: that string is the gate refusing, and it means the chain is
+#: one cycle behind. This means the chain is about to overtake itself, and it
+#: expires in one pass. One constant because `hold_reason` and `_upstream_starting_now`
+#: answer two questions about one fact, and every pair of those two has disagreed
+#: by construction since #870.
+SAME_PASS_UPSTREAM_HOLD = ("waiting on #{uid} (this dispatch pass is starting #{uid}, "
+                           "which will write its output; this dependent dispatches "
+                           "next pass)")
+
+
+def _same_pass_hold(task: dict) -> str:
+    """`SAME_PASS_UPSTREAM_HOLD` with the upstream's id filled into both blanks.
+
+    `.replace`, not `str.format`, because the id appears twice in the template.
+    Naming the upstream is not decoration: #1739's ruling is that a stall
+    description pointing at nothing is worth nothing, and a dependent held by an
+    upstream the board cannot see reads as a task that forgot to run.
+    """
+    return SAME_PASS_UPSTREAM_HOLD.replace("{uid}",
+                                           str(task.get("depends_on")).strip())
+
+
+def _upstream_task(task: dict, all_tasks: list[dict]) -> Optional[dict]:
+    """The task `task`'s `depends_on` names in `all_tasks`, or None.
+
+    The lookup `_dependency_refusal` does inline, factored out for the one caller
+    that has to ask about an upstream WITHOUT re-asking the gate — the pass-level
+    hold below. None means either no `depends_on` at all or an id no task file
+    answers, and this caller reads both as "nothing to hold for": the fail-closed
+    verdict for a missing upstream file belongs to `_dependency_refusal`, which is
+    where #558 put it, and duplicating it here would be a second owner of it.
+    """
+    dep_id = task.get("depends_on")
+    if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
+        return None
+    dep_id = str(dep_id).strip()
+    for t in all_tasks:
+        if str(t.get("id", "")).strip() == dep_id:
+            return t
+    return None
+
+
+def _upstream_starting_now(task: dict, all_tasks: list[dict], *,
+                           now: datetime.datetime,
+                           _seen: frozenset = frozenset(),
+                           pass_catch_up=_CATCH_UP_UNSET) -> bool:
+    """Is the upstream this dependent would forward past being dispatched right now?
+
+    #4135. Both nightly reflection jobs came off a 46 h 43 m operator hold and
+    were dispatched in ONE scheduler tick on 2026-11-15: #38 at
+    03:58:40.328609Z and #42 at 03:58:40.510792Z — 182 ms apart, #42's entire
+    683 s run inside #38's 852 s. #42 declares `depends_on: 38` and
+    `stale_bypass_hours: 36`, and #38's last run was 93.8 h old, so the bound
+    forwarded it past an upstream that was STARTING. #42's handoff then stated
+    "This cycle's signal report is ABSENT" at 04:09:40Z, about a report #38
+    finished writing 170 s later at 04:12:30Z — the fresh 27,170-byte report was
+    read by nobody in that cycle. The same overlap had already occurred on
+    2026-11-11, 471 ms apart.
+
+    WHY THE GATE CANNOT SEE IT. `_dependency_bypassed` already refuses to forward
+    past an upstream that is `in_progress`, and that guard is right; only its
+    moment is missing. `status: in_progress` is written by `run_task`, which the
+    pool reaches only after the due list is built — `get_due_tasks` filters one
+    `dependency_resolution_set()` snapshot at one instant — so inside a pass the
+    upstream's file still says `up_next`. Every in-flight guard in this module
+    reads a state that does not exist yet at the moment the decision is made. What
+    this function asks instead is the question the file CAN answer at that instant:
+    is the upstream dispatch-due now, by the very predicate dispatch is about to
+    apply to it. It is asked here, in the due pass, not inside the gate.
+
+    THAT PLACEMENT IS THE #1538 RULING, NOT A WORKAROUND FOR IT. #1538 deleted the
+    "is the upstream due this very tick?" question from `_dependency_refusal`
+    because asked there it answered `return False` before the declared bound could
+    speak, and a `stale_bypass_hours` no one can reach is not a bound. Nothing here
+    puts it back: `_dependency_refusal` and `_is_dependency_met` are untouched, the
+    bound still releases the dependent, and what this defers is the DISPATCH, for
+    one pass. Two facts make one pass enough. The hold cannot outlive the pass it
+    was made in — once the upstream's run starts, `in_progress` is held by the gate
+    itself (`_dependency_bypassed`'s own guard), and once it completes, the
+    freshness rule releases the dependent on real input; and the hold only ever
+    applies to a dependent the BYPASS ALONE released, because
+    `_dependency_bypassed` is asked first. A dependent released because its
+    upstream's output is already fresh — the healthy chain, one cycle behind — is
+    not touched, which is why this is not #1538's prediction wearing a different
+    name: that prediction suppressed the bound, this one delays one 60 s tick.
+
+    WHERE IT IS ASKED, AND WHY THERE. It is the LAST veto in `_is_task_due` — after
+    the elapsed stamp, the gate, the window, the preferred hours, the infra hold, the
+    retry cooldown and the run record — and the last answer `hold_reason` gives, at the
+    same position, so it speaks only for a task every other gate called due and never
+    overwrites a description another gate owns. That ordering is load-bearing for
+    #1296/#3544: a dependent holding a `success` for this period must keep reading
+    `already ran this period`, not this sentence, and a dependent the gate refused must
+    keep reading `waiting on #N` with #1538's detail.
+
+    Answers False, leaving today's behaviour, for everything it is not sure about:
+    no `depends_on`, no upstream file (#558's verdict, not a hold), an upstream that
+    is not `up_next`, a dependent that declares no bound or is not past it, and a
+    `depends_on` cycle that revisits a task already on the way (`_seen`, which is
+    threaded through the recursive `_is_task_due` exactly as `_dependency_refusal`
+    threads its own). That recursion is handed the caller's `pass_catch_up` untouched —
+    the sentinel when production asked, which makes the upstream resolve the loss ledger
+    for itself, and the injected value when a test did, so the pass and the board hear
+    one catch-up answer for one instant instead of two (#2552's `window_catch_up=`
+    injection is the precedent for a tick-level fact that is not in any task file).
+
+    And False for an upstream that has NEVER run, which is a scope line, not an
+    oversight. #814 made that branch forward unconditionally: with no `last_run` there
+    is nothing to measure a bound against, so any declared window releases; and
+    `_is_task_due` answers due on sight for a task with no run record whatever its
+    `next_run` claims — measured True at `next_run` six hours ahead, six hours behind,
+    and absent. A never-ran upstream is therefore in EVERY pass's due list, so a hold
+    keyed to it is not one pass but forever: the dependent of an upstream that has
+    never succeeded would stop dispatching outright. That is #1538's `a stale bypass
+    no one can reach` in the opposite dress, and #814's fail-forward deleted. What the
+    clause here is about is a bound past the upstream's LAST RUN, and the incident is
+    exactly that shape — #38's last run was 93.8 h old at 182 ms. Nothing has ever been
+    produced to be in flight, and #1551's warning already says so once per episode.
+    """
+    tid = str(task.get("id", "")).strip()
+    if not tid or tid in _seen:
+        return False
+    dep_task = _upstream_task(task, all_tasks)
+    if dep_task is None:
+        return False
+    if str(dep_task.get("status", "")).strip() != "up_next":
+        return False
+    dep_last_run = _parse_iso(dep_task.get("last_run"))
+    if dep_last_run is None:
+        return False
+    # Asked in `_is_dependency_met`'s own order, because both can read True at one
+    # instant and only one of them is this rule's business. A FRESH upstream releases
+    # the dependent on real input — the healthy chain, one cycle behind, whose next
+    # pass is supposed to run — and `_dependency_bypassed` measures only the upstream's
+    # age against the declared bound, so a chain whose upstream ran 37 h ago and whose
+    # window still counts that run as this cycle's answers True to the bypass question
+    # while the gate released on freshness. Measured on #38/#42's own windowed fixture
+    # (`test_the_bound_releases_the_dependent_inside_the_shared_window`): 37.0 h old,
+    # inside the shared 05:00Z window, released fresh, and holding it there would be
+    # exactly the "chain that can never catch up" #1538 was filed about.
+    if _window_dependency_fresh(task, dep_task, dep_last_run, now):
+        return False
+    if not _dependency_bypassed(task, dep_task, dep_last_run, now):
+        return False
+    return _is_task_due(dep_task, all_tasks, now=now, _seen=_seen | {tid},
+                        window_catch_up=pass_catch_up)
+
+
 def _is_task_due(task: dict, all_tasks: list[dict], *,
                  now: Optional[datetime.datetime] = None,
-                 window_catch_up=_CATCH_UP_UNSET) -> bool:
+                 window_catch_up=_CATCH_UP_UNSET,
+                 _seen: frozenset = frozenset()) -> bool:
     # `all_tasks` is the dependency resolution set, not the dispatch candidates
     # — pass `dependency_resolution_set()`. `now` is one instant for this whole
     # evaluation, so `hold_reason` can be asked the same question at the same
@@ -2840,6 +2992,19 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
             return False
     if redrive is not _REDIVE_UNASKED and redrive is not None:
         _trace_consumer_redrive(task, redrive)
+    # #4135, LAST on purpose — after the elapsed stamp, the dependency gate, the
+    # window, the preferred hours, the infra hold, the retry cooldown and the run
+    # record, so it is consulted only for a task every other gate already called due,
+    # it never overwrites a description another gate earned (the #1296 rule that a
+    # dependent with a success for this period is not left describing someone else's
+    # stall), and it is asked at the SAME position in `hold_reason` (#870: one
+    # definition of due-ness). This is not a dependency refusal — the gate RELEASED
+    # this dependent. It is the pass declining to start it in the tick in which it
+    # also starts the upstream whose input the bypass would have it consume nothing
+    # of. `_seen` is threaded so a `depends_on` cycle terminates.
+    if _upstream_starting_now(task, all_tasks, now=now, _seen=_seen,
+                              pass_catch_up=window_catch_up):
+        return False
     return True
 
 
@@ -2986,6 +3151,21 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
     # dispatch consumed the artifact the board claimed was already consumed.
     if _run_record_hold(task, all_tasks, now=now):
         return RUN_SUCCESS_HOLD
+    # #4135, and the LAST answer here for the same reason it is the last veto in
+    # `_is_task_due`: every gate above owns a description this rule must not overwrite,
+    # and the #1296/#3544 pair in this file pins the one that matters most — a
+    # dependent with a `success` for this period is not left describing somebody
+    # else's stall, so `already ran this period` keeps winning over this sentence.
+    # Asked directly, as every other gate here is asked directly: this function mirrors
+    # `_is_task_due` gate by gate rather than calling it, and skipping a gate is
+    # exactly how a held task comes to look green (#870). The gate RELEASED this
+    # dependent — nothing above returned — and the only thing holding it is that this
+    # pass is starting the upstream whose input the bypass would have it consume
+    # nothing of. #42's file said `last_run: 2026-11-12` at 03:58:40Z, three days
+    # stale, which is exactly the state that reaches this line.
+    if _upstream_starting_now(task, all_tasks, now=now,
+                              pass_catch_up=window_catch_up):
+        return _same_pass_hold(task)
     return None
 
 

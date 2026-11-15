@@ -288,7 +288,7 @@ carrying the matched `SKILL.md`, and the model re-issues the call informed.
 
 **`is_error=False` is the entire point of the second outcome.** The same
 intercept expressed as a deny comes back `is_error=True` and is booked into
-`tool_errors` (appended at `app/autonomy.py:4970`, reported at `:5021`) — the very
+`tool_errors` (`run_task` at `app/autonomy.py:5441`, reported at `:5493`) — the very
 number this feature exists to improve, so a deny would make the fleet look
 sicker exactly where it is being taught something.
 `HookRegistry.fire_pre_tool_use` recognises
@@ -365,10 +365,10 @@ a deliver in both registration orders.
 ### 4. Autonomy, by name
 
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
-`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:3032`) resolves a
+`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:3212`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
 a slug (see below); the body is pasted into the task prompt
-under "Follow the skill instructions below" (`:3077`).
+under "Follow the skill instructions below" (`:3257`).
 
 A task with neither is unrunnable, and says so once per task id rather than
 silently dead-lettering (`:2549-2559`). `hold_reason` reports it as `"no skill"`

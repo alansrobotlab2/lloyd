@@ -6892,3 +6892,139 @@ def test_the_two_nightly_tasks_declare_their_real_marker_to_the_shipped_verdict(
             else:
                 assert basis is None, (tid, name, basis)
                 assert evidence.get("path") == str(probe), evidence
+
+
+# ── #4135: a stale bypass must not release a dependent inside its upstream's pass ──
+#
+# The dispatch pass is the one reader that can see an upstream it is about to start:
+# `_dependency_bypassed` refuses to forward past an upstream whose file says
+# `in_progress`, but `status: in_progress` is written by `run_task`, which the worker
+# pool reaches only after the due list is already built. So within one pass the
+# upstream still reads `up_next`, its age reads as dead, and the bound forwards. That
+# is what the live store recorded twice: #38 at 2026-11-15T03:58:40.328609Z with #42
+# at 03:58:40.510792Z (182 ms apart, #42's whole 683 s run inside #38's 852 s), and
+# #38/#42 again on 2026-11-11 471 ms apart.
+#
+# #1538 ruled that the gate must not carry a PREDICTION about the next tick
+# (`_dependency_refusal`'s docstring, pinned by
+# `test_both_gate_branches_under_one_pinned_instant`). The nodes below pin the other
+# half of that ruling: the pass rule is an OBSERVATION made outside the gate, so
+# `_is_dependency_met`'s answers for a merely-stale upstream are byte-for-byte the
+# matrix #870 pinned, and the hold is a fact the board and the watchdog can see.
+
+def _same_pass_pair(aut):
+    """#1 → #2 with #2's 36 h bound 25 h past and nothing else holding it: the
+    upstream `up_next` and 61 h quiet with NO `output_artifact`, the dependent 5 days
+    quiet. Five days is deliberate — it clears `_grossly_overdue`'s own bound
+    (`_STALL_INTERVAL_MULT` 2.5 × the daily interval = 60 h) so the alarm would report
+    #2 as a silent stall if the pass hold did not reach `_is_task_due`.
+    """
+    write_task(aut, 1, last_run=(PIN - dt.timedelta(hours=61)).isoformat())
+    write_task(aut, 2, depends_on=1, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=5)).isoformat())
+    write_task(aut, 912, last_run=(PIN - dt.timedelta(days=5)).isoformat())  # control
+    return [read_task(aut, 1), read_task(aut, 2), read_task(aut, 912)]
+
+
+async def test_a_pass_held_dependent_is_a_hold_on_every_dispatch_surface(
+        aut, monkeypatch, tmp_path):
+    """Clause 2: the hold is one gate seen from three surfaces, and the watchdog's
+    stall alarm is one of them.
+
+    The dependent is 5 days quiet against a 60 h stall bound, so it is exactly the
+    shape `_grossly_overdue` exists to shout about — "due, this stale, and NOT in the
+    queue means the dispatch path itself is broken". It is not due, because this pass
+    is starting its upstream, and the alarm says nothing about it while still shouting
+    about #912, the dependency-free control at the same age. `hold_reason` is a
+    sentence naming #1, not None: #1739's rule is that a hold with no cause is a hold
+    nobody can act on, and `already ran this period` — what the run-record check
+    below the pass rule would have said, since #2's own last run succeeded — describes
+    the very completed cycle this dependent did not consume.
+    """
+    from workers.queue import WorkQueue
+
+    _pin(aut, monkeypatch)
+    board = _same_pass_pair(aut)
+    due = [int(t["id"]) for t in aut.get_due_tasks(now=PIN)]
+    held = {int(t["id"]): aut.hold_reason(t, board, now=PIN) for t in board}
+
+    assert 1 in due and 2 not in due and 912 in due, (due, held)
+    assert (2 in due) is not (held[2] is not None), (
+        f"one gate, two answers: dispatch and the board disagree about #2 "
+        f"(due={due}, hold={held[2]!r})")
+    assert held[2] == ("waiting on #1 (this dispatch pass is starting #1, which will "
+                       "write its output; this dependent dispatches next pass)"), held[2]
+    assert held[1] is None and held[912] is None, held
+
+    stalled = [int(i) for i in fw._grossly_overdue(WorkQueue(tmp_path / "stall.db"))]
+    assert 2 not in stalled, (
+        f"the stall alarm reported a cycle held one pass as a silently skipped one; "
+        f"it reports {stalled}")
+    assert 912 in stalled, (
+        f"the control at the same age is not reported either, so the assertion above "
+        f"is vacuous: {stalled}")
+
+
+async def test_the_pass_rule_leaves_the_pinned_bypass_matrix_and_its_reach_alone(
+        aut, monkeypatch, tmp_path):
+    """Clause 3: the gate's answers are untouched, and a declared bound is still
+    reachable end to end.
+
+    The matrix is the one #870 pinned — never-ran-with-bypass `True` (#6),
+    40 h against a 36 h bound `True` (#7), 30 h against the same bound `False` (#8),
+    and both no-bypass dependents `False` (#2, #4) — asked of `_is_dependency_met`
+    directly at one pinned instant, exactly as
+    `test_both_gate_branches_under_one_pinned_instant` asks it. Then the same board
+    with each upstream's `next_run` pushed past the instant, which is the state a
+    board reaches once the upstream's run for the period is recorded: dispatch returns
+    BOTH released dependents, so #4135 costs a pass and not the fail-forward.
+
+    Two refusals are asserted empty beside them, because that is where a re-added
+    prediction would show up. A `False` from `_dependency_refusal` for a pair the gate
+    RELEASED is impossible by construction (`if _is_dependency_met(...): return ""` is
+    its first line), so what is pinned is the string: `upstream owes a run` and
+    `due at` must not come back for either the released pair (#7/#3) or the in-window
+    pair (#8/#5). #1538 deleted those sentences for good reasons — #42 emitted the
+    first and #39 the second, 48 and 54 times across one weekend, while the board
+    printed one bare string for three different states.
+    """
+    _pin(aut, monkeypatch)
+    stale = (PIN - dt.timedelta(days=3)).isoformat()
+    write_task(aut, 1, last_run="")                                         # never ran
+    write_task(aut, 3, last_run=(PIN - dt.timedelta(hours=40)).isoformat())  # stale
+    write_task(aut, 5, last_run=(PIN - dt.timedelta(hours=30)).isoformat())  # stale
+    write_task(aut, 2, depends_on=1, last_run=stale)                        # no bypass
+    write_task(aut=aut, task_id=6, depends_on=1, last_run=stale, stale_bypass_hours=36)
+    write_task(aut, 4, depends_on=3, last_run=stale)                        # no bypass
+    write_task(aut=aut, task_id=7, depends_on=3, last_run=stale, stale_bypass_hours=36)
+    write_task(aut=aut, task_id=8, depends_on=5, last_run=stale, stale_bypass_hours=36)
+    board = list(aut.dependency_resolution_set())
+    by = {int(t["id"]): t for t in board}
+    met = {d: aut._is_dependency_met(by[d], board, now=PIN) for d in (2, 4, 6, 7, 8)}
+    assert met == {2: False, 4: False, 6: True, 7: True, 8: False}, met
+    # #7 is the pair the bound RELEASED, so the only thing holding it is the pass rule,
+    # and `hold_reason` — the one production caller of `_dependency_refusal` with
+    # `_explain=True` — must name the pass. #8 is inside its bound, where #1538's own
+    # sentence must still win and must not grow a second half: `upstream owes a run`
+    # and `due at` are what #42 and #39 emitted 48 and 54 times across one weekend, and
+    # `git grep -c "owes a run" -- app/autonomy.py` answers rc=1 against this file at
+    # this commit. Asserted on the strings the caller builds, not on
+    # `_dependency_refusal`'s return value: a refusal for a pair the gate released is
+    # unreachable (`if _is_dependency_met(...): return None` is two lines in), so a test
+    # comparing that to `""` would be grading a name and passing on nothing.
+    assert aut.hold_reason(by[7], board, now=PIN) == (
+        "waiting on #3 (this dispatch pass is starting #3, which will write its "
+        "output; this dependent dispatches next pass)"), aut.hold_reason(
+        by[7], board, now=PIN)
+    in_window = aut.hold_reason(by[8], board, now=PIN)
+    assert in_window == ("waiting on #5 (inside its 36 h stale_bypass window: "
+                         "#5 ran 30.0 h ago)"), f"#1538's in-window sentence moved: {in_window!r}"
+    assert "owes a run" not in in_window and "due at" not in in_window, in_window
+
+    for tid in (1, 3, 5):
+        write_task(aut, tid, next_run=(PIN + dt.timedelta(hours=6)).isoformat())
+    board = list(aut.dependency_resolution_set())
+    due = sorted(int(t["id"]) for t in aut.get_due_tasks(now=PIN))
+    assert {6, 7} <= set(due), (
+        f"with nothing starting in this pass, a released dependent is still not "
+        f"dispatched — #4135 cost the fail-forward, not a pass: {due}")

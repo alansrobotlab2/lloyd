@@ -232,7 +232,7 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:3112` in that module, pinned by
+  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:3292` in that module, pinned by
   `tests/test_worker_evidence.py`) — 7 of the 23 jobs that write durable state
   unattended. #53 Documentation Digester joined on 2026-10-09 (#2482), the first
   widening since #902 scoped the pilot to the reflection chain: that job's run of
@@ -589,7 +589,7 @@ sessions it wrote into one dated JSONL per day. #81 QMD Index Maintenance is hel
 out by that same ruling: what it would claim is the qmd embedding index's own
 state, which none of the four check kinds can read —
 `EVIDENCE_PILOT_TASK_IDS = frozenset({24, 38, 39, 40, 42, 53, 56})`
-(`app/autonomy.py:3112`, not inside the verifier's own file, and pinned there by
+(`app/autonomy.py:3292`, not inside the verifier's own file, and pinned there by
 `tests/test_worker_evidence.py:686`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
@@ -2121,3 +2121,38 @@ decide what gets worked on next.
   above stayed green); **#4097** (`WATCH_JOBS[105]`'s frozen-field comment and
   `test_watch_105_cadence_is_the_module_not_its_frozen_field`'s docstring still describe
   a field that has moved).
+
+## One dispatch pass, one link of a chain (#4135, 2026-11-15)
+
+`_is_task_due` ends with a veto no other gate owns, and `_upstream_starting_now` is its
+only owner. It fires for exactly one shape: a dependent its own `stale_bypass_hours`
+RELEASED (so `_dependency_bypassed` answered True and `_window_dependency_fresh` did
+not), whose upstream is `up_next`, has a `last_run`, and is itself dispatch-due in the
+same pass. Then the dependent is not due for THIS pass, and `hold_reason` says
+`waiting on #N (this dispatch pass is starting #N, which will write its output; this
+dependent dispatches next pass)`. It is asked at the same position in both, so the
+board, `/api/autonomy/health`, and `fleet_watchdog._next_run_stalled` describe one hold
+(#870); being non-None, it also clears the dependent out of `_grossly_overdue`, which
+shouts about a task that is due, stale, and unqueued.
+
+Why the pass and not the gate: `status: in_progress`, which `_dependency_bypassed`
+already refuses to forward past, is written by `run_task` — reached by the worker pool
+after the due list is built — so inside one pass the upstream still reads `up_next` and
+its three-day-old `last_run` reads as dead. That is what the live `runs` table recorded
+twice: #38 at 2026-11-15T03:58:40.328609Z and #42 at 03:58:40.510792Z, 182 ms apart with
+#42's whole 683 s run inside #38's 852 s, and the same pair 471 ms apart on 2026-11-11.
+#42's handoff then stated "This cycle's signal report is ABSENT" 170 s before #38
+finished writing it.
+
+Three scope lines, each load-bearing. NOT a never-ran upstream: with no `last_run`
+there is nothing to measure a bound against, `_is_task_due` answers due on sight for a
+task with no run record whatever its `next_run` claims, so such an upstream is in every
+pass's due list and a hold keyed to it is forever, not one pass — that would delete
+#814's fail-forward. NOT an upstream released by freshness, which is the healthy chain
+one cycle behind and the state #1538 was filed about. And NOT a prediction: #1538
+deleted the "due this very tick" question from `_dependency_refusal` because asked
+there it answered before the bound could speak, so this rule asks nothing about the next
+tick, changes no answer of `_is_dependency_met`, and costs one 60 s scan — pinned by
+`tests/test_autonomy_dependency_bypass.py` (release, one-pass expiry, the watchdog
+sentence) and `tests/test_autonomy_scheduler.py` (the #870 matrix and a declared bound
+still reachable).
