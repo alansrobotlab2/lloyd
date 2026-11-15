@@ -62,6 +62,18 @@ is what this proof is looking for. Same-length, not merely "a window": a longer 
 sees more background and forgives a real write, which is how the item's "equal-length"
 wording earned its place.
 
+**A control window only excuses a path it happened to catch, so the list names the rest**
+(#4126 clause 2). The 2026-11-09 attempt failed on 50 leftover paths, and every one of them
+was churn under `_pipeline/vault-derived/sessions-background/` or `event_logs/` — background
+the 120 s control had simply not sampled. `BACKGROUND_PREFIXES` is the bounded answer: a
+leftover path is forgiven when it sits under one of those FOUR named prefixes relative to its
+own watched root AND carries no trial marker (`carries_trial_marker`), and by nothing else.
+The subset check remains the rule; the list only states which directories this box is known
+to rewrite, so a leftover at `lloyd/MEMORY.md` or any other unlisted place is still
+unexplained and still FAILs — and `unexplained_detail` prints a production leg's leftovers
+FIRST, because the Nov-9 reason line printed 10 paths out of 50 and a leak at position 11
+would have gone unnamed.
+
 **The flags are read where the real server puts them, and the question is asked with the
 credential on.** `GET /state` answers with `tool_sandbox: _tool_sandbox.status()`
 (`agent_mcp/main.py:909`), whose `is_production_data` / `is_production_vault` /
@@ -182,6 +194,35 @@ PROOF_TOOLS: tuple[dict[str, str], ...] = (
     {"tool": "fact_add", "store": "facts"},
     {"tool": "backlog_write_task", "store": "backlog"},
 )
+
+#: The one phrase this trial plants in everything it writes, and the spelling its own
+#: artefacts wear in their NAMES (#4126 clause 4). `trial_marker` puts it in the CONTENT of
+#: each durable write; `carries_trial_marker` looks for it in a changed PATH, so the two
+#: sides of the attribution rule cannot drift apart on a hand-typed literal.
+BENCH_MARKER_PREFIX = "bench-durable-write-proof"
+
+#: What the memory leg passes as `memory_add`'s `file`: a TOPIC, not `MEMORY.md`. The
+#: difference is measured, not stylistic — the shipped writer prices `memory_write_error` on
+#: the bytes it is about to commit (`agent_mcp/session.py:439-441`), and the house's
+#: `lloyd/MEMORY.md` measured 19,318 B against `MEMORY.md`'s 25,600 B ceiling on 2026-11-15,
+#: 6,282 B of headroom on a file the nightly passes append to. A trial aimed at it would
+#: eventually be refused for a reason that has nothing to do with isolation, and the refusal
+#: would read as a failed proof. A topic file is bounded by `TOPIC_FILE_CEILING_BYTES`
+#: (32,768 B, `app/memory_ceiling.py:82`) and is NEW in every freshly built copy, so the
+#: copy-side `git diff` names exactly one path for it.
+#:
+#: `_resolve_file` maps `topics/<slug>` to `<MEMORIES_ROOT>/memory/<slug>.md`
+#: (`agent_mcp/session.py:265-275`, `app/memory_ceiling.py:611`), so the file this names lands
+#: inside the watched memory tree as `lloyd/memory/bench-durable-write-proof.md`. The slug is
+#: the marker's own prefix, which is what lets `carries_trial_marker` recognise a leak of it
+#: in any tree, not only in the copy.
+MEMORY_TRIAL_DEST = f"topics/{BENCH_MARKER_PREFIX}"
+
+
+def trial_marker(trial_id: str) -> str:
+    """The string that ties one trial's writes to it, in content and (by prefix) in paths."""
+    return f"{BENCH_MARKER_PREFIX} {trial_id}"
+
 
 #: How long each window is when nobody overrides it. 120 s is the interval the triage
 #: measurement was taken over, so the number a first PASS is judged against is the number
@@ -525,29 +566,173 @@ def changed_paths(before: dict[str, Any], after: dict[str, Any]) -> set[str]:
     return moved
 
 
-def attribute_windows(control: dict[str, set[str]], trial: dict[str, set[str]]) -> dict[str, Any]:
+#: The paths a watched tree is allowed to change without weighing against the trial
+#: (#4126 clause 2), spelled relative to THAT TREE's own root. The box writes to itself
+#: continuously and the equal-length control window only proves a path is chatty when it
+#: happens to catch it being chatty: the 2026-11-09 attempt failed with
+#: `reason: "50 live path(s) changed during the trial and not during the equal-length
+#: control window"`, and every one of those 50 paths sat under
+#: `_pipeline/vault-derived/sessions-background/` or `event_logs/`
+#: (`~/lloyd-data/eval/measurements/durable-write-proof-20261109.json`). Background churn,
+#: not a leak — the whole FAIL rested on paths this list names.
+#:
+#: The list is the BOUND on forgiveness, which is what makes it safe to have one: nothing
+#: here is a memory, facts or backlog file, so no path a trial tool can write to is on it.
+BACKGROUND_PREFIXES: tuple[str, ...] = (
+    "event_logs/",
+    "logs/locks/tmp/",
+    "_pipeline/vault-derived/sessions-background/",
+    "logs/mcp.err",
+)
+
+
+def relative_to_tree(root: Any, path: str) -> str:
+    """A changed path spelled relative to a watched tree's root, or `""` if it is not under it.
+
+    Compared on the root AS THE WALK WAS GIVEN IT, not on a resolved one: `snapshot_tree`
+    keys its manifest off `Path(entry.path)` grown from that same root string, so the two
+    spellings agree by construction. A resolved root would be a second answer to "where is
+    this tree", and a symlinked root would then produce a `rel` beginning `..` for a path
+    that is plainly inside it — which reads as "not forgiven", the fail-closed direction,
+    but for a reason no reader could follow.
+    """
+    if root is None:
+        return ""
+    try:
+        rel = os.path.relpath(str(path), str(root))
+    except (OSError, ValueError):
+        return ""
+    if rel == os.curdir or rel.startswith(os.pardir) or os.path.isabs(rel):
+        return ""
+    return rel.replace(os.sep, "/")
+
+
+def carries_trial_marker(path: str, marker: str) -> bool:
+    """Whether a changed path names THIS trial, so the background list cannot excuse it.
+
+    The marker is prose with a space in it (`bench-durable-write-proof <trial id>`), which no
+    file name carries verbatim, so the test covers the marker plus the two separator spellings
+    a path could wear it in (`-` and `_`), plus the marker's own
+    `BENCH_MARKER_PREFIX` — the memory topic file this trial writes is named for the prefix
+    alone (`MEMORY_TRIAL_DEST`), so a leak of it into a live tree is recognisable by that.
+
+    **The marker's separate words are deliberately NOT matched, and matching them would
+    un-make the fix.** The trial id is a date (`ts()` is `%Y%m%d`), and the box names its churn
+    by date: the paths that failed the 2026-11-09 attempt are
+    `event_logs/20261109_owed…` and `_pipeline/vault-derived/sessions-background/2026-11-09/…`.
+    A matcher that treated `20261109` as a trial marker would have refused forgiveness for
+    every one of them and this instrument would still report FAIL on background churn. A path
+    is therefore called trial-marked only when it carries the whole marker, one of its
+    separator spellings, or the prefix.
+
+    Matched against the path RELATIVE to the tree, never the absolute one: under the
+    sanctioned command the data root itself is `~/lloyd-work/dwproof-<ts>`, so an absolute
+    match would let the directory the trial was pointed at brand every path beneath it as a
+    trial artefact and forgive nothing.
+
+    A match REFUSES forgiveness, which is the safe direction: a trial artefact wearing
+    background clothing cannot be excused (#4126 clause 4).
+    """
+    marker = str(marker).lower().strip()
+    if not marker:
+        return False
+    hay = str(path).lower()
+    spellings = {marker, marker.replace(" ", "-"), marker.replace(" ", "_"),
+                 BENCH_MARKER_PREFIX.lower()}
+    return any(spelling in hay for spelling in spellings)
+
+
+def background_prefix(root: Any, path: str, marker: str = "") -> str | None:
+    """The named background prefix `path` sits under, or None when nothing excuses it.
+
+    None is the answer for every unclear case, and there is no default of forgiveness in
+    this function: no root handed in, a path outside that tree, a path that cannot be made
+    relative, or a path carrying the trial marker. The prefix list is the ONLY ground for
+    excusing a path the control window did not see, so a miss here leaves the path in
+    `unexplained`.
+    """
+    rel = relative_to_tree(root, path)
+    if not rel or carries_trial_marker(rel, marker):
+        return None
+    for prefix in BACKGROUND_PREFIXES:
+        if rel.startswith(prefix):
+            return prefix
+    return None
+
+
+def attribute_windows(control: dict[str, set[str]], trial: dict[str, set[str]], *,
+                      roots: dict[str, Any] | None = None,
+                      marker: str = "") -> dict[str, Any]:
     """The attributed diff: which trial-window changes are NOT explained by background.
 
     `control[tree]` is what changed in a window of the SAME length with no trial running
-    (`_measure_window`); `trial[tree]` is what changed during the trial. A change is
-    background when the control window saw the same path; `unexplained` is the trial set
-    minus that, and `unexplained` being empty is the live half of PASS. See the module
+    (`_measure_window`); `trial[tree]` is what changed during the trial. See the module
     docstring for why the subset rule replaced `changed == 0`.
+
+    Two grounds make a change background, and only these two (#4126 clause 2): the control
+    window saw the SAME path, or the path sits under a named `BACKGROUND_PREFIXES` entry
+    relative to that tree's root and does not carry the trial marker. The second is a
+    BOUNDED exception to the first, not a replacement for it — the control-window subset
+    check is still the rule, and the only thing the list adds is the box's own chatty
+    directories, named one by one, that a 120 s control happened to miss. A path outside
+    that list which the control did not see is unexplained, exactly as before.
+
+    `roots` is what makes the prefix test mean anything: manifest keys are ABSOLUTE, so a
+    prefix is matched against the path relative to the tree it was walked from. No roots, no
+    prefix forgiveness at all — the fail-closed default, and also the pre-#4126 signature,
+    which is why every caller that wants the new rule has to ask for it by name.
+    `marker` is `trial_marker(trial_id)`; a path carrying it is never forgiven (clause 4).
+
+    `production` is `is_production_tree` of that tree's root (`None` when no root was handed
+    in), so `verdict` can hold a leg the record marks production to a stricter account of
+    what is left over (clause 3). `background_by_prefix` records what the list forgave, per
+    prefix: a reader has to be able to see how much of the churn the exception swallowed.
     """
     per_tree: dict[str, Any] = {}
     unexplained: set[str] = set()
     for tree, trial_changed in trial.items():
         background = control.get(tree, set())
-        gap = sorted(trial_changed - background)
+        root = (roots or {}).get(tree)
+        forgiven: dict[str, list[str]] = {}
+        gap: list[str] = []
+        for path in sorted(trial_changed):
+            if path in background:
+                continue
+            prefix = background_prefix(root, path, marker)
+            if prefix is None:
+                gap.append(path)
+            else:
+                forgiven.setdefault(prefix, []).append(path)
         unexplained |= set(gap)
         per_tree[tree] = {
             "trial_changed": sorted(trial_changed), "control_changed": sorted(background),
             "unexplained": gap,
+            "background_by_prefix": {name: forgiven[name] for name in sorted(forgiven)},
+            "production": (None if root is None else is_production_tree(Path(root))),
             "counts": {"trial": len(trial_changed), "control": len(background),
-                       "unexplained": len(gap)},
+                       "unexplained": len(gap),
+                       "background_by_prefix": sum(len(paths) for paths in forgiven.values())},
         }
     return {"per_tree": per_tree, "unexplained": sorted(unexplained),
             "unexplained_count": len(unexplained)}
+
+
+def unexplained_detail(windows: dict[str, Any], cap: int = 10) -> list[str]:
+    """The paths a FAIL reason has to print, with production legs first.
+
+    Order is the whole point. The old reason printed `unexplained[:10]`, and the 2026-11-09
+    record printed 10 of 50: a leak into `~/obsidian/lloyd/MEMORY.md` sitting at position 11
+    of a churn-heavy leftover set would have gone unnamed, which is the one leak this
+    instrument was built to catch. So every unexplained path from a leg the record marks
+    `production: true` is printed ahead of the rest, up to `cap`, and non-production paths
+    only fill what is left — the printed total stays bounded at `cap` exactly as before.
+    """
+    production = sorted({path for row in (windows.get("per_tree") or {}).values()
+                         if row.get("production")
+                         for path in row.get("unexplained", [])})
+    rest = [path for path in windows.get("unexplained", []) if path not in set(production)]
+    return (production[:cap] + rest)[:cap]
+
 
 
 def server_isolation_block(body: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
@@ -865,11 +1050,24 @@ def trial_arguments(store: str, trial_id: str) -> dict[str, Any]:
     One row per store, with the trial id inside it, so a leak into the live tree is
     attributable to this trial by grep rather than by inference. Category and entity are
     the ones the fact store already accepts for bench material.
+
+    **The keys are the SHIPPED WRITER's own vocabulary, per store, and that is a constraint
+    rather than a preference (#4126 clause 1).** Each arm must be spellable by the tool that
+    receives it, and `memory_add` is not `fact_add`: `_memory_add`
+    (`agent_mcp/session.py:392`) reads `file`, `entry` and `type` and nothing else, and
+    answers an absent `entry` with `_err("entry is required", ErrorCode.MISSING_PARAM)` at
+    `agent_mcp/session.py:409`. Until #4126 this arm returned `fact_add`'s four keys for the
+    memory store too, so the memory leg could never land: the 2026-11-09 record shows
+    `tool_calls[memory_add].text == {"error": "entry is required", "code": "MISSING_PARAM"}`
+    while `fact_add`, handed the SAME dict, returned `{"success": true, "fact_id":
+    "refe-001"}` — and `copy_side.not_landed_by_git_diff` named `memory_add` on the strength
+    of a key name. The keys below are what `test_the_memory_trial_arguments_satisfy_the_shipped_memory_add`
+    hands to the real `_memory_add`, so a future rename on the writer's side reddens a node
+    instead of quietly orphaning the owed run again.
     """
-    marker = f"bench-durable-write-proof {trial_id}"
+    marker = trial_marker(trial_id)
     if store == "memory":
-        return {"entity": "bench-durable-write-proof", "category": "reference",
-                "fact": marker, "provenance": "STATED"}
+        return {"file": MEMORY_TRIAL_DEST, "entry": marker, "type": "reference"}
     if store == "facts":
         return {"entity": "bench-durable-write-proof", "category": "reference",
                 "fact": marker, "provenance": "STATED"}
@@ -971,9 +1169,13 @@ def verdict(*, guard: dict[str, Any], windows: dict[str, Any],
     if unreadable:
         reasons.append(f"unreadable directories inside the manifested trees: {unreadable}")
     if windows["unexplained_count"]:
+        # Named by `unexplained_detail`, not by a plain slice, so a path that moved inside a
+        # leg the record marks `production: true` is in the printed set rather than merely
+        # counted in it (#4126 clause 3): that leg is a tree the trial had no business
+        # touching, and the reason line is what a reader of the record has to go on.
         reasons.append(f"{windows['unexplained_count']} live path(s) changed during the "
-                       f"trial and not during the equal-length control window: "
-                       f"{windows['unexplained'][:10]}")
+                       f"trial and not during the equal-length control window nor under a "
+                       f"background prefix: {unexplained_detail(windows)}")
     failed = sorted(str(c.get("tool")) for c in calls if not c.get("ok"))
     if failed:
         reasons.append(f"tool call(s) did not return success: {failed}")
@@ -1159,7 +1361,8 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
                   for name, root in trees.items()}
     trial_changed = {name: changed_paths(live_before[name], live_after[name])
                      for name in trees}
-    windows = attribute_windows(control_changed, trial_changed)
+    windows = attribute_windows(control_changed, trial_changed,
+                                roots=trees, marker=trial_marker(trial_id))
     witness = copy_side_witness(fixture_root, intended=intended, diff_paths=diff_paths)
     after_rows = {n: {k: v for k, v in row.items() if k != "manifest"}
                   for n, row in live_after.items()}

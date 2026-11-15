@@ -566,7 +566,11 @@ def test_a_change_in_only_the_trial_window_fails_and_one_in_both_passes(tmp_path
     assert passed["verdict"] == "PASS", passed["reason"]
     assert passed["windows"]["unexplained_count"] == 0
     assert passed["windows"]["per_tree"]["memory"]["counts"] == {
-        "trial": 1, "control": 1, "unexplained": 0}, passed["windows"]["per_tree"]["memory"]
+        "trial": 1, "control": 1, "unexplained": 0,
+        # Zero, and it has to stay zero: `log.md` was excused by the CONTROL window, not by
+        # the background prefix list (#4126 clause 3), which is only allowed to speak for the
+        # four directories it names.
+        "background_by_prefix": 0}, passed["windows"]["per_tree"]["memory"]
     assert not leak.exists(), "the control run must not have planted the leak"
 
     # A write that reaches the live tree: planted by the call itself, so the control
@@ -583,7 +587,9 @@ def test_a_change_in_only_the_trial_window_fails_and_one_in_both_passes(tmp_path
     assert leaked["checks"]["copy_witness_landed"] is True, (
         "the copy leg was green: the FAIL must come from the live diff alone")
     assert leaked["windows"]["per_tree"]["memory"]["counts"] == {
-        "trial": 2, "control": 1, "unexplained": 1}
+        "trial": 2, "control": 1, "unexplained": 1, "background_by_prefix": 0}, (
+        "LEAKED.md is not under a background prefix, so nothing in the new list may excuse "
+        "it (#4126 clause 3)")
 
 
 # ── clause 5: no copy-side landing is FAIL, never PASS ─────────────────────
@@ -2164,3 +2170,282 @@ def test_a_missing_or_empty_facts_leg_still_refuses_naming_facts(tmp_path, monke
     assert result["verdict"] == "REFUSED", result.get("reason")
     assert "facts" in result["reason"], result["reason"]
     assert ("zero files" in result["reason"]) is (arm == "zero-file"), result["reason"]
+
+
+# ── #4126: the probe speaks each writer's vocabulary, and the control window is bounded ─
+#
+# Both defects were read out of the 2026-11-09 attempt's own record
+# (`~/lloyd-data/eval/measurements/durable-write-proof-20261109.json`), which is the only
+# artefact of a real run this instrument has ever produced. Its `reason` was
+# `50 live path(s) changed during the trial and not during the equal-length control window`,
+# every named path was churn under `_pipeline/vault-derived/sessions-background/` or
+# `event_logs/`, its `tool_calls[memory_add].text` was
+# `{"error": "entry is required", "code": "MISSING_PARAM"}`, and
+# `copy_side.not_landed_by_git_diff` was `["fact_add", "memory_add"]`. The five nodes below
+# are each one of those sentences made unfalsifiable.
+
+#: The vocabulary the shipped `memory_add` accepts, read off its own declared schema
+#: rather than typed here: `agent_mcp/session.py:1169-1170` lists exactly
+#: `file`/`entry`/`type`, with `entry` the one required key.
+def _shipped_memory_add_schema() -> dict:
+    """`memory_add`'s input schema as `list_tools()` ships it to a client."""
+    import asyncio
+
+    from agent_mcp import session as S
+
+    tools = {tool.name: tool for tool in asyncio.run(S.list_tools())}
+    return dict(tools["memory_add"].input_schema)
+
+
+def test_the_memory_trial_probe_speaks_memory_adds_own_vocabulary():
+    """Clause 1: the memory arm's keys ARE `memory_add`'s parameters, and only those.
+
+    Until #4126 this arm returned `fact_add`'s `entity`/`category`/`fact`/`provenance`, so
+    the shipped writer saw no `entry` and the memory leg could never land. The keys are
+    pinned against the tool's own declared schema — not against a set this file chose — so a
+    rename on the writer's side reddens this node instead of orphaning the owed run a third
+    time. The other two arms are pinned as UNCHANGED, because the defect was one arm
+    borrowing another's keys and the fix must not be a rewrite of all three.
+    """
+    tid = "20261115"
+    memory = proof.trial_arguments("memory", tid)
+    schema = _shipped_memory_add_schema()
+
+    assert set(memory) == {"file", "entry", "type"}, memory
+    assert set(memory) <= set(schema["properties"]), (
+        f"the probe sends a key {sorted(set(memory) - set(schema['properties']))} that "
+        "`memory_add`'s own schema does not declare")
+    assert schema["required"] == ["entry"], (
+        "the clause is about the REQUIRED key: if the schema's requirement moved, this "
+        "node's premise moved with it")
+    assert memory["entry"] == proof.trial_marker(tid), memory
+    assert tid in memory["entry"] and "bench-durable-write-proof" in memory["entry"], (
+        "the trial id has to ride in the CONTENT, which is what makes a leak attributable "
+        "by grep rather than by inference")
+    for borrowed in ("entity", "category", "fact", "provenance"):
+        assert borrowed not in memory, f"the memory arm is still wearing {borrowed}"
+
+    # The two arms that were never wrong, pinned byte-for-byte.
+    assert proof.trial_arguments("facts", tid) == {
+        "entity": "bench-durable-write-proof", "category": "reference",
+        "fact": f"bench-durable-write-proof {tid}", "provenance": "STATED"}
+    assert proof.trial_arguments("backlog", tid) == {
+        "name": f"bench durable write proof {tid}",
+        "description": f"bench-durable-write-proof {tid}", "board": "lloyd"}
+
+
+def test_the_memory_trial_arguments_satisfy_the_shipped_memory_add(tmp_path, monkeypatch):
+    """Clause 2 across the real boundary: hand the probe's dict to the shipped writer.
+
+    A unit assertion on key names would pass for a dict the writer refuses for some other
+    reason, so this calls `agent_mcp.session._memory_add` itself over a stand-in memories
+    root and asks for `success`. The contrast half is the 2026-11-09 record reproduced: the
+    SAME writer, given `fact_add`'s vocabulary, answers `MISSING_PARAM` / `entry is required`
+    — the exact two strings this node forbids on the fixed arm.
+
+    The lock goes to a stand-in directory so the node never takes a lock file under the live
+    data root (`lock_file_for` is off-tree by design, `app/atomic_io.py:90-101`).
+    """
+    import json
+
+    from app import atomic_io, memory_ceiling
+    from agent_mcp import session
+
+    root = tmp_path / "lloyd"
+    root.mkdir()
+    monkeypatch.setattr(session, "MEMORIES_ROOT", root)
+    monkeypatch.setattr(memory_ceiling, "MEMORIES_DIR", root)
+    monkeypatch.setattr(atomic_io, "LOCK_DIR", tmp_path / "locks")
+
+    tid = "20261115"
+    res = session._memory_add(proof.trial_arguments("memory", tid))
+    assert res.get("success") is True, res
+    assert res.get("code") is None, res
+    assert "entry is required" not in json.dumps(res) and "MISSING_PARAM" not in json.dumps(res)
+    # `topics/<slug>` resolves to `<MEMORIES_ROOT>/memory/<slug>.md` — the writer's own
+    # mapping (`agent_mcp/session.py:265-275`), which the probe names by slug and does not
+    # hard-code. The node asserts the destination the writer picked, not the one the probe
+    # spelled, because the point of clause 2 is that the probe's dict survives the writer.
+    landed = root / "memory" / "bench-durable-write-proof.md"
+    assert res["path"] == str(landed), res
+    assert Path(res["path"]) != root / "MEMORY.md", (
+        "the probe names a topic precisely so it never has to price MEMORY.md's ceiling")
+    assert landed.is_file() and tid in landed.read_text(encoding="utf-8"), (
+        "the write has to have reached the file the probe named, or `success` is the only "
+        "thing this node checked")
+
+    # And the pre-fix shape, unchanged in this file's hands: the writer's own refusal, not a
+    # guess about it. This is `tool_calls[memory_add]` from the Nov-9 record.
+    stale = session._memory_add(proof.trial_arguments("facts", tid))
+    assert stale.get("code") == "MISSING_PARAM", stale
+    assert stale.get("error") == "entry is required", stale
+
+
+def test_the_background_list_forgives_only_what_it_names(tmp_path):
+    """Clause 3: the control window stays the rule, and the list is its bounded exception.
+
+    Two halves, both necessary. Through the whole trial: churn that appears ONLY in the
+    trial window, under each of the four named prefixes, is forgiven — that is precisely the
+    50-path shape that failed the 2026-11-09 attempt — while churn in a directory the list
+    does not name is still unexplained. Then at the attribution table itself: the four
+    prefixes, plus three lookalikes that must NOT be forgiven (`event_logs_backup/` and
+    `event-logs/` differ from `event_logs/` by characters a substring match would ignore,
+    and `_pipeline/vault-derived/facts/` is the store the trial writes to, one directory
+    above the background one). Removing the subset check would make the second half of the
+    first half pass for the wrong reason, which is why the unlisted path is in the same node.
+    """
+    data = _tree(tmp_path, "data", {"sessions/seed.jsonl": "seed\n"})
+    listed = ["event_logs/20261115_owed-check.md",
+              "logs/locks/tmp/agent_mcp.lock",
+              "_pipeline/vault-derived/sessions-background/2026-11-15/auto_triage.md",
+              "logs/mcp.err"]
+    unlisted = "sessions/20261115_103804_ivpump01.jsonl"
+    marker = proof.trial_marker("t_proof")
+
+    def churn_only_in_trial(rel: str):
+        """A sleeper that writes `rel` on its SECOND call: the trial's padding sleep.
+
+        `run_proof` sleeps once for the control window and once to pad the trial, so the
+        first call is a control window with no trial in it. Writing on the second call only
+        is how a path the control never sampled is created — the case the list exists for.
+        """
+        state = {"calls": 0}
+
+        def sleeper(_seconds: float) -> None:
+            state["calls"] += 1
+            if state["calls"] > 1:
+                path = data / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("churn\n", encoding="utf-8")
+
+        return sleeper
+
+    forgiven = _run(tmp_path, trees={"data": data}, sleep=churn_only_in_trial(listed[0]),
+                    diff_paths=["lloyd/MEMORY.md"])
+    assert forgiven["verdict"] == "PASS", forgiven["reason"]
+    assert forgiven["windows"]["per_tree"]["data"]["counts"] == {
+        "trial": 1, "control": 0, "unexplained": 0, "background_by_prefix": 1}, (
+        forgiven["windows"]["per_tree"]["data"])
+    assert forgiven["windows"]["per_tree"]["data"]["background_by_prefix"] == {
+        "event_logs/": [str(data / listed[0])]}, forgiven["windows"]["per_tree"]["data"]
+
+    leaked = _run(tmp_path, trees={"data": data}, sleep=churn_only_in_trial(unlisted),
+                  diff_paths=["lloyd/MEMORY.md"])
+    assert leaked["verdict"] == "FAIL", leaked["reason"]
+    assert leaked["windows"]["unexplained"] == [str(data / unlisted)], leaked["windows"]
+    assert "ivpump01" in leaked["reason"], leaked["reason"]
+
+    control: dict[str, set[str]] = {"data": set()}
+    trial = {"data": {str(data / rel) for rel in listed} | {
+        str(data / "event_logs_backup/x.md"),
+        str(data / "event-logs/x.md"),
+        str(data / "_pipeline/vault-derived/facts/entity.md")}}
+    table = proof.attribute_windows(control, trial, roots={"data": data}, marker=marker)
+    assert table["unexplained"] == [
+        str(data / rel) for rel in sorted([
+            "event-logs/x.md", "_pipeline/vault-derived/facts/entity.md",
+            "event_logs_backup/x.md"])], table["unexplained"]
+    assert table["per_tree"]["data"]["counts"]["background_by_prefix"] == 4, table
+    assert sorted(table["per_tree"]["data"]["background_by_prefix"]) == sorted(
+        proof.BACKGROUND_PREFIXES), (
+        "every named prefix has to actually forgive something here, or the list this node "
+        "checks is not the list the trial uses")
+    assert proof.attribute_windows(control, trial)["unexplained_count"] == 7, (
+        "with no roots handed in there is no prefix forgiveness at all — the fail-closed "
+        "default a caller has to opt out of by name")
+
+
+def test_a_background_path_wearing_the_trial_marker_is_never_forgiven(tmp_path):
+    """Clause 4: the marker outranks the directory, in every spelling a path can wear.
+
+    A trial artefact can be written INTO a background directory — an event-log line the trial
+    itself emitted, a lock file named for the trial, the memory topic file a leak would leave
+    behind — and the list must not swallow it. Three spellings are checked, because the marker
+    is prose with a space in it and no file name carries that verbatim: the whole marker, its
+    hyphenated spelling, and `BENCH_MARKER_PREFIX` alone, which is the memory topic file's own
+    name (`MEMORY_TRIAL_DEST`). The control in each call is an unmarked path in the SAME
+    directory, so what the node pins is that the MARKER refused forgiveness, not the directory.
+
+    The control's name is load-bearing too: `event_logs/20261115_…` carries the trial id as a
+    date, which is exactly how the box names its own churn
+    (`event_logs/20261109_owed…` in the 2026-11-09 record). A matcher that treated a marker
+    WORD as a marker would forgive nothing and this instrument would still FAIL on churn — so
+    the date token is asserted unmarked here, in the node that could otherwise hide it.
+    """
+    data = _tree(tmp_path, "data", {"sessions/seed.jsonl": "seed\n"})
+    tid = "20261115"
+    marker = proof.trial_marker(tid)
+    control: dict[str, set[str]] = {"data": set()}
+
+    def unexplained(*paths: str) -> list[str]:
+        trial = {"data": {str(data / p) for p in paths}}
+        return proof.attribute_windows(control, trial, roots={"data": data},
+                                       marker=marker)["unexplained"]
+
+    plain = "event_logs/20261115_103804_ivpump01.jsonl"
+    assert unexplained(plain) == [], (
+        "the control case: churn named for the SAME date as the trial id IS forgiven — the "
+        "2026-11-09 failure's own path shape")
+    marked = unexplained(
+        "event_logs/bench-durable-write-proof 20261115.md",
+        "logs/locks/tmp/bench-durable-write-proof-20261115.jsonl",
+        "_pipeline/vault-derived/sessions-background/bench-durable-write-proof.md",
+        "logs/mcp.err")
+    assert marked == [
+        str(data / rel) for rel in sorted([
+            "_pipeline/vault-derived/sessions-background/bench-durable-write-proof.md",
+            "event_logs/bench-durable-write-proof 20261115.md",
+            "logs/locks/tmp/bench-durable-write-proof-20261115.jsonl"])], marked
+    assert str(data / "logs/mcp.err") not in marked
+
+    # The relative-path rule, in the direction that would otherwise break the sanctioned
+    # command: `LLOYD_DATA=/…/dwproof-<ts>` names the ROOT, and every path under it would
+    # look trial-marked to a matcher that read absolute paths.
+    assert proof.carries_trial_marker(f"{data}/event_logs/x.md", marker) is False
+    assert proof.relative_to_tree(data, str(data / "event_logs/x.md")) == "event_logs/x.md"
+    assert proof.relative_to_tree(data, "/somewhere/else/event_logs/x.md") == ""
+    assert proof.background_prefix(None, str(data / "event_logs/x.md"), marker) is None, (
+        "no root handed in, no prefix forgiveness")
+
+
+def test_a_production_leg_with_an_unexplained_path_fails_and_names_it(tmp_path):
+    """Clause 5: on a leg the record marks production, a leftover is named or the verdict lies.
+
+    `attribute_windows` now forgives a path the control window missed when a named prefix
+    claims it, so this node asks the question the forgiveness makes sharp: a leak into a
+    PRODUCTION tree is outside that list, so the trial must FAIL and its reason must NAME it
+    — the `~/obsidian/lloyd/MEMORY.md` case, the one leak this instrument was built to catch.
+
+    It is planted among twelve leftovers on a NON-production leg whose names sort first, so
+    the old `unexplained[:10]` slice would have printed only those twelve's first ten and
+    left the leak counted but unnamed. `production` is decided by the real
+    `is_production_tree` against the env-immune anchors, moved to stand-in roots — not by
+    patching the predicate itself.
+    """
+    house = tmp_path / "zhouse"          # sorts after `aleak`: see the slice assertion below
+    other = tmp_path / "aleak"
+    trees = {"memory": _tree(house, "lloyd", {"MEMORY.md": "index line\n"}),
+             "backlog": _tree(other, "backlog", {"1-item.md": "keep\n"})}
+
+    def leaking_call(name: str, arguments: dict, *, session_id: str = "") -> dict:
+        (trees["memory"] / "MEMORY.md").write_text("a durable write reached the house\n",
+                                                   encoding="utf-8")
+        for i in range(12):
+            (trees["backlog"] / f"leak-{i:02d}.md").write_text("noise\n", encoding="utf-8")
+        return {"tool": name, "ok": True, "session_id": session_id}
+
+    with _patched(proof, PRODUCTION_VAULT=house, PRODUCTION_DATA_ROOT=house):
+        result = _run(tmp_path, trees=trees, call=leaking_call,
+                      diff_paths=["lloyd/MEMORY.md"])
+
+    assert result["verdict"] == "FAIL", result["reason"]
+    assert result["windows"]["unexplained_count"] == 13, result["windows"]
+    leak = str(trees["memory"] / "MEMORY.md")
+    assert result["windows"]["per_tree"]["memory"]["production"] is True
+    assert result["windows"]["per_tree"]["backlog"]["production"] is False
+    assert result["windows"]["per_tree"]["memory"]["unexplained"] == [leak]
+    assert result["windows"]["per_tree"]["backlog"]["counts"]["background_by_prefix"] == 0
+    assert "MEMORY.md" in result["reason"], result["reason"]
+    assert leak not in result["windows"]["unexplained"][:10], (
+        "the premise of the node: a plain first-ten slice would have missed the leak")
+    assert result["reason"].count("MEMORY.md") >= 1
