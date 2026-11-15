@@ -13672,3 +13672,62 @@ def test_b8_carries_the_disarmed_refusal_and_the_armed_credential_swap():
     assert "outbound_content.py:526" not in cells[-1], (
         "B8's controls column cites `redact` — the findings-excerpt text redactor — "
         "as this boundary's outbound-content control again")
+
+
+# ---------------------------------------------------------------------------
+# #4148: §3's retirement route is a deletion, and its recovery command is a
+# template because the sha is not knowable at filing time.
+# ---------------------------------------------------------------------------
+
+def test_the_superseded_paragraph_files_a_deletion_with_a_placeholder_sha():
+    """#4148 clause 3. §3 used to tell a reader the review turn files "retire
+    `architecture/<slug>.md` → `.archive/`" — a destination this checkout does not
+    have, kept out of git by `.gitignore` and therefore outside every ref and inside
+    `git clean -fdx`. The paragraph now names a deletion and the one way back: the
+    deletion commit's parent, which is how this page's own opening paragraph and
+    `architecture/index.md`'s `## Retired (in git history alone)` section already
+    reach every retired doc.
+
+    The recovery command it offers carries a literal `<sha>` and no hex, on purpose:
+    the commit that deletes a doc does not exist when its item is filed, and
+    `test_every_archive_recovery_command_the_docs_name_resolves` runs every hex-sha'd
+    command this corpus backticks through `git cat-file -e` — so inventing a sha here
+    is a red gate over a true sentence. The two real commands the page already carries
+    (`f80c9d00`, `b94be171`) are what keep that node's `>= 3` floor a count of commands
+    that resolve rather than a count of templates.
+    """
+    text = _text("arch-review.md")
+    anchor = "`superseded` and `aspirational`"
+    assert anchor in text, "§3's retirement paragraph no longer opens with its anchor"
+    start = text.index(anchor)
+    para = " ".join(text[start:text.index("\n\n", start)].split())
+    assert "deletion" in para and "git history" in para, (
+        f"the paragraph stopped naming what a retirement is: {para[:240]}")
+    assert "`git show <sha>^:architecture/<slug>.md`" in para, (
+        "the paragraph no longer offers the recovery command, or offers it spelled "
+        "with something other than the <sha> placeholder")
+    assert RECOVERY_CMD.findall(para) == [], (
+        f"the paragraph invented a runnable-looking sha, which the resolver node "
+        f"named above will rightly refuse: {RECOVERY_CMD.findall(para)}")
+    assert "→ .archive/" not in para and "retire architecture/" not in para, (
+        f"the old 'retire … → .archive/' title is back where a human reads it: "
+        f"{para[:200]}")
+    # The exemption a tidy rewrite must not orphan. `PATH_CITATION_EXEMPTIONS` keeps an
+    # 'arch-review.md' → '.archive/' entry, and the node policing that list refuses an
+    # entry the doc no longer cites — so emptying this page of `.archive/` spans to
+    # make §3 clean would go red two nodes away, on a stale excuse. The §1 sentence
+    # ("never `.archive/` or a subdirectory") is what earns it, and it still stands.
+    cited = {span for span, _p, _l in cited_citations(text)}
+    assert ".archive/" in cited, (
+        "arch-review.md stopped citing `.archive/` anywhere, which turns its "
+        "PATH_CITATION_EXEMPTIONS entry into the stale excuse the anti-growth node "
+        "refuses — restore the sentence, do not delete the entry")
+    shas = {sha for sha, _path in RECOVERY_CMD.findall(text)}
+    assert {"f80c9d00", "b94be171"} <= shas, (
+        f"the page lost one of its two real recovery commands; it now carries "
+        f"{sorted(shas)}")
+    corpus = {m for slug in RECOVERY_DOCS for m in RECOVERY_CMD.findall(_text(slug))}
+    assert len(corpus) >= 3, (
+        f"only {len(corpus)} recovery commands across {list(RECOVERY_DOCS)}: the "
+        "resolver node's floor is about commands that RESOLVE, so a thin harvest "
+        "means the pointers went away rather than getting fixed")

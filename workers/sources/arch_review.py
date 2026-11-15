@@ -126,14 +126,18 @@ LONG_LIVED = True
 
 #: Where the picklist lives, relative to the repo root.
 ARCH_DIRNAME = "architecture"
-#: Reviewed docs are the top-level ones only. `architecture/.archive/` is where a
-#: retired doc goes, and here it is **absent and holds nothing tracked**: only
-#: five copies were ever added to git (`412a8012`), and `f80c9d00` is the commit
-#: that untracked all five; the other retirements never had a tracked copy.
-#: The filter is not a description of that tree but a guard on a future one —
-#: `.gitignore` keeps the `/architecture/.archive/` rule, so the directory may be
-#: recreated at any time, and a future `rglob` would then offer a doc retired
-#: *for being wrong* — the one review with no possible value.
+#: Reviewed docs are the top-level ones only. A retirement is a **deletion** —
+#: `git rm architecture/<slug>.md` — and its archive is git history: the doc is
+#: read back from the deletion commit's parent, never out of a directory. So
+#: `architecture/.archive/` is NOT where a retired doc goes, and here it is
+#: **absent and holds nothing tracked**: only five copies were ever added to git
+#: (`412a8012`), and `f80c9d00` is the commit that untracked all five; the other
+#: retirements never had a tracked copy. The filter is not a description of that
+#: tree but a guard on a future one — `.gitignore` keeps the
+#: `/architecture/.archive/` rule, so the directory may be recreated at any time
+#: (by a hand that still believes the old route), and a future `rglob` would
+#: then offer a doc retired *for being wrong* — the one review with no possible
+#: value.
 EXCLUDED_DIRS = (".archive",)
 
 DOC_STATUSES = ("current", "stale", "superseded", "aspirational")
@@ -304,10 +308,13 @@ def arch_dir(root: Path | None = None) -> Path:
 def doc_slugs(root: Path | None = None) -> list[str]:
     """Every reviewable doc, by slug, sorted.
 
-    `glob("*.md")` does not descend, so `.archive/` is already out; the explicit
-    filter is here for a tree that does not exist yet. `architecture/.archive/` is
-    absent in this checkout and nothing under it is tracked — `f80c9d00` untracked
-    the five retired copies git ever had — but `.gitignore` carries
+    A retirement is a **deletion**, not a move: the doc is `git rm`'d and git
+    history is where it stays readable, read back from the deletion commit's
+    parent. So `architecture/.archive/` is not a destination. `glob("*.md")` does
+    not descend, so `.archive/` is already out; the explicit filter is here for a
+    tree that does not exist yet. `architecture/.archive/` is absent in this
+    checkout and nothing under it is tracked — `f80c9d00` untracked the five
+    retired copies git ever had — but `.gitignore` carries
     `/architecture/.archive/`, so the directory may be recreated, and a future
     `rglob` would then silently pick its docs up. The exclusion is by **path**, so
     it holds whatever git's record of that path happens to be.
@@ -1006,6 +1013,23 @@ def _filed_item_exists(item_id: int, slug: str, name: str = "",
 
 # ── The prompt ───────────────────────────────────────────────────────────────
 
+#: The title a retirement filing must carry, with `<slug>` as the placeholder the
+#: turn substitutes. ONE constant, because two surfaces print it: the prompt below
+#: emits it with the unit's slug filled in, and `architecture/arch-review.md` §3
+#: quotes it to a reader. This node in `tests/test_arch_review_source.py` asserts
+#: the prompt's rendering and the doc's quotation are one string, so the two
+#: cannot drift by being edited in different rounds:
+#: `test_the_title_the_prompt_emits_and_the_title_the_doc_quotes_are_one_string`.
+#: The title names a deletion because a retirement IS one:
+#: `architecture/.archive/` is absent, holds nothing tracked, and `.gitignore`'s
+#: rule plus `git clean -fdx` is what turned "move it there" into a route that
+#: puts a tracked doc past every ref. The sha is a placeholder, not a number,
+#: because the commit that deletes the doc does not exist when the item is filed —
+#: and `tests/test_architecture_coverage_doc_claims.py` runs every hex sha this
+#: corpus backticks, so an invented one would be a red gate on a true sentence.
+RETIREMENT_TITLE = ("delete architecture/<slug>.md (recover via "
+                    "`git show <sha>^:architecture/<slug>.md`)")
+
 PROMPT = """\
 [SYSTEM: You are running the "arch-review" worker job. Work autonomously and \
 do not ask for confirmation — nobody answers questions here.]
@@ -1092,8 +1116,9 @@ classified `aspirational` — that is what the classification is for.
 true edit — this is a correction pass, not a rewrite.
   - `superseded` or `aspirational`: do **not** rewrite the body. Add one \
 paragraph under the H1 saying what replaced it (or that it was never built) \
-and file an item titled "retire architecture/{slug}.md → \
-.archive/".
+and file an item titled "{retirement_title}". A retirement is a deletion, but \
+the commit that makes it is a later human's or round's, never this turn's: \
+leave the doc exactly where it is and never move it into another directory.
 {doc_log_rule}
   - Never run `git commit`, `git add`, `git checkout`, `git restore` or \
 `git stash`. This job's runner commits the doc for you; a git write from here \
@@ -1258,6 +1283,8 @@ def build_prompt(unit: dict, *, head: str, last_reviewed: str, doc_lines: int,
         status_rule=(_STATUS_RULE_GROUP if is_group else _STATUS_RULE_DOC),
         review_lenses=(_GROUP_LENSES if is_group else _DOC_LENSES),
         review_tag=REVIEW_TAG, spawn_tag=SPAWN_TAG, slug=slug,
+        # The one title, with the unit's slug filled in — see `RETIREMENT_TITLE`.
+        retirement_title=RETIREMENT_TITLE.replace("<slug>", slug),
         group_tag_hint=(f", `group-{unit['name'].casefold().replace(' ', '-')}`" if is_group else ""),
         provenance=provenance_line(slug, unit["name"] if is_group else ""),
         spawn_cap=spawn_cap,

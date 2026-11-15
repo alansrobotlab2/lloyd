@@ -2261,6 +2261,23 @@ def _module_prose() -> str:
     return " ".join(_MODULE_SRC.replace("\\\n", " ").split())
 
 
+def _retirement_spans() -> dict[str, str]:
+    """The two prose spans that explain the `.archive` filter — the `#:` comment
+    above `EXCLUDED_DIRS` and `doc_slugs.__doc__` — each folded to one line and
+    returned under its own name, so a node that checks them checks each on ITS text
+    and a fix cannot satisfy one by leaving the other's claim standing (#4056's
+    class). The `#:` markers are stripped before folding because they are
+    line-wrapping: a check that saw `#: rglob` as one word would fail on a re-wrap
+    of correct prose."""
+    comment = ("#:" + _MODULE_SRC.split("#: Reviewed docs are the top-level ones only.")
+               [1].split("EXCLUDED_DIRS = ")[0])
+    return {
+        "the EXCLUDED_DIRS comment": " ".join(
+            " ".join(c.replace("#:", " ").split()) for c in comment.splitlines()),
+        "the doc_slugs docstring": " ".join((A.doc_slugs.__doc__ or "").split()),
+    }
+
+
 def _archive_absent_in_this_checkout() -> None:
     """The fact the prose below has to match: nothing under `architecture/.archive/`
     is tracked in HEAD, and the directory is not on disk."""
@@ -2299,22 +2316,8 @@ def test_the_archive_comment_states_the_future_rglob_reason_not_a_fake_one():
     is absent and untracked **here**, `.gitignore`'s rule is what lets it come back,
     and a `rglob` would then offer a retired doc. Naming `.gitignore` is the load-
     bearing part: it is why the rail is not dead code in a tree that has none."""
-    # Both spans, not one: the comment is where a reader looks first and `doc_slugs`
-    # is where the filter is applied, and a fix that rewrote only the first left the
-    # false claim standing in the function's own docstring. Each span is checked on
-    # its own text, so deleting one of the two cannot pass on the other's wording.
-    comment = ("#:" + _MODULE_SRC.split("#: Reviewed docs are the top-level ones only.")
-               [1].split("EXCLUDED_DIRS = ")[0])
-    spans = {
-        # The `#:` markers are stripped before folding: they are line-wrapping, and a
-        # check that saw `#: rglob` as one word would fail on a re-wrap of correct
-        # prose.
-        "the EXCLUDED_DIRS comment": " ".join(
-            " ".join(c.replace("#:", " ").split()) for c in comment.splitlines()),
-        "the doc_slugs docstring": " ".join(
-            (A.doc_slugs.__doc__ or "").split()),
-    }
-    for name, span in spans.items():
+    # Both spans, not one, and each on its own text — see `_retirement_spans()`.
+    for name, span in _retirement_spans().items():
         assert span, f"{name} is empty"
         for must in ("absent", "f80c9d00", "/architecture/.archive/", ".gitignore",
                      "rglob"):
@@ -2681,3 +2684,71 @@ async def test_the_sources_own_commit_is_not_reported_as_a_moved_head(tree, monk
     res = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
     assert res["meta"]["commit"], "the fixture run did not commit, so it proves nothing"
     assert res["meta"]["live_head_moved"] == {}, res["meta"]["live_head_moved"]
+
+
+# ── #4148: a retirement is a deletion ────────────────────────────────────────
+
+
+def test_the_retirement_prompt_files_a_deletion_and_never_names_the_archive(tree):
+    """Clause 1: the one retirement route this job puts in front of a turn ends in a
+    deletion, not in a directory. `architecture/.archive/` is absent from this checkout
+    and holds nothing tracked, and `.gitignore`'s `/architecture/.archive/` rule is
+    precisely what lets it come back as an IGNORED path — which is the pair that made
+    "move it into `.archive/`" a dead end wearing a destination's clothes: bytes there
+    are outside every git ref and inside `git clean -fdx`'s reach. The prompt is the
+    surface a turn actually reads, so the route has to die here and not only in the doc
+    (`tests/test_architecture_coverage_doc_claims.py` pins the doc half)."""
+    p = _prompt_for(tree, "memory", "doc")
+    assert A.RETIREMENT_TITLE.replace("<slug>", "memory") in p, (
+        "the prompt no longer tells the turn to file a retirement under the title "
+        "`RETIREMENT_TITLE` carries, so that constant and the doc's quotation of it "
+        "are claims about a prompt that no longer exists")
+    assert ".archive/" not in p, (
+        "the prompt again names a retirement destination — a directory this checkout "
+        "does not have and git is told to ignore")
+    assert "retire architecture/" not in p, "the old 'retire … → .archive/' title is back"
+    assert "leave the doc exactly where it is" in p, (
+        "the bullet now says 'delete' without saying whose commit does it: this turn "
+        "may not write to git at all (#2604), so a retirement it is told to name has "
+        "to be one it is told to leave alone")
+
+
+def test_the_retirement_spans_call_a_retirement_a_deletion():
+    """Clause 2: the two spans that explain the `.archive` filter keep the five tokens
+    `test_the_archive_comment_states_the_future_rglob_reason_not_a_fake_one` pins, and
+    now also say what a retirement IS. The comment used to open that
+    "`architecture/.archive/` is where a retired doc goes" — present tense, in a
+    checkout with no such directory — and a reader who believes that is a reader who
+    moves a doc there instead of deleting it, which is the route #4148 exists to close.
+    What is true, and what both spans now say, is that a retirement is a deletion whose
+    archive is git history and that the filter guards a directory `.gitignore` lets
+    come back — which is why the guard and its five tokens stay standing."""
+    for name, span in _retirement_spans().items():
+        for must in ("deletion", "git history", "recreated"):
+            assert must in span, f"{name} does not say {must!r}: {span[:200]}"
+    assert A.EXCLUDED_DIRS == (".archive",), (
+        "the filter is what these spans are about. Retirement being a deletion does "
+        "not retire it: `.gitignore` still lets a stray copy of that name exist, and a "
+        "future `rglob` would offer it")
+
+
+def test_the_title_the_prompt_emits_and_the_title_the_doc_quotes_are_one_string(tree):
+    """Clause 4: the prompt and `architecture/arch-review.md` §3 are read by two
+    different actors — the review turn, and whoever picks the filed item up — and the
+    retirement has one name only while both print the same one. Before #4148 they did
+    not: the module emitted `retire architecture/{slug}.md → .archive/` while the doc
+    quoted "retire `architecture/<slug>.md` → `.archive/`", so the two already differed
+    by the backticks before anyone edited either. `RETIREMENT_TITLE` is now the single
+    source, so this node reads the module through the prompt that renders it AND reads
+    the doc as text, and asks that both carry that one string."""
+    doc = " ".join((Path(__file__).resolve().parent.parent / "architecture" /
+                    "arch-review.md").read_text(encoding="utf-8").split())
+    title = " ".join(A.RETIREMENT_TITLE.split())
+    assert title in doc, (
+        "architecture/arch-review.md §3 no longer quotes the title the module emits; "
+        f"the module's is {title!r}")
+    assert "→ .archive/" not in doc, "§3 quotes the old '→ .archive/' title again"
+    p = _prompt_for(tree, "memory", "doc")
+    assert A.RETIREMENT_TITLE.replace("<slug>", "memory") in p, (
+        "the rendered prompt is not the constant with the slug filled in, so the doc "
+        "quotes a string no turn is ever shown")

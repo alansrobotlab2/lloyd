@@ -268,10 +268,16 @@ retired on its own, the doc it lives in holds that verdict, and a section
 describing something gone is exactly what `stale` means. A **doc** never
 reports a grouping.
 
-`superseded` and `aspirational` do not trigger an archive path. The turn adds
-one paragraph under the H1 and files an item — "retire
-`architecture/<slug>.md` → `.archive/`". Moving a doc is a human's commit, or
-an autocode round's.
+`superseded` and `aspirational` file a deletion, never a move. The turn
+adds one paragraph under the H1 and files an item titled "delete
+architecture/<slug>.md (recover via
+`git show <sha>^:architecture/<slug>.md`)" — a retirement is a `git rm`
+of that one doc, and git history is its archive: the deletion commit's
+parent is where the prose stays readable, which is how the retirements
+in the opening paragraph survive and how [[index]]'s Retired section
+lists them. The sha is a placeholder because the commit that deletes a
+doc does not exist when its item is filed. Making that commit is a
+human's, or an autocode round's — never this job's.
 
 Every `filed` id is verified on disk before the ledger records it: the file
 must exist, carry the `arch-review` tag, and carry this unit's provenance line
