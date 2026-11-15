@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, harness]
 type: reference
 status: implemented
-date: 2026-10-14
+date: 2026-11-15
 ---
 
 # The agent harness
@@ -31,8 +31,9 @@ below.
 | `mcp_pool.py` | `MCPPool`: discovery with annotations, dispatch, the process-wide pool cache (`get_or_open_pool`). The HTTP path opens a session per call and is unlocked — the 2026-07-28 core is stateless, so a held connection buys nothing; only the stdio path shares one `ClientSession` and takes a per-server lock. Raises `ToolDiscoveryError` on an empty pool. The catalog is one immutable value swapped whole, refreshed at turn start on a TTL (P12) |
 | `tool_schema.py` | MCP `inputSchema` → OpenAI tool schema; bare-name advertise with the legacy `mcp__server__tool` form still parsed for replay; `add_summary_param` |
 | `tool_search.py`, `tool_search_cache.py` | progressive disclosure: a baseline toolset plus `ToolSearch` when the pool exceeds `threshold_tools` |
-| `hooks.py` | `HookRegistry` — pre/post tool-use callbacks (Inner Voice, safety, skill dispatch, the #534 grant gate) |
+| `hooks.py` | `HookRegistry` — pre/post tool-use callbacks (Inner Voice, safety, skill dispatch, the #534 grant gate, the credential-read deny) |
 | `safety.py` | the destructive-Bash patterns; the only thing between an unattended turn and `rm -rf` |
+| `secret_read_deny.py` | the credential-read deny (#3524): refuses `Read`/`Grep`/`Glob` (`READ_TOOLS`) into `~/lloyd/.env`, the credential registry and `~/.openclaw`. Armed on **every** source since #3949 — installed by `app/routers/turn_options.py` and `workers/sources/_common.py`, fail-closed, journaled as `secret_read` — where before it armed only for `capabilities.UNTRUSTED_INGEST_SOURCES`. `CREDENTIAL_CARVE_OUT_LABELS` (SSH keys, gh CLI) are the two entries an operator's own turn may read; it closes the *read* route only — `http_fetch`/`browser_navigate` can still carry a value out and `harness.egress_policy.enforce` is false |
 | `policy.py` | authority grants (#534): scopes, tiers, `current_scope` / `current_effect_scope` contextvars |
 | `skill_dispatch.py` | `/skill` invocation from a turn |
 | `microcompact.py` | intra-turn compaction: clears the oldest tool results, spilling each to disk first so the marker can name the file. Budget-driven since 2026-09-05 — it fires on the prompt's fraction of the truncation threshold, not on a tool count; the old count rule cleared 93 of 97 results on a review using 17% of its window and is now disabled outright |
@@ -192,6 +193,16 @@ load and shadows this key wholesale. `app/config.py` warns when the two
 disagree, because config.yaml is the state a fresh clone boots into and
 `enabled` decides whether the model is handed the whole catalog or a
 baseline plus `ToolSearch`.
+
+Four live blocks of this section are not in the list above, each read by code
+and each with its own off switch: `images` (how a tool-returned screenshot
+reaches a model — `route: native | aux | auto | drop`, gated on
+`models.<alias>.supports_vision`, `agent_mcp`/`app/harness/tool_images.py`),
+`component_manifest` (the served chat template hashed into every request
+manifest, `app/component_manifest.py`), `worker_prompt.drop_memory_files`
+(which memory files an unattended turn's prompt does *not* carry — `USER.md`
+today) and `egress_policy.bash_record` (#4044, the third egress switch: a
+recorder of a Bash child's destinations, not a gate, and it ships `false`).
 
 ## Tests that pin the above
 
@@ -962,7 +973,11 @@ returns a deny naming the gate and the error at once, ahead of any held
 deliver. The three gates — `safety._safety_pretool_cb`,
 `outbound_content._content_pretool_cb`, `policy._policy_pretool_cb` — register
 fail-closed, and so does the bench-contamination guard
-`bench_corpus._bench_corpus_pretool_cb`. `_pre` stays `(matcher, cb)` pairs (tests unpack them); the flag
+`bench_corpus._bench_corpus_pretool_cb` and, since #3949, the credential-read
+deny `secret_read_deny._secret_read_pretool_cb` (`install_secret_read_deny` passes
+`fail_closed=True`: a gate that cannot evaluate has not answered the question).
+It is not one of "the three gates" above because it installs outside
+`install_policy_hook`, at the two options builders. `_pre` stays `(matcher, cb)` pairs (tests unpack them); the flag
 lives index-for-index in `_pre_fail_closed`. Pins:
 `app/harness/tests/test_harness_unit.py` (the four `a_raising_*` /
 `a_raised_hook_*` tests) and
@@ -1898,8 +1913,13 @@ P1's `prompt_layout` `freeze_memory` and `replay_injected_context`, P6's
 **Pending measurements and decisions** (each deploys only on a measured gain;
 a negative result is a clean `rejected`):
 
-- **P7** — the context-rot run (tonight's window) sets
-  `compaction.microcompact.trigger_fraction` via `--decide`.
+- **P7** — run twice since, and neither run moved anything: 2026-09-24
+  (`eval/measurements/context-rot-2026-09-24.md`, whose reading is "keep
+  `compaction.microcompact` at 0.72 / 0.52; no config change") and a k-sweep
+  re-run on 2026-11-08 (`context-rot-ksweep-2026-11-08.md`, verdict "not
+  applicable: the trigger does not move", `current_trigger_tokens` 151,303).
+  `trigger_fraction` is still 0.72; re-run it when `models.primary.expect_model`
+  changes, not on a calendar.
 - **D2** — `eval/run_compaction_recall_eval.py` `summary_legacy` vs
   `summary_persisted`, then `persist_summary: true`.
 - **P3** — the same eval's `memory_flush` arm, then `memory_flush.enabled`.
@@ -1930,8 +1950,11 @@ a negative result is a clean `rejected`):
 `guard`, `where` (`hook` | `dispatch`), `session`, `session_class`
 (`chat` | `background` | `bench` | `subagent` | `none`, read off the id alone), `tool`,
 `label` (the pattern label inside a `harness safety: blocked '…'` reason), `reason`
-(400 chars), `excerpt` (200 chars) and `commit` (the tree's HEAD at first use, cached for
-the process).
+(400 chars), `excerpt` (200 chars, `EXCERPT_CHARS`) and `commit` (the tree's HEAD at first use, cached for
+the process). Since #3874 a row whose refused command folds longer than 200 characters
+*and* longer than the excerpt the row kept also carries `full_command` — the same fold, cut
+at `FULL_CMD_CHARS` (1200) — so a long refusal survives a grep; absent otherwise, which
+leaves ~68% of live rows byte-identical to the pre-#3874 shape.
 
 **Why.** Before it, a refusal's only durable witness was whatever the refusing guard chose
 to keep. The grant gate had its `grant_dispatch` table and install provenance its
@@ -1952,6 +1975,7 @@ journal exists:
   guard name comes from the callback's qualname through `denial_journal._HOOK_GUARDS`
   (`_safety_pretool_cb` → `safety`, `_policy_pretool_cb` → `grant`,
   `_content_pretool_cb` → `outbound_content`, `_bench_corpus_pretool_cb` → `bench_corpus`,
+  `_secret_read_pretool_cb` → `secret_read`,
   `write_scope_denial` → `trial_write_scope`); an unlisted callback is journaled under its
   own qualname, so it is still counted.
 - `agent_mcp.main._refused_call(name, reason, *, guard, session_id)` journals every refusal
@@ -2266,6 +2290,19 @@ the one rung with no in-band handle; its reasoning is persisted as
 `tests/test_compaction_recall_eval.py`.
 
 ## Review log
+
+- **2026-11-15 — `stale`.** The deny surface had moved under the doc since
+  #3949/#3874 and the Config list had drifted: corrected in place —
+  `secret_read_deny.py` added to the module map and to D5's fail-closed set,
+  `secret_read` added to `_HOOK_GUARDS`, `full_command` to the journal's row
+  shape, the four omitted live `harness.*` blocks named, and P7's "pending"
+  line closed (it has run twice, verdict "the trigger does not move"). The four
+  engine-build attributions are left at `0.31.1rc1.dev260` on purpose: the
+  primary now answers `0.33.0rc1.dev1148+g8f2ba935a`, `eval/tool_choice_none_probe.py`
+  still PASSES on it (7,982 at `"none"` and `"auto"`, 7,639 with `tools`
+  dropped, no tool call), so only the label is wrong — and the doc's sentences
+  are pinned to `TC_NONE_BUILD` in `tests/test_harness_doc_claims.py`, so doc and
+  constant must move in one change (filed).
 
 - **2026-10-14 — `measured`.** #2678: the `tool_choice: "none"`-with-tools
   property that P6(b) and §Structured verdicts both rest on is now measured on
