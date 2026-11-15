@@ -43,14 +43,15 @@ Four things keep this from being a stopwatch that always passes:
 from __future__ import annotations
 
 import ast
+import gzip
 import importlib.util
 import json
 import os
 import math
 import re
-import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -439,7 +440,234 @@ def assert_board_within_calibration_drift(live_board_files: int) -> None:
     )
 
 
-def assert_ledger_within_calibration_drift(live_ledger_bytes: int) -> None:
+def ledger_drift_band() -> tuple[int, int]:
+    """The bytes the live store may sit between and still be the one measured.
+
+    Both readers of the low edge take it from here: the drift check below, and the
+    drift node that decides whether to ask the store for a fold witness at all. The
+    file previously spelled `int(CALIBRATED_LEDGER_BYTES * ...)` out at four call
+    sites, and #4140 is precisely about a floor that a node asks a store to escape
+    and a helper refuses it on — those two spellings must be one number.
+    """
+    return (int(CALIBRATED_LEDGER_BYTES * (1.0 - BOARD_DRIFT_FRACTION)),
+            int(CALIBRATED_LEDGER_BYTES * (1.0 + BOARD_DRIFT_FRACTION)))
+
+
+class LedgerFoldWitness(NamedTuple):
+    """What the fold leaves behind, read off the store and its rotations.
+
+    The drift check's low edge used to be a byte magnitude, and a byte magnitude
+    cannot tell a folded store from a truncated one — it can only get staler. The
+    window was priced at `LEDGER_ARCHIVE_AGE_DAYS` x 1,992,001 B/day
+    (`scripts/groundskeeper/retention-sweep.py`, `_WITNESS_RATE_B_PER_DAY` in
+    `tests/test_retention_sweep.py`), and the live store arrives at 858,958 B/day as
+    of 2026-11-15 — 43 % of that rate — so the floor `window x rate` sits above the
+    whole legitimate sawtooth: 21,349,019 B post-fold, 22,207,977 B at the 1-day
+    cadence the scheduler resolves today, both under the floor the calibration
+    yields. No fold run at any cadence this box resolves can lift the store back
+    into the band, and the node's own message told the reader to run the fold.
+
+    So the low side is decided by what the fold is REQUIRED to keep, which a
+    truncation cannot reproduce because the ledger is append-only: a `truncate()`
+    keeps the OLDEST rows, which are the rows an archive already holds, and loses
+    exactly the rows below. Three structural facts, all read through the sweep's own
+    primitives (`_ledger_row_seconds` for an age, `_archive_plan` for the keep/drop
+    partition, `LEDGER_ARCHIVE_GLOB` for where the rotations live):
+
+    * `in_window_rows` — rows dated inside the window. The fold never archives
+      these, so a live store with none has lost recent history.
+    * `missing_rounds` — `round_id`s present in a rotation with no row left in the
+      live file. `_archive_plan` holds back every round's newest row however old it
+      is, so a folding store keeps one row per archived round forever; a truncated
+      one loses them. This is the check against an EXTERNAL population, which is why
+      it survives a store that is legitimately much smaller.
+    * `archive_holds_window_rows` — rows inside the window that a rotation holds.
+      Must be 0: the fold may not move a row it is required to keep.
+
+    Deliberately NOT a byte total of the rotations. The three rotations on this box
+    are 88,766,723 raw bytes, so "an archive covers the deficit" would found a
+    1,024-byte store — the exact case `test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check`
+    demands stay red. Rows and rounds, never bytes.
+    """
+
+    live_bytes: int
+    live_path: str
+    live_rows: int
+    in_window_rows: int
+    in_window_bytes: int
+    protected_rows: int          # kept by the fold though dated outside the window
+    protected_bytes: int
+    newest_live: float | None
+    newest_archived: float | None
+    archives: tuple[Path, ...]
+    archived_rows: int
+    archived_rounds: int
+    archive_holds_window_rows: int
+    missing_rounds: tuple[str, ...]
+
+    def describe(self) -> str:
+        """The accepted-on line the drift node prints, archives and all."""
+        return (f"{self.live_bytes:,} B live over {self.live_rows:,} rows; "
+                f"{self.in_window_rows:,} rows / {self.in_window_bytes:,} B inside "
+                f"the window; {self.protected_rows:,} fold-protected rows "
+                f"({self.protected_bytes:,} B) of rounds the fold has already "
+                f"rotated; rotations read: "
+                f"{', '.join(f'{a.name} ({a.stat().st_size:,} B gz)' for a in self.archives) or 'NONE'} "
+                f"= {self.archived_rows:,} rows / {self.archived_rounds:,} rounds, "
+                f"{len(self.missing_rounds)} of them with no live row")
+
+    def deficit_problems(self, of_bytes: int | None = None) -> list[str]:
+        """Why this store is NOT a folding store, empty if structurally it is one.
+
+        One measurement read by both sides: the drift check raises on a non-empty
+        list, and the accept-side node asserts this list is empty for the fixture it
+        just built. A pair of separate predicates is where the two drift apart.
+
+        `of_bytes` is the size the caller is asking about. A witness vouches only for
+        the bytes it read itself, so passing a number this reading does not describe
+        (the 0 and the 1,024 the truncation node parametrises, or any store swapped
+        under the measurement after the witness was taken) is itself a deficit. That
+        check lives here rather than at the accept point so it cannot be skipped by
+        the way the witness arrived: a caller that hands one over gets the same
+        comparison as a disk read, and the live store's own witness can never certify
+        a truncated file.
+        """
+        problems: list[str] = []
+        if of_bytes is not None and of_bytes != self.live_bytes:
+            problems.append(
+                f"the caller reports {of_bytes:,} bytes but this witness read "
+                f"{self.live_bytes:,} from {self.live_path}, so nothing here vouches "
+                f"for that number")
+        if not self.archives:
+            problems.append(
+                "no rotation of any kind sits beside it, so no fold has ever run on "
+                "this file")
+        if self.live_rows == 0:
+            problems.append("the live file holds no rows at all")
+        if self.in_window_rows == 0:
+            problems.append(
+                f"it holds no row dated inside the "
+                f"{_ledger_window_days()} d `LEDGER_ARCHIVE_AGE_DAYS` window, which "
+                f"the fold never archives (newest live row "
+                f"{_stamp(self.newest_live)}, newest rotated row "
+                f"{_stamp(self.newest_archived)})")
+        if self.missing_rounds:
+            shown = ", ".join(self.missing_rounds[:5])
+            problems.append(
+                f"{len(self.missing_rounds)} round(s) the fold already rotated have "
+                f"no row left in the live file ({shown}"
+                f"{' …' if len(self.missing_rounds) > 5 else ''}), and "
+                f"`_archive_plan` keeps every round's newest row however old, so a "
+                f"folding store could not lose them")
+        if self.archive_holds_window_rows:
+            problems.append(
+                f"{self.archive_holds_window_rows} row(s) inside the window sit in a "
+                f"rotation, which is the fold archiving a row it must keep")
+        return problems
+
+
+def _ledger_window_days() -> int:
+    """`LEDGER_ARCHIVE_AGE_DAYS`, read from the rung that owns it."""
+    return _sweep_module().LEDGER_ARCHIVE_AGE_DAYS
+
+
+def _stamp(seconds: float | None) -> str:
+    """A UTC day for a row timestamp, or `none` when there is no dated row."""
+    return "none" if seconds is None else time.strftime("%Y-%m-%d", time.gmtime(seconds))
+
+
+def _ledger_lines(ledger: Path) -> list[tuple[bytes, dict | None]]:
+    """The `(raw line, parsed row)` pair for one ledger, plain or gzipped.
+
+    Built exactly the way `sweep_promotions_ledger:2019-2027` builds it, because the
+    indices `_archive_plan` returns are into this list: blank lines and
+    unparseable lines arrive as `None` rather than being skipped, and the length is
+    the on-disk byte count, not the character count. The `.gz` branch is the
+    rotations, which are what a below-floor store is accounted against.
+    """
+    opener = gzip.open if ledger.suffix == ".gz" else open
+    rows: list[tuple[bytes, dict | None]] = []
+    with opener(ledger, "rb") as handle:
+        for line in handle:
+            body = line.strip()
+            try:
+                row = json.loads(body.decode("utf-8", "replace")) if body else None
+            except ValueError:
+                row = None
+            rows.append((line, row if isinstance(row, dict) else None))
+    return rows
+
+
+def ledger_fold_witness(ledger: Path, now: float | None = None, *,
+                        archives: list[Path] | None = None) -> LedgerFoldWitness:
+    """Read `ledger` and its rotations into the record the low side is judged on.
+
+    `archives` defaults to the rotations `scripts/automod/state.py`'s
+    `ledger_archives()` globs beside this ledger — the same reader the landed-outcomes
+    report and the review contract use, so this check and they cannot disagree about
+    which rotations exist. A caller may pass its own list to account a copy against
+    the real rotations, which is what the truncation fixture does; both directions
+    are exercised by `test_a_folding_store_below_the_byte_floor_is_accepted_on_its_fold_witness`.
+    """
+    mod = _sweep_module()
+    now = time.time() if now is None else now
+    window_start = now - mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
+    if archives is None:
+        from scripts.automod import state as st
+        archives = list(st.ledger_archives(ledger))
+
+    rows = _ledger_lines(ledger)
+    archive_idx, _kept = mod._archive_plan(rows, now)
+    dropped = set(archive_idx)
+    live_rounds: set[str] = set()
+    newest_live: float | None = None
+    in_window_rows = in_window_bytes = protected_rows = protected_bytes = 0
+    for i, (line, row) in enumerate(rows):
+        if row is None:
+            continue
+        if row.get("round_id"):
+            live_rounds.add(str(row["round_id"]))
+        stamp = mod._ledger_row_seconds(row)
+        if stamp is None:
+            continue
+        newest_live = stamp if newest_live is None else max(newest_live, stamp)
+        if stamp > window_start:
+            in_window_rows += 1
+            in_window_bytes += len(line)
+        elif i not in dropped:
+            protected_rows += 1
+            protected_bytes += len(line)
+
+    archived_rounds: set[str] = set()
+    archived_rows = archive_holds_window_rows = 0
+    newest_archived: float | None = None
+    for archive in archives:
+        for line, row in _ledger_lines(archive):
+            if row is None:
+                continue
+            archived_rows += 1
+            if row.get("round_id"):
+                archived_rounds.add(str(row["round_id"]))
+            stamp = mod._ledger_row_seconds(row)
+            if stamp is None:
+                continue
+            newest_archived = stamp if newest_archived is None else max(newest_archived, stamp)
+            if stamp > window_start:
+                archive_holds_window_rows += 1
+
+    return LedgerFoldWitness(
+        live_bytes=ledger.stat().st_size, live_path=str(ledger), live_rows=len(rows),
+        in_window_rows=in_window_rows, in_window_bytes=in_window_bytes,
+        protected_rows=protected_rows, protected_bytes=protected_bytes,
+        newest_live=newest_live, newest_archived=newest_archived,
+        archives=tuple(archives), archived_rows=archived_rows,
+        archived_rounds=len(archived_rounds),
+        archive_holds_window_rows=archive_holds_window_rows,
+        missing_rounds=tuple(sorted(archived_rounds - live_rounds)))
+
+
+def assert_ledger_within_calibration_drift(live_ledger_bytes: int,
+                                          fold: LedgerFoldWitness | None = None) -> None:
     """Redden when the ledger this cycle decodes is no longer the one measured.
 
     The same band as the board\'s, applied to the cycle\'s other input. Cost has
@@ -463,23 +691,124 @@ def assert_ledger_within_calibration_drift(live_ledger_bytes: int) -> None:
     `live_ledger_bytes` is a parameter and the caller reads it, exactly as the
     board arm does, so the band and the measurement are one comparison rather
     than two claims that have to be kept in agreement by hand.
+
+    The LOW edge is not a byte comparison any more (#4140). Below the floor the
+    verdict comes from `fold`, a `LedgerFoldWitness` read off the store and its
+    rotations: absent it is read from `board_presence.live_ledger()` here, and a
+    caller may hand one over to account a copy against rotations it did not write.
+    Three outcomes, and the two red ones carry different advice on purpose. Inside
+    the band, or below it with no structural deficit AND the witness measuring the
+    very bytes reported: green, and the accept line is printed. A structural
+    deficit: red, naming the rows the live file lost, and saying in as many words
+    that the fold is not the cause — the old message told the reader to run the
+    sweep, which is the operation that made the file smaller. A witness that read a
+    different number than the one reported: red with the original calibration-and-
+    FOLD advice, because nothing here vouches for that figure and a fixture's number
+    must not be certified by a reading of a file nobody opened.
     """
-    low = int(CALIBRATED_LEDGER_BYTES * (1.0 - BOARD_DRIFT_FRACTION))
-    high = int(CALIBRATED_LEDGER_BYTES * (1.0 + BOARD_DRIFT_FRACTION))
-    assert low <= live_ledger_bytes <= high, (
-        f"the cold cycle is calibrated on {CALIBRATED_LEDGER_BYTES:,} decoded "
-        f"ledger bytes and the live `promotions.jsonl` holds "
-        f"{live_ledger_bytes:,} — outside the "
-        f"+/-{BOARD_DRIFT_FRACTION:.0%} band ({low:,}..{high:,}). FOLD THE STORE "
-        f"OR RE-MEASURE, do not raise the budget: run "
-        f"`scripts/groundskeeper/retention-sweep.py --apply` and read its "
-        f"`promotions ledger:` line (a `REFUSED` there is this drift with a named "
-        f"cause and the live file untouched), and if the rung reports the window "
-        f"empty then `LEDGER_ARCHIVE_AGE_DAYS` needs the owed ruling rather than "
-        f"a bigger constant. Re-basing means setting `CALIBRATED_LEDGER_BYTES` to "
-        f"what the live file measures now. Raising `COLD_BUDGET_MARGIN` instead "
-        f"accepts the slower cycle and leaves the store unbounded."
-    )
+    low, high = ledger_drift_band()
+    if low <= live_ledger_bytes <= high:
+        return
+
+    if live_ledger_bytes > high:
+        problem = (
+            f"the cold cycle is calibrated on {CALIBRATED_LEDGER_BYTES:,} decoded "
+            f"ledger bytes and the live `promotions.jsonl` holds "
+            f"{live_ledger_bytes:,} — outside the "
+            f"+/-{BOARD_DRIFT_FRACTION:.0%} band ({low:,}..{high:,}). FOLD THE STORE "
+            f"OR RE-MEASURE, do not raise the budget: run "
+            f"`scripts/groundskeeper/retention-sweep.py --apply` and read its "
+            f"`promotions ledger:` line (a `REFUSED` there is this drift with a named "
+            f"cause and the live file untouched), and if the rung reports the window "
+            f"empty then `LEDGER_ARCHIVE_AGE_DAYS` needs the owed ruling rather than "
+            f"a bigger constant. Re-basing means setting `CALIBRATED_LEDGER_BYTES` to "
+            f"what the live file measures now. Raising `COLD_BUDGET_MARGIN` instead "
+            f"accepts the slower cycle and leaves the store unbounded."
+        )
+    else:
+        # Below the floor. The byte magnitude has nothing left to say: the floor is
+        # `window x rate` and the live arrival rate (858,958 B/day on 2026-11-15) is
+        # 43 % of the 1,992,001 B/day that priced it, so the whole legitimate
+        # sawtooth sits under it and the message below tells the reader to run the
+        # very operation that deepens the deficit (#4140). Decide it structurally —
+        # computed here when the caller did not hand one over, which is the live
+        # case, and handed in by the fixtures that account a copy against rotations
+        # they did not write.
+        if fold is None:
+            fold = ledger_fold_witness(board_presence.live_ledger())
+        problems = fold.deficit_problems(of_bytes=live_ledger_bytes)
+        if not problems:
+            print(f"ledger below the calibration floor and accepted on its fold "
+                  f"witness: {fold.describe()}")
+            return
+        if fold.live_bytes == live_ledger_bytes and fold.archives:
+            # A structural deficit, in a directory the fold demonstrably HAS run over.
+            # Running the sweep cannot help: the rotations are the proof it ran, and
+            # `_archive_plan`'s keep rule is what accounts for every row it moved. So
+            # the message names the rows the live file lost instead of sending the
+            # reader to run the operation that made the file smaller (#4140).
+            problem = (
+                f"the cold cycle is calibrated on {CALIBRATED_LEDGER_BYTES:,} decoded "
+                f"ledger bytes and the live `promotions.jsonl` holds "
+                f"{live_ledger_bytes:,}, below the {low:,} floor of the "
+                f"+/-{BOARD_DRIFT_FRACTION:.0%} band, and the fold does not account "
+                f"for it: " + "; ".join(problems) + ". What the store and its "
+                f"rotations do hold: {fold.describe()}. THIS IS NOT THE FOLD: "
+                f"`_archive_plan` keeps every row inside the "
+                f"{_ledger_window_days()} d window and every round's newest row "
+                f"however old, so no sweep run explains these away and re-running it "
+                f"only shrinks the file further (#1975). Restore the lost rows from "
+                f"the rotation that holds them, and do not raise the budget."
+            )
+        else:
+            # The witness cannot vouch for this store, for one of two reasons, and both
+            # keep the original advice: either the size reported is not the size the
+            # reading took (a fixture's number, or a store swapped under the
+            # measurement between the two calls — nothing here certifies a file nobody
+            # opened, which is #2127's never-0 rule), or there is no rotation at all,
+            # in which case the fold really may be the thing that has not run.
+            problem = (
+                f"the cold cycle is calibrated on {CALIBRATED_LEDGER_BYTES:,} decoded "
+                f"ledger bytes and the live `promotions.jsonl` is reported at "
+                f"{live_ledger_bytes:,}, below the {low:,} floor of the "
+                f"+/-{BOARD_DRIFT_FRACTION:.0%} band, and the fold does not vouch for "
+                f"it: " + "; ".join(problems) + f". The witness read "
+                f"{fold.live_bytes:,} bytes from {fold.live_path}: "
+                f"{fold.describe()}. A live ledger far from the calibrated size means "
+                f"the fold is not running, or something truncated the store. FOLD THE "
+                f"STORE (#1975): make the sweep archive the ledger and re-run, and do "
+                f"not raise the budget."
+            )
+    raise AssertionError(problem)
+
+
+def readable_ledger_rotation(ledger: Path) -> Path | None:
+    """The first rotation beside `ledger` that is what its own name claims.
+
+    `scripts/automod/state.py`'s `ledger_archives()` globs the pattern
+    `promotions-archive-*.jsonl.gz` and reads no bytes. That is right for its own
+    callers and not sufficient for the one question asked here — "is this directory a
+    folding store's, or a run's scratch dir?" — where the point of the pattern is that
+    a file can wear a rotation's name without being one. So the NAME comes from the
+    shared reader and the SUBSTANCE is checked: the file has to gunzip to at least one
+    non-empty line.
+
+    One line, never the file: this decides what a file is, not what it holds, and the
+    rotations beside this store are 65,684 rows that nobody needs to decompress to
+    answer a question about provenance.
+    """
+    from scripts.automod import state as st
+    for candidate in st.ledger_archives(ledger):
+        try:
+            with gzip.open(candidate, "rb") as handle:
+                for line in handle:
+                    if line.strip():
+                        return candidate
+        except (OSError, EOFError):
+            # `gzip.BadGzipFile` is an `OSError`; a truncated or foreign file, or one
+            # that is not a file at all, lands here and is not a rotation.
+            continue
+    return None
 
 
 def live_ledger_bytes() -> tuple[int, str]:
@@ -513,21 +842,36 @@ def live_ledger_bytes() -> tuple[int, str]:
 
     from scripts.automod import state as st
     configured = Path(st.LEDGER_PATH)
-    floor = int(CALIBRATED_LEDGER_BYTES * (1.0 - BOARD_DRIFT_FRACTION))
     if configured.is_file() and configured.stat().st_size > 0:
         size = configured.stat().st_size
-        if size >= floor:
-            return (size, f"the configured store ({configured}); the live path "
-                         f"{live} has no bytes")
-        # Below the floor with no live store to compare against, this file is a
-        # run's scratch ledger and not a shrunken store: a real trim of this
+        # #4140. This arm used to ask "is the configured store at least a
+        # calibration-minus-20% byte magnitude?", and that answer had nothing to do
+        # with what the file was. Once the live store legitimately sits BELOW that
+        # floor — which it now does, the fold plus an arrival rate at 43 % of the
+        # one that priced it — a scratch stub of the same magnitude would be
+        # believed and a real store refused, so the node under `LLOYD_AUTOMOD_STATE`
+        # would quietly stop measuring the file it is about. The question a stub
+        # actually fails is structural: a run's scratch directory never accumulates
+        # the fold's rotations, and a store the fold has ever run over always has
+        # them. The candidate list comes from `scripts/automod/state.py`'s own
+        # `ledger_archives()`, the reader the landed-outcomes report and the review
+        # contract use, so this is one fact and not a second glob to drift; it is then
+        # narrowed to one that gunzips, because a glob answers "what is it called" and
+        # this arm is asking "what is it".
+        rotation = readable_ledger_rotation(configured)
+        if rotation is not None:
+            return (size, f"the configured store ({configured}), which the fold has "
+                          f"rotated ({rotation.name}); the live path {live} has no "
+                          f"bytes")
+        # No rotation beside it and no live store to compare against, so this file is
+        # a run's scratch ledger and not a shrunken store: a real trim of this
         # corpus is what the fold rung does, and it says so in its own report
         # line. Naming it a drift would send a reader to look for a rung that
         # truncated a file that was never a store.
         raise AssertionError(
             f"no promotion ledger to measure: {live} is absent and {configured} "
-            f"holds {size:,} bytes, under the band's {floor:,}-byte floor — that "
-            f"is a run's scratch state dir, not the store "
+            f"holds {size:,} bytes with no `promotions-archive-*.jsonl.gz` rotation "
+            f"beside it — that is a run's scratch state dir, not the store "
             f"`CALIBRATED_LEDGER_BYTES` describes. Red rather than skipped: 0 or a "
             f"stub would report an unbounded store as a bounded one")
 
@@ -1327,6 +1671,15 @@ def test_the_board_is_still_the_size_the_budget_was_calibrated_on():
 def test_the_ledger_is_still_the_size_the_budget_was_calibrated_on():
     """Redden when the ledger this cycle decodes has drifted out of its band.
 
+    Two ways to be green, and the line this prints says which one it used. Inside
+    the +/-20% band is the old one. Below the floor the store is accepted only on the
+    fold witness the check reads and this node repeats verbatim — the rotations it
+    found, the in-window row count, and the fold-protected rows of rounds the archive
+    already holds — because as of #4140 the floor itself is unreachable by any fold
+    run this box resolves (21,349,019 B post-fold, 22,207,977 B at the 1-day cadence,
+    both under the 23,168,528 B the calibration yields). A green that printed no
+    witness is a store inside the band; there is no third path.
+
     The board's twin, and the reason it exists is the sentence in the table beside
     `COLD_P90_S`: a cycle decodes two things, the board and the ledger, and until
     #1975 only the first had a bound and only the first was checked. Ledger growth
@@ -1335,9 +1688,15 @@ def test_the_ledger_is_still_the_size_the_budget_was_calibrated_on():
     on the machine.
     """
     size, why = live_ledger_bytes()
-    assert_ledger_within_calibration_drift(size)
+    low, high = ledger_drift_band()
+    fold = ledger_fold_witness(board_presence.live_ledger())
+    assert_ledger_within_calibration_drift(size, fold)
+    where = (f"inside the +/-{BOARD_DRIFT_FRACTION:.0%} band"
+             if size >= low else
+             f"below the {low:,} floor and ACCEPTED ON ITS FOLD WITNESS: "
+             f"{fold.describe()}")
     print(f"ledger drift: {size:,} bytes live vs {CALIBRATED_LEDGER_BYTES:,} "
-          f"calibrated — inside the +/-{BOARD_DRIFT_FRACTION:.0%} band; {why}")
+          f"calibrated — {where}; {why}")
 
 
 @pytest.mark.parametrize("live_ledger_bytes", [
@@ -1359,6 +1718,222 @@ def test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check(
     assert f"{CALIBRATED_LEDGER_BYTES:,}" in message, message
     assert f"{live_ledger_bytes:,}" in message, message
     assert "FOLD THE STORE" in message and "do not raise the budget" in message, message
+
+
+def _folded_store_pair(tmp_path: Path, now: float) -> tuple[Path, Path]:
+    """A live store and the rotation the fold made from it, both in `tmp_path`.
+
+    Built by running the sweep's own `_archive_plan` over the real live store and
+    writing both halves out — the keep side as `promotions.jsonl`, the drop side as
+    `promotions-archive-202610.jsonl.gz` in the same directory, which is the layout
+    `scripts/automod/state.py`'s `ledger_archives()` globs. Building the fixture with
+    the code under test rather than hand-assembling rows is the whole point: the
+    accepted-on case is only worth something if it is what the fold actually leaves,
+    and then the arrival rate, the protected-row count and the round population are
+    the live store's, not invented. The live store is read, never written.
+    """
+    mod = _sweep_module()
+    rows = _ledger_lines(board_presence.live_ledger())
+    assert len(rows) > 1000, f"{board_presence.live_ledger()} is not a store"
+    archive_idx, kept_idx = mod._archive_plan(rows, now)
+    assert archive_idx, "the live store has nothing for the fold to move"
+    live = tmp_path / "promotions.jsonl"
+    live.write_bytes(b"".join(rows[i][0] for i in sorted(kept_idx)))
+    archive = tmp_path / "promotions-archive-202610.jsonl.gz"
+    with gzip.open(archive, "wb") as handle:
+        handle.write(b"".join(rows[i][0] for i in sorted(archive_idx)))
+    return live, archive
+
+
+def test_a_folding_store_below_the_byte_floor_is_accepted_on_its_fold_witness(
+        tmp_path, capsys):
+    """The store the fold leaves behind is green, and the check says what it read.
+
+    #4140's accept side, over the live store's own rows: the keep half of a real
+    `_archive_plan` pass sits under the +/-20% floor the calibration yields
+    (23,168,528 bytes), so under the old byte magnitude this fixture was the exact
+    failure the node reported — while the sweep had done nothing wrong. It is
+    accepted because the fold is required to leave two things and both are there:
+    rows dated inside the `LEDGER_ARCHIVE_AGE_DAYS` window, which the fold never
+    archives, and one row of every round the rotation already holds
+    (`_archive_plan` keeps each round's newest however old).
+
+    And the accept is stated, not silently taken. A check that stops comparing on the
+    low side and prints nothing is the false green #2127 was filed against, so the
+    witness line — which rotations, how many rows of each kind — has to be in the
+    output for this to count.
+    """
+    now = time.time()
+    live, archive = _folded_store_pair(tmp_path, now)
+    fold = ledger_fold_witness(live, now)
+    low, high = ledger_drift_band()
+
+    assert fold.live_bytes < low, (
+        f"the fixture is {fold.live_bytes:,} B, not below the {low:,} floor, so it "
+        f"is not testing the low side at all")
+    assert fold.in_window_rows > 0 and fold.protected_rows > 0, fold.describe()
+    assert fold.archive_holds_window_rows == 0, fold.describe()
+    assert fold.missing_rounds == (), fold.describe()
+    assert fold.deficit_problems() == [], fold.deficit_problems()
+    assert archive in fold.archives, fold.describe()
+
+    assert_ledger_within_calibration_drift(fold.live_bytes, fold)
+    printed = capsys.readouterr().out
+    assert "accepted on its fold witness" in printed, printed
+    assert archive.name in printed, printed
+    assert f"{fold.protected_rows:,}" in printed, printed
+
+
+def test_a_truncated_store_with_every_rotation_present_reddens_and_names_the_rows(
+        tmp_path):
+    """Append-only truncation loses the in-window rows, and the witness sees it.
+
+    #4140's red side, and the reason a rotation's BYTE total cannot be the witness:
+    the three rotations beside the live store are 88,766,723 raw bytes, so "a
+    rotation covers the deficit" would accept a 1,024-byte file — the exact case
+    `test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check` keeps
+    red. Here every rotation is present and whole, and the store is still red.
+
+    The truncation shape is the one this file makes possible: the ledger is
+    append-only, so a truncate keeps the OLDEST rows — the ones a rotation already
+    holds — and loses precisely the rows below. The fixture therefore keeps only the
+    fold-protected rows and drops every row inside the window, and the message has to
+    name what was lost instead of telling the reader to run the fold, which is the
+    operation that made the file smaller in the first place.
+    """
+    now = time.time()
+    live, archive = _folded_store_pair(tmp_path, now)
+    mod = _sweep_module()
+    rows = _ledger_lines(live)
+    window_start = now - mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
+    kept = [line for line, row in rows
+            if row is not None
+            and (s := mod._ledger_row_seconds(row)) is not None
+            and s <= window_start]
+    assert kept, "the fixture store has no fold-protected rows to keep"
+    truncated = tmp_path / "promotions.jsonl"
+    truncated.write_bytes(b"".join(kept))
+    fold = ledger_fold_witness(truncated, now, archives=[archive])
+
+    assert fold.in_window_rows == 0, fold.describe()
+    assert fold.missing_rounds, fold.describe()
+    assert fold.deficit_problems(), fold.describe()
+
+    with pytest.raises(AssertionError) as caught:
+        assert_ledger_within_calibration_drift(fold.live_bytes, fold)
+    message = str(caught.value)
+    assert "no row dated inside" in message, message
+    assert "have no row left in the live file" in message, message
+    assert archive.name in message, message
+    assert "THIS IS NOT THE FOLD" in message, message
+    assert "FOLD THE STORE" not in message, message
+
+
+def test_a_witness_of_other_bytes_never_certifies_a_size_a_caller_reports():
+    """A real store's witness cannot vouch for a number it did not read.
+
+    The accept path takes an optional witness, which is what lets a fixture account a
+    copy against rotations it did not write — and the same door lets a caller hand the
+    live store's structurally perfect witness over a truncated byte count and be
+    believed. That is a false green wearing a real measurement, and it is the exact
+    shape of the 1,024-byte case this file already keeps red, so both are seeded here
+    against the LIVE store's own witness: 13,000-plus in-window rows and 0 missing
+    rounds, a store no structural check would ever fault.
+
+    The third case is the other direction, and it has to stay green or the fix is a
+    refusal to accept anything: the same witness over the bytes it actually read is the
+    accept #4140 is for.
+    """
+    fold = ledger_fold_witness(board_presence.live_ledger())
+    assert fold.deficit_problems() == [], fold.describe()
+
+    for reported in (1024, 0):
+        with pytest.raises(AssertionError) as caught:
+            assert_ledger_within_calibration_drift(reported, fold)
+        message = str(caught.value)
+        assert "so nothing here vouches for that number" in message, message
+        assert f"{reported:,}" in message, message
+        assert "FOLD THE STORE" in message, message
+
+    assert_ledger_within_calibration_drift(fold.live_bytes, fold)
+
+
+def test_a_store_with_no_rotation_beside_it_is_never_accepted_below_the_floor(
+        tmp_path):
+    """A keep-side with no rotation is not a folding store, and the advice stays.
+
+    `_archive_plan`'s output with the drop side discarded and never rotated is
+    byte-for-byte a store the fold has NOT run over: below the floor, in-window rows
+    intact, every round still present. Accepting it on the in-window fact alone would
+    take the one message this file is supposed to keep for a fold that has not run —
+    #1975's `FOLD THE STORE` — and hand it to a directory where running the sweep is
+    precisely the remedy. So the witness reports the missing rotations as a deficit,
+    and because no rotation proves the fold ran, the low-side branch keeps the original
+    advice instead of claiming `THIS IS NOT THE FOLD`.
+    """
+    now = time.time()
+    live, _archive = _folded_store_pair(tmp_path, now)
+    fold = ledger_fold_witness(live, now, archives=[])
+    low, _high = ledger_drift_band()
+    assert fold.live_bytes < low, fold.describe()
+    assert fold.in_window_rows > 0, fold.describe()
+    assert fold.missing_rounds == (), fold.describe()
+
+    problems = fold.deficit_problems(of_bytes=fold.live_bytes)
+    assert any("no rotation of any kind" in q for q in problems), problems
+
+    with pytest.raises(AssertionError) as caught:
+        assert_ledger_within_calibration_drift(fold.live_bytes, fold)
+    message = str(caught.value)
+    assert "no rotation of any kind" in message, message
+    assert "FOLD THE STORE" in message, message
+    assert "THIS IS NOT THE FOLD" not in message, message
+
+
+def test_the_low_side_still_derives_from_the_one_calibration_and_bites_above_it(
+        monkeypatch):
+    """The low side changed mechanism; the band it kept did not, and both edges bite.
+
+    Clause 4's real teeth, since the low side is no longer a byte comparison: this
+    pins that the surviving band is still DERIVED — re-based from `CALIBRATED_LEDGER_BYTES`
+    and `BOARD_DRIFT_FRACTION` and from nowhere else, so re-basing the calibration moves
+    both edges together and no second hard-coded figure can be slipped in — and that the
+    UPPER edge still reddens, which the whole low-side change had no reason to preserve
+    and could quietly have dropped. A ceiling that stopped biting would leave a store
+    growing without bound inside a check that prints a fold witness, which is the exact
+    failure #1858 was filed against.
+
+    The derivation is checked by moving the constant: patch
+    `CALIBRATED_LEDGER_BYTES` and the band moves with it. A literal floor would sit
+    there and disagree, which is what makes this a pin and not a restatement.
+    """
+    low, high = ledger_drift_band()
+    assert (low, high) == (
+        int(CALIBRATED_LEDGER_BYTES * (1.0 - BOARD_DRIFT_FRACTION)),
+        int(CALIBRATED_LEDGER_BYTES * (1.0 + BOARD_DRIFT_FRACTION))), (low, high)
+
+    # Patched through THIS module's own name, not a spelled-out path: pytest imports
+    # this file as `test_dashboard_cold_render`, and naming it `tests.…` resolves a
+    # second copy of the module, leaving the functions under test reading an
+    # unpatched constant and the check passing for the wrong reason.
+    monkeypatch.setattr(f"{__name__}.CALIBRATED_LEDGER_BYTES", 10_000_000)
+    moved_low, moved_high = ledger_drift_band()
+    assert (moved_low, moved_high) == (8_000_000, 12_000_000), (
+        f"the band did not follow the constant it is derived from: "
+        f"{moved_low:,}..{moved_high:,}")
+
+    # And the upper edge still reddens on the live store's own witness, which the low
+    # side would otherwise have been free to swallow: a perfect fold witness over a size
+    # above the ceiling is still an unbounded store.
+    monkeypatch.undo()
+    fold = ledger_fold_witness(board_presence.live_ledger())
+    assert fold.deficit_problems() == [], fold.describe()
+    over = ledger_drift_band()[1] + 1
+    with pytest.raises(AssertionError) as caught:
+        assert_ledger_within_calibration_drift(over, fold)
+    message = str(caught.value)
+    assert f"{over:,}" in message and f"{CALIBRATED_LEDGER_BYTES:,}" in message, message
+    assert "retention-sweep.py" in message, message
 
 
 def test_a_ledger_that_outgrew_the_calibration_reddens_with_the_rung_named():
@@ -2152,29 +2727,47 @@ def test_a_sandbox_ledger_stub_never_becomes_the_drift_measurement(tmp_path, mon
         f"describes; the band is about the store, not about the run's scratch dir")
     assert "live store" in why, why
 
-    # The fallback needs the configured file to be plausible as a store, and the
-    # only test that can say so is one that sets the bar: with the calibration
-    # re-based to the fixture's own size, the configured path IS the store and the
-    # number comes from it, with `why` naming which file was read.
+    # The fallback is reached by structure, not by a byte magnitude: the configured
+    # file is believed when its own directory holds the fold's rotation. #4140
+    # removed the `CALIBRATED_LEDGER_BYTES` re-base this node used to do — a
+    # monkeypatch of a constant nobody re-measures, which is how a magnitude-gated
+    # fallback stayed testable after the magnitude stopped describing anything. The
+    # fixture now supplies the thing a scratch dir can never grow.
     monkeypatch.setattr(board_presence, "live_ledger",
                         lambda: tmp_path / "nothing-here.jsonl")
-    real_calibration = CALIBRATED_LEDGER_BYTES
-    monkeypatch.setattr(sys.modules[__name__], "CALIBRATED_LEDGER_BYTES",
-                        stub.stat().st_size)
+    rotation = stub.parent / "promotions-archive-202610.jsonl.gz"
+    rotation.write_bytes(gzip.compress(
+        b'{"round_id": "SM_old", "promoted_at": "2026-10-05T00:00:00+00:00"}\n'))
     size2, why2 = live_ledger_bytes()
     assert size2 == stub.stat().st_size, size2
     assert "configured store" in why2 and "no bytes" in why2, why2
+    assert rotation.name in why2, (
+        f"the fallback accepted without naming the rotation it accepted on: {why2}")
 
-    # And with the calibration back at the real number, that same stub is refused:
-    # below the band's floor with no live store beside it, it is a scratch file,
-    # and a node that measured it would report a sandbox as a bounded store. The
-    # number is carried in a variable, never retyped — the written-once node below
-    # reddens on a second copy of it in this file, including one in a test.
-    monkeypatch.setattr(sys.modules[__name__], "CALIBRATED_LEDGER_BYTES",
-                        real_calibration)
+    # And with the rotation removed, that same stub is refused: no fold has ever
+    # rotated this file, so it is a scratch file, and a node that measured it would
+    # report a sandbox as a bounded store.
+    rotation.unlink()
     with pytest.raises(AssertionError) as caught:
         live_ledger_bytes()
     assert "scratch state dir" in str(caught.value), caught.value
+
+    # Wearing the rotation's NAME is not being one. `ledger_archives()` globs a
+    # pattern and reads no bytes, so a glob alone would let a 200-byte text file turn
+    # this stub into a store — which is how a scratch dir gets promoted to a
+    # measurement again, the same failure this node exists to prevent, arriving by
+    # filename instead of by size. `readable_ledger_rotation` is what closes it, so the
+    # fixture is the impostor and then the real thing.
+    rotation.write_bytes(b"not a gzip file, just 200 bytes of text\n" * 7)
+    with pytest.raises(AssertionError) as caught:
+        live_ledger_bytes()
+    assert "scratch state dir" in str(caught.value), caught.value
+
+    rotation.write_bytes(gzip.compress(
+        b'{"round_id": "SM_old", "promoted_at": "2026-10-05T00:00:00+00:00"}\n'))
+    size3, why3 = live_ledger_bytes()
+    assert size3 == stub.stat().st_size, size3
+    assert rotation.name in why3, why3
 
 
 def test_no_ledger_at_all_is_red_and_not_a_zero(tmp_path, monkeypatch):
