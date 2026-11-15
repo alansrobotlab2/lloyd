@@ -392,13 +392,18 @@ Builds a dedicated bleeding-edge vLLM venv, pinned by
 vLLM drag in its own torch/flashinfer/transformers — do **not** pre-pin torch.
 It verifies the result is a working CUDA 13 / SM120 stack rather than assuming it.
 
-Two other model-specific venvs exist and are only needed if you run those models:
+Not every model-specific venv is on this box; `vllm-omni` is installed and has its
+own section below rather than a row here. In this table a row marked **not
+installed** is a venv you would have to build, and names what would build it; a row
+with no such mark is on the box. The distinction exists because a path in a table is
+read as a path to point `VLLM_VENV` at mid-incident, and a deleted one is a dead
+engine at the end of the instructions (#3136):
 
 | Venv | vLLM | Serves |
 |---|---|---|
-| `vllm-experimental` | 0.23.1rc1.dev1218 | Qwen3.5/3.6 family, 35B, 122B |
-| `vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash draft |
-| `vllm-qwen3.8` | nightly | **Qwen3.8-27B-NVFP4 (live primary)** |
+| `vllm-experimental` | 0.23.1rc1.dev1218 | Qwen3.5/3.6 family, 35B, 122B — **not installed**: nothing on either slot serves them today; `setup-vllm-experimental.sh` would rebuild it |
+| `vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash draft — **not installed**, and no `setup/` script builds it: `bin/start-laguna-s-2.1-nvfp4-dflash.sh` prints the bare `uv venv … vllm==0.25.1` command that would |
+| `vllm-qwen3.8` | nightly | Qwen3.8-27B-NVFP4 — **not installed**: still the default in `bin/start-qwen3.8-27b-nvfp4.sh` (`setup-vllm-qwen3.8.sh` rebuilds it) and the 27B weights are off-box too, so that arm needs a build *and* a download; the live primary is `vllm-flash-next-main-1110` below |
 | `vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 (125B MoE, PLE offload worker) — **not installed**: deleted, and still the default `VLLM_VENV` in `flash-next-gdn-sm12x-patch.py` and in `start-secondary.sh`; rebuild with `setup-vllm-qwen38-flash-next.sh` before pointing anything at it |
 | `vllm-flash-next-main-1110` | main @ `8f2ba935a5cb` + PDL patch | **live primary** since 2026-11-10: the same checkpoint on vLLM main, UVA PLE offload, FP8 KV cache, torch 2.14, FlashInfer 0.7.3 with prebuilt cubins + JIT cache |
 | `vllm-flash-next-main-1012` | main @ `a98247ab4db6` + PDL patch | served 2026-10-12 → 11-10; **first revert target** |

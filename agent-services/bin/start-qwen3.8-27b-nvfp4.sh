@@ -79,8 +79,15 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # without re-qualifying Laguna S 2.1 or the Qwen3.5/3.6 fleet.
 #   build:    bash setup/setup-vllm-qwen3.8.sh
 #   versions: setup/vllm-qwen3.8.versions.txt
-# Fall back without editing this file:
-#   VLLM_VENV=~/lloyd/.venvs/vllm-laguna bash bin/start-qwen3.8-27b-nvfp4.sh
+# Neither half of that exists on this box as of 2026-11-15: the venv is not in
+# `.venvs/`, and `llm/models/` holds only the Flash-Next and DiffusionGemma
+# checkpoints, so the 27B weights are off-box too. Reaching this arm means the build
+# above plus `bash setup/setup-qwen3.8-27b-nvfp4.sh`. The fallback example that used
+# to sit here pointed at the Laguna S build, which is neither installed nor buildable
+# from `setup/`, and no installed venv is qualified for this model — so the only
+# override worth naming is a venv built for it, never one of the Flash-Next builds
+# the primary runs:
+#   VLLM_VENV=~/lloyd/.venvs/vllm-qwen3.8 bash bin/start-qwen3.8-27b-nvfp4.sh   # not installed until you build it
 VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-qwen3.8}"
 MODEL_DIR="${MODEL_DIR:-$PROJECT_DIR/llm/models/unsloth-Qwen3.8-27B-NVFP4}"
 

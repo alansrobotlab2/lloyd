@@ -5337,7 +5337,12 @@ VENV_PATH = re.compile(r"\.venvs/([A-Za-z0-9][A-Za-z0-9._-]*)")
 # so a row names a venv without the `.venvs/` prefix that the surrounding prose
 # ("The venvs on this box:") supplies. `vllm-` is the prefix every one of them
 # carries, and it is what keeps a knob table from being read as a directory list.
-TABLE_VENV_ROW = re.compile(r"^\|\s*`(vllm-[A-Za-z0-9._-]+)`")
+# SETUP.md's venv table writes the bare directory name; agent-services/README.md's
+# writes the path inside the backticks (`| `.venvs/vllm-qwen3.8` | nightly |…`), so the
+# prefix is optional here rather than a second regex — one row shape, one rule. Without
+# this alternative the README's table matches zero rows and a scope aimed at it reads
+# nothing while looking like it reads the class (#4145's review found exactly that).
+TABLE_VENV_ROW = re.compile(r"^\|\s*`(?:\.venvs/)?(vllm-[A-Za-z0-9._-]+)`")
 ABSENT_MARK = re.compile(
     r"\b(deleted|not installed|gone|removed|absent|no longer|wiped|does not "
     r"exist|not a directory)\b", re.I)
@@ -5377,21 +5382,170 @@ def _revert_targets_paragraph():
     return m.group(0).splitlines()
 
 
+def _venv_table_lines(path: Path):
+    """Every table row in `path` whose first cell names a venv — the venv table
+    proper, and only it. The `setup/` tables two rows down also carry `.venvs/…`
+    paths, but there the path is a build script's OUTPUT ("Builds
+    `.venvs/vllm-qwen3.8`"), which is a true sentence about the script whether or not
+    the venv is on the box; grading those rows as rollback instructions would fail a
+    correct build table.
+
+    #4145: this function existed as a regex (`TABLE_VENV_ROW`) and was never applied
+    to anything, which is the whole reason SETUP.md could keep a row asserting a
+    deleted venv was the live primary while the paragraph below it said so. It returns
+    non-empty by assertion too: a regex that quietly stops matching would otherwise
+    report the whole class as clean, the same failure mode in the other direction.
+    """
+    assert path.is_file(), f"{path} is not in the tree"
+    rows = [ln for ln in path.read_text(encoding="utf-8").splitlines()
+            if TABLE_VENV_ROW.match(ln)]
+    assert len(rows) >= 2, (
+        f"{path.relative_to(ROOT)} yielded {len(rows)} venv-table rows — "
+        "TABLE_VENV_ROW stopped matching, so a scope aimed at it reads nothing and "
+        "looks like it reads the class")
+    return rows
+
+
+# ── the one exemption in this file, and what keeps it honest ────────────────────
+# agent-services/README.md's venv table IS read by the rule below; its rows are not yet
+# HELD to it. The file is in no tuple of the gate's `ALLOWED_GLOBS`
+# (`scripts/automod/spec.py:76`, deny-by-default), so a round that marks those rows is
+# refused at preflight — quoted from
+# `~/.local/state/lloyd-automod/rounds/SM_20261115_172237/gate.json`, preflight `detail`
+# at head c3b16e22: "paths outside the writable set: ['agent-services/README.md'].
+# Leave it out of the diff, land the rest, and report it under `human_paths`". #4156
+# carries the refused text, that line, and the one-entry widening that unblocks it.
+# So the rows are read and named in an assertion instead of skipped: a fourth row
+# naming a deleted venv fails the node TODAY, and the day a person marks these three the
+# equality fails and says to delete this set. An exemption that cannot survive its own
+# work being done is the only kind worth writing.
+README_ROWS_OPEN_ON_4156 = {
+    "vllm-experimental",   # 0.23.1rc1.dev1218 — deleted; the row says nothing
+    "vllm-laguna",         # 0.25.1 — deleted, and no setup/ script builds it
+    "vllm-qwen3.8",        # nightly — deleted, and the row adds "(live)"
+}
+README_DOC = "agent-services/README.md"
+
+
+def _venv_table_rows(path: Path) -> dict:
+    """The same rows keyed by the venv directory they name."""
+    out = {}
+    for ln in _venv_table_lines(path):
+        m = TABLE_VENV_ROW.match(ln)
+        out[m.group(1)] = ln
+    return out
+
+
+def _bad_venv_lines(lines):
+    """`(venv, line)` for every line that names a `.venvs/…` path or a first-column
+    venv which is not on the box and does not say so on that same line. Shared with
+    `test_launcher_venv_defaults.py`, which points it at launcher comments and
+    `VLLM_VENV=` examples."""
+    bad = []
+    for ln in lines:
+        names = list(dict.fromkeys(
+            VENV_PATH.findall(ln)
+            + [m.group(1) for m in [TABLE_VENV_ROW.match(ln)] if m]))
+        for name in names:
+            if not (VENV_ROOT / name).is_dir() and not ABSENT_MARK.search(ln):
+                bad.append((name, ln.strip()[:100]))
+    return bad
+
+
 def test_no_rollback_instruction_names_a_venv_that_is_not_installed():
-    """clause 5 (#3136): every `.venvs/…` path in the two scopes where a human is
-    told what to set is either installed or marked absent on the same line."""
+    """clause 5 (#3136, widened by #4145): every `.venvs/…` path in the scopes where
+    a human is told what to set is either installed or marked absent on the same
+    line. #3136 scanned two prose scopes — §1's rollback paragraph and SETUP's
+    Revert-targets paragraph. #4145 adds SETUP.md's venv TABLE, because a table is
+    what a reader copies: row `vllm-qwen3.8` said "**Qwen3.8-27B-NVFP4 (live
+    primary)**" for a venv that had been deleted, and two rows above it
+    `vllm-experimental` and `vllm-laguna` were listed with no mark either. Nothing
+    read that table, so the class the §1 fix closed stayed open one row away from the
+    paragraph that was already fixed.
+
+    `agent-services/README.md` carries the same table with the same three unmarked
+    rows. Its rows ARE read here and held to a tracked exemption rather than skipped —
+    see `README_ROWS_OPEN_ON_4156` for why a round cannot mark them itself."""
     assert VENV_ROOT.is_dir(), f"{VENV_ROOT} is not a tree to check against"
     scopes = {"architecture/vllm.md §1": _section_lines(1),
-              "SETUP.md Revert targets": _revert_targets_paragraph()}
-    bad = []
-    for where, lines in scopes.items():
-        for ln in lines:
-            for name in VENV_PATH.findall(ln):
-                if not (VENV_ROOT / name).is_dir() and not ABSENT_MARK.search(ln):
-                    bad.append((where, name))
+              "SETUP.md Revert targets": _revert_targets_paragraph(),
+              "SETUP.md venv table": _venv_table_lines(ROOT / "SETUP.md")}
+    # A scope that reads empty is not a passing scope. Without this the widening
+    # could be undone by narrowing one regex and the node would report green.
+    empty = [where for where, lines in scopes.items() if not lines]
+    assert empty == [], f"these scopes stopped yielding any lines to check: {empty}"
+    bad = [(where, *row) for where, lines in scopes.items()
+           for row in _bad_venv_lines(lines)]
     assert bad == [], (
         f"these scopes name an uninstalled venv without saying so: {bad} — the box "
         f"holds {sorted(p.name for p in VENV_ROOT.iterdir())}")
+
+    # clause 5's other table, read under the exemption above: the README's rows are
+    # measured against the box right now, and only the exact known set may fail.
+    readme_bad = _bad_venv_lines(_venv_table_lines(ROOT / README_DOC))
+    assert {name for name, _ in readme_bad} == README_ROWS_OPEN_ON_4156, (
+        f"{README_DOC}'s venv table now fails the rule with "
+        f"{sorted(set(name for name, _ in readme_bad))} but this node holds exactly "
+        f"{sorted(README_ROWS_OPEN_ON_4156)} open on #4156. Either a fourth row names "
+        "a deleted venv — fix it, it is in the writable set as of this commit — or "
+        "someone marked these rows and this exemption must go. Either way this is not "
+        "a state to widen the set past.")
+
+
+def test_the_setup_venv_table_marks_the_three_venvs_that_are_off_the_box():
+    """clause 4 (#4145), the specific rows the widening above now reads. Three venvs
+    were listed as though installed; one of them was labelled the live primary while
+    the live primary is `vllm-flash-next-main-1110` four rows down. The fix is a
+    re-label, not a deletion: each row stays with its version pin, because the
+    rebuild route is the reason the row is worth keeping."""
+    setup = ROOT / "SETUP.md"
+    rows = _venv_table_rows(setup)
+    for name in ("vllm-experimental", "vllm-laguna", "vllm-qwen3.8"):
+        assert name in rows, f"SETUP.md's venv table lost its {name} row"
+        assert not (VENV_ROOT / name).is_dir(), \
+            f"{name} is installed again, so this node's premise moved — re-read " \
+            "the table before deleting the marks"
+        assert ABSENT_MARK.search(rows[name]), \
+            f"the {name} row does not say the venv is not installed: {rows[name]}"
+    assert "(live primary)" not in rows["vllm-qwen3.8"], \
+        "the absent venv is called the live primary again: " + rows["vllm-qwen3.8"]
+    live = rows["vllm-flash-next-main-1110"]
+    assert "live primary" in live and not ABSENT_MARK.search(live), \
+        "the label did not move to the build that earns it: -1110 is installed, is "\
+        f"what agent-llm-primary.conf pins, and should carry no absent mark: {live}"
+    lead_in = setup.read_text(encoding="utf-8").split("| Venv |")[0]
+    assert "Two other model-specific venvs exist" not in lead_in, \
+        "the sentence introducing this table still asserts that the uninstalled " \
+        "venvs exist on this box"
+
+
+def test_the_readme_venv_table_is_read_by_the_rule_with_one_tracked_exception():
+    """The instrument, not the doc: agent-services/README.md's table is a scope of the
+    check above, and only the three rows #4156 owns are exempt from failing it.
+
+    This node exists because clause 5 asked for both tables to be scanned and the
+    review found the first cut of that scope passing with zero rows:
+    `TABLE_VENV_ROW` required the first cell to open with `vllm-`, while the README
+    writes it as `` `.venvs/vllm-qwen3.8` ``, so the alternative that supposedly covered
+    the file matched nothing and `assert len(out) >= 2` was the only thing that would
+    have said so. Here the file's rows are named, counted and checked against the box,
+    which is the version of "the scope reads something" that cannot be satisfied by a
+    regex nobody narrowed back."""
+    rows = _venv_table_rows(ROOT / README_DOC)
+    assert len(rows) >= 3, \
+        f"{README_DOC}'s venv table yielded {len(rows)} rows, so the rule above is " \
+        "not reading it — the prefix the first cell opens with changed"
+    deleted = {name for name in rows if not (VENV_ROOT / name).is_dir()}
+    assert deleted == README_ROWS_OPEN_ON_4156, (
+        f"{README_DOC}'s table names {sorted(deleted)} deleted venvs, and #4156's "
+        f"exemption covers {sorted(README_ROWS_OPEN_ON_4156)}. A new one is a new row "
+        "to mark in the file a person can edit; a smaller set means #4156 landed and "
+        "the exemption is dead code — delete README_ROWS_OPEN_ON_4156 and the "
+        "assertion that reads it.")
+    for name in sorted(README_ROWS_OPEN_ON_4156):
+        assert name in rows, f"{README_DOC} lost the {name} row #4156 is owed"
+        assert not ABSENT_MARK.search(rows[name]), \
+            f"the {name} row is now marked, so drop the exemption: {rows[name]}"
 
 
 def test_the_historical_0910_records_are_left_alone():

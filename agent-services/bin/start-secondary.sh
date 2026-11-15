@@ -39,9 +39,12 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # guard below untestable: proving "the guard refused without booting anything"
 # needs a fake engine whose launch a test can watch for, and with `LLAMA_SERVER`
 # hardcoded the only way to reach the guard at all was to build the real llama.cpp
-# and let it try. `VLLM_VENV` names `.venvs/vllm-qwen38-flash-next`, which is not
-# a directory on this box as of 2026-09-23 (`vllm-flash-next-main` is), so the
-# vLLM branch could not reach its exec either way without the override.
+# and let it try. `VLLM_VENV` names `.venvs/vllm-qwen38-flash-next` — not installed
+# on this box as of 2026-09-23 and still not installed on 2026-11-15 — so the vLLM
+# branch could not reach its exec either way without the override. The default stays
+# put rather than naming an installed build of another model family: an unqualified
+# venv that boots is a worse incident than a refusal that says what to build, and the
+# qwen35/lfm2 weights those arms would need are off-box too.
 VLLM_VENV="${VLLM_VENV:-$HOME/lloyd/.venvs/vllm-qwen38-flash-next}"
 LLAMA_SERVER="${LLAMA_SERVER:-$PROJECT_DIR/llm/llama.cpp/build/bin/llama-server}"
 MODEL="${MODEL:-qwen36}"
@@ -273,7 +276,15 @@ case "$MODEL" in
 esac
 
 if [[ ! -x "$VLLM_VENV/bin/python" ]]; then
+  # #3136's class, off the primary. A venv refusal is read mid-incident, so the
+  # route has to be in the refusal: this used to end at "vLLM venv not found" with
+  # nothing underneath, and the only "Build it first" line in the file belongs to
+  # the LLAMA_SERVER check above, not to this venv. The default is the deleted
+  # worker build, so the honest line is its rebuild script — same shape as
+  # start-qwen38-flash-next.sh's guard.
   echo "vLLM venv not found at $VLLM_VENV" >&2
+  echo "Build it: bash $PROJECT_DIR/setup/setup-vllm-qwen38-flash-next.sh" >&2
+  echo "   or set: VLLM_VENV=/path/to/a/venv/qualified/for/$MODEL, then re-run $0" >&2
   exit 1
 fi
 if [[ ! -f "$MODEL_DIR/config.json" ]]; then
