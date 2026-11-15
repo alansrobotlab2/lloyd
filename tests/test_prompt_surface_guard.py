@@ -1026,3 +1026,102 @@ def test_the_replay_guard_refuses_the_same_overlay_promote_would(tmp_path):
     assert len(errs) == 1, errs
     assert errs[0].startswith("USER.md is "), errs
     assert f"{ps.USER_MD_CEILING_BYTES:,}-byte ceiling" in errs[0], errs
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# #4122 clause 5: what `MEMORY_CEILINGS` is allowed to say about the names it
+# leaves out. The table's own documentation claimed that a name absent from it
+# "is not loaded into a prompt" — false about the one file loaded FIRST.
+# `app/prompt_builder.py:224` resolves `lloyd/SOUL.md`, `:545` states the read
+# order, `:558` puts it into `components` on every build, and the file reached
+# 30,582 B on 2026-09-02 with no refusal possible because no byte constant
+# exists for it and #377 rules that none shall. Prose that a loader contradicts
+# is how the next reader decides the loader is the bug, so the sentence is
+# graded here rather than trusted.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _ceilings_comment() -> str:
+    """The `#:` block that documents `MEMORY_CEILINGS`, harvested not transcribed.
+
+    A node that pasted the paragraph it wanted into an assertion would keep passing
+    while the module said the opposite somewhere else, so the block is taken as the
+    run of `#:` lines immediately above the assignment: the claim is graded against
+    whatever the table's own documentation says on the day the node runs.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "app" / "prompt_surface.py").read_text(encoding="utf-8")
+    lines = src.split("\n")
+    at = next((i for i, ln in enumerate(lines) if ln.startswith("MEMORY_CEILINGS")), None)
+    assert at is not None, "MEMORY_CEILINGS has moved out of app/prompt_surface.py"
+    block = []
+    i = at - 1
+    while i >= 0 and lines[i].startswith("#:"):
+        block.append(lines[i])
+        i -= 1
+    assert block, "MEMORY_CEILINGS lost its documentation block; nothing left to grade"
+    return "\n".join(reversed(block))
+
+
+def test_the_ceilings_table_no_longer_says_an_absent_name_is_unloaded():
+    """Clause 5, first half: the false sentence is gone and the true one replaced it.
+
+    Both refuted literals are graded against the WHOLE module, not just the block,
+    because #4122's verify command is a plain `grep -n "not loaded into a prompt"
+    app/prompt_surface.py` — a reworded comment that left the claim standing on
+    another line would still fail that check, and this node is that check.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "app" / "prompt_surface.py").read_text(encoding="utf-8")
+    for refuted in ("not loaded into a prompt", "no business being refused"):
+        assert refuted not in src, f"app/prompt_surface.py still says it {refuted!r}"
+
+    comment = _ceilings_comment()
+    assert "SOUL.md" in comment, "the block never names the file it is about"
+    assert re.search(r"FIRST", comment), comment
+    assert "prompt_builder.py" in comment, (
+        "the correction has to name the loader that contradicts the old claim, or a "
+        "reader has to take the correction on trust")
+    assert "load-bearing" in comment and "#377" in comment, (
+        "the block must state what SOUL.md IS bounded by, not only what it lacks")
+
+
+def test_soul_md_still_gains_no_byte_ceiling_from_the_correction():
+    """Clause 5, second half: fixing the comment must not smuggle in a constant.
+
+    #377's ruling (`app/prompt_surface.py:84-86`) bars a byte ceiling on SOUL.md as
+    "a second, unblessed answer to a question #377 already answered", so the half of
+    this item that was landable was the comment and the half that was not stays owed.
+    Asserted on the table, the accessor and the source: `memory_ceiling("SOUL.md")`
+    must stay None (that None is what makes `loaded_memory_dose_rate.py` print
+    `headroom_days: null` for the file), and no name carrying both SOUL and CEILING
+    may be assigned a number anywhere in the module.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "app" / "prompt_surface.py").read_text(encoding="utf-8")
+    assert set(ps.MEMORY_CEILINGS) == {"MEMORY.md", "USER.md"}, ps.MEMORY_CEILINGS
+    assert ps.memory_ceiling("SOUL.md") is None
+    assert re.search(r"SOUL\w*CEILING\w*\s*[:=]\s*\d", src) is None, (
+        "a byte-ceiling constant for SOUL.md appeared, which #377 forbids")
+    assert "no ceiling" in src and "#377 settled" in src, (
+        "the ruling that SOUL.md is bounded by ratios and markers, not bytes, has "
+        "been deleted rather than superseded by a person")
+
+
+def test_the_dose_report_shares_the_ceiling_instead_of_copying_it():
+    """No private copy of the ceiling numbers may live in the new reporter (#1069).
+
+    The failure this file exists for is a report that re-implements the guard and
+    then passes over a broken one (`9ca4fc6`). `loaded_memory_dose_rate.py` publishes
+    `ceiling` and `headroom_days` for two of these files, so it must read them through
+    `memory_ceiling`; if it hard-coded 16,384 and 25,600, the day a ceiling moved with
+    a trim in the same commit (the rule at `MEMORY_MD_CEILING_BYTES`) the series would
+    go on dividing by the retired number and every row would be quietly wrong.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "maintenance" / "loaded_memory_dose_rate.py").read_text(
+               encoding="utf-8")
+    assert "memory_ceiling(" in src, "the reporter stopped reading the shared accessor"
+    assert "from app.prompt_surface import memory_ceiling" in src, src[:400]
+    for number in ("16384", "16_384", "25600", "25_600"):
+        assert number not in src, f"the reporter carries its own copy of {number}"

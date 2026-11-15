@@ -149,9 +149,20 @@ def untyped_entry_count(text: str) -> int:
     return sum(1 for ln in body(text).split("\n")
                if _TOP_LEVEL_BULLET_RE.match(ln) and not TYPED_ENTRY_RE.match(ln))
 
-#: The loaded memory files and their ceilings, keyed by the filename each one is
-#: written as. A name absent here is not loaded into a prompt and therefore has no
-#: ceiling and no business being refused.
+#: The loaded memory files that have a BYTE ceiling, keyed by the filename each one
+#: is written as. Absence here means exactly one thing: no byte bound for a writer to
+#: refuse against. It does NOT mean the file is absent from a prompt — the sentence
+#: this one replaces was false about the file loaded FIRST: `lloyd/SOUL.md`
+#: is resolved at `app/prompt_builder.py:224`, is what the read order at `:545` puts
+#: ahead of both entries below, and lands in `components` at `:558` of every build. It
+#: reached 30,582 B on 2026-09-02 with nothing able to refuse it, and no refusal was
+#: possible precisely because its bound is the two shape ratios plus the load-bearing
+#: markers above, which is what #377 settled (see the ruling at `:84-86` refusing a
+#: size constant as "a second, unblessed answer"). So the table stays a byte-ceiling
+#: table and not an inventory of the prompt: `scripts/maintenance/
+#: loaded_memory_dose_rate.py` reports SOUL.md's dose and level with `ceiling: null`
+#: and can therefore never alarm on it. Whether it should gain an alerting-only bound
+#: is a re-settlement of #377 and is owed to a person, not to this comment.
 MEMORY_CEILINGS: dict[str, int] = {
     "MEMORY.md": MEMORY_MD_CEILING_BYTES,
     "USER.md": USER_MD_CEILING_BYTES,
