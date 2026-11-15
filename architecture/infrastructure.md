@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, infrastructure, supervisord, systemd]
 type: reference
 status: implemented
-date: 2026-10-14
+date: 2026-11-15
 ---
 
 # Infrastructure
@@ -45,12 +45,18 @@ added `agent-tts-omni.conf`, and the sentence still said *four* a week later;
 it was five until 2026-11-10 retired the vendored TTS server. A count in prose is worth no more than the drop-in
 directory it was read out of, which is why
 `tests/test_infrastructure_gpu_inventory.py` reads the confs rather than this
-line. The four engine launchers export it themselves —
+line. The four live engine launchers export it themselves —
 `agent-services/bin/start-qwen38-flash-next.sh` (with `CUDA_VISIBLE_DEVICES=1` on the next
 line), `start-secondary.sh` (taking the conf's
 `GPU="2"`; before either exec it reads the card through
 `agent-services/bin/gpu-mem.sh` — see the preflight in `architecture/djev.md`),
-`agent-services/bin/start-qwen3-tts.sh` and `agent-services/bin/start-qwen3-tts-omni.sh`. **Neither LLM program
+`agent-services/bin/start-djev.sh` (`:266-267`, taking its conf's `GPU="2"` — GPU 2's conf
+sets no `environment=` pin, so for the card's live tenant this launcher is the only pin
+that exists), and `agent-services/bin/start-qwen3-tts-omni.sh`.
+The retired vendored server's `agent-services/bin/start-qwen3-tts.sh` exports it too, for
+the day it comes back; it was in this list as a live launcher until 2026-11-10, and
+`start-djev.sh` was missing from it, which is what a prose count with no conf behind it
+costs. **No LLM program
 names it in `environment=` at all**, so a `supervisorctl` dump of the primary's
 environment shows no pin and the pin is nonetheless there. The retired
 vendored TTS server was pinned twice, in both places, to the same device;
@@ -173,14 +179,20 @@ Three venvs **on this box** can serve the primary's model family, which is why
 `vllm-flash-next-main-1110` (what the program names), `vllm-flash-next-main-1012`
 (the 10-12 build, first revert target) and the undated `vllm-flash-next-main`,
 the 09-17 build, all with the same fp8 QSA path. The launcher's *own* fallback default
-(`agent-services/bin/start-qwen38-flash-next.sh`) is `.venvs/vllm-qwen38-flash-next`, and a
-dropped `VLLM_VENV` still does not reach BF16 — it exits 1 one check earlier, at
-the venv-exists guard `:239-243`, because that venv is no longer installed; had
-it been, the fp8 QSA guard at `:578-581` would still have refused it, since the
-conf exports `KV_CACHE_DTYPE=fp8` and that build's QSA kernel has no fp8 path.
-`vllm-qwen3.8` is the same story one slot over: it is the default in
-`agent-services/bin/start-qwen3.8-27b-nvfp4.sh` (the 27B revert target) and is likewise absent.
-Both revert targets are therefore a rebuild, not a variable — `SETUP.md` Part 4
+(`agent-services/bin/start-qwen38-flash-next.sh:224`) is **not** the absent
+`.venvs/vllm-qwen38-flash-next` any more — #3136 moved it to
+`.venvs/vllm-flash-next-main`, the undated FP8 build `setup-vllm-flash-next-main.sh`
+rebuilds in place and the conf's second-named revert target. Until then the documented
+recovery died at the venv-exists guard (`:264-268`) with nothing underneath it, which is
+the failure this sentence used to describe as the design. A dropped `VLLM_VENV` therefore
+boots the 09-17 build today, and the fp8 QSA guard at `:611-619` lets it through — that
+build does have the fp8 path the conf's `KV_CACHE_DTYPE=fp8` needs.
+The two absent venvs are still what other launchers default to, and those routes remain a
+rebuild rather than a variable: `.venvs/vllm-qwen38-flash-next` in
+`agent-services/bin/start-secondary.sh:45` (a vLLM arm only — the default `MODEL=qwen36`
+never reaches it), and `.venvs/vllm-qwen3.8` (the 27B revert target) in
+`agent-services/bin/start-qwen3.8-27b-nvfp4.sh:84`. #3136 closed the class for the primary
+alone. `SETUP.md` Part 4
 (venvs) and Part 9 (LLM models) carry the builds and the weights.
 
 ## Process management
@@ -359,7 +371,7 @@ each. Stop the hands before moving the floor.
 
 | Unit | Kind | What |
 |---|---|---|
-| `lloyd-guardian.service` | user service, `WatchdogSec=90` | the automod rollback watchdog over `lloyd-mc:lloyd-backend` and `lloyd-mc:lloyd-mcp` (not the frontend): stdlib-only, runs `/usr/bin/python3` from a pinned snapshot staged by `guardian-stage.sh`; deliberately not under supervisord ([[automod]]) |
+| `lloyd-guardian.service` | user service, `WatchdogSec=90` | the automod rollback watchdog over `policy.WATCHED` — `lloyd-mc:lloyd-backend`, `lloyd-mc:lloyd-mcp` and the voice TTS `agent-tts-omni` (not the frontend): stdlib-only, runs `/usr/bin/python3` from a pinned snapshot staged by `guardian-stage.sh`; deliberately not under supervisord ([[automod]]) |
 | `lloyd-guardian-nag.timer` | user timer, every 15 min | re-announces an unresolved BROKEN state through `nag.py` → the same `Notifier` |
 | `lloyd-qmd-cleanup.timer` | user timer, 04:45 | qmd orphaned-vector cleanup |
 | `lloyd-graph-backup.timer` | user timer, 05:30 | `scripts/backup/backup-graph.sh` — the knowledge-graph store |
@@ -367,7 +379,7 @@ each. Stop the hands before moving the floor.
 | `lloyd-data-snapshot-prune.timer` | **system** timer, daily, root | `/usr/local/sbin/prune-data-snapshots.sh` — 48 hourly + 14 daily. Root because the user cannot delete a read-only snapshot, which is the point; installed by hand (`SETUP.md`), so it lives in `agent-services/systemd/system/` and is not symlinked |
 | `lloyd-vault-backup.timer` | user timer, every 15 min | `scripts/backup/backup-vault.sh` — a git snapshot of the vault kept outside it, at `Nice=15` and idle IO class because a snapshot is never urgent |
 | `lloyd-cert-renew.timer` | user timer, 04:17 | `scripts/renew-tailnet-cert.sh`. The tailnet leaf is a 90-day Let's Encrypt cert and Vite picks it **by existence, not validity**, so an expired one is served as confidently as a live one and the only symptom is every tailnet client failing TLS; the script is inert outside its 14-day window (#1727) |
-| `lloyd-persistence-window.timer` | user timer, 02:10 | `eval/run_persistence_arms.sh` — ten reps of the three persistence arms with dispatch held. Not an autonomy task by construction: the driver refuses while any queue row is in flight, and a dispatched run *is* such a row |
+| `lloyd-persistence-window.timer` | user timer, weekly (Mon) 02:10 | `eval/run_persistence_arms.sh` — ten reps of the three persistence arms with dispatch held. Not an autonomy task by construction: the driver refuses while any queue row is in flight, and a dispatched run *is* such a row |
 | `lloyd-egress-window.timer` | user timer, weekly (Mon) 06:23 | the egress two-arm canary window (`eval/egress_arms.py`), same constraint, hence its own `--drain-wait 3600`. Weekly Mondays since #2770, the cadence #2754 gave its sibling. Answers `is-enabled` → **disabled** on a box where the installer below has not been re-run since before #2774; re-running it is the arming (#2770's owed half) |
 | `thunderbird.service` | user service | Thunderbird itself, hosting the `thunderbird-mcp` extension and its bridge on `:8765` |
 | `nvidia-power-limit.service` | system service, root scope | GPU power clamp, via `/usr/local/sbin/set-gpu-power-limit.sh`. Declares 275 W for every 3090 (the fallback) and **450** W for GPU 1. GPU 1, the Xid-79 card, was raised to 450 W on 2026-09-17 (#1107). It had been set to 450 W by hand twice before that, and each boot reset it to the 400 W the unit declared at the time. A hand-set `-pl` still lasts only until the next boot, so compare the unit's `Environment=` against `nvidia-smi` |
@@ -378,24 +390,26 @@ the `ln -sf` loop in `agent-services/setup/install-services.sh` **symlinks** eve
 repo copy is the deploy — *after the installer has been re-run*. That same script now also
 **arms** what it linked (#2774): `systemctl --user enable --now` for every `.timer`, bare
 `enable` for an armable `.service`, never `--now` on a service, and never a unit without an
-`[Install]` section. Five tracked
-units were placed before the last run and sit there as plain `-rw-r--r--`
-copies, not symlinks: `lloyd-cert-renew.*`, `lloyd-egress-window.*`,
-`lloyd-persistence-window.*`, `thunderbird.service` and `voxtype.service`. For
-those the sentence above is not yet true, and #1109's "tracked and linked"
-holds only for its first half (#2714), which
+`[Install]` section. The five tracked
+units that were plain `-rw-r--r--` copies at the last review — `lloyd-cert-renew.*`,
+`lloyd-egress-window.*`, `lloyd-persistence-window.*`, `thunderbird.service` and
+`voxtype.service` — are **symlinks now**: the installer was re-run on 2026-10-17, so
+#2714's half-true case is closed and the sentence above holds for every tracked unit
+file. What remains is the guard, not the gap:
 `scripts/service_health_check.py` (`check_unit_file_links`, category `deploy`, in the
-default run) now reports as a failing row per tracked unit file rather than leaving it
-unmentioned. `thunderbird.service`
+default run) reports a failing row per tracked unit file that is a copy rather than a
+link, or a link pointing somewhere other than this tree, which is what would catch the
+five coming back as copies. `thunderbird.service`
 and `voxtype.service` are both `WantedBy=graphical-session.target` (Thunderbird hosts the
 `thunderbird-mcp` extension its 40 tools bridge over; voxtype is push-to-talk),
 so `enable` runs them with the desktop, not via supervisord.
 `lloyd-graph-backup.{service,timer}` (05:30) reach the same `copy:` verdict from a
 different starting point: the pair was live with nothing in git owning it until #2864
 tracked it into `agent-services/systemd/`, and the only record of what ran was
-`SETUP.md`'s inline unit text — which is why that block is now gone. The deployed
-copies predate the tracking, so their two rows are #2714's finding and not a
-regression until `install-services.sh` re-runs. The
+`SETUP.md`'s inline unit text — which is why that block is now gone. Its two deployed
+entries are symlinks like every other tracked unit as of 2026-10-17, so the `copy:` rows
+#2714 recorded for them are gone too; the history of how they came to be tracked is the
+part still worth reading. The
 root-only
 `nvidia-power-limit.service` is skipped
 by that glob (`SYSTEM_SCOPE_UNITS` in `install-services.sh`, #1108) — it used
@@ -724,6 +738,29 @@ triage and implementation ([[automod]]), research, digests and session
 mining. The systemd timers above are the only wall-clock schedules.
 
 ## Review log
+
+- **2026-11-15 — stale.** Whole-document pass against `f9a6daa14d0d`. Wrong against the
+  tree, and corrected here: §Model slots said the primary launcher's own `VLLM_VENV`
+  fallback is the uninstalled `.venvs/vllm-qwen38-flash-next` and that a dropped
+  `VLLM_VENV` exits 1 at the venv-exists guard — #3136 moved that fallback to the
+  installed undated `vllm-flash-next-main` (`:224`), so the documented recovery now boots
+  the 09-17 build instead of dying, and the two guards are at `:264-268` and `:611-619`
+  rather than `:239-243`/`:578-581`; §GPUs named `start-qwen3-tts.sh` (retired 2026-11-10)
+  as a live launcher and omitted `start-djev.sh`, which is the only pin for GPU 2's live
+  tenant since its conf sets no `environment=` CUDA line; the unit paragraph still said
+  five tracked units sit as plain copies when the installer re-ran on 2026-10-17 and all
+  five plus `lloyd-graph-backup.*` are symlinks now (measured with `check_unit_file_links`
+  and `ls -l ~/.config/systemd/user/`); the guardian row named two watched programs while
+  `policy.WATCHED` is three since the TTS watch, disagreeing with the §Process-management
+  sentence two pages up; `lloyd-persistence-window.timer` said `02:10` where its own
+  sibling's row already credits #2754 with making both weekly Mondays. Re-read and
+  unchanged: the five-card GPU roster and every power limit (`nvidia-smi` and the confs
+  agree, `test_infrastructure_gpu_inventory.py` green at 22), the 12 `conf.d` programs and
+  their serving ports against both tables, `startsecs` 900/25/15, the live listener set for
+  every §Ports row, the 180/150 GiB ram-gate pair read from `ram-boot-gate.sh`, the
+  275 W/450 W declaration, `memwatch.py`'s 15%/15 s/120/30 thresholds, the alert
+  fan-out's six channels and `policy`'s 900 s/3600 s repeats, every timer's `OnCalendar`,
+  the tailnet leaf valid to 2026-12-19, and `clients.json` still `{}`. Filed #4145, #4146.
 
 - **2026-10-14 — current for the two tables that answer "what is running"
   (#2712, round SM_20261014_164921).** §Ports carried no `8501` row while
