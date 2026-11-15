@@ -1,6 +1,6 @@
 """Fleet surveillance for the autonomy scheduler — the alarms, not the dispatch.
 
-Six steps live here, and none of them is about enqueuing:
+Seven steps live here, and none of them is about enqueuing:
 
 - the grossly-overdue stall alarm (#24/#48/#75, #1550), `_grossly_overdue`, with the
   operator-pause clause that says when a held pool, not a stuck scheduler, owns a
@@ -20,7 +20,14 @@ Six steps live here, and none of them is about enqueuing:
   failing;
 - the unparseable-task-file scan (#939), `_scan_unparseable_task_files`, on its own
   30 min cadence, which is the only thing that notices a task file the scheduler
-  silently drops.
+  silently drops;
+- the engine-build check (#4137), `_check_engine_build`, on its own 6 h cadence and last
+  in the tick, behind both stall alarms — the caller
+  `scripts/maintenance/engine_build_drift.py` never had, which is why a true DRIFT sat at
+  exit 1 for 32 days with the doc attributing the property to a build that no longer
+  answered. It is the one seat here that reaches the engine, and only for `/version`, so
+  its position in the tick is what keeps a slow answer off the stall alarms' path. A
+  detector, not an alarm: it adds no stall assertion and no throughput class.
 
 This is the fleet-watch seat's roster of record (#3516). The steps are decided in one
 place, `tick()`, and `tests/test_fleet_watchdog.py` derives them from its source and
@@ -2001,8 +2008,12 @@ async def tick(queue: WorkQueue) -> None:
     The body is the surveillance the dispatch tick used to run, in the order it ran it,
     with the dispatch half left behind: the vLLM probe and gate, `recover_stuck_tasks`
     (which resets claims so dispatch can resume them) and `get_due_tasks` all stay in
-    `scheduled_task.enqueue_if_due`. It never probes the model server: watching needs
-    nothing from it, which is exactly what #938 was about.
+    `scheduled_task.enqueue_if_due`. It never probes the model server on the alarm path:
+    watching the fleet needs nothing from it, which is exactly what #938 was about. The
+    one read that does reach the engine is #4137's engine-build check, which asks
+    `/version` — not `/v1/models`, so it cannot trip #938's 404-parked-the-whole-pool
+    failure — through a subprocess, on a 6 h cadence, positioned below both stall alarms
+    so a slow answer cannot delay them.
 
     Raises are the seat's business — `WorkerPool._watch_fleet` catches, because an
     alarm's own failure must not take the loop that enqueues everything down with it.
@@ -2176,6 +2187,23 @@ async def tick(queue: WorkQueue) -> None:
                     "nextrun stall alarm not posted, declared parks only: %s",
                     _nextrun_alert_message(stalled))
 
+    # #4137: the engine-build detector, on its own 6 h cadence. It is the caller
+    # `architecture/harness.md` P6(b) used to describe as turning a re-run into
+    # something that happens, which it was not until this line: the script had been
+    # exiting 1 on a real drift for 32 days with nothing invoking it. Its one
+    # `GET /version` goes through `workers.maintenance` as a subprocess, so the verdict
+    # is the script's and not a second implementation here, and an engine that will not
+    # answer is recorded as UNKNOWN and not alerted.
+    #
+    # The placement is load-bearing and is the census's own argument below, borrowed:
+    # this is the only detector in the loop that spawns a process and waits on a socket,
+    # so it goes AFTER both stall alarms — an engine that stalls its 5 s read must not
+    # become the reason a stall alert went out late. (It goes before the census, which
+    # keeps the ordering claim in that comment true.) `tests/test_engine_build_drift.py`
+    # pins the order, because a re-order here is invisible in the arm's own tests: every
+    # one of them calls `_check_engine_build` directly and none of them runs the loop.
+    await _check_engine_build(queue)
+
     # The worker pool's failure-throughput census (#2890). Last in the tick, which is
     # the whole of its safety argument and is stated here rather than hidden in a
     # try/except: `tick` guards none of its alarms individually — the seat that calls
@@ -2189,3 +2217,153 @@ async def tick(queue: WorkQueue) -> None:
     # the POOL ran, which no source's dispatch switch has any standing to define away
     # (#1682).
     await _census_failure_throughput(loop, queue)
+
+
+# ── #4137: the arm that runs the engine-build detector ─────────────────────────
+#
+# `scripts/maintenance/engine_build_drift.py` decided correctly for 32 days and told no
+# one. It printed `engine-build-drift DRIFT: recorded build 0.31.1rc1.dev260+ga98247ab4
+# … live build 0.33.0rc1.dev1148+g8f2ba935a` with RC=1 the whole time, because nothing
+# ran it: no job in `workers/`, nothing in `config.yaml`, no rung of any gate — and
+# `architecture/harness.md` P6(b) described the script as "the detector that turns that
+# re-run into something that happens", which is the sentence that let the class stay
+# closed. This is the caller that sentence was promising.
+#
+# It goes here rather than into a cron because everything this needed is already in this
+# module: a scheduler loop that runs whether or not a task is due, a watermark store for
+# "when did I last ask" and "when did I last tell a person", and `_alert`, the one route
+# that reaches a human on this box. The detector's own exit-code contract stays its own:
+# `workers.maintenance.engine_build_verdict` runs it as a subprocess and reads the
+# verdict word off its line, so this file holds no second definition of what DRIFT means
+# and cannot drift from it.
+#
+# What an engine rebuild actually costs a reader: `harness.finalizer` and
+# `harness.max_turns_wrapup` (`models: [primary]`) rest on `tool_choice: "none"`
+# rendering the same prompt as `"auto"`. That is per-build. On a DRIFT the right action
+# is to re-run `eval/tool_choice_none_probe.py` and re-record the build beside the
+# result — which is a decision about the engine and its measurement, so the alarm asks
+# for it rather than silently re-recording it. An UNKNOWN — the engine will not name its
+# build — is recorded and NOT alerted: on this box the watchdog runs while the engine is
+# restarting for entirely ordinary reasons, and a wake-up that fires during every
+# restart is a wake-up that gets ignored during the one it is for.
+
+#: How often to ask. The thing watched moves once per engine rebuild — weeks apart on
+#: this box — so this is a backstop for a rebuild that went by without anyone
+#: re-recording the build, not a poll of anything live. Six hours is the interval the
+#: unparseable-task scan above uses, chosen so a second slow arm does not double the
+#: worst-case work in one tick.
+_ENGINE_BUILD_SCAN_SECONDS = 6 * 3600
+
+#: When this process last ran the detector, and when a DRIFT last reached a person. The
+#: alert interval is a day: the condition persists until someone re-measures, and a
+#: person reading the same DRIFT every six hours stops reading it.
+#:
+#: Two keys with two different readers, on purpose. The alert key goes through
+#: `_last_alert_instant`/`_record_alert_instant`, which is the pair that reads a
+#: cooldown as a fact about the fleet rather than this process (#2662). The scan stamp is
+#: read and written straight through `wm_get`/`wm_set` instead: both helpers word their
+#: failure logs and their docstrings as alert cooldowns ("%s stall alarm: the persisted
+#: alert instant…"), so routing a "when did we last run the check" stamp through them
+#: makes the log claim a cooldown read that is not one, and a cadence that silently
+#: inherits an alert's log line is how an interval looks like an alarm to the next reader.
+_ENGINE_BUILD_SCAN_KEY = "engine_build_scanned_at"
+_ENGINE_BUILD_ALERT_KEY = "engine_build_drift_alerted_at"
+_ENGINE_BUILD_ALERT_INTERVAL_SECONDS = 24 * 3600
+
+#: The detector's last reading, kept beside the other two so a Mission Control row can
+#: show the build verdict without running anything (#3891).
+_ENGINE_BUILD_STATE_KEY = "engine_build"
+
+#: Its own watermark SOURCE, not `NAME`. The stall alarms keep their alert instants
+#: under `NAME` and `tests/test_fleet_watchdog.py` reads that source back to prove an
+#: instant is durable queue state — a scan stamp that merely happens to parse as an
+#: instant is a second row there and a false alarm of a different kind. So the arm's
+#: three rows live under their own source, read and written directly.
+_ENGINE_BUILD_WM_SOURCE = "fleet-watchdog-engine-build"
+
+
+def _eb_wm_get(queue: WorkQueue, key: str):
+    """The arm's own watermark read; an unreadable store reads as "never happened".
+
+    Returning None on failure is the loud side for both callers: a cadence that cannot be
+    read runs the check again, and an alert cooldown that cannot be read re-posts an alarm
+    that is still true. Neither can silently stop checking.
+    """
+    try:
+        return queue.wm_get(_ENGINE_BUILD_WM_SOURCE, key)
+    except Exception:
+        logger.exception("engine-build check: watermark %s unreadable", key)
+        return None
+
+
+def _eb_wm_set(queue: WorkQueue, key: str, value: str) -> None:
+    try:
+        queue.wm_set(_ENGINE_BUILD_WM_SOURCE, key, value)
+    except Exception:
+        logger.exception("engine-build check: watermark %s not persisted", key)
+
+
+def _engine_build_message(reading: dict) -> str:
+    """The alarm, with the detector's own line in it verbatim.
+
+    Not re-worded: the line names both builds — the one `finalizer.py`'s docstring
+    records and the one `/version` answers — and the re-record route, which is the whole
+    action. Paraphrasing it here would drop one of the two builds, and a drift alarm that
+    names only the live build cannot be acted on without a second command.
+    """
+    return (
+        "Engine build drift: the build the primary serves no longer matches the build "
+        "the `tool_choice: \"none\"` property was measured on, so the max-turns wrap-up "
+        "and the finalizer are resting on a measurement of an engine that is not "
+        "answering.\n\n"
+        f"{reading.get('line') or '(the detector printed nothing)'}\n\n"
+        "Re-run `eval/tool_choice_none_probe.py` and record the build beside the result: "
+        "`Re-verified <date> on <build>` in `app/harness/finalizer.py`, whose docstring "
+        "is the record this check reads."
+    )
+
+
+async def _check_engine_build(queue: WorkQueue, *, now=None, runner=None,
+                              base_url: str | None = None) -> dict | None:
+    """Run the engine-build detector on its cadence; alert a person on a DRIFT.
+
+    Returns the reading when the detector was actually run this call, None when the
+    cadence said not yet — the shape the unparseable-task scan above uses, so a caller
+    inside the loop can tell "nothing to do" from "nothing found".
+    """
+    import json
+
+    from app import autonomy
+    from workers import maintenance
+
+    now = now or autonomy._utcnow()
+    # Read directly rather than through `_last_alert_instant`, for the reason on the
+    # key above. An unreadable or absent stamp counts as "never run", which is the side
+    # that runs the check rather than the side that never does.
+    last = _parse_iso_safe(_eb_wm_get(queue, _ENGINE_BUILD_SCAN_KEY))
+    if last is not None and (now - last).total_seconds() < _ENGINE_BUILD_SCAN_SECONDS:
+        return None
+
+    loop = asyncio.get_event_loop()
+    argv = maintenance.engine_build_argv(base_url=base_url)
+    reading = await loop.run_in_executor(
+        None, lambda: maintenance.engine_build_verdict(argv, runner=runner))
+    # Stamp and reading are written before any alert goes out and whether or not one
+    # does: the scan stamp is what makes the next tick wait six hours, and a reading
+    # that reached no person is still the last thing the detector said (#2662's
+    # ordering, same reason as the stall arm).
+    _eb_wm_set(queue, _ENGINE_BUILD_SCAN_KEY, now.isoformat())
+    _eb_wm_set(queue, _ENGINE_BUILD_STATE_KEY, json.dumps(reading, default=str))
+
+    if reading.get("verdict") != "DRIFT":
+        return reading
+    raw_drifted = _eb_wm_get(queue, _ENGINE_BUILD_ALERT_KEY)
+    drifted = _parse_iso_safe(raw_drifted) if raw_drifted else None
+    if drifted is not None and (
+            (now - drifted).total_seconds() < _ENGINE_BUILD_ALERT_INTERVAL_SECONDS):
+        return reading
+    # Record first, dispatch second (#1704): a send that fails must still spend the
+    # cooldown rather than hand the next process a fresh window.
+    _eb_wm_set(queue, _ENGINE_BUILD_ALERT_KEY, now.isoformat())
+    await _alert(_engine_build_message(reading))
+    return reading

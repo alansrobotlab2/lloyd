@@ -1201,8 +1201,8 @@ def test_the_canary_registry_row_names_the_endpoint_state_as_what_sets_the_arm()
 #: The build the primary answers on `/version`, and the date the property was
 #: re-measured on it. Both come from the probe's own report, which prints the
 #: build it decided against.
-TC_NONE_BUILD = "0.31.1rc1.dev260+ga98247ab4"
-TC_NONE_MEASURED_ON = "2026-10-14"
+TC_NONE_BUILD = "0.33.0rc1.dev1148+g8f2ba935a"
+TC_NONE_MEASURED_ON = "2026-11-15"
 
 P6_HEADING = "### P6 — `tool_choice` levers"
 STRUCTURED_VERDICTS_HEADING = "### Structured verdicts (the finalizer)"
@@ -2135,3 +2135,149 @@ def test_the_2026_11_02_egress_arm_baseline_is_recomputed_from_its_own_window():
         assert forbidden not in body, forbidden
     assert "not a refusal" in body and "turn-budget non-completion" in body, body[-600:]
     assert "not a change against" in body or "denominator is its own" in body, body[:400]
+
+
+# ── #4137 clause 3: no architecture doc may name another serving build ─────────
+#
+# The 2026-11-15 review found the same stale build string in TWO units — three
+# present-tense sentences in `harness.md` and one in `vllm.md` §2 — and the pins above
+# could not see the second one because they only read `harness.md`. Doc-versus-constant
+# cannot catch a doc that moved somewhere else, so this node asks the other question: take
+# the build from `app/harness/finalizer.py`'s `Re-verified <date> on <build>` line —
+# through `engine_build_drift.py::recorded`, so this file holds no literal to disagree
+# with it — and sweep every architecture doc for any other build stated as the one
+# serving the primary.
+
+#: What a vLLM wheel version looks like. Deliberately loose: the point is to catch a
+#: build string wherever it is written, including one this rule has never seen.
+_BUILD_TOKEN = re.compile(r"\b\d+\.\d+\.\d+rc\d+\.dev\d+\+g[0-9a-f]{7,}\b")
+
+#: Words that make a build string a claim about NOW rather than a record of then. A
+#: sentence in a review log is dated by construction and is excluded below, so these
+#: markers only need to separate "the build serving the primary is X" from "on 2026-10-12
+#: it was rebuilt at X" — which is exactly the distinction the item's own correction
+#: insists on: dated lines are history and must not move.
+_PRESENT_MARKERS = ("today", "serving", "serves", "the wheel reports", "answers")
+
+#: Everything after this heading in an architecture doc is a dated log, not a claim.
+_REVIEW_LOG_HEADING = "## Review log"
+
+
+def _recorded_build() -> str:
+    """The build `finalizer.py`'s docstring records, parsed and not re-spelled."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "engine_build_drift_for_doc_claim", ROOT / "scripts/maintenance/engine_build_drift.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    got = mod.recorded()
+    assert got is not None, "finalizer.py records no build, so this rule has no anchor"
+    return got[1]
+
+
+def _present_tense_builds(text: str) -> "list[str]":
+    """Every build the doc states as serving now, excluding its dated review log."""
+    return _live_build_claims(text, _PRESENT_MARKERS)
+
+
+#: The two files whose own prose says what the 7,982/7,639 figures were measured on.
+#: They are not architecture docs, which is why the sweep below missed the copy of the
+#: stale build sitting in `tests/test_tool_choice_none_probe.py`'s header — the blind
+#: spot the 2026-11-15 review found in this round's own instrument.
+_PROBE_PROSE = ("eval/tool_choice_none_probe.py", "tests/test_tool_choice_none_probe.py")
+
+#: Present-tense markers for prose about the engine on THIS box, where a sentence about
+#: the docs says "serving"/"today" and a sentence about the probe says "the live primary".
+_LIVE_ENGINE_MARKERS = _PRESENT_MARKERS + ("live primary", "the primary")
+
+#: The sentence that sat in the probe test's header until this round, verbatim, as the
+#: control's input. It named the build the figures were first taken on next to "the live
+#: primary", which reads as a claim about the box and was false on the day it was read.
+PROBE_OLD_HEADER = (
+    "The stubs answer with the numbers measured on the live primary on 2026-10-14\n"
+    "(build `0.31.1rc1.dev260+ga98247ab4`): 7,982 prompt tokens at both `\"auto\"` and\n"
+    "`\"none\"` with a two-tool array, 7,639 for the tools-dropped control")
+
+
+def _live_build_claims(text: str, markers: "tuple[str, ...]" = _LIVE_ENGINE_MARKERS
+                       ) -> "list[str]":
+    """Every build the text states as the one on this box, dated log excluded."""
+    head = text.split(_REVIEW_LOG_HEADING, 1)[0]
+    found: "list[str]" = []
+    for match in _BUILD_TOKEN.finditer(head):
+        window = head[max(0, match.start() - 200):match.end() + 200].lower()
+        if any(marker in window for marker in markers):
+            found.append(match.group())
+    return found
+
+
+def test_the_probe_files_prose_never_repeats_a_serving_build_of_its_own():
+    """The 2026-11-15 review's second finding: the sweep below reads `architecture/*.md`,
+    so the third copy of the stale build — in the probe test's header, which attributed
+    the 7,982/7,639 figures to the build that served on 2026-10-14 while naming it "the
+    live primary" — stayed invisible to an instrument built for exactly this class.
+
+    The two probe files now state the DATE of each measurement and name no build of their
+    own, deferring to `app/harness/finalizer.py`'s `Re-verified` line, so the assertion
+    here is the flat one: no build token at all in their module docstrings, whatever the
+    wording around it. A fixture's stand-in `/version` answer (`BUILD` in that file) is a
+    statement about a stub, not about this box, and is deliberately outside this node,
+    which reads the docstring only.
+    """
+    for rel in _PROBE_PROSE:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        doc = ast.get_docstring(ast.parse(text)) or ""
+        assert doc, f"{rel} has no module docstring, so there is nothing to read"
+        named = _BUILD_TOKEN.findall(doc)
+        assert not named, (
+            f"{rel}'s module docstring names {sorted(set(named))}. Prose in a probe "
+            "states the DATE it was measured and points at `app/harness/finalizer.py`'s "
+            "`Re-verified` line for the build: a second copy of the string in prose is "
+            "the copy that went stale twice (#2678, #4137).")
+        assert "finalizer.py" in doc, (
+            f"{rel}'s docstring names no build and also does not point at the one "
+            "record that does, so a reader has nowhere to look")
+
+    # Control: the sentence this replaced, run through the same reading, is caught. The
+    # marker that makes it a claim about the box is "live primary", which is not one of
+    # the architecture docs' markers — the reason the doc sweep could not see it.
+    assert _live_build_claims(PROBE_OLD_HEADER) == ["0.31.1rc1.dev260+ga98247ab4"], (
+        "the pre-fix header no longer reads as a live-engine attribution, so the "
+        "assertion above is grading a pattern that was never the bug")
+    assert _live_build_claims(PROBE_OLD_HEADER, _PRESENT_MARKERS) == [], (
+        "'live primary' is not doing the work: the doc sweep's markers alone would have "
+        "caught this copy, which is what the review said they would not")
+
+
+def test_no_architecture_doc_names_a_serving_build_other_than_the_recorded_one():
+    """Clause 3: one build is the build serving the primary, in every doc that says so.
+
+    The positive leg is what keeps this from being a scan that found nothing: the three
+    `harness.md` attributions and the `vllm.md` §2 sentence have to be among what the sweep
+    sees, so a re-word that hides them from the pattern fails here instead of going
+    quietly green — the failure mode that let `vllm.md:69` age out of sight for 32 days.
+    """
+    want = _recorded_build()
+    docs = sorted((ROOT / "architecture").glob("*.md"))
+    assert docs, "no architecture docs to sweep, so this node proves nothing"
+
+    seen: "list[str]" = []
+    for doc in docs:
+        stale = [b for b in _present_tense_builds(doc.read_text(encoding="utf-8"))
+                 if b != want]
+        assert not stale, (
+            f"{doc.name} states {sorted(set(stale))} as the build serving the primary, "
+            f"but `app/harness/finalizer.py` records {want}; the drift script "
+            f"(scripts/maintenance/engine_build_drift.py) exits 1 on exactly this")
+        seen.extend(_present_tense_builds(
+            doc.read_text(encoding="utf-8")))
+
+    assert seen, (
+        "the sweep matched no build string in any architecture doc at all — either the "
+        "serving attributions were re-worded out of the pattern or the docs stopped "
+        "naming a build, and a scan that finds nothing is not a clean result")
+    assert len(seen) >= 4, (
+        f"only {len(seen)} present-tense build attributions found; the three in "
+        f"harness.md plus the one in vllm.md §2 are the known set, so the sweep has gone "
+        f"blind to them: {seen}")

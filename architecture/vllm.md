@@ -65,8 +65,8 @@ fp8` is emitted from `KV_CACHE_DTYPE` (§3), and `--engram-config
 offload (§8) — on the older worker build the same request goes out as
 `VLLM_PLE_CPU_OFFLOAD=1` plus `--distributed-executor-backend mp` instead.
 
-vLLM main at `a98247ab4db6` (2026-10-10; the wheel reports
-`0.31.1rc1.dev260+ga98247ab4`) — a **main** build, not a release, a habit that
+vLLM main at `8f2ba935a` (the venv is dated 2026-11-10; the wheel reports
+`0.33.0rc1.dev1148+g8f2ba935a`) — a **main** build, not a release, a habit that
 started when the FP8 QSA path §3 depends on was newer than any release. The
 history: until 2026-09-17 that path was PR #55557 overlaid from a contributor's
 fork onto `0.28.1rc1.dev661+g6ee5bb0a0`; the PR merged as `dff1bde84dd6` on

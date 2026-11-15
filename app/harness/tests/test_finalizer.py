@@ -883,8 +883,8 @@ async def test_an_uncapped_copy_of_any_of_the_eight_falls_back_to_the_budget_adv
 # re-checked it; `eval/tool_choice_none_probe.py` is the instrument that keeps it
 # honest after the next rebuild.
 
-TC_NONE_BUILD = "0.31.1rc1.dev260+ga98247ab4"
-TC_NONE_MEASURED_ON = "2026-10-14"
+TC_NONE_BUILD = "0.33.0rc1.dev1148+g8f2ba935a"
+TC_NONE_MEASURED_ON = "2026-11-15"
 MEASUREMENT_DATE = "2026-09-08"
 
 #: The attribution this replaces, verbatim, as the control's input.

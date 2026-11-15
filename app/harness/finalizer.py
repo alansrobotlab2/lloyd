@@ -22,8 +22,8 @@ yields plain content with no tool parser attached, `response_format.type ==
 "json_schema"` maps to the guided decoder, and the grammar applies after
 `</think>` (`enable_in_reasoning` is False), so thinking can stay on.
 
-Re-verified 2026-10-14 on 0.31.1rc1.dev260+ga98247ab4
------------------------------------------------------
+Re-verified 2026-11-15 on 0.33.0rc1.dev1148+g8f2ba935a
+------------------------------------------------------
 `tool_choice: "none"` with the tools array attached renders the same prompt as
 `"auto"` — 7,982 `prompt_tokens` against 7,639 with `tools` dropped, so the
 343 tokens of tool schema are still inside the prompt at `"none"` — and emits

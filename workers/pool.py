@@ -2012,8 +2012,9 @@ class WorkerPool:
         record — the stall alarms `_grossly_overdue` and `_queue_starving`, the
         lost-cycle ledger `_window_losses` (#2552), the `next_run` stall assertion
         `_next_run_stalled`, the failure-throughput census
-        `_census_failure_throughput` (#2890) and the unparseable-task-file scan
-        `_scan_unparseable_task_files`. The names are repeated here so a reader of
+        `_census_failure_throughput` (#2890), the unparseable-task-file scan
+        `_scan_unparseable_task_files` and the engine-build check
+        `_check_engine_build` (#4137). The names are repeated here so a reader of
         this file sees what the seat is running, and
         `tests/test_fleet_watchdog.py` derives them from `tick()`'s own source and
         fails if either list is missing one (#3516): the first time this

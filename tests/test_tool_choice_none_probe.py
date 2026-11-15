@@ -9,10 +9,16 @@ engine still render the `tools` array into the prompt when `tool_choice` is
 wrap-up ship on it, and a build that started dropping `tools` there is silent —
 the answer still arrives, the prefill just costs full price.
 
-The stubs answer with the numbers measured on the live primary on 2026-10-14
-(build `0.31.1rc1.dev260+ga98247ab4`): 7,982 prompt tokens at both `"auto"` and
-`"none"` with a two-tool array, 7,639 for the tools-dropped control, so the
-tool schema is worth 343 tokens of the rendered prompt.
+The stubs answer with the numbers measured on the live primary: 7,982 prompt
+tokens at both `"auto"` and `"none"` with a two-tool array, 7,639 for the
+tools-dropped control, so the tool schema is worth 343 tokens of the rendered
+prompt — taken 2026-10-14 and re-measured unchanged on 2026-11-15, the date
+`app/harness/finalizer.py` carries beside the build it names. This file states no
+build of its own on purpose: the header used to attribute those figures to
+whichever build served when they were first taken, and that sentence went false
+the way #4137 is about, out of sight of the architecture-doc sweep that catches
+the other copies. `BUILD` below is what the stub answers `/version` with — a
+fixture's stand-in, never a claim about this box.
 """
 from __future__ import annotations
 

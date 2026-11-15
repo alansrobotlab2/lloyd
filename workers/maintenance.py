@@ -728,3 +728,94 @@ def maybe_run_mitigation_drill(queue: WorkQueue, cfg: Optional[dict] = None, *,
 def repo_root() -> Path:
     """The checkout this module runs from — the cwd a `-m scripts.…` needs."""
     return Path(__file__).resolve().parents[1]
+
+
+# ── #4137: the engine-build detector's caller ───────────────────────────────────
+#
+# `scripts/maintenance/engine_build_drift.py` has existed since #3648 and answers one
+# question correctly: does the build the primary is serving match the build
+# `app/harness/finalizer.py`'s docstring says the `tool_choice: "none"` property was
+# measured on? It exits 0 PASS / 1 DRIFT / 2 UNKNOWN, parses the expected build out of
+# that docstring rather than holding a second copy of the literal, and never treats an
+# unreadable `/version` as a pass. What it never had was a caller. `git grep -l
+# engine_build_drift` named the script, its own test, and two architecture docs — no
+# job, no gate rung, no watchdog arm — so on 2026-11-15 it had been printing
+# `engine-build-drift DRIFT: recorded build 0.31.1rc1.dev260+ga98247ab4 … live build
+# 0.33.0rc1.dev1148+g8f2ba935a` with RC=1 for 32 days while `architecture/harness.md`
+# attributed the property to the old build in three present-tense sentences and
+# described the script as "the detector that turns that re-run into something that
+# happens". An exit code nobody runs is not an alarm, and #3648 closed `done` because
+# building the detector satisfied it while running it was never a clause.
+#
+# So the caller goes here, beside the mitigation drill above, which is this module's
+# existing shape for "run one maintenance script on a cadence and record what it said":
+# a build-in-one-place argv function, a `runner` seam so the test crosses the same
+# process boundary the real call uses, and no decision made twice — this code reads the
+# verdict word off the script's own line and never re-derives PASS/DRIFT/UNKNOWN.
+#
+# The alert is NOT dispatched from here. `workers/fleet_watchdog.py` owns when to ask
+# (`maybe_check_engine_build` there, on a cadence) and how to reach a person (`_alert` →
+# `app.discord_notify.discord_alert`, which on this box falls through to today's daily
+# note). This half only runs the script and hands back what it saw, so the arm can be
+# exercised with no Discord, no daily note and no engine.
+
+#: The detector, relative to the repo root. One path, named once, for the caller and
+#: the test alike; `mitigation_drill_argv` above is the same discipline.
+ENGINE_BUILD_SCRIPT = "scripts/maintenance/engine_build_drift.py"
+
+#: Worst-case wait for one run. The script's own `/version` read is bounded at 5 s and
+#: an engine that will not answer must not become a stall in the caller's loop; a
+#: timeout is reported as `runner`-failed, which the arm records and never alerts on.
+ENGINE_BUILD_TIMEOUT_SECONDS = 20
+
+
+def engine_build_argv(cfg: Optional[dict] = None, *,
+                      python: Optional[str] = None,
+                      base_url: Optional[str] = None) -> list[str]:
+    """The command that runs the detector, built in one place (#4137).
+
+    Mirrors `mitigation_drill_argv`: the interpreter and the repo root are this
+    process's own, so the arm runs against the same tree the docstrings it checks live
+    in, and a base URL override exists because the only way to see a DRIFT on a healthy
+    box is to point one run at an engine answering a different build.
+    """
+    return [
+        python or sys.executable,
+        str(repo_root() / ENGINE_BUILD_SCRIPT),
+        *(["--base-url", base_url] if base_url else []),
+    ]
+
+
+def engine_build_verdict(argv: list[str], *, runner=None,
+                         timeout: int = ENGINE_BUILD_TIMEOUT_SECONDS) -> dict:
+    """Run the detector and report what it said — deciding nothing about it.
+
+    Returns `{"verdict", "line", "rc", "at"}` where `verdict` is the first word of the
+    line the script prints (`PASS` / `DRIFT` / `UNKNOWN`), or `None` when the run itself
+    failed — a timeout, a missing interpreter, a script that raised — which is NOT
+    folded into UNKNOWN, because "the detector could not be run" and "the engine would
+    not name its build" are different things to wake for and the second one is the
+    script's own verdict, printed and already worded.
+
+    The seam is the subprocess call itself: a test that swaps `runner` for an in-process
+    fake never grades this function's parse of a string the script did not print.
+    """
+    import datetime as _dt
+
+    run = runner or subprocess.run
+    try:
+        proc = run(argv, capture_output=True, text=True,
+                   timeout=timeout, check=False)
+    except Exception as exc:                                    # noqa: BLE001
+        logger.warning("engine-build check could not run: %s", exc)
+        return {"verdict": None, "line": f"run failed: {exc}", "rc": None,
+                "at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+    line = (proc.stdout or "").strip().splitlines()
+    line = line[0] if line else (proc.stderr or "").strip()
+    word = line.split(":", 1)[0].strip().split()[-1] if line else ""
+    return {
+        "verdict": word if word in ("PASS", "DRIFT", "UNKNOWN") else None,
+        "line": line,
+        "rc": proc.returncode,
+        "at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }

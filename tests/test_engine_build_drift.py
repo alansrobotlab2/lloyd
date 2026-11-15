@@ -462,3 +462,432 @@ def test_no_engine_listening_is_unknown_end_to_end():
     assert code == EBD.UNKNOWN, f"expected UNKNOWN against a dead port, got {line}"
     assert "Not a pass" in line or "neither confirmed nor contradicted" in line, (
         "an unreachable engine must say what it did NOT establish: " + line)
+
+
+# ── #4137 clause 4: the three exit codes across the real process boundary ───────
+#
+# The nodes above decide `verdict()` and `main()` in-process with a fixture pair. These
+# run the SCRIPT as a subprocess against an HTTP server that really answers `/version`,
+# with the expected build read out of `finalizer.py`'s docstring rather than spelled —
+# so what is proved is the whole contract the caller relies on: 0 when the engine answers
+# the build the record names, 1 when it answers another, 2 when nothing answers.
+
+def _serve_version(payload: str):
+    """A one-request-per-connection `/version` server; yields its base URL."""
+    import http.server
+    import threading
+    from contextlib import contextmanager
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                       # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        def log_message(self, *args):
+            pass
+
+    @contextmanager
+    def serve():
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{srv.server_address[1]}"
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=2)
+
+    return serve()
+
+
+def _run_script(*argv) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(SCRIPT), *argv],
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_the_process_exits_zero_against_an_engine_answering_the_recorded_build():
+    """Clause 4: PASS is 0, end to end, on the build THIS tree records.
+
+    The expected build comes from `EBD.recorded()` — this file's rule again — so the node
+    cannot go green by naming a build the record does not, and cannot go red because the
+    record was re-verified: it asks the same question the caller asks.
+    """
+    want = EBD.recorded()
+    assert want is not None, "finalizer.py's record is unreadable, so nothing here proves"
+    with _serve_version(json.dumps({"version": want[1]})) as base_url:
+        proc = _run_script("--base-url", base_url)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("engine-build-drift PASS"), proc.stdout
+
+
+def test_the_process_exits_one_against_an_engine_answering_another_build():
+    """Clause 4: DRIFT is 1 through the process, naming both builds."""
+    want = EBD.recorded()
+    other = "0.99.0rc1.dev1+gdeadbeef"
+    assert other != want[1]
+    with _serve_version(json.dumps({"version": other})) as base_url:
+        proc = _run_script("--base-url", base_url)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert want[1] in proc.stdout and other in proc.stdout, proc.stdout
+
+
+def test_the_process_exits_two_when_no_engine_answers():
+    """Clause 4: an unreadable `/version` is 2 (UNKNOWN), never a silent 0."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    proc = _run_script("--base-url", f"http://127.0.0.1:{port}")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert proc.stdout.startswith("engine-build-drift UNKNOWN"), proc.stdout
+
+
+# ── #4137 clause 5: the detector has a caller, and the doc names it ────────────
+#
+# #3648 built this script and closed; `git grep -l engine_build_drift` then named the
+# script, its own test and two architecture docs, and no runner — so a true DRIFT printed
+# `RC=1` for 32 days with nobody hearing it, while `architecture/harness.md` P6(b) called
+# the script "the detector that turns that re-run into something that happens". These
+# nodes are the wiring's pins: the caller's argv names THIS script, its runner seam is
+# the subprocess boundary (not an in-process re-decision), the watchdog arm alerts on
+# DRIFT and not on UNKNOWN, and the doc names the arm instead of the promise.
+
+def _maintenance():
+    from workers import maintenance
+    return maintenance
+
+
+def _watchdog():
+    import workers.fleet_watchdog as fw
+    return fw
+
+
+def test_the_caller_builds_a_command_that_runs_this_script():
+    """The caller's argv is this script, so the wiring cannot silently re-point."""
+    maintenance = _maintenance()
+    argv = maintenance.engine_build_argv()
+    assert argv[1] == str(SCRIPT), argv
+    assert "--base-url" not in argv, argv          # the default engine, by default
+    assert maintenance.engine_build_argv(base_url="http://h:1")[-2:] == [
+        "--base-url", "http://h:1"]
+
+
+def test_the_caller_reads_the_verdict_word_and_decides_nothing_of_its_own():
+    """Clause 5 across the subprocess seam: the caller parses, the script decides.
+
+    The runner seam stands in for `subprocess.run`, so a fake line here grades only this
+    function's reading of a line the script really printed — and the three verdicts are
+    taken verbatim from the script's own prefixes. A run that cannot happen is NOT folded
+    into UNKNOWN: "the detector did not run" and "the engine will not name its build" are
+    different things to wake for, and only the second is the script's verdict.
+    """
+    maintenance = _maintenance()
+
+    class Proc:
+        def __init__(self, out, rc):
+            self.stdout, self.stderr, self.returncode = out, "", rc
+
+    for word, rc in (("PASS", 0), ("DRIFT", 1), ("UNKNOWN", 2)):
+        line = f"engine-build-drift {word}: the body a person has to read"
+        out = maintenance.engine_build_verdict(["x"],
+                                               runner=lambda *a, _l=line, _r=rc, **k: Proc(_l, _r))
+        assert out["verdict"] == word, out
+        assert out["line"] == line and out["rc"] == rc, out
+
+    def boom(*a, **k):
+        raise OSError("no interpreter")
+
+    out = maintenance.engine_build_verdict(["x"], runner=boom)
+    assert out["verdict"] is None and "no interpreter" in out["line"], out
+
+
+async def test_the_watchdog_alerts_a_person_on_a_drift_and_never_on_an_unknown(tmp_path, monkeypatch):
+    """Clause 5: DRIFT reaches `_alert`; UNKNOWN is recorded and quiet.
+
+    `_alert` is the watchdog's one route to a human (`app.discord_notify.discord_alert`,
+    which on this box falls through to today's daily note), so the alarm is asserted there
+    and carries BOTH builds — the recorded one and the live one — because a drift alarm
+    naming only one of them cannot be acted on. UNKNOWN stays silent on purpose: this
+    watchdog runs while the engine is restarting for entirely ordinary reasons, and an
+    alarm that fires at every restart is an alarm that gets ignored at the one it is for.
+    The cooldown is graded from BOTH sides, and each step is taken PAST
+    `_ENGINE_BUILD_SCAN_SECONDS` — which is what the 2026-11-15 review found missing. An
+    earlier draft advanced one hour between calls, and at one hour the 6 h scan cadence
+    returns None before the alert branch is ever reached, so "no second alert" held with
+    `_ENGINE_BUILD_ALERT_INTERVAL_SECONDS` deleted outright: a leg that cannot fail grades
+    no constant. So the cadence stamp is stepped over at +7 h (the script really runs —
+    asserted by a non-None reading, not by silence) and the interval is read at +7 h,
+    inside the day, where deleting the cooldown posts a second alarm; then again at +31 h,
+    outside it, where a cooldown stretched past a day stays silent forever. The condition
+    itself persists until someone re-measures, which is why a day is the right interval
+    rather than never or six hours.
+    """
+    import datetime as dt
+    import json
+
+    fw = _watchdog()
+    from workers.queue import WorkQueue
+
+    # `_state` is the watchdog's module-global pacing dict and `monkeypatch`
+    # restores it: `clear()` would take the cooldowns every other watchdog test in
+    # the session shares, which reads as their failure and is this file's.
+    monkeypatch.setattr(fw, "_state", {})
+    queue = WorkQueue(str(tmp_path / "drift.db"))
+    sent: list[str] = []
+
+    async def fake_alert(message):
+        sent.append(message)
+
+    # Patched through monkeypatch, not assignment: `_alert` is the watchdog's one
+    # route to a person, and a bare assignment leaves a fake installed for every
+    # later test in the session that asserts an alarm reaches the daily note.
+    monkeypatch.setattr(fw, "_alert", fake_alert)
+    want = EBD.recorded()
+    assert want is not None
+    drift = (f"engine-build-drift DRIFT: recorded build {want[1]} (measured {want[0]}), "
+             f"live build 0.33.9rc1.dev9+gcafebabe.")
+
+    def runner(line, rc):
+        def run(argv, **kw):
+            class Proc:
+                stdout, stderr, returncode = line, "", rc
+            return Proc()
+        return run
+
+    now = dt.datetime.now(dt.timezone.utc)
+    reading = await fw._check_engine_build(queue, now=now, runner=runner(drift, 1))
+    assert reading["verdict"] == "DRIFT", reading
+    assert len(sent) == 1, sent
+    assert want[1] in sent[0] and "0.33.9rc1.dev9+gcafebabe" in sent[0], sent[0]
+    assert "eval/tool_choice_none_probe.py" in sent[0], sent[0]
+    assert json.loads(queue.wm_get(fw._ENGINE_BUILD_WM_SOURCE,
+                                   fw._ENGINE_BUILD_STATE_KEY))["verdict"] == "DRIFT"
+
+    # +7 h: past the 6 h scan cadence, so the detector RUNS again — the non-None reading
+    # is what makes the next line mean "the cooldown held" rather than "the cadence
+    # skipped". A still-true DRIFT inside the day posts no second alarm.
+    again = await fw._check_engine_build(queue, now=now + dt.timedelta(hours=7),
+                                         runner=runner(drift, 1))
+    assert again is not None and again["verdict"] == "DRIFT", (
+        f"the arm skipped the check at +7 h on a 6 h cadence, so the line below could "
+        f"not have failed however the cooldown were set: {again}")
+    assert len(sent) == 1, (
+        f"a second alarm posted at +7 h, inside the "
+        f"{fw._ENGINE_BUILD_ALERT_INTERVAL_SECONDS}s interval: {sent}")
+
+    # +31 h: past the interval, so the same unbroken drift posts again. This is the leg
+    # that fails if the interval is stretched to a year or the cooldown becomes a mute.
+    sent.clear()
+    later = await fw._check_engine_build(queue, now=now + dt.timedelta(hours=31),
+                                         runner=runner(drift, 1))
+    assert later is not None and later["verdict"] == "DRIFT", later
+    assert len(sent) == 1, (
+        f"the drift was still true 31 h on and no second alarm went out, so the "
+        f"cooldown reads as a mute: {sent}")
+
+    sent.clear()
+    unknown = "engine-build-drift UNKNOWN: no engine answering on the base url."
+    out = await fw._check_engine_build(
+        queue, now=now + dt.timedelta(days=2, hours=1), runner=runner(unknown, 2))
+    assert out["verdict"] == "UNKNOWN", out
+    assert sent == [], sent
+
+
+async def test_the_arm_awaits_its_cadence_and_the_loop_calls_it(tmp_path, monkeypatch):
+    """Clause 5, the two seams the drift actually has to cross.
+
+    1. Inside `tick`: the arm is awaited from the loop that runs whether or not a task is
+       due, so "nobody typed the command" can never again be why a DRIFT went unheard.
+    2. Its own cadence: two calls inside the interval run the script ONCE, and a cadence
+       stamp is not an alert cooldown — the two keys are separate because an interval and
+       a cooldown answer different questions.
+    """
+    import inspect
+
+    fw = _watchdog()
+    src = inspect.getsource(fw.tick)
+    assert "_check_engine_build(" in src, \
+        "fleet_watchdog.tick no longer calls the engine-build arm"
+
+    from workers.queue import WorkQueue
+    import datetime as dt
+
+    # `_state` is the watchdog's module-global pacing dict and `monkeypatch`
+    # restores it: `clear()` would take the cooldowns every other watchdog test in
+    # the session shares, which reads as their failure and is this file's.
+    monkeypatch.setattr(fw, "_state", {})
+    queue = WorkQueue(str(tmp_path / "cadence.db"))
+    calls: list[list] = []
+
+    def runner(argv, **kw):
+        calls.append(argv)
+        class Proc:
+            stdout, stderr, returncode = "engine-build-drift PASS: x", "", 0
+        return Proc()
+
+    now = dt.datetime.now(dt.timezone.utc)
+    assert await fw._check_engine_build(queue, now=now, runner=runner) is not None
+    assert await fw._check_engine_build(queue,
+                                        now=now + dt.timedelta(minutes=5),
+                                        runner=runner) is None
+    assert len(calls) == 1, calls
+    assert calls[0][1].endswith("scripts/maintenance/engine_build_drift.py"), calls
+
+
+def test_the_arm_runs_behind_both_stall_alarms_in_the_tick():
+    """The placement the arm has to keep, pinned where nothing else can see it.
+
+    The arm is the only detector in `tick` that spawns a process and waits on a socket,
+    so its position decides what a slow engine delays. It shipped at the top of the tick
+    and the first thing that showed it was `tests/test_fleet_watchdog.py`'s scheduler-loop
+    test going intermittently red: on a fresh queue the first tick really runs the script,
+    and the next_run stall alarm behind it had not run by the time the test stopped
+    polling. Every test in this file calls `_check_engine_build` directly, so none of them
+    can see an order — only a reading of the tick can, which is what this node is.
+
+    Read against the executed statements, not the prose: `#4137`, the arm's name and the
+    stall detectors' names all appear in `tick`'s comments, and a comment-reading version
+    of this node would pass on a tick that never called the arm. So comments are dropped
+    first, and each name must then occur EXACTLY once — the detectors are reached through
+    `run_in_executor`, so it is the single reference that is being ordered, and one is the
+    only count that has an order to grade.
+    """
+    import inspect
+    import re
+
+    fw = _watchdog()
+    src = "\n".join(ln.split("#")[0] for ln in inspect.getsource(fw.tick).splitlines())
+
+    def call_at(name: str) -> int:
+        hits = [m.start() for m in re.finditer(rf"\b{name}\b", src)]
+        assert len(hits) == 1, (
+            f"`tick` refers to `{name}` {len(hits)} times outside comments, so this "
+            f"ordering node has no single position to grade: {hits}")
+        return hits[0]
+
+    arm = call_at("_check_engine_build")
+    for earlier in ("_grossly_overdue", "_next_run_stalled"):
+        assert arm > call_at(earlier), (
+            f"the engine-build arm runs before `{earlier}` in the tick, so an engine "
+            "that stalls its 5 s `/version` read is once again on the stall alarm's "
+            "critical path")
+    assert arm < call_at("_census_failure_throughput"), (
+        "the arm moved past the census, and the census's comment claims it is last in "
+        "the tick — one of the two is false")
+
+
+async def test_the_real_scheduler_loop_runs_the_arm_without_anyone_typing_it(tmp_path,
+                                                                              monkeypatch):
+    """Clause 5's outermost seam, EXECUTED rather than read.
+
+    The 2026-11-15 review marked this seam unverified, and it is the one the item is
+    about: "nobody runs it" was the whole defect, so the proof has to be the pool's own
+    scheduler loop starting, ticking, and reaching the arm with no human and no test
+    calling `_check_engine_build`. Only the subprocess is stood in for — a unit test that
+    POSTed to the live engine's `/version` would be measuring what the engine happens to
+    serve today, and the script's own process boundary is crossed by
+    `test_the_process_exits_zero_against_an_engine_answering_the_recorded_build` instead.
+
+    Dispatch is switched off the way `tests/test_fleet_watchdog.py` switches it off, the
+    autonomy board is empty so no stall alarm has anything to name, and every other seat
+    of the loop that would touch the machine is stubbed: what is left running is the
+    scheduler loop, `tick`, the arm, and the queue.
+    """
+    import asyncio
+
+    from app import autonomy
+    from workers.pool import WorkerPool
+    from workers.queue import WorkQueue
+    import workers.sources as sources
+    import workers.sources.scheduled_task as st
+
+    fw = _watchdog()
+    monkeypatch.setattr(fw, "_state", {})
+    board = tmp_path / "autonomy"
+    board.mkdir()
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", board)
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY", {"scheduled-task": st}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {
+        "scheduled-task": {"enabled": False, "interval_seconds": 0,
+                           "max_duration_seconds": 1800}}, raising=False)
+
+    sent: list[str] = []
+
+    async def _capture(msg):
+        sent.append(msg)
+
+    monkeypatch.setattr(fw, "_alert", _capture)
+
+    run_argv: list[list] = []
+
+    class Proc:
+        stdout = ("engine-build-drift DRIFT: recorded build 0.33.0rc1.dev1148+g8f2ba935a "
+                  "(measured 2026-11-15), live build 0.99.9rc1.dev9+gcafebabe.")
+        stderr = ""
+        returncode = 1
+
+    def fake_runner(argv, **_kw):
+        run_argv.append(list(argv))
+        return Proc()
+
+    real = fw._check_engine_build
+
+    async def spy(queue, **kw):
+        # Injects the stub runner into the REAL arm: everything between the loop and the
+        # subprocess — the cadence, the verdict read, the watermark writes, the alert —
+        # is the shipped code, not a stand-in for it.
+        return await real(queue, runner=fake_runner, **kw)
+
+    monkeypatch.setattr(fw, "_check_engine_build", spy)
+
+    async def _noop(*_a, **_k):
+        return None
+
+    queue = WorkQueue(str(tmp_path / "loop.db"))
+    pool = WorkerPool(queue, slots=0, poll_idle_seconds=0.01)
+    monkeypatch.setattr(pool, "_maybe_sweep_poisoned", _noop)
+    monkeypatch.setattr(pool, "_probe_services", _noop)
+    monkeypatch.setattr(pool, "_watch_dispatch", _noop)
+    await pool.start()
+    try:
+        for _ in range(300):
+            if sent:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        await pool.stop()
+
+    assert run_argv, (
+        "the scheduler loop never reached the engine-build arm, so the detector is "
+        "unowned again — the exact state #3648 left behind")
+    assert run_argv[0][1] == str(SCRIPT), run_argv[0]
+    assert len(sent) == 1, f"expected the one drift alarm, got {sent}"
+    assert "0.33.0rc1.dev1148+g8f2ba935a" in sent[0] and "0.99.9rc1.dev9+gcafebabe" in (
+        sent[0]), "the alarm the loop produced names neither build, so nobody can act on it"
+
+
+def test_the_doc_names_the_caller_and_no_longer_promises_it():
+    """Clause 5's last half: the doc's promise became a name.
+
+    P6(b) used to say this script "is the detector that turns that re-run into something
+    that happens". That sentence was false for 32 days — an unrun exit code is not an
+    alarm — and it is what let the class stay closed after #3648 shipped the detector, so
+    it is gone rather than softened: the bullet now names the arm that runs it, and the
+    ban below is what stops the promise returning in place of the wiring.
+    """
+    doc = (ROOT / "architecture" / "harness.md").read_text(encoding="utf-8")
+    fw = _watchdog()
+    assert "_check_engine_build" in doc, \
+        "harness.md names no caller, so the detector is unowned again"
+    banned = "the detector that turns that re-run into something that happens"
+    assert banned not in doc, \
+        "the promise is back in the doc while nothing runs the script"
+    # The named caller is the real symbol, not prose about one.
+    assert callable(getattr(fw, "_check_engine_build", None)), \
+        "the doc names a watchdog function that does not exist"

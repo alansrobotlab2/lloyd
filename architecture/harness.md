@@ -286,7 +286,7 @@ ignores the other's field *silently*:
 
 | Engine | Reads | Ignores |
 |---|---|---|
-| vLLM (primary) — measured on 0.28; the build serving `:8096` today is `0.31.1rc1.dev260+ga98247ab4`, see [[vllm]] §10 | `reasoning` | `reasoning_content` |
+| vLLM (primary) — measured on 0.28; the build serving `:8096` today is `0.33.0rc1.dev1148+g8f2ba935a`, see [[vllm]] §10 | `reasoning` | `reasoning_content` |
 | llama.cpp (secondary, Qwen3.6) — measured when `secondary_enabled` was true | `reasoning_content` | `reasoning` |
 
 vLLM accepts both on the wire but only populates the template from
@@ -612,8 +612,8 @@ turn ends, restating its conclusion as a JSON object
   one finalizer): keeping tools reuses 177,600 of 180,068 tokens and takes
   1.19 s; dropping them reuses nothing and takes **25.00 s**. 21x, for one
   object. `eval/measurements/finalizer-2026-09-08.md` has the runs (vLLM
-  0.28.1, measured 2026-09-08). The property itself was re-measured 2026-10-14
-  on the build serving the primary today, `0.31.1rc1.dev260+ga98247ab4`:
+  0.28.1, measured 2026-09-08). The property itself was re-measured 2026-11-15
+  on the build serving the primary today, `0.33.0rc1.dev1148+g8f2ba935a`:
   `"none"` with a two-tool array attached renders the same 7,982-token prompt
   as `"auto"` and emits no tool call, against 7,639 with `tools` dropped — the
   343 tokens of tool schema are still inside the prompt at `"none"`.
@@ -621,7 +621,7 @@ turn ends, restating its conclusion as a JSON object
   `usage.prompt_tokens`, which needs no warm cache; re-run it after every
   engine rebuild and record the build beside the result. The two ways to
   measure this wrongly: `cached_tokens` reads 0 for the **first request of a
-  fresh prefix** (measured 2026-10-14 on the same build — 0 on the first
+  fresh prefix** (measured 2026-10-14 on the build then serving the primary — 0 on the first
   request, 3,200 on every later request that kept the prefix), so one cold
   moment reads exactly like a dropped-tools failure and `prompt_tokens` is the
   instrument that cannot be fooled that way; and an alternating A/B ends up
@@ -1331,8 +1331,8 @@ byte-identical — the property the finalizer already relies on for `"none"`.
   column). No drain or budget anchor runs on that request. **Per engine**:
   `models` resolves to base URLs (`mcp_discovery.max_turns_wrapup_kwargs`) and
   the loop wraps up only when the run's own `base_url` is listed. Shipped
-  `[primary]`, and the property is measured on that engine as of 2026-10-14: the
-  build serving the primary is `0.31.1rc1.dev260+ga98247ab4`, on which `"none"`
+  `[primary]`, and the property is measured on that engine as of 2026-11-15: the
+  build serving the primary is `0.33.0rc1.dev1148+g8f2ba935a`, on which `"none"`
   with a two-tool array attached renders the same 7,982-token prompt as `"auto"`
   and emits no tool call, against 7,639 with `tools` dropped — 343 tokens of
   schema still rendered, so the wrap-up stays a byte-identical continuation of
@@ -1349,12 +1349,16 @@ byte-identical — the property the finalizer already relies on for `"none"`.
   (`run_prompt_on_primary`), whose `TurnResult.ok` reads non-empty text as
   success. Pins: `app/harness/tests/test_tool_choice_levers.py`,
   `tests/test_task_subagent_answer.py::test_a_wrapped_up_budget_run_returns_its_summary_marked_truncated`.
-  `scripts/maintenance/engine_build_drift.py` is the detector that turns that re-run into
-  something that happens: it asks the engine for its build over one `GET /version`,
-  compares it to the build `finalizer.py`'s docstring records, and exits non-zero naming
-  this probe when the two differ — UNKNOWN, never a pass, when the engine will not name
-  its build. It sends no completion request, so it cannot perturb the prompt-token counts
-  the probe decides on.
+  `scripts/maintenance/engine_build_drift.py` is the detector: one `GET /version`,
+  compared to the build `finalizer.py`'s docstring records, exiting non-zero naming this
+  probe when the two differ — UNKNOWN, never a pass, when the engine will not name its
+  build. It sends no completion request, so it cannot perturb the prompt-token counts the
+  probe decides on. Its caller is `workers/fleet_watchdog.py::_check_engine_build`, which
+  runs it every six hours from the fleet watchdog's tick and alerts on a DRIFT through
+  the same route as the stall alarm (#4137). Before that arm existed the script had been
+  exiting 1 on a real drift for 32 days with nothing invoking it, while the bullet here
+  described the script as turning the re-run into something that happens — an exit code
+  nobody runs is not an alarm, so the caller's name is now written beside the script's.
 
 ### D11 — `/compact` is a queued turn that folds into the same record
 
@@ -2339,3 +2343,24 @@ the one rung with no in-band handle; its reasoning is persisted as
   the per-source capability envelope (#2269/#2471) is a live part of how a
   worker turn's tools are decided and the doc named neither — and the eight
   post-September files in `app/harness/tests/`.
+- **2026-11-15 — `stale`, corrected and wired.** The three present-tense engine-build
+  attributions above (§Preserved thinking engine, §Structured verdicts, P6(b)) named
+  `0.31.1rc1.dev260+ga98247ab4`; `GET :8096/version` answers
+  `0.33.0rc1.dev1148+g8f2ba935a`, so the label was false under the word "today" while the
+  property it attributes still held — `eval/tool_choice_none_probe.py` re-ran clean that
+  day (7,982 prompt tokens at both `"none"` and `"auto"`, 7,639 with `tools` dropped,
+  343 of schema, no tool call), so every figure here is unchanged and only the build and
+  its date moved. They move together, in one change, because
+  `tests/test_harness_doc_claims.py` pins `TC_NONE_BUILD`/`TC_NONE_MEASURED_ON` verbatim
+  against this file and `app/harness/tests/test_finalizer.py` holds a second copy against
+  `finalizer.py`'s docstring: the 2026-11-15 pass above left the labels stale precisely
+  because correcting the doc alone reddens a test, which is the coupling that makes the
+  drift safe to notice and was never the reason to ignore it. The two dated entries below
+  are left exactly as written — they record what was measured when. What was actually
+  missing was not the measurement but a caller: `engine_build_drift.py` had been printing
+  `DRIFT … RC=1` for 32 days unheard, since #3648 closed `done` on building the detector
+  and no job, gate rung or watchdog arm ran it. P6(b) now names
+  `workers/fleet_watchdog.py::_check_engine_build`, which is the caller that earlier
+  sentence about this script was promising; the sentence itself is replaced rather than
+  softened, and `tests/test_engine_build_drift.py` bans it. See also [[vllm]] §2 for the
+  build itself.
