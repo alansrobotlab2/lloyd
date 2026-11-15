@@ -350,6 +350,39 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # tests/test_automod_spec.py's #4037 section pins both halves, including the comment
     # you are reading.
     "agent-services/setup/setup-decider.sh",
+    # #4156 (2026-11-15): one document under `agent-services/` — its day-to-day
+    # README — is writable by a round, verbatim and alone. It is writable because it is a
+    # document, and it is the only thing under that path a document-shaped round has any
+    # business editing. What it refuses is the whole directory, and the refusal is the
+    # point: `agent-services/**` would admit every launcher and every supervisor conf, and
+    # #1449's own line is quoted rather than paraphrased because the reason outlives the
+    # edit — `agent-services/**` "would admit every launcher and conf a round may not touch
+    # (the 2026-09-21 agent-llm-primary restart is what those rails exist for)".
+    # The corpus is what prices that: 226 tracked files under `agent-services/` at this
+    # round's base, of which 138 are `protected` (81 launchers under `bin/`, 15 supervisor
+    # confs, 23 systemd units, 19 guardian scripts) and 78 were `unlisted`. Spelling the
+    # directory instead would put all 78 into a round's writable set — 77 of them never
+    # named beside this line — while moving none of the 138 `protected` verdicts, which is
+    # also why #1376's rail keeps its teeth after this entry: 77 paths stay `unlisted`,
+    # against the floor of 70 that rail is sized on. This line moves one classification.
+    # Why this file earns an entry at all: it is the document the root `README.md`:243 links
+    # as "the service layer, day to day", so a round sent to the service layer arrives here
+    # by the documented path — and finds program rows naming scripts its confs do not run, a
+    # conf's `; Previous occupant (revert target)` script presented as the live occupant, and
+    # a venv table listing three absent venvs as installed, one of them "(live)". A round
+    # that can read that and not correct it manufactures findings shaped exactly like #4156.
+    # What this entry does NOT buy is the fix itself: rung 0 grades with the spec the
+    # detached gate imports from the live tree, so a widening never binds for its own round.
+    # The README's prose, and the three test pins that were withheld from the round this
+    # unblocks, belong to #4145's next round.
+    # tests/test_automod_spec.py's #4156 section pins all of it — the single moved
+    # classification, the rail's corpus floor, and this comment's own wording.
+    # Cost of widening here, learned the hard way in this round: an entry in this tuple sits
+    # ~360 lines above `check_scope`, so every `path:NNN` citation below it moves too, and
+    # `architecture/threat-model.md` cites `check_scope` by line number — re-pointing it is
+    # forced into the same diff by #4045's anchor rail. #3646's clause-4 node used to refuse
+    # exactly that; its #4156 note says what an admission may now carry.
+    "agent-services/README.md",
 )
 
 PROTECTED_GLOBS: tuple[str, ...] = (

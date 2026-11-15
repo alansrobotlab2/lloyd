@@ -1505,14 +1505,24 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # the round after this one can delete it. `pre` still strips only TTS_PATCH, so the
     # before/after diff this node computes stays exactly one path: the installer entry is
     # in both tuples.
-    assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py",
-                             QMD_TEMPLATE, VOICE_TIMELINE,
-                             "agent-services/setup/install-services.sh",
-                             "agent-services/scripts/qmd-watcher.sh",
-                             "agent-services/setup/setup-decider.sh"} \
-            | set(expected_allowed_model_paths()), (
-        f"the named grants over tracked agent-services paths are the seven names this "
-        f"node pins plus whichever of the #3258 turn-1-mini grant is in the index "
+    # #4156 added the eleventh, `agent-services/README.md`, verbatim and by the same rule
+    # this block states: a widening that lands as a verbatim grant adds a NAME here and no
+    # path beyond the named set. The teeth are the equality itself — `allowed_after` is
+    # every tracked agent-services path the shipped tuple admits, so an entry that let in a
+    # path nobody spelled out breaks it and names the offender — and neither the equality nor
+    # the corpus is relaxed by this addition. What stays red is a grant admitting unnamed
+    # paths. The count in the message below is now derived from the set rather than written
+    # out: #4156 found this node's message still reading "the seven names" nine grants after
+    # seven was true, in a rail whose whole job is counting named grants.
+    named_grants = {TTS_PATCH, "agent-services/livekit_worker.py",
+                    QMD_TEMPLATE, VOICE_TIMELINE,
+                    "agent-services/setup/install-services.sh",
+                    "agent-services/scripts/qmd-watcher.sh",
+                    "agent-services/setup/setup-decider.sh",
+                    "agent-services/README.md"}
+    assert allowed_after == named_grants | set(expected_allowed_model_paths()), (
+        f"the named grants over tracked agent-services paths are the {len(named_grants)} "
+        f"names this node pins plus whichever of the #3258 turn-1-mini grant is in the index "
         f"({expected_allowed_model_paths()}); found {sorted(allowed_after)}. A new "
         f"verbatim grant is a legitimate edit — add its path to this pin (unless it is "
         f"a turn-1-mini path, which the derived half already covers), and check it "
@@ -3859,6 +3869,107 @@ def test_every_other_rail_in_this_file_stays_green_with_the_grant_in_place(monke
     test_the_fix_diff_clears_rung_0_under_the_grant()
 
 
+#: The one document an admission may carry beside `scripts/automod/spec.py`, permitted by
+#: shape and not by name alone (see `_anchor_repoints_in_diff`). It is here because
+#: `architecture/threat-model.md`'s T-24 cell cites `check_scope` as `spec.py:<its line>`, and
+#: #4045's `THREAT_AUTOMOD_ANCHORS` in tests/test_architecture_coverage_doc_claims.py fails the
+#: doc the moment that number stops landing on the definition. Every entry of `ALLOWED_GLOBS`
+#: is inserted some 360 lines above it, so widening the tuple and re-pointing the anchor are
+#: one change and not two. #4156 is the first round asked to satisfy both rails at once — it
+#: moved `check_scope` from 715 to 748 — and #4037's widening landed while the T-24 cell still
+#: carried the number of the base it was written against, which is how the two never met.
+ANCHOR_REPOINT_DOCS = ("architecture/threat-model.md",)
+
+
+#: One `file.ext:NNN` code anchor inside a line of prose.
+_CITATION_RE = r"([A-Za-z0-9][\w./-]*\.[A-Za-z]+):(\d+)"
+
+
+def _citations(line: str) -> dict[str, str]:
+    import re
+    return {m.group(1): m.group(2) for m in re.finditer(_CITATION_RE, line)}
+
+
+def _masked(line: str) -> str:
+    """`line` with every code anchor's number removed, so the rest can be compared."""
+    import re
+    return re.sub(_CITATION_RE, lambda m: f"{m.group(1)}:#", line)
+
+
+def _anchor_repoints_in_diff(root: Path, base: str, doc: str, diff) -> tuple[list, list]:
+    """`(repointed, problems)` for the round's edits inside `doc`, checked line by line.
+
+    Reads `git diff --unified=0 <base> -- <doc>` so the answer is what the round wrote, not
+    what the shipped file now says, and admits a changed line only in the one shape an
+    arithmetic re-point has:
+
+    1. removed and added line identical once every anchor's number is masked — so not one
+       character of prose moved, which is what stops the document riding the admission as
+       the fix's author instead of as its arithmetic;
+    2. at least one anchor's number actually changed, and every anchor it names that this
+       diff touched is in `diff`;
+    3. the OLD number's line of the OLD file and the NEW number's line of the shipped file
+       are the same text — the proof that the new number still aims at the construct the
+       old one named, which is exactly what a stale or careless re-point breaks. A number
+       aimed anywhere else in the moved file is a problem, not a pass.
+
+    `repointed` is `[(path, old, new)]`; `problems` is every reason the document's diff is
+    not that shape, phrased for an assertion message.
+    """
+    import subprocess as sp
+    out = sp.run(["git", "diff", "--unified=0", base, "--", doc], cwd=root,
+                 capture_output=True, text=True, timeout=120).stdout
+    removed = [ln[1:] for ln in out.splitlines() if ln.startswith("-") and not ln.startswith("---")]
+    added = [ln[1:] for ln in out.splitlines() if ln.startswith("+") and not ln.startswith("+++")]
+    problems: list[str] = []
+    if len(removed) != len(added):
+        problems.append(
+            f"{doc}: {len(removed)} line(s) removed against {len(added)} added — an anchor "
+            "re-point edits a line in place, so a net gain or loss is prose being written")
+    repointed: list[tuple[str, str, str]] = []
+    old_src: dict[str, list[str]] = {}
+    new_src: dict[str, list[str]] = {}
+    for old_ln, new_ln in zip(removed, added):
+        if _masked(old_ln) != _masked(new_ln):
+            problems.append(
+                f"{doc}: a changed line is not an anchor re-point — once the numbers are "
+                f"masked the two lines differ, so prose rode the admission: +{new_ln[:110]!r}")
+            continue
+        oc, nc = _citations(old_ln), _citations(new_ln)
+        moved = {p for p in nc if p in oc and oc[p] != nc[p]}
+        if not moved:
+            problems.append(
+                f"{doc}: a line was replaced without moving any anchor's number: +{new_ln[:110]!r}")
+            continue
+        for p in sorted(nc):
+            if p == doc or p not in diff:
+                continue
+            if p not in moved:
+                problems.append(f"{doc}: cites {p}, a file this diff changed, with an unmoved number")
+                continue
+            if p not in old_src:
+                old_src[p] = sp.run(["git", "show", f"{base}:{p}"], cwd=root,
+                                    capture_output=True, text=True,
+                                    timeout=120).stdout.splitlines()
+                new_src[p] = (root / p).read_text().splitlines()
+            o, n = oc[p], nc[p]
+            try:
+                o_text = old_src[p][int(o) - 1].strip()
+                n_text = new_src[p][int(n) - 1].strip()
+            except IndexError:
+                problems.append(
+                    f"{doc}: {p}:{o} -> {p}:{n}, but {n} is past the end of the shipped file "
+                    f"({len(new_src[p])} lines)")
+                continue
+            if o_text != n_text:
+                problems.append(
+                    f"{doc}: {p}:{o} -> {p}:{n} does not name the same code — {o} read "
+                    f"{o_text[:70]!r} in the base and {n} reads {n_text[:70]!r} now")
+                continue
+            repointed.append((p, o, n))
+    return repointed, problems
+
+
 # --- clause 4: the admission is a verdict change and nothing else ------------------- #
 
 def test_the_admission_changes_no_verdict_but_the_two_paths_it_grants():
@@ -3877,6 +3988,9 @@ def test_the_admission_changes_no_verdict_but_the_two_paths_it_grants():
     `skip_inventory` uses, which is the helper that exists precisely because `git diff
     HEAD` names nothing once a round commits. So the property fires wherever a round's
     diff is actually on disk, including the gate's checkout and the review snapshot, and
+    #4156 added the one permitted exception, read as a shape rather than waved through: a
+    widening may also carry the architecture document whose `path:NNN` anchor its own entry
+    moved, and only where the document demonstrably re-cites the file that shifted.
     degrades to the shipped-tree witness (asserted unconditionally below) where the tree
     is simply `main` and there is no round diff to read.
 
@@ -3925,17 +4039,49 @@ def test_the_admission_changes_no_verdict_but_the_two_paths_it_grants():
     # The node imports the reader lazily and off `tests/`, the way test_skip_inventory
     # does: this file is collected with the repo root on sys.path, not its own directory.
     sys.path.insert(0, str(REPO_ROOT / "tests"))
-    from skip_inventory import changed_paths  # noqa: E402
+    from skip_inventory import changed_paths, round_base  # noqa: E402
     diff = set(changed_paths(REPO_ROOT))
     if "scripts/automod/spec.py" in diff:
         chrome = sorted(pth for pth in diff if pth.startswith("chrome-extension/"))
         assert not chrome, (
             "an admission round wrote a file under `chrome-extension/`, the one thing "
             f"clause 4 forbids so that the admission cannot half-fix the defect: {chrome[:5]}")
+        # #3646 wrote the line below as an equality against the one diff it shipped, and read
+        # as a standing rule it has no admissible instance left: an entry in `ALLOWED_GLOBS`
+        # shifts every line beneath it in `spec.py`, `architecture/threat-model.md` cites
+        # `check_scope` by line number, and #4045's anchor rail grades that number against the
+        # tree — so any widening owes the doc a re-point in the same diff, which the old
+        # equality then refused. The substance is unchanged and still read off the tree: no
+        # `chrome-extension/` path (asserted just above), no unnamed document, and a named
+        # document only in the shape that proves it is arithmetic — every citation it rewrote
+        # points into a file this diff also changes. #4156 is the first round to hit it;
+        # #4037's widening predates the pinned anchor, so the two rails had never both spoken.
         non_test = sorted(pth for pth in diff if not pth.startswith("tests/"))
-        assert non_test == ["scripts/automod/spec.py"], (
-            "the only non-test file an admission may change is the scope module itself; "
-            f"this diff also changed {non_test}")
+        extra = [pth for pth in non_test if pth != "scripts/automod/spec.py"]
+        assert extra == [] or extra == list(ANCHOR_REPOINT_DOCS), (
+            "the non-test files an admission may change are the scope module itself and, when "
+            "its own entry moved a line-number anchor, the document named in "
+            f"ANCHOR_REPOINT_DOCS; this diff also changed {extra}")
+        if extra:
+            # The document is admitted for one thing and nothing else, and the helper reads
+            # the diff line by line to hold it to that: every changed line must be identical
+            # to the line it replaced once the anchor numbers are masked, at least one
+            # number must have moved, and the new number must land on the same text the old
+            # one named — so the re-point is arithmetic, never prose, never a stale number.
+            repointed, problems = _anchor_repoints_in_diff(
+                REPO_ROOT, round_base(REPO_ROOT), extra[0], diff)
+            assert problems == [], (
+                f"{extra[0]} rode an admission diff and is not a clean anchor re-point: "
+                + "; ".join(problems))
+            # Not `(spec.py, "715", "748")` as an equality: those are #4156's own numbers, and
+            # once this lands they are the *base*, so the next widening's re-point starts at
+            # 748 and a pinned pair would blame it for moving. Which number is right is
+            # #4045's rail's question, graded against the tree; what this node asks is that
+            # the document moved a number into the file the admission actually shifted.
+            assert any(p == "scripts/automod/spec.py" for p, _o, _n in repointed), (
+                f"{extra[0]} was admitted beside an admission because widening this tuple "
+                "shifts `check_scope` and #4045's anchor rail grades the document's citation "
+                f"of it; this diff re-pointed {repointed or 'nothing'} instead")
         # #3769 clause 5's second half, which #3646 could not have written. The assert above
         # catches a rebuild that was COMMITTED (its paths are in the diff), and the freshness
         # suite catches one that left the tree inconsistent. What neither catches is the third
@@ -4264,13 +4410,46 @@ def test_the_grant_adds_one_entry_and_edits_no_other():
     assert not dupes, (
         f"{dupes} appear more than once in ALLOWED_GLOBS, so the tuple is no longer a "
         f"readable list of the grants the loop holds")
-    assert len(shipped) == len(ALLOWED_GLOBS_BEFORE_4037) + 1, (
+    # `+ 2`, not `+ 1`. That constant names the 30 entries exactly as they stood before
+    # #4037, so it holds #4037's own grant as the 31st and #4156's README grant as the
+    # 32nd. Its docstring's "extend the constant rather than the arithmetic" and this
+    # line's `+ 1` cannot both survive a second widening - extending the constant would
+    # make its own name false - so the constant stays a snapshot of that moment and the
+    # delta counts the one-string grants that followed. Teeth undiminished: an entry
+    # beyond #4156's, a rename, a drop or a reorder fails this line, and so does a
+    # wildcard grant, which is a new string too; the membership and ordering assertions
+    # below are what still grade that.
+    assert len(shipped) == len(ALLOWED_GLOBS_BEFORE_4037) + 2, (
         f"{len(shipped)} entries against the {len(ALLOWED_GLOBS_BEFORE_4037)} shipped "
         f"before #4037 plus this one: the grant was asked to add exactly one string")
-    assert tuple(g for g in shipped if g != SETUP_DECIDER) == ALLOWED_GLOBS_BEFORE_4037, (
-        f"stripping this grant does not reproduce the pre-#4037 tuple, so an existing entry "
-        f"was edited, removed or reordered — the 30-entry snapshot names what was expected "
-        f"and the live tuple, minus one, is {tuple(g for g in shipped if g != SETUP_DECIDER)}")
+    # #4156 is the widening this docstring predicts ("the next widening that lands rewrites
+    # this node to name 32"), so the strip now removes TWO one-string grants: #4037's and
+    # #4156's. Comparing the remainder to the snapshot in tuple order is the whole point of
+    # this node and is strictly stronger than a set comparison — it still refuses an edit,
+    # a removal or a reorder of any of the 30, and it refuses a third entry nobody granted,
+    # because then the remainder is 31 long and cannot equal the snapshot at all.
+    only_grants = (SETUP_DECIDER, "agent-services/README.md")
+    remainder = tuple(g for g in shipped if g not in only_grants)
+    assert remainder == ALLOWED_GLOBS_BEFORE_4037, (
+        f"stripping the two verbatim grants does not reproduce the pre-#4037 tuple, so an "
+        f"existing entry was edited, removed or reordered — the 30-entry snapshot names "
+        f"what was expected and the live tuple, minus those two, is {remainder}")
+    assert shipped[-1] == "agent-services/README.md" and shipped[-2] == SETUP_DECIDER, (
+        "both grants are appended, in landing order; anything else is a diff that is not "
+        '"one string added"')
+    # Measured off the shipped tuple, not off `only_grants[1]`: a string this file itself
+    # wrote cannot fail, and the claim is about what `spec.py` ships. `fnmatch` is the same
+    # matcher `classify` uses, so a wildcard spelling of this one file would turn up here in
+    # place of the verbatim name rather than hiding behind a literal.
+    import fnmatch
+    matching = tuple(g for g in shipped if fnmatch.fnmatch("agent-services/README.md", g))
+    assert matching == ("agent-services/README.md",), (
+        f"{matching} in the shipped tuple match `agent-services/README.md`, and only the "
+        "verbatim name may. fnmatch's `*` crosses `/`, so a wildcard spelling of one file is "
+        "a grant over all 226 tracked agent-services paths")
+    assert set(shipped) - set(ALLOWED_GLOBS_BEFORE_4037) == set(only_grants), (
+        f"{sorted(set(shipped) - set(ALLOWED_GLOBS_BEFORE_4037) - set(only_grants))} joined "
+        f"the tuple beside the two grants")
     assert "*" not in SETUP_DECIDER, (
         f"{SETUP_DECIDER!r} is not a verbatim path; #1376 clause 1 refuses a wildcard here "
         f"because fnmatch's `*` crosses `/`")
@@ -4490,3 +4669,211 @@ def test_no_code_left_in_the_tree_points_at_the_installer():
         "the installer now spells its own filename, so the caller check above stopped "
         "being a full census of who names this path and would silently count this file as "
         "a caller if it were removed from the exemption list")
+
+
+# --------------------------------------------------------------------------
+# #4156 (2026-11-15): one more verbatim grant — the service layer's own README,
+# which the 2026-10-14 rails deliberately left unlisted. Round SM_20261115_172237
+# wrote #4145's program-table and venv-table fixes into that file and died at
+# rung 0 with `paths outside the writable set: ['agent-services/README.md']`, so
+# the whole gate ran without ever reaching the diff's content, and the withheld
+# commit is unreachable: the fix text survives only in the item's description.
+# That is the failure this section pins shut. It is a widening and nothing else:
+# the README's prose is #4145's NEXT round, because rung 0 grades with the spec
+# the detached gate imported from the live tree and a widening never binds for
+# its own round.
+
+
+README_GRANT = "agent-services/README.md"
+# Two members of the 78 `unlisted` and two of the 138 `protected`, so a grant that
+# quietly admitted a launcher or a conf is caught rather than counted. Two are named
+# here and asserted as `protected` because the corpus does the rest: this file cannot
+# know which conf a future round re-pins, but it can insist that whatever is protected
+# stays protected.
+README_GRANT_SIBLINGS = [
+    "agent-services/bin/start-secondary.sh",
+    "agent-services/bin/start-qwen38-flash-next.sh",
+    "agent-services/supervisor/conf.d/agent-llm-primary.conf",
+    "agent-services/supervisor/conf.d/agent-llm-secondary.conf",
+    # A tracked document elsewhere in the tree — the one a `*.md` glob would admit beside
+    # this grant. `agent-services/setup/README.md`, the path first written here, is not in
+    # the index at all, so classifying it is a statement about a string, not about the corpus.
+    "agent-services/setup/venv-history/README.md",
+]
+
+
+def _spec_with_tuple(extra: tuple[str, ...] = (), drop: tuple[str, ...] = ()):
+    """A fresh spec module whose ALLOWED_GLOBS is the shipped tuple, plus `extra` minus `drop`.
+
+    `classify` resolves `ALLOWED_GLOBS` from module globals at call time, so rebinding the
+    attribute on a freshly-loaded copy is enough to ask "what would the rails say with this
+    entry added / removed?" without touching the live module. Deriving from the shipped tuple
+    rather than a hard-coded copy is the point: the question this section asks is what one
+    entry changed, and a frozen copy answers a question about the past.
+    """
+    import importlib.util
+    path = REPO_ROOT / "scripts" / "automod" / "spec.py"
+    s = importlib.util.spec_from_file_location("spec_probe_4156", path)
+    mod = importlib.util.module_from_spec(s)
+    s.loader.exec_module(mod)
+    mod.ALLOWED_GLOBS = tuple(g for g in mod.ALLOWED_GLOBS if g not in drop) + tuple(extra)
+    return mod
+
+
+def test_agent_services_readme_is_granted_verbatim_and_now_classifies_allowed():
+    """#4156: the README a round must read before touching a launcher is now writable.
+
+    The grant is the one-line, verbatim shape every earlier widening in this tuple
+    used — `README.md`, `SETUP.md` (#1073), `agent-services/livekit_worker.py`
+    (#1449), the three turn-1-mini paths (#3258) — and the entry carries no `*`,
+    which matters here more than elsewhere because fnmatch's `*` crosses `/`: a
+    wildcard spelling of this one file would be a grant over 226 tracked paths.
+    """
+    # Which entry of the shipped tuple the grant is, chosen the way `classify` chooses: by
+    # matching the path. An `agent-services/*.md` entry leaves the verbatim name out of the
+    # tuple yet still makes `classify` answer `allowed`, so a membership assert on the literal
+    # and a verdict assert are both satisfied by a grant over every document in that tree —
+    # only asking what actually matches the path refuses it, and that is what this line does.
+    import fnmatch
+    matching = [g for g in spec.ALLOWED_GLOBS if fnmatch.fnmatch(README_GRANT, g)]
+    assert matching == [README_GRANT], (
+        f"{matching} in the shipped tuple match `agent-services/README.md`; exactly the "
+        "verbatim name may, because fnmatch's `*` crosses `/` and a wildcard spelling of one "
+        "document is a grant over the tree that holds it")
+    assert spec.classify(README_GRANT) == "allowed"
+    # The arbiter, not just the classifier: the diff that carries this grant has no
+    # `unlisted` and no `denied` bucket, so the next round — #4145's next round, which is
+    # the one that rewrites the README — clears rung 0 on the README alone. `spec.py`
+    # itself lands in `protected`, which is what routes the widening through the drill
+    # rather than refusing it: permitted-but-drilled is the shape every prior widening
+    # in this file has used.
+    ok, _reason, buckets = spec.check_scope(["scripts/automod/spec.py", README_GRANT])
+    assert ok is True, buckets
+    assert buckets["unlisted"] == [] and buckets["denied"] == [], buckets
+    assert buckets["allowed"] == [README_GRANT], buckets
+    assert buckets["protected"] == ["scripts/automod/spec.py"], buckets
+
+
+def test_the_readme_grant_moves_exactly_one_classification():
+    """#4156: the entry admits the README and nothing else, measured both directions.
+
+    Recomputed against the shipped tuple minus this one entry, over the whole tracked
+    `agent-services/` corpus plus the named probes: exactly one path changes verdict,
+    it was `unlisted` and is now `allowed`, and no path that was `unlisted` or
+    `protected` came back `allowed`. That last half is the clause — a reader who
+    swaps this line for `agent-services/README*` or drops the extension finds both
+    assertions below red, and the sibling one is what a `*.md` glob trips on: it admits
+    `agent-services/setup/venv-history/README.md`, unlisted under the shipped tuple.
+    """
+    before = _spec_with_tuple(drop=(README_GRANT,))
+    tracked = tracked_agent_services_paths()
+    # A floor, not `== 226`: the corpus is the index, and an unrelated commit that adds a
+    # launcher would otherwise turn this node red for a fact it is not about. 226 is what
+    # #4156 measured, and it is still the floor.
+    assert len(tracked) >= 226, (
+        f"{len(tracked)} tracked paths under agent-services/, below the 226 measured at "
+        f"#4156's base: the index lost files, so re-measure the corpus before quoting the "
+        f"77/78 that the #1376 rail is sized against")
+    changed = {p: (before.classify(p), spec.classify(p)) for p in tracked + README_GRANT_SIBLINGS
+               if before.classify(p) != spec.classify(p)}
+    assert changed == {README_GRANT: ("unlisted", "allowed")}, (
+        f"the grant moved {len(changed)} classification(s): {changed}")
+    assert (before.classify(README_GRANT), spec.classify(README_GRANT)) == ("unlisted", "allowed")
+    became_writable = [p for p in tracked if p != README_GRANT
+                       and before.classify(p) in ("unlisted", "protected")
+                       and spec.classify(p) == "allowed"]
+    assert became_writable == [], (
+        f"{became_writable} became writable through a grant that names one file")
+    assert spec.classify("agent-services/setup/venv-history/README.md") == "unlisted", (
+        "a tracked sibling document that no grant names — the path a `*.md` glob would take "
+        "with this entry, which is why it is in README_GRANT_SIBLINGS and in the diff above")
+
+
+def test_the_readme_grant_leaves_the_path_exactness_rail_holding_its_corpus():
+    """#4156 clause 3: #1376 clause 1 still has teeth after this grant, on both sides.
+
+    The rail `test_only_a_verbatised_path_under_agent_services_may_be_admitted` keeps
+    needs two things: nothing admitted without being named (it asserts that itself, so
+    this node asserts the *corpus* half — 77 `unlisted` paths remain against its floor of
+    70, which is what stops the rail going vacuous as grants accumulate), and a blanket
+    spelling still trips it with a message that names an illegal admission rather than
+    blaming the count. 78 tracked were `unlisted` before this entry, so the rail has 77
+    left and 7 of slack; that is the room #4156 spent, and this node is where the next
+    widening finds the meter running.
+    """
+    unlisted = [p for p in tracked_agent_services_paths() if spec.classify(p) == "unlisted"]
+    assert len(unlisted) >= 70, f"{len(unlisted)} unlisted against the rail's floor of 70"
+    # The expectation is derived, not written as `== 77`: what the grant owes is a delta of
+    # one verdict, and recomputing the same corpus with the entry removed measures exactly
+    # that. At #4156's base it is 78 -> 77; a hard 77 would instead blame the next unrelated
+    # launcher anyone adds for a widening it did not commit.
+    without = _spec_with_tuple(drop=(README_GRANT,))
+    n_without = sum(1 for p in tracked_agent_services_paths()
+                    if without.classify(p) == "unlisted")
+    assert len(unlisted) == n_without - 1, (
+        f"{n_without} tracked agent-services paths are `unlisted` with this entry removed and "
+        f"{len(unlisted)} with it: one grant moves one verdict, which at #4156's base was "
+        f"78 -> 77")
+    assert agent_services_paths_admitted_without_being_named() == []
+    widened = _spec_with_tuple(extra=("agent-services/**",))
+    universe = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    verbatim = {g for g in widened.ALLOWED_GLOBS if "*" not in g}
+    illegal = sorted(p for p in universe if p not in verbatim
+                     and widened.classify(p) == "allowed")
+    # Shipped verdicts, not the pre-grant ones: the README is named verbatim, so the rail
+    # rightly does not count it as an unnamed admission, and comparing against the 78 that
+    # were unlisted before this entry would ask the violation list to name it.
+    unlisted = [p for p in tracked_agent_services_paths() if spec.classify(p) == "unlisted"]
+    assert illegal, (
+        "an `agent-services/**` entry admitted nothing — the rail's violation list would be "
+        "vacuous and could no longer refuse a blanket glob")
+    assert len(illegal) >= 70, (
+        f"only {len(illegal)} admissions go unnamed under a blanket glob, and the #1376 rail "
+        f"refuses at that floor: the rail would be vacuous, not sharp")
+    missing = sorted(set(unlisted) - set(illegal))
+    assert missing == [], (
+        f"{len(missing)} paths that are `unlisted` today escape the violation list, e.g. "
+        f"{missing[:4]}: the rail could no longer name everything a tree grant admits")
+    assert "agent-services/docs/services.md" in illegal, (
+        f"the simulation no longer names an ordinary unlisted document among "
+        f"{len(illegal)} illegal admissions")
+    assert "agent-services/README.md" not in illegal, (
+        "the README is named verbatim, so it must not be counted as an illegal admission")
+    assert len(illegal) < len(tracked_agent_services_paths()), (
+        "a blanket glob is supposed to be refused for admitting the unnamed majority, not "
+        "for classifying everything: the corpus and the violation list have collided")
+
+
+def test_the_readme_grant_comment_names_the_item_and_refuses_the_directory():
+    """#4156 clause 4: the entry says what it grants, and says no to the tree.
+
+    A grant of one document inside 226 tracked paths is the shape that gets mistaken for
+    a tree grant three months later, when nobody remembers which line admitted what. The
+    comment therefore carries the item number, the words "directory" and a glob spelling,
+    and the reason the rails exist at all — #1449's own line, quoted rather than
+    paraphrased, because the 2026-09-21 agent-llm-primary restart is a fact a later reader
+    should not have to reconstruct.
+    """
+    src = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text().splitlines()
+    at = [i for i, l in enumerate(src) if l.strip() == f'"{README_GRANT}",']
+    assert len(at) == 1, f"{len(at)} entries spell {README_GRANT} verbatim; expected one"
+    # The whole contiguous comment block, not a fixed window measured when this comment was
+    # shorter: a window slides off its own top as the comment grows, and would then stop
+    # grading the lead-in — where the item number is — while still passing on tokens that
+    # happen to appear further down.
+    start = at[0]
+    while start and src[start - 1].lstrip().startswith("#"):
+        start -= 1
+    block = "\n".join(src[start:at[0]])
+    assert block.strip(), "the entry has no comment above it to read the grant from"
+    assert "#4156" in block, "the comment must name the item that asked for the grant"
+    assert "directory" in block.lower(), (
+        "the comment must say the directory is refused, not merely leave it out")
+    assert "agent-services/**" in block, (
+        "the comment must spell out the glob it is refusing, so a reader weighing it "
+        "later sees the exact thing that was priced and declined")
+    assert "launcher" in block.lower(), (
+        "the comment must name the rails the directory would have crossed")
+    assert "rung 0" in block or "live tree" in block, (
+        "the comment must record that a widening does not bind for its own round, which is "
+        "why the README's prose is a later item and not this diff")

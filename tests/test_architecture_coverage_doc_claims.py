@@ -3685,7 +3685,7 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
 #: #4045: the three `threat-model.md` anchors that were re-pointed at the definition
 #: deciding the capability their row names, each with the symbol the cell must name.
 THREAT_AUTOMOD_ANCHORS = (
-    ("scripts/automod/spec.py:715", "check_scope"),     # what classifies the diff
+    ("scripts/automod/spec.py:748", "check_scope"),     # what classifies the diff
     (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
     ("scripts/automod/gate.py:4320", "rung_review"),    # the second reader
 )
