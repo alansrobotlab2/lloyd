@@ -450,18 +450,69 @@ def size_error(filename: str, text: str) -> str | None:
         f"({size - ceiling:,} B over). It loads into every user-platform system "
         f"prompt; write the content to a knowledge note under "
         f"~/obsidian/knowledge/ instead, or trim another entry in the same edit."
-        + consolidation_hint(text)
+        + consolidation_hint(text, filename)
     )
 
 
-def consolidation_hint(text: str) -> str:
+#: Where a loaded PROFILE file's detail goes when the file is full: the vault-root
+#: `memory/mental-models.md`, which is in no `MEMORY_CEILINGS` and is never rendered
+#: into a prompt. `lloyd/USER.md` names that destination itself ("When this file is
+#: full, reinforcements go in the uncapped vault-root `memory/mental-models.md`
+#: (NOT `lloyd/memory/`, topic files)"); #4121 makes the guard say the same thing,
+#: because until now the one refusal `USER.md` actually receives ended by sending its
+#: writer to a `topics/<slug>` file — the index's route, on a file that is not an
+#: index, which is how a profile line gets deleted from every prompt by a writer that
+#: meant to park it. Placed below `size_error` rather than beside the ceilings for the
+#: standing reason the audit-citation test gives: `lloyd/reviews/2026-09-14-user-md-audit.md`
+#: cites `app/prompt_surface.py:102` and `:130`, and anything inserted above them
+#: moves a line that note claims by number.
+PROFILE_OVERFLOW_TARGET = "memory/mental-models.md"
+
+#: The one loaded memory file that IS an index, and so the only one whose overflow
+#: route is a `lloyd/memory/<slug>.md` topic file. The authority on that scope is
+#: `app/memory_ceiling.INDEX_MEMORY_FILE`; this is the prose half, spelled here only
+#: because `memory_ceiling` imports this module and importing it back would be a
+#: cycle. `tests/test_memory_headroom_warning.py::test_the_prose_route_and_the_guard_scope_name_the_same_index_file`
+#: is the pin that reddens the day the two names differ.
+INDEX_MEMORY_NAME = "MEMORY.md"
+
+
+def overflow_route(filename: str) -> str:
+    """The sentence telling `filename`'s writer where its detail goes instead.
+
+    Two routes, because the two loaded files hold two different things. An INDEX line
+    is a pointer with a hook, so its detail moves to a topic file and the line stays.
+    A PROFILE line is the rule itself, so what moves is the *detail* hung under it,
+    into the uncapped vault-root `memory/mental-models.md`, and the ruling stays on
+    the loaded line. The caveat is in the text because it is the real cost: that file
+    is uncapped but unloaded (#4122 measures the dose), so a relocation buys bytes by
+    taking that detail out of every prompt — which is why the route says *detail*,
+    and never "move the entry".
+    """
+    if filename == INDEX_MEMORY_NAME:
+        return ("Move detail into a topic file (memory_add file=\"topics/<slug>\") "
+                "and keep one typed index line.")
+    return (f"Move the DETAIL into the uncapped vault-root `{PROFILE_OVERFLOW_TARGET}` "
+            f"(NOT a `lloyd/memory/` topic file — those are index pointers, never "
+            f"loaded into a prompt, and {filename} is a profile, not an index) and "
+            f"keep the ruling itself on the loaded line. A relocation there takes "
+            f"that detail out of every prompt, which is what it buys the bytes with.")
+
+
+def consolidation_hint(text: str, filename: str) -> str:
     """Where the bytes are, appended to a size refusal (review 2026-09-24, P4).
 
     A refusal that only says "too big" sends the writer to guess what to cut, and
     the guess is usually the entry it was trying to add. The three largest `## `
     sections by bytes and the count of untyped top-level entries are the two
-    numbers a consolidation starts from. Names no file: the refusal it rides on
-    already did, and a hint that named one could name the wrong one.
+    numbers a consolidation starts from.
+
+    It names a destination now, and so it takes the file as an argument: the hint the
+    index needs (`lloyd/memory/<slug>.md`) is the opposite of the hint a profile needs
+    (`memory/mental-models.md`), and a hint that guessed which file it was riding on —
+    as this one did, offering the index's route to both — gave `USER.md`'s writer the
+    one instruction that loses a ruling (#4121). The refusal above has already said
+    which file it is about; this now repeats it rather than assuming it.
     """
     secs = sorted(sections(text), key=lambda s: s[1], reverse=True)[:3]
     parts: list[str] = []
@@ -471,10 +522,10 @@ def consolidation_hint(text: str) -> str:
     untyped = untyped_entry_count(text)
     if untyped:
         parts.append(f"{untyped} top-level entries carry no [type] tag")
+    route = overflow_route(filename)
     if not parts:
-        return ""
-    return (" Consolidate — " + "; ".join(parts) + ". Move detail into a topic file "
-            "(memory_add file=\"topics/<slug>\") and keep one typed index line.")
+        return " " + route
+    return " Consolidate — " + "; ".join(parts) + ". " + route
 
 
 def size_errors(surfaces: dict[str, str | None]) -> list[str]:

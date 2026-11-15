@@ -40,7 +40,7 @@ from app.config import service_url
 # The loaded-memory byte ceiling, shared with `memory_add`/`memory_replace` and
 # Write/Edit. Stdlib-only module, number and wording owned by `prompt_surface`
 # (#1010).
-from app.memory_ceiling import memory_write_error
+from app.memory_ceiling import memory_write_error, memory_write_warning
 from mcp.types import Tool
 
 from agent_mcp._shared import (
@@ -2511,6 +2511,7 @@ def _vault_write(params: dict) -> dict:
     refusal = _guard_research_route(path, content)
     if refusal is not None:
         return refusal
+    headroom = None  # #4121: the advisory notice, set below; None when quiet
     try:
         content, type_err, replaced = _guard_knowledge_type(path, content)
         if type_err is not None:
@@ -2528,6 +2529,11 @@ def _vault_write(params: dict) -> dict:
         ceiling_msg = memory_write_error(target, content)
         if ceiling_msg:
             return _err(ceiling_msg, ErrorCode.INVALID_PARAM)
+        # The advisory half (#4121), priced on the same post-guard `content` the
+        # refusal above was priced on, so what is reported is what lands. A write of
+        # `lloyd/USER.md` through this lane is one of the three routes onto a loaded
+        # profile, and until now it was the lane that said least about the ceiling.
+        headroom = memory_write_warning(target, content)
         target.parent.mkdir(parents=True, exist_ok=True)
         # Same lock key the memory tools and Write/Edit take: `vault_write` with
         # path `lloyd/MEMORY.md` is the same state as `memory_add`, spelled a
@@ -2584,6 +2590,12 @@ def _vault_write(params: dict) -> dict:
         # write's success path rather than on an hour.
         _notify_prompt_surface_write(path)
         result = {"success": True, "path": path, "bytes": byte_count}
+        if headroom:
+            # #4121: the notice rides in the SUCCESS result, under the same key the
+            # memory tools use, because it refused nothing — the write above landed and
+            # the only thing to say is about the next one. `vault_write` answers a dict
+            # where Write/Edit answer a sentence, so this lane has no tail to append to.
+            result["headroom_warning"] = headroom
         if replaced:
             # Say so: a writer that asked for one spelling and got another needs
             # to see it, or it keeps asking for the retired one.

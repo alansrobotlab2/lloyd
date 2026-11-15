@@ -50,6 +50,7 @@ from app.memory_ceiling import (
     TOPIC_SLUG_RE,
     TOPICS_SUBDIR,
     memory_write_error,
+    memory_write_warning,
     topic_path,
     topic_slug,
 )
@@ -412,6 +413,7 @@ def _memory_add(params: dict) -> dict:
     if injection_msg:
         return _err(injection_msg, ErrorCode.INJECTION)
     filepath.parent.mkdir(parents=True, exist_ok=True)
+    headroom = None  # set under the lock, below; None means nothing to say
     try:
         # The read belongs inside the lock. Locking only the write turns a lost
         # update into a slightly later lost update, and MEMORY.md/USER.md have
@@ -438,6 +440,16 @@ def _memory_add(params: dict) -> dict:
             if ceiling_msg:
                 return _err(ceiling_msg, ErrorCode.INVALID_PARAM)
             write_text_durable(filepath, updated)
+            # #4121: the advisory companion to the refusal above, priced on the SAME
+            # bytes under the same lock. It refuses nothing — a growth write that
+            # `memory_write_error` allowed is allowed — and this is the only place it
+            # can be delivered where the writer still has its attention: the refusal
+            # that eventually lands on `USER.md` at 16,384 B arrives with the entry
+            # already unwritten, and `memory_ledger.py status` has been printing that
+            # file's `CURATE` for five weeks while it went from 59 B to 137 B of
+            # headroom, because a status line is read by a different process than the
+            # one holding the pen.
+            headroom = memory_write_warning(filepath, updated)
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
     # #1729: report the absolute path, not only the `file` argument. Each of the
@@ -445,7 +457,13 @@ def _memory_add(params: dict) -> dict:
     # result whose wrongness the caller had to notice for itself. The path it
     # wrote is the half it cannot misread, and a write aimed at a topic can never
     # print MEMORY.md.
-    return {"success": True, "file": file, "path": str(filepath)}
+    result = {"success": True, "file": file, "path": str(filepath)}
+    if headroom:
+        # The notice rides in the SUCCESS result, never as a second field the caller
+        # has to go looking for on an error path: the write happened, and the only
+        # question the warning answers is about the next one.
+        result["headroom_warning"] = headroom
+    return result
 
 
 def _memory_replace(params: dict) -> dict:
@@ -463,6 +481,7 @@ def _memory_replace(params: dict) -> dict:
     injection_msg = _check_injection(new_text)
     if injection_msg:
         return _err(injection_msg, ErrorCode.INJECTION)
+    headroom = None  # set under the lock, below; None means nothing to say
     try:
         with commit_lock(filepath):
             if not filepath.exists():
@@ -485,10 +504,18 @@ def _memory_replace(params: dict) -> dict:
             if ceiling_msg:
                 return _err(ceiling_msg, ErrorCode.INVALID_PARAM)
             write_text_durable(filepath, updated)
+            # #4121, the same companion `_memory_add` gives: a replace is an append
+            # wearing a disguise (the comment above this refusal says so), so it is
+            # one of the lanes that walks `USER.md` up to its ceiling one edit at a
+            # time, and it is priced on the exact bytes that just landed.
+            headroom = memory_write_warning(filepath, updated)
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
     # `path` for the reason given in `_memory_add`.
-    return {"success": True, "file": file, "path": str(filepath)}
+    result = {"success": True, "file": file, "path": str(filepath)}
+    if headroom:
+        result["headroom_warning"] = headroom
+    return result
 
 
 def _drop_entry_line(content: str, needle: str) -> str:

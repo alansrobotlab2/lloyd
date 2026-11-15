@@ -740,3 +740,184 @@ async def test_the_slug_refusal_comes_back_over_the_aggregator_as_an_error(topic
     assert res.is_error is True, _text(res)
     assert "48-character topic-slug cap" in _text(res), _text(res)
     assert not target.exists()
+
+
+# ── #4121 clause 5: the headroom notice survives the trip out to the writer ────
+#
+# `app/memory_ceiling.memory_write_warning` is worth nothing on its own: it is a
+# string, and a handler that computes it and drops it tells the writer precisely as
+# little as no handler at all. #4121's whole finding is that `USER.md`'s writer never
+# hears anything before the flat refusal — `memory_ledger.py status` had been printing
+# that file's `-> CURATE` for five weeks, at 59 B of headroom and then 137 B, from a
+# process that was not holding the pen. So what is pinned here is the SEAM: each of the
+# five handlers that already asks `memory_write_error` — `Write`, `Edit`,
+# `memory_add`, `memory_replace`, `vault_write` — must put the text in the result of the
+# write that SUCCEEDED. The predicate itself, and the fact that it refuses nothing, are
+# pinned in `tests/test_memory_headroom_warning.py`.
+
+#: The live `USER.md` size at triage: 16,247 of a 16,384-byte ceiling. These fixtures
+#: reproduce that shape exactly rather than a round number, because the finding is
+#: about the last 137 bytes and a fixture at "90 %" of a made-up size proves nothing
+#: about the file that actually got there.
+LIVE_USER_MD_BYTES = 16_247
+
+
+def _profile_of_nbytes(n: int, *,
+                       tail: str = "\n- the entry the Edit lane rewrites\n") -> str:
+    """A `USER.md` of EXACTLY `n` bytes, ending in one line the Edit node can aim at.
+
+    Byte-exact because every bound in this area is `len(text.encode("utf-8"))` and not a
+    character count (#1010's standing lesson), and tail-anchored because `Edit` refuses
+    an `old_string` that matches twice and a run of padding would.
+    """
+    text = "# User Profile\n\n- [user] a stated ruling that stays loaded\n"
+    filler = "- filler entry that pads the profile out to its size here\n"
+    assert len(text.encode("utf-8")) + len(tail.encode("utf-8")) <= n, \
+        "fixture smaller than its own ends"
+    while len((text + filler + tail).encode("utf-8")) <= n:
+        text += filler
+    pad = n - len(text.encode("utf-8")) - len(tail.encode("utf-8"))
+    return text + "x" * pad + tail
+
+
+def _profile_lane(home, monkeypatch, tmp_path, size: int = LIVE_USER_MD_BYTES):
+    """All three lanes that can grow `USER.md`, aimed at one scratch profile.
+
+    Every root the lanes resolve through has to move together or the node passes for
+    the wrong reason: `memory_ceiling.MEMORIES_DIR` decides what counts as a loaded
+    memory file at all, `session.MEMORIES_ROOT` is where the memory tools put their
+    bytes, and `vault.VAULT` is where `vault_write` puts its own — patch one and not
+    the others and the handler is writing a file the predicate has never seen.
+    """
+    from agent_mcp import session as S
+    from app import memory_ceiling as MC
+
+    V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
+    root = vault_root / "lloyd"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(MC, "MEMORIES_DIR", root)
+    monkeypatch.setattr(S, "MEMORIES_ROOT", root)
+    # #3771's re-warm hook is a POST to the live backend. Silent and fire-and-forget
+    # in production, and neither of those from a test, where it would ask a running
+    # service to re-warm a prefix this file has no business invalidating.
+    monkeypatch.setattr(V, "_notify_prompt_surface_write", lambda path: None)
+    user_md = root / "USER.md"
+    user_md.write_text(_profile_of_nbytes(size), encoding="utf-8")
+    return S, V, user_md
+
+
+async def test_the_write_lane_lands_the_growth_and_carries_the_notice(home, monkeypatch,
+                                                                     tmp_path):
+    """`Write` accepts a near-full `USER.md` and says so, in the same result.
+
+    The success sentence keeps its exact prefix — `File written: <path> (N chars)` is
+    what the nightly job's own log lines match on — and the notice arrives after it, so
+    the byte count the lane has always answered with is undisturbed. The write landing
+    is half of clause 5 and half of clause 2: the notice is a notice because this write
+    was not refused.
+    """
+    S, V, user_md = _profile_lane(home, monkeypatch, tmp_path)
+    grown = user_md.read_text(encoding="utf-8") + "\n- x"
+    await FS.call_tool("Read", {"file_path": str(user_md)})
+    res = await FS.call_tool("Write", {"file_path": str(user_md), "content": grown})
+    assert res.is_error is False, _text(res)
+    assert user_md.read_text(encoding="utf-8") == grown, "the write itself was blocked"
+    text = _text(res)
+    assert text.startswith(f"File written: {user_md} ({len(grown)} chars)"), text
+    assert "memory/mental-models.md" in text, text
+    assert "topics/<slug>" not in text, text
+
+
+async def test_the_edit_lane_lands_the_growth_and_carries_the_notice(home, monkeypatch,
+                                                                    tmp_path):
+    """`Edit` — the lane the nightly knowledge-write job is told to use — same deal.
+
+    This is the lane that matters most and the reason the clause names it: the skill
+    says "Use `Edit` for targeted changes", so it is the writer that walks `USER.md` up
+    to its ceiling one small change at a time, and the one that needs the notice while a
+    relocation is still ahead of the refusal rather than one byte behind it.
+    """
+    S, V, user_md = _profile_lane(home, monkeypatch, tmp_path)
+    before = len(user_md.read_text(encoding="utf-8").encode("utf-8"))
+    await FS.call_tool("Read", {"file_path": str(user_md)})
+    res = await FS.call_tool("Edit", {
+        "file_path": str(user_md),
+        "old_string": "the entry the Edit lane rewrites",
+        "new_string": "the entry the Edit lane rewrites, now grown by this node"})
+    assert res.is_error is False, _text(res)
+    text = _text(res)
+    assert text.startswith(f"Edited {user_md} (1 replacement)"), text
+    assert "memory/mental-models.md" in text, text
+    after = len(user_md.read_text(encoding="utf-8").encode("utf-8"))
+    assert after == before + len(", now grown by this node"), \
+        f"the growth itself was disturbed: {before} -> {after}"
+
+
+def test_the_memory_tools_carry_the_notice_in_their_success_result(home, monkeypatch,
+                                                                  tmp_path):
+    """`memory_add` and `memory_replace` answer a dict: the key is `headroom_warning`.
+
+    One key for both dict-answering lanes, and the sentence-answering lanes append the
+    same text instead — because a writer has to find the notice in the result it already
+    reads, and a second field it has to know to look for is a field it never reads.
+    The file must have GROWN for the notice to be worth anything here, so the entry is
+    asserted on disk too.
+    """
+    S, V, user_md = _profile_lane(home, monkeypatch, tmp_path)
+    res = S._memory_add({"file": "USER.md", "entry": "a short stated fact",
+                         "type": "user"})
+    assert res.get("success") is True, res
+    notice = res.get("headroom_warning")
+    assert notice and "memory/mental-models.md" in notice, sorted(res)
+    assert "a short stated fact" in user_md.read_text(encoding="utf-8")
+
+    res = S._memory_replace({"file": "USER.md", "old_text": "a short stated fact",
+                             "new_text": "a short stated fact, restated at length"})
+    assert res.get("success") is True, res
+    assert res.get("headroom_warning"), sorted(res)
+
+
+def test_the_vault_write_lane_carries_the_notice_in_its_success_result(home, monkeypatch,
+                                                                      tmp_path):
+    """The third lane onto the same file, off the change ledger.
+
+    A CREATE rather than an overwrite: `_note_clobber_refusal` (#3291) is a different
+    guard, on a different question, and a node that tripped it would report a refusal
+    where this one needs a success. `bytes` is asserted intact for the same reason the
+    other lanes' prefixes are — the notice is addition, not replacement.
+    """
+    S, V, user_md = _profile_lane(home, monkeypatch, tmp_path)
+    user_md.unlink()
+    content = _profile_of_nbytes(LIVE_USER_MD_BYTES)
+    res = V._vault_write({"path": "lloyd/USER.md", "content": content})
+    assert res.get("success") is True, res
+    assert res["bytes"] == len(content.encode("utf-8")), res
+    notice = res.get("headroom_warning")
+    assert notice and "memory/mental-models.md" in notice, sorted(res)
+    assert user_md.read_text(encoding="utf-8") == content
+
+
+async def test_a_write_with_room_left_answers_exactly_what_it_always_did(
+        home, monkeypatch, tmp_path):
+    """The quiet half of clause 5, on every lane at once: no notice, no new byte.
+
+    Half of "no write that succeeds today starts failing" is that a write nowhere near a
+    ceiling is not turned into a wall of advice: `Write` returns its one sentence
+    unchanged, `memory_add` its three keys, `vault_write` a create of a topic file with
+    no notice key at all. A notice that fires on everything is noise, and noise is how a
+    real warning stops being read.
+    """
+    S, V, user_md = _profile_lane(home, monkeypatch, tmp_path, size=200)
+    small = _profile_of_nbytes(210)
+    await FS.call_tool("Read", {"file_path": str(user_md)})
+    res = await FS.call_tool("Write", {"file_path": str(user_md), "content": small})
+    assert _text(res) == f"File written: {user_md} ({len(small)} chars)", _text(res)
+
+    res = S._memory_add({"file": "USER.md", "entry": "one more line", "type": "user"})
+    assert res.get("success") is True, res
+    assert "headroom_warning" not in res, res
+
+    res = V._vault_write({"path": "lloyd/memory/quiet-slug.md",
+                          "content": "# detail that is nowhere near a bound\n"})
+    assert res.get("success") is True, res
+    assert "headroom_warning" not in res, res

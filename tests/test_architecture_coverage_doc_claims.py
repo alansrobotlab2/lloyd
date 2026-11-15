@@ -12587,8 +12587,14 @@ def test_the_witness_pass_reports_every_seeded_anchor_the_2026_10_31_review_repl
     """
     text = (ARCH / "guard-coverage.md").read_text()
     stale = {
-        "`agent_mcp/session.py:411`": "`agent_mcp/session.py:299`",
-        "`:463`": "`:351`",
+        # Same rule as the `safety.py` keys below: #4121 put `memory_write_warning`
+        # beside the ceiling call in both writers, which pushed the two
+        # `_check_injection` sites from `:411`/`:463` to `:412`/`:481` and the doc with
+        # them. The seeded VALUES stay historical — `:299` is `_memory_read`, `:351` is
+        # `_topic_names`, neither a line the witness block prints — so the finding this
+        # test exists to prove still fires.
+        "`agent_mcp/session.py:412`": "`agent_mcp/session.py:299`",
+        "`:481`": "`:351`",
         "`agent_mcp/http_tools.py:108`": "`agent_mcp/http_tools.py:119`",
         "`:435`": "`:413`",
         "`:549`": "`:523`",

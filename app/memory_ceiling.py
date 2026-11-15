@@ -1173,3 +1173,113 @@ def index_unrepresentable_error(path: str | os.PathLike[str],
         f"check sees only the lines THIS write adds, so a file that already holds such a "
         f"line stays writable and the fix is the reword, not a different tool.")
     return "\n".join(lines)
+
+
+# ── #4121: the headroom WARNING rung (advisory, both loaded memory files) ──────
+#
+# `USER.md` reaches its 16,384-byte ceiling with no signal of any kind on the way
+# there. The two staged bounds that protect the index — `MEMORY_TIGHTNESS`'s tight
+# limit and `INDEX_ROOM_RESERVE_BYTES` — both sit behind `index_bounds_apply`, and that
+# scope is right: a tight REFUSAL applied to a file living at 99.2 % of its own ceiling
+# refuses every non-shrinking write on the day it ships, which is the freeze
+# `INDEX_MEMORY_FILE`'s comment and `prompt_surface`'s `USER_MD_CEILING_BYTES` comment
+# both name, and which #3629 measured twice without changing (59 B of headroom on
+# 2026-11-06, 137 B on 2026-11-14, `memory_ledger.py status` printing `-> CURATE` at
+# both). What was missing is not a bound. It is a NOTICE: `memory_write_error` answers
+# None right up to the byte that refuses — witnessed directly at a prospective 16,251 B,
+# 133 B from the wall — and the only thing that ever said the file was nearly full is a
+# status line read by a script that is not holding the pen.
+#
+# So this is a third kind of arm in this module: not a refusal, a warning, priced on the
+# same prospective text and handed back BY THE CALLER, in the result of the write that
+# succeeded. It refuses nothing — `memory_write_error` is untouched, including the
+# 16,384 B refusal, the shrink escape and every index bound — and it is deliberately NOT
+# gated on `index_bounds_apply`, because the scope that decides whether a byte budget may
+# REFUSE is not the scope that decides whether a writer may be TOLD. That split is the
+# whole item: `tests/test_memory_headroom_warning.py::test_the_warning_is_not_gated_on_the_index_scope`
+# is its pin.
+#
+# Appended at the END of the module for the standing reason given twice above: the audit
+# note `lloyd/reviews/2026-09-14-user-md-audit.md` cites `app/memory_ceiling.py:114`,
+# `:162` and `:262` by line number, and
+# `tests/test_prompt_surface_budget.py::test_every_code_line_the_audit_cites_is_the_line_it_claims`
+# reddens any edit that shifts them.
+
+#: Share of its ceiling at which a loaded memory file's writer starts to be told.
+#: A tightness RATIO, not a byte count: the rung is
+#: `tight_limit(filename, HEADROOM_WARNING_TIGHTNESS)`, so the arithmetic stays in one
+#: place (#1010) and this module gains no new ceiling. 0.90 and not the index's 0.80
+#: because this is a notice and not a bound: at 80 % a file that already sits above the
+#: line would warn on every write it ever receives again, and the stretch worth warning
+#: about is the last one in which a relocation is still possible before the flat
+#: refusal. #4122 settles whether the right quantity is a level at all rather than a
+#: dose, once its headroom-days row has ~two weeks of data; that re-settling is one
+#: edit to this line and nothing else.
+HEADROOM_WARNING_TIGHTNESS = 0.90
+
+
+def headroom_warning(filename: str, text: str) -> str | None:
+    """Advice for a writer whose prospective text leaves `filename` near its ceiling.
+
+    Non-None from `HEADROOM_WARNING_TIGHTNESS` of the file's ceiling upward, None below
+    it, and None for a name that is not loaded (`tight_limit` answers None there, since
+    a name outside `MEMORY_CEILINGS` has no ceiling to be near). The rung is
+    `tight_limit(filename, HEADROOM_WARNING_TIGHTNESS)` — the same derivation the
+    index's tight limit uses, at a different tightness — so the number this text quotes
+    is computed from `memory_ceiling()` and no byte constant is written down here to go
+    stale against it. The rounding follows `tight_limit`'s `int()` exactly, which is the
+    reason the comparison below is `<` and not `<=`: a rung of 14,745 B warns AT 14,745,
+    one byte earlier than a strictly-90 % reading of the same ratio would, and the two
+    tight limits in this module must round the same way or the instrument and the guard
+    disagree about where the line is.
+
+    Advisory by construction: this function is never called by `memory_write_error`, and
+    a caller that ignores it loses nothing but the notice. The bytes are still refused,
+    at the same place and by the same arm, by `size_error` through
+    `memory_write_error`'s ceiling check.
+
+    The route it names is the file's own, from `prompt_surface.overflow_route`: an index
+    is told to move detail to a topic file, and a profile is told to move DETAIL to the
+    uncapped vault-root `memory/mental-models.md` while keeping the ruling loaded
+    (#4121). The local import is not laziness — the module-level import line sits above
+    the `:114`/`:162`/`:262` citations this file cannot shift, and `prompt_surface` is
+    already in `sys.modules` by the time this runs.
+    """
+    from app.prompt_surface import overflow_route
+    rung = tight_limit(filename, HEADROOM_WARNING_TIGHTNESS)
+    if rung is None:
+        return None
+    ceiling = memory_ceiling(filename) or 0
+    size = len(text.encode("utf-8"))
+    if size < rung:
+        return None
+    return (
+        f"{filename} would be {size:,} bytes, at or over the {rung:,}-byte headroom "
+        f"rung ({HEADROOM_WARNING_TIGHTNESS:.0%} of its {ceiling:,}-byte ceiling): "
+        f"{max(ceiling - size, 0):,} B of headroom left. This write is NOT refused — "
+        f"the rung is a notice, and the next growth may be the one that meets the flat "
+        f"ceiling refusal with no route through it but a relocation made now. "
+        + overflow_route(filename)
+    )
+
+
+def memory_write_warning(path: str | os.PathLike[str], prospective: str) -> str | None:
+    """What a writer about to make this whole-file write should be TOLD, or None.
+
+    The advisory companion to `memory_write_error(path, prospective)`: same path
+    resolution against `MEMORIES_DIR`, same prospective text, same five callers. A
+    handler asks the two together — the error before the write, because it stops one;
+    the warning after it succeeds, because it changes nothing about this write and is
+    only useful as a heads-up for the next — and puts the warning text in its SUCCESSFUL
+    result, which is the only place a writer reads before its next write.
+
+    Topic files and every other path answer None, exactly as the error abstains on them:
+    `_loaded_memory_name` is the one gate, so a warning cannot fire on a file that has
+    no prompt cost. Nothing under this function's name can refuse: no caller of it has
+    ever had the authority to stop a write, and giving it that authority later is how a
+    notice becomes the freeze the item's two comments exist to prevent.
+    """
+    filename = _loaded_memory_name(path)
+    if filename is None:
+        return None
+    return headroom_warning(filename, prospective)

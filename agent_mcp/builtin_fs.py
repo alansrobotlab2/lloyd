@@ -47,7 +47,7 @@ from app.atomic_io import commit_lock, write_text_durable
 # memory files — this one, `memory_add`/`memory_replace`, `vault_write`, and the
 # vault-round validator — with the number and the wording owned by `prompt_surface`.
 # Stdlib-only, so it costs this module nothing to import (#1010).
-from app.memory_ceiling import memory_write_error
+from app.memory_ceiling import memory_write_error, memory_write_warning
 
 logger = logging.getLogger("lloyd-builtin-fs")
 
@@ -1167,6 +1167,22 @@ _NON_REGULAR_TYPES: "dict[int, str]" = {
 }
 
 
+def _headroom_note(p: Path, prospective: str) -> str:
+    """#4121: the advisory tail a SUCCESS sentence from this lane carries, or `""`.
+
+    `Write` and `Edit` answer success with a sentence and not a dict, so the one
+    formatting rule for both lanes is here rather than spelled twice at two returns —
+    the same reason the ceiling they refuse by is one call in `app.memory_ceiling`.
+    The text is priced on the exact bytes the lane wrote and appended AFTER the write,
+    because it refuses nothing: this is the notice #4121 found missing on `USER.md`,
+    where the first thing any writer ever heard was the flat 16,384-byte refusal one
+    byte past the end, and `memory_ledger.py status` had been printing that file's
+    `CURATE` for five weeks from a process that was not holding the pen.
+    """
+    warning = memory_write_warning(p, prospective)
+    return f"\n{warning}" if warning else ""
+
+
 def _write_target(mut: "_Mutation", p: Path) -> Path:
     """Where an atomic replace of `p` actually has to land.
 
@@ -1239,6 +1255,7 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
     # path here for both reasons. The gate above stays outside: it is a refusal,
     # not part of the commit, and holding the lock across it would put policy
     # latency inside everyone else's wait.
+    headroom = ""  # #4121: advisory tail of the success sentence; "" when quiet
     try:
         with commit_lock(mut.real):
             if mut.existed:
@@ -1256,6 +1273,12 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
             ceiling_msg = memory_write_error(p, content)
             if ceiling_msg:
                 return json.dumps({"error": ceiling_msg})
+            # Beside the refusal, priced on the same `content`: the lane that has to
+            # be stopped from landing 16,390 bytes on `USER.md` is the lane that gets
+            # told, at 90 % of that ceiling, that it is running out of room. #4121 —
+            # this is the writer the nightly knowledge-write job uses, and until now
+            # the only thing it ever heard near the ceiling was the flat refusal.
+            headroom = _headroom_note(p, content)
 
             # Same position and same reasoning as the ceiling: a rule about the
             # bytes about to land, priced on `content`, refusing before the undo
@@ -1297,7 +1320,11 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
     except TimeoutError as exc:
         return json.dumps({"error": f"failed to write {file_path}: {exc}",
                            "code": "LOCK_TIMEOUT"})
-    return f"File written: {file_path} ({len(content)} chars)"
+    # #4121: the notice goes on the END of the success sentence, after the byte count,
+    # so every existing reader of this lane's `File written: … (N chars)` prefix still
+    # matches. Quiet writes — anything that is not a loaded memory file near its
+    # ceiling — get the byte they always got.
+    return f"File written: {file_path} ({len(content)} chars)" + headroom
 
 
 # ---------------------------------------------------------------------------
@@ -1374,6 +1401,7 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
     # 82 of 100 at base. The old_string check below is inside the lock for the same
     # reason the read is: matching against bytes this lane does not hold is what
     # turns "the edit applied" into "the edit reverted someone else".
+    headroom = ""  # #4121: advisory tail of the success sentence; "" when quiet
     try:
         with commit_lock(mut.real):
             try:
@@ -1419,6 +1447,12 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
             ceiling_msg = memory_write_error(p, updated)
             if ceiling_msg:
                 return json.dumps({"error": ceiling_msg})
+            # The advisory half, on the same `updated` (#4121): this is the lane the
+            # nightly knowledge-write job is told to use for MEMORY.md and USER.md, so
+            # it is the writer that actually runs `USER.md` up to its ceiling — the one
+            # that needs the notice while a relocation is still ahead of the refusal
+            # rather than a refusal that arrives after the entry was written.
+            headroom = _headroom_note(p, updated)
             # Priced on `updated`, not on the file as it stands, so an Edit that
             # REPAIRS a bad `type:` gets through the file that carries one — and
             # one that introduces it is refused with nothing written. `Write`
@@ -1453,7 +1487,11 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
     except TimeoutError as exc:
         return json.dumps({"error": f"failed to edit {file_path}: {exc}",
                            "code": "LOCK_TIMEOUT"})
-    return f"Edited {file_path} ({replaced} replacement{'s' if replaced != 1 else ''})"
+    # #4121: after the byte this lane has always answered with, so an `Edited … (1
+    # replacement)` prefix still matches; "" on every path that is not a loaded memory
+    # file at or past its headroom rung.
+    return (f"Edited {file_path} ({replaced} replacement{'s' if replaced != 1 else ''})"
+            + headroom)
 
 
 # ---------------------------------------------------------------------------
