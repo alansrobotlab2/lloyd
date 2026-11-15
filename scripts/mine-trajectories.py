@@ -665,9 +665,42 @@ def bucket_completeness(day: str, rows: int, newest_row: datetime | None,
             "uncovered_hours": round(gap_hours, 1)}
 
 
+def window_missing_days(window_start, dated_names) -> list:
+    """ISO dates the window spans for which no dated bucket exists, oldest first.
+
+    `window_start` is the cutoff date the loader already applies and `dated_names` the
+    `D.jsonl` day-names it counted, so the range is answered from the same two facts the
+    bucket count is — no second notion of what the window covered. It runs from that
+    cutoff to the LATEST name present and returns `[]` when every date between them has a
+    file.
+
+    The end is the newest bucket's own date and not today's, because a date past it has
+    nothing to be missing from. #2449's open-day rule already says the newest bucket may
+    hold only part of its day, and naming that same day absent would report one
+    half-written day twice — once as partial, once as a hole. So what this can report is a
+    date the window spanned for which extraction produced nothing, which is precisely the
+    fact a bucket count cannot express: six files spanning seven dates count as six either
+    way. The live case (#4123): the corpus holds 2026-11-08 through -12 and -14 and no
+    2026-11-13, because #56 never dispatched on the 13th — the operator pool was
+    person-held from 2026-11-13T05:14:28Z to 2026-11-15T03:58:05Z — and the run that found
+    it had to compare a directory listing against seven dates to say so. A window whose
+    buckets are all older than it stays honest here: the dates named are inside the range,
+    and the run's own recency is the newest-bucket flag's sentence, not this one's.
+    """
+    dates = {datetime.strptime(n, "%Y-%m-%d").date() for n in dated_names}
+    if not dates:
+        return []
+    missing, day = [], window_start
+    while day <= max(dates):
+        if day not in dates:
+            missing.append(day.isoformat())
+        day += timedelta(days=1)
+    return missing
+
+
 def window_denominator_line(window: dict) -> str:
-    """The miner's window denominator in one line, newest-bucket completeness and
-    all.
+    """The miner's window denominator in one line: newest-bucket completeness and any
+    date the window spans that has no bucket at all.
 
     It exists because a file count alone was being read as a claim about days. On
     2026-10-02 the nightly report said `2768 rows in 7 daily files (no missing
@@ -675,9 +708,20 @@ def window_denominator_line(window: dict) -> str:
     00:03-01:09 local (`~/lloyd-data/autonomy-runs/57/run_57_20261002_060006.md`,
     #2045). Seven dated files was a true count and a false denominator, so the
     count now travels with the one flag that makes it readable.
+
+    The same argument applies to a date that has no file at all, and #4123 is that half:
+    when `missing_days` is non-empty the absent dates are named and counted, ahead of the
+    newest-bucket clause so the #2045/#2449 flag the runbook parses stays the last thing on
+    the line. With nothing absent the line is byte-identical to the one #2449 left, and a
+    window dict from before this key existed renders the same way, so the segment is an
+    addition to the format and not a change of it.
     """
     line = (f"Window: {window.get('rows', 0)} row(s) in "
             f"{window.get('files', 0)} dated bucket(s)")
+    missing = window.get("missing_days") or []
+    if missing:
+        line += (f"; no bucket for {', '.join(missing)} "
+                 f"({len(missing)} day(s) of the window have none)")
     newest = window.get("newest")
     if newest is None:
         return line + "; no dated bucket in the window"
@@ -729,6 +773,11 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
     than the batch and the guard below still stops a zero run from rewriting the index
     at all, so neither half of that sentence is reachable — but the window dict is
     still the only thing that distinguishes the two empties, which is what this is for.
+
+    What it fills: `files` and `rows` over the dated buckets the cutoff let in, `newest`
+    for the newest of them (#2045, #2449), and `missing_days` — the ISO dates between the
+    cutoff's own date and that newest bucket's date for which no `D.jsonl` exists, oldest
+    first, `[]` when every date in the range has a file (#4123).
     """
     trajectories = []
     run_instant = now if now is not None else datetime.now(tz=timezone.utc)
@@ -742,7 +791,7 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
     if not TRAJECTORY_DIR.exists():
         print(f"Warning: Trajectory directory not found: {TRAJECTORY_DIR}")
         if window is not None:
-            window.update(files=0, rows=0, newest=None)
+            window.update(files=0, rows=0, newest=None, missing_days=[])
         return trajectories
 
     def tally(bucket: str, cls: str) -> None:
@@ -751,7 +800,7 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
             class_counts[bucket][cls] = class_counts[bucket].get(cls, 0) + 1
 
     if window is not None:
-        window.update(files=0, rows=0, newest=None)
+        window.update(files=0, rows=0, newest=None, missing_days=[])
 
     for jsonl_file in sorted(TRAJECTORY_DIR.glob("*.jsonl")):
         # Skip non-date files
@@ -839,6 +888,10 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
             continue
 
     if window is not None:
+        # The hole half of the denominator, from the names this loop counted and the
+        # cutoff it applied: `files` says six and cannot say which of the seven dates
+        # those six do not cover (#4123).
+        window["missing_days"] = window_missing_days(cutoff.date(), bucket_stats)
         # Only the NEWEST dated bucket gets the flag. An older bucket that holds
         # only its first hour is a fact about history — the extractor finalised it
         # later — and flagging it would read every future window as short even

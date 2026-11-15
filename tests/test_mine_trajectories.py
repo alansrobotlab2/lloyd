@@ -17,6 +17,9 @@ what is the miner's alone:
 - **#2045 — the window denominator.** `window` carries the newest dated bucket's
   completeness, and the miner prints it, so a run over a bucket holding only the
   first hour of its day cannot report a full window.
+- **#4123 — the same denominator's other half.** A bucket count cannot see a date
+  the window spans for which no `D.jsonl` exists at all, so `window` also carries
+  `missing_days` and the printed line names the absent date(s) and counts them.
 """
 from __future__ import annotations
 
@@ -64,11 +67,18 @@ def _corpus(tmp_path, rows):
     return d
 
 
-def _run(tmp_path, corpus, *extra):
+def _run(tmp_path, corpus, *extra, days: str = "9999"):
+    """Run the miner as a child process over `corpus`.
+
+    `days` is the window the run asks for. The 9999 default exists so every bucket
+    a fixture wrote falls inside the window whatever the suite's clock says; a node
+    about the window's own day-range passes the real number instead, because the
+    range is exactly what `missing_days` is measured over (#4123).
+    """
     store = tmp_path / "store"
     store.mkdir(exist_ok=True)
     cmd = [sys.executable, str(MINER_PATH), "--trajectory-dir", str(corpus),
-           "--sessions-dir", str(store), "--days", "9999",
+           "--sessions-dir", str(store), "--days", days,
            "--output-dir", str(tmp_path / "out"), *extra]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
@@ -377,15 +387,21 @@ def _multi_bucket_corpus(tmp_path, buckets):
     return d
 
 
-def _load_window(tmp_path, buckets, now_iso, monkeypatch, zone="UTC"):
+def _load_window(tmp_path, buckets, now_iso, monkeypatch, zone="UTC",
+                 days: int = 9999):
     """`window` as `load_trajectories` fills it, with the run instant fixed — the
     second operand of `earlier of (that bucket's local-day close, the run instant)`
-    has to be a stated instant, not whatever the clock said when the suite ran."""
+    has to be a stated instant, not whatever the clock said when the suite ran.
+
+    `days` is the window asked for, and it is the same lever for the same reason:
+    `missing_days` is the day-range FROM that cutoff, so a node about the hole names
+    the window the nightly actually runs (#4123) and the 9999 default keeps every
+    other node seeing all of its buckets."""
     monkeypatch.setattr(mt, "TRAJECTORY_DIR",
                         _multi_bucket_corpus(tmp_path, buckets))
     window: dict = {}
     with _frozen_zone(zone):
-        mt.load_trajectories(days=9999, agent_filter="all", window=window,
+        mt.load_trajectories(days=days, agent_filter="all", window=window,
                              now=datetime.fromisoformat(now_iso))
     return window
 
@@ -681,6 +697,186 @@ def test_the_miners_stderr_line_calls_a_finalised_newest_bucket_complete(tmp_pat
     assert len(lines) == 1, proc.stderr
     assert f"newest bucket {full}: 2 row(s)" in lines[0], lines[0]
     assert mt.COMPLETE_FLAG in lines[0] and mt.PARTIAL_FLAG not in lines[0], lines[0]
+
+
+# ── #4123: the hole half of the same denominator ──────────────────────────────
+#
+# One night produced both the fact and the gap in the reporting. The operator pool
+# was person-held from 2026-11-13T05:14:28Z to 2026-11-15T03:58:05Z
+# (`~/lloyd-data/workers.db` `pause_journal` ids 63 and 64, actor
+# `mission-control:gpu-off`), #56 never dispatched, and no `2026-11-13.jsonl` was
+# ever written — `ls -1 ~/lloyd-data/sessions | grep -c '^20261113'` is 0, so no
+# extractor had anything to put in it. The miner printed
+# `Window: 1187 row(s) in 6 dated bucket(s)` over that window and the run worked the
+# missing date out by hand from `ls` (`run_57_20261115_043921.md`). #2045 (9b021485)
+# and #2449 (17cbb55b) fixed the newest-bucket half of this denominator; the hole
+# half is these nodes.
+#
+# The window #57 ran, the instant it ran, and the six dated buckets it found — the
+# live names, so a reader can set the fixture beside the tree. The 13th is absent
+# because it never existed and never will, which is why the shape is built here: this
+# is the one corpus that cannot be had by waiting for the live tree to reproduce it.
+HOLE_WINDOW_DAYS = 7
+HOLE_RUN_INSTANT = "2026-11-15T04:39:21+00:00"
+MISSING_DAY = "2026-11-13"
+HOLE_BUCKETS = ("2026-11-08", "2026-11-09", "2026-11-10", "2026-11-11",
+                "2026-11-12", "2026-11-14")
+
+#: The segment the line appends for `MISSING_DAY` alone, spelled once so the clause
+#: nodes and the implementation cannot drift apart unnoticed.
+ABSENT_SEGMENT = f"no bucket for {MISSING_DAY} (1 day(s) of the window have none)"
+
+
+def _hole_corpus():
+    """The live shape: six dated buckets with `MISSING_DAY` absent. One row per
+    bucket, because a hole is a fact about names and not about contents."""
+    return {day: [_row_at(f"{day}-r1", day, "09:00:00")] for day in HOLE_BUCKETS}
+
+
+def _gappy_corpus():
+    """The same window with TWO dates absent, one of them the window's own first:
+    every date from 2026-11-08 to 2026-11-14 is present except 2026-11-08 (a leading
+    gap — what a run that stopped writing looks like) and 2026-11-12 (an interior
+    one), so five buckets span seven dates."""
+    corpus = _hole_corpus()
+    corpus[MISSING_DAY] = [_row_at("13-r1", MISSING_DAY, "09:00:00")]
+    for day in ("2026-11-08", "2026-11-12"):
+        del corpus[day]
+    return corpus
+
+
+def _whole_corpus():
+    """Every date of the 2026-11-08…14 window present, seven buckets, no hole."""
+    return {day: [_row_at(f"{day}-r1", day, "09:00:00")]
+            for day in ("2026-11-08", "2026-11-09", "2026-11-10", "2026-11-11",
+                        "2026-11-12", MISSING_DAY, "2026-11-14")}
+
+
+def test_a_window_spanning_a_date_with_no_bucket_names_that_date(tmp_path, monkeypatch):
+    """Clause 1: `window['missing_days']` is the ascending ISO dates from the cutoff
+    the loader already applies up to the newest dated bucket's date for which no
+    `D.jsonl` exists, and `[]` when every day of the range has one.
+
+    At the instant #57 ran with `--days 7` the loader's cutoff date is 2026-11-08 and
+    the newest bucket is 2026-11-14, so the range is the seven dates 2026-11-08…14:
+    six buckets, seven days, and the hole is `2026-11-13` alone. The count alone said
+    nothing about it — `files` counts six and cannot see the seventh date.
+    """
+    window = _load_window(tmp_path, _hole_corpus(), HOLE_RUN_INSTANT, monkeypatch,
+                          zone=WITNESS_ZONE, days=HOLE_WINDOW_DAYS)
+    assert window["files"] == 6 and window["rows"] == 6, window
+    assert window["missing_days"] == [MISSING_DAY], window
+
+
+def test_the_absent_dates_are_listed_all_of_them_and_oldest_first(tmp_path, monkeypatch):
+    """Clause 1's shape, from the side a single hole cannot show: the list is every
+    absent date, oldest first — including dates at the FRONT of the window, which is
+    how a run that stopped writing altogether reads.
+
+    Dropping `2026-11-08` (the window's own first date) and `2026-11-12` leaves five
+    buckets whose range still runs 2026-11-08…14, and the two absent dates must come
+    back oldest-first rather than in the order the glob found them. The second case is
+    the same window with every date filled: `missing_days` is `[]`, and `files` goes
+    5 → 7 with the range unmoved, so a bucket count and a hole count cannot be
+    conflated.
+    """
+    window = _load_window(tmp_path, _gappy_corpus(), HOLE_RUN_INSTANT, monkeypatch,
+                          zone=WITNESS_ZONE, days=HOLE_WINDOW_DAYS)
+    assert window["files"] == 5, window
+    assert window["missing_days"] == ["2026-11-08", "2026-11-12"], window
+
+    full = _load_window(tmp_path, _whole_corpus(), HOLE_RUN_INSTANT, monkeypatch,
+                        zone=WITNESS_ZONE, days=HOLE_WINDOW_DAYS)
+    assert full["files"] == 7, full
+    assert full["missing_days"] == [], full
+
+
+def test_the_printed_denominator_names_the_absent_date_and_counts_it(tmp_path):
+    """Clause 2, across the process boundary: the line the miner prints to stderr
+    names the absent date and says how many are absent, so the hole is readable
+    without arithmetic. The #57 run had to list the directory and compare six names
+    against seven dates to reach the sentence this line now carries.
+
+    Buckets are dated FROM the clock because the child cannot be handed a run instant
+    (`main()` passes none), and the assertions are the absent date and its count rather
+    than the bucket count: a run that starts seconds after midnight moves the window's
+    first date by one, which changes how many buckets fall inside and does not change
+    that the hole is named exactly once.
+    """
+    hole = _past_day(3)
+    buckets = {day: [_row_at(f"{day}-r1", day, "09:00:00"),
+                     _row_at(f"{day}-r2", day, "22:10:00")]
+               for day in (_past_day(7), _past_day(6), _past_day(5), _past_day(4),
+                           hole, _past_day(2), _past_day(1))}
+    del buckets[hole]
+    corpus = _multi_bucket_corpus(tmp_path, buckets)
+    with _frozen_zone():
+        proc = _run(tmp_path, corpus, "--stats", days=str(HOLE_WINDOW_DAYS))
+    assert proc.returncode == 0, proc.stderr
+    denoms = [l for l in proc.stderr.splitlines() if "dated bucket(s)" in l]
+    assert len(denoms) == 1, proc.stderr
+    line = denoms[0]
+    assert f"no bucket for {hole}" in line, line
+    assert "1 day(s) of the window have none" in line, line
+    assert line.index("no bucket for") < line.index("newest bucket"), (
+        f"the absent-date segment must not displace the #2045 newest-bucket flag: {line}")
+
+
+def test_the_line_names_every_absent_date_with_their_count(tmp_path, monkeypatch):
+    """Clause 2's plural: two absent dates are both named, oldest first, and the
+    counted figure is the number of them — not the number of buckets, and not one.
+
+    In-process and on the fixed live dates so the expected segment can be spelled
+    exactly: `window_denominator_line` is what `main()` prints, so the string built
+    here IS the string that reaches stderr, and the bucket and row counts of the
+    window ride ahead of it untouched.
+    """
+    window = _load_window(tmp_path, _gappy_corpus(), HOLE_RUN_INSTANT, monkeypatch,
+                          zone=WITNESS_ZONE, days=HOLE_WINDOW_DAYS)
+    assert window["files"] == 5 and window["rows"] == 5, window
+    printed = mt.window_denominator_line(window)
+    assert (f"Window: {window['rows']} row(s) in {window['files']} dated bucket(s); "
+            f"no bucket for 2026-11-08, 2026-11-12 "
+            f"(2 day(s) of the window have none)") in printed, printed
+    assert ABSENT_SEGMENT not in printed, (
+        f"the one-day spelling must not survive a two-day hole: {printed}")
+
+
+def test_the_denominator_line_is_unchanged_when_every_day_has_a_bucket(tmp_path, monkeypatch):
+    """Clause 3: with nothing absent the line is the line #2449 left, and it still
+    ENDS with `LAST DAY PARTIAL` or `complete` followed by the uncovered hours — the
+    token `skills/trajectory-skill-mining/SKILL.md` step 2 tells a run to read.
+
+    Both flags are run: the run's own open day, and a finalised newest bucket. In each
+    case the rendering of the same window with the `missing_days` key removed — every
+    window this key never existed in — is byte-identical, which is the pin that the
+    segment is an addition and not a re-write of what the runbook parses.
+    """
+    stub = _hole_corpus() | {MISSING_DAY: [_row_at("m1", MISSING_DAY, "09:00:00"),
+                                           _row_at("m2", MISSING_DAY, "09:30:00")]}
+    cases = []
+    for now_iso, rows_for_newest, flag in (
+            ("2026-11-15T04:39:21+00:00",
+             [_row_at("n1", "2026-11-14", "00:03:13"),
+              _row_at("n2", "2026-11-14", "01:09:19")], mt.PARTIAL_FLAG),
+            ("2026-11-15T01:00:00+00:00",
+             [_row_at("n1", "2026-11-14", "09:00:00"),
+              _row_at("n2", "2026-11-14", "23:40:00")], mt.COMPLETE_FLAG)):
+        corpus = {day: rows for day, rows in stub.items() if day != "2026-11-14"}
+        corpus["2026-11-14"] = rows_for_newest
+        window = _load_window(tmp_path, corpus, now_iso, monkeypatch,
+                              days=HOLE_WINDOW_DAYS)
+        assert window["missing_days"] == [], window
+        printed = mt.window_denominator_line(window)
+        newest = window["newest"]
+        assert newest["partial"] is (flag == mt.PARTIAL_FLAG), newest
+        assert printed.endswith(
+            f"{flag} ({newest['uncovered_hours']} h uncovered after its newest row)"), printed
+        assert "no bucket for" not in printed, printed
+        legacy = {k: v for k, v in window.items() if k != "missing_days"}
+        assert mt.window_denominator_line(legacy) == printed, printed
+        cases.append(printed)
+    assert len(set(cases)) == 2, cases
 
 
 def _vault_file(rel, what):
