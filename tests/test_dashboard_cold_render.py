@@ -483,16 +483,22 @@ class LedgerFoldWitness(NamedTuple):
       check against an EXTERNAL population, which is why it survives a store that is
       legitimately much smaller.
 
-      It is NOT a truncation detector, and #4152 is the node that proved it. The row
-      the fold holds back is itself an OLD row, and an append-only truncate keeps the
-      old rows, so a truncation leaves every archived round's held-back row standing.
-      For a truncate to lose a round the round's rows would have to straddle the
-      window boundary, and on this store they do not: the widest gap between two rows
-      of one `round_id` is 0.1365 d — 11,791 s on `SM_20261109_024659` — measured
-      2026-11-15 across all 2,688 `round_id`s the live file carries, against a
-      `LEDGER_ARCHIVE_AGE_DAYS` window of 14 d. So the leg fires on a lost row, never
-      on a truncate: `test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss`
-      pins the loss, and the truncation node pins that this leg stays silent there.
+      It IS also a truncation detector, for one shape of round, and #4153 is the node
+      that proved it. The row the fold holds back is itself an OLD row, and an
+      append-only truncate keeps the old rows, so a truncate leaves standing every
+      round whose NEWEST row sits outside the window. A round whose own rows straddle
+      the boundary is held back by the `young` rule instead, so all of its old rows are
+      in the rotation and only its in-window rows are live — and a truncate that drops
+      the window's rows loses that round whole. The boundary advances a day a day and
+      crosses every round's span in turn, so a round sits in that state for the width of
+      its own span, once, as the window reaches it: the spans are short (the widest
+      measured 2026-11-15 is 0.1365 d — 11,791 s on `SM_20261109_024659`) but the store
+      carries 2,690 `round_id`s, so which round is straddling is a fact about the hour
+      and the set may never be assumed empty. Both legs are therefore pinned where they
+      are constructed: a lost row by
+      `test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss`, a round a
+      truncate takes with it by
+      `test_a_truncate_that_drops_a_straddling_rounds_only_young_rows_names_that_round`.
     * `archive_holds_window_rows` — rows inside the window that a rotation holds.
       Must be 0: the fold may not move a row it is required to keep.
 
@@ -608,6 +614,42 @@ def _ledger_lines(ledger: Path) -> list[tuple[bytes, dict | None]]:
                 row = None
             rows.append((line, row if isinstance(row, dict) else None))
     return rows
+
+
+def _survives_a_truncate(mod, row: dict | None, window_start: float) -> bool:
+    """Does this row outlive a truncate that keeps only pre-window rows?
+
+    One predicate, read both by the fixture that writes such a file and by the helper
+    that predicts what one loses — two spellings is where they disagree (#4153). An
+    undated row does not survive: the cut is made at a date, and a row with no date to
+    compare cannot land on the kept side of it.
+    """
+    return bool(row) and (s := mod._ledger_row_seconds(row)) is not None \
+        and s <= window_start
+
+
+def _rounds_a_truncate_loses(mod, rows: list[tuple[bytes, dict | None]],
+                             now: float) -> set[str]:
+    """Which rounds of `rows` a truncate loses entirely, per the fold's own plan.
+
+    A round is lost when the fold archives one of its rows AND keeps none the truncate
+    spares. `_archive_plan`'s `newest-of-round` rule guarantees that a round whose newest
+    row sits outside the window keeps an OLD row, and such a round always outlives the
+    cut; a round whose own rows straddle the boundary is held back only by `young` rows,
+    every one of which the truncate drops (#4153). Answered from `_archive_plan`'s own
+    return rather than a second guess at its rule, so the prediction and the fold cannot
+    drift apart.
+    """
+    window_start = now - mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
+    archive_idx, kept_idx = mod._archive_plan(rows, now)
+    archived = {str(rows[i][1]["round_id"]) for i in archive_idx
+                if rows[i][1] and rows[i][1].get("round_id")}
+    surviving: set[str] = set()
+    for i in kept_idx:
+        row = rows[i][1]
+        if row and row.get("round_id") and _survives_a_truncate(mod, row, window_start):
+            surviving.add(str(row["round_id"]))
+    return archived - surviving
 
 
 def ledger_fold_witness(ledger: Path, now: float | None = None, *,
@@ -1732,7 +1774,8 @@ def test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check(
     assert "FOLD THE STORE" in message and "do not raise the budget" in message, message
 
 
-def _folded_store_pair(tmp_path: Path, now: float) -> tuple[Path, Path]:
+def _folded_store_pair(tmp_path: Path, now: float, *,
+                       omit_rounds_a_truncate_would_lose: bool = False) -> tuple[Path, Path]:
     """A live store and the rotation the fold made from it, both in `tmp_path`.
 
     Built by running the sweep's own `_archive_plan` over the real live store and
@@ -1743,10 +1786,26 @@ def _folded_store_pair(tmp_path: Path, now: float) -> tuple[Path, Path]:
     accepted-on case is only worth something if it is what the fold actually leaves,
     and then the arrival rate, the protected-row count and the round population are
     the live store's, not invented. The live store is read, never written.
+
+    `omit_rounds_a_truncate_would_lose` drops whole rounds from the source read before
+    the fold runs over it — the rounds `_rounds_a_truncate_loses` says a truncate that
+    drops the window's rows would lose entirely, whose rows straddle the boundary and
+    which the fold therefore keeps back only as `young` rows (#4153). Which rounds those
+    are moves with the hour, so a node that wants the truncate to cost it ONE deficit has
+    to say so here rather than assume the set is empty; the drop takes whole rounds out
+    of BOTH halves, so what is left is exactly the store and rotation a box with no
+    straddling round leaves, and every other round's classification is untouched because
+    `_archive_plan` decides per `round_id`. Computed and applied over ONE read of the
+    store: the live file is being appended to under this test, and a second read would
+    let a row land between the prediction and the fold.
     """
     mod = _sweep_module()
     rows = _ledger_lines(board_presence.live_ledger())
     assert len(rows) > 1000, f"{board_presence.live_ledger()} is not a store"
+    if omit_rounds_a_truncate_would_lose:
+        doomed = _rounds_a_truncate_loses(mod, rows, now)
+        rows = [pair for pair in rows
+                if not (pair[1] and str(pair[1].get("round_id") or "") in doomed)]
     archive_idx, kept_idx = mod._archive_plan(rows, now)
     assert archive_idx, "the live store has nothing for the fold to move"
     live = tmp_path / "promotions.jsonl"
@@ -1813,36 +1872,40 @@ def test_a_truncated_store_with_every_rotation_present_reddens_and_names_the_row
     name what was lost instead of telling the reader to run the fold, which is the
     operation that made the file smaller in the first place.
 
-    What the truncation does NOT do, and what this node used to assert (#4152, the
-    node sat red from `58cc23b4` onward): it cannot lose a round. The row
-    `_archive_plan` holds back for an archived round is that round's newest row, and
-    it is an OLD row — measured 2026-11-15, all 10 rounds in this fixture's own
-    rotation keep exactly 1 old row and hold no row inside the window at all, because
-    the widest gap between two rows of one `round_id` in the live file is 0.1365 d
-    against a 14 d window. A truncate keeps old rows. So `missing_rounds` is empty
-    here BY CONSTRUCTION, and asserting it non-empty asked this node to pass only on
-    a day some round's rows happened to land across the window boundary — a green that
-    depends on the hour the ledger was written is the flake this item was filed
-    against. The assertion is now the true one, and the lost-row leg it stood in for
-    is pinned where it can actually fire, in
-    `test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss`.
+    What the truncation must NOT do here is lose a round, and holding THAT fixed is
+    what makes this node's green mean one thing (#4153). A round whose own rows straddle
+    the window boundary is held back by `_archive_plan`'s `young` rule rather than its
+    `newest-of-round` rule, so the rotation carries all of that round's old rows, the
+    live half carries only in-window rows, and this truncate loses the round entirely —
+    which is what happened on 2026-11-15, when the boundary crossed `SM_20261101_132930`
+    (48 rows, 0.0606 d wide, first at 13:29:31 and last at 14:56:46 UTC) and this node
+    went red on a SECOND leg. #4152 had read the store one morning, found no straddler,
+    and written `missing_rounds == ()` as though it were an invariant; the boundary moves
+    a day a day and crosses every round's span in turn, so that set is a fact about the
+    hour. This node now holds the population fixed — the fixture omits the rounds a
+    truncate would lose, computed from the fold's own plan over the same read and clock —
+    so the red reported here is the in-window leg alone at every hour. The loss itself is
+    pinned where it can be constructed, in
+    `test_a_truncate_that_drops_a_straddling_rounds_only_young_rows_names_that_round`.
     """
     now = time.time()
-    live, archive = _folded_store_pair(tmp_path, now)
+    live, archive = _folded_store_pair(
+        tmp_path, now, omit_rounds_a_truncate_would_lose=True)
     mod = _sweep_module()
     rows = _ledger_lines(live)
     window_start = now - mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
     kept = [line for line, row in rows
-            if row is not None
-            and (s := mod._ledger_row_seconds(row)) is not None
-            and s <= window_start]
+            if _survives_a_truncate(mod, row, window_start)]
     assert kept, "the fixture store has no fold-protected rows to keep"
     truncated = tmp_path / "promotions.jsonl"
     truncated.write_bytes(b"".join(kept))
     fold = ledger_fold_witness(truncated, now, archives=[archive])
 
     assert fold.in_window_rows == 0, fold.describe()
-    assert fold.missing_rounds == (), fold.describe()
+    assert fold.missing_rounds == (), (
+        f"{fold.describe()} — the fixture was built with "
+        f"`omit_rounds_a_truncate_would_lose=True`, so no round this truncate reaches "
+        f"may be missing; a name here means the helper and the fold disagree")
     assert fold.deficit_problems(), fold.describe()
 
     with pytest.raises(AssertionError) as caught:
@@ -1855,21 +1918,98 @@ def test_a_truncated_store_with_every_rotation_present_reddens_and_names_the_row
     assert "FOLD THE STORE" not in message, message
 
 
+def test_a_truncate_that_drops_a_straddling_rounds_only_young_rows_names_that_round(
+        tmp_path):
+    """A truncate CAN lose a round, and the witness names it (#4153).
+
+    The shape the live store produced on 2026-11-15 at `SM_20261101_132930`, built here
+    so it exists at every hour: `SM_STRADDLES` has rows on both sides of the boundary, so
+    `_archive_plan` archives each of its OLD rows (none is that round's newest) and keeps
+    only its in-window rows back as `young`. `SM_SETTLED` ran out entirely before the
+    boundary, so its newest row is held back however old and the cut spares it. Built from
+    hand-written rows on a fixed clock because the real store offers a straddler only
+    while the sliding boundary happens to sit inside one round's span — which is the very
+    hour-dependence that took #4152's assertion down, and the reason the mechanism needs
+    a fixture that constructs it rather than one that waits for it.
+
+    The round is asserted present BEFORE the cut and missing after it, so the node proves
+    the truncate is what lost it and not the fold.
+    """
+    mod = _sweep_module()
+    now = 1_800_000_000.0
+    horizon = mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
+    day = 86400.0
+    rows = [
+        {"ts": now - (horizon + 3 * day), "round_id": "SM_SETTLED"},
+        {"ts": now - (horizon + 2 * day), "round_id": "SM_SETTLED"},
+        {"ts": now - (horizon + 1 * day), "round_id": "SM_SETTLED"},
+        {"ts": now - (horizon + 2 * day), "round_id": "SM_STRADDLES"},
+        {"ts": now - (horizon + 1 * day), "round_id": "SM_STRADDLES"},
+        {"ts": now - (horizon - 1 * day), "round_id": "SM_STRADDLES"},
+        {"ts": now - (horizon - 2 * day), "round_id": "SM_STRADDLES"},
+    ]
+    pairs = [(json.dumps(row).encode("utf-8") + b"\n", row) for row in rows]
+    archive_idx, kept_idx = mod._archive_plan(pairs, now)
+    assert _rounds_a_truncate_loses(mod, pairs, now) == {"SM_STRADDLES"}, (
+        "the synthetic store holds no round a truncate would lose, so nothing below can "
+        "fail: `_archive_plan` decided nothing here turns on the straddle")
+
+    whole = tmp_path / "promotions.jsonl"
+    whole.write_bytes(b"".join(pairs[i][0] for i in sorted(kept_idx)))
+    archive = tmp_path / "promotions-archive-202610.jsonl.gz"
+    with gzip.open(archive, "wb") as handle:
+        handle.write(b"".join(pairs[i][0] for i in sorted(archive_idx)))
+
+    before = ledger_fold_witness(whole, now, archives=[archive])
+    assert before.missing_rounds == (), before.describe()
+    assert before.in_window_rows == 2, before.describe()
+
+    window_start = now - horizon
+    truncated = tmp_path / "truncated.jsonl"
+    truncated.write_bytes(b"".join(
+        line for line, row in _ledger_lines(whole)
+        if _survives_a_truncate(mod, row, window_start)))
+    fold = ledger_fold_witness(truncated, now, archives=[archive])
+
+    assert fold.in_window_rows == 0, fold.describe()
+    assert fold.missing_rounds == ("SM_STRADDLES",), fold.describe()
+    problems = fold.deficit_problems()
+    assert len(problems) == 2, problems
+    assert any("no row dated inside" in p for p in problems), problems
+    assert any("SM_STRADDLES" in p and "have no row left in the live file" in p
+               for p in problems), problems
+
+    with pytest.raises(AssertionError) as caught:
+        assert_ledger_within_calibration_drift(fold.live_bytes, fold)
+    message = str(caught.value)
+    assert "SM_STRADDLES" in message, message
+    assert "no row dated inside" in message, message
+    assert "have no row left in the live file" in message, message
+    assert "THIS IS NOT THE FOLD" in message, message
+    assert "FOLD THE STORE" not in message, message
+
+
 def test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss(tmp_path):
     """One round's last live row gone: the witness names it, and blames no fold.
 
-    This is the loss `missing_rounds` exists to catch, which the truncation node above
-    cannot produce (#4152): `_archive_plan` keeps one OLD row per round, so the
-    rotation holds a round only while the live file holds that row, and the row is the
-    sole thing `_settle_times` answers "when did this round last matter" with. Drop it
+    This is the loss `missing_rounds` exists to catch, pinned by deletion:
+    `_archive_plan` keeps one OLD row per round whose newest row sits outside the window,
+    so the rotation holds a round only while the live file holds that row, and the row is
+    the sole thing `_settle_times` answers "when did this round last matter" with. Drop it
     and `sweep_automod_branches` counts the round `untracked` for ever — the failure
-    the keep rule at `retention-sweep.py:_archive_plan` is load-bearing for (#2043).
+    the keep rule at `retention-sweep.py:_archive_plan` is load-bearing for (#2043). A
+    truncate takes a round the same way once that round's rows straddle the boundary
+    (#4153,
+    `test_a_truncate_that_drops_a_straddling_rounds_only_young_rows_names_that_round`);
+    the truncation node above is built so it cannot.
 
     Built on the real fold pair so the population is the live store's, with one
-    deletion: every archived round here keeps exactly 1 live row, so deleting one
-    round's rows makes it missing and touches nothing else — which is what lets this
-    node assert ONE problem, from ONE leg, naming ONE round. The in-window leg is
-    asserted alive precisely so the red here cannot be that one.
+    deletion. A round whose newest row is outside the window keeps exactly 1 live row
+    there and one still inside it keeps many (#4153), so the victim is taken from the
+    singletons: deleting its rows makes exactly one round missing and touches nothing
+    else — which is what lets this node assert ONE problem, from ONE leg, naming ONE
+    round. The in-window leg is asserted alive precisely so the red here cannot be that
+    one.
     """
     now = time.time()
     live, archive = _folded_store_pair(tmp_path, now)
