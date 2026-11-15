@@ -2603,12 +2603,17 @@ NAMED_SYMBOL_UNNAMED_FLOOR = 0
 #: 13 contribute none, the rail doc `measurement.md` among them. Per doc, descending:
 #:
 #:   threat-model.md 39, autonomy-jobs.md 19, context-window.md 18,
-#:   workers-jobs.md 18, guard-coverage.md 14, skills.md 14, djev.md 10,
-#:   tools.md 10, ambient-context-injection.md 7, autonomy.md 6,
+#:   workers-jobs.md 18, guard-coverage.md 14, skills.md 13, djev.md 10,
+#:   tools.md 10, autonomy.md 9, ambient-context-injection.md 7,
 #:   background-runs.md 4, memory.md 4, research-pipeline.md 4, vllm.md 4,
-#:   editing-safeguards.md 3, arch-review.md 2, authority-surfaces.md 2,
-#:   automod.md 2, qmd.md 2, retrieval.md 2, testing.md 2,
-#:   browser-side-panel.md 1, mission-control.md 1
+#:   arch-review.md 2, authority-surfaces.md 2, automod.md 2, qmd.md 2,
+#:   retrieval.md 2, testing.md 2, browser-side-panel.md 1, mission-control.md 1
+#:
+#: Re-measured 2026-11-15 at c180665f for the line below, and that census is what the
+#: 187 is made of: 22 docs, not 23 — `editing-safeguards.md`'s 3 are gone and
+#: `autonomy.md` is 6 -> 9, both moved by other rounds' doc edits since 2026-11-11, and
+#: `skills.md` 14 -> 13. The per-doc list above is prose and no node grades it; the
+#: total is the number two nodes do read.
 #:
 #: The bound is one-way: re-typing an anchor so its sentence names the enclosing
 #: definition is the only way to move it, and doing that means lowering this
@@ -2618,7 +2623,18 @@ NAMED_SYMBOL_UNNAMED_FLOOR = 0
 #: `threat-model.md` anchors that pointed at xdist worker sizing and at a lock
 #: release now name `check_scope`, `run` and `rung_review`, which is 42 -> 39 for
 #: that doc and 191 -> 188 for the corpus.
-NAMED_SYMBOL_UNNAMED_CEILING = 188
+#: #4136 is the second commit to move it, and by exactly one: `architecture/index.md`
+#: cited the desktop tools' non-chat refusal as `agent_mcp/main.py:553` with no symbol
+#: beside it, and the sentence now reads `call_tool` at `agent_mcp/main.py:553` — the
+#: enclosing `async def call_tool` opens at 489 — so the anchor is graded by that
+#: definition's own span rather than by "inside SOME definition", and `index.md` is back
+#: to contributing none. Measured in the tree this commit is in, not in the worktree it
+#: was drafted in: `c180665f` gives 188, and `c180665f` with only this commit's
+#: `architecture/index.md` applied gives 187, so the shrink is this edit's and not a
+#: population that happened to move underneath it. That distinction is the point:
+#: `test_the_fallback_anchor_ceiling_is_shown_able_to_bite` measures whatever tree it
+#: runs in, so a number carried in from a draft tree is a guess about the promoted one.
+NAMED_SYMBOL_UNNAMED_CEILING = 187
 
 
 def fallback_decision(text: str) -> list[dict]:
@@ -8671,6 +8687,53 @@ def test_arch_review_rail_4_names_the_thing_that_enforces_it():
 # so a later change to the constant that forgets the page goes red here rather
 # than re-creating the drift with the doc now one step further from the truth.
 
+def _keyless_retry_default_ids() -> set[str]:
+    """Every autonomy task whose own file declares no `max_retries:` key, as `#NN`.
+
+    Measured, not remembered. This node carried five literal ids — the key-less set on
+    the day #2640 landed — and the fleet has moved since without the page being wrong:
+    #82 and #86 now declare the key, and #104, #105 and #108 joined the set when they
+    were filed. The arch cadence rewrites the page on its own schedule and cannot know
+    a list held in a test, so literal ids here redden on a fleet change rather than on
+    a doc defect — which is the wrong thing to be red for, and the reason the expected
+    set is read from disk like the expected retry default is.
+
+    The front matter is the measurement because it is what the scheduler reads:
+    `max_retries_budget()` takes the key out of it, so "no `max_retries:` line in the
+    front matter" is exactly the state the page's sentence is about. A file with no
+    parseable front matter is not counted either way — that file's own node (#1932's)
+    grades it.
+    """
+    from tests.board_presence import vault_root
+    found = set()
+    for note in (vault_root() / "autonomy").glob("*.md"):
+        head = re.match(r"(\d+)-", note.name)
+        if not head:
+            continue
+        front = re.match(r"\A---\n(.*?)\n---\n",
+                         note.read_text(encoding="utf-8", errors="replace"), re.S)
+        if front and not re.search(r"^max_retries:", front.group(1), re.M):
+            found.add("#" + str(int(head.group(1))))
+    return found
+
+
+def _keyless_ids_stated(section: str) -> set[str]:
+    """The ids the page itself names as the files carrying no key.
+
+    Cut from the phrase to the first `;`, full stop or blank line, not over the whole
+    section: the surrounding prose cites item ids (#2640, #1086, #75) that are nobody's
+    key-less file, and a window wide enough to notice one id leaving would swallow
+    those too and never notice.
+    """
+    at = section.find("carry none")
+    if at < 0:
+        return set()
+    head = section[at:]
+    stops = [head.find(ch) for ch in (";", ".", "\n\n")]
+    stop = min(x for x in stops if x > -1)
+    return set(re.findall(r"#\d+", head[:stop]))
+
+
 def test_the_autonomy_page_states_one_retry_default_rather_than_a_disagreement():
     text = _text("autonomy.md")
     section = _section(text, "Failure is a state machine, not a log line")
@@ -8727,10 +8790,38 @@ def test_the_autonomy_page_states_one_retry_default_rather_than_a_disagreement()
     assert re.search(r"(?:declaring|carries?|carry) no(?: `max_retries:`)? key",
                      section) or "carry none" in section, (
         "the page no longer describes what happens to a file with no key")
-    for task_id in ("#82", "#83", "#86", "#91", "#92"):
-        assert task_id in section, (
-            f"{task_id} has left the page: the key-less files must be named as "
-            "showing the default, not remembered as an exception")
+
+    # Which files those are is read from the fleet, not from this file. The five ids
+    # pinned here literally were the key-less set on the day #2640 landed; #82 and #86
+    # have since declared the key and #104, #105 and #108 have joined the set, so the
+    # literals reddened the node on a fleet change while the page's sentence stayed
+    # true. What still has to hold, and is the whole of #2640's claim about these
+    # files, is that the page names the set that exists — showing the default, never
+    # remembered as an exception.
+    measured = _keyless_retry_default_ids()
+    assert measured, (
+        "no autonomy task file reads as key-less at all: either the fleet is empty or "
+        "this reader stopped matching front matter, and the comparison below would "
+        "otherwise pass on a page that names nothing")
+    stated = _keyless_ids_stated(section)
+    assert stated == measured, (
+        f"the page names {sorted(stated)} as the files carrying no `max_retries:` key "
+        f"while the vault holds {sorted(measured)} — one of the two is out of date, and "
+        "a reader following the sentence to a file that declares the key learns "
+        "nothing about the default")
+
+    # The equality above is an id-for-id comparison, so it has to be able to see an id
+    # leave the sentence: delete one from the live text and the stated set loses
+    # exactly that one. Without this the comparison could be matching on the phrase
+    # alone and pass a page whose list had emptied.
+    one = sorted(stated)[0]
+    seeded = section.replace(one, "", 1)
+    assert seeded != section, (
+        f"{one} is not in the page's own sentence, so the extractor is not reading the "
+        "ids and the equality above proves nothing about them")
+    assert _keyless_ids_stated(seeded) == stated - {one}, (
+        f"deleting {one} from the sentence left the stated set unchanged, so it is not "
+        "being read off the list")
     assert re.search(r"no key is retired at\s+`_DEFAULT_MAX_RETRIES`", section), (
         "the page does not say a key-less file is retired AT the default it "
         "shows, which is the sentence the other four clauses exist to make true")
@@ -9087,6 +9178,34 @@ def _accepted_open_paragraph(text: str) -> str:
     return para
 
 
+#: How the paragraph cites the probe-env line: by number, inside backticks.
+_PROBE_VAULT_CITE = re.compile(r"`scripts/automod/vault_guards\.py:(\d+)`")
+
+#: What the cited line has to say for the citation to be worth anything.
+_PROBE_VAULT_KNOB = "LLOYD_VAULT_ROOT"
+
+
+def _probe_vault_citation_missing(ruling: str) -> bool:
+    """True when the `vault_guards.py:NNN` the paragraph cites does not set the knob.
+
+    Read by number and then by CONTENT, never by matching the number. A `file:line`
+    citation is the one claim in this file that the arch cadence re-points on its own
+    schedule: `scripts/automod/vault_guards.py:710` became `:781` when #3033 grew that
+    file's `_probe_env` docstring, and a check that compared the digits reddened on the
+    cadence's correct re-point — on a page that had become *more* accurate — instead of
+    on a citation that had stopped naming the probe's vault. The number is where to
+    look; the knob it names is the claim.
+    """
+    found = _PROBE_VAULT_CITE.search(ruling)
+    if not found:
+        return True
+    lines = (ROOT / "scripts" / "automod" / "vault_guards.py").read_text(
+        encoding="utf-8", errors="replace").splitlines()
+    number = int(found.group(1))
+    return not (1 <= number <= len(lines)
+                and _PROBE_VAULT_KNOB in lines[number - 1])
+
+
 def _body_ruling_gaps(para: str) -> list[str]:
     """Each way this paragraph can fail to record the #2589 ruling, named.
 
@@ -9097,14 +9216,12 @@ def _body_ruling_gaps(para: str) -> list[str]:
     if _ACCEPTED_OPEN_RULING not in para:
         return ["it never mentions the #2589 body rule"]
     ruling = para[para.index(_ACCEPTED_OPEN_RULING):]
-    return [why for needle, why in (
+    gaps = [why for needle, why in (
         ("64b501c3", "it does not name the commit that landed the body rule"),
         ("bind-mount", "it does not tie itself to the same bind-mount reason the "
                        "paragraph already gives"),
         ("land-time", "it does not name the land-time probe as the enforcement point "
                       "for a shell-authored body"),
-        ("scripts/automod/vault_guards.py:710",
-         "it does not cite the line that hands the probe its vault"),
         ("LLOYD_VAULT_ROOT", "it does not name the knob that line sets"),
         ("tests/test_research_doc_claims.py::_task_files",
          "it does not name the corpus that probe grades"),
@@ -9112,6 +9229,9 @@ def _body_ruling_gaps(para: str) -> list[str]:
          "it states no reopen trigger an offender could be checked against"),
         ("Reopen", "it states no condition for un-accepting the lane"),
     ) if needle not in ruling]
+    if _probe_vault_citation_missing(ruling):
+        gaps.append("it does not cite the line that hands the probe its vault")
+    return gaps
 
 
 def test_the_accepted_open_bash_lane_records_the_body_rule_ruling():
@@ -9120,8 +9240,9 @@ def test_the_accepted_open_bash_lane_records_the_body_rule_ruling():
     claim: the paragraph that accepts the Bash lane names #2589's body rule
            (`64b501c3`) as open on this lane for the same bind-mount reason, names
            the land-time probe as what enforces it for a shell-authored body —
-           the env it builds handing the probe its vault by both routes, one of them
-           `scripts/automod/vault_guards.py:710`, grading
+           the env it builds handing the probe its vault by both routes, one route a
+           `scripts/automod/vault_guards.py:NNN` citation that has to land on the line
+           setting `LLOYD_VAULT_ROOT`, grading
            the corpus of `tests/test_research_doc_claims.py::_task_files` — and
            states its reopen trigger as an observable a reader can go and measure.
     verdict: #2589 put the rail on both writer lanes and ruled the Bash lane "not
@@ -9165,8 +9286,17 @@ def test_the_body_ruling_check_fails_on_a_paragraph_that_lost_the_ruling():
         "the fixture dropped the lane's own argument with the ruling, so the failure "
         "above came from an emptied paragraph and not from a missing ruling")
 
+    cite = _PROBE_VAULT_CITE.search(para)
+    assert cite, (
+        "the live paragraph cites no `scripts/automod/vault_guards.py:NNN` line at all, "
+        "so the citation check below has nothing to read and would pass a page that "
+        "stopped saying where the probe's vault comes from")
+    assert not _probe_vault_citation_missing(para), (
+        f"the page cites line {cite.group(1)} of scripts/automod/vault_guards.py, which "
+        f"does not name {_PROBE_VAULT_KNOB} — re-point the citation, do not widen the check")
+
     for needle in ("64b501c3",
-                   "scripts/automod/vault_guards.py:710",
+                   cite.group(0),
                    "LLOYD_VAULT_ROOT",
                    "tests/test_research_doc_claims.py::_task_files",
                    'guard="autonomy_body_rail"'):
@@ -9178,6 +9308,18 @@ def test_the_body_ruling_check_fails_on_a_paragraph_that_lost_the_ruling():
         assert "#2589" in missing, (
             f"dropping {needle} took the ruling's subject with it, so the fixture "
             "tested the whole-ruling case a second time")
+
+    # A citation that survives but points elsewhere is the failure this check exists
+    # for: the digits are still on the page and the claim no longer is. Line 1 of that
+    # file is its module docstring, which names no probe env.
+    wrong = para.replace(cite.group(0), "`scripts/automod/vault_guards.py:1`", 1)
+    assert wrong != para and _PROBE_VAULT_KNOB in wrong, (
+        "the seeded text lost the knob with the number, so a failure below would only "
+        "have re-proved the needle check")
+    assert _body_ruling_gaps(wrong) == [
+        "it does not cite the line that hands the probe its vault"], (
+        "the citation check matched on the digits rather than on the cited line's "
+        "contents, so a page pointing at any other line would still read as complete")
 
 
 # --------------------------------------------------------------------------- #

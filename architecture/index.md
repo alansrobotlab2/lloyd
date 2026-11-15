@@ -200,15 +200,17 @@ the tree, and its text is recoverable from git history alone, at
   sibling docs each head exactly one table row and no wikilink dangles
   (`test_architecture_doc_frontmatter.py` 10 passed,
   `test_architecture_index_parity.py` 19 passed), the five-card glance table
-  still agrees with `conf.d/`, with `[[infrastructure]]` §GPUs and with the box
+  still agrees with `agent-services/supervisor/conf.d`, with
+  `[[infrastructure]]` §GPUs and with the box
   (`test_infrastructure_gpu_inventory.py` 22 passed — `agent-decider`'s
   2026-11-11 removal and qmd's 2026-11-10 move to GPU 4 are both reflected), the
   conventions hold (`app/harness/loop.py::run_query`, `app/kg_store.py`,
   `research.db`, `GET /api/dashboard`, `/compact`, the desktop tools'
-  non-chat refusal at `agent_mcp/main.py:553`), and `b94be171^` and
-  `4a6cdd54^` still answer for the retired names. Filed #4141
-  (`config.yaml:58-59` says djev records "three production seams in shadow"
-  while `SEAMS` has four and `config.yaml:95` in the same file says four),
+  non-chat refusal in `call_tool` at `agent_mcp/main.py:553`), and
+  `b94be171^` and `4a6cdd54^` still answer for the retired names. Filed #4141
+  (`config.yaml` records djev as answering "three production seams in shadow"
+  while `djev_shadow.SEAMS` holds four, and the same file's `shadow:` block
+  sizes itself off those four),
   #4142 (`.gitignore:188-192` still prescribes moving a retired doc into the
   gitignored retired-doc home that has not existed since `f80c9d00` — the one
   retirement route that defeats this page's "recoverable from git history

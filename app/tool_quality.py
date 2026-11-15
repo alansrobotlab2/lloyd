@@ -679,17 +679,33 @@ def _parse_day(text: str, *, fmt: str = "%Y-%m-%d") -> "date | None":
 
 
 def _as_day(value: "str | date | None") -> "date | None":
-    """Coerce a caller's `today` — an ISO string or a `date` — into a `date`.
+    """Coerce a caller's `today` into a `date`: `YYYY-MM-DD`, `YYYYMMDD`, or a `date`.
 
-    Every public entry point takes either spelling, because `--today` arrives from
+    Every public entry point takes any spelling, because `--today` arrives from
     argv as a string and a test passes a `date`. A retention path that raised
     `TypeError` on the string form would be a prune that silently never ran (or,
     in `prune_store`, a function documented never to raise raising) — so the
     coercion lives in one place instead of being remembered per caller.
+
+    The compact form is accepted because it is the spelling the swept corpus is
+    named in: a transcript is `20261105_224519_chat_a.json`, so a caller holding a
+    day read out of the store it is about to sweep — a script, a report, a shell —
+    holds 8 digits and means exactly that day. It was refused until #4136, and
+    refusing it was the unsafe direction, not the safe one: an unparseable `today`
+    is `None`, which every caller resolves to *today's clock*, so
+    `--today 20261105 --days 7` silently measured the week ending today. Over the
+    row-set store that is worse than a wrong label — `transcript_paths` lets the
+    archive stand only for days the dated files do not cover, so a window running
+    past the dated set counts each archived head again beside its live copy and
+    publishes a denominator that is a sum of two counts of the same calls
+    (#3815's defect from the other side). Both formats are matched whole rather
+    than by a prefix slice, so a stray suffix stays unparseable and still resolves
+    to the clock rather than to a plausible wrong date.
     """
     if value is None or isinstance(value, date):
         return value
-    return _parse_day(str(value))
+    text = str(value)
+    return _parse_day(text) or _parse_day(text, fmt="%Y%m%d")
 
 
 def load_transcript(path: Path) -> "Any | None":
@@ -948,7 +964,9 @@ def main(argv: "list[str] | None" = None) -> int:
                         help=f"window in days, inclusive (default {DEFAULT_DAYS});"
                              " negative means every transcript in the directory")
     parser.add_argument("--today", default=None,
-                        help="YYYY-MM-DD clock for the file name and cutoff")
+                        help="day for the file name and cutoff, as YYYY-MM-DD or"
+                             " YYYYMMDD (the spelling a transcript file name"
+                             " carries); unparseable means today's clock")
     parser.add_argument("--top", type=int, default=5,
                         help="rows to print, worst-first; 0 prints all")
     args = parser.parse_args(argv)

@@ -893,3 +893,66 @@ def test_no_duration_is_read_from_a_transcript():
     assert not hasattr(tq, "is_instant_return")
     assert not any("instant" in key or "duration" in key
                    for row in tq.tool_rows(rows) for key in row)
+
+
+# ─────────────────── the day a caller writes (#4136) ──────────────────────────
+def test_a_day_is_read_in_either_spelling_of_the_same_day(corpus):
+    """`today=` and `--today` take `YYYY-MM-DD` or `YYYYMMDD`, and both mean one day.
+
+    The boundary is argv: `main` passes `--today` through as the string a shell
+    typed, and `sweep`'s `today=` is the same value on the in-process side. The
+    compact spelling is not hypothetical input — the corpus being swept is named
+    that way (`20261105_224519_chat_a.json`), so a caller holding a day read out of
+    a transcript file name holds 8 digits. `_as_day` parsed only the ISO form and
+    answered `None` to the compact one, and every caller turns `None` into *today's
+    clock*: `--today 20261105 --days 7` measured the 7 days ending today and never
+    said so. `transcript_paths` is where that became a wrong count rather than a
+    wrong label — its archive arm excludes only the days the dated files cover, so
+    a window running past the dated set added each archived head beside its live
+    copy and published `n + m` where the truth is `n`, which is #3815's denominator
+    defect arriving from the other side
+    (`tests/test_session_sidecar_denominators.py::
+    test_the_tool_quality_window_walk_reports_n_heads_not_n_plus_m`).
+
+    Note which spelling the OUTPUT keeps: `day_name` writes the row-set file as
+    `2026-10-06.json`, ISO, which is what the end-to-end half below asserts. Two
+    spellings in and one out is the intent — the store's names sort lexicographically
+    as dates only in ISO, so widening what is ACCEPTED is not a licence to widen
+    what is WRITTEN.
+
+    A `date` still passes through untouched, and both spellings are matched whole
+    rather than by a prefix slice: the strings that are NOT a day — a trailing
+    character, a bare month-day, a month 13 — still resolve to the clock, because
+    guessing a plausible wrong date is the failure this file's strictness exists to
+    avoid.
+    """
+    assert tq._as_day("2026-11-05") == date(2026, 11, 5)
+    assert tq._as_day("20261105") == date(2026, 11, 5)
+    assert tq._as_day(date(2026, 11, 5)) == date(2026, 11, 5)
+    assert tq._as_day(None) is None
+    for not_a_day in ("2026-11-05x", "2026110x", "1105", "2026-13-05", ""):
+        assert tq._as_day(not_a_day) is None, not_a_day
+
+    # End to end across the argv boundary: a day handed over in its compact
+    # spelling is still that day's row-set — the file is written under the ISO name
+    # `day_name` gives, dated with that ISO date, and its window is the 7 days
+    # ending there. Before #4136 the compact form fell to the clock, so the store
+    # gained a file named for whatever day the run happened on and a report whose
+    # window ended there too.
+    sessions, store = corpus
+    store.mkdir(parents=True, exist_ok=True)
+    write_session(sessions, "20261006_000000_chat_a.json", doc(
+        call_row("j1", "Glob", {"pattern": "*.py"}),
+        result_row("j1", "app/paths.py\n", ok_stats("app/paths.py\n"))))
+    run = tq.sweep(sessions_dir=sessions, out_dir=store, days=7,
+                   today="20261006")
+    assert [path.name for path in store.iterdir()] == ["2026-10-06.json"]
+    published = json.loads(Path(run["written_to"]).read_text(encoding="utf-8"))
+    assert published["date"] == "2026-10-06"
+    # The window the report describes ends at the day the caller named. `from` is
+    # the exclusive lower edge, one day before the first day the walk admits
+    # (2026-09-30); `sessions_dir` is the absolute temp path, so this compares the
+    # three date fields rather than the whole sub-object.
+    window = published["window"]
+    assert (window["days"], window["from"], window["through"]) == \
+        (7, "2026-09-29", "2026-10-06"), window
