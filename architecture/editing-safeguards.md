@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, tools, safety]
 type: reference
 status: implemented
-date: 2026-10-13
+date: 2026-11-15
 ---
 
 # Editing safeguards: what stands between a turn and the tree
@@ -15,6 +15,13 @@ lloyd-mcp aggregator and switch under `harness:` in `config.yaml`; the last
 three are backend-side and have no switch at all. Read the Switch column
 before assuming a layer can be turned off — or that it is installed.
 
+This is the editing layers, not the whole guard inventory: the outbound
+content gate, the credential-read deny, the deterministic turn guards, the
+bench/eval tool sandbox and the dispatch-time desktop refusal also stand
+between a turn and a tool call, and the union — with the command that proves
+each exclusion — is [[guard-coverage]] and the derived
+`app/harness/guard_arm_matrix.py`.
+
 | Layer | Module | Switch | What it prevents |
 |---|---|---|---|
 | Read-before-edit and stale-file gates | `agent_mcp/builtin_fs.py` (`_read_records`, `_gate_check`) | `harness.edit_gates.enabled` — the switch covers the clobber rules only; the protected-path deny-set `_gate_check` also runs refuses outside it | the edit that **succeeds** over another writer's change and silently reverts it; and, outside any switch, a write whose target is on the deny-set |
@@ -23,9 +30,9 @@ before assuming a layer can be turned off — or that it is installed.
 | TypeScript diagnostics, later | `agent_mcp/_tsc_runner.py` | `harness.edit_diagnostics.typescript` | a `.tsx` edit that breaks the build; whole-project tsc is ~5 s, so it rides the drain queue |
 | The per-turn change ledger | `agent_mcp/_change_ledger.py` | `harness.change_ledger.enabled` | an edit with no record and no undo; `GET /changes`, `POST /changes/revert` |
 | The effect ledger | `agent_mcp/_tool_effects.py` | `harness.effect_ledger.enabled` | a requeued worker item re-landing every side effect its first attempt made |
-| Destructive-Bash patterns | `app/harness/safety.py` | — no config read at all, so no kill switch | `rm -rf` and friends — on the turns that install it, which is not all of them (below) |
+| Destructive-Bash patterns | `app/harness/safety.py` | — no config read at all, so no kill switch | `rm -rf` and friends — on *every* Bash call, because the aggregator's dispatch check runs the same function for every session whatever hooks its caller installed; one label set is still hook-only (below) |
 | The grant gate (#534) | `app/harness/policy.py`, `agent_mcp/builtin_grants.py` | armed per session platform | an unattended turn minting its own authority |
-| Automod ban on worker turns | `workers/sources/_common.WORKER_AUTOMOD_BAN` | — | a worker driving the self-modification loop |
+| Automod ban on worker turns | `app/tool_bans.WORKER_AUTOMOD_BAN` (re-exported from `workers/sources/_common.py`) | — | a worker driving the self-modification loop |
 
 ## The rules that are easy to get wrong
 
@@ -39,9 +46,11 @@ before assuming a layer can be turned off — or that it is installed.
   pyflakes and a multiset for tsc — one shared normaliser,
   `app/lint_findings.py`, so the model is never told about a finding the gate
   will not mind. The tolerated count depends entirely on scope: `app/` alone
-  is 34, the whole tree including `scripts/` is ~160, and `config.yaml`'s
-  "~69" is neither. A post-image syntax error is always reported; a
-  pre-image-only syntax error reports nothing.
+  is 30 and every tracked `.py` is 261 (measured 2026-11-14 with
+  `python -m pyflakes $(git ls-files '*.py') | wc -l`; pyflakes exits 1 on a
+  finding, so read the count off stdout), and `config.yaml`'s "~69" is
+  neither scope and still says so (#4131). A post-image syntax error is
+  always reported; a pre-image-only syntax error reports nothing.
 - **A foreground Bash command gets the pyflakes delta too** (#695,
   `agent_mcp/_bash_edit_diagnostics.py`). A command carrying a write marker
   (`sed -i`, `patch`/`git apply`, a redirect, `.write_text(`, a formatter)
@@ -57,13 +66,19 @@ before assuming a layer can be turned off — or that it is installed.
   graph of the tree *before* the edit, drops anything over `FANOUT_CEILING`
   (20) call sites, and runs in a thread the edit abandons after
   `RAIL_BUDGET_S` (90 ms).
-  Its switch is the one key here with no line in `config.yaml` — absent means
-  the default, which is on; adding the line is a `config.yaml` value change,
-  which a round may land since 2026-10-05 (`harness.*` is outside the fence).
+  Its switch has had its own line in `config.yaml` since #2141 (2026-10-04),
+  `blast_radius: true` beside `python` and `typescript`; an absent key still
+  means the default, which is on. Changing the line is a `config.yaml` value
+  change, which a round may land since 2026-10-05 (`harness.*` is outside the
+  fence).
 - **The change ledger's first writer per realpath per turn wins**, so a turn
   that edits a file ten times reverts to where it came in. Revert refuses a
   file whose sha moved since. A subagent's writes land on the parent's turn.
-  Only `builtin_fs` writes are recorded — a Bash `sed -i` is invisible to it.
+  Two write paths record: `builtin_fs`'s `Write`/`Edit`, and `vault_write`
+  (`agent_mcp/vault.py` since 2026-09-20), whose `_ledger_scope` delegates to
+  `builtin_fs._ledger_scope` so both honour one switch and one first-writer
+  rule — and since `vault_write` is `IDEMPOTENT` and so kept out of the effect
+  ledger, this is its only undo. A Bash `sed -i` is invisible to both.
   `turn_id` is what switches the whole thing on, so until 2026-09-10 every
   background run left no pre-images and no undo — the gap that made an
   autonomy task both the prime suspect in the vault wipe and impossible to
@@ -88,26 +103,38 @@ before assuming a layer can be turned off — or that it is installed.
   replayed or refused, and left out of the suppression counter.
   `_tool_effects.shadow_repeats()` reads the within-turn and across-turn
   repeat counts the replay-vs-re-fire decision (Alan's) is waiting on.
-- **The grant gate is not vault protection.** Tier 1 is everything
-  unclassified and returns before the store is even opened, so `Bash`,
-  `Edit`, `Write`, `backlog_write_task` and `vault_write` all pass. What it
-  gates is the durable-external surface — email, calendar, contacts, tasks.
-- **And `safety.py` is not installed everywhere.** It is a PreToolUse hook,
-  so it exists only where a caller built a registry with it:
-  `app/routers/messages.py` — three sites (`:1907` streaming, `:2045` ambient,
-  `:2175` sync), which covers the session-backed workers too, since those post
-  to the chat endpoint — and `builtin_task.py` for subagents. Two paths build
-  options and get *no* registry at all: **voice**
-  (`app/routers/voice.py:139` passes no `hooks=`, and `_run_turn` fills in
-  every other option but never that one, so an IV-off voice turn has neither
-  this nor the grant gate) and the bare `HookRegistry` that
-  `attach_observer_for_turn` creates when it finds none. The two *direct*
-  paths build their own registries and install the grant gate only, so an
-  `autonomy.run_task` or `run_prompt_on_primary` turn has neither this nor
-  anything else between it and `rm -rf`; `builtin_bash.py` deliberately does
-  not self-check, and says so in its docstring, which names this file and
-  `agent_mcp/main.call_tool`'s dispatch check as the gate. Voice is the same shape as the one #534 closed for the
-  grant gate, one layer down and still open.
+- **The grant gate is not vault protection.** A call answering tier 1 returns
+  before the store is even opened, so `Edit`, `Write`, `backlog_write_task` and
+  `vault_write` all pass. `Bash` is no longer on that list: since #740
+  (2026-09-24) the callback tiers a Bash call by its command *shape* against
+  `safety.py`'s durable-external table — the same number `check_grants`
+  computes, through `effective_tier` — so a `git push` or a service restart
+  from an unattended scope is tier 2 and comes back with the grant to mint.
+  `autonomy_write_task` is tier 2 for the shape that re-arms another task and 1
+  for appending its own run record (#724). What it gates is the
+  durable-external surface — email, calendar, contacts, tasks, scheduler state.
+- **`safety.py` is a PreToolUse hook, and the hook is not the whole gate.**
+  One builder arms it — `app/routers/turn_options.py::build_turn_options`, for
+  all four kinds (stream, ambient, flush, voice) — plus `builtin_task.py` for
+  a `Task` child. P13.4-6 (2026-09-24) replaced the three hand-built chat sites
+  with that one builder and deleted `POST /api/message`, and #1136 armed the
+  floor on a spoken turn, so **voice has it now**, along with the content gate
+  the same installer arms. What the hook still misses is the two *direct*
+  paths — `autonomy.run_task` and `_worker_run_options` (which
+  `run_prompt_on_primary` builds on), each of which makes its own registry
+  without it — and the bare `HookRegistry` `attach_observer_for_turn` creates
+  when it finds none. That survives only because `agent_mcp/main.py::call_tool`
+  runs the same `check_bash_command` with `at_dispatch=True` on every Bash
+  dispatch "whatever hooks the caller installed", so `rm -rf` is refused on
+  those turns as well. The one asymmetry left is `_HOOK_ONLY_LABELS` — the
+  labels the dispatch pass skips and the hook keeps, today only `sudo` — so a
+  label added to that set silently stops being enforced on exactly those
+  paths (#4129). `builtin_bash.py` deliberately does not self-check, and says
+  so in its docstring, which names this file and that dispatch check as the
+  gate. Voice is still the shape #534 closed for the *grant* gate, one layer
+  down and open: `build_turn_options` arms the gate for every kind but `voice`,
+  on the stated reasoning that a spoken turn is always a person's, while
+  handing it the chat's tool surface.
 - **A gate that raises denies** (review 2026-09-24, D5). `safety.py`, the
   outbound content gate and the grant gate register with
   `add_pre_tool_use(..., fail_closed=True)`: if the callback raises, the call
@@ -186,9 +213,11 @@ pre-image and post-image and reports the difference.
 
 Delta, and the three rules the delta needs, all inherited from the gate:
 
-- **Never absolute.** The tree carries tolerated pyflakes findings (34 in
-  `app/`, ~160 whole-tree; the "~69" CLAUDE.md quoted named neither scope —
-  see the 2026-09-13 review below). Reporting them on every edit trains the
+- **Never absolute.** The tree carries tolerated pyflakes findings (30 in
+  `app/`, 261 across every tracked `.py`, measured above; the "~69" CLAUDE.md
+  used to quote names neither scope and is still carried by
+  `agent_mcp/_edit_diagnostics.py`, `app/lint_findings.py`, `config.yaml` and
+  two test headers — #4131). Reporting them on every edit trains the
   model to skip the block, which is worse than not having one.
 - **Position is not identity.** `lint_findings.normalize_pyflakes_line` drops
   line and column, so inserting a line at the top does not report the whole
@@ -259,7 +288,8 @@ or moves on.
 
 - **Cold start seeds, it does not report.** With no baseline the first run
   attributes every pre-existing error in the tree to whoever edited first, so
-  `main.lifespan` schedules `warm_baseline()` a few seconds after boot.
+  the aggregator's lifespan schedules `warm_baseline()` about 20 s after boot
+  (its `delay_s` default).
   Without that the first `.tsx` edit of every restart is the one with the
   wrong answer. The baseline persists to `_pipeline/tsc/baseline.json` (under
   the data root, [[data-home]]).
@@ -294,7 +324,7 @@ which three, and no undo.
 `agent_mcp/_change_ledger.py` writes one record per (session, turn) under
 `sessions/<sid>.changes/<turn_id>/` (under the data root) — an `index.json`
 naming every file the turn wrote and a `<sha1(realpath)>.pre` beside it. The
-layout follows `tool_result_spill.py` for the same reason: per-turn side data
+layout follows `app/harness/tool_result_spill.py` for the same reason: per-turn side data
 that has to survive an aggregator restart and be findable from a session id
 alone.
 
@@ -399,13 +429,16 @@ handler — so keep Grep for string keys and routes.
 `tests/test_tool_effects.py`, `tests/test_edit_diagnostics.py`,
 `tests/test_tsc_runner.py`, `tests/test_lint_findings.py`,
 `tests/test_code_graph.py`, `tests/test_code_graph_doc_claims.py`,
-`tests/test_mcp_layer.py` — which is why the gates skip an unbound session:
+`tests/test_mcp_layer.py`, plus `tests/test_turn_options.py` (every turn kind's
+`RunOptions` and hook set, against a fixture recorded off the hand-built sites
+that preceded the builder) and `tests/test_task_subagent_authority.py` — which
+is why the gates skip an unbound session:
 a gate that fired there would fail that file rather than protect anything —
 and `tests/test_automod_hardening.py::test_worker_turns_cannot_drive_the_loop`.
 
 ## Related
 
-[[harness]], [[automod]], [[tools]], [[background-runs]].
+[[harness]], [[automod]], [[tools]], [[background-runs]], [[guard-coverage]].
 
 ## Review log
 
@@ -421,3 +454,27 @@ and `tests/test_automod_hardening.py::test_worker_turns_cannot_drive_the_loop`.
   is half wrong (#963); `safety.py` has no config key, hence no kill switch.
   Code-graph, effect-ledger and read-stat sections checked claim-by-claim and
   held.
+- 2026-11-15 — **stale.** (No entry was booked for the 2026-10-13 pass, which
+  changed two lines.) The safety-hook coverage bullet was the wrong shape
+  again, this time in the direction that invents a hole: the floor is armed by
+  one builder, `app/routers/turn_options.py`, for all four kinds including
+  voice (#1136), the "three sites in `messages.py`" and its four `path:line`
+  anchors died with P13.4-6 (`6a866ae1`, 2026-09-24, which also deleted
+  `POST /api/message`), and `agent_mcp/main.py::call_tool` has run the same
+  `check_bash_command` on every Bash dispatch since 2026-09-14 — so the two
+  direct paths are refused `rm -rf` too, and what is actually left is
+  `_HOOK_ONLY_LABELS` (#4129). `Bash` stopped being an unconditional tier 1
+  with #740, so the grant-gate bullet's pass-list lost it; `vault_write`
+  joined `builtin_fs` as a change-ledger writer on 2026-09-20, so "only
+  `builtin_fs` writes are recorded" named one where there are two, and the
+  effect ledger's exclusion of `vault_write` now has to be read as
+  effect-only. `blast_radius` has had a `config.yaml` line since #2141, which
+  contradicted this doc's own later sentence that named it. Tolerated-pyflakes
+  counts re-measured (30 `app/`, 261 all tracked `.py`) and the command is
+  cited, because the "~69" this doc refutes is still carried by two modules,
+  `config.yaml` and two test headers (#4131); the rail that was supposed to
+  catch a drifted anchor grades only "the number is inside the file" (#4130).
+  Module list, both ledgers' semantics, the constants (`FANOUT_CEILING`,
+  `RAIL_BUDGET_S`, `RAIL_MAX_SOURCE_BYTES`, 256×2000 read records), the tsc
+  runner, the code graph's six tools and every file named under Tests verified
+  clean; the `kg_store.store`/`RunOptions` fanout figures were not re-measured.
