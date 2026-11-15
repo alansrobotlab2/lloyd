@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, index]
 type: reference
 status: implemented
-date: 2026-10-14
+date: 2026-11-15
 ---
 
 # Lloyd — architecture index
@@ -116,9 +116,9 @@ from this directory and left no tracked copy behind anywhere, so what survives o
 each is that commit's parent —
 `git show b94be171^:architecture/<slug>.md`.
 
-Three retirements on 2026-09-11 were folds rather than obsolescence, and the
-distinction is worth keeping: nothing in any of them was wrong, it was in the
-wrong place.
+Six docs retired on 2026-09-11 were folds rather than obsolescence, described
+below by the destination they were folded into, and the distinction is worth
+keeping: nothing in any of them was wrong, it was in the wrong place.
 
 `gpu-power-limit-persist` went into [[vllm]] §2 — the power clamp only ever
 mattered because of what runs on that card, and keeping the two apart meant
@@ -189,3 +189,28 @@ the tree, and its text is recoverable from git history alone, at
   two prose restatements), #2700 (the no-owned-count guard matches digits, so
   "five due-gates" was never visible to it) and #2701 (the parity check is
   set-based and cannot see a doc listed twice).
+- **2026-11-15 — `stale`.** One number in the page disagreed with the page: the
+  Retired section opened "Three retirements on 2026-09-11 were folds" and then
+  named six docs — `gpu-power-limit-persist`, `engines`, `groundskeeper`,
+  `morning-briefing`, `nightly-reflection`, `nightly-skills-management`, all
+  deleted that day across `412a8012` and `f80c9d00` — against this page's own
+  2026-09-14 entry, which already calls them "6 absorbed". Six is the true
+  count and the sentence now says six; the three paragraphs under it are
+  destinations, not retirements, and now say so. Nothing else moved: the 35
+  sibling docs each head exactly one table row and no wikilink dangles
+  (`test_architecture_doc_frontmatter.py` 10 passed,
+  `test_architecture_index_parity.py` 19 passed), the five-card glance table
+  still agrees with `conf.d/`, with `[[infrastructure]]` §GPUs and with the box
+  (`test_infrastructure_gpu_inventory.py` 22 passed — `agent-decider`'s
+  2026-11-11 removal and qmd's 2026-11-10 move to GPU 4 are both reflected), the
+  conventions hold (`app/harness/loop.py::run_query`, `app/kg_store.py`,
+  `research.db`, `GET /api/dashboard`, `/compact`, the desktop tools'
+  non-chat refusal at `agent_mcp/main.py:553`), and `b94be171^` and
+  `4a6cdd54^` still answer for the retired names. Filed #4141
+  (`config.yaml:58-59` says djev records "three production seams in shadow"
+  while `SEAMS` has four and `config.yaml:95` in the same file says four),
+  #4142 (`.gitignore:188-192` still prescribes moving a retired doc into the
+  gitignored retired-doc home that has not existed since `f80c9d00` — the one
+  retirement route that defeats this page's "recoverable from git history
+  alone") and #4143 (the parity rail's presence check reads whole-file
+  wikilinks, so a doc can lose its row and stay green).
