@@ -81,7 +81,18 @@ def topics_switched_off(profile: dict,
 # call costs seconds. Uncapped, a bad day of items becomes a timeout, which is
 # the failure mode the fleet already tracks for other tasks. Items past the cap
 # keep their keyword-derived score and say so in the run output.
-LLM_MAX_CALLS = 40
+#
+# Sized to the one measured full-coverage day (#4117). On 2026-11-13 — 62 of 63
+# feeds fetched, the first such day since 2026-11-05 — stage 1 kept 129 survivors
+# and a grade call measured 0.76 s each, so grading the whole day is ~98 s inside
+# a run that took 514 s in total. 160 covers that day with headroom at ~2 min of
+# the 1800 s timeout; the 40 this held before covered 31 % of it, refusing 89 rows
+# including all 9 GitHub ones, so the GitHub half of that day wrote nothing. It is
+# a ceiling and not a target: survivors ran 2-27 a day over 2026-10-31→11-12 and
+# a quiet day still spends 2 calls, because calls are only ever bought by the
+# items that exist. Raise it again on the measured wall clock, not on a hunch —
+# if a day's survivor count passes 160 the sizing has to be revisited (#4117 owed).
+LLM_MAX_CALLS = 160
 LLM_TIMEOUT_SECONDS = 90
 
 # ── which survivor the call budget is spent on (backlog #2081) ────────────────
@@ -389,10 +400,12 @@ def stage1_filter(
     nothing left owed for them. All three emit published output — the text the grader is
     shown, the stand-in relevance a writer may publish, project attribution — so widening
     them would push back into `knowledge/` the link-block and channel boilerplate this
-    strip exists to keep out, while the gain is unmeasured: 0 `grade_source: call_cap`
-    rows across the four days of day files written after #2314 landed, and 70 of 70
-    graded rows model-graded. The one Stage 2 number that did move is eligibility
-    (#2314); the allocation rank is ruled to keep reading this copy too (#3144 owed 3).
+    strip exists to keep out, and what widening them would buy has never been measured.
+    The number that HAS been measured since is the call budget's own cost, and it was
+    never about this copy: on 2026-11-13 the day's 129 survivors met a 40-call budget, so
+    89 rows went out ungraded as `grade_source: call_cap` (#4117). The one Stage 2 number
+    that did move is eligibility (#2314); the allocation rank is ruled to keep reading this
+    copy too (#3144 owed 3).
 
     Since #2463 the match runs on `gate_match_text(item)` rather than on `stage1_text()`
     itself: the same text with its URL substrings taken out, because `\b` cannot tell an
@@ -638,9 +651,16 @@ def stage2_score(
         # for them: each of the three emits published output — the text the grader is
         # shown, the stand-in relevance a writer may publish, project attribution — so
         # widening them would push the link-block and channel boilerplate the strip
-        # exists to remove straight back into `knowledge/`, while the gain is
-        # unmeasured (0 `grade_source: call_cap` rows across the four days of day files
-        # written after #2314 landed, 70 of 70 graded rows model-graded). The allocation
+        # exists to remove straight back into `knowledge/`, and what widening them would
+        # buy has never been measured. What HAS been measured, on 2026-11-13, is this
+        # module's other knob: the first full-coverage YouTube day since 2026-11-05 (62 of
+        # 63 feeds) left stage 1 with 129 eligible survivors while `LLM_MAX_CALLS` was 40,
+        # so 89 of those 129 rows shipped ungraded as `grade_source: call_cap` — all 9
+        # GitHub rows among them, and the GitHub half of the day wrote nothing. One grade
+        # call measured 0.76 s, so the whole day is ~98 s inside the 1800 s task timeout of
+        # autonomy task #30 that the budget exists to respect, which is why the budget is
+        # now 160 (#4117): the day's shortfall was the budget, never this copy. The
+        # allocation
         # ranking above is no longer on that list: #3144 settles #2314 owed 3 by ruling
         # that the rank keeps reading f"{item.title} {item.summary}" deliberately, so
         # this line and that key are two different numbers wherever the two copies

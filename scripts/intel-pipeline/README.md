@@ -179,13 +179,25 @@ for item in scored:
 - Assign category
 
 #### Who gets a model call (`LLM_MAX_CALLS`, backlog #2081)
-`stage2_score` buys at most `LLM_MAX_CALLS = 40` model grades, and
+`stage2_score` buys at most `LLM_MAX_CALLS = 160` model grades, and
 `scoring.stage2_allocation_order` decides who they go to. The key, highest priority
 first: **feed source** (`SOURCE_ALLOCATION_RANK`: youtube before github), then the
 stage-1 `keyword_score` descending, then position. Items the keyword stage rated
 below `LLM_KEYWORD_THRESHOLD` never get a call wherever they land, and the returned
 list stays in the caller's order — allocation decides who is asked, not the shape of
 the day file.
+
+A budget below the day's survivor count leaves the surplus survivors ungraded
+(`grade_source: call_cap`, which the writer then refuses), and because the key ranks
+every video above every GitHub row the surplus is not spread across the day — it can
+be one whole source's day that goes unwritten. That is measured, not hypothetical: on
+2026-11-13, the first full-coverage YouTube day since 2026-11-05 (62 of 63 feeds),
+stage 1 kept 129 survivors against a budget of 40, so 89 rows shipped ungraded and
+all 9 GitHub items were among them — nothing GitHub was written that day. The budget
+is sized to that day at the one measured grade call's 0.76 s, which grades all 129 in
+~98 s inside the 1800 s task timeout of autonomy task #30 the cap exists to respect,
+and it is a ceiling and not a target: survivors ran 2–27 a day over 2026-10-31→11-12
+and a quiet day spends only the calls its own survivors buy (#4117).
 
 Source is first because it is the cheapest stage-1 signal that discriminates. On
 2026-10-02, the first day the cap bound, 20 of the 33 graded GitHub items came in

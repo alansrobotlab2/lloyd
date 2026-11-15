@@ -1205,6 +1205,22 @@ def _cli_home(tmp_path):
     return home, feeds
 
 
+def _seed_dedup_state(feeds: Path, n: int = 3) -> None:
+    """Give a scratch home the non-empty dedup state every real run starts with.
+
+    `vault_writer.state_loss_suspected` refuses a day outright when
+    `scanner-state.json` holds 0 seen ids AND the day file holds more than
+    `STATE_LOSS_MIN_SCORED_ITEMS` (100) scored rows — the 2026-09-22 guard against an
+    emptied `seen` list publishing the whole backlog as today's news. A day built at
+    `scoring.LLM_MAX_CALLS` is over that floor on its own now that #4117 sizes the
+    budget at 160, so a cap-bound day in this harness has to carry the ids a production
+    state carries: the guard is doing its job, and leaving the fixture empty would
+    test the guard instead of the cap.
+    """
+    (feeds / "scanner-state.json").write_text(json.dumps(
+        {"seen": [f"seed{i}" for i in range(n)], "last_run": None}))
+
+
 def _today_str() -> str:
     """The calendar-day key the CLI derives for itself, as this process sees it.
 
@@ -2934,9 +2950,14 @@ def test_cli_run_past_the_call_cap_writes_only_what_the_model_graded(tmp_path):
     `write_all_to_vault` re-reads `intel-<date>.jsonl` from disk, so a cause held
     only in the scoring process would be absent exactly where the refusal has to
     act. `LLM_MAX_CALLS + 2` eligible items, the stub grading each 6 — above the
-    floor — so every refusal is attributable to the cap and to nothing else.
+    floor — so every refusal is attributable to the cap and to nothing else. The home
+    carries the seen ids a real dedup state holds, because
+    `vault_writer.state_loss_suspected` refuses an over-100-row day whose
+    `scanner-state.json` is empty and a day at the #4117 budget is over that floor by
+    itself — unseeded, this node would be testing that guard rather than the cap.
     """
     home, feeds = _cli_home(tmp_path)
+    _seed_dedup_state(feeds)
     today = _today_str()
     cap = scoring_mod.LLM_MAX_CALLS
     items = [_item(f"yt{i}", source="youtube", title="vllm speculative decoding",
@@ -3571,9 +3592,12 @@ def test_stage1_filter_records_the_ruling_on_its_three_sibling_readers():
     #2241 and called widening them "an open scope question on that item". #3144 owed 1
     answered it on 2026-10-26: the three stay on the stripped copy, because all three emit
     published output and widening them would push the link-block and channel boilerplate
-    the strip exists to remove back into `knowledge/`, on a gain measured at zero
-    `grade_source: call_cap` rows across the four days of day files after #2314 landed and
-    70 of 70 graded rows model-graded. An answered question left written as open is how
+    the strip exists to remove back into `knowledge/`. The gain figure that ruling quoted —
+    zero `grade_source: call_cap` rows over the four days then on file — was a sample of
+    four quiet days, and #4117 measured a day that produced 89 such rows out of 129
+    survivors on 2026-11-13; the docstring now says the widening's own gain has never been
+    measured and attributes that day's refusals to the call budget, which is what they were.
+    An answered question left written as open is how
     the next round re-opens it. Read off the function, not by line number, so relocating
     the prose cannot make this node silently vacuous.
     """
@@ -3737,9 +3761,10 @@ def test_a_call_cap_item_never_headlines_the_top_results_block(tmp_path):
     """Clause 4, across the process boundary the block is printed in.
 
     `python -m intel_pipeline --score` is the process autonomy task #30 spawns, so
-    the run goes over it: 20 GitHub items concatenated ahead of 21 videos, 41
-    eligible survivors against the real `LLM_MAX_CALLS = 40`, and the stub model
-    grading everything 6. The margin is deliberately one item over the cap, so the
+    the run goes over it: 20 GitHub items concatenated ahead of enough videos to make
+    `LLM_MAX_CALLS + 1` eligible survivors — exactly one row past the budget
+    `scoring.LLM_MAX_CALLS` carries on this tree, whatever that number is — and the
+    stub model grading everything 6. The margin is deliberately one item over the cap, so the
     whole exclusion the block performs is one row wide — a renderer that filtered by
     anything other than grade would have to get that single row wrong to look right,
     and the `refused == {cap-18} == the day file's only call_cap row` check below is
@@ -3756,8 +3781,8 @@ def test_a_call_cap_item_never_headlines_the_top_results_block(tmp_path):
 
     The day file is read back too, because it is the artefact `vault_writer`
     consumes in the separate `--write` phase: `stage2_score` walks the allocation
-    order but returns caller order, so the rows must still arrive 42-strong and in
-    raw order with a single `call_cap` row, whatever the budget did on the way in.
+    order but returns caller order, so the rows must still arrive `cap + 1`-strong and
+    in raw order with a single `call_cap` row, whatever the budget did on the way in.
     """
     home, feeds = _cli_home(tmp_path)
     today = _today_str()
@@ -3766,7 +3791,9 @@ def test_a_call_cap_item_never_headlines_the_top_results_block(tmp_path):
                     summary="vllm") for i in range(20)]
              + [_item(f"yt{i}", source="youtube", title="vllm speculative decoding",
                       summary="vllm") for i in range(cap + 1 - 20)])
-    assert len(items) == cap + 1 == 41
+    assert len(items) == cap + 1, (
+        "the day is built one row past the budget, so this must track "
+        f"`scoring.LLM_MAX_CALLS` wherever it is sized: {scoring_mod.LLM_MAX_CALLS}")
     (feeds / "raw" / f"{today}.jsonl").write_text(
         "\n".join(i.to_json() for i in items) + "\n")
 
@@ -3812,7 +3839,7 @@ def test_a_call_cap_item_never_headlines_the_top_results_block(tmp_path):
     # precisely because that row was never graded.
     day_rows = {json.loads(l)["id"]: json.loads(l) for l in
                 (feeds / f"intel-{day}.jsonl").read_text().splitlines() if l.strip()}
-    assert len(day_rows) == 41, len(day_rows)
+    assert len(day_rows) == cap + 1, len(day_rows)
     scored = {i: ScoredItem.from_dict(r) for i, r in day_rows.items()}
     assert {scored[rid].relevance for rid in refused} == {KW_SCORE_09}, (
         f"the excluded rows do not carry the fallback 9: "
@@ -3833,13 +3860,17 @@ def test_the_writer_omits_from_its_ledger_the_row_the_block_excluded(tmp_path):
 
     The block lives in the scoring phase; `vault-written.json` is written by a
     separate `--write` phase of the same CLI over the same day file. Running both
-    phases against the stub and the real 40-call cap therefore puts a test across the
+    phases against the stub and the real `LLM_MAX_CALLS` budget therefore puts a test across the
     seam #2081's argument rests on — the row the block hid is the row the ledger
     never gains, and the rows the block showed are all in it. This is the 2026-10-02
     evidence (`pAnLpiAG6Es` and `50IgNjRtwNE` ABSENT from `feeds/vault-written.json`)
-    reproduced as a test instead of a report, on a cap-bound day.
+    reproduced as a test instead of a report, on a cap-bound day. The dedup state is
+    seeded for the same reason as the node above: this day is `LLM_MAX_CALLS + 1` rows,
+    past `STATE_LOSS_MIN_SCORED_ITEMS`, and an empty state would hand the write phase
+    to `state_loss_suspected` before the ledger assertion could run.
     """
     home, feeds = _cli_home(tmp_path)
+    _seed_dedup_state(feeds)
     today = _today_str()
     cap = scoring_mod.LLM_MAX_CALLS
     items = ([_item(f"gh{i}", source="github",
@@ -5688,3 +5719,115 @@ def test_two_scans_leave_two_rows_and_the_state_slot_holds_only_the_latest(tmp_p
     # this diff.
     st = json.loads((feeds / "scanner-state.json").read_text())
     assert "youtube_coverage" not in st, st.keys()
+
+
+# --- the call budget sized to a measured full-coverage day (#4117) --------------
+#
+# 2026-11-13 is the first full-coverage YouTube day since 2026-11-05 (`scan-series.jsonl`:
+# 62 of 63 feeds fetched, 32 written) and the first day on which the stage-2 call budget
+# bit at scale. Stage 1 kept 129 of 223 raw rows — 120 youtube + 9 github — the
+# `LLM_MAX_CALLS = 40` budget asked 40, and the settled day file holds
+# `{model: 40, call_cap: 89}` with `(github, call_cap) = 9`: the GitHub half of the day
+# was never asked, so `knowledge/` gained 32 entries, every one of them a video, and no
+# GitHub note carried the date. The two nodes below replay that day and its overflow
+# against the sized budget. Neither one touches the allocation rank (#2081) or the topic
+# weights (#1380, ruled 2026-09-27): every row on both days scores the same keyword 1.0,
+# so the key stays YouTube-first by `SOURCE_ALLOCATION_RANK` and the budget is the only
+# variable in the outcome.
+
+def _kw_full_items(n: int, source: str, prefix: str) -> list:
+    """`n` survivors that all clear the stage-2 threshold at keyword score 1.0.
+
+    Identical copy on purpose: the rank's discriminating components are the same for
+    every row, which is the measured state of a real day's top of the scale (all 40
+    asked rows and 57 of the 80 cap-held YouTube rows on 2026-11-13 scored exactly 1.0
+    on the stripped copy), so what the day decides is decided by the budget alone.
+    """
+    return [_item(f"{prefix}{i}", source=source,
+                  title="vllm speculative decoding", summary="vllm")
+            for i in range(n)]
+
+
+def test_a_full_coverage_day_of_129_survivors_is_graded_end_to_end(redirect_paths):
+    """Clause 1: the measured full-coverage day now fits inside the budget.
+
+    The 2026-11-13 day's 129 stage-1 survivors (120 videos ahead of 9 GitHub rows) go
+    through `stage2_score` at its default budget with a stub grader, and all 129 are
+    asked: `last_llm_calls == 129`, `last_cap_refused == 0`, no row comes back
+    `grade_source: call_cap`, and all 9 GitHub rows carry a `model` grade — the half of
+    the day the 40-call budget left ungraded and unwritten.
+
+    The sizing is asserted with the behaviour, because the number is the change: 160
+    covers the measured 129 with headroom, ~2 min at the one measured grade call's
+    0.76 s against the 1800 s timeout of autonomy task #30 that the cap exists to
+    respect. Cost is bounded and local: the 2026-11-13 run spent ~30 s of its 514 s on
+    40 calls, and the day's whole expected wall clock at 129 calls is ~98 s of grading.
+    """
+    profile = _profile(redirect_paths)
+    items = _kw_full_items(120, "youtube", "yt") + _kw_full_items(9, "github", "gh")
+    assert len(items) == 129, "2026-11-13 kept 129 survivors: 120 youtube + 9 github"
+    for it in items:
+        assert profile_mod.keyword_score(
+            scoring_mod.gate_match_text(it),
+            profile) > scoring_mod.LLM_KEYWORD_THRESHOLD, \
+            f"{it.id} is not eligible, so a call would never have been spent on it"
+
+    llm = RecordingLLM(relevance=6)
+    scored = scoring_mod.stage2_score(items, profile, llm_call=llm)
+
+    assert scoring_mod.stage2_score.last_llm_calls == 129, (
+        "the day's 129 eligible survivors must each be asked, not the first 40")
+    assert scoring_mod.stage2_score.last_cap_refused == 0, (
+        "a full-coverage day must not leave any survivor ungraded")
+    assert len(llm.asked) == 129
+    ungraded = [s.id for s in scored if s.grade_source == "call_cap"]
+    assert ungraded == [], f"cap-refused rows on a day that fits the budget: {ungraded}"
+    gh = [s for s in scored if s.source == "github"]
+    assert len(gh) == 9 and all(s.grade_source == "model" for s in gh), (
+        "the GitHub half of the day is what the 40-call budget never reached: "
+        f"{[(s.id, s.grade_source) for s in gh]}")
+    assert scoring_mod.LLM_MAX_CALLS >= 160, (
+        "clause 1 sizes the budget at the measured day's 129 survivors with headroom "
+        f"— 160 is ~2 min at the measured 0.76 s per grade call against the 1800 s "
+        f"task timeout; this tree has {scoring_mod.LLM_MAX_CALLS}")
+
+
+def test_the_budget_still_bounds_a_day_of_three_over_it(redirect_paths):
+    """Clause 2: a bigger number is still a limit — which is what it exists to be.
+
+    The cap is what stops a bad day of items turning autonomy task #30 into a 1800 s
+    timeout (`LLM_MAX_CALLS`'s own comment above its definition), so raising it must not
+    remove the rule. A day of
+    `LLM_MAX_CALLS + 3` eligible survivors therefore still spends exactly
+    `LLM_MAX_CALLS` calls and no more; the 3 overflow rows carry
+    `grade_source: call_cap` and are the 3 rows `stage2_allocation_order` ranks last —
+    the GitHub half, behind every video, the same shape the real day had —
+    `vault_writer.refused_by_call_cap` still refuses each of them, and the list still
+    returns in the caller's order, because the allocation decides who is asked and
+    never the shape of the day file the writer reads back.
+    """
+    profile = _profile(redirect_paths)
+    cap = scoring_mod.LLM_MAX_CALLS
+    items = _kw_full_items(cap, "youtube", "yt") + _kw_full_items(3, "github", "gh")
+    assert len(items) == cap + 3
+
+    llm = RecordingLLM(relevance=6)
+    scored = scoring_mod.stage2_score(items, profile, llm_call=llm)
+
+    assert scoring_mod.stage2_score.last_llm_calls == cap, (
+        "the budget must be spent exactly, not overrun because it was raised")
+    assert scoring_mod.stage2_score.last_cap_refused == 3
+    assert len(llm.asked) == cap, "the cap is a cap: no call after the budget is spent"
+    refused = [s.id for s in scored if s.grade_source == "call_cap"]
+    assert refused == ["gh0", "gh1", "gh2"], (
+        f"the overflow must land on the GitHub rows the key ranks last: {refused}")
+    order = scoring_mod.stage2_allocation_order(items, profile)
+    assert [items[i].id for i in order[-3:]] == refused, (
+        "the refused rows are not the ones the allocation ranks last, so the cap is "
+        f"deciding by something other than the key: {refused}")
+    assert sum(1 for s in scored if vw_mod.refused_by_call_cap(s)) == 3, (
+        "refused_by_call_cap no longer refuses what the cap refused")
+    assert all(not vw_mod.refused_by_call_cap(s)
+               for s in scored if s.grade_source == "model")
+    assert [s.id for s in scored] == [i.id for i in items], (
+        "stage2_score must return the caller's order whatever the allocation did")
