@@ -478,9 +478,21 @@ class LedgerFoldWitness(NamedTuple):
       these, so a live store with none has lost recent history.
     * `missing_rounds` — `round_id`s present in a rotation with no row left in the
       live file. `_archive_plan` holds back every round's newest row however old it
-      is, so a folding store keeps one row per archived round forever; a truncated
-      one loses them. This is the check against an EXTERNAL population, which is why
-      it survives a store that is legitimately much smaller.
+      is, so a folding store keeps one row per archived round forever, and a round
+      that loses that row loses the answer `_settle_times` gives for it. This is the
+      check against an EXTERNAL population, which is why it survives a store that is
+      legitimately much smaller.
+
+      It is NOT a truncation detector, and #4152 is the node that proved it. The row
+      the fold holds back is itself an OLD row, and an append-only truncate keeps the
+      old rows, so a truncation leaves every archived round's held-back row standing.
+      For a truncate to lose a round the round's rows would have to straddle the
+      window boundary, and on this store they do not: the widest gap between two rows
+      of one `round_id` is 0.1365 d — 11,791 s on `SM_20261109_024659` — measured
+      2026-11-15 across all 2,688 `round_id`s the live file carries, against a
+      `LEDGER_ARCHIVE_AGE_DAYS` window of 14 d. So the leg fires on a lost row, never
+      on a truncate: `test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss`
+      pins the loss, and the truncation node pins that this leg stays silent there.
     * `archive_holds_window_rows` — rows inside the window that a rotation holds.
       Must be 0: the fold may not move a row it is required to keep.
 
@@ -1800,6 +1812,20 @@ def test_a_truncated_store_with_every_rotation_present_reddens_and_names_the_row
     fold-protected rows and drops every row inside the window, and the message has to
     name what was lost instead of telling the reader to run the fold, which is the
     operation that made the file smaller in the first place.
+
+    What the truncation does NOT do, and what this node used to assert (#4152, the
+    node sat red from `58cc23b4` onward): it cannot lose a round. The row
+    `_archive_plan` holds back for an archived round is that round's newest row, and
+    it is an OLD row — measured 2026-11-15, all 10 rounds in this fixture's own
+    rotation keep exactly 1 old row and hold no row inside the window at all, because
+    the widest gap between two rows of one `round_id` in the live file is 0.1365 d
+    against a 14 d window. A truncate keeps old rows. So `missing_rounds` is empty
+    here BY CONSTRUCTION, and asserting it non-empty asked this node to pass only on
+    a day some round's rows happened to land across the window boundary — a green that
+    depends on the hour the ledger was written is the flake this item was filed
+    against. The assertion is now the true one, and the lost-row leg it stood in for
+    is pinned where it can actually fire, in
+    `test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss`.
     """
     now = time.time()
     live, archive = _folded_store_pair(tmp_path, now)
@@ -1816,14 +1842,71 @@ def test_a_truncated_store_with_every_rotation_present_reddens_and_names_the_row
     fold = ledger_fold_witness(truncated, now, archives=[archive])
 
     assert fold.in_window_rows == 0, fold.describe()
-    assert fold.missing_rounds, fold.describe()
+    assert fold.missing_rounds == (), fold.describe()
     assert fold.deficit_problems(), fold.describe()
 
     with pytest.raises(AssertionError) as caught:
         assert_ledger_within_calibration_drift(fold.live_bytes, fold)
     message = str(caught.value)
     assert "no row dated inside" in message, message
+    assert "have no row left in the live file" not in message, message
+    assert archive.name in message, message
+    assert "THIS IS NOT THE FOLD" in message, message
+    assert "FOLD THE STORE" not in message, message
+
+
+def test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss(tmp_path):
+    """One round's last live row gone: the witness names it, and blames no fold.
+
+    This is the loss `missing_rounds` exists to catch, which the truncation node above
+    cannot produce (#4152): `_archive_plan` keeps one OLD row per round, so the
+    rotation holds a round only while the live file holds that row, and the row is the
+    sole thing `_settle_times` answers "when did this round last matter" with. Drop it
+    and `sweep_automod_branches` counts the round `untracked` for ever — the failure
+    the keep rule at `retention-sweep.py:_archive_plan` is load-bearing for (#2043).
+
+    Built on the real fold pair so the population is the live store's, with one
+    deletion: every archived round here keeps exactly 1 live row, so deleting one
+    round's rows makes it missing and touches nothing else — which is what lets this
+    node assert ONE problem, from ONE leg, naming ONE round. The in-window leg is
+    asserted alive precisely so the red here cannot be that one.
+    """
+    now = time.time()
+    live, archive = _folded_store_pair(tmp_path, now)
+    rows = _ledger_lines(live)
+    live_rounds = {}
+    for _line, row in rows:
+        if row and (rid := row.get("round_id")):
+            live_rounds[str(rid)] = live_rounds.get(str(rid), 0) + 1
+    archived_rounds = {str(row["round_id"]) for _line, row in _ledger_lines(archive)
+                       if row and row.get("round_id")}
+    assert archived_rounds, "the fixture rotation holds no rounds at all"
+    singletons = sorted(r for r in archived_rounds if live_rounds.get(r) == 1)
+    assert singletons, (f"no archived round holds exactly one live row, so deleting "
+                        f"one cannot make a round missing; counts: "
+                        f"{ {r: live_rounds.get(r, 0) for r in sorted(archived_rounds)} }")
+    victim = singletons[0]
+
+    pruned = tmp_path / "pruned.jsonl"
+    pruned.write_bytes(b"".join(line for line, row in rows
+                                if not (row and row.get("round_id") == victim)))
+    fold = ledger_fold_witness(pruned, now, archives=[archive])
+
+    assert fold.missing_rounds == (victim,), fold.describe()
+    assert fold.in_window_rows > 0, fold.describe()
+    low, _high = ledger_drift_band()
+    assert fold.live_bytes < low, fold.describe()
+    problems = fold.deficit_problems(of_bytes=fold.live_bytes)
+    assert len(problems) == 1, problems
+    assert "have no row left in the live file" in problems[0], problems
+    assert victim in problems[0], problems
+
+    with pytest.raises(AssertionError) as caught:
+        assert_ledger_within_calibration_drift(fold.live_bytes, fold)
+    message = str(caught.value)
+    assert victim in message, message
     assert "have no row left in the live file" in message, message
+    assert "no row dated inside" not in message, message
     assert archive.name in message, message
     assert "THIS IS NOT THE FOLD" in message, message
     assert "FOLD THE STORE" not in message, message
