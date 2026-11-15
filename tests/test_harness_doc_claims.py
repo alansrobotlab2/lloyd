@@ -2281,3 +2281,315 @@ def test_no_architecture_doc_names_a_serving_build_other_than_the_recorded_one()
         f"only {len(seen)} present-tense build attributions found; the three in "
         f"harness.md plus the one in vllm.md §2 are the known set, so the sweep has gone "
         f"blind to them: {seen}")
+
+
+# ── #4138: the Modules table has to be a map of the package ───────────────────
+#
+# `architecture/harness.md` calls itself the map of `app/harness/`, and a reader
+# locates behaviour by that table. When the item was filed 13 of the package's 42
+# modules were named nowhere in its 2,300-odd lines — among them `protected_paths.py`,
+# which the table's own `safety.py` row delegates to for two of its lanes. Nothing
+# compared the table with the package, so the gap could only ever grow: the last
+# module added to the package (dc6e2b2b's `secret_read_deny.py`) got a row only
+# because someone happened to be in the file. These five nodes are the arm.
+
+#: How many modules `app/harness/` held when this was filed (2026-11-15: 43 files
+#: less `__init__.py`). A floor rather than an equality so a module added tomorrow
+#: does not redden this node — but a package that globbed to nothing cannot pass.
+_MODULE_COUNT_FLOOR = 40
+
+#: The rows that point at another architecture doc instead of restating it, and the
+#: ONE doc each is sent to. The owner is pinned per row rather than counted, because a
+#: bare count leaves a row free to restate the unit that owns the module while pointing
+#: somewhere else — `supply_chain_inventory` could copy `autonomy-jobs.md` into its Owns
+#: cell and keep a pointer to `context-window.md`, and a count of nine would still pass.
+#: The node asserts the cited set equals this registry's keys and each row cites exactly
+#: its owner, so both a dropped pointer and a swapped one are caught.
+_POINTER_ROWS = {
+    "protected_paths": "authority-surfaces.md",
+    "sync_registration": "vault-protection.md",
+    "service_control": "tools.md",
+    "live_git_writes": "guard-coverage.md",
+    "guard_arm_matrix": "guard-coverage.md",
+    "credential_store": "threat-model.md",
+    "context_meter": "context-window.md",
+    "turn_guards": "inner-voice.md",
+    "supply_chain_inventory": "autonomy-jobs.md",
+}
+
+#: A row that OWNS its module in the harness but delegates part of its answer, and so
+#: has to cite the doc holding that answer: `safety.py` implements neither protected-path
+#: lane. Kept apart from `_POINTER_ROWS` because the two say different things — one is
+#: "the map of this module lives there", the other is "this row leans on that doc" — and
+#: merging them would let a module with no owner elsewhere look pointered.
+_DELEGATION_CITES = {"safety": "authority-surfaces.md"}
+
+#: The guard-order doc: the layer stack whose row 3 documents the protected-path
+#: set — what may be destroyed, written and read — in full.
+_GUARD_ORDER_DOC = "authority-surfaces.md"
+
+_DOC_CITE = re.compile(r"`architecture/([A-Za-z0-9._-]+\.md)`")
+_ROW_MODULE = re.compile(r"`([a-z0-9_]+)\.py`")
+
+
+def _harness_modules() -> "list[str]":
+    """Every module in `app/harness/` except the package initialiser."""
+    return sorted(p.stem for p in (ROOT / "app" / "harness").glob("*.py")
+                  if p.stem != "__init__")
+
+
+def _modules_table_rows(text: str) -> "list[tuple[str, str]]":
+    """`(first cell, Owns cell)` for each `## Modules` row, header and rule dropped.
+
+    The Owns cell is every cell after the first, re-joined: a row legitimately
+    carries an escaped pipe inside a cell (the `bash_pipeline.py` row quotes
+    `pytest -q \\| tail`), and splitting on it there must not lose the half of the
+    row that says what the module owns.
+    """
+    rows: "list[tuple[str, str]]" = []
+    for line in _section(text, "## Modules").splitlines():
+        if not line.startswith("|") or set(line) <= set("|- "):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or cells[0] == "Module":
+            continue
+        rows.append((cells[0], " | ".join(cells[1:])))
+    assert rows, "the `## Modules` table has no rows, so nothing here is graded"
+    return rows
+
+
+def _modules_missing(text: str, modules: "list[str]") -> "list[str]":
+    """Modules the doc never names — the filer's loop, `grep -qw <module>` semantics."""
+    return [m for m in modules if re.search(rf"\b{m}\b", text) is None]
+
+
+def _guard_order_pointer_missing(text: str) -> "str | None":
+    """Why the doc does not route a reader to the guard-order doc, or None if it does.
+
+    A function over the bytes rather than asserts inside a node, so the failure control
+    can drive it on text with the pointer removed: clause 4's own arm is then shown
+    failing, and not only asserted to hold.
+    """
+    for line in text.splitlines():
+        if line.startswith("| `safety.py` |") or line.startswith("| `protected_paths.py` |"):
+            if f"`architecture/{_GUARD_ORDER_DOC}`" not in line:
+                return (
+                    f"the row `{line[:40]}...` delegates to the protected-path set "
+                    f"without citing `architecture/{_GUARD_ORDER_DOC}`")
+    return None
+
+
+def test_every_module_of_the_package_is_named_by_the_doc_that_maps_it():
+    """Clause 1: the table is a map of `app/harness/`, not a selection from it.
+
+    Graded property is the filer's loop verbatim: for every `*.py` in the package
+    except `__init__.py`, the bare module name appears in the doc. It named 13
+    module files nowhere on 2026-11-15, which is a 2,300-line reference a reader
+    cannot trust as a map: the thing they are looking for may simply be absent, with
+    no way to tell absence from a synonym.
+    """
+    mods = _harness_modules()
+    assert len(mods) >= _MODULE_COUNT_FLOOR, (
+        f"`app/harness/` globbed to {len(mods)} modules, under the "
+        f"{_MODULE_COUNT_FLOOR} it held when this was filed — the glob stopped "
+        "matching the package, so a clean result below would mean nothing")
+    missing = _modules_missing(DOC.read_text(encoding="utf-8"), mods)
+    assert missing == [], (
+        f"architecture/harness.md names none of {missing}, but calls itself the map "
+        f"of app/harness/ ({len(mods)} modules); a reader working from the table "
+        "cannot tell a module that is absent from one described under another name")
+
+
+def test_a_module_another_architecture_doc_owns_is_pointed_at_not_restated():
+    """Clause 2: a pointer row names a doc that actually covers the module.
+
+    Nine of the thirteen had a home elsewhere — `guard_arm_matrix` is derived into
+    `guard-coverage.md`, `context_meter`'s arithmetic is `context-window.md`, the
+    service-control deny is told in `tools.md` — so the row's job is to say where,
+    and the restating the item warns against is what makes the corpus disagree with
+    itself. Three legs, each able to fail on its own: the citing rows are EXACTLY the
+    registry (a row that stops pointing, or starts pointing at a doc nobody declared,
+    fails here), each row cites its declared doc and nothing else (so a row cannot
+    restate its owner while pointing elsewhere), and the cited doc has to name the
+    module — a pointer to a doc that never mentions it is worse than the gap it papers
+    over. `safety.py` sits in a second, smaller registry: it owns its module in the
+    harness but delegates two lanes, so its row must cite the guard-order doc without
+    being a pointer.
+    """
+    rows = _modules_table_rows(DOC.read_text(encoding="utf-8"))
+    owns: "dict[str, str]" = {}
+    for first, own in rows:
+        for module in _ROW_MODULE.findall(first):
+            owns[module] = own
+
+    pointers = {m: set(_DOC_CITE.findall(own))
+                for m, own in owns.items() if _DOC_CITE.search(own)}
+    declared = {**_POINTER_ROWS, **_DELEGATION_CITES}
+    dropped = sorted(set(declared) - set(pointers))
+    assert dropped == [], (
+        f"these rows stopped naming the doc they lean on: {dropped} — a pointer row "
+        "became a restatement, and the corpus now owns two copies of each")
+    added = sorted(set(pointers) - set(declared))
+    assert added == [], (
+        f"rows now cite another unit for {added}, which the registry does not carry: a "
+        "pointer added here has to be added to `_POINTER_ROWS` (owned elsewhere) or "
+        "`_DELEGATION_CITES` (leans on it), or nothing grades where it goes")
+
+    for module, cited in pointers.items():
+        assert cited == {declared[module]}, (
+            f"the `{module}.py` row cites {sorted(cited)}; this row's doc is "
+            f"`architecture/{declared[module]}` — one row, one doc, or the registry has "
+            "to say which of the two is really the map")
+        if module not in _POINTER_ROWS:
+            continue
+        for slug in cited:
+            assert slug != "harness.md", (
+                f"the `{module}.py` row cites harness.md itself, which is not a pointer")
+            target = ROOT / "architecture" / slug
+            assert target.is_file(), (
+                f"the `{module}.py` row sends the reader to architecture/{slug}, which "
+                "is not in the tree")
+            assert re.search(rf"\b{module}\b", target.read_text(encoding="utf-8")), (
+                f"the `{module}.py` row points at architecture/{slug}, which never names "
+                f"`{module}` — the pointer is a claim about a doc that does not keep it")
+
+
+def test_the_safety_row_names_the_arbiter_its_protected_path_lanes_delegate_to():
+    """Clause 3: `safety.py`'s row says where its two protected-path lanes live.
+
+    The row used to read "the destructive-Bash patterns; the only thing between an
+    unattended turn and `rm -rf`", while two of its lanes are imports:
+    `check_protected_delete` and `check_bash_write_denied` both come from
+    `app/harness/protected_paths.py`. The doc therefore described a guard whose
+    answer to "what is sacred" it never named — the reader got the pattern list and
+    not the set. This node crosses the seam rather than reading two strings for each
+    other: it parses `safety.py` and requires both names to be imports from that
+    module, so the row cannot stay true by the doc and the code drifting together.
+    """
+    owns: "dict[str, str]" = {}
+    for first, own in _modules_table_rows(DOC.read_text(encoding="utf-8")):
+        for module in _ROW_MODULE.findall(first):
+            owns[module] = own
+
+    assert "protected_paths" in owns, "the table has no `protected_paths.py` row"
+    assert "arbiter" in owns["protected_paths"], (
+        "the `protected_paths.py` row no longer says what it is: the one answer to "
+        "what may be destroyed, written and read")
+    for fn in ("check_protected_delete", "check_bash_write_denied"):
+        assert fn in owns["safety"], (
+            f"the `safety.py` row does not name `{fn}`, so a reader of the table "
+            "cannot find the code that decides the refusal they just got")
+
+    tree = ast.parse((ROOT / "app" / "harness" / "safety.py").read_text(encoding="utf-8"))
+    imported = {alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+                and node.module == "app.harness.protected_paths"
+                for alias in node.names}
+    assert {"check_protected_delete", "check_bash_write_denied"} <= imported, (
+        f"safety.py imports {sorted(imported)} from app.harness.protected_paths, so "
+        "the row's delegation claim is stale — either the lanes moved or the doc "
+        "names functions the module never asked for")
+
+
+def test_the_harness_doc_points_at_the_guard_order_doc_for_the_protected_set():
+    """Clause 4: the doc that owns the guard stack is cited, and owns what it says.
+
+    `architecture/harness.md` cited no other architecture unit at all before this —
+    `grep -n "authority-surfaces" architecture/harness.md` was 0 hits — so a harness
+    reader had no route to the layer stack the harness sits inside, and the row that
+    delegates to the arbiter stopped short of the one doc that spells the set out.
+    The pointer is graded on both ends: the file exists, it carries the three policy
+    names the pointer promises, and it names the arbiter itself. And it is required on
+    BOTH rows that touch the set — the `protected_paths.py` row and the `safety.py` row
+    that delegates to it — because the row where a reader learns the answer lives
+    elsewhere is the row they have to be sent from; one citation anywhere in 2,400 lines
+    would leave them at the delegating row with nowhere to go.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    reason = _guard_order_pointer_missing(text)
+    assert reason is None, (
+        f"architecture/harness.md does not route its reader to "
+        f"architecture/{_GUARD_ORDER_DOC}: {reason}")
+    order = (ROOT / "architecture" / _GUARD_ORDER_DOC).read_text(encoding="utf-8")
+    for name in ("protected_paths", "PROTECTED_WRITE_ROOTS", "read_deny_reason"):
+        assert name in order, (
+            f"the pointer sends the reader to architecture/{_GUARD_ORDER_DOC} for "
+            f"`{name}`, which that doc does not name — the set is documented "
+            "somewhere else now and this row was not told")
+
+
+def test_the_module_coverage_pin_is_shown_able_to_fail():
+    """Clause 5: the arm is demonstrated, on a doc this node writes itself.
+
+    Two deletions, both from the real bytes. First a single row: the module has to be
+    named exactly once in the doc first, or deleting its row is not a deletion and
+    the node would report success on a doc that still names the module in prose. Then
+    the whole table body, against the population the table alone was naming — so an
+    extraction that found no rows, or a table re-worded out of the pattern, reports
+    every one of them missing instead of passing green.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    mods = _harness_modules()
+    assert _modules_missing(text, mods) == [], (
+        "the doc already fails clause 1, so the controls below are grading a broken "
+        "baseline rather than the arm")
+
+    victim = "session_test_runs"
+    row_lines = [ln for ln in text.splitlines() if ln.startswith(f"| `{victim}.py` |")]
+    assert len(row_lines) == 1, (
+        f"the control needs exactly one `{victim}.py` row to delete and found "
+        f"{len(row_lines)} — re-point the control at a row that exists")
+    assert text.count(victim) == 1, (
+        f"`{victim}` occurs {text.count(victim)} times in the doc, so deleting its row "
+        "leaves the name standing and the control below would pass whatever the "
+        "extraction did — pick a module the doc names once")
+    mutated = text.replace(row_lines[0] + "\n", "", 1)
+    assert mutated != text, "deleting the row changed nothing"
+    assert _modules_missing(mutated, mods) == [victim], (
+        f"dropping the only `{victim}.py` row did not report it missing, so the "
+        "coverage check is not reading the rows it claims to")
+
+    # The same mutation on the POINTER arm: `sync_registration`'s pointer is the only
+    # place its owner is named for it, so dropping that row must leave the pointer
+    # registry short — otherwise clause 2's rows are graded by an extraction that was
+    # never seen to depend on the bytes.
+    pointer_row = [ln for ln in text.splitlines()
+                   if ln.startswith("| `sync_registration.py` |")]
+    assert len(pointer_row) == 1, (
+        f"the control needs exactly one `sync_registration.py` row and found "
+        f"{len(pointer_row)}")
+    no_pointer = text.replace(pointer_row[0] + "\n", "", 1)
+    cited = {m for first, own in _modules_table_rows(no_pointer)
+             for m in _ROW_MODULE.findall(first) if _DOC_CITE.search(own)}
+    assert "sync_registration" not in cited, (
+        "deleting the only row that pointed at the owning doc left the pointer set "
+        "unchanged, so the pointer arm reads something other than these rows")
+
+    # And on clause 4's arm. The citation is downgraded from the wikilink form to a
+    # bare filename in both delegating rows — a form a reader cannot follow from the
+    # table — and the check has to call that out.
+    downgraded = text.replace(
+        f"`architecture/{_GUARD_ORDER_DOC}`", f"`{_GUARD_ORDER_DOC}`")
+    assert downgraded != text, "no guard-order citation to downgrade"
+    assert _modules_missing(downgraded, mods) == [], (
+        "the downgrade changed a module name too, so this control is not isolated to "
+        "the pointer")
+    reason = _guard_order_pointer_missing(downgraded)
+    assert reason is not None, (
+        "both delegating rows lost the pointer and the check still said the doc routes "
+        "its reader — clause 4's arm is reading something other than these rows")
+
+    body = _section(text, "## Modules")
+    wo_table = text.replace(body, "\n", 1)
+    table_only = [m for m in mods
+                  if re.search(rf"\b{m}\b", body)
+                  and re.search(rf"\b{m}\b", wo_table) is None]
+    assert len(table_only) >= 13, (
+        f"only {len(table_only)} modules are named by the table alone, under the 13 "
+        "rows #4138 added — the table is no longer what makes the package nameable "
+        "(measured on 2026-11-15: 15 of the 42, `run_state` and `tool_search_cache` "
+        "among them), so there is nothing here to show an empty extraction failing on")
+    assert sorted(_modules_missing(wo_table, mods)) == sorted(table_only), (
+        "with the table body gone the modules reported missing are not the ones the "
+        "table alone named, so the two readings of the doc have drifted apart")
