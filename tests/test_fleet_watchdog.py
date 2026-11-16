@@ -4342,3 +4342,274 @@ async def test_an_unheld_lane_still_alerts_and_the_alert_names_no_held_source(
     stall = [a for a in alerts if "claimable" in a]
     assert len(stall) == 1, f"expected the one starving-queue alert: {alerts}"
     assert "oldest claimable queue item is 1200 min old" in stall[0], stall[0]
+
+
+# ── #4089: the throughput line carries the pause shape its own window holds ───
+#
+# The window these nodes measure is `[boot, now]` = 1,085 min: `_THROUGHPUT_BOOT` is
+# 06:00:00Z on the counted day, `_THROUGHPUT_NOW` is 00:05:00Z the next morning, and
+# `minutes_since_boot` already prints 1085 on the shipped line. A pause span is seeded by
+# its offset in MINUTES from the boot instant, so every expected figure below is one the
+# node itself can write down.
+#
+# The real shape they are scaled from, measured read-only against
+# `/home/alansrobotlab/lloyd-data/workers.db` at triage on 2026-11-12 and re-measured on
+# 2026-11-16: eleven spans inside the 5,636 min window the 2026-11-12T00:01Z line printed,
+# 1,583.7 min taken by a person (take row 59, opened 2026-11-10T03:59:26.118737+00:00,
+# lifted 2026-11-11T06:23:09.671403+00:00) and 252.6 by a machine.
+
+
+def _pause_instant(minutes_from_boot) -> str:
+    """A `pause_journal` stamp `minutes_from_boot` after the pinned boot instant."""
+    return (_THROUGHPUT_BOOT + dt.timedelta(minutes=minutes_from_boot)).isoformat()
+
+
+def _throughput_paused(q, spans):
+    """Journal `spans` = `(taken_min, released_min_or_None, kind, actor)` into `q`'s store.
+
+    Written through `WorkQueue.pause_journal_append`, the only writer the pool has, rather
+    than by hand-plugging rows: that is what pairs a lift to its take via `hold_id`, and a
+    seeder that paired them itself would leave the real pairing logic unpinned. A release
+    carries the kind that WAS holding, as the schema demands, and `None` leaves the hold
+    open — the shape of a fleet nobody resumed.
+    """
+    for taken, released, kind, actor in spans:
+        q.pause_journal_append(value="1", holder_kind=kind, actor=actor,
+                               at=_pause_instant(taken))
+        if released is not None:
+            q.pause_journal_append(value="0", holder_kind=kind,
+                                   actor=f"{actor} (release)",
+                                   at=_pause_instant(released))
+    return q
+
+
+def _throughput_pressure_rows():
+    """45 failures on the counted day against 20 on its predecessor: the floor fires.
+
+    `_boot_split_rows()` also puts 33 of them a minute apart, so a 5-minute cluster
+    exists on the line and the degradation node below can assert the cluster field
+    SURVIVES a journal it cannot read, rather than asserting around its absence.
+    """
+    return _boot_split_rows() + _throughput_rows(_THROUGHPUT_PREV, 20)
+
+
+def test_the_throughput_line_names_person_and_machine_held_minutes_inside_the_window(
+        monkeypatch, tmp_path):
+    """Clause 1: two figures, one clause, both clipped to the window the alarm counts.
+
+    Four spans are seeded and only two may be reported: a person hold that OPENS 30 min
+    before the boot instant and releases at +120 (clipped, so 120.0 min, not 150.0), a
+    machine hold wholly inside at +300..+420 (120.0), a machine hold that ended 540..600
+    min BEFORE the window opened, and a person hold taken 60 min AFTER the alarm instant.
+    The first is the case the item's own hold is: `skills-review: hold for Alan …` opened
+    2026-11-10T03:59:26 and is 1,200.6 min of the base day, so a reader needs the part
+    inside the window, not the whole hold. Both excluded spans have to stay out, or the
+    clause over-reports a window the responder cannot check.
+    """
+    _boot_pinned(monkeypatch)
+    q = _throughput_queue(tmp_path / "pause-shape.db", _throughput_pressure_rows())
+    _throughput_paused(q, [
+        (-30, 120, "person", "skills-review: hold for Alan until lloyd-f1 all-clear"),
+        (300, 420, "machine", "eval-window:context-rot"),
+        (-600, -540, "machine", "before-the-window"),
+        (1145, 1205, "person", "after-the-alarm"),
+    ])
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    assert census is not None and census["pause"] is not None, (
+        "the census reported no pause shape at all for a store with two spans inside "
+        f"its window: {census and census.get('pause')}")
+    shape = census["pause"]
+    assert shape["window_min"] == 1085, (
+        f"the window this clause names must be the one the boot clause already prints "
+        f"(06:00Z yesterday to 00:05Z today = 1085 min), got {shape['window_min']}")
+    assert shape["person_min"] == 120.0 and shape["machine_min"] == 120.0, (
+        f"a hold opened before the window must be clipped to its start, and a span "
+        f"outside the window must not count at all: {shape}")
+    assert shape["spans"] == 2, f"only two seeded spans overlap the window: {shape}"
+
+    line = fw._throughput_alert_message(census)
+    assert ("Pool held 120.0 min by a person and 120.0 min by a machine across 2 pause "
+            "spans inside the 1085 min window since host boot." in line), line
+
+
+def test_the_throughput_pause_clause_counts_spans_and_never_merges_the_two_kinds(
+        monkeypatch, tmp_path):
+    """Clause 2: the span count is on the line, and no summed held figure is.
+
+    Three spans, two kinds: 90.5 person min plus 7.5 and 10.0 machine min. The sum, 108.0,
+    is asserted ABSENT — `108.0 min held` is one number where the responder needs two,
+    because a person's halt and a process that died holding the fleet have opposite
+    remedies (resume it / go find what died), which is the #2498 distinction the stall
+    alarm's `(person hold)` already carries and this line did not.
+    """
+    _boot_pinned(monkeypatch)
+    q = _throughput_queue(tmp_path / "pause-spans.db", _throughput_pressure_rows())
+    _throughput_paused(q, [
+        (0, 90.5, "person", "alan"),
+        (200, 207.5, "machine", "eval-window"),
+        (400, 410, "machine", "voice-review engine A/B (claude)"),
+    ])
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    shape = census["pause"]
+    assert (shape["person_min"], shape["machine_min"], shape["spans"]) == (
+        90.5, 17.5, 3), f"{shape}"
+
+    line = fw._throughput_alert_message(census)
+    assert "across 3 pause spans" in line, line
+    assert "90.5 min by a person" in line, line
+    assert "17.5 min by a machine" in line, line
+    assert "108.0 min" not in line, (
+        f"the two kinds were summed into one held figure, which is the reading the "
+        f"item refuses: {line}")
+    assert "More than half that window" not in line, (
+        f"90.5 of 1085 min is 8.3 % person-held, so the majority sentence has no "
+        f"business appearing: {line}")
+
+
+def test_the_throughput_line_says_so_only_when_more_than_half_the_window_is_person_held(
+        monkeypatch, tmp_path):
+    """Clause 3: the majority sentence is strictly-over-half, in both directions.
+
+    542.5 min is exactly half of 1085, so it must NOT carry the sentence; 542.6 must. A
+    threshold asserted on one side only is a threshold nobody can tell from `always` or
+    `never`, and 50 % is the boundary the item states as the boundary.
+    """
+    _boot_pinned(monkeypatch)
+    rows = _throughput_pressure_rows()
+
+    q_half = _throughput_queue(tmp_path / "half.db", rows)
+    _throughput_paused(q_half, [(0, 542.5, "person", "alan")])
+    at_half = fw._throughput_census(q_half, now=_THROUGHPUT_NOW)["pause"]
+    assert (at_half["person_min"], at_half["window_min"]) == (542.5, 1085), at_half
+    half_line = fw._throughput_alert_message(
+        fw._throughput_census(q_half, now=_THROUGHPUT_NOW))
+    assert "Pool held 542.5 min by a person" in half_line, half_line
+    assert "More than half that window was held by a person" not in half_line, (
+        f"a window that is exactly half person-held was reported as a majority: "
+        f"{half_line}")
+
+    q_over = _throughput_queue(tmp_path / "over.db", rows)
+    _throughput_paused(q_over, [(0, 600, "person", "alan")])
+    over_census = fw._throughput_census(q_over, now=_THROUGHPUT_NOW)
+    assert over_census["pause"]["person_min"] == 600.0, over_census["pause"]
+    over_line = fw._throughput_alert_message(over_census)
+    assert "More than half that window was held by a person" in over_line, (
+        f"600 of 1085 min (55.3 %) is a majority held by a person and the line is "
+        f"silent about it: {over_line}")
+
+
+def test_the_throughput_pause_shape_comes_from_journal_history_not_live_pause_state(
+        monkeypatch, tmp_path):
+    """Clause 4: the hold that explains the numbers has usually already been released.
+
+    This is the 2026-11-11 case at fixture scale. The person hold releases at +440 min —
+    645 min, 10.75 h, before the alarm instant — and the real one had been released 17.6 h
+    before the line posted. Two things are pinned together: the same store yields an EMPTY
+    live-pause clause (so `_operator_pause_clause`, wired to the stall alarm, could never
+    have carried this), and a hold that was never lifted at all still counts, clipped to
+    the alarm instant (the +1025 machine take, unclosed, is 60.0 min). Then the live-state
+    route is made to raise, and the reading does not change — proof the census never
+    consults it.
+    """
+    _boot_pinned(monkeypatch)
+    q = _throughput_queue(tmp_path / "released.db", _throughput_pressure_rows())
+    _throughput_paused(q, [
+        (240, 440, "person", "skills-review: hold for Alan until lloyd-f1 all-clear"),
+        (1025, None, "machine", "kv_gate never resumed"),
+    ])
+    assert fw._operator_pause_clause(q) == "", (
+        "this store's live pause state is holding, so the empty live clause below would "
+        "prove nothing about where the alarm's numbers came from")
+
+    census = fw._throughput_census(q, now=_THROUGHPUT_NOW)
+    shape = census["pause"]
+    assert (shape["person_min"], shape["machine_min"], shape["spans"]) == (
+        200.0, 60.0, 2), (
+        f"a hold released 10.75 h before the alarm still belongs to the window, and an "
+        f"unclosed hold runs to the alarm instant: {shape}")
+
+    line = fw._throughput_alert_message(census)
+    assert ("Pool held 200.0 min by a person and 60.0 min by a machine across 2 pause "
+            "spans inside the 1085 min window since host boot." in line), line
+
+    from workers import pool as pool_module
+    def _refusing(queue):
+        raise AssertionError("the throughput census read LIVE pause state")
+    monkeypatch.setattr(pool_module, "operator_pause_state", _refusing)
+    again = fw._throughput_alert_message(
+        fw._throughput_census(q, now=_THROUGHPUT_NOW))
+    assert again == line, (
+        "the pause shape moved when the live-state route was taken away, so it is not "
+        f"pure journal history: {again}")
+
+
+def test_an_unreadable_journal_or_an_unheld_window_costs_only_the_pause_clause(
+        monkeypatch, tmp_path):
+    """Clause 5: three stores render ONE line, and the stall alarm's clause is untouched.
+
+    Same 45-vs-20 day on three stores: an empty journal, a journal whose only spans lie
+    outside the window, and a store whose `pause_journal` table has been dropped from
+    under the census (the read failure). All three lines are asserted BYTE-IDENTICAL,
+    because the day counts, the fired-rule parenthetical, the cluster field, the
+    since-boot rate, the class tally and the `failures span` bounds are what every other
+    node and the owed re-pricing of the floor read (#2890, #2899, #2956, #3494), and a
+    missing pause clause may not disturb one of them. The empty and out-of-window stores
+    differ only in `spans: 0` against a `None` shape, which is the difference between
+    "nothing held it" and "I could not look" — kept in the census, kept off the line.
+    """
+    _boot_pinned(monkeypatch)
+    rows = _throughput_pressure_rows()
+
+    q_empty = _throughput_paused(
+        _throughput_queue(tmp_path / "empty.db", rows), [])
+    q_outside = _throughput_queue(tmp_path / "outside.db", rows)
+    _throughput_paused(q_outside, [(-600, -540, "person", "before the window"),
+                                   (1145, 1205, "machine", "after the alarm")])
+    q_broken = _throughput_queue(tmp_path / "broken.db", rows)
+    broken_conn = sqlite3.connect(str(tmp_path / "broken.db"))
+    broken_conn.execute("DROP TABLE pause_journal")
+    broken_conn.commit()
+    broken_conn.close()
+
+    empty_census = fw._throughput_census(q_empty, now=_THROUGHPUT_NOW)
+    outside_census = fw._throughput_census(q_outside, now=_THROUGHPUT_NOW)
+    broken_census = fw._throughput_census(q_broken, now=_THROUGHPUT_NOW)
+
+    assert broken_census is not None, (
+        "a journal that would not answer silenced the whole alarm: #1682's rule is that "
+        "one reader's fault may not stop the throughput line")
+    assert broken_census["pause"] is None, broken_census
+    assert empty_census["pause"] == {"window_min": 1085, "person_min": 0.0,
+                                     "machine_min": 0.0, "spans": 0}, empty_census
+    assert outside_census["pause"] == empty_census["pause"], (
+        f"spans outside the window were counted into it: {outside_census['pause']}")
+
+    empty_line = fw._throughput_alert_message(empty_census)
+    assert empty_line == fw._throughput_alert_message(outside_census)
+    broken_line = fw._throughput_alert_message(broken_census)
+    assert broken_line == empty_line, (
+        f"a failed journal read moved the line: {broken_line}")
+    assert "Pool held" not in empty_line and "pause span" not in empty_line, empty_line
+
+    # …and every figure that was on the line before this clause exists is still on it.
+    assert "45 failed runs on UTC" in empty_line, empty_line
+    assert f"against 20 on UTC {_THROUGHPUT_PREV}" in empty_line, empty_line
+    assert "floor rule: >= 40" in empty_line, empty_line
+    assert "largest cluster" in empty_line, empty_line
+    assert "= 0.17 / 15 min" in empty_line and "(1085 min since boot)" in empty_line, (
+        empty_line)
+    # The pinned boot is 06:00Z and this fixture's densest stretch is 00:00–00:05Z, so
+    # the relation the shipped line prints here is `follows`, not `precedes`.
+    assert "boot follows the largest cluster" in empty_line, empty_line
+    assert "classes:" in empty_line and "no structured answer 33" in empty_line, empty_line
+    assert "connect error 10" in empty_line and "other 2" in empty_line, empty_line
+    assert f"failures span {_THROUGHPUT_DAY}T" in empty_line, empty_line
+
+    # The stall alarm's own hold clause, on the same diff: byte-unchanged, because this
+    # item touches the throughput line's shape and not the live-hold path.
+    person_stall = fw._operator_pause_clause(
+        _held_watchdog_queue(tmp_path / "stall", kind="person"))
+    assert "the worker pool is PAUSED by operator (person hold)" in person_stall, (
+        person_stall)
+    assert "claims are held by that pause, not by this scheduler" in person_stall, (
+        person_stall)

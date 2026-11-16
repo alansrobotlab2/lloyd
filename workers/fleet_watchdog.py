@@ -1540,6 +1540,107 @@ def _largest_failure_cluster(points, window_minutes: int) -> dict | None:
     return best
 
 
+def _throughput_pause_shape(conn, boot, now) -> dict | None:
+    """How much of the alarm's own window the pool was held for, and by whom.
+
+    #4089. The window is `[boot, now]` — the SAME window the since-boot clause already
+    prints as `(5636 min since boot)` — and the reading is `person_min`, `machine_min`
+    and the count of pause spans clipped into it. The measured instance: the line that
+    fired on 2026-11-12T00:01Z read `10 failed runs on UTC 2026-11-11 against 1 on UTC
+    2026-11-10 (10x rule: 10.0x) … (5636 min since boot)` (`memory/2026-11-11.md:31`),
+    while the same window contained ELEVEN pause spans worth 1,583.7 person minutes and
+    252.6 machine minutes of its 5,636 — take row 59, opened
+    `2026-11-10T03:59:26.118737+00:00` by `skills-review: hold for Alan until lloyd-f1
+    all-clear` and lifted `2026-11-11T06:23:09.671403+00:00`, is 1,200.6 of the 1,440 min
+    of the base day the 10x ratio divides by. Measured read-only against
+    `/home/alansrobotlab/lloyd-data/workers.db` at triage on 2026-11-12 and re-measured
+    on 2026-11-16 with this function's own overlap rule; both returned 11 spans,
+    1583.7 / 252.6 min, 32.6 % held.
+
+    Why a second pause read when `_operator_pause_clause` already exists: that clause is
+    LIVE STATE — it returns "" unless a hold is engaged at the instant it is called — and
+    this alarm fires the morning AFTER the day it counts, so the hold that explains the
+    numbers has usually been released by then. Hold 59 released 17.6 h before the line
+    above was posted; the live read would have printed nothing. The journal is the
+    history, and history is what a denominator needs.
+
+    Why the window is the since-boot one and not the counted UTC day: the day pair is
+    what the rules weighed, but the only elapsed figure the line prints is the boot
+    window, which is also the window the item's own numbers were measured over, and a
+    hold spanning midnight corrupts BOTH legs from inside it (hold 59 covers the base day
+    AND 383 min of the counted day). No window is invented when the machine will not say
+    when it booted: no boot, no window, no shape — the same degradation the boot clause
+    already accepts.
+
+    The pairing is the journal's own: a take row (`value = '1'`) is closed by the earliest
+    lift that names it (`hold_id`, `value = '0'`), `MIN` rather than a bare join because a
+    journal row that names a take twice must not make one hold count twice. A take with no
+    lift is held all the way to `now`, which is the honest reading of a hold nobody
+    resumed. `holder_kind` is read off the TAKE row — the writer sets it on both edges —
+    and normalises exactly like `workers.pool._holder_kind`: `machine` is machine and
+    anything else is person, the default that keeps an unattributed halt out of the
+    machine column.
+
+    No time bound in the SQL, on purpose: `at` is TEXT ISO and a row stamped in a
+    non-UTC zone sorts wrong against a `+00:00` bound, which would silently DROP a hold —
+    the exact failure this clause exists to remove — so the bound is applied to parsed
+    instants here. The table is bounded by the groundskeeper's `PAUSE_JOURNAL_MAX_AGE_DAYS`
+    sweep, so reading it whole is bounded too.
+
+    Returns None — no shape, no clause — when there is no window or the journal will not
+    answer, and never raises past its own `except`: this runs on the pool's scheduler tick
+    beside two stall alarms and #1682's rule is that one reader's fault may not be the
+    thing that stops the others.
+    """
+    if boot is None:
+        return None
+    try:
+        from workers.pool import HOLDER_MACHINE
+        rows = conn.execute(
+            "WITH ends AS (SELECT hold_id, MIN(at) AS ended_at FROM pause_journal "
+            "                 WHERE value = '0' AND hold_id IS NOT NULL "
+            "                 GROUP BY hold_id) "
+            "SELECT t.at, e.ended_at, t.holder_kind "
+            "FROM pause_journal t LEFT JOIN ends e ON e.hold_id = t.id "
+            "WHERE t.value = '1' ORDER BY t.id").fetchall()
+    except Exception:
+        logger.exception("failure-throughput census: the hold journal could not be "
+                        "read; the alarm goes out without its pause shape")
+        return None
+    # Whole minutes, floored, exactly as `minutes_since_boot` below takes them, so the
+    # window this clause names and the window the boot clause prints are one number.
+    window_min = int((now - boot).total_seconds() // 60)
+    if window_min < 1:
+        # A boot in the future — a clock step, an NTP correction — leaves no window for
+        # a hold to sit in, and a negative denominator is a sentence nobody can read.
+        return None
+    person_min = 0.0
+    machine_min = 0.0
+    spans = 0
+    for started_at, ended_at, holder_kind in rows:
+        start = _parse_iso_safe(started_at)
+        if start is None or start > now:
+            # Unplaceable, or taken after the instant this census was read: either way
+            # it is not part of this window, and an unparseable stamp is left out of the
+            # shape as it is left out of the since-boot count above.
+            continue
+        end = _parse_iso_safe(ended_at) if ended_at else None
+        if end is None:
+            end = now
+        if end < boot:
+            continue          # released before the window even opened
+        held_min = (min(end, now) - max(start, boot)).total_seconds() / 60.0
+        if held_min <= 0:
+            continue          # a lift stamped before its own take: no span to count
+        spans += 1
+        if (holder_kind or "").strip() == HOLDER_MACHINE:
+            machine_min += held_min
+        else:
+            person_min += held_min
+    return {"window_min": window_min, "person_min": person_min,
+            "machine_min": machine_min, "spans": spans}
+
+
 def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
     """The newest COMPLETE UTC day's failed runs, against its own predecessor.
 
@@ -1644,6 +1745,12 @@ def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
         # Read after the legs, so a tick that trips neither — the ordinary case, every
         # minute of the day — never opens the uptime file for a figure nobody prints.
         boot = _host_boot_instant()
+        # …and the hold journal is read off the SAME connection, on the same
+        # fired-a-leg-only condition (#4089). The pause shape is a statement about the
+        # window this line is about, so it is read once here rather than re-derived at
+        # print time from a second opening of the store, and it cannot raise: a journal
+        # that will not answer costs its own clause, never the alarm.
+        pause = _throughput_pause_shape(conn, boot, now)
     except Exception:
         logger.exception("failure-throughput census: the runs store could not be "
                         "read; saying nothing rather than guessing")
@@ -1725,6 +1832,11 @@ def _throughput_census(queue: WorkQueue, now=None) -> dict | None:
         # does not have. None is also the shape a test overrides the helper to return.
         "boot": boot, "since_boot": since_boot,
         "minutes_since_boot": minutes_since_boot,
+        # #4089, and it is None in exactly two shapes: no boot instant (no window), or a
+        # journal that would not answer. It is not a zero — a reading that failed and a
+        # window that was never held are different facts, and the second one still says
+        # so with `spans: 0` rather than silence.
+        "pause": pause,
         # #3494, and it travels with the rest rather than being computed at print time:
         # the formatter would then have to re-derive the instants the census already
         # parsed, and a line whose cluster came from a second reading of the store is
@@ -1771,6 +1883,41 @@ def _boot_cluster_relation(boot, cluster) -> str | None:
     if boot > cluster["end"]:
         return "boot follows the largest cluster"
     return "boot falls inside the largest cluster"
+
+
+def _throughput_pause_clause(shape) -> str:
+    """The pause sentence, or "" when there is no pause shape to say (#4089).
+
+    Leads with a space and ends with a full stop so that an empty return leaves the
+    line's bytes EXACTLY as they were: every other figure on the line is quoted by
+    nodes three files away and by the owed re-pricing of the floor, and this clause is
+    an addition to that line, never a re-write of it.
+
+    The two held figures stay separate on purpose. `1836.3 min held` would be one more
+    number and still not answer the only question the responder has — whether a person
+    stopped the pool or a process died stopping it — and those two readings have opposite
+    actions attached (resume it, or go find what died). `workers/pool.py`'s `_holder_kind`
+    and `_operator_pause_clause`'s `(person hold)` / `(machine hold)` exist for the same
+    distinction (#2498); this is that distinction carried onto the line that COUNTS
+    failures, where it was missing on 2026-11-11 while a 1,583.7 min person hold sat
+    inside the window.
+
+    The majority sentence is a separate sentence because it is a separate claim: the
+    first states a shape, this one states that the shape is most of the window, and it is
+    the one that changes what a reader should do with the day counts above it. Strictly
+    MORE than half — at exactly half the window was as likely held for other reasons as
+    not, and a sentence that fired there would say nothing a reader could act on.
+    """
+    if not shape or not shape["spans"]:
+        return ""
+    clause = (f" Pool held {shape['person_min']:.1f} min by a person and "
+              f"{shape['machine_min']:.1f} min by a machine across {shape['spans']} "
+              f"pause span{'s' if shape['spans'] != 1 else ''} inside the "
+              f"{shape['window_min']} min window since host boot.")
+    if shape["person_min"] * 2 > shape["window_min"]:
+        clause += (" More than half that window was held by a person, so a rate over it "
+                   "is not a rate over a pool that was free to claim.")
+    return clause
 
 
 def _throughput_alert_message(census: dict) -> str:
@@ -1835,6 +1982,22 @@ def _throughput_alert_message(census: dict) -> str:
     and the owed re-pricing of the floor count those lines; what changed is that it no
     longer has to carry a causal reading on its own. The cluster and the relation are both
     printed and read by nothing — the trip arithmetic is exactly as #2899 priced it.
+
+    The pause sentence is #4089, and it is the counted window disclosing its own shape.
+    The line fired on 2026-11-12T00:01Z reading `10 failed runs on UTC 2026-11-11 against 1
+    on UTC 2026-11-10 (10x rule: 10.0x) … (5636 min since boot)` over a window that held
+    eleven pause spans — 1,583.7 min of them taken by a person, 252.6 by a machine — and
+    said none of it: the responder had to find the two 11-10 PAUSE alarms in the same daily
+    note, a different alarm from a different writer, to learn the pool had been held at
+    all. So the line now prints what `_throughput_pause_shape` read from the hold journal
+    across the window it already prints: `Pool held 1583.7 min by a person and 252.6 min by
+    a machine across 11 pause spans inside the 5636 min window since host boot.`, with a
+    sentence of its own when more than half that window was a person's hold. Like the
+    cluster and the boot relation it is reported and read by NOTHING — the ratio leg and
+    the floor leg are untouched, and whether a person-held base day should still be the
+    denominator is the owed ruling #2899 carries. Absent when the census could not read the
+    journal, when the machine would not name its boot, or when no span overlapped the
+    window; in all three the rest of the line keeps the bytes it had.
     """
     parts = [f"{label} {n}" for label, n in census["classes"] if n]
     parts.append(f"other {census['other']}")
@@ -1880,12 +2043,20 @@ def _throughput_alert_message(census: dict) -> str:
         relation = _boot_cluster_relation(census["boot"], cluster)
         if relation:
             boot_part += f"; {relation}"
+    # …and the window's own pause shape, after the day's bounds and before the clock
+    # caveat (#4089). Placed there because it is a statement about the window those
+    # bounds sit in, and because an empty clause has to leave the trailing sentence
+    # byte-identical — `_operator_pause_clause`'s precedent is that a pause clause which
+    # leaks into the unheld case both breaks the guard that greps this line and blames a
+    # person who touched nothing.
+    pause_part = _throughput_pause_clause(census.get("pause"))
     return (
         f"worker pool failure throughput: {census['newer']} failed runs on UTC "
         f"{census['day']} against {census['older']} on UTC {census['prev']} "
         f"({'; '.join(rules)}){cluster_part}{boot_part}; classes: "
-        f"{', '.join(parts)}{bounds}. Times and days are UTC; this note is keyed to "
-        f"America/Los_Angeles, so the day named is not necessarily this note's day.")
+        f"{', '.join(parts)}{bounds}.{pause_part} Times and days are UTC; this note is "
+        f"keyed to America/Los_Angeles, so the day named is not necessarily this note's "
+        f"day.")
 
 
 def _throughput_reported_day(queue: WorkQueue) -> str | None:
