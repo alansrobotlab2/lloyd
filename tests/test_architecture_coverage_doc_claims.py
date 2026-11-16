@@ -875,14 +875,6 @@ PATH_DOC_SLUGS = [p.name for p in sorted(ARCH.glob("*.md"))]
 #: refuses an entry no doc cites, so the only way to add one is to write the
 #: sentence that needs it. The owed-check on #2582 rules on whether it shrinks.
 PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
- 'ambient-context-injection.md': {
-  '~/lloyd-data/next-session-notes.json':
-   ('generated: `app/next_session_notes.py` creates the store on its '
-    'first note (`_save` writes it), and `_read` reads a missing file '
-    'as an empty channel by design, so a box holding no pending note '
-    'shows only the sibling `.lock` that `locked_file` takes for every '
-    'read — the location the row names is the one the module writes'),
- },
  'arch-review.md': {
   '.archive/':
    ('historical: the page quotes the `.gitignore` rule'
@@ -1413,6 +1405,17 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: `keep_conflict` writes them by unit and prunes them itself — and the page now names the
 #: other keeper, the `arch-review-rejected` dir, by its constant rather than by a new
 #: path-shaped citation, so a store the size rail counts gained no debt row.
+#: Re-measured 2026-11-16, the day the list lost an entry rather than gaining one.
+#: #4182 deleted the whole `ambient-context-injection.md` key, which held a single
+#: span — `~/lloyd-data/next-session-notes.json`, admitted `generated:` by `05abd9b3`
+#: on the ground that `app/next_session_notes.py` writes the store only on its first
+#: note. The store has been here since 2026-10-17, 31 bytes and `"notes": []`, so the
+#: page's citation resolves on the very note-less box its reason says shows only the
+#: `.lock`, and an entry beside a citation that resolves excuses nothing — it only
+#: keeps the sweep from seeing that the reason died. No node ever asked whether an
+#: exempted span still fails to resolve; #4182's own node now asks it, for that span.
+#: The list is 109 exemptions across 28 docs — other-tree 43, generated 33,
+#: historical 33 — and NONE of them is `stale:`.
 #: The ruling, from that owed-check: `stale` STAYS an admitted kind, and this ceiling — not
 #: the kind list — is the rail. Deleting the kind was refused for a reason worth keeping
 #: beside the number, because it is the rail's own text: the failure message of
@@ -9138,6 +9141,103 @@ def test_the_ceiling_s_ruling_is_recorded_in_its_own_comment():
         "the block must name the ruling as settled, which is what replaces the pointer")
     for refused in ("leave the admitted kinds", "drop `stale`", "drop the kind"):
         assert refused not in block, f"the block proposes {refused!r}, which was refused"
+
+
+# ── #4182 — an exemption whose path has appeared has to be deleted ────────────
+
+#: The span #4182 dropped the exemption for, spelled once so both nodes below and
+#: every failure message quote the same bytes the page itself cites.
+NEXT_SESSION_NOTES_SPAN = "~/lloyd-data/next-session-notes.json"
+
+
+def test_no_exemption_excuses_the_next_session_notes_citation_that_resolves():
+    """#4182: the one exemption on `ambient-context-injection.md` excused nothing.
+
+    `05abd9b3` admitted `~/lloyd-data/next-session-notes.json` as `generated:` on
+    2026-10-11 on the ground that `app/next_session_notes.py` creates the store only
+    on its first note, so — in the entry's own words — "a box holding no pending note
+    shows only the sibling `.lock`". That box is this one. The store has stood here
+    since 2026-10-17 10:46: 31 bytes, `{"version": 1, "notes": []}` — no pending note,
+    the JSON present — so the reason is false on the machine it was written for while
+    the citation resolves through `_resolve`'s `ACCOUNT_HOME` rule.
+
+    Nothing in this file noticed, and that is the durable half of the item:
+    `test_every_path_citation_exemption_is_a_citation_the_doc_actually_makes` grades
+    that a doc makes the citation, that the kind is admitted and that the reason is
+    long enough, while `STALE_EXEMPTION_CEILING` bounds only the `stale:` kind — so no
+    node ever asked whether an exempted span still fails to resolve, and this entry
+    outlived its reason by 30 days without a single red assertion. This node asks that
+    question for the one span #4182 rules on. The other exemption spans whose path now
+    resolves are a corpus ruling for the owed-check, not a diff here.
+    """
+    assert "ambient-context-injection.md" not in PATH_CITATION_EXEMPTIONS, (
+        "the key came back; it held the next-session-notes span and nothing else, so a "
+        "re-add is the stale exemption #4182 deleted — an emptied key is exactly what "
+        "the validator's own message says to drop")
+    re_excused = [(doc, span) for doc, spans in PATH_CITATION_EXEMPTIONS.items()
+                  for span in spans if "next-session-notes.json" in span]
+    assert re_excused == [], (
+        f"{re_excused} excuses the next-session-notes span under another doc key; the "
+        "path resolves on this box, so the entry hides nothing (see #4182)")
+
+    # The two facts that make the deletion safe, both re-read rather than remembered:
+    # the page still writes the sentence, and the path the sentence names is really
+    # there. A re-spelled citation would satisfy the first assert below and the
+    # deletion would look free; this is where that costs.
+    page = (ARCH / "ambient-context-injection.md").read_text(encoding="utf-8")
+    assert NEXT_SESSION_NOTES_SPAN in page, (
+        "the page stopped citing the span — deleting the citation is the other way to "
+        "make an exemption look unnecessary, and #4182 deletes the entry, not the "
+        "sentence that needed it")
+    resolved = resolve_citation(_resolve("~/", "lloyd-data/next-session-notes.json"))
+    assert resolved is not None and resolved.is_file(), (
+        f"{NEXT_SESSION_NOTES_SPAN} resolves to no file ({resolved}). A store that "
+        "vanished is the case the #4182 owed-check rules on, and until it rules the "
+        "answer is a re-admitted `generated:` entry, not a re-spelled citation")
+
+
+def test_the_dropped_exemption_stays_dropped_with_home_and_data_root_emptied(tmp_path):
+    """#4182: the `~/` span resolves on `ACCOUNT_HOME`, so no moved `$HOME` un-drops it.
+
+    Deleting an exemption is only safe while the citation it excused keeps resolving,
+    and there is one environment where that plausibly stops: the automod gate's own.
+    `gate._child_env` points `$HOME` at the round's symlink farm and `$LLOYD_DATA` at
+    the round's empty data root, and `worktree.py::HOME_LINK_SKIP` carries neither
+    `lloyd` nor `lloyd-data` into that farm — which is exactly why `_resolve` expands
+    `~/` to the passwd entry instead of `Path.home()`. This node re-runs the two nodes
+    #4182 depends on, the doc-wide citation sweep for `ambient-context-injection.md`
+    and the ceiling ruling that recomputes the exemption figures, in a child pytest
+    whose `$HOME` and `$LLOYD_DATA` are empty directories. A future `_resolve` that
+    reaches for `$HOME` therefore reddens a node instead of quietly re-earning an
+    exemption six weeks later.
+
+    A child process rather than `monkeypatch.setenv`, because `ENV_DATA_ROOT` is read
+    off `os.environ["LLOYD_DATA"]` at import: patching it in-process would test a value
+    the module has already forgotten. `addopts` is emptied and no `-n` is passed, so the
+    child stays one process even under an xdist parent, and
+    `-p no:cacheprovider` keeps it from writing into this tree.
+    """
+    empty_home, empty_data = tmp_path / "home", tmp_path / "data"
+    empty_home.mkdir()
+    empty_data.mkdir()
+    env = {**os.environ, "HOME": str(empty_home), "LLOYD_DATA": str(empty_data),
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    env.pop("PYTEST_CURRENT_TEST", None)
+    name = "tests/test_architecture_coverage_doc_claims.py"
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-o", "addopts=", "-p", "no:cacheprovider",
+         "-q", "--no-header",
+         f"{name}::test_every_path_an_architecture_doc_cites_resolves_in_the"
+         f"_working_tree[ambient-context-injection.md]",
+         f"{name}::test_the_ceiling_s_ruling_is_recorded_in_its_own_comment"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, (
+        f"exit {proc.returncode} with $HOME and $LLOYD_DATA emptied at "
+        f"{empty_home} / {empty_data} — the tilde citation stopped resolving through "
+        f"ACCOUNT_HOME:\n{proc.stdout[-3000:]}")
+    assert "2 passed" in proc.stdout, (
+        f"expected the citation sweep and the ceiling ruling to run and pass; got "
+        f"{proc.stdout[-1500:]}")
 
 
 # ── #2804 — the Bash-lane ruling has to carry the body rule it leaves open ────
