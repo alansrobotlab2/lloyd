@@ -413,11 +413,31 @@ turn, drains the queued turns in **both** tiers, discards the session's ambient
 prefetch and `rmtree`s the `<id>.tool-results` spill dir beside the transcript,
 while `POST /api/sessions/clear` (`app/routers/sessions.py:1711`) is a
 bare `meta_path.unlink()` of the one id its body names — no cancel, no drain, no
-spill dir, no `logger` call at all. Neither leaves a per-session record a later
-reader could find, so this page records the emptiness and the missing witness and
-asserts no cause for the vanished twelve, one of which,
-`20260917_105134_autocode_029c`, exists under no suffix at all (#2651). That
-witness is thinner than it looks: measured 2026-10-18 on the *name* date of every
+spill dir, no `logger` call at all. Neither handler logs what it removed, yet
+neither route goes unrecorded either: uvicorn runs the app at `log_level="info"` in
+`./server.py`'s `if __name__ == "__main__"` block, with no `access_log` or
+`LOGGING_CONFIG` override anywhere in the tracked tree, so its INFO access logger
+writes one line per request — method, path,
+peer address, status — into `~/lloyd-data/logs/server.log`, the
+supervisor-captured stdout. The two routes are not equal witnesses. On the DELETE
+route the session id rides in the path, so its access line is a per-session record
+of which transcript went; this very router's retained traffic already shows the
+shape — `INFO: 127.0.0.1:42964 - "PATCH
+/api/sessions/20261115_080153_iv1967/metadata HTTP/1.1" 200 OK`. On the clear route
+the id is in the request body, so the line names the route and never the session,
+and the handler answers `{"success": true}` whether or not a file was there, so
+even its 200 says nothing about a transcript. What is genuinely unwitnessed is the
+clear route alone, and only as to *which* session. No call to either route appears
+in any of the eleven rotations read on 2026-11-16. Nor is the record durable: that
+log and its ten `.N` backups are capped at `stdout_logfile_maxbytes=10MB` each
+(`agent-services/supervisor/conf.d/lloyd-backend.conf:49`), so the whole window is
+11 files of ~10 MB — oldest backup dated 2026-11-05, measured 2026-11-16, about
+eleven days of traffic, and an in-handler `logger` call would expire in the same
+rotation. That span, not the absence of a record, is why the twelve below can never
+be accounted for from here; this page records the emptiness and the missing witness
+and asserts no cause for the vanished twelve, one of which,
+`20260917_105134_autocode_029c`, exists under no suffix at all (#2651). The
+name-date witness is thinner than it looks: measured 2026-10-18 on the *name* date of every
 entry in `~/lloyd-data/sessions/` — not its mtime, which here is the archive time
 — no entry of any suffix is named `2026-09-13` through `2026-09-21`, while the
 `2026-09-09`/`2026-09-12` archives and every day from `2026-09-22` on are

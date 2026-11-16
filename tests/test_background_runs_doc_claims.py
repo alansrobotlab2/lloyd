@@ -14,6 +14,13 @@ The #2917 nodes at the bottom take the third: §8's census sentence named one
 in-tree route that removes a transcript where the router declares two, and read a
 missing witness out of a store that holds no transcript by any name for nine days
 either side of it.
+
+The #4114 nodes take the half of that reading the server disproves: uvicorn's INFO
+access logger records a call to either route with method, path, peer and status, so
+"neither leaves a per-session record" was false for the DELETE route and true only in
+a narrower way for the clear route (its id is in the body). What is left to pin is
+the asymmetry, and the record's rotation-bounded life inside `server.log` — the bound
+that actually explains why the vanished twelve cannot be accounted for.
 """
 from __future__ import annotations
 
@@ -160,9 +167,11 @@ def test_one_dated_sentence_records_the_emptiness_and_the_missing_witness():
     no archive behind them. The sweep never deletes a transcript and no writer
     rewrites an existing session's platform, so the in-tree candidates are the
     two routes that remove one (#2917: not the DELETE route alone, which is what
-    this node's first version said), and neither of them leaves a per-session
-    record — which is a missing witness, not a cause, and this page must not
-    promote it into one."""
+    this node's first version said). What the twelve have in common with those two
+    routes is only that no writer records their departure; the removal routes are
+    logged, at least as to path (#4114, and the three nodes above this one), so the
+    absence is a missing witness about the clear route and the archive window, not a
+    cause — and this page must not promote it into one."""
     s8 = _section("8. The history split")
     cand = [p for p in re.split(r"\n\s*\n", s8) if "no writer records" in p]
     assert len(cand) == 1, f"expected exactly one such sentence, got {len(cand)}"
@@ -379,18 +388,154 @@ def test_the_census_sentence_says_what_separates_the_two_routes():
         "the emptiness is a measurement and keeps the date it was taken")
 
 
-def test_the_census_sentence_keeps_the_missing_witness_for_both_routes():
-    """Clause 3. Widening the candidate set must not smuggle in a cause: what the
-    two routes have in common is only that neither leaves a record a later reader
-    could check, which is why the page states an absence and stops there. The
-    cause ban is checked over the whole of §8 rather than the one sentence,
-    because a page with one incident has one place to say a thing about it."""
+#: Where the rotation ceiling the census paragraph quotes comes from. Read rather than
+#: transcribed for the reason #2917 filed this file: a page that still says one figure
+#: after the conf moved is a false measurement with a date on it.
+BACKEND_CONF = ROOT / "agent-services" / "supervisor" / "conf.d" / "lloyd-backend.conf"
+
+
+def _stdout_rotation_ceiling() -> str:
+    """The `stdout_logfile_maxbytes` value the backend's supervisor block sets."""
+    lines = [ln for ln in BACKEND_CONF.read_text(encoding="utf-8").splitlines()
+             if ln.startswith("stdout_logfile_maxbytes")]
+    assert len(lines) == 1, (
+        f"{BACKEND_CONF} sets stdout_logfile_maxbytes {len(lines)} times; the page "
+        "quotes one value and this helper can only hand over one")
+    return lines[0].split("=", 1)[1].strip()
+
+
+def test_the_census_paragraph_names_the_access_line_both_removals_leave():
+    """Clause 1, and the correction #4114 exists for. The sentence this node used to
+    pin — "Neither leaves a per-session record a later reader could find" — was false
+    for the DELETE route: uvicorn boots at `log_level="info"` with no `access_log` or
+    `LOGGING_CONFIG` override in the tree, so its access logger records every request
+    to either route, with method, path, peer and status, into the stdout file
+    supervisor rotates. Saying otherwise is what generated the "no witness" items
+    (#4110 proposed an in-handler `logger.warning` that would have landed in that same
+    file and expired with it), so the paragraph now states the witness and this node
+    forbids the sentence's return.
+    """
     para = _census_paragraph()
-    assert "Neither leaves a per-session record" in para, para[:160]
+    assert "Neither leaves a per-session record" not in para, (
+        "the falsified sentence is back: an INFO access line names both removal "
+        "routes, so a later reader does find a record for at least one of them")
+    sents = _sentences(para)
+    witness = [s for s in sents if "access" in s.lower()]
+    assert witness, (
+        "the paragraph no longer names any access log; it has gone back to the "
+        f"unwitnessed claim: {para[:200]}")
+    joined = " ".join(witness)
+    assert "INFO" in joined, (
+        "the record is an INFO access line and the level is what makes it live at "
+        "`log_level=\"info\"`: " + joined[:220])
+    for field in ("method", "path", "status"):
+        assert field in joined, (
+            f"the access line is described without its {field!r} field: " + joined[:220])
+    assert "peer" in joined, (
+        "the peer address is half of what makes the line evidence about a caller: "
+        + joined[:220])
+    assert "server.log" in joined, (
+        "the witness has to name the file it lands in, or a reader cannot find it: "
+        + joined[:220])
+
+
+def test_the_census_paragraph_states_which_route_is_a_per_session_witness():
+    """Clause 2. The two routes are not equally good records, and collapsing them into
+    "both are logged" would be the same error as the sentence it replaces, mirrored:
+    on the DELETE route the id is in the path, so the line identifies a transcript;
+    on the clear route the id is in the body and the handler returns success for a
+    request that removed nothing, so the line identifies neither.
+    """
+    para = _census_paragraph()
+    sents = _sentences(para)
+    path_side = [s for s in sents if "rides in the path" in s]
+    body_side = [s for s in sents if "in the request body" in s]
+    assert len(path_side) == 1 and len(body_side) == 1, (
+        f"the asymmetry is one pair of sentences and the paragraph carries "
+        f"{len(path_side)} path sides and {len(body_side)} body sides")
+    assert "per-session" in path_side[0], (
+        "the path case is the one that names a transcript, which is the whole "
+        "difference: " + path_side[0][:200])
+    assert "never the session" in body_side[0], (
+        "the body case has to say the line does not identify the vanished "
+        "transcript: " + body_side[0][:200])
+    assert "success" in body_side[0], (
+        "a 200 from the clear route is not evidence a transcript went, because the "
+        "handler answers the same when the file was absent: " + body_side[0][:220])
+
+
+def test_the_witness_is_bounded_by_rotation_and_dated_not_stated_as_durable():
+    """Clause 3. The record exists, and it survives about eleven days, which is the
+    actual reason the vanished twelve cannot be explained from it. Without the bound a
+    reader draws the opposite conclusion from the same paragraph — that a checkable
+    record of a removal is sitting there to be read — so the ceiling is pinned against
+    the supervisor block that sets it and the span against the date it was measured.
+    """
+    para = _census_paragraph()
+    ceiling = _stdout_rotation_ceiling()
+    bound = [s for s in _sentences(para) if "rotation" in s or "backup" in s]
+    assert bound, "the paragraph stopped bounding the witness by rotation"
+    joined = " ".join(bound)
+    assert ceiling in joined, (
+        f"the page quotes a rotation ceiling other than the {ceiling!r} the backend's "
+        "supervisor block sets: " + joined[:220])
+    assert re.search(r"(eleven|11)\b", joined), (
+        "the window is a count of files, not an adjective — the page says eleven "
+        "(the live file plus ten backups): " + joined[:220])
+    assert re.search(r"[Mm]easured 20\d\d-\d\d-\d\d", joined), (
+        "the span is a box state that traffic volume moves, so it keeps its date and "
+        "the owed-check re-derives it: " + joined[:220])
+    assert "eleven days" in joined or re.search(r"~?\d+ days", joined), (
+        "the bound has to be stated in days as well as bytes, since days is what a "
+        "reader of a nine-day gap needs: " + joined[:220])
+    assert "in-handler" in joined and "rotation" in joined, (
+        "the paragraph has to say why the fix is prose: a new in-handler logger call "
+        "expires in the same rotation")
+
+
+def test_the_cause_ban_still_covers_the_rewritten_census_paragraph():
+    """Clause 4. Everything #2651 and #2917 needed from this paragraph survives the
+    reword: the page still asserts no cause, and the four cause phrasings stay out of
+    all of §8 — checked over the section rather than the sentence, because a page with
+    one incident has one place to say a thing about it. The witness paragraph adds a
+    real mechanism ("an access line naming the route"), which is exactly the kind of
+    sentence that quietly becomes a cause, so this is the rung that says it may not.
+    """
+    para = _census_paragraph()
+    assert "asserts no cause" in para, para[:160]
     s8 = _flat(_section("8. The history split"))
     for cause in ("were deleted", "the sweep deleted", "someone deleted",
                   "a DELETE call removed"):
         assert cause not in s8, f"§8 asserted a cause: {cause!r}"
+    assert "no writer records" in para and "gzips and never deletes" in para, (
+        "#2651's carried phrases left with the reword: " + para[:200])
+
+
+def test_neither_removal_handler_gained_a_logger_call_for_the_witness():
+    """Clause 5. #4110's proposed remedy was a `logger.warning` in each handler; it
+    would have landed in the same rotating file and bought no lifetime, which is why
+    this round is prose. The router is read rather than trusted: it has exactly one
+    `logger.` call — the spill-dir `rmtree` failure warning — and one `getLogger`
+    binding, so the count of `logger.` call sites is the whole of what the handlers
+    log. Both grep spellings are pinned with their numbers because they differ: a bare
+    `logger.` matches the module-level `logger = logging.getLogger(...)` binding as
+    well (2 hits), and only `logger.` with the dot escaped counts calls (1 hit), which
+    is the number the page's account rests on.
+    """
+    src = _router_source()
+    calls = re.findall(r"\blogger\.\w+\(", src)
+    escaped = len(re.findall(r"logger\.", src))
+    bare = len(re.findall(r"logger.", src))
+    assert escaped == 1, (
+        f"the router now makes {escaped} logger calls, not the one spill-dir warning §8 "
+        "describes — either a handler logs removals now and the page under-states it, "
+        "or it logs them and this round's reason for prose over code needs re-reading")
+    assert bare == 2, (
+        f"the router reads as {bare} bare `logger.` hits, not 2; the extra one is the "
+        "module's own `logger = logging.getLogger(...)` binding, so the file's logging "
+        "shape moved and both spellings above have to be re-read")
+    assert calls == ["logger.warning("], (
+        f"the one call is no longer the spill-dir warning alone: {calls}")
 
 
 def test_exactly_one_dated_sentence_records_the_store_wide_name_date_gap():
