@@ -916,8 +916,10 @@ def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
             # autocode heads 105 of the 107 live ones belong to go at 30, and
             # `with_suffix(".json.gz")` on it produces a file `_sidecar_payload`
             # cannot resolve — that reader names the `.json`, so the reduction record
-            # would vanish with no error anywhere. It is archived only beside its own
-            # head, below.
+            # would vanish with no error anywhere. It is archived beside its own
+            # head, below, or — once its head is gone in both spellings and it is past
+            # ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS — by `collect_orphan_sidecars`, which the
+            # sweep runs after this function returns (#4109).
             if _is_reduction_sidecar(path.name):
                 continue
             if _session_age_days(path, now) < _archive_age_for(path):
@@ -953,6 +955,100 @@ def sweep_sessions(apply: bool, now: float) -> tuple[int, int]:
             count += 1
         except Exception as e:
             print(f"  ! skip {path.name}: {e}", file=sys.stderr)
+    return count, saved
+
+
+#: How long an ORPHANED reduction sidecar stays a live file before this sweep archives
+#: it (#4109). 30 days is `BACKGROUND_SESSION_ARCHIVE_AGE_DAYS`, and it is that constant
+#: on purpose rather than a new number: a sidecar exists for exactly one consumer — a live
+#: head being compacted — and the head it belongs to is a background transcript, which
+#: leaves the live listings at 30 anyway. The number the sidecar used to age on was
+#: `SESSION_ARCHIVE_AGE_DAYS` = 90, and 90 was only ever what the `*.json` walk's
+#: default happened to give a file whose real class was "unclassifiable" (`_archive_age_for`
+#: cannot read a platform out of it). The bound this replaces was therefore never chosen;
+#: it was the fallback, and it sat three times longer than the record it describes.
+#:
+#: An orphan is what a hand deletion, `DELETE /api/sessions/{id}` or
+#: `POST /api/sessions/clear` leaves behind: both remove a transcript and touch no
+#: sidecar. Until #4109 nothing collected one at all — this walk `continue`d past every
+#: sidecar and the only collection site was inside the block that archives that sidecar's
+#: HEAD, so the owner of the file was its head, and when the head was gone by hand the
+#: record was invisible to every lister AND unowned by every pass, permanently. Measured
+#: on the live store the day the item was filed: 212 sidecars, 212 with a live head, 0
+#: orphans — a bound with no owner, not a leak in progress. That is the state this makes
+#: false, and it is why the pass archives rather than deletes: an archive is reversible,
+#: which is what lets the fix be merged while #4109's disposition ruling is still owed.
+ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS = 30
+
+
+def _head_of_sidecar(sidecar_name: str) -> str:
+    """The transcript name a sidecar's head would have, by name arithmetic alone.
+
+    The suffix comes off the END, because the suffix is what makes the file a sidecar:
+    `X + SIDECAR_SUFFIX` is the pair rule the writer's `reduction_sidecar_path` implements,
+    so a name this function resolves is a head only if `_is_reduction_sidecar(head +
+    SIDECAR_SUFFIX)` is true again. That round trip is the whole reason this is a function
+    and not `Path(name).stem`: the stem of `abc.microcompact-reduced.json` is
+    `abc.microcompact-reduced`, and its `.json` is a TRANSCRIPT whose own id contains the
+    marker. Resolve a sidecar's head that way and the sweep archives records belonging to a
+    live session, which is #3815's defect class — silently deleting a live reduction record
+    — with an archive in front of it so nothing errors. `Path.stem` is what
+    `_sidecar_beside` uses for the opposite direction, where the head is the caller's own
+    file and the imprecision costs an extra candidate in the glob, never a wrong deletion.
+    """
+    return str(sidecar_name or "")[:-len(SIDECAR_SUFFIX)] + ".json"
+
+
+def collect_orphan_sidecars(apply: bool, now: float) -> tuple[int, int]:
+    """Archive a reduction sidecar whose head is gone in both spellings. Returns
+    (count, bytes_saved).
+
+    Both spellings is the whole check: `<stem>.json` means the head is live,
+    `<stem>.json.gz` means this sweep already archived it and `_sidecar_beside` ran the
+    co-archive beside it, in which pass the sidecar left this directory. Neither present
+    means nothing that reads this store can reach the record — every lister and reporter
+    in-tree filters sidecars out (`agent_mcp/mission_control.py`, `app/behaviour_exhibit.py`,
+    `app/tool_quality.py`, `workers/sources/session_distill.py`), and `sweep_sessions`
+    skips it by name — so its age decides, and its age is its own mtime because a sidecar
+    carries no `timestamp:` field for `_session_age_days` to find.
+
+    The archive is written, round-tripped as JSON, and only then the source removed, which
+    is `sweep_sessions`' rule for every other file here. What it is NOT is readable by
+    `_sidecar_payload`: that reader names the `.json`, so an orphan's archive is a
+    recoverable byte-blob and nothing more. That is the same trade `test_archiving_a_head_takes_its_sidecar_with_it`
+    already accepted for a co-archived sidecar — a record whose only consumer was a live
+    head being compacted has the same value dead as archived — and it is why the owed
+    disposition ruling can still be taken after this lands: an archive can be reverted, a
+    deletion cannot.
+    """
+    count = saved = 0
+    if not SESSIONS_DIR.exists():
+        return 0, 0
+    for side in sorted(SESSIONS_DIR.glob(f"*{SIDECAR_SUFFIX}")):
+        try:
+            if side.is_symlink():
+                continue
+            stem = side.name[:-len(SIDECAR_SUFFIX)]
+            if (SESSIONS_DIR / f"{stem}.json").exists():
+                continue      # live head: it rides with that head, in `sweep_sessions`
+            if (SESSIONS_DIR / f"{stem}.json.gz").exists():
+                continue      # already archived with its head, or its head was gzipped
+            if _session_age_days(side, now) < ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS:
+                continue
+            orig = side.stat().st_size
+            if apply:
+                gz = side.with_suffix(".json.gz")
+                with side.open("rb") as src, gzip.open(gz, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                with gzip.open(gz, "rt", encoding="utf-8") as fh:
+                    json.load(fh)
+                side.unlink()
+                saved += orig - gz.stat().st_size
+            else:
+                saved += orig  # dry-run: report candidate size
+            count += 1
+        except Exception as e:
+            print(f"  ! skip {side.name}: {e}", file=sys.stderr)
     return count, saved
 
 
@@ -5466,6 +5562,11 @@ def main() -> int:
 
     logs_n, logs_b = sweep_task_logs(args.apply, now)
     sess_n, sess_b = sweep_sessions(args.apply, now)
+    # After `sweep_sessions`, never inside it: that walk is what archives a head, and a
+    # head archived two files ago has a sidecar beside it that `collect_orphan_sidecars`
+    # must see as belonging to `<stem>.json.gz` and skip. Run in the same order in dry run,
+    # which is also why nothing here prints from inside a sweep function. (#4109)
+    orph_n, orph_b = collect_orphan_sidecars(args.apply, now)
     runs_n, runs_b = sweep_autonomy_runs(args.apply, now)
     act_f, act_e, act_l = sweep_activity_logs(args.apply)
     # Left at its default so the coupled rule is what the shipped job runs: the ledger is
@@ -5524,9 +5625,19 @@ def main() -> int:
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
+    # The orphan count is its own number, in the same shape, on this same line (#4109). It
+    # is not folded into `sess_n` because `sess_n` is the count of transcripts that left the
+    # listings and an orphaned reduction record is not a transcript — a run that shows `12
+    # gzipped, 2 orphaned` archived 14 files, two of which nothing could have reached. And
+    # it prints in both modes because every other number on this report does: a dry run that
+    # showed nothing would be indistinguishable from a store with no orphans, which is
+    # exactly how #4109's own 0-orphan measurement looked before it was ever measured.
     print(f"  sessions >{SESSION_ARCHIVE_AGE_DAYS}d inactive "
           f"(background >{BACKGROUND_SESSION_ARCHIVE_AGE_DAYS}d): "
           f"{sess_n} gzipped, {sess_b / 1024 / 1024:.1f} MiB "
+          f"{'saved' if args.apply else 'candidate'}; "
+          f"orphaned reduction records >{ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS}d: "
+          f"{orph_n} archived, {orph_b / 1024 / 1024:.1f} MiB "
           f"{'saved' if args.apply else 'candidate'}")
     print(f"  autonomy runs >{RUN_RECORD_MAX_AGE_DAYS}d: "
           f"{runs_n} deleted, {runs_b / 1024 / 1024:.1f} MiB freed")

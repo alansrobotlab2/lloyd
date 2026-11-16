@@ -12061,25 +12061,178 @@ def test_a_sidecar_is_never_selected_as_an_independent_archive_candidate(rs):
         "a sidecar was gzipped into a file its own reader cannot open"
 
 
-def test_an_orphan_sidecar_outlives_its_window_untouched_instead_of_becoming_an_archive(rs):
-    """The head is already gone (archived long ago, by an earlier sweep or by anything
-    else), so the sidecar has nothing to ride with and stays exactly where it is.
+def test_an_orphan_sidecar_past_the_bound_is_archived_rather_than_left_unowned(rs):
+    """#4109 reverses the decision this node used to pin. It was
+    `test_an_orphan_sidecar_outlives_its_window_untouched_instead_of_becoming_an_archive`
+    and asserted the opposite: that a 120-day sidecar with no head "stays exactly where it
+    is". That was true of the tree then, and the sentence describing why was also true —
+    `_sidecar_payload` resolves only through `reduction_sidecar_path`, which names the
+    `.json`, so a `.gz` of it is unreadable — but the node read only one of the two
+    dispositions on offer. What "untouched" actually bought was permanence: the `*.json`
+    walk `continue`s past every sidecar, every lister and reporter in-tree filters them out,
+    and the sole collection site sat inside the block that archives the sidecar's HEAD. So a
+    head removed by hand, by `DELETE /api/sessions/{id}` or by `POST /api/sessions/clear`
+    left a record that nothing counted, nothing reached, and nothing would ever collect.
+    Invisible is not the same as safe; it is the one outcome with no route back.
 
-    This is the `no live sidecar is left whose head is gone` half of clause 5 read
-    from the other side. The alternative — archiving it — is not a neutral choice:
-    `_sidecar_payload` resolves only through `reduction_sidecar_path`, which names
-    `<stem>.microcompact-reduced.json`, so the `.gz` is unreadable and the recorded
-    reductions are lost with no error anywhere. Deleting it outright is also refused:
-    the writer can recreate a sidecar but cannot recreate the decision history in it,
-    and deleting a record this sweep does not own is not a retention call to make.
+    #4109 archives it, and the archive is the disposition the tree already accepted for a
+    co-archived sidecar in `test_archiving_a_head_takes_its_sidecar_with_it` — a record
+    whose only consumer is a live head being compacted is worth the same dead as alive, and
+    a `.gz` is reversible where a delete is not. The unreadability the old docstring
+    objected to is therefore real and is the reason the disposition decision the item owes can still
+    be taken after this lands: an archive can be reverted, so nothing here forecloses the
+    choice between "keep the bytes" and "delete them past the bound".
+
+    Asserted in the shape the clause states: in apply mode a 120-day orphan is GONE from the
+    sessions dir and its `<sidecar>.json.gz` is beside it and parses back to the same
+    `reduced_call_ids` the live file carried, and `sweep_sessions` itself still reports 0 —
+    an orphan is not a gzipped transcript.
     """
     now = time.time()
     side = _write_sidecar(rs.SESSIONS_DIR, "20260801_100000_iv1bbb", age_days=120)
+    before = json.loads(side.read_text(encoding="utf-8"))
+    assert before["reduced_call_ids"] == ["toolu_01B"], \
+        "the fixture no longer writes a reduction record, so the round-trip below is vacuous"
 
-    count, _ = rs.sweep_sessions(apply=True, now=now)
-    assert count == 0
-    assert side.exists(), "an orphan sidecar was deleted or archived"
+    head_count, _ = rs.sweep_sessions(apply=True, now=now)
+    assert head_count == 0, (
+        "an orphan sidecar was counted as a gzipped transcript; the sessions count is "
+        "transcripts that left the listings and this file is not one")
+
+    orphans, saved = rs.collect_orphan_sidecars(apply=True, now=now)
+    assert orphans == 1, (
+        f"a 120-day orphan with no head in either spelling was not collected: "
+        f"count={orphans} saved={saved}")
+    assert not side.exists(), "the live sidecar was left beside its own archive"
+
+    gz = side.with_suffix(".json.gz")
+    assert gz.exists(), (
+        f"{side.name} left the directory with nothing written for it — that is a delete "
+        f"where the clause says archive")
+    import gzip as _gzip
+    with _gzip.open(gz, "rt", encoding="utf-8") as fh:
+        after = json.load(fh)
+    assert after["reduced_call_ids"] == ["toolu_01B"], after
+    assert after["cleared_call_ids"] == ["toolu_01A"], after
+    assert after == before, "the archive is not the record that was in the directory"
+
+
+def test_a_sidecar_whose_head_is_live_is_never_collected_however_old_it_is(rs):
+    """#4109 clause 2, the half that must NOT change. The bound is on the sidecar's
+    own age and the head's existence is the veto: a 400-day sidecar belonging to a
+    transcript that is still in the directory stays exactly where it is, because it is
+    still the record a future compaction of that head reads.
+
+    The dry-run half rides here because this is the store that has an orphan in it: in dry
+    run the orphan must be reported and untouched, and the head's sidecar must be neither.
+    `0 collected` and `nothing in this store is collectable` are the same printout, which is
+    why the pass prints its number in both modes rather than only in apply.
+    """
+    now = time.time()
+    head = _write_session(rs.SESSIONS_DIR, "20260801_100000_iv1aaa", 1.0,
+                          platform="mission-control")
+    live = _write_sidecar(rs.SESSIONS_DIR, head.stem, age_days=400)
+    orphan = _write_sidecar(rs.SESSIONS_DIR, "20260801_100000_iv1bbb", age_days=120)
+
+    dry_count, dry_saved = rs.collect_orphan_sidecars(apply=False, now=now)
+    assert dry_count == 1, (
+        f"a dry run must report the one orphan it would collect, not silently agree with "
+        f"an empty store: count={dry_count}")
+    assert dry_saved > 0, "the dry run reported no candidate size"
+    assert _live_sidecars(rs.SESSIONS_DIR) == sorted([live.name, orphan.name]), \
+        "a dry run deleted a sidecar"
+    assert not list(rs.SESSIONS_DIR.glob("*.gz")), "a dry run created an archive"
+
+    count, _ = rs.collect_orphan_sidecars(apply=True, now=now)
+    assert count == 1, (
+        f"exactly one of two old sidecars is an orphan; the pass collected {count}")
+    assert live.exists(), (
+        f"a 400-day sidecar was collected although {head.name} is its live head")
+    assert not orphan.exists(), "the orphan was not collected"
+    assert head.exists()
+
+
+def test_an_orphan_younger_than_the_bound_survives_the_pass(rs):
+    """#4109 clause 3, the age half. 29 days is under
+    `ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS` = 30, so the pass leaves it: a hand deletion
+    followed by a same-day sweep must not be what destroys the record, and the sweep
+    runs nightly, so the bound is what makes the first nightly after a deletion a
+    report rather than a collection.
+
+    The two ages are pinned against the constant rather than each other, because a bound
+    read as "one node at 120 passes and one at 29 fails" would still pass if the constant
+    moved to 150 or 0 — the constant is the thing the item chose, so the constant is the
+    thing asserted.
+    """
+    now = time.time()
+    assert rs.ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS == 30, (
+        f"{rs.ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS}: the bound was meant to be "
+        f"BACKGROUND_SESSION_ARCHIVE_AGE_DAYS, a background transcript's own horizon")
+    assert rs.ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS == rs.BACKGROUND_SESSION_ARCHIVE_AGE_DAYS, (
+        "the orphan bound and the background head's bound moved apart; the sidecar "
+        "describes a background transcript, so they are one decision")
+
+    side = _write_sidecar(rs.SESSIONS_DIR, "20260801_100000_iv1ccc",
+                          age_days=rs.ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS - 1)
+    count, saved = rs.collect_orphan_sidecars(apply=True, now=now)
+    assert (count, saved) == (0, 0), (
+        f"a sidecar {rs.ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS - 1} days old was collected "
+        f"before its bound: count={count} saved={saved}")
+    assert side.exists()
     assert not list(rs.SESSIONS_DIR.glob("*.gz"))
+
+
+def test_dry_run_and_apply_print_the_orphan_count_as_its_own_number(rs, capsys,
+                                                                    monkeypatch):
+    """#4109 clause 4: the report shape.
+
+    Three things, all on the `sessions` line: the orphan count is a number of its own, the
+    line has the same shape in both modes, and it is not folded into `{sess_n} gzipped`.
+    The last is why the store here has one orphan and nothing else eligible — a run that
+    printed `1 gzipped` for one transcript plus one orphan would be indistinguishable from a
+    run that archived one file, and the whole defect being fixed is that a class of file
+    left the store without ever appearing in a count.
+
+    Driven through `rs.main()` for the same reason `test_dry_run_and_apply_print_the_same_workers_store_line`
+    is: the pairing of a number with the word `saved`/`candidate` is `main`'s decision, and
+    asserting it against `main`'s own printout is the cheapest thing that cannot go stale.
+    The archive byte total is `0.0 MiB` at this file size and is deliberately not asserted:
+    MiB at this scale is a rounding artefact, and the count is the claim.
+    """
+    now = time.time()
+    monkeypatch.setattr(rs.time, "time", lambda: now)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    _write_sidecar(rs.SESSIONS_DIR, "20260801_100000_iv1bbb", age_days=120)
+
+    def _sessions_line() -> str:
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "sessions >" in ln]
+        assert len(lines) == 1, f"the report must carry exactly one sessions line: {lines}"
+        return lines[0]
+
+    assert rs.main() == 0, "dry run must exit 0"
+    dry = _sessions_line()
+    # The dry run names the same count and the same verb as apply and differs only in the
+    # money word, which is the `0 deleted … N held` convention at the foot of this report:
+    # a line that printed nothing here would be indistinguishable from a store with no
+    # orphans, and the count the operator approved is the count that then moves.
+    assert "orphaned reduction records >30d: 1 archived, " in dry, (
+        f"a dry run must print the orphan it is about to collect, not omit it: {dry}")
+    assert dry.rstrip().endswith("candidate"), (
+        f"the dry run's orphan figure must be labelled candidate: {dry}")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0, "--apply must exit 0"
+    applied = _sessions_line()
+    assert "orphaned reduction records >30d: 1 archived" in applied, (
+        f"the collected orphan is not its own number on the line: {applied}")
+    assert " 0 gzipped, " in dry.split("orphaned")[0], (
+        f"dry run counted the orphan as a transcript: {dry}")
+    assert " 0 gzipped, " in applied.split("orphaned")[0], (
+        f"apply counted the orphan as a transcript, folding 2 files into 1 count: "
+        f"{applied}")
+    for pre in (dry.split(";"), applied.split(";")):
+        assert pre[0].count("gzipped") == 1, (
+            f"the sessions line lost the transcript count it must keep: {pre[0]}")
 
 
 def test_archiving_a_head_takes_its_sidecar_with_it(rs):

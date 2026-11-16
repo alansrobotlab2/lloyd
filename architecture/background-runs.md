@@ -510,10 +510,20 @@ never is, whatever its age. One file in that `*.json` glob is **not** a session:
 conversation window while the 4-part head it describes goes at 30.
 `microcompact.is_reduction_sidecar` — `sessions_io.is_session_head` for the app —
 is the one rule every counter and reporter applies, the sweep restates it
-stdlib-only for the same reason it restates the platform tuple, and a sidecar is
-archived only *beside* a head the sweep is archiving, never on its own age; a
-head removed by hand therefore leaves its sidecar with nothing left to collect
-it (§8's two routes, filed alongside this review).
+stdlib-only for the same reason it restates the platform tuple. A sidecar is
+archived *beside* a head the sweep is archiving, never on the 90-day age it used to
+fall through to; and since #4109 `collect_orphan_sidecars` owns the other case — a
+head removed by hand (§8's two routes) or archived before the rule existed —
+collecting one past `ORPHAN_SIDECAR_ARCHIVE_AGE_DAYS` (30, the background figure)
+whose head is absent in BOTH spellings, `<stem>.json` and `<stem>.json.gz`. It is
+its own number on the report line, not folded into the `gzipped` count, because it
+is not a transcript leaving the listings. The head is resolved by slicing the suffix
+off the end — `Path(name).stem` on a sidecar leaves `.microcompact-reduced` on the
+id, which is a live transcript's name, and the sweep would then file a live session's
+record as orphaned. An archived orphan is unreadable to `_sidecar_payload`, exactly as
+a co-archived one already is: whether to keep those bytes or delete them past the
+bound is the disposition decision #4109 still carries, and archiving forecloses
+neither.
 
 ---
 

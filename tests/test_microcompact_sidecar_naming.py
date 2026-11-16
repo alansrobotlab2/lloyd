@@ -156,3 +156,80 @@ def test_the_groundskeeper_restatement_has_not_drifted():
     assert restated == REDUCTION_SIDECAR_SUFFIX, (
         f"retention-sweep.py says {restated!r}, the writer says "
         f"{REDUCTION_SIDECAR_SUFFIX!r}")
+
+
+# ── #4109 clause 5: resolving a sidecar's HEAD is name arithmetic, not `Path.stem` ──
+
+def _load_sweep():
+    """The groundskeeper sweep as a module.
+
+    Loaded by path the way `tests/test_retention_sweep.py`'s `rs` fixture loads it: the
+    script's name contains a hyphen, so it cannot be imported by name, and it is
+    stdlib-only on purpose (it runs from cron with no venv), which is what makes loading
+    it here cheap and side-effect free.
+    """
+    import importlib.util
+    src = REPO_ROOT / "scripts" / "groundskeeper" / "retention-sweep.py"
+    spec = importlib.util.spec_from_file_location("rs_under_test", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_sweep_resolves_a_sidecars_head_by_slicing_the_suffix_not_by_path_stem():
+    """#4109 clause 5. `Path.stem` removes ONE extension, and a sidecar name has two, so
+    `Path("abc.microcompact-reduced.json").stem` is `abc.microcompact-reduced` — and
+    `abc.microcompact-reduced.json` is a TRANSCRIPT whose own id contains the marker.
+
+    That difference is not cosmetic in the direction #4109 points it: the sweep's new
+    orphan pass archives a sidecar whose head is absent in both spellings, so a head
+    resolved by stem for the sidecar `abc.microcompact-reduced.json` + suffix would be
+    `abc.microcompact-reduced`, a live transcript, and the pass would file the record as
+    orphaned while that session is sitting in the directory — #3815's defect class
+    (silently losing a live reduction record) reached through an archive, which is why
+    nothing would error. The rule that cannot do that is the pair rule the writer
+    implements: cut `SIDECAR_SUFFIX` off the END, and the head round-trips back to the
+    same sidecar name.
+
+    Asserted on the loaded module rather than by grepping the script's source, because
+    "does not use `Path.stem`" is satisfiable by any wrong expression that happens not to
+    spell it: what is pinned is the two resolutions and their round trip, plus the
+    restatement's constant read off the same loaded module — so a suffix that drifted from
+    the writer's would fail here on the loaded value and not only on
+    `test_the_groundskeeper_restatement_has_not_drifted`'s regex over the text.
+    """
+    rs = _load_sweep()
+    assert rs.SIDECAR_SUFFIX == REDUCTION_SIDECAR_SUFFIX, (
+        f"the sweep's loaded copy says {rs.SIDECAR_SUFFIX!r}, the writer says "
+        f"{REDUCTION_SIDECAR_SUFFIX!r}")
+
+    ordinary = f"{HEAD_ID}{REDUCTION_SIDECAR_SUFFIX}"
+    assert rs._head_of_sidecar(ordinary) == f"{HEAD_ID}.json", (
+        "a plain sidecar must resolve to its plain transcript")
+
+    # The trap: an id that already contains the marker. Both files exist in this
+    # hypothetical store, and each sidecar must point at its OWN head.
+    marker_id = f"20261112_060102_iv1d9b{REDUCTION_SIDECAR_SUFFIX}"
+    marker_sidecar = f"{marker_id}{REDUCTION_SIDECAR_SUFFIX}"
+    assert rs._head_of_sidecar(marker_sidecar) == f"{marker_id}.json", (
+        f"the sidecar of a transcript whose own id contains the marker resolved to "
+        f"{rs._head_of_sidecar(marker_sidecar)!r}, which is that transcript's OWN head "
+        f"name minus one extension — the Path.stem answer")
+    assert rs._head_of_sidecar(marker_sidecar) != (
+        f"{marker_id[:-len('.json')]}{rs.SIDECAR_SUFFIX}.json"), (
+        "the resolution moved to a name that is a transcript rather than the head")
+
+    # The round trip that makes the rule the pair rule: slicing then re-appending the
+    # suffix returns the file you started from, for BOTH names. A stem-based cut breaks it
+    # for the second one, and it is exactly the second one the sweep must not touch.
+    for sidecar in (ordinary, marker_sidecar):
+        head = rs._head_of_sidecar(sidecar)
+        assert head.endswith(".json") and not head.endswith(".json.gz"), head
+        rebuilt = f"{head[:-len('.json')]}{rs.SIDECAR_SUFFIX}"
+        assert rebuilt == sidecar, (
+            f"{sidecar!r} -> {head!r} -> {rebuilt!r}: not the pair rule the writer's "
+            f"`reduction_sidecar_path` implements, so a head exists that this resolves "
+            f"to the wrong record")
+        assert rs._is_reduction_sidecar(rebuilt) is True
+        assert rs._is_reduction_sidecar(head) is False, (
+            f"{head!r} resolved as a head is itself a sidecar — that is the stem answer")
