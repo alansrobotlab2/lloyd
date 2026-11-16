@@ -92,6 +92,59 @@ def test_junk_entities_never_enter_a_cluster():
     assert [c["canonical"] for c in plan["safe_merges"]] == ["vLLM"]
 
 
+# ── #4183: the high-value gate on the gate-approved suffix path ──────────────
+
+def _post_training_edges(post_training: int, pipeline: int):
+    """The 2026-11-16 cluster expressed as edges: `Post-Training` at degree 172
+    and `Post-Training Pipeline` at 3, both meeting `Alan`."""
+    return _edges([("Post-Training", "Alan")] * post_training
+                  + [("Post-Training Pipeline", "Alan")] * pipeline)
+
+
+def test_over_gate_suffix_cluster_never_reaches_safe_merges():
+    """#4183 clauses 1 and 2. `Post-Training`(172) + `Post-Training Pipeline`(3)
+    is 175 combined, over HIGH_VALUE_GATE = 150. A unanimous SAME from the
+    semantic gate must not mark it SAFE: it belongs in the hand-review queue with
+    `high-value` in its decision, the way CASE/PUNCT already refuse at that width."""
+    gate = FakeGate({("Post-Training Pipeline", "Post-Training"): "SAME"})
+    plan = ers.build_plan(_post_training_edges(172, 3), set(), gate=gate,
+                          allowed_tiers=None)
+    assert plan["safe_clusters"] == 0 and plan["safe_merges"] == []
+    row = next(r for r in plan["ambiguous"] if r["canonical"] == "Post-Training")
+    assert row["tier"] == "SUFFIX_SAFE"
+    assert "high-value" in row["decision"], row["decision"]
+    assert row["gate"]["Post-Training Pipeline"]["decision"] == "SAME"
+
+
+def test_high_value_flag_survives_a_restricted_tier_set():
+    """#4183: the flag has to be there at any `--tiers` setting. The daily #48 run
+    passes `--tiers CASE,PUNCT`, which used to overwrite the decision with
+    "tier SUFFIX_SAFE excluded by --tiers", so the reviewer of section A saw
+    neither the 175-fact width nor that the gate had agreed."""
+    gate = FakeGate({("Post-Training Pipeline", "Post-Training"): "SAME"})
+    plan = ers.build_plan(_post_training_edges(172, 3), set(), gate=gate,
+                          allowed_tiers=["CASE", "PUNCT"])
+    row = next(r for r in plan["ambiguous"] if r["canonical"] == "Post-Training")
+    assert "high-value" in row["decision"], row["decision"]
+
+
+def test_at_gate_suffix_still_merges_and_over_gate_case_punct_still_refuse():
+    """#4183 clause 3: the two behaviours that must not move. 147 + 3 is exactly
+    HIGH_VALUE_GATE = 150, which is not over the gate, so a unanimous SAME suffix
+    cluster still auto-merges on the gate's word; and CASE/PUNCT at 400 + 300 with
+    both variants non-zero still refuse, as they did before this change."""
+    gate = FakeGate({("Post-Training Pipeline", "Post-Training"): "SAME"})
+    plan = ers.build_plan(_post_training_edges(147, 3), set(), gate=gate,
+                          allowed_tiers=None)
+    assert plan["safe_clusters"] == 1
+    assert plan["safe_merges"][0]["decision"].startswith("SUFFIX_JUDGED")
+
+    assert ers.decide_merge("CASE", "vLLM", ["vLLM", "vllm"],
+                            {"vLLM": 400, "vllm": 300})[0] is False
+    assert ers.decide_merge("PUNCT", "SWE-Bench", ["SWE-Bench", "SweBench"],
+                            {"SWE-Bench": 400, "SweBench": 300})[0] is False
+
+
 # ── aliases: an approved suffix merge must be routable ───────────────────────
 
 def test_apply_writes_the_approved_suffix_alias(tmp_path):

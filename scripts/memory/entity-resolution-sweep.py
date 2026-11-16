@@ -330,13 +330,33 @@ def pick_canonical(variants: list[str], degrees: dict[str, int], existing_dirs: 
 #                    (reserves Tier-3 hand-review for highly-connected entities
 #                    like lloyd/Lloyd, openclaw/OpenClaw where a wrong merge
 #                    damages many edges at once).
-#   SUFFIX_SAFE    → auto-merge if canonical ≥ 2× max_other_degree, OR variant
-#                    degree ≤ 5 (small leftover cleanup). Otherwise hand-review.
+#   SUFFIX_SAFE    → never on name shape: only the semantic gate in build_plan
+#                    may call it safe, and HIGH_VALUE_GATE still refuses an
+#                    over-wide cluster there (#4183).
 #   SUFFIX_AMBIG.  → always hand-review.
 
-HIGH_VALUE_GATE = 150  # total cluster degree above which CASE/PUNCT → review
+HIGH_VALUE_GATE = 150  # total cluster degree above which a merge → review
 SUFFIX_SAFE_RATIO = 1.3  # canonical:max-other ratio for SUFFIX_SAFE auto-merge
 SUFFIX_SAFE_SMALL_VARIANT = 5
+
+
+def high_value_refusal(total_degree: int) -> str | None:
+    """The hand-review decision for a cluster whose combined variant degree
+    crosses ``HIGH_VALUE_GATE``, else ``None``.
+
+    One measurement, both readers (#4183). ``decide_merge`` applies this to
+    CASE/PUNCT/IDENTICAL; ``build_plan`` applies it where the semantic gate's
+    verdict marks a SUFFIX_SAFE cluster safe — that path never comes back through
+    ``decide_merge``, which is how a 175-fact suffix cluster ended up approved
+    while two PUNCT clusters of comparable size were refused. Holding the
+    threshold and the ``high-value`` wording here is what makes the skill's claim
+    ("high-value clusters >150 combined never auto-merge even if SAFE") true for
+    the suffix path too.
+    """
+    if total_degree > HIGH_VALUE_GATE:
+        return (f"high-value cluster (total degree {total_degree} > "
+                f"{HIGH_VALUE_GATE}) — hand-review")
+    return None
 
 
 def decide_merge(
@@ -350,6 +370,13 @@ def decide_merge(
     Ratio is computed as max/second-max across the cluster (not canonical/other),
     so canonical-pick heuristics (e.g. bare-noun preference) don't interfere
     with the imbalance measurement.
+
+    #4183 retired the `"SAFE"` tier branch from this function. `build_plan`
+    inlines its own pairwise tiers (CASE/PUNCT/OTHER/SUFFIX_*/IDENTICAL) and never
+    hands "SAFE" here, so the high-value check that branch carried could not
+    fire — it now runs in `build_plan`, where the semantic gate's verdict is
+    applied. `cluster_tier` still returns "SAFE" as a shape label for
+    `kg_hygiene`'s tally; that label was never a tier this function is given.
     """
     if len(variants) < 2:
         return (True, "single variant")
@@ -365,11 +392,10 @@ def decide_merge(
         # is meaningless — there's no risk of merging distinct high-degree
         # entities. Only the high-degree variant's edges are at stake, and
         # they map 1:1 to the canonical.
-        if total > HIGH_VALUE_GATE and smallest_deg > 0:
-            return (
-                False,
-                f"high-value cluster (total degree {total} > {HIGH_VALUE_GATE}) — hand-review",
-            )
+        if smallest_deg > 0:
+            refusal = high_value_refusal(total)
+            if refusal:
+                return (False, refusal)
         return (True, f"{tier} merge, total degree {total} (smallest={smallest_deg})")
 
     if tier == "SUFFIX_SAFE":
@@ -385,16 +411,6 @@ def decide_merge(
 
     if tier == "OTHER":
         return (False, f"OTHER — always hand-review")
-
-    if tier == "SAFE":
-        # SAFE tier: every pair is CASE/PUNCT/SUFFIX_SAFE.
-        # Auto-merge unless high-value gate.
-        if total > HIGH_VALUE_GATE:
-            return (
-                False,
-                f"SAFE high-value cluster (total degree {total} > {HIGH_VALUE_GATE}) — hand-review",
-            )
-        return (True, f"SAFE merge, total degree {total}")
 
     return (False, f"unclassified tier {tier}")
 
@@ -589,8 +605,21 @@ def build_plan(edges: list[dict], existing_dirs: set[str],
                 gate_info[v] = {"decision": verdict.get("decision"),
                                 "judges": verdict.get("judges", {})}
             if gate_info and all(g["decision"] == "SAME" for g in gate_info.values()):
-                auto_ok, decide_reason = True, "SUFFIX_JUDGED — every judge: SAME"
                 gate_stats["same"] += 1
+                # #4183: a unanimous SAME says the names denote one system, not
+                # that merging them is cheap. Read HIGH_VALUE_GATE here — where
+                # the verdict becomes a SAFE marking — so a cluster as wide as
+                # `Post-Training`(172) + `Post-Training Pipeline`(3) goes to
+                # hand-review with `high-value` in its decision instead of being
+                # approved beside two refused PUNCT clusters. The refusal is
+                # applied before the --tiers demotion below, so the flag survives
+                # whatever tier set the caller passed. `gate_stats["same"]` still
+                # counts the verdict: the gate did agree; the width refused it.
+                refusal = high_value_refusal(sum(d for _, d in variant_degs))
+                if refusal:
+                    auto_ok, decide_reason = False, refusal
+                else:
+                    auto_ok, decide_reason = True, "SUFFIX_JUDGED — every judge: SAME"
             else:
                 auto_ok, decide_reason = False, "SUFFIX_SAFE — semantic gate: review"
                 gate_stats["review"] += 1
