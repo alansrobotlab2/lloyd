@@ -4050,6 +4050,41 @@ def test_the_doc_no_longer_states_that_the_seven_have_no_entry():
         "so the three absences above would prove nothing")
 
 
+#: Cardinal numbers spelled the way the #100 row spells its arm count. Finite on purpose,
+#: and the node that reads it refuses a tuple this map does not cover: an unspelled count
+#: must be a red node naming the number it cannot spell, never a green node that quietly
+#: stopped comparing the row to the module. The count this file exists to catch is one that
+#: moved and left the sentence behind, and a check that evaporates on the ninth arm is that
+#: same defect wearing a test.
+_ARM_COUNT_WORDS = {
+    2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
+    8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
+}
+
+
+def _arm_count() -> int:
+    """How many arms `scripts/eval_instrument_index.py` declares, read from the module.
+
+    Imported the way `_index_arm_job_ids` imports it, for the same reason: the number the
+    #100 row states is a property of that tuple, so grading it against a number typed into
+    this file means the row and its grader can each drift from the module and from each
+    other. #3541 filed the node that uses this when the tuple held eight; #3886 grew it to
+    nine on 2026-11-07 (`52bd12e1`) and the row followed it in `4a6ad5a0`, and the
+    hard-coded word left in the test was then the stale sentence — the row was right and
+    this file was red.
+    """
+    import sys
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts import eval_instrument_index as eii
+
+    assert eii.INSTRUMENTS, (
+        "eval_instrument_index.INSTRUMENTS is empty, so no arm count in the doc can be "
+        "graded against it")
+    return len(eii.INSTRUMENTS)
+
+
 def test_the_instrument_index_row_counts_eight_arms_and_the_lag_journal_names_its_reader():
     """#3541 clause 5. Two sentences in the §Watch the machinery table were false on
     this change's path, and neither was graded by anything: the #100 row counted
@@ -4063,8 +4098,10 @@ def test_the_instrument_index_row_counts_eight_arms_and_the_lag_journal_names_it
     Three things are pinned here, all against the same two table rows the per-job
     grader reads:
 
-    * the #100 row counts EIGHT instruments and lists the lag journal among the
-      artifacts it reads, so the count cannot silently lag the table again;
+    * the #100 row counts as many instruments as the publisher's `INSTRUMENTS` tuple
+      holds, spelled with that cardinal, and lists the lag journal among the artifacts
+      it reads — so the count cannot silently lag the table again, and equally cannot
+      run ahead of the module;
     * the #101 row names the instrument it feeds — `gate_to_land_lag`, read by #100 —
       so the output cell says who consumes the journal rather than leaving it a
       dangling file;
@@ -4075,16 +4112,38 @@ def test_the_instrument_index_row_counts_eight_arms_and_the_lag_journal_names_it
     The control is the row's own journal name: `gate_to_land_lag.jsonl` must still be
     in the #101 row, so the two absences below are a corrected sentence and not a row
     that stopped describing the job at all.
+
+    The count is derived (`_arm_count`), which is the whole point of the first bullet and
+    the reason it went red here: #3886 registered the ninth arm on 2026-11-07 and
+    `4a6ad5a0` moved the row's word to nine, while this node still asserted the word
+    "eight" — the doc became true and the test became the stale one. Renaming the node to
+    say nine would install the same time bomb in the identifier, so the eight in its name
+    is a filing stamp, like the seven in
+    `test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once`: it names
+    the change that filed the node, and every live count below comes from the module. The
+    id is also what the `red-tree` frontmatter and `close_healed_red_tree_at_pickup` key
+    a re-run on, so it stays put.
     """
+    count = _arm_count()
+    word = _ARM_COUNT_WORDS.get(count)
+    assert word, (
+        f"the publisher declares {count} arms and _ARM_COUNT_WORDS spells up to "
+        f"{max(_ARM_COUNT_WORDS)}; add the word rather than relaxing the assertion — a "
+        "row that states no checkable count is the sentence #3541 was filed for")
+
     row100 = _flat(_watch_row("#100"))
-    assert "eight instruments" in row100, (
-        "the #100 row must count the eight instruments the publisher now reads; it "
-        f"said: {row100[:200]}")
-    assert "seven instruments" not in row100, (
-        "the #100 row still counts seven artifacts while the publisher's own table "
-        "declares eight")
+    assert f"{word} instruments" in row100, (
+        f"the #100 row must count the {count} instruments the publisher now reads "
+        f"(`INSTRUMENTS` in scripts/eval_instrument_index.py is {count} long); it said: "
+        f"{row100[:200]}")
+    stale = sorted(f"{w} instruments" for n, w in _ARM_COUNT_WORDS.items()
+                   if n != count and f"{w} instruments" in row100)
+    assert not stale, (
+        f"the #100 row also counts {stale[0]!r} while the publisher's own table declares "
+        f"{count}; one tuple cannot have two cardinals, which is the class of false "
+        "sentence #3541 fixed when it found the row saying seven at eight")
     assert "gate_to_land_lag.jsonl" in row100, (
-        "the #100 row must NAME the eighth artifact it reads, not merely count it — "
+        "the #100 row must NAME the lag-journal artifact it reads, not merely count it — "
         "a count without the path is the sentence #3541 was fixing")
 
     row101 = _flat(_watch_row("#101"))
