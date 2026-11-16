@@ -1808,7 +1808,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # re-read here, which is why filing a question cannot widen what the steward
     # writes. Runs in a thread: it reads the queue and may write a backlog item,
     # and blocking this event loop is how a steward tick starves the pool.
-    await asyncio.to_thread(_file_quietly, agree, parsed["moves"], expected)
+    # The flag state rides along (#4147): the alarm's 7-day stop condition is watched
+    # from the flip's minute, and a reader of the filed item has to be able to tell
+    # whether the reading that triggered it was pre- or post-flip — the two legs measure
+    # different things. Same `apply` this tick read at the top; not re-read here.
+    await asyncio.to_thread(
+        _file_quietly, agree, parsed["moves"], expected,
+        rules_note=("apply: true since 2026-11-16T00:06Z (#4147)" if apply
+                    else "apply: false (dry run: this tick wrote nothing)"))
     verb = "applied" if apply else "proposed (dry run)"
     # The steward's own sentence leads, and the counts follow it (#1606). This
     # string is capped at 500 characters on its way into `runs.summary`, the

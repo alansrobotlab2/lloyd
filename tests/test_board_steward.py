@@ -214,11 +214,22 @@ def test_a_stale_pick_is_ignored(monkeypatch, tmp_path):
     assert B.steward_pick(p) is None
 
 
-def test_the_shipped_state_is_dry_run():
+def test_the_shipped_state_applies():
+    """What the shipped source is configured to do, read off the real config.
+
+    `apply` was false from Cut 3 (#3088) until #4147 flipped it at 2026-11-16T00:06Z, on
+    the gate the block beside it states (summed judged 140 and rate 0.9714, both over the
+    rolling 7-day window). This node is the YAML-leg counterpart of the comment pins: a
+    block that recites the cleared figures beside `apply: false` would satisfy the prose
+    and ship the dry run, and the only thing that catches that is the parsed value. The
+    stop condition in that block puts this back to False if the disagreement alarm fires
+    within 7 days of the flip — and this node is what makes that round a real edit rather
+    than a stray keystroke.
+    """
     from app.config import CONFIG
     cfg = CONFIG["workers"]["sources"]["board-steward"]
     assert cfg["enabled"] is True
-    assert cfg["apply"] is False
+    assert cfg["apply"] is True
     assert cfg["model"] == "primary"      # since the first live tick; see the source
     assert int(cfg["max_turns"]) >= 16
 
@@ -1689,47 +1700,44 @@ def test_the_window_is_a_string_comparison_on_completed_at(tmp_path):
         "wider than the 7 days it claims: " + agg["window_since"])
 
 
-def test_the_config_states_both_flip_thresholds_and_when_they_were_measured():
-    """Clause 5 (second half), re-pinned by #3329: the gate lives in the file that
-    would flip it, and it states the numbers that were RULED.
+#: The gate reading #4147 published into `config.yaml`'s board-steward block, measured
+#: through the shipped reader (`workers.dispatch_watch.judgement_aggregate` over
+#: `~/lloyd-data/workers.db` — the same call `GET /api/workers/health` publishes as
+#: `judgement` on this source's row) at 2026-11-16T00:06Z: judged 140 of the 50 the leg
+#: needs, rate 0.9714 of the 0.90 it needs. The reading one 900 s poll earlier (judged
+#: 124, agree 120, disagree 3, rate 0.9677, 96 ticks, truncated false at
+#: 2026-11-15T07:46Z) is in the block beside it, so the block carries the trend and not
+#: only the last number. These are the figures the flip RAN on, not a bar: the bar is
+#: `` `judged` >= 50 `` AND `` `rate` >= 0.90 `` over the rolling 7-day window, and this
+#: round moved neither number nor any other source's `apply`.
+FLIP_READING = {"judged": 140, "agree": 136, "disagree": 3, "rate": 0.9714,
+                "ticks": 93, "truncated": "false", "at": "2026-11-16T00:06"}
 
-    `config.yaml`'s board-steward comment has always said the flip waits for a
-    summed `judged` count to clear "a minimum" with a rate that "holds over it" —
-    a gate with no numbers in it, so no reader can tell cleared from unmet without
-    a query. #3089 put numbers in; owed-check ruled them on 2026-10-25, KEEPING
-    `rate` >= 0.90 and the 7-day window and REPLACING the summed-judged floor 100
-    with 50. The node therefore pins four things a re-worded comment can fail one
-    at a time:
+#: The cleared reading as the block writes it, in the block's own order, against
+#: marker-stripped prose so a re-wrapped comment still reads (the markers have to go, not
+#: just the newlines: leaving them in re-joins the text as "the agree-rate is the # half
+#: that does not", so a pinned phrase that happens to wrap would fail for where the
+#: author broke the line). Every figure the clause names — summed judged, agree,
+#: disagree, rate, the tick count, `truncated false` — plus the minute it was measured,
+#: in ONE expression: a block missing any one of them is not a reading.
+CLEARED_READING_RE = re.compile(
+    r"summed judged (\d+), agree (\d+), disagree (\d+), rate ([01]\.\d+), (\d+) ticks "
+    r"in the window, truncated (false|true) — both over the rolling 7-day window, "
+    r"measured (2026-\d\d-\d\dT\d\d:\d\d)Z")
 
-     - the ruled floor, and the ABSENCE of the superseded one — a reader obeys the
-       number written beside the flag, so a retired 100 left in the prose is still
-       a live instruction to the next round;
-     - the half of the gate that did not move (`>= 0.90`, the 7-day window, the date
-       the figures were read) plus WHICH half today's reading leaves unmet: judged
-       86 clears a 50 floor, so the old "NEITHER threshold is met" went false the
-       moment the floor dropped;
-     - that the numbers are settled, on the ruling's own reason — the floor sits
-       ~20% above a measured ~80/week plateau (weekly judged 163/82/78/82 for the
-       four weeks ending 2026-10-25) — and NOT on "100 was unreachable", which the
-       ruling's own 163-judged week refutes;
-     - that `judgement.rate` is a pre-flip-only measure, with its mechanism named:
-       once `apply: true` has written a wrong status the item sits at the steward's
-       value and is never re-proposed, so the standing divergence lands in `missed`
-       and in the `judged` denominator only and never arrives as a fresh
-       `disagree`.
 
-    And `apply` is still read as YAML and asserted false: stating a threshold beside
-    a flipped flag would be a flip dressed as documentation.
+def _board_steward_block(text: str) -> str:
+    """The `board-steward:` source's own lines plus the comment run above its key.
+
+    Not a fixed window of text: that drifts into the neighbouring source's comment and
+    lets its prose satisfy a node about this flag. The gate lives in the comment ABOVE
+    the key, which is why the slice runs backwards over the comment run.
     """
-    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
     lines = text.splitlines()
     keys = [i for i, ln in enumerate(lines) if ln.strip() == "board-steward:"]
     assert len(keys) == 1, (
         f"the source block this gate is written into must be findable by its own key, "
         f"found {len(keys)}")
-    # The gate lives in the comment ABOVE the key, so the block is that comment run
-    # and the key's own lines — not a fixed window of text, which would drift into
-    # the neighbouring source's comment and let its prose satisfy this node.
     start = keys[0]
     while start > 0 and (lines[start - 1].strip().startswith("#")
                          or not lines[start - 1].strip()):
@@ -1738,103 +1746,257 @@ def test_the_config_states_both_flip_thresholds_and_when_they_were_measured():
     while end < len(lines) and (lines[end].startswith("      ")
                                 or lines[end].strip().startswith("#")):
         end += 1
-    block = "\n".join(lines[start:end])
-    assert "apply: false" in block, (
-        "the slice did not capture the flag the comment gates: " + block[-200:])
-    # Comment lines wrap at ~76 columns, so every phrase below is pinned against
-    # the comment's PROSE — comment markers stripped, whitespace collapsed. The
-    # markers have to go, not just the newlines: leaving them in re-joins the text
-    # as "the agree-rate is the # half that does not", so a pinned phrase that
-    # happens to wrap would fail for where the author broke the line. The wording
-    # is the contract; the line breaks are not.
+    return "\n".join(lines[start:end])
+
+
+def _flip_block_problems(block: str, *, apply_value) -> list[str]:
+    """Which pins the flip block FAILS, each labelled. Empty list == every pin holds.
+
+    The pins are the ones #3329 shipped, moved to the cleared side by #4147, plus the
+    caveat and the stop condition the flip owes. They live in a function rather than in
+    the node's body for one reason: `test_every_flip_block_pin_reddens_on_its_own_
+    mutation` has to run them against a MUTATED copy of the same block, and a mutation
+    test that re-implements the predicate proves nothing about the node it imitates. The
+    label on each entry is what lets that node say which pin a mutation tripped.
+    """
+    from workers import dispatch_watch as DW
     prose = " ".join(ln.lstrip().lstrip("#").rstrip() for ln in block.splitlines())
     flat = " ".join(prose.split())
+    low = flat.lower()
+    problems: list[str] = []
 
-    # The ruled floor is the stated floor, and the superseded one is gone.
-    assert "judged` >= 50" in block, (
-        "the judged-count threshold in the board-steward block is not the ruled "
-        "number — owed-check set the floor to 50 on 2026-10-25: " + block[:200])
-    assert "judged` >= 100" not in block, (
-        "the block still states the floor #3089 proposed and the 2026-10-25 ruling "
-        "replaced. Beside a flag that flips on what this comment says, a retired "
-        "number left in prose is an instruction, not history")
-    # The half of the gate the ruling did NOT move. The window is pinned as the
-    # phrase attached to the two numbers, not as "7-day" or "7 days" somewhere in
-    # the block: the block also says the rate "read 0.7317 over the trailing 7
-    # days", and that incidental phrase satisfied the loose check while the
-    # thresholds' own window silently became 30.
-    assert ">= 0.90" in block, "the agree-rate threshold is not stated as a number"
-    assert "both over the rolling 7-day window" in flat, (
-        "the thresholds are meaningless without the window they are measured over, "
-        "and it has to be the window attached to THEM")
-    # And the prose window is the code window: `judgement_aggregate` measures what
-    # this comment promises, so a drift between the two is the seam failing, not a
-    # wording preference.
-    from workers import dispatch_watch as DW
-    assert DW.JUDGEMENT_WINDOW_DAYS == 7, (
-        "`JUDGEMENT_WINDOW_DAYS` is no longer 7, so the window this comment states "
-        "and the one `judgement_aggregate` measures have come apart")
-    # The reading needs a timestamp, not merely some date in the block: the
-    # comment also carries the ruling's date and the plateau weeks' end dates, and
-    # any one of them satisfied a bare `2026-\d\d-\d\d`. Only the measurement is
-    # dated to the minute.
-    assert re.search(r"2026-\d\d-\d\dT\d\d:\d\dZ", block), (
-        "the figures need the moment they were measured, or the next reader cannot "
-        "tell a stale reading from a current one")
-    assert "not cleared" in block.lower(), (
-        "the comment must say what today's figures read, so an unmet gate is not "
-        "mistaken for an absent one")
-    # …and which of the two halves that leaves unmet. Lowering the floor made the
-    # #3089 wording false rather than merely stale: judged clears, rate does not.
-    assert "neither" not in flat.lower(), (
-        "the comment still says NEITHER threshold is met. A 50 floor made that "
-        "false — the live reading clears it — and a comment naming the wrong unmet "
-        "half is how the wrong bar gets lowered next time")
-    assert "the agree-rate is the half that does not" in flat, (
-        "naming the gate NOT cleared is not enough; the block has to say which half "
-        "of it today's figures leave unmet")
+    # The flag itself. Prose is no proof of a value: the comment says "Flip to
+    # `apply: true` only after …", so a substring test would trip on its own instruction.
+    # `apply_value` is the YAML-parsed value, and this first pin only proves the slice
+    # captured the key line the parsed value came from.
+    if not re.search(r"^\s+apply:\s*(?:true|false)\s*$", block, re.MULTILINE):
+        problems.append("[flag key captured] the slice did not capture the flag the "
+                        "comment gates: " + block[-200:])
+    if apply_value is not True:
+        problems.append(
+            f"[apply ships on] `workers.sources.board-steward.apply` reads "
+            f"{apply_value!r}, not True — the gate's own reading cleared, so a flag "
+            f"still false is the flip that never happened")
+
+    # The ruled floor is the stated floor, and the superseded one is gone. A reader
+    # obeys the number written beside the flag, so a retired 100 left in the prose is
+    # still a live instruction to the next round.
+    if "judged` >= 50" not in block:
+        problems.append(
+            "[ruled floor] the judged-count threshold in the board-steward block is not "
+            "the ruled number — owed-check set the floor to 50 on 2026-10-25: "
+            + block[:200])
+    if "judged` >= 100" in block:
+        problems.append(
+            "[retired floor gone] the block still states the floor #3089 proposed and "
+            "the 2026-10-25 ruling replaced")
+    # The half of the gate the ruling did NOT move. The window is pinned as the phrase
+    # attached to the two numbers, not as "7-day" somewhere in the block: the block also
+    # says the rate "read 0.7317 over the trailing 7 days", and that incidental phrase
+    # satisfied the loose check while the thresholds' own window silently became 30.
+    if ">= 0.90" not in block:
+        problems.append("[rate floor stated] the agree-rate threshold is not stated as a number")
+    if "both over the rolling 7-day window" not in flat:
+        problems.append("[one rolling window] the thresholds are meaningless without the "
+                        "window they are measured over, and it has to be the window "
+                        "attached to THEM")
+    # And the prose window is the code window: a drift between the two is the seam
+    # failing, not a wording preference.
+    if DW.JUDGEMENT_WINDOW_DAYS != 7:
+        problems.append(
+            "[window is the code window] `JUDGEMENT_WINDOW_DAYS` is no longer 7, so the "
+            "window this comment states and the one `judgement_aggregate` measures have "
+            "come apart")
+
+    # The reading: every figure, in one expression, with the minute it was measured. A
+    # bare `2026-\d\d-\d\d` is not enough — the block also carries the ruling's date and
+    # the plateau weeks' end dates, and only the measurement is dated to the minute.
+    if not re.search(r"2026-\d\d-\d\dT\d\d:\d\dZ", block):
+        problems.append("[reading stamped to the minute] the figures need the moment they "
+                        "were measured, or the next reader cannot tell a stale reading "
+                        "from a current one")
+    m = CLEARED_READING_RE.search(flat)
+    if not m:
+        problems.append(
+            "[cleared reading] the block states no reading carrying summed judged, "
+            "agree, disagree, rate, the tick count, `truncated false` and the measured "
+            "minute in the block's one reading form")
+    else:
+        got = {"judged": int(m.group(1)), "agree": int(m.group(2)),
+               "disagree": int(m.group(3)), "rate": float(m.group(4)),
+               "ticks": int(m.group(5)), "truncated": m.group(6), "at": m.group(7)}
+        for key, want in FLIP_READING.items():
+            if got[key] != want:
+                problems.append(
+                    f"[cleared reading] figure `{key}`: the block says {got[key]!r} and "
+                    f"the round measured {want!r} through the shipped reader")
+        if got["judged"] < 50 or got["rate"] < 0.90 or got["truncated"] != "false":
+            problems.append(
+                "[cleared reading] its own figures do not clear the bar beside them "
+                "(`judged` >= 50 AND `rate` >= 0.90, truncated false), so the block "
+                "calls an unmet gate cleared")
+    # And it says so in words. The banned pair is the other side of the same pin: the
+    # block that says CLEARED and still carries the unmet wording is two readings.
+    if "the gate reads cleared" not in low:
+        problems.append("[gate reads cleared] the comment must say what today's figures "
+                        "read, so a cleared gate is not mistaken for an absent one")
+    if "not cleared" in low:
+        problems.append("[unmet wording gone] the block still reads NOT cleared beside a "
+                        "flag that is now true — the flip's own file cannot hold both")
+    if "the agree-rate is the half that does not" in low:
+        problems.append("[retired half-sentence gone] the block still names the "
+                        "agree-rate the half that does not clear, which is the reading "
+                        "#4147 replaced")
+    # The reading before this one stays quoted: the trend is the evidence that the gate
+    # cleared by ageing AND by agreement, and #3329's bar was fitted to neither.
+    if "0.9677" not in flat or "judged 124" not in flat:
+        problems.append("[previous reading kept] the 900 s poll before the flip read "
+                        "judged 124 / rate 0.9677 and the block is supposed to carry it")
+
     # Settled, with the ruling's reason and not a refuted one. An assert on "owed"
-    # proves nothing here because "owed-check" contains it, so the settled wording
-    # itself is what has to be present.
-    assert "settled by the owed-check ruling of 2026-10-25" in flat, (
-        "the two numbers have to read as ruled, not as proposals still on trial")
-    assert "still owed" not in flat.lower(), (
-        "the block still calls the numbers a ruling owed to owed-check, which #3089 "
-        "settled on 2026-10-25")
-    assert "80/week plateau" in flat, (
-        "the reason 50 is the floor is the measured plateau under the old one; a "
-        "number with no reason beside it gets re-litigated by the next reader")
-    assert "163/82/78/82" in flat, (
-        "the four weekly judged counts behind that plateau are the evidence for the "
-        "floor, so they belong with the number they justify")
-    assert "unreachable" not in flat.lower(), (
-        "the block repeats a claim the ruling's own first week (judged 163, over "
-        "the old floor) refutes — the reason is a plateau under the floor, not an "
-        "unreachable floor")
-    assert "rate bar was deliberately not lowered" in flat.lower(), (
-        "keeping 0.90 while moving the floor was a decision, and the comment has to "
-        "say it was one")
-    assert "0.7317" in flat and "0.80" in flat, (
-        "the rate readings the bar was deliberately NOT fitted to are the whole "
-        "point of that sentence")
-    # The rate is only evidence while the steward is still dry-running, and the
-    # file that would end the dry-run has to carry the reason.
-    assert "pre-flip-only" in flat.lower(), (
-        "the block has to say that judgement.rate stops meaning agreement at the flip")
-    assert "never as a fresh `disagree`" in flat, (
-        "the pre-flip-only claim without its mechanism reads as an opinion: an "
-        "applied wrong status is never re-proposed, so no fresh `disagree` is ever "
-        "scored on it")
-    assert "`missed` and in the `judged` denominator only" in flat, (
-        "and where the divergence does go instead — `missed`, plus the denominator, "
-        "which is what pulls the rate down while nothing new disagrees")
-    # The flag itself is read as YAML, not as prose: the comment says
-    # "Flip to `apply: true` only after …" and a substring test would trip on its
-    # own instruction. The value is the only thing that answers "is it flipped?".
+    # proves nothing here because "owed-check" contains it, so the settled wording itself
+    # is what has to be present.
+    if "settled by the owed-check ruling of 2026-10-25" not in flat:
+        problems.append("[numbers settled] the two numbers have to read as ruled, not as "
+                        "proposals still on trial")
+    if "still owed" in low:
+        problems.append("[not on trial] the block still calls the numbers a ruling owed "
+                        "to owed-check, which #3089 settled on 2026-10-25")
+    if "80/week plateau" not in flat:
+        problems.append("[floor's reason] the reason 50 is the floor is the measured "
+                        "plateau under the old one; a number with no reason beside it "
+                        "gets re-litigated by the next reader")
+    if "163/82/78/82" not in flat:
+        problems.append("[plateau evidence] the four weekly judged counts behind that "
+                        "plateau are the evidence for the floor")
+    if "unreachable" in low:
+        problems.append("[no refuted reason] the block repeats a claim the ruling's own "
+                        "first week (judged 163, over the old floor) refutes")
+    if "rate bar was deliberately not lowered" not in low:
+        problems.append("[rate bar not lowered] keeping 0.90 while moving the floor was a "
+                        "decision, and the comment has to say it was one")
+    if "0.7317" not in flat or "0.80" not in flat:
+        problems.append("[history kept] the rate readings the bar was deliberately NOT "
+                        "fitted to are the whole point of that sentence")
+
+    # The rate is only evidence while the steward is still dry-running, the mechanism is
+    # named beside the claim, and the post-flip measure and the stop condition are in the
+    # same comment as the flag they govern.
+    if "pre-flip-only" not in low:
+        problems.append("[pre-flip-only caveat] the block has to say that judgement.rate "
+                        "stops meaning agreement at the flip")
+    if "never as a fresh `disagree`" not in flat:
+        problems.append("[mechanism named] the pre-flip-only claim without its mechanism "
+                        "reads as an opinion: an applied wrong status is never "
+                        "re-proposed, so no fresh `disagree` is ever scored on it")
+    if "`missed` and in the `judged` denominator only" not in flat:
+        problems.append("[where it goes instead] and where the divergence does go — "
+                        "`missed`, plus the denominator, which is what pulls the rate "
+                        "down while nothing new disagrees")
+    if "post-flip 0.90 is a phantom" not in low:
+        problems.append("[phantom stated] the caveat has to say what a post-flip 0.90 IS: "
+                        "a phantom, because a wrong applied status scores no fresh "
+                        "disagreement")
+    if "reverted_moves" not in flat:
+        problems.append("[post-flip leg named] the block has to name what measures the "
+                        "steward after the flip — `reverted_moves`, the applied move the "
+                        "machine puts back inside the window")
+    if "'tried, didn't work out'" not in flat:
+        problems.append("[stop condition] the flip and the route back have to be in the "
+                        "same comment: if the alarm fires within 7 days, `apply` goes "
+                        "back to false and this reading is recorded as tried, didn't "
+                        "work out")
+    if "`apply` back to false" not in flat:
+        problems.append("[stop condition moves the flag] the stop condition has to name "
+                        "the value it writes, not just the alarm it watches")
+    return problems
+
+
+def test_the_config_ships_the_flag_on_and_states_the_cleared_reading():
+    """#4147: the gate cleared, so the flag is on, and the block says so.
+
+    Every pin in `_flip_block_problems`, asserted on the real file. #3329 shipped this
+    node pinning the UNMET half (`not cleared`, the agree-rate named as the failing leg,
+    the flag read as False); #3386 and #3651 re-pinned it to their own readings. From
+    2026-11-16T00:06Z the same node pins the cleared side: the flag parses True, the
+    block states the figures that clear both legs with the minute they were measured, and
+    the two strings that said otherwise are gone — while the history the bar was
+    deliberately NOT fitted to (0.7317, 0.80) stays exactly where it was.
+
+    The bar itself is unchanged and this node is the witness that it is: `judged` >= 50,
+    `>= 0.90` and 'both over the rolling 7-day window' are still in the block, because
+    the flip consumed the gate, it did not move it.
+    """
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
     import yaml
     cfg = yaml.safe_load(text)
-    assert cfg["workers"]["sources"]["board-steward"]["apply"] is False, (
-        "this item exposes the gate; it does not open it")
+    apply_value = cfg["workers"]["sources"]["board-steward"]["apply"]
+    problems = _flip_block_problems(_board_steward_block(text), apply_value=apply_value)
+    assert problems == [], problems
+
+
+def test_every_flip_block_pin_reddens_on_its_own_mutation():
+    """A pin that cannot fail is not a pin: each mutation below breaks exactly one
+    claim about the flip and has to be caught by the label that guards it.
+
+    Two of these are the clause's own words — restore `not cleared` into the block, or
+    restore `apply: false` — and the rest are the pins a careless later round is most
+    likely to break while editing the comment for another reason: the measured minute,
+    the window attached to the two numbers, a figure, the stop condition, the retired
+    half-sentence typed back in.
+    """
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    import yaml
+    assert yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"] is True, (
+        "the mutations below are written against the flipped block; on an unflipped "
+        "file this node would be proving the wrong thing")
+    block = _board_steward_block(text)
+    assert _flip_block_problems(block, apply_value=True) == [], (
+        "the committed block does not pass its own pins")
+
+    def labels(mutated: str, *, apply_value=True) -> str:
+        return " ".join(_flip_block_problems(mutated, apply_value=apply_value))
+
+    # `not cleared` typed back in, wherever the comment wrap happens to fall.
+    restored = re.sub(r"reads\s+(?:#\s*)?CLEARED", "reads NOT cleared", block, count=1)
+    assert restored != block and "[unmet wording gone]" in labels(restored), restored
+    assert "[gate reads cleared]" in labels(restored)
+    # The flag value, restored. Prose untouched: this is the YAML leg failing alone.
+    assert "[apply ships on]" in labels(block, apply_value=False)
+    # The retired half-sentence, typed back in at the end of the comment run.
+    half = block + "\n    # the agree-rate is the half that does not\n"
+    assert "[retired half-sentence gone]" in labels(half)
+    # The measured minute dropped from the reading (the comment wraps across it).
+    unstamped = re.sub(r",\s+(?:#\s*)?measured\s+(?:#\s*)?2026-\d\d-\d\dT\d\d:\d\dZ",
+                       "", block)
+    assert unstamped != block and (
+            "[reading stamped to the minute]" in labels(unstamped)
+            or "[cleared reading]" in labels(unstamped)), labels(unstamped)
+        # Either pin may be the one that reddens: the reading regex carries the minute
+        # inside its one expression, so dropping the stamp can fail the whole reading or
+        # only the stamp pin — but the mutation must not read clean.
+    # The window that the two numbers are measured over, widened by a reader in a hurry.
+    widened = block.replace("both over the rolling 7-day window",
+                            "both over the rolling 30-day window")
+    assert "[one rolling window]" in labels(widened)
+    # A figure that no longer clears the leg it is quoted under.
+    thin = re.sub(r"judged\s+(?:#\s*)?140", "judged 40", block, count=1)
+    got = labels(thin)
+    assert "[cleared reading]" in got, got
+    # The stop condition, dropped as too much prose.
+    no_stop = block.replace("'tried, didn't work out'", "'shipped'")
+    assert "[stop condition]" in labels(no_stop)
+    no_stop2 = block.replace("a round sets `apply`", "a round considers whether it sets")
+    assert "[stop condition moves the flag]" in labels(no_stop2)
+    # The phantom caveat, softened into an opinion.
+    soft = block.replace("a post-flip 0.90 is a PHANTOM", "a post-flip 0.90 is a number")
+    assert "[phantom stated]" in labels(soft)
+    # The post-flip measure, un-named.
+    unnamed = block.replace("`reverted_moves`", "the alarm")
+    assert "[post-flip leg named]" in labels(unnamed)
+    # The retired floor, typed back in beside the flag.
+    old_floor = block.replace("summed `judged` >= 50", "summed `judged` >= 100")
+    assert "[retired floor gone]" in labels(old_floor)
 
 
 #: The three ways the tree actually writes the retired floor. #3089's own absence
@@ -2458,6 +2620,303 @@ DIS_MOVES = [{"item_id": i, "status": "draft", "note": "no triage verdict in its
              for i in DIS_AGREE]
 DIS_EXPECTED = {i: ("up_next", "has a confirmed triage with acceptance text")
                 for i in DIS_AGREE}
+
+
+# ── the post-flip leg: an applied move the machine puts back (#4147) ────────
+#
+# `below_floor` used to have one leg, and after this round's flip that leg can only ever
+# read as agreement: `agreement()` scores a `disagree` on the tick that asks, so once
+# `apply: true` has written a wrong status the item sits there and is never re-proposed —
+# the divergence lands in `missed` and in the `judged` denominator only and NEVER arrives
+# as a fresh `disagree` (`config.yaml`'s pre-flip-only caveat). A steward whose every
+# applied move the state machine silently put back would hold `rate` 1.0 and the alarm
+# would have no leg left to stand on. These nodes are that leg: the pair of ledger rows
+# the flip itself produces, read back.
+
+
+def _post_flip_window(**over):
+    """A window that CLEARS the old gate — `judged` over the floor and `rate` at or above
+    0.90 — which is precisely the reading the flip leaves behind as its own.
+
+    Built on `_window7()` so the shape stays the shipped reader's, with the figures
+    `workers.dispatch_watch.judgement_aggregate` returned at 2026-11-16T00:06Z (judged 140,
+    agree 136, disagree 3, rate 0.9714, 93 ticks, truncated false). The leg is exercised on
+    the dict production publishes, not on a fixture invented for the node.
+    """
+    w = _window7()
+    w.update({"judged": 140, "agree": 136, "disagree": 3, "rate": 0.9714,
+              "ticks_in_window": 93, "ticks_with_judged": 93, "truncated": False,
+              "window_since": "2026-11-15T00:00:00+00:00"})
+    w.update(over)
+    return w
+
+
+#: The item the leg pairs, and the two statuses of one real revert. #3024 is a live
+#: disagreement in the same window (`judgement_aggregate`'s `disagree_ids` today reads
+#: [3024, 4035]), and `up_next` → `draft` is the direction #3024's own tick ran: the
+#: steward parks an item with no triage verdict at `draft`, the state machine wants it
+#: `up_next`. Post-flip the steward's `draft` is WRITTEN, and the machine's revert is a
+#: `status_moved` row back to `up_next` — the pair below.
+REVERT_ITEM = 3024
+REVERT_APPLIED = "draft"
+REVERT_TO = "up_next"
+REVERT_REASON = "triage verdict re-read; the steward parked an already-triaged item"
+
+
+def _flip_ledger(tmp_path, *, applied=REVERT_APPLIED, moved_to=REVERT_TO,
+                 order=("steward_move", "status_moved"), same_item=True,
+                 revert_at="2026-11-16T01:15:00Z", apply_at="2026-11-16T01:00:00Z",
+                 shape="real"):
+    """A `promotions.jsonl` holding an applied steward move and the machine's revert of it.
+
+    Every row goes through the REAL writer, `S.append_event(entry, path=…)`, with the
+    payload copied from the two writers verbatim: `steward_move` from
+    `workers/sources/board_steward.py:1606` (`from`/`to`/`note`/`tick`) and `status_moved`
+    from `scripts/automod/backlog.py:7007` (`from`/`to`/`reason`/`needs_human`/`owed`).
+    Writing through the writer is the point: `append_event` is what supplies the stamp
+    (`scripts/automod/state.py:187` builds `{..., "created_at": now_iso(), **entry}`), so a
+    row carries `created_at` and never `at`, and the entry's own keys win — which is how
+    only the stamp is back-dated here (the machine's row 15 minutes after the apply: one
+    `autocode .interval_seconds: 900` poll, the delay a real revert has). #4147's first
+    round hand-rolled its rows with `at` and `to_status`, names NO writer emits, and its
+    node passed while the shipped reader found nothing on the production store — #3150's
+    failure, reproduced in a new module. A fixture produced by the writer cannot drift from
+    the store a third time.
+
+    `shape="invented"` writes the WRONG spellings instead, and the reader must find
+    nothing: that is the negative half of the field-name proof, held by
+    `test_the_pair_is_found_only_in_the_field_names_the_writers_actually_stamp`.
+    """
+    from scripts.automod import state as S
+    stamp_field = "created_at" if shape == "real" else "at"
+    rows = []
+    for kind in order:
+        if kind == "steward_move":
+            rows.append({"event": "steward_move", "item_id": REVERT_ITEM,
+                         "from": "up_next", "to": applied,
+                         "note": "no triage verdict in its history", "tick": "run-3024",
+                         stamp_field: apply_at})
+        else:
+            rows.append({"event": "status_moved",
+                         "item_id": REVERT_ITEM if same_item else REVERT_ITEM + 1,
+                         "from": applied, "to": moved_to,
+                         "reason": REVERT_REASON, "needs_human": False, "owed": False,
+                         # `to_status` is the invented spelling of `to` and the ONLY key
+                         # re-spelled: renaming `from` too would drop a key the reader never
+                         # claimed to read, and this node proves the pair is unreadable, not
+                         # that a required key went missing.
+                         **({stamp_field: revert_at} if shape == "real" else
+                            {stamp_field: revert_at, "to_status": moved_to})})
+    led = tmp_path / "ledger.jsonl"
+    if shape == "real":
+        for r in rows:
+            S.append_event(r, path=led)
+        return led
+    # The invented shape is written RAW, because that is exactly what round 1's fixture did:
+    # `append_event` CANNOT produce it — it injects `created_at` into every payload
+    # (state.py:187), so a hand-rolled line is the only way to hold a ledger whose stamp is
+    # named `at`. That is the store round 1 believed it was testing, and the reader must be
+    # silent on it.
+    led.parent.mkdir(parents=True, exist_ok=True)
+    led.write_text("".join(json.dumps(r) + chr(10) for r in rows), encoding="utf-8")
+    return led
+
+
+def test_the_pair_is_found_only_in_the_field_names_the_writers_actually_stamp(tmp_path):
+    """The schema claim, proved both directions on one ledger written two ways (#4147).
+
+    #4147's first round got this wrong in the direction that HIDES rather than the one that
+    crashes: `reverted_moves` read `at` for the stamp and `to_status` for the reverted
+    status, while the stamp is `created_at` on EVERY row (`scripts/automod/state.py:187`,
+    injected by `append_event`, never passed by a writer) and BOTH kinds write the status
+    pair as `from`/`TO` (`workers/sources/board_steward.py:1606`;
+    `scripts/automod/backlog.py:6960`, `:7007`, `:8163` — `from_status`/`to_status` appear
+    on neither). The cause was reading this module's own `_event`, which does add `at` to a
+    `board_steward_disagreement` row, and assuming it described the rows this leg reads.
+
+    The witness is the store a writer really wrote. A row carrying the invented spellings
+    is not evidence of a revert, so the alarm stays silent on it — and a reader that kept
+    `at` as a fallback would PASS here and go blind post-flip, which is precisely the
+    outcome the flip's 7-day stop condition depends on not having.
+    """
+    real = _flip_ledger(tmp_path / "real", shape="real")
+    invented = _flip_ledger(tmp_path / "invented", shape="invented")
+    rows = [json.loads(line) for line in real.read_text().splitlines() if line.strip()]
+    # Both rows carry the stamp the reader reads, and neither carries the one it must not.
+    # This is the assertion that reddens if `append_event` ever stops supplying
+    # `created_at`, which would otherwise un-arm the leg with nothing going red.
+    assert {frozenset(r) for r in rows} == {
+        frozenset({"ts", "created_at", "event", "item_id", "from", "to", "note", "tick"}),
+        frozenset({"ts", "created_at", "event", "item_id", "from", "to", "reason",
+                   "needs_human", "owed"})}
+    assert not [r for r in rows if "at" in r or "to_status" in r]
+
+    hit, why = D.below_floor(_post_flip_window(), real)
+    assert hit is True and f"#{REVERT_ITEM}" in why, why
+    miss, why2 = D.below_floor(_post_flip_window(), invented)
+    assert miss is False and "at or above" in why2, why2
+    assert D.reverted_moves(_post_flip_window(), invented) == []
+
+
+def test_a_reverted_applied_move_fires_the_alarm_on_a_window_the_rate_clears(tmp_path):
+    """Clause 3: apply:true, rate at or above 0.90, and a reverted applied move fires.
+
+    This is the whole point of the leg. Post-flip the rate can only drift DOWN and never
+    scores a fresh `disagree`, so without this second leg a steward that is being
+    systematically reverted reports a rate that only decays, never trips. The window here
+    is the shape production publishes today (`judged` 140, `rate` 0.9714), so the rate's
+    own floor passes and the ONLY thing that can fire the alarm is the ledger pair.
+    """
+    led = _flip_ledger(tmp_path / "fire")
+    hit, why = D.below_floor(_post_flip_window(), led)
+    assert hit is True, why
+    assert f"#{REVERT_ITEM}" in why and REVERT_TO in why and REVERT_APPLIED in why, why
+    # The moment and the machine's own reason are in the string. The stop condition counts
+    # days from the flip, so a reason that cannot say WHEN the machine reverted, or WHY, is
+    # unusable by the round that has to reverse the flag.
+    assert "2026-11-16T01:15:00Z" in why, why
+    assert REVERT_REASON in why, why
+    assert D.reverted_moves(_post_flip_window(), led) == [
+        {"item_id": REVERT_ITEM, "applied": REVERT_APPLIED, "reverted_to": REVERT_TO,
+         "at": "2026-11-16T01:15:00Z", "reason": REVERT_REASON}]
+
+
+def test_the_same_post_flip_window_with_no_reverted_move_does_not_fire(tmp_path):
+    """Clause 4, first half: the same window with no reverted move stays silent.
+
+    One pair of rows per ledger (`name=`), because `append_event` appends: two ledgers built
+    into one file would carry the first pair into the second assertion, and the negative
+    half of this clause would be measuring a revert it just wrote itself.
+    """
+    agree = _flip_ledger(tmp_path / "agree", moved_to=REVERT_APPLIED)
+    miss, why = D.below_floor(_post_flip_window(), agree)
+    assert miss is False and "at or above" in why, why
+
+    other = _flip_ledger(tmp_path / "other", same_item=False)
+    miss, why = D.below_floor(_post_flip_window(), other)
+    assert miss is False and "at or above" in why, why
+
+    # The leg does not reach outside the window either: a revert stamped BEFORE
+    # `window_since` is history, not a live disagreement, and re-fires every tick otherwise.
+    old = _flip_ledger(tmp_path / "old", revert_at="2026-11-10T01:15:00Z")
+    miss, why = D.below_floor(_post_flip_window(), old)
+    assert miss is False and "at or above" in why, why
+
+    # And an apply the machine never touched cannot fire, however the rate reads.
+    quiet = _flip_ledger(tmp_path / "quiet", order=("steward_move",))
+    miss, why = D.below_floor(_post_flip_window(), quiet)
+    assert miss is False and "at or above" in why, why
+
+    # The rate's own leg is UNCHANGED by the flip: a window under the floor fires with the
+    # rate's reason and no ledger at all. This is the node that keeps the flip from
+    # replacing the pre-flip alarm instead of adding to it.
+    under, why = D.below_floor(_post_flip_window(rate=0.5))
+    assert under is True and "under the" in why, why
+
+    # Precedence when both would fire: the rate names the measurement, and the leg is the
+    # post-flip instrument, so a reader must not have to open the ledger to learn which
+    # half of the gate moved.
+    both, why = D.below_floor(_post_flip_window(rate=0.5), _flip_ledger(tmp_path / "both"))
+    assert both is True and "rate 0.5 under the" in why and "reverted_moves" not in why, why
+
+
+def test_a_quiet_window_still_reports_the_volume_leg_not_agreement(tmp_path):
+    """Clause 4, second half: judged below the floor still reads as volume, with the leg on.
+
+    The pre-flip ordering is kept — volume before rate before the leg — because a steward
+    that has run three ticks has not been shown to be wrong, and filing disagreement off
+    three ticks is what the volume leg exists to stop. With `apply: true` the volume leg
+    gets MORE important, not less: the ticks are now writing to the board.
+    """
+    miss, why = D.below_floor(_post_flip_window(judged=30, rate=0.5),
+                              _flip_ledger(tmp_path))
+    assert miss is False and "volume leg unmet" in why and "judged 30" in why, why
+    miss2, why2 = D.below_floor(_post_flip_window(truncated=True),
+                                _flip_ledger(tmp_path / "trunc"))
+    assert miss2 is False and "truncated" in why2, why2
+
+
+def test_a_revert_files_the_alarm_end_to_end_with_the_flag_state_on_its_body(
+        board, tmp_path, monkeypatch):
+    """The alarm on the path a tick actually takes, with the flip state on its body.
+
+    The steward source ends its tick with `_file_quietly`, which resolves the window, the
+    backlog dir and the ledger and then asks `file_or_update`. Calling `file_or_update`
+    directly leaves `_file_quietly`'s own forwarding unexercised, and that function
+    swallows EVERY exception: an `apply`/`rules_note` kwarg that never reached its filer
+    would have to turn a green tick red here, or nothing at all would show it. `window_now`
+    is monkeypatched to the published reading so the node measures forwarding rather than
+    the scratch queue this run's conftest points at — and the patch is asserted, not
+    assumed: the body has to carry these numbers.
+
+    The ledger argument is the seam the review caught (finding 3): the trigger now reads the
+    store it is handed, so a test that pointed the trigger at one file and the rows at
+    another could pass with the pair never sitting in one place. Here the revert rows AND
+    the filed event row are `tmp_path/"route"/ledger.jsonl`, and the last assertion reads
+    the event back off that same file.
+    """
+    from workers.board_disagreement import _file_quietly
+    monkeypatch.setattr(D, "window_now", lambda: _post_flip_window())
+    led = _flip_ledger(tmp_path / "route")
+    out = _file_quietly(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                        backlog_dir=board, ledger=led,
+                        rules_note="apply: true since 2026-11-16T00:06Z (#4147)")
+    assert out is not None and out["action"] == "filed", out
+    body = _filed(board)[0].body
+    assert "apply: true since 2026-11-16T00:06Z" in body, body
+    # The reason is the LEG's, not the rate's: a body filed by the pre-flip trigger says the
+    # agree-rate fell under the floor, this one has to say the machine reverted an applied
+    # move. That distinction is what the 7-day stop condition gets read off.
+    assert f"#{REVERT_ITEM}" in body and REVERT_REASON in body, body
+    assert "0.9714" in body, body          # the window it was forwarded, not a re-read
+    events = [json.loads(line) for line in led.read_text().splitlines() if line.strip()]
+    filed = [e for e in events if e.get("event") == "board_steward_disagreement"]
+    assert len(filed) == 1, filed
+    # The ledger row says WHICH leg fired, as a selectable field: the 7-day stop
+    # condition is read off this store later, and a reader must be able to pick out the
+    # revert-leg rows without parsing prose or re-measuring an aged window.
+    assert filed[0]["leg"] == "post-flip revert", filed[0]
+    assert "post-flip revert" in body or "steward_move applied" in body, body
+
+
+def test_the_alarm_body_states_a_dry_run_flag_when_the_tick_wrote_nothing(board, tmp_path,
+                                                                         monkeypatch):
+    """The body distinguishes an alarm raised while the steward was APPLYING from one
+    raised while it only PROPOSED.
+
+    #4147's owed entry asks whether the alarm fired within 7 days of the flip; the answer is
+    only readable if the item records the flag it was filed under. A tick on `apply: false`
+    wrote nothing, so a revert could not have happened under it and the body says so — a
+    reader who took that as post-flip evidence would set the flag back to false on a dry run.
+    """
+    monkeypatch.setattr(D, "window_now", lambda: _post_flip_window())
+    out = D._file_quietly(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                          backlog_dir=board, ledger=_flip_ledger(tmp_path / "dry"),
+                          rules_note="apply: false (dry run: this tick wrote nothing)")
+    assert out is not None
+    body = _filed(board)[0].body
+    assert "apply: false (dry run" in body, body
+
+
+def test_the_post_flip_leg_silences_itself_on_a_missing_ledger_or_window(tmp_path):
+    """A missing ledger, a missing window, and an unreadable one all keep the alarm quiet.
+
+    The filing is allowed to be silent and never allowed to be wrong: firing disagreement
+    because a store was briefly absent would set the stop condition off on an outage, and the
+    stop condition's whole consequence is turning the steward off. `window_since` is what the
+    filter needs, so a window without one is refused before any read.
+    """
+    missing = tmp_path / "nope.jsonl"
+    assert D.reverted_moves(_post_flip_window(), missing) == []
+    assert D.below_floor(_post_flip_window(), missing)[0] is False
+    assert D.reverted_moves(_post_flip_window(window_since=""),
+                            _flip_ledger(tmp_path / "ws")) == []
+    # A ledger with no parseable row at all is a missing ledger (`read_events` skips what
+    # it cannot decode, and returns [] for the whole file on an OSError).
+    junk = tmp_path / "junk"
+    junk.mkdir()
+    (junk / "ledger.jsonl").write_text("not json\n{also bad\n")
+    assert D.reverted_moves(_post_flip_window(), junk / "ledger.jsonl") == []
 
 
 def test_below_floor_needs_both_legs_of_the_flip_bar():

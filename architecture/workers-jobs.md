@@ -480,16 +480,21 @@ in two of five dry-runs and its live tick died at `max_turns` on tool reads
 with no answer; a two-minute judgment every fifteen minutes is a cost the
 primary carries, and the round hold keeps it off the engine while a round runs.
 
-**Writes** nothing to the board while `apply: false`, which is the shipped
-state: it records how far its answer agrees with what the state machine would
-have done, and that record is what decides whether `apply` flips. The state
-machine in `scripts/automod/backlog.py` is still the writer today — the
-module docstring's "the replacement" is the plan, not the present. With
-`apply: true` one mechanical writer would apply its moves and
-`select_confirmed` would take its pick.
+**Writes** to the board since 2026-11-16T00:06Z, when #4147 flipped `apply` to
+`true` on the gate's own cleared reading (`config.yaml` carries the figures:
+summed judged 140, agree 136, disagree 3, rate 0.9714, 93 ticks, truncated
+false — both over the rolling 7-day window). For the ten weeks before that
+minute it ran `apply: false` and recorded only how far its answer agrees with
+what the state machine would have done, and that record is what decided the
+flip. The state machine in `scripts/automod/backlog.py` is still a writer beside
+it — the module docstring's "the replacement" is the plan, not the present — and
+with the flag true one mechanical writer applies its moves while
+`select_confirmed` takes its pick; the `steward_move` row and the abstention
+below are what stop the two fighting over one item.
 
 **How a move will reach the board is decided** (2026-11-02, #3467), and the
-mechanism is landed here while `apply` stays `false`. Every status the steward
+mechanism was landed fourteen days before the flag that lets it run — from #4147
+it is the live route, not the reserved one. Every status the steward
 actually applies appends its own `steward_move` ledger row — item, the status
 it moved from, the status it moved to, the note, the tick — and
 `desired_statuses` then answers that item with the row and abstains from its
@@ -501,9 +506,10 @@ park; a tick's aggregate `board_steward` row could not carry this, since its
 The abstention sits below the group and in-flight rules — those are what
 `split_writable` already refuses at write time — and the steward's own
 `status_moved` row cannot end a claim, because that row is the move the
-abstention stops. `apply: false` is unchanged: the row is written by the
-writer that flag gates, so no row exists on a dry-run tick, and this changes
-the value of no config key.
+abstention stops. A dry-run tick writes no row at all — the
+row comes from the writer the flag gates — which is why the pre-flip store holds
+none and why `reverted_moves` below reads that silence as *no evidence* rather
+than as a reverted move.
 
 **That record was not evidence of anything when it was first read** (measured
 2026-09-27, 136 ticks over 7 d). Its successful ticks reported `0 move(s)
@@ -520,9 +526,12 @@ evidence now, and the evidence is negative: over the rolling 7 d to 2026-10-27
 `judgement` reads 127 judged, 101 agree, 26 disagree — **rate 0.795, under the
 0.90 the flip needs** — on 279 ticks (267 ok, 12 failed, and the failures are no
 longer truncation: they are `output is not JSON`, an empty answer, a diverging
-finalizer and `ConnectTimeout`). So `apply: false` is no longer an unmade
-decision waiting on an
-unmeasured quantity; it is the reading of a bar this week does not clear.
+finalizer and `ConnectTimeout`). So at that reading `apply: false` was no
+longer an unmade decision waiting on an unmeasured quantity; it was the reading
+of a bar that week did not clear. #4147 flipped it eight days later on the same
+bar with both numbers unchanged — judged 140, rate 0.9714 — and the block's stop
+condition puts it back if the disagreement alarm fires within 7 days of that
+minute.
 
 **Below the floor, the disagreement now has a reader** (#3519). A measured fail
 is actionable in a way an unmeasured one is not, and until now the 26 disagreeing
@@ -601,7 +610,12 @@ of the four weeks the ruling read (163/82/78/82, ending 2026-10-25) cleared it.
 And `rate` is a pre-flip measure only: `disagree` is scored on the moves a tick
 proposes, so after `apply: true` an applied wrong status is never re-proposed and
 the standing divergence shows up in `missed` and the `judged` denominator
-instead, where nothing new ever reads as a disagreement.
+instead, where nothing new ever reads as a disagreement. What measures the
+steward now is the alarm's post-flip leg: `reverted_moves` pairs an applied
+`steward_move` row with a LATER `status_moved` row on the same item inside the
+window, and `below_floor` fires on that pair naming the item and both statuses —
+the machine undoing an applied move is the one disagreement the rate can never
+score again, and it is the trigger #4147's stop condition watches.
 
 **It may never set `done`.** Closing is gated on a settled promotion whose
 outcome said `met` and stays mechanical in `close_settled_items`: a closed

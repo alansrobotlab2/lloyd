@@ -1955,9 +1955,12 @@ workers:
     # `implement_outcomes` and its caps, quarantine, expiry, the three-tier
     # `select_confirmed`). Every 15 minutes it reads the ledger since its
     # last pass and the open board and answers with the moves and the next
-    # pick. `apply: false` is the state it ships and runs in today: it
-    # records how far its answer agrees with the machine's (`agreement()`,
-    # on its `board_steward` ledger rows) and writes nothing. Flip to
+    # pick. `apply: true` since 2026-11-16T00:06Z (#4147): it applies its moves
+    # through the one status writer and records how far its answer agrees with
+    # the machine's (`agreement()`, on its `board_steward` ledger rows) on the
+    # way. For the ten weeks before that minute it ran with `apply: false` and
+    # wrote nothing, which is the state the two numbers below were ruled to
+    # measure. Flip to
     # `apply: true` only after a run of live ticks at `apply: false` whose
     # summed `judged` count clears a minimum and whose rate holds over it —
     # a tick that judged nothing has no rate (#1688) — and with the
@@ -1976,21 +1979,46 @@ workers:
     # cleared it. The rate bar was deliberately not lowered: it read 0.7317 over
     # the trailing 7 days and 0.80 post-#3089-landing, and fitting a bar to its
     # own measurement is exactly what this comment forbids.
-    # TODAY'S READING off the field the flip actually reads
-    # (`GET /api/workers/health`, 2026-10-25T22:46Z): summed judged 86, agree
-    # 64, disagree 22, rate 0.7442 over 242 board-steward run rows (224 carrying
-    # `judged`, truncated false). The floor clears at 86;
-    # the agree-rate is the half that does not, and the gate reads NOT cleared —
-    # an unmet gate is a reason to keep dry-running, not a number to adjust.
+    # TODAY'S READING off the field the flip actually reads, and the gate reads
+    # CLEARED. Measured 2026-11-16T00:06Z through the shipped reader
+    # (`workers.dispatch_watch.judgement_aggregate` over `~/lloyd-data/workers.db`,
+    # the same call `GET /api/workers/health` publishes as `judgement` on this
+    # source's row): summed judged 140, agree 136, disagree 3, rate 0.9714, 93
+    # ticks in the window, truncated false — both over the rolling 7-day window,
+    # measured 2026-11-16T00:06Z. The poll before it reads the same way: summed
+    # judged 124, agree 120, disagree 3, rate 0.9677, 96 ticks in the window,
+    # truncated false — both over the rolling 7-day window, measured
+    # 2026-11-15T07:46Z. The last reading this file carried, 2026-10-25T22:46Z,
+    # was summed judged 86, agree 64, disagree 22, rate 0.7442 over 242 run rows
+    # (224 carrying `judged`, truncated false) — the floor cleared at 86 and the
+    # agree-rate did not. An unmet gate was a reason to keep dry-running, not a
+    # number to adjust; a cleared one is why the flag below is true. Why this was
+    # not deferred: daily ticks fell from 23-26 (Nov 1-9) to 2/13/8/0/6 (Nov
+    # 10/12/13/14/15), so summed judged read 337 as-of 2026-11-05 and 124 by
+    # 2026-11-15, and on that cadence the `judged` leg goes unmet within weeks —
+    # no round can manufacture the traffic, and a later round would meet its own
+    # precondition failing.
     # `judgement.rate` is a PRE-FLIP-ONLY measure, never a post-flip KPI:
     # `agreement()` scores `disagree` only over the moves it proposes on the tick
     # that asks, so once `apply: true` has written a wrong status the item sits
     # at the steward's value and is never re-proposed.
     # The divergence lands in `missed` and in the `judged` denominator only,
     # never as a fresh `disagree`. The rate drifts down from that alone, with no
-    # 0.90 is a number that exists only while `apply: false` — and a round that
-    # reported this gate cleared after the flip would be reporting a phantom
-    # rate. With `apply: true`
+    # new disagreement behind it: a post-flip 0.90 is a PHANTOM — a number that
+    # exists only while `apply: false` — and a round that reported THIS gate
+    # cleared after the flip would be reporting a phantom rate as proof the
+    # steward is right.
+    # WHAT MEASURES THE STEWARD INSTEAD, with the stop condition beside it. The
+    # disagreement alarm (`workers/board_disagreement.py`) keeps a post-flip leg:
+    # `reverted_moves` reads the ledger for an applied `steward_move` row that a
+    # LATER `status_moved` row on the same item moves off the status the steward
+    # wrote, inside the same window, and `below_floor` fires on that with the item
+    # and both statuses named — the machine undoing an applied move is the one
+    # disagreement the rate can never score again. STOP CONDITION: if that alarm
+    # fires within 7 days of this flip (2026-11-16T00:06Z), a round sets `apply`
+    # back to false and records this reading as 'tried, didn't work out'. The
+    # revert is the finding, and the round that reverses this one is a normal
+    # outcome here, not a failure to hide. With `apply: true`
     # it writes through the one status writer and `select_confirmed` takes
     # its pick. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.
@@ -2007,9 +2035,11 @@ workers:
     # poll — the same 900 s clock this job is on (`autocode.interval_seconds`: 900) —
     # and the revert carries its own `status_moved` row, reading back as a machine
     # decision. The row names a status, so a move that only put tags on an item already
-    # at that status writes none. NONE OF THIS MOVES A VALUE: the row is written by the
-    # same writer this flag gates, so while `apply` is false no row is written and
-    # nothing above describes a live one. What this settles is the steward's own
+    # at that status writes none. WHAT THIS COULD SAY BEFORE THE FLIP: while `apply`
+    # was false the row came from a writer that never ran, so nothing above described
+    # a live one. From 2026-11-16T00:06Z the flag is true, `steward_move` rows are
+    # live, and the abstention is the machine's own behaviour on the next poll — which
+    # is the row `reverted_moves` reads. What this settles is the steward's own
     # precondition; the `autocode.status_pipeline` / `close_on_settle` handover named
     # above is a different one and stays owed-check's to rule on.
     # Primary since the first live tick: on the secondary it made ordering
@@ -2019,7 +2049,7 @@ workers:
     # engine while a round runs.
     board-steward:
       enabled: true
-      apply: false
+      apply: true
       interval_seconds: 900
       max_inflight: 1
       max_duration_seconds: 600
