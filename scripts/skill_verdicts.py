@@ -1195,7 +1195,21 @@ def record_verdict(
             f"{INPUT_ROWS_FIELD} field at all is now refused too, one guard below — the "
             "silence and the declared zero are the same unusable evidence (#2052)"
         )
-    if require_input_rows and status_rc == 0 and declared is None:
+    if (require_input_rows and status_rc == 0 and declared is None
+            # This module's OWN absence frame is exempt, and only that frame. It measures a
+            # corpus by design and reports it under its own field names — `dated_corpus_files=`
+            # beside `pinned_input=` — so `input_rows=` is not a field it was ever written to
+            # print, and the mandate asked the one command shape whose whole job is publishing
+            # an honest absence for a declaration nothing in its own text offers. The internal
+            # mint paths already knew this and passed `require_input_rows=False` for it (:3245
+            # disposal, :3191 root-move rewrite); a caller who cannot pass it — `reanchor`,
+            # whose CLI has no such flag — was simply refused (#4132). Keyed on
+            # `_DISPOSAL_TOMBSTONE_RE`, the same matcher `candidate_input_lost` already trusts
+            # to mean "this row measures its absence out loud", so a command that merely looks
+            # file-shaped still owes a denominator. The vacuous-pin rail above is NOT bypassed:
+            # it is what caught the four rows this exemption exists for, and it keys on the
+            # quoted operand, which the corrected frame does not have.
+            and not _DISPOSAL_TOMBSTONE_RE.fullmatch(evidence_cmd or "")):
         # The silence, and the reason #2048's rail could not do its job: a declared zero is a
         # claim `audit` can tally and a repair can act on, while an absent field is nothing to
         # read. Measured on the live ledger 2026-10-02: 109 latest-wins keys, 0 of them

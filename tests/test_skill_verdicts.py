@@ -7950,3 +7950,204 @@ def test_the_legacy_disposal_tombstones_stay_exempt_from_input_lost(tmp_path):
     assert ("candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 0") in out, out
     assert "vacuous_pins: latest_wins 1" in out, out
     assert rc == 0, out
+
+
+# ── #4132 ─────────────────────────────────────────────────────────────────────
+# Four live cohort keys — `seq-2-bash-fs-edit`, `seq-3-bash-explore-bash-fs-read`,
+# `seq-3-bash-fs-backlog-write-task-bash-fs`, `seq-3-read-edit-bash-fs` — hold a
+# `LEGACY_TOMBSTONE_TEMPLATE` disposal of 2026-10-11 as their latest row, and that
+# frame is vacuous for the reason #3941 names: its pin puts a REGEX in glob position
+# (`ls -1 '…[0-9]{8}\.md'`), quote removal runs before pathname expansion, stderr is
+# swallowed and `wc -l` prints 0 at exit 0 whatever the corpus holds. Re-minting them
+# means `reanchor` onto this module's own corrected `TOMBSTONE_TEMPLATE`, which was
+# unreachable: `reanchor_verdict` passes no `require_input_rows=False`, the corrected
+# frame publishes `dated_corpus_files=` and `pinned_input=` and never `input_rows=`,
+# so #2052's no-denominator mandate raised `declares no input count` and
+# `cmd_reanchor` exited 2 — while the two mint paths inside this module that author
+# that very frame waive the mandate (:3245, :3191), and #2569 already exempted the
+# frame from `INPUT_LOST` on the same ground: a command that declares the corpus and
+# its bound is accountable. These nodes pin the waiver, its exact boundary, and the
+# three properties the owed ledger pass depends on. A fixture ledger is not the
+# ledger: the four live keys, the `vacuous_pins: latest_wins 0` reading, the
+# `grep -c` of the corrected frame over the live file and the suppression-date ruling
+# are owed after landing, not claimed here.
+
+VACUOUS_KEY_4132 = "seq-2-bash-fs-edit"
+VACUOUS_PIN_4132 = "candidate-seq-2-bash-fs-edit-[0-9]{8}\\.md"
+VACUOUS_OTHER_PIN_4132 = "candidate-seq-9-bash-fs-[0-9]{8}\\.md"
+VACUOUS_REASON_4132 = ("the corpus the tombstone counted is gone, so the decision "
+                       "cannot be re-checked")
+
+
+def _vacuous_frames_4132(tmp_path: Path):
+    """(store, key, the frame that fabricated the zero, the corrected frame, the pin).
+
+    The candidates directory exists and holds one unrelated candidate — the live
+    cohort's retention state (`ls -1 …/candidates | grep -cE '^candidate-<key>-'` is 0
+    for all four), so an honest count is 0 and the corrected frame prints it.
+    """
+    cand = _cand_dir_2433(tmp_path)
+    pin = f"{cand}/{VACUOUS_PIN_4132}"
+    return (tmp_path / "verdicts.jsonl", VACUOUS_KEY_4132,
+            _legacy_tombstone_2569(pin), sv.TOMBSTONE_TEMPLATE.format(input=pin), pin)
+
+
+def _vacuous_wins_4132(store: Path) -> list[str]:
+    """The keys `audit`'s `vacuous_pins: latest_wins` counts over `store`.
+
+    The call `cmd_audit` makes at its own `vacuous_pins:` line, over `store`.
+    """
+    return sv.vacuous_pin_keys(sv.load_verdicts(store))
+
+
+def _vacuous_ledger_4132(tmp_path: Path):
+    """A ledger whose latest row for the key is the vacuous legacy disposal.
+
+    `stored_row` writes `occurrences_at_decision` directly, which is what the growth
+    block would have carried from a real mint, so the re-anchor has a baseline to keep.
+    """
+    store, key, legacy, corrected, pin = _vacuous_frames_4132(tmp_path)
+    stored_row(store, key, legacy, verdict="rejected_unverifiable",
+               reason=VACUOUS_REASON_4132, occurrences=7)
+    return store, key, legacy, corrected, pin
+
+
+def test_record_verdict_accepts_the_tombstone_frame_that_declares_no_input_rows(tmp_path,
+                                                                                 mirror):
+    """Clause 1: the re-anchor lane opens, at the DEFAULT `require_input_rows`.
+
+    `record_verdict` is called exactly as `reanchor_verdict` calls it — no waiver
+    offered, because the caller has none to give — and the command is the module's own
+    corrected template, which measures rc 0, prints the frame's two fields and declares
+    no input count. The rc-0/declared-None measurement is taken first so a reader sees
+    the mandate's own trigger rather than trusting this node's word for it.
+    """
+    store, key, _legacy, corrected, _pin = _vacuous_frames_4132(tmp_path)
+    rc, detail, declared = sv._run_stored_check({"evidence_cmd": corrected})
+    assert (rc, declared) == (0, None), (
+        f"the corrected frame measures rc={rc} declared={declared} (detail {detail!r}), "
+        "so this node is no longer pinned to the mandate it exists to open past")
+    assert sv._DISPOSAL_TOMBSTONE_RE.fullmatch(corrected) is not None, (
+        "the command is not the frame the waiver is keyed on, so a pass here would "
+        "prove nothing about #2052")
+
+    sv.record_verdict(store=store, pattern_key=key, verdict=sv.UNVERIFIABLE_VERDICT,
+                      reason=VACUOUS_REASON_4132, evidence_cmd=corrected)
+
+    assert store.exists(), "the frame was still refused: nothing was appended"
+    lines = [json.loads(ln) for ln in store.read_text(encoding="utf-8").splitlines()
+             if ln.strip()]
+    assert len(lines) == 1, f"expected one appended row, got {len(lines)}"
+    assert lines[0]["evidence_cmd"] == corrected
+    assert lines[0]["verdict"] == sv.UNVERIFIABLE_VERDICT
+
+
+def test_the_tombstone_waiver_stops_at_the_frame_it_names(tmp_path, mirror):
+    """Clause 2: the mandate keeps catching the silence it exists to catch.
+
+    Two refusals, both rc 0 and both printing no `input_rows=`. The first is a command
+    that is no tombstone frame at all — #2052's original shape, a count with no
+    denominator. The second is the frame with its `pinned_input=` pointing at another
+    pattern: the backreference is what makes the text THIS frame, so breaking it must
+    put the command back under the mandate rather than let the waiver read as "any
+    command mentioning `dated_corpus_files=`". Neither may write a line.
+    """
+    store, key, _legacy, corrected, pin = _vacuous_frames_4132(tmp_path)
+    lookalike = corrected.replace(
+        f"pinned_input='{pin}'", f"pinned_input='{VACUOUS_OTHER_PIN_4132}'")
+    assert lookalike != corrected, "the substitution found nothing to substitute"
+    assert sv._DISPOSAL_TOMBSTONE_RE.fullmatch(lookalike) is None, (
+        "the lookalike still matches the frame, so this node cannot show the waiver "
+        "is keyed on it")
+
+    for cmd, what in ((f"echo \"matched=3\" # {key}",
+                       "an rc-0 command that is not the tombstone frame"),
+                      (lookalike, "the tombstone frame with a pinned_input naming "
+                                  "another pattern")):
+        with pytest.raises(ValueError) as exc:
+            sv.record_verdict(store=store, pattern_key=key,
+                              verdict=sv.UNVERIFIABLE_VERDICT,
+                              reason=VACUOUS_REASON_4132, evidence_cmd=cmd)
+        assert "declares no input count" in str(exc.value), (
+            f"{what} was refused for something else ({exc.value}), so the mandate "
+            "cannot be trusted to still be the thing that refused it")
+    assert not store.exists(), "a refused command still wrote a line"
+
+
+def test_reanchoring_a_legacy_tombstone_appends_the_frame_and_keeps_the_decision(tmp_path,
+                                                                                 mirror):
+    """Clause 3: the whole re-anchor, end to end, over a legacy-tombstone latest row.
+
+    This is the call the owed pass makes per key. Nothing about the decision is
+    re-made: the verdict, the reason and the growth baseline come off the superseded
+    row (`occurrences=None` → the carry-forward in the growth block), and only the
+    falsifier changes.
+    """
+    store, key, legacy, corrected, _pin = _vacuous_ledger_4132(tmp_path)
+
+    row = sv.reanchor_verdict(store=store, pattern_key=key, evidence_cmd=corrected)
+
+    assert row["evidence_cmd"] == corrected
+    assert row["verdict"] == "rejected_unverifiable", "the verdict was re-decided"
+    assert row["reason"] == VACUOUS_REASON_4132, "the reason was replaced, not carried"
+    assert row.get("occurrences_at_decision") == 7, (
+        "the growth baseline was dropped, so a later tally under-counts this key")
+    assert row.get("decided_by") == sv.REANCHOR_DECIDED_BY
+    lines = [json.loads(ln) for ln in store.read_text(encoding="utf-8").splitlines()
+             if ln.strip()]
+    assert len(lines) == 2, f"reanchor must append; got {len(lines)} rows"
+    assert lines[0]["evidence_cmd"] == legacy, (
+        "the superseded row was rewritten: a tombstone history that changes under a "
+        "re-anchor is a decision that was never kept")
+    assert sv._regex_in_glob_position(lines[0]["evidence_cmd"]) is not None
+    assert sv._regex_in_glob_position(lines[1]["evidence_cmd"]) is None
+
+
+def test_a_reanchored_key_drops_out_of_the_vacuous_pin_tally(tmp_path, mirror):
+    """Clause 4: the instrument that found the four keys stops finding the re-minted one.
+
+    `vacuous_pin_keys` reads the latest row's command, so the corrected frame has to
+    clear `_regex_in_glob_position` while the legacy one does not. Asserted both ways
+    around the append, and asserted again through `audit`, which is the line the owed
+    pass reads as its done-condition.
+    """
+    store, key, _legacy, corrected, _pin = _vacuous_ledger_4132(tmp_path)
+    assert _vacuous_wins_4132(store) == [key], (
+        "the fixture's latest row is not vacuous, so a drop after the append would "
+        "prove nothing")
+    rc, out = run_audit(store)
+    assert "vacuous_pins: latest_wins 1 of_them_tombstoned 1" in out, out
+
+    sv.reanchor_verdict(store=store, pattern_key=key, evidence_cmd=corrected)
+
+    assert _vacuous_wins_4132(store) == [], (
+        "the re-minted row is still counted vacuous, so audit will keep naming the key")
+    rc, out = run_audit(store)
+    assert "vacuous_pins: latest_wins 0 of_them_tombstoned 0" in out, out
+
+
+def test_a_reanchored_tombstone_stays_out_of_the_input_lost_tally(tmp_path, mirror,
+                                                                  monkeypatch):
+    """Clause 5: the re-minted row is not a new `INPUT_LOST` finding, and audit stays 0.
+
+    The row counts a corpus retention pruned, which is exactly what `INPUT_LOST` was
+    built to report about a live measurement — so the exemption the legacy frame was
+    given in #2569 has to carry to the corrected frame, or the owed pass turns four
+    vacuous pins into four audit findings and a non-zero exit. The negative control is
+    the #2569 one: with the matcher monkeypatched away the same command IS named, so a
+    `None` here is the exemption working and not a detector that cannot see.
+    """
+    store, key, _legacy, corrected, _pin = _vacuous_ledger_4132(tmp_path)
+    sv.reanchor_verdict(store=store, pattern_key=key, evidence_cmd=corrected)
+
+    assert sv.candidate_input_lost(corrected) is None
+
+    rc, out = run_audit(store)
+    assert rc == 0, f"audit exited {rc} over a corpus it did not prune:\n{out}"
+    assert "input_lost 0" in out, out
+    assert "vacuous_pins: latest_wins 0" in out, out
+
+    monkeypatch.setattr(sv, "_DISPOSAL_TOMBSTONE_RE", re.compile(r"(?!)"))
+    assert sv.candidate_input_lost(corrected) is not None, (
+        "the command is named input-lost even with the exemption matcher removed, so "
+        "the None asserted above was blindness, not the exemption")
