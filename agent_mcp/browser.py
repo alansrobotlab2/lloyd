@@ -886,7 +886,7 @@ async def _frame_sections(page, ref_map: dict, first_ref_number: int = 0) -> str
             )
             continue
         try:
-            raw = await frame.locator("body").aria_snapshot()
+            raw = await _aria_snapshot_masked(frame)
         except Exception as exc:
             out.append(f"{header}\n[unreadable: {exc}]")
             continue
@@ -919,7 +919,7 @@ async def _browser_snapshot(full: bool = False) -> str:
         return json.dumps({"error": landed})
     _ref_map = {}
     try:
-        raw = await page.locator("body").aria_snapshot()
+        raw = await _aria_snapshot_masked(page)
     except Exception as exc:
         return json.dumps({"error": f"Accessibility snapshot failed: {exc}"})
 
@@ -1167,7 +1167,7 @@ async def _capture_state(tool_name: str) -> dict | None:
     refs: dict[str, dict] = {}
     top_refs = 0
     try:
-        raw = await page.locator("body").aria_snapshot()
+        raw = await _aria_snapshot_masked(page)
         snapshot, top_refs = _parse_aria_snapshot(raw, refs)
     except Exception as exc:
         logger.debug("browser state: aria_snapshot failed: %s", exc)
@@ -1710,6 +1710,8 @@ async def shutdown() -> None:
     Playwright node driver — the process tree grew one of each per restart.
     """
     global _pw, _browser, _context
+    if _ui_trailing_push is not None and not _ui_trailing_push.done():
+        _ui_trailing_push.cancel()
     for label, obj, closer in (
         ("context", _context, "close"),
         ("browser", _browser, "close"),
@@ -1822,3 +1824,244 @@ async def navigate_from_ui(url: str) -> dict:
     # the most confusing possible answer.
     await _push_browser_state("url_bar")
     return result
+
+
+# ── Mission Control's pointer and keyboard ─────────────────────────────────────
+#
+# The URL bar was the tab's one control, so a page that wanted a login could be
+# watched and never answered. These are the human's hands on the same Chromium:
+# a click at a pixel of the frame, text, a named key, a wheel. Same seam and the
+# same reasoning as the URL bar — a route on this process, proxied by the
+# backend, never an MCP call — and one more that matters more here: what a human
+# types into a login form is a credential, and nothing on this path may write it
+# down. No log line carries the text or a Playwright message about it (those
+# echo their arguments), the frame masks password values
+# (`_aria_snapshot_masked`), and the agent's transcript never sees the call.
+
+_UI_INPUT_KINDS = ("click", "type", "key", "scroll")
+_UI_MAX_TEXT = 4096
+_UI_MAX_SCROLL = 5000
+_UI_NAMED_KEYS = frozenset({
+    "Enter", "Tab", "Backspace", "Delete", "Escape", "Space", "Insert",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Home", "End", "PageUp", "PageDown",
+    *(f"F{i}" for i in range(1, 13)),
+})
+_UI_MODIFIERS = frozenset({"Shift", "Control", "Alt", "Meta", "ControlOrMeta"})
+# Serialises input from every open tab, so two viewers' keystrokes interleave
+# per event rather than per character inside one `keyboard.type`.
+_ui_input_lock = asyncio.Lock()
+# One trailing frame per burst: a click's effect often lands after the settle
+# (a menu animating open, a SPA route fetching), and a newer event supersedes it.
+_ui_trailing_push: asyncio.Task | None = None
+_UI_TRAILING_PUSH_S = 1.0
+
+
+def _valid_ui_key(key: object) -> bool:
+    """`Shift+Tab`, `Control+a`, `Enter` — Playwright's names, nothing else."""
+    if not isinstance(key, str) or not key or len(key) > 48:
+        return False
+    *mods, last = key.split("+") if key != "+" else ["+"]
+    if any(m not in _UI_MODIFIERS for m in mods):
+        return False
+    return last in _UI_NAMED_KEYS or (len(last) == 1 and last.isprintable())
+
+
+def _ui_number(value: object, lo: float, hi: float) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value:  # NaN
+        return None
+    return max(lo, min(hi, float(value)))
+
+
+def _schedule_ui_trailing_push() -> None:
+    global _ui_trailing_push
+    if _ui_trailing_push is not None and not _ui_trailing_push.done():
+        _ui_trailing_push.cancel()
+
+    async def _later() -> None:
+        await asyncio.sleep(_UI_TRAILING_PUSH_S)
+        await _push_browser_state("user_input")
+
+    _ui_trailing_push = asyncio.create_task(_later())
+
+
+async def input_from_ui(event: dict) -> dict:
+    """Apply one pointer or keyboard event from the Browser tab.
+
+    `event` is one of::
+
+        {"kind": "click",  "x": 412, "y": 233, "button": "left", "count": 1}
+        {"kind": "type",   "text": "alan@example.com"}
+        {"kind": "key",    "key": "Shift+Tab"}
+        {"kind": "scroll", "x": 640, "y": 400, "dx": 0, "dy": 300}
+
+    Coordinates are frame pixels, which are viewport CSS pixels — the frame is a
+    viewport screenshot at device scale 1 — clamped to the viewport.
+
+    Never launches a browser: input with no page open has nothing to land on,
+    and reviving a browser the agent closed is the state mirror's rule too.
+    Every navigation an event causes passes the same host checks a tool call's
+    does — the context-wide interceptor for the request, `_enforce_landing` for
+    wherever it ended up. A click that opens a tab moves the view to that tab,
+    or the viewer would be left on the page they clicked away from. The frame is
+    awaited before returning and tagged `user_input`.
+
+    An error never carries Playwright's message: for `type` that message would
+    quote the text, and for the others the type name is enough to act on.
+    """
+    global _active_page
+    if not isinstance(event, dict):
+        return {"error": "event must be an object"}
+    kind = event.get("kind")
+    if kind not in _UI_INPUT_KINDS:
+        return {"error": f"kind must be one of {', '.join(_UI_INPUT_KINDS)}"}
+
+    text = key = None
+    if kind == "type":
+        text = event.get("text")
+        if not isinstance(text, str) or not text:
+            return {"error": "text is required"}
+        if len(text) > _UI_MAX_TEXT:
+            return {"error": f"text is limited to {_UI_MAX_TEXT} characters per event"}
+    elif kind == "key":
+        key = event.get("key")
+        if not _valid_ui_key(key):
+            return {"error": "unsupported key"}
+
+    async with _ui_input_lock:
+        page = _existing_page()
+        if page is None:
+            return {"error": "no page is open — type a URL first"}
+        viewport = page.viewport_size or {"width": 1280, "height": 800}
+        vw, vh = viewport["width"] - 1, viewport["height"] - 1
+        before = list(_context.pages) if _context is not None else []
+        try:
+            if kind in ("click", "scroll"):
+                x = _ui_number(event.get("x"), 0, vw)
+                y = _ui_number(event.get("y"), 0, vh)
+                if x is None or y is None:
+                    return {"error": "x and y are required"}
+            if kind == "click":
+                button = event.get("button") if event.get("button") in ("left", "right", "middle") else "left"
+                count = int(_ui_number(event.get("count", 1), 1, 3) or 1)
+                if count == 1:
+                    await page.mouse.click(x, y, button=button)
+                else:
+                    # The tab sends every click of a double-click as it happens,
+                    # the second one carrying count 2 (the DOM's `detail`). One
+                    # press at that count is what a real second click is;
+                    # `mouse.click(click_count=2)` would press twice more.
+                    await page.mouse.move(x, y)
+                    await page.mouse.down(button=button, click_count=count)
+                    await page.mouse.up(button=button, click_count=count)
+            elif kind == "type":
+                await page.keyboard.type(text)
+            elif kind == "key":
+                await page.keyboard.press(key)
+            else:
+                dx = _ui_number(event.get("dx", 0), -_UI_MAX_SCROLL, _UI_MAX_SCROLL) or 0.0
+                dy = _ui_number(event.get("dy", 0), -_UI_MAX_SCROLL, _UI_MAX_SCROLL) or 0.0
+                await page.mouse.move(x, y)
+                await page.mouse.wheel(dx, dy)
+        except Exception as exc:
+            logger.warning("browser/input: %s failed: %s", kind, type(exc).__name__)
+            return {"error": f"{kind} failed ({type(exc).__name__})"}
+
+        # A click or a key may have started a navigation or opened a tab. Give it
+        # a moment to commit; typing into a field changes nothing to wait for.
+        if kind in ("click", "key"):
+            await asyncio.sleep(0.15)
+            if _context is not None:
+                opened = [p for p in _context.pages if p not in before and not p.is_closed()]
+                if opened:
+                    page = _active_page = opened[-1]
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except Exception:
+                pass
+
+        result: dict = {"ok": True, "kind": kind}
+        landed = await _enforce_landing(page)
+        if landed:
+            result = {"error": landed}
+        await _push_browser_state("user_input")
+    if kind != "type":
+        _schedule_ui_trailing_push()
+    return result
+
+
+# ── Password values in the accessibility tree ─────────────────────────────────
+#
+# Kept at the end of the module so the line anchors other docs cite above it
+# do not move; every caller resolves it at call time.
+
+# Chromium's accessibility tree carries a password field's value in plain text:
+# `- textbox "Password": hunter2`, measured against /usr/bin/chromium on
+# 2026-11-16. The screenshot shows dots, the tree does not. Every aria read in
+# this module therefore goes through `_aria_snapshot_masked`, because the tree
+# reaches two places a secret must not: the model's context (`browser_snapshot`,
+# and from there the session transcript on disk) and the Mission Control frame.
+# It mattered less while only the agent could fill a field — it already knew the
+# value — and it matters now that the Browser tab lets a human type credentials.
+_PASSWORD_MASK = "••••••••"
+_PASSWORD_VALUES_JS = (
+    "() => Array.from(document.querySelectorAll('input[type=password]'),"
+    " e => e.value).filter(v => typeof v === 'string' && v.length > 0)"
+)
+# One textbox line of Playwright's aria YAML: role, optional quoted name (which
+# may itself contain `: `), any number of `[attr]` groups, then `: value`.
+_TEXTBOX_VALUE_RE = re.compile(
+    r'^(?P<head>[ \t]*- textbox(?:[ \t]+"(?:[^"\\]|\\.)*")?(?:[ \t]+\[[^\]\n]*\])*):[ \t]'
+    r'(?P<value>[^\n]+)$',
+    re.M,
+)
+
+
+def _mask_password_values(raw: str, secrets: list[str], mask_all: bool = False) -> str:
+    """Replace the value of every textbox line that is (part of) a password.
+
+    Matched both ways round — the value holds a secret, or a secret holds the
+    value — because the tree and the DOM are read in two calls and the field can
+    change between them: a keystroke lengthens one, a backspace shortens it.
+    YAML may quote a value with a colon in it, which the containment test
+    survives as well. Only textbox values are touched, so a one-character
+    password costs some over-masking of other fields, never a leak.
+
+    `mask_all` is the fail-closed answer when the DOM could not be asked which
+    fields are passwords: every textbox value goes.
+    """
+    if not raw or (not secrets and not mask_all):
+        return raw
+
+    def _sub(m: re.Match) -> str:
+        value = m.group("value")
+        bare = value.strip().strip('"')
+        if mask_all or any(s in value or (bare and bare in s) for s in secrets):
+            return f"{m.group('head')}: {_PASSWORD_MASK}"
+        return m.group(0)
+
+    return _TEXTBOX_VALUE_RE.sub(_sub, raw)
+
+
+async def _aria_snapshot_masked(target) -> str:
+    """`target.locator("body").aria_snapshot()` with password values masked.
+
+    `target` is a Page or a Frame; both answer `locator` and `evaluate`. Raises
+    what the aria read raises, so callers keep their own error wording.
+    """
+    raw = await target.locator("body").aria_snapshot()
+    if not raw or "textbox" not in raw:
+        return raw
+    try:
+        found = await target.evaluate(_PASSWORD_VALUES_JS)
+        secrets = [s for s in (found or []) if isinstance(s, str) and s]
+        mask_all = False
+    except Exception as exc:
+        # The tree was readable and the DOM was not: mid-navigation, most often.
+        # Not knowing which fields are passwords is a reason to hide them all.
+        logger.debug("browser: password scan failed, masking every textbox: %s",
+                     type(exc).__name__)
+        secrets, mask_all = [], True
+    return _mask_password_values(raw, secrets, mask_all=mask_all)

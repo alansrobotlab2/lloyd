@@ -1333,7 +1333,7 @@ file is present on any box where the aggregator or the backend has ever booted a
 nowhere else: on a machine where neither has run there is no token to read, and the
 credential has to come from `LLOYD_MCP_TOKEN` / `LLOYD_MCP_TOKEN_FILE` (:79-80)
 instead. The credential gate is first and loud: `require_credential()` wraps the whole
-aggregator app (`agent_mcp/main.py:1148`), so a request with no header is a 401 whose
+aggregator app (`agent_mcp/main.py:1171`), so a request with no header is a 401 whose
 body carries `{"code": "AGGREGATOR_UNAUTHENTICATED"}` (`AUTH_ERROR_CODE`, :77) whatever
 it asks for. Behind it the streamable-HTTP mount still imposes its own rule, and it is
 on the presence of an `Accept` header, not on its content: with a valid token,

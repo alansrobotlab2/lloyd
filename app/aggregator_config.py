@@ -40,6 +40,7 @@ _PATHS: dict[str, str] = {
     "changes": "/changes",
     "changes_revert": "/changes/revert",
     "browser_navigate": "/browser/navigate",
+    "browser_input": "/browser/input",
     # `{task_id}` and `{verb}` are filled by `subagent_route`.
     "subagent_control": "/subagents/{task_id}/{verb}",
 }

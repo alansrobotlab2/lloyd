@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowRight, Camera, RefreshCw, ExternalLink, Globe, Crosshair, Loader2,
+  Eye, EyeOff, Keyboard, Send,
 } from 'lucide-react'
-import { api, type BrowserFrame } from '../../api'
+import { api, type BrowserFrame, type BrowserInputEvent } from '../../api'
 import { useReportMcFocus } from '../../contexts/McUiContext'
 import { Button } from '../ui/button'
 import { cn } from '@/lib/utils'
+import { playwrightKey } from '@/lib/browserKeys'
 
 // Mirrors the agent's live browser session (#278).
 //
@@ -15,17 +17,27 @@ import { cn } from '@/lib/utils'
 // browse session costs the user a tab instead of a second browser window on
 // the box's display.
 //
-// The URL bar is the one control here. It POSTs to /api/browser/navigate,
+// The URL bar is the first control. It POSTs to /api/browser/navigate,
 // which the backend proxies to the aggregator — Playwright runs in that
 // process, so a control action has to cross the seam. It is not an MCP call:
 // the user typing a URL is not the agent using a tool, and dispatching it as
 // one would write a browser_navigate into the transcript nobody made.
 //
-// Everything else stays read-only, and not for want of a route: the overlay
-// shows which regions the agent's `eN` refs point at, but clicking one has
-// nothing to send. The tool surface has no "click pixel (x,y)" — refs come
-// from an a11y tree we no longer hold by the time the frame is rendered.
+// The frame itself is the second control (POST /api/browser/input, the same
+// seam): a click on the screenshot is a click at that viewport pixel, and while
+// the frame has focus the keyboard, paste and the wheel go to the page. That is
+// what lets a human answer a login the agent cannot — so what is typed here is
+// a credential, and nothing on this path logs it. The "type into page" row is
+// the same `type` event for a phone, whose keyboard a focused <div> never opens.
+//
+// The overlay shows which regions the agent's `eN` refs point at; it is not a
+// control — refs come from an a11y tree we no longer hold by render time.
 const REFS_WITHOUT_GEOMETRY = 0
+
+// Printable keystrokes arrive one keydown at a time; a short window turns a
+// typed word into one request and one frame instead of one per letter.
+const TYPE_FLUSH_MS = 120
+const SCROLL_FLUSH_MS = 120
 
 function RefBadge({ label }: { label: string }) {
   return (
@@ -50,6 +62,22 @@ export default function BrowserPage() {
   const imgRef = useRef<HTMLImageElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const [containerW, setContainerW] = useState(0)
+  const frameRef = useRef<HTMLDivElement>(null)
+  const [frameFocused, setFrameFocused] = useState(false)
+  const [inFlight, setInFlight] = useState(0)
+  const [inputError, setInputError] = useState<string | null>(null)
+  const [sendText, setSendText] = useState('')
+  const [revealText, setRevealText] = useState(false)
+  // Events go out strictly in order: a password typed then Enter must not
+  // race into Enter-then-password.
+  const queue = useRef<Promise<void>>(Promise.resolve())
+  const textBuf = useRef('')
+  const textTimer = useRef<number | null>(null)
+  const scrollAcc = useRef({ x: 0, y: 0, dx: 0, dy: 0 })
+  const scrollTimer = useRef<number | null>(null)
+  // The frame wrapper mounts with the first screenshot; the wheel listener
+  // has to be attached to it then, not at page mount.
+  const hasFrame = Boolean(frame?.screenshot_b64)
 
   useReportMcFocus('browser', frame?.url ? { kind: 'url', id: frame.url } : null)
 
@@ -90,6 +118,128 @@ export default function BrowserPage() {
       setNavigating(false)
     }
   }, [urlInput, navigating])
+
+  const enqueue = useCallback((event: BrowserInputEvent) => {
+    setInFlight(n => n + 1)
+    queue.current = queue.current
+      .then(async () => {
+        try {
+          const res = await api.browserInput(event)
+          setInputError(res.error ?? null)
+        } catch (err) {
+          setInputError(err instanceof Error ? err.message : String(err))
+        }
+      })
+      .finally(() => setInFlight(n => n - 1))
+  }, [])
+
+  const flushText = useCallback(() => {
+    if (textTimer.current !== null) {
+      window.clearTimeout(textTimer.current)
+      textTimer.current = null
+    }
+    const text = textBuf.current
+    textBuf.current = ''
+    if (text) enqueue({ kind: 'type', text })
+  }, [enqueue])
+
+  const queueText = useCallback((text: string) => {
+    textBuf.current += text
+    if (textTimer.current !== null) window.clearTimeout(textTimer.current)
+    textTimer.current = window.setTimeout(flushText, TYPE_FLUSH_MS)
+  }, [flushText])
+
+  const sendKey = useCallback((key: string) => {
+    flushText()
+    enqueue({ kind: 'key', key })
+  }, [enqueue, flushText])
+
+  // Screen pixels of the rendered <img> → the frame's own pixels, which are
+  // the agent browser's viewport pixels.
+  const toFrame = useCallback((clientX: number, clientY: number) => {
+    const img = imgRef.current
+    if (!img || !img.naturalWidth) return null
+    const r = img.getBoundingClientRect()
+    if (r.width === 0 || r.height === 0) return null
+    return {
+      x: Math.round((clientX - r.left) * (img.naturalWidth / r.width)),
+      y: Math.round((clientY - r.top) * (img.naturalHeight / r.height)),
+    }
+  }, [])
+
+  const onFrameClick = useCallback((e: React.MouseEvent, button: 'left' | 'right' | 'middle') => {
+    const p = toFrame(e.clientX, e.clientY)
+    if (!p) return
+    flushText()
+    enqueue({ kind: 'click', ...p, button, count: Math.min(3, Math.max(1, e.detail || 1)) })
+  }, [enqueue, flushText, toFrame])
+
+  const onFrameKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing) return
+    if (['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock'].includes(e.key)) return
+    // Paste arrives as its own event with the clipboard text; let it.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') return
+    const altGraph = e.getModifierState?.('AltGraph')
+    if (e.key.length === 1 && (altGraph || (!e.ctrlKey && !e.metaKey))) {
+      e.preventDefault()
+      queueText(e.key)
+      return
+    }
+    const key = playwrightKey(e)
+    if (!key) return
+    // Tab must not move focus out of the frame, Backspace must not navigate
+    // Mission Control, Ctrl+R must reload the page in there, not this one.
+    e.preventDefault()
+    sendKey(key)
+  }, [queueText, sendKey])
+
+  const onFramePaste = useCallback((e: React.ClipboardEvent) => {
+    const text = e.clipboardData.getData('text/plain')
+    if (!text) return
+    e.preventDefault()
+    queueText(text)
+    flushText()
+  }, [flushText, queueText])
+
+  // React's onWheel is passive, so it cannot stop Mission Control scrolling
+  // under the page that is being scrolled. A native listener can.
+  useEffect(() => {
+    const el = frameRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      const p = toFrame(e.clientX, e.clientY)
+      if (!p) return
+      e.preventDefault()
+      const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1
+      const acc = scrollAcc.current
+      acc.x = p.x
+      acc.y = p.y
+      acc.dx += e.deltaX * unit
+      acc.dy += e.deltaY * unit
+      if (scrollTimer.current !== null) return
+      scrollTimer.current = window.setTimeout(() => {
+        scrollTimer.current = null
+        const { x, y, dx, dy } = scrollAcc.current
+        scrollAcc.current = { x, y, dx: 0, dy: 0 }
+        if (dx || dy) enqueue({ kind: 'scroll', x, y, dx: Math.round(dx), dy: Math.round(dy) })
+      }, SCROLL_FLUSH_MS)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [enqueue, toFrame, hasFrame])
+
+  useEffect(() => () => {
+    if (textTimer.current !== null) window.clearTimeout(textTimer.current)
+    if (scrollTimer.current !== null) window.clearTimeout(scrollTimer.current)
+  }, [])
+
+  const submitSendText = useCallback((e: React.FormEvent) => {
+    e.preventDefault()
+    if (!sendText) return
+    flushText()
+    enqueue({ kind: 'type', text: sendText })
+    setSendText('')
+  }, [enqueue, flushText, sendText])
 
   useEffect(() => {
     let es: EventSource | null = null
@@ -167,6 +317,13 @@ export default function BrowserPage() {
         {frame?.tool && (
           <span className="truncate font-mono text-[11px] text-muted-foreground">{frame.tool}</span>
         )}
+        {frameFocused && (
+          <span className="flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-400">
+            <Keyboard className="h-3 w-3" />
+            keys go to the page
+          </span>
+        )}
+        {inFlight > 0 && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
         <div className="ml-auto flex items-center gap-1">
           <Button
             variant="ghost"
@@ -249,18 +406,73 @@ export default function BrowserPage() {
         </div>
       )}
 
+      {frame?.screenshot_b64 && (
+        <form onSubmit={submitSendText} className="flex items-center gap-1 border-b border-border/40 px-4 py-1.5">
+          <input
+            value={sendText}
+            onChange={e => setSendText(e.target.value)}
+            type={revealText ? 'text' : 'password'}
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            placeholder="Type into the page (click a field first)"
+            aria-label="Text to type into the page"
+            className="min-w-0 flex-1 rounded border border-border/60 bg-muted/30 px-2 py-1 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-ring"
+          />
+          <Button type="button" variant="ghost" size="sm" className="h-7 w-7 shrink-0 p-0"
+            aria-label={revealText ? 'Hide text' : 'Show text'}
+            onClick={() => setRevealText(v => !v)}>
+            {revealText ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+          </Button>
+          <Button type="submit" variant="ghost" size="sm" className="h-7 shrink-0 gap-1 text-xs" disabled={!sendText}>
+            <Send className="h-3.5 w-3.5" />
+            type
+          </Button>
+          {(['Tab', 'Enter', 'Backspace'] as const).map(k => (
+            <Button key={k} type="button" variant="ghost" size="sm" className="h-7 shrink-0 px-2 font-mono text-[11px]"
+              onClick={() => sendKey(k)}>
+              {k === 'Backspace' ? '⌫' : k}
+            </Button>
+          ))}
+        </form>
+      )}
+
+      {inputError && (
+        <div className="border-b border-border/40 px-4 py-1 text-[11px] text-destructive">
+          {inputError}
+        </div>
+      )}
+
       <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto p-4">
         {frame?.screenshot_b64 ? (
-          <div className="relative inline-block max-w-full">
+          <div
+            ref={frameRef}
+            tabIndex={0}
+            role="application"
+            aria-label="Agent browser — click to interact; keys go to the page while focused"
+            onKeyDown={onFrameKeyDown}
+            onPaste={onFramePaste}
+            onFocus={() => setFrameFocused(true)}
+            onBlur={() => { flushText(); setFrameFocused(false) }}
+            className={cn(
+              'relative inline-block max-w-full cursor-pointer rounded outline-none',
+              frameFocused && 'ring-2 ring-sky-500/70',
+            )}
+          >
             <img
               ref={imgRef}
+              draggable={false}
+              onClick={e => onFrameClick(e, 'left')}
+              onAuxClick={e => { if (e.button === 1) { e.preventDefault(); onFrameClick(e, 'middle') } }}
+              onContextMenu={e => { e.preventDefault(); onFrameClick(e, 'right') }}
               alt={frame.title || 'agent browser screenshot'}
               src={`data:${frame.mime || 'image/jpeg'};base64,${frame.screenshot_b64}`}
               onLoad={e => {
                 const el = e.currentTarget
                 setNatural({ w: el.naturalWidth, h: el.naturalHeight })
               }}
-              className="block max-w-full rounded border border-border/60"
+              className="block max-w-full select-none rounded border border-border/60"
             />
             {showOverlay && scale > 0 && (
               <div className="pointer-events-none absolute inset-0">
@@ -286,7 +498,7 @@ export default function BrowserPage() {
             <Camera className="h-6 w-6" />
             <span>Waiting for the agent to open a page.</span>
             <span className="text-xs">
-              Every browser_* tool call pushes a frame here automatically.
+              Every browser_* tool call pushes a frame here automatically — or type a URL above.
             </span>
           </div>
         )}

@@ -52,7 +52,7 @@ the HTTP leg runs against a stub that answers the envelope the real mount sends
 (`{"jsonrpc": "2.0", "id": …, "result": {"tools": […]}}`) and gates in the order the
 live server gates in, which the second half of
 `test_a_copy_that_sends_no_credential_is_refused` pins: credential first, because
-`require_credential()` wraps the whole app (`agent_mcp/main.py:1148`) — so a request
+`require_credential()` wraps the whole app (`agent_mcp/main.py:1171`) — so a request
 missing both halves measures as the 401, not the 406 — and behind it the mount's own
 rule, that an `Accept` header exist at all (`*/*` is served; the bare `urllib.request`
 default, no header, is the 406). The substitutions that redirect it are the same
@@ -330,7 +330,7 @@ class _Stub(BaseHTTPRequestHandler):
                            "body": json.loads(raw) if raw.strip() else {}}
         # This order is the live server's, not the other way round:
         # `require_credential()` wraps the whole aggregator app
-        # (`agent_mcp/main.py:1148`), so a request missing the credential is a 401
+        # (`agent_mcp/main.py:1171`), so a request missing the credential is a 401
         # whatever else it says, and a request missing both halves measures as the
         # 401 — which is what
         # `test_a_copy_that_sends_no_credential_is_refused` asserts by deleting both.
@@ -472,7 +472,7 @@ def test_a_copy_that_sends_no_credential_is_refused(stub, tmp_path):
     command exits non-zero rather than printing an empty table.
 
     The second half of this node is the ordering §11 states — that the credential gate is
-    `require_credential()` wrapping the app (`agent_mcp/main.py:1148`), so it is the 401
+    `require_credential()` wrapping the app (`agent_mcp/main.py:1171`), so it is the 401
     that answers a request missing *both* halves. It is also the ordering this file's
     stub has to keep: were the gate modelled Accept-first, the request below would come
     back 406 and the claim in the page would be standing on a fixture that contradicts

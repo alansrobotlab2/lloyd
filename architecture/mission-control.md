@@ -31,7 +31,7 @@ each backed by a router under `app/routers/`.
 | `settings` | `system.py`, `models.py` | config view, model identity |
 | `architecture` | `architecture.py` | a **source import-graph browser** for `.py`/`.ts`, not these docs |
 | `ide` | `ide.py`, `lsp.py` | file view with LSP diagnostics |
-| `browser` | `browser.py` | mirrors the agent's Chromium; the URL bar is the one control |
+| `browser` | `browser.py` | mirrors the agent's Chromium; the URL bar and the frame (click, keys, paste, wheel) are the controls |
 | `desktop` | `desktop.py`, `app/desktop_lease.py` | mirrors the real desktop over SSE `GET /api/desktop/state`; the lease's grant/revoke buttons live here — see [[desktop]] |
 
 Six lists name the tabs and one file keeps them equal:
@@ -408,10 +408,65 @@ can say who drove it. `navigate_from_ui` completes a scheme-less host to
 `https://`, detecting the scheme by `://` rather than by the bare colon — the
 colon alone reads the whole of `localhost:8080` as a scheme, and on this box
 that is the first thing anybody types. `browser_navigate` stays strict, because
-an agent omitting the scheme has made a mistake worth seeing. Everything else
-on the page stays read-only, and not for want of a route: the ref overlay has
-nothing to send, since the tool surface has no "click pixel (x,y)" and the a11y
-tree is gone by render time.
+an agent omitting the scheme has made a mistake worth seeing.
+
+### Pointer and keyboard, and the password mask (2026-11-16)
+
+With the URL bar as the only control, a page that wanted a login could be
+watched and never answered. The frame is now the second control:
+`POST /api/browser/input` → aggregator `POST /browser/input` →
+`browser.input_from_ui`, one event per request — `click {x, y, button, count}`,
+`type {text}`, `key {key}`, `scroll {x, y, dx, dy}`. Coordinates are frame
+pixels, which are the viewport's CSS pixels (a viewport screenshot at device
+scale 1), clamped to it. The tab sends a click on the image, keystrokes while
+the frame has focus (printables batched into one `type` per 120 ms; named keys
+and Ctrl/Cmd shortcuts as Playwright names, Cmd and Ctrl both `ControlOrMeta`),
+paste as `type`, and the wheel through a non-passive listener so Mission
+Control does not scroll underneath. A "type into the page" row sends the same
+`type` event from a phone, whose keyboard a focused `<div>` never opens. Events
+go out in a strict queue — a password then Enter must not arrive as Enter then
+the password — and the aggregator serialises them under one lock across tabs.
+
+It is the URL bar's seam for the URL bar's reason — a route, never an MCP call,
+so a human's input is not written into the transcript as something the model
+did — and it inherits that path's guards: no event launches a browser (input
+with no page open is refused, as the state mirror refuses to revive one), and a
+click or key that navigates goes through the context-wide interceptor and then
+`_enforce_landing`. A click that opens a tab moves `_active_page` to it, or the
+viewer is left on the page they clicked away from. Each event awaits its frame
+(tagged `user_input`); a click, key or wheel also schedules one trailing frame a
+second later, superseded by the next event, for the menu that animates open or
+the SPA route that fetches after the settle. A double-click arrives as the two
+clicks it is, the second with `count: 2`, and is applied as one press at that
+count — `mouse.click(click_count=2)` would press twice more.
+
+**What is typed here is a credential, so nothing on this path writes it
+down.** No log line or returned error carries the text or a Playwright message
+(those quote their arguments): the aggregator and the backend both log the
+exception's type only. And the accessibility tree had to be masked, because
+Chromium carries a password field's value in it in plain text —
+`- textbox "Password": hunter2`, measured on `/usr/bin/chromium` on 2026-11-16,
+while the screenshot shows dots — and that tree is what `browser_snapshot`
+hands the model (then the session transcript, then recall) and what the frame
+hands this tab. Every aria read in `agent_mcp/browser.py` goes through
+`_aria_snapshot_masked`: it reads the values of `input[type=password]` in that
+document (page or frame) and replaces any textbox value that contains one, or
+is contained in one — the tree and the DOM are two reads and a keystroke can
+land between them. When the DOM cannot be asked, every textbox value in that
+read is masked: not knowing which fields are passwords is a reason to hide them
+all. `tests/test_browser_input.py` pins the three reads to that helper and logs
+in through a real Chromium, page and iframe, asserting the value reaches
+neither the frame, the snapshot nor a log line. The mask predates nothing the
+agent could not already do — `browser_evaluate` can still read `.value` — it
+closes the passive path, where a human's secret would otherwise reach the
+model just because the agent looked at the page after.
+
+The session itself is not persisted: the context is created fresh at launch
+with no storage state, so a login lasts until Chromium or `lloyd-mcp` restarts
+— and a landing that touches `agent_mcp/` restarts it.
+
+The ref overlay is not a control: refs come from an a11y tree that is gone by
+render time.
 
 `_is_private_host` was defined on 2026-04-11 and called from nowhere until
 2026-09-09 (`b7e2f69`, "wire the SSRF guard that was never called"). #278's

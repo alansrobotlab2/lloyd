@@ -577,6 +577,20 @@ export interface BrowserNavigateResult {
   error?: string
 }
 
+/** One event from the Browser tab's pointer or keyboard. Coordinates are frame
+ *  pixels (= the agent browser's viewport CSS pixels). */
+export type BrowserInputEvent =
+  | { kind: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; count?: number }
+  | { kind: 'type'; text: string }
+  | { kind: 'key'; key: string }
+  | { kind: 'scroll'; x: number; y: number; dx: number; dy: number }
+
+export interface BrowserInputResult {
+  ok?: boolean
+  kind?: string
+  error?: string
+}
+
 export interface GpuPowerStatus {
   /** `on` / `off` at rest; `stopping` / `starting` while a transition runs. */
   phase: 'on' | 'off' | 'stopping' | 'starting'
@@ -1751,6 +1765,16 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
+    }).then(r => r.json()),
+
+  // The Browser tab's pointer and keyboard. Like the URL bar, a failure the
+  // page caused comes back 200 with `error`. A `type` body can be a password:
+  // never log the event.
+  browserInput: (event: BrowserInputEvent): Promise<BrowserInputResult> =>
+    fetch(`${API_BASE}/browser/input`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event),
     }).then(r => r.json()),
 
   // Desktop computer use: the last capture, and the lease only a human grants.

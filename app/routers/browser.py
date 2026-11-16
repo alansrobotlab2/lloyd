@@ -9,6 +9,7 @@ POST /api/browser/state — MCP server publishes one frame (screenshot + annotat
 GET  /api/browser/state — SSE: the frame that was current when you subscribed, then each push.
 GET  /api/browser/frame — the same frame as plain JSON, for a client that doesn't want a stream.
 POST /api/browser/navigate — the tab's URL bar, proxied to the aggregator (see below).
+POST /api/browser/input — the tab's pointer and keyboard, proxied the same way.
 
 Deliberately NOT on the /api/mc/events bus: that channel fans out to every
 page in Mission Control and carries commands, so adding ~20 KB of JPEG to
@@ -43,10 +44,15 @@ _subscribers: set[asyncio.Queue] = set()
 # of #1053 comes from: the URL and the header travel together, so a proxy cannot
 # be updated to send one and forget the other.
 _MCP_NAVIGATE_URL = aggregator_route("browser_navigate")
+_MCP_INPUT_URL = aggregator_route("browser_input")
 
 # A navigation is a page load (up to 30s in the tool) plus a screenshot and
 # an aria snapshot, and the viewer is watching a spinner for all of it.
 _NAVIGATE_TIMEOUT_S = 45.0
+# An input event is a click or a few keystrokes, a settle of at most 3 s when it
+# started a navigation, and the frame. Short, because the tab queues events
+# behind each other and one stuck request would hold every keystroke after it.
+_INPUT_TIMEOUT_S = 15.0
 
 
 def subscribe() -> asyncio.Queue:
@@ -139,6 +145,35 @@ async def post_browser_navigate(body: dict):
         data = {"error": r.text or f"navigate failed (HTTP {r.status_code})"}
     if r.status_code >= 400 and "error" not in data:
         data = {"error": f"navigate failed (HTTP {r.status_code})"}
+    return JSONResponse(data)
+
+
+@router.post("/api/browser/input")
+async def post_browser_input(body: dict):
+    """The Browser tab's pointer and keyboard: one click, text, key or wheel.
+
+    Proxied for the same reason the URL bar is, and with one more rule: the
+    body of a `type` event can be a password, so nothing here logs the body or
+    an error derived from it. The aggregator validates the event; this only
+    checks it is an object.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    try:
+        async with httpx.AsyncClient(timeout=_INPUT_TIMEOUT_S) as client:
+            r = await client.post(_MCP_INPUT_URL, json=body,
+                                  headers=auth_headers_for(_MCP_INPUT_URL))
+    except Exception as e:
+        logger.warning("browser/input: aggregator unreachable: %s", type(e).__name__)
+        return JSONResponse({"error": f"browser service unreachable ({type(e).__name__})"})
+    try:
+        data = r.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if r.status_code >= 400 or not data:
+        data = {"error": data.get("error") or f"input failed (HTTP {r.status_code})"}
     return JSONResponse(data)
 
 

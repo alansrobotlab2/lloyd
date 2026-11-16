@@ -977,6 +977,28 @@ async def browser_navigate(request):
     return JSONResponse(result)
 
 
+async def browser_input(request):
+    """Mission Control's pointer and keyboard. `POST /browser/input {kind, …}`.
+
+    The URL bar's sibling, for the same reason it is a route and not a tool —
+    plus one: this body can be a password, so neither a log line nor an error
+    here may quote it. `browser.input_from_ui` validates the event and never
+    returns Playwright's message; this handler logs only the exception's type.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be an object"}, status_code=400)
+    try:
+        result = await browser.input_from_ui(body)
+    except Exception as e:
+        logger.warning("browser/input failed: %s", type(e).__name__)
+        return JSONResponse({"error": f"input failed ({type(e).__name__})"}, status_code=200)
+    return JSONResponse(result)
+
+
 async def subagent_control(request):
     """Stop or steer a running `Task` child. `POST /subagents/{task_id}/{verb}`.
 
@@ -1125,6 +1147,7 @@ starlette_app = combined.streamable_http_app(
         Route("/state", state, methods=["GET"]),
         Route("/loaded", loaded_paths, methods=["POST"]),
         Route("/browser/navigate", browser_navigate, methods=["POST"]),
+        Route("/browser/input", browser_input, methods=["POST"]),
         Route("/changes", changes, methods=["GET"]),
         Route("/changes/revert", changes_revert, methods=["POST"]),
         Route("/subagents/{task_id}/{verb}", subagent_control, methods=["POST"]),

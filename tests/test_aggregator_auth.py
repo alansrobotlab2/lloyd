@@ -346,6 +346,7 @@ def test_every_backend_proxy_sends_the_credential_it_needs():
     assert route("changes").endswith("/changes")
     for rel, needle in (
         ("app/routers/browser.py", "auth_headers_for(_MCP_NAVIGATE_URL)"),
+        ("app/routers/browser.py", "auth_headers_for(_MCP_INPUT_URL)"),
         ("app/routers/sessions.py", "auth_headers_for(revert_url)"),
         ("app/routers/messages.py", "auth_headers_for(changes_url)"),
         ("app/routers/dashboard.py", "auth_headers_for(_MCP_STATE_URL)"),

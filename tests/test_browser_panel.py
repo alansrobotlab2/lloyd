@@ -1483,7 +1483,7 @@ async def test_an_error_document_is_not_reported_as_a_successful_fetch(monkeypat
 
     assert out["ok"] is False, out
     assert "error" not in out, \
-        "an `error` key turns BrowserPage.tsx:82 into a red banner over a page " \
+        "an `error` key turns BrowserPage.tsx:110 into a red banner over a page " \
         "the human asked to see — the verdict belongs in `warning`"
     assert out["status"] == 404, out
     assert out["title"] == _ERR_TITLE, out
@@ -1576,7 +1576,7 @@ async def test_the_error_label_does_not_outlive_the_document_it_describes(monkey
 async def test_the_url_bar_shows_an_error_page_instead_of_a_red_banner(monkeypatch):
     """Clause 4: the document facts reach the viewer, and no `error` key does.
 
-    `BrowserPage.tsx:82` is `if (res.error) setNavError(res.error)`, so a 404
+    `BrowserPage.tsx:110` is `if (res.error) setNavError(res.error)`, so a 404
     reported through `error` would blank a page the human chose to look at.
     The scheme fallback keys on `error` too, so this also pins that a 404 does
     not spend a second goto over http.
@@ -1622,7 +1622,7 @@ async def test_the_url_bar_route_hands_the_error_document_through_unchanged(monk
 async def test_the_backend_proxy_forwards_the_error_document_without_minting_one(monkeypatch):
     """One hop further out: the backend's proxy into the aggregator process.
 
-    `app/routers/browser.py:140` mints an `error` when the aggregator answers
+    `app/routers/browser.py:146` mints an `error` when the aggregator answers
     4xx, so a proxy that learned to read `ok: false` as a broken request would
     put the red banner back for a page that only the *site* failed to find. The
     aggregator answers 200 with the document's own facts, and this pins that

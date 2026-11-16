@@ -513,6 +513,9 @@ version.
   screenshot or snapshot.
 - Browser SSRF: the check is on **resolved** addresses; `_enforce_landing`
   covers redirects, which route interception never sees.
+- Browser tab input (`/browser/input`) carries credentials: log only an
+  exception's type; every aria read goes through `_aria_snapshot_masked`
+  (Chromium puts password values in the tree in plain text).
 - Desktop (`architecture/desktop.md`): acting needs a lease only a human grants
   from the Desktop tab; chat sessions only; screenshots are refs, never base64.
 
