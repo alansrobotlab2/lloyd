@@ -750,9 +750,11 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
         # the rail and not from a tuple in this file: a lane that cannot load the
         # rule says WHICH fields it could not verify, spelled from the set.
         from app.harness.policy import (DISPATCHING_STATUS, SCHEDULE_STATE_FIELDS,
-                                        create_arms_a_task, first_arm_allowed,
-                                        front_matter_map, schedule_value_moves,
-                                        shown_schedule_value)
+                                        create_arms_a_task, create_declares_grants,
+                                        first_arm_allowed, front_matter_map,
+                                        grants_rail_refusal, grants_widenings,
+                                        GRANTS_CREATE_REASON,
+                                        schedule_value_moves, shown_schedule_value)
     except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
         _record_schedule_denial(mut, tool, f"the rail itself could not run ({exc})")
         return json.dumps({
@@ -783,6 +785,18 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
                           f"the scheduler reads ({held}) can be checked. Refusing "
                           f"rather than guessing."),
                 "code": ErrorCode.PROTECTED_PATH})
+        if create_declares_grants(new_fm):
+            # #4155's create arm, asked before the arming question: `create_arms_a_task`
+            # reads `status` alone, so a new task that both arms itself and declares its
+            # own licence would be judged only on the half that dispatches once. The
+            # licence is the half that outlives the create.
+            _record_schedule_denial(mut, tool, "create declaring a `grants:` block")
+            return json.dumps({
+                "error": (f"{tool} refused: {mut.path}: "
+                          + grants_rail_refusal(
+                              "autonomy/" + os.path.basename(real),
+                              [GRANTS_CREATE_REASON])),
+                "code": ErrorCode.PROTECTED_PATH})
         if create_arms_a_task(new_fm):
             _record_schedule_denial(mut, tool, f"create with status: {DISPATCHING_STATUS}")
             return json.dumps({
@@ -810,6 +824,23 @@ def _autonomy_schedule_refusal(mut: "_Mutation", post_text: str,
                       f"can be checked against it. Repair the front matter rather "
                       f"than writing past it."),
             "code": ErrorCode.PROTECTED_PATH})
+    widens = grants_widenings(old_fm, new_fm)
+    if widens:
+        # #4155, and asked before the dispatch comparison: `grants:` moves no dispatch
+        # field, so `schedule_value_moves` is blind to it, but it is the field that MINTS
+        # the authority to move them — `sync_task_grants` turns the block into an
+        # `authority_grants` row scoped `autonomy-task:<id>` on the task's next run, and
+        # the tool the #724 rail holds from this scope is `autonomy_write_task`. The
+        # predicate is policy's, imported and not restated: a block parsing equal to the
+        # pre-image's, or smaller than it, answers with no reasons and the write proceeds,
+        # which is what keeps the scheduler's own `yaml.dump` re-emission of the eight
+        # licensed blocks and #2313's withdrawal deletions landing.
+        _record_schedule_denial(mut, tool, "; ".join(widens))
+        return json.dumps({
+            "error": (f"{tool} refused: {mut.path}: "
+                      + grants_rail_refusal("autonomy/" + os.path.basename(real),
+                                            widens)),
+            "code": ErrorCode.PROTECTED_PATH, "path": str(mut.path)})
     moves = schedule_value_moves(old_fm, new_fm)
     # This lane holds ABSOLUTE paths, and the predicate's path rule is the vault-relative
     # shape the other two lanes pass it; `real` is already known to sit under `_autonomy_root()`

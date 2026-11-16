@@ -616,6 +616,73 @@ def schedule_state_errors(paths: list[str]) -> list[str]:
     return errors
 
 
+def grants_widening_errors(paths: list[str]) -> list[str]:
+    """Refuse a land that ADDS or WIDENS an autonomy task's `grants:` block (#4155).
+
+    The dispatch-field rail above holds seven fields on this route, and `grants` is not
+    one of them — correctly, because declaring a grant does not dispatch anything. What
+    it does instead is worse than dispatching one run: `app/autonomy.py` calls
+    `sync_task_grants` unconditionally before every run, so a block committed here
+    becomes a live `authority_grants` row scoped `autonomy-task:<id>`, and the tool that
+    row pays for can then move `preferred_hours`, which this same route may not. The
+    route is proved, not theoretical: vault `60b3f2c3` (2026-10-23, #3193) added a
+    five-line block to eight task files and `workers.db` holds the eight rows it
+    minted (`minted_by=frontmatter:38/47/53/54/74/78/83/86`), while row 1 —
+    `autonomy-task:40` / `autonomy_write_task` — is the field-moving tool, declared by a
+    task file. `validate_task_grants` refuses only `grant_create`, and `issued_by` is
+    free text a round may type, so nothing downstream catches what lands here.
+
+    Three properties this shares with `schedule_state_errors`, because a rule with two
+    definitions is a rule with none:
+
+    * **Values, never bytes.** HEAD's block is parsed (`_front_matter_map`), so the
+      nightly writers' `yaml.dump` re-emission of a block that means the same thing is
+      not a widening, and all eight currently licensed jobs keep landing.
+    * **Asymmetric on purpose.** A narrowing or a deleted block is accepted: #2313's
+      withdrawal pass is a round removing a declaration, and a lane that refused it
+      would make a revocation undeletable. The predicate that decides this is policy's
+      (`grants_widenings`), imported and not restated here.
+    * **Its own create arm, asked before any exemption.** A created file that declares
+      a block is refused on the shape alone, whatever its `status`, because the
+      first-arm exemption (#3464) tests `status` and nothing else — a single commit that
+      arms a never-run task and writes itself the licence is exactly what a
+      `status`-only rule waves through.
+
+    Deletions of the whole file stay accepted, for the reason `schedule_state_errors`
+    gives: a lander that cannot retire a task stops retiring them, and a retired task's
+    block goes with it.
+    """
+    # Read here, at call time, never copied: the field set, the comparison, the create
+    # arm and the refusal sentence all live in `app/harness/policy.py`, so a change to
+    # the rule reaches this route and the two MCP lanes in one edit. Function-local for
+    # the standing reason in this module — a loaded memory note cites
+    # `vault_round.py:237` by line number, and `test_prompt_surface_budget.py` fails the
+    # round whose diff moves it.
+    from app.harness.policy import (GRANTS_CREATE_REASON, create_declares_grants,
+                                    grants_rail_refusal, grants_widenings)
+
+    errors: list[str] = []
+    for p in sorted(set(paths)):
+        if not p.startswith("autonomy/") or not p.endswith(".md"):
+            continue  # the same scope rule as `schedule_state_errors`: the scheduler reads these
+        f = VAULT / p
+        if not f.exists():
+            continue  # a deletion: the licence retires with the task, and #777 says why a lander must still be able to
+        try:
+            new_fm = _front_matter_map(f.read_text(encoding="utf-8"))
+        except OSError:
+            continue  # `frontmatter_error` reports an unreadable file; do not double-book it
+        shown = _git("show", f"HEAD:{p}")
+        if shown.returncode != 0:
+            if create_declares_grants(new_fm):
+                errors.append(f"{p}: {grants_rail_refusal(p, [GRANTS_CREATE_REASON])}")
+            continue
+        widens = grants_widenings(_front_matter_map(shown.stdout), new_fm)
+        if widens:
+            errors.append(f"{p}: {grants_rail_refusal(p, widens)}")
+    return errors
+
+
 def task_body_contract_errors(paths: list[str], *, vault: Path | None = None) -> list[str]:
     """Refuse a land whose numbered task body does not open with `TASK_BODY_CONTRACT`.
 
@@ -699,6 +766,16 @@ def validate(paths: list[str], session_id: "str | None" = None) -> tuple[list[st
                 if terr:
                     errors.append(f"{p}: {terr}")
     if not errors:
+        # A task file whose front matter parses is not a task file whose AUTHORITY is
+        # unchanged. `grants:` is not a dispatch field and so is not in the set the door
+        # below reads, but it is the field that mints the authority to move them, which
+        # makes it the more dangerous half and the reason it is asked FIRST — before the
+        # schedule read and before the first-arm exemption inside it (#3464 tests
+        # `status` and nothing else, so a single commit that arms a never-run task and
+        # writes its own licence is refused for the licence, not waved through by the
+        # arm). Both doors run in this one block, so a land that did both is told both
+        # (#4155).
+        errors.extend(grants_widening_errors(paths))
         # A task file whose front matter parses is not a task file whose schedule is
         # unchanged: the #724 rail's second door closes here (#2190).
         errors.extend(schedule_state_errors(paths))

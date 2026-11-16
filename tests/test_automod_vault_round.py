@@ -10573,3 +10573,324 @@ def test_land_commits_and_says_so_when_the_clock_check_cannot_look(vault, capsys
     assert "landing without it" in err, \
         "an unread check must never be laundered into a clean zero"
     assert _events("vault_land")[-1]["ok"] is True, _events("vault_land")[-1]
+
+
+# ── #4155: a round may not ADD or WIDEN a task's `grants:` block ─────────────
+#
+# The dispatch-field rail above holds seven fields on this route and `grants` is not
+# one of them — correctly, since declaring a grant dispatches nothing. What it does
+# instead is worth more: `app/autonomy.py` calls `sync_task_grants` unconditionally
+# before every run, so a block committed here becomes a live `authority_grants` row
+# scoped `autonomy-task:<id>`, and the tool such a row pays for can move
+# `preferred_hours`, which this same route may not. The route ran: vault `60b3f2c3`
+# (2026-10-23, #3193) added a five-line block to eight task files — `autonomy/38, 47,
+# 53, 54, 74, 78, 83, 86` — and `workers.db` holds the eight rows it minted plus row
+# 1, `autonomy-task:40` on `autonomy_write_task`, the field-moving tool.
+#
+# The eight licensed jobs are also this rail's accept side: their files are rewritten
+# by `_update_task_field` and `_write_run_record` through `yaml.dump` on every status
+# and `failure_count` write, so a block that PARSES equal to HEAD's must land here or
+# eight nightly jobs stop landing the day this ships. That is why the comparison below
+# is on parsed values in one helper (clause 3's yaml.dump variant is not decoration —
+# it is what the scheduler actually writes), and why #2313's withdrawal pass, which is
+# a round DELETING a block, has to land too.
+
+LICENSED_HEAD = (
+    "---\nid: 1\nstatus: up_next\n"
+    "grants:\n"
+    "-   tool: automod_vault_land\n"
+    "    expires_at: 2027-01-31\n"
+    "    issued_by: alan\n"
+    "---\n\n" + CONTRACT + "\n\n# task\n")
+ONE_GRANT = [{"tool": "automod_vault_land", "expires_at": "2027-01-31",
+              "issued_by": "alan"}]
+
+
+def _task_at_head(vault, text: str) -> str:
+    """Put `text` on `autonomy/1-task.md` and commit it, so it is the lane's HEAD."""
+    (vault / TASK_REL).write_text(text, encoding="utf-8")
+    git(vault, "add", "-A")
+    git(vault, "commit", "-q", "-m", "what the lane must compare against")
+    return text
+
+
+def _task_with(fm_extra: str = "", body: str = "# task\n") -> str:
+    return (f"---\nid: 1\nstatus: up_next\n{fm_extra}---\n\n{CONTRACT}\n\n{body}")
+
+
+def grants_fm(entries) -> str:
+    """Front-matter lines for a `grants:` block, in the shape vault `60b3f2c3` wrote.
+
+    Unquoted `expires_at` on purpose: that is what the real eight files hold, and
+    PyYAML hands back a `date` for it where a `yaml.dump` of the same instant hands back
+    a quoted `str` — the byte difference the accept side of this rail is built on.
+    """
+    lines = ["grants:"]
+    for e in entries:
+        lines.append(f"-   tool: {e['tool']}\n"
+                     f"    expires_at: {e['expires_at']}\n"
+                     f"    issued_by: {e['issued_by']}")
+        if e.get("quota") is not None:
+            lines.append(f"    quota: {e['quota']}")
+    return "\n".join(lines) + "\n"
+
+
+def _grants_error(errors: list) -> str:
+    hits = [e for e in errors if "grants" in e]
+    assert hits, f"no refusal naming the `grants` key in: {errors}"
+    return hits[0]
+
+
+def test_a_round_that_adds_a_grants_block_to_a_task_file_is_refused(vault):
+    """Clause 1, the add half: HEAD declares nothing, the diff declares a licence.
+
+    Asserted through `land()` as well as `validate()`: the item's acceptance is that a
+    ROUND is refused, and a predicate that only spoke to `validate()` would let
+    `land()`'s own call commit the licence anyway — which is how `60b3f2c3` happened.
+    """
+    (vault / TASK_REL).write_text(_task_with(grants_fm(ONE_GRANT)), encoding="utf-8")
+
+    error = _grants_error(V.validate([TASK_REL])[0])
+    assert TASK_REL in error, error
+    assert "autonomy-task:1" in error, \
+        "the refusal has to name the scope the row lands under: " + error
+    assert "grant_create" in error and "human" in error.lower(), \
+        "a refusal that names no way out reads as a bug in the rail: " + error
+
+    # `land()` speaks by raising, and the ledger row is what records it: a node that
+    # asserted only on `validate()` would pass against a `land()` that committed anyway,
+    # which is precisely how `60b3f2c3` got its eight rows.
+    with pytest.raises(V.VaultRoundError, match="grants"):
+        V.land([TASK_REL], "license the task", item_id=4155)
+    row = _events("vault_land")[-1]
+    assert row["ok"] is False and any("grants" in e for e in row["errors"]), row
+    assert git(vault, "show", f"HEAD:{TASK_REL}").stdout == SEED_TASK_TEXT, \
+        "a refused land must not commit the licence"
+
+
+def test_a_round_that_widens_an_existing_grants_block_is_refused_entry_by_entry(vault):
+    """Clause 1, the widen half: four ways in, and the refusal names which one.
+
+    The three ways the item lists — an added entry, a changed tool, an expiry pushed
+    later — plus `quota`, which is the fourth and the one that reads innocently: a
+    declared quota is a LIFETIME cap because a spent one suppresses every later
+    re-mint whatever the file says next (`app/harness/policy.py`, the `sync_task_grants`
+    docstring), so it is refused in both directions while `expires_at` is refused only
+    forward. A refusal that said only "`grants` changed" would leave the caller guessing
+    which line to re-word, which is the failure the dispatch rail's per-field messages
+    exist to prevent.
+    """
+    _task_at_head(vault, LICENSED_HEAD)
+    cases = [
+        ("a second entry added",
+         _task_with(grants_fm([ONE_GRANT[0],
+                               {"tool": "autonomy_write_task",
+                                "expires_at": "2026-12-31", "issued_by": "alan"}])),
+         "added"),
+        ("the tool of the existing entry swapped",
+         _task_with(grants_fm([{"tool": "autonomy_write_task",
+                                "expires_at": "2027-01-31", "issued_by": "alan"}])),
+         "added"),
+        ("the expiry pushed later",
+         _task_with(grants_fm([{"tool": "automod_vault_land",
+                                "expires_at": "2027-02-28", "issued_by": "alan"}])),
+         "expires_at"),
+        ("a quota declared",
+         _task_with(grants_fm([dict(ONE_GRANT[0], quota=3)])),
+         "quota"),
+    ]
+    for label, text, expected in cases:
+        (vault / TASK_REL).write_text(text, encoding="utf-8")
+        error = _grants_error(V.validate([TASK_REL])[0])
+        assert expected in error, f"{label}: {error}"
+        assert "autonomy-task:1" in error, f"{label}: {error}"
+
+
+def test_a_created_task_file_carrying_a_grants_block_is_refused_whatever_status_says(vault):
+    """Clause 2: the create arm, and it is asked BEFORE any first-arm exemption.
+
+    The file is not at HEAD at all, so there is no block to diff and the create arm is
+    the only thing that can answer. Its `status` is `draft` in the first half — no
+    first-arm exemption is even in play — and `up_next` in the second, where the
+    arming refusal must ALSO appear: both doors are in the same gate, so a round that
+    both arms itself and licenses itself is told both, and neither is decided by a rule
+    that reads `status` alone.
+    """
+    rel = "autonomy/7-new.md"
+    assert git(vault, "cat-file", "-e", f"HEAD:{rel}").returncode != 0, rel
+
+    (vault / rel).write_text(
+        "---\nid: 7\nstatus: draft\n"
+        "grants:\n-   tool: automod_vault_land\n    expires_at: 2027-01-31\n"
+        "    issued_by: alan\n---\n\n" + CONTRACT + "\n\n# new task\n", encoding="utf-8")
+    error = _grants_error(V.validate([rel])[0])
+    assert "created" in error and rel in error, error
+
+    (vault / rel).write_text(
+        "---\nid: 7\nstatus: up_next\n"
+        "grants:\n-   tool: automod_vault_land\n    expires_at: 2027-01-31\n"
+        "    issued_by: alan\n---\n\n" + CONTRACT + "\n\n# new task\n", encoding="utf-8")
+    errors = V.validate([rel])[0]
+    error = _grants_error(errors)
+    assert "created" in error, errors
+    assert any("status" in e and "arms a task" in e for e in errors), \
+        "the grants arm must not swallow the arming refusal: " + str(errors)
+
+    (vault / rel).write_text(
+        "---\nid: 7\nstatus: draft\n---\n\n" + CONTRACT + "\n\n# new task\n",
+        encoding="utf-8")
+    assert not any("grants" in e for e in V.validate([rel])[0]), \
+        "a new task that declares NO grant is the hand-down shape and must land"
+
+
+def test_a_block_that_only_requotes_or_narrows_keeps_landing(vault):
+    """Clause 3: the eight licensed jobs, and #2313's withdrawal, both still land.
+
+    Four accept shapes, all on the same HEAD: the scheduler's own `yaml.dump`
+    re-emission of the block (key order, quoting and the `expires_at` type all differ,
+    the parsed value does not — `2027-01-31` unquoted is a `date` to PyYAML and a
+    `str` after a dump of the same instant, which is why equality runs through
+    `_parse_expiry` and not through bytes); a body and `description` edit beside an
+    unchanged block; one of two entries removed; and the whole block deleted. The last
+    is #2313's withdrawal pass, and a lane that refused it would make a revocation
+    undeletable — the asymmetry is the design, not an oversight.
+    """
+    _task_at_head(vault, LICENSED_HEAD)
+    two = [ONE_GRANT[0], {"tool": "autonomy_write_task", "expires_at": "2026-12-31",
+                          "issued_by": "alan"}]
+    dumped = ("---\n"
+              + __import__("yaml").dump({"id": 1, "status": "up_next",
+                                         "grants": ONE_GRANT}, sort_keys=True)
+              + "---\n\n" + CONTRACT + "\n\n# task, retitled by its own job\n")
+    accepts = [
+        ("yaml.dump re-emission of the same block", dumped),
+        ("body edited, block quoted differently",
+         _task_with('grants: [{tool: "automod_vault_land", expires_at: 2027-01-31,\n'
+                    '            issued_by: "alan"}]\n', "# task, with a new Activity Log\n")),
+        ("one of two entries removed", _task_with(grants_fm([two[0]]))),
+        ("the expiry pulled earlier by its owner",
+         _task_with(grants_fm([{"tool": "automod_vault_land",
+                                "expires_at": "2026-12-31", "issued_by": "alan"}]))),
+        ("the whole block deleted (#2313's withdrawal)", _task_with()),
+    ]
+    for label, text in accepts:
+        (vault / TASK_REL).write_text(text, encoding="utf-8")
+        assert V.validate([TASK_REL])[0] == [], f"{label}: {V.validate([TASK_REL])[0]}"
+
+    # No `item_id`: passing one sends the batch to the vault review grader, which this
+    # suite refuses to stub from a node whose subject is the accept side of a predicate.
+    out = V.land([TASK_REL], "withdraw the licence")
+    assert out["ok"] is True, out
+    assert "grants" not in git(vault, "show", f"HEAD:{TASK_REL}").stdout
+
+
+def test_the_round_lane_asks_the_shared_grants_predicate_and_restates_none_of_it():
+    """Clause 4's no-restatement rail, for the lane that has the least excuse.
+
+    AST, with comments and the docstring stripped: `ast.walk` visits nodes, not prose,
+    so the module's own account of the escalation cannot trip this — only CODE can. The
+    drift is always one lane quietly re-adding a condition: `expires_at` back into an
+    `if`, an `ack` parameter to satisfy a caller, a `first_arm_allowed` exemption
+    borrowed from the dispatch rail because it happens to be in scope. All four live in
+    `app/harness/policy.py`, and this route is refused a copy.
+    """
+    import ast
+    import inspect as _inspect
+
+    src = _inspect.getsource(V.grants_widening_errors)
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "grants_widening_errors")
+    # Cut the docstring by LINE, not by editing the tree: `ast.get_source_segment` slices
+    # the text it is handed, so blanking the docstring node in the AST removes nothing and
+    # the rail would be grading this file's prose about the escalation. Prose and comments
+    # are out; code is what must not name a condition the predicate owns.
+    first_code = (fn.body[0].end_lineno if isinstance(fn.body[0], ast.Expr)
+                  and isinstance(fn.body[0].value, ast.Constant) else fn.body[0].lineno) - 1
+    body = "\n".join(l.split("#")[0] for l in src.splitlines()[first_code:])
+
+    imported = {a.name
+                for n in ast.walk(fn) if isinstance(n, ast.ImportFrom)
+                and n.module == "app.harness.policy" for a in n.names}
+    assert {"GRANTS_CREATE_REASON", "create_declares_grants",
+            "grants_rail_refusal", "grants_widenings"} <= imported, sorted(imported)
+    for banned in ("issued_by", "expires_at", "quota", "predicate",
+                   "first_arm_allowed", "create_arms_a_task", "ack"):
+        assert banned not in body, \
+            f"the round lane is restating part of the rule: {banned}"
+    assert "grants_rail_refusal(" in body, \
+        "the sentence the caller reads is policy's, not this lane's"
+
+
+def test_the_eight_licensed_jobs_and_the_commit_that_licensed_them_are_the_proofs():
+    """Clause 3 and clause 1 self-attested, on the real vault rather than a fixture.
+
+    Two measurements, both over files this round does not own:
+
+    ADD side — vault `60b3f2c3` (2026-10-23, #3193) is the escalation this rail exists for:
+    it added one `grants:` block to each of eight task files. Replaying that commit's own
+    before-and-after front matter through the predicate must refuse all eight. If it does
+    not, the rail does not close the hole it names, whatever the fixture above says.
+
+    ACCEPT side — every task file in the live vault that carries a block, re-emitted the
+    way `app/autonomy.py` re-emits it (`_update_task_field` and `_write_run_record` dump
+    the whole front matter with `yaml.dump` on every status and `failure_count` write). The
+    predicate must find nothing wrong with a file compared to a re-emission of ITSELF. That
+    is written as an invariant over whatever files exist rather than as eight paths with
+    pinned contents, so it stays true when a human legitimately edits a licence and still
+    catches the one failure that matters: a normalisation that reads a re-quote as a
+    widening, which would stop those eight jobs the day this ships.
+    """
+    import subprocess
+    import yaml as _yaml
+
+    from app.harness.policy import front_matter_map, grants_widenings
+
+    vault = Path.home() / "obsidian"
+    if not (vault / "autonomy").is_dir():
+        pytest.skip(f"no vault checkout at {vault} to measure")
+
+    def git_vault(*args):
+        return subprocess.run(("git", "-C", str(vault)) + args,
+                              capture_output=True, text=True)
+
+    carrying = []
+    for path in sorted((vault / "autonomy").glob("[0-9]*-*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        fm = front_matter_map(text)
+        if isinstance((fm or {}).get("grants"), list):
+            carrying.append((path, fm, text))
+    assert carrying, (
+        "this node's accept half measures the live licences — eight task files were "
+        "licensed at vault 60b3f2c3, so an empty list means the vault was not readable, "
+        "not that nothing needed checking")
+
+    for path, fm, text in carrying:
+        dumped = ("---\n" + _yaml.dump(dict(fm), sort_keys=True, width=10 ** 6)
+                  + "---\n\n" + text.split("---", 2)[-1])
+        re_emitted = front_matter_map(dumped)
+        assert re_emitted.get("grants") is not None, \
+            f"{path.name}: the re-emission lost the block, so this proves nothing"
+        widens = grants_widenings(fm, re_emitted)
+        assert widens == [], (
+            f"{path.name}: a scheduler's own re-write of its licence reads as a widening "
+            f"— {widens}. Those {len(carrying)} jobs would stop landing the day this rail "
+            "ships.")
+
+    show = git_vault("show", "--format=%H", "60b3f2c3")
+    if show.returncode != 0:
+        pytest.skip("vault commit 60b3f2c3 is not in this checkout to replay")
+    changed = git_vault("show", "--name-only", "--format=",
+                        "60b3f2c3").stdout.split("\n")
+    touched = [p for p in changed if p.startswith("autonomy/")]
+    assert len(touched) == 8, touched
+    replayed = 0
+    for rel in touched:
+        new_blob = git_vault("show", f"60b3f2c3:{rel}")
+        old_blob = git_vault("show", f"60b3f2c3^:{rel}")
+        assert new_blob.returncode == 0 and old_blob.returncode == 0, rel
+        widens = grants_widenings(front_matter_map(old_blob.stdout),
+                                  front_matter_map(new_blob.stdout))
+        assert widens, f"{rel}: the commit that minted eight rows now reads as no change"
+        replayed += 1
+    assert replayed == 8, replayed

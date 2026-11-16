@@ -2455,3 +2455,394 @@ def test_a_numbered_task_body_that_already_says_what_it_is_lands_on_both_lanes(s
     assert (fs.root / TASK_PATH).read_text(encoding="utf-8") == good
     assert _contract_rows(fs.journal) == [], (
         f"the fs lane denied a compliant body: {_contract_rows(fs.journal)}")
+
+
+# ── #4155: a `grants:` block is authority, so no file lane may write one ──────
+#
+# Everything above holds the seven dispatch fields. `grants` is not one of them and is
+# not in `SCHEDULE_STATE_FIELDS` — correctly, since declaring a grant dispatches
+# nothing. What it does instead is worth more than a dispatch: `app/autonomy.py` calls
+# `sync_task_grants` unconditionally before every run, so a block landing here becomes
+# a live `authority_grants` row scoped `autonomy-task:<id>`, and the tool that row pays
+# for can then move `preferred_hours`, which these lanes refuse. Proved, not
+# hypothetical: vault `60b3f2c3` (2026-10-23, #3193) added a five-line block to eight
+# task files and `workers.db` holds the rows it minted, with row 1 being
+# `autonomy-task:40` on `autonomy_write_task` — the field-moving tool, itself declared
+# by a task file. `validate_task_grants` refuses only `grant_create`, and `issued_by` is
+# free text a writer may type, so nothing downstream catches what lands here.
+#
+# These nodes cover the two MCP lanes. The round's own landing route is pinned in
+# `tests/test_automod_vault_round.py`, and the last node here is the one that makes the
+# three of them one rule rather than three: the shared predicate is imported, and the
+# refusal has no branch.
+
+#: The block exactly as vault `60b3f2c3` wrote it into the eight licensed jobs, so the
+#: accept side below is measured on the bytes the nightly writers actually re-emit.
+LICENSEE = {"tool": "automod_vault_land", "expires_at": "2027-01-31",
+            "issued_by": "alan"}
+MOVER = {"tool": "autonomy_write_task", "expires_at": "2026-12-31", "issued_by": "alan"}
+
+
+def _granting(task_text: str, *entries: dict) -> str:
+    """`_task()`'s fixture with a `grants:` block spliced into its front matter."""
+    head, sep, rest = task_text.partition("\n---\n")
+    return head + "\n" + "grants:\n" + "".join(
+        f"-   tool: {e['tool']}\n    expires_at: {e['expires_at']}\n"
+        f"    issued_by: {e['issued_by']}"
+        + (f"\n    quota: {e['quota']}" if e.get("quota") is not None else "") + "\n"
+        for e in entries) + "---\n" + rest
+
+
+def test_vault_write_refuses_adding_a_grants_block_to_an_existing_task(scratch):
+    """Clause 1 on this lane: HEAD has no block, the write declares one, refused.
+
+    The status stays `draft` on both sides so the ONLY thing this write changes is the
+    licence — a node that also moved `status` would pass on the dispatch refusal and
+    prove nothing about the new half. The journal assertion is the other half of the
+    clause: the row goes under the guard name the dispatch rail already uses
+    (`autonomy_schedule_rail`), because "did a writer reach a task file through a lane
+    that used to be open" has to stay one grep, not two.
+    """
+    before = _seed(scratch, _task())
+    assert "grants" not in before, "the fixture grew a licence and this node is moot"
+
+    out = _write(scratch, TASK_PATH, _granting(_task(), LICENSEE))
+
+    assert out.get("success") is not True, out
+    err = out["error"]
+    assert "grants" in err and TASK_PATH in err, err
+    assert "autonomy-task:96" in err, f"the refusal must name the scope: {err}"
+    assert "grant_create" in err and "human" in err.lower(), \
+        f"both routes out, or the refusal reads as a bug: {err}"
+    assert (scratch.root / TASK_PATH).read_text(encoding="utf-8") == before, \
+        "a refused write left bytes behind"
+    assert scratch.journal[-1]["guard"] == "autonomy_schedule_rail", scratch.journal[-1]
+    assert "grants" in scratch.journal[-1]["reason"], scratch.journal[-1]
+
+
+def test_vault_write_lets_a_requote_or_narrowing_land_and_refuses_every_widening(
+        scratch):
+    """Clauses 2 and 3 on this lane, on the same seeded block.
+
+    The accept side is not a courtesy: the eight jobs licensed at `60b3f2c3` rewrite
+    these files on every cycle through `yaml.dump`, which re-quotes `expires_at`, and
+    #2313's withdrawal pass is a round DELETING a block. Both must keep landing, or this
+    rail stops the nightly chain the day it ships. The refusals then take the four ways
+    the authority grows — an added entry, a different tool, a later expiry, a declared
+    quota — with the file's `status` never touched, so no dispatch refusal can be
+    mistaken for the grants one.
+    """
+    licensed = _granting(_task(status="up_next"), LICENSEE)
+    _seed_armed(scratch, licensed)
+
+    body_edit = _write(scratch, TASK_PATH, licensed.replace(
+        "- 2026-10-05T06:27Z created by an autocode round",
+        "- 2026-10-05T06:27Z created by an autocode round\n"
+        "- 2026-11-16T01:20Z ran the job, 3 rows written"))
+    assert body_edit.get("success") is True, body_edit
+
+    requote = licensed.replace("expires_at: 2027-01-31", "expires_at: '2027-01-31'")
+    assert _write(scratch, TASK_PATH, requote).get("success") is True, \
+        "a `yaml.dump` re-quote of the same instant is not a widening"
+
+    narrowed = _granting(_task(status="up_next"), dict(LICENSEE,
+                                                       expires_at="2026-12-31"))
+    assert _write(scratch, TASK_PATH, narrowed).get("success") is True, \
+        "pulling an expiry back is a human renewal and must land"
+
+    deleted = _write(scratch, TASK_PATH, _task(status="up_next"))
+    assert deleted.get("success") is True, \
+        f"#2313's withdrawal — deleting the block — was refused: {deleted}"
+
+    # Re-seed the baseline the four refusals are measured against: the accept side above
+    # rewrote the file, and the last of those writes DELETED the block, so a refusal loop
+    # that ran on without re-seeding would read every case as an add and never reach the
+    # `expires_at` or `quota` reasons it is here to pin.
+    _seed_armed(scratch, licensed)
+    wideners = [
+        ("a second entry", _granting(_task(status="up_next"), LICENSEE, MOVER), "added"),
+        ("the tool swapped", _granting(_task(status="up_next"), MOVER), "added"),
+        ("the expiry pushed later", _granting(_task(status="up_next"),
+                                              dict(LICENSEE,
+                                                   expires_at="2027-02-28")),
+         "expires_at"),
+        ("a quota declared", _granting(_task(status="up_next"),
+                                       dict(LICENSEE, quota=3)), "quota"),
+    ]
+    for label, content, expected in wideners:
+        out = _write(scratch, TASK_PATH, content)
+        assert out.get("success") is not True, f"{label} landed: {out}"
+        assert expected in out["error"], f"{label}: {out['error']}"
+        assert "grants" in out["error"] and "autonomy-task:96" in out["error"]
+
+    # The shape that reaches for `_err`'s 500-char cap: every refusal reason at once. The
+    # sentence is composed remedy-first precisely so this cannot cut off the way out, and
+    # the only thing allowed to fall off the end is reason detail. The first draft of the
+    # message did land here — at 544 chars it reached the caller as ``needs a hum``, which
+    # is a refusal the writer cannot act on.
+    worst = _granting(_task(status="up_next"),
+                      dict(LICENSEE, expires_at="2028-01-31", quota=9), MOVER,
+                      {"tool": "grant_create", "expires_at": "2030-01-01",
+                       "issued_by": "alan"},
+                      {"tool": "Bash", "expires_at": "2030-01-01", "issued_by": "alan"},
+                      {"tool": "vault_write", "expires_at": "2030-01-01",
+                       "issued_by": "alan"})
+    worst_out = _write(scratch, TASK_PATH, worst)
+    assert worst_out.get("success") is not True, worst_out
+    err = worst_out["error"]
+    assert " …[truncated]" not in err, f"the refusal was cut by `_err`: {err}"
+    assert len(err) <= 500, len(err)
+    assert "grant_create" in err and "autonomy-task:96" in err, err
+    assert "(+4 more)" in err, f"reasons past the third must be counted: {err}"
+
+
+def test_builtin_write_and_edit_refuse_the_same_add_or_widen(fs):
+    """Clause 1 and 3 on the fourth lane, including the `Edit` shape.
+
+    `Edit` is the shape that matters here: the move is invisible to any check that only
+    sees the incoming arguments, so this lane has to re-read the file and assemble the
+    result before the grants question can even be asked. The narrowing case is the one
+    that separates a rail from a refusal: the same `Edit` call that extends an expiry is
+    refused, and the one that shortens it writes.
+    """
+    _fs_seed(fs, _granting(_task(status="up_next"), LICENSEE))
+
+    extended = _fs_edit(fs, TASK_PATH, "expires_at: 2027-01-31",
+                        "expires_at: 2027-06-30")
+    assert extended, "an expiry extended through `Edit` reached the file"
+    assert "expires_at" in extended["error"] and "grants" in extended["error"], extended
+    assert fs.journal[-1]["guard"] == "autonomy_schedule_rail", fs.journal[-1]
+    assert fs.journal[-1]["tool"] == "Edit", fs.journal[-1]
+
+    # The refused `Edit` wrote nothing, so the file still holds the ORIGINAL expiry — and
+    # shortening that one is the accept side of the very same call shape.
+    assert "expires_at: 2027-01-31" in (fs.root / TASK_PATH).read_text(encoding="utf-8"), \
+        "a refused Edit wrote bytes"
+    shortened = _fs_edit(fs, TASK_PATH, "expires_at: 2027-01-31",
+                         "expires_at: 2026-12-31")
+    assert shortened == {}, f"a narrowing was refused: {shortened}"
+
+    added = _fs_write(fs, TASK_PATH, _granting(_task(status="up_next"), LICENSEE, MOVER))
+    assert added, "a second declared grant reached the file through `Write`"
+    assert "autonomy-task:96" in added["error"], added
+
+    parked = _fs_edit(fs, TASK_PATH, "status: up_next", "status: draft")
+    assert parked, (
+        "the control on the control: this task HAS a run record, so parking it is a "
+        "dispatch move and stays refused — the grants rail did not widen this lane into "
+        f"accepting schedule edits: {parked}")
+    assert "status" in parked["error"] and "grants" not in parked["error"], parked
+
+
+def test_a_created_task_file_declaring_grants_is_refused_on_both_mcp_lanes(scratch, fs):
+    """Clause 2 on both MCP lanes: the create arm, and it does not care about `status`.
+
+    `status: draft` is the shape the dispatch rail explicitly ALLOWS on a create — a new
+    task written draft is the nightly chain's hand-down form — so a `grants:` block that
+    survives it proves the create arm is its own question and not a side effect of the
+    arming one. `grants: []` is the negative control: a new task declaring that it wants
+    no authority must still be creatable, or this rail has quietly made the hand-down
+    shape impossible.
+    """
+    drafted = _granting(_task(status="draft"), LICENSEE)
+
+    out = _write(scratch, TASK_PATH, drafted)
+    assert out.get("success") is not True, out
+    assert "grants" in out["error"] and "created" in out["error"], out["error"]
+
+    fs_out = _fs_write(fs, TASK_PATH, drafted)
+    assert fs_out, "the `Write` lane created a task that licenses itself"
+    assert "grants" in fs_out["error"] and "created" in fs_out["error"], fs_out
+
+    declared_none = _task(status="draft").replace("status: draft",
+                                                  "status: draft\ngrants: []")
+    assert _write(scratch, TASK_PATH, declared_none).get("success") is True, (
+        "a new task that declares NO grant is the hand-down shape; refusing it would "
+        "make the shape impossible, which is not what a licence rail is for")
+
+    both = _granting(_task(status="up_next"), LICENSEE)
+    armed = _write(scratch, TASK_PATH, both)
+    assert armed.get("success") is not True, armed
+    assert "grants" in armed["error"], \
+        "the grants half must be answered even where the arming half also refuses"
+
+
+# The four file lanes that can write a task file, and the one function each of them is
+# allowed to ask. `first_arm_allowed` is deliberately NOT in this list: the exemption is
+# the dispatch rail's, and a grants branch that reached for it would let one commit that
+# both arms a never-run task and licenses itself through the very same write.
+_LANE_FILES = {
+    "scripts/automod/vault_round.py": "grants_widening_errors",
+    "agent_mcp/vault.py": "_autonomy_schedule_refusal",
+    "agent_mcp/builtin_fs.py": "_autonomy_schedule_refusal",
+}
+_GRANTS_IMPORTS = {"GRANTS_CREATE_REASON", "create_declares_grants",
+                   "grants_rail_refusal", "grants_widenings"}
+#: Words that must not appear inside a refusal branch — each is a condition the shared
+#: predicate owns (`issued_by`, `expires_at`, `quota`) or an escape hatch (#4155's clause 5
+#: forbids: an `ack`, an `override`, a wider `grant_scope`, the first-arm exemption).
+_BANNED_IN_A_REFUSAL = ("issued_by", "expires_at", "quota", "predicate", "ack",
+                        "override", "grant_scope", "first_arm_allowed", "allow")
+
+
+def _refusal_branches(tree: ast.AST) -> list[ast.If]:
+    """The INNERMOST `if` whose body speaks the shared refusal, wherever it sits.
+
+    Innermost is the point. `vault_round.py` wraps its create arm in a test on whether the
+    file exists at HEAD — that is a shape question with two answers and it is allowed two
+    arms; what is not allowed is a second condition inside the branch that actually refuses.
+    Checking only the leaves is what makes the rail say that instead of failing on code that
+    is fine.
+    """
+    def speaks(node):
+        return any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                   and c.func.id == "grants_rail_refusal" for c in ast.walk(node))
+    found = [n for n in ast.walk(tree)
+             if isinstance(n, ast.If) and speaks(n) and not speaks(n.test)]
+    return [n for n in found
+            if not any(c is not n and isinstance(c, ast.If) and c in found
+                       for c in ast.walk(n))]
+
+
+def _refusal_tokens(branch: ast.If) -> list[str]:
+    """Every identifier, keyword and string constant inside a refusal branch."""
+    tokens = []
+    for node in ast.walk(branch):
+        if isinstance(node, ast.Name):
+            tokens.append(node.id)
+        elif isinstance(node, ast.keyword):
+            tokens.append(node.arg or "")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            tokens.append(node.value)
+    return tokens
+
+
+def _first_arm_line(func: ast.FunctionDef) -> int | None:
+    """Where a function asks the first-arm exemption, if it ever does."""
+    arms = [c.lineno for c in ast.walk(func)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "first_arm_allowed"]
+    return min(arms) if arms else None
+
+
+def _enclosing_func(tree: ast.AST) -> dict:
+    """`If` node id -> the `def` that holds it, for the ordering half of the assertion."""
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        cur = parents.get(id(node))
+        while cur is not None and not isinstance(cur, ast.FunctionDef):
+            cur = parents.get(id(cur))
+        out[id(node)] = cur
+    return out
+
+
+def test_all_three_file_lanes_import_the_shared_grants_predicate_and_branch_on_nothing():
+    """Clause 4's shared-helper rail, AST-parsed over all three lanes at once.
+
+    Four things, none of which a behaviour test can see:
+
+    1. each lane IMPORTS the predicate from `app.harness.policy` rather than restating it.
+       This is the #724 rail's own pattern — the same file already AST-parses
+       `schedule_state_errors` to prove it names the frozenset instead of copying it, and
+       the drift it prevents is the boring kind: one lane quietly re-adding an `expires_at`
+       test because that is how the dispatch rail works.
+    2. the refusal has NO branch. `grants_widenings` answers with zero or more reasons and
+       the lane refuses on a non-empty list; a second condition inside the branch that
+       refuses is where an escape hatch would live, and #4155's clause 5 forbids one.
+    3. the grants question is asked BEFORE `first_arm_allowed`. Two lanes exempt the first
+       arm of a never-run task; if the licence check ran after that exemption returned, a
+       single commit that creates an `up_next` task and declares its own grant would be
+       waved through by a rule that tests `status`. Line order is what clause 2 promises,
+       and it is the part that a later refactor silently reverses.
+    4. the predicate itself takes only front-matter maps. A parameter named `ack`, `allow`
+       or `scope` is the same refusal, reachable by argument instead of by branch.
+
+    Prose is out of scope by construction: `ast.walk` yields nodes, and the banned words are
+    read off identifiers and string constants inside the refusal bodies — so this file's own
+    account of the escalation cannot trip it, and neither can the lanes' comments.
+    """
+    root = Path(__file__).resolve().parents[1]
+    lanes = {}
+    for rel, func_name in _LANE_FILES.items():
+        src = (root / rel).read_text(encoding="utf-8")
+        lanes[rel] = (src, ast.parse(src))
+        imported = {a.name
+                    for n in ast.walk(lanes[rel][1])
+                    if isinstance(n, ast.ImportFrom) and n.module == "app.harness.policy"
+                    for a in n.names}
+        assert _GRANTS_IMPORTS <= imported, \
+            f"{rel} restates part of the rule; imports {sorted(imported)}"
+
+    total = 0
+    for rel, (src, tree) in lanes.items():
+        branches = _refusal_branches(tree)
+        assert branches, f"{rel} never refuses through the shared sentence"
+        funcs = _enclosing_func(tree)
+        for branch in branches:
+            total += 1
+            assert not any(isinstance(n, ast.If) for n in list(ast.walk(branch))[1:]), \
+                f"{rel}:{branch.lineno}: the grants refusal grew a branch"
+            hits = [b for b in _BANNED_IN_A_REFUSAL
+                    if any(b in tok for tok in _refusal_tokens(branch))]
+            assert not hits, f"{rel}:{branch.lineno}: the refusal branch carries {hits}"
+        for node in branches:
+            holder = funcs[id(node)]
+            arm = _first_arm_line(holder) if holder is not None else None
+            if arm is not None:
+                assert node.lineno < arm, (
+                    f"{rel}: {holder.name} asks the first-arm exemption at line {arm} and "
+                    "the grants question at "
+                    f"{node.lineno}; clause 2 is that a licence is refused even where the "
+                    "arm would be exempt")
+
+    assert total >= 4, f"expected a refusal on every lane, found {total}"
+
+    # And the detector is shown to bite, on the two shapes this rail exists to catch. A
+    # guard whose red case nobody has run is a guard that reads green for the wrong reason:
+    # `_refusal_branches` finds nothing in a lane that never refuses, so without these two
+    # asserts an accidental empty scan would look identical to a clean corpus.
+    seeded = ast.parse("""
+def _lane(path, new_fm):
+    if create_declares_grants(new_fm):
+        if ack:
+            return grants_rail_refusal(path, [GRANTS_CREATE_REASON])
+    return None
+""")
+    seeded_branches = _refusal_branches(seeded)
+    assert len(seeded_branches) == 1, seeded_branches
+    assert "ack" in [b for b in _BANNED_IN_A_REFUSAL
+                     if any(b in tok for tok in _refusal_tokens(seeded_branches[0]))], \
+        "an escape hatch inside a refusal branch went undetected"
+
+    reordered = ast.parse("""
+def _lane2(path, old_fm, new_fm):
+    if first_arm_allowed(path, old_fm, new_fm):
+        return None
+    widens = grants_widenings(old_fm, new_map=new_fm)
+    if widens:
+        return grants_rail_refusal(path, widens)
+""")
+    branch = _refusal_branches(reordered)[0]
+    holder = _enclosing_func(reordered)[id(branch)]
+    assert _first_arm_line(holder) < branch.lineno, \
+        "the ordering check passes a lane that asks the exemption first"
+
+    policy_src = (root / "app/harness/policy.py").read_text(encoding="utf-8")
+    for fn in (n for n in ast.walk(ast.parse(policy_src))
+               if isinstance(n, ast.FunctionDef) and n.name.startswith("grants_")):
+        names = [a.arg for a in fn.args.args]
+        assert not fn.args.kwonlyargs and not fn.args.vararg and not fn.args.kwarg, fn.name
+        assert not {"ack", "allow", "override", "scope", "grant_scope"} & set(names), \
+            f"{fn.name} takes {names}: an acknowledgement is a widened rail by argument"
+    sig = {n.name: [a.arg for a in n.args.args]
+           for n in ast.walk(ast.parse(policy_src))
+           if isinstance(n, ast.FunctionDef)
+           and n.name in ("grants_widenings", "create_declares_grants")}
+    assert sig == {"grants_widenings": ["old_map", "new_map"],
+                   "create_declares_grants": ["new_map"]}, sig

@@ -2253,7 +2253,9 @@ def _autonomy_schedule_refusal(path: str, content: str) -> dict | None:
         # the rule says WHICH fields it could not verify, spelled from the set
         # rather than from a sentence this module maintains.
         from app.harness.policy import (DISPATCHING_STATUS, SCHEDULE_STATE_FIELDS,
-                                       create_arms_a_task, front_matter_map)
+                                       create_arms_a_task, create_declares_grants,
+                                       front_matter_map, grants_rail_refusal,
+                                       GRANTS_CREATE_REASON)
     except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
         _record_schedule_refusal(path, f"the rail itself could not run ({exc})")
         return _err("vault_write refused: the autonomy schedule rail could not run, "
@@ -2269,6 +2271,16 @@ def _autonomy_schedule_refusal(path: str, content: str) -> dict | None:
                     f"matter this rail can read, so none of the dispatch fields the "
                     f"scheduler reads ({held}) can be checked. Refusing rather than "
                     "guessing.", ErrorCode.PROTECTED_PATH)
+    if create_declares_grants(new_fm):
+        # #4155's create arm, asked BEFORE the arming question: a created task that
+        # declares its own licence is refused whatever its `status` says, because
+        # `create_arms_a_task` reads `status` alone and the licence is the half that
+        # outlives the create — `sync_task_grants` mints it into `authority_grants` on
+        # the task's first run, whether or not that run was this write's doing.
+        _record_schedule_refusal(path, "create declaring a `grants:` block")
+        return _err(f"vault_write refused: {path}: "
+                    + grants_rail_refusal(path, [GRANTS_CREATE_REASON]),
+                    ErrorCode.PROTECTED_PATH)
     if create_arms_a_task(new_fm):
         _record_schedule_refusal(path, f"create with status: {DISPATCHING_STATUS}")
         return _err(f"vault_write refused: {path} would be created `status: "
@@ -2305,7 +2317,8 @@ def _autonomy_schedule_move_refusal(path: str, content: str,
         return None
     try:
         from app.harness.policy import (SCHEDULE_STATE_FIELDS, first_arm_allowed,
-                                       front_matter_map, schedule_value_moves,
+                                       front_matter_map, grants_rail_refusal,
+                                       grants_widenings, schedule_value_moves,
                                        shown_schedule_value)
     except Exception as exc:  # noqa: BLE001 — see phase A
         _record_schedule_refusal(path, f"the rail itself could not run ({exc})")
@@ -2336,6 +2349,19 @@ def _autonomy_schedule_move_refusal(path: str, content: str,
                     f"read as a mapping, so none of the dispatch fields ({held}) can "
                     "be checked against it. Repair the front matter rather than "
                     "writing past it.", ErrorCode.PROTECTED_PATH)
+    widens = grants_widenings(old_fm, new_fm)
+    if widens:
+        # #4155, and asked before the dispatch comparison below: `grants:` is not a
+        # dispatch field, so `schedule_value_moves` cannot see it, yet it is the field
+        # that MINTS the authority to move them — `sync_task_grants` turns this block
+        # into an `authority_grants` row scoped `autonomy-task:<id>` on the task's next
+        # run. A block parsing equal to the pre-image's, or smaller than it, returns no
+        # reasons and lands: the eight jobs licensed at vault `60b3f2c3` rewrite these
+        # files every cycle through `yaml.dump`, and #2313's withdrawal pass is a round
+        # that must still be able to delete one.
+        _record_schedule_refusal(path, "; ".join(widens))
+        return _err(f"vault_write refused: {path}: {grants_rail_refusal(path, widens)}",
+                    ErrorCode.PROTECTED_PATH)
     moves = schedule_value_moves(old_fm, new_fm)
     if not moves or first_arm_allowed(path, old_fm, new_fm):
         # Nothing dispatch-affecting moved, but the body still came through this

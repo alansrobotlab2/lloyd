@@ -477,6 +477,239 @@ def create_arms_a_task(new_map: dict | None) -> bool:
     return str((new_map or {}).get("status") or "").strip() == DISPATCHING_STATUS
 
 
+# ── a task file's `grants:` block (#4155) ────────────────────────────────────
+#
+# `grants:` is correctly absent from `SCHEDULE_STATE_FIELDS`: moving `status`
+# dispatches a run, while declaring a grant does not. What declaring
+# one does is worth more than a dispatch. `app/autonomy.py` sets
+# `grant_scope = f"autonomy-task:{task_id}"` and calls `sync_task_grants`
+# unconditionally BEFORE the run, so a block that lands in a task file becomes a live
+# `authority_grants` row in `workers.db` scoped `autonomy-task:<id>` the next time that
+# task fires — authority the file's author may then spend on the very dispatch fields
+# the four helpers above hold from it.
+#
+# The escalation is not hypothetical. `validate_task_grants` refuses exactly one tool
+# name (`grant_create`, "a task may not grant itself the mint tool"), so
+# `autonomy_write_task` — the tool the #724 rail refuses an unattended scope for
+# `preferred_hours` — is declarable; and `issued_by` is free text that reaches
+# `store.mint()` past nothing but `_is_worker_identity`, so a round can sign a human's
+# name. Vault `60b3f2c3` (2026-10-23, #3193) put a five-line `grants:` block into eight
+# task files, `authority_grants` rows 2-9 are what it produced, and row 1 is
+# `autonomy-task:40` / `autonomy_write_task` — the field-moving tool itself.
+#
+# So the declaration joins the dispatch fields as something a FILE LANE may not write,
+# under the same four properties those helpers already hold to: values and never bytes
+# (`_update_task_field` and `_write_run_record` re-emit the whole front matter with
+# `yaml.dump` on every status or `failure_count` write, so the eight blocks are
+# re-quoted constantly), one definition that all three lanes import and none restates,
+# an asymmetry the caller cannot argue with, and a refusal that names the scope the
+# row lives under and the two routes still open to the caller.
+
+#: The front-matter key this rail guards, named once so the lanes carry the word in a
+#: refusal by import rather than by spelling it out four times.
+GRANTS_FIELD = "grants"
+
+
+def grants_task_scope(path: Any) -> str:
+    """The scope a task file's declared block is materialised into.
+
+    `autonomy-task:<id>`, the id being the basename's leading number — the same read
+    `first_arm_allowed` makes through `_AUTONOMY_TASK_PATH`, which is why this is a
+    lookup and not a second rule. A refusal has to name it: the authority is not in the
+    file, it is a row in `workers.db` under this scope, and the two tools that may
+    legitimately write such a row (`grant_create`, `grant_revoke`) take it as an
+    argument. The `<id>` placeholder means the path is not a numbered task file; the
+    refusal still says which store the row would land in.
+    """
+    match = _AUTONOMY_TASK_PATH.search(str(path or ""))
+    return f"autonomy-task:{match.group(1)}" if match else "autonomy-task:<id>"
+
+
+def _grant_entries(value: Any) -> list[dict]:
+    """A declared `grants:` value as comparable entries. Never raises, never compares bytes.
+
+    An entry's identity is `(tool, predicate, issued_by)`: the tool, the argument
+    predicate and the human whose name signs it are what a grant IS. `issued_by` belongs
+    to the identity rather than being ignored because it is free text on this route and
+    reaches `store.mint()` unchecked, so an entry whose issuer was rewritten is a
+    DIFFERENT grant, and a file lane is not the place where a writer acquires a human's
+    signature. `expires_at` and `quota` are compared apart from the identity because
+    both are ORDERED — only an increase is an escalation, and #2313's withdrawal pass
+    and a human's expiry pull-back both move them the other way.
+
+    `expires_at` normalises through `_parse_expiry`, the grant store's own parser, so
+    `2027-01-31` unquoted (a `date` after PyYAML), the same date quoted, and a full
+    datetime naming that instant all compare as one value. `expiry_raw` is what is left
+    when even that parser cannot read it, and equal raw values on both sides is equality:
+    a lane must not refuse an unrelated body edit because HEAD's block is unreadable.
+    """
+    out: list[dict] = []
+    for item in (value if isinstance(value, (list, tuple)) else []):
+        if not isinstance(item, dict):
+            out.append({"key": ("?", repr(item), ""), "tool": "?", "predicate": "",
+                        "issued": "", "quota": "invalid", "quota_raw": repr(item),
+                        "expiry": None, "expiry_raw": repr(item),
+                        "label": "a non-map entry"})
+            continue
+        raw_expiry = item.get("expires_at")
+        try:
+            expiry: "dt.datetime | None" = _parse_expiry(raw_expiry)
+            expiry_raw: "str | None" = None
+        except GrantError:
+            expiry, expiry_raw = None, str(raw_expiry)
+        raw_quota = item.get("quota")
+        try:
+            quota: Any = None if raw_quota is None else int(raw_quota)
+            quota_raw: "str | None" = None
+        except (TypeError, ValueError):
+            quota, quota_raw = "invalid", str(raw_quota)
+        tool = normalize_tool_name(item.get("tool")) or "?"
+        predicate = str(item.get("predicate") or "").strip()
+        issued = str(item.get("issued_by") or "").strip()
+        out.append({"key": (tool, predicate, issued), "tool": tool,
+                    "predicate": predicate, "issued": issued, "quota": quota,
+                    "quota_raw": quota_raw, "expiry": expiry, "expiry_raw": expiry_raw,
+                    "label": f"`{tool}`" + (f" predicate {predicate!r}" if predicate
+                                            else "")})
+    return out
+
+
+def grants_widenings(old_map: dict | None, new_map: dict | None) -> list[str]:
+    """Every way `new_map`'s `grants:` block ADDS to or WIDENS `old_map`'s, as reasons.
+
+    Empty means the authority stayed the same or shrank. This is deliberately not
+    `schedule_value_moves` with one more field in the set: that predicate is symmetric —
+    absent-on-one-side is a move — and the asymmetry is the whole design here. Deleting a
+    licence is a visible act of withdrawal that a file lane must be able to carry
+    (#2313's pass is exactly a round deleting a block, and a lane that refused it would
+    make a revocation undeletable), while writing one is the act this rail exists to
+    stop. So:
+
+    * no block on either side, `grants: []`, or the block deleted or narrowed — accepted;
+    * a block where HEAD has none — refused. `old_map` being None is refused on the same
+      grounds the lanes already treat an unreadable pre-image: a rail that cannot read
+      what HEAD declared cannot say nothing was added;
+    * an entry whose identity is not in HEAD's set — a genuinely added entry, or one
+      whose `issued_by` was rewritten — is refused;
+    * a matched entry whose `quota` differs AT ALL is refused in both directions: a
+      spent declared quota suppresses every later re-mint whatever the file says next, so
+      a "smaller" number here is not a smaller licence in the store;
+    * a matched entry whose `expires_at` parses strictly LATER than HEAD's is refused;
+      equal or earlier is the human's own renewal and lands.
+
+    Sorted and total. The returned strings are what every lane puts in its refusal, so
+    each one names the tool, the entry and the field that moved.
+    """
+    new_value = (new_map or {}).get(GRANTS_FIELD)
+    old_value = (old_map or {}).get(GRANTS_FIELD)
+    if new_value is None or (isinstance(new_value, (list, tuple)) and not new_value):
+        return []           # absent, empty, or deleted: nothing was added
+    if old_map is None:
+        return [f"`{GRANTS_FIELD}` cannot be compared: this task file's HEAD front matter "
+                f"could not be read, so nothing here can say the declared block is not "
+                f"new authority"]
+    if old_value is None:
+        return [f"`{GRANTS_FIELD}` block added, declaring "
+                f"{len(_grant_entries(new_value))} grant(s)"]
+    if not (isinstance(old_value, (list, tuple))
+            and isinstance(new_value, (list, tuple))):
+        # One side holds something that is not a list of maps. `validate_task_grants`
+        # fails such a task closed at LOAD, so it cannot escalate — but a file lane is
+        # not where a malformed authority gets retyped, and the shapes cannot be matched
+        # entry to entry, which is the only evidence this predicate accepts.
+        return [f"`{GRANTS_FIELD}` block rewritten into a shape that cannot be compared "
+                f"entry to entry (HEAD: {type(old_value).__name__}, now: "
+                f"{type(new_value).__name__})"]
+    old_entries = _grant_entries(old_value)
+    new_entries = _grant_entries(new_value)
+    old_by_key = {e["key"]: e for e in old_entries}
+    reasons: list[str] = []
+    for entry in new_entries:
+        head = old_by_key.get(entry["key"])
+        if head is None:
+            reasons.append(f"entry {entry['label']} added, issued_by "
+                           f"{entry['issued']!r}")
+            continue
+        if (entry["quota"], entry["quota_raw"]) != (head["quota"], head["quota_raw"]):
+            reasons.append(f"{entry['label']}: `quota` changed "
+                           f"{head['quota_raw'] or head['quota']} -> "
+                           f"{entry['quota_raw'] or entry['quota']}")
+        if entry["expiry_raw"] is not None or head["expiry_raw"] is not None:
+            if entry["expiry_raw"] != head["expiry_raw"]:
+                reasons.append(f"{entry['label']}: `expires_at` changed "
+                               f"{head['expiry_raw'] or head['expiry']} -> "
+                               f"{entry['expiry_raw'] or entry['expiry']}")
+        elif entry["expiry"] and head["expiry"] and entry["expiry"] > head["expiry"]:
+            reasons.append(f"{entry['label']}: `expires_at` extended "
+                           f"{_iso(head['expiry'])} -> {_iso(entry['expiry'])}")
+    return sorted(reasons)
+
+
+def create_declares_grants(new_map: dict | None) -> bool:
+    """True when a CREATED task file declares authority of its own.
+
+    A block cannot be diffed on a create, so this is the whole question a create may
+    answer: does it declare a grant? `grants: []` does not and is accepted — that is a
+    new task saying it wants none, which is the shape a hand-down takes. A scalar or a
+    map under the key is True: `grants_widenings` cannot compare such a shape entry to
+    entry and neither can a reviewer, so the create is refused rather than assumed
+    benign. This is the create arm the dispatch rail has in `create_arms_a_task`, and
+    like that one it is asked BEFORE any first-arm exemption: one commit that arms a
+    never-run task and writes itself the licence for it is the exact shape a rule that
+    tests only `status` waves through.
+    """
+    value = (new_map or {}).get(GRANTS_FIELD)
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, dict)):
+        return bool(value)
+    return True
+
+
+#: The reason a CREATE is refused, phrased once. A created file has no HEAD to diff
+#: against, so this is not a measurement the predicate can compute — it is the one
+#: sentence all three lanes must say identically, which is why it is a constant here and
+#: not a string in each of them.
+GRANTS_CREATE_REASON = f"`{GRANTS_FIELD}` block declared on a created task file"
+
+
+def grants_rail_refusal(path: Any, widens: list[str]) -> str:
+    """The refusal every file lane says, composed from the reasons it was handed.
+
+    One sentence, spoken by the round's landing route, by `vault_write` and by
+    `Write`/`Edit` alike, so a caller cannot shop between three lanes for the message it
+    can argue with. It names the key, the scope the row would live under, BOTH routes
+    still open — a human editing this task file, or an explicit `grant_create` mint — and
+    then, last, why this particular write is one of the refused shapes: a refusal that
+    names only the prohibition reads as a bug in the rail, and a refusal whose remedy is
+    cut off reads the same way. Nothing on this path takes an acknowledgement:
+    `grants_widenings` accepts two front-matter maps and answers, and a lane that could
+    pass an `ack` is a lane that has already been widened.
+    """
+    # Ordered with the remedy FIRST and the reasons LAST, deliberately. `agent_mcp/
+    # _shared._err` caps a tool error at 500 chars — the first draft of this sentence
+    # explained the escalation up front and reached ``needs a hum`` at 502, so the caller
+    # got the prohibition and not the way out, which is exactly the failure mode
+    # `agent_mcp/vault.py`'s body-rail comment warns about two functions away. There is no
+    # acknowledgement parameter on this path anywhere: `grants_widenings` takes two
+    # front-matter maps and answers, and a lane that could pass an `ack` is a lane that has
+    # already been widened.
+    # The tail is bounded by COUNT and by width, and what falls off is detail about which
+    # entry widened — never the remedy, which is why the remedy is at the FRONT.
+    # `agent_mcp/_shared._err` caps a tool error at 500 characters and every lane prefixes
+    # this sentence with its own verb and path, so an unbounded reason list is the one thing
+    # that can push it over. The first draft of this message did exactly that: at 544
+    # characters the caller received ``needs a hum`` and no way out.
+    shown = "; ".join(r if len(r) <= 70 else r[:69] + "…" for r in widens[:2])
+    if len(widens) > 2:
+        shown += f" (+{len(widens) - 2} more)"
+    return (f"a `{GRANTS_FIELD}` block is authority, not metadata: `sync_task_grants` "
+            f"mints it into `authority_grants` scoped `{grants_task_scope(path)}`. Only a "
+            f"human adds or widens one — hand-edit the task file, or mint with "
+            f"`{GRANT_MINT_TOOL}`. Narrowing or deleting it still lands. "
+            f"Refused because: {shown}")
+
+
 #: The one tool whose reversibility is not a property of its name. Every other
 #: name in the ladder means the same thing whatever it is handed; this one is
 #: `ls` in one call and a service restart in the next.
