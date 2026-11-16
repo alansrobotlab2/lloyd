@@ -526,6 +526,63 @@ def _gate_reached(round_id: str | None, events: list[dict]) -> bool:
         return False
 
 
+def _item_scoped_landing_events(events: list[dict], *, round_id: str | None,
+                                item_id: int | None, surface: str,
+                                session_id: str | None) -> list[dict]:
+    """The events for the `landed` reconciliation, widened to the item's whole
+    landing history when the run's snapshot cannot see its landing row.
+
+    The caller's snapshot is the last 200 rows of the ledger
+    (`_record_run`'s `read_events(limit=200)`). As at 2026-11-16 those 200 rows
+    covered 3 h 52 min of traffic, and the cap is not a speed guard:
+    `scripts/automod/state.py:read_events` does `target.read_text()` and slices
+    `out[-limit:]` afterwards, so the whole ledger measured 227 ms against 287 ms
+    for the tail. Item #4085 paid for that tail. Its successful `vault_land`
+    (commit `c09326122ccb7ff998767955ce8dd96cebabb412`, 2026-11-12T06:33:26Z) was
+    row 15018 of 16,484 — 1,465 rows between it and the tail — so a later attempt
+    of the SAME item, whose `landed: true` was true, was reconciled against a
+    window that could not contain the row, was demoted to `landed: false`, spent
+    the item's one unattended attempt, and went back to `draft` for a triage turn
+    to close work that had been on the vault's `main` for four days.
+
+    The second look mirrors `_landing_seen` above, and widens REACH only, never
+    attribution: the widened list goes to the same
+    `backlog.round_landing_rows`, which still matches a `vault_land` on the
+    `item_id` the ROW carries and consults the round or the harness-stamped session
+    only for a row that carries none. #2888 (rows naming two other items on this
+    item's own session) and #2039 (closed on #2027's sha) both still demote at this
+    reach — measured, not asserted: of the 15 vault-surface
+    `outcome_landing_mismatch` rows in that 16,513-row ledger exactly one (#4085)
+    had a prior successful `vault_land` naming its own item, so the other 14 keep
+    firing. A row written by an EARLIER attempt of the item is still that item's
+    landing; that is what "already landed" means, and it is the thing the tail was
+    throwing away.
+
+    Deliberately not applied to the turn's own fields. `_round_opened_since` and
+    `_vault_commits_since` above read `events`, and the second filters `ts >=
+    started` on purpose — #4085's real `finished` row correctly carries
+    `round_id: null` and `vault_commits: []`, because the earlier commit belongs to
+    a different turn. Only the `landed` attribution was over-narrow.
+
+    The re-read fires only when the snapshot found no landing row AND the turn
+    claims it landed AND no landing is in flight — the exact shape that would
+    otherwise be demoted — so the ordinary path still pays one read.
+    """
+    from scripts.automod import backlog as B, state as S
+
+    def _matches(source: list[dict]) -> bool:
+        return bool(B.round_landing_rows(source, round_id=round_id, item_id=item_id,
+                                         surface=surface, session_id=session_id))
+
+    if _matches(events):
+        return events
+    try:
+        whole = S.read_events(limit=10**9)
+    except Exception:  # noqa: BLE001 — an unreadable ledger is not a landing either
+        return events
+    return whole if _matches(whole) else events
+
+
 def _abandon_grace_seconds() -> int:
     """How long a round left open waits before the reaper acts: none.
 
@@ -2673,10 +2730,21 @@ def _record_run(candidate, triage, run: dict, started: float, *, warm: dict | No
     # the code commit never on `main`. Hence the surface: on `code`/`mixed` only a
     # `promoted` / `item_landed` row counts, because that is the half the round's
     # own diff still needs a landing for.
+    landing_surface = str(triage.get("surface") or "code")
+    landing_events = events
+    if outcome and outcome.get("landed") and not round_seen:
+        # An item's own landing row can be hundreds of rows older than the turn
+        # reconciling it — #4085, re-attempted after an earlier attempt of itself
+        # had already landed the deliverable. Only this call widens its reach; the
+        # five other readers of `events` above short-circuit on `round_id` or
+        # filter on `ts >= started`, so `round_id` / `vault_commits` stay this
+        # turn's own.
+        landing_events = _item_scoped_landing_events(
+            events, round_id=round_id, item_id=candidate.id, surface=landing_surface,
+            session_id=turn_session)
     outcome, landing_mismatch = B.reconcile_outcome_landing(
-        outcome, round_id=round_id, item_id=candidate.id, events=events,
-        landing_seen=round_seen, surface=str(triage.get("surface") or "code"),
-        session_id=turn_session)
+        outcome, round_id=round_id, item_id=candidate.id, events=landing_events,
+        landing_seen=round_seen, surface=landing_surface, session_id=turn_session)
     if landing_mismatch:
         logger.warning("backlog #%s: %s", candidate.id, landing_mismatch)
     # A path the round needed and the loop may never write. Recorded on the

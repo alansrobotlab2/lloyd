@@ -4130,6 +4130,173 @@ def test_the_early_returns_and_the_surface_rule_survive_the_narrowed_landing_arm
         assert claim["landed"] is False and mismatch, (surface, claim, mismatch)
 
 
+# ── #4160: the landing lookup's reach is the item's history, not a 200-row tail ──
+#
+# `_record_run` reads the ledger once with `read_events(limit=200)`
+# (`workers/sources/autocode.py`) and hands that same list to
+# `reconcile_outcome_landing`, so the whole reach of the `landed: true`
+# cross-check was the last 200 rows whatever the item is. Triage measured that
+# window on 2026-11-16 at 3 h 52 min of ledger traffic, and measured that the cap
+# buys no speed either: `scripts/automod/state.py:read_events` does
+# `target.read_text()` and slices `out[-limit:]` afterwards — 287 ms at
+# `limit=200` against 227 ms over all 16,513 rows.
+#
+# Item #4085 paid for it. Its successful `vault_land` (commit
+# c09326122ccb7ff998767955ce8dd96cebabb412, 2026-11-12T06:33:26Z) is row 15018 of
+# the 16,484 rows the ledger held at the moment of its demotion — 1,465 rows
+# between it and the tail — so the later attempt that correctly reported
+# `landed: true` with all five clauses `met` was demoted, spent its one unattended
+# attempt, and was moved `in_progress → draft` for a triage turn to close work
+# that had been on the vault's `main` since 2026-11-12. Over that whole ledger
+# only 1 of the 15 vault-surface `outcome_landing_mismatch` rows has that shape;
+# the other 14 (#2888's) are correct demotions and stay correct at the new reach.
+#
+# The writer-level nodes below are the replay: the landing row exists in the real
+# ledger file and provably sits outside the window the writer reads —
+# `_seed_beyond_the_window` asserts both halves, so the first node cannot pass
+# with the defect present. A pure function-level replay would pass either way,
+# because the function is handed the rows.
+
+# More filler rows than the writer's window, so anything seeded before them is
+# outside it by construction.
+FILLER_ROWS_PAST_THE_WINDOW = 210
+WRITER_LEDGER_WINDOW = 200  # `_record_run`'s `read_events(limit=200)`
+
+
+def _filler_row(i):
+    """One row of unrelated ledger traffic: no landing, no round, no item."""
+    return {"event": "housekeeping", "sweep": i, "detail": "unrelated ledger traffic"}
+
+
+def _earlier_attempt_vault_land(item_id=415, *, session="s415",
+                                commit="c0932612" + "0" * 32):
+    """A successful `vault_land` written by an EARLIER attempt of the same item.
+
+    Stamped four days before the turn being reconciled, which is why
+    `_vault_commits_since`'s `ts >= started` filter keeps its sha out of this
+    turn's `vault_commits`: #4085's real `finished` row carries `round_id: null`
+    and `vault_commits: []` beside exactly this row, and must keep doing so."""
+    return {"event": "vault_land", "item_id": item_id, "ok": True, "commit": commit,
+            "session_id": session,
+            "ts": (datetime.now(timezone.utc) - timedelta(days=4)).timestamp()}
+
+
+def _seed_beyond_the_window(land_rows, *, filler=FILLER_ROWS_PAST_THE_WINDOW):
+    """Append `land_rows`, then `filler` unrelated rows, and prove the premise.
+
+    The premise IS the bug: every `vault_land` row must be absent from the
+    200-row tail the writer reads and present in the whole ledger. Checked here
+    rather than assumed because a replay whose row quietly stayed inside the
+    window would pass with the defect present and prove nothing."""
+    for row in land_rows:
+        S.append_event(row, path=S.LEDGER_PATH)
+    for i in range(filler):
+        S.append_event(_filler_row(i), path=S.LEDGER_PATH)
+    tail = S.read_events(path=S.LEDGER_PATH, limit=WRITER_LEDGER_WINDOW)
+    assert [e for e in tail if e.get("event") == "vault_land"] == [], (
+        "the seeded landing row is inside the window the writer reads, so this "
+        "replay would pass with the defect present")
+    whole = S.read_events(path=S.LEDGER_PATH, limit=10**9)
+    assert len([e for e in whole if e.get("event") == "vault_land"]) == len(land_rows)
+
+
+def test_an_earlier_attempt_s_vault_landing_is_still_this_items_landing(isolated,
+                                                                       monkeypatch):
+    """#4085 replayed through the writer: the item's own landing row is in the
+    ledger, 210 rows back, and the claim stands.
+
+    This is the demotion that cost a finished item its attempt and a triage turn:
+    `landed: true` with no `outcome_landing_mismatch` is the whole acceptance, and
+    the row it is attributed to names this item and nobody else.
+    """
+    def seed():
+        _seed_beyond_the_window([_earlier_attempt_vault_land()])
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=seed, surface="vault")
+    assert ev["outcome"]["landed"] is True, (
+        "an item whose deliverable an earlier attempt of its own item landed was "
+        f"demoted because the row sits outside a {WRITER_LEDGER_WINDOW}-row window: "
+        f"{ev['outcome']}")
+    assert ev["outcome_landing_mismatch"] == "", ev["outcome_landing_mismatch"]
+
+
+def test_an_earlier_attempt_s_commit_stays_out_of_this_turn_s_own_fields(isolated,
+                                                                        monkeypatch):
+    """The same turn, and the fields that must NOT absorb it.
+
+    The widening is the `landed` attribution's reach, nothing else. This turn
+    opened no round and wrote nothing, so its `finished` row still says
+    `round_id: null` and `vault_commits: []` even with the older commit now
+    visible to the reconciliation — the earlier commit belongs to a different
+    turn, and reporting it here would make this turn claim work it did not do."""
+    def seed():
+        _seed_beyond_the_window([_earlier_attempt_vault_land()])
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=seed, surface="vault")
+    assert ev["outcome"]["landed"] is True, ev["outcome"]
+    assert ev["round_id"] is None, ev["round_id"]
+    assert ev["vault_commits"] == [], (
+        f"the per-turn fields absorbed an older turn's commit: {ev['vault_commits']}")
+
+
+def test_foreign_vault_landings_are_still_not_this_items_past_the_window(isolated,
+                                                                        monkeypatch):
+    """#2888's shape at #4160's reach: a wider look finds rows, and they are still
+    not this item's.
+
+    Both rows name other items (#2885, #2887) on this turn's own session and sit
+    outside the window, so the only way the claim can be kept is by an arm that
+    vouches for a third item through a session match — the exact arm #2888 removed.
+    """
+    def seed():
+        _seed_beyond_the_window([_session_vault_row(2885), _session_vault_row(2887)])
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=seed, surface="vault")
+    assert ev["outcome"]["landed"] is False, (
+        "reach was widened into attribution: rows naming two other items vouched "
+        f"for item 415: {ev['outcome']}")
+    assert "vault_land" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+    assert "(none opened)" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+
+
+def test_an_item_that_landed_nothing_is_still_demoted_at_the_wider_reach(isolated,
+                                                                       monkeypatch):
+    """The control the widening needs: a whole-ledger look is not a standing
+    exemption. Same filler, same surface, same claim, and no `vault_land` row for
+    the item anywhere in the file — the demotion has to fire anyway."""
+    def seed():
+        _seed_beyond_the_window([])
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=seed, surface="vault")
+    assert ev["outcome"]["landed"] is False, (
+        "the second ledger look answers yes for an item with no landing row at all")
+    assert "vault_land" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+    assert ev["outcome"]["acceptance"] == "met", "the flag is demoted, not the verdict"
+
+
+@pytest.mark.parametrize("surface", ["code", "mixed"])
+def test_a_vault_landing_row_past_the_window_still_proves_nothing_about_a_code_landing(
+        isolated, monkeypatch, surface):
+    """#415's rule, re-pinned at the new reach: reaching further back must not make
+    a vault row evidence that a diff reached `main`.
+
+    The row names THIS item, so attribution is satisfied — and on `code` and
+    `mixed` that is still not the landing this surface needs.
+    """
+    def seed():
+        _seed_beyond_the_window([_earlier_attempt_vault_land()])
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=seed, surface=surface)
+    assert ev["outcome"]["landed"] is False, (
+        f"a vault row kept a {surface}-surface claim on the strength of reach alone")
+    assert "promoted" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+
+
 def test_a_commit_the_vault_holds_is_not_an_unresolved_citation(repo, tmp_path, monkeypatch):
     """A `mixed` round lands vault commits and the grader cites them. Three of
     the five shas that spent review attempts on 2026-09-26/27 were real vault
