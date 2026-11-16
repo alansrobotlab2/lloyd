@@ -559,3 +559,282 @@ def test_the_recorded_acceptance_grep_over_the_route_returns_only_dated_lines():
     assert not undated, (
         f"{len(undated)} of {len(lines)} hits carry no measurement date, so they "
         f"read as the live corpus: {undated[:4]}")
+
+
+# ── #4115: the `board-steward-disagreement` row and the producer it describes ───
+#
+# The tag-table row said `workers/board_disagreement.py` files one `draft` item per
+# disagreement, on a ledger-provenance test, with a four-name kind list and an
+# intake cap of five items a tick under a constant named in the same breath. None
+# of it was ever written: `git log -S` over the filer's history for the cap's name
+# and for the provenance label both come back empty, and the cap appears in zero
+# tracked Python files — so the row was not stale against a refactor, it described
+# a producer that never existed. The live filer triggers on a *measurement*
+# (`below_floor`, owed-check's flip bar) and cannot accumulate at all: it merges
+# into the one opener, which is why 18 filings carried this tag between 2026-10-27
+# and 2026-11-13 and none of them was open.
+#
+# What the false sentence was worth is the reason for this section. The row ended
+# "…does not bound them → filed.", and the architecture review of `doc:backlog`
+# that refreshed the page on 2026-11-12 read it, re-derived an unbounded-expiry
+# defect from constants that do not exist, and filed #4111 — closed `stale` 25
+# minutes later. Closing the item without rewriting the row re-arms the loop: the
+# next review of the same page reads the same row. `_tag_table_row` already folded
+# this very row for the `needs-human` pass and never looked inside it, which is how
+# four invented identifiers survived a suite whose whole subject is prose that
+# blames code. So each claim the row now makes is checked against the filer whose
+# behaviour it states, not against this file's memory of it.
+
+FILER = ROOT / "workers" / "board_disagreement.py"
+
+#: The identifiers the row blamed filing on. None is a filer constant or a kind
+#: the code writes — `MAX_NEW_ITEMS` is in no Python file and the provenance label
+#: lives only in unrelated test names — so a row carrying one points a reader at
+#: code that never existed.
+INVENTED_FILER_NAMES = ("no_ledger", "unapplied", "ambiguous", "unreadable",
+                        "MAX_NEW_ITEMS", "5 a tick")
+
+#: Every filer symbol the rewritten row names. Each has to resolve in the module it
+#: is blamed in: the defect this section exists for is a doc naming code.
+LIVE_FILER_SYMBOLS = ("TAG", "ROWS_MAX", "FLIP_MIN_JUDGED", "FLIP_MIN_RATE",
+                      "below_floor", "reverted_moves", "file_or_update",
+                      "openers", "_merge", "_create")
+
+
+def _filer_src() -> str:
+    src = FILER.read_text(encoding="utf-8")
+    assert len(src) > 2000, f"the disagreement filer read back as {len(src)} chars"
+    return src
+
+
+def _filer_func(name: str) -> str:
+    """One function's source from the filer.
+
+    A row that says a gate lives in a named function is a claim about that
+    function's body; checked against the whole file, the claim would pass with the
+    gate moved anywhere else in the module.
+    """
+    src = _filer_src()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            seg = ast.get_source_segment(src, node)
+            assert seg, f"{name} parsed but has no source segment"
+            return seg
+    raise AssertionError(f"{name} is not defined in workers/board_disagreement.py")
+
+
+def _filer_const(name: str):
+    """A module-level literal constant of the filer, read from the AST."""
+    for node in ast.parse(_filer_src()).body:
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == name:
+                    return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} is not a module-level constant in the filer")
+
+
+def _git_grep(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "grep", "-n", *args], cwd=str(ROOT),
+                          capture_output=True, text=True, timeout=120)
+
+
+def test_the_board_steward_row_blames_no_name_the_filer_never_had():
+    """Clause 1: the row carries none of the invented names, and names only code.
+
+    Two directions, because a deletion would satisfy the first alone: the banned
+    names are gone, and every filer symbol the row does carry is defined in that
+    file. The old row would have passed a pure-absence check by being deleted.
+    """
+    row = _tag_table_row("board-steward-disagreement")
+    offenders = [n for n in INVENTED_FILER_NAMES if n in row]
+    assert not offenders, (
+        f"the tag row still names {offenders} — `git log -S` over "
+        f"workers/board_disagreement.py is empty for every one of them, so the row "
+        f"is describing a producer that was never written, not a refactored one")
+
+    # The item's own check, run as a reader runs it: `-E` because the recorded
+    # pattern is an alternation, and aimed at a control string second so a wrong
+    # pathspec cannot report the pass.
+    gone = _git_grep("-E", "-e", "|".join(INVENTED_FILER_NAMES),
+                     "--", "architecture/backlog.md")
+    assert gone.returncode == 1, (
+        f"the invented-name pattern still matches the page "
+        f"(rc={gone.returncode}): {gone.stdout[:400]!r}")
+    control = _git_grep("-e", "board_steward.py", "--", "architecture/backlog.md")
+    assert control.returncode == 0, (
+        f"the same instrument over the same page found its control string nowhere "
+        f"(rc={control.returncode}), so the absence above proves nothing")
+
+    src = _filer_src()
+    missing = [s for s in LIVE_FILER_SYMBOLS
+               if not re.search(rf"\b{re.escape(s)}\b", src)]
+    assert not missing, (
+        f"the row names {missing} as filer code and the module does not define "
+        f"them — the exact defect #4115 removed")
+
+
+def test_the_board_steward_row_states_the_measured_floor_that_gates_filing():
+    """Clause 2: filing is gated by a measured window, and the row says whose bar.
+
+    The two figures are owed-check's flip bar (#3089 asked, #3329 ruled
+    2026-10-25) restated in the filer as `FLIP_MIN_JUDGED` / `FLIP_MIN_RATE`; the
+    row's numbers are compared to those constants rather than to literals written
+    twice, so a re-ruled floor fails here instead of leaving the page explaining a
+    trigger that no longer fires.
+    """
+    row = _tag_table_row("board-steward-disagreement")
+    assert "end of that same tick" in row, "the row no longer says when the filer runs"
+    assert "rolling-7-day" in row, "the window the trigger reads is not named"
+    assert "owed-check" in row, "the owner of the bar is not named"
+    assert "below_floor" in row, "the row does not name where the gate is enforced"
+    assert "judged >= 50" in row and "rate >= 0.90" in row, (
+        "the flip floor is missing its figures: the accepted bar is judged >= 50 "
+        "AND rate >= 0.90 over the 7-day window")
+
+    m_judged = re.search(r"judged >= (\d+)", row)
+    m_rate = re.search(r"rate >= (\d+\.?\d*)", row)
+    assert m_judged and m_rate, "the floor figures are not in the row at all"
+    assert int(m_judged.group(1)) == _filer_const("FLIP_MIN_JUDGED"), (
+        f"the row says judged >= {m_judged.group(1)} but the filer's "
+        f"FLIP_MIN_JUDGED is {_filer_const('FLIP_MIN_JUDGED')}")
+    assert float(m_rate.group(1)) == _filer_const("FLIP_MIN_RATE"), (
+        f"the row says rate >= {m_rate.group(1)} but the filer's FLIP_MIN_RATE is "
+        f"{_filer_const('FLIP_MIN_RATE')}")
+
+    body = _filer_func("file_or_update")
+    assert "below_floor(" in body, (
+        "the row blames `below_floor` for the trigger, but the filing entry point "
+        "never calls it — the gate is somewhere the reader will not look")
+    assert "return None" in body.split("below_floor(")[1][:200], (
+        "`file_or_update` calls `below_floor` but does not stop filing on its "
+        "verdict, so the row overstates the gate")
+
+
+def test_the_board_steward_row_bounds_the_producer_at_one_open_item():
+    """Clause 3: at most one open item, and `ROWS_MAX` is rows, not items.
+
+    The bound is what makes the old "unbounded accumulation" reading wrong, so it
+    is checked on both sides: the row states the merge design, and `file_or_update`
+    still implements it — openers collected by tag, nothing filed beside an
+    `in_progress` one, otherwise `_merge` into the first.
+    """
+    row = _tag_table_row("board-steward-disagreement")
+    assert "one open item" in row, "the accumulation bound is gone from the row"
+    assert "openers" in row and "in_progress" in row and "_merge" in row, (
+        "the bound is asserted without the mechanism that produces it")
+    assert "ROWS_MAX" in row, "the row dropped the real cap"
+    assert "rows per item" in row and "not items per tick" in row, (
+        "ROWS_MAX is not stated as rows per item — the quantity it bounds is the "
+        "one thing a reader sizing the producer needs")
+    assert "one `draft` item per disagreement" not in row, (
+        "the row still files per disagreement, which is the claim that made #4111 "
+        "look like unbounded growth")
+
+    body = _filer_func("file_or_update")
+    assert "openers" in body and "in_progress" in body, (
+        "the filer no longer skips filing beside an item a round is working")
+    assert "_merge(openers[0]" in body, (
+        "the filer no longer merges into the existing opener, so more than one "
+        "open item can exist and the row's bound is false")
+    assert _filer_const("ROWS_MAX") == 40, (
+        f"ROWS_MAX is {_filer_const('ROWS_MAX')}, not the 40 the row states")
+    assert "ROWS_MAX" in _filer_func("disagreement_rows"), (
+        "ROWS_MAX no longer caps the rows one filing writes, so the row names the "
+        "wrong bound")
+
+
+def test_the_board_steward_row_states_the_gauge_undercount_instead_of_an_item():
+    """Clause 4: the residual is documentation, and the true tag sentence stays.
+
+    The old row drew a false inference from a true fact: these items carry no
+    `spawned-by-*` tag, and from that the page concluded the 30-day cap does not
+    bound them and filed a defect. The true consequence is narrower — the tag is
+    in neither `loop_spawn_tags()` nor `quarantine_tags()`, so the scorecard's open
+    self-spawned gauge never counts them — and it is read here through the real
+    readers, which is the only way the row's claim can be more than a sentence.
+    """
+    row = _tag_table_row("board-steward-disagreement")
+    assert "→ filed" not in row, "the row still ends on the imperative that re-files it"
+    assert "#4111" not in row, "the row points a reader at the item instead of the residual"
+    assert "spawned-by-*" in row, "the one true tag sentence was dropped with the false inference"
+    assert "loop_spawn_tags()" in row and "quarantine_tags()" in row, (
+        "the residual is not stated as the two readers that miss the tag")
+    assert "scorecard" in row, "the gauge the undercount lands on is not named"
+
+    from scripts.automod import backlog as B
+    tag = _filer_const("TAG")
+    assert tag == "board-steward-disagreement", (
+        f"the filer's tag moved to {tag!r}; the row and this test describe the old one")
+    assert tag not in B.quarantine_tags(), (
+        "the tag joined quarantine, so these items are held out of triage and the "
+        "row's account of why triage closed them is stale")
+    assert tag not in B.loop_spawn_tags(), (
+        "the tag joined the expiry-and-gauge set, so the ≤ 1-item undercount the "
+        "row documents no longer exists")
+    assert B.loop_spawn_tag([tag, "swept"]) == "", (
+        "the prefix rule now matches a disagreement item, which is the reading the "
+        "row says is false")
+    gauge = _git_grep("-e", "loop_spawn_tag(", "--", "scripts/automod/scorecard.py")
+    assert gauge.returncode == 0, (
+        f"the scorecard no longer asks `loop_spawn_tag` (rc={gauge.returncode}), so "
+        f"the row names a gauge that is not there")
+
+    arrow = _git_grep("-e", "→ filed", "--", "architecture/backlog.md")
+    table_rows = [ln for ln in arrow.stdout.splitlines() if ln.split(":", 2)[-1]
+                  .lstrip().startswith("| `")]
+    assert not table_rows, (
+        f"a tag-table row still tells the next review this was filed: {table_rows[:2]}")
+
+
+# The dated refresh entry that filed #4111 off this page. The label, not the item:
+# the entry is a record of what the 2026-11-12 review believed, and the thing a
+# future review re-derives is the label "that expiry hole" pointing at an open
+# defect. The fix is to date the refutation into it, not to delete the history.
+_STALE_HOLE_ANCHOR = "#4111 (that expiry hole"
+
+
+def _refresh_entries() -> list[str]:
+    """Each `- ` list entry of the page's refresh log, folded onto one line.
+
+    Folded because the entry wraps: an assertion against a single source line would
+    fail on a re-flow that changed nothing a reader cares about.
+    """
+    lines = DOC.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("- "):
+            j = i + 1
+            while j < len(lines) and lines[j].strip() and not lines[j].startswith("- "):
+                j += 1
+            out.append(" ".join(" ".join(lines[i:j]).split()))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def test_the_refresh_narration_records_the_refutation_of_that_expiry_hole():
+    """Clause 5: the 2026-11-12 narration is annotated, not erased.
+
+    #4111 closed `stale` on 2026-11-13, 25 minutes after the review that minted it
+    from this page, because the accumulation it named cannot happen. The entry still
+    has to say what that review saw — it is dated history — and has to say beside it
+    that the claim was refuted and which item survived as the actual defect.
+    """
+    hits = [e for e in _refresh_entries() if _STALE_HOLE_ANCHOR in e]
+    assert len(hits) == 1, (
+        f"expected exactly one refresh entry naming {_STALE_HOLE_ANCHOR!r}, found "
+        f"{len(hits)} — the clause says the line is not deleted, and a second copy "
+        f"would be the same claim standing in two places")
+    entry = hits[0]
+    assert "that expiry hole" in entry, "the dated claim was deleted rather than annotated"
+    assert "refuted" in entry, "the refutation is not recorded beside the claim"
+    assert "2026-11-13" in entry, "the refutation is undated, so it reads as opinion"
+    assert "stale" in entry, (
+        "the entry does not say how #4111 closed, so a reader cannot see the "
+        "closure was a refutation and not a fix")
+    assert "#4115" in entry, "the surviving doc defect is not named as the successor"
+    assert "one open item" in entry, (
+        "the annotation does not say why the accumulation cannot happen, which is "
+        "the half a future review needs to stop re-deriving it")
