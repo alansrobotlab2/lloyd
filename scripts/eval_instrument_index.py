@@ -96,9 +96,12 @@ MIN_SCORED_COMPONENTS = 2
 
 #: Rows of this series needed before a component can be called flat: three prior
 #: rows plus the one being published. Below it the answer is `insufficient-series`,
-#: never `flat` — `scorecard.jsonl` holds 2 rows and `uptake` 3 today, and reading
-#: either of those as a flat line would be exactly the crying-wolf failure the
-#: item's risks name.
+#: never `flat` — the thinnest store the table carries now is uptake's three dated
+#: tables (`ls eval/uptake/uptake-*.json` → 3, measured 2026-11-16), and reading three
+#: rows as a flat line would be exactly the crying-wolf failure the item's risks name.
+#: (`scorecard.jsonl`, at 2 rows, was the thinner case until #4169 retired that arm
+#: below: four is now the minimum that excludes the thinnest store, no longer one row
+#: of margin above it.)
 FLAT_WINDOW_ROWS = 4
 
 #: Two floats this close are the same number. Used only for the flat-headline
@@ -202,11 +205,6 @@ def _funnel_dir() -> Path:
     return p.DATA_ROOT.joinpath(*fc.FUNNEL_ARTIFACT_SUBDIR)
 
 
-def _scorecard_series() -> Path:
-    from scripts.automod import scorecard as sc
-    return sc.scorecard_path()
-
-
 def _landed_outcomes_series() -> Path:
     from scripts.automod import landed_outcomes as lo
     return lo.landed_outcomes_path()
@@ -234,7 +232,7 @@ def _gate_to_land_lag_series() -> Path:
     return gtll.record_path()
 
 
-#: The table. Nine instruments, the seven weighted arms summing to 1.0 and the
+#: The table. Eight instruments, the six weighted arms summing to 1.0 and the
 #: two reported-only arms carrying weight 0.0: `gate_to_land_lag` (#3541) because
 #: it is a latency in seconds and seconds cannot enter a percentage, and
 #: `behaviour_exhibit` (#3886) because its one scalar is a share pooled over four
@@ -245,9 +243,38 @@ def _gate_to_land_lag_series() -> Path:
 #: is the precedent for what that costs the composite (nothing). Every path is resolved
 #: through the writer's own constant — which is how the two stores the item calls
 #: out end up IN the table instead of being skipped for living where the data root
-#: does not reach: the automod state dir holds `scorecard.jsonl`,
-#: `landed_outcomes.jsonl` and the gate-to-land lag journal outside `DATA_ROOT`,
-#: and uptake's default output is inside the code tree.
+#: does not reach: the automod state dir holds `landed_outcomes.jsonl` and the
+#: gate-to-land lag journal outside `DATA_ROOT`, and uptake's default output is
+#: inside the code tree.
+#:
+#: RETIRED 2026-11-16 (#4169) — `automod_scorecard`, the arm that scored
+#: `scorecard.jsonl` in that same state dir, is out of this table, and the retirement
+#: is the ENTRY'S REMOVAL, not a flag: its newest row is 2026-09-12 and nothing writes
+#: the file any more. The only code path that appends it is the `--record` flag of
+#: `scripts.automod.round scorecard` — `cd ~/lloyd && .venvs/lloyd/bin/python -m
+#: scripts.automod.round scorecard --record` — and no autonomy task file, crontab entry
+#: (`crontab -l | grep -ci scorecard` → 0), systemd unit under `agent-services/` or
+#: `~/.config/systemd/`, or `workers.db` queue row invokes it (measured 2026-11-16).
+#: `app/routers/dashboard.py` calls `scorecard.compute()` fresh for the loop tab, so the
+#: JSONL had no reader but this index. The arm therefore published `stale` every day and
+#: its 0.18 of declared weight was renormalised away every day, indefinitely.
+#:
+#: THE ROUTE BACK IN, if the owed-check ruling on #4169 (carried from #2572's owed item
+#: 5, whose 2026-10-15 closure at `9474d91b` left it unowned) decides to name a writer
+#: instead: re-add this `Instrument` entry with `scheduled_by` set to the task file of
+#: the job that runs that command. `scheduled_by` is the field that tells a reader the
+#: arm is written, so an entry re-added without it re-opens the same defect.
+#:
+#: What is NOT the route back in: `hand_run_by_ruling`. That flag suppresses the
+#: staleness test outright — it is how `uptake_probe` sat in the 2026-11-15 published
+#: total as `measured` at 56 days old, value 1.0 — so setting it on this arm would have
+#: returned a store whose newest row was 2026-09-12 to the daily composite as if it were
+#: current, which is a worse reading than the visible exclusion it replaces.
+#:
+#: The dropped 0.18 went back to the six surviving weighted arms in proportion to the
+#: weight each already carried — old weight over the 0.82 they summed to, rounded to two
+#: decimals — with the rounding residue placed on `retrieval_nightly`, the largest, so
+#: the table still adds up: `weights_sum_declared` publishes 1.0, not 0.82.
 INSTRUMENTS: tuple[Instrument, ...] = (
     Instrument(
         key="retrieval_nightly",
@@ -257,7 +284,7 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         value_path="summary.overall.doc_hit_rate",
         unit="rate",
         polarity="up",
-        weight=0.28,
+        weight=0.35,
         weight_why="weighted by reach: every prompt this box builds is built out "
                    "of the retrieval this arm scores, and it is the only component "
                    "carrying its own Wilson interval (#696)",
@@ -279,7 +306,7 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         value_path="dropped_rate",
         unit="rate",
         polarity="down",
-        weight=0.20,
+        weight=0.24,
         weight_why="weighted by coverage: it observes every turn of every session "
                    "on the box, so it is the widest-behaviour arm in the table",
         cadence_days=1,
@@ -293,29 +320,6 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         date_key="recorded_at",
     ),
     Instrument(
-        key="automod_scorecard",
-        title="Unattended-loop scorecard (acceptance hit rate)",
-        artifact=_scorecard_series,
-        pattern=None,
-        value_path="acceptance.hit_rate",
-        unit="rate",
-        polarity="up",
-        weight=0.18,
-        weight_why="weighted by decisions informed: it is the only read of whether "
-                   "the loop is earning its keep, and the loop's own dashboard tab "
-                   "is rendered from it",
-        cadence_days=7,
-        hand_run_by_ruling=False,
-        scheduled_by=None,
-        consumer=Consumer("app/routers/dashboard.py",
-                          "calls `scorecard.compute()` fresh for the loop tab, so it "
-                          "renders the newest numbers but never compares one stored "
-                          "row against another",
-                          compares_rows=False),
-        n_path="acceptance.with_outcome",
-        date_key="computed_at",
-    ),
-    Instrument(
         key="landed_outcomes",
         title="Landed-change undo rate by author (agent arm)",
         artifact=_landed_outcomes_series,
@@ -323,7 +327,7 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         value_path="by_author.agent.later_undo_7d",
         unit="rate",
         polarity="down",
-        weight=0.14,
+        weight=0.17,
         weight_why="weighted by what it alone measures: the cost side of a landing "
                    "— how often a landed commit is undone within 7 days — has no "
                    "other arm",
@@ -344,7 +348,7 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         value_path="corpus_rates.empty",
         unit="rate",
         polarity="down",
-        weight=0.10,
+        weight=0.12,
         weight_why="weighted by call volume against recoverability: it sees every "
                    "tool call, but an empty return is retried inside the same turn "
                    "rather than ending it",
@@ -364,7 +368,7 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         value_path="classifier.precision",
         unit="rate",
         polarity="up",
-        weight=0.05,
+        weight=0.06,
         weight_why="weighted by thinness: hand-labelled over a 23-positive label "
                    "file, so a small weight rather than a zero, and no weight at "
                    "all would hide that the store is in the code tree",
@@ -386,7 +390,7 @@ INSTRUMENTS: tuple[Instrument, ...] = (
         value_path="stages[surfaced].rate",
         unit="share",
         polarity="up",
-        weight=0.05,
+        weight=0.06,
         weight_why="weighted by breadth against unit honesty: it censuses every "
                    "durable artifact, but its own round finding is that its stages "
                    "divide by artifacts and rows interchangeably, so it is reported "

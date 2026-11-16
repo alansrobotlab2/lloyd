@@ -87,7 +87,10 @@ from scripts.maintenance import gate_to_land_lag as GTL  # noqa: E402
 NOW = datetime(2026, 10, 13, 3, 40, tzinfo=timezone.utc)
 FRESH = "2026-10-12"
 
-ALL_KEYS = ("retrieval_nightly", "iv_metrics", "automod_scorecard",
+#: The eight arms #4169 leaves in the table. `automod_scorecard` was here until that
+#: item retired it: its store's newest row is 2026-09-12 and nothing writes the file,
+#: so it published `stale` every day and its weight was renormalised away every day.
+ALL_KEYS = ("retrieval_nightly", "iv_metrics",
             "landed_outcomes", "tool_quality", "uptake_probe", "funnel_census",
             "gate_to_land_lag", "behaviour_exhibit")
 
@@ -136,11 +139,6 @@ def _seed(store: Path, key: str, day: str, value) -> Path:
         return _seed_series(store, "iv-metrics.jsonl", [{
             "recorded_at": f"{day}T08:00:52+00:00", "dropped_rate": value,
             "llm_calls": 754, "observations": 1420}])
-    if key == "automod_scorecard":
-        return _seed_series(store, "scorecard.jsonl", [{
-            "computed_at": f"{day}T20:00:00+00:00", "since_days": 7.0,
-            "acceptance": {"hit_rate": value, "landed": 26, "met": 7,
-                           "with_outcome": 14}}])
     if key == "landed_outcomes":
         # `scripts/automod/landed_outcomes.py::rate` publishes a share as a RECORD,
         # never a string — {k, n, rate, ci_low, ci_high} with Wilson bounds over the
@@ -271,7 +269,6 @@ def _prior_row(declared: float, equal: float, delta_declared: float,
 GOOD_VALUES = {
     "retrieval_nightly": 0.689,      # up is better
     "iv_metrics": 0.0451,            # down is better -> quality 0.955
-    "automod_scorecard": 0.5,        # up
     "landed_outcomes": 0.075,        # down is better -> quality 0.925
     "tool_quality": 0.04,            # down is better -> quality 0.96
     "uptake_probe": 1.0,             # up
@@ -293,7 +290,8 @@ ZERO_WEIGHT_KEYS = ("gate_to_land_lag", "behaviour_exhibit")
 # ── clause 1: one dated row, >=6 components, every declared field ─────────────
 
 def test_run_appends_one_dated_row_covering_nine_components_with_every_declared_field(tmp_path):
-    """Clause 1 (#2597, grown to eight arms by #3541 and nine by #3886): running the
+    """Clause 1 (#2597, grown to eight arms by #3541 and nine by #3886, back to eight
+    when #4169 retired `automod_scorecard`): running the
     publisher appends ONE dated row under the data root covering >=6 components, each
     carrying its instrument path, newest-artifact date, tier, weight, unit and latest
     value.
@@ -311,7 +309,10 @@ def test_run_appends_one_dated_row_covering_nine_components_with_every_declared_
     assert row["item"] == "#2597"
 
     components = row["components"]
-    assert len(components) == 9, "the table covers nine instruments, not eight"
+    assert len(components) == 8, (
+        "eight instruments: the nine #3886 shipped, less the `automod_scorecard` arm "
+        "#4169 retired — and an arm that fell out for want of an update would leave "
+        "this list at seven, which is the failure this count is here to catch")
     assert len(components) >= 6
     assert sorted(c["key"] for c in components) == sorted(ALL_KEYS)
     for c in components:
@@ -427,13 +428,13 @@ def test_the_lag_arm_is_carried_in_the_table_and_excluded_from_both_totals(tmp_p
 
     keys = [c["key"] for c in with_lag["components"]]
     assert "gate_to_land_lag" in keys, "the published table still carries the row"
-    assert len(keys) == 9
+    assert len(keys) == 8
     lag = _component(with_lag, "gate_to_land_lag")
     assert lag["weight"] == 0.0
     assert lag["averageable"] is False
     assert lag["contributes"] is False and lag["in_total_denominator"] is False
     assert with_lag["weights_sum_declared"] == pytest.approx(1.0), (
-        "adding the arm cannot have re-scaled the seven weighted arms")
+        "adding the arm cannot have re-scaled the six weighted arms")
     excluded = {e["key"]: e for e in with_lag["totals"]["excluded"]}
     assert "gate_to_land_lag" in excluded, (
         "the exclusion has to be PRINTED, the same way the funnel's is — a silent "
@@ -486,14 +487,15 @@ def test_the_series_default_lives_under_the_data_root():
 
 
 def test_a_component_with_a_short_series_reports_insufficient_series_not_flat(tmp_path):
-    """`scorecard.jsonl` holds 2 rows and `uptake` 3 today, so a short series may
-    not be read as a flat line: the answer is `insufficient-series`, per the
+    """`uptake` holds 3 dated tables on this box and `landed_outcomes` is a series a
+    daily job has written for under four days of history in a fixture, so a short
+    series may not be read as a flat line: the answer is `insufficient-series`, per the
     flat-headline rule's own window of 4 rows."""
     row, _, _ = _row(tmp_path, GOOD_VALUES,
                      extra_rows=[_prior_row(0.6, 0.5, 0.01, 0.01)] * 2,
                      prior_rows=2)
     assert row["history_rows"] == 2
-    for key in ("automod_scorecard", "uptake_probe"):
+    for key in ("landed_outcomes", "uptake_probe"):
         assert _component(row, key)["flat_check"] == "insufficient-series(3 of 4 rows)"
         assert "vanity" not in _component(row, key)["flat_check"]
 
@@ -520,7 +522,9 @@ def test_a_component_flat_for_four_rows_while_the_composite_moved_is_named(tmp_p
     assert uptake["quality"] == 0.5
     assert uptake["flat_check"].startswith("flat over 4 rows while the composite moved")
     assert "candidate vanity metric" in uptake["flat_check"]
-    assert _component(row, "automod_scorecard")["flat_check"] == "moving"
+    assert _component(row, "landed_outcomes")["flat_check"] == "moving", (
+        "every arm but the pinned one moves: its quality is 1 - 0.075, against 0.4 in "
+        "each of the three prior rows")
 
 
 # ── clause 2: absence excludes, never penalises ───────────────────────────────
@@ -541,12 +545,14 @@ def test_an_absent_instrument_is_recorded_missing_and_enters_neither_numerator_n
                                              / "tool_quality")
 
     totals = row["totals"]
-    assert totals["scored"] == 5, "six measured, but funnel_census is not averageable"
+    assert totals["scored"] == 4, (
+        "four arms in the denominator: retrieval, iv_metrics, landed_outcomes and "
+        "uptake_probe — `funnel_census` is measured but not averageable")
     assert [e["key"] for e in totals["excluded"] if e["status"] == "missing"] == \
         ["tool_quality"]
-    # 1.0 minus the missing arm (0.10) and the non-averageable share (0.05):
+    # 1.0 minus the missing arm (0.12) and the non-averageable share (0.06):
     # the renormalisation is printed, not implied by a changed denominator.
-    assert totals["renormalised_weight_sum"] == pytest.approx(0.85)
+    assert totals["renormalised_weight_sum"] == pytest.approx(0.82)
     assert not any(e["key"] == "tool_quality" and e["status"] == "measured"
                    for e in totals["excluded"])
 
@@ -563,10 +569,11 @@ def test_an_absent_instrument_cannot_contribute_a_pass_even_at_a_perfect_score(t
 def test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_reading_100_percent(tmp_path):
     """Clause 2's fixture: all but one instrument missing, and the one that
     survives scores 100% — the total must refuse, not publish that as a composite.
-    Eight of the nine are omitted (#3541 grew the table to eight arms, #3886 to nine),
-    the surviving one being `retrieval_nightly`."""
+    Seven of the eight are omitted (#3541 grew the table to eight arms, #3886 to nine,
+    #4169 retired `automod_scorecard` back to eight), the surviving one being
+    `retrieval_nightly`."""
     row, _, _ = _row(tmp_path, {"retrieval_nightly": 1.0},
-                     omit=("iv_metrics", "automod_scorecard", "landed_outcomes",
+                     omit=("iv_metrics", "landed_outcomes",
                            "tool_quality", "uptake_probe", "funnel_census",
                            "gate_to_land_lag", "behaviour_exhibit"))
 
@@ -578,22 +585,25 @@ def test_with_all_but_one_instrument_missing_the_total_refuses_rather_than_readi
     assert totals["min_scored"] == EII.MIN_SCORED_COMPONENTS
     assert "refuses" in row["headline"]
     assert "1.0" not in json.dumps({"declared": totals["declared_weights"]})
-    assert len(row["dead_or_stale"]) == 8
+    assert len(row["dead_or_stale"]) == 7
     assert {d["status"] for d in row["dead_or_stale"]} == {"missing"}
 
 
 def test_a_stale_instrument_is_excluded_and_named_with_its_declared_cadence(tmp_path):
     """A component older than its own declared cadence contributes `stale` and
     leaves the denominator, with the renormalisation visible."""
-    row, _, _ = _row(tmp_path, GOOD_VALUES, days={"automod_scorecard": "2026-09-11"})
+    # `tool_quality` carries a declared cadence of 7 days and is not hand-run, so it
+    # is the arm this behaviour belongs on now that `automod_scorecard` is retired
+    # (#4169) — the test is about the staleness rule, never about that arm.
+    row, _, _ = _row(tmp_path, GOOD_VALUES, days={"tool_quality": "2026-09-11"})
 
-    stale = _component(row, "automod_scorecard")
+    stale = _component(row, "tool_quality")
     assert stale["status"] == "stale"
     assert stale["age_days"] == 32
     assert stale["tier"] == 1, "rows are not arriving, so nothing is tracked over time"
     assert stale["contributes"] is False and stale["in_total_denominator"] is False
     assert "cadence of 7 d" in stale["detail"]
-    assert "automod_scorecard" in [d["key"] for d in row["dead_or_stale"]]
+    assert "tool_quality" in [d["key"] for d in row["dead_or_stale"]]
 
 
 def test_a_hand_run_instrument_is_never_flagged_stale(tmp_path):
@@ -664,12 +674,11 @@ def test_funnel_census_is_carried_in_the_table_and_excluded_from_the_average(tmp
 def test_the_declared_weight_and_equal_weight_totals_differ_under_non_uniform_weights(tmp_path):
     """Clause 3: both totals in one row, and under non-uniform weights the two
     are different numbers — the test is non-vacuous by construction."""
-    values = {"retrieval_nightly": 0.2,    # quality 0.20, weight 0.28
-              "iv_metrics": 0.90,          # quality 0.10, weight 0.20
-              "automod_scorecard": 0.9,    # quality 0.90, weight 0.18
-              "landed_outcomes": 0.0,      # quality 1.00, weight 0.14
-              "tool_quality": 0.9,         # quality 0.10, weight 0.10
-              "uptake_probe": 1.0,         # quality 1.00, weight 0.05
+    values = {"retrieval_nightly": 0.2,    # quality 0.20, weight 0.35
+              "iv_metrics": 0.90,          # quality 0.10, weight 0.24
+              "landed_outcomes": 0.0,      # quality 1.00, weight 0.17
+              "tool_quality": 0.9,         # quality 0.10, weight 0.12 — omitted below
+              "uptake_probe": 1.0,         # quality 1.00, weight 0.06
               "funnel_census": 0.6,
               "gate_to_land_lag": 17.687,  # weight 0.0, reported not averaged
               "behaviour_exhibit": 0.9058}  # weight 0.0 too (#3886): in neither total
@@ -678,9 +687,10 @@ def test_the_declared_weight_and_equal_weight_totals_differ_under_non_uniform_we
 
     assert totals["status"] == "ok"
     declared, equal = totals["declared_weights"], totals["equal_weights"]
-    # (0.2*0.28 + 0.1*0.20 + 0.9*0.18 + 1.0*0.14 + 1.0*0.05) / 0.85 = 0.5035
-    assert declared == pytest.approx(0.5035, abs=1e-4)
-    assert equal == pytest.approx((0.2 + 0.1 + 0.9 + 1.0 + 1.0) / 5, abs=1e-6)
+    # The four scored arms' weights sum to 0.82 (0.35 + 0.24 + 0.17 + 0.06), so:
+    # (0.2*0.35 + 0.1*0.24 + 1.0*0.17 + 1.0*0.06) / 0.82 = 0.324 / 0.82 = 0.3951
+    assert declared == pytest.approx(0.3951, abs=1e-4)
+    assert equal == pytest.approx((0.2 + 0.1 + 1.0 + 1.0) / 4, abs=1e-6)
     assert declared != equal, "a non-uniform weighting must show up in the number"
     assert abs(declared - equal) > 0.1
 
@@ -688,10 +698,14 @@ def test_the_declared_weight_and_equal_weight_totals_differ_under_non_uniform_we
 def test_a_sign_disagreement_between_the_two_totals_publishes_the_weights_decide_headline(tmp_path):
     """Clause 3's deliverable, implemented: when the two weightings disagree about
     the DIRECTION of the move, the headline is the disagreement, not the number."""
-    prior = _prior_row(declared=0.60, equal=0.40, delta_declared=0.02,
+    # The prior's declared total sits at 0.70 because the scored arms' qualities below
+    # weight out to 0.614/0.94 = 0.6532 — down from it — while their unweighted mean is
+    # 2.9/5 = 0.58, up from the prior's 0.40. Before #4169 the 0.70 was 0.60, and the
+    # retired arm's 0.1-quality read at weight 0.18 did the pulling instead.
+    prior = _prior_row(declared=0.70, equal=0.40, delta_declared=0.02,
                        delta_equal=-0.02)
     values = {"retrieval_nightly": 0.9, "iv_metrics": 0.1,       # quality .9, .9
-              "automod_scorecard": 0.1, "landed_outcomes": 0.9,  # quality .1, .1
+              "landed_outcomes": 0.9,                            # quality .1
               "tool_quality": 0.9, "uptake_probe": 0.9,           # quality .1, .9
               "funnel_census": 0.6,
               "gate_to_land_lag": 17.687,   # weight 0.0, in neither total
@@ -715,13 +729,13 @@ def test_agreeing_totals_publish_the_number_rather_than_the_disagreement_headlin
 
     assert "the weights decide the answer" not in row["headline"]
     # `scored` is the count of arms that entered a total, not of arms that measured:
-    # seven components report `measured` here and six are scored, because the two
+    # seven components report `measured` here and five are scored, because the two
     # shares carried by ruling — `funnel_census` and `behaviour_exhibit` — are published
     # and excluded. The exclusion of the new one is asserted arithmetically in
     # `test_the_exhibit_arm_is_excluded_from_both_totals_and_still_printed`; what the
     # headline proves is that the DENOMINATOR grew with the table, which is the number a
     # store cannot hide from.
-    assert row["headline"].startswith("6 of 9 instruments measured")
+    assert row["headline"].startswith("5 of 8 instruments measured")
     assert row["weight_agreement"]["prior_rows_compared"] == 1
     assert row["weight_agreement"]["sign_disagreements"] == 0
     assert row["weight_agreement"]["decorative"] is True
@@ -789,19 +803,22 @@ def test_the_same_fresh_component_with_the_consumer_removed_scores_tier_one(tmp_
 def test_a_component_with_no_artifact_is_tier_zero_and_a_stale_one_is_tier_one(tmp_path):
     from dataclasses import replace
 
-    row, _, _ = _row(tmp_path, GOOD_VALUES, omit=("tool_quality",),
-                     days={"automod_scorecard": "2026-09-11"})
-    assert _component(row, "tool_quality")["tier"] == 0
-    assert _component(row, "automod_scorecard")["tier"] == 1
+    # `uptake_probe` is the absent one (tier 0) and `tool_quality` the stale one
+    # (tier 1): both behaviours belong on arms the table still carries, which since
+    # #4169 it does at eight.
+    row, _, _ = _row(tmp_path, GOOD_VALUES, omit=("uptake_probe",),
+                     days={"tool_quality": "2026-09-11"})
+    assert _component(row, "uptake_probe")["tier"] == 0
+    assert _component(row, "tool_quality")["tier"] == 1
 
-    reading = EII.read_instrument(_instr("automod_scorecard"), today=NOW.date(),
+    reading = EII.read_instrument(_instr("tool_quality"), today=NOW.date(),
                                   root_override=tmp_path / "roots"
-                                  / "automod_scorecard")
+                                  / "tool_quality")
     assert reading.status == "stale"
-    assert EII.tier_of(_instr("automod_scorecard"), reading) == 1
+    assert EII.tier_of(_instr("tool_quality"), reading) == 1
     # Even with a row-comparing consumer, rows that are not arriving cannot be
     # "tracked over time".
-    armed = replace(_instr("automod_scorecard"), consumer=EII.Consumer(
+    armed = replace(_instr("tool_quality"), consumer=EII.Consumer(
         "scripts/eval_trend_stats.py", "compares rows", compares_rows=True))
     assert EII.tier_of(armed, reading) == 1
 
@@ -820,14 +837,13 @@ def test_each_component_path_is_the_path_its_own_writer_declares():
     which joins that state dir with `RECORD_NAME`."""
     from app import paths, uptake
     from scripts import funnel_census, iv_metrics_record
-    from scripts.automod import landed_outcomes, scorecard, state
+    from scripts.automod import landed_outcomes, state
 
     expected = {
         "retrieval_nightly": paths.EVAL_BASELINES_DIR,
         "tool_quality": paths.TOOL_QUALITY_DIR,
         "funnel_census": paths.DATA_ROOT.joinpath(*funnel_census.FUNNEL_ARTIFACT_SUBDIR),
         "iv_metrics": iv_metrics_record.DEFAULT_SERIES_PATH,
-        "automod_scorecard": scorecard.scorecard_path(),
         "landed_outcomes": landed_outcomes.landed_outcomes_path(),
         "uptake_probe": uptake.UPTAKE_ARTIFACT_DIR,
         "gate_to_land_lag": GTL.record_path(),
@@ -844,7 +860,10 @@ def test_each_component_path_is_the_path_its_own_writer_declares():
     uptake_path = uptake.UPTAKE_ARTIFACT_DIR
     assert paths.LLOYD_HOME in uptake_path.parents, "uptake defaults into the code tree"
     assert paths.DATA_ROOT not in uptake_path.parents
-    assert scorecard.scorecard_path().parent == state.STATE_DIR
+    # `landed_outcomes` is the arm that proves the state-dir case now that
+    # `automod_scorecard` is retired (#4169): same dir, same reason it is not an
+    # `app.paths` constant.
+    assert landed_outcomes.landed_outcomes_path().parent == state.STATE_DIR
     assert paths.DATA_ROOT not in state.STATE_DIR.parents, (
         "the automod ledger dir is outside the data root")
     # And the five that ARE under the data root, so the table spans both worlds.
@@ -894,31 +913,38 @@ def test_the_lag_component_path_is_not_a_re_typed_literal():
 
 def test_the_state_dir_store_and_the_in_tree_store_both_appear_with_real_newest_dates(tmp_path):
     """Clause 5 measured: the store outside the data root (an automod state dir
-    holding `scorecard.jsonl`) and the one inside the code tree (uptake's default)
-    are in the row, with the newest date each actually holds."""
+    holding `landed_outcomes.jsonl`) and the one inside the code tree (uptake's default)
+    are in the row, with the newest date each actually holds.
+
+    The state-dir store this test seeded was `scorecard.jsonl` until #4169 retired that
+    arm; `landed_outcomes` is the arm that still lives in `state.STATE_DIR`, so the case
+    — a store `DATA_ROOT` does not reach, resolved through its writer's own constant —
+    is proved by an arm the table actually carries."""
     state_dir = tmp_path / "state" / "lloyd-automod"
     code_tree = tmp_path / "lloyd"
     uptake_dir = code_tree / "eval" / "uptake"
-    _seed_series(state_dir, "scorecard.jsonl", [
-        {"computed_at": "2026-09-11T02:45:18+00:00",
-         "acceptance": {"hit_rate": 0.5, "with_outcome": 14}},
-        {"computed_at": "2026-10-12T20:03:00+00:00",
-         "acceptance": {"hit_rate": 0.62, "with_outcome": 21}}])
+    _seed_series(state_dir, "landed_outcomes.jsonl", [
+        {"generated_at": "2026-09-11T02:45:18+00:00",
+         "by_author": {"agent": {"commits": 40, "later_undo_7d": {
+             "k": 20, "n": 40, "rate": 0.5, "ci_low": 0.35, "ci_high": 0.65}}}},
+        {"generated_at": "2026-10-12T20:03:00+00:00",
+         "by_author": {"agent": {"commits": 50, "later_undo_7d": {
+             "k": 31, "n": 50, "rate": 0.62, "ci_low": 0.48, "ci_high": 0.74}}}}])
     _seed(uptake_dir, "uptake_probe", "2026-09-11", 0.9)
     _seed(uptake_dir, "uptake_probe", "2026-09-20", 1.0)
 
     roots = _seed_all(tmp_path, GOOD_VALUES)
-    roots["automod_scorecard"] = state_dir / "scorecard.jsonl"
+    roots["landed_outcomes"] = state_dir / "landed_outcomes.jsonl"
     roots["uptake_probe"] = uptake_dir
     out = tmp_path / "index"
     row = EII.build_row(now=NOW, root_overrides=roots, out_dir=out,
                         code_root=code_tree)
 
-    score = _component(row, "automod_scorecard")
-    assert score["newest_artifact"] == "2026-10-12", "the newest of the two rows"
-    assert score["value"] == pytest.approx(0.62)
-    assert score["outside_data_root"] is True
-    assert score["instrument_path"] == str(state_dir)
+    landed = _component(row, "landed_outcomes")
+    assert landed["newest_artifact"] == "2026-10-12", "the newest of the two rows"
+    assert landed["value"] == pytest.approx(0.62)
+    assert landed["outside_data_root"] is True
+    assert landed["instrument_path"] == str(state_dir)
 
     uptake = _component(row, "uptake_probe")
     assert uptake["newest_artifact"] == "2026-09-20", "the later of the two tables"
@@ -1333,18 +1359,19 @@ def test_the_module_cli_appends_one_row_and_exits_zero_on_the_ok_branch(tmp_path
         "this fixture is the ok branch — the exit-1 test below is the other one, so "
         "the pair pins a mapping rather than self-consistency")
     assert rows[0]["date"] == "2026-10-13", "`--now` is what stamps the row"
-    assert len(rows[0]["components"]) == 9, (
+    assert len(rows[0]["components"]) == 8, (
         "the subprocess publishes the whole table, arms carried by ruling included — "
-        "#3886 added the ninth")
+        "nine since #3886 added the ninth, eight since #4169 retired the scorecard arm")
 
 
 def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(tmp_path):
-    """The other exit branch on the same seam: eight of the nine instruments
+    """The other exit branch on the same seam: seven of the eight instruments
     missing, so the totals refuse, the refusal is still published as the day's
     record, and the exit code is 1 — because `main()` returning 0 whatever the
     totals said is how a scheduler ends up reading an index that measured nothing
-    as a green run. Eight, not seven, because #3541 grew the table to eight arms,
-    #3886 to nine, and `gate_to_land_lag` and `behaviour_exhibit` are both among the
+    as a green run. Seven, not six, because #3541 grew the table to eight arms,
+    #3886 to nine and #4169 retired `automod_scorecard` back to eight, and
+    `gate_to_land_lag` and `behaviour_exhibit` are both among the
     omitted ones: neither is seeded here, and a fixture that left either reading its
     live store would make this run depend on a real artifact instead of a snapshot —
     for the exhibit arm that would mean reading a store whose only artifact is dated
@@ -1353,7 +1380,7 @@ def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(
     proc = _run_publisher(
         "--roots", str(_roots_file(
             tmp_path, {"retrieval_nightly": 1.0},
-            omit=("iv_metrics", "automod_scorecard", "landed_outcomes",
+            omit=("iv_metrics", "landed_outcomes",
                   "tool_quality", "uptake_probe", "funnel_census",
                   "gate_to_land_lag", "behaviour_exhibit"))),
         "--out-dir", str(out), "--now", "2026-10-13T03:40:00+00:00", "--print")
@@ -1365,7 +1392,7 @@ def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(
     rows = EII.read_series(out)
     assert len(rows) == 1, "a refused run publishes one row, not zero"
     assert rows[0]["totals"]["status"] == "refused"
-    assert len(rows[0]["dead_or_stale"]) == 8
+    assert len(rows[0]["dead_or_stale"]) == 7
 
 
 def test_no_record_prints_and_creates_nothing_even_on_the_refused_branch(tmp_path):
@@ -1612,7 +1639,7 @@ def test_the_exhibit_arm_is_carried_in_the_table_and_excluded_from_both_totals(t
     with_arm, _, _ = _row(tmp_path / "with", GOOD_VALUES)
     without = [i for i in EII.INSTRUMENTS if i.key != "behaviour_exhibit"]
     assert sum(i.weight for i in without) == pytest.approx(1.0), (
-        "the seven weighted arms still sum to 1.0 — the new one adds no weight")
+        "the six weighted arms still sum to 1.0 — the new one adds no weight")
     without_arm, _, _ = _row(tmp_path / "without", GOOD_VALUES, instruments=without)
     assert (with_arm["totals"]["declared_weights"]
             == without_arm["totals"]["declared_weights"]), (
@@ -1620,7 +1647,182 @@ def test_the_exhibit_arm_is_carried_in_the_table_and_excluded_from_both_totals(t
         "the composite")
     assert (with_arm["totals"]["equal_weights"]
             == without_arm["totals"]["equal_weights"])
-    assert len(without_arm["components"]) == 8 and len(with_arm["components"]) == 9
+    assert len(without_arm["components"]) == 7 and len(with_arm["components"]) == 8
     assert _component(with_arm, "behaviour_exhibit")["contributes"] is False
     assert any(x["key"] == "behaviour_exhibit" for x in with_arm["totals"]["excluded"])
     assert with_arm["totals"]["status"] == without_arm["totals"]["status"] == "ok"
+
+
+# ── #4169: the automod_scorecard arm is RETIRED, not left to age out ──────────
+#
+# `~/.local/state/lloyd-automod/scorecard.jsonl` has had no writer since its newest
+# row, 2026-09-12: the only code path that appends it is the `--record` flag of
+# `python -m scripts.automod.round scorecard`, which no autonomy task file, crontab
+# entry, systemd unit or workers.db queue row invokes. So the arm published `stale`
+# every day and its 0.18 was renormalised away every day, while the headline kept
+# printing two totals over whatever survived. Two ways out existed — name a writer,
+# or remove the arm — and the ruling recorded below in the module source is removal.
+# The third option the item suggested (`hand_run_by_ruling=True`, as `uptake_probe`
+# carries) is the wrong one and is NOT taken here: that flag suppresses the staleness
+# test outright, so a 65-day-old 0.7 would have come back into the composite as if it
+# were current. These three tests are the retirement made checkable: the key is gone
+# from the row, the weights still add up, and the ruling is in the source where the
+# next reader of the table will find it.
+
+#: The declared weights BEFORE #4169, spelled out so the redistribution arithmetic
+#: below can be checked from this block alone. The retired arm carried 0.18, so the
+#: six surviving weighted arms summed to 0.82 and each was scaled by 1/0.82.
+_PRE_4169_WEIGHTS = {"retrieval_nightly": 0.28, "iv_metrics": 0.20,
+                     "automod_scorecard": 0.18, "landed_outcomes": 0.14,
+                     "tool_quality": 0.10, "uptake_probe": 0.05,
+                     "funnel_census": 0.05}
+#: The sum the six survivors carried, and the arm that absorbs the rounding residue.
+_SURVIVOR_WEIGHT_SUM = 0.82
+_RESIDUE_ARM = "retrieval_nightly"
+
+
+def test_the_retired_scorecard_arm_appears_nowhere_in_a_published_row(tmp_path):
+    """Clause 1 (#4169): the arm is out of the table, so a published row carries
+    eight components and never names `automod_scorecard` at all.
+
+    The absence is checked over the WHOLE serialised row rather than over
+    `components` alone, because the state the item was in for 65 days was precisely
+    "not scored but still named": the key sat in `totals.excluded` and in
+    `dead_or_stale` with a reason string, which is what made the exclusion visible
+    but also permanent. A row that still lists it under either heading is an arm
+    ageing out, not an arm retired."""
+    keys = {i.key for i in EII.INSTRUMENTS}
+    assert "automod_scorecard" not in keys
+    assert len(EII.INSTRUMENTS) == 8 == len(ALL_KEYS), (
+        "eight arms: nine minus the retired one")
+
+    row, _, _ = _row(tmp_path, GOOD_VALUES)
+    assert len(row["components"]) == 8, (
+        "a published row's components list holds exactly eight entries")
+    assert {c["key"] for c in row["components"]} == keys
+    blob = json.dumps(row)
+    assert "automod_scorecard" not in blob, (
+        "the key must name nothing in the row — not a component, not an entry of "
+        "`totals.excluded`, not one of `dead_or_stale`")
+    assert not any(c["key"] == "automod_scorecard" for c in row["totals"]["excluded"])
+    assert not any(d["key"] == "automod_scorecard" for d in row["dead_or_stale"])
+
+
+def test_the_eight_declared_weights_sum_to_one_with_the_retired_share_redistributed(tmp_path):
+    """Clause 2 (#4169): dropping an arm must not leave the table a set of numbers
+    that stopped adding up.
+
+    The rule is the item's: the retired 0.18 goes back to the survivors in
+    proportion to the weight each already carried (its old share over the 0.82 the
+    survivors summed to), each rounded to two decimals, and the residue lands on the
+    largest arm. Proportional rather than a flat split because these weights are
+    judgements about reach and coverage, and a flat split would silently promote
+    `funnel_census` and `uptake_probe` — the two arms the table calls thinnest —
+    onto the same footing as the ones that see every prompt and every turn."""
+    weights = {i.key: i.weight for i in EII.INSTRUMENTS}
+    assert len(weights) == 8
+    assert weights[_RESIDUE_ARM] == max(weights.values()), (
+        "the residue goes to the largest arm, so the arm that takes it has to be it")
+
+    survivors = {k: v for k, v in _PRE_4169_WEIGHTS.items()
+                 if k not in (_RESIDUE_ARM, "automod_scorecard")}
+    for key, old in survivors.items():
+        want = round(old / _SURVIVOR_WEIGHT_SUM, 2)
+        assert weights[key] == pytest.approx(want, abs=1e-9), (
+            f"{key} carried {old} of {0.82}, so its share of the redistribution is "
+            f"{old / _SURVIVOR_WEIGHT_SUM:.6f} rounded to {want}")
+    assert weights[_RESIDUE_ARM] == pytest.approx(
+        1.0 - sum(weights[k] for k in survivors), abs=1e-9), (
+        "the largest arm takes exactly what the other five roundings leave")
+    assert weights["gate_to_land_lag"] == 0.0 and weights["behaviour_exhibit"] == 0.0, (
+        "the two arms carried by ruling stay unweighted; a redistribution is not the "
+        "place to change that")
+
+    assert sum(weights.values()) == pytest.approx(1.0, abs=1e-9)
+    row, _, _ = _row(tmp_path, GOOD_VALUES)
+    assert row["weights_sum_declared"] == 1.0, (
+        "published exactly, not approximately: this is the index's own honesty field, "
+        "and it is the field that would have printed 0.82 the day the arm went")
+
+
+def _instrument_table_source(source: str) -> str:
+    """The source text of the `INSTRUMENTS` assignment plus the comment block
+    attached directly above it — what "beside the table" means, as the file itself
+    defines it rather than as a substring the check happens to find."""
+    tree = ast.parse(source)
+    assign = next(n for n in tree.body
+                  if isinstance(n, (ast.Assign, ast.AnnAssign))
+                  and getattr(getattr(n, "target", None), "id", None) == "INSTRUMENTS")
+    lines = source.splitlines()
+    start = assign.lineno - 1
+    while start > 0 and (lines[start - 1].lstrip().startswith("#")
+                         or not lines[start - 1].strip()):
+        start -= 1
+    return "\n".join(lines[start:assign.end_lineno])
+
+
+def test_the_module_source_records_the_retirement_ruling_beside_the_table():
+    """Clause 3 (#4169): the ruling lives in the module, next to the thing it
+    retired, with the route back in.
+
+    The pairing is the deliverable. A `git log` line is not this: the next reader
+    of the table reads the table, and the only reason this arm was still published
+    six weeks after its store died is that nothing anywhere said whether it was
+    meant to be alive."""
+    source = (ROOT / "scripts" / "eval_instrument_index.py").read_text(encoding="utf-8")
+    span = _instrument_table_source(source)
+
+    assert "retrieval_nightly" in span, (
+        "positive control: the span must cover the table itself, or every absence "
+        "below would be a reading of an empty slice")
+    assert "automod_scorecard" in span, (
+        "the retirement has to be named where the table is declared")
+    assert "automod_scorecard" not in {i.key for i in EII.INSTRUMENTS}, (
+        "and the key must be named as history, not carried as an arm")
+    assert "scorecard.jsonl" in span, "the ruling names the store it is about"
+    assert "2026-09-12" in span, "the ruling names the newest row on disk"
+    assert "scripts.automod.round scorecard --record" in span, (
+        "the ruling names the command a future writer would run")
+    assert "scheduled_by" in span, (
+        "and the field to set when it comes back, so a re-added arm cannot be "
+        "neither-written-nor-retired a second time")
+
+
+def test_no_test_before_the_retirement_block_selects_the_retired_arm_by_key():
+    """Clause 4 (#4169): the fixture machinery must not keep selecting an arm the
+    table no longer carries.
+
+    Checked on the syntax tree rather than by substring, because the distinction that
+    matters is a selector versus prose: a test that says "the arm #4169 retired" in a
+    comment is the record this item asked for, while `_component(row, "automod_"
+    "scorecard")` is a test still asserting an arm's behaviour against a fixture and a
+    table that no longer has one. So the test is a STRING CONSTANT EQUAL TO THE BARE KEY —
+    that is what a dict-literal key, a `key ==` comparison, an `_instr(...)`/`_component(...)`
+    argument and an `omit=` tuple member all compile to, and no sentence about the arm
+    compiles to it. Every such constant in the file sits in the retirement block below,
+    where its only job is to prove the key is gone.
+    """
+    path = ROOT / "tests" / "test_eval_instrument_index.py"
+    source = path.read_text(encoding="utf-8")
+    banner = source.index("# ── #4169")
+    banner_line = source[:banner].count("\n") + 1
+
+    selected = sorted({(node.lineno, node.value)
+                       for node in ast.walk(ast.parse(source))
+                       if isinstance(node, ast.Constant)
+                       and node.value in {i.key for i in EII.INSTRUMENTS}
+                       | {"automod_scorecard"}
+                       and node.lineno < banner_line})
+    keys_before = {k for _, k in selected}
+    assert keys_before == {i.key for i in EII.INSTRUMENTS}, (
+        f"keys selected by constant before the retirement block: {sorted(keys_before)} — "
+        "it must be exactly the eight arms the table carries, so that no fixture still "
+        "selects the retired one and no absence list quietly dropped a live arm either")
+    assert "automod_scorecard" not in keys_before
+
+    after = {node.value for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Constant) and node.lineno >= banner_line
+             and node.value == "automod_scorecard"}
+    assert after == {"automod_scorecard"}, (
+        "positive control: the key IS still a constant in the file, below the banner, "
+        "so the check above reads a file that mentions it rather than one that lost it")

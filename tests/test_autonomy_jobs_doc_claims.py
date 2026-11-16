@@ -8401,11 +8401,13 @@ def _index_arm_job_ids() -> set[str]:
     Derived from the module's own `INSTRUMENTS` tuple: an arm's `scheduled_by` names the
     task file of the job that produces the artefact that arm scores, so the ids in those
     fields are exactly the jobs with an index read-back. At base that is `#82 #86 #97
-    #101 #109` — the other four arms carry `scheduled_by=None` because their artefacts
-    come from automod's ledger, `app/tool_quality.py`, `scripts/uptake_probe.py` and
+    #101 #109` — the other arms carry `scheduled_by=None` because their artefacts
+    come from `app/tool_quality.py`, `scripts/uptake_probe.py` and
     `scripts/funnel_census.py` rather than from a row of §Watch the machinery. #91 is in
     none of them, and never was: `git log -S fidelity -- scripts/eval_instrument_index.py`
-    returns no commit. Reading the set instead of typing a ban is what lets a real #91 arm
+    returns no commit. (#4169 retired the arm that scored `scorecard.jsonl`, which was one
+    of the `scheduled_by=None` four, so this set is derived from the tuple rather than
+    counted from prose.) Reading the set instead of typing a ban is what lets a real #91 arm
     in future make the doc's claim admissible rather than red a node nobody can satisfy.
     """
     import sys
