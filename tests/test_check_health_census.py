@@ -684,43 +684,145 @@ def test_autonomy_task_105_names_the_journal_this_module_actually_writes():
 NEAR_FLAG_NEGATIONS = ("never", "no such", "does not", "used to name", "not a flag",
                        "no flag", "has no", "instead of")
 
+#: The sentences #3777 struck from the task file's body, revived verbatim by the controls
+#: below. Typing them as the file once had them — rather than as a paraphrase — is what makes
+#: each control a revival rather than an invention: `git show 303af3a05^:autonomy/
+#: 105-check-health-census-weekly.md` in ~/obsidian prints the second one, and the first is
+#: the same paragraph's opening line.
+#:
+#: The two daily shapes are kept as the literals this node has always matched, and a third
+#: is added beside them: a body can state a wrong shipped cadence in ordinary prose without
+#: reproducing either historical sentence, and a guard that only recognises the exact wording
+#: of one past mistake is a guard on that wording.
+_BODY_105_DAILY_SHAPES = ("shipped cadence is daily",
+                          "cadence is `frequency: daily`",
+                          "this recorder ships is daily")
+_BODY_105_RETIRED_READINGS = ("the slug is the stale name", "field is the schedule")
+
+
+def _body_105_cadence_findings(text: str, shipped: str) -> list[str]:
+    """What #105's body says wrong about its own cadence. An empty list means correct.
+
+    A function rather than inline asserts because the node below has to run the same three
+    guards against seeded revivals, and a control that re-implements the check it is testing
+    proves nothing — it would pass on a body the live asserts had simply failed to look at.
+    The failure texts live here so the live assert and the controls report the same reason.
+    """
+    body = text[text.index("## Why this exists"):]
+    para = [ln for ln in body.splitlines() if "cadence" in ln.lower()]
+    if not para:
+        return ["the body never mentions its cadence at all"]
+    joined = " ".join(para).lower()
+    found: list[str] = []
+    if shipped not in joined:
+        found.append(
+            f"the body never states {shipped!r} as the cadence it ships; what it says "
+            f"about cadence is: {joined[:220]!r}")
+    # The two claim-checks scan the whole body, not the cadence lines. Filtering by the word
+    # "cadence" is right for "is the shipped cadence stated" and wrong for "is this claim
+    # present": the argument #3777 struck out was `the field is the schedule and the slug is
+    # the stale name`, and that sentence never uses the word cadence — the line that held it
+    # (303af3a05^:autonomy/105-check-health-census-weekly.md:62) would have passed a
+    # cadence-line filter untouched. Control 3 below is that sentence, and it is what caught
+    # this: a guard that cannot see the mistake it was written for is a guard on a word.
+    whole = body.lower()
+    if any(shape in whole for shape in _BODY_105_DAILY_SHAPES):
+        found.append(
+            "the body states daily as the shipped cadence again — the claim #3777 removed")
+    for retired in _BODY_105_RETIRED_READINGS:
+        if retired in whole:
+            found.append(
+                f"the body revives the retired reading (`{retired}`), which rested on "
+                "tests/test_check_health_census_schedule_claims.py — a test that is not on "
+                "main — and argues the file out of its own module's cadence")
+    if "#3782" not in body:
+        found.append(
+            "the body no longer names #3782, the item that records who moved the "
+            "`frequency:` field and when, so a reader of the file cannot tell that the "
+            "cadence it reads was settled deliberately rather than left to drift")
+    return found
+
 
 def test_autonomy_task_105s_body_states_the_cadence_the_module_ships():
     """#3777 clause 3, the half the review rung found unpinned: the body's own cadence
-    paragraph. The first round retyped it and nothing pinned the result, so the review
-    rung's finding was that retyping it back would redden no node — which is the same hole
-    #1102 was written for on the cadence cells.
+    paragraph. The first round retyped it and nothing pinned the result, so the review rung's
+    finding was that retyping it back would redden no node — which is the same hole #1102 was
+    written for on the cadence cells.
 
     It asserts three things about the paragraph, all of them about what the body SAYS the
-    cadence is, and none about the `frequency:` field, which no round may move (#3782):
-    weekly is stated as the shipped cadence; daily is never stated as the shipped cadence;
-    and the retired argument — that the field is the schedule and the slug the stale name —
-    stays retired. That argument is what this file shipped with, and it is what a future
-    editor would restore, so it is named by its own words rather than by a paraphrase.
+    cadence is: weekly is stated as the shipped cadence; daily is never stated as the shipped
+    cadence; and the retired argument — that the field is the schedule and the slug the stale
+    name — stays retired. That argument is what this file shipped with, and it is what a
+    future editor would restore, so it is named by its own words rather than by a paraphrase.
+
+    Plus the id: the body must still name #3782. #3777 wrote this node when the field still
+    read `daily` and the paragraph was overruling it, so the message that fires if the id goes
+    missing explained the id as a debt on a field the body had no way to move — a statement
+    about the field, not about the body. Neither half of that is true any more: a person moved
+    `frequency:` `daily` → `weekly` and #3782 closed on 2026-11-09. So the message is retyped
+    to what the id is actually for on this surface — provenance for an agreement that now
+    holds, which is why a body that drops it loses its only record of the change being
+    deliberate. The requirement itself is unchanged, and so is the rule the task file's
+    paragraph keeps: moving `frequency:` is a #724 dispatch-affecting write, so no unattended
+    route may move it. What changed is that the message no longer tells the next reader the
+    field is stuck, which is the same mis-instruction #4097 was filed against on the code side
+    (see `test_no_watch_105_rationale_says_the_field_is_frozen_or_owed`).
+
+    Three controls revive each guard in turn, in the historical wording where one exists, and
+    require the finding to name it. Without them the node is three `not in` tests whose
+    negative could be satisfied by a body that says nothing about cadence at all.
     """
     from scripts.maintenance import check_health_census as CHC
 
     text = _task_105_text()
     shipped = CHC.CADENCE.split(" ")[0]          # 'weekly', read off the module
     assert shipped == "weekly", f"unexpected CADENCE {CHC.CADENCE!r}"
-    body = text[text.index("## Why this exists"):]
-    para = [ln for ln in body.splitlines() if "cadence" in ln.lower()]
-    assert para, f"{TASK_105}'s body never mentions its cadence at all"
-    joined = " ".join(para).lower()
-    assert shipped in joined, (
-        f"the body never states {shipped!r} as the cadence it ships; what it says about "
-        f"cadence is: {joined[:220]!r}")
-    assert "shipped cadence is daily" not in joined and "cadence is `frequency: daily`" \
-        not in joined.lower(), (
-        "the body states daily as the shipped cadence again — the claim #3777 removed")
-    for retired in ("the slug is the stale name", "field is the schedule"):
-        assert retired not in joined.lower(), (
-            f"the body revives the retired reading (`{retired}`), which rested on "
-            "tests/test_check_health_census_schedule_claims.py — a test that is not on "
-            "main — and argues the file out of its own module's cadence")
-    assert "#3782" in body, (
-        "the body no longer names the id carrying the field it cannot move, so a reader "
-        "of the file cannot tell the disagreement is known and owed")
+    findings = _body_105_cadence_findings(text, shipped)
+    assert not findings, (
+        f"{TASK_105}'s body is wrong about its own cadence:\n"
+        + "\n".join(f"  - {f}" for f in findings))
+
+    assert text.count("- The cadence this recorder ships is weekly:") == 1, (
+        "the body's opening cadence sentence is not the single sentence the controls below "
+        "edit, so a control would seed a sentence that is not there")
+
+    # Control 1 — a body that stops stating the shipped cadence. Revives the weekly guard.
+    silent = text.replace("- The cadence this recorder ships is weekly:",
+                          "- The cadence this recorder ships is what the scheduler arms:", 1)
+    fired = _body_105_cadence_findings(silent, shipped)
+    assert any("never states" in f for f in fired), (
+        f"a body stripped of the shipped cadence gave {fired!r}, so the weekly guard cannot "
+        "tell an unwritten cadence from a stated one")
+
+    # Control 2 — the pre-#3777 opening line, in its own words. Revives the daily guard.
+    daily = text.replace("- The cadence this recorder ships is weekly:",
+                         "- The skill's slug says `weekly` and the shipped cadence is "
+                         "`frequency: daily`.", 1)
+    fired = _body_105_cadence_findings(daily, shipped)
+    assert any("states daily as the shipped cadence" in f for f in fired), (
+        f"the body revived with the sentence #3777 struck out still gave {fired!r}, so the "
+        "daily guard does not recognise the wording it was written for")
+
+    # Control 2b — the same mistake in ordinary prose, which reproduces no historical
+    # sentence. The literal-only guard missed this shape, which is why the third shape is in
+    # the set rather than the two #3777 left behind.
+    plain = text.replace("- The cadence this recorder ships is weekly:",
+                         "- The cadence this recorder ships is daily, per its field.", 1)
+    fired = _body_105_cadence_findings(plain, shipped)
+    assert any("states daily as the shipped cadence" in f for f in fired), (
+        f"an ordinary sentence stating daily as the shipped cadence gave {fired!r}, so the "
+        "guard is a match on one past wording rather than on the claim")
+
+    # Control 3 — the retired argument, in the paragraph's own historical words.
+    revived = text.replace(
+        "  machinery row for #105 in architecture/autonomy-jobs.md agrees with them. Read "
+        "weekly as",
+        "  the field is the schedule and the slug is the stale name; the machinery row for "
+        "#105 agrees. Read weekly as", 1)
+    fired = _body_105_cadence_findings(revived, shipped)
+    assert any("revives the retired reading" in f for f in fired), (
+        f"the body revived with the argument it shipped with still gave {fired!r}, so the "
+        "retired reading is unpinned — the hole #1102 was written for")
 
 
 def test_the_skill_pages_command_is_the_one_that_runs_and_names_only_real_flags():

@@ -227,17 +227,24 @@ WATCH_JOBS = {
     # `Reports only` beside #97 rather than with #94, whose ledger rewrite is a write.
     105: ("weekly", "check_health_census", "check_health_census.jsonl",
           "retires, disables or weakens"),
-    # The #105 entry ABOVE, and why its Freq is the cadence its MODULE ships, not
-    # the `frequency:` its task file declares. `CADENCE` is weekly, the skill slug is
-    # `-weekly`, its `name:` is weekly and #103 beside it is weekly; the field read
-    # `daily` when #3777 landed (read 2026-11-05) and stayed there because moving a
-    # `frequency:` is a #724 dispatch-affecting write that every route refuses an
-    # unattended round — that one line is owed as #3782, and it arms nothing meanwhile
-    # since the task is `draft`. #3777 moved every artefact code CAN reach to weekly.
+    # The #105 entry ABOVE, and why its Freq is the cadence its MODULE ships rather than
+    # the `frequency:` its task file declares: the module is the artifact the cadence
+    # executes at — the task's own `command:` runs this module, so what the module states
+    # is what a run carries, while the field is only what the scheduler would read if the
+    # task were armed. Grading the row off the module therefore tests the thing that
+    # happens; grading it off the field would test a word. #3777 moved every artefact code
+    # CAN reach to weekly, and the one surface it could not reach has agreed since: the
+    # file has read `weekly` since #3782 closed on 2026-11-09, when a person moved
+    # `frequency:` `daily` → `weekly` (a #724 dispatch-affecting write, which is exactly
+    # why the module, not the field, is what code is graded against). The task is `draft`,
+    # so nothing is armed either way.
     # `test_watch_105_cadence_is_the_module_not_its_frozen_field` below grades this entry
     # against the module instead of the task file, and `tests/test_check_health_census.py`
     # reads `JOURNAL_NAME` out of that module rather than copying it, so renaming either
     # constant reddens both files instead of leaving one of them holding the old name.
+    # And `test_no_watch_105_rationale_says_the_field_is_frozen_or_owed` forbids this note
+    # from ever going back to the retired reason, because a note that mis-states why an
+    # exception exists is how a future pass refuses a legitimate change to that field.
     # #3456: the four probes read off ~/obsidian/autonomy/106-published-maxima-probe-daily-record.md
     # on 2026-11-01. `reads` is the recorder the task file exists to call — shipped in 621192c4 and
     # never invoked outside a test until this cadence — `writes` the one journal that command
@@ -3997,9 +4004,13 @@ def test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibi
     a run record, for the reason #1102 states: #86 said "every night" while a later
     hand typed `frequency: weekly`, and the cell is the only place the two can be
     caught disagreeing. For fourteen of the fifteen jobs that pin IS the `frequency:`
-    its task file declares, read off it by #2630; the exception is #105, whose field
-    is held at `daily` behind the #724 rail and whose pin follows the module's
-    `CADENCE` — see the note on that entry, and
+    its task file declares, read off it by #2630; the exception is #105, whose pin
+    follows the module's `CADENCE` because the module is the artifact the cadence
+    executes at — the task's `command:` runs that module, so its stated cadence is
+    what a run carries, while a task file's field is a word the scheduler reads.
+    The exception is not a claim that the field is stuck: the file has read `weekly`
+    since #3782 closed on 2026-11-09, and the module stays the graded source for the
+    same reason it was chosen before the field moved. See the note on that entry, and
     `test_watch_105_cadence_is_the_module_not_its_frozen_field` below, which owns the
     difference instead of letting this node state it wrongly. The other three probes
     are the artefact and the bound the task file itself names, so a row that reads as
@@ -4012,7 +4023,10 @@ def test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibi
         f"#{job}'s row reads {cells[1]!r} where `WATCH_JOBS[{job}]` pins {freq!r} — "
         f"the same drift #1102's clause 2 was written for. For every job but #105 the "
         f"pin is that task file's `frequency:`; for #105 it is "
-        f"`check_health_census.CADENCE`, because its field cannot move unattended.")
+        f"`check_health_census.CADENCE`, because that module is the artifact the "
+        f"cadence executes at — the file's own field has read weekly since #3782 "
+        f"closed, so a row disagreeing with the module is the row's defect, not the "
+        f"field's.")
     for want, why in ((reads, "what it reads"), (writes, "what it writes"),
                       (prohibition, "what it must not do")):
         assert want in row, (
@@ -4025,10 +4039,14 @@ def test_watch_105_cadence_is_the_module_not_its_frozen_field():
     """#3777 clause 4: #105's row and its pin are graded against the module it watches.
 
     The two graders above can only ask a row to match `WATCH_JOBS`, and #105's entry is the
-    one value in that table a task file does not supply — its `frequency:` is held at
-    `daily` by the #724 rail (#3782) while everything else about the job says weekly. So
-    this node drops the task file and reads the shipped module instead, which is the
-    artifact the cadence is actually executed at:
+    one value in that table a task file does not supply. The reason is the surface, not a
+    disagreement: the task's `command:` runs `scripts/maintenance/check_health_census.py`,
+    so the module is the artifact the cadence executes at and `CADENCE` is what a run
+    actually carries, while a task file's field is a word the scheduler reads. That
+    survives the disagreement being gone — the field has read weekly since #3782 closed on
+    2026-11-09, when a person moved it, so the file and the module have agreed since, and
+    this node still grades the row against the surface the cadence runs on because that is
+    the one a change to the module can move past the row. Reading the shipped module:
 
     * `WATCH_JOBS[105]`'s cadence is the first word of `check_health_census.CADENCE`, and
       its artefact is `check_health_census.JOURNAL_NAME` — both read from the module at
@@ -4064,8 +4082,10 @@ def test_watch_105_cadence_is_the_module_not_its_frozen_field():
     assert CHC.JOURNAL_NAME.strip(), "check_health_census.JOURNAL_NAME is empty, ditto"
     assert cadence == CHC.CADENCE.strip().split()[0], (
         f"WATCH_JOBS[105] pins the cadence as {cadence!r} where the module this job runs "
-        f"says {CHC.CADENCE.strip()!r} — the field in the task file is frozen at `daily` "
-        f"pending #3782, so this pin is the only place the shipped cadence is recorded")
+        f"says {CHC.CADENCE.strip()!r} — the module is the artifact the cadence executes "
+        f"at, so this pin is where the shipped cadence is recorded; the file has read "
+        f"weekly since #3782 closed, so a cell on any other value is the cell's drift, "
+        f"not the module's")
     assert artefact == CHC.JOURNAL_NAME, (
         f"WATCH_JOBS[105] pins the artefact as {artefact!r} where the module writes "
         f"{CHC.JOURNAL_NAME!r}; the hyphenated spelling is not a file that exists")
@@ -4099,6 +4119,209 @@ def test_watch_105_cadence_is_the_module_not_its_frozen_field():
         "`check_health_census.py --help` does not advertise — a flag the parser rejects "
         "turns the shipped `command:` into an exit 2 in argparse, which is exactly how "
         "this row's `--days 90` line behaved and why the job never journaled")
+
+
+#: ---------------------------------------------------------------------------
+#: #4097: #105's cadence exception, and the reason this file gives for it.
+#:
+#: The exception is right and stays: the row is graded against `check_health_census`
+#: because that module is the surface a run of the job happens on. The reason this file
+#: gave was wrong — it said the task file's `frequency:` was held behind a rail and the
+#: move was owed, when a person had moved it on 2026-11-09 and #3782 closed. A rationale
+#: of that shape is not merely stale: its failure message is what the next pass reads, and
+#: one saying the field must not move gets a legitimate change refused. So BOTH halves are
+#: pinned below — the five retired statements absent, and the true reason present in every
+#: site that ever carried one.
+#: ---------------------------------------------------------------------------
+
+#: The five statements about #105's cadence that #4097 retired, each stored as a head and a
+#: tail rather than in one piece — the file these probes are typed into is the file they
+#: scan, and a ban-list that spelled out what it forbids would fail its own check, the trap
+#: #3861/#3777 records at `test_the_seam_seventeen_s_fix_prose_names_no_live_module`. Joined,
+#: these are the exact words #4097's acceptance check greps this file for.
+_WATCH_105_RETIRED: tuple[tuple[str, str], ...] = (
+    ("held at ", "`daily`"),
+    ("frozen at ", "`daily`"),
+    ("kept frozen at ", "`daily`"),
+    ("owed as #3", "782"),
+    ("cannot move un", "attended"),
+)
+
+#: What every rationale site must now say. Typed across a line break so that this
+#: definition is not itself the sentence the controls below rewrite.
+_WATCH_105_WHY = ("module is the artifact the cadence "
+                  "executes at")
+#: …and the two facts that replaced the false ones: the field's value, and its date.
+_WATCH_105_MOVED = "#3782 closed"
+_WATCH_105_WEEKLY = "weekly"
+
+#: Two module-level comment blocks that carried a retired statement, as
+#: (label, unique start literal, unique end literal). Both literals are asserted to occur
+#: exactly once, so a note that is renamed or deleted fails HERE, loudly, instead of turning
+#: the scan into a pass over an empty window. Each is typed as two adjacent literals for the
+#: reason that applies to `_WATCH_105_RETIRED` above: this table lives in the file it
+#: windows, and an anchor written in one piece would be found twice — once at the note and
+#: once here — which is exactly how the first draft of this scan failed.
+_WATCH_105_COMMENTS: tuple[tuple[str, str, str], ...] = (
+    ("the WATCH_JOBS[105] note",
+     "# The #105 entry " "ABOVE", "# #3456: the four " "probes"),
+    ("the CADENCE_CELLS §Watch note",
+     "# not a task file's `frequency:`: #105's " "is", '"Watch the ' 'machinery": {'),
+)
+
+#: Three nodes that carried one too — each graded in two halves, because retyping a
+#: docstring while leaving its assert message stating the old reason is precisely the
+#: half-fix #4097 clause 2 is written against.
+_WATCH_105_NODES: tuple[str, ...] = (
+    "test_each_watch_entry_states_its_schedule_its_reads_its_writes_and_a_prohibition",
+    "test_watch_105_cadence_is_the_module_not_its_frozen_field",
+    "test_a_group_row_states_the_cadence_its_task_file_declares",
+)
+
+#: The site both controls edit: the docstring of the second node above, addressed by a
+#: literal whose uniqueness is asserted before either control runs.
+_WATCH_105_SEED_SITE = ("so the module is the artifact the cadence executes at and "
+                        "`CADENCE`")
+_WATCH_105_SEED_LABEL = ("test_watch_105_cadence_is_the_module_not_its_frozen_field "
+                         "(docstring)")
+
+
+def _watch_105_prose(region: str) -> str:
+    """One rationale region as prose: comment markers, string quotes, line joins gone.
+
+    Every rationale in this file is written across wrapped comment lines or across
+    concatenated f-string pieces, so a substring test against raw source would miss a
+    sentence that is plainly there — which would read as a passing check on a file whose
+    prose is merely laid out differently. So: drop the `#` that OPENS a comment line and the
+    `"`/`f"` that joins an f-string piece, collapse the run of whitespace each introduces,
+    and the sentence matches whatever its layout.
+
+    Only a LEADING `#` is dropped, never an inline one: the facts these sites must state are
+    item numbers — `#3782 closed` — and stripping every `#` would delete the very thing the
+    probe looks for, turning "the site no longer dates the agreement" into a passing check.
+    """
+    opened = re.sub(r"(?m)^[ \t]*#[ \t]?", " ", region)
+    return re.sub(r"\s+", " ", opened.replace('f"', " ").replace('"', " "))
+
+
+def _watch_105_regions(text: str) -> dict[str, str]:
+    """Every region of this file that carries #105's rationale, keyed by a name to blame."""
+    out: dict[str, str] = {}
+    for label, start, end in _WATCH_105_COMMENTS:
+        assert text.count(start) == 1, (
+            f"{label}: its start literal occurs {text.count(start)} times, so the window "
+            f"this scan reads is no longer the note the rationale lives in")
+        i = text.index(start)
+        j = text.find(end, i + len(start))
+        assert j > i, f"{label}: its end literal {end!r} never follows its start"
+        out[label] = text[i:j]
+    lines = text.splitlines(keepends=True)
+    tree = ast.parse(text)
+    for name in _WATCH_105_NODES:
+        fn = [n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == name]
+        assert len(fn) == 1, (
+            f"{name} is defined {len(fn)} times in this file, so the scan has no single "
+            f"node to read and cannot tell a retype from a duplicate")
+        doc = fn[0].body[0]
+        assert (isinstance(doc, ast.Expr) and isinstance(doc.value, ast.Constant)
+                and isinstance(doc.value.value, str)), (
+            f"{name} has no docstring: its rationale was deleted rather than retyped, and "
+            f"an exception with no stated reason is an exception someone removes")
+        out[f"{name} (docstring)"] = "".join(lines[doc.lineno - 1: doc.end_lineno])
+        out[f"{name} (assert message)"] = "".join(lines[doc.end_lineno: fn[0].end_lineno])
+    return out
+
+
+def _watch_105_findings(text: str) -> list[str]:
+    """What is wrong with `text` as the home of #105's rationale. Empty means correct."""
+    found = [f"the retired statement {head + tail!r} is in the file again"
+             for head, tail in _WATCH_105_RETIRED if head + tail in text]
+    for label, region in _watch_105_regions(text).items():
+        prose = _watch_105_prose(region)
+        for probe, what in ((_WATCH_105_WHY, "why the pin is the module and not the field"),
+                            (_WATCH_105_WEEKLY, "what the task file reads"),
+                            (_WATCH_105_MOVED, "when the field moved")):
+            if probe not in prose:
+                found.append(f"{label} does not state {what} (looked for {probe!r})")
+    return found
+
+
+def test_no_watch_105_rationale_says_the_field_is_frozen_or_owed():
+    """#4097: the exception keeps its reason, in every site that ever carried one.
+
+    `test_watch_105_cadence_is_the_module_not_its_frozen_field` grades #105's cadence row
+    against `check_health_census` rather than against the job's `frequency:` field, and that
+    is right for a reason of SURFACES: the task's `command:` runs that module, so what the
+    module states is what a run carries, while a task file's field is what the scheduler
+    would read. This file explained the same exception as a reason of CONSTRAINT — the field
+    held behind the #724 rail, the move owed — and that was false the day it was last read:
+    a person moved `frequency:` `daily` → `weekly` and #3782 closed on 2026-11-09. A
+    rationale of that shape is not a cosmetic error, because its failure message is what the
+    next pass reads; a message saying the field cannot move is how a legitimate future change
+    to it gets refused, which is the harm #4097 was filed for.
+
+    So this node pins both directions, over five sites it locates rather than copies.
+
+    Absent: none of the five retired statements appears anywhere in this file. Each is
+    joined from two literals in `_WATCH_105_RETIRED` above, because this file is what the
+    scan reads — a ban-list that spelled out what it forbids would fail its own check, the
+    trap #3861/#3777 records at `test_the_seam_seventeen_s_fix_prose_names_no_live_module`.
+    Joined, those five are the exact words #4097's acceptance check greps for, so `git grep`
+    over this file and this node ask the same question.
+
+    Present: the `WATCH_JOBS[105]` note, the `CADENCE_CELLS["Watch the machinery"]` note, and
+    the docstring AND the assert message of each node in `_WATCH_105_NODES` still carry the
+    module-as-executed-surface reason, the word `weekly`, and the fact that #3782 closed.
+    Deleting the exception, or retyping a docstring and leaving its message telling the old
+    reason, fails here.
+
+    Control (a) rewrites the seed site back to a retired statement and requires the absence
+    half to name it. Control (b) removes the reason from that site while reviving nothing and
+    requires the presence half to fire ALONE — without it, (a) would prove only that a
+    substring search works, and a rationale that is simply deleted would pass. The two region
+    anchors carry their own uniqueness assertion inside `_watch_105_regions`; no seeded-window
+    test is added, because a window this node built proves nothing about the window the live
+    check reads, which is the lesson #3777 records about copying a control.
+    """
+    text = Path(__file__).read_text(encoding="utf-8")
+    findings = _watch_105_findings(text)
+    assert not findings, (
+        "#105's cadence rationale has gone wrong in this file:\n"
+        + "\n".join(f"  - {f}" for f in findings)
+        + "\nThe row is graded against `check_health_census` because the job's own "
+        "`command:` runs that module — the task file's field is a scheduler value, and it "
+        "has read weekly since #3782 closed on 2026-11-09. Say that in every site: a "
+        "rationale saying instead that the field cannot move instructs the next pass to "
+        "refuse a legitimate change to it.")
+
+    assert text.count(_WATCH_105_SEED_SITE) == 1, (
+        f"the control site is found {text.count(_WATCH_105_SEED_SITE)} times, so neither "
+        "control below edits a known sentence and neither would prove anything")
+
+    # Control (a): a revived retired statement must be caught by the absence half.
+    revived = text.replace(
+        _WATCH_105_SEED_SITE,
+        "so its field is " + _WATCH_105_RETIRED[0][0] + _WATCH_105_RETIRED[0][1]
+        + " behind the #724 rail and `CADENCE`", 1)
+    caught = [f for f in _watch_105_findings(revived) if "retired statement" in f]
+    assert caught, (
+        f"the scan read a file holding the retired statement "
+        f"{_WATCH_105_RETIRED[0][0] + _WATCH_105_RETIRED[0][1]!r} and reported nothing, so "
+        "the absence half is vacuous and this prose would survive the next re-rot")
+
+    # Control (b): the reason deleted and nothing revived must be caught by the presence
+    # half alone — the difference between "the words are gone" and "the reasoning is gone",
+    # which is what clause 2 of #4097 actually requires.
+    stripped = text.replace(_WATCH_105_SEED_SITE,
+                            "so the module it watches states it and `CADENCE`", 1)
+    bare = _watch_105_findings(stripped)
+    assert bare and not any("retired statement" in f for f in bare), (
+        f"removing the stated reason from one site and reviving nothing gave {bare!r}, so "
+        "the presence half cannot tell a deletion from a retype")
+    assert any(_WATCH_105_SEED_LABEL in f for f in bare), (
+        f"the control edited {_WATCH_105_SEED_LABEL} but the findings {bare!r} do not name "
+        "it, so the scan is not reading the site it grades")
 
 
 def test_the_doc_no_longer_states_that_the_seven_have_no_entry():
@@ -6660,9 +6883,12 @@ CADENCE_CELLS: dict[str, dict[str, str]] = {
     # 107 asserts straight off that file; this dict's value is the one the row-set half
     # and the seeded-copy control below read, so an admitted §Watch row can no longer
     # carry a cadence this section never looked at. One entry in the derived fifteen is
-    # not a task file's `frequency:`: #105's is `check_health_census.CADENCE`, because
-    # its field is the one a #724 dispatch-affecting rail keeps frozen at `daily` until a
-    # person moves it (#3782). See the note on `WATCH_JOBS[105]`.
+    # not a task file's `frequency:`: #105's is `check_health_census.CADENCE`, because the
+    # module is the artifact the cadence executes at — its `command:` runs that module, so
+    # what the module states is what a run carries, while the file's field is what the
+    # scheduler reads. The reason is the surface, not a stuck field: the file has read
+    # weekly since #3782 closed on 2026-11-09, when a person moved it. See the note on
+    # `WATCH_JOBS[105]`.
     "Watch the machinery": {f"#{jid}": cadence
                             for jid, (cadence, _r, _w, _b) in WATCH_JOBS.items()},
 }
@@ -6739,12 +6965,14 @@ def test_a_group_row_states_the_cadence_its_task_file_declares(group: str, job: 
 
     `CADENCE_CELLS` spells §Ingest and §Bound entropy by hand off their task files and
     DERIVES §Watch the machinery from `WATCH_JOBS`, so a value here is a task file's
-    `frequency:` except for #105, whose pin is its module's `CADENCE` while its field
-    sits frozen at `daily` behind the #724 rail (#3782). The message below therefore
-    names the pin, not the file: on the day #3777 moved that row to `weekly` the file it
-    is named after still said `daily`, and a failure text that asserted otherwise would
-    have been a false statement about a vault file inside the very node that exists to
-    catch cadence lies.
+    `frequency:` except for #105, whose pin is its module's `CADENCE` because the module
+    is the artifact the cadence executes at — the derivation follows the surface a run
+    happens on, not a field that could not move. The file has read weekly since #3782
+    closed on 2026-11-09, so the two surfaces have agreed since; they did not agree the
+    day #3777 moved the row to `weekly`, which is why the message below names the pin
+    rather than the file — a failure text asserting the file agreed would have been a
+    false statement about a vault file inside the very node that exists to catch cadence
+    lies.
     """
     want = CADENCE_CELLS[group][job]
     have = _cadence_rows(_text(), group).get(job)
@@ -6758,7 +6986,9 @@ def test_a_group_row_states_the_cadence_its_task_file_declares(group: str, job: 
         f"both directions: #30 kept a `3×/day` cell past vault commit `1cc570a7` cutting "
         f"its runs_per_day 3 → 1, and #79 read `weekly` against a daily retention sweep. "
         f"The pin is some task file's `frequency:` for every entry but #105, which "
-        f"follows its module's `CADENCE`; see the note on `WATCH_JOBS[105]`.")
+        f"follows its module's `CADENCE` because the module is the artifact the cadence "
+        f"executes at — the file has read weekly since #3782 closed, so the module is "
+        f"still what a row is graded against; see the note on `WATCH_JOBS[105]`.")
 
 
 @pytest.mark.parametrize("group", CADENCE_TABLES,
