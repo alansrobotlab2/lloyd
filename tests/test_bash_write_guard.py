@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -675,18 +676,25 @@ def test_the_vault_tree_is_covered_on_the_bash_lane_without_joining_the_deny_set
     assert PP.VAULT_BASH_WRITE_ROOT == "~/obsidian"
 
 
-def test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed(home):
-    """`cp` into the vault still passes, and this node says so on purpose.
+def test_a_mover_into_the_vault_tree_is_ruled_redirect_only_so_it_is_not_refused(home):
+    """`cp` into the vault passes, and this node says so because the question is RULED.
 
     `write_targets` classifies `cp`, `install`, `ln`, `mv`, `rsync` and `tee` with
     shapes of their own, so widening the root over all of them is a one-entry change to
-    `VAULT_BASH_WRITE_SHAPES`. #3701 names redirects only and records the widening as
-    owed to the owed-check job; a node that asserted the mover refusal today would take
-    that ruling by accident and leave no evidence of the decision.
+    `VAULT_BASH_WRITE_SHAPES`. #3701 named redirects only, and owed-check ruled on
+    2026-11-15 (#3956) that the widening is not to be taken: the Bash vault lane is
+    redirect-only BY DESIGN, because a mover is how bytes are sanctioned to enter the
+    vault at all — stage them outside it, `cp` or `install -m 644` them in, then
+    `automod_vault_land` the path, which is precisely what the #3737 witness refusal
+    tells a session to do. Widening the shapes would have made that advice a trap. So
+    the two assertions below close a settled question rather than holding it open: a
+    node asserting the mover refusal instead would take that ruling back by accident
+    and leave no evidence of the decision either way.
     """
     mover = _cmd("cp /tmp/x.txt {home}/obsidian/backlog/moved-by-cp.md", home)
     assert PP.check_bash_write_denied(mover, str(home / "lloyd")) is None, \
-        "a mover into the vault was refused — the owed widening was taken without a ruling"
+        "a mover into the vault was refused — the Bash vault lane is ruled " \
+        "redirect-only, movers deliberately allowed (#3956, 2026-11-15)"
     assert PP.VAULT_BASH_WRITE_SHAPES == ("a redirect into",), PP.VAULT_BASH_WRITE_SHAPES
 
 
@@ -701,7 +709,7 @@ def test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_o
 #     `sed -n '6,11p' $L > backlog/data/2026-11-01.3541-gate-to-land-lag-witness.jsonl`.
 #     Answered by hand-emitting the block through `vault_write`'s content argument: the
 #     committed artifact reads `wc -l -c` → `6 6371` at vault `f7fa7bca2`, and
-#     `~/obsidian/backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md:139`
+#     `~/obsidian/backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md:169`
 #     criticises exactly that — the bytes "travelled through `vault_write`'s content
 #     argument, i.e. through the model's own generation, which is exactly what
 #     'byte-identical' cannot be assumed of".
@@ -720,14 +728,16 @@ def test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_o
 # unconditional backstop and every later session may be refused by either.
 #
 # The lane that works — stage the bytes OUTSIDE the vault, move them in with `cp` or
-# `install -m 644`, then `automod_vault_land` the path — is open: #3701 refused the
-# redirect shape alone, and this file's own
-# `test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed`
-# measures it as open on purpose. It was named nowhere a refused session could read:
+# `install -m 644`, then `automod_vault_land` the path — is open BY RULING, not by
+# oversight: #3701 refused the redirect shape alone, owed-check ruled on 2026-11-15
+# (#3956) that it stays that way, and this file's own
+# `test_a_mover_into_the_vault_tree_is_ruled_redirect_only_so_it_is_not_refused`
+# measures the allowance as deliberate. It was named nowhere a refused session could read:
 # not in `VAULT_BASH_WRITE_LABEL`, not on the board. The nodes below pin the sentence
 # for that one directory and pin that it stops there. Widening `VAULT_BASH_WRITE_SHAPES`
-# is NOT decided here — the owed #3701 mover ruling stays owed, so the mover node above
-# this block passes unmodified, and so does every one of these targets' `cp`/`install`.
+# is RULED, not pending: owed-check settled the #3701 mover question as redirect-only on
+# 2026-11-15 (#3956), so the mover node above this block passes unmodified, and so does
+# every one of these targets' `cp`/`install`.
 
 #: Redirects into the witness-artifact directory (`scripts/automod/backlog.py`'s
 #: `WITNESS_ARTIFACT_DIR`, `backlog/data`), in the three spellings the journal shows.
@@ -877,11 +887,11 @@ def test_the_witness_advice_refuses_no_mover_because_the_staging_lane_stays_open
 
     The sentence names a mover as the sanctioned way in, so the round that added it had
     better not also have widened the refused shapes to cover it — that would make the
-    advice a trap and take the owed #3701 ruling in the same commit as a string change.
+    advice a trap and reverse the #3701 ruling in the same commit as a string change.
     Measured here rather than trusted: `cp` and `install -m 644` into the very directory
     the new sentence describes both answer None, and the shape tuple is still the one
-    entry `test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed`
-    pins from the other side.
+    entry `test_a_mover_into_the_vault_tree_is_ruled_redirect_only_so_it_is_not_refused`
+    pins from the other side, closed as redirect-only by owed-check on 2026-11-15 (#3956).
     """
     for mover in ("cp /tmp/x.jsonl {home}/obsidian/backlog/data/witness.jsonl",
                   "install -m 644 /tmp/x.jsonl {home}/obsidian/backlog/data/witness.jsonl",
@@ -896,7 +906,7 @@ def test_the_guard_names_the_witness_directory_by_literal_and_agrees_with_the_ro
 
     `app` imports `scripts` nowhere — `git grep -nE "^(from|import) scripts" -- 'app/**'`
     returned 0 hits at this round's base — so the guard spells the directory as a literal
-    instead of importing `WITNESS_ARTIFACT_DIR` from `scripts/automod/backlog.py:1397`.
+    instead of importing `WITNESS_ARTIFACT_DIR` from `scripts/automod/backlog.py:1426`.
     That buys the layering and pays with a second copy of one string, so the copy is
     pinned against the constant it describes, read through the same route that names it.
     """
@@ -906,3 +916,188 @@ def test_the_guard_names_the_witness_directory_by_literal_and_agrees_with_the_ro
     target = home / "obsidian" / B.WITNESS_ARTIFACT_DIR / "probe.jsonl"
     reason = PP.check_bash_write_denied(f"echo x > {target}", str(home / "lloyd"))
     assert reason and "witness-artifact directory" in reason, reason
+
+
+# ── #4158: the mover ruling is worded as settled, and pinned so it cannot rot back ─────
+#
+# #3701 shipped the redirect-only lane and recorded the mover question as still open;
+# owed-check ruled that reading dead on 2026-11-15 (#3956) — `VAULT_BASH_WRITE_SHAPES`
+# stays one entry for good — and the behaviour already matched the ruling. The WORDING did
+# not: seven sentences across this file and `app/harness/protected_paths.py` still told a
+# reader the question was open, which is the class loaded memory names "a carried-forward
+# 'still owed' claim is the least-verified sentence in the system" (2026-09-19) — every
+# later round re-cites the sentence and no round re-runs it. A comment that only restates
+# its own fix passes forever, so the nodes below read both files as TEXT and assert the
+# readings: write an open-question sentence back, or re-name the mover node, and the node
+# for that clause reddens. `tests/test_memory_index_cap.py`'s #3990 nodes are the
+# precedent for this shape, including the split spellings below: the acceptance check for
+# #4158 is `git grep -nE '…'` over THESE TWO FILES, so a ban list carrying its own
+# literals verbatim would fail the very check it exists to enforce. Each pattern is
+# therefore written around its whitespace (`is\s+owed`) or built at runtime, which is the
+# same reading and is not itself a match — the control node re-joins each one and shows it
+# caught.
+#: The open-question readings neither file may carry, each labelled with the wording it
+#: was shipped in. The surviving `owed` in both files is the ruling job's own hyphenated
+#: name, which the citation needs — what is banned here is the reading, not the letters.
+MOVER_ROT_READINGS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("an outstanding-ruling sentence",
+     re.compile(r"that ruling is\s+owed|that_ruling_is_+owed")),
+    ("an outstanding ruling that stays one", re.compile(r"stays\s+owed")),
+    ("delegated to the ruling job", re.compile(r"owed to the owed-check\s+job")),
+    ("delegated to somebody else", re.compile(r"a ruling for someone\s+else")),
+    ("left outstanding by #3701", re.compile(r"#3701 left\s+owed")),
+    ("the widening/ruling/#3701 called outstanding",
+     re.compile(r"the owed\s+(?:widening|ruling|#3701)")),
+    ("a refusal that has not happened yet",
+     re.compile(r"not\s+yet\s+refused|not_yet[_ ]+refused")),
+)
+
+#: The mover node's old id. A pattern for the same grep reason, and one more: it also
+#: catches a half-renamed survivor of the rename #4158 makes.
+OLD_MOVER_NODE_ID = re.compile(r"test_a_mover_into_the_vault_tree_is_\w*not_yet\w*refused")
+
+#: The mover node's id as #4158 re-names it, and the four words every block that carries
+#: the ruling must contain: the carrier, its date, and the two readings it settles.
+MOVER_NODE_ID = ("test_a_mover_into_the_vault_tree_is_ruled_"
+                 "redirect_only_so_it_is_not_refused")
+RULING_WORDS = ("#3956", "2026-11-15", "RULED", "redirect-only")
+
+#: The two files whose wording the nodes below read. The guard is reached by path, not by
+#: importing it and asking for a constant: the thing under test IS its prose.
+_GUARD_TEXT = ROOT / "app" / "harness" / "protected_paths.py"
+_HERE_TEXT = Path(__file__)
+
+
+def _block(text: str, start: str, end: str, label: str) -> str:
+    """One named block of `text`, sliced between two markers rather than by line number.
+
+    Slicing is what keeps a wording pin from being a whole-file grep that any unrelated
+    sentence can trip: the assertion is about the mover ruling's own sentences. A marker
+    that has moved raises with its label, so a re-section is reported as what it is
+    instead of silently grading an empty span — and a line-number slice would be the very
+    fragility #4158 is fixing.
+    """
+    try:
+        lo = text.index(start)
+        hi = text.index(end, lo)
+    except ValueError as exc:
+        raise AssertionError(f"{label}: no block between {start!r} and {end!r}") from exc
+    return text[lo:hi]
+
+
+def _mover_wording_blocks() -> dict[str, str]:
+    """The four blocks that carry the mover ruling, keyed by what each one is.
+
+    Three are in the guard: the `VAULT_BASH_WRITE_SHAPES` comment, the
+    `bash_vault_write_denial` docstring and the end-of-file #3737 header — clause 3's three
+    mover sentences. The fourth is this file's mover node, clause 2's. Keyed, because a
+    failure has to name the sentence its author has to re-word.
+    """
+    guard = _GUARD_TEXT.read_text(encoding="utf-8")
+    return {
+        "the VAULT_BASH_WRITE_SHAPES comment": _block(
+            guard, "#: The `write_targets` shapes this root refuses",
+            "VAULT_BASH_WRITE_SHAPES: tuple", "guard shapes comment"),
+        "bash_vault_write_denial's docstring": _block(
+            guard, "def bash_vault_write_denial",
+            "    if not target or shape not in VAULT_BASH_WRITE_SHAPES",
+            "guard denial docstring"),
+        "the #3737 end-of-file header": _block(
+            guard, "# The witness directory: what a refused redirect",
+            "VAULT_BASH_WRITE_SUBDIR: str", "guard witness header"),
+        "this file's mover node": _block(
+            _HERE_TEXT.read_text(encoding="utf-8"), f"def {MOVER_NODE_ID}",
+            "# ── #3737: the refusal for a witness-extract", "mover node"),
+    }
+
+
+def test_the_mover_ruling_is_worded_as_settled_in_every_block_that_carries_it():
+    """Clauses 2 and 3: no block calls the mover question open, and every one cites #3956.
+
+    Read as text, in both directions. BANNED, over each file whole: the open-question
+    readings in `MOVER_ROT_READINGS` — the guard's shapes comment, its denial docstring and
+    its #3737 header are clause 3's three sentences, and this file is clause 2's. REQUIRED,
+    per block: the ruling's carrier — #3956, dated 2026-11-15 — plus that it is RULED and
+    redirect-only, which is what a reader arriving with no context needs and the difference
+    between a settled design and an unowned hole.
+    """
+    srcs = {"app/harness/protected_paths.py": _GUARD_TEXT.read_text(encoding="utf-8"),
+            "tests/test_bash_write_guard.py": _HERE_TEXT.read_text(encoding="utf-8")}
+    assert all(len(t) > 20_000 for t in srcs.values()), \
+        "a file read empty would let every absence assertion below pass vacuously"
+    for label, rx in MOVER_ROT_READINGS:
+        for name, text in srcs.items():
+            hit = rx.search(text)
+            assert not hit, (
+                f"{name} carries the {label} reading again ({hit.group(0)!r} at offset "
+                f"{hit.start()}): owed-check ruled the mover question redirect-only on "
+                f"2026-11-15 (#3956), so the wording has to say so too")
+    blocks = _mover_wording_blocks()
+    for label, block in blocks.items():
+        missing = [w for w in RULING_WORDS if w not in block]
+        assert not missing, (f"{label} no longer states the ruling as settled: {missing} "
+                             f"are absent from it")
+
+
+def test_no_tracked_file_names_the_old_mover_node_id():
+    """Clause 4's repo-wide half: the rename left no citation of the old id anywhere.
+
+    Three places cited it at #4158's base — the guard's #3737 header and two docstrings in
+    this file — and a citation to a node that no longer exists is the same rot one commit
+    later, only quieter: it reads as a pointer while pointing nowhere. Measured with the
+    acceptance check's own instrument (`git grep` over tracked files, so a copy filed in a
+    scratch note cannot hide a survivor), and with the new id's presence in both files
+    beside it, because a re-point that deleted the citation instead would also be green.
+    """
+    import subprocess
+    probe = subprocess.run(["git", "-C", str(ROOT), "grep", "-nE",
+                            OLD_MOVER_NODE_ID.pattern],
+                           capture_output=True, text=True)
+    assert probe.returncode in (0, 1), f"git grep failed: {probe.stderr.strip()}"
+    assert not probe.stdout.strip(), (
+        f"the old mover node id is still cited, so the rename stranded these: "
+        f"{probe.stdout.strip()}")
+    guard = _GUARD_TEXT.read_text(encoding="utf-8")
+    here = _HERE_TEXT.read_text(encoding="utf-8")
+    assert MOVER_NODE_ID in guard, "the guard's #3737 header no longer cites the mover node"
+    assert here.count(MOVER_NODE_ID) >= 3, (
+        "this file names the mover node fewer times than its def plus its two citations "
+        f"({here.count(MOVER_NODE_ID)}), so a citation was deleted rather than re-pointed")
+
+
+def test_the_mover_wording_check_is_shown_able_to_fail():
+    """The control the wording pin owes: each banned reading, re-seeded, is caught.
+
+    A ban list that matched nothing would pass forever, so every pattern in
+    `MOVER_ROT_READINGS` is run against the sentence this repo actually shipped at
+    `39008364`, rebuilt here from two halves (one file cannot hold the literal and survive
+    its own grep). Asserted per reading — a pattern that quietly stopped matching is the
+    exact hole being closed — and the old id's pattern against the old def line, so the
+    repo-wide grep node above is shown to be able to bite as well.
+    """
+    seeded = {
+        "an outstanding-ruling sentence": ("#3701 names redirects only and records"
+                                           " the widening as that ruling is" + " owed"),
+        "an outstanding ruling that stays one": ("the mover ruling" + " stays" + " owed"),
+        "delegated to the ruling job": ("leaves that widening to the" +
+                                        " owed to the owed-check" + " job"),
+        "delegated to somebody else": ("names widening to `cp`/`mv`/`tee` as"
+                                       " a ruling for someone" + " else"),
+        "left outstanding by #3701": ("no shape joins the tuple, and the mover"
+                                      " ruling #3701 left" + " owed"),
+        "the widening/ruling/#3701 called outstanding": ("so" + " the owed" +
+                                                        " ruling cannot be taken"),
+        "a refusal that has not happened yet": ("def test_a_mover_into_the_vault_tree_is_"
+                                                "not" + "_yet_refused_because"
+                                                "_that_ruling_is" + "_owed(home):"),
+    }
+    assert set(seeded) == {label for label, _ in MOVER_ROT_READINGS}, \
+        "the control and the ban list cover different readings, so one of them is vacuous"
+    for label, rx in MOVER_ROT_READINGS:
+        assert rx.search(seeded[label]), (
+            f"the pattern for {label} does not catch the wording it was written for: "
+            f"{rx.pattern!r}")
+    assert OLD_MOVER_NODE_ID.search(seeded["a refusal that has not happened yet"]), \
+        "the old-id pattern would not have caught the id #4158 re-names"
+    assert not OLD_MOVER_NODE_ID.search(MOVER_NODE_ID), \
+        "the old-id pattern matches the new node id, so the repo-wide node is a false red"

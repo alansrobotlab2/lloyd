@@ -13861,3 +13861,202 @@ def test_editing_safeguards_reports_the_retired_pyflakes_figure_only_in_the_past
         f"the carrier-claim pattern fired on only {len(fired)} of the 3 retired "
         "sentences, so the absence asserted above may be a pattern that could never "
         "have matched this page")
+
+
+# ---------------------------------------------------------------------------
+# The citations inside the mover ruling's own comments (#4158 clause 5)
+# ---------------------------------------------------------------------------
+#
+# Every anchor rail in this file parses the ARCHITECTURE DOCS — `py_anchor_citations`
+# walks `ARCH`, the span rule walks `slug`s, the gap rail at `_line_citation_gaps` walks
+# doc text. None of them has ever read a citation inside a code COMMENT, and that is why
+# four of them had silently drifted by the time #4158 measured them: the guard cited
+# `scripts/automod/backlog.py:1397` for `WITNESS_ARTIFACT_DIR`, which sits at :1426;
+# `scripts/automod/vault_round.py:1735` for the vault-relative path rule, where the
+# refusal is raised at :1934; its own `:264` for the cite-by-line-number header, which is
+# at :300; and `backlog/3686-…md:139` for the `vault_write`-content criticism, which is at
+# :169. A comment citation is load-bearing in exactly the way a doc citation is — the
+# mover sentences carry the carrier for a RULED policy, and a reader who follows a dead
+# line number checks nothing — so the smallest rail that says so is this one. Scoped to
+# the mover region of the two files that hold the ruling, because the rest of those files'
+# citations are other rails' claims; the node states the regions it read rather than
+# implying it swept the tree.
+_MOVER_RULING_REGIONS: dict[str, str] = {
+    #: From the fourth policy's header to end of file — the shapes comment, the denial
+    #: docstring and the #3737 witness header all live below it.
+    "app/harness/protected_paths.py": "# The vault tree as a Bash-only write root (#3701)",
+    #: From the #3737 test header to end of file: the block that advises the mover lane,
+    #: the staging-lane node, and #4158's wording pins.
+    "tests/test_bash_write_guard.py": "# ── #3737: the refusal for a witness-extract",
+}
+
+#: What each citation in those regions is cited FOR, and the text its target line has to
+#: carry. A line-number-only check could be satisfied by any in-range number; this is the
+#: half that makes the check mean something.
+_MOVER_RULING_CITATIONS: tuple[tuple[str, int, str, re.Pattern[str]], ...] = (
+    ("app/harness/protected_paths.py", 300, "the header that says four documents cite "
+     "this file by line number", re.compile(r"cite this file by line number")),
+    ("scripts/automod/backlog.py", 1426, "the witness-artifact directory constant",
+     re.compile(r"^WITNESS_ARTIFACT_DIR\s*=")),
+    ("scripts/automod/vault_round.py", 1934, "the refusal of a path that is not "
+     "vault-relative", re.compile(r"not a safe vault-relative path")),
+    ("backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md", 169,
+     "the criticism of bytes that travelled through vault_write's content argument",
+     re.compile(r"travelled through \S*vault_write\S* content argument")),
+)
+
+#: `path.py:123` / `note.md:123`, and the bare `` `:123` `` a file uses to cite itself.
+_MOVER_CITED_LINE = re.compile(r"(?P<path>[\w./$~#-]+\.(?:py|md)):(?P<line>\d+)")
+_MOVER_SELF_LINE = re.compile(r"`:(?P<line>\d+)`")
+
+
+def _mover_citation_key(spelling: str) -> str:
+    """A cited path as the table keys it, with the vault root made relative.
+
+    The comments cite the note as `~/obsidian/backlog/…md` because that is how a reader
+    opens it; the table keys it vault-relative because that is how every other rail in
+    this file names a vault document. One normalisation, applied to both sides of the
+    comparison, so the two spellings cannot drift apart.
+    """
+    prefix = "~/obsidian/"
+    return spelling[len(prefix):] if spelling.startswith(prefix) else spelling
+
+
+def _mover_citation_target(rel: str) -> Path | None:
+    """Where a cited path actually is: the checkout first, then the vault."""
+    for base in (ROOT, VAULT_ROOT):
+        p = base / rel
+        if p.is_file():
+            return p
+    return None
+
+
+def _mover_comment_citations() -> dict[tuple[str, int], set[str]]:
+    """Every line citation in the mover regions, keyed by (target, line).
+
+    The value is the set of files that make it — the guard cites the #3686 note and this
+    file does too, and one drifted spelling in one of them is enough to turn the node red,
+    so the failure has to name every place to fix.
+    """
+    found: dict[tuple[str, int], set[str]] = {}
+    for citing, marker in _MOVER_RULING_REGIONS.items():
+        text = (ROOT / citing).read_text(encoding="utf-8")
+        start = text.index(marker)
+        region = text[start:]
+        for m in _MOVER_CITED_LINE.finditer(region):
+            key = (_mover_citation_key(m.group("path")), int(m.group("line")))
+            found.setdefault(key, set()).add(citing)
+        for m in _MOVER_SELF_LINE.finditer(region):
+            found.setdefault((citing, int(m.group("line"))), set()).add(citing)
+    return found
+
+
+def _mover_table(rows=_MOVER_RULING_CITATIONS) -> dict:
+    """The claim rows as a lookup, so a control can hand in a re-lined copy."""
+    return {(rel, line): (what, claim) for rel, line, what, claim in rows}
+
+
+def _mover_citation_problems(found: dict[tuple[str, int], set[str]],
+                             table=None) -> list[str]:
+    """Every reason the citations in `found` do not land on the claims `table` names.
+
+    Four kinds, because each is a different mistake a later round makes: an ungraded
+    citation (a new one, no claim row), a dead table row (a re-point that updated the
+    comment and not the table), a line that no longer holds the claim (the drift this rail
+    exists for), and a target that is not a file at all.
+    """
+    problems: list[str] = []
+    table = _mover_table() if table is None else table
+    for (rel, line), citers in sorted(found.items()):
+        row = table.get((rel, line))
+        if row is None:
+            problems.append(f"{', '.join(sorted(citers))} cites {rel}:{line}, which has no "
+                            "claim row here, so this rail does not grade it")
+            continue
+        what, claim = row
+        target = _mover_citation_target(rel)
+        if target is None:
+            problems.append(f"{rel}:{line} ({what}) is cited but is not a file under the "
+                            "checkout or the vault")
+            continue
+        lines = target.read_text(encoding="utf-8").splitlines()
+        if line > len(lines):
+            problems.append(f"{rel}:{line} ({what}) is past the target's {len(lines)} lines")
+        elif not claim.search(lines[line - 1]):
+            problems.append(
+                f"{rel}:{line} does not hold {what} — it reads "
+                f"{lines[line - 1].strip()[:120]!r}")
+    for (rel, line), (what, _claim) in table.items():
+        if (rel, line) not in found:
+            problems.append(f"the table still names {rel}:{line} ({what}) but no comment in "
+                            "the mover regions cites it")
+    return problems
+
+
+def test_the_citations_in_the_mover_ruling_comments_land_on_the_claims_they_name():
+    """#4158 clause 5: the four citations the mover blocks make resolve where they say.
+
+    The measured drift this replaces: `protected_paths.py` cited `backlog.py:1397` for a
+    constant at :1426, `vault_round.py:1735` for a refusal at :1934, its own `:264` for a
+    header at :300, and `backlog/3686-…md:139` for a criticism at :169 — four dead
+    pointers, all of them inside the sentences that carry a settled ruling, and none of
+    them graded, because every anchor rail above reads `architecture/*.md`. Read here:
+    both files' mover regions, every citation they make, each against the text its line
+    has to carry, plus a claim row for anything new and a live row for anything re-pointed
+    away. Asserted as a report rather than four hand-written `assert`s so an added
+    citation cannot join the ungraded set quietly.
+    """
+    found = _mover_comment_citations()
+    assert len(found) >= 4, (
+        f"the mover regions yielded {len(found)} line citations "
+        f"({sorted(found)}), fewer than the four #4158 measured, so an extractor that "
+        "found nothing would let every claim assertion below pass vacuously")
+    problems = _mover_citation_problems(found)
+    assert not problems, "the mover ruling's comments carry dead citations:\n  " + \
+        "\n  ".join(problems)
+
+
+#: The four citations as they shipped at #4158's base, each landing somewhere other than
+#: the claim it names. Data for the control below, never a live claim.
+_DRIFTED_MOVER_CITATIONS: tuple[tuple[str, int, str], ...] = (
+    ("app/harness/protected_paths.py", 264, "the cite-by-line-number header, at :300"),
+    ("scripts/automod/backlog.py", 1397, "WITNESS_ARTIFACT_DIR, at :1426"),
+    ("scripts/automod/vault_round.py", 1735, "the vault-relative refusal, at :1934"),
+    ("backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md", 139,
+     "the vault_write-content criticism, at :169"),
+)
+
+
+def test_the_mover_citation_rail_is_shown_reading_the_drift_it_bans():
+    """The control clause 5 owes: seed the base's four drifted citations, and reddens.
+
+    A report function that returned [] for everything would satisfy the live node forever.
+    So each shipped spelling is fed back in as though the table still pinned it there, and
+    the DRIFT arm has to fire — the target's line, the claim it missed, named in the
+    problem. That is the exact state the four citations were in: on disk, in range,
+    plausible, and pointing at the wrong sentence. Then the other two arms: a citation with
+    no claim row, and a target that is not a file. Seeded from what #4158 measured rather
+    than invented, so the rail is graded against the failure it was written for.
+    """
+    by_rel = {rel: (what, claim) for rel, _line, what, claim in _MOVER_RULING_CITATIONS}
+    assert len(by_rel) == len(_MOVER_RULING_CITATIONS), \
+        "two claim rows name the same target file, so the control below would seed one at random"
+    for rel, line, where in _DRIFTED_MOVER_CITATIONS:
+        what, claim = by_rel[rel]
+        seeded = {(rel, line): {"app/harness/protected_paths.py"}}
+        problems = _mover_citation_problems(seeded, table={(rel, line): (what, claim)})
+        drift = [p for p in problems if "does not hold" in p]
+        assert len(drift) == 1, (
+            f"seeding the shipped citation {rel}:{line} ({where}) produced {problems}, "
+            "so the drift arm would not have caught what #4158 measured")
+    ungraded = _mover_comment_citations()
+    ungraded[("tests/test_architecture_coverage_doc_claims.py", 999999)] = {"x"}
+    assert any("no claim row" in p for p in _mover_citation_problems(ungraded)), \
+        "a citation with no claim row slipped through ungraded"
+    ghost = ("scripts/automod/no_such_rail.py", 12)
+    missing = {ghost: {"x"}}
+    assert any("not a file" in p for p in
+               _mover_citation_problems(missing,
+                                        table={ghost: ("a file this round deleted",
+                                                       re.compile("."))})), \
+        "a citation to a file that does not exist was reported as resolved"

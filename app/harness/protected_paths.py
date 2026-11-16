@@ -1413,7 +1413,7 @@ def check_protected_delete(command: str, cwd: str | None = None) -> str | None:
 #
 # This is the module's FOURTH policy and its narrowest. It lives here, at the end of
 # the file rather than beside `write_deny_reason`, for a documentary reason: four
-# documents on this box cite this file BY LINE NUMBER (the header above :264 says so,
+# documents on this box cite this file BY LINE NUMBER (the header at `:300` says so,
 # and `tests/test_architecture_coverage_doc_claims.py` parses those citations), so an
 # insertion at line 250 would silently re-point all of them. Appending costs the
 # reader a forward reference and buys back every one of those citations.
@@ -1436,11 +1436,15 @@ VAULT_BASH_WRITE_ROOT: str = "~/obsidian"
 
 #: The `write_targets` shapes this root refuses — the redirect classification, spelled
 #: exactly as `write_targets` emits it (its `add_token(tok, "a redirect into")`).
-#: ONE shape on purpose: `write_targets` also resolves `cp`, `install`, `ln`, `mv`,
-#: `rsync` and `tee` destinations with shapes of their own, so covering them is a
-#: one-entry widening, and #3701 names redirects alone and leaves that widening to the
-#: owed-check job. `tests/test_bash_write_guard.py` pins that a `cp` into the vault is
-#: NOT yet refused, so the owed ruling cannot be taken by accident.
+#: ONE shape, RULED and not tentative: `write_targets` also resolves `cp`, `install`,
+#: `ln`, `mv`, `rsync` and `tee` destinations with shapes of their own, so covering them
+#: would be a one-entry widening, and owed-check ruled on 2026-11-15 (#3956) that it is
+#: not to be taken — the Bash vault lane is redirect-only BY DESIGN, because a mover is
+#: the sanctioned way bytes enter the vault at all (`cp`/`install -m 644` then
+#: `automod_vault_land`, the route #3737's witness advice below hands to a refused
+#: session). `tests/test_bash_write_guard.py` pins both halves of the settled position: a
+#: `cp` into the vault answers None, and this tuple stays one entry, so the ruling cannot
+#: be reversed by accident.
 VAULT_BASH_WRITE_SHAPES: tuple[str, ...] = ("a redirect into",)
 
 #: The clause of a refusal that says what the root is. It names the lane, because the
@@ -1474,8 +1478,10 @@ def bash_vault_write_denial(target: str, shape: str) -> str | None:
 
     Two conditions, both narrow. The shape must be one of `VAULT_BASH_WRITE_SHAPES` —
     the redirect classification, and no mover — because #3701 scopes the change to
-    redirects and names widening to `cp`/`mv`/`tee` as a ruling for someone else. And
-    the target must fall under `VAULT_BASH_WRITE_ROOT` by realpath-anchored
+    redirects and owed-check ruled on 2026-11-15 (#3956) that it stays that way: covering
+    `cp`/`mv`/`tee` is RULED OUT, redirect-only by design, because movers are the lane the
+    witness-staging advice below tells a session to use. And the target must fall under
+    `VAULT_BASH_WRITE_ROOT` by realpath-anchored
     whole-component prefix matching, with no `exists()` test: `write_deny_reason` never
     asks whether the target is on disk either, so a redirect that CREATES a board file
     is refused on the identical predicate to one that overwrites it — which is why "the
@@ -1512,8 +1518,10 @@ def bash_vault_write_denial(target: str, shape: str) -> str | None:
 # documents cite this file by line number and `tests/test_architecture_coverage_doc_claims.py`
 # parses those citations, so anything that can live at the end must not be inserted above.
 # What follows is one sentence of advice plus the predicate that scopes it. No policy
-# change: no shape joins `VAULT_BASH_WRITE_SHAPES`, and the mover ruling #3701 left owed
-# stays owed — `tests/test_bash_write_guard.py::test_a_mover_into_the_vault_tree_is_not_yet_refused_because_that_ruling_is_owed`
+# change: no shape joins `VAULT_BASH_WRITE_SHAPES`, and the mover question #3701 left
+# open is RULED — owed-check closed it redirect-only on 2026-11-15 (#3956), so a mover
+# into the vault is allowed by design, which is exactly what the sentence below needs to
+# be true. `tests/test_bash_write_guard.py::test_a_mover_into_the_vault_tree_is_ruled_redirect_only_so_it_is_not_refused`
 # passes unmodified, and its neighbour re-measures a `cp`/`install -m 644` into this very
 # directory as None so the advice cannot become a trap.
 #
@@ -1522,18 +1530,19 @@ def bash_vault_write_denial(target: str, shape: str) -> str | None:
 # `20261103_060506_autocode_1237` was refused a `sed -n '6,11p' $L > backlog/data/…jsonl`
 # and answered it by hand-emitting the block through `vault_write`'s content argument —
 # 6 lines / 6,371 B committed at vault `f7fa7bca2`, criticised at
-# `~/obsidian/backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md:139` as
+# `~/obsidian/backlog/3686-commit-the-gate-to-land-lag-witness-bytes-for-3541.md:169` as
 # bytes that "travelled through `vault_write`'s content argument, i.e. through the model's
 # own generation, which is exactly what 'byte-identical' cannot be assumed of". The
 # `17:29:07Z` one (`20261103_092822_autocode_3774`, a 637-line `head` of the same journal)
 # was never answered: the artifact did not exist when this was written. For that traffic
 # the two lanes the #3701 sentence names are both dead ends — `vault_write` can carry the
 # bytes only as text the model regenerates, and `automod_vault_land` takes vault-relative
-# PATHS (`scripts/automod/vault_round.py:1735`) and commits bytes already in the tree, so
+# PATHS (`scripts/automod/vault_round.py:1934` raises on any other spelling) and commits
+# bytes already in the tree, so
 # it never says how they got there.
 
 #: The vault subtree holding witness extracts, as a literal. Deliberately NOT imported
-#: from `scripts/automod/backlog.py:1397`'s `WITNESS_ARTIFACT_DIR`: `app` never imports
+#: from `scripts/automod/backlog.py:1426`'s `WITNESS_ARTIFACT_DIR`: `app` never imports
 #: `scripts` (`git grep -nE "^(from|import) scripts" -- 'app/**'` → 0 hits at this commit),
 #: and inverting that layering to build one refusal string is the worse trade. The copy is
 #: pinned against the constant it describes by
