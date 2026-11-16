@@ -803,3 +803,118 @@ def test_the_swept_count_line_does_not_move_the_numbers_the_section_reads(tmp_pa
     section = _section(_report(path))
     assert _stated(section, "dangling") == "1"
     assert _stated(section, "exempt") == "1"
+
+
+# ── #4173: the section states one total for the population, and never a frozen one ──
+#
+# The baseline sentence used to carry a pair of its own — a frozen reading of a store
+# #94 rewrites nightly — printed under the live total the same block emits eight lines
+# earlier. That pair was true on 2026-10-16, the day #2821's section was written, and
+# false in every report from that of 2026-10-24 onward: 20 of the 27 dated reports under
+# `~/lloyd-data/_pipeline/reflection/` that carry the sentence state a total disagreeing
+# with the `- dangling:` line above it. One report, one quantity, two totals. What is
+# pinned below is that the sentence can no longer disagree, whatever the ledger says —
+# not that it says any particular number, since a node asserting one is false the next
+# morning (the standing rule in `tests/test_autonomy_jobs_doc_claims.py`'s docstring).
+
+#: Populations fed to the fixture by the node below. None of them is the fixture's own
+#: unrewritten value, so every one is a rewrite the frozen prose could not follow: a
+#: sentence that reproduced one morning's total, or quoted one as history, fails all
+#: three.
+POPULATIONS = (7, 31, 128)
+
+
+def _ledger_population(tmp_path: Path, dangling: int) -> Path:
+    """The measured fixture with its `- dangling:` line rewritten to `dangling`.
+
+    Rewritten rather than retyped, so the fixture's other three counts stay put: the
+    claim is that this one line is what moves the section's total.
+    """
+    return _ledger(tmp_path, LEDGER_MEASURED.replace(
+        "- dangling: 23", f"- dangling: {dangling}"))
+
+
+def _baseline_sentence(section: str) -> str:
+    """The printed sentence carrying the BASELINE ruling, sliced at line level.
+
+    One line, not the whole section: the clause is about a sentence, and a section-wide
+    integer check would have to forgive the run stamp and the four count lines to pass —
+    a node that forgives digits to reach green is grading nothing.
+    """
+    hits = [ln for ln in section.splitlines() if "BASELINE" in ln]
+    assert len(hits) == 1, (
+        f"expected exactly one BASELINE line, got {len(hits)}: {hits}")
+    return hits[0]
+
+
+@pytest.mark.parametrize("dangling", POPULATIONS)
+def test_the_baseline_sentence_never_states_a_population_of_its_own(tmp_path, dangling):
+    """Whatever the ledger's total, the sentence under it agrees or says no number.
+
+    The defect was a string literal inside the same `out.append` block that formats the
+    four ledger counts, so the section printed two totals for one quantity. The fix
+    drops the pair rather than re-deriving a first endpoint: the only other source for
+    the older number is a directory read of the dated ledgers, which this section does
+    not do and should not — its whole point is that it reads one ledger.
+
+    A clause like "was 12 on 2026-10-04" fails here too, on the digits in its count and
+    its date. That is deliberate and it is #4173's own acceptance check: an as-of-dated
+    historical clause is acceptable prose *in a document*, but this sentence is reprinted
+    nightly under a number that has already moved, so any total in it is a second total
+    by the next morning.
+    """
+    section = _section(_report(_ledger_population(tmp_path, dangling)))
+    assert _stated(section, "dangling") == str(dangling), (
+        f"the count line did not follow the ledger: {_stated(section, 'dangling')} "
+        f"vs {dangling}")
+    sentence = _baseline_sentence(section)
+    foreign = sorted({n for n in re.findall(r"\d+", sentence) if n != str(dangling)})
+    assert not foreign, (
+        f"the ledger's total is {dangling} but the baseline sentence states "
+        f"{foreign}: {sentence}")
+
+
+def test_the_emitted_section_carries_no_growth_pair_in_its_source():
+    """A re-pin canary: the block may not take a `grown from N to M` back.
+
+    Scoped to `_referential_integrity_lines`'s own source rather than the whole script,
+    because the clause this replaces is that `git grep -n "12 to 23"
+    scripts/memory/knowledge-health-report.py` returns nothing, and a ban over all 2,900
+    lines would reach other sections of the report that legitimately describe a dated
+    change. Inside this function no frozen pair is acceptable at all: the population it
+    describes is rewritten every night by #94.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    start = src.index("def _referential_integrity_lines")
+    body = src[start + 1:]
+    end = re.search(r"^def ", body, re.M)
+    assert end, "no following top-level def, so the function's source is unbounded"
+    frozen = re.search(r"(?i)grown\s+from\s+\d+\s+to\s+\d+", body[:end.start()])
+    assert frozen is None, (
+        f"a frozen population pair is back in the emitted section: {frozen.group(0)!r}")
+
+
+def test_a_zero_delta_still_prints_the_baseline_and_delta_ruling(tmp_path):
+    """Removing the numbers may not remove the ruling the sentence exists to carry.
+
+    The frozen pair was never decoration: it was the evidence for a policy — the
+    `dangling` TOTAL is a standing baseline and the `newly dangling` DELTA is the
+    reportable change (`~/obsidian/autonomy/94-referential-integrity-ledger.md`, which
+    also rules out any total-based threshold, so none is added here), with #882's owed
+    check ruling a newly-dangling cite a signals finding and never a gate. Asserted at a
+    zero delta, the flat nightly state, because that is the night with no finding to lean
+    on: with a nonzero delta the marker paragraph above would carry part of the meaning
+    and this node could pass on a section that had lost the ruling entirely.
+    """
+    path = _ledger(tmp_path, LEDGER_MEASURED.replace(
+        "- newly dangling since the previous report: 2",
+        "- newly dangling since the previous report: 0"))
+    section = _section(_report(path))
+    assert _stated(section, "dangling") == "23", section
+    assert _stated(section, "newly dangling since the previous report") == "0", section
+    assert "NEWLY DANGLING" not in section, section
+    sentence = _baseline_sentence(section)
+    assert re.search(r"(?i)baseline", sentence), f"no baseline ruling in: {sentence}"
+    assert "not a finding" in sentence, f"the total is not ruled out as a finding: {sentence}"
+    assert re.search(r"reportable.*newly dangling.*delta", sentence, re.I | re.S), (
+        f"the delta is not named as the reportable change: {sentence}")

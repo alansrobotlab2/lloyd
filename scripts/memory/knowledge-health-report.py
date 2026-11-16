@@ -1662,9 +1662,9 @@ def _referential_integrity_lines(ledger: dict) -> list[str]:
     out.append("")
 
     # The delta is the finding; the total is the standing population. Printed as a
-    # marker only for a real nonzero count, so that tonight's 23-cite baseline — the
-    # state the item was filed against — never arrives as news. Whether the delta
-    # should ever become an alarm, a filed item, or a blocked write is #882's
+    # marker only for a real nonzero count, so that the standing baseline — the
+    # population the item was filed against — never arrives as news. Whether the
+    # delta should ever become an alarm, a filed item, or a blocked write is #882's
     # `>=14 runs` revisit and is not this section's call (#2821's owed clause).
     if ledger["newly"]:
         out.append(f"NEWLY DANGLING: {ledger['newly']}")
@@ -1680,11 +1680,17 @@ def _referential_integrity_lines(ledger: dict) -> list[str]:
         out.append("Nothing newly dangling since the previous report, so this section "
                    "carries no finding today.")
     out.append("")
+    # No count of the population is typed into this sentence (#4173). It used to carry
+    # a baked pair — the endpoints as they stood on 2026-10-16, the day #2821's contract
+    # was written — and a literal cannot follow a store that moves nightly, so the pair
+    # was false in every report from that of 2026-10-24 onward, printed eight lines under
+    # the live total the same block emits. The population is the `- dangling:` line
+    # above, read from the ledger; this sentence carries only the ruling on how to read
+    # it, so it cannot disagree with the number it is printed under.
     out.append("The `dangling` total above is a BASELINE, not a finding: cites go "
                "stale when a file moves rather than when a memory breaks, and the "
-               "population has grown from 12 to 23 since 2026-10-04 with no single "
-               "night's damage in it. The reportable change is the `newly dangling` "
-               "delta.")
+               "population drifts with no single night's damage in it. The reportable "
+               "change is the `newly dangling` delta printed above.")
     out.append("")
     return out
 
