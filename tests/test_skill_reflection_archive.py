@@ -1236,6 +1236,141 @@ def test_the_archive_check_can_actually_fail():
     )
 
 
+_SLIVE = _P + "signals-latest.md"
+
+#: #4177's false positive, in the two shapes that fired it. `PROSE_WRITE` carried the
+#: past participle `written` alongside the instruction verbs, so a sentence *about*
+#: somebody else's write bound the tier:
+#:
+#: * the annotation leg — a bullet recounting the clock the report's own header
+#:   quotes, which has no verb before the path and so falls through to the walk-back;
+#: * the walk-back leg — `_heading_verb` climbing to the producer's narrative
+#:   ("its dated copy **is written** there by the signals job"), reached because no
+#:   blank line, heading or `Read` token stands between it and the bullet. Six lines
+#:   is far enough to cross a nested bullet, and that is exactly how far a paragraph
+#:   of narration about another job can reach into this skill's verdict.
+#:
+#: The real bodies are `nightly-reflection-knowledge-analysis/SKILL.md` lines 202 and
+#: 256, and the skill it mis-bound only ever `Read`s that report; its own write target
+#: is the dated handoff artifact. Neither leg prescribes a write, and `BOUND_TIERS` is
+#: what decides whether an archive step is owed, so one past tense both demanded a
+#: `cp` the skill has no reason to make and refused every vault round editing it.
+_NARRATED_PROVENANCE = "\n".join([
+    "### 1. Read the signals report",
+    "Producer #38 owns that file: its dated copy is written there by the signals",
+    "job's own step, three hours before this skill runs, so nothing below has to",
+    "preserve it — the bullet only reports the clock its header quotes.",
+    f"- `{_SLIVE}` was written at `04:12:30Z` (`date -u -r signals-latest.md "
+    "+%FT%TZ`).",
+    f'- The body, when it is wanted: `Read(file_path="{_SLIVE}")`.',
+    "",
+])
+
+
+def test_a_past_participle_is_not_an_instruction():
+    """The tense rule, pinned by the sentence that broke it (#4177).
+
+    `PROSE_WRITE`'s own comment says the alternation is verbs of *instruction* only
+    and that "the tense has to say so"; `written` is the past participle, which is
+    what a report's provenance note uses, not what a step tells a run to do. Every
+    assertion below was red before the token came out of the regex: two forms of the
+    participle, both classifier legs, and the entry point the refusal is built from.
+    """
+    assert not ra.PROSE_WRITE.search("was written at 04:12:30Z"), (
+        "`written` is back in PROSE_WRITE. A past participle reports that a write "
+        "happened; it prescribes nothing, and it was the whole of #4177."
+    )
+    assert not ra.PROSE_WRITE.search("the copy is being written by a job"), (
+        "the progressive form is narrative too — that is the wording "
+        "`_heading_verb` harvested three lines up from the real skill"
+    )
+    assert classify(_NARRATED_PROVENANCE, "signals-latest") == "read", (
+        "a skill that reads a report and annotates when the producer wrote it was "
+        "classified as a bound writer of it"
+    )
+    assert ra.skill_rule_violations("s", _NARRATED_PROVENANCE) == [], (
+        "the vault writer would refuse a land on a skill that overwrites nothing"
+    )
+    # The walk-back leg alone: with the `Read` bullet removed, the annotation is the
+    # only mention, so its tier can only come from the sentence above it. `read` is
+    # not on offer there — after the fix that leg yields `unclassified`, which is a
+    # failure of this rule rather than a verdict about the skill, so what is asserted
+    # is that it is not a *bound* tier and therefore owes no `cp`.
+    annotation_only = "\n".join(_NARRATED_PROVENANCE.splitlines()[:5])
+    assert classify(annotation_only, "signals-latest") not in ra.BOUND_TIERS, (
+        f"`_heading_verb` still recruits a past-tense paragraph three lines up: "
+        f"{classify(annotation_only, 'signals-latest')}"
+    )
+    assert ra.skill_rule_violations("s", annotation_only) == [], (
+        "the walk-back leg alone still produced a refusal"
+    )
+
+
+def test_the_instruction_forms_still_bind_after_the_tense_fix():
+    """The guard keeps its teeth: dropping the participle must not drop the tier.
+
+    #4177's acceptance is that a read-only skill stops being bound *and* a real
+    prose overwrite is still caught. Each verb of the alternation is asked on its
+    own, so the fix cannot be an accidental narrowing of the instruction set, and the
+    merge into `signals-latest` is checked end to end: tier, the named problem, and
+    the writer's refusal.
+    """
+    merge = (
+        "1. **Consolidate the analysis:** Merge all analysis into "
+        "`~/lloyd-data/_pipeline/reflection/signals-latest.md`\n"
+    )
+    assert classify(merge, "signals-latest") == "prose-write", (
+        "a prose merge into the live report stopped binding — the tier that "
+        "`historical-knowledge-refresh` is bound by is gone"
+    )
+    problems = archive_problems(merge, "signals-latest")
+    assert any("no dated-copy archive step" in p for p in problems), (
+        f"a prose overwrite with no dated `cp` was passed: {problems}"
+    )
+    assert ra.skill_rule_violations("s", merge), (
+        "the vault writer would land a skill that destroys a report in prose"
+    )
+    for verb in ("merge", "consolidate", "regenerate", "write"):
+        body = f"1. {verb.capitalize()} everything into `{_SLIVE}`\n"
+        assert classify(body, "signals-latest") == "prose-write", (
+            f"`{verb}` no longer binds the prose tier: the alternation lost an "
+            "instruction verb, not just the participle"
+        )
+        assert ra.skill_rule_violations("s", body), verb
+
+
+@pytest.mark.live_vault
+def test_the_read_only_knowledge_analysis_skill_is_not_a_bound_writer(skills):
+    """The same verdict, measured on the live skill rather than on a transcription.
+
+    `nightly-reflection-knowledge-analysis` names `signals-latest.md` in prose that
+    recounts a timestamp and in a `Read`; its own write target is
+    `knowledge-handoff-<date>.md`, a dated artifact this rule does not police. So its
+    strongest tier is `read`. Asserted beside the skill that *is* a prose writer,
+    which is the half that would let this node pass by switching the rule off:
+    `historical-knowledge-refresh` merges into the same report and stays bound, and
+    `_pipeline/` is gitignored, so its archive step is what preserves the report
+    (#436).
+    """
+    name = "nightly-reflection-knowledge-analysis"
+    tier = classify(skills[name], "signals-latest")
+    assert tier not in ra.BOUND_TIERS, (
+        f"{name} is bound as a {tier}r of signals-latest.md, so it owes a dated "
+        "copy of a report it only reads — and `skill_rule_violations` refuses every "
+        "vault round that edits its skill (#4177)"
+    )
+    assert tier == "read", f"{name} classifies as {tier!r}, not 'read'"
+    assert ra.skill_rule_violations(name, skills[name]) == [], (
+        "the writer's entry point still refuses that skill"
+    )
+    assert classify(skills["historical-knowledge-refresh"], "signals-latest") == (
+        "prose-write"
+    ), (
+        "the guard was loosened rather than corrected: the real prose merge into "
+        "signals-latest.md no longer binds, which is #436's defect reopened"
+    )
+
+
 def test_the_bound_tiers_are_the_two_that_can_lose_a_report():
     """The quantifier of clause 2, pinned by value.
 

@@ -4789,6 +4789,139 @@ name: foo
 
 
 # --------------------------------------------------------------------------- #
+# #4177: the retention guard must refuse the overwrite, not the sentence about one.
+#
+# `reflection_archive.PROSE_WRITE` carried the past participle `written`, so the
+# read-only `nightly-reflection-knowledge-analysis` — whose prose reports that
+# `signals-latest.md` "was written at 04:12:30Z" and whose only access to that file
+# is a `Read` — classified as a bound prose writer. The consequence landed here:
+# `reflection_archive_errors` runs on every `skills/**/SKILL.md` a round touches, so
+# `automod_vault_land` refused ANY round editing that skill, including the nightly
+# knowledge-write route that owns its prose. The two nodes below are the pair: the
+# guard still refuses the round that deletes an archive `cp`, and it no longer
+# refuses one that merely edits a skill narrating somebody else's write. The live
+# half of the second claim is the `live_vault` node after them, because the skill
+# text is state no round controls.
+# --------------------------------------------------------------------------- #
+
+#: A prose writer of a live reflection report in the shape the guard accepts: read,
+#: dated `cp` named with a UTC stamp, then the merge. Shaped like
+#: `historical-knowledge-refresh`, the one live skill bound at this tier (#436).
+_REFLECTION_SKILL_WITH_COPY = """---
+name: foo
+---
+# foo
+
+1. Read the live report: `Read(file_path="/home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest.md")`.
+   STAMP=$(date -u +%Y-%m-%d-%H%M) && cp /home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest.md /home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest-$STAMP.md
+   Archive copied before this write: `signals-latest-$STAMP.md`.
+2. **Consolidate the analysis:** Merge all analysis into `~/lloyd-data/_pipeline/reflection/signals-latest.md`.
+"""
+
+#: Same skill, the `cp` line removed — the edit that "tidies" a reflection skill and
+#: takes away the only thing preserving a report under gitignored `_pipeline/`.
+_REFLECTION_SKILL_WITHOUT_COPY = _REFLECTION_SKILL_WITH_COPY.replace(
+    "   STAMP=$(date -u +%Y-%m-%d-%H%M) && cp /home/alansrobotlab/lloyd-data/"
+    "_pipeline/reflection/signals-latest.md /home/alansrobotlab/lloyd-data/"
+    "_pipeline/reflection/signals-latest-$STAMP.md\n",
+    "",
+)
+
+#: A skill that reads the report and annotates when the producer wrote it. Compact
+#: form of `_NARRATED_PROVENANCE` in tests/test_skill_reflection_archive.py, which
+#: is where the two classifier legs are pinned; this node asks only what the lander
+#: makes of the same text.
+_REFLECTION_SKILL_NARRATED = """---
+name: foo
+---
+# foo
+
+Producer #38 owns that file: its dated copy is written there by the signals job
+hours before this step runs, so nothing here preserves it.
+- `/home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest.md` was
+  written at `04:12:30Z` (`date -u -r signals-latest.md +%FT%TZ`).
+- When the body is wanted: `Read(file_path="/home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest.md")`.
+"""
+
+
+def _skill(vault, body):
+    (vault / "skills" / "foo" / "SKILL.md").write_text(body, encoding="utf-8")
+    return "skills/foo/SKILL.md"
+
+
+def test_deleting_a_dated_copy_step_from_a_reflection_skill_is_refused(vault):
+    """Clause 5: the refusal this guard exists for, on the route that lands.
+
+    Both halves are needed. An edit that leaves a governed skill overwriting
+    `signals-latest.md` with no dated copy comes back refused and is reverted; the
+    same skill with its `cp` intact is landable, which is what keeps the first
+    assertion from being satisfied by a validator that refuses everything.
+    """
+    from scripts import reflection_archive
+
+    assert _REFLECTION_SKILL_WITHOUT_COPY != _REFLECTION_SKILL_WITH_COPY, (
+        "the mutation stopped matching the fixture — the round would land"
+    )
+    path = _skill(vault, _REFLECTION_SKILL_WITH_COPY)
+    assert V.validate([path])[0] == [], (
+        f"a compliant reflection writer must be landable: {V.validate([path])[0]}"
+    )
+    path = _skill(vault, _REFLECTION_SKILL_WITHOUT_COPY)
+    assert reflection_archive.skill_rule_violations("foo", (
+        _REFLECTION_SKILL_WITHOUT_COPY)) != [], (
+        "the helper stopped seeing a deleted archive step, so nothing below can "
+        "refuse the round that deletes one")
+    errs = V.reflection_archive_errors([path])
+    assert len(errs) == 1, (
+        f"the round that deleted the archive `cp` was not refused: {errs}")
+    assert "signals-latest" in errs[0] and "dated-copy archive step" in errs[0], errs[0]
+    assert V.validate([path])[0] == errs, (
+        "validate() no longer routes the retention rule into the refusal")
+
+
+def test_editing_a_skill_that_only_narrates_a_write_is_not_refused(vault):
+    """Clause 4's mechanism, gate-run: a reader is not refused for a reader's prose.
+
+    The same route, the same validator, the opposite body — prose that states a
+    write happened elsewhere. This node was red before `written` came out of
+    `PROSE_WRITE`: the lander computed a missing archive step for a report the skill
+    never overwrites, which is the block #4177 was filed against.
+    """
+    path = _skill(vault, _REFLECTION_SKILL_NARRATED)
+    assert V.validate([path])[0] == [], (
+        "a skill that only reads a reflection report was refused for having no "
+        f"dated copy of it: {V.validate([path])[0]}"
+    )
+
+
+@pytest.mark.live_vault
+def test_the_knowledge_analysis_skill_can_be_edited_by_a_vault_round():
+    """Clause 4 on the real tree: the guard must stop blocking that one file.
+
+    `reflection_archive_errors` reads `V.VAULT` — the same path `automod_vault_land`
+    reads — so this is the refusal as the next round will meet it, not a paraphrase.
+    Asserted against the live body rather than a fixture because the block was a
+    property of that prose: while `written` stood in the regex, no round could land
+    an edit to it, including the two nightly knowledge-write lands that most recently
+    touched it (vault `7925d9f2f` 2026-11-15, `4c7e8473b` 2026-11-14).
+    """
+    from scripts import reflection_archive
+
+    rel = "skills/nightly-reflection-knowledge-analysis/SKILL.md"
+    live = V.VAULT / rel
+    assert live.exists(), (
+        f"{live} is the file #4177 is about; a run that could not read it proves "
+        "nothing, so this is a failure and not a skip")
+    body = live.read_text(encoding="utf-8")
+    assert reflection_archive.skill_rule_violations(
+        "nightly-reflection-knowledge-analysis", body) == [], (
+        "the writer's entry point still refuses that skill")
+    assert V.reflection_archive_errors([rel]) == [], (
+        "automod_vault_land still refuses any round that edits "
+        f"{rel}: {V.reflection_archive_errors([rel])}")
+
+
+# --------------------------------------------------------------------------- #
 # #2283: the agreement probe may not refuse a land on a node it cannot explain.
 #
 # Four real `vault_land` rows on 2026-10-06 — the last at ts 1791278737 — refused

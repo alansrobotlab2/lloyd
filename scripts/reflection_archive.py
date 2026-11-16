@@ -96,9 +96,20 @@ READ = re.compile(
 #: writer. The example outlives the skill; the tense has to say so, and
 #: `tests/test_skill_reflection_archive.py`
 #: holds every sentence here that names a retired skill to that rule.
+#:
+#: The past participle `written` sat in this alternation until #4177, and it was
+#: the same category of error as a noun: "`~/lloyd-data/_pipeline/reflection/
+#: signals-latest.md` was written at `04:12:30Z`" reports the clock a header
+#: quotes, it prescribes nothing. It is reached by two legs — as the annotation on
+#: a mention line, and from three lines up through `_heading_verb`'s walk-back,
+#: which is how one narrative sentence about the *producer's* write recruited the
+#: read-only `nightly-reflection-knowledge-analysis` as a bound writer of a report
+#: it only reads, and made `skill_rule_violations` refuse every vault round that
+#: edited that skill. `test_a_past_participle_is_not_an_instruction` pins both
+#: legs, and the instruction forms that must still bind.
 PROSE_WRITE = re.compile(
     r"\b(?:merge|merges|consolidate|consolidates|regenerate|regenerates"
-    r"|write|writes|written)\b",
+    r"|write|writes)\b",
     re.IGNORECASE,
 )
 
