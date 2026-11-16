@@ -877,6 +877,14 @@ def test_a_dead_engine_leaves_no_ranking_and_says_so():
 
 def _recorded_rows(tmp_path, *, arm_b_citations=(("real.py", 1), ("real.py", 2)),
                    chosen_b="pre-existing at base 1: pre-existing"):
+    """Two cases, every arm landed: A and A-retry wrong, B right on case 0.
+
+    The A-retry rows arrived with #4166: the graded set is now the declared cases whose
+    retry verdict LANDED, so a fixture whose rows hold only A and B declares a pass with no
+    retry arm at all, and the honest report of that is `cannot evaluate` — not the
+    evaluation these nodes read. Its spend mirrors arm A's because it is the same arm run
+    again under the same ceiling, which is the whole reason it is the compute-matched one.
+    """
     (tmp_path / "real.py").write_text("a\nb\nc\n", encoding="utf-8")
     cases = _cases(2)
     rows = []
@@ -886,6 +894,11 @@ def _recorded_rows(tmp_path, *, arm_b_citations=(("real.py", 1), ("real.py", 2))
                      "tokens": 5000})
         rows.append({"seq": 2, "run_id": "r", "case_key": case["key"], "arm": ARM_A,
                      "kind": "tool", "claims": [], "tokens": 5000})
+        rows.append({"seq": 5, "run_id": "r", "case_key": case["key"], "arm": ARM_RETRY,
+                     "kind": "verdict", "chosen_cause": "the diff caused it",
+                     "tokens": 5500})
+        rows.append({"seq": 6, "run_id": "r", "case_key": case["key"], "arm": ARM_RETRY,
+                     "kind": "tool", "claims": [], "tokens": 5500})
         chosen = chosen_b if i == 0 else "the diff caused it"
         rows.append({"seq": 3, "run_id": "r", "case_key": case["key"], "arm": ARM_B,
                      "kind": "verdict", "chosen_cause": chosen, "tokens": 9000})
@@ -2365,15 +2378,22 @@ def test_report_grading_the_real_sequence_end_to_end_needs_no_engine(tmp_path):
     assert "HEADLINE: cannot evaluate" not in out, out
     assert "HEADLINE: arm B" in out, out
 
-    # And the same file with the whole corpus graded refuses the 21-case baseline: the
-    # subset selector is what makes the sequence legal, not a looser check.
+    # And the same files with NO `--only` at all: the corpus is 98 cases, the retry arm
+    # landed 21 of them, and #4166 says that is the graded set — 21 — rather than a
+    # `baseline N 21 != graded N 98` refusal that had to be hand-narrowed away. The artifact
+    # states both figures so the shrink cannot be read as a whole-corpus claim; what still
+    # refuses (clause 5) is a baseline from another corpus, model or ceiling, and a pass with
+    # no landed retry row at all.
     proc2 = subprocess.run(
         [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"), "report",
          "--cases", str(cases_path), "--rows", str(rows_path),
          "--baseline", str(baseline_path)],
         capture_output=True, text=True, timeout=300, cwd=str(REPO))
-    assert proc2.returncode == 3, proc2.stdout + proc2.stderr
-    assert "baseline N 21 != graded N 98" in proc2.stdout, proc2.stdout
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    assert "graded 98 declared / 21 landed A-retry" in proc2.stdout, proc2.stdout
+    assert "cases: 98" in proc2.stdout, proc2.stdout
+    assert "HEADLINE: cannot evaluate" not in proc2.stdout, proc2.stdout
+    assert "/98" not in proc2.stdout, proc2.stdout
 
 
 
@@ -3652,3 +3672,247 @@ def test_rows_recorded_before_the_clock_print_as_untimed(tmp_path):
     assert "total A+B: 0.000" in text, text
     assert "over 0 timed verdict(s)" in text, text
     assert replay.score(rows, cases)["arms"][ARM_B]["elapsed_n"] == 0, text
+
+
+# ── #4166: report and baseline agree on the graded-set denominator ───────────
+#
+# The owed study's sequence is `run --arms A,A-retry,B`, then `baseline`, then `report`. When
+# the retry arm stops recording part-way — which is what a pass over 21 keys looks like when
+# the engine drops ten of them — the two halves of the instrument disagreed about what `N`
+# was. `report` graded the 21 keys it was asked for (`n=len(cases)`) while `cmd_baseline`
+# recorded the 11 the retry arm actually wrote (`n=len(verdicts)`), and `baseline_problem`
+# turned any difference into `HEADLINE: cannot evaluate` and exit 3 — so a fully successful
+# pass over a shrunk set had no headline at all, and the only way to one was hand-narrowing
+# `report --only` to exactly the landed keys (`~/lloyd-data/eval/2258/launch-pass.sh:21-26`
+# documents that ritual and measures its EXIT=3). The margin was the other half of the same
+# bug: arm B's hits were counted over the declared cases while the retry arm's came from the
+# landed ones, so ten cases only B answered were ten cases of phantom margin. And a retry row
+# whose `case_key` was in no case file inflated the recorded N past anything report could
+# grade, because the `key in by_key` guard covered `hits` and never `n`.
+#
+# These nodes drive the real subcommands as subprocesses over `_study_corpus`'s 98/21 shape:
+# 21 keys declared, 11 of them with a landed A-retry verdict — the real corpus's own ratio
+# (`2258/graded-keys.txt` names 21, `2258/rows.jsonl` holds 11 distinct A-retry verdict keys).
+
+#: Declared keys of `_study_corpus` whose A-retry verdict row this block records.
+SHRUNK_LANDED = 11
+
+
+def _shrunken_rows(cases, declared, landed, *, ceiling: int = DEFAULT_TOKEN_CEILING):
+    """Rows for `declared` keys in which only `landed` recorded an A-retry verdict.
+
+    Arm A names the diff on every case (0 top-1 hits), arm B names the true mechanism on
+    every DECLARED case — including the ones the retry arm never answered, which is exactly
+    the hit count a denominator gap turns into a win — and A-retry names the truth on the
+    landed keys only. Every arm carries one resolvable citation per case, so the citation
+    line's denominator is the graded count rather than `0/0`, and every verdict row is
+    stamped `ceiling` because that is what `run` writes since #3866.
+    """
+    by_key = {c["key"]: c for c in cases}
+    landed_set = set(landed)
+    rows, seq = [], 0
+    for key in declared:
+        case = by_key[key]
+        arms = [(ARM_A, "the diff caused it"), (ARM_B, case["actual_cause"])]
+        if key in landed_set:
+            arms.append((ARM_RETRY, case["actual_cause"]))
+        for arm, chosen in arms:
+            seq += 1
+            rows.append({"seq": seq, "run_id": "r4166", "case_key": key, "arm": arm,
+                         "kind": "tool", "slot": None, "tokens": 30_000,
+                         "claims": [{"claim": case["actual_cause"],
+                                     "citations": [{"path": "eval/diagnosis_fanout_replay.py",
+                                                    "line": 1}]}]})
+            seq += 1
+            rows.append({"seq": seq, "run_id": "r4166", "case_key": key, "arm": arm,
+                         "kind": "verdict", "chosen_cause": chosen,
+                         "token_ceiling": ceiling, "tokens": 30_000})
+    return rows
+
+
+def _shrunken_study(tmp_path, *, landed: int = SHRUNK_LANDED, strays: int = 0,
+                    ceiling: int = DEFAULT_TOKEN_CEILING):
+    """The 21-declared / 11-landed pass on disk, written by the same helpers #2466 uses.
+
+    `strays` appends that many A-retry verdict rows whose `case_key` is in no case file — the
+    shape a renamed or hand-cut corpus leaves behind (#4166 clause 4). `landed=0` is a pass
+    that recorded no retry arm at all. Returns
+    `(cases_path, rows_path, baseline_path, declared, landed_keys)`.
+    """
+    cases = _study_corpus()
+    declared = _non_leaky_keys(cases)
+    landed_keys = declared[:landed]
+    rows = _shrunken_rows(cases, declared, landed_keys, ceiling=ceiling)
+    for i in range(strays):
+        rows.append({"seq": 90_000 + i, "run_id": "r4166", "case_key": f"ghost-{i}",
+                     "arm": ARM_RETRY, "kind": "verdict",
+                     "chosen_cause": "parallel-load-flake at base: parallel-load-flake",
+                     "token_ceiling": ceiling, "tokens": 30_000})
+    return (_jsonl(tmp_path / "cases.jsonl", cases),
+            _jsonl(tmp_path / "rows.jsonl", rows),
+            tmp_path / "retry_baseline.json", declared, landed_keys)
+
+
+def _run_report(cases: Path, rows: Path, baseline: Path,
+                *extra: str) -> subprocess.CompletedProcess:
+    """`report` as the owed study runs it: argv in, exit code and stdout out.
+
+    Citations resolve against this checkout because the fixture rows cite a file in it; the
+    flag is passed explicitly rather than left to the default so the node says which tree the
+    citation rate is graded against.
+    """
+    return subprocess.run(
+        [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"), "report",
+         "--cases", str(cases), "--rows", str(rows), "--baseline", str(baseline),
+         "--root", str(REPO), *extra],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO))
+
+
+def test_report_prints_both_denominators_when_the_retry_arm_landed_fewer_keys(tmp_path):
+    """Clause 1: `graded 21 declared / 11 landed A-retry`, on the refused branch too.
+
+    The figure that decides whether a headline exists has to be readable in the artifact that
+    refuses to print one: before #4166 a shrunk pass printed `cases: 21` and a bare refusal,
+    and the number that was actually missing lived only in the baseline file.
+    """
+    cases_path, rows_path, baseline_path, declared, landed = _shrunken_study(tmp_path)
+    assert len(declared) == 21 and len(landed) == 11, (declared, landed)
+    made = _run_baseline(rows_path, cases_path, baseline_path)
+    assert made.returncode == 0, made.stdout
+
+    proc = _run_report(cases_path, rows_path, baseline_path, "--only", *declared)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "graded 21 declared / 11 landed A-retry" in proc.stdout, proc.stdout
+
+    refused = _run_report(cases_path, rows_path, tmp_path / "no-baseline.json",
+                          "--only", *declared)
+    assert refused.returncode == 3, refused.stdout
+    assert "HEADLINE: cannot evaluate" in refused.stdout, refused.stdout
+    assert "graded 21 declared / 11 landed A-retry" in refused.stdout, refused.stdout
+
+
+def test_every_graded_denominator_is_the_landed_count_when_an_arm_row_is_missing(tmp_path):
+    """Clause 2: A, A-retry and B are scored over the same declared∩landed set.
+
+    Every `x/y` in the artifact reads /11, so no line of the report is a count from a set
+    another line is not counting over — and the pass that lost ten A-retry rows still gets a
+    HEADLINE and an exit 0 instead of a refusal that needed hand-narrowing to clear.
+    """
+    cases_path, rows_path, baseline_path, declared, _ = _shrunken_study(tmp_path)
+    assert _run_baseline(rows_path, cases_path, baseline_path).returncode == 0
+
+    proc = _run_report(cases_path, rows_path, baseline_path, "--only", *declared)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    assert "graded 21 declared / 11 landed A-retry" in out, out
+    assert re.search(r"top-1 agreement\s+A: 0/11\s+B: 11/11", out), out
+    assert f"top-1 agreement {ARM_RETRY}: 11/11" in out, out
+    assert re.search(r"citations verified\s+A: 11/11\s+B: 11/11", out), out
+    assert "/21" not in out, f"a denominator still counts the declared 21: {out}"
+    assert "HEADLINE: cannot evaluate" not in out, out
+    assert re.search(r"HEADLINE: arm B (does not win|wins)", out), out
+    assert "excluded from the graded set: 77 of 98 corpus cases" in out, out
+
+
+def test_a_shrunk_graded_set_cannot_turn_unanswered_cases_into_an_arm_b_win(tmp_path):
+    """Clause 3: B and the retry arm agree case-for-case over the landed keys → no win.
+
+    Arm B named the true mechanism on all 21 declared cases and A-retry on the 11 that landed,
+    so over the one graded set the margin is `11 - 11 = 0` and the headline says `does not
+    win`. The phantom is the ten cases only B answered: scored over the declared set — which
+    is what the old report did — B's hit count is 21 against the baseline's 11, and 21 - 11
+    clears the bar of 2. Handing the old code a matching N was precisely the hand-narrowing
+    `launch-pass.sh` documents; the point here is that no such arithmetic is reachable now.
+    """
+    cases_path, rows_path, baseline_path, declared, landed = _shrunken_study(tmp_path)
+    assert _run_baseline(rows_path, cases_path, baseline_path).returncode == 0
+    rows = [json.loads(ln) for ln in rows_path.read_text().splitlines()]
+    assert replay.score(rows, load_cases(cases_path))["arms"][ARM_B]["top1_hits"] == 21, (
+        "the fixture no longer holds the phantom this node is about: arm B must hit all 21 "
+        "declared cases, 10 of which the retry arm never answered")
+
+    proc = _run_report(cases_path, rows_path, baseline_path, "--only", *declared)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "arm B wins" not in proc.stdout, proc.stdout
+    assert "HEADLINE: arm B does not win" in proc.stdout, proc.stdout
+    assert "margin over the better single-trace arm: 0 case(s)" in proc.stdout, proc.stdout
+
+
+def test_a_retry_row_for_a_key_outside_the_corpus_cannot_inflate_the_recorded_n(tmp_path):
+    """Clause 4: `baseline`'s n counts keys the corpus has, so M can never exceed N.
+
+    Three A-retry verdict rows for `ghost-*` — no such case — used to raise the recorded N to
+    14 over a 21-key declared set, which no report could ever match from the other direction.
+    The second half is the point of the whole item: with both sides counting the same
+    intersection, `report` over the same files needs no `--only` ritual to evaluate.
+    """
+    cases_path, rows_path, baseline_path, declared, _ = _shrunken_study(tmp_path, strays=3)
+    proc = _run_baseline(rows_path, cases_path, baseline_path)
+    assert proc.returncode == 0, proc.stdout
+    record = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert record["n"] == 11, f"ghost retry rows inflated the recorded N: {record}"
+    assert record["n"] <= len(declared), record
+    assert record["top1_hits"] == 11, record
+
+    rep = _run_report(cases_path, rows_path, baseline_path)
+    assert rep.returncode == 0, rep.stdout + rep.stderr
+    assert "graded 98 declared / 11 landed A-retry" in rep.stdout, rep.stdout
+    assert "HEADLINE: cannot evaluate" not in rep.stdout, rep.stdout
+
+
+def test_the_guard_still_refuses_a_missing_retry_arm_and_a_mismatched_baseline(tmp_path):
+    """Clause 5: exit 3 is reserved for M=0 and the fingerprint refusals — and holds on both.
+
+    Four refusals, each with the both-figures line printed. The first pass has landed no
+    retry row at all, and is shown against a baseline that agrees with it on N (n=0) so the
+    refusal can only come from the M=0 rule and not from a fingerprint arm. The other three
+    are the checks #627, #3866 and #4162 built: another corpus's fingerprint, another model,
+    and a baseline stamped above the ceiling the verdict rows carry. A study that never
+    measured its compute-matched baseline still cannot print a headline.
+    """
+    empty_cases, empty_rows, empty_base, declared, _ = _shrunken_study(tmp_path, landed=0)
+    zero_base = tmp_path / "zero.jsonl"
+    write_baseline(zero_base, cases_path=empty_cases, n=0, model="primary",
+                   token_ceiling=DEFAULT_TOKEN_CEILING, token_spend=0, top1_hits=0)
+    for base in (empty_base, zero_base):
+        proc = _run_report(empty_cases, empty_rows, base, "--only", *declared)
+        assert proc.returncode == 3, f"{base}: {proc.stdout}"
+        assert "HEADLINE: cannot evaluate" in proc.stdout, proc.stdout
+        assert "graded 21 declared / 0 landed A-retry" in proc.stdout, proc.stdout
+        assert "no A-retry verdict row landed among the 21 graded case(s)" in proc.stdout, \
+            proc.stdout
+        assert "arm B wins" not in proc.stdout, proc.stdout
+
+    landed_cases, landed_rows, landed_base, _, _ = _shrunken_study(tmp_path)
+    assert _run_baseline(landed_rows, landed_cases, landed_base).returncode == 0
+
+    other_cases = _jsonl(tmp_path / "cases-other.jsonl", _study_corpus()[:21])
+    fingerprint = tmp_path / "other-corpus.json"
+    write_baseline(fingerprint, cases_path=other_cases, n=11, model="primary",
+                   token_ceiling=DEFAULT_TOKEN_CEILING, token_spend=330_000,
+                   top1_hits=11)
+    proc = _run_report(landed_cases, landed_rows, fingerprint, "--only", *_non_leaky_keys(
+        _study_corpus()))
+    assert proc.returncode == 3, proc.stdout
+    assert "corpus fingerprint" in proc.stdout, proc.stdout
+    assert "baseline N" not in proc.stdout, (
+        f"a baseline that matches the graded N was refused on N: {proc.stdout}")
+    assert "graded 21 declared / 11 landed A-retry" in proc.stdout, proc.stdout
+
+    wrong_model = tmp_path / "wrong-model.json"
+    write_baseline(wrong_model, cases_path=landed_cases, n=11, model="other-model",
+                   token_ceiling=DEFAULT_TOKEN_CEILING, token_spend=330_000, top1_hits=11)
+    proc = _run_report(landed_cases, landed_rows, wrong_model, "--only", *_non_leaky_keys(
+        _study_corpus()))
+    assert proc.returncode == 3, proc.stdout
+    assert "baseline model 'other-model' != 'primary'" in proc.stdout, proc.stdout
+
+    cold_cases, cold_rows, cold_base, cold_declared, _ = _shrunken_study(
+        tmp_path, ceiling=200_000)
+    wrong_ceiling = tmp_path / "wrong-ceiling.json"
+    write_baseline(wrong_ceiling, cases_path=cold_cases, n=11, model="primary",
+                   token_ceiling=600_000, token_spend=330_000, top1_hits=11)
+    proc = _run_report(cold_cases, cold_rows, wrong_ceiling, "--only", *cold_declared)
+    assert proc.returncode == 3, proc.stdout
+    assert "baseline ceiling 600000 != 200000" in proc.stdout, proc.stdout
+    assert "HEADLINE: cannot evaluate" in proc.stdout, proc.stdout

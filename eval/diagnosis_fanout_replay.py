@@ -1517,7 +1517,10 @@ def baseline_problem(baseline: dict | None, *, corpus: str, n: int, model: str,
         # "graded", not "corpus", and #2466 is why the word matters: `n` here is the set
         # being reported on, which a `--only` subset makes smaller than the file the
         # baseline's fingerprint was taken from. Calling 2 a corpus count would print an
-        # N that no other line in the artifact agrees with.
+        # N that no other line in the artifact agrees with. Since #4166 the caller passes
+        # the declared cases whose retry row landed, and `cmd_baseline` writes the same
+        # intersection, so this line fires on a baseline from another corpus or another
+        # cut — never on an arm that simply failed to record.
         problems.append(f"baseline N {baseline.get('n')!r} != graded N {n}")
     if baseline.get("model") != model:
         problems.append(f"baseline model {baseline.get('model')!r} != {model!r}")
@@ -1663,10 +1666,17 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
     may produce — a study that has not measured its compute-matched baseline
     cannot say the fan-out won, because it cannot say the arms were matched.
 
-    `cases` is what gets GRADED, which since #2466 need not be the whole corpus: the
+    `cases` is what gets DECLARED, which since #2466 need not be the whole corpus: the
     study runs over the 21 non-leaky cases and leaves the 77 `preexisting` ones out.
     `all_cases` is the corpus those 21 were cut from, and it exists so the artifact can
     say so; pass it nothing and the report states that it graded everything it was given.
+
+    What is GRADED is narrower again, and since #4166 both sides of the comparison agree on
+    it: the declared cases whose `A-retry` verdict row actually landed. The agreement,
+    citation and margin lines are scored over that one set and say so in their denominators;
+    the spend and wall-clock lines are the whole declared pass, because what a run cost is a
+    fact about the run and not about the subset that survived (#3243). `baseline_problem`
+    checks the cached file against the graded N, which is the number `cmd_baseline` writes.
     """
     scored = score(rows, cases, citation_root=citation_root)
     a, b = scored["arms"][ARM_A], scored["arms"][ARM_B]
@@ -1680,8 +1690,29 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
     # between a measured budget and a remembered one. A corpus whose rows carry none says
     # so; a corpus whose rows disagree says which budgets it is holding.
     rc = row_ceilings(rows)
+    # #4166: the graded set is the A-retry keys that LANDED, intersected with the declared
+    # cases — ONE universe for all three arms, and `cmd_baseline` now records its n over
+    # exactly that intersection. Before this, report graded over `len(cases)` while the
+    # retry numbers came from a file counted off landed rows, so a pass that recorded 11 of
+    # the 21 keys it was asked for could only refuse (`baseline N 11 != graded N 21`) or, if
+    # the two hit counts happened to differ by the bar, print `arm B wins` out of the
+    # ten-key denominator gap. Both figures are printed on every branch, `cannot evaluate`
+    # included, so a shrunk denominator is never invisible; whether a headline may be
+    # stated over a shrunk set at all is a ruling for whoever publishes the number.
+    landed_retry = {key for (key, arm) in latest_verdicts(rows) if arm == ARM_RETRY}
+    graded = [c for c in cases if c["key"] in landed_retry]
+    graded_keys = {c["key"] for c in graded}
+    graded_rows = [r for r in rows if str(r.get("case_key")) in graded_keys]
+    # Everything a reader compares — each arm's top-1, B's citation rate, the margin — comes
+    # from this one scoring over the intersection, never from two differently-sized sets.
+    # With M=0 there is no graded set to score at all, so the refused artifact prints the
+    # declared set's own figures and the refusal below names which half is missing.
+    compared = (score(graded_rows, graded, citation_root=citation_root)
+                if graded else scored)
+    ca, cb = compared["arms"][ARM_A], compared["arms"][ARM_B]
     lines = [f"[2258] cases: {len(cases)}  recorded verdicts: "
              f"A={a['n']} B={b['n']}  ceiling: {rc.label}"]
+    lines.append(f"  graded {len(cases)} declared / {len(graded)} landed A-retry")
     if rc.ceiling is not None and rc.ceiling != token_ceiling:
         lines.append(f"  note: the --ceiling argument ({token_ceiling}) is not the "
                      f"ceiling the verdict rows carry ({rc.ceiling}); the line above "
@@ -1694,12 +1725,12 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
     # 77 leaky cases (#2258 excludes them because their input quotes the refuted claim).
     lines.append("  " + excluded_note(all_cases if all_cases is not None else cases,
                                       cases))
-    lines.append(f"  top-1 agreement   A: {a['top1_hits']}/{a['n']}   "
-                 f"B: {b['top1_hits']}/{b['n']}   "
+    lines.append(f"  top-1 agreement   A: {ca['top1_hits']}/{ca['n']}   "
+                 f"B: {cb['top1_hits']}/{cb['n']}   "
                  f"(bar: B ahead by >= {TOP1_MARGIN})")
-    lines.append(f"  citations verified A: {a['citations']['passed']}/"
-                 f"{a['citations']['n']}   B: {b['citations']['passed']}/"
-                 f"{b['citations']['n']}   (bar: B >= {CITATION_BAR:.0%})")
+    lines.append(f"  citations verified A: {ca['citations']['passed']}/"
+                 f"{ca['citations']['n']}   B: {cb['citations']['passed']}/"
+                 f"{cb['citations']['n']}   (bar: B >= {CITATION_BAR:.0%})")
     lines.append(f"  token spend       A: {a['token_spend']}   B: {b['token_spend']}")
     # Wall clock beside the token spend, because the study's cost claim has two axes and
     # the ceiling matches only one of them: equal tokens under a very different latency
@@ -1715,8 +1746,15 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
                  f"{a['elapsed_n']} timed verdict(s)   B: {b['elapsed_mean']:.3f} over "
                  f"{b['elapsed_n']} timed verdict(s)")
 
-    problem = baseline_problem(baseline, corpus=corpus, n=len(cases), model=model,
+    problem = baseline_problem(baseline, corpus=corpus, n=len(graded), model=model,
                               token_ceiling=token_ceiling, row_ceiling=rc)
+    if not graded:
+        # M=0 is a refusal of its own and it arrives before the fingerprint check has
+        # anything to say: with no landed retry key there is no N to match a baseline
+        # against, and a cached file that disagrees on something else too must not read as
+        # the whole cause of a report that could never evaluate (#4166).
+        problem = (f"no {ARM_RETRY} verdict row landed among the {len(cases)} graded "
+                   f"case(s)" + (f"; {problem}" if problem else ""))
     if problem:
         lines.append(f"  token spend  A-retry: not recorded ({problem})")
         lines.append(f"HEADLINE: cannot evaluate — {problem}")
@@ -1727,15 +1765,19 @@ def format_report(rows: Sequence[dict], cases: Sequence[dict], *,
                  f"(cached baseline, N={retry.get('n')}, model={retry.get('model')}, "
                  f"ceiling={retry.get('token_ceiling')})")
     lines.append(f"  top-1 agreement A-retry: {retry.get('top1_hits')}/{retry.get('n')}")
-    margin = b["top1_hits"] - max(a["top1_hits"], int(retry.get("top1_hits") or 0))
-    rate = b["citations"]["rate"]
-    won = margin >= TOP1_MARGIN and b["citations"]["n"] > 0 and rate >= CITATION_BAR
+    # Three hit counts, all of them over the same M landed keys: arm B's from `compared`,
+    # arm A's from `compared`, the retry arm's from a baseline whose n was just checked
+    # against that same M. Comparing a count over 21 declared cases with a count over 11
+    # landed ones is the artifact this clause exists to make impossible (#4166).
+    margin = cb["top1_hits"] - max(ca["top1_hits"], int(retry.get("top1_hits") or 0))
+    rate = cb["citations"]["rate"]
+    won = margin >= TOP1_MARGIN and cb["citations"]["n"] > 0 and rate >= CITATION_BAR
     lines.append(f"  margin over the better single-trace arm: {margin} case(s); "
                  f"B citation rate {rate:.1%}")
     lines.append(f"HEADLINE: {'arm B wins' if won else 'arm B does not win'} "
                  f"(margin {margin} >= {TOP1_MARGIN}: {margin >= TOP1_MARGIN}; "
                  f"citations {rate:.1%} >= {CITATION_BAR:.0%}: "
-                 f"{b['citations']['n'] > 0 and rate >= CITATION_BAR})")
+                 f"{cb['citations']['n'] > 0 and rate >= CITATION_BAR})")
     return lines, True
 
 
@@ -1955,6 +1997,11 @@ def cmd_baseline(args) -> int:
     file names the corpus, the N, the model and the ceiling it was measured
     under, and `report` refuses it when any of those no longer hold.
 
+    The N recorded here is the cases in `--cases` whose retry verdict row landed — the same
+    set `report` grades over (#4166), so the two agree by construction on a pass that simply
+    lost an arm part-way, and a disagreement is once again the fingerprint mismatch this
+    check was built for.
+
     The ceiling in that file is read off the rows and never taken from `--ceiling` (#4162).
     #3866 moved the printed ceiling onto the verdict rows because a budget is a fact of a run
     and not a fact of a reader, but this writer kept echoing its own argument — and the
@@ -1992,10 +2039,17 @@ def cmd_baseline(args) -> int:
         print(f"[2258] note: --ceiling {args.ceiling} is not what these retry rows carry "
               f"({row_ceiling.ceiling}); the file records {row_ceiling.ceiling}, the figure "
               "the rows measured")
-    verdicts = {k: v for k, v in latest_verdicts(rows).items() if k[1] == ARM_RETRY}
     by_key = {c["key"]: c for c in cases}
+    # The intersection, not the landed set: `report` grades the declared cases whose retry
+    # row landed (#4166), so a retry row whose `case_key` is in no case file used to raise
+    # the recorded N above anything report could ever grade — an A-retry row left behind by
+    # a renamed or hand-cut corpus made a fully successful pass refuse itself from the other
+    # direction. The `key in by_key` guard already protected `hits`; `n` was never over the
+    # same universe as the hits beside it, which is the number this file exists to certify.
+    verdicts = {k: v for k, v in latest_verdicts(rows).items()
+                if k[1] == ARM_RETRY and k[0] in by_key}
     hits = sum(1 for (key, _), row in verdicts.items()
-               if key in by_key and agrees(by_key[key], row.get("chosen_cause") or ""))
+               if agrees(by_key[key], row.get("chosen_cause") or ""))
     record = write_baseline(Path(args.out), cases_path=cases_path, n=len(verdicts),
                             model=args.model, token_ceiling=row_ceiling.ceiling,
                             token_spend=sum(int(r.get("tokens") or 0)
