@@ -550,3 +550,115 @@ def test_building_a_fixture_sweeps_its_own_fixtures_area_first(tmp_path):
     # `cleanup()` and the sweep share one rails function, so the copy the build made is gone
     # and the planted fresh copy is still there for the next build to sweep.
     assert fresh.is_dir() and not fx.root.exists()
+
+
+# ── #4163 clause 5: the byte estimate a disk precondition is graded against ───────
+def _measured_live(tmp_path: Path) -> tuple[Path, Path]:
+    """A source tree whose every file has a size this file states.
+
+    Sizes are distinct so a wrong sum cannot accidentally equal the right one: 100, 50, 30,
+    20, 700 and 9999 each move the total on their own.
+    """
+    vault = tmp_path / "obsidian"
+    (vault / "lloyd").mkdir(parents=True)
+    (vault / "memory").mkdir()
+    (vault / "backlog" / "nested").mkdir(parents=True)
+    (vault / "lloyd" / "MEMORY.md").write_bytes(b"x" * 100)
+    (vault / "memory" / "2026-09-11.md").write_bytes(b"y" * 50)
+    (vault / "backlog" / "4163-a.md").write_bytes(b"z" * 30)
+    (vault / "backlog" / "nested" / "4163-b.md").write_bytes(b"w" * 20)
+    # Never copied: `copytree` runs with `ignore=_vault_ignore`, which prunes these names at
+    # every depth. If the estimate counted them the figure would be 39997 too high, and an
+    # over-count is the failure a round never notices because it only ever skips a boot.
+    (vault / ".git").mkdir()
+    (vault / ".git" / "config").write_bytes(b"g" * 9999)
+    (vault / ".obsidian").mkdir()
+    (vault / ".obsidian" / "workspace.json").write_bytes(b"o" * 9999)
+    (vault / ".DS_Store").write_bytes(b"d" * 9999)
+    data = tmp_path / "lloyd-data"
+    # The KG store is seeded where `DATA_STORE_SCOPES["kg"]` points — `KG_DB_RELATIVE`,
+    # which is `_pipeline/vault-derived/kg.sqlite` — and the shorter `<data_root>/kg.sqlite`
+    # gets its own size as bait, because the loop and the estimate both read the constant and
+    # a hand-written `"kg.sqlite"` measures a file nothing ever copies.
+    from app.data_root import KG_DB_RELATIVE
+    (data / KG_DB_RELATIVE).parent.mkdir(parents=True, exist_ok=True)
+    (data / KG_DB_RELATIVE).write_bytes(b"s" * 700)
+    data.joinpath("kg.sqlite").write_bytes(b"k" * 400)
+    # The board moved into the vault; `<data_root>/backlog` has not existed on this box
+    # since, and the copy loop never reads it. A file here is bait: if the estimate is
+    # computed off the data root again, the `backlog` figure comes back 9999 too high.
+    (data / "backlog").mkdir()
+    (data / "backlog" / "4163-should-not-count.md").write_bytes(b"b" * 9999)
+    return vault, data
+
+
+def test_the_estimate_counts_the_sources_the_copy_loop_walks_and_nothing_else(tmp_path):
+    """Each figure is that scope's copy, resolved by the loop's own rules.
+
+    Every number here is a wrong answer the first cut of this function gave: `backlog` off
+    `<data_root>/backlog` measured **0** on this box (the board lives in the vault), and
+    bare `vault` measured `memory/` plus one file when the loop `copytree`s the WHOLE source
+    vault. An estimate that under-counts is a precondition that lets the copy start on a
+    nearly-full disk, which is the one thing this function exists to prevent.
+    """
+    vault, data = _measured_live(tmp_path)
+    estimate = bench_fixture.estimate_fixture_bytes
+    assert estimate(vault=vault, data_root=data, scopes=["vault"]) == 200, (
+        "100 (lloyd/MEMORY.md) + 50 (memory/) + 30 + 20 (backlog/, walked recursively), "
+        "and none of the three ignored entries")
+    assert estimate(vault=vault, data_root=data, scopes=["backlog"]) == 50, (
+        "30 + 20, counted off <vault>/backlog — the path the loop actually joins the scope "
+        "name onto. The 9999-byte decoy under <data_root>/backlog is not a copy source")
+    assert estimate(vault=vault, data_root=data, scopes=["memory"]) == 50
+    assert estimate(vault=vault, data_root=data, scopes=["kg"]) == 700, (
+        "`kg` is a DATA scope: the one file `copy2` copies, resolved through "
+        "DATA_STORE_SCOPES['kg'] = KG_DB_RELATIVE = _pipeline/vault-derived/kg.sqlite. The "
+        "400-byte <data_root>/kg.sqlite beside it is not the store and must not move this "
+        "figure, which is what makes the two spellings answer differently")
+    assert estimate(vault=vault, data_root=data, scopes=["vault", "backlog"]) == 200, (
+        "the second copytree lands inside the first (dirs_exist_ok=True), so a card that "
+        "declares both occupies one copy of <vault>/backlog, not two")
+    assert estimate(vault=vault, data_root=data, scopes=["vault", "kg"]) == 900
+    assert estimate(vault=vault, data_root=data, scopes=["kg", "kg"]) == 700
+    assert estimate(vault=vault, data_root=data, scopes=[]) == 0
+    assert estimate(vault=vault, data_root=tmp_path / "no-such-root",
+                    scopes=["kg"]) == 0, (
+        "an absent store measures 0, because the loop touches an empty destination rather "
+        "than copying anything for it — there is no source to measure")
+
+
+def test_the_estimate_does_not_undercount_what_a_real_build_puts_on_disk(tmp_path):
+    """The precondition multiplies this figure by 2, so the direction that matters is one-way.
+
+    Actual copied bytes must be at least the estimate. The fixture directory also holds
+    three things the estimate deliberately excludes — `.metadata`, the `LLOYD_DATA_MARKER`
+    file, and a fresh `git init` in the copied vault, whose own `.git` the copy never reads —
+    so actual runs over it by a bounded byproduct, and the bound below is what keeps that
+    byproduct from being where the space actually goes.
+    """
+    def _bytes(root: Path) -> int:
+        total = 0
+        for dirpath, _dirs, names in os.walk(root):
+            for name in names:
+                try:
+                    total += (Path(dirpath) / name).stat().st_size
+                except OSError:
+                    continue
+        return total
+
+    vault, data = _measured_live(tmp_path)
+    estimate = bench_fixture.estimate_fixture_bytes(vault=vault, data_root=data,
+                                                   scopes=["vault", "backlog"])
+    fixture = build_fixture(trial_id="estimate-4163", writes=["vault", "backlog"],
+                            vault=vault, data_root=data,
+                            fixtures_parent=fixture_parent(data))
+    try:
+        actual = _bytes(fixture.root)
+        assert actual >= estimate, (
+            f"the copy is {actual} bytes and the estimate said {estimate}: an estimate "
+            "under the copy is a disk precondition that starts the copy anyway")
+        assert actual - estimate <= 8_000_000, (
+            f"{actual - estimate} bytes of byproduct (.metadata, the marker, `git init`) "
+            "dwarfs the copied state, so the figure is no longer a measure of the copy")
+    finally:
+        fixture.cleanup()

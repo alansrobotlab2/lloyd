@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -352,6 +353,7 @@ async def _run_trials(
     max_parallel: int,
     *,
     deadline: float | None = None,
+    writes_trial: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Run the (variant × task) matrix, split by harness routing.
 
@@ -396,6 +398,8 @@ async def _run_trials(
             max_parallel=1,
             per_task_timeout=SDK_PER_TASK_TIMEOUT,
             deadline=deadline,
+            # Only when a child exists — see the call site in `run`.
+            **({"writes_trial": writes_trial} if writes_trial is not None else {}),
         )
         arm_seconds["sdk_seconds"] = round(time.monotonic() - arm_started, 1)
     return direct_traces, sdk_traces, arm_seconds
@@ -1168,7 +1172,8 @@ def writes_declared(task: dict) -> list[str]:
 
 
 def unscorable_writes_drops(pre_fit_tasks: list[dict[str, Any]],
-                            dropped_ids: Iterable[str]) -> list[dict[str, Any]]:
+                            dropped_ids: Iterable[str], *,
+                            second_cause: str | None = None) -> list[dict[str, Any]]:
     """The dropped tasks that could not have run this round whatever the window did.
 
     Reads the shrink's own victim list against the task dicts it was cut from, so the
@@ -1178,19 +1183,21 @@ def unscorable_writes_drops(pre_fit_tasks: list[dict[str, Any]],
     greps for an id.
     """
     if fixture_rooted_aggregator():
+        # The box-side signal that `UNSCORABLE_CAUSE` is not true of this box: an
+        # operator-level `LLOYD_BENCH_STATE_URL` names an aggregator whose trials the
+        # runner was pointed at from outside, and a row claiming none exists would be a
+        # false cause in the durable record. It is NOT what a round's own boot does —
+        # #4163 hands a booted child's URL and tool route to the ONE admitted trial as an
+        # argument, never through the environment, precisely so the two cards that were
+        # not admitted keep their rows with the cause the round actually owed them.
         return []
     dropped = {str(t) for t in dropped_ids}
     if not dropped:
         return []
-    if fixture_rooted_aggregator():
-        # The one box-side signal that the second cause is no longer true. `UNSCORABLE_CAUSE`
-        # is a claim about this box, and a round whose environment names a fixture-rooted
-        # aggregator would be publishing a false cause into the durable record — where a
-        # later reader cannot tell it from a measured one. Checked here rather than in the
-        # report writer so the ledger row, the report line and the promotion key all come
-        # from one decision and cannot disagree about which box they were describing.
-        return []
-    rows = [{"task_id": str(t.get("id")), "writes": writes_declared(t)}
+    rows = [{"task_id": str(t.get("id")), "writes": writes_declared(t),
+             # None unless this round booted a child or was refused one. A round that did
+             # neither keeps `UNSCORABLE_CAUSE` verbatim — true of it, and pinned as such.
+             "second_cause": second_cause}
             for t in pre_fit_tasks
             if str(t.get("id")) in dropped and writes_declared(t)]
     return sorted(rows, key=lambda r: r["task_id"])
@@ -1208,18 +1215,385 @@ def unscorable_writes_ledger_row(round_id: str, drop: dict[str, Any],
     finds with a grep. No `duration_seconds` key at all: a null duration on a row with no
     variant is the same fabricated-trial shape one key away.
     """
+    # A round that booted a child for one card, or was refused a boot, passes the
+    # sentence that is true of THIS round (#4163). On a shrink drop it REPLACES the
+    # box-level `UNSCORABLE_CAUSE` after the window clause — "no fixture-rooted
+    # aggregator is booted" is false of a round that booted one for a neighbour, and a
+    # false cause in the durable record is exactly what `cd938624` exists to prevent —
+    # and with no second cause the text is byte-identical to what it wrote before, which
+    # is what the pinned-wording test needs. `not_dropped` is a card the shrink KEPT and
+    # the round still could not run: it must not be described as a drop.
+    second = drop.get("second_cause")
+    if drop.get("not_dropped"):
+        reason = f"unscorable this round: {second}"
+    else:
+        reason = (
+            f"unscorable this round: dropped by the pre-trial matrix shrink "
+            f"({'no budget' if window_seconds is None else f'{window_seconds:.0f} s window'}), "
+            f"and {second or UNSCORABLE_CAUSE}")
     return {
         "round_id": round_id,
         "event": UNSCORABLE_EVENT,
         "variant_id": None,
         "task_id": drop["task_id"],
         "declared_writes": list(drop["writes"]),
-        "reason": (
-            f"unscorable this round: dropped by the pre-trial matrix shrink "
-            f"({'no budget' if window_seconds is None else f'{window_seconds:.0f} s window'}), "
-            f"and {UNSCORABLE_CAUSE}"),
+        "reason": reason,
         "created_at": now_iso(),
     }
+
+
+# ── the writes-scoped trial boot (#4163) ─────────────────────────────────────────
+# Ruled on 2026-11-16 by the #3959 owed-check (`#2 ruling: Adopt step (3)'s bounded
+# branch`): a round boots ONE fixture-rooted child aggregator and admits ONE
+# writes-scoped trial against it. The cost that bound is sized with is what the same
+# ruling measured on this box — `build_fixture` 5.24 s, spawn→`/state` 2.37 s, an
+# admitted `memory_add` 0.07 s, `stop()` 0.16 s — which is a ~148 s trial on the arm
+# whose p90 is 140.5 s, 10.3% of the 1435 s window `R_20261116_031740` shrank to.
+#
+# ONE child, not one per trial, and one admitted card, not three: the trial is a
+# serial 140.5 s+ expense on the arm that carries it, so three writes cards cost
+# ~450 s of a window the shrink already finds 5056 s short, and the second and third
+# would displace scored non-writes coverage for a second copy of the same proof.
+
+#: What a boot costs, rounded UP from the 2026-11-15 measurement (5.24 s + 2.37 s).
+#: Deliberately constants rather than derived from history: a boot is the one dispatch
+#: whose cost is knowable before it happens, and a bound derived from a moving p90 of
+#: ITS OWN cost would let a slow night boot less and a fast night boot more, which is
+#: the same self-referential shrink #1635 removed from the arm priors.
+FIXTURE_BUILD_SECONDS = 6.0
+#: spawn→`/state` answered, measured 2.37 s; rounded up for the same reason.
+CHILD_BOOT_SECONDS = 3.0
+#: Free space a fixture copy may need, as a multiple of the copy's own size. The copy
+#: is a `copytree` of the live roots; 2× covers the copy plus the trial's own writes
+#: into it, and below that the copy itself is what would fail — mid-copy, with a
+#: half-written second copy of the user's memory left under the fixtures area.
+FIXTURE_DISK_FACTOR = 2.0
+
+#: The rotation. An id-ordered rotation rather than "first card in the matrix" because
+#: the matrix order is the shrink's choice and shifts with the window: a card would
+#: then be admitted or not by which neighbour got cut, and #031 would never run at all
+#: on a window that keeps dropping the tail. These are the three cards the ledger holds
+#: `unscorable_writes_trial` rows for (56 split + 75 unscorable, 0 per-trial rows).
+WRITES_ROTATION = ("bench_029_durable_write_vault_note",
+                   "bench_030_durable_write_kg_row",
+                   "bench_031_durable_write_backlog_card")
+
+
+def writes_rotation_index(ledger_path: Path | str) -> int:
+    """How many rounds this ledger already holds — the rotation's position.
+
+    Counted from the ledger's DISTINCT `round_id`s rather than from a round id, a clock or
+    a counter file: the clause says the admitted card advances 029→030→031 across
+    consecutive ROUNDS, and the ledger is the only record of what a round was. A
+    clock-derived index would advance twice on a night with two rounds and not at all on a
+    night with none — rotation over time, not over rounds — and a counter file would be a
+    second source of truth for a number the ledger already answers. A missing file is 0:
+    a box with no ledger has run no rounds, which is the rotation's start, not an error.
+    """
+    path = Path(ledger_path)
+    if not path.exists():
+        return 0
+    seen: set[str] = set()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("round_id"):
+            seen.add(str(row["round_id"]))
+    return len(seen)
+
+
+def pick_writes_card(task_ids: Iterable[Any], *, round_index: int) -> str | None:
+    """The ONE writes card this round may admit, advancing 029→030→031, or None.
+
+    The modulo is over the candidates PRESENT rather than over 3, so a matrix holding two
+    of the three still advances over what it can actually run instead of stalling on an id
+    that is not in it. Returns a card from `WRITES_ROTATION` even when the shrink dropped
+    it: the caller decides whether it can be admitted, and a dropped card is exactly the
+    case whose row has to say why.
+    """
+    have = {str(t) for t in task_ids}
+    present = [c for c in WRITES_ROTATION if c in have]
+    if not present:
+        return None
+    return present[round_index % len(present)]
+
+
+def boot_precondition(*, seconds_left: float, agent_p90: float,
+                      estimate_bytes: int, free_bytes: int) -> str | None:
+    """Why a boot must not be attempted, or None when it may.
+
+    Checked BEFORE any trial is dispatched (clause 4): a boot discovered to be
+    unaffordable halfway through has already spent the copy, and a fixture cut off
+    mid-`copytree` is a partial second copy of the user's memory sitting under the
+    fixtures area, which is what `sweep_orphan_fixtures` exists to reap and what a round
+    must never create in the first place.
+
+    The window bound is `copy + boot + one agent-loop trial at the arm p90` — a child
+    that cannot outlive its own trial is a child that gets stopped mid-write, and the
+    trial then reports a `deadline_cut` nobody asked for. `agent_p90` is the round's own
+    ledger-derived arm prior (`derive_trial_priors`), so the bound tightens with
+    measured cost rather than with a constant. The copy/boot halves stay constants for
+    the opposite reason: they are knowable before the round, and letting them float on a
+    moving p90 of their own cost would let a slow night boot less and a fast night boot
+    more, the self-reference #1635 removed from the priors.
+    """
+    need = FIXTURE_BUILD_SECONDS + CHILD_BOOT_SECONDS + agent_p90
+    if seconds_left < need:
+        return (f"window {seconds_left:.0f} s left is below the {need:.0f} s a writes "
+                f"trial needs ({FIXTURE_BUILD_SECONDS:.0f} s copy + "
+                f"{CHILD_BOOT_SECONDS:.0f} s boot + {agent_p90:.1f} s agent-loop p90)")
+    if free_bytes < estimate_bytes * FIXTURE_DISK_FACTOR:
+        return (f"free disk {free_bytes} bytes below {FIXTURE_DISK_FACTOR:g}x the "
+                f"fixture estimate of {estimate_bytes} bytes")
+    return None
+
+
+#: Where a round builds its writes fixture when this process's own data root IS the
+#: production one. `build_fixture`'s rule (1) demands the destination inside
+#: `<src_data>/eval/fixtures` and rule (2) refuses a destination anywhere inside either
+#: production root (`bench_fixture.py:282-290`), so with `src_data` = the production data
+#: root the two rails have **no intersection** and a boot that passes `data_root=DATA_ROOT`
+#: raises `FixtureRefused` every time it is called — which is why the previous round's boot
+#: never once produced a child, and why its clause 1 came back unmet twice: the test that
+#: would have caught it patched the production roots away, so the rails it checked were not
+#: the rails the box has. The area below is outside both live trees, which is where #3095
+#: puts a throwaway directory — under `~/lloyd-work`, never the data root, where deleting it
+#: reads as data loss. `bench_durable_write_proof.build_trial_fixture`'s own docstring says
+#: the same thing about the hand-run route: "on this box the build needs `LLOYD_DATA` pointed
+#: at a scratch root outside `~/lloyd-data`". A round just cannot ask a human to set it, so
+#: it points the builder there itself.
+WRITES_FIXTURE_AREA = Path.home() / "lloyd-work" / "eval-fixtures"
+
+
+def writes_fixture_source(*, data_root: Path | str | None = None
+                          ) -> tuple[Path, Path]:
+    """Return `(source data root, fixtures parent)` that `build_fixture`'s rails accept.
+
+    The pair, not one path, because rule (1) is a relation: the destination must sit in
+    **the passed source's** fixtures area, so choosing an area chooses its source with it.
+
+    Two cases, and the difference is the whole clause:
+
+    * the round's data root is the production one → build under `WRITES_FIXTURE_AREA`, so
+      the destination is inside neither live tree (rule 2) and still inside that source's
+      own fixtures area (rule 1). The vault the copy is made FROM stays the live vault: the
+      rule refuses a destination inside the house, not a copy taken out of it, and a trial
+      graded against an empty vault would score a blank;
+    * the data root is already a scratch root (`LLOYD_DATA` overridden, as a bench run or a
+      test does) → its own fixtures area, which is what `bench_runner_sdk.build_task_fixture`
+      uses and what keeps two runners' copies in one auditable place.
+
+    Reads `app.paths.DATA_ROOT` per call rather than binding it at import, so a test (or a
+    bench run) that points the data root elsewhere is not asked to patch this module too.
+    """
+    from app.data_root import PRODUCTION_DATA_ROOT, PRODUCTION_VAULT
+    from app.paths import DATA_ROOT as _live
+
+    src = Path(data_root) if data_root is not None else Path(_live)
+    if _inside_one_of(src, (PRODUCTION_DATA_ROOT, PRODUCTION_VAULT)):
+        area = Path(WRITES_FIXTURE_AREA)
+        return area, area / "eval" / "fixtures"
+    from .bench_fixture import fixture_parent
+    return src, fixture_parent(src)
+
+
+def _inside_one_of(candidate: Path, roots: tuple[Path, ...]) -> bool:
+    """Is `candidate` one of `roots`, or nested inside one? Compared twice, per `app.data_root`.
+
+    Literal first, then resolved, because a round's own `DATA_ROOT` can be a symlink into
+    the live tree (`worktree.py` skips relinking `HOME/lloyd-data`, so the link survives a
+    round). A string comparison calls that path not-production, the boot builds its copy
+    inside it, and `build_fixture`'s rule (2) is the thing that should have stopped the
+    write — which is the failure the previous round's boot actually had, only reached from
+    the other side. Resolving a path that does not exist yet has no realpath, so the
+    lexical answer stands for it.
+    """
+    p = Path(candidate)
+    for root in roots:
+        try:
+            if p == root or root in p.parents:
+                return True
+            if p.resolve() == root.resolve() or root.resolve() in p.resolve().parents:
+                return True
+        except OSError:                      # unreadable either side: not inside it
+            continue
+    return False
+
+
+def boot_writes_trial_child(cfg: AutoresearchConfig, *, card: str,
+                            scopes: list[str], round_id: str,
+                            data_root: Path | str | None = None) -> dict[str, Any]:
+    """Build the fixture and boot the child aggregator rooted in it.
+
+    Returns `{"handle", "fixture", "card", "scopes", "url", "state_url", "mcp_servers",
+    "fixtures_area"}`. The vault the copy is made from is the LIVE one `app.paths` resolves —
+    the same source `bench_runner_sdk.build_task_fixture` copies from — because the point of
+    the copy is that the trial's write is graded against a real-shaped memory, while the
+    destination `build_fixture` writes is a pair of roots its own rails accept
+    (`writes_fixture_source`), because on this box the round's data root is the production
+    one and no fixture may be built inside it. `spawn` takes no endpoint: it inherits this
+    process's environment and self-checks the child's `/state`, so the child answers the
+    round's own primary by construction and an arm engine cannot be substituted into it.
+
+    `data_root` is the round's own data root and defaults to what `app.paths` resolves; it
+    is a parameter because the one case this boot must get right — a round whose data root
+    IS the production one — cannot be produced in a test any other way short of pointing
+    the whole process at the live tree. A test that leaves it unset is a test of the
+    scratch-root case, which is not the case that made the first boot always raise.
+
+    Raises what the spawner and the fixture builder raise (`SpawnError`, `SpawnRefused`,
+    `FixtureRefused`) — a boot that cannot prove its own isolation is a reason not to
+    admit the trial, never a reason to run it against the supervised server, because the
+    write executes in whatever process answers the route (#3403). The caller turns a
+    raise into an unscorable row that names it.
+    """
+    from app.paths import VAULT_ROOT
+    from .bench_fixture import build_fixture, new_trial_id
+    from .bench_runner_sdk import child_mcp_servers, state_url_of
+    from .bench_spawner import auth_headers, spawn
+
+    src_data, fixtures_parent = writes_fixture_source(data_root=data_root)
+    # `new_trial_id`, not a round-named directory: two rounds can overlap (a manual
+    # `--budget` run while the nightly one is alive), and `build_fixture` refuses a
+    # `trial_id` whose directory already exists rather than writing into a live copy.
+    fixture = build_fixture(trial_id=new_trial_id(f"round-{round_id}"), writes=scopes,
+                            vault=VAULT_ROOT, data_root=src_data,
+                            fixtures_parent=fixtures_parent)
+    try:
+        # No endpoint argument exists to pass: `spawn` picks a free loopback port, builds
+        # the child's env from the FIXTURE's roots, and refuses a child whose `/state`
+        # reports either production root — so the child answers for the copy and for
+        # nothing else (#3403).
+        handle = spawn(fixture_root=fixture, scopes=scopes)
+    except BaseException:
+        # A child that never answered is still a copy on disk, and the copy is the thing
+        # a later round must not find. The spawner reaps its own process (`finally:
+        # handle.stop()` on every raise path inside `spawn`); only the fixture is ours.
+        fixture.cleanup()
+        raise
+    # `handle.url` is an ORIGIN (`http://127.0.0.1:PORT`) — the spawner's own docstring
+    # says the caller appends `/mcp`. Both halves are derived from it here and nowhere
+    # else, which is what makes them name one process.
+    return {
+        "handle": handle,
+        "fixture": fixture,
+        "card": card,
+        "scopes": list(scopes),
+        "url": handle.url + "/mcp",
+        "state_url": state_url_of(handle.url + "/mcp"),
+        # The credential comes from the CHILD's env (`bench_spawner.auth_headers`), which
+        # is the only place the child's token file is named — see `child_mcp_servers`.
+        "mcp_servers": child_mcp_servers(handle.url + "/mcp",
+                                        auth_headers(handle.env)),
+        # Where the copy was built. The leftover check at the end of the round censuses this
+        # area and not `<data_root>/eval/fixtures`: on the live box those are different
+        # directories, and a check that looked in the data root would find nothing while a
+        # copy of the vault sat under `~/lloyd-work`.
+        "fixtures_area": str(fixtures_parent),
+    }
+
+
+def fixtures_free_bytes(path: Path | str) -> int:
+    """Free bytes on the filesystem that WILL hold a fixture built at `path`.
+
+    The area may not exist yet — a box that has never booted a writes trial has no
+    `lloyd-work/eval-fixtures` — and `shutil.disk_usage` raises on a missing path, so the
+    walk-up stops at the nearest existing ancestor, which is on the same filesystem as the
+    directory `build_fixture` is about to `mkdir`. An unreadable path measures 0 free bytes,
+    which is the honest reading: a precondition this function cannot compute is a boot the
+    round must not attempt, and `boot_precondition` then says so.
+    """
+    probe = Path(path)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        return int(shutil.disk_usage(probe).free)
+    except OSError:
+        return 0
+
+
+def teardown_writes_trial_child(boot: dict[str, Any]) -> dict[str, Any]:
+    """Stop the child and remove its fixture, unconditionally.
+
+    Both on EVERY path — a refused trial, a raised trial, a round that timed out — for
+    the same reason: a child left alive is a process holding a port and the fixture's
+    roots, and a fixture left behind is a second copy of the user's memory under
+    `eval/fixtures/`, readable by anything that walks the data root.
+    `BenchFixture.cleanup` is the only delete this repo permits there and it refuses
+    anything outside the fixtures area, so calling it is also the assertion that the
+    directory removed was really this round's.
+    """
+    out: dict[str, Any] = {}
+    handle = boot.get("handle")
+    if handle is not None:
+        code, secs = handle.stop()
+        out["stop"] = {"code": code, "seconds": round(secs, 3)}
+    fixture = boot.get("fixture")
+    if fixture is not None:
+        out["fixture_removed"] = str(fixture.cleanup())
+    return out
+
+
+def fixture_dirs(data_root: Path | str) -> set[str]:
+    """Names of every directory currently under the fixtures area.
+
+    No name filter: the area belongs to `build_fixture` alone, and a copy's directory name
+    is its builder's `trial_id` — `bench_029_durable_write_kg_row_a1b2c3d4e5f6` for a
+    per-trial copy, `round-R_…_…` for a round's — so any prefix invented here would
+    silently ignore one of the two shapes the check exists to catch.
+    """
+    from .bench_fixture import fixture_parent
+
+    parent = fixture_parent(data_root)
+    if not parent.is_dir():
+        return set()
+    return {p.name for p in parent.iterdir() if p.is_dir()}
+
+
+def leftover_fixtures(data_root: Path | str, *, before: set[str]) -> list[str]:
+    """Fixture directories THIS round created and did not remove (clause 5).
+
+    A baseline difference, deliberately, not a census of the area. The area is shared with
+    copies this round neither made nor owns: a hand-run `bench_runner_sdk` trial's
+    per-trial copy, or a concurrent round's live copy — and `sweep_orphan_fixtures` only
+    ever collects a `dw-*` tree, so a leaked per-trial copy is permanent debris that would
+    otherwise fail EVERY later round for a process that ran before it. `before` is the
+    area as this round found it, read before anything it dispatches can build.
+
+    The case it cannot separate is a concurrent round or hand-run trial whose copy is
+    STILL alive when this round finishes: it appeared after `before`, so it is reported.
+    That is a false failure in the safe direction — a spurious red round gets re-run, a
+    stray copy of the memory tree is otherwise noticed by nobody.
+    """
+    return sorted(fixture_dirs(data_root) - set(before))
+
+
+def _writes_unscorable_cause(*, boot: dict[str, Any] | None,
+                             boot_skipped: str | None, dropped: bool) -> str:
+    """The second cause, phrased for what the round actually did about the aggregator.
+
+    `UNSCORABLE_CAUSE` is a claim about the box — no fixture-rooted aggregator is
+    booted. `tests/test_autoresearch_round_report.py::test_the_cause_is_a_statement_
+    about_this_box...` pins that wording for the case it describes, and it stays
+    byte-identical when nothing was attempted. Once a round HAS booted a child, or
+    tried and was refused by a precondition, publishing that sentence would be a false
+    cause in the durable record — `cd938624` exists to keep this row accurate — so the
+    cause names the bound that actually applied: one admitted trial per round, or the
+    precondition that blocked the boot.
+    """
+    if boot is not None:
+        return (f"one fixture-rooted aggregator was booted for {boot['card']} and the "
+                "round admits one writes-scoped trial, so this card was not admitted"
+                + (" and the shrink dropped it" if dropped else ""))
+    if boot_skipped:
+        return (f"no fixture-rooted aggregator was booted for this round: {boot_skipped}"
+                + (" and the shrink dropped this card" if dropped else ""))
+    return UNSCORABLE_CAUSE + (" and the shrink dropped it" if dropped else "")
 
 
 def _unscorable_writes_text(rows: list[dict[str, Any]], ledger_path: Path) -> list[str]:
@@ -1607,15 +1981,96 @@ async def run(
     # drop list as "coverage the budget cost". Written per card, before any trial starts,
     # with `variant_id: None` — see `unscorable_writes_ledger_row` for why that key is
     # what keeps it out of the arm priors it must not enter.
-    unscorable_writes = unscorable_writes_drops(pre_fit_tasks, matrix_dropped)
-    for _drop in unscorable_writes:
+    # ── the writes-scoped boot (#4163) ────────────────────────────────────────
+    # ONE fixture-rooted child aggregator for the whole round and at most ONE
+    # writes-scoped trial against it, both decided HERE — before any trial is dispatched.
+    # The trial's write executes in the SERVER process, so a child that is not up and
+    # named by BOTH the round's state URL and the harness's tool route is a trial that
+    # must not be admitted at all; and a boot the window or the free disk cannot carry
+    # must never start the copy, because a `copytree` that dies partway leaves a partial
+    # second copy of the user's memory under `eval/fixtures/`.
+    boot: dict[str, Any] | None = None
+    boot_skipped: str | None = None
+    # Clause 5's baseline, read here — before this round dispatches anything that could
+    # build a copy, and before its own boot can build one. The check at the end is a
+    # difference from this reading, which is what keeps a round from being failed for a
+    # copy it never made: a hand-run trial's per-trial copy, or a concurrent round's live
+    # one, can be sitting in the shared fixtures area the whole time.
+    # Both the census and the disk probe follow THIS pair, because on a production-rooted
+    # box the area the round builds in is not `<data_root>/eval/fixtures`
+    # (`writes_fixture_source`): a check that looked in the data root would report an empty
+    # fixtures area while a copy of the vault sat under `~/lloyd-work`, and a disk probe of
+    # the data root would measure a filesystem the copy never touches.
+    _boot_src, _boot_fixtures_parent = writes_fixture_source()
+    fixtures_before = fixture_dirs(_boot_src)
+    writes_card = pick_writes_card((t.get("id") for t in tasks),
+                                   round_index=writes_rotation_index(
+                                       cfg.paths.ledger_path))
+    # Read through `all_tasks`, not `tasks`: the shrink may have dropped this card and the
+    # scopes are what decides whether a boot is even attempted. Reading `tasks` would answer
+    # [] on precisely the round where the row matters most, and the round would then publish
+    # the box-level cause for a card whose own declaration says otherwise.
+    card_scopes = writes_declared(next((t for t in all_tasks
+                                        if t.get("id") == writes_card), {}))
+    if writes_card and card_scopes:
+        from app.paths import VAULT_ROOT
+        from .bench_fixture import estimate_fixture_bytes
+        seconds_left = (deadline - time.monotonic() if deadline is not None
+                        else float(budget_minutes * 60))
+        why = boot_precondition(
+            seconds_left=seconds_left, agent_p90=priors.sdk.seconds,
+            estimate_bytes=estimate_fixture_bytes(vault=VAULT_ROOT,
+                                                 data_root=_boot_src,
+                                                 scopes=card_scopes),
+            free_bytes=fixtures_free_bytes(_boot_fixtures_parent))
+        if why:
+            boot_skipped = why
+        else:
+            try:
+                boot = boot_writes_trial_child(cfg, card=writes_card,
+                                              scopes=card_scopes, round_id=rid)
+                logger.info("writes trial child booted for %s at %s",
+                            writes_card, boot["state_url"])
+            except Exception as exc:  # noqa: BLE001 — any raise is a reason not to run
+                boot_skipped = f"boot refused: {type(exc).__name__}: {exc}"
+    elif writes_card:
+        # In the rotation but carrying no `writes:` block, so there is nothing to scope a
+        # copy to. Named rather than passed over in silence: an empty scope list is
+        # exactly the reading that would turn a real writes card into a no-op that looks
+        # like a rotation miss.
+        boot_skipped = f"{writes_card} declares no writes: scope"
+
+    # One sentence for the rows this round publishes: what it did about the aggregator,
+    # phrased so it is true of THIS round rather than of the box in general.
+    boot_cause = (_writes_unscorable_cause(boot=boot, boot_skipped=boot_skipped,
+                                          dropped=False)
+                  if writes_card and card_scopes else None)
+    boot_unscorable: list[dict[str, Any]] = []
+    if boot is None and writes_card and card_scopes \
+            and writes_card in {str(t.get("id")) for t in tasks}:
+        # The shrink KEPT this card and the round still cannot run it, so take it out of
+        # the matrix — a writes trial against the supervised server refuses at
+        # `require_copied_state` and burns a slot on the serial agent-loop arm to record
+        # a refusal the round already knows — and publish why in its place.
+        logger.info("writes trial boot skipped: %s", boot_skipped)
+        boot_unscorable.append({"task_id": writes_card, "writes": card_scopes,
+                                "not_dropped": True, "second_cause": boot_cause})
+        tasks = [t for t in tasks if t.get("id") != writes_card]
+
+    unscorable_writes = unscorable_writes_drops(pre_fit_tasks, matrix_dropped,
+                                               second_cause=boot_cause)
+    for _drop in unscorable_writes + boot_unscorable:
         ledger_append(cfg.paths.ledger_path,
                       unscorable_writes_ledger_row(rid, _drop, window))
     if unscorable_writes:
         logger.warning(
             "unscorable this round: %d writes-scoped task(s) dropped by the matrix shrink "
             "(%s) — %s", len(unscorable_writes),
-            ", ".join(d["task_id"] for d in unscorable_writes), UNSCORABLE_CAUSE)
+            ", ".join(d["task_id"] for d in unscorable_writes),
+            boot_cause or UNSCORABLE_CAUSE)
+    if boot_unscorable:
+        logger.warning("writes trial not admitted this round: %s — %s",
+                       boot_unscorable[0]["task_id"], boot_skipped)
     shrink_stopped = projection.get("shrink_stopped_early") or {}
     if shrink_stopped:
         # Loud on purpose. This is the state where the round WILL be cut at the
@@ -1639,9 +2094,30 @@ async def run(
     logger.info("running %d variants × %d tasks = %d trials (harness=%s)",
                 len(variant_pairs), len(tasks), len(variant_pairs) * len(tasks), harness)
     trials_started = time.monotonic()
-    direct_traces, sdk_traces, arm_seconds = await _run_trials(
-        cfg, variant_pairs, tasks, model, harness, max_parallel, deadline=deadline,
-    )
+    # The ONE card the child was booted for. `run_bench_sdk` pins that task's state URL,
+    # fixture directory and tool route to the child, and restores all three the moment
+    # its trial returns, so nothing else in the round can inherit a pointer to a process
+    # that is about to be stopped. The kwarg is passed ONLY when a child exists: a round
+    # with no child calls `_run_trials` exactly as it did before #4163.
+    _writes_kw: dict[str, Any] = {} if boot is None else {"writes_trial": {
+        "task_id": boot["card"],
+        "state_url": boot["state_url"],
+        "fixture_dir": str(boot["fixture"].root),
+        "mcp_servers": boot["mcp_servers"],
+    }}
+    try:
+        direct_traces, sdk_traces, arm_seconds = await _run_trials(
+            cfg, variant_pairs, tasks, model, harness, max_parallel, deadline=deadline,
+            **_writes_kw,
+        )
+    finally:
+        # Runs whether the matrix finished cleanly, a trial raised through it, or a
+        # signal unwound the round. The child is a live process holding a port and the
+        # fixture's roots, and neither may survive as something the retention sweep will
+        # age out quietly.
+        if boot is not None:
+            logger.info("writes trial child torn down: %s",
+                        teardown_writes_trial_child(boot))
     trial_seconds = round(time.monotonic() - trials_started, 1)
     # #1546: what the deadline did not reach is dropped for every variant at
     # once and named, so the round still ranks what it measured — on the same
@@ -1826,6 +2302,19 @@ async def run(
             restore=restore_outcome,
         )
 
+    # What the round decided about the ONE writes card it may admit (#4163 clause 1/3),
+    # and whether any fixture copy outlived it (clause 5). Both computed BEFORE the report
+    # is assembled, because both belong IN it: the report is what a reader who was not the
+    # caller reads, and a verdict that lives only in the returned payload or in `main`'s
+    # exit status is invisible to whoever opens this file next morning.
+    leftovers = leftover_fixtures(_boot_src, before=fixtures_before)
+    result_boot_note = (
+        f"child booted for {boot['card']} over scopes {boot['scopes']}, one trial "
+        f"admitted against it ({boot['state_url']})"
+        if boot else
+        (f"no child booted: {boot_skipped}" if writes_card and card_scopes
+         else "no writes-scoped card in this round's matrix"))
+
     # Write round summary markdown
     summary_file = cfg.paths.rounds_dir / f"{rid}.md"
     sdk_task_ids = sorted({t["task_id"] for t in sdk_traces})
@@ -1866,6 +2355,21 @@ async def run(
         # that card" — and for a writes-scoped card the shrink removed something that
         # could not have been scored here at all.
         *(_unscorable_writes_text(unscorable_writes, cfg.paths.ledger_path)),
+        # #4163 clause 5: a fixture copy that outlived the round. In the REPORT, not only
+        # in the returned payload and `main`'s exit status — the report is what a reader
+        # who was not the caller reads, and a verdict that is only printed or only in a
+        # process's status is invisible to whoever opens the artifact next morning.
+        *(["- FIXTURE LEFT BEHIND: this round FAILS — its teardown did not remove "
+           f"{len(leftovers)} fixture director"
+           f"{'y' if len(leftovers) == 1 else 'ies'} under the fixtures area: "
+           f"{', '.join(leftovers)}. A copy of the memory tree must not outlive the "
+           "trial that needed it."]
+           if leftovers else []),
+        # #4163 clause 1/3: what the round decided about the one writes card it may
+        # admit. A round that booted a child and admitted a trial has to say so where a
+        # reader can see it, or the ledger's per-trial row for that card is the only
+        # evidence and it does not name the boot that made it possible.
+        f"- writes-scoped trial: {result_boot_note}",
         # #1715: the case #1605's loop had no words for. The matrix is over window,
         # shrinking has stopped, and the reason is not that it ran out of tasks — it
         # is that every step left frees less than the margin already holds back, so
@@ -2021,6 +2525,10 @@ async def run(
 
     return {
         "round_id": rid,
+        "leftover_fixtures": leftovers,
+        "writes_trial_boot": (f"booted:{boot['card']}" if boot else
+                              (f"skipped:{boot_skipped}" if writes_card and card_scopes
+                               else "no-writes-card-in-matrix")),
         "summary_file": str(summary_file),
         "spec_file": str(spec_path),
         # #1549: the behavioural artifact's name, so a caller can open the per-axis
@@ -2125,6 +2633,17 @@ def main() -> None:
         harness=args.harness,
     ))
     print(json.dumps(result, indent=2, default=str))
+    # A fixture still under `eval/fixtures/` after a round that reached here is a second
+    # copy of the user's memory that its own teardown lost track of (#4163 clause 5). It
+    # fails the round rather than riding out in the printed payload: the sweep's 30-minute
+    # grace is there to spare an IN-FLIGHT round's copy, not to quietly age out a
+    # completed one, and `sys.exit(1)` is the only verdict the worker's own exit-status
+    # reading can see.
+    if result.get("leftover_fixtures"):
+        print(f"ROUND FAILED: {len(result['leftover_fixtures'])} fixture director"
+              f"(ies) left under the fixtures area: "
+              f"{', '.join(result['leftover_fixtures'])}", file=sys.stderr)
+        sys.exit(1)
 
 
 async def _off_loop(fn, *args, **kwargs):

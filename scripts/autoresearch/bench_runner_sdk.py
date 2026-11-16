@@ -439,13 +439,33 @@ def isolation_flags(env: dict[str, str] | None = None) -> dict[str, bool]:
                 "probe_error": True}
 
 
-def build_task_fixture(task: dict, trial_id: str):
-    """Build the disposable copy for one `writes:`-scoped trial, or raise `TrialRefused`."""
+def build_task_fixture(task: dict, trial_id: str, reuse_dir: "Path | str | None" = None):
+    """Build the disposable copy for one `writes:`-scoped trial, or raise `TrialRefused`.
+
+    `reuse_dir` names a copy that ALREADY exists and loads it (`bench_spawner.
+    fixture_from_dir`, the same loader the spawner's own CLI uses) instead of copying.
+    That is not an optimisation of the ~5.2 s copy: the write executes in the SERVER
+    process against the roots THAT process resolved, so the copy the trial's write lands
+    in is the one the booted child is rooted in (#4163). Copying a second time here would
+    leave the runner's assertion pointing at a directory the write never touches — a
+    bystander that reports green while something else is graded. A borrowed copy stays
+    owned by whoever built it: `isolation_refusal` marks the context `borrowed` so
+    `run_trial` does not delete the tree the round's own teardown is responsible for.
+    """
     from app.paths import DATA_ROOT, VAULT_ROOT
     from scripts.autoresearch.bench_fixture import (
         build_fixture, declared_scopes, fixture_parent)
 
     scopes = declared_scopes(task)
+    if reuse_dir is not None:
+        from scripts.autoresearch.bench_spawner import fixture_from_dir
+        try:
+            return fixture_from_dir(Path(reuse_dir), scopes)
+        except Exception as exc:  # noqa: BLE001 — an unloadable copy is a refusal
+            raise TrialRefused(
+                f"the fixture copy the trial was handed cannot be loaded "
+                f"({exc}), so the assertion below has nothing to assert about",
+                state={"state_is_copied": False}) from exc
     try:
         return build_fixture(
             trial_id=trial_id, writes=scopes, vault=VAULT_ROOT, data_root=DATA_ROOT,
@@ -455,21 +475,33 @@ def build_task_fixture(task: dict, trial_id: str):
 
 
 def isolation_refusal(task: dict, env: dict[str, str],
-                      trial_id: str) -> dict[str, Any]:
+                      trial_id: str,
+                      reuse_dir: "Path | str | None" = None) -> dict[str, Any]:
     """For a `writes:`-scoped task: build its fixture and prove the copy is a copy.
 
-    Returns the trial context — `{"env": …, "fixture": …, "flags": …}`, or raises `TrialRefused` — before the first message
+    `reuse_dir` (#4163) loads the round's already-built copy instead of making a second
+    one; the returned context then says `"borrowed": True`, which is what tells the caller
+    that the tree is NOT its to delete.
+
+    Returns the trial context — `{"env": …, "fixture": …, "flags": …, "borrowed": …}`, or raises `TrialRefused` — before the first message
     reaches the model, never after. The order is the point: the fixture is built first,
     because the flags are meaningless until something has been copied to point at, and
     asserted against the environment the fixture WOULD give, so the trial is refused for
     a fixture that does not actually isolate rather than running and grading a real write
     to the house.
     """
-    fixture = build_task_fixture(task, trial_id)
+    # Called positionally, and only with the third argument when one was handed in: the
+    # existing seam tests stand in for this builder with a two-parameter lambda.
+    fixture = (build_task_fixture(task, trial_id) if reuse_dir is None
+               else build_task_fixture(task, trial_id, reuse_dir))
     fixture_env = {**env, **fixture.env()}
     flags = isolation_flags(fixture_env)
     if flags.get("is_production_data") or flags.get("is_production_vault"):
-        fixture.cleanup()
+        if reuse_dir is None:
+            fixture.cleanup()
+        # A borrowed copy stays where it is: the round that built it may already have a
+        # child aggregator running on it, and deleting the tree under a live process is
+        # not this function's to do — its `finally` teardown is (#4163).
         raise TrialRefused(
             "a `writes:`-scoped trial needs both `IS_PRODUCTION_DATA` and "
             "`IS_PRODUCTION_VAULT` False inside the trial process; they read "
@@ -495,10 +527,100 @@ def resolve_state_url() -> str:
     override = os.environ.get(STATE_URL_ENV)
     if override:
         return override
+    return state_url_of(effective_mcp_route())
+
+
+def state_url_of(mcp_url: str) -> str:
+    """`…/state` beside the MCP route `mcp_url` — the pair's other endpoint, one origin."""
+    base = (mcp_url or "").rsplit("/mcp", 1)[0]
+    return f"{base}/state"
+
+
+def effective_mcp_route(mcp_servers: dict[str, Any] | None = None) -> str:
+    """The url the harness WILL dial for `lloyd-mcp`, whether or not a caller repointed it.
+
+    Resolution lives in `app.mcp_discovery._get_mcp_servers` and nowhere else, so the two
+    halves of the isolation assertion resolve the same way here as the harness resolves it
+    in `build_options` — a pairing check against a caller-supplied mapping alone would
+    pass a round that never repointed anything, which is the shape of the real bug (#4163
+    clause 2).
+    """
     from app.mcp_discovery import _get_mcp_servers
-    server = (_get_mcp_servers() or {}).get("lloyd-mcp") or {}
-    base = str(server.get("url") or "http://127.0.0.1:8500/mcp")
-    return base.rsplit("/mcp", 1)[0] + "/state"
+
+    # The pre-existing fallback: a box with no `mcp_servers:` section still has one
+    # aggregator, and the runner has always named it rather than answering "nothing".
+    fallback = "http://127.0.0.1:8500/mcp"
+    if mcp_servers is not None:
+        return mcp_route_of(mcp_servers) or fallback
+    return mcp_route_of(_get_mcp_servers()) or fallback
+
+
+def mcp_route_of(mcp_servers: dict[str, Any] | None) -> str:
+    """The URL the harness will dial for the `lloyd-mcp` tools — the pair's other half.
+
+    (#4163) A `writes:`-scoped trial's write executes in the process THIS names, so it and
+    `resolve_state_url()` must agree on the origin. Empty string when the mapping carries
+    no `lloyd-mcp` entry, which is no pair to check rather than a disagreement.
+    """
+    server = (mcp_servers or {}).get("lloyd-mcp") or {}
+    return str(server.get("url") or "")
+
+
+def url_origin(url: str) -> tuple[str, int] | None:
+    """`(host, port)` of a URL — what "the same process" means for the two halves."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url or "")
+    if not parsed.hostname:
+        return None
+    return parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def child_mcp_servers(url: str,
+                      headers: dict[str, str] | None = None) -> dict[str, Any]:
+    """The `mcp_servers` mapping that points the harness's lloyd tools at a child aggregator.
+
+    Built from the SUPERVISED entry rather than a bare `{url}`, so every other key the
+    box declared for `lloyd-mcp` survives and exactly one thing moves: the origin. No
+    `config.yaml` edit is involved — this is the mapping handed to `build_options` per
+    trial, which is where `#4163` repoints it. Every OTHER configured server survives
+    too, so a writes trial's tool surface differs from an ordinary round's trial in one
+    entry and the comparison stays about the writes.
+
+    `headers` is the child's credential (`bench_spawner.auth_headers`, read from the
+    CHILD's env), carried explicitly rather than left to discovery. The reader that
+    normally supplies it — `app/harness/mcp_pool.py:655`,
+    `agent_mcp.aggregator_auth.headers_for_url(url)` — resolves the token file from the
+    CALLING process's environment, and a fixture-rooted child's token lives under the
+    FIXTURE's data root (`bench_fixture` writes `DATA_ROOT_MARKER` into the copy, so
+    `aggregator_auth.token_path` resolves inside it whenever `LLOYD_MCP_TOKEN_FILE` is
+    set). The runner process does not carry that variable; the spawner's env does. A
+    route without the header is therefore a repoint that answers 401 on the round's own
+    first read, and `bench_spawner.py:439-447` records a first real boot being fooled
+    into thinking `/state` did not exist for exactly that reason.
+
+    On today's box the child inherits the supervised token, because `bench_spawner` hands
+    it the fixture's roots and never sets `LLOYD_MCP_TOKEN_FILE` — both processes read
+    `~/.local/state/lloyd/aggregator-token` — and the boot test asserts that equality
+    rather than asserting a divergence. Carrying the header is what keeps the boot correct
+    if a fixture ever gets its own credential, and `auth_headers` returns `{}` when the
+    child has none, so nothing is invented here.
+    """
+    # Derived from discovery rather than written as a transport literal: an inline
+    # `{"type": "http", ...}` is what `tests/test_mcp_layer.py::
+    # test_no_inline_mcp_server_config_anywhere_in_the_repo` exists to keep out of the
+    # tree, and building on the configured entry is also what keeps every other declared
+    # key of `lloyd-mcp` — timeout, header env names — exactly as the box declared it.
+    from app.mcp_discovery import _get_mcp_servers
+
+    configured = dict(_get_mcp_servers() or {})
+    base = dict(configured.get("lloyd-mcp") or {})
+    base["url"] = url
+    if headers:
+        merged = dict(base.get("headers") or {})
+        merged.update(headers)
+        base["headers"] = merged
+    return {**configured, "lloyd-mcp": base}
 
 
 #: The `tool_sandbox` keys a `writes:`-scoped trial needs the server to report, and a
@@ -511,7 +633,8 @@ _SERVER_ISOLATION_KEYS = ("is_production_data", "is_production_vault",
 
 
 async def require_copied_state(declared: list[str], state_url: str | None = None,
-                               *, measured: dict[str, Any] | None = None) -> dict:
+                               *, measured: dict[str, Any] | None = None,
+                               mcp_route: str | None = None) -> dict:
     """Ask the process that will EXECUTE the writes whether its state is a copy.
 
     The second half of the isolation assertion, across the boundary the first half cannot
@@ -531,6 +654,23 @@ async def require_copied_state(declared: list[str], state_url: str | None = None
     aggregator that reports nothing. Its answer is a refusal naming the missing keys, not
     a pass-by-absence, and the trial row carries the flags it did report.
     """
+    if mcp_route:
+        route = url_origin(mcp_route)
+        if route is not None and route != url_origin(state_url or resolve_state_url()):
+            # The two halves of one assertion naming two different processes. The /state
+            # read below would then be a bystander's: the trial would be admitted on the
+            # child's answer while the write executes in whatever `mcp_route` names — the
+            # supervised server on this box, which is precisely what #3403 exists to stop.
+            # #4163 clause 2 pins this as a refusal, not a warning.
+            raise TrialRefused(
+                "require_copied_state: the trial's two halves name different processes — "
+                f"the state is read at {state_url or resolve_state_url()} while the harness "
+                f"dials the `lloyd-mcp` tools at {mcp_route}, so the write would execute in "
+                "a state nobody was asked about. Repoint both at the same aggregator "
+                "(#4163).",
+                flags=dict(measured or {}),
+                state={"state_is_copied": False,
+                       "mcp_route": mcp_route})
     import httpx
 
     url = state_url or resolve_state_url()
@@ -610,6 +750,12 @@ class ToolSandboxUnavailable(RuntimeError):
 
 _sandbox_verified = False
 
+#: Origins whose sandbox answer has already been read in this process (#4163). Separate
+#: from the latch above because a writes trial asks a DIFFERENT process from every other
+#: trial in the round — the fixture-rooted child — and a round that latched "yes" on the
+#: supervised aggregator must not therefore skip the one check that matters.
+_sandbox_verified_urls: set[str] = set()
+
 
 async def require_tool_sandbox(state_url: str | None = None) -> None:
     """Refuse to run a trial unless the aggregator enforces the sandbox.
@@ -619,8 +765,19 @@ async def require_tool_sandbox(state_url: str | None = None) -> None:
     a trial dispatched to one that predates the sandbox would run bare. Cached
     per process once it has said yes.
     """
+    # #4163: the latch is per-origin, because the origin now varies within one process.
+    # A round's admitted writes trial is asked of the CHILD aggregator, and a round always
+    # runs other trials first — so a process-wide "yes, some aggregator enforces the
+    # sandbox" would let the one trial that writes skip the pre-flight of the one process
+    # that will execute it, which is the whole point of the check. A caller that named a
+    # URL is cached against that URL; the unnamed path keeps the process-wide latch the
+    # existing pins exercise (`_sandbox_verified`), unchanged.
     global _sandbox_verified
-    if _sandbox_verified:
+    named_url = state_url is not None
+    if not named_url:
+        if _sandbox_verified:
+            return
+    elif state_url in _sandbox_verified_urls:
         return
     import httpx
 
@@ -650,7 +807,12 @@ async def require_tool_sandbox(state_url: str | None = None) -> None:
     if RECORDED_SESSION_SLUG not in (sandbox.get("background_slugs") or []):
         raise ToolSandboxUnavailable(
             f"the aggregator does not sandbox {RECORDED_SESSION_SLUG!r} sessions")
-    _sandbox_verified = True
+    if named_url:
+        # A child's yes is a fact about THAT child: it lets a later trial against the same
+        # child skip the read, and nothing else (#4163).
+        _sandbox_verified_urls.add(state_url)
+    else:
+        _sandbox_verified = True
 
 
 def build_options(
@@ -669,6 +831,7 @@ def build_options(
     strip_description_tools: list[str] | None = None,
     visible_tools_capture: list[dict[str, Any]] | None = None,
     base_url: str = "",
+    mcp_servers: dict[str, Any] | None = None,
 ) -> Any:
     """Build the `RunOptions` for one trial.
 
@@ -792,7 +955,7 @@ def build_options(
                   or model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096")),
         system_prompt=system_prompt,
         max_turns=max_agent_turns,
-        mcp_servers=_get_mcp_servers(),
+        mcp_servers=(mcp_servers if mcp_servers is not None else _get_mcp_servers()),
         disallowed_tools=disallowed,
         hooks=hooks,
         priority=priority,
@@ -1019,8 +1182,19 @@ async def run_trial(
     writes_into: Path | str | None = None,
     tool_visibility: Any = None,
     base_url: str = "",
+    writes_child: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One (variant × task) trial through the harness. Returns a trace.
+
+    `writes_child` (#4163) is the ONE thing a round hands a trial to point it at a
+    fixture-rooted child aggregator it booted for that card: `{"fixture_dir": …,
+    "state_url": …, "mcp_servers": {…}}`. It is one bundle rather than three arguments on
+    purpose — a trial handed the child's `/state` but not its tool route is a trial that
+    reads the copy's answer and writes to the house, which is the exact failure
+    `require_copied_state` refuses, so the three pointers travel together or not at all.
+    Absent (every caller today except a round's admitted writes trial) keeps the
+    pre-#4163 path: the trial builds its own copy and refuses at `require_copied_state`
+    against the supervised server.
 
     `system_append` is forwarded to `build_options` (#678's planted policy), and
     so is `writes_into` (#1843): the trial's write bound, which a behavioural
@@ -1075,19 +1249,46 @@ async def run_trial(
     # every trial that declared no scope (nothing was asked of it) and on a refusal that
     # never got as far as asking — which is why it is a dict and not a `True`/`False`.
     server_state: dict[str, Any] = {}
+    # The round-booted child this trial may have been admitted to, unpacked once. Each
+    # half is `None` for every trial that was not admitted, which is how the pre-#4163
+    # path (build your own copy, refuse at the supervised server) stays the default.
+    child_fixture_dir = (writes_child or {}).get("fixture_dir")
+    child_state_url = (writes_child or {}).get("state_url")
+    child_server_map = (writes_child or {}).get("mcp_servers")
     if write_scope:
         try:
-            fixture_ctx = isolation_refusal(task, dict(os.environ), trial_id)
+            # ONE bundle, not three arguments: a round that could hand in the child's
+            # `/state` without its `mcp_servers` would be a round that reads the copy's
+            # answer and writes somewhere else, so the three pointers travel together or
+            # not at all (#4163).
+            fixture_ctx = isolation_refusal(task, dict(os.environ), trial_id,
+                                            reuse_dir=child_fixture_dir)
             try:
+                # The pair is compared only when a CALLER named one of its halves, and the
+                # two situations that looks like must not be conflated. An operator's
+                # hand-run trial publishes `LLOYD_BENCH_STATE_URL` with no repointed route
+                # — #3403's sanctioned workflow, where discovery is config and config
+                # naming another origin than the env is no claim anyone is making. A round
+                # that hands over the child's `/state` WITHOUT its tool route IS making a
+                # claim: it would be admitted on the child's answer while its harness
+                # dialled the house, which is the half-repoint #4163 clause 2 refuses. So
+                # compare on a bundle and invent no claim out of config alone — pinned by
+                # `test_a_config_resolved_state_url_beside_an_unrepointed_route_is_no_claim`.
+                pair = ({} if (child_state_url is None
+                               and child_server_map is None)
+                        else {"state_url": child_state_url,
+                              "mcp_route": effective_mcp_route(child_server_map)})
                 server_state = await require_copied_state(
-                    write_scope_of(task), measured=fixture_ctx["flags"])
+                    write_scope_of(task), measured=fixture_ctx["flags"], **pair)
             except TrialRefused:
                 # The copy was built and then found to be pointless: the process that
                 # would have written it resolves the house. Leaving the copy behind is
                 # exactly the orphaned second copy of Alan's memory the item's Risks name,
                 # and the fixture's own `cleanup` refuses to delete anything else, so one
-                # call here is both the removal and the assertion.
-                fixture_ctx["fixture"].cleanup()
+                # call here is both the removal and the assertion. A BORROWED copy is the
+                # round's to remove: a child may still be running on it.
+                if not fixture_ctx.get("borrowed"):
+                    fixture_ctx["fixture"].cleanup()
                 raise
         except TrialRefused as exc:
             # A refusal that got as far as asking the server carries its answer, and the
@@ -1193,8 +1394,18 @@ async def run_trial(
         trace["error"] = "bench task has no prompt"
         return trace
 
-    # Before anything reaches a model: no enforced sandbox, no trial.
-    await require_tool_sandbox()
+    # Before anything reaches a model: no enforced sandbox, no trial. An admitted trial
+    # asks the process that will execute its write, not the one it happens to resolve off
+    # config (#4163); a trial with no child asks exactly what it asked before #4163, which
+    # is why the argument is passed only when a child exists. The module's
+    # `_sandbox_verified` latch is per-process and URL-blind, so on a round that ran any
+    # earlier trial this one is already latched — named on the item rather than changed
+    # here, because making it per-origin moves every trial's admission path, not just a
+    # writes trial's.
+    if child_state_url is None:
+        await require_tool_sandbox()
+    else:
+        await require_tool_sandbox(child_state_url)
     try:
         create_session(session_id, platform="worker", model=model,
                        title=f"bench {task_id} · {variant_id}"[:80],
@@ -1286,6 +1497,10 @@ async def run_trial(
         # config alias, and a call site that dropped this would send every arm trial
         # to whatever `models.default` points at while the report named the arm.
         base_url=base_url,
+        # The half that decides where the write EXECUTES. Absent for every trial that was
+        # not admitted, so `build_options` resolves the supervised mapping as it always
+        # did (#4163).
+        mcp_servers=child_server_map,
     )
     # Read back off what was built rather than restating the pin (#427). A pin
     # that is later changed, or overridden by a caller, then shows up in the
@@ -1411,8 +1626,20 @@ async def run_bench_sdk(
     probe_prompt: str = "",
     prefetched_text: str | None = None,
     deadline: float | None = None,
+    writes_trial: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Fan out (variant × task) harness trials through a semaphore.
+
+    `writes_trial` (#4163) names the ONE task in this matrix that the round has booted a
+    fixture-rooted child aggregator for: `{"task_id": …, "state_url": …, "fixture_dir":
+    …, "mcp_servers": {…}}`. That task's `run_trial` call is handed the bundle whole as
+    `writes_child=`; every other task is passed `None`. The pointer is a per-call argument
+    rather than `LLOYD_BENCH_STATE_URL` because that variable is process-wide, and a
+    process-wide pointer plus a per-trial route is how a second `writes:` card would read
+    the child's `/state` and write through the supervised server. Every other `writes:`
+    card therefore keeps the pre-#4163 path: it refuses at `require_copied_state`, and the
+    round publishes that as an unscorable row. One child per round means one admitted card
+    per round, which is what the ~148 s cost buys.
 
     `deadline` (a `time.monotonic()` instant) bounds the fan-out the way it
     bounds `bench_runner.run_bench`: no trial starts with less than
@@ -1458,12 +1685,20 @@ async def run_bench_sdk(
             if timeout is None:
                 return
             hooks = hooks_factory() if hooks_factory is not None else None
+            # Exactly one task in the matrix sees the child, and it sees it as one bundle.
+            # The pointer is an ARGUMENT and never `LLOYD_BENCH_STATE_URL`: an env-set
+            # pointer is process-wide, so a second `writes:` card whose trial happened to
+            # run while it was set would read the CHILD's `/state` (green) and write
+            # through the supervised route — the half-repoint #4163 clause 2 exists to
+            # refuse. Passing it per call makes that state unrepresentable.
+            admitted = bool(writes_trial) and task.get("id") == writes_trial.get("task_id")
             trace = await run_trial(
                 task, variant_id, overlay_dir, model,
                 per_task_timeout=timeout,
                 max_agent_turns=max_agent_turns,
                 hooks=hooks, probe_prompt=probe_prompt,
                 prefetched_text=prefetched_text,
+                writes_child=writes_trial if admitted else None,
             )
             traces.append(mark_if_cut(trace, timeout, per_task_timeout, deadline))
 

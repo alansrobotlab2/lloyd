@@ -954,3 +954,471 @@ def test_a_round_told_about_a_fixture_rooted_aggregator_stays_silent(round_env, 
         encoding="utf-8")
     assert not [ln for ln in report.splitlines() if "unscorable" in ln], report
     assert "- matrix reduced before trials:" in report
+
+
+# ── #4163 clauses 3 and 4: one admitted writes card, and a row that says which
+#    bound stopped the others ────────────────────────────────────────────────────
+# `cd938624` (#3959) landed the recording half: a writes card the shrink drops gets
+# an `unscorable_writes_trial` row with `variant_id: null`, so its zero trials are
+# attributable instead of mysterious. Its cause sentence was a claim about the BOX
+# (`UNSCORABLE_CAUSE`: no fixture-rooted aggregator is booted). A round that boots a
+# child for one card and not for the others makes that sentence false for exactly the
+# cards whose record it is — the failure mode the item names. These pin that the rows
+# survive a boot with a cause that stops claiming none exists.
+def _drop(task_id: str, writes: list[str], second_cause: str | None = None) -> dict:
+    entry = {"task_id": task_id, "writes": writes, "window_seconds": 1435.0}
+    if second_cause is not None:
+        entry["second_cause"] = second_cause
+    return entry
+
+
+def test_the_rotation_admits_one_card_and_advances_across_rounds():
+    cards = list(run_round.WRITES_ROTATION)
+    assert len(cards) == 3, "029, 030 and 031 — the three cards the ledger holds rows for"
+    picked = [run_round.pick_writes_card(cards, round_index=i) for i in range(6)]
+    assert picked == cards + cards, (
+        f"the admitted card must advance 029→030→031 across consecutive rounds and "
+        f"wrap; it gave {picked}")
+    assert run_round.pick_writes_card(["bench_001_x"], round_index=0) is None, (
+        "a matrix with no writes card in it admits nothing")
+    two = cards[:2]
+    assert [run_round.pick_writes_card(two, round_index=i) for i in range(4)] == \
+        [two[0], two[1], two[0], two[1]], (
+        "with two of the three present the rotation still advances over what can run, "
+        "rather than stalling on the id that is absent")
+
+
+def test_the_rotation_index_counts_rounds_and_not_rows(tmp_path):
+    ledger = tmp_path / "ledger.jsonl"
+    assert run_round.writes_rotation_index(ledger) == 0, (
+        "no ledger is no rounds, which is the rotation's start and not an error")
+    lines = []
+    for rid in ("R_1", "R_2", "R_3"):
+        for _ in range(20):  # one round writes many rows; it is still ONE round
+            lines.append(json.dumps({"round_id": rid, "event": "trial"}))
+    lines.append("not json")
+    ledger.write_text("\n".join(lines), encoding="utf-8")
+    assert run_round.writes_rotation_index(ledger) == 3
+
+
+def test_a_dropped_card_still_gets_its_row_when_a_child_was_booted_for_another():
+    boot = {"card": run_round.WRITES_ROTATION[0]}
+    drops = run_round.unscorable_writes_drops(
+        [{"id": run_round.WRITES_ROTATION[1], "writes": ["kg"]},
+         {"id": run_round.WRITES_ROTATION[0], "writes": ["vault"]}],
+        [run_round.WRITES_ROTATION[1]], second_cause="booted for " + boot["card"])
+    assert [d["task_id"] for d in drops] == [run_round.WRITES_ROTATION[1]], (
+        "the card the child was booted for is not here — it has a trial; the one that "
+        "was NOT admitted keeps its row")
+    row = run_round.unscorable_writes_ledger_row("R_4", drops[0], 1435.0)
+    assert row["event"] == run_round.UNSCORABLE_EVENT
+    assert row["variant_id"] is None, (
+        "still a null variant: this row must stay out of the arm p90s it never ran")
+    assert "duration_seconds" not in row
+    assert "booted for" in row["reason"], (
+        f"the cause must say what actually applied, got: {row['reason']}")
+    assert "no fixture-rooted aggregator is booted" not in row["reason"], (
+        "publishing the box-level claim while a child IS booted is the false cause "
+        "cd938624 exists to keep out of the record")
+
+
+def test_a_boot_refused_by_a_precondition_names_that_precondition_in_the_row():
+    why = "free disk 100 bytes below 2x the fixture estimate of 900 bytes"
+    drops = run_round.unscorable_writes_drops(
+        [{"id": run_round.WRITES_ROTATION[2], "writes": ["backlog"]}],
+        [run_round.WRITES_ROTATION[2]], second_cause=why)
+    row = run_round.unscorable_writes_ledger_row("R_5", drops[0], 900.0)
+    assert why in row["reason"], row["reason"]
+    assert "dropped by the pre-trial matrix shrink" in row["reason"], (
+        "both causes stay in one sentence: the shrink and the boot bound are separate "
+        "facts and a reader needs both to know what to change")
+
+
+def test_the_row_is_unchanged_when_no_boot_was_attempted():
+    drops = run_round.unscorable_writes_drops(
+        [{"id": run_round.WRITES_ROTATION[0], "writes": ["vault"]}],
+        [run_round.WRITES_ROTATION[0]], second_cause=None)
+    row = run_round.unscorable_writes_ledger_row("R_6", drops[0], 1435.0)
+    assert run_round.UNSCORABLE_CAUSE in row["reason"], (
+        "with no child attempted, the box-level claim is TRUE and pinned as worded by "
+        "test_the_cause_is_a_statement_about_this_box_and_not_a_tautology")
+
+
+def test_the_boot_bound_is_window_and_disk_decided_before_any_trial():
+    p90 = 140.5
+    need = run_round.FIXTURE_BUILD_SECONDS + run_round.CHILD_BOOT_SECONDS + p90
+    tight = run_round.boot_precondition(seconds_left=need - 1, agent_p90=p90,
+                                        estimate_bytes=1000, free_bytes=10 ** 12)
+    assert tight and "window" in tight and f"{p90:.1f}" in tight, (
+        "the window bound must state the p90 it charged, or a reader cannot re-derive "
+        f"the decision; got: {tight}")
+    assert run_round.boot_precondition(seconds_left=need, agent_p90=p90,
+                                       estimate_bytes=1000,
+                                       free_bytes=10 ** 12) is None
+    disk = run_round.boot_precondition(seconds_left=10_000, agent_p90=p90,
+                                       estimate_bytes=900,
+                                       free_bytes=int(900 * run_round.FIXTURE_DISK_FACTOR) - 1)
+    assert disk and "disk" in disk, (
+        "free space below 2x the copy's own estimate must refuse the copy rather than "
+        "discover ENOSPC inside it, which is a partial second copy of the memory")
+    assert run_round.boot_precondition(seconds_left=10_000, agent_p90=p90,
+                                       estimate_bytes=900,
+                                       free_bytes=900 * run_round.FIXTURE_DISK_FACTOR) is None
+
+
+def test_a_fixture_left_behind_fails_the_round_and_says_so_in_the_report(round_env,
+                                                                        tmp_path,
+                                                                        monkeypatch):
+    """#4163 clause 5, measured on the production `run()` path.
+
+    The fixture area is `DATA_ROOT/eval/fixtures`, and a copy still there after a round
+    that completed means its own teardown lost track of it: a second copy of the memory
+    tree, readable by anything that walks the data root, with only the sweep's 30-minute
+    grace between it and a deletion the round was supposed to have done itself. The
+    verdict therefore has to reach the REPORT — a payload key and `main`'s exit status
+    are both invisible to the reader who opens the artifact next morning, which is the
+    failure `a-verdict-that-is-only-printed` names.
+    """
+    # The fixtures area is `<DATA_ROOT>/eval/fixtures`, and `leftover_fixtures` reads
+    # DATA_ROOT from `app.paths`, so the scratch root is a directory of this test's own.
+    data_root = tmp_path / "data-root"
+    stranded = data_root / "eval" / "fixtures" / "dw-20261116-050000-bench_029-x"
+    monkeypatch.setattr("app.paths.DATA_ROOT", data_root)
+
+    # The copy has to appear DURING the round, not before it. The check is a difference
+    # from a baseline the round reads before it dispatches anything, precisely because the
+    # area is shared: a hand-run trial's per-trial copy, or a concurrent round's live one,
+    # can be sitting there the whole time, and `sweep_orphan_fixtures` collects only `dw-*`
+    # trees — so a census of the area would fail every later round forever for one stray
+    # copy nobody in that round made. So the double below is the round's own trial
+    # dispatch, and the directory it leaves behind is the copy that dispatch built.
+    dispatched = run_round._run_trials
+    attempts: list[int] = []
+
+    async def _dispatch_that_leaves_a_copy(cfg_, *a, **k):
+        if not attempts:
+            stranded.mkdir(parents=True, exist_ok=True)
+        attempts.append(1)
+        return await dispatched(cfg_, *a, **k)
+
+    monkeypatch.setattr(run_round, "_run_trials", _dispatch_that_leaves_a_copy)
+    # No boot in either round: the round must be failed for the copy it left, not for one
+    # it might have booted, and the second round has to be unable to build a fresh one.
+    monkeypatch.setattr(run_round, "boot_precondition",
+                        lambda **_kw: "window below build+boot+one agent-loop p90")
+
+    def _run(_cfg):
+        return asyncio.run(run_round.run(
+            targets=["memory"], budget_minutes=5, max_variants=1, model="m-test"))
+
+    result = _run(round_env)
+    assert result["leftover_fixtures"] == ["dw-20261116-050000-bench_029-x"], (
+        "the round's own result must name the copy it failed to remove")
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(
+        encoding="utf-8")
+    assert "FIXTURE LEFT BEHIND" in report and "dw-20261116-050000-bench_029-x" in report, (
+        f"the report must carry the failure, got:\n{report}")
+    # And a copy that was already there when a round started is not that round's failure:
+    # the stranded directory is still on disk from the first round, and this round builds
+    # nothing, so it predates the baseline and publishes nothing. This is the half a census
+    # of the area could not express at all — and the only shape that survives a stray copy.
+    result2 = asyncio.run(run_round.run(targets=["memory"], budget_minutes=5,
+                                        max_variants=1, model="m-test"))
+    assert result2["leftover_fixtures"] == [], (
+        "a copy the round did not build is not a copy the round failed to remove")
+    report2 = (round_env.paths.rounds_dir / f"{result2['round_id']}.md").read_text(
+        encoding="utf-8")
+    assert "FIXTURE LEFT BEHIND" not in report2
+
+
+def test_the_report_states_what_the_round_decided_about_a_writes_card(round_env):
+    """#4163 clauses 1 and 3 at the level a reader actually looks at.
+
+    A round that booted a child and admitted a trial has to say so where a reader can see
+    it: the ledger's per-trial row for that card does not name the boot that made the
+    score possible, and a round that skipped the boot is otherwise indistinguishable from
+    one that never considered it.
+    """
+    result = asyncio.run(run_round.run(targets=["memory"], budget_minutes=5,
+                                       max_variants=1, model="m-test"))
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(
+        encoding="utf-8")
+    assert "- writes-scoped trial:" in report, (
+        f"every round states its writes decision; got:\n{report}")
+    assert "no writes-scoped card in this round's matrix" in report, (
+        "this bench corpus declares no writes card, and the report says the true reason "
+        "rather than leaving the line out")
+
+
+def test_a_production_rooted_round_probes_and_censuses_the_area_it_builds_in(round_env,
+                                                                            tmp_path,
+                                                                            monkeypatch):
+    """#4163 clause 5 where it actually bites: the round's data root IS the production one.
+
+    Every other node here runs under a scratch data root, and on a scratch root the fixtures
+    area IS `<data_root>/eval/fixtures`, so those nodes cannot tell the two wirings apart. On
+    this box `app.paths.DATA_ROOT` answers `PRODUCTION_DATA_ROOT` for a real round, and the
+    copy then goes to `WRITES_FIXTURE_AREA` — a different filesystem path, and the only one
+    the round's teardown, its leftover census and its free-disk precondition may read. A
+    census of the data root reports an empty fixtures area while a copy of the vault sits
+    under `~/lloyd-work`; a disk probe of the data root measures a filesystem the copy never
+    touches. Both errors read as a healthy round.
+    """
+    prod_data = tmp_path / "prod-data"
+    prod_vault = tmp_path / "prod-vault"
+    area = tmp_path / "lloyd-work"
+    prod_data.mkdir()
+    prod_vault.mkdir()
+    monkeypatch.setattr("app.data_root.PRODUCTION_DATA_ROOT", prod_data)
+    monkeypatch.setattr("app.data_root.PRODUCTION_VAULT", prod_vault)
+    monkeypatch.setattr("app.paths.DATA_ROOT", prod_data)
+    monkeypatch.setattr(run_round, "WRITES_FIXTURE_AREA", area)
+
+    probes: list[str] = []
+    real_probe = run_round.fixtures_free_bytes
+
+    def _probe(path):
+        probes.append(str(path))
+        return real_probe(path)
+
+    monkeypatch.setattr(run_round, "fixtures_free_bytes", _probe)
+    # Force the skip so this node measures the wiring, not a child: the precondition is
+    # patched, so the free-byte probe it was handed is still this round's own reading.
+    monkeypatch.setattr(run_round, "boot_precondition",
+                        lambda **_kw: "window below build+boot+one agent-loop p90")
+
+    # A copy left in each area during the round's dispatch. Only the one under the AREA the
+    # round builds in is this round's failure; the data-root copy is what a hand-run built
+    # under the old layout, and flagging it would fail every later round forever.
+    dispatched = run_round._run_trials
+    attempts: list[int] = []
+
+    async def _dispatch_that_leaves_copies(cfg_, *a, **k):
+        if not attempts:
+            (area / "eval" / "fixtures" / "dw-in-area").mkdir(parents=True)
+            (prod_data / "eval" / "fixtures" / "dw-in-data-root").mkdir(parents=True)
+        attempts.append(1)
+        return await dispatched(cfg_, *a, **k)
+
+    monkeypatch.setattr(run_round, "_run_trials", _dispatch_that_leaves_copies)
+    # A round whose matrix has no writes card in it never reaches the precondition at all,
+    # and the scratch corpus contains none (every other node here depends on that). The two
+    # readers the boot decision calls are patched instead of the corpus: the card the round
+    # picks and the scopes it declares are what decide whether a probe happens.
+    monkeypatch.setattr(run_round, "pick_writes_card",
+                        lambda *_a, **_k: run_round.WRITES_ROTATION[0])
+    monkeypatch.setattr(run_round, "writes_declared",
+                        lambda *_a, **_k: ["vault"])
+    result = asyncio.run(run_round.run(targets=["memory"], budget_minutes=5,
+                                      max_variants=1, model="m-test"))
+
+    assert result["leftover_fixtures"] == ["dw-in-area"], (
+        "the census must see the copy in the area the round booted into and must not blame "
+        f"this round for one sitting in the data root; got {result['leftover_fixtures']}")
+    assert probes, "the round must probe free bytes before deciding to boot"
+    assert probes[0] == str(area / "eval" / "fixtures"), (
+        f"the disk precondition must measure the filesystem the copy lands on, not the data "
+        f"root's; it measured {probes[0]}")
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(
+        encoding="utf-8")
+    assert "dw-in-area" in report and "dw-in-data-root" not in report, (
+        f"the report names one and not the other; got:\n{report}")
+
+
+def test_the_free_byte_probe_of_an_area_that_does_not_exist_yet_is_its_filesystem(tmp_path):
+    """A box that has never booted a writes trial has no fixtures directory.
+
+    `shutil.disk_usage` raises on a missing path, and the caller reads any raise as 0 free
+    bytes — which the precondition then refuses every boot forever, on a box with 2.1 TB
+    free, with the row claiming a disk shortage that does not exist. So the walk-up to the
+    nearest existing ancestor is what makes the guard usable at all, and it is the same
+    filesystem: the area is about to be `mkdir`ed inside that ancestor.
+    """
+    import shutil as _sh
+
+    missing = tmp_path / "lloyd-work" / "eval" / "fixtures"
+    assert not missing.exists()
+    measured = run_round.fixtures_free_bytes(missing)
+    assert measured == _sh.disk_usage(tmp_path).free, (
+        "the probe must answer with the free bytes of the filesystem the directory will be "
+        "created on; it gave a value that is not that filesystem's")
+    assert measured > 0
+    assert run_round.fixtures_free_bytes(tmp_path) == _sh.disk_usage(tmp_path).free, (
+        "an area that does exist is measured directly, with no walk-up at all")
+
+
+# ── #4163 clause 4: a boot that cannot happen takes the card out of the matrix ─────
+#: The scratch corpus this file's `round_env` writes contains none of the rotation, so a
+#: node that wants to see a writes card REMOVED from the dispatched matrix has to put one
+#: there first. It carries the rotation's first id and the scopes
+#: `bench_029_durable_write_vault_note` really declares, and it does not require the engine,
+#: so the round keeps it through the split and the only thing that can take it out is the
+#: boot decision under test.
+REFUSED_CARD = run_round.WRITES_ROTATION[0]
+
+
+def _card_in_the_matrix(cfg, *, scopes: list[str]) -> None:
+    card_file = cfg.paths.bench_dir / f"{REFUSED_CARD}.md"
+    card_file.write_text(
+        "---\n"
+        f"id: {REFUSED_CARD}\n"
+        "category: synthetic\n"
+        "safety_critical: false\n"
+        "writes:\n" + "".join(f"  - {s}\n" for s in scopes) +
+        "prompt: write the note\n"
+        "objective_checks: []\n"
+        "---\n\nProse body.\n", encoding="utf-8")
+
+
+def _refusal_rails(round_env, monkeypatch) -> Path:
+    """Make the round's data root BE a production root, so the real rails refuse the build.
+
+    `build_fixture` rule (2) refuses any destination inside `PRODUCTION_DATA_ROOT`
+    (`bench_fixture.py:289-290`), and on this box a real round's fixtures area IS
+    `<DATA_ROOT>/eval/fixtures`, so the rail fires on the live tree exactly as it does here
+    once the constant names the root the area hangs off. Patching a constant is not stubbing
+    a rail: the builder's own containment comparison still does the refusing, and
+    `test_the_old_builder_arguments_are_refused_by_the_rails_as_they_stand` in
+    tests/test_autoresearch_writes_trial_boot.py pins that those rails are live against the
+    UNPATCHED constants. It refuses before copying anything, so nothing needs cleaning.
+    """
+    from app import paths as app_paths
+
+    data_root = Path(app_paths.DATA_ROOT)
+    # The rail only bites if the boot is about to build inside this root, which is what
+    # `writes_fixture_source` does for a source that is NOT itself production — the case this
+    # scratch round is in. Asserted rather than assumed: if the source choice ever starts
+    # sending this round somewhere else, the refusal below stops happening and the node must
+    # fail here rather than silently boot a child.
+    chosen_src, chosen_parent = run_round.writes_fixture_source()
+    assert chosen_parent.is_relative_to(data_root), (
+        f"this node refuses the build by naming the round's own data root production, which "
+        f"only works while the boot builds under it; it chose {chosen_parent}")
+    monkeypatch.setattr("scripts.autoresearch.bench_fixture.PRODUCTION_DATA_ROOT", data_root)
+    return data_root
+
+
+def test_a_boot_the_builder_refuses_takes_the_card_out_of_the_matrix_and_says_so(round_env,
+                                                                              monkeypatch):
+    """#4163 clause 4 at run level, with nothing stubbed on the refusal path.
+
+    The refusal is the real rule (2) rail, so nothing on this path is stubbed.
+    Two claims, each read off what the round actually did:
+
+    - the card is GONE from the matrix `_run_trials` was handed, so no agent-loop trial is
+      dispatched against a server that would only refuse it. The witness that it was ever
+      there is the task list `fit_matrix` was asked to fit — without that, asserting absence
+      in a scratch corpus that never held the card would pass on its own.
+    - the row names the raise, and does not publish `UNSCORABLE_CAUSE`: a round that
+      ATTEMPTED a boot and was refused by the rails cannot book a sentence saying none was
+      ever booted, which is the false cause `cd938624` exists to prevent.
+    """
+    _card_in_the_matrix(round_env, scopes=["vault"])
+    _refusal_rails(round_env, monkeypatch)
+
+    def _ids_of(args):
+        # Position-agnostic: take the first argument that IS a list of task dicts, so this
+        # witness keeps reading the matrix even if the two helpers reorder their parameters.
+        for arg in args:
+            if isinstance(arg, list) and arg and isinstance(arg[0], dict) \
+                    and "id" in arg[0]:
+                return [str(t.get("id")) for t in arg]
+        return []
+
+    pre_fit: list[list[str]] = []
+    real_fit = run_round.fit_matrix
+
+    def _watch_fit(*a, **k):
+        pre_fit.append(_ids_of(a))
+        return real_fit(*a, **k)
+
+    monkeypatch.setattr(run_round, "fit_matrix", _watch_fit)
+    dispatched = run_round._run_trials
+    seen: list[list[str]] = []
+
+    async def _record_what_was_dispatched(*a, **k):
+        seen.append(_ids_of(a))
+        return await dispatched(*a, **k)
+
+    monkeypatch.setattr(run_round, "_run_trials", _record_what_was_dispatched)
+    # 30 minutes against a ~150 s boot bound: the shrink keeps every card, so the ONLY
+    # thing that can remove this one from the matrix is the refused boot. The dropped-card
+    # path is `test_a_dropped_writes_card_still_gets_an_unscorable_row`.
+    result = asyncio.run(run_round.run(targets=["memory"], budget_minutes=30,
+                                      max_variants=1, model="m-test"))
+
+    assert pre_fit and REFUSED_CARD in pre_fit[0], (
+        f"the round must have had the card to remove: fit_matrix was asked to fit "
+        f"{pre_fit[0] if pre_fit else '(never called)'}")
+    assert seen, "the round must still dispatch its other cards"
+    for ids in seen:
+        assert REFUSED_CARD not in ids, (
+            f"a writes card whose boot the rails refused must not be dispatched for an "
+            f"agent-loop trial against the supervised server; it appeared in {ids}")
+
+    rows = _unscorable_rows(round_env, result["round_id"])
+    mine = [r for r in rows if r["task_id"] == REFUSED_CARD]
+    assert mine, (
+        f"the trial is gone but the record is not; rows published: "
+        f"{[(r['task_id'], r['event']) for r in rows]}")
+    row = mine[0]
+    assert "FixtureRefused" in row["reason"], (
+        f"the row must name the refusal that actually stopped the boot, not a pretext; "
+        f"got {row['reason']!r}")
+    assert run_round.UNSCORABLE_CAUSE not in row["reason"], (
+        f"a round that attempted a boot cannot publish a sentence saying none was booted; "
+        f"got {row['reason']!r}")
+    # `variant_id: None` is the load-bearing key: a row with a variant id would feed
+    # `derive_trial_priors` a trial that never ran. The category is not on this row shape
+    # (only a shrink drop carries one), so it is not asserted here.
+    assert row["variant_id"] is None, row
+    assert row["event"] == run_round.UNSCORABLE_EVENT, row
+
+
+def test_a_refused_boot_is_not_recorded_as_a_shrink_drop(round_env, monkeypatch):
+    """The refused-boot cause and the drop cause stay distinguishable in one row.
+
+    Both travel through the same `second_cause` slot and both are true, but they answer
+    different questions — one says the isolation rails stopped the boot, the other says the
+    deadline did — and a reader deciding whether to widen the window must not be handed the
+    wrong one. A budget that keeps the card is therefore the point of this node, not an
+    accident of it: `dropped` must be False here, so any wording that mentions a drop is a
+    bug this catches.
+    """
+    _card_in_the_matrix(round_env, scopes=["vault"])
+    _refusal_rails(round_env, monkeypatch)
+    result = asyncio.run(run_round.run(targets=["memory"], budget_minutes=30,
+                                      max_variants=1, model="m-test"))
+    row = [r for r in _unscorable_rows(round_env, result["round_id"])
+           if r["task_id"] == REFUSED_CARD][0]
+    assert "FixtureRefused" in row["reason"], row["reason"]
+    for pretext in ("shrink", "dropped", "drop"):
+        assert pretext not in row["reason"], (
+            f"the shrink did not drop this card — the window carries it — so the reason "
+            f"must not read as if it had; got {row['reason']!r}")
+
+
+def test_a_boot_already_attempted_never_falls_back_to_the_box_level_cause():
+    """Every cause the round can publish after it has TRIED, in one table.
+
+    `boot is None` covers two different histories — skipped by a bound, or attempted and
+    refused — and both must stop asserting `UNSCORABLE_CAUSE`, because by then the round has
+    itself disproved it. The third row is the one case that keeps the box-level wording
+    byte-identical: no writes card existed to boot for, which is what
+    `test_the_cause_is_a_statement_about_this_box...` pins from the other side.
+    """
+    cause = run_round._writes_unscorable_cause
+    refused = cause(boot=None, boot_skipped="FixtureRefused: rule 2", dropped=False)
+    skipped = cause(boot=None, boot_skipped="window below build+boot+one agent-loop p90",
+                    dropped=True)
+    never_attempted = cause(boot=None, boot_skipped=None, dropped=True)
+    booted = cause(boot={"card": REFUSED_CARD}, boot_skipped=None, dropped=False)
+
+    for published in (refused, skipped, booted):
+        assert run_round.UNSCORABLE_CAUSE not in published, published
+    assert "FixtureRefused: rule 2" in refused, refused
+    assert "window below build+boot" in skipped, skipped
+    assert REFUSED_CARD in booted, booted
+    assert never_attempted == run_round.UNSCORABLE_CAUSE + " and the shrink dropped it", (
+        f"with no boot attempted at all the sentence must stay byte-identical, since that "
+        f"is the only case whose claim it still supports; got {never_attempted!r}")

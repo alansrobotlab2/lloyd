@@ -30,13 +30,14 @@ half-built version fails:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from app.data_root import (
     DATA_ROOT_MARKER, KG_DB_RELATIVE, PRODUCTION_DATA_ROOT, PRODUCTION_VAULT,
@@ -380,6 +381,85 @@ def build_fixture(*, trial_id: str, writes: list[str], vault: Path | str,
                       source_vault=src_vault, source_data_root=src_data)
     fx.init_git(git_identity=git_identity)
     return fx
+
+
+def estimate_fixture_bytes(*, vault: Path | str, data_root: Path | str,
+                           scopes: Sequence[str]) -> int:
+    """Bytes a `build_fixture` copy of THESE scopes would occupy, measured off the sources.
+
+    #4163 clause 5 needs this BEFORE the copy exists: the disk precondition asks whether the
+    filesystem can carry the copy, and "we will find out by running out" is the failure mode
+    — a `copytree` that dies on ENOSPC leaves a partial second copy of the user's memory
+    under the fixtures area, which is what `sweep_orphan_fixtures` exists to reap and what a
+    round must never create in the first place.
+
+    The figure is the sources the copy loop ACTUALLY walks, resolved by that loop's own rules
+    (`build_fixture`, the `for scope in scopes` body). The first version of this function
+    guessed, and guessed wrong three ways at once: it counted `backlog` off
+    `<data_root>/backlog` — a directory that has not existed on this box since the board
+    moved into the vault, so a backlog-scoped card estimated **0 bytes** — it counted `vault`
+    as `memory/` plus one file when bare `vault` copies the WHOLE source vault, and it
+    invented `data` and `runtime` scopes the loop resolves as vault paths. Two of the three
+    under-counted, and a bound that under-counts is a bound that lets the copy start on a
+    full disk, which is the one thing this function is for.
+
+    Per scope, matching the loop line for line:
+
+    * bare `vault` → the whole source vault minus `VAULT_IGNORE` (`.git`, `.obsidian`,
+      `.trash`, `.DS_Store`), because `copytree` runs with `ignore=_vault_ignore`, which
+      prunes those names at every depth;
+    * any other vault scope (`backlog`, `memory`, `vault/x`) → `<vault>/<scope-with-vault/-
+      stripped>`, since the loop joins the declaration onto the **source vault**, never the
+      data root — which is why `<vault>/backlog` and not `<data_root>/backlog` is the figure
+      for a `backlog` card;
+    * a data-store scope (`kg`, `workers.db`) → the ONE file `copy2` copies,
+      `<data_root>/<rel>`; a missing store measures 0, which is honest, because the loop
+      `touch`es an empty destination rather than copying anything for it.
+
+    A scope already inside the whole-vault walk is not counted twice: the loop's second
+    `copytree` lands on the same destination with `dirs_exist_ok=True`, so a card declaring
+    `vault` plus `backlog` occupies one copy of `<vault>/backlog`, not two.
+    """
+    vault, data_root = Path(vault), Path(data_root)
+    total = 0
+
+    def _add(path: Path) -> None:
+        nonlocal total
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:                      # raced away mid-walk: measures nothing
+            pass
+
+    def _walk(root: Path) -> None:
+        if not root.is_dir():
+            return
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Both halves of `_vault_ignore`, which `copytree` applies to `names` at EVERY
+            # depth: pruning only the directories would leave a root-level `.DS_Store` in
+            # the figure while the copy leaves it out. That direction is the safe one, so a
+            # test would not have caught it by failing — it is wrong because the estimate is
+            # then not the copy, and the 2x bound below it silently shrinks.
+            dirnames[:] = [d for d in dirnames if d not in VAULT_IGNORE]
+            for name in filenames:
+                if name not in VAULT_IGNORE:
+                    _add(Path(dirpath) / name)
+
+    whole_vault = "vault" in set(scopes)
+    if whole_vault:
+        _walk(vault)
+    for scope in dict.fromkeys(scopes):
+        if scope in DATA_STORE_SCOPES:
+            _add(data_root / DATA_STORE_SCOPES[scope])
+            continue
+        if scope == "vault" or whole_vault:
+            continue                         # the whole-vault walk already counted it
+        src = vault / (scope[len("vault/"):] if scope.startswith("vault/") else scope)
+        if src.is_dir():
+            _walk(src)
+        else:
+            _add(src)
+    return total
 
 
 def _vault_ignore(directory: str, names: list[str]) -> set[str]:
