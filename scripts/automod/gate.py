@@ -125,6 +125,7 @@ from pathlib import Path
 from app import lint_findings
 from scripts.automod import canary as C
 from scripts.automod import canary_smoke as CS
+from scripts.automod import chrome_dist as _cd
 from scripts.automod import code_rules as CR
 from scripts.automod import frontend_layout as _fe_layout
 from scripts.automod import frontend_probe as _fe_probe
@@ -619,48 +620,30 @@ CHROME_VITE_CONFIG = "vite.chrome.config.ts"
 CHROME_README = "chrome-extension/README.md"
 CHROME_VERDICT_OK = "chrome bundle provenance ok"
 
-#: What "the frontend changed" means, beside the `web/` prefix (#3770).
-FRONTEND_TRIGGER_PATHS: tuple[str, ...] = (CHROME_WORKER_SRC, CHROME_WORKER_BUNDLE)
-
-#: The README's build line carries the API base the shipped bundle was baked with.
-_API_BASE_RE = re.compile(r"""VITE_API_BASE=['"]?([^'"\s]*)['"]?""")
+#: What "the frontend changed" means, beside the `web/` prefix (#3770; #4171 added the panel
+#: half). Its html has one fixed name so it joins the SET; its chunks are `[name]-[hash]` so
+#: they can only be a PREFIX — a set of hashes expires on the first rebuild. What stays out is
+#: what stays out of the grant: `manifest.json`, the README, `url.ts`.
+FRONTEND_TRIGGER_PATHS: tuple[str, ...] = (
+    CHROME_WORKER_SRC, CHROME_WORKER_BUNDLE, _cd.PANEL_HTML)
+#: The one prefix, and the reason a path set is not the whole answer.
+PANEL_TRIGGER_PREFIXES: tuple[str, ...] = (_cd.PANEL_ASSETS,)
 
 
 def frontend_changed(paths) -> list[str]:
     """The one answer to "did the frontend change", for the two places that decide it.
 
-    `rung_frontend`'s changed-path filter and `Gate._reuse_rule`'s frontend branch each
-    spelled `p.startswith("web/")` to themselves until #3770 measured what that costs:
-    commit `dc81f046` rewrote `chrome-extension/dist/service-worker.js` — the bytes Chrome
-    actually loads — with zero `web/` paths in the diff, so the rung answered "no frontend
-    changed" for that round, and any later chrome-only commit reused the previous green
-    instead of re-running it. Fixing only one of the two leaves the other open, so both
-    read this predicate; one node in tests/test_automod_gate.py patches it and watches both
-    callers, which is what keeps a later edit from re-forking them in silence.
-
-    The extension entries are trigger paths, not a trigger prefix, for the same reason the
-    grant names them: `chrome-extension/manifest.json` is tracked here and is not frontend.
+    `rung_frontend`'s filter and `Gate._reuse_rule`'s frontend branch each spelled
+    `p.startswith("web/")` to themselves until #3770 measured what that costs: `dc81f046`
+    rewrote `chrome-extension/dist/service-worker.js` — the bytes Chrome actually loads —
+    with zero `web/` paths in the diff, so the rung skipped and any later chrome-only commit
+    reused its green instead of re-running. Both callers read this one predicate and one node
+    patches it to watch both, because an edit that reaches only one leaves the other broken in
+    silence. #4171 added the panel half, the same shape one commit later: see
+    `chrome_dist.panel_path`.
     """
-    return [p for p in paths
-            if p.startswith("web/") or p in FRONTEND_TRIGGER_PATHS]
-
-
-def _api_base_from_readme(root: Path) -> str:
-    """The `VITE_API_BASE` value `chrome-extension/README.md` tells a human to build with.
-
-    Harvested, never hardcoded into the gate: the README and the shipped bundle are the pair
-    that "build-produced" actually means, so a round that repoints the extension at a
-    different backend AND rebuilds stays green here, while a README whose build command no
-    longer matches what was shipped reddens. Both empties are a stated skip, not a pass —
-    building with an unset base would bake `'/api'`, a different bundle, and the node would
-    report a provenance failure for what is really a missing instruction.
-    """
-    try:
-        text = (root / CHROME_README).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    m = _API_BASE_RE.search(text)
-    return m.group(1) if m else ""
+    return [p for p in paths if p.startswith("web/") or p in FRONTEND_TRIGGER_PATHS
+            or p.startswith(PANEL_TRIGGER_PREFIXES)]
 
 
 def _chrome_vite_build(web: Path, out_dir: Path, api_base: str,
@@ -690,48 +673,29 @@ def _chrome_vite_build(web: Path, out_dir: Path, api_base: str,
     return r.returncode == 0, text[-900:]
 
 
-def _porcelain_paths(root: Path, scope: str) -> list[str]:
-    """The paths `git status --porcelain -- <scope>` reports, git's order preserved.
+def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "", *,
+                             build=None, porcelain=None,
+                             changed: list[str] | None = None) -> tuple[bool, str, dict]:
+    """Prove the shipped bytes under `chrome-extension/dist/` are what the source builds.
 
-    Splits rename lines on `" -> "` and keeps the target, because a rename inside the
-    extension is exactly as dirty as an edit and reporting only the left-hand side would
-    name a path that no longer exists.
-    """
-    r = _run(["git", "status", "--porcelain", "--", scope], cwd=root, timeout=60)
-    out: list[str] = []
-    for line in r.stdout.splitlines():
-        if not line.strip():
-            continue
-        path = line[3:] if len(line) > 3 else ""
-        out.append(path.split(" -> ", 1)[1] if " -> " in path else path)
-    return out
-
-
-def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "",
-                             *, build=None, porcelain=None) -> tuple[bool, str, dict]:
-    """Prove the tracked worker bundle is what the tracked source builds (#3770).
-
-    Returns the rung's own `(ok, detail, data)` triple so a failure reddens the frontend
-    rung and a skip stays a skip. #3646's grant made `chrome-extension/dist/service-worker.js`
-    writable by a round, and the strongest thing any test asserted of it was that harvested
-    literals are PRESENT — `tests/test_chrome_extension_manifest_tracked.py` counts
-    `type:"focus-session"` occurrences and all ten of its nodes stay green for a minified
-    bundle nobody built. A byte comparison against a fresh build is the only thing that
-    distinguishes ship from hand-authoring, and it is cheap here because the config pins the
-    worker entry to a FIXED name (`entryFileNames` maps it to `service-worker.js`, hashless)
-    while the panel chunks are content-hashed.
-
-    That is also why the comparison is this one file and no other path under `dist/`: the
-    hashed panel half re-hashes on every build — #3769's owed rebuild (#3963) re-named all of
-    it when it landed — so byte-comparing a content-hashed half here would sit permanently red.
-
-    `build` and `porcelain` are injectable because the red leg and the dirty-tree leg need a
-    build that produces bytes the tracked file does not, and a node that shells out to vite
-    cannot be tested for either without a 2.6-second build per case; the shipped call is the
-    default, so the gate runs the real thing.
+    Returns the rung's `(ok, detail, data)` triple, so a failure reddens the frontend rung and a
+    skip stays a skip. #3646's grant made the worker bundle writable by a round and the literals
+    `tests/test_chrome_extension_manifest_tracked.py` harvest are satisfiable by hand, so a byte
+    comparison against a fresh build is the only thing that tells ship from hand-authoring. One
+    build buys both halves, and each is compared against the same `out_dir` (#3770, widened to the
+    panel half by #4171). That half is compared BY CONTENT, not by name — a chunk's name is a hash
+    of its bytes, so a matching name proves nothing about them — which inverts the false reason
+    two files gave for skipping it, that the hashed names move on every build and a byte compare
+    would sit permanently red: `41bc89de`'s second identical build left `chrome-extension/dist/`
+    porcelain-clean, hashed names included. `chrome_dist.compare_panel_half` holds that rule and
+    the exclusion of `dist/manifest.json` and `icons/`, which the copy plugin writes to the
+    ABSOLUTE dist and which the porcelain leg below alone owns. `changed` decides whom a
+    disagreement REFUSES: a leg blocks only a round whose own diff ships its bytes, and elsewhere
+    the verdict is RECORDED beside its byte counts, the bar to a block being #4171's ten rounds
+    naming a panel path with zero. `build` and `porcelain` are injectable for the red legs.
     """
     build = build or _chrome_vite_build
-    porcelain = porcelain or _porcelain_paths
+    porcelain = porcelain or _cd.porcelain_paths
     worktree = Path(worktree)
     web = Path(web)
     # ONE value for both `_scratch_dir` and `_drop_scratch`: the two recompute the round's
@@ -746,7 +710,7 @@ def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "",
                       "extension cannot be built here and a mismatch would be the missing "
                       "install, not a hand-edited bundle"), {
             "skipped": True, "reason": "no web/node_modules/.bin/vite"}
-    api_base = _api_base_from_readme(worktree)
+    api_base = _cd.api_base_from_readme(worktree)
     if not api_base:
         return True, (f"chrome bundle provenance skipped: {CHROME_README} carries no "
                       "VITE_API_BASE, so the base the shipped bundle was baked with is "
@@ -758,6 +722,17 @@ def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "",
     ok, tail = build(web, out_dir, api_base)
     seconds = time.time() - started
     data = {"chrome_build_seconds": round(seconds, 2), "chrome_api_base": api_base}
+
+    def ships(*names: str) -> bool:
+        """Does this diff ship bytes in these halves? `changed=None`: every round does."""
+        if changed is None:
+            return True
+        prefixes = tuple(n for n in names if n.endswith("/"))
+        return any(p in names or p.startswith(prefixes) for p in changed)
+
+    # A build that will not run is not a byte disagreement. It is the config, a source file
+    # it imports, or the install — all of them defects the round that broke them owns — so
+    # this arm refuses whatever `changed` says, unlike the two legs below it.
     if not ok:
         _drop_scratch(out_dir, round_id)
         return False, f"chrome bundle build failed in {seconds:.1f}s: {tail[-500:]}", data
@@ -778,31 +753,56 @@ def chrome_bundle_provenance(worktree: Path, web: Path, round_id: str = "",
     tracked_bytes = tracked.read_bytes()
     data.update({"chrome_produced_bytes": len(produced_bytes),
                  "chrome_tracked_bytes": len(tracked_bytes)})
+    # BOTH halves are compared on every run and `ships()` decides afterwards whom to refuse.
+    # The order is load-bearing: a refusal hands the reader this node's dict FLAT, so a leg
+    # that gave up first would delete the other half's byte counts from the ledger row.
+    panel_ok, panel_detail, panel_data = _cd.compare_panel_half(
+        worktree, out_dir, api_base=api_base, changed=changed)
+    data.update(panel_data)
+    worker_detail = ""
     if produced_bytes != tracked_bytes:
-        _drop_scratch(out_dir, round_id)
-        return False, (
+        worker_detail = (
             f"{CHROME_WORKER_BUNDLE} is not what the tracked source builds: a fresh "
             f"`vite build -c {CHROME_VITE_CONFIG}` produced {len(produced_bytes)} bytes "
             f"and the tracked file is {len(tracked_bytes)}. "
-            f"cd web && VITE_API_BASE='{api_base}' npx vite build -c "
-            f"{CHROME_VITE_CONFIG} && git add {CHROME_WORKER_BUNDLE} && git commit. "
-            "The literals tests/test_chrome_extension_manifest_tracked.py harvest are "
-            "satisfiable by hand; these bytes are not — and the panel half of dist/ is "
-            "deliberately NOT compared, because its names are content hashes."), data
+            f"{_cd.rebuild_command(api_base, CHROME_WORKER_BUNDLE)}. The literals "
+            "tests/test_chrome_extension_manifest_tracked.py harvest are satisfiable by "
+            "hand; these bytes are not.")
+        if ships(CHROME_WORKER_SRC, CHROME_WORKER_BUNDLE):
+            _drop_scratch(out_dir, round_id)
+            return False, worker_detail, data
+        data["chrome_worker_would_red"] = True
+    if not panel_ok:
+        _drop_scratch(out_dir, round_id)
+        return False, panel_detail, data
 
     dirty = porcelain(worktree, "chrome-extension/")
     _drop_scratch(out_dir, round_id)
     if dirty:
-        return False, (
-            f"the chrome build left {len(dirty)} path(s) dirty under chrome-extension/: "
-            f"{dirty[:6]}. The build's copy plugin rewrites `dist/manifest.json` and "
-            "`icons/` at their absolute paths whatever --outDir says, so a diff here means "
-            "the build output and the tracked bytes disagree — commit what it produced or "
-            "the bundle Chrome loads is not the bundle the gate just built."), data
-    return True, (f"chrome bundle provenance: {CHROME_WORKER_BUNDLE} matches a fresh "
-                  f"`vite build -c {CHROME_VITE_CONFIG}` byte-for-byte "
-                  f"({len(tracked_bytes)} bytes) in {seconds:.1f}s; chrome-extension/ "
-                  "porcelain-clean after the build"), data
+        if ships(CHROME_WORKER_SRC, CHROME_WORKER_BUNDLE, _cd.PANEL_HTML,
+                 _cd.PANEL_ASSETS):
+            return False, (
+                f"the chrome build left {len(dirty)} path(s) dirty under "
+                f"chrome-extension/: {dirty[:6]}. The build's copy plugin rewrites "
+                "`dist/manifest.json` and `icons/` at their absolute paths whatever "
+                "--outDir says, so a diff here means the build output and the tracked "
+                "bytes disagree — commit what it produced or the bundle Chrome loads is "
+                "not the bundle the gate just built."), data
+        data["chrome_porcelain_would_red"] = True
+    parts = [f"chrome bundle provenance: {CHROME_WORKER_SRC} built by a fresh "
+             f"`vite build -c {CHROME_VITE_CONFIG}` matches {CHROME_WORKER_BUNDLE} "
+             f"byte-for-byte ({len(tracked_bytes)} bytes) in {seconds:.1f}s"]
+    if worker_detail:
+        parts.append(f"RECORDED not refused (no worker path in this diff): {worker_detail}")
+    if panel_detail:
+        parts.append(panel_detail)
+    parts.append(f"chrome build left {len(dirty)} path(s) dirty under chrome-extension/, "
+                 f"RECORDED not refused: {dirty[:6]}" if dirty
+                 else "chrome-extension/ porcelain-clean after the build")
+    recorded = sorted(k for k in data if k.endswith("_would_red"))
+    data["chrome_verdict"] = (CHROME_VERDICT_OK if not recorded
+                              else "recorded, not blocking: " + ", ".join(recorded))
+    return True, "; ".join(parts), data
 
 
 def engine_reachable(root: Path, timeout: float = 4.0) -> tuple[bool, str]:
@@ -3345,18 +3345,18 @@ class Gate:
         # that every already-cached round would have to pay for once. Its seconds land in the
         # rung detail beside the other frontend timings, which is where a future cost review
         # of the trigger set (#3770's owed note) will look.
-        chrome_triggers = [p for p in changed_fe if p in FRONTEND_TRIGGER_PATHS]
-        if chrome_triggers:
-            c_ok, c_detail, c_data = chrome_bundle_provenance(self.worktree, web,
-                                                              self.round_id)
-            if not c_ok:
-                return False, c_detail, c_data
-        else:
-            c_detail = (f"chrome bundle provenance skipped: neither {CHROME_WORKER_SRC} "
-                        f"nor {CHROME_WORKER_BUNDLE} is in this diff, so there is no "
-                        "bundle whose provenance this node could check")
-            c_data = {"chrome_verdict": c_detail, "chrome_build_seconds": None,
-                      "chrome_api_base": None, "chrome_porcelain_after": None}
+        # So the node runs on EVERY frontend round, and the honest price is one vite build per
+        # round: a `web/src/App.tsx` diff can stale the shipped panel too, since the panel bundle
+        # imports the same `web/src/api.ts` the dashboard does, and the only way to know whether
+        # the bytes under `dist/assets/` still agree is to build them. #3770's owed note asked
+        # whether that is worth it — 2.57 s and 2.91 s, the store's only two samples — and the
+        # wider leg #4171 asks for cannot be measured without paying for it, which is why the
+        # leg RECORDS here, `changed` deciding whom it refuses, instead of declining to look.
+        c_ok, c_detail, c_data = chrome_bundle_provenance(self.worktree, web,
+                                                          self.round_id,
+                                                          changed=changed_fe)
+        if not c_ok:
+            return False, c_detail, c_data
         return True, (f"tsc: no new errors ({sum(head.values())} pre-existing); "
                       f"vite build ok; {unit}; {_fe_probe.summary(probe)}; "
                       f"{_fe_layout.summary(probe.get('layout') or {})}; "

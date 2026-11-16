@@ -101,6 +101,30 @@ def test_a_rung_is_re_run_when_its_own_files_moved(tmp_path, stub_git):
     assert g._reuse("frontend") is None
 
 
+def test_a_panel_only_commit_re_rungs_the_rung_rather_than_reusing_a_green(tmp_path,
+                                                                          stub_git):
+    """#4171 clause 1's second half, at the seam the reuse rule owns.
+
+    `frontend_changed` answering non-empty is only half of it: a cached green from an
+    earlier round is keyed on the SAME predicate, so if the reuse rule resolved the panel
+    paths a different way, a commit that rewrites `dist/sidepanel.html` and a chunk would
+    inherit the previous round's verdict and ship a panel no build has ever emitted. This
+    is the leg the worker pair has had since #3770 and the panel half never did.
+
+    The byte that matters is the one on the line above: `test_a_rung_is_reused_when_nothing_
+    relevant_changed` asserts `web/src/api.ts` alone still reuses. So the reuse reader is
+    the same function the rung's own gate reads, and a widening that reached one and not the
+    other would leave a rebuild commit reusing a green — which is what this node exists to
+    refuse.
+    """
+    stub_git["delta"] = ["chrome-extension/dist/sidepanel.html",
+                        "chrome-extension/dist/assets/sidepanel-Bf8Ekfot.js"]
+    g = _Gate(tmp_path, cached={"frontend": _entry()})
+    assert g._reuse("frontend") is None, (
+        "a commit naming only the shipped panel half reused a previous round's green, so "
+        "the bytes it shipped were never compared to any build")
+
+
 def test_a_moved_base_invalidates_everything(tmp_path, stub_git):
     """A rebase changes what the diff MEANS, so every cached answer is about
     a different question.

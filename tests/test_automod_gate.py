@@ -4229,25 +4229,58 @@ README_WITH_BUILD_LINE = (
     "```\nbash\ncd web && VITE_API_BASE='http://127.0.0.1:8080/api' npx vite build "
     "-c vite.chrome.config.ts && cd ..\n```\n")
 
+# The panel half (#4171). The chunk NAMES are this HEAD's real shipped ones — `41bc89de`
+# renamed the pre-#3963 `sidepanel-BaMPpFsS.js` to the `-Bf8Ekfot.js` below — because the
+# whole point of the compare is that a name is a hash and the trigger set therefore matches
+# a prefix; the BYTES are synthetic, since these nodes test what the node DECIDES.
+PANEL_HTML = "chrome-extension/dist/sidepanel.html"
+PANEL_ASSETS = "chrome-extension/dist/assets/"
+PANEL_CHUNK_JS = "sidepanel-Bf8Ekfot.js"
+PANEL_CHUNK_CSS = "sidepanel-CDg8mPEj.css"
+TRACKED_PANEL_HTML = (b'<!doctype html>\n<script type="module" crossorigin '
+                      b'src="/assets/sidepanel-Bf8Ekfot.js"></script>\n')
+TRACKED_PANEL_JS = b"console.log('panel');\n"
+TRACKED_PANEL_CSS = b".root{color:red}\n"
+#: Everything the build puts under `chrome-extension/dist/` except the worker, keyed by
+#: path relative to that directory — so one dict seeds BOTH the tracked tree and the fake
+#: build's output, and agreement is the same literal on both sides.
+PANEL_HALF = {"sidepanel.html": TRACKED_PANEL_HTML,
+              f"assets/{PANEL_CHUNK_JS}": TRACKED_PANEL_JS,
+              f"assets/{PANEL_CHUNK_CSS}": TRACKED_PANEL_CSS}
+
 
 def _chrome_repo(live_repo, *, tracked=TRACKED_WORKER_BYTES,
-                 readme=README_WITH_BUILD_LINE):
+                 readme=README_WITH_BUILD_LINE, panel=None):
     """Give the scratch repo the chrome half the grant admits, and commit it.
 
     Called BEFORE `_frontend_gate`, which branches its worktree at the live HEAD, so the
     worktree under test carries `chrome-extension/` the way a real round's does and the node
     compares against bytes that are genuinely tracked.
     """
-    (live_repo / "chrome-extension" / "dist").mkdir(parents=True, exist_ok=True)
-    (live_repo / "chrome-extension" / "README.md").write_text(readme)
+    _chrome = live_repo / "chrome-extension"
+    _dist = _chrome / "dist"
+    # Wipe the whole half first: `live_repo` is SESSION-scoped and every node commits what it
+    # stages, so a panel half written by one node is still tracked for the next — and a node
+    # that asks for no panel half is precisely a node asserting what ABSENCE looks like.
+    if _chrome.exists():
+        shutil.rmtree(_chrome)
+    _dist.mkdir(parents=True)
+    (_chrome / "README.md").write_text(readme)
     (live_repo / "chrome-extension" / "dist" / "service-worker.js").write_bytes(tracked)
-    git(live_repo, "add", "chrome-extension")
+    # Keyed by path relative to `chrome-extension/dist/`, the same dict `_fake_chrome_run`
+    # takes, so a test that wants a MATCHING panel half passes the one literal `PANEL_HALF`
+    # twice and a test that wants a disagreement changes one value on one side.
+    for rel, blob in (panel or {}).items():
+        target = live_repo / "chrome-extension" / "dist" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(blob)
+    git(live_repo, "add", "-A", "chrome-extension")
     git(live_repo, "commit", "-qm", "chrome half for the provenance nodes")
     return live_repo
 
 
 def _fake_chrome_run(*, produce=TRACKED_WORKER_BYTES, ok=True, dirty=None,
-                     writes=None, calls=None):
+                     writes=None, calls=None, panel=None):
     """A `_run` that plays vite for the chrome config: writes `produce` into the outDir.
 
     Only the vite invocation is faked. `git status --porcelain` inside the provenance node
@@ -4271,6 +4304,13 @@ def _fake_chrome_run(*, produce=TRACKED_WORKER_BYTES, ok=True, dirty=None,
         out_dir = Path(cmd[cmd.index("--outDir") + 1])
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "service-worker.js").write_bytes(produce)
+        # The panel half, keyed the same way `_chrome_repo` keys it. Only what is passed is
+        # emitted: a test that passes nothing reproduces a base whose build produced no
+        # panel, which is a real state the node must answer as "nothing to compare".
+        for rel, blob in (panel or {}).items():
+            target = out_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob)
         # Two maps, one loop shape: `dirty` writes NEW content (porcelain reports it),
         # `writes` writes the SAME content the tree already tracks (porcelain does not) —
         # that difference is clause 4's two arms and the only thing separating them.
@@ -4290,12 +4330,14 @@ def test_the_frontend_predicate_admits_web_and_the_two_granted_chrome_paths():
     The predicate is the whole of clause 3: `rung_frontend`'s filter and `_reuse_rule`'s
     frontend branch both ask it, so a chrome-only commit cannot be a "no frontend changed"
     skip in one and a re-run in the other. The refusals are the point of the second half:
-    both manifests, `README.md`, the panel html, one hashed asset, `url.ts`, the `.tsx` and
-    `.js` look-alikes of the worker source, and the prefix traps all stay OUT. A predicate
-    keyed on `chrome-extension/` would put the panel rebuild — whose bytes are not
-    reproducible, see #3769 — inside a rung that can only check the worker, and would then
-    red rounds whose diff never touched it. `web` and `webfoo/x.ts` are here because the
-    predicate replaced a `startswith("web/")` and must refuse everything that one refused.
+    both manifests, `README.md`, `url.ts`, the `.tsx` and `.js` look-alikes of the worker
+    source, and the prefix traps all stay OUT. #4171 moved the panel html and its hashed
+    chunks from that list into the set, because the node now has bytes to check there; what
+    still keeps a `chrome-extension/`-keyed predicate wrong is `manifest.json` — a permission
+    surface, and a SIBLING of `dist/assets/` rather than a member, so the one admitted prefix
+    cannot widen to its parent — plus the README and the worker source's look-alikes. `web`
+    and `webfoo/x.ts` are here because the predicate replaced a `startswith("web/")` and must
+    refuse everything that one refused.
     """
     assert G.frontend_changed(["web/src/api.ts"]) == ["web/src/api.ts"]
     for trigger in G.FRONTEND_TRIGGER_PATHS:
@@ -4313,10 +4355,19 @@ def test_the_frontend_predicate_admits_web_and_the_two_granted_chrome_paths():
         "detail's frontend file count and the probe's changed-path list disagree with the "
         "diff")
     assert G.frontend_changed([]) == []
+    # A panel-half chunk that exists is a trigger; one that does not is the shape a rename
+    # leaves behind, so both are here under their real names. `41bc89de` renamed the pre-#3963
+    # `assets/sidepanel-BaMPpFsS.js` to `-Bf8Ekfot.js`, and a list naming the old one refuses
+    # a path the tree has not contained since — which is how a stale refusal reads green.
+    assert (G.frontend_changed([PANEL_HTML, f"{PANEL_ASSETS}sidepanel-Bf8Ekfot.js"])
+            == [PANEL_HTML, f"{PANEL_ASSETS}sidepanel-Bf8Ekfot.js"]), (
+        "a panel-only diff — the shipped html plus the chunk its new `src=` names, the exact "
+        "shape of a #3769 rebuild commit — is not frontend, so the rung skips it and "
+        "_reuse_rule reuses somebody else's green")
     for refused in ("app/m.py", "chrome-extension/manifest.json",
                     "chrome-extension/dist/manifest.json", "chrome-extension/README.md",
-                    "chrome-extension/dist/sidepanel.html",
-                    "chrome-extension/dist/assets/sidepanel-BaMPpFsS.js",
+                    "chrome-extension/dist/icons/16.png",
+                    "chrome-extension/dist/assetsess/x.js",
                     "chrome-extension/src/background/url.ts",
                     "chrome-extension/src/background/service-worker.tsx",
                     "chrome-extension/src/background/service-worker.js",
@@ -4324,21 +4375,23 @@ def test_the_frontend_predicate_admits_web_and_the_two_granted_chrome_paths():
         assert refused not in G.frontend_changed([refused]), (
             f"{refused!r} counts as a frontend change; the rung would then run its tsc, "
             "vitest and dashboard probe on a diff that touched none of the frontend")
-    # The trigger set is the WORKER pair specifically, which is narrower than "what the
-    # chrome grant admits": #3769 admitted a third verbatim path the same day this node was
-    # written (`chrome-extension/dist/sidepanel.html`), and its bytes are NOT reproducible —
-    # every build re-hashes the panel assets — so firing this node on it would sit
-    # permanently red. The relation pinned is "a subset of what the grant admits, and the
-    # admitted-but-unchecked remainder is exactly the panel html".
+    # The trigger set is the worker pair PLUS the panel html by name, and the prefix carries
+    # the hashed chunks — three names and one prefix, which is what `chrome_dist` spells and
+    # what the grant admits. The relation to the grant still matters and is still pinned: the
+    # set must stay inside what a round is allowed to write, and the admitted-but-untriggered
+    # remainder is now exactly the copy plugin's outputs, which the porcelain leg owns.
     from scripts.automod import spec as SPEC
     admitted = {e for e in SPEC.ALLOWED_GLOBS
                 if e.startswith("chrome-extension/") and "*" not in e}
     assert set(G.FRONTEND_TRIGGER_PATHS) <= admitted, (
         "the trigger set names a path the chrome grant does not admit, so this node would "
         "refuse a round for editing a file it was never granted")
-    assert admitted - set(G.FRONTEND_TRIGGER_PATHS) == {
-        "chrome-extension/dist/sidepanel.html"}, admitted
-    assert list(G.FRONTEND_TRIGGER_PATHS) == [CHROME_WORKER_SRC, CHROME_BUNDLE]
+    assert admitted - set(G.FRONTEND_TRIGGER_PATHS) == set(), admitted
+    assert list(G.FRONTEND_TRIGGER_PATHS) == [CHROME_WORKER_SRC, CHROME_BUNDLE,
+                                              PANEL_HTML]
+    assert list(G.PANEL_TRIGGER_PREFIXES) == [PANEL_ASSETS], (
+        "the chunk prefix moved out of the module the trigger set reads, so a diff naming a "
+        "renamed chunk is invisible to both callers again")
 
 
 def test_a_chrome_only_diff_runs_the_rung_and_the_provenance_node(
@@ -4371,27 +4424,53 @@ def test_a_chrome_only_diff_runs_the_rung_and_the_provenance_node(
         "ledger key that has always named web/ files both moved without being asked")
 
 
-def test_the_provenance_node_skips_when_neither_worker_path_is_touched(
+def test_a_web_only_round_runs_the_node_and_records_a_panel_disagreement(
         live_repo, tmp_path, monkeypatch):
-    """Clause 2's skip arm, and it must cost nothing.
+    """Clause 5: the wider graph is OBSERVED, and only the round that ships bytes is refused.
 
-    The `chrome-extension/README.md` in the changed list is deliberate: it is a chrome path
-    the grant does NOT admit, so it now moves the rung (clause 3's predicate refuses it, so
-    this diff only runs the rung because of the `web/` path) without moving this node.
+    #3770 skipped this round entirely — "neither path is in this diff, so there is no bundle
+    whose provenance this node could check" — which is the sentence that made a panel rebuild
+    invisible from the dashboard side too: a `web/src/sidepanel/**` commit runs the rung, and
+    if the shipped panel bytes are stale, the only node that could see it declined to look.
+    #4171 pays the one extra vite build (2.57 s and 2.91 s on the only two real chrome builds
+    in the store's history) and keeps the consequence proportionate: with no byte path of
+    its own in the diff this round can still be innocent, so every leg RECORDS. What makes the
+    record worth having is that it is the same verdict the blocking leg would have returned,
+    with the same numbers — `chrome_panel_would_red` beside the emitted and tracked byte
+    counts — which is the count owed-check promotes the leg on. The
+    `chrome-extension/README.md` in the changed list is #3770's own leg and stays refused by
+    the predicate: a chrome path the grant does not admit moves nothing here either.
     """
     _chrome_repo(live_repo)
     calls = []
     g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
                            changed=["web/src/App.tsx", "chrome-extension/README.md"],
                            head={}, base={})
-    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls))
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls, panel={
+        "sidepanel.html": b"<html>a rebuild nothing asked for</html>\n"}))
     ok, detail, data = g.rung_frontend()
     assert ok is True, detail
-    assert not calls, "the node ran a build for a diff that touched neither worker path"
-    assert "chrome bundle provenance skipped: neither" in detail, detail
+    assert calls, "the wider leg skipped the build, so there is no observation to record"
+    assert "RECORDED" in detail, detail
+    row = data["chrome_bundle_provenance"]
+    assert row["chrome_panel_would_red"] is True, row
+    assert row["chrome_panel_bytes_compared"] == 0, row
+    assert row["chrome_panel_emitted_bytes"] == 41, row
+    assert row["chrome_panel_tracked_bytes"] == 0, row
+    # The worker half agrees here (the fake emits the tracked bytes), so the worker records
+    # nothing: the two legs are decided apart, not by one verdict covering the whole dist.
+    # The worker half AGREES, so it contributes nothing: the legs are decided apart, not by
+    # one verdict over the whole of `dist/`.
+    assert "chrome_worker_would_red" not in row, row
+    assert row["chrome_verdict"] == (
+        "recorded, not blocking: chrome_panel_would_red"), row
     assert CHROME_WORKER_SRC in detail and CHROME_BUNDLE in detail, detail
-    assert data["chrome_build_seconds"] is None, (
-        "a skip carries a build time, so the ledger would record a build that did not run")
+    # A build DID run here (`calls` above), so its seconds are recorded. The `is None` claim
+    # belongs to the skip arms alone — `chrome_build_seconds` is present only on an arm that
+    # built, and the node beside this one pins that absence — so demanding None here would
+    # assert a build that this node proves happened had not happened.
+    assert isinstance(data["chrome_build_seconds"], float) \
+        and data["chrome_build_seconds"] >= 0.0, data["chrome_build_seconds"]
 
 
 def test_the_node_builds_with_the_chrome_config_and_the_readme_api_base(
@@ -4466,11 +4545,12 @@ def test_the_node_reds_on_a_hand_edited_bundle_naming_both_byte_counts(
     the minified file, which keeps the harvested literals and the API base and so passes all
     twelve nodes in tests/test_chrome_extension_manifest_tracked.py. The verdict has to name
     both byte counts, because "the bytes differ" tells a reader nothing about whether they
-    were 2 bytes off or the file is a different document. And it compares ONLY the worker:
-    the panel half of `dist/` re-hashes on every build — #3769's owed rebuild has since been
-    landed (#3963) and running it re-named every chunk under `dist/assets/` again — so a
-    whole-`dist/` comparison would sit permanently red, and this node says nothing about
-    whether the panel half is byte-correct.
+    were 2 bytes off or the file is a different document. What it says NOTHING about is the
+    panel half — not because that half cannot be byte-compared (it can, and #4171 compares
+    it beside this one from the same build; `41bc89de`'s second identical build left
+    `chrome-extension/dist/` porcelain-clean, hashed names included) but because this repo
+    has no panel bytes at all, so the compare has nothing to answer with. A red that named a
+    half it never looked at would send the reader chasing a finding that is not in the detail.
     """
     _chrome_repo(live_repo)
     calls = []
@@ -4493,7 +4573,16 @@ def test_the_node_reds_on_a_hand_edited_bundle_naming_both_byte_counts(
     assert row["chrome_tracked_bytes"] == len(TRACKED_WORKER_BYTES), row
     assert CHROME_BUNDLE in detail, detail
     assert "npx vite build -c vite.chrome.config.ts" in detail, detail
-    assert "panel half of dist/ is deliberately NOT compared" in detail, detail
+    assert "cd web && VITE_API_BASE='http://127.0.0.1:8080/api'" in detail, detail
+    # The repo fixture has no panel half, so the compare had nothing to answer with and the
+    # red must not mention it: a refusal that names a half it never looked at is a claim
+    # about a file the reader cannot find, and #4171's whole point is that the half IS
+    # comparable now — which makes the sentence assembled at the bottom of this file (the
+    # phrase is built from fragments there precisely so this comment cannot be the hit that
+    # check reports) the one sentence here that
+    # has to stay absent.
+    assert "panel" not in detail, detail
+    assert data["chrome_panel_bytes_compared"] == 0, data
 
 
 def test_a_round_that_rebuilds_the_worker_clears_the_node(
@@ -4517,30 +4606,29 @@ def test_a_round_that_rebuilds_the_worker_clears_the_node(
     assert row["chrome_tracked_bytes"] == len(TRACKED_WORKER_BYTES), row
 
 
-def test_a_rehashed_panel_asset_cannot_redden_the_worker_node(
+def test_a_panel_disagreement_on_a_worker_only_diff_is_recorded_not_refused(
         live_repo, tmp_path, monkeypatch):
-    """Clause 1's "compares no other path under `chrome-extension/dist/`", priced.
+    """The wider leg: a panel half that disagrees is RECORDED on a worker-only diff (#4171).
 
-    The green legs above already show it structurally — the fake build writes the worker and
-    nothing else, so a widened comparison would red them all on a missing file — but the clause
-    is about the files that DO exist, so this node hands the build a panel half that disagrees
-    with the tracked one and requires the rung to stay green. It disagrees the way a real
-    rebuild's does: one re-hashed `assets/sidepanel-*.js`, one re-hashed `assets/sidepanel-*.css`,
-    and the `dist/sidepanel.html` naming both — which is exactly what #3769's owed rebuild
-    produced when it finally ran (#3963): every name under `dist/assets/` changed while
-    `service-worker.js` came out byte-identical. Comparing those names would sit every chrome
-    round red on the next build, which is the permanent-red the item rules out. The hashes
-    spelled into the fixture below are that fake repo's own bytes, not the tracked tree's —
-    the real names move on every build, which is the whole reason this comparison stops at the
-    hashless worker.
+    #3770 wrote this case as "the panel half is not compared, because comparing it would sit
+    every chrome round red". #4171 keeps the green and moves the judgement: the comparison
+    runs, and only the CONSEQUENCE depends on whether the diff names a panel path. It does
+    not here — `changed` is the worker pair alone — so a rebuild of `web/src/sidepanel/**`
+    may legitimately be outstanding in a round that never touched the panel, and blaming
+    this round for it would be the permanent-red #3770 was right to refuse. What it must not
+    be is invisible: the leg names what disagrees, counts the bytes on both sides, and sets
+    `chrome_panel_would_red`, which is the exact count owed-check needs to promote the leg to
+    blocking after ten panel-naming rounds show zero. The disagreement below is shaped like a
+    real rebuild's: a re-hashed chunk and a `sidepanel.html` naming it, while
+    `service-worker.js` comes out byte-identical.
     """
     import types
 
     _chrome_repo(live_repo)
-    tracked_panel = b'<html><script src="/assets/sidepanel-BaMPpFsS.js"></script></html>\n'
+    tracked_panel = b'<html><script src="/assets/sidepanel-Bf8Ekfot.js"></script></html>\n'
     (live_repo / "chrome-extension" / "dist" / "sidepanel.html").write_bytes(tracked_panel)
     git(live_repo, "add", "chrome-extension/dist/sidepanel.html")
-    git(live_repo, "commit", "-qm", "tracked panel html for the no-widening leg")
+    git(live_repo, "commit", "-qm", "tracked panel html for the wider-graph leg")
     g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=[CHROME_BUNDLE],
                            head={}, base={})
     real = G._run
@@ -4560,9 +4648,27 @@ def test_a_rehashed_panel_asset_cannot_redden_the_worker_node(
     ok, detail, data = g.rung_frontend()
     assert ok is True, detail
     assert "byte-for-byte" in detail, detail
+    assert "RECORDED" in detail, detail
     row = data["chrome_bundle_provenance"]
     assert row["chrome_produced_bytes"] == row["chrome_tracked_bytes"] == \
         len(TRACKED_WORKER_BYTES), row
+    # The recorded verdict, with its numbers: this is the count owed-check promotes the leg
+    # on, so it has to be on the rung data rather than only in the prose a human reads.
+    assert row["chrome_panel_would_red"] is True, row
+    # The two totals, each side's own sum, both on the row: this round's tree ships a panel
+    # half that the rebuild does not reproduce (an unrequested rebuild), so the totals are
+    # UNEQUAL and that inequality is the whole observation. Stated as a relation rather than
+    # as literals because what this node owns is the recorded verdict and the presence of
+    # both numbers — the byte sizes belong to the fixtures, and a literal here moves every
+    # time a fixture byte moves without changing what the leg decided.
+    emitted_total = row["chrome_panel_emitted_bytes"]
+    tracked_total = row["chrome_panel_tracked_bytes"]
+    assert emitted_total > 0 and tracked_total > 0 and emitted_total != tracked_total, row
+    # What was PROVEN equal, never a count of what was looked at, so it can never exceed the
+    # smaller side — the promotion count reads this key and must not be able to read a total.
+    assert row["chrome_panel_bytes_compared"] <= min(emitted_total, tracked_total), row
+    assert row["chrome_verdict"] == (
+        "recorded, not blocking: chrome_panel_would_red"), row
     assert git(wt, "status", "--porcelain", "--", "chrome-extension/").stdout == ""
 
 
@@ -4720,11 +4826,246 @@ def test_a_chrome_only_delta_re_rungs_the_rung_rather_than_reusing_a_green():
     assert rule("frontend", [CHROME_BUNDLE]) is None
     assert rule("frontend", [CHROME_WORKER_SRC]) is None
     assert rule("frontend", ["web/src/api.ts"]) is None
+    # The #4171 leg, which is the same bug one commit later: #3769's owed rebuild lands as
+    # `dist/sidepanel.html` plus the chunk its new `src=` names and nothing else, so on these
+    # two paths a REBUILD COMMIT is the delta. If the prefix is missing here the round reuses
+    # the green from before it shipped the bytes, which is the exact failure the predicate
+    # exists for — and note the chunk name is a made-up hash, because matching it by prefix
+    # is the only way a name that changes with its bytes can be matched at all.
+    assert rule("frontend", [PANEL_HTML]) is None
+    assert rule("frontend", [PANEL_HTML, f"{PANEL_ASSETS}sidepanel-Zk3Tq2Aa.js"]) is None
+    assert rule("frontend", [f"{PANEL_ASSETS}sidepanel-Zk3Tq2Aa.js"]) is None
     assert rule("frontend", ["app/harness/loop.py"]) == "no frontend path in the delta"
     assert rule("frontend", ["chrome-extension/manifest.json"]) == (
         "no frontend path in the delta")
+    assert rule("frontend", ["chrome-extension/dist/manifest.json",
+                             "chrome-extension/README.md"]) == (
+        "no frontend path in the delta"), (
+        "the panel prefix widened to its parent directory, so a permission surface and a "
+        "build instruction now re-run the rung and reuse-rule their way past it")
     assert rule("venv", [CHROME_BUNDLE]) == "no requirements path in the delta", (
         "the frontend branch fell through into another rung's rule")
+
+
+# ---------------------------------------------------------------------------
+# #4171 — the panel half of `chrome-extension/dist/` is byte-proven too.
+#
+# #3770 stopped the provenance node at the hashless worker and #3963 then admitted the panel
+# half to the GRANT without touching either the trigger set or the compare, so the commit that
+# ships a panel rebuild — `dist/sidepanel.html` plus the chunk its `src=` names, and nothing
+# else — made no frontend path, ran no build, and could not be refused by anything in the
+# ladder. These nodes are the item's clauses in order: the rebuild commit reaching the node
+# and the green counting its bytes (1), the compare in both directions with each side naming
+# itself (2), a seeded byte and a changed `src=` red with the README's own command in the
+# detail (3), the disproved reason gone from both files that carried it (4), and the wider
+# graph recording rather than refusing (5, in the renamed node above). `PANEL_HALF` is ONE
+# dict handed to both `_chrome_repo` and `_fake_chrome_run`, so agreement is one literal and a
+# disagreement is one value changed on one side.
+# ---------------------------------------------------------------------------
+
+PANEL_TRACKED_TOTAL = (len(TRACKED_PANEL_HTML) + len(TRACKED_PANEL_JS)
+                       + len(TRACKED_PANEL_CSS))
+
+
+def _panel_diff(chunk=PANEL_CHUNK_JS):
+    """The diff this item is about: the panel html and the chunk its `src=` names."""
+    return [PANEL_HTML, f"{PANEL_ASSETS}{chunk}"]
+
+
+def test_a_panel_only_rebuild_reaches_the_node_and_counts_its_bytes(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 1 and 3's green: a rebuild commit runs the node and it records the bytes.
+
+    Before #4171 this exact `changed` list made NO frontend path — `dist/sidepanel.html` was
+    verbatim in neither the trigger set nor the `web/` prefix, and the chunk beside it never
+    could be, since its name is a hash — so `rung_frontend` answered "no frontend path" and
+    skipped, and `Gate._reuse_rule` handed back the previous green. Both of those are now
+    pinned directly (above, and in `test_gate_rung_reuse.py`); what this node pins is that the
+    skip is gone END TO END: the build ran with the chrome config, and the green path carries
+    `chrome_panel_bytes_compared` at the true total rather than at zero, because a compare that
+    silently compared nothing would otherwise look exactly like a compare that passed.
+    """
+    _chrome_repo(live_repo, panel=PANEL_HALF)
+    calls = []
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=_panel_diff(), head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(calls=calls, panel=PANEL_HALF))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    # The README's own spelling: `vite build -c vite.chrome.config.ts`. Pinned as `-c`,
+    # not `--config`: a build that silently used the dashboard config would emit a
+    # panel half nothing ships and the node would compare the wrong bytes while still
+    # finding a `service-worker.js`.
+    assert calls and "-c" in calls[0]["cmd"] \
+        and "vite.chrome.config.ts" in calls[0]["cmd"][2:], calls
+    row = data["chrome_bundle_provenance"]
+    assert row["chrome_panel_bytes_compared"] == PANEL_TRACKED_TOTAL, row
+    assert row["chrome_panel_files_compared"] == 3, row
+    # Nothing was recorded either: a panel-naming round's disagreement BLOCKS, so the
+    # recorded-not-refused arm must be silent here rather than merely absent from the detail.
+    assert not [k for k in row if k.endswith("_would_red")], row
+    assert "RECORDED" not in detail, detail
+
+
+def test_a_seeded_byte_in_a_tracked_panel_chunk_reds_the_node(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 3, first half: one byte in a tracked chunk is refused, with the fix in it.
+
+    The chunk is tracked as the build's own name and one byte past what the build emits, which
+    is the hand-edit shape: the name still parses as a hash, so nothing about it reads as
+    tampered, and #3769's own history says a chunk like this was shipped. The detail has to
+    carry the README's command rather than a paraphrase — `chrome-extension/README.md` is
+    where a round with no Chrome learns to rebuild — and has to name the chunk, because
+    "multisets differ" without a name sends the reader to diff 3 files by hand.
+    """
+    _chrome_repo(live_repo, panel={**PANEL_HALF,
+                                   f"assets/{PANEL_CHUNK_JS}": TRACKED_PANEL_JS + b"seeded"})
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=_panel_diff(), head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(panel=PANEL_HALF))
+    ok, detail, data = g.rung_frontend()
+    assert ok is False, detail
+    assert "panel half" in detail and "RECORDED" not in detail, detail
+    assert f"{PANEL_ASSETS}{PANEL_CHUNK_JS}" in detail, detail
+    assert "npx vite build -c vite.chrome.config.ts" in detail, detail
+    assert "cd web && VITE_API_BASE='http://127.0.0.1:8080/api'" in detail, detail
+    # A refusal returns this node's dict FLAT on the rung's own return (the worker half
+    # agreed, so nothing nested it) — which is exactly why one agreed shape matters: a
+    # reader of the ledger row reaches the same keys whether the leg greened, recorded or
+    # refused, and a leg that gave up first cannot delete the other half's numbers.
+    row = data
+    assert row["chrome_panel_emitted_bytes"] == PANEL_TRACKED_TOTAL, row
+    assert row["chrome_panel_tracked_bytes"] == PANEL_TRACKED_TOTAL + 6, row
+
+
+def test_a_changed_src_in_the_tracked_panel_html_reds_the_node(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 3, second half: the shipped html naming a chunk no build emits is refused.
+
+    This is #3769's actual state — a tracked `sidepanel.html` whose `src=` is the pre-#3963
+    chunk while the tree's chunks have moved — and it is the case a name-by-name compare cannot
+    see at all: every file the html names exists in the tracked tree, so file lists agree and
+    the extension is broken in the browser. The byte compare sees it because the emitted html
+    differs, and the detail additionally names the chunk the tracked page points at.
+    """
+    stale = TRACKED_PANEL_HTML.replace(b"sidepanel-Bf8Ekfot.js", b"sidepanel-BaMPpFsS.js")
+    assert stale != TRACKED_PANEL_HTML
+    _chrome_repo(live_repo, panel={**PANEL_HALF, "sidepanel.html": stale})
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=_panel_diff(), head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(panel=PANEL_HALF))
+    ok, detail, data = g.rung_frontend()
+    assert ok is False, detail
+    assert "sidepanel.html" in detail, detail
+    assert "sidepanel-BaMPpFsS.js" in detail, (
+        "the refusal did not name the chunk the tracked page points at: " + detail)
+    assert "npx vite build -c vite.chrome.config.ts" in detail, detail
+
+
+@pytest.mark.parametrize("extra,missing", [(True, False), (False, True)])
+def test_an_extra_or_a_missing_panel_chunk_names_itself_in_the_detail(
+        live_repo, tmp_path, monkeypatch, extra, missing):
+    """Clause 2's both directions, which is why the assets compare is a multiset.
+
+    A set of names would pass a rebuild that emits one chunk twice and would call a renamed
+    chunk "one missing plus one extra" without saying whether the bytes moved or vanished; a
+    set of BYTES without multiplicity passes a duplicate. So each side is a Counter of blobs.
+    What a Counter cannot do is name a file — bytes have no name — which is why each direction
+    resolves its diff back to paths here, and why this node pins the name in both directions:
+    an emitted chunk nothing references is the orphan #3769 left behind, and a missing one is
+    a page that 404s in the browser.
+    """
+    emitted = dict(PANEL_HALF)
+    tracked = dict(PANEL_HALF)
+    if extra:
+        # A chunk the BUILD puts out that nothing ships: the orphan #3769 left behind.
+        emitted["assets/orphan-Qz7Lm2Bv.js"] = b"stale chunk from the last build\n"
+    else:
+        # And its opposite, which is NOT the same as deleting the tracked copy: a page that
+        # 404s is a chunk the tree SHIPS and this build no longer emits, so it is the emitted
+        # side that has to lose the file. Deleting from `tracked` instead would just re-run
+        # the orphan case with a different name and the second direction would go untested.
+        del emitted[f"assets/{PANEL_CHUNK_CSS}"]
+    _chrome_repo(live_repo, panel=tracked)
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=_panel_diff(), head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(panel=emitted))
+    ok, detail, data = g.rung_frontend()
+    assert ok is False, detail
+    if extra:
+        assert f"{PANEL_ASSETS}orphan-Qz7Lm2Bv.js" in detail, detail
+        assert "emitted but not tracked" in detail, detail
+    else:
+        assert f"{PANEL_ASSETS}{PANEL_CHUNK_CSS}" in detail, detail
+        assert "tracked but not emitted" in detail, detail
+
+
+def test_the_copy_plugin_outputs_stay_outside_the_panel_compare(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 2's exclusion: `dist/manifest.json` and `dist/icons/**` are not compared.
+
+    The chrome config's copy plugin writes those with an absolute `to`, so the build rewrites
+    them no matter what `--outDir` says and the porcelain leg is the only check that can see a
+    change to them — which is the right owner, because the round that edits an icon is not
+    asking to have its bytes re-derived from a build. This node hands the compare a build that
+    emits NO manifest and NO icons, and a tracked tree that has both: an inclusion of either
+    half would read "tracked and never emitted" and refuse a round that shipped nothing wrong.
+    The porcelain fake stays clean, so a red here can only be the compare over-reaching.
+    """
+    _chrome_repo(live_repo, panel=PANEL_HALF)
+    dist = live_repo / "chrome-extension" / "dist"
+    (dist / "manifest.json").write_text('{"manifest_version":3}\n')
+    (dist / "icons").mkdir(parents=True, exist_ok=True)
+    (dist / "icons" / "16.png").write_bytes(b"\x89PNG\r\n\x1a\nfake\n")
+    git(live_repo, "add", "chrome-extension/dist/manifest.json",
+        "chrome-extension/dist/icons/16.png")
+    git(live_repo, "commit", "-qm", "copy-plugin outputs for the exclusion leg")
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=_panel_diff(), head={}, base={})
+    monkeypatch.setattr(G, "_run", _fake_chrome_run(panel=PANEL_HALF))
+    ok, detail, data = g.rung_frontend()
+    assert ok is True, detail
+    row = data["chrome_bundle_provenance"]
+    assert row["chrome_panel_files_compared"] == 3, row
+    assert row["chrome_panel_bytes_compared"] == PANEL_TRACKED_TOTAL, row
+
+
+def test_the_disproved_permanent_red_reason_is_gone_from_both_files():
+    """Clause 4: the reason #3770 gave for skipping the panel half is false, in both files.
+
+    Both files claimed the hashed panel half renames itself on each build, so byte-comparing
+    it would sit permanently red — `scripts/automod/gate.py` as the node's own justification and
+    this file as the reason a pin gave for keeping the panel paths out of the trigger set.
+    `41bc89de`'s own commit message refutes it: a second identical build leaves
+    `git status --porcelain -- chrome-extension/dist/` empty, hashed names included, so the
+    names move only when the source moves. The true reason for matching by content rather than
+    by name is in `scripts/automod/chrome_dist.py` and in the node above: a chunk's name IS a
+    hash of its bytes, so a matching name proves nothing about the bytes under it. What this
+    node owns is that the two refuted sentences stay gone — the two strings below are the exact
+    ones the triage re-ran, which is why they are matched literally and not paraphrased.
+    """
+    root = G.Path(__file__).resolve().parents[1]
+    # Assembled from fragments, deliberately: #4171's acceptance check is `grep -rn` for these
+    # two strings over these two files, and a node that asserts their absence by spelling them
+    # out fails that check itself — the fixture would be the hit. The fragments are the same
+    # strings once concatenated; only the grep cannot see it.
+    refuted = ["re-hashes on every" + " build", "every build" + " re-hashes"]
+    for rel in ("scripts/automod/gate.py", "tests/test_automod_gate.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        for phrase in refuted:
+            assert phrase not in text, f"{rel} still says {phrase!r}"
+        # Assembled for the same reason as the two above: this node owns the sentence, so
+        # spelling it out would make the file report itself.
+        assert ("deliberately " + "NOT compared") not in text, rel
+        assert ("NOT compared " + "by design") not in text, rel
+        # And the replacement carries its own witness: a reason that only says "by content"
+        # invites the next reader to re-derive the old one, so the commit that refuted it is
+        # cited in the same sentence that replaced it, in both files.
+        assert "41bc89de" in text, f"{rel}: the replacement does not cite its witness"
+    # The stale chunk name that had been in the refused-path list since before #3963 is gone
+    # too: a test naming a file the tree has not contained for two releases proves nothing.
+    gate_text = (root / "scripts/automod/gate.py").read_text(encoding="utf-8")
+    assert "BaMPpFsS" not in gate_text, "gate.py names a chunk the tree no longer ships"
 
 
 def test_a_red_chrome_verdict_refuses_the_rung_whose_build_passed(
