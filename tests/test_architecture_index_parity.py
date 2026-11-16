@@ -39,6 +39,16 @@ table rows only: `index.md` also names `[[desktop]]` in the Review-log entry tha
 records that deletion, and a whole-file count would report the survivor as the
 duplicate and invite a "fix" that rewrites the log.
 
+Scoping to rows cuts both ways, and #4143 is the direction that was never taken: the
+multiplicity half reads rows, while the membership half reads the whole file. A doc whose
+row was deleted survives in that whole-file set as long as any `[[slug]]` of it is left in
+prose — the GPU-allocation lead-in, or a Review-log entry — so "every doc has a row, one
+row" is enforced only against a second row, never against a missing one, and the count
+guard cannot see it either because it is fed rows and an unrowed doc simply stops being a
+candidate. So membership is asserted over rows as well, by the same `_ROW_LINK` anchor and
+with the same whole-file node left standing beside it: that node is the dangling-link
+direction's mate, and the prose it counts is exactly what the row-scoped one excludes.
+
 The fourth half is a figure that travels. #3249 found the index quoting a suite integer
 this page had already retired while claiming, in the present tense, that the doc which
 owns the measurement measured it — a figure the owner had long since re-measured, and a
@@ -180,6 +190,45 @@ def _duplicate_row_cells(text: str) -> list[str]:
     return sorted(stem for stem, seen in counts.items() if seen > 1)
 
 
+def _unrowed_docs(text: str) -> list[str]:
+    """Every doc on disk that heads no table row of this page: `_docs_on_disk() -
+    set(_row_first_cells(text))`, sorted by name.
+
+    Membership at the scope the invariant is stated at. `_docs_linked()` is
+    `set(_LINK.findall(whole file))`, which is the right scope for a dangling link and the
+    wrong one for a row: a `[[slug]]` left in the GPU-allocation lead-in or in a Review-log
+    entry keeps a deleted doc a member of that set, so `test_every_architecture_doc_is_linked_from_the_index`
+    stays green over a page that lists the doc in no table and so carries no Covers cell for
+    it. #4143. The count guard is no backstop either: it is fed rows, and a doc with no row
+    simply stops being a candidate.
+
+    Names the doc, never a count — the reader's job is to open that one table and put the
+    row back. Nothing is subtracted from the on-disk side: a retired doc is named in
+    backticks under Retired, and `_retirement_problems` already refuses a retired name that
+    is on disk or linked, so the retired set has no member in `_docs_on_disk()` to except.
+    """
+    return sorted(_docs_on_disk() - set(_row_first_cells(text)))
+
+
+def _without_row(text: str, slug: str) -> str:
+    """The shipped page with the one table row heading `[[slug]]` deleted.
+
+    A deletion from the real bytes, not a typed fixture: what #4143 claims is that THIS
+    page, with THAT row gone, still reads complete to the whole-file check — and only the
+    page itself can say where else the slug is named. Asserts exactly one line left, so a
+    slug that headed no row or headed two cannot silently seed a control about a
+    single-row doc.
+    """
+    pattern = re.compile(r"^[ \t]*\|[ \t]*\[\[" + re.escape(slug) + r"\]\][ \t]*\|")
+    lines = text.splitlines(keepends=True)
+    kept = [ln for ln in lines if not pattern.match(ln)]
+    assert len(kept) == len(lines) - 1, (
+        f"expected [[{slug}]] to head exactly one line of index.md, so deleting a row "
+        f"is a one-line edit; found {len(lines) - len(kept)} — the seeded copy would "
+        "then be deleting something other than the row this control is about")
+    return "".join(kept)
+
+
 #: The section that records a retirement. Its heading is matched by prefix so the
 #: parenthetical about where the files live can be reworded without blinding this.
 _RETIRED_HEADING = "## Retired"
@@ -252,6 +301,62 @@ def test_no_doc_is_listed_in_more_than_one_table_row():
         f"architecture docs heading more than one table row in index.md: {dupes} — "
         "fold the two Covers cells into one row; a doc with two rows has no single "
         "description, and a reader cannot tell which row is stale")
+
+
+def test_every_architecture_doc_heads_a_table_row():
+    """Every doc on disk heads a row of a link table: membership, at row scope.
+
+    `test_every_architecture_doc_is_linked_from_the_index` asks only whether the stem occurs
+    as a `[[slug]]` somewhere in the page, and that is the whole of #4143. Delete the
+    `[[workers]]` row from the shipped page and its Covers cell goes with it, while the slug
+    is still named in the GPU-allocation lead-in and in a Review-log entry — measured on
+    those bytes, the presence node reports nothing, the duplicate node reports nothing, the
+    count guard reports nothing (it is fed rows, and an unrowed doc stops being a candidate),
+    and the index advertises a doc it does not list. So the page's stated invariant, "every
+    doc has a row, one row", was enforced only against a second row. This node is the missing
+    direction, on the same `_ROW_LINK` anchor the node above already uses.
+
+    The whole-file node stays, and stays whole-file: it is the dangling-link direction's
+    mate, and a prose `[[slug]]` is precisely what that check has to keep finding. Widening
+    `_ROW_LINK` to prose instead would buy the same blindness back on this node and re-break
+    the scoping that stops the Review-log entry from reading as a second `[[desktop]]`.
+
+    No retired name is excepted from the on-disk side, so no retired name is subtracted. A
+    retirement is a backticked name under Retired and `_retirement_problems` refuses one that
+    is on disk or linked, so the retired set has no member in `_docs_on_disk()` to take away,
+    and the check below passes with the `## Retired` section standing as shipped — the three
+    assertions after it are that claim measured, not asserted away.
+    """
+    text = INDEX.read_text(encoding="utf-8")
+    assert _docs_on_disk(), (
+        "architecture/ holds no doc besides index.md, so an empty unrowed list below is a "
+        "walk that found nowhere to look and not a complete index")
+    unrowed = _unrowed_docs(text)
+    assert unrowed == [], (
+        f"architecture docs heading no table row of index.md: {unrowed} — add a row, with a "
+        "Covers cell, to the right table. A `[[slug]]` named in prose is not a listing: it is "
+        "what keeps the whole-file presence node green over a doc no table carries")
+    # Clause 4, measured. The Retired section is there, it names docs, and none of those
+    # names is on disk or heads a row — so a subtraction would be a code path with nothing
+    # to subtract, and a name showing up here is a broken retirement, not a reason to widen
+    # the expression.
+    retired = set(_BACKTICKED.findall(_retired_section(text)))
+    assert retired, (
+        "the Retired section names no doc, so this node's claim that retired names need no "
+        "subtraction is a claim about an empty set")
+    clashing = sorted(retired & (_docs_on_disk() | set(_row_first_cells(text))))
+    assert clashing == [], (
+        f"retired name(s) {clashing} are on disk or heading a row, which is "
+        "`_retirement_problems`'s defect and not a reason to subtract the retired set here")
+    # And the node is blind to that section by construction: the answer is read off rows, so
+    # cutting the whole Retired block out of the text it is computed over cannot move it.
+    body = _retired_section(text)
+    assert text.count(body) == 1, (
+        "the Retired section's body occurs more than once in index.md, so removing it to "
+        "test this node's scope would remove something else too")
+    assert _unrowed_docs(text.replace(body, "", 1)) == unrowed, (
+        "coverage changed when the Retired section came out, so `_unrowed_docs` is reading "
+        "prose it was written to ignore — the row anchor is not what is deciding the answer")
 
 
 def test_the_row_scope_is_what_keeps_the_review_log_from_reading_as_a_duplicate():
@@ -1045,6 +1150,58 @@ def test_the_parity_check_can_see_a_duplicate_row():
         "| [[alpha]] | a |\n\nProse carried [[alpha]] in two rows.\n") == [], (
         "prose naming a stem is being counted as a second table row, which would "
         "make the Review log read as a duplicate of the row it describes")
+
+
+def test_a_deleted_row_stays_invisible_to_the_whole_file_presence_check():
+    """The coverage gap, planted in the shipped page: rows out, the file still complete.
+
+    #2701's control had to show that a set-based check could not see a SECOND row; this is
+    the same blindness one direction over, shown the same way — on the shipped bytes, never
+    on a sentence typed beside the pattern. For every doc the page names outside the row it
+    heads (`[[workers]]`, `[[infrastructure]]`, `[[vllm]]` and the rest — the GPU-allocation
+    lead-in, the Retired paragraphs and the Review log each mention some of them), deleting
+    that one row:
+
+    1. makes `_unrowed_docs` report exactly that doc, which is the point of it, and
+    2. leaves `_docs_on_disk() - set(_LINK.findall(seed))` empty, which is the defect: the
+       whole-file read `test_every_architecture_doc_is_linked_from_the_index` lives on cannot
+       see the row go, because the prose mention outlives it.
+
+    The pair, on the same bytes, is the whole of #4143: the two reads differ, so the file
+    stays the dangling-link direction's mate and rows become the scope membership is checked
+    at. Every one of the prose-named docs is seeded, not one, because the claim is about the
+    read scope and not about a particular slug.
+    """
+    text = INDEX.read_text(encoding="utf-8")
+    on_disk = _docs_on_disk()
+    whole, rows = _LINK.findall(text), _row_first_cells(text)
+    prose_named = sorted(d for d in on_disk if whole.count(d) > rows.count(d))
+    assert prose_named, (
+        "no doc on disk is named in prose outside a row it heads, so there is nothing left to "
+        "seed: with no surviving mention the whole-file read would see a deleted row go, and "
+        "this control would be proving a hole the page no longer has")
+    for slug in prose_named:
+        seed = _without_row(text, slug)
+        assert _row_first_cells(seed).count(slug) == 0, (
+            f"[[{slug}]]'s row was deleted from the seed and it still heads a row, so the "
+            "row extractor is not reading the bytes this control edited")
+        assert _unrowed_docs(seed) == [slug], (
+            f"deleting [[{slug}]]'s row from the shipped page gave "
+            f"{_unrowed_docs(seed)}: expected exactly that one doc, so either the row "
+            "deletion took more than the row or the coverage read cannot see a row go")
+        assert on_disk - set(_LINK.findall(seed)) == set(), (
+            f"[[{slug}]] vanished from the whole page when its row went, so this seed no "
+            "longer holds the prose mention the control exists to measure — the gap would be "
+            "simulated, not reproduced")
+        # Nothing else in this file reports the missing row either: the other two row-scoped
+        # nodes stay green on the same bytes, which is why the new node had to be added
+        # rather than one of these widened.
+        assert _duplicate_row_cells(seed) == [], (
+            f"deleting [[{slug}]]'s row made some other doc look duplicated, so the seed is "
+            "no longer the page this control is about")
+        assert _owned_count_offenders(seed) == [], (
+            f"deleting [[{slug}]]'s row made the count guard fire, which the shipped page "
+            "asserts it never does")
 
 
 def test_a_retired_doc_is_named_under_retired_and_linked_from_no_table():
