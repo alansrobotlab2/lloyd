@@ -265,14 +265,18 @@ not:
 ### The wiring, which this layout no longer carries
 
 Grouping by chain had one advantage this grouping gives up: the layout was the
-dependency graph. Ten `depends_on` edges exist and **three of them now cross a
-function boundary**, so they are written down here instead:
+dependency graph. Twelve `depends_on` edges exist and **five of them now cross a
+function boundary**, so they are written down here instead (measured
+2026-11-16; the two lowest lines are the ones this page had never drawn — see
+§Review log):
 
 ```
 #38 ─► #42 ─► #39 ─► #40 ─► #47     distil, wholly inside
 #56 ─► #57 ─► #58 ─► #83            distil, wholly inside
 #56 ─► #51                          distil ──► build
 #24 ─► #48 ─► #74                   build ──► canonicalize ──► build
+#24 ─► #98                          build ──► canonicalize
+#81 ─► #82                          bound entropy ──► measure
 ```
 
 The last line is the interesting one, and it is a genuine finding rather than an
@@ -281,24 +285,26 @@ canonicalizing**, which is exactly why #74 declares `depends_on: 48` — it must
 re-type edges only after the names under them have settled. Under the chain
 grouping those three jobs sat in one list and the alternation was invisible.
 
-29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name a
-parent, one each, and those ten are exactly the arrows drawn above. None of
-#91–#97 declares a parent, so the arrows are the same ten #1520 verified and the
-pair moved by seven together. Neither #100, #101, #102, #103, #104, #105, #106, #107 nor #108 declares
-a parent, so naming #102 (filed 2026-10-18), #103 (filed 2026-10-19), #104 (filed
-2026-10-29) and #105 (task file 2026-10-31) and #106 (task file 2026-11-01) and #107
-(task file 2026-11-01, rowed 2026-11-03) and #108
-(task file 2026-11-03) in the membership tables move no arrow
-and no number in this paragraph — the 29 and the
-39 are the fleet the route parsed on the day
-the sentence was written, and a job entering these tables is not a job entering
-that count. #107 was the newest of those arrivals and #106, #105 and #104 sat
-beside it; #101 was the newest
-when that sentence was written, and #99 before it, and #98 before that — and #98 is still the only one
-that declares a parent without being drawn: `depends_on: 24`, filed `status: draft`,
-so it is not in the fleet the diagram counts — arming it adds an eleventh arrow
-and takes one off the 29, which is the armed-state move the fleet-bound
-paragraph above already carries.
+41 of the 53 tasks (2026-11-16) declare no dependency at all: twelve jobs name a
+parent, one each, and those twelve are exactly the arrows drawn above. The convention is in the sentence because the fleet has two defensible
+denominators and a diagram has to pick one: this count is **every task file
+`GET /api/autonomy/tasks` parses, drafts included** — 53 files, 12 of them naming a
+parent, 53 − 12 = 41. The armed-only view is 49 files with 11 declarers, #98 being
+`status: draft`; the drawing counts #98's edge anyway, because a `depends_on` is
+enforced by `app/autonomy.py`'s `_dependency_refusal` the moment its child is armed
+and a draft's file sits in the same directory whether or not it fires, so an edge
+that becomes real on arming belongs in the picture rather than waiting for it.
+
+The pair moved by two since it was last re-measured (2026-10-12), and the arrows
+moved by two as well — #82 (`nightly-retrieval-eval`) has declared `depends_on: 81`
+since the vault commit `a01fa34f` on 2026-10-29 and #98 has declared `depends_on: 24`
+since its own file arrived, and neither was ever drawn, which is how an edge stays
+true for two weeks while the picture meant to index it says nothing. None of #91–#97
+declares a parent, and neither #100, #101, #102, #103, #104, #105, #106, #107 nor
+#108 does, so naming those arrivals in the membership tables moves no arrow and no
+number here — the 41 and the 53 are the fleet the route parsed on the day the
+sentence was written, and a job entering these tables is not a job entering that
+count.
 
 ### Two holes in the wiring
 
@@ -480,7 +486,7 @@ rather than the shape it reproduced by it — and a zero-item run that finds a s
 
 ## Distil: #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54
 
-Ten of the fleet's 39 jobs (2026-10-12), and the largest concentration of
+Ten of the fleet's 53 jobs (2026-11-16), and the largest concentration of
 unattended write authority in it. Two chains and one straggler: reflection turns
 the day's *signals* into memory and config, trace2skill turns the *tool-call
 record* into skills, and #54 turns the vault's existing notes into new ones.
@@ -2206,3 +2212,37 @@ tick, changes no answer of `_is_dependency_met`, and costs one 60 s scan — pin
 `tests/test_autonomy_dependency_bypass.py` (release, one-pass expiry, the watchdog
 sentence) and `tests/test_autonomy_scheduler.py` (the #870 matrix and a declared bound
 still reachable).
+
+- **2026-11-16 — `stale`, corrected in place: the wiring drew ten edges and the
+  fleet declared twelve.** §The wiring read "29 of the 39 tasks (2026-10-12)" over a
+  four-line diagram, and §Distil read "Ten of the fleet's 39 jobs".
+  `GET /api/autonomy/tasks` measured 2026-11-16 parses **53** tasks and exactly
+  **twelve** declare a parent — #39, #40, #42, #47, #48, #51, #57, #58, #74, #82,
+  #83, #98 — and `grep -l '^depends_on:' ~/obsidian/autonomy/[0-9]*.md` returns the
+  same twelve files. Two of those edges had never been drawn: `#81 ─► #82`, because
+  `82-nightly-retrieval-eval.md` gained `depends_on: 81` in the vault commit
+  `a01fa34f` (2026-10-29) three weeks after the diagram was pinned and nothing
+  compared the two, and `#24 ─► #98`, because the paragraph this entry replaces had
+  argued #98 out of the count on the strength of its `status: draft` ("arming it adds
+  an eleventh arrow and takes one off the 29"). The count now states its convention in
+  the sentence — all 53 files the route parses, drafts included, hence 41 with no
+  dependency — because the armed-only view (49 files, 11 declarers) is equally
+  defensible and the diagram has to draw one of them; a `depends_on` is enforced by
+  `_dependency_refusal` the moment its child is armed, so a draft's edge is drawn. The
+  cross-function count moves with it, three → five: `#81 ─► #82` is
+  bound entropy→measure and `#24 ─► #98` is build→canonicalize, read off §The
+  functions' own membership table (`#81` grouped under Bound entropy, `#82` under
+  Measure, `#24` under Build the graph, `#98` under Canonicalize) — the node that
+  grades the sentence now derives the crossing set from that table rather than
+  remembering it, and `test_every_job_has_one_function_and_exactly_one_write_tier`
+  is what pins the table against the task files. The reason nothing
+  caught this is worth keeping: `TEN_EDGES` and `_diagram_edges()` slice only the
+  fenced block, so the task files were never an input to any check here — the same
+  gap #4095 records for the one prose sentence it found, in the other direction — and
+  the locator sliced on the literal word "Ten", so the correction that was owed would
+  have raised `IndexError` in every caller instead of reporting the drift. Both are
+  closed: the constant is `WIRING_EDGES` with no count in its name, the locator keys on
+  "`depends_on` edges exist", and the count, the denominator and the arrow total are
+  now asserted as one arithmetic against twelve. #82's own §Measure passage is #4095's,
+  which landed 2026-11-15 and moved that prose without moving this picture; this entry
+  moves the wiring and nothing else.

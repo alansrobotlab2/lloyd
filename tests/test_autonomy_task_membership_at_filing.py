@@ -941,7 +941,9 @@ def vt_default_dir() -> str:
 # the inverse of what the scheduler does (`app/autonomy.py` reads `task.get("depends_on")`
 # into `_dependency_refusal` and holds the child fail-closed, #558), and nothing gated it:
 # `TEN_EDGES`/`_diagram_edges()` in `tests/test_autonomy_jobs_doc_claims.py` read only the
-# fenced wiring block, that file's `WATCH_JOBS` probes the group tables, and the nodes that
+# fenced wiring block — that constant is `WIRING_EDGES` and holds twelve pairs since #4094,
+# which redrew the diagram; the blind spot described here is unchanged by it —, that file's
+# `WATCH_JOBS` probes the group tables, and the nodes that
 # do read the live pair carry `@live_vault` — which `scripts/automod/gate.py`'s
 # `TESTS_MARK_EXPR = "not live_vault and not fault_injection"` deselects at every gate.
 #

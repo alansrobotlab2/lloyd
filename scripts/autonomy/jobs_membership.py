@@ -272,14 +272,15 @@ def journal_path() -> Path:
 # #81 does not hold it" while `82-nightly-retrieval-eval.md:17` has declared
 # `depends_on: 81` since the vault commit `a01fa34f` (2026-10-29), which is the inverse of
 # runtime behaviour — `app/autonomy.py` reads `task.get("depends_on")` into
-# `_dependency_refusal` and holds the child fail-closed (#558). `TEN_EDGES` and
+# `_dependency_refusal` and holds the child fail-closed (#558). `WIRING_EDGES` — `TEN_EDGES`
+# until #4094, which gave it twelve pairs and dropped the count from its name — and
 # `_diagram_edges()` read only the fenced wiring block, so the diagram stayed green over
 # the wrong sentence, and the reconciling nodes that could have seen it are `@live_vault`.
 #
 # Scope deliberately parsed: the two shapes the class was filed with — the doc claims a job
 # declares NO parent beside a file that declares one, and the doc states a parent the file
-# does not state. Not parsed, and said so rather than silently: a fleet-wide count ("29 of
-# the 39 tasks declare no dependency at all") names no id to attribute to, and a claim about
+# does not state. Not parsed, and said so rather than silently: a fleet-wide count ("41 of
+# the 53 tasks declare no dependency at all") names no id to attribute to, and a claim about
 # an id with no task file is unverifiable — the ghost half belongs to `membership_drift`.
 
 #: Everything from this heading on narrates edits to the doc rather than jobs. The

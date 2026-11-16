@@ -274,14 +274,23 @@ WATCH_JOBS = {
           "never add `--out`"),
 }
 
-#: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
-#: Verified parent-by-parent on 2026-09-26: 74→48, 48→24, 39→42, 58→57, 42→38,
-#: 40→39, 83→58, 47→40, 51→56, 57→56 (child→parent), i.e. these ten pairs
-#: read the other way round.
-TEN_EDGES = {
+#: Every `depends_on` edge the fleet declares, as the wiring diagram's parent ─► child
+#: arrows. Verified parent-by-parent on 2026-09-26 for the ten, and on 2026-11-16 for the
+#: two #4094 adds, read as child→parent: 74→48, 48→24, 39→42, 58→57, 42→38, 40→39,
+#: 83→58, 47→40, 51→56, 57→56, **82→81**, **98→24** — i.e. each pair below reads the
+#: other way round. `82-nightly-retrieval-eval.md` has declared `depends_on: 81` since the
+#: vault commit `a01fa34f` (2026-10-29) and `98-retag-untagged-facts.md` `depends_on: 24`
+#: since its own file arrived; neither was ever drawn, which is what #4094 is about. The
+#: twelve declarers, `GET /api/autonomy/tasks` measured 2026-11-16: 39, 40, 42, 47, 48,
+#: 51, 57, 58, 74, 82, 83, 98.
+#:
+#: The name carries no number on purpose. This constant was `TEN_EDGES` and held ten pairs
+#: while the fleet declared twelve, and a name that states a count is a second copy of a
+#: number nothing checks — the same defect as the doc sentence, one file away from it.
+WIRING_EDGES = {
     ("#38", "#42"), ("#42", "#39"), ("#39", "#40"), ("#40", "#47"),
     ("#56", "#57"), ("#57", "#58"), ("#58", "#83"), ("#56", "#51"),
-    ("#24", "#48"), ("#48", "#74"),
+    ("#24", "#48"), ("#48", "#74"), ("#81", "#82"), ("#24", "#98"),
 }
 
 
@@ -388,8 +397,16 @@ def _diagram_edges() -> set[tuple[str, str]]:
     #42 ─► #39` has to yield two edges, and a plain findall would eat `#42` in the
     first match and lose the second. The `──►` in the annotation column never
     matches, because no `#id` precedes it.
+
+    The slice key is the tail of the sentence — "`depends_on` edges exist" — and not the
+    sentence as written, which on 2026-10-12 began `Ten`. Keying on the count meant that
+    the edit #4094 asks for, retyping that word to `Twelve`, raised IndexError in every
+    caller of this helper at once: a locator that breaks when the number it describes
+    changes cannot tell you the number changed, it can only crash. The phrase is
+    load-bearing without the numeral: it occurs exactly once in the doc, and the fence
+    two lines below it is what bounds the block.
     """
-    after = _text().split("Ten `depends_on` edges exist", 1)[1]
+    after = _text().split("`depends_on` edges exist", 1)[1]
     block = after.split("```", 2)[1]
     assert block.startswith("\n#"), f"the wiring block is not a fenced diagram: {block[:40]!r}"
     return {(f"#{a}", f"#{b}") for a, b in re.findall(r"#(\d+)\s+─►\s+(?=#(\d+))", block)}
@@ -2027,20 +2044,31 @@ def test_the_dated_review_log_entry_keeps_what_was_true_that_day():
 def test_the_no_dependency_count_is_the_fleet_minus_the_edges_the_doc_draws():
     """#1520 clause 3. §The functions said "22 of the 32 tasks declare no
     dependency at all" while §Distil said "Ten of the fleet's 36 jobs" — two fleet
-    sizes in one document on the same day, and the live route says 36 parsed tasks
-    with 10 declaring `depends_on`.
+    sizes in one document on the same day, 2026-09-26, and the live route agreed with
+    neither. The route's figure for that day is not recited here, for the reason #2630
+    gives for renaming its own neighbour: a superseded measurement written into prose is
+    invisible to the diff that supersedes it.
 
     The count is derived, not remembered: it has to equal §Distil's denominator
     minus the `depends_on` arrows this very section draws three lines above it, and
     travel with the date it was taken. Three statements that must be edited together
     is the point — a fleet that grows makes all three fail at once instead of
     leaving one section quietly ahead.
+
+    #4094 is that failure having happened anyway. Between #1520's measurement and the
+    53 tasks / 12 parents measured 2026-11-16, the denominator and the no-dependency count
+    were re-dated twice while the arrows the diagram draws were never touched — so by the
+    day the item was filed, the picture on the page was no longer the fleet's edge count.
+    §Distil's leading word is that section's OWN job count — ten ids in its heading,
+    unchanged — and its denominator is what has to agree with §The wiring, so the pattern no
+    longer binds the word: a locator that names one numeral crashes the day the group
+    changes size, and a crash is not an agreement.
     """
     funcs = _functions_section()
     m = re.search(r"\b(\w+) of the (\w+) tasks\b[^.]*\.", funcs)
     assert m, "§The functions no longer counts the jobs that declare no dependency"
     said, without, fleet = m.group(0), _num(m.group(1)), _num(m.group(2))
-    distil = re.search(r"[Tt]en of the fleet's (\d+) jobs", _text())
+    distil = re.search(r"\b\w+ of the fleet's (\d+) jobs\b", _text())
     assert distil, (
         "§Distil no longer counts its share of the fleet, so §The functions has "
         "nothing left to be made to agree with")
@@ -2055,27 +2083,73 @@ def test_the_no_dependency_count_is_the_fleet_minus_the_edges_the_doc_draws():
         f"Neither number can be bumped alone: the denominator has to move with the "
         f"arrows, the arrows have to move with the diagram, and §Distil has to agree "
         f"on the denominator. `GET /api/autonomy/tasks` is the live view — measured "
-        f"on 2026-09-26 at 36 parsed tasks and 10 declaring `depends_on` — so "
+        f"on 2026-11-16 at 53 parsed tasks and 12 declaring `depends_on` — so "
         f"re-measure it before editing any of the three.")
     assert re.search(r"\(\d{4}-\d{2}-\d{2}\)", said), f"'{said}' carries no date"
 
 
-def test_the_wiring_sentence_and_its_diagram_still_declare_the_ten_verified_edges():
-    """#1520 clause 3, the half that must NOT change. The ten edges were re-checked
-    parent-by-parent on 2026-09-26 — 74→48, 48→24, 39→42, 58→57, 42→38, 40→39,
-    83→58, 47→40, 51→56, 57→56 — so both the sentence and its arrows stay exactly as
-    they are. A count that is right deserves the same protection as one that is
-    wrong: this fails if the diagram loses an arrow, gains one, or the sentence's
-    number stops matching the picture it introduces.
+def test_the_wiring_sentence_and_its_diagram_still_declare_every_verified_edge():
+    """#1520 clause 3's second half, which #4094 had to re-date rather than retire.
+
+    #1520 pinned this node to the literal word `Ten` on the reasoning that a count which
+    is right deserves the same protection as one that is wrong. It was right on
+    2026-09-26 and wrong by 2026-11-12: the fleet declared twelve parents (39, 40, 42, 47,
+    48, 51, 57, 58, 74, 82, 83, 98) and the sentence and its diagram still said ten. A
+    literal is not protection, it is a snapshot — so the assertion is now the relation the
+    literal was standing in for: the numeral the sentence carries has to parse to the
+    number of arrows `_diagram_edges()` reads out of the block beneath it, which has to
+    equal the verified constant. Three ways to be wrong stay caught — the diagram loses an
+    arrow, the diagram gains one the constant does not verify, or the sentence's number
+    stops matching the picture it introduces — and retyping the numeral alongside a real
+    change in the arrows is no longer an edit this node refuses.
+
+    The cross-function count is derived rather than remembered, and it moved with the edges:
+    #81 ─► #82 is Bound entropy into Measure and #24 ─► #98 is Build the graph into
+    Canonicalize, so five of the twelve cross where three of the ten did. Which function an
+    endpoint sits in is read out of the doc's own §The functions membership table — the
+    parse `test_every_job_has_one_function_and_exactly_one_write_tier` runs two sections
+    earlier against the task files — so the sentence's numeral is pinned to the grouping,
+    and the grouping to the fleet, without this file reading `~/obsidian/autonomy/` (the
+    header says why it must not; #2631 owns that check). Five is then pinned as well, on
+    #2630's reasoning for the fleet numbers: a regrouping that moved an edge across a
+    boundary would otherwise move the count and the sentence together and agree with itself
+    about a fleet nobody measured.
     """
     funcs = _functions_section()
-    assert re.search(r"Ten `depends_on` edges exist and \*\*three of them now cross a "
-                     r"function boundary\*\*", funcs), (
-        "the sentence naming the ten edges and their three cross-function hops has "
-        "been edited; #1520 says leave it, because ten is still correct")
-    assert _diagram_edges() == TEN_EDGES, (
-        f"the wiring diagram draws {sorted(_diagram_edges())}, not the ten verified "
-        f"edges {sorted(TEN_EDGES)}")
+    said = re.search(r"\b(\w+) `depends_on` edges exist and \*\*(\w+) of them now cross a "
+                     r"function boundary\*\*", funcs)
+    assert said, (
+        "§The wiring no longer carries the sentence that names the edges and their "
+        "cross-function hops, so nothing here ties that sentence to its diagram any more")
+    edges = _diagram_edges()
+    assert edges == WIRING_EDGES, (
+        f"the wiring diagram draws {sorted(edges)}, not the verified edges "
+        f"{sorted(WIRING_EDGES)}")
+    assert _num(said.group(1)) == len(edges), (
+        f"the sentence says {said.group(1)} `depends_on` edges exist while the diagram "
+        f"below it draws {len(edges)} — the number and the picture are #1520's defect, "
+        f"whichever of them the live route has outgrown")
+    # The boundary count is derived, not remembered: which function each end belongs to
+    # is what the §The functions membership table says, and `test_every_job_has_one_function_and_exactly_one_write_tier`
+    # parses those tables against the task files two sections earlier, so the crossing set
+    # here is pinned to the membership indirectly — through the doc's own grouping — rather
+    # than by re-reading `~/obsidian/autonomy/`, which this file never does (#2631 owns that).
+    grouped = {i: row for row, (ids, _) in _table(FUNCTIONS_HEADER).items() for i in ids}
+    missing = sorted({i for p, c in edges for i in (p, c) if i not in grouped})
+    assert not missing, (
+        f"an edge endpoint is in no function row, so the crossing set below could not "
+        f"be derived for it: {missing}")
+    crossing = {(p, c) for p, c in edges if grouped[p] != grouped[c]}
+    assert _num(said.group(2)) == len(crossing), (
+        f"the sentence claims {said.group(2)} of the {len(edges)} edges cross a function "
+        f"boundary while the §functions membership table puts {len(crossing)} of them "
+        f"across one: {sorted(crossing)}")
+    assert len(crossing) == 5, (
+        f"measured 2026-11-16 the twelve edges cross a boundary five times — "
+        f"#56─►#51 distil→build, #24─►#48 and #48─►#74 build↔canonicalize, #81─►#82 "
+        f"bound entropy→measure, #24─►#98 build→canonicalize — so a sixth or fourth "
+        f"means the grouping moved and this sentence has to move with it: "
+        f"{sorted(crossing)}")
 
 
 # ── #1520 clause 5 — the four newest jobs are in both tables ─────────────────
@@ -4208,22 +4282,32 @@ def test_the_departed_paper_digests_hold_no_membership_row():
 
 
 def test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once():
-    """#2630's bound on itself: listing seven jobs must not invent wiring.
+    """#2630's bound on itself — listing arrivals must not invent wiring — plus #4094.
 
-    None of the seven declares `depends_on` — `grep -c depends_on
-    ~/obsidian/autonomy/9[1-7]-*.md` reads 0 for all seven, and
-    `GET /api/autonomy/tasks` on 2026-10-12 parsed 39 tasks with exactly ten
-    declaring a parent (39, 40, 42, 47, 48, 51, 57, 58, 74, 83) — so the ten arrows
-    stay, and the one arithmetic they sit inside moves: §The wiring's
-    "N of the M tasks declare no dependency" and §Distil's "Ten of the fleet's M
-    jobs" both take the route's 39, and 39 − 29 = 10 is still the diagram's arrow
-    count.
+    The name's seven is a filing stamp, for the reason given at length on
+    `test_the_instrument_index_row_counts_eight_arms_and_the_lag_journal_names_its_reader`:
+    the number names the change that filed the node (#2630's arrivals #91–#97, none of which
+    declares `depends_on` — the §Watch-the-machinery control below still enforces that), and
+    every live count below is measured. What did NOT survive is the roster its docstring
+    enumerated beside the stamp: the parent list the route returned on 2026-10-12, ten ids
+    long, which this node recited as fact. #4094 re-measured the route on 2026-11-16 and it
+    answers **53** tasks, of which exactly **twelve** declare a parent: #39, #40, #42, #47,
+    #48, #51, #57, #58, #74, #82, #83, #98. The two the recited roster missed are #82
+    (`82-nightly-retrieval-eval.md`, which has declared `depends_on: 81` since the vault
+    commit `a01fa34f` 2026-10-29, both jobs armed) and #98 (`98-retag-untagged-facts.md`,
+    which declares `depends_on: 24`). So 53 − 41 = 12 is the diagram's arrow count.
+
+    The binding does what it always did — denominator, no-dependency count and arrows move
+    in one edit or this fails — which is exactly what #4094 shows was missing: this pair was
+    re-dated from 29 of 39 (2026-10-12) to 41 of 53 without the picture being redrawn by one
+    arrow, because re-dating a sentence is one edit and redrawing a diagram is another. A lag
+    of two edges is what a lag of ten looks like.
     """
     edges = _diagram_edges()
-    assert edges == TEN_EDGES, (
-        f"the wiring diagram reads {sorted(edges)}, not the ten verified edges "
-        f"{sorted(TEN_EDGES)} — none of #91–#97 declares a parent, so none of them "
-        f"belongs in this picture")
+    assert edges == WIRING_EDGES, (
+        f"the wiring diagram reads {sorted(edges)}, not the twelve edges verified "
+        f"2026-11-16 {sorted(WIRING_EDGES)} — none of #91–#97 declares a parent, so "
+        f"none of them belongs in this picture, and #82 and #98 do")
     grouped = {f"#{job}" for job in WATCH_JOBS}
     assert not (grouped & {e for pair in edges for e in pair}), (
         f"the diagram drew an edge for one of {sorted(grouped)}; every file in "
@@ -4233,14 +4317,70 @@ def test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once():
     m = re.search(r"\b(\w+) of the (\w+) tasks\b", _flat(funcs))
     assert m, "§The wiring no longer counts the jobs that declare no dependency"
     without, fleet = _num(m.group(1)), _num(m.group(2))
-    assert fleet == 39, (
-        f"the doc counts a fleet of {fleet} while `GET /api/autonomy/tasks` parsed 39 "
-        f"tasks on 2026-10-12, #91–#97 included — the denominator is the thing "
+    assert fleet == 53, (
+        f"the doc counts a fleet of {fleet} while `GET /api/autonomy/tasks` parsed 53 "
+        f"tasks on 2026-11-16, #91–#97 included — the denominator is the thing "
         f"#1520 clause 3 pinned two sections together over")
     assert fleet - without == len(edges), (
         f"{fleet} − {without} = {fleet - without} but the diagram draws {len(edges)} "
         f"edges; a job joining §Watch the machinery adds no parent, so the two "
         f"numbers move together or the sentence and the picture part company")
+
+
+#: A superseded fleet measurement or parent roster, still spelled as fact in this
+#: file's own prose. Each pattern puts its own leading digit pair in a character class —
+#: `3[9]`, not the bare two characters — because the needle is written into the very source
+#: it greps: a plain phrase here would match its own spelling two lines below and the node
+#: could never pass. With the class, this file contains `3[9]` where the pattern wants `39`,
+#: so only a genuine recitation matches. The node's own docstring is written around the same
+#: constraint, and both the phrase and the ten-id roster are referred to rather than quoted.
+_STALE_ROUTE_FIGURES = (
+    re.compile(r"parsed 3[9]\b"),
+    re.compile(r"3[6] parsed tasks\b"),
+    re.compile(r"3[6] tasks with \d+ declaring\b"),
+    re.compile(r"\(39, 40, 42, 47, 48, 51, 57, 58, 74, 8[39]\)"),
+)
+
+
+def test_no_prose_in_this_file_recites_a_superseded_fleet_measurement():
+    """#4094 clause 5, on this file itself.
+
+    The drift #4094 filed was not only the doc's. This file carried, as fact, the ten-id
+    parent roster the route returned on 2026-10-12 in one docstring, that same
+    thirty-nine-task denominator in a failure message two nodes away, and a
+    thirty-six-task figure in another — three superseded measurements, each already stale
+    twice over by the day the item was filed, while the node wrapped around each one stayed
+    green. A number in prose is graded by nothing: the assertion beside it checks the DOC, so
+    this file's own provenance text was the one measurement in the repo with no instrument on
+    it.
+
+    Hence this node, which is the clause in the shape the clause states it — the file's
+    source must contain no such figure. It reads its own module's source rather than a
+    fixture, because the artefact under test is this file's prose and nothing else. The
+    docstring above therefore names the stale denominators spelled out, not transcribed: a
+    needle quoted verbatim matches itself, and the node would fail on its own explanation of
+    what it forbids. The twelve ids the arithmetic node's docstring now carries are checked
+    here positively as well — a re-date that moves the assertion and leaves the roster behind
+    is the exact half-edit that made the old one wrong.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    for pattern in _STALE_ROUTE_FIGURES:
+        hits = pattern.findall(src)
+        assert not hits, (
+            f"this file recites {pattern.pattern!r} {len(hits)} time(s) as though it were "
+            f"a current measurement — /api/autonomy/tasks answers 53 tasks with 12 "
+            f"declaring `depends_on` (2026-11-16), so move the superseded figure to "
+            f"§Review log in architecture/autonomy-jobs.md, where a dated record belongs, "
+            f"instead of letting it stand beside an assertion that has moved on")
+
+    roster = test_the_seven_add_no_dependency_edge_and_the_fleet_arithmetic_moves_once.__doc__ or ""
+    measured = ["#39", "#40", "#42", "#47", "#48", "#51", "#57", "#58", "#74",
+                "#82", "#83", "#98"]
+    absent = [job for job in measured if job not in roster]
+    assert not absent, (
+        f"the arithmetic node's docstring no longer names the twelve parents measured "
+        f"2026-11-16 — {absent} missing — so the node's assertion may still be true while "
+        f"the prose beside it lists a roster the route stopped returning")
 
 
 #: A claim that some id is the fleet's newest, as the doc writes it in §The
@@ -9153,9 +9293,10 @@ def test_the_drop_ruling_is_recorded_as_settled_with_both_arms_rederivable():
 
 # ── #4095 clause 1: §Measure's #82 passage describes the edge its FILE declares ─────
 #
-# Every dependency node above reads the fenced wiring block (`TEN_EDGES`, and
-# `_diagram_edges()` slices the text after "Ten `depends_on` edges exist" and stops at the
-# fence), so the diagram stayed green over the one sentence that was wrong: §Measure's #82
+# Every dependency node above reads the fenced wiring block (`WIRING_EDGES`, and
+# `_diagram_edges()` slices the text after "`depends_on` edges exist" — the numeral-free
+# tail since #4094 — and stops at the fence), so the diagram could stay green over the one
+# sentence that was wrong: §Measure's #82
 # passage read "ordered after #81's index maintenance by window only — it declares no
 # `depends_on`, so a late #81 does not hold it", while `82-nightly-retrieval-eval.md` has
 # declared `depends_on: 81` since the vault commit `a01fa34f` (2026-10-29). That is the
