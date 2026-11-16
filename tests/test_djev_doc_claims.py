@@ -1727,3 +1727,343 @@ def test_the_three_places_that_state_the_rank_measurement_still_agree():
                 f"{name} no longer states {needle!r}: the tool rank path's "
                 "measurement is quoted from three places and they must not "
                 "disagree about it")
+
+
+# ── #4141: config.yaml restates the roster in prose, and got the count wrong ──
+
+#: The two sentences #4141 was filed on, quoted verbatim from `config.yaml` at
+#: base 3923ee50. The slot header's claim about what the engine records was
+#: wrapped across two comment lines and the `shadow:` block described itself the
+#: same way inside its own key; both counted three seams while
+#: `djev_shadow.SEAMS` had carried its fourth since 2026-09-25, and the same file
+#: said four 36 lines further down. That wrapping is why a plain
+#: `grep -n 'shadow seams' config.yaml` printed nothing even on the wrong file —
+#: the phrase straddles a line break — so every read below folds a comment
+#: paragraph onto one line before matching anything.
+SHIPPED_HEADER_CLAIM = "record three production seams in shadow"
+SHIPPED_BLOCK_CLAIM = "at three seams"
+
+#: A TRUE sentence the guard must keep: three of the four seams really are
+#: rounding beside `action_review`'s 99.5%. Named because the naive widening — a
+#: `[num] … seams` window with no qualifier — refuses it, and a guard that refuses
+#: a true sentence is a guard somebody deletes.
+TRUE_OLD_SEAMS_SENTENCE = ("The three older seams are rounding beside it: over the "
+                           "store's 34.6 days `dedupe` wrote 974 rows")
+
+#: The two regions as they shipped and as this item reworded them, line for line.
+#: The pair lets a test rebuild the shipped pre-image from the live file, which is
+#: the only before-side a node can name: the round's own commit holds the fixed
+#: text, the gate runs on a rebased head, and no test may read a stash.
+OLD_HEADER_COMMENT = [
+    "# three MCP tools (`djev_rank`, `djev_decide`, `djev_status`) and record three",
+    "# production seams in shadow — `architecture/djev.md` is the long version.",
+]
+NEW_HEADER_COMMENT = [
+    "# three MCP tools (`djev_rank`, `djev_decide`, `djev_status`) and record every",
+    "# seam in `djev_shadow.SEAMS` in shadow — `architecture/djev.md` is the long",
+    "# version. That roster owns the count, so this header names none; #4141 is",
+    "# what a counted restatement of it turned into.",
+]
+OLD_SHADOW_BLOCK_COMMENT = [
+    "  # at three seams. It changes no decision anywhere: the recorder returns",
+    "  # None, drops rather than waits, and runs on its own thread.",
+]
+NEW_SHADOW_BLOCK_COMMENT = [
+    "  # at every seam in `djev_shadow.SEAMS`. It changes no decision anywhere: the",
+    "  # recorder returns None, drops rather than waits, and runs on its own",
+    "  # thread.",
+]
+
+#: The two roster-claim shapes `_SEAM_COUNT` cannot see. It requires the word
+#: `shadow` between the number and the noun, and measured over the shipped file it
+#: returned `[]` raw and `[four]` over folded comments only, with
+#: `record three production seams in shadow -> []` and `at three seams -> []`. That
+#: is why the item's own proposed check — "add `config.yaml` to the existing
+#: seam-roster node" — would have come out green on the wrong file, and why the
+#: shapes are widened before the file they read is. Each keeps its qualifier rather
+#: than degrading to a bare `[num] seams`, which would refuse the true sentence
+#: above.
+_PRODUCTION_SEAM_COUNT = re.compile(
+    r"\b(?:(\d{1,2})|(" + "|".join(_NUMBER_WORDS) + r"))"
+    r"[ \t]+production[ \t]+seams?\b", re.IGNORECASE)
+_AT_SEAM_COUNT = re.compile(
+    r"\bat[ \t]+(?:(\d{1,2})|(" + "|".join(_NUMBER_WORDS) + r"))"
+    r"[ \t]+seams?\b", re.IGNORECASE)
+
+#: All three spellings the claim takes, scanned together: §6.1's `N shadow seams`
+#: plus the two this config writes.
+_SEAM_ROSTER_SHAPES = (_SEAM_COUNT, _PRODUCTION_SEAM_COUNT, _AT_SEAM_COUNT)
+
+
+def _roster_seam_counts(flat: str) -> list[int]:
+    """Every seam count in folded prose, across all three shapes it is written in."""
+    counts = []
+    for shape in _SEAM_ROSTER_SHAPES:
+        for digits, word in shape.findall(flat):
+            counts.append(int(digits) if digits else _NUMBER_WORDS[word.lower()])
+    return counts
+
+
+def _fold_comment_prose(text: str) -> str:
+    """Every whole-line comment in a YAML file, each paragraph folded onto one line.
+
+    Reading one visual line at a time is precisely how the shipped file hid the
+    claim from the module's own regex: the count shapes never cross a newline, and
+    the header's sentence did. A blank line, a bare `#`, or any non-comment line
+    ends a paragraph, so folding can never weld two paragraphs into a phrase that
+    neither of them contains.
+    """
+    paragraphs, current = [], []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and stripped.lstrip("#").strip():
+            current.append(stripped.lstrip("#").strip())
+            continue
+        if current:
+            paragraphs.append(" ".join(current))
+            current = []
+    if current:
+        paragraphs.append(" ".join(current))
+    return "\n".join(paragraphs)
+
+
+def _config_comment_prose(path: Path = CONFIG_SRC) -> str:
+    """`config.yaml`'s comment prose, whole file and folded.
+
+    The whole file rather than the block above one key: #4141's two wrong counts
+    sat at the djev slot header and inside the `shadow:` block, and
+    `_queue_max_comment` — which walks backwards from `queue_max:` over the block
+    directly above it, the one window the shipped suite had — could not reach
+    either. That unreachable middle is the gap this reader exists to close.
+    """
+    return _fold_comment_prose(path.read_text(encoding="utf-8"))
+
+
+def _prose_block(needle: str, *, what: str, path: Path = CONFIG_SRC) -> str:
+    """The one comment paragraph carrying `needle`.
+
+    Located by its own words rather than by a line range, so re-wrapping the
+    paragraph moves the window along instead of leaving the check reading its
+    neighbour's prose. Exactly one paragraph must carry it: two would mean the
+    claim was copied somewhere new, and none that it moved.
+    """
+    blocks = [b for b in _config_comment_prose(path).splitlines() if needle in b]
+    assert len(blocks) == 1, (
+        f"expected exactly one comment paragraph in {path.name} to carry "
+        f"{needle!r} ({what}); found {len(blocks)}, so this window is no longer the "
+        "paragraph it was written against")
+    return blocks[0]
+
+
+def _assert_no_stale_roster_seam_count(flat: str, *, where: str) -> None:
+    """Refuse prose that counts the seams differently from the roster that owns them.
+
+    `len(djev_shadow.SEAMS)` is read off the module on every call — never a literal
+    four — so a fifth seam makes every counted copy in the corpus wrong rather than
+    letting this check agree with them quietly. No count at all is a passing answer:
+    the roster is nameable through `djev_shadow.SEAMS` without an integer, which is
+    what #4141's own reword does. A disagreeing count is not, because the slot
+    header is the first thing a reader of the slot reads — believing it,
+    `action_review`, which writes 99.5% of the shadow log, reads as a seam nobody
+    documented.
+    """
+    from app import djev_shadow
+
+    seams = tuple(djev_shadow.SEAMS)
+    counts = _roster_seam_counts(flat)
+    stale = sorted({c for c in counts if c != len(seams)})
+    assert not stale, (
+        f"{where} counts {stale} seam(s) while `djev_shadow.SEAMS` holds "
+        f"{len(seams)}: {seams}. Restate the roster through `djev_shadow.SEAMS` or "
+        f"state {len(seams)} — an integer in prose is stale the day a seam lands, "
+        "which is what #4141 is.")
+
+
+def _config_before_4141(text: str) -> str:
+    """`config.yaml` as it shipped, rebuilt by swapping the two regions back.
+
+    Each region has to appear exactly once, or the substitution quietly rebuilds
+    nothing and every before-side below reads as green.
+    """
+    for new_lines, old_lines in ((NEW_HEADER_COMMENT, OLD_HEADER_COMMENT),
+                                 (NEW_SHADOW_BLOCK_COMMENT,
+                                  OLD_SHADOW_BLOCK_COMMENT)):
+        new = "\n".join(new_lines)
+        assert text.count(new) == 1, (
+            "the region #4141 reworded is not the text pinned here, so the "
+            f"before/after pair cannot be rebuilt: {new_lines[0]!r}")
+        text = text.replace(new, "\n".join(old_lines))
+    return text
+
+
+def test_no_config_comment_counts_seams_the_recorder_does_not_declare():
+    """Clauses 1, 2 and 3 together: the file's own prose now agrees with its owner.
+
+    Three claims, because the item is about a reader believing the wrong half of a
+    file that states the count twice. The whole comment prose is scanned for any
+    roster count differing from `djev_shadow.SEAMS` — not only the `queue_max:`
+    block, which is as far as the shipped suite reached. The slot header, the
+    paragraph a reader of the djev slot reads first, is graded on its own and has to
+    name the roster through `djev_shadow.SEAMS` while carrying no count of its own;
+    the `shadow:` block's self-description likewise names no integer. And #3326's
+    dated probe keeps every figure — which is what makes this green mean "reworded"
+    rather than "the guarded prose went missing". The probe still holds
+    `TRUE_OLD_SEAMS_SENTENCE` too, the true three-count the guard above has just
+    looked at and declined to refuse.
+    """
+    prose = _config_comment_prose()
+    for figure in (SEAM_PROBE_DATE, SEAM_ROWS_PER_DAY, SEAM_ROWS_PER_HOUR,
+                   SEAM_DOMINANT_SHARE):
+        assert figure in prose, (
+            f"`config.yaml`'s comment prose no longer carries #3326's {figure!r}, "
+            "so this node's green half would be an empty file rather than a fixed "
+            "one")
+    assert TRUE_OLD_SEAMS_SENTENCE in prose, (
+        "the true `three older seams` reading is gone from the probe, so the width "
+        "of the guard below proves nothing")
+
+    _assert_no_stale_roster_seam_count(prose, where="`config.yaml`'s comment prose")
+    assert _roster_seam_counts(prose), (
+        "no seam count survives anywhere in the config's prose, so the green above "
+        "is silence: #3326's probe still counts the roster once")
+
+    header = _prose_block("`djev_rank`", what="the djev slot header")
+    assert SHIPPED_HEADER_CLAIM not in header, (
+        "the slot header still claims what the engine records by an integer")
+    assert "`djev_shadow.SEAMS`" in header, (
+        "the slot header names the roster by neither its owner nor its length, so a "
+        "reader still has to guess how many seams record")
+    assert not _roster_seam_counts(header), (
+        f"the slot header counts the seams again ({_roster_seam_counts(header)}) "
+        "instead of pointing at `djev_shadow.SEAMS` — the copy that went stale is "
+        "back")
+
+    shadow = _prose_block("WOULD have decided",
+                          what="the `shadow:` block's self-description")
+    assert SHIPPED_BLOCK_CLAIM not in shadow, (
+        "the `shadow:` block still counts its own seams")
+    assert not _roster_seam_counts(shadow), (
+        f"the `shadow:` block names a seam integer "
+        f"({_roster_seam_counts(shadow)}); clause 2 asks it to name the roster, not "
+        "a count")
+
+
+def test_the_config_seam_count_check_refuses_the_two_sentences_it_exists_to_refuse():
+    """Clause 4: the red side, seeded with the shipped sentences verbatim.
+
+    Two forms, not one. The two bare sentences are what the item names; the third
+    seed is the whole shipped file rebuilt around them, which is the form the guard
+    actually meets — a fragment-only green could still come from a reader that
+    never folds a file at all. Each raise has to name the count it refused, so a
+    refusal raised by some other assertion cannot pass for the bite. The paired
+    greens are the width control: the true `three older seams` reading, #3326's own
+    true `four shadow seams` figure, and the reworded `at every seam` line all pass
+    untouched.
+    """
+    for seed in (SHIPPED_HEADER_CLAIM, SHIPPED_BLOCK_CLAIM):
+        with pytest.raises(AssertionError) as raised:
+            _assert_no_stale_roster_seam_count(seed, where="config.yaml")
+        assert "3" in str(raised.value), (
+            f"it raised, but not on the count: {raised.value}")
+        assert "SEAMS" in str(raised.value), (
+            f"it raised without naming the roster it disagrees with: "
+            f"{raised.value}")
+
+    shipped_prose = _fold_comment_prose(_config_before_4141(
+        CONFIG_SRC.read_text(encoding="utf-8")))
+    assert (SHIPPED_HEADER_CLAIM in shipped_prose
+            and SHIPPED_BLOCK_CLAIM in shipped_prose), (
+        "the rebuilt pre-image does not carry both shipped sentences folded onto a "
+        "line, so the file form of the red side is not the file #4141 was filed on")
+    with pytest.raises(AssertionError) as whole_file:
+        _assert_no_stale_roster_seam_count(shipped_prose,
+                                           where="config.yaml (as shipped)")
+    assert "3" in str(whole_file.value), (
+        f"the guard read the shipped file's prose and said nothing: "
+        f"{whole_file.value}")
+
+    _assert_no_stale_roster_seam_count(TRUE_OLD_SEAMS_SENTENCE,
+                                       where="the rounding reading")
+    _assert_no_stale_roster_seam_count(
+        f"the four shadow seams in `djev_shadow.SEAMS` wrote {SEAM_ROWS_PER_DAY} "
+        "rows/day", where="#3326's probe")
+    _assert_no_stale_roster_seam_count(
+        "at every seam in `djev_shadow.SEAMS` it changes no decision anywhere",
+        where="the reworded shadow block")
+
+
+def test_the_seam_count_refuses_a_config_whose_owner_moved(monkeypatch):
+    """Clause 3's other half: the number compared is the roster's, never a literal.
+
+    `config.yaml` says four and `SEAMS` holds four, so on its own that green cannot
+    tell a derived comparison from a hardcoded one. Growing the roster in-process
+    must therefore make the config's own `four` wrong — the same inversion a fifth
+    seam would cause for real — and putting it back must clear it. A node that only
+    ever sees four agreeing with four proves nothing about which four it used.
+    """
+    from app import djev_shadow
+
+    prose = _config_comment_prose()
+    assert len(djev_shadow.SEAMS) == 4, (
+        "the roster is no longer four deep, so this node's premise — that the "
+        "config's `four` and the owner's `four` agree by luck today — has moved; "
+        "re-read the length and re-pin the inversion below")
+    monkeypatch.setattr(djev_shadow, "SEAMS", tuple(djev_shadow.SEAMS) + ("fifth",))
+    with pytest.raises(AssertionError) as grown:
+        _assert_no_stale_roster_seam_count(prose, where="config.yaml")
+    assert "4" in str(grown.value), (
+        "with the roster grown, the config's `four` is still accepted, so the "
+        f"comparison is against a literal: {grown.value}")
+    monkeypatch.undo()
+    _assert_no_stale_roster_seam_count(prose, where="config.yaml")
+
+
+def test_the_4141_reword_is_comment_only_and_moves_no_value_the_loader_sees():
+    """Clause 5: the fix is prose, through the route #3326 shipped by.
+
+    `config.yaml` sits in `DENIED_GLOBS`, and what lets a round land a change in it
+    is `COMMENT_ONLY_GLOBS` plus `comment_only_change`'s two checks — an identical
+    scanner token stream and an equal parsed document. Both are run here on a real
+    before/after pair rebuilt from the shipped file, so the claim is about this edit
+    rather than about the file's general shape. The two values the surrounding prose
+    talks about are asserted unchanged on each side: the parsed
+    `djev.shadow.queue_max`, still the recorder's own default, and `djev.enabled`.
+    Then #3326's probe is re-read through the shipped window, because clause 2
+    protects those figures from this round's rewording.
+    """
+    import yaml
+
+    from app import djev_shadow
+    from scripts.automod.spec import COMMENT_ONLY_GLOBS, comment_only_change
+
+    after = CONFIG_SRC.read_text(encoding="utf-8")
+    before = _config_before_4141(after)
+    assert CONFIG_SRC.name in COMMENT_ONLY_GLOBS, (
+        "`config.yaml` left `COMMENT_ONLY_GLOBS`, so a comment here is a human "
+        "edit again and this item's route is gone")
+
+    ok, why = comment_only_change(before, after)
+    assert ok, f"`comment_only_change` refused the #4141 reword: {why}"
+
+    parsed_before = yaml.safe_load(before)
+    parsed_after = yaml.safe_load(after)
+    assert parsed_after["djev"]["enabled"] is True
+    assert parsed_before["djev"]["enabled"] == parsed_after["djev"]["enabled"], (
+        "`djev.enabled` moved alongside the comments")
+    assert (parsed_after["djev"]["shadow"]["queue_max"]
+            == parsed_before["djev"]["shadow"]["queue_max"]
+            == int(djev_shadow.DEFAULTS["queue_max"])), (
+        "`djev.shadow.queue_max` moved alongside the comments, or stopped matching "
+        "the recorder's default")
+
+    for lines in (NEW_HEADER_COMMENT, NEW_SHADOW_BLOCK_COMMENT):
+        for line in lines:
+            assert line.strip().startswith("#"), (
+                f"a #4141 line is not a whole-line comment: {line!r}")
+
+    queue_max_now = _queue_max_comment(CONFIG_SRC)
+    for figure in (SEAM_PROBE_DATE, SEAM_ROWS_PER_DAY, SEAM_ROWS_PER_HOUR,
+                   SEAM_DOMINANT_SHARE):
+        assert figure in queue_max_now, (
+            f"the probe above `queue_max:` lost {figure!r}, which #3326 pinned and "
+            "clause 2 excludes from this change")

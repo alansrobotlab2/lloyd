@@ -55,8 +55,10 @@ secondary_enabled: false
 # It is NOT a chat slot and deliberately absent from `models:`. Nothing routes
 # a TURN here; `resolve_model_alias`, the model dropdown and the harness have
 # never heard of it, and that stays true. Since 2026-09-20 it does answer
-# three MCP tools (`djev_rank`, `djev_decide`, `djev_status`) and record three
-# production seams in shadow — `architecture/djev.md` is the long version.
+# three MCP tools (`djev_rank`, `djev_decide`, `djev_status`) and record every
+# seam in `djev_shadow.SEAMS` in shadow — `architecture/djev.md` is the long
+# version. That roster owns the count, so this header names none; #4141 is
+# what a counted restatement of it turned into.
 # What `enabled` does is: server.py reconciles the supervisord process against
 # it on boot (the same treatment `secondary_enabled` gets), the Mission
 # Control dashboard shows its engine card while it is true, and `app/djev.py`
@@ -81,8 +83,9 @@ djev:
   # POST /v1/systemone, GET /health.
   structured_url: http://127.0.0.1:8011
   # Recording what djev WOULD have decided beside what production did decide,
-  # at three seams. It changes no decision anywhere: the recorder returns
-  # None, drops rather than waits, and runs on its own thread.
+  # at every seam in `djev_shadow.SEAMS`. It changes no decision anywhere: the
+  # recorder returns None, drops rather than waits, and runs on its own
+  # thread.
   #
   # `LLOYD_DJEV_SHADOW=0` mutes it for a process, which every eval and every
   # pinned-corpus regression arm sets — a replay recorded as production
