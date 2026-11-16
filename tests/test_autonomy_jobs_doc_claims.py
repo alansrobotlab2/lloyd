@@ -4135,10 +4135,12 @@ def test_watch_105_cadence_is_the_module_not_its_frozen_field():
 #: ---------------------------------------------------------------------------
 
 #: The five statements about #105's cadence that #4097 retired, each stored as a head and a
-#: tail rather than in one piece — the file these probes are typed into is the file they
-#: scan, and a ban-list that spelled out what it forbids would fail its own check, the trap
-#: #3861/#3777 records at `test_the_seam_seventeen_s_fix_prose_names_no_live_module`. Joined,
-#: these are the exact words #4097's acceptance check greps this file for.
+#: tail rather than in one piece. The reason is self-reference: the file these probes are typed
+#: into is the file they scan, so a ban-list that spelled out what it forbids would fail its own
+#: check — the first assertion of `test_no_watch_105_rationale_says_the_field_is_frozen_or_owed`
+#: is exactly a claim that this file's text does not contain these strings, and typing them
+#: whole would fail it. Joined at the comma, these are the exact words #4097's acceptance check
+#: greps this file for.
 _WATCH_105_RETIRED: tuple[tuple[str, str], ...] = (
     ("held at ", "`daily`"),
     ("frozen at ", "`daily`"),
@@ -4154,6 +4156,31 @@ _WATCH_105_WHY = ("module is the artifact the cadence "
 #: …and the two facts that replaced the false ones: the field's value, and its date.
 _WATCH_105_MOVED = "#3782 closed"
 _WATCH_105_WEEKLY = "weekly"
+
+#: The field's VALUE, attributed to the field. The bare word above was the first draft's
+#: probe and #4097's review refused it: `weekly` names a cadence in any sentence that
+#: mentions one, so a site discussing some other job satisfied the probe while saying
+#: nothing about #105's `frequency:`. Clause 2 asks for the claim, so the probe is the
+#: shape — `field`/`file` … `has read` … `weekly` — matched over normalised prose, which
+#: is also how it survives a wrap.
+_WATCH_105_READS_WEEKLY = re.compile(
+    r"\b(?:field|file)\b\D{0,40}?\bhas read\b\D{0,15}?\bweekly\b")
+
+#: The same reason, matched where it is WRITTEN rather than where it is meant: eight of
+#: these sites spell it across a wrapped comment line or a joined f-string piece, so no
+#: one-line literal reaches it. `[\s"'#f]*` is exactly the noise a wrap leaves behind —
+#: the newline, the indentation, the `#` that reopens a comment, the `"` and `f` that
+#: join one string piece to the next — and nothing else in this file can supply it
+#: between those eight words. The controls below cut the reason out of every site with
+#: this, which is how they reach the two notes and the failure messages at all.
+_WATCH_105_WHY_RAW = re.compile(
+    "[\\s\"'#f]*".join(map(re.escape, _WATCH_105_WHY.split())))
+
+#: Which finding belongs to which probe, so a control can insist that cutting one reason
+#: out of one site reddens exactly that reason at exactly that site.
+_WATCH_105_PROBE_WHY = "why the pin is the module"
+_WATCH_105_PROBE_VALUE = "field reads weekly"
+_WATCH_105_PROBE_MOVED = "dates the agreement"
 
 #: Two module-level comment blocks that carried a retired statement, as
 #: (label, unique start literal, unique end literal). Both literals are asserted to occur
@@ -4199,14 +4226,43 @@ def _watch_105_prose(region: str) -> str:
     Only a LEADING `#` is dropped, never an inline one: the facts these sites must state are
     item numbers — `#3782 closed` — and stripping every `#` would delete the very thing the
     probe looks for, turning "the site no longer dates the agreement" into a passing check.
+
+    The same normalisation is applied to the WHOLE FILE by the absence half below, which is
+    what makes it a two-directional tool rather than a convenience: a retired statement
+    revived the way prose is written here — one phrase across two comment lines — is
+    invisible to a raw substring scan and to `git grep` alike, and would sit in the file
+    unread by anything. Control (b) is that revival.
     """
     opened = re.sub(r"(?m)^[ \t]*#[ \t]?", " ", region)
     return re.sub(r"\s+", " ", opened.replace('f"', " ").replace('"', " "))
 
 
-def _watch_105_regions(text: str) -> dict[str, str]:
-    """Every region of this file that carries #105's rationale, keyed by a name to blame."""
-    out: dict[str, str] = {}
+def _watch_105_blanked(cut: str) -> str:
+    """`cut` with its prose erased and its syntax left standing.
+
+    The controls below delete a stated reason from a site, and every site is a wrapped
+    comment or a joined f-string piece, so the erasure has to keep each character that
+    carries structure: the NEWLINE, because the node windows are read by line number and a
+    control that shifted them would be grading different lines than the live check reads;
+    the `"` , because an f-string piece whose closing quote is erased runs on to the next
+    one and the mutated file stops being Python; and the `#`, for the same reason in a
+    comment. Everything else becomes a space — including an `f` prefix, which is a plain
+    string with no prefix, and still parses.
+    """
+    return "".join(ch if ch in '\n"# ' else " " for ch in cut)
+
+
+def _watch_105_spans(text: str, tree: ast.AST | None = None
+                     ) -> dict[str, tuple[int, int]]:
+    """Every region of this file that carries #105's rationale, as `{name: (start, end)}`.
+
+    Spans and not slices because the controls cut a SITE out of the file they then scan: a
+    control that assembled its own copy of a window would be grading its own reconstruction
+    instead of the window the live check reads, which is the lesson #3777 records about
+    copying a control. `tree` is the syntax tree to find the three nodes in — the controls
+    preserve the file's line count, so one parse answers for all of them.
+    """
+    out: dict[str, tuple[int, int]] = {}
     for label, start, end in _WATCH_105_COMMENTS:
         assert text.count(start) == 1, (
             f"{label}: its start literal occurs {text.count(start)} times, so the window "
@@ -4214,9 +4270,13 @@ def _watch_105_regions(text: str) -> dict[str, str]:
         i = text.index(start)
         j = text.find(end, i + len(start))
         assert j > i, f"{label}: its end literal {end!r} never follows its start"
-        out[label] = text[i:j]
+        out[label] = (i, j)
     lines = text.splitlines(keepends=True)
-    tree = ast.parse(text)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+    if tree is None:
+        tree = ast.parse(text)
     for name in _WATCH_105_NODES:
         fn = [n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == name]
@@ -4228,22 +4288,34 @@ def _watch_105_regions(text: str) -> dict[str, str]:
                 and isinstance(doc.value.value, str)), (
             f"{name} has no docstring: its rationale was deleted rather than retyped, and "
             f"an exception with no stated reason is an exception someone removes")
-        out[f"{name} (docstring)"] = "".join(lines[doc.lineno - 1: doc.end_lineno])
-        out[f"{name} (assert message)"] = "".join(lines[doc.end_lineno: fn[0].end_lineno])
+        out[f"{name} (docstring)"] = (starts[doc.lineno - 1], starts[doc.end_lineno])
+        out[f"{name} (assert message)"] = (starts[doc.end_lineno], starts[fn[0].end_lineno])
     return out
 
 
-def _watch_105_findings(text: str) -> list[str]:
-    """What is wrong with `text` as the home of #105's rationale. Empty means correct."""
+def _watch_105_findings(text: str, tree: ast.AST | None = None) -> list[str]:
+    """What is wrong with `text` as the home of #105's rationale. Empty means correct.
+
+    One function for the live check and for every control, because a control that
+    re-implemented the scan it is testing would pass on a file the live asserts had simply
+    failed to look at — the reason #3777 gives for `_body_105_cadence_findings`.
+    """
+    flat = _watch_105_prose(text)
     found = [f"the retired statement {head + tail!r} is in the file again"
-             for head, tail in _WATCH_105_RETIRED if head + tail in text]
-    for label, region in _watch_105_regions(text).items():
-        prose = _watch_105_prose(region)
-        for probe, what in ((_WATCH_105_WHY, "why the pin is the module and not the field"),
-                            (_WATCH_105_WEEKLY, "what the task file reads"),
-                            (_WATCH_105_MOVED, "when the field moved")):
-            if probe not in prose:
-                found.append(f"{label} does not state {what} (looked for {probe!r})")
+             for head, tail in _WATCH_105_RETIRED
+             if head + tail in text or head + tail in flat]
+    for label, (i, j) in _watch_105_spans(text, tree).items():
+        prose = _watch_105_prose(text[i:j])
+        if _WATCH_105_WHY not in prose:
+            found.append(f"{label} no longer states {_WATCH_105_PROBE_WHY} and not the "
+                         f"field (looked for {_WATCH_105_WHY!r})")
+        if not _WATCH_105_READS_WEEKLY.search(prose):
+            found.append(f"{label} no longer states that the task file's `frequency:` "
+                         f"field reads weekly (looked for the shape "
+                         f"{_WATCH_105_READS_WEEKLY.pattern!r})")
+        if _WATCH_105_MOVED not in prose:
+            found.append(f"{label} no longer {_WATCH_105_PROBE_MOVED} to #3782 closing "
+                         f"(looked for {_WATCH_105_MOVED!r})")
     return found
 
 
@@ -4261,67 +4333,239 @@ def test_no_watch_105_rationale_says_the_field_is_frozen_or_owed():
     next pass reads; a message saying the field cannot move is how a legitimate future change
     to it gets refused, which is the harm #4097 was filed for.
 
-    So this node pins both directions, over five sites it locates rather than copies.
+    Both directions are pinned, over the EIGHT regions this file locates rather than copies:
+    the two module-level notes, and the docstring AND the failure message of each of the
+    three nodes in `_WATCH_105_NODES`.
 
-    Absent: none of the five retired statements appears anywhere in this file. Each is
-    joined from two literals in `_WATCH_105_RETIRED` above, because this file is what the
-    scan reads — a ban-list that spelled out what it forbids would fail its own check, the
-    trap #3861/#3777 records at `test_the_seam_seventeen_s_fix_prose_names_no_live_module`.
-    Joined, those five are the exact words #4097's acceptance check greps for, so `git grep`
-    over this file and this node ask the same question.
+    Absent: none of the five retired statements appears anywhere in this file, in raw source
+    OR in the file's prose normalised onto one line. The second half is not decoration. Every
+    rationale here is written across wrapped comment lines and joined f-string pieces, so a
+    statement revived in the same layout is invisible to a raw substring scan — and to
+    `git grep`, which is what #4097's acceptance check runs — and would then sit in the file
+    with nothing reading it. Each phrase is joined from two literals in `_WATCH_105_RETIRED`,
+    because this file is what the scan reads: a ban-list that spelled out what it forbids would
+    fail the first assertion below, which is a claim that this file contains none of them.
+    Joined, those five are the exact words the acceptance check greps for, so `git grep` over
+    this file and this node ask the same question.
 
-    Present: the `WATCH_JOBS[105]` note, the `CADENCE_CELLS["Watch the machinery"]` note, and
-    the docstring AND the assert message of each node in `_WATCH_105_NODES` still carry the
-    module-as-executed-surface reason, the word `weekly`, and the fact that #3782 closed.
-    Deleting the exception, or retyping a docstring and leaving its message telling the old
-    reason, fails here.
+    Present, in each of the eight regions: the module-as-executed-surface reason
+    (`_WATCH_105_WHY`), the field's VALUE attributed to the field (`_WATCH_105_READS_WEEKLY`,
+    a shape and not the bare word `weekly` — the word names any cadence mentioned nearby,
+    which is why #4097's first review refused it), and the fact that #3782 closed
+    (`_WATCH_105_MOVED`).
 
-    Control (a) rewrites the seed site back to a retired statement and requires the absence
-    half to name it. Control (b) removes the reason from that site while reviving nothing and
-    requires the presence half to fire ALONE — without it, (a) would prove only that a
-    substring search works, and a rationale that is simply deleted would pass. The two region
-    anchors carry their own uniqueness assertion inside `_watch_105_regions`; no seeded-window
-    test is added, because a window this node built proves nothing about the window the live
-    check reads, which is the lesson #3777 records about copying a control.
+    Six controls. Three prove the scan can fail:
+
+      (a) a retired statement revived on one line at the seed site → the absence half names
+          it; (b) the same statement revived ACROSS a line break → the normalised-prose half
+          names it, which the raw half walks past; (c) the reason deleted at the seed site
+          with nothing revived → the presence half fires ALONE and names that site, the
+          difference between "the words are gone" and "the reasoning is gone".
+
+    Three walk all eight regions and cut ONE probe out of each in turn — (d) the reason, with
+    the layout-tolerant `_WATCH_105_WHY_RAW` because these sites wrap, (e) the value by
+    erasing the word `weekly`, (f) the date by erasing `#3782` — and require a finding that
+    names THAT region and complains about THAT probe, with no retired-statement finding and no
+    complaint about the other two probes. Without the per-site walk, a scan that reads only
+    the one place it was typed beside, or that fires on every site whatever was edited, would
+    look identical from here; the first round of #4097 was refused for exactly that gap. Each
+    mutation is `compile`d before it is scanned, because an erasure that stopped the file
+    being Python would otherwise pass as a caught revivor. The region anchors keep their own
+    uniqueness assertion inside `_watch_105_spans`; no seeded-window test is added, since a
+    window this node built proves nothing about the window the live check reads — #3777's
+    lesson about copying a control.
     """
     text = Path(__file__).read_text(encoding="utf-8")
-    findings = _watch_105_findings(text)
+    tree = ast.parse(text)
+    findings = _watch_105_findings(text, tree)
     assert not findings, (
         "#105's cadence rationale has gone wrong in this file:\n"
         + "\n".join(f"  - {f}" for f in findings)
         + "\nThe row is graded against `check_health_census` because the job's own "
         "`command:` runs that module — the task file's field is a scheduler value, and it "
         "has read weekly since #3782 closed on 2026-11-09. Say that in every site: a "
-        "rationale saying instead that the field cannot move instructs the next pass to "
+        "rationale saying instead that the field is stuck instructs the next pass to "
         "refuse a legitimate change to it.")
+
+    regions = _watch_105_spans(text, tree)
+    assert len(regions) == 8, (
+        f"the scan reads {len(regions)} rationale regions, not the 8 sites #4097 lists "
+        f"(2 module notes + docstring and failure message of 3 nodes): {sorted(regions)}")
 
     assert text.count(_WATCH_105_SEED_SITE) == 1, (
         f"the control site is found {text.count(_WATCH_105_SEED_SITE)} times, so neither "
         "control below edits a known sentence and neither would prove anything")
 
-    # Control (a): a revived retired statement must be caught by the absence half.
+    retired = _WATCH_105_RETIRED[0][0] + _WATCH_105_RETIRED[0][1]
+
+    # (a) a revived retired statement, written on one line, must be caught by the absence
+    # half. This is the shape `git grep` already sees.
     revived = text.replace(
         _WATCH_105_SEED_SITE,
-        "so its field is " + _WATCH_105_RETIRED[0][0] + _WATCH_105_RETIRED[0][1]
-        + " behind the #724 rail and `CADENCE`", 1)
-    caught = [f for f in _watch_105_findings(revived) if "retired statement" in f]
+        f"so its field is {retired} behind the #724 rail and `CADENCE`", 1)
+    caught = [f for f in _watch_105_findings(revived, tree) if "retired statement" in f]
     assert caught, (
-        f"the scan read a file holding the retired statement "
-        f"{_WATCH_105_RETIRED[0][0] + _WATCH_105_RETIRED[0][1]!r} and reported nothing, so "
-        "the absence half is vacuous and this prose would survive the next re-rot")
+        f"the scan read a file holding the retired statement {retired!r} and reported "
+        "nothing, so the absence half is vacuous and this prose would survive the next "
+        "re-rot")
 
-    # Control (b): the reason deleted and nothing revived must be caught by the presence
-    # half alone — the difference between "the words are gone" and "the reasoning is gone",
-    # which is what clause 2 of #4097 actually requires.
+    # (b) the same statement wrapped across a line break — the layout every rationale in
+    # this file actually uses, and the one a raw substring scan and `git grep` both miss.
+    head, tail = _WATCH_105_RETIRED[0]
+    wrapped = text.replace(
+        _WATCH_105_SEED_SITE,
+        f"so its field is {head}\n    {tail} behind the #724 rail and `CADENCE`", 1)
+    assert head + tail not in wrapped, (
+        "the wrapped revival is contiguous after all, so control (b) is testing the same "
+        "thing control (a) tests and the normalised-prose half is unproved")
+    caught_w = [f for f in _watch_105_findings(wrapped) if "retired statement" in f]
+    assert caught_w, (
+        f"the scan read a file holding {retired!r} split across two lines and reported "
+        f"nothing ({caught_w!r}), so a retired statement revived the way this file's prose "
+        "is written would pass — and `git grep` would agree that it is absent")
+
+    # (c) the reason deleted and nothing revived must be caught by the presence half alone —
+    # the difference between "the words are gone" and "the reasoning is gone", which is what
+    # clause 2 of #4097 actually requires.
     stripped = text.replace(_WATCH_105_SEED_SITE,
                             "so the module it watches states it and `CADENCE`", 1)
-    bare = _watch_105_findings(stripped)
+    bare = _watch_105_findings(stripped, tree)
     assert bare and not any("retired statement" in f for f in bare), (
         f"removing the stated reason from one site and reviving nothing gave {bare!r}, so "
         "the presence half cannot tell a deletion from a retype")
     assert any(_WATCH_105_SEED_LABEL in f for f in bare), (
         f"the control edited {_WATCH_105_SEED_LABEL} but the findings {bare!r} do not name "
         "it, so the scan is not reading the site it grades")
+
+    # (d)–(f) every site, not only the seed site: cut one probe out of one region and demand
+    # a finding that names that region and that probe and nothing else.
+    for label, (i, j) in sorted(regions.items()):
+        region = text[i:j]
+
+        # (d) the reason, erased where this site itself writes it.
+        why_hits = list(_WATCH_105_WHY_RAW.finditer(region))
+        assert why_hits, (
+            f"{label}: `_WATCH_105_WHY_RAW` matched no wording here, so this control has no "
+            "sentence to cut — either the site stopped stating the reason or the pattern "
+            "stopped describing how it is written")
+        no_why = text[:i] + _WATCH_105_WHY_RAW.sub(
+            lambda m: _watch_105_blanked(m.group(0)), region) + text[j:]
+        compile(no_why, "<no_why>", "exec")
+        fired = _watch_105_findings(no_why, tree)
+        mine = [f for f in fired if label in f]
+        assert any(_WATCH_105_PROBE_WHY in f for f in mine), (
+            f"erasing the reason from {label} gave {fired!r}: the scan did not notice the "
+            "one thing that site exists to say")
+        assert not any(_WATCH_105_PROBE_VALUE in f or _WATCH_105_PROBE_MOVED in f
+                       for f in mine), (
+            f"erasing only the reason from {label} also lost its value or its date "
+            f"({mine!r}), so the two halves of a site are not graded separately")
+        assert not any("retired statement" in f for f in fired), (
+            f"erasing prose from {label} manufactured a retired statement ({fired!r}); the "
+            "absence half is matching something it should not")
+
+        # (e) the field's value, by erasing the word the value takes.
+        assert _WATCH_105_WEEKLY in region, (
+            f"{label}: the word {_WATCH_105_WEEKLY!r} never appears, so the value probe "
+            "below has nothing to erase and its pass would prove nothing")
+        no_value = text[:i] + region.replace(_WATCH_105_WEEKLY, "`another cadence`") \
+            + text[j:]
+        compile(no_value, "<no_value>", "exec")
+        fired = _watch_105_findings(no_value, tree)
+        mine = [f for f in fired if label in f]
+        assert any(_WATCH_105_PROBE_VALUE in f for f in mine), (
+            f"{label} had every mention of {_WATCH_105_WEEKLY!r} erased and the scan still "
+            f"found nothing wrong ({fired!r}) — the value probe is being satisfied by prose "
+            "that says nothing about what #105's `frequency:` reads")
+        assert not any(_WATCH_105_PROBE_WHY in f or _WATCH_105_PROBE_MOVED in f
+                       for f in mine), (
+            f"erasing only the value from {label} also lost its reason or its date "
+            f"({mine!r}), so the probes are not independent")
+
+        # (f) the date, by erasing the item the agreement is dated by.
+        assert _WATCH_105_MOVED.split()[0] in region, (
+            f"{label}: it never names {_WATCH_105_MOVED.split()[0]!r}, so the moved probe "
+            "below has nothing to erase and its pass would prove nothing")
+        no_moved = text[:i] + region.replace(_WATCH_105_MOVED.split()[0], "that item") \
+            + text[j:]
+        compile(no_moved, "<no_moved>", "exec")
+        fired = _watch_105_findings(no_moved, tree)
+        mine = [f for f in fired if label in f]
+        assert any(_WATCH_105_PROBE_MOVED in f for f in mine), (
+            f"{label} had its item number erased and the scan found nothing wrong "
+            f"({fired!r}), so a site that stops dating the agreement is not caught")
+        assert not any(_WATCH_105_PROBE_WHY in f or _WATCH_105_PROBE_VALUE in f
+                       for f in mine), (
+            f"erasing only the date from {label} also lost its reason or its value "
+            f"({mine!r}), so the probes are not independent")
+
+
+#: Where the other half of #4097 clause 3 lives: the sibling module that must keep reading
+#: the same two constants out of the same module rather than copying their values.
+_WATCH_105_SIBLING = Path(__file__).resolve().parent / "test_check_health_census.py"
+
+
+def test_watch_105_cadence_pin_still_reads_both_constants_off_the_module():
+    """#4097 clause 3: the exception survived the retype, and still reads the module.
+
+    The retype is only safe if the teeth underneath it are the ones #3777 grew. The node
+    keeps its identifier because `architecture/autonomy-jobs.md` names it in its §Review log
+    (:2178), so renaming it would make a code-only diff false — but the identifier is the
+    cheap half. The load-bearing property is WHERE #105's expected cadence and journal come
+    from: if they were ever retyped as the literals `weekly` and
+    `check_health_census.jsonl`, the node would go on passing while `CADENCE` and
+    `JOURNAL_NAME` moved out from under the doc, which is the drift this pin exists to catch.
+    So the source of that one node is read back and required to name `CHC.CADENCE` and
+    `CHC.JOURNAL_NAME` — attributes of the imported module, not strings — and to contain none
+    of the helpers above: a node whose assertions had migrated into this file's prose scan
+    would keep its green result and lose the constant-coupling.
+
+    Coupling means coupling in both files, so the sibling module is read as text and must still
+    name both attributes off that import — `shipped = CHC.CADENCE.split(" ")[0]` and
+    `assert CHC.JOURNAL_NAME in description` are the two lines where it does. It is read, never
+    imported nor executed: `test_the_cadence_pin_reads_only_the_tracked_doc_and_values_typed_here`
+    scans the nodes that go looking for a cadence for filesystem calls and vault constants, and
+    executing another test module from inside this one would be a side effect no one asked for.
+
+    So what reddens a rename, in either file, is the attribute lookup itself: `CHC.CADENCE` and
+    `CHC.JOURNAL_NAME` stop resolving and each module dies at that line. Neither file seeds a
+    rename to prove it, and this docstring does not claim one is seeded — what this node adds is
+    that both files are still holding the lookup, which is the property a future edit removes by
+    retyping a value rather than by renaming a constant.
+    """
+    text = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    fn = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+          and n.name == "test_watch_105_cadence_is_the_module_not_its_frozen_field"]
+    assert len(fn) == 1, (
+        f"`test_watch_105_cadence_is_the_module_not_its_frozen_field` is defined {len(fn)} "
+        "times: the fleet doc cites it by name, and clause 3 of #4097 keeps the identifier "
+        "for exactly that reason")
+    body = ast.get_source_segment(text, fn[0])
+    assert body, (
+        "`ast.get_source_segment` returned nothing for the node, so this pin had no source "
+        "to read and would have asserted an absence it never looked at")
+
+    for attr in ("CADENCE", "JOURNAL_NAME"):
+        assert f"CHC.{attr}" in body, (
+            f"the #105 cadence node no longer reads `CHC.{attr}` from the module, so renaming "
+            f"that constant stops reddening this file — the value is presumably typed here as "
+            "a literal now, which is the drift #3777 grew this pin to catch")
+    for displaced in ("_WATCH_105_WHY", "_watch_105_findings", "read_text"):
+        assert displaced not in body, (
+            f"the #105 cadence node now mentions {displaced!r}, i.e. its assertion migrated "
+            "into this file's prose scan; a node that passes on prose instead of on the "
+            "module's constants has lost the coupling #4097 clause 3 exists to keep")
+    assert _WATCH_105_MOVED in body, (
+        "the node's own prose no longer dates the agreement to #3782 closing, so the reason "
+        "it grades the module is back to being unstated")
+
+    sibling = _WATCH_105_SIBLING.read_text(encoding="utf-8")
+    for attr in ("CADENCE", "JOURNAL_NAME"):
+        assert f"CHC.{attr}" in sibling, (
+            f"tests/test_check_health_census.py no longer names `CHC.{attr}`, so the module "
+            f"and this file stopped sharing one source for that value — renaming it would "
+            "now redden at most one of them, and the doc would agree with whichever did not")
 
 
 def test_the_doc_no_longer_states_that_the_seven_have_no_entry():

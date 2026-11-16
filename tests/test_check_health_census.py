@@ -49,8 +49,10 @@ fixture shape and not its ledger format.
 """
 from __future__ import annotations
 
+import ast
 import gzip
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -684,20 +686,69 @@ def test_autonomy_task_105_names_the_journal_this_module_actually_writes():
 NEAR_FLAG_NEGATIONS = ("never", "no such", "does not", "used to name", "not a flag",
                        "no flag", "has no", "instead of")
 
-#: The sentences #3777 struck from the task file's body, revived verbatim by the controls
-#: below. Typing them as the file once had them — rather than as a paraphrase — is what makes
-#: each control a revival rather than an invention: `git show 303af3a05^:autonomy/
-#: 105-check-health-census-weekly.md` in ~/obsidian prints the second one, and the first is
-#: the same paragraph's opening line.
-#:
-#: The two daily shapes are kept as the literals this node has always matched, and a third
-#: is added beside them: a body can state a wrong shipped cadence in ordinary prose without
-#: reproducing either historical sentence, and a guard that only recognises the exact wording
-#: of one past mistake is a guard on that wording.
-_BODY_105_DAILY_SHAPES = ("shipped cadence is daily",
-                          "cadence is `frequency: daily`",
-                          "this recorder ships is daily")
+#: The binding wording #3777 struck from the task file's body, kept as the file once had it:
+#: `git show 303af3a05^:autonomy/105-check-health-census-weekly.md` in ~/obsidian prints it.
+#: Control 2 seeds it verbatim, so that control is a revival rather than an invention, and
+#: control 2b asserts its OWN seed contains it nowhere — which is how that control proves the
+#: guard is a shape and not this literal. One string, not two: the sentence this item shipped
+#: with contained a shorter one (`cadence is `frequency: daily``) as a substring, so listing
+#: both would have made control 2b's absence check one test wearing two names.
+_BODY_105_HISTORICAL_LITERALS = ("cadence is `frequency: daily`",)
+
+#: The claim, as a shape: some cadence said to BE/READ/SAY/STATE daily. #4097's review found
+#: the guard here was three literals — the two above plus one added to match its own seeded
+#: control — so it caught that control's sentence and nothing else, which is a guard on one
+#: past mistake's phrasing rather than on the mistake: "the cadence this module ships is
+#: daily, taken from its field" states the identical falsehood, reproduces none of the three,
+#: and passed. So the shape is the sentence instead: `cadence`, then a span that cannot cross
+#: a full stop, then a copula, then `daily`. The lookbehinds hold a sentence NEGATING the word
+#: ("is not daily", "never daily") out of a match, because the body names the retired daily
+#: cadence in order to bury it and a guard that fires on that paragraph is a guard someone
+#: switches off — control 2c below is the sentence that keeps the lookbehinds honest.
+_BODY_105_DAILY_SHAPE = re.compile(
+    r"\bcadence\b[^.\n]{0,60}?\b(?:is|reads|says|states)\b[^.\n]{0,20}?"
+    r"(?<!not )(?<!never )\bdaily\b")
+
 _BODY_105_RETIRED_READINGS = ("the slug is the stale name", "field is the schedule")
+
+#: …and the two sentences #4097 clause 4 removed from the SAME paragraph. Split for a different
+#: reason than the two constants beside it: the guard below scans the VAULT body, so typing
+#: these here would not trip it — what they would trip is #4097's own acceptance check, a
+#: `git grep` over `tests/` for the second of them spelled whole, which is how an item that
+#: forbids a phrase can be filed against the file that forbids it.
+#:
+#: These are not #3777's readings and are not reported as such: the field was called the
+#: OUTLIER and a person's move was called OWED, and both were false the day the paragraph was
+#: last read. Clause 4 asks that the removal stay removed, and the vault is landed through a
+#: different route than the code, so nothing but a guard here would notice the paragraph slide
+#: back — a grep in an acceptance check runs once, whoever runs it, and not again.
+_BODY_105_RETIRED_OUTLIER = (("the field is the ", "outlier"),
+                             ("owed as #", "3782"))
+
+#: What #3777's failure message used to say about the field, and what #4097 clause 5 asked be
+#: removed from it. Held as a head and a tail for the same reason
+#: `tests/test_autonomy_jobs_doc_claims.py` holds its ban-list that way: the node below reads
+#: THIS file's own source, so a ban-list that spelled out what it forbids would fail the first
+#: assertion it makes. Joined at the comma they are the words to look for; split across a
+#: literal boundary they cannot be seen by the scan that hunts them.
+_BODY_105_RETIRED_MESSAGE = (("the field it cannot ", "move"),
+                             ("known and ", "owed"))
+
+
+def _assertion_prose(text: str) -> str:
+    """This file's source as prose: comment openers and quotes gone, whitespace collapsed.
+
+    `test_no_body_assertion_calls_the_field_something_it_cannot_move` needs to recognise a
+    retired phrase revived the way an assert message is actually written — a comment line
+    wrapped on to the next, or one string piece joined to another — and neither a raw
+    substring test nor the line-based `git grep` #4097's acceptance check runs can see across
+    that join, so a revival in the file's own layout would sit there unread by anything. The
+    body-side guards above need no such helper: they look for words that appear whole on one
+    line of markdown. Quotes are the noise here because they are what stands between the two
+    halves of a wrapped message.
+    """
+    opened = re.sub(r"(?m)^[ \t]*#[ \t]?", " ", text)
+    return re.sub(r"\s+", " ", opened.replace('f"', " ").replace('"', " ").replace("'", " "))
 
 
 def _body_105_cadence_findings(text: str, shipped: str) -> list[str]:
@@ -726,7 +777,7 @@ def _body_105_cadence_findings(text: str, shipped: str) -> list[str]:
     # cadence-line filter untouched. Control 3 below is that sentence, and it is what caught
     # this: a guard that cannot see the mistake it was written for is a guard on a word.
     whole = body.lower()
-    if any(shape in whole for shape in _BODY_105_DAILY_SHAPES):
+    if _BODY_105_DAILY_SHAPE.search(whole):
         found.append(
             "the body states daily as the shipped cadence again — the claim #3777 removed")
     for retired in _BODY_105_RETIRED_READINGS:
@@ -735,6 +786,13 @@ def _body_105_cadence_findings(text: str, shipped: str) -> list[str]:
                 f"the body revives the retired reading (`{retired}`), which rested on "
                 "tests/test_check_health_census_schedule_claims.py — a test that is not on "
                 "main — and argues the file out of its own module's cadence")
+    for head, tail in _BODY_105_RETIRED_OUTLIER:
+        if head + tail in whole:
+            found.append(
+                f"the body revives {head + tail!r}, the wording #4097 clause 4 removed: the "
+                "field is not the outlier when it agrees, and a move a person already made is "
+                "not owed — a reader of this file is an autonomy run, and either sentence tells "
+                "it the disagreement is still open")
     if "#3782" not in body:
         found.append(
             "the body no longer names #3782, the item that records who moved the "
@@ -768,9 +826,15 @@ def test_autonomy_task_105s_body_states_the_cadence_the_module_ships():
     field is stuck, which is the same mis-instruction #4097 was filed against on the code side
     (see `test_no_watch_105_rationale_says_the_field_is_frozen_or_owed`).
 
-    Three controls revive each guard in turn, in the historical wording where one exists, and
+    Six controls revive each guard in turn, in the historical wording where one exists, and
     require the finding to name it. Without them the node is three `not in` tests whose
-    negative could be satisfied by a body that says nothing about cadence at all.
+    negative could be satisfied by a body that says nothing about cadence at all. Two of the
+    six point at the guard rather than at the body: 2b seeds a daily sentence containing none
+    of the wording #3777 struck, which is what proves the guard is a shape and not a literal,
+    and 2c seeds the same word DENIED, which is what proves the shape has not swallowed the
+    paragraph that exists to keep the retired reading retired. Control 4 is clause 4's: the two
+    sentences this item deleted from the paragraph, seeded back one at a time, because that
+    paragraph is vault prose and reaches HEAD by a route that runs no test in this repository.
     """
     from scripts.maintenance import check_health_census as CHC
 
@@ -803,15 +867,34 @@ def test_autonomy_task_105s_body_states_the_cadence_the_module_ships():
         f"the body revived with the sentence #3777 struck out still gave {fired!r}, so the "
         "daily guard does not recognise the wording it was written for")
 
-    # Control 2b — the same mistake in ordinary prose, which reproduces no historical
-    # sentence. The literal-only guard missed this shape, which is why the third shape is in
-    # the set rather than the two #3777 left behind.
+    # Control 2b — the same mistake in a sentence that reproduces NO historical wording. This
+    # is the control that makes the guard a guard on the claim rather than on one past
+    # mistake's phrasing, so it has to say out loud that the phrasing is absent: without the
+    # first assert, a literal-only guard could satisfy this control by accident and the
+    # generalisation would be unproved — which is exactly how the first version of this guard
+    # passed while matching nothing but the two sentences #3777 struck.
     plain = text.replace("- The cadence this recorder ships is weekly:",
-                         "- The cadence this recorder ships is daily, per its field.", 1)
+                         "- The cadence this module ships is daily, taken from its field.", 1)
+    assert not any(lit in plain.lower() for lit in _BODY_105_HISTORICAL_LITERALS), (
+        "the seeded sentence reproduces a historical wording, so control 2b would be caught "
+        "by a literal-only guard and proves nothing about the shape")
     fired = _body_105_cadence_findings(plain, shipped)
     assert any("states daily as the shipped cadence" in f for f in fired), (
         f"an ordinary sentence stating daily as the shipped cadence gave {fired!r}, so the "
         "guard is a match on one past wording rather than on the claim")
+
+    # Control 2c — the other direction, which the shape has to survive: the body discusses the
+    # RETIRED daily cadence by name, in negation, and a guard that fires there is a guard that
+    # gets switched off inside a week. So a sentence that mentions daily only to deny it must
+    # leave the daily guard silent while the body still states its shipped cadence.
+    denied = text.replace("- The cadence this recorder ships is weekly:",
+                          "- The cadence this recorder ships is weekly, and its field is "
+                          "not daily.", 1)
+    fired = _body_105_cadence_findings(denied, shipped)
+    assert not any("states daily as the shipped cadence" in f for f in fired), (
+        f"a body that names daily only to deny it tripped the daily guard ({fired!r}), so "
+        "the shape matches negations and will be silenced the first time it cries wolf on "
+        "the paragraph that exists to keep the retired reading retired")
 
     # Control 3 — the retired argument, in the paragraph's own historical words.
     revived = text.replace(
@@ -823,6 +906,25 @@ def test_autonomy_task_105s_body_states_the_cadence_the_module_ships():
     assert any("revives the retired reading" in f for f in fired), (
         f"the body revived with the argument it shipped with still gave {fired!r}, so the "
         "retired reading is unpinned — the hole #1102 was written for")
+
+    # Control 4 — clause 4's own removals, both of them. These are the sentences THIS item
+    # deleted from the paragraph, and the paragraph lives in the vault, which lands through a
+    # different route than code: without a guard here the only thing that ever checked them was
+    # a grep someone ran at triage. Each is seeded from its split pieces, so the needles are
+    # assembled the way the constant is and the live body is also shown to hold neither.
+    for head, tail in _BODY_105_RETIRED_OUTLIER:
+        assert head + tail not in text.lower(), (
+            f"the live body already says {head + tail!r}, so this item's clause 4 did not "
+            "remove it and the guard below is grading a file nobody edited")
+        seeded = text.replace(
+            "- The cadence this recorder ships is weekly:",
+            f"- The cadence this recorder ships is weekly, and the {head}{tail}.", 1)
+        assert seeded != text, (
+            "the control found no cadence sentence to seed into, so it proves nothing")
+        fired = _body_105_cadence_findings(seeded, shipped)
+        assert any("clause 4 removed" in f and head + tail in f for f in fired), (
+            f"the body revived with {head + tail!r} gave {fired!r}, so the wording clause 4 "
+            "deleted can come back through a vault-only edit and no node here will say so")
 
 
 def test_the_skill_pages_command_is_the_one_that_runs_and_names_only_real_flags():
@@ -936,3 +1038,121 @@ def test_the_fleet_document_row_for_this_job_states_weekly_and_the_real_journal(
         f"({CHC.JOURNAL_NAME!r}); it reads {cells[4][:70]!r}…")
     assert CHC.JOURNAL_NAME.replace("_", "-") not in rows[0], (
         "the row carries the journal's hyphenated spelling, which is the name of no file")
+
+
+def test_no_body_assertion_calls_the_field_something_it_cannot_move():
+    """#4097 clause 5: the requirement survives its mis-explanation.
+
+    `test_autonomy_task_105s_body_states_the_cadence_the_module_ships` requires the task file's
+    body to name #3782. That requirement is right and unchanged — the body has no other record
+    that the cadence it reads was settled rather than left to drift. What #3777 wrote alongside
+    it was a failure message explaining the id as a debt carried by a field the body "cannot
+    move", on the theory that the #724 rail held `frequency:` at `daily` until a person
+    discharged the item. A person moved the field and #3782 closed on 2026-11-09, so that
+    message is now a false statement about a live vault file, and it is the kind that does
+    damage: it is the text a future pass reads when it decides whether a change to that field
+    is allowed. Clause 5 of #4097 asked for the wording gone and the requirement kept, and the
+    first round did exactly that — leaving the message itself unpinned, so retyping it back
+    would have reddened nothing.
+
+    Absent, then, in this file's source AND in its normalised prose (see `_assertion_prose`:
+    an assert message revived across a line join is invisible to the line-based `git grep` the
+    acceptance check runs); present, in the failure texts that carry the #3782 requirement:
+    the id itself. The failure texts are located by reading the two functions that hold them
+    out of this file's own syntax tree — `_body_105_cadence_findings`, which builds every
+    message the live node and its controls report, and the node's own body — because asserting
+    against a hand-typed window would be checking a copy of the message rather than the message
+    that fires, the lesson #3777 records about copying a control.
+
+    Three controls, one per direction. (a) revives a fragment on one line and (b) revives one
+    across a comment join, which only the prose half can see — the same pair
+    `tests/test_autonomy_jobs_doc_claims.py` runs for the same reason. (c) erases the id from
+    both failure texts and requires the citation probe to come up empty, so the "requirement
+    kept" half is shown to be reading something: a message that stopped naming the id would
+    otherwise pass an absent-word check by saying nothing at all.
+    """
+    text = Path(__file__).read_text(encoding="utf-8")
+    flat = _assertion_prose(text)
+    hits = [f"{head}{tail}" for head, tail in _BODY_105_RETIRED_MESSAGE
+            if head + tail in text or head + tail in flat]
+    assert not hits, (
+        f"the retired wording {hits!r} is back in this file. #3777 wrote it while "
+        f"{TASK_105}'s `frequency:` still read `daily`; a person moved that field and #3782 "
+        "closed on 2026-11-09, so it is now a false statement about a live vault file — and a "
+        "false statement in a failure message instructs whoever reads it next that the field "
+        "may not be changed, which is the harm #4097 was filed for.")
+
+    def _cited(source: str) -> dict[str, str]:
+        """The two functions' sources, and which of them name #3782.
+
+        A function and not an inline comprehension because control (c) has to run THIS probe
+        against a mutated file and see it come up empty; a control that re-derived the same
+        thing its own way would show only that its own edit took.
+        """
+        found: dict[str, str] = {}
+        for name in ("_body_105_cadence_findings",
+                     "test_autonomy_task_105s_body_states_the_cadence_the_module_ships"):
+            fn = [n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.FunctionDef) and n.name == name]
+            assert len(fn) == 1, (
+                f"{name} is defined {len(fn)} times, so the failure text this node reads is not "
+                "the one the live assert and its controls report")
+            found[name] = ast.get_source_segment(source, fn[0]) or ""
+            assert found[name], f"`ast` recovered no source for {name}"
+        return found
+
+    regions = _cited(text)
+    cited = [n for n, src in regions.items() if "#3782" in src]
+    assert cited, (
+        "neither the body-cadence failure text nor its node names #3782 any more, so the "
+        "requirement this file holds it for is no longer explained by the incident that "
+        "settled the cadence")
+
+    # (a) a fragment revived on one line, where `git grep` would see it too. The seed is
+    # assembled from the two pieces rather than typed whole: a control that spelled out the
+    # phrase it plants trips the very scan it exists to prove works, which is the same trap the
+    # ban-list constant above is split for.
+    head, tail = _BODY_105_RETIRED_MESSAGE[0]
+    seed = "#3782, " + head + tail + ", which "
+    revived = text.replace("#3782, the item that records who moved the ", seed, 1)
+    assert revived != text, (
+        "the control found no failure text to edit, so it proves nothing about the scan")
+    caught = [f"{head}{tail}" for head, tail in _BODY_105_RETIRED_MESSAGE
+              if head + tail in revived or head + tail in _assertion_prose(revived)]
+    assert caught, (
+        "a failure message revived with the retired wording on one line was not caught, so "
+        "the absence half is vacuous")
+
+    # (b) the same fragment split across a comment continuation, which no line-based scan sees.
+    head, tail = _BODY_105_RETIRED_MESSAGE[0]
+    # The continuation opens with a bare `#` and not `#:` because that is what
+    # `_assertion_prose` strips: it removes one optional space after the hash and nothing else,
+    # so the colon of a `#:` line survives into the prose and holds the two halves apart — a
+    # seed written that way would "pass" by never having been joined in the first place.
+    wrapped = text.replace(
+        "#: `tests/test_autonomy_jobs_doc_claims.py` splits its own ban-list: this file is what",
+        f"#: {head}\n# {tail}: this file is what", 1)
+    assert wrapped != text and head + tail not in wrapped, (
+        "the wrapped control found no comment line to split, or split one that was already "
+        "contiguous, so the prose half of the scan is unproved")
+    caught = [f"{h}{t}" for h, t in _BODY_105_RETIRED_MESSAGE
+              if h + t in wrapped or h + t in _assertion_prose(wrapped)]
+    assert caught, (
+        "the retired wording split across two comment lines passed the scan, so a revival "
+        "written the way comments are written here would survive in the file unread")
+
+    # (c) the id erased from every failure text, then `_cited` — the very probe the live assert
+    # above ran — executed again on the result. What the control has to show is that the PROBE
+    # goes empty, which is the one thing proving the control's own edit took would not: on the
+    # live file that same call returns two citers, and a future message that drops the id is
+    # caught by that assert firing, not by this one.
+    uncited = text
+    for src in regions.values():
+        uncited = uncited.replace(src, src.replace("#3782", "the closed item"), 1)
+    assert uncited != text, (
+        "erasing the id from both failure texts changed nothing, so this control edited a place "
+        "that is not in the file")
+    still = [n for n, src in _cited(uncited).items() if "#3782" in src]
+    assert not still, (
+        f"the id was erased from both failure texts and {still!r} still names it, so the probe "
+        "above is reading some third place and would keep passing if the message lost the id")
