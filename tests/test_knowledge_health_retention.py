@@ -69,13 +69,18 @@ def _stub_note(d: Path, name: str) -> Path:
 _UNSET = object()
 
 
-def _report(gaps, stale_patterns=None, pointer_lag=_UNSET, witness=_UNSET) -> str:
+def _report(gaps, stale_patterns=None, pointer_lag=_UNSET, witness=_UNSET,
+            missing_health_reports=_UNSET) -> str:
     """The generated report, with the two #2996 rows defaulted to *unpassed*.
 
     A sentinel, not `None`: `None` is the *measured-and-absent* state of these rows in
     `generate_report`, so a `None` default would quietly put the section into its
     #1227 not-measured state for every test that does not name them. A test that
     wants a row names it.
+
+    `missing_health_reports` (#4180) follows the same rule for the same reason: its
+    `None` is the measured-nothing state, so a bare-list default would have put every
+    pre-#4180 node in this file into the new row's not-measured state.
     """
     now = datetime.now(timezone.utc)
     kwargs = {}
@@ -83,6 +88,8 @@ def _report(gaps, stale_patterns=None, pointer_lag=_UNSET, witness=_UNSET) -> st
         kwargs["pointer_lag"] = pointer_lag
     if witness is not _UNSET:
         kwargs["mtime_witness"] = witness
+    if missing_health_reports is not _UNSET:
+        kwargs["missing_health_reports"] = missing_health_reports
     return khr.generate_report({}, khr.compute_relationship_stats([], {}), [], [], now,
                                copy_gaps=gaps, pattern_staleness=stale_patterns, **kwargs)
 
@@ -1572,3 +1579,287 @@ def test_the_shield_docstring_records_the_disposition_as_ruled():
     assert "a -latest.md in the vault is a defect" in doc, (
         "the hazard the shield guards is unstated: a §2e run reading only that line would "
         "delete the two autonomous-systems-*-latest.md pages")
+
+# ── #4180: a night on which the job never ran is not a clean cycle ───────────
+#
+# `copy_gaps` judges only the reports that exist: it walks `reports_in`'s glob of
+# files already on disk, so a night that produced no report contributes nothing to
+# judge, names no copy, and cannot be a gap. That is why
+# `_pipeline/reflection/knowledge-health-2026-11-16.md` printed `no cycle is missing
+# a copy` while 2026-11-10, -13 and -14 held no knowledge-health report at all. The
+# row added here asks the directory the calendar question directly, and stays
+# report-only for a measured reason: a skipped night is usually a fleet-wide
+# scheduler gap this job does not own — nothing on this box dispatched at all on
+# 2026-11-14 — so no line of it may reach `_alarms` or move the exit code.
+
+#: A fixed instant for the window nodes. Both the checker and `generate_report` take
+#: `now`, so these nodes never depend on the wall clock: with this value the seven UTC
+#: days in the window are 2026-11-09 through 2026-11-15, and the report's own day is
+#: 2026-11-16.
+_FIXED_NOW = datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc)
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+#: A store reading that satisfies every rail `_alarms` can reach: a real floor and an
+#: active count above it, so `rc == EXIT_OK` is this row's verdict and not an accident
+#: of an unread tree.
+_EDGES = 53416
+
+
+def _window(now: datetime, days: int) -> list[str]:
+    """The ISO dates a window covers: the `days` UTC days BEFORE `now`'s own day."""
+    return [(now.date() - timedelta(days=back)).isoformat()
+            for back in range(1, days + 1)]
+
+
+def _health_fixture(tmp_path: Path, *, skip=(), now=_FIXED_NOW) -> Path:
+    """A reflection directory holding `knowledge-health-<day>.md` for the window.
+
+    Built as files rather than as a hand-made list of dates, so what reaches the report
+    is the checker's own verdict over a directory — the seam at which #4180 was blind.
+    `skip` names the window days whose files are NOT written. The report's own day is
+    never written, which is the state `main()` is actually in when it renders.
+    """
+    d = tmp_path / "reflection"
+    d.mkdir(parents=True)
+    for day in _window(now, ra.REPORT_CYCLE_LOOKBACK_DAYS):
+        if day not in skip:
+            (d / f"knowledge-health-{day}.md").write_text("# Knowledge Health\n",
+                                                          encoding="utf-8")
+    return d
+
+
+def _absent_row(section: str) -> str:
+    """The one expected-and-absent row, failing loudly if there is not exactly one."""
+    rows = [ln for ln in section.splitlines() if "expected and absent" in ln]
+    assert len(rows) == 1, f"expected exactly one expected-and-absent row, got {rows!r}"
+    return rows[0]
+
+
+def test_two_absent_nights_are_named_and_no_other_date_is(tmp_path):
+    """Clause 1: with two of the seven UTC days absent, the row names exactly those.
+
+    The dates asserted are read back out of the printed row, not passed in, so the
+    checker's own ordering and its window both have to be right for this to pass.
+    """
+    d = _health_fixture(tmp_path, skip=("2026-11-13", "2026-11-14"))
+    absent = ra.missing_health_reports(d, _FIXED_NOW)
+    assert absent == ["2026-11-13", "2026-11-14"], absent
+    section = _section(_report([], missing_health_reports=absent))
+    row = _absent_row(section)
+    assert set(_DATE_RE.findall(row)) == {"2026-11-13", "2026-11-14"}, row
+    # Beside the #1227 row, in the same section and after it — not a section of its own.
+    assert "Reports naming an archive copy that is missing: 0" in section
+    assert (section.index("Reports naming an archive copy")
+            < section.index("expected and absent"))
+
+
+def test_a_complete_window_says_none_is_absent_and_names_no_date(tmp_path):
+    """Clause 2, first half: seven present days print a zero row carrying no date."""
+    d = _health_fixture(tmp_path)
+    absent = ra.missing_health_reports(d, _FIXED_NOW)
+    assert absent == [], absent
+    row = _absent_row(_section(_report([], missing_health_reports=absent)))
+    assert _DATE_RE.search(row) is None, f"the zero row names a date: {row!r}"
+    assert "0" in row, row
+
+
+def test_the_report_s_own_utc_day_is_never_named_even_with_its_file_absent(tmp_path):
+    """Clause 2, second half: the window is strictly older days than the report's own.
+
+    This is the trap that would make the row wrong by construction on every nightly
+    run: `main()` renders this section and only then writes
+    `knowledge-health-<date_str>.md`, so on the first run of a UTC day that day's own
+    file is not on disk yet. A window including today would name the report itself as a
+    missing cycle every single night. The day BEFORE the window opens is asserted in the
+    same node, because the far edge is the one a `range(days + 1)` breaks.
+    """
+    d = _health_fixture(tmp_path)                      # own day's file is NOT written
+    own = _FIXED_NOW.strftime("%Y-%m-%d")
+    assert not (d / f"knowledge-health-{own}.md").exists()
+    absent = ra.missing_health_reports(d, _FIXED_NOW)
+    assert absent == [], absent
+    assert own not in absent
+    section = _section(_report([], missing_health_reports=absent))
+    assert own not in section, "the report named its own day as a missing cycle"
+    older = (_FIXED_NOW.date() - timedelta(days=ra.REPORT_CYCLE_LOOKBACK_DAYS + 1)).isoformat()
+    assert older not in section, f"a day outside the window was named: {older}"
+
+
+def test_an_unmeasured_window_never_prints_a_clean_window(tmp_path):
+    """`None` means the caller never measured, so the section says nothing about it.
+
+    The row is omitted rather than printed as `0 — every expected nightly cycle has its
+    report`: that is the `referential_ledger` convention in this same call, and a render
+    that did not read the directory must not publish a clean verdict for it. The silence
+    is also what keeps every pre-#4180 node in this file rendering the section it always
+    rendered, which is what clause 3's "unchanged" rests on.
+    """
+    section = _section(_report([], missing_health_reports=None))
+    assert "expected and absent" not in section, section
+    assert "Knowledge-health reports" not in section, section
+    assert ("Reports naming an archive copy that is missing: 0 — no cycle is missing "
+            "a copy.") in section, (
+        "omitting the new row must not disturb the #1227 row's measured-and-clean "
+        "verdict, which is now the only retention claim this section makes by itself")
+
+
+def test_the_1227_row_keeps_its_wording_with_the_new_row_alongside(tmp_path):
+    """Clause 3: the archive-copy check, its count and its exact wording survive.
+
+    Both states are checked with the new row PRESENT, because the regression worth
+    pinning is not the wording vanishing but the new row displacing it: a section that
+    printed the calendar verdict and dropped the pointer verdict would still read as a
+    clean bill of retention until someone noticed which check had gone.
+    """
+    d = tmp_path / "reflection"
+    d.mkdir()
+    (d / "signals-latest.md").write_text(
+        "Archive copied before this write: `signals-latest-2026-09-20-0517.md`\n")
+    gaps = copy_gaps(d, reports_in(d))
+    assert len(gaps) == 1, "the fixture stopped being read as a missing copy"
+    both = _section(_report(gaps, missing_health_reports=["2026-11-13"]))
+    assert _stated_count(both) == len(gaps)
+    assert f"| `{gaps[0].report.name}` | `{gaps[0].copy}` |" in both
+    assert "no cycle is missing a copy" not in both
+    assert "2026-11-13" in _absent_row(both)
+    zero = _section(_report([], missing_health_reports=["2026-11-13"]))
+    assert ("Reports naming an archive copy that is missing: 0 "
+            "— no cycle is missing a copy.") in zero
+
+
+# ── clause 4: the row is report-only, never an alarm and never an exit code ───
+
+class _Store:
+    """Just enough of `app.kg_store.store()` for `main()` to run clean.
+
+    `facts_idx` and `entities` return empties rather than raising so the index-ghost
+    reconciliation MEASURES zero: an `{"error": ...}` dict would render as
+    not-measured, which is honest for that row but would leave this node's `rc`
+    comparing two runs that both skipped a check.
+    """
+
+    class _Edges:
+        def all(self):
+            return [{"source": "Pile", "target": "Other", "type": "uses"}]
+
+    class _FactsIdx:
+        def file_row_counts(self):
+            return {}
+
+        def exact_duplicate_stats(self):
+            return {"files": 0, "groups": 0, "rows": 0}
+
+    class _Entities:
+        def rows(self):
+            return []
+
+    edges = _Edges()
+    facts_idx = _FactsIdx()
+    entities = _Entities()
+
+    def stats(self):
+        return {"edges_active": _EDGES, "edges_total": _EDGES}
+
+
+def _run_main(tmp_root: Path, monkeypatch) -> tuple[int, list, Path]:
+    """One `main()` over an empty facts tree, reading `tmp_root/reflection`.
+
+    Returns (rc, alarms posted, the report the run wrote). `PIPELINE_DIR` is what
+    routes the reflection directory: `main()` takes it from `DEFAULT_OUTPUT_DIR`, which
+    is the module global, so patching that is patching the input this row is measured
+    over. Every alarm input is held clean — the store, the graph floor, the duplicate
+    store — so an `rc` of `EXIT_OK` is a verdict about this row, not the absence of a
+    comparison. `_alert` is captured rather than allowed to write the vault's alert
+    file: the whole point of the node is that it is never called.
+    """
+    import json
+
+    facts = tmp_root / "facts"
+    facts.mkdir(parents=True)
+    out = tmp_root / "out"
+    monkeypatch.setenv("HOME", str(tmp_root))
+    pipeline = tmp_root / "pipeline"
+    floor = pipeline / khr.GRAPH_BASELINE_RELPATH
+    floor.parent.mkdir(parents=True, exist_ok=True)
+    floor.write_text(json.dumps({"active_edges": _EDGES,
+                                 "recorded_at": "2026-11-16T05:00:00+00:00"}))
+    monkeypatch.setattr(khr, "PIPELINE_DIR", pipeline)
+    monkeypatch.setattr(khr, "DEFAULT_OUTPUT_DIR", pipeline / "reflection")
+    monkeypatch.setattr(khr, "_kg_store", lambda: _Store())
+    monkeypatch.setattr(khr, "fact_duplicate_stats", lambda: {"unavailable": True})
+    alerts: list = []
+    monkeypatch.setattr(khr, "_alert", lambda alarms, path: alerts.append(alarms))
+    monkeypatch.setattr(sys, "argv", ["knowledge-health-report.py",
+                                      "--facts-dir", str(facts),
+                                      "--output-dir", str(out)])
+    rc = khr.main()
+    reports = list(out.glob("knowledge-health-*.md"))
+    assert len(reports) == 1, f"the run wrote {len(reports)} reports to {out}"
+    return rc, alerts, reports[0]
+
+
+def test_absent_nights_raise_no_alarm_and_do_not_change_the_exit_code(tmp_path,
+                                                                      monkeypatch):
+    """Clause 4: two runs that differ only in whether two nights exist.
+
+    Run twice through `main()` rather than once through `generate_report`, because what
+    has to stay unchanged is the exit code the scheduler reads and the alarm channel it
+    posts to, and both are assembled after the report text exists. The two runs are
+    asserted EQUAL before either is asserted clean: a literal 0 would be a claim about
+    whatever tree this rung happens to run in, where the equality is a claim about this
+    row. The row is then asserted to have FIRED on the second run, or the equality
+    above would be two runs that measured nothing.
+    """
+    real_now = datetime.now(timezone.utc)
+    skipped = _window(real_now, ra.REPORT_CYCLE_LOOKBACK_DAYS)[-2:]
+    # The fixture goes under `pipeline/` because that is where `_run_main` points
+    # `DEFAULT_OUTPUT_DIR`, which is the directory `main()` measures. A fixture built
+    # anywhere else is a run that measured an empty directory — which still exits 0,
+    # and is exactly how this node looked green while measuring nothing.
+    complete_root = tmp_path / "complete"
+    _health_fixture(complete_root / "pipeline")
+    rc_complete, alarms_complete, report_complete = _run_main(complete_root, monkeypatch)
+
+    gap_root = tmp_path / "with-gaps"
+    _health_fixture(gap_root / "pipeline", skip=skipped)
+    rc_gaps, alarms_gaps, report_gaps = _run_main(gap_root, monkeypatch)
+
+    assert rc_complete == rc_gaps, (
+        f"a skipped night changed the exit code: {rc_complete} complete vs {rc_gaps} "
+        f"with absent days")
+    assert rc_complete == khr.EXIT_OK, (
+        "the complete-window run did not exit clean, so the equality above proves "
+        "nothing about this row — the fakes no longer hold the tree's own alarms back")
+    assert alarms_complete == [] and alarms_gaps == [], (
+        f"a skipped night posted alarms: {alarms_gaps!r}")
+    row = _absent_row(_section(report_gaps.read_text(encoding="utf-8")))
+    assert set(_DATE_RE.findall(row)) == set(skipped), row
+    assert _DATE_RE.search(_absent_row(_section(
+        report_complete.read_text(encoding="utf-8")))) is None
+
+
+def test_the_alarm_function_cannot_see_the_absent_days(tmp_path):
+    """Clause 4's other side: `_alarms` cannot reach this row, by signature and by call.
+
+    `architecture/autonomy-jobs.md` states the ruling this node holds in force: the
+    absent-night row and the #1227 pointer row alike reach neither `_alarms` nor the exit
+    code, and only the pointer row names a loss this chain can act on. `main()` builds its
+    alarms from five inputs (`store_stats`, `hygiene`, `duplicate_id_files`, `baseline`,
+    `index_ghosts`) and neither check is one of them; asserting the absence of a parameter
+    is what stops a later round from wiring it in with one line, which is exactly the shape
+    an "obviously useful" alarm would take.
+    The direct call below is `main()`'s own call with every input held clean, over a
+    directory that DOES hold two absent nights — so the empty result is the row being
+    report-only, not a comparison that had nothing to say.
+    """
+    assert "missing_health_reports" not in inspect.signature(khr._alarms).parameters, (
+        "`_alarms` grew a parameter for the absent-night row, which #4180 rules out: a "
+        "skipped night is usually a fleet-wide scheduler gap this job does not own")
+
+    d = _health_fixture(tmp_path, skip=("2026-11-13", "2026-11-14"))
+    absent = ra.missing_health_reports(d, _FIXED_NOW)
+    assert absent == ["2026-11-13", "2026-11-14"], absent
+    alarms = khr._alarms({"edges_active": _EDGES, "edges_total": _EDGES},
+                         khr.compute_hygiene({}, _FIXED_NOW), 0, _EDGES, None)
+    assert alarms == [], f"the report-only row reached the alarm channel: {alarms!r}"

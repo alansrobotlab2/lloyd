@@ -31,8 +31,10 @@ from app.paths import (PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB,
 from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
                           store as _kg_store)
 from scripts.reflection_archive import (EXPECTED_MTIME_WITNESSES,
+                                        REPORT_CYCLE_LOOKBACK_DAYS,
                                         RETIRED_COPY_WINDOW_DAYS,
                                         copy_gaps as _copy_gaps,
+                                        missing_health_reports as _missing_health_reports,
                                         mtime_witness as _mtime_witness,
                                         pattern_staleness as _pattern_staleness,
                                         pointer_mtime_lag as _pointer_mtime_lag,
@@ -1730,6 +1732,7 @@ def generate_report(
     stale_unevaluable: tuple[int, int] | None = None,
     duplicate_id_files: int | None = None,
     copy_gaps: list | None = None,
+    missing_health_reports: list | None = None,
     trace_coverage: tuple[int, int] | None = None,
     stamp_cohort: dict | None = None,
     pattern_staleness: list | None = None,
@@ -1766,6 +1769,22 @@ def generate_report(
     `copy_gaps` is `reflection_archive.copy_gaps` over the reflection directory:
     a report naming an archive copy the directory lacks is a lost cycle (#1227).
     None means not measured, and the section says that too.
+
+    `missing_health_reports` is `reflection_archive.missing_health_reports` over the
+    same directory (#4180): ISO dates of the previous `REPORT_CYCLE_LOOKBACK_DAYS` UTC
+    days holding no `knowledge-health-<date>.md`. It is the question `copy_gaps`
+    structurally cannot ask — that check walks the reports that EXIST, so a night on
+    which the job never ran names no copy and cannot be a gap, which is how
+    `knowledge-health-2026-11-16.md` came to print `no cycle is missing a copy` over
+    three absent nights. The report's own UTC day is never in the window, because
+    `main()` renders this section before writing this file. A `None` here means the
+    caller never measured, and the row is then omitted entirely rather than printed as
+    a zero — the convention `referential_ledger` immediately below uses, which is the
+    right one for this row: a render that did not read the directory has no finding to
+    report, and printing a clean zero for a check that did not run is the exact failure
+    #4180 is about. Like the ledger row below and `index_ghosts` above, it is
+    REPORT-ONLY: it is not an input to `_alarms`, because a skipped night is usually a
+    fleet-wide scheduler gap this job neither owns nor can remedy.
 
     `pattern_staleness` is `reflection_archive.pattern_staleness` over the same
     directory (#2413): a §2e pattern file whose newest dated archive copy predates
@@ -2126,6 +2145,28 @@ def generate_report(
             lines.append(f"| `{gap.report.name}` | `{gap.copy}` |")
         if len(copy_gaps) > SECTION_ROW_CAP:
             lines.append(f"| … | *{len(copy_gaps) - SECTION_ROW_CAP:,} more* |")
+
+    # Expected-vs-present cycles (#4180), beside the pointer check rather than in a
+    # section of its own: the two answer different questions about the same directory,
+    # and a reader who has to leave the section to learn that three nights produced
+    # nothing is a reader who will not leave it. `copy_gaps` above cannot say this at
+    # all — it walks the reports that EXIST, so a night that never ran names no copy
+    # and cannot be a gap. REPORT-ONLY by ruling: not an input to `_alarms`, and not
+    # able to move the exit code, because a skipped night is usually somebody else's
+    # outage — nothing on this box dispatched at all on 2026-11-14, and 2026-11-10's
+    # gap was a person-set queue hold. The window excludes the day this report is
+    # written on, which is the difference between a useful row and one that names
+    # itself as missing on every first run of a UTC day.
+    window_days = REPORT_CYCLE_LOOKBACK_DAYS
+    if missing_health_reports is not None:
+        lines.append("")
+        if missing_health_reports:
+            lines.append("- Knowledge-health reports expected and absent in the previous "
+                         f"{window_days} UTC days: {', '.join(missing_health_reports)}")
+        else:
+            lines.append("- Knowledge-health reports expected and absent in the previous "
+                         f"{window_days} UTC days: 0 — every expected nightly cycle has "
+                         f"its report.")
     lines.append("")
 
     # The same retention question, asked of the directory rather than of the
@@ -2558,7 +2599,12 @@ GRAPH_BASELINE_RELPATH = f"{MEMORY_GRAPH_RELPATH}/graph-baseline.json"
 
 def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
             baseline: int, index_ghosts: dict | None = None) -> list[str]:
-    """Conditions that make this run an alarm rather than a report."""
+    """Conditions that make this run an alarm rather than a report.
+
+    Its five inputs are the whole of what can alarm, and the #4180 absent-night row is
+    not one of them: a report-only line stays report-only by not being reachable from
+    here, so a night the scheduler skipped cannot page about somebody else's outage.
+    """
     out = []
     if store_stats is None:
         out.append("the knowledge-graph store could not be read")
@@ -2754,11 +2800,18 @@ def main():
     # the cycle that did write them said so in its own note.
     pointer_lag = _pointer_mtime_lag(reflection_dir)
     witness = _mtime_witness(reflection_dir)
+    # One more reading of the same listing, and the only one that asks a calendar
+    # question (#4180): which of the previous UTC days in the window have no report
+    # file at all — one `is_file()` stat per day, no file is read. Report-only, so it
+    # stops here and in the section: it is deliberately NOT an input to `_alarms`
+    # below, and a caller that never measures passes None.
+    absent_reports = _missing_health_reports(reflection_dir, now)
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
                              fact_dups=fact_dups, stale_unevaluable=stale_unevaluable,
                              duplicate_id_files=dup_id_files, copy_gaps=gaps,
+                             missing_health_reports=absent_reports,
                              trace_coverage=trace_coverage,
                              stamp_cohort=stamp_cohort,
                              pattern_staleness=stale_patterns,

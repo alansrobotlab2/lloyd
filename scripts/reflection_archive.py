@@ -426,6 +426,70 @@ def reports_in(reflection_dir: Path) -> dict[Path, str]:
     return out
 
 
+# ── Cycles the calendar expected and the directory never got (#4180) ─────────
+#
+# Both checks that follow judge files that exist. `copy_gaps` above walks
+# `reports_in`'s glob, and `pattern_staleness` below compares the newest dated copy
+# against the newest report — so a night on which the job never ran contributes
+# nothing to either: no report, so no pointer, so nothing to be missing. On
+# 2026-11-16 the section these feed printed `no cycle is missing a copy` while
+# 2026-11-10, -13 and -14 held no knowledge-health report at all, and the two jobs
+# that open that file as an input (#65, #48) could not tell from the artefact that
+# they were reading a two-day-old verdict.
+#
+# So this asks the calendar question the pointer check structurally cannot, over a
+# bounded window. It is REPORT-ONLY by ruling, and stays out of the alarm channel
+# for a measured reason: a skipped night is usually somebody else's outage — on
+# 2026-11-14 nothing on this box dispatched at all, fleet-wide, and 2026-11-10's gap
+# was a person-set queue hold — so a bell here would page about a gap this job can
+# neither own nor remedy.
+#
+# The window is the seven UTC days strictly BEFORE the day the report is written.
+# `main()` renders this section and only then writes `knowledge-health-<date>.md`,
+# so a window that included today would name the report itself as a missing cycle
+# on the first run of every UTC day.
+
+#: Calendar days whose knowledge-health report this check expects, counting back
+#: from but EXCLUDING the report's own UTC day. Seven is the same horizon
+#: `RETIRED_COPY_WINDOW_DAYS` uses, and it is a window rather than "every day since
+#: the store began": the finding exists to catch a gap while someone can still act
+#: on it, not to accumulate a permanent list of nights nobody can restore.
+REPORT_CYCLE_LOOKBACK_DAYS = 7
+
+#: The dated knowledge-health report, named as `main()` names it
+#: (`knowledge-health-{date_str}.md`, on the UTC date). Matched as an exact filename
+#: rather than a glob on purpose: a `.md.tmp` left by an interrupted write, or a
+#: directory entry of some other shape, is not a report.
+HEALTH_REPORT_STEM = "knowledge-health-"
+
+
+def missing_health_reports(reflection_dir: Path, now: datetime,
+                           days: int = REPORT_CYCLE_LOOKBACK_DAYS) -> list[str]:
+    """ISO dates of the last `days` UTC cycles holding no knowledge-health report.
+
+    Oldest first, so the list reads as a timeline. The report's own UTC day is never
+    in the window — the days are `now`'s UTC date minus one through minus `days` —
+    which is what keeps this from naming the file the calling run has not written
+    yet. An empty list means every expected cycle is present; it is NOT the
+    un-measured state, which every caller of every check in this module spells
+    `None` at the rendering end.
+
+    `now` is a parameter rather than a call to `datetime.now()` for the reason the
+    other checks take it: the window must be gradeable against a fixture directory
+    on a hermetic rung. It must be timezone-aware — the arithmetic is on
+    `now.astimezone(timezone.utc).date()`, so a naive value would be read as local
+    time and could shift the window by a day.
+    """
+    reflection_dir = Path(reflection_dir)
+    today = now.astimezone(timezone.utc).date()
+    missing = []
+    for back in range(days, 0, -1):
+        day = (today - timedelta(days=back)).isoformat()
+        if not (reflection_dir / f"{HEALTH_REPORT_STEM}{day}.md").is_file():
+            missing.append(day)
+    return missing
+
+
 # ── Pattern-file currency: the second directory check (#2413) ────────────────
 #
 # `copy_gaps` above asks one question — did a cycle lose a copy *its own report

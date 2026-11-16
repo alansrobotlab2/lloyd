@@ -573,8 +573,31 @@ never `vault_write`.
 directory itself: a report that names the copy it made (`Archive copied before
 this write: …`, or any `<stem>-latest-<stamp>.md`) whose file is absent is a lost
 cycle, listed under `## Reflection Retention` in the daily Knowledge Health
-Report. The expectation comes from that pointer, never from the calendar — a
-report naming no copy is not a gap.
+Report. That expectation comes from the pointer, never from the calendar — a
+report naming no copy is not a gap. #2413 added the one calendar-shaped question
+that directory does answer, and answered it obliquely: `pattern_staleness` compares
+a pattern file's newest dated name stamp against the newest report's date, so it
+catches a cycle behind without ever asking whether a given night produced a report
+at all.
+
+The calendar question is asked, but by a second row and with a different force.
+`copy_gaps` walks the reports that *exist*, so a night on which the job never ran
+names no copy and cannot be a gap: on 2026-11-16 the section above read
+`no cycle is missing a copy` while 2026-11-10, -13 and -14 held no report at all,
+and the two jobs that open that file as an input could not tell from the artefact
+that they were reading a two-day-old verdict. So `missing_health_reports` names
+the days among the previous seven UTC days with no
+`knowledge-health-<date>.md`, excluding the day the report itself is written on —
+the report is rendered before its own file exists, so a window that included today
+would name the report as missing every night (#4180). Like the pointer check above,
+that row reaches neither `_alarms` nor the exit code — the two are `_alarms`'s five
+inputs and neither check is one of them. What differs is what a reader is meant to
+do with each. A missing copy names a cycle this chain lost on a night it did run,
+and the remedy is the skill that skipped its `cp`. An absent report is usually not
+this job's failure at all: on 2026-11-14 nothing on this box dispatched, fleet-wide,
+and 2026-11-10's gap was a person-set queue hold. Naming the dates is the finding;
+paging over them would page about the scheduler and stay quiet about the one loss
+the chain can act on.
 
 **The claims a run makes are re-checked against disk.** The chain's most-repeated
 defect was never a crash, it was a confident number: a handoff reporting the
@@ -1214,7 +1237,7 @@ two incidents (#3453).
 
 **A monitor that reports success when it cannot see the thing it monitors is
 worse than none.** #60 exits 2 (`EXIT_ALARM`,
-`scripts/memory/knowledge-health-report.py:2310`) and alerts when the store
+`scripts/memory/knowledge-health-report.py`, `EXIT_ALARM = 2`) and alerts when the store
 cannot be read, when active edges fall below half the
 baseline, when any directory holds facts about another entity, when fact records
 carry no `entity:` tag over the hygiene floor (#2474), or when any fact file
