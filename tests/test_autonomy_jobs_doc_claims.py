@@ -9088,3 +9088,101 @@ def test_the_drop_ruling_is_recorded_as_settled_with_both_arms_rederivable():
     assert bound_errors(mis_bound), (
         "attaching the figure 4 to the declared period — the one-row error #4077 was "
         "filed to prevent — passed the bounds check")
+
+
+# ── #4095 clause 1: §Measure's #82 passage describes the edge its FILE declares ─────
+#
+# Every dependency node above reads the fenced wiring block (`TEN_EDGES`, and
+# `_diagram_edges()` slices the text after "Ten `depends_on` edges exist" and stops at the
+# fence), so the diagram stayed green over the one sentence that was wrong: §Measure's #82
+# passage read "ordered after #81's index maintenance by window only — it declares no
+# `depends_on`, so a late #81 does not hold it", while `82-nightly-retrieval-eval.md` has
+# declared `depends_on: 81` since the vault commit `a01fa34f` (2026-10-29). That is the
+# inverse of runtime behaviour — `app/autonomy.py` reads `task.get("depends_on")` into
+# `_dependency_refusal`, which holds the child when the parent has no successful run for the
+# current period, fail-closed since #558 — and nothing in this file, nor the `WATCH_JOBS`
+# group probes, nor the `@live_vault` reconciling nodes the gate deselects, had any view of
+# the sentence at all.
+#
+# The passage's run-in header `**#82 must pass no flags.**` is what makes it checkable: the
+# sentence carrying the claim names #81 and not #82, so an id-nearest rule would have read
+# #81's file — which really does declare no parent — and passed. `jobs_membership`
+# (`PASSAGE_SUBJECT`) applies the same rule for the linter; this pins the ONE sentence whose
+# wording the item was filed for.
+
+_PASSAGE_82_STALE = ("ordered after #81's index maintenance by window only — it declares no "
+                     "`depends_on`, so a late #81 does not hold it")
+
+
+def _82_passage(text: str) -> str:
+    """The run-in passage whose subject is #82, wraps collapsed.
+
+    Asserting there is exactly ONE rather than taking `[0]`: a doc that duplicated the header
+    would leave this node grading whichever copy came first, and a doc that renamed the header
+    would leave it grading nothing — the two ways a per-passage check goes vacuously green.
+    """
+    hits = [b for b in text.split("\n\n") if b.lstrip().startswith("**#82 ")]
+    assert len(hits) == 1, (
+        f"clause 1 is about one passage and the doc holds {len(hits)} headed `**#82 ` — "
+        f"re-point this check at the passage's new home rather than let it read nothing")
+    return _flat(hits[0])
+
+
+def _82_passage_lies(passage: str) -> list[str]:
+    """What the #82 passage gets wrong, in the terms clause 1 states it.
+
+    Four demands, one per return path: name the declared `depends_on: 81`; do not deny it;
+    say the scheduler's dependency gate is what can hold #82 behind #81; keep the hour window
+    as ordering ON TOP of that edge. Each is a string the passage must or must not contain,
+    because the clause is about wording and a paraphrase of a false sentence is still false.
+    """
+    problems: list[str] = []
+    if "`depends_on: 81`" not in passage:
+        problems.append("the edge its file declares (`depends_on: 81`) is not named")
+    for stale in ("declares no `depends_on`", "does not hold it", "by window only"):
+        if stale in passage:
+            problems.append(f"still says {stale!r}")
+    if "dependency gate" not in passage and "_dependency_refusal" not in passage:
+        problems.append("does not say the scheduler's dependency gate is what can hold it "
+                        "behind #81")
+    if "preferred_hours" not in passage:
+        problems.append("does not keep the `preferred_hours` window as the additional ordering")
+    return problems
+
+
+def test_the_82_passage_describes_the_edge_its_file_declares():
+    """#4095 clause 1, on the committed doc: the passage states the edge, and states who holds.
+
+    The controls are the node. Each one rewrites the corrected passage back toward the stale
+    wording — dropping the edge, restoring the denial, replacing the gate with the old
+    "does not hold it", cutting the window out — and the predicate must go red on each, so a
+    pass here means the four demands are what is being satisfied and not that the docstring
+    matched itself. `_PASSAGE_82_STALE` is the sentence as filed, kept here as the mutation
+    target rather than re-typed inside four `replace` calls.
+    """
+    passage = _82_passage(_text())
+    assert _82_passage_lies(passage) == [], (
+        f"§Measure's #82 passage still misdescribes its dependency: {_82_passage_lies(passage)}")
+    assert _PASSAGE_82_STALE not in passage, (
+        "the sentence #4095 was filed against is back in the doc")
+
+    for label, mutated in (
+        ("dropped the declared edge", passage.replace("`depends_on: 81`", "an upstream job")),
+        ("denied the parent again", passage.replace(
+            "What orders it behind #81's index maintenance is the edge its own file declares, "
+            "`depends_on: 81`, so the scheduler's dependency gate is what can hold #82 back",
+            _PASSAGE_82_STALE)),
+        ("put the window back as the only ordering", passage.replace(
+            "and the `preferred_hours` window is ordering on top of the edge, never instead "
+            "of it.", "ordered by window only.")),
+        # The predicate accepts either name of the mechanism — the gate in prose or the
+        # function by symbol — so the control must strike BOTH, or it proves only that one
+        # synonym is load-bearing and the node passes on a doc that named neither.
+        ("unnamed the mechanism holding it", passage
+         .replace("dependency gate", "nightly schedule")
+         .replace("_dependency_refusal", "the schedule")),
+    ):
+        assert mutated != passage, (
+            f"the {label} control rewrote nothing, so it proved nothing")
+        assert _82_passage_lies(mutated), (
+            f"a passage that {label} still passed the clause-1 predicate")

@@ -11,13 +11,20 @@ the reason is structural, recorded at `tests/test_autonomy_jobs_doc_claims.py:33
 So the first thing in any day to read both sides was allowed to be a red suite.
 
 This file moves the check to the moment the file is written, on fixtures, and it runs at the
-gate. Nothing here reads `~/obsidian`: a filing test that graded the live fleet would be
-written by the fleet — on 2026-10-17 the live tree measured `live 43` and `([], [], [])` for
-both tables precisely because #2881 had hand-fixed the doc that morning, so "green" here
-would have meant "nobody has filed anything today", and a guard nobody can see fail is the
-same guard that has already failed four times. The seeded directions below are clause 4: a
-directory holding `41-*.md` that neither table names, and a doc naming `#41` with no file
-behind it.
+gate. Nothing that PROVES a direction reads `~/obsidian`: a filing test that graded the live
+fleet would be written by the fleet — on 2026-10-17 the live tree measured `live 43` and
+`([], [], [])` for both tables precisely because #2881 had hand-fixed the doc that morning, so
+"green" here would have meant "nobody has filed anything today", and a guard nobody can see fail
+is the same guard that has already failed four times. The seeded directions below are clause 4: a
+directory holding `41-*.md` that neither table names, and a doc naming `#41` with no file behind
+it.
+
+The two nodes at the foot of the file are the exception, and they are the ones #4095 added. They
+read the committed doc beside the real task directory because the artefact is that pair — a
+fixture can prove the reconciler reports a lie, and only the live pair can prove this fleet is
+not currently telling one — so they skip when no fleet is installed rather than pass on nothing.
+The distinction that keeps the rule above intact: every failure MODE in this class is pinned by a
+seeded fixture, and the live pair is asked only the standing question "is it clean today".
 
 The bound this file is most careful to prove is the one that is easy to over-build: the
 report NEVER refuses a write. A round that turned doc drift into a blocking error would have
@@ -28,8 +35,10 @@ refuses". So several nodes below assert on the written file as much as on the re
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -921,3 +930,331 @@ def vt_default_dir() -> str:
     linter about the tree the linter is actually pointed at rather than a guessed one."""
     from scripts.autonomy.validate_tasks import DEFAULT_DIR
     return str(DEFAULT_DIR)
+
+
+# ── #4095: the doc's PROSE about a job's parent, against the file it describes ─────
+#
+# Everything above reconciles IDS — is this job in the two membership tables. It says nothing
+# about a dependency SENTENCE, and that is how §Measure could state, of #82, "it declares no
+# `depends_on`, so a late #81 does not hold it" while `82-nightly-retrieval-eval.md:17` had
+# declared `depends_on: 81` since the vault commit `a01fa34f` (2026-10-29). The sentence is
+# the inverse of what the scheduler does (`app/autonomy.py` reads `task.get("depends_on")`
+# into `_dependency_refusal` and holds the child fail-closed, #558), and nothing gated it:
+# `TEN_EDGES`/`_diagram_edges()` in `tests/test_autonomy_jobs_doc_claims.py` read only the
+# fenced wiring block, that file's `WATCH_JOBS` probes the group tables, and the nodes that
+# do read the live pair carry `@live_vault` — which `scripts/automod/gate.py`'s
+# `TESTS_MARK_EXPR = "not live_vault and not fault_injection"` deselects at every gate.
+#
+# So these nodes grade `jm.dependency_claim_drift` on a FIXTURE doc beside a FIXTURE task
+# directory: no vault read, gate-running, and seeded in both directions the way
+# `membership_drift` above is. Each passage is one physical line so an asserted `line` is the
+# passage's own line number and not an artefact of how the fixture is wrapped.
+
+
+def dep_dir(tmp_path: Path, parents: "dict[int, int | None]") -> Path:
+    """A task directory whose files declare exactly these parents: `{82: 81, 81: None}`.
+
+    A `None` parent is written as a file with NO `depends_on` key rather than an empty one,
+    because "declares nothing" must be the shape the live fleet actually has — #81's file
+    carries no such key — and a blank `depends_on:` line would be a third state neither side
+    produces.
+    """
+    d = tmp_path / "autonomy"
+    d.mkdir(parents=True, exist_ok=True)
+    for job, parent in parents.items():
+        decl = f"depends_on: {parent}\n" if parent is not None else ""
+        (d / f"{job}-seeded-job.md").write_text(
+            f"---\ntype: autonomy\nid: {job}\n{decl}---\n\nb\n", encoding="utf-8")
+    return d
+
+
+def dep_line(doc: str, needle: str) -> int:
+    """The line `needle` sits on, 1-based — so an asserted line is read off the fixture."""
+    return 1 + next(i for i, ln in enumerate(doc.splitlines()) if needle in ln)
+
+
+def test_a_passage_that_denies_a_parent_the_file_declares_is_reported(tmp_path):
+    """The #4095 shape, seeded: a `**#82 …**` passage says "it declares no `depends_on`" and
+    `82-….md` declares `depends_on: 81`. Exactly #82 is reported, with both sides named.
+
+    The attribution is what this node is really about. The sentence carrying the claim does
+    not contain the string "#82" at all — the id is in the run-in header four lines up, and
+    the nearest id before the claim is `#81`, the PARENT. Checking nearest-id would have read
+    #81's file (which genuinely declares nothing) and called the passage clean, which is what
+    every earlier reader of this doc did. `PASSAGE_SUBJECT` is the only rule that lands the
+    claim on the job the passage describes.
+    """
+    doc = (
+        "## Measure: #60, #82\n"
+        "\n"
+        "**#82 must pass no flags.** It is ordered after #81's index maintenance by window "
+        "only — it declares no `depends_on`, so a late #81 does not hold it.\n"
+    )
+    d = dep_dir(tmp_path, {82: 81, 81: None})
+
+    found = jm.dependency_claim_drift(doc, d)
+    assert [f.job for f in found] == ["#82"], (
+        f"the denial was not attributed to the passage's own subject: "
+        f"{[(f.job, f.doc_claim) for f in found]}")
+    f = found[0]
+    assert f.doc_claim == "declares no `depends_on`", f.doc_claim
+    assert f.file_declares == "depends_on: 81", f.file_declares
+    assert f.file == "82-seeded-job.md", f.file
+    assert f.line == dep_line(doc, "must pass no flags"), (
+        f"a reader needs the doc line to fix: got {f.line}")
+    line = f.describe()
+    assert line.startswith("DOC_DEPENDS: line "), line
+    assert "declares no `depends_on`" in line and "depends_on: 81" in line, line
+
+
+def test_the_matched_pair_reports_nothing(tmp_path):
+    """Green control: the same doc with the edge stated is clean, so the finding above is the
+    disagreement and not the parser reacting to prose about dependencies.
+
+    This is the wording clause 1 requires in the live doc — the declared edge named, the
+    dependency gate as the thing that can hold #82 behind #81, and the hour window kept as
+    the ADDITIONAL ordering, per the doc's own rule that what orders a chain is the freshness
+    half of `depends_on`, not the clock.
+    """
+    doc = (
+        "## Measure: #60, #82\n"
+        "\n"
+        "**#82 must pass no flags.** It declares `depends_on: 81`, so the scheduler's "
+        "dependency gate is what can hold #82 behind #81; the hour window is the additional "
+        "ordering, not the only one.\n"
+    )
+    d = dep_dir(tmp_path, {82: 81, 81: None})
+    assert jm.dependency_claim_drift(doc, d) == [], (
+        "a doc that agrees with the files was reported: "
+        f"{[(f.job, f.doc_claim, f.file_declares) for f in jm.dependency_claim_drift(doc, d)]}")
+
+
+def test_a_claimed_parent_the_file_disagrees_with_names_both_values(tmp_path):
+    """The second shape the item was filed with: the doc states a parent, the file states
+    another — and a file that declares none is a third answer, spelled out.
+
+    The row shape is also the attribution control for a TABLE row: the live #98 row reads
+    "its `depends_on: 24` is an ordering *statement* only, since #24 runs six times a day",
+    which names #60 one clause earlier. A row's first cell is its subject, so #98 is credited
+    and #60 is not; mutating the same row to a parent its file does not declare has to name
+    #98, never #60.
+    """
+    row = ("| #98 | daily | #24 | **Armed, 0 rows.** Its `depends_on: 24` is an ordering "
+           "*statement* only, since #24 runs six times a day. |")
+    d = dep_dir(tmp_path, {98: 24, 24: None, 60: None})
+
+    assert jm.dependency_claim_drift(f"{row}\n", d) == [], (
+        "the live #98 row's own claim was reported as drift")
+
+    wrong = row.replace("`depends_on: 24`", "`depends_on: 60`")
+    found = jm.dependency_claim_drift(f"{wrong}\n", d)
+    assert [f.job for f in found] == ["#98"], (
+        f"a row's dependency claim was attributed to another id in the row: "
+        f"{[(f.job, f.doc_claim) for f in found]}")
+    assert found[0].doc_claim == "declares `depends_on: 60`", found[0].doc_claim
+    assert found[0].file_declares == "depends_on: 24", found[0].file_declares
+
+    orphan = dep_dir(tmp_path / "orphan", {98: None, 24: None, 60: None})
+    found = jm.dependency_claim_drift(f"{row}\n", orphan)
+    assert len(found) == 1 and found[0].job == "#98", found
+    assert found[0].file_declares == "no depends_on field", found[0].file_declares
+
+
+def test_a_denial_between_two_jobs_blames_neither_that_the_prose_credits(tmp_path):
+    """§Measure's #70/#83 sentence: "there is no `depends_on` between them, and #83's own is
+    `58`" — true of #70 (which declares nothing) and FALSE if read of #83, whose file declares
+    `depends_on: 58`.
+
+    This is the false-positive control for the denial pattern, and the reason `is `N`` is
+    parsed into `credited` before the absent-claim pass runs: a check that accused #83 would
+    be wrong about a job the sentence itself credits with a parent, and the first real use of
+    this function would have had to be silenced by hand.
+    """
+    doc = (
+        "## Measure: #60, #82\n"
+        "\n"
+        "**#70 owns half of it.** #70's findings are advisory and reach #83 only if #83 "
+        "happens to look — there is no `depends_on` between them, and #83's own is `58`.\n"
+    )
+    d = dep_dir(tmp_path, {70: None, 83: 58, 58: 57})
+    assert jm.dependency_claim_drift(doc, d) == [], (
+        f"{[(f.job, f.doc_claim, f.file_declares) for f in jm.dependency_claim_drift(doc, d)]}")
+
+
+def test_a_wrapped_line_beginning_with_an_id_does_not_cut_the_passage(tmp_path):
+    """The parser bug this round hit while writing it, pinned: a paragraph line that OPENS
+    with an id reference — §Measure's "#3454, whose test now reads the conjunction's own terms"
+    — is not a heading, and treating it as one split the #82 passage in half.
+
+    The split is not cosmetic. The `**#82 …**` subject lands in the first half and the denial
+    in the second, so the second half has no subject and the check goes silent on the exact
+    sentence #4095 was filed for. A `startswith("#")` test looked right against the doc's own
+    headings and was wrong against its prose.
+    """
+    doc = (
+        "## Measure: #60, #82\n"
+        "\n"
+        "**#82 must pass no flags.** The comment block introducing those knobs counted them\n"
+        "#3454, whose test now reads the conjunction's own terms out of that file. It is\n"
+        "ordered after #81's index maintenance by window only — it declares no `depends_on`.\n"
+    )
+    d = dep_dir(tmp_path, {82: 81, 81: None})
+    found = jm.dependency_claim_drift(doc, d)
+    assert [f.job for f in found] == ["#82"], (
+        f"a paragraph line opening with an id was read as a heading and lost the subject: "
+        f"{[(f.job, f.doc_claim) for f in found]}")
+
+
+def test_a_fleet_wide_count_and_the_review_log_are_not_mined_for_claims(tmp_path):
+    """The two things this check must NOT report, because a check that cries wolf on the live
+    doc gets switched off: a COUNT of declarers, and the review log's own corrections.
+
+    §The wiring's "29 of the 39 tasks (2026-10-12) declare no dependency at all: ten jobs name
+    a parent" matches the denial pattern over a sentence with no id to attribute it to, and
+    its replacement "Those five jobs declare nothing else in the fleet can see" opens with
+    ids belonging to the OTHER sentence's roster — a fleet count is not eleven per-job claims.
+    And §Review log's #4095 entry quotes "`depends_on: 106`" precisely to record that no row
+    states it; parsing a narration of an edit as a job description would report the
+    correction that closes this class as drift in it.
+    """
+    doc = (
+        "## The wiring\n"
+        "\n"
+        "Those five jobs declare nothing else in the fleet can see. 29 of the 39 tasks\n"
+        "(2026-10-12) declare no dependency at all: ten jobs name a parent, and only nine of\n"
+        "them are drawn.\n"
+        "\n"
+        "**#107 is new here.** Neither #100 nor #105 nor #107 declares a parent.\n"
+        "\n"
+        "## Review log\n"
+        "\n"
+        "### #4095 — §Measure says #82 declares no `depends_on`, and the row asserts\n"
+        "`depends_on: 106` while its file declares no such field.\n"
+    )
+    d = dep_dir(tmp_path, {100: None, 105: None, 107: None, 82: 81, 81: None})
+    found = jm.dependency_claim_drift(doc, d)
+    assert found == [], (
+        f"a fleet-wide count or a review-log correction was reported as a per-job claim: "
+        f"{[(f.job, f.doc_claim, f.line) for f in found]}")
+
+
+def test_the_dependency_nodes_carry_no_live_vault_mark():
+    """The mark is the point of #4095, read off this file's own AST rather than asserted once.
+
+    The premise is that the reconciling nodes which could have seen the #82 sentence carry
+    `@live_vault` and so never run at a gate (`scripts/automod/gate.py`'s `TESTS_MARK_EXPR =
+    "not live_vault and not fault_injection"`); #3270's reasoning bank scores a clause pinned
+    only by such a node as pinned by nothing. So a node that merely re-stated that rule in
+    prose would not survive someone decorating the new nodes with the mark they were written
+    to avoid.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    dep_nodes = [n for n in tree.body
+                 if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")
+                 and "dependency_claim_drift" in (ast.get_source_segment(src, n) or "")]
+    assert len(dep_nodes) >= 5, (
+        f"the dependency-claim class is barely present: {[n.name for n in dep_nodes]}")
+    marked = [n.name for n in dep_nodes
+              if any(getattr(d, "attr", "") == "live_vault" for d in n.decorator_list)]
+    assert not marked, (
+        f"a node gated on the live vault cannot fail a gate, which is the failure #4095 was "
+        f"filed against: {marked}")
+
+
+# ── The committed doc against the live fleet, through the seam the linter uses ────────
+#
+# Everything above this line runs on `tmp_path` and never reads the vault, which is what makes
+# it gate-effective. These two nodes are the deliberate exception, and they are the only ones
+# that can be: the artefact this class exists to keep honest is ONE committed doc beside ONE
+# real task directory, so a fixture pair proves the mechanism and nothing about the drift. They
+# ask `validate_tasks.doc_membership_warnings` — the function that prints the finding and sets
+# the exit code a fleet change runs against — rather than the parser, so the seam is covered by
+# the same assertion. `test_the_live_tree_invariant_rejects_a_warning_that_is_not_membership_drift`
+# already proves this seam can receive a DOC_DEPENDS warning and the strict mode will not wave
+# it through; this closes the half it left open by showing the seam emitting one.
+
+def _live_doc_dependency_warnings(tmp_path, *, mutate=None):
+    """`doc_membership_warnings` over the committed doc and the live task dir, DOC_DEPENDS only.
+
+    `mutate`, when given, rewrites the doc text first and the pair is written under `tmp_path`
+    so the run grades the drift rather than the clean pair. Returns the warnings and the doc
+    text actually graded, because a caller asserting "the report names line 1246" needs the
+    line number read off THAT text, not off the file on disk.
+    """
+    from scripts.autonomy.validate_tasks import doc_membership_warnings
+
+    live = Path(vt_default_dir())
+    if not any(live.glob("[0-9]*-*.md")):
+        pytest.skip(f"the live task directory is not populated here ({live})")
+    doc = (ROOT / "architecture" / "autonomy-jobs.md").read_text(encoding="utf-8")
+    if mutate is None:
+        path = ROOT / "architecture" / "autonomy-jobs.md"
+    else:
+        doc = mutate(doc)
+        path = tmp_path / "autonomy-jobs.md"
+        path.write_text(doc, encoding="utf-8")
+    warns = [w for w in doc_membership_warnings(live, path) if "DOC_DEPENDS" in w]
+    return warns, doc
+
+
+_CORRECTED_82_EDGE = re.compile(
+    r"What orders\s+it behind #81's index maintenance.*?#82 back", re.S)
+
+
+def _deny_82s_parent(doc: str) -> str:
+    """Put §Measure's stale sentence back into the committed doc, verbatim as filed.
+
+    Matched across the doc's hard wraps rather than by a flat literal: the sentence is three
+    lines long, so a one-line `str.replace` finds nothing and returns the input unchanged, and a
+    control that mutates nothing reports the same clean answer as a check that is working. The
+    `assert` below is what makes that failure mode loud instead of green.
+    """
+    hit = _CORRECTED_82_EDGE.search(doc)
+    assert hit is not None, (
+        "the corrected #82 edge sentence is not in architecture/autonomy-jobs.md where this "
+        "control expects it — re-point the control, or the doc lost the clause it pins")
+    return doc.replace(
+        hit.group(0),
+        "It is ordered after #81's index maintenance by window only — it declares no "
+        "`depends_on`, so a late #81 does not hold it")
+
+
+def test_the_committed_doc_agrees_with_the_live_fleet_about_every_parent(tmp_path):
+    """The doc and the fleet agree about every `depends_on` the doc states, measured now.
+
+    Zero findings, not zero findings-about-#82: clause 1's own correction is the reason a
+    whole-doc assertion is available, and it is the rail that catches the next job whose prose
+    falls behind its file — the failure mode #4095 was filed against, in which the fleet moved
+    (`a01fa34f` put `depends_on: 81` into #82's file) and the doc went on denying it for 17 days
+    because nothing ever asked the pair the question together.
+    """
+    warns, _ = _live_doc_dependency_warnings(tmp_path)
+    assert warns == [], (
+        "the committed doc misdescribes some job's parent. Fix the SENTENCE in "
+        "architecture/autonomy-jobs.md — a new `depends_on` appearing in a task file is not "
+        f"drift and is never reported, so a finding here is always the doc lagging: {warns}")
+
+
+def test_the_linter_names_the_stale_sentence_when_the_doc_lags_the_fleet(tmp_path):
+    """The control, and clause 4's finding seen from the real fleet's side.
+
+    The committed doc with its #82 sentence restored to the as-filed wording must produce
+    EXACTLY one warning, blamed to #82, naming the live file and the parent that file declares
+    — read off `82-….md` rather than hard-coded, so this stays true if #82's parent ever moves
+    while staying a lie in the doc. Zero findings would mean the seam is deaf on the real tree
+    no matter how many fixture pairs it grades; two or more would mean the check cannot be
+    switched off without also muting an unrelated job.
+    """
+    warns, _ = _live_doc_dependency_warnings(tmp_path, mutate=_deny_82s_parent)
+    assert len(warns) == 1, f"expected exactly the #82 finding, got: {warns}"
+    w = warns[0]
+    assert w.startswith("#82: DOC_DEPENDS: line "), w
+    assert "declares no `depends_on`" in w, w
+    eight_two = sorted(Path(vt_default_dir()).glob("82-*.md"))
+    assert len(eight_two) == 1, f"#82 must have exactly one task file, saw {eight_two}"
+    parent = [ln.split(":", 1)[1].strip()
+              for ln in eight_two[0].read_text(encoding="utf-8").splitlines()
+              if ln.startswith("depends_on:") and ln.split(":", 1)[1].strip().isdigit()]
+    assert parent, f"{eight_two[0].name} declares no numeric depends_on"
+    assert eight_two[0].name in w and f"depends_on: {parent[0]}" in w, w

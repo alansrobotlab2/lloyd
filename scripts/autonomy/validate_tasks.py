@@ -461,13 +461,47 @@ def drift_journal_warnings(jobs_doc: Path, journal: Path | None = None,
     return out
 
 
+def dependency_claim_warnings(d: Path, jobs_doc: Path, parser=None,
+                              text: str | None = None) -> list[str]:
+    """DOC_DEPENDS warnings — the doc's per-job `depends_on` PROSE against each job's file.
+
+    `jm.dependency_claim_drift` answers the question; this only formats it into the linter's
+    one-line shape (`#82: DOC_DEPENDS: line 1246 says it declares no `depends_on`, but …`) with
+    the id as the leading field, because `tests/test_autonomy_task_membership_at_filing.py`'s
+    live-tree invariant and `_id_lines` here both read the blame off the first token.
+
+    `text=None` means "read it yourself", which is what the tables-failed path does: the
+    membership tables and the dependency prose are different reads of the same file, and a doc
+    whose headings were reworded must not have its prose silently reported as graded. A parse
+    surprise is an `unchecked` line, never a raise — this class is prose lagging the fleet and
+    must not cost the scheduler its verdict on the files that dispatch it.
+    """
+    jm = parser if parser is not None else globals().get("jm")
+    if jm is None:
+        return ["DOC_DEPENDS: unchecked — jobs_membership.py is not importable"]
+    if text is None:
+        try:
+            text = Path(jobs_doc).read_text(encoding="utf-8")
+        except OSError as exc:
+            return [f"DOC_DEPENDS: unchecked — {jobs_doc}: {exc}"]
+    try:
+        claims = jm.dependency_claim_drift(text, Path(d))
+    except Exception as exc:  # noqa: BLE001 - report, never mask the classes beside this one
+        return [f"DOC_DEPENDS: unchecked — {jobs_doc}: {type(exc).__name__}: {exc}"]
+    return [f"{f.job}: {f.describe()}" for f in claims]
+
+
 def doc_membership_warnings(d: Path, jobs_doc: Path,
                             parser=None) -> list[str]:
-    """DOC_MEMBERSHIP and DRIFT_UNCLOSED warnings for the fleet in `d` against `jobs_doc`.
+    """DOC_MEMBERSHIP, DOC_DEPENDS and DRIFT_UNCLOSED warnings for `d` against `jobs_doc`.
 
     Separate from `main()` so `tests/test_validate_tasks_linter.py` can assert on the
     messages over a fixture pair without running the scheduler's whole field validation over
-    a synthetic file, and so the rule lives in one place with the parser it uses.
+    a synthetic file, and so the rule lives in one place with the parser it uses. DOC_DEPENDS
+    (#4095) hangs off here rather than opening its own entry point because it is the same
+    question asked of the same two objects — this doc, these task files — one read apart, and
+    a second caller would have to re-decide the `--jobs-doc` scoping rule and the exit-code
+    bound that only this function has settled.
 
     The ids come from the DIRECTORY and the tables come from the DOC, both parsed by
     `scripts/autonomy/jobs_membership.py` — never from a list of expected ids in this file.
@@ -485,6 +519,7 @@ def doc_membership_warnings(d: Path, jobs_doc: Path,
     if jm is None:
         return [f"DOC_MEMBERSHIP: unchecked — jobs_membership.py is not importable from "
                 f"{Path(__file__).parent}",
+                *dependency_claim_warnings(d, jobs_doc, parser=None),
                 *drift_journal_warnings(jobs_doc, parser=None)]
     try:
         text = Path(jobs_doc).read_text(encoding="utf-8")
@@ -501,8 +536,12 @@ def doc_membership_warnings(d: Path, jobs_doc: Path,
         #
         # The journal is still read on this path: a row's date is a fact about the store and does
         # not depend on the doc parsing, and `drift_journal_warnings` reports its own rows as
-        # `unchecked` rather than closed when the tables cannot be re-read.
+        # `unchecked` rather than closed when the tables cannot be re-read. The dependency prose
+        # is graded here too — `dependency_claim_warnings` reads the file itself rather than the
+        # `text` this `try` may not have bound, so a doc that loses its table headings is
+        # reported unchecked on membership while still being checked for a lie about a parent.
         return [f"DOC_MEMBERSHIP: unchecked — {jobs_doc}: {exc}",
+                *dependency_claim_warnings(d, jobs_doc, parser=parser),
                 *drift_journal_warnings(jobs_doc, parser=parser)]
     out: list[str] = []
     for name, named in parsed:
@@ -512,6 +551,19 @@ def doc_membership_warnings(d: Path, jobs_doc: Path,
         out += [f"{i}: DOC_MEMBERSHIP: {name} names a job with no task file under {d} and "
                 f"no Retired row" for i in ghosts]
         out += [f"{i}: DOC_MEMBERSHIP: listed more than once in {name}" for i in dupes]
+
+    # DOC_DEPENDS (#4095) — the same doc read, one more question: does each job's PROSE about
+    # its parent agree with that job's file? Membership says a job is LISTED; it never read a
+    # dependency SENTENCE, which is how §Measure could state "#82 … declares no `depends_on`,
+    # so a late #81 does not hold it" above a file declaring `depends_on: 81` since `a01fa34f`
+    # — the inverse of what `_dependency_refusal` does. It rides this seam and not a new one
+    # because the scoping rule (`main`'s `--jobs-doc` gate), the doc read and the exit-code
+    # bound below are all already decided here, and a second caller would decide them twice.
+    #
+    # It is passed the text this function already read — one read of the doc for both classes,
+    # which is the reason the class rides this seam at all.
+    out += dependency_claim_warnings(d, jobs_doc, parser=parser, text=text)
+
     out += drift_journal_warnings(jobs_doc, parser=parser)
     return out
 

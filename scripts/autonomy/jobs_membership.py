@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -260,6 +261,313 @@ def journal_path() -> Path:
     from app import paths
 
     return paths.PIPELINE_DIR / "arch-review" / "membership-drift.jsonl"
+
+
+# ── What the doc's PROSE claims about each job's parent (#4095) ────────────────────
+#
+# The two membership tables above reconcile ids; this reconciles *dependency sentences*.
+# The doc has no `Depends on` column — dependency statements are prose, in §The wiring
+# and in per-job sentences — and until now nothing compared one to the file it describes.
+# The gap is #4095: §Measure's #82 passage states "it declares no `depends_on`, so a late
+# #81 does not hold it" while `82-nightly-retrieval-eval.md:17` has declared
+# `depends_on: 81` since the vault commit `a01fa34f` (2026-10-29), which is the inverse of
+# runtime behaviour — `app/autonomy.py` reads `task.get("depends_on")` into
+# `_dependency_refusal` and holds the child fail-closed (#558). `TEN_EDGES` and
+# `_diagram_edges()` read only the fenced wiring block, so the diagram stayed green over
+# the wrong sentence, and the reconciling nodes that could have seen it are `@live_vault`.
+#
+# Scope deliberately parsed: the two shapes the class was filed with — the doc claims a job
+# declares NO parent beside a file that declares one, and the doc states a parent the file
+# does not state. Not parsed, and said so rather than silently: a fleet-wide count ("29 of
+# the 39 tasks declare no dependency at all") names no id to attribute to, and a claim about
+# an id with no task file is unverifiable — the ghost half belongs to `membership_drift`.
+
+#: Everything from this heading on narrates edits to the doc rather than jobs. The
+#: 2026-11-12 review entry quotes "`depends_on: 106`" precisely to record that no row states
+#: it; parsed as a job description, that correction would report itself as a contradiction.
+REVIEW_LOG_HEADING = re.compile(r"^## Review log\b", re.M)
+
+#: `**#82 must pass no flags.**` — a paragraph's run-in header names the job the WHOLE
+#: passage describes. It is the only thing that can attribute a pronoun-led claim at all:
+#: "it declares no `depends_on`" carries no id, and the nearest id in that sentence is the
+#: PARENT's (`#81`), so nearest-id attribution would have checked #81's file — which indeed
+#: declares nothing — and passed over the one wrong sentence this class was filed for.
+PASSAGE_SUBJECT = re.compile(r"^\*\*\s*#(\d+)\b")
+
+#: `| #98 | daily | #24 | … |` — a per-job table row's first cell is its subject. Preferred
+#: over an in-sentence id for the same reason: #98's row says "its `depends_on: 24` is an
+#: ordering *statement* only, since #24 runs six times a day" three clauses after naming
+#: #60, and nearest-id would attribute the claim to #60.
+ROW_SUBJECT = re.compile(r"^\|\s*#(\d+)\s*\|")
+
+#: `depends_on: 81` — the value the doc claims. The colon is what keeps a count out of the
+#: parse: #51's row holds "84 `depends_on`, 23 `derived_from`", a tally of fact-edge TYPES.
+CLAIMS_PARENT = re.compile(r"`?depends_on:\s*(\d+)`?")
+
+#: `#83's own is `58`` — the doc's shorthand for a parent, at §Measure. Requiring the word
+#: `is` and the backtick is what keeps a tally out of it: "after 68 days in which its own
+#: `depends_on: 58`" must not be read as "#83's own is 68", and the gap class excludes a
+#: period but not the newline, because that sentence wraps inside it.
+CLAIMS_OWN_PARENT = re.compile(r"#(\d+)'s own\b[^.`]{0,12}is\s+`(\d+)`")
+
+#: The two ways the doc says a job has no parent. The object must be a dependency word:
+#: "Task #91 declares no `acceptance.objective_checks`" is the same verb over another field,
+#: and `no `depends_on`` carries a colon guard so a claimed VALUE never reads as its absence.
+CLAIMS_NO_PARENT = re.compile(
+    r"\bdeclar\w*\s+no\b[^.]{0,40}?\b(?:depends_on|dependenc\w+|parent)s?\b"
+    r"|\bno\s+`depends_on`(?!\s*:)", re.I)
+
+#: `#91–#97` — a span written as a range. Left unexpanded, the endpoints alone get checked,
+#: which is how a drift in the MIDDLE of a roster would hide.
+RANGE_IDS = re.compile(r"#(\d+)\s*[–—-]\s*#(\d+)")
+
+#: A `depends_on:` key with a numeric value, read from a task file's own front matter. A
+#: present-but-blank one (`depends_on:`) is the doc's own way of saying "no parent", so it
+#: is deliberately NOT a match here.
+DEPENDS_ON_FIELD = re.compile(r"^depends_on:\s*(\d+)\s*$", re.M)
+
+#: A markdown heading — the hash(es) MUST be followed by a space. `#NN` alone is not one, and
+#: a wrapped paragraph line may well begin with an id: §Measure's #82 passage has "#3454,
+#: whose test now reads…" at column 0 three lines above the sentence this check exists to
+#: catch, so a `startswith("#")` test cut the passage in half, lost its `**#82 …**` subject
+#: and passed over the drift.
+HEADING_LINE = re.compile(r"^#{1,6}\s")
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+@dataclass(frozen=True)
+class DependencyClaimDrift:
+    """One sentence in the doc that disagrees with the task file it describes.
+
+    `doc_claim` is what the prose asserts, normalised into the doc's own shape
+    ("declares no `depends_on`" / "declares `depends_on: 106`"); `file_declares` is what the
+    front matter says ("depends_on: 81", or "no depends_on field"). Both are strings because
+    the two states a reader must compare are "absent" and "a number", and an `int | None`
+    would make the absence look like the finding's own missing data rather than the fleet's.
+    """
+
+    job: str
+    doc_claim: str
+    file_declares: str
+    line: int
+    file: str = ""
+
+    def describe(self) -> str:
+        """The linter's line, minus the id prefix the caller adds."""
+        return (f"DOC_DEPENDS: line {self.line} says it {self.doc_claim}, but "
+                f"{self.file} declares {self.file_declares}")
+
+
+def _doc_body(text: str) -> str:
+    """The doc up to `## Review log` — the part that describes jobs, not its own edits."""
+    m = REVIEW_LOG_HEADING.search(text)
+    return text[: m.start()] if m else text
+
+
+def _prose_units(text: str) -> list[tuple[int, str | None, str]]:
+    """`(first_line, subject_id, text)` blocks a claim can be attributed within.
+
+    A block is one paragraph, or one table row (rows are the doc's per-job prose too, and
+    #98's `depends_on: 24` lives in a row). Headings are skipped — `## Measure: #60, #82,
+    #70 …` is a section roster, not a claim about any of them — and so is everything inside
+    a fenced block, which is where the wiring diagram's `#38 ─► #42` arrows live.
+    """
+    out: list[tuple[int, str | None, str]] = []
+    buf: list[str] = []
+    start = 1
+    fence = False
+
+    def flush() -> None:
+        if not buf:
+            return
+        text = "\n".join(buf)
+        m = PASSAGE_SUBJECT.match(text)
+        out.append((start, f"#{m.group(1)}" if m else None, text))
+        buf.clear()
+
+    for i, line in enumerate(text.splitlines(), start=1):
+        if line.lstrip().startswith("```"):
+            flush()
+            fence = not fence
+            continue
+        if fence:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            continue
+        if stripped.startswith("|"):
+            flush()
+            m = ROW_SUBJECT.match(stripped)
+            out.append((i, f"#{m.group(1)}" if m else None, stripped))
+            continue
+        if HEADING_LINE.match(stripped):
+            flush()
+            continue
+        if not buf:
+            start = i
+        buf.append(stripped)
+    flush()
+    return out
+
+
+def _sentences(text: str) -> list[tuple[int, int]]:
+    """`(start, end)` offsets of sentence-ish spans within one block's text.
+
+    Split on sentence-final punctuation followed by whitespace, which is what a markdown
+    paragraph written by hand actually uses. Imperfect on an abbreviation, and harmless: a
+    spurious split only shrinks the window a subject may be found in, and the passage
+    subject still covers a claim left on its own.
+    """
+    out: list[tuple[int, int]] = []
+    start = 0
+    for m in _SENTENCE_END.finditer(text):
+        out.append((start, m.start()))
+        start = m.end()
+    if start < len(text):
+        out.append((start, len(text)))
+    return out
+
+
+def _claim_ids(text: str) -> list[str]:
+    """Every `#NN` in a stretch of prose, with `#91–#97` spans expanded."""
+    out = [f"#{n}" for n in re.findall(r"#(\d+)", text)]
+    for lo, hi in RANGE_IDS.findall(text):
+        out += [f"#{n}" for n in range(int(lo), int(hi) + 1)]
+    return out
+
+
+def _front_matter(text: str) -> str:
+    """The YAML block between a task file's two `---` fences, or the whole text."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return text
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "\n".join(lines[1:i])
+    return "\n".join(lines[1:])
+
+
+def declared_parents(task_dir: Path) -> dict[str, tuple[str, str | None]]:
+    """`{#82: ("82-nightly-retrieval-eval.md", "81"), …}` over one task-file directory.
+
+    Every `NN-*.md` is in the map, its parent either a digit string or None, because "the
+    file declares no parent" is itself an answer the doc can contradict. A file that cannot
+    be read is left out rather than guessed at: an unreadable file is the linter's
+    `UNPARSEABLE` class, and inventing a parent here would report a doc drift over it too.
+    """
+    out: dict[str, tuple[str, str | None]] = {}
+    for p in sorted(Path(task_dir).glob("*.md")):
+        m = TASK_FILE_NAME.match(p.name)
+        if not m:
+            continue
+        try:
+            fm = _front_matter(p.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        d = DEPENDS_ON_FIELD.search(fm)
+        out[f"#{m.group(1)}"] = (p.name, d.group(1) if d else None)
+    return out
+
+
+def _claim_job(subject: str | None, sentence: str, block: str, sent_start: int,
+               sent_pos: int) -> str | None:
+    """Which job a claimed parent belongs to, or None when the text does not say.
+
+    The block subject WINS, because #98's membership row reads "its `depends_on: 24` is an
+    ordering *statement* only, since #24 runs six times a day" one clause after naming #60 —
+    nearest-id would hand #98's parent to #60, whose file declares no parent, and report a
+    drift that is a parsing error. With no subject it is the nearest `#NN` preceding the
+    value inside the sentence, and failing that inside the block: §The wiring's "#98 is
+    still the only one that declares a parent without being drawn: `depends_on: 24`" resolves
+    from its own clause. Neither, and the claim is not this check's to make — a guess here
+    would report drift the doc never stated.
+    """
+    if subject:
+        return subject
+    before = re.findall(r"#(\d+)", sentence[:sent_pos])
+    if not before:
+        before = re.findall(r"#(\d+)", block[:sent_start + sent_pos])
+    return f"#{before[-1]}" if before else None
+
+
+def dependency_claim_drift(doc_text: str, task_dir: Path) -> list[DependencyClaimDrift]:
+    """Per-job `depends_on` sentences in the doc that the task files contradict.
+
+    Pure over `(doc text, task directory)`: no journal, no vault constant, no network, so a
+    fixture doc beside a fixture directory grades it inside the gate — the reason #2895's
+    `membership_drift` was extracted the same way. Returns one entry per contradicting
+    claim, sorted by job id, each naming the job, what the doc claims, what the file
+    declares and the doc line to fix.
+
+    Attribution, which is the whole design (see `PASSAGE_SUBJECT`): a block subject — a
+    `**#82 …**` run-in or a `| #98 |` row — wins; then the nearest id preceding the claim
+    inside its sentence; then the nearest anywhere before it in the block. A block with no
+    subject and no preceding id yields no claim, because a guess here would report drift
+    that is not there. An "absent" claim (`CLAIMS_NO_PARENT`) attributed to a block subject
+    is checked against THAT job only, and one attributed to a sentence's ids skips any id the
+    same sentence credits with a parent — §Measure's "#70's findings … reach #83 … there is
+    no `depends_on` between them, and #83's own is `58`" must not accuse #83 of the absence
+    its own clause denies.
+    """
+    declared = declared_parents(task_dir)
+    findings: list[DependencyClaimDrift] = []
+    for block_line, subject, block in _prose_units(_doc_body(doc_text)):
+        for s, e in _sentences(block):
+            sentence = block[s:e]
+            credited: set[str] = set()
+
+            for m in CLAIMS_PARENT.finditer(sentence):
+                job = _claim_job(subject, sentence, block, s, m.start())
+                if job is None or job not in declared:
+                    continue
+                credited.add(job)
+                name, parent = declared[job]
+                if parent != m.group(1):
+                    findings.append(DependencyClaimDrift(
+                        job=job,
+                        doc_claim=f"declares `depends_on: {m.group(1)}`",
+                        file_declares=(f"depends_on: {parent}" if parent
+                                       else "no depends_on field"),
+                        line=block_line + block.count("\n", 0, s + m.start()),
+                        file=name))
+
+            for m in CLAIMS_OWN_PARENT.finditer(sentence):
+                job = f"#{m.group(1)}"
+                credited.add(job)
+                if job not in declared:
+                    continue
+                name, parent = declared[job]
+                if parent != m.group(2):
+                    findings.append(DependencyClaimDrift(
+                        job=job,
+                        doc_claim=f"declares `depends_on: {m.group(2)}`",
+                        file_declares=(f"depends_on: {parent}" if parent
+                                       else "no depends_on field"),
+                        line=block_line + block.count("\n", 0, s + m.start()),
+                        file=name))
+
+            if not CLAIMS_NO_PARENT.search(sentence):
+                continue
+            # An absence is checked against the block's subject when it has one — the only
+            # way to catch "it declares no `depends_on`", which names no id and whose
+            # nearest preceding id is the PARENT's — and otherwise against every id the
+            # sentence carries, except one the same sentence credits with a parent.
+            absent = ([subject] if subject
+                      else [j for j in dict.fromkeys(_claim_ids(sentence))
+                            if j not in credited])
+            for job in absent:
+                if job is None or job not in declared:
+                    continue
+                name, parent = declared[job]
+                if parent is None:
+                    continue
+                findings.append(DependencyClaimDrift(
+                    job=job, doc_claim="declares no `depends_on`",
+                    file_declares=f"depends_on: {parent}",
+                    line=block_line + block.count("\n", 0, s), file=name))
+    return sorted(findings, key=lambda f: (int(f.job[1:]), f.line))
 
 
 def report_at_filing(task_id: object, *, task_dir: Path | None = None,

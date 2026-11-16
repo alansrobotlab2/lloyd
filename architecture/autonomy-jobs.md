@@ -1243,11 +1243,15 @@ corpus is no longer the 20 queries this row once advertised:
 detect the change it exists to detect, and it holds 81 today (measured 2026-10-26).
 The 27-query reserve beside it (`eval/vault_recall_holdout_queries.yaml`, #1412) is
 scored only by the post-landing automod paired check — `run_eval.py` refuses a
-`nightly*` label over it — so this trend is a dev-set number by design. It is
-ordered after #81's index maintenance by window only — it declares no
-`depends_on`, so a late #81 does not hold it — and it takes 291–884 s against its
-1800 s ceiling (run records, 2026-10-24 to -26). If a night's writes hurt recall,
-this is where it shows up.
+`nightly*` label over it — so this trend is a dev-set number by design. What orders
+it behind #81's index maintenance is the edge its own file declares, `depends_on: 81`,
+so the scheduler's dependency gate is what can hold #82 back: with no successful #81
+run for the current period `_dependency_refusal` holds this job fail-closed (#558).
+That is the reflection chain's rule — what orders a chain is the freshness half of
+`depends_on`, not the clock — and the `preferred_hours` window is ordering on top of
+the edge, never instead of it. It takes 291–884 s against its 1800 s ceiling (run
+records, 2026-10-24 to -26). If a night's writes hurt recall, this is where it shows
+up.
 
 **#70 owns half of "wrong skill".** Its `MISSING_DESC` and `DRIFT` cover the case
 where a skill's body is fine and its *description* is not, so retrieval fires it

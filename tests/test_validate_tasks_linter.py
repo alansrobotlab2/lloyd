@@ -1480,6 +1480,95 @@ def test_doc_membership_reports_an_unreadable_doc_instead_of_passing(tmp_path):
     assert len(hits) == 1 and "unchecked" in hits[0], out
 
 
+def test_doc_depends_reports_a_dependency_claim_the_file_contradicts(tmp_path):
+    """#4095 clause 4: `DOC_DEPENDS` rides out of the SAME seam as `DOC_MEMBERSHIP`, so a doc
+    that lists a job correctly can still be reported for lying about its parent.
+
+    Membership and dependency prose are different questions, and the seeded pair asks both at
+    once: `41-y.md` declares `depends_on: 40`, the doc neither tables it nor states the edge —
+    so one run must print TWO `DOC_MEMBERSHIP` lines (one per table) AND ONE `DOC_DEPENDS`
+    line naming #41, with neither class swallowing the other. The prose is a `**#41 …**`
+    passage denying the parent, which is the live #4095 shape, not a front-matter check: the
+    linter already had a `depends_on`-points-at-a-parked-task rule (#870) and it stayed green
+    over a doc that denied the edge existed.
+
+    The exit-code bound is #2895's and must not move: a doc lagging the fleet is a warning
+    (exit 0), `--strict` is what turns it into exit 2. What is NEW here is only that this class
+    joins that same set rather than opening a second flag nobody would pass.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="up_next", frequency="daily",
+             skill_name="heartbeat")
+    lint.add("41-y.md", id=41, name="y", status="up_next", frequency="daily",
+             skill_name="heartbeat", depends_on=40)
+    doc = _membership_doc(tmp_path, functions=(40,), tiers=(40,))
+    doc.write_text(
+        doc.read_text(encoding="utf-8")
+        + "\n**#41 backfills what #40 leaves.** It declares no `depends_on`, so nothing "
+          "holds it back.\n",
+        encoding="utf-8")
+
+    rc, out = _membership_run(tmp_path, lint, doc)
+    depends = [ln for ln in out.splitlines() if "DOC_DEPENDS" in ln]
+    assert len(depends) == 1 and "#41" in depends[0], out
+    assert "declares no `depends_on`" in depends[0], depends[0]
+    assert "depends_on: 40" in depends[0], (
+        f"the finding must state what the file declares, not only what the doc said: "
+        f"{depends[0]}")
+    membership = [ln for ln in out.splitlines() if "DOC_MEMBERSHIP" in ln]
+    assert len(membership) == 2 and all("#41" in ln for ln in membership), (
+        f"the two classes do not coexist — a job can be untabled AND misdescribed: {out}")
+    assert rc == 0, f"a doc lagging the fleet must cost a run nothing, got exit {rc}"
+    assert _membership_run(tmp_path, lint, doc, "--strict")[0] == 2, (
+        "--strict did not cover the new class, so it sits outside the flag DOC_MEMBERSHIP "
+        "is inside")
+
+    matched = _membership_doc(tmp_path, functions=(40, 41), tiers=(40, 41))
+    matched.write_text(
+        matched.read_text(encoding="utf-8")
+        + "\n**#41 backfills what #40 leaves.** It declares `depends_on: 40`, so the "
+          "dependency gate is what orders it.\n",
+        encoding="utf-8")
+    rc_clean, out_clean = _membership_run(tmp_path, lint, matched)
+    assert not [ln for ln in out_clean.splitlines()
+                if "DOC_DEPENDS" in ln or "DOC_MEMBERSHIP" in ln], (
+        f"a doc that tables the job and states its real edge was still reported:\n{out_clean}")
+    assert rc_clean == 0, out_clean
+
+
+def test_a_doc_with_unreadable_tables_is_reported_unchecked_for_its_prose_too(tmp_path):
+    """The failure half of the new class, pinned because silence reads as a pass.
+
+    The linter's membership reader returns early when the membership tables cannot be located,
+    and the dependency check lives behind that return — so unless the early path says so, a doc
+    with its headings reworded prints `DOC_MEMBERSHIP: unchecked` and NOTHING about
+    dependencies, and a reader concluding the prose was graded would be wrong. Both classes now
+    announce themselves unchecked on both failure paths: an unreadable doc, and a
+    `jobs_membership.py` that will not import.
+
+    (The reader's own name is not spelled out anywhere in this node on purpose. The node below
+    that audits this file's drift nodes finds them by searching each node's source — docstring
+    included — for that name, and a node that merely mentions it in prose would be drafted in
+    among the ones that call it and be told to redirect a journal it never opens.)
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-x.md", id=40, name="x", status="up_next", frequency="daily",
+             skill_name="heartbeat")
+    headerless = tmp_path / "reworded.md"
+    headerless.write_text("# A doc whose tables were reworded\n\nnothing here\n",
+                          encoding="utf-8")
+
+    _, out = _membership_run(tmp_path, lint, headerless)
+    assert "DOC_DEPENDS: unchecked" not in out, (
+        "the tables' failure path was made to look like the prose ran")
+    assert "DOC_MEMBERSHIP: unchecked" in out, (
+        f"the pre-existing half of this bound is what the new line rides beside:\n{out}")
+
+    linter_src = SCRIPT.read_text(encoding="utf-8")
+    assert "DOC_DEPENDS: unchecked" in linter_src, (
+        "the not-importable path no longer announces DOC_DEPENDS as unchecked")
+
+
 def test_without_the_flag_a_fixture_directory_is_not_graded_against_the_shared_doc(tmp_path):
     """The scoping rule, pinned because it is the one thing here that could lie.
 
