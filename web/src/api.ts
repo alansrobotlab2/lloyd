@@ -1625,9 +1625,23 @@ export const api = {
   // Per-source health: config, queue depth, outcome rollup, recent runs.
   // `workersStatus` reports only what a source is allowed to do; this is
   // whether it works.
+  // #4108: the top-level pair is kept, not dropped. `days` below is the REQUEST;
+  // when `workers.db` holds less history than it asks for the whole payload spans
+  // only `window_clamped_to_hours`, so a rollup that rests on 257.8 h of runs has
+  // to be able to say so (#2127, mirroring #1401's `AutonomyHealth.fleet`). Both
+  // optional because a backend older than #2127 sends neither key, and nullable
+  // because the route emits `null` for a store that does cover its window. `0.0` is
+  // a clamp, not an absence. Fleet-wide: `oldest_input` is `MIN(completed_at)` over
+  // every source, never one source's own history.
   workersHealth: (
     days = 7, runs = 10,
-  ): Promise<{ initialized: boolean; days: number; sources: WorkerSourceHealth[] }> =>
+  ): Promise<{
+    initialized: boolean
+    days: number
+    oldest_input?: string | null
+    window_clamped_to_hours?: number | null
+    sources: WorkerSourceHealth[]
+  }> =>
     fetch(`${API_BASE}/workers/health?days=${days}&runs=${runs}`).then(r => {
       if (!r.ok) throw new Error(`workers health: ${r.status}`)
       return r.json()

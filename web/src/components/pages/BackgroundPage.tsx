@@ -40,6 +40,7 @@ import { runTranscriptIds, transcriptLabel } from '@/lib/runSessions'
 import { emptyStateCopy } from './benchRows'
 import { RunsToolbar } from './RunsToolbar'
 import { SourceHealthRow } from './SourceHealthRow'
+import { WorkersWindowNote } from './WorkersWindowNote'
 import {
   initialPanelState,
   loadRuns,
@@ -273,11 +274,27 @@ function SourceCard({
 function SourcesPanel({ onOpen }: { onOpen: (id: string) => void }) {
   const [sources, setSources] = useState<WorkerSourceHealth[]>([])
   const [error, setError] = useState<string | null>(null)
+  // #4108: how wide the window behind those numbers actually is, taken off the
+  // response rather than assumed from the `7` requested. Kept at PANEL level because
+  // the pair is a fleet bound — `oldest_input` is `MIN(completed_at)` over EVERY
+  // source (`app/routers/workers.py`, #2127) — so a per-card phrase would attribute
+  // one store-wide measurement to one source. `window_clamped_to_hours` stays
+  // undefined until the first response lands: no measurement, no claim.
+  const [healthWindow, setHealthWindow] = useState<{
+    days: number
+    window_clamped_to_hours?: number | null
+    oldest_input?: string | null
+  }>({ days: 7 })
 
   const load = useCallback(async () => {
     try {
       const out = await api.workersHealth(7, 5)
       setSources(out.sources || [])
+      setHealthWindow({
+        days: out.days ?? 7,
+        window_clamped_to_hours: out.window_clamped_to_hours,
+        oldest_input: out.oldest_input,
+      })
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -299,6 +316,14 @@ function SourcesPanel({ onOpen }: { onOpen: (id: string) => void }) {
   }
   return (
     <div className="space-y-3">
+      {/* Above the cards, because the span it names bounds all of them and no one of
+          them: the route clamps `days` to the store's own history (#2127), and until
+          this line existed a clamped rollup printed under a 7-day label (#4108). */}
+      <WorkersWindowNote
+        clampHours={healthWindow.window_clamped_to_hours}
+        oldestInput={healthWindow.oldest_input}
+        days={healthWindow.days}
+      />
       {sources.map(s => <SourceCard key={s.name} source={s} onOpen={onOpen} />)}
       {sources.length === 0 && (
         <div className="rounded border border-border p-4 text-xs text-muted-foreground">

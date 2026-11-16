@@ -47,7 +47,9 @@ import source from './BackgroundPage.tsx?raw'
 import panelSource from './runsPanelState.ts?raw'
 import toolbarSource from './RunsToolbar.tsx?raw'
 import rowSource from './SourceHealthRow.tsx?raw'
+import apiSource from '../../api.ts?raw'
 import { api } from '../../api'
+import { WorkersWindowNote, windowSpanText } from './WorkersWindowNote'
 import { RunsToolbar } from './RunsToolbar'
 import {
   ALARM_FAIL_RATE,
@@ -582,5 +584,141 @@ describe('SourceHealthRow — the failure rate and the age of its failures', () 
     // `health: null` stays SourceCard's branch and stays worded as "no runs" — the
     // absence the panel must never render as a 0 % pass rate.
     expect(source).toContain('<span>no runs in the window</span>')
+  })
+})
+
+// ── #4108: the Sources panel states the span its rollup actually rests on ──────────
+// `/api/workers/health` clamps the `days` it was ASKED for down to whatever history
+// `workers.db` holds, and publishes the measurement beside the payload it bounds
+// (`app/routers/workers.py` splices `_health_window_fields`' pair into the response:
+// `oldest_input`, `window_clamped_to_hours` — #2127, mirroring #1401 on the autonomy
+// route). The client typed its return `{ initialized, days, sources }` and threw the
+// pair away, and `SourcesPanel` kept only `sources`, so a clamped rollup printed under
+// a 7-day label read as a 7-day figure. Measured on the live route 2026-11-12:
+// `?days=90` returned `window_clamped_to_hours: 738.3` with
+// `oldest_input: 2026-10-13T06:01:10.413329+00:00` — 738.3 h of the 2160 h asked for —
+// and `?days=7` returned both fields null. The null reading is why clause 3 exists:
+// the payload that genuinely covers its window must print no span claim at all.
+describe('the Sources panel names the span its rollup rests on (#4108)', () => {
+  // The clause-2 seed shape: the clamp figure #2127's own table records for a store
+  // younger than the window, over the 7-day request the panel actually makes.
+  const CLAMPED = {
+    initialized: true,
+    days: 7,
+    window_clamped_to_hours: 257.81,
+    oldest_input: '2026-10-13T06:01:10.413329+00:00',
+    sources: [],
+  }
+
+  /// Answers like `/api/workers/health` does — the payload given, verbatim, top level
+  /// included — and hands back the URLs so the request the panel made is readable.
+  function stubHealth(payload: object): string[] {
+    const urls: string[] = []
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input)
+      urls.push(url)
+      return { ok: true, status: 200, statusText: 'OK', json: async () => payload }
+    }) as unknown as typeof fetch
+    return urls
+  }
+
+  it('the client keeps the clamp pair the route sends instead of dropping it', async () => {
+    const urls = stubHealth(CLAMPED)
+    const out = await api.workersHealth(7, 5)
+    expect(urls[0]).toContain('workers/health?days=7&runs=5')
+    // The whole point: the pair survives the client. Dropping it here is what made
+    // the panel's blindness unfixable downstream — a component cannot render a
+    // field its own type says does not exist.
+    expect(out.window_clamped_to_hours).toBe(257.81)
+    expect(out.oldest_input).toBe('2026-10-13T06:01:10.413329+00:00')
+    // …and nothing that was already kept moved.
+    expect(out.initialized).toBe(true)
+    expect(out.days).toBe(7)
+    expect(out.sources).toEqual([])
+    // The DECLARED type, not only this run's object. All three literals below
+    // compile only if both fields are optional AND nullable — the third is a
+    // payload from a backend that predates the pair and sends neither key — and
+    // the gate's `frontend` rung type-checks this file with `tsc --noEmit`.
+    const nulled: Awaited<ReturnType<typeof api.workersHealth>> =
+      { ...CLAMPED, window_clamped_to_hours: null, oldest_input: null }
+    const absent: Awaited<ReturnType<typeof api.workersHealth>> =
+      { initialized: true, days: 7, sources: [] }
+    expect(nulled.window_clamped_to_hours).toBeNull()
+    expect(nulled.oldest_input).toBeNull()
+    expect(absent.window_clamped_to_hours).toBeUndefined()
+    // The wording of that declaration, off the client's own bytes: `?: … | null`.
+    // Required-but-nullable would break the `absent` literal above but not the
+    // runtime asserts, so the shape is pinned both ways.
+    const decl = apiSource.match(/workersHealth: \([\s\S]*?\n    \}\),/)?.[0] ?? ''
+    expect(decl, 'no workersHealth block in the api.ts this node reads').toBeTruthy()
+    expect(decl).toMatch(/window_clamped_to_hours\?: number \| null/)
+    expect(decl).toMatch(/oldest_input\?: string \| null/)
+  })
+
+  it('the helper names the measured hours and the requested window together', () => {
+    // One string, one source of truth for the wording: the component below prints
+    // exactly what this returns, so the phrase is asserted here and rendered there.
+    expect(windowSpanText(257.81, 7, '2026-10-13T06:01:10.413329+00:00')).toBe(
+      'Sources rollup covers 257.8h of the 7d window (oldest input 2026-10-13)')
+    // The reading actually taken off the live route: 738.3 h of a 90-day request,
+    // which is 2160 h of label over 738.3 h of measurement.
+    expect(windowSpanText(738.3, 90, '2026-10-13T06:01:10.413329+00:00')).toContain(
+      '738.3h of the 90d window')
+    // Hours are the payload's own figure rounded to a tenth, never re-derived from
+    // `oldest_input` — the two are emitted from one clock reading upstream, and a
+    // second arithmetic here would be a third number for the same window.
+    expect(windowSpanText(11.04, 7, null)).toBe('Sources rollup covers 11h of the 7d window')
+    // A stamp the client cannot parse costs the date clause, not the hours.
+    expect(windowSpanText(257.81, 7, 'not-a-stamp')).toBe(
+      'Sources rollup covers 257.8h of the 7d window')
+  })
+
+  it('a payload that covers its window prints no span claim at all', () => {
+    // Today's live `?days=7` shape: both fields null. Printing "covering 168h" for
+    // a window nobody measured would be a claim resting on nothing, which is the
+    // same error as the missing label in the opposite direction.
+    expect(windowSpanText(null, 7, null)).toBe('')
+    // An absent key is the identical statement from a backend older than #2127.
+    expect(windowSpanText(undefined, 7, undefined)).toBe('')
+    // 0 IS a measurement. `_health_window_fields` emits 0.0 for a window that held
+    // no row reaching the tallies, so a falsy test rather than a null test would
+    // print nothing for exactly the payload with the least evidence behind it —
+    // #1401's trap, restated for the route that borrowed it.
+    expect(windowSpanText(0, 7, null)).toBe('Sources rollup covers 0h of the 7d window')
+  })
+
+  it('the panel renders the phrase at panel level, never inside a source card', () => {
+    const clamped = renderToStaticMarkup(createElement(WorkersWindowNote, {
+      clampHours: 257.81, days: 7, oldestInput: '2026-10-13T06:01:10.413329+00:00',
+    }))
+    expect(clamped).toContain(
+      'Sources rollup covers 257.8h of the 7d window (oldest input 2026-10-13)')
+    // The same component, today's payload: no element, so no phrase, no border,
+    // nothing that reads as a span claim.
+    expect(renderToStaticMarkup(createElement(WorkersWindowNote, {
+      clampHours: null, days: 7, oldestInput: null,
+    }))).toBe('')
+    // The one link this repo cannot execute (no DOM env — this file's header): that
+    // `SourcesPanel` takes the pair off the RESPONSE and hands it to the note above,
+    // rather than holding a 7-day constant of its own. Read off the panel's bytes.
+    expect(source).toContain("import { WorkersWindowNote } from './WorkersWindowNote'")
+    const panel = source.match(/function SourcesPanel[\s\S]*?\n}/)?.[0] ?? ''
+    expect(panel, 'no SourcesPanel in the BackgroundPage.tsx this node reads').toBeTruthy()
+    expect(panel).toMatch(/const out = await api\.workersHealth\(/)
+    expect(panel).toMatch(/window_clamped_to_hours: out\.window_clamped_to_hours/)
+    expect(panel).toMatch(/oldest_input: out\.oldest_input/)
+    expect(panel).toMatch(
+      /<WorkersWindowNote[\s\S]{0,240}?clampHours=\{healthWindow\.window_clamped_to_hours\}/)
+    expect(panel).toContain('oldestInput={healthWindow.oldest_input}')
+    expect(panel).toContain('days={healthWindow.days}')
+    // And it must NOT reach a per-source card: `oldest_input` is
+    // `MIN(completed_at)` over EVERY source, so a card printing it attributes one
+    // store-wide bound to one source and lies about a young source whose own
+    // history starts after it.
+    const card = source.slice(
+      source.indexOf('function SourceCard'), source.indexOf('function SourcesPanel'))
+    expect(card).not.toBe('')
+    expect(card).not.toContain('WorkersWindowNote')
+    expect(card).not.toContain('window_clamped_to_hours')
   })
 })
