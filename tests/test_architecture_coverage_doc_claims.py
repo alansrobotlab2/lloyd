@@ -13731,3 +13731,133 @@ def test_the_superseded_paragraph_files_a_deletion_with_a_placeholder_sha():
         f"only {len(corpus)} recovery commands across {list(RECOVERY_DOCS)}: the "
         "resolver node's floor is about commands that RESOLVE, so a thin harvest "
         "means the pointers went away rather than getting fixed")
+
+
+# --------------------------------------------------------------------------- #
+# editing-safeguards.md's tolerated-pyflakes counts (#4131)
+# --------------------------------------------------------------------------- #
+
+#: The retired figure, assembled from two literals so this file cannot hold the
+#: string the sweep in `tests/test_lint_findings.py` forbids under `tests/`.
+_STALE_FIGURE = "~" + "69"
+
+#: Present-tense forms of "the code says it", which are the claims #4131 falsifies.
+#: The page may quote the figure, may refute it, and a dated entry may report what
+#: an earlier pass believed about it; what it may not do is tell a reader today
+#: that the code is carrying it. Past tense ("was still carried", "used to quote")
+#: is what the page says instead and stays legal.
+_PRESENT_TENSE_CARRIER_CLAIMS = ("is still carried", "are still carried",
+                                 "still says so", "still carries",
+                                 "still quotes")
+
+#: The command that produced the pair, which the page has to keep publishing.
+_MEASURE_CMD = "python -m pyflakes $(git ls-files '*.py') | wc -l"
+
+
+def _sentences_quoting(text: str, needle: str) -> list[str]:
+    """Every sentence of `text` that quotes `needle`, whitespace flattened.
+
+    Sentence-scoped rather than page-scoped because the page is *meant* to name the
+    figure — refuting it is the whole point of two of its bullets — and only the
+    sentence claiming the code is carrying it today is the false one. Split on
+    sentence punctuation after flattening: the doc is hand-wrapped at ~78 columns,
+    so a carrier sentence straddles two lines, and splitting on a period that is
+    followed by whitespace keeps a `stdout).` or `e.g.` boundary from throwing the
+    window around the figure into a different sentence than a reader would call it.
+    """
+    flat = _flat(text)
+    return [s for s in re.split(r"(?<=[.!?])\s+", flat) if needle in s]
+
+
+def test_editing_safeguards_reports_the_retired_pyflakes_figure_only_in_the_past_tense():
+    """#4131 clause 3. This page is the one surface that knows the figure names no
+    scope, and until now it asserted the code was still saying it: both live
+    carrier sentences and the 2026-11-15 review-log entry named
+    `agent_mcp/_edit_diagnostics.py`, `app/lint_findings.py`, `config.yaml` and two
+    test headers as still carrying it. #4131 removed the figure from all five on
+    2026-11-15, which made each of those sentences false in the same commit that
+    fixed the code — and a doc that outlives its own carriers sends the next reader
+    hunting for a comment that is no longer there.
+
+    Three halves, because a doc-vs-tree node that only asserts an absence grades the
+    prose and never the tree:
+
+      * no live sentence, and no review-log entry citing #4131, claims the figure is
+        carried in the present tense;
+      * every path those figure-quoting sentences still name is read back and proven
+        free of the figure — the page's claim about the code, checked against the code;
+      * the measured pair, its date and its command are still the ones the 2026-11-14
+        measurement produced, unmoved by the prose edit that was made around them.
+    """
+    doc = _text("editing-safeguards.md")
+    body = doc[:doc.index("## Review log")]
+
+    live = _sentences_quoting(body, _STALE_FIGURE)
+    assert live, (
+        "the live prose stopped quoting the retired figure altogether, so this node "
+        "is reading nothing: the refutation was deleted or the figure renamed")
+    offending = [s for s in live if any(c in s for c in _PRESENT_TENSE_CARRIER_CLAIMS)]
+    assert offending == [], (
+        f"the live page still tells a reader the code carries the figure: {offending} "
+        "— the five carriers were emptied on 2026-11-15, and a carrier sentence that "
+        "outlives its carriers is a false instruction, not a stale one")
+
+    named = sorted({p for s in live for p in re.findall(r"`([\w./-]+\.(?:py|ya?ml))`", s)})
+    assert named, (
+        "the sentences quoting the figure name no file, so the tree half of this "
+        "check would be passing on an empty harvest")
+    for rel in named:
+        path = ROOT / rel
+        assert path.is_file(), (
+            f"the carrier sentence names {rel}, which is not in this tree — the path "
+            "citation node reports absent citations, but this node may not read a "
+            "missing file as a figure-free one")
+        assert _STALE_FIGURE not in path.read_text(encoding="utf-8", errors="replace"), (
+            f"the page says {rel} no longer quotes the figure, and it still does")
+
+    log = doc[doc.index("## Review log"):]
+    cited = [b for b in log.split("\n- ") if "#4131" in b]
+    assert cited, (
+        "no review-log entry cites #4131 any more, so whatever that entry claimed "
+        "about the five carriers has left the graded surface")
+    for entry in cited:
+        bad = [s for s in _sentences_quoting(entry, _STALE_FIGURE)
+               if any(c in s for c in _PRESENT_TENSE_CARRIER_CLAIMS)]
+        assert bad == [], (
+            f"a review-log entry citing #4131 asserts the figure is in the code "
+            f"today: {bad} — a dated record may keep its finding in the past tense")
+
+    flat_body = _flat(body)
+    app_counts = (set(re.findall(r"`app/` alone is (\d+)", flat_body))
+                  | set(re.findall(r"(\d+) in `app/`", flat_body)))
+    tree_counts = (set(re.findall(r"every tracked `\.py` is (\d+)", flat_body))
+                   | set(re.findall(r"(\d+) across every tracked `\.py`", flat_body)))
+    assert app_counts == {"30"} and tree_counts == {"261"}, (
+        f"the page no longer publishes the 2026-11-14 pair it re-measured: "
+        f"`app/`={app_counts}, every tracked `.py`={tree_counts}")
+    assert _MEASURE_CMD in flat_body, (
+        "the command that produced the pair left the page along with the prose edit, "
+        "which turns the figures back into an assertion nobody can re-run")
+    assert "measured 2026-11-14" in flat_body, (
+        "the date the pair was measured on left the page, and a count with no date "
+        "is the exact defect #4131 is about")
+
+    # Shown able to fail, on the three sentences this commit retired — the two
+    # live carrier sentences and the review-log claim, in the wording they had
+    # before the edit. A pattern that does not fire on the text it was written
+    # against has graded nothing.
+    retired = [
+        'and `config.yaml`\'s "' + _STALE_FIGURE + '" is neither scope and still '
+        'says so (#4131).',
+        'the "' + _STALE_FIGURE + '" CLAUDE.md used to quote names neither scope and '
+        'is still carried by `agent_mcp/_edit_diagnostics.py`, '
+        '`app/lint_findings.py`, `config.yaml` and two test headers — #4131).',
+        'because the "' + _STALE_FIGURE + '" this doc refutes is still carried by '
+        'two modules, `config.yaml` and two test headers (#4131);',
+    ]
+    fired = [s for s in retired
+             if any(c in _flat(s) for c in _PRESENT_TENSE_CARRIER_CLAIMS)]
+    assert len(fired) == len(retired) == 3, (
+        f"the carrier-claim pattern fired on only {len(fired)} of the 3 retired "
+        "sentences, so the absence asserted above may be a pattern that could never "
+        "have matched this page")

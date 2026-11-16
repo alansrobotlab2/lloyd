@@ -11,9 +11,11 @@ normalisers so the two cannot disagree.
 
 Three rules the delta has to follow, all of them learned from the gate:
 
-* **Delta, never absolute.** The tree carries ~69 tolerated pyflakes
-  findings. Reporting them on every edit would be pure noise, and worse,
-  would train the model to skip the block.
+* **Delta, never absolute.** The tree carries tolerated pyflakes findings,
+  and how many depends entirely on the scope —
+  `architecture/editing-safeguards.md` carries the measured counts with the
+  command that produced them. Reporting them on every edit would be pure
+  noise, and worse, would train the model to skip the block.
 * **Position is not identity.** `lint_findings.normalize_pyflakes_line`
   drops line and column, so inserting ten lines at the top of a file does
   not report every finding below as new.

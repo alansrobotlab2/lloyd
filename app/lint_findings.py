@@ -2,8 +2,10 @@
 
 Both answer the same question — "is this finding *new*?" — and they must
 answer it the same way. The gate judges pyflakes and tsc as deltas against
-the pre-image because the tree carries ~69 tolerated pyflakes findings and a
-handful of tsc errors; an absolute bar would fail every round forever. The
+the pre-image because the tree carries tolerated pyflakes findings — by the
+score, at every scope, and `architecture/editing-safeguards.md` has the
+measured counts with the command that produced them — and a handful of tsc
+errors; an absolute bar would fail every round forever. The
 post-edit diagnostics appended to an Edit result have to use those same
 normalisers or the model is told about a finding the gate will not mind, or
 worse, not told about one it will.

@@ -48,8 +48,11 @@ each exclusion — is [[guard-coverage]] and the derived
   will not mind. The tolerated count depends entirely on scope: `app/` alone
   is 30 and every tracked `.py` is 261 (measured 2026-11-14 with
   `python -m pyflakes $(git ls-files '*.py') | wc -l`; pyflakes exits 1 on a
-  finding, so read the count off stdout), and `config.yaml`'s "~69" is
-  neither scope and still says so (#4131). A post-image syntax error is
+  finding, so read the count off stdout). The "~69" `config.yaml` used to
+  carry named neither scope and is gone: as of #4131 (2026-11-15) no code
+  comment, config line or test header quotes a count at all, so this pair is
+  the only one the tree carries and `tests/test_lint_findings.py` refuses a
+  new bare one. A post-image syntax error is
   always reported; a pre-image-only syntax error reports nothing.
 - **A foreground Bash command gets the pyflakes delta too** (#695,
   `agent_mcp/_bash_edit_diagnostics.py`). A command carrying a write marker
@@ -214,10 +217,11 @@ pre-image and post-image and reports the difference.
 Delta, and the three rules the delta needs, all inherited from the gate:
 
 - **Never absolute.** The tree carries tolerated pyflakes findings (30 in
-  `app/`, 261 across every tracked `.py`, measured above; the "~69" CLAUDE.md
-  used to quote names neither scope and is still carried by
+  `app/`, 261 across every tracked `.py`, measured above). The "~69" CLAUDE.md
+  used to quote names neither scope; #4131 removed it on 2026-11-15 from
   `agent_mcp/_edit_diagnostics.py`, `app/lint_findings.py`, `config.yaml` and
-  two test headers — #4131). Reporting them on every edit trains the
+  two test headers, so no live comment states a count and the reason does the
+  work. Reporting tolerated findings on every edit trains the
   model to skip the block, which is worse than not having one.
 - **Position is not identity.** `lint_findings.normalize_pyflakes_line` drops
   line and column, so inserting a line at the top does not report the whole
@@ -471,10 +475,25 @@ and `tests/test_automod_hardening.py::test_worker_turns_cannot_drive_the_loop`.
   effect-only. `blast_radius` has had a `config.yaml` line since #2141, which
   contradicted this doc's own later sentence that named it. Tolerated-pyflakes
   counts re-measured (30 `app/`, 261 all tracked `.py`) and the command is
-  cited, because the "~69" this doc refutes is still carried by two modules,
-  `config.yaml` and two test headers (#4131); the rail that was supposed to
+  cited, because the "~69" this doc refutes was still carried by two modules,
+  `config.yaml` and two test headers until the entry below removed it (#4131);
+  the rail that was supposed to
   catch a drifted anchor grades only "the number is inside the file" (#4130).
   Module list, both ledgers' semantics, the constants (`FANOUT_CEILING`,
   `RAIL_BUDGET_S`, `RAIL_MAX_SOURCE_BYTES`, 256×2000 read records), the tsc
   runner, the code graph's six tools and every file named under Tests verified
   clean; the `kg_store.store`/`RunOptions` fanout figures were not re-measured.
+- 2026-11-15 — **#4131: the code stopped quoting the count.** The "~69" this
+  page refutes was carried by `agent_mcp/_edit_diagnostics.py`,
+  `app/lint_findings.py`, `config.yaml` and two test headers, none of which
+  named a scope and none of which this page reached — the doc knew the number
+  was scope-less; the comments said it as fact. All five now state the reason
+  the rule is a delta and point here for a number, and none states a count,
+  because the count is the part that rots: between this item's two
+  measurements `agent_mcp` moved 33 → 34 and `tests` 89 → 90 while `app/` held
+  at 30 and the tracked tree at 261. `tests/test_lint_findings.py` pins the
+  absence, the reason, the pointer, and that the three `eval/uptake/` uptake
+  snapshots still carry the turn's own wording of the figure (labelled
+  records, not live claims); `tests/test_architecture_coverage_doc_claims.py`
+  pins the measured pair and its command on this page. The 30 / 261 pair and
+  its 2026-11-14 measurement stand unchanged.

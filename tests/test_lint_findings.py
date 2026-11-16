@@ -1,9 +1,11 @@
 """One definition of "is this finding new?", shared by the gate and the model.
 
-The gate judges pyflakes and tsc as deltas because the tree carries ~69
-tolerated pyflakes findings; an absolute bar would fail every round forever.
-Post-edit diagnostics have to normalise identically or the model is told
-about findings the gate will not mind — or, worse, not told about one it
+The gate judges pyflakes and tsc as deltas because the tree carries tolerated
+pyflakes findings — how many depends entirely on the scope, and
+`architecture/editing-safeguards.md` carries the measured counts with the
+command that produced them — and an absolute bar would fail every round
+forever. Post-edit diagnostics have to normalise identically or the model is
+told about findings the gate will not mind — or, worse, not told about one it
 will. Two private copies of that rule is exactly how they would drift.
 """
 
@@ -11,9 +13,12 @@ from __future__ import annotations
 
 import inspect
 from collections import Counter
+from pathlib import Path
 
 from app import lint_findings as LF
 from scripts.automod import gate as G
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 # ── the normalisers themselves ──────────────────────────────────────────────
@@ -278,3 +283,161 @@ def test_parse_pyright_of_text_that_is_not_a_payload_is_empty_not_wrong():
     assert L.parse_pyright("") == {}
     assert L.parse_pyright('File or directory "x.py" does not exist\n') == {}
     assert L.parse_pyright('{"generalDiagnostics": "not a list"}') == {}
+
+
+# ── the prose that justifies the delta (#4131) ──────────────────────────────
+#
+# Everything above grades code; this section grades a comment. That comment is
+# where a reader sizes the cost of the delta rule before widening it, and until
+# #4131 it opened with a bare count that matched no scope. Measured 2026-11-14
+# with `python -m pyflakes $(git ls-files '*.py') | wc -l` — pyflakes exits 1 on
+# a finding, so the count comes off stdout — every tracked `.py` is 261 findings
+# and `app/` alone is 30, so the retired figure was under a third of one scope
+# and 2.3× the other, and the per-scope figures move commit to commit. The
+# number is therefore gone from the live tree and the reason stayed: a count is
+# the part that rots.
+#
+# The needle is assembled from two literals so that this file — itself one of
+# the surfaces the sweep reads — cannot carry the string it forbids.
+STALE_FIGURE = "~" + "69"
+
+#: The five live surfaces that justify the rule where a reader looks for it.
+FIVE_SITES = (
+    "config.yaml",
+    "agent_mcp/_edit_diagnostics.py",
+    "app/lint_findings.py",
+    "tests/test_edit_diagnostics.py",
+    "tests/test_lint_findings.py",
+)
+
+#: The directories the acceptance check's `git grep` walks beside `config.yaml`.
+#: The sweep takes every `.py` under them, so a sixth site written tomorrow is
+#: caught by the sweep instead of having to be added to a list today.
+SWEPT_DIRS = ("agent_mcp", "app", "tests")
+
+#: The two forms the cost takes across the five sites: reporting tolerated
+#: findings on every edit trains the model to skip the block, and an absolute
+#: bar would fail every round forever.
+COST_OF_AN_ABSOLUTE_BAR = ("skip the block", "fail every round forever",
+                           "how a block dies")
+
+#: Where a reader who wants a number is sent instead.
+MEASUREMENT_DOC = "architecture/editing-safeguards.md"
+
+#: The three tracked uptake snapshots whose hand-labelled turn quotes the
+#: retired figure verbatim — `tests/test_funnel_census.py` names them as the
+#: three committed tables `app/uptake.py` reads. They are a record of what a
+#: model believed in September, not a live claim, so #4131 stays away from
+#: them; the node below is what keeps it away.
+UPTAKE_SNAPSHOTS = (
+    "eval/uptake/uptake-2026-09-11.json",
+    "eval/uptake/uptake-2026-09-17.json",
+    "eval/uptake/uptake-2026-09-20.json",
+)
+
+
+def _read(rel: str) -> str:
+    return (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+
+
+def _flat(text: str) -> str:
+    """Whitespace collapsed to single spaces. Every sentence this section grades is
+    hand-wrapped at ~79 columns, so a phrase as a reader quotes it straddles a line
+    break and matching it against the raw text would grade the wrapping."""
+    return " ".join(text.split())
+
+
+def _swept() -> dict[str, str]:
+    """`config.yaml` plus every `.py` under the swept dirs, keyed repo-relative."""
+    out = {"config.yaml": _read("config.yaml")}
+    for d in SWEPT_DIRS:
+        for path in sorted((ROOT / d).rglob("*.py")):
+            out[str(path.relative_to(ROOT))] = _read(str(path.relative_to(ROOT)))
+    return out
+
+
+def test_no_live_surface_states_the_scope_less_pyflakes_count_any_more():
+    """#4131 clause 1: the acceptance check — a `git grep` over `config.yaml`,
+    `agent_mcp/`, `app/` and `tests/` for the retired figure and the word
+    "tolerated" beside it — comes back empty, because each of the five sites now
+    carries no count at all.
+
+    The count, not the comment, is what a reader mis-sizes. `RAIL_MAX_SOURCE_BYTES`,
+    `max_lines` and the gate's `static` rung are all sized against how expensive a
+    false report is, and a figure under a third of the whole-tree count argues the
+    block is cheap to widen. So nothing in the live tree states a bare count: the
+    measured pair lives in the doc that also states the command and the date it was
+    taken on, which is the only place a number can be checked.
+    """
+    swept = _swept()
+    assert set(FIVE_SITES) <= set(swept), (
+        f"the sweep stopped reading a site, so the absence below is a sweep over "
+        f"nothing: missing {sorted(set(FIVE_SITES) - set(swept))}")
+    hits = sorted(rel for rel, text in swept.items() if STALE_FIGURE in text)
+    assert hits == [], (
+        f"{len(hits)} live surface(s) still head the delta rule with the scope-less "
+        f"count: {hits}. It matches no scope — 30 in `app/`, 261 across every tracked "
+        "`.py`, measured 2026-11-14 — so anyone sizing the block off it is sizing it "
+        f"wrong: {STALE_FIGURE} still in {hits}")
+
+    # The check has to be shown able to bite. This is the retired sentence — the
+    # one `config.yaml` carried — reassembled; without this control, an absence
+    # over a needle that could never have matched reads exactly like a fixed tree.
+    retired = ("  # later. Delta only: the tree carries " + STALE_FIGURE +
+               " tolerated pyflakes findings and reporting them every time would "
+               "train the model to skip the block.")
+    assert STALE_FIGURE in retired, (
+        "the fixture does not carry the figure, so the sweep above is unfalsifiable")
+
+
+def test_every_site_that_justifies_the_delta_still_states_its_cost_and_where_the_number_lives():
+    """#4131 clause 2: the reason is the part that does not rot, so it stayed, on
+    all five surfaces — and all five send a reader who wants a number to the one
+    page that measured one.
+
+    Both halves are pinned across all five rather than as the clause's letter,
+    "at least one says why somewhere". The five are exactly where a reader looks
+    when they wonder whether the block should report more, and a site that
+    states the rule with no reason attached is the site where it gets widened.
+
+    Matching is whitespace-collapsed: all five are hand-wrapped comments, and a
+    reader's phrase here straddles a newline in
+    `tests/test_edit_diagnostics.py`, so a raw grep would report the reason
+    missing from a comment that states it plainly.
+    """
+    unpointed = []
+    for rel in FIVE_SITES:
+        text = _flat(_read(rel))
+        assert any(c in text for c in COST_OF_AN_ABSOLUTE_BAR), (
+            f"{rel} still says the rule is a delta but no longer says why. The reason "
+            f"is the sentence that survives a re-measurement, and none of "
+            f"{COST_OF_AN_ABSOLUTE_BAR} appears in it")
+        if MEASUREMENT_DOC not in text:
+            unpointed.append(rel)
+    assert unpointed == [], (
+        f"{unpointed} dropped the pointer to {MEASUREMENT_DOC}, which is where the "
+        "measured counts and the command that produced them are kept — a site with no "
+        "count and no route to one is a site a reader will refill from memory")
+
+
+def test_the_three_uptake_snapshots_keep_the_quote_that_records_the_block():
+    """#4131 clause 1's other half: the fix is confined to the five live surfaces,
+    so the three tracked uptake snapshots still carry the historical quote.
+
+    Each of the three quotes a hand-labelled turn describing the diagnostics
+    block in the model's own words. A sweep that "fixed" the stale figure in
+    place there would rewrite labelled evidence to match today's tree, which is
+    the one thing a snapshot cannot survive — the quote was true of what the
+    model believed on that date whatever the count is now.
+    """
+    quoted = STALE_FIGURE + " tolerated pyflakes findings"
+    assert len(UPTAKE_SNAPSHOTS) == 3, (
+        "this list stopped being the three committed tables; re-read the "
+        "`_uptake_store_repointed` docstring in tests/test_funnel_census.py "
+        "before changing it")
+    for rel in UPTAKE_SNAPSHOTS:
+        text = _read(rel)
+        assert quoted in text, (
+            f"{rel} no longer carries the turn's own wording of the figure. That "
+            "quote is labelled evidence, and #4131 retires the figure from the live "
+            "comments and from nowhere else")

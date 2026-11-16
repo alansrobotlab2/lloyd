@@ -1,8 +1,10 @@
 """Diagnostics on the edit result, not on the gate three minutes later.
 
-The delta rules are the interesting part. This tree carries ~69 tolerated
-pyflakes findings; an absolute report would be noise on every edit, and the
-model would learn to skip the block — which is worse than not having one.
+The delta rules are the interesting part. This tree carries tolerated
+pyflakes findings — the measured counts per scope, with the command that
+produced them, are in `architecture/editing-safeguards.md` — and an absolute
+report would be noise on every edit, so the model would learn to skip the
+block, which is worse than not having one.
 """
 
 from __future__ import annotations
@@ -61,7 +63,8 @@ def test_a_clean_edit_reports_nothing():
 
 
 def test_a_pre_existing_finding_is_not_reported():
-    """~69 of these exist in the tree; reporting them is how a block dies."""
+    """The tree carries these at every scope; reporting them is how a block
+    dies."""
     src = "import os\n\n\ndef f():\n    return 1\n"        # unused import
     assert D.python_block("/x/a.py", src.encode(), src + "\n") == ""
 

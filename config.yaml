@@ -787,8 +787,10 @@ harness:
     unknown_retention_days: 30
   # Diagnostics appended to a successful Edit/Write result, so the model
   # learns about a broken edit at the edit rather than at the gate minutes
-  # later. Delta only: the tree carries ~69 tolerated pyflakes findings and
-  # reporting them every time would train the model to skip the block.
+  # later. Delta only: the tree carries tolerated pyflakes findings — how
+  # many depends entirely on the scope, and architecture/editing-safeguards.md
+  # holds the measured counts with the command and date that produced them —
+  # and reporting them every time would train the model to skip the block.
   # `python` runs pyflakes in-process; `typescript` queues a debounced tsc
   # whose new errors arrive as a notification on a later iteration.
   # Egress policy (#628, seeded by #2123 on 2026-10-04). `telemetry` records
