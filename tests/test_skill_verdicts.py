@@ -7196,6 +7196,14 @@ def test_the_reopened_names_are_reopen_reasons_and_not_a_second_sixty_day_count(
     assert rc == 0, out
 
 
+#: The sibling `SKILL.md` hands step 0's report-line narrative to, by the `## Files in this
+#: skill` bullet (#4086, vault 60ea07e87). Derived from `MINING_RUNBOOK`'s own directory, not
+#: typed as a second path, so the route asserted below and the file asserted below cannot
+#: drift apart: rename the sibling and this node goes red instead of leaving a pointer that
+#: resolves to nothing.
+MINING_RUNBOOK_LEDGER_SIBLING = MINING_RUNBOOK.parent / "ledger-fileless-keys.md"
+
+
 def test_the_runbook_step_zero_carries_the_reopened_names_too():
     """Clause 5: the runbook, on the surface a nightly actually executes, in prose.
 
@@ -7206,6 +7214,18 @@ def test_the_runbook_step_zero_carries_the_reopened_names_too():
     string the code stopped printing. The assertions are the three things step 0 has to say:
     that the line exists and sits beside `ledger_only_keys`, that its names go into the report,
     and that a released key is a decision to make rather than a suppression to honour.
+
+    The quiet-night sentence is pinned in the sibling, not the body, because it moved rather
+    than died: #4084 (vault b9720bad5, 2026-11-15) re-flowed step 0 to pay for the body's
+    character budget and dropped the sentence there, while `ledger-fileless-keys.md` has
+    carried it verbatim since the #4086 spill. Putting it back is not this round's to do — the
+    body measures 11,946 chars against the 12,000 `SKILL_BODY_CHAR_CAP`, and the sentence is
+    54 chars, so restoring it lands the body on exactly the cap and the next prose edit to
+    this runbook is refused for growth. And a body-only pin is the weaker instrument anyway:
+    it cannot tell a moved claim from an abandoned one. So this node pins both halves — step
+    0's own section must still hand the reader to the sibling by name, and the sibling must
+    still print the released-key zero as the quiet night. Either file alone stays green
+    through a move; the pair is what fails when the sentence loses its route.
     """
     text = MINING_RUNBOOK.read_text(encoding="utf-8")
     step0 = text[text.index("### 0."):text.index("### 1.")]
@@ -7215,7 +7235,14 @@ def test_the_runbook_step_zero_carries_the_reopened_names_too():
     assert f"`{sv.LEDGER_ONLY_LABEL}`" in flat, flat
     assert "into the same result line" in flat, flat
     assert "re-minted deliberately or left to be re-mined" in flat, flat
-    assert f"`{sv.LEDGER_REOPENED_LABEL}: 0 :: none` is the quiet night" in flat, flat
+
+    route = " ".join(text[:text.index("### 0.")].split())
+    assert f"`{MINING_RUNBOOK_LEDGER_SIBLING.name}` — step 0" in route, (
+        "step 0 stopped routing its report-line narrative to the sibling this node reads, so "
+        "a nightly following the body would never reach the claim below")
+
+    sibling = " ".join(MINING_RUNBOOK_LEDGER_SIBLING.read_text(encoding="utf-8").split())
+    assert f"`{sv.LEDGER_REOPENED_LABEL}: 0 :: none` is the quiet night" in sibling, sibling
 
 # ── #3010: a `~/…` candidates directory has a home, and the detector must keep it ──
 #
