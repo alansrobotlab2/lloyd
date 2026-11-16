@@ -1954,6 +1954,18 @@ def cmd_baseline(args) -> int:
     whatever rows exist at report time is what makes the match auditable: the
     file names the corpus, the N, the model and the ceiling it was measured
     under, and `report` refuses it when any of those no longer hold.
+
+    The ceiling in that file is read off the rows and never taken from `--ceiling` (#4162).
+    #3866 moved the printed ceiling onto the verdict rows because a budget is a fact of a run
+    and not a fact of a reader, but this writer kept echoing its own argument — and the
+    argument defaults to 600,000, shared with the arms that actually enforce it — so
+    `baseline` over a corpus that states no ceiling exited 0 and recorded a figure no arm ran
+    under, then passed the very check #3866 added: with the rows carrying none,
+    `baseline_problem` compares the recorded stamp against that same argument. The
+    `--ceiling` flag is therefore an expectation of the run being read, not a value to write:
+    disagreeing with the rows is worth saying out loud, and nothing else. A corpus with no
+    stamp, or with rows from two ceilings, is refused rather than guessed at — the Oct-13
+    corpus can only ever be baselined by re-running it.
     """
     cases_path = Path(args.cases)
     cases = load_cases(cases_path)
@@ -1963,12 +1975,29 @@ def cmd_baseline(args) -> int:
         print("[2258] cannot evaluate: no retry-arm rows recorded for this corpus; "
               "run `run --arms A-retry` first")
         return 1
+    row_ceiling = row_ceilings(retry_rows)
+    if row_ceiling.ceiling is None:
+        # The label is the same string `report` prints after `ceiling: `, and for an
+        # unstamped corpus it is deliberately digit-free — quoting `args.ceiling` here is how
+        # a typed 600000 became a recorded measurement in the first place, so the refusal
+        # names only what the rows say (#4162). A disagreement's label already lists every
+        # stamp, which is the figure a reader needs in order to discard the wrong run.
+        print(f"[2258] baseline refuses to write {args.out}: the retry rows do not state one "
+              f"ceiling ({row_ceiling.label})")
+        print("[2258] `--ceiling` is no substitute for a stamp: the file has to carry the "
+              "budget the arm actually ran under, so re-run the pass at one ceiling "
+              "(`run --arms A-retry`) and baseline those rows.")
+        return 1
+    if args.ceiling != row_ceiling.ceiling:
+        print(f"[2258] note: --ceiling {args.ceiling} is not what these retry rows carry "
+              f"({row_ceiling.ceiling}); the file records {row_ceiling.ceiling}, the figure "
+              "the rows measured")
     verdicts = {k: v for k, v in latest_verdicts(rows).items() if k[1] == ARM_RETRY}
     by_key = {c["key"]: c for c in cases}
     hits = sum(1 for (key, _), row in verdicts.items()
                if key in by_key and agrees(by_key[key], row.get("chosen_cause") or ""))
     record = write_baseline(Path(args.out), cases_path=cases_path, n=len(verdicts),
-                            model=args.model, token_ceiling=args.ceiling,
+                            model=args.model, token_ceiling=row_ceiling.ceiling,
                             token_spend=sum(int(r.get("tokens") or 0)
                                             for r in retry_rows
                                             if r.get("kind") != "verdict"),

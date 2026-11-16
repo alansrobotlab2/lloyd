@@ -1189,6 +1189,157 @@ def test_a_baseline_cannot_be_matched_to_rows_that_disagree_on_the_ceiling(tmp_p
         assert "cannot evaluate" in text and "200000" in text and "600000" in text, text
 
 
+# ── #4162: the ceiling the BASELINE file states is the one its rows carry ─────
+#
+# #3866 moved the printed ceiling onto the verdict rows and taught `report` to read it
+# there, but left the writer echoing its own argument: `cmd_baseline` passed `args.ceiling`
+# — 600,000 by default, since the `baseline` subparser defaults the flag like the run arms
+# — straight to `write_baseline`. The Oct-13 corpus shows what that costs: 36 verdict rows
+# carrying no stamp, arms that ran at 200,000, and a `baseline` with `--ceiling` unset that
+# exited 0 and recorded 600000. `report` could not refuse it, because `baseline_problem`
+# compares the recorded stamp against the argument whenever the rows carry none — the same
+# argument the file was written from. These nodes are the writer's half of that check; the
+# reader's half already existed.
+#
+# They drive the real subcommand as a subprocess, the way the shipped-defaults node below
+# does: the exit code and the printed label are what a person running the owed pass sees,
+# and neither is observable by calling `cmd_baseline` in process.
+
+def _jsonl(path: Path, rows: list[dict]) -> Path:
+    """Rows on disk in the shape `_read_jsonl` reads."""
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def _run_baseline(rows: Path, cases: Path, out: Path, *extra: str) -> subprocess.CompletedProcess:
+    """`baseline` as the owed study runs it: argv in, exit code and stdout out."""
+    return subprocess.run(
+        [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"), "baseline",
+         "--cases", str(cases), "--rows", str(rows), "--out", str(out), *extra],
+        capture_output=True, text=True, timeout=180)
+
+
+def _unstamped(rows: list[dict]) -> list[dict]:
+    """The same rows with the verdict stamp taken back out: a corpus recorded pre-#3866.
+
+    Stripping the key rather than hand-writing the rows keeps every other field one of
+    these runs actually recorded — the arm labels, the outcome shape, the token spend — so
+    the refusal has to come from the missing ceiling and not from a malformed row.
+    """
+    return [{k: v for k, v in r.items() if k != "token_ceiling"}
+            if r.get("kind") == "verdict" else r for r in rows]
+
+
+def test_baseline_refuses_rows_that_carry_no_ceiling_even_when_one_is_typed(tmp_path):
+    """`baseline` over unstamped verdict rows exits non-zero and writes nothing at all.
+
+    The Oct-13 corpus with `--ceiling 600000` on the command line — the exact command the
+    owed study's hand_run carries. Before #4162 that exited 0 and wrote a file stating
+    600000 for a budget no arm ran under. The typed argument is refused too, because the
+    alternative to a measured ceiling is not a remembered one.
+    """
+    cases = _cases(2)
+    cases_path = _jsonl(tmp_path / "cases.jsonl", cases)
+    rows_path = _jsonl(tmp_path / "unstamped.jsonl",
+                       _unstamped(_arms_at(tmp_path, cases, ceiling=200_000, run_id="oct13")))
+    out = tmp_path / "retry_baseline.json"
+    proc = _run_baseline(rows_path, cases_path, out, "--ceiling", "600000")
+    assert proc.returncode != 0, (
+        f"`baseline` wrote a ceiling over rows that state none (rc={proc.returncode}): "
+        f"{proc.stdout}")
+    assert replay.CEILING_UNKNOWN in proc.stdout, (
+        f"the refusal does not name the ceiling it could not find: {proc.stdout}")
+    assert "600000" not in proc.stdout, (
+        "the refusal quotes the typed argument as if it were the measurement, which is "
+        f"the figure a reader then carries into the pass: {proc.stdout}")
+    assert not out.exists(), (
+        f"a baseline was written over rows that state no ceiling: {out.read_text()}")
+
+
+def test_baseline_records_the_rows_own_200000_when_no_ceiling_is_asked_for(tmp_path):
+    """`--ceiling` unset over rows stamped 200000: the file says 200000, not 600000.
+
+    The case the item measured end to end, and the reason the default matters — the
+    `baseline` subparser shares `DEFAULT_TOKEN_CEILING` with the run arms, so an unset flag
+    used to be an assertion that the arms ran at 600000.
+    """
+    assert DEFAULT_TOKEN_CEILING != 200_000, (
+        "the default moved, so this node no longer separates it from the rows")
+    cases = _cases(2)
+    cases_path = _jsonl(tmp_path / "cases-200k.jsonl", cases)
+    rows_path = _jsonl(tmp_path / "stamped-200k.jsonl",
+                       _arms_at(tmp_path, cases, ceiling=200_000, run_id="two00k"))
+    out = tmp_path / "retry_baseline.json"
+    proc = _run_baseline(rows_path, cases_path, out)
+    assert proc.returncode == 0, (
+        f"a corpus stating one ceiling was refused (rc={proc.returncode}): {proc.stdout}")
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert record["token_ceiling"] == 200_000, (
+        f"rows stamping 200000 recorded {record['token_ceiling']} — the subparser's "
+        f"default, not the run that made the rows: {record}")
+
+
+def test_baseline_records_the_ceiling_its_retry_rows_stamp_rather_than_its_argument(
+        tmp_path):
+    """Rows stamped 600000 asked for at 120000: the file says 600000 and the reader agrees.
+
+    The disagreement is the whole item in one invocation — the argument used to win. And the
+    record has to satisfy the reader's check without that argument's help: `baseline_problem`
+    given the rows' own ceiling and the rows' own fingerprint accepts it, where #3866's
+    fallback compared the argument with the argument and called it a match.
+    """
+    cases = _cases(2)
+    cases_path = _jsonl(tmp_path / "cases-600k.jsonl", cases)
+    rows = _arms_at(tmp_path, cases, ceiling=600_000, run_id="six00k")
+    rows_path = _jsonl(tmp_path / "stamped-600k.jsonl", rows)
+    out = tmp_path / "retry_baseline.json"
+    proc = _run_baseline(rows_path, cases_path, out, "--ceiling", "120000")
+    assert proc.returncode == 0, (
+        f"a corpus stating one ceiling was refused (rc={proc.returncode}): {proc.stdout}")
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert record["token_ceiling"] == 600_000, (
+        f"the writer recorded {record['token_ceiling']} for rows that stamp 600000 — the "
+        f"argument echoed again: {record}")
+    assert "120000" not in json.dumps(record), (
+        f"the refused argument leaked into the record: {record}")
+    assert "120000" in proc.stdout, (
+        "the file recorded a figure other than the one the command asked for and the "
+        f"operator was never told: {proc.stdout}")
+    assert baseline_problem(
+        record, corpus=replay.corpus_fingerprint(cases_path), n=record["n"],
+        model="primary", token_ceiling=120_000,
+        row_ceiling=replay.row_ceilings(rows)) is None, (
+        f"the ceiling the writer recorded is not the one the reader accepts from these "
+        f"rows: {record}")
+
+
+def test_baseline_refuses_retry_rows_that_disagree_on_the_ceiling(tmp_path):
+    """Both stamps present (200000 and 600000): the refusal names both and writes nothing.
+
+    The mixed file #3866 pinned for `report`, reaching the writer this time — which is where
+    a corpus of two runs used to be settled at whichever ceiling the person running it
+    happened to type.
+    """
+    cases = _cases(2)
+    cases_path = _jsonl(tmp_path / "cases-mixed.jsonl", cases)
+    rows = (_arms_at(tmp_path, [cases[0]], ceiling=200_000, run_id="early")
+            + _arms_at(tmp_path, [cases[1]], ceiling=600_000, run_id="late"))
+    rows_path = _jsonl(tmp_path / "mixed.jsonl", rows)
+    out = tmp_path / "retry_baseline.json"
+    proc = _run_baseline(rows_path, cases_path, out)
+    assert proc.returncode != 0, (
+        f"rows carrying 200000 and 600000 were baselined (rc={proc.returncode}): "
+        f"{proc.stdout}")
+    assert "DISAGREEMENT" in proc.stdout, (
+        "the refusal does not name the disagreement, so a reader who concatenated two "
+        f"passes' row files is told neither that nor what to discard: {proc.stdout}")
+    assert "200000" in proc.stdout and "600000" in proc.stdout, (
+        "the refusal does not name both ceilings the rows carry, so no reader can tell "
+        f"which run to discard: {proc.stdout}")
+    assert not out.exists(), (
+        f"a baseline was written over two different ceilings: {out.read_text()}")
+
+
 def test_report_of_the_real_paths_needs_no_engine(tmp_path):
     """`report` runs end to end against the shipped defaults on an empty row file.
 
