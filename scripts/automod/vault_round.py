@@ -2894,6 +2894,55 @@ def _index_description_cap() -> int:
         return 100
 
 
+def _char_cap_note(skill_file: Path) -> str:
+    """Append to the body-size refusal: how many skills this ceiling already freezes.
+
+    Observability only (#4191). The refusal above is already justified and stays
+    byte-exact; this sentence answers the question every round that hit it had to ask
+    by hand. Four backlog items (#4086, #4139, #4186, #4190) each discovered per-skill
+    that a body was over the ceiling only after an unattended implement attempt had been
+    spent on the refusal, because the count existed nowhere: the report's `Over the cap:`
+    line counts the 100-LINE spill target, and 30 of the 208 live skills sat past the
+    12,000-CHAR one on 2026-11-16.
+
+    Measured here, at refusal time, by `skill_lint`'s own census function over the
+    corpus `iter_active_skills` owns — never parsed out of
+    `~/obsidian/autonomy/skill-lint-report.md`, which regenerates only on the nightly
+    chain and was three days stale the day this was written. It counts, and it never
+    refuses: #2334 settled on 2026-10-08 that SIZE stays advisory library-wide. The
+    import is lazy because `skill_lint` is imported by this module's sibling checks and
+    must never import this one back.
+
+    Second sentence, same reason: a skill that ALREADY has sibling `.md` files gets told
+    siblings are not the fix. `skills/system-health-check/SKILL.md` is the named case —
+    `## Files in this skill` plus four sibling files, and still 20,078 body chars —
+    because the cap counts SKILL.md's own body, so a spilled skill stays frozen until the
+    body shrinks as well. 7 of the 30 frozen skills on 2026-11-16 were in that shape.
+    """
+    try:
+        from scripts import skill_lint as SL
+
+        census = SL.live_char_cap_census()
+        siblings = len(SL.sibling_md(skill_file))
+    except Exception:  # noqa: BLE001 — an unavailable census never eats the refusal
+        return ""
+    parts = []
+    if census["count"]:
+        parts.append(
+            f". {census['over']} of {census['count']} {census['corpus']} skills are "
+            f"already frozen against that ceiling, so this is the library's shape and "
+            f"not one skill's oddity; the census — each skill, its body chars, and "
+            f"whether it already has sibling files — is published by "
+            f"`scripts/skill_lint.py` under `### SIZE`")
+    if siblings:
+        parts.append(
+            f". {siblings} sibling .md file{'s' if siblings != 1 else ''} "
+            f"{'are' if siblings != 1 else 'is'} already beside this one, which is not "
+            f"the fix on its own: the ceiling counts SKILL.md's own body, so the body "
+            f"has to shrink too")
+    return "".join(parts)
+
+
 def skill_contract_findings(paths: list[str]) -> list[dict]:
     """One refusing row per touched `skills/<slug>/SKILL.md` that breaks the contract.
 
@@ -2941,7 +2990,8 @@ def skill_contract_findings(paths: list[str]) -> list[dict]:
                                    f"{'creates' if old_desc is None else 'grows'} it; "
                                    f"keep the procedure and its hard rules in SKILL.md, "
                                    f"move reference sections into sibling .md files and "
-                                   f"list them under `## Files in this skill`"})
+                                   f"list them under `## Files in this skill`"
+                                   + _char_cap_note(VAULT / rel)})
     return rows
 
 

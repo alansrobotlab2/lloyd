@@ -863,6 +863,30 @@ MAX_BODY_LINES = 100
 #: importing prefetch pulls in the retrieval stack; a test pins the two equal.
 CHAT_SKILL_CUT = 6000
 
+#: `vault_round.SKILL_BODY_CHAR_CAP`, restated for the same reason as the line above:
+#: vault_round lazily imports THIS module inside its body-lines check, so importing it
+#: back at module level here is a circular import. A test pins the two equal, so the
+#: census cannot quietly start counting against a different ceiling than the one the
+#: gate refuses at.
+#:
+#: This is the ceiling that actually FREEZES a skill. The 100 above is the spill
+#: target for five sampled skills and the report's `Over the cap:` count has always
+#: been that line count, which is why 30 of 208 live skills sat past 12,000 body chars
+#: on 2026-11-16 with no number printed anywhere saying so — `system-health-check`
+#: among them, at 20,078 chars in 98 lines, so it passed the only size rule it was
+#: measured by (#4191). Advisory like everything else in this bucket: the gate refuses
+#: only a landing that CREATES or GROWS a body past it, and #2334 ruled on 2026-10-08
+#: that SIZE stays advisory library-wide, so this constant is counted against here and
+#: never enforced here.
+SKILL_BODY_CHAR_CAP = 12_000
+
+#: Which corpus the char-cap census counts, published beside the number. `lint()` and
+#: the census both count the skills `iter_active_skills` yields (208 on 2026-11-16),
+#: not the raw on-disk `SKILL.md` walk (218 files, 32 over) — the difference is skills
+#: the corpus owner excludes, and a count that does not say which set it counted is a
+#: count two readers will reconcile wrongly.
+CHAR_CAP_CORPUS = "live"
+
 #: The five oversized skills #624 samples for a spill pass. The pass itself is a
 #: vault edit; `spill_delta` reports what it has done to their embedded size.
 SPILL_SAMPLE = ("powerpoint", "deep-research", "nightly-reflection-knowledge-write",
@@ -912,6 +936,21 @@ def skill_folder_text(skill_dir: Path, content: str) -> str:
     return "\n".join(parts)
 
 
+def sibling_md(skill_file: Path) -> list[str]:
+    """Sibling `.md` files beside a `SKILL.md`, by name, sorted; [] if unreadable.
+
+    Published beside the char count (#4191) because the two together are the finding:
+    a skill can carry the whole spill shape — `## Files in this skill` and four sibling
+    files — and still sit past the ceiling, because the ceiling counts SKILL.md's own
+    body. Siblings existing is not the fix; siblings plus a stripped body is.
+    """
+    try:
+        return sorted(p.name for p in skill_file.parent.glob("*.md")
+                      if p.name != "SKILL.md")
+    except OSError:
+        return []
+
+
 def skill_size(name: str, path: Path, content: str, body: str) -> dict:
     """One skill's SIZE row. `body` is the text after front matter."""
     body = body.strip("\n")
@@ -924,6 +963,11 @@ def skill_size(name: str, path: Path, content: str, body: str) -> dict:
         # What the autonomy and worker prompts embed: the file, front matter and all.
         "file_chars": len(content),
         "over_cap": len(lines) > MAX_BODY_LINES,
+        # The OTHER ceiling, and the one that freezes an authoring round: characters,
+        # counted against the cap the automod gate refuses at, strictly-greater like the
+        # gate's own comparison. Advisory here — counting, never refusing (#2334).
+        "over_char_cap": len(body) > SKILL_BODY_CHAR_CAP,
+        "siblings": sibling_md(path),
         "past_chat_cut": max(0, len(content) - CHAT_SKILL_CUT),
         "largest_block": _largest_block(lines),
     }
@@ -938,15 +982,81 @@ def _percentile(values: list[int], q: float) -> int:
     return ordered[int(rank) - 1]
 
 
+def char_cap_census(rows: Sequence[dict], *, corpus: str = CHAR_CAP_CORPUS) -> dict:
+    """The population frozen by `SKILL_BODY_CHAR_CAP`, counted from `skill_size` rows.
+
+    One counting rule for the whole system (#4191). `size_summary` publishes it into
+    the nightly report, and `scripts/automod/vault_round.py` calls
+    `live_char_cap_census` — which is this function over the corpus it resolves itself —
+    to put the same number into the refusal reason a round reads. Before this, a round
+    told its skill was over the cap had no way to learn that 30 of 208 were, and four
+    backlog items (#4086, #4139, #4186, #4190) each discovered it per-skill after an
+    unattended implement attempt had been spent on the refusal.
+
+    Advisory, and empty-of-teeth by ruling: nothing here refuses. #2334 settled on
+    2026-10-08 that SIZE stays advisory library-wide, and #4186 ruled the ceiling is
+    not a round's to raise (`prefetch.SKILL_BODY_MAX`, 6000, is the clip that makes it
+    load-bearing). Rows are worst-first because the census doubles as a spill queue.
+    """
+    over = sorted((r for r in rows if r["over_char_cap"]),
+                  key=lambda r: (-r["body_chars"], r["name"]))
+    return {
+        "cap": SKILL_BODY_CHAR_CAP,
+        "corpus": corpus,
+        "count": len(rows),
+        "over": len(over),
+        "skills": [{"name": r["name"], "body_chars": r["body_chars"],
+                    "siblings": len(r["siblings"])} for r in over],
+    }
+
+
+def live_char_cap_census(skill_records: Optional[Sequence] = None) -> dict:
+    """Count the frozen population NOW, over the corpus `iter_active_skills` owns.
+
+    The automod gate calls this at refusal time rather than parsing
+    `~/obsidian/autonomy/skill-lint-report.md`: that file regenerates on the nightly
+    chain and was three days old on 2026-11-16, and a refusal quoting it would quote a
+    number that has already moved. Same ruler as the published report —
+    `parse_frontmatter` + `skill_size` + `char_cap_census` — and the same corpus OWNER,
+    never a private filesystem walk (#2963). `skill_records` is in
+    `iter_active_skills`' own shape so a test can point the census at a temp root.
+
+    Never raises on a bad file: a skill it cannot read is a skill not counted, and a
+    census that can throw would put an observability note in the way of a refusal
+    `skill_contract_findings` has already justified.
+    """
+    records = (list(iter_active_skills()) if skill_records is None
+               else list(skill_records))
+    rows = []
+    for record in records:
+        skill_file = Path(record.skill_file)
+        try:
+            content = skill_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rows.append(skill_size(record.directory.name, skill_file, content,
+                               parse_frontmatter(content)[1]))
+    return char_cap_census(rows)
+
+
 def size_summary(rows: list[dict]) -> dict:
-    """The SIZE bucket: library percentiles, the over-cap count, every row."""
+    """The SIZE bucket: library percentiles, both over-cap counts, every row."""
     lines = [r["body_lines"] for r in rows]
     chars = [r["body_chars"] for r in rows]
+    census = char_cap_census(rows)
     return {
         "max_body_lines": MAX_BODY_LINES,
         "chat_skill_cut": CHAT_SKILL_CUT,
         "count": len(rows),
         "over_cap": sum(1 for r in rows if r["over_cap"]),
+        # The two caps, both counts, on one bucket: `over_cap` is the 100-LINE spill
+        # target, `over_char_cap` is the 12,000-CHAR ceiling the gate enforces. They
+        # disagree about real skills — system-health-check was over one and inside the
+        # other — which is the whole reason both are published (#4191).
+        "char_cap": census["cap"],
+        "char_cap_corpus": census["corpus"],
+        "over_char_cap": census["over"],
+        "over_char_cap_skills": census["skills"],
         "p50_lines": _percentile(lines, 50),
         "p90_lines": _percentile(lines, 90),
         "max_lines": max(lines, default=0),
@@ -1422,12 +1532,34 @@ def render_size(result: dict) -> list[str]:
     size = result.get("size")
     if not size:
         return []
+    # The heading string is what `tests/test_skill_lint_size.py` finds this section by,
+    # so it stays byte-exact; the char ceiling rides on the summary line under it.
     out = [f"### SIZE — body length (advisory; cap {size['max_body_lines']} lines)", ""]
-    out.append(f"Over the cap: **{size['over_cap']}** of {size['count']} · "
+    out.append(f"Over the cap: **{size['over_cap']}** of {size['count']} lines "
+               f"(> {size['max_body_lines']}, the spill target) · "
+               f"**{size['over_char_cap']}** of {size['count']} {size['char_cap_corpus']} "
+               f"skills past the {size['char_cap']:,}-char ceiling the automod gate "
+               f"enforces, so that many bodies accept only shrinkings · "
                f"body lines p50 **{size['p50_lines']}**, p90 **{size['p90_lines']}**, "
                f"max **{size['max_lines']}** · body chars p50 {size['p50_chars']}, "
                f"p90 {size['p90_chars']}, max {size['max_chars']}.")
     out.append("")
+    frozen = size.get("over_char_cap_skills") or []
+    if frozen:
+        worst = frozen[0]
+        spilled = sum(1 for s in frozen if s["siblings"])
+        out.append(f"Frozen by the char cap ({len(frozen)} of {size['count']}, "
+                   f"{size['char_cap_corpus']} corpus), worst first: "
+                   + ", ".join(f"`{s['name']}` {s['body_chars']:,}"
+                               + (f" ({s['siblings']} siblings)" if s["siblings"] else "")
+                               for s in frozen[:10])
+                   + (f" … +{len(frozen) - 10} more" if len(frozen) > 10 else "")
+                   + f". {worst['name']} is the largest at {worst['body_chars']:,} chars; "
+                     f"{spilled} of the {len(frozen)} already have sibling files, which is "
+                     "not the fix — the cap counts SKILL.md's own body, so a spilled "
+                     "skill stays frozen until its body shrinks too. Splitting one is a "
+                     "ruled item each; this line only publishes the queue.")
+        out.append("")
     out.append(f"The chat injector keeps the first {size['chat_skill_cut']} chars of a "
                "skill, so there a long body loses its tail rather than costing more; "
                "the autonomy and worker prompts embed the whole file for the run.")
@@ -1447,13 +1579,22 @@ def render_size(result: dict) -> list[str]:
             out.append(f"| `{r['name']}` | {r['before_chars']} | {r['after_chars']} | "
                        f"{r['delta_chars']} | {r['before_body_lines']} → {r['after_body_lines']} | {sib} |")
         out.append("")
-    out.append("| skill | body lines | body chars | over cap | chars past chat cut | largest block |")
-    out.append("|---|---|---|---|---|---|")
+    # Two flag columns, each named by the ceiling it counts against. Collapsing them
+    # into one `over cap` column is how a LINE count came to be read as the CHAR count,
+    # and the pair `yes` + a non-zero sibling count is the row this report exists to
+    # surface: the skill whose spill is already done and whose body is still frozen
+    # (#4191 — `system-health-check`, 98 lines, 20,078 chars, four siblings).
+    out.append("| skill | body lines | body chars | over line cap | over char cap | "
+               "sibling files | chars past chat cut | largest block |")
+    out.append("|---|---|---|---|---|---|---|---|")
     for r in size.get("skills", []):
         block = r.get("largest_block") or {}
         heading = str(block.get("heading", "")).replace("|", "\\|")
         out.append(f"| `{r['name']}` | {r['body_lines']} | {r['body_chars']} | "
-                   f"{'yes' if r['over_cap'] else ''} | {r['past_chat_cut'] or ''} | "
+                   f"{'yes' if r['over_cap'] else ''} | "
+                   f"{'yes' if r.get('over_char_cap') else ''} | "
+                   f"{len(r.get('siblings') or [])} | "
+                   f"{r['past_chat_cut'] or ''} | "
                    f"{heading} ({block.get('lines', 0)} lines) |")
     out.append("")
     return out
@@ -2127,6 +2268,8 @@ def main() -> int:
     size = result.get("size")
     if size:
         print(f"Size: over_cap={size['over_cap']}/{size['count']} (>{MAX_BODY_LINES} lines), "
+              f"over_char_cap={size['over_char_cap']}/{size['count']} "
+              f"(>{size['char_cap']} chars, {size['char_cap_corpus']} corpus), "
               f"p50={size['p50_lines']} p90={size['p90_lines']} max={size['max_lines']}")
     # `phantom` was absent from this line as well, same class of gap one category
     # earlier: the count reached the report and not the stdout the nightly job's

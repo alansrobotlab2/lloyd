@@ -653,3 +653,127 @@ def test_contract_refusal_reaches_validate_and_can_be_switched_off(vault, monkey
     assert any("skill description" in e and "brand-new" in e for e in errors), errors
     monkeypatch.setattr(V, "SKILL_CONTRACT_ENFORCE", False)
     assert V.skill_contract_findings([rel]) == []
+
+
+# ── #4191: the refusal names the frozen population, measured at refusal time ──
+#
+# `skill_contract_findings` refuses a landing that creates or grows a SKILL.md body
+# past `SKILL_BODY_CHAR_CAP` (12,000 chars). The refusal is right, and it was also
+# silently telling each round it was alone: 30 of the 208 live skills were already
+# over that ceiling on 2026-11-16, and nothing on the reason said so. The reason now
+# carries the published census (#4191), counted by `skill_lint`'s own function over the
+# corpus `iter_active_skills` owns — NOT parsed from
+# `~/obsidian/autonomy/skill-lint-report.md`, which regenerates only on the nightly
+# chain and was three days stale the day this was written.
+
+
+def _corpus(tmp_path, monkeypatch, *, over: int, under: int, tag: str) -> Path:
+    """Point `skill_lint`'s corpus at a temp root: `over` skills past the char cap.
+
+    One seam is replaced — the corpus owner — because that is the only thing the
+    census reads. A test that stubbed the census function itself would pin the
+    plumbing and prove nothing about the count.
+    """
+    from agent_mcp import skills as SK
+    from scripts import skill_lint as SL
+    root = tmp_path / tag / "skills"
+    width = 200
+    for i in range(over):
+        d = root / f"frozen-{tag}-{i}"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            "---\nname: x\ndescription: Use when frozen.\n---\n"
+            + "x" * width * (SL.SKILL_BODY_CHAR_CAP // width + 40) + "\n",
+            encoding="utf-8")
+    for i in range(under):
+        d = root / f"under-{tag}-{i}"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("---\nname: x\ndescription: Use when small.\n"
+                                    "---\nshort body\n", encoding="utf-8")
+    monkeypatch.setattr("scripts.skill_lint.iter_active_skills",
+                        lambda *a, **k: list(SK.iter_active_skills(roots=[root])))
+    return root
+
+
+def _body_finding(vault, slug="frozen-target"):
+    """Write one skill past the cap and hand back its body-size row."""
+    rel = _write(vault, slug, "Use when frozen.", "# body\n" + ("x" * 200 + "\n") * 70)
+    rows = [r for r in V.skill_contract_findings([rel]) if r["gate"] == "skill body size"]
+    assert rows, "a landing that grows a body past 12,000 chars must still be refused"
+    return rows[0]
+
+
+def test_the_body_size_refusal_names_the_frozen_population_measured_now(vault, tmp_path,
+                                                                       monkeypatch):
+    """#4191 clause 4: a round told to spill one skill learns how many are frozen.
+
+    The number has to arrive from the census, in the refusal, at the moment of the
+    refusal: this is what four items (#4086, #4139, #4186, #4190) each paid a spent
+    unattended implement attempt to discover one skill at a time.
+    """
+    _corpus(tmp_path, monkeypatch, over=3, under=1, tag="a")
+    row = _body_finding(vault)
+    assert "3 of 4" in row["reason"], \
+        "the refusal must say how many skills are already frozen, over how many: " + row["reason"]
+    assert "12,000" in row["reason"], \
+        "and the ceiling those skills are frozen against: " + row["reason"]
+    # Same call, different corpus → different number: this is a measurement taken here,
+    # not a string carried from the nightly report or from a constant.
+    _corpus(tmp_path, monkeypatch, over=1, under=4, tag="b")
+    assert "1 of 5" in _body_finding(vault)["reason"], \
+        "the count did not move with the corpus, so it is not being measured at refusal time"
+
+
+def test_the_refusal_says_siblings_already_present_are_not_the_fix(vault, tmp_path,
+                                                                   monkeypatch):
+    """The failure mode the census exists to name (`skills/system-health-check`): the
+    spill pattern applied, the body still over. A skill with siblings on disk gets told
+    that explicitly, or it will re-do the spill that is already done."""
+    _corpus(tmp_path, monkeypatch, over=2, under=0, tag="c")
+    rel = _write(vault, "spilled-still-over", "Use when spilled.",
+                 "# body\n" + ("x" * 200 + "\n") * 70)
+    (vault / "skills" / "spilled-still-over" / "reference.md").write_text("# detail\n")
+    row = [r for r in V.skill_contract_findings([rel])
+           if r["gate"] == "skill body size"][0]
+    assert "1" in row["reason"] and "sibling" in row["reason"].lower()
+    assert "not the fix" in row["reason"], \
+        "a skill that already has sibling .md files has to be told the cap counts " \
+        "SKILL.md's own body: " + row["reason"]
+
+
+def test_a_broken_census_never_eats_the_refusal(vault, monkeypatch):
+    """The census is observability bolted onto a refusal that is already justified: if
+    it cannot run, the refusal ships without the note, exactly as it did before #4191."""
+    def boom(*_a, **_k):
+        raise RuntimeError("no corpus")
+    monkeypatch.setattr("scripts.skill_lint.live_char_cap_census", boom)
+    row = _body_finding(vault)
+    assert row["would_refuse"] is True
+    assert "12,000" in row["reason"], "the ceiling is stated even with no census: " \
+        + row["reason"]
+    assert "frozen against that ceiling" not in row["reason"], \
+        "the note IS the census and the census is unavailable, so the reason must be " \
+        "what it was before #4191 rather than a sentence with a hole in it: " \
+        + row["reason"]
+
+
+def test_the_census_publishes_without_refusing_anything(vault, tmp_path, monkeypatch):
+    """#4191 clause 5: #2334 ruled SIZE stays advisory library-wide, so this round
+    adds a measurement and NO refusal. Every skill already over the cap, untouched by
+    the landing, still produces nothing — the blindness the item describes is the
+    ruling's own consequence and stays exactly as it was. And the refusal row that does
+    exist keeps its shape: the census went into `reason`, not into a new gate."""
+    from scripts import skill_lint as SL
+    assert SL.SKILL_BODY_CHAR_CAP == V.SKILL_BODY_CHAR_CAP == 12_000, \
+        "the cap is not this round's to move: app/prefetch.SKILL_BODY_MAX (6000) is the " \
+        "clip that makes it load-bearing, which is what #4186 ruled"
+    big = "# body\n" + ("x" * 200 + "\n") * 70
+    rels = [_write(vault, f"already-frozen-{i}", "Use when frozen.", big) for i in range(3)]
+    git(vault, "add", "-A"); git(vault, "commit", "-q", "-m", "seed frozen skills")
+    _corpus(tmp_path, monkeypatch, over=3, under=0, tag="d")
+    assert V.skill_contract_findings(rels) == [], \
+        "three untouched skills over the cap must produce no row: a census that started " \
+        "refusing would be the library-wide enforcement #2334 ruled against"
+    row = _body_finding(vault)
+    assert set(row) == {"skill", "gate", "would_refuse", "body_chars", "cap", "reason"}, \
+        "no new field, and above all no new gate: " + str(sorted(row))

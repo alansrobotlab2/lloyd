@@ -742,3 +742,234 @@ def test_the_skill_that_sat_at_the_cap_now_has_headroom():
         f"the working tree sits at {live_lines} body lines, past the 100-line ceiling — "
         "an uncommitted edit has used up more headroom than exists. The committed figure "
         f"above ({lines}) is what this node judges; this one is the same file on disk.")
+
+
+# ── the 12,000-CHAR cap the automod gate enforces (#4191) ────────────────────
+#
+# `MAX_BODY_LINES` (100) is the SPILL_SAMPLE target and the report's `Over the cap:`
+# count has always been that LINE count. The ceiling that actually freezes a skill is
+# a different one: `scripts/automod/vault_round.SKILL_BODY_CHAR_CAP` (12,000 body
+# chars), which refuses a landing that creates or grows a body past it. On 2026-11-16
+# that froze 30 of the 208 live skills — `system-health-check` among them at 20,078
+# body chars in 98 lines, so it passes the line rule it is measured by and no number
+# printed anywhere said it was frozen. Four backlog items were spent discovering it
+# one skill at a time (#4086, #4139, #4186, #4190), each after an unattended implement
+# attempt had already been spent on the refusal. This block publishes the population.
+# It adds measurements only: #2334 ruled on 2026-10-08 that SIZE stays advisory
+# library-wide, so no node here asks for a refusal and none can be caused by it.
+
+def _wide(root: Path, name: str, chars: int, *, siblings: int = 0) -> Path:
+    """A skill whose BODY is about `chars` chars in FEWER than `MAX_BODY_LINES` lines.
+
+    200-char lines keep the LINE ceiling off the measurement: a builder that overshot
+    100 lines as well would make `over_char_cap` unfalsifiable against `over_cap`, and
+    the whole point of the flag is that the two rules disagree about real skills —
+    `system-health-check` is over the char cap at 98 body lines.
+    """
+    d = root / name
+    d.mkdir(parents=True)
+    width = 200
+    text = ("---\n"
+            f"description: Use this skill when testing {name} char sizes.\n"
+            "tags: [test]\n"
+            "---\n\n" + "\n".join(["x" * width] * max(1, chars // width)) + "\n")
+    (d / "SKILL.md").write_text(text, encoding="utf-8")
+    for i in range(siblings):
+        (d / f"detail-{i}.md").write_text(f"# detail {i}\n", encoding="utf-8")
+    return d / "SKILL.md"
+
+
+@pytest.fixture
+def char_library(tmp_path):
+    """Two skills past the char cap (one with siblings, one without) and one under it."""
+    from agent_mcp.skills import iter_active_skills
+    root = tmp_path / "skills"
+    cap = sl.SKILL_BODY_CHAR_CAP
+    paths = {"frozen-wide": _wide(root, "frozen-wide", cap + 4_000),
+             "frozen-spilled": _wide(root, "frozen-spilled", cap + 1_000, siblings=4),
+             "under": _wide(root, "under", 2_000)}
+    return root, paths, list(iter_active_skills(roots=[root]))
+
+
+def test_the_char_cap_is_the_gate_s_own_twelve_thousand():
+    """One ceiling, two spellings, pinned equal (#4191 clause 1).
+
+    `skill_lint` cannot import `scripts.automod.vault_round` to read the constant:
+    vault_round imports this module lazily inside its body-lines check, so a
+    module-level import back is a cycle. `CHAT_SKILL_CUT` above restates
+    `prefetch.SKILL_BODY_MAX` for the identical reason and `test_chat_cut_matches_the_
+    injector` pins that pair; this pins this one, so a move on either side is a red
+    node here rather than two numbers that drift apart silently.
+    """
+    from scripts.automod import vault_round as vr
+    assert sl.SKILL_BODY_CHAR_CAP == vr.SKILL_BODY_CHAR_CAP == 12_000, (
+        "the census must count against the cap the gate refuses at; 12,000 is also the "
+        "value #4186 ruled must NOT be raised, because app/prefetch.SKILL_BODY_MAX (6000) "
+        "is the clip that makes the ceiling load-bearing")
+
+
+def test_the_boundary_is_strictly_greater_like_the_gate():
+    """12,000 chars is allowed; 12,001 is over — the gate's `>` at the same boundary."""
+    from scripts.automod import vault_round as vr
+    at = sl.skill_size("at", Path("/tmp/x/SKILL.md"), "", "y" * vr.SKILL_BODY_CHAR_CAP)
+    over = sl.skill_size("over", Path("/tmp/x/SKILL.md"), "",
+                         "y" * (vr.SKILL_BODY_CHAR_CAP + 1))
+    assert at["over_char_cap"] is False and over["over_char_cap"] is True
+
+
+def test_the_size_row_carries_the_char_cap_flag_beside_the_line_flag(char_library):
+    """#4191 clause 1: the per-skill row flags the char ceiling, and the two rules
+    stay separate fields — a skill can be over either, both, or neither."""
+    _root, _paths, records = char_library
+    rows = {r["name"]: r for r in sl.lint(skill_records=records)["size"]["skills"]}
+    assert rows["frozen-wide"]["over_char_cap"] is True
+    assert rows["frozen-spilled"]["over_char_cap"] is True
+    assert rows["under"]["over_char_cap"] is False
+    assert all(r["over_cap"] is False for r in rows.values()), \
+        "the fixture is under 100 lines on purpose: over_char_cap must not be a synonym"
+
+
+def test_size_summary_publishes_the_frozen_count_and_the_cap_it_counted(char_library):
+    """#4191 clause 1: the count, the cap it counted against, and the corpus named."""
+    _root, _paths, records = char_library
+    size = sl.lint(skill_records=records)["size"]
+    assert size["over_char_cap"] == 2
+    assert size["char_cap"] == 12_000
+    assert size["char_cap_corpus"] == "live", \
+        "the report counts the corpus `iter_active_skills` owns (208 on 2026-11-16), not " \
+        "the on-disk SKILL.md walk (218); the label has to travel with the number"
+    assert size["count"] == 3
+    assert size["over_char_cap"] == sl.char_cap_census(size["skills"])["over"], \
+        "the published count and the shared census are one measurement, not two rules"
+
+
+def test_each_frozen_row_names_the_skill_its_chars_and_its_siblings(char_library):
+    """#4191 clause 2: the published census is per-skill, worst first.
+
+    `siblings` is published beside the count because the failure mode the census names
+    is a skill that HAS siblings and is still frozen — the spill pattern was applied to
+    `system-health-check` without ever stripping its SKILL.md, so a report that treated
+    siblings as the fix would tell the next round it had nothing to do.
+    """
+    _root, _paths, records = char_library
+    size = sl.lint(skill_records=records)["size"]
+    rows = {r["name"]: r for r in size["skills"]}
+    assert rows["frozen-spilled"]["siblings"] == ["detail-0.md", "detail-1.md",
+                                                  "detail-2.md", "detail-3.md"]
+    assert rows["frozen-wide"]["siblings"] == []
+    frozen = size["over_char_cap_skills"]
+    assert [s["name"] for s in frozen] == ["frozen-wide", "frozen-spilled"], \
+        "the census is ordered by cost, so the first row is the one worth spilling first"
+    for s in frozen:
+        assert s["body_chars"] == rows[s["name"]]["body_chars"] > sl.SKILL_BODY_CHAR_CAP
+        assert s["siblings"] == len(rows[s["name"]]["siblings"])
+
+
+def test_the_size_summary_line_prints_the_frozen_count_beside_the_line_count(char_library):
+    """#4191 clause 3: one run of this script puts the frozen population on the
+    `### SIZE` line, next to the line-cap count that was the only count before."""
+    _root, _paths, records = char_library
+    result = sl.lint(skill_records=records)
+    size = result["size"]
+    report = sl.render_report(result)
+    line = next(l for l in report.splitlines() if l.startswith("Over the cap:"))
+    assert f"Over the cap: **{size['over_cap']}** of {size['count']} lines" in line, \
+        "the line-cap count this report has always printed stays where its tests find it"
+    assert f"**{size['over_char_cap']}** of {size['count']}" in line.split("lines", 1)[1], \
+        "the frozen count is on the SAME line, beside it: " + line
+    assert "12,000" in line and "char" in line.lower(), \
+        "a reader has to be able to tell which cap this count is against: " + line
+    assert "live" in line, "and which corpus it was counted over: " + line
+
+
+def test_the_frozen_rows_render_in_the_size_table(char_library):
+    """The table carries the same three facts, so the published census is per-skill and
+    not only a total."""
+    _root, _paths, records = char_library
+    result = sl.lint(skill_records=records)
+    report = sl.render_report(result)
+    for name in ("frozen-wide", "frozen-spilled"):
+        row = next((l for l in report.splitlines() if l.startswith(f"| `{name}` |")), "")
+        assert row, f"{name} is over the char cap and must appear in the SIZE table"
+        chars = next(r["body_chars"] for r in result["size"]["skills"] if r["name"] == name)
+        assert f"{chars:,}" in row or str(chars) in row, row
+    spilled = next(l for l in report.splitlines() if l.startswith("| `frozen-spilled` |"))
+    assert "| yes | 4 |" in spilled, \
+        "over the char cap AND four sibling files, side by side — the pair that shows a " \
+        "spilled skill can still be frozen: " + spilled
+    assert "| yes | 0 |" in next(l for l in report.splitlines()
+                                 if l.startswith("| `frozen-wide` |")), \
+        "and the majority shape: 23 of the 30 frozen skills have nothing spilled at all"
+
+
+def test_the_census_counts_the_records_it_is_handed(tmp_path):
+    """`live_char_cap_census` is the function the automod gate calls at refusal time;
+    it resolves the corpus through `iter_active_skills` (#2963: never a private walk)
+    and counts with the same rows the report publishes."""
+    from agent_mcp.skills import iter_active_skills
+    root = tmp_path / "skills"
+    cap = sl.SKILL_BODY_CHAR_CAP
+    _wide(root, "one", cap + 400)
+    _wide(root, "two", cap + 9_000)
+    _wide(root, "three", 500)
+    census = sl.live_char_cap_census(list(iter_active_skills(roots=[root])))
+    assert (census["cap"], census["count"], census["over"]) == (12_000, 3, 2)
+    assert [s["name"] for s in census["skills"]] == ["two", "one"]
+    assert sl.live_char_cap_census([]) == {"cap": 12_000, "corpus": "live", "count": 0,
+                                          "over": 0, "skills": []}
+
+
+def test_the_live_census_and_the_report_agree_on_the_real_corpus():
+    """The published line and the refusal reason must not disagree about the library,
+    so both count through this one function over the corpus owner's list. Measured on
+    2026-11-16: 208 live skills, 30 of them over the 12,000-char cap, worst
+    `nightly-reflection-signals` at 162,608 chars and the smallest freeze
+    `ascii-video` at 12,057. Nothing here pins those figures — skills get split and the
+    count moves, which is the point of publishing it — but the census and a fresh
+    re-count by the gate's own extractor must land on the same number."""
+    from agent_mcp.skills import iter_active_skills
+    from scripts.automod.vault_round import _skill_desc_and_body, SKILL_BODY_CHAR_CAP
+    census = sl.live_char_cap_census()
+    assert census["count"] == len(list(iter_active_skills())), \
+        "the census counts the corpus its caller would count, not a walk of its own"
+    recount = sum(1 for rec in iter_active_skills()
+                  if _skill_desc_and_body(
+                      Path(rec.skill_file).read_text(encoding="utf-8",
+                                                     errors="replace"))[1]
+                  > SKILL_BODY_CHAR_CAP)
+    assert census["over"] == recount > 0, \
+        f"the census says {census['over']}, the gate's own extractor says {recount}"
+
+
+def test_system_health_check_is_frozen_with_siblings_already_on_disk():
+    """#4191 clause 2's named instance, read from the bytes as committed (#3028).
+
+    This is the row the census exists to print: 98 body lines (inside the 100-line
+    spill target, so the line rule never flagged it), 20,078 body chars (past the
+    ceiling the gate enforces), and the spill pattern ALREADY APPLIED —
+    `## Files in this skill` plus check-components.md, implementation.md,
+    output-format.md, usage-examples.md. Siblings existing is not the fix, and 23 of
+    the 30 frozen skills on 2026-11-16 have no siblings at all.
+
+    The 20,078 and the four names are a recorded measurement, not a ceiling: if they
+    move, a commit split this skill or renamed a sibling, and this node names it.
+    """
+    vault = _vault()
+    skill = vault / "skills" / "system-health-check" / "SKILL.md"
+    text = _committed_skill_text(vault, "system-health-check")
+    if text is None or not skill.is_file():
+        pytest.skip("vault has no system-health-check committed to measure")
+    body = sl.parse_frontmatter(text)[1]
+    row = sl.skill_size("system-health-check", skill, text, body)
+    assert row["body_chars"] == 20_078, (
+        f"the committed body is {row['body_chars']:,} chars, not the 20,078 recorded on "
+        "2026-11-15/16; refresh the figure from `git log -1 --format=%h -- "
+        "skills/system-health-check/SKILL.md` in ~/obsidian, and if it has fallen under "
+        "12,000 the skill has been split and this node's instance is stale")
+    assert row["over_char_cap"] is True and row["over_cap"] is False, (
+        f"{row['body_lines']} body lines is inside the 100-line spill target while "
+        f"{row['body_chars']:,} chars is past the gate's ceiling — that disagreement IS "
+        "the blind spot; if it has gone, re-measure before editing the expected pair")
+    assert row["siblings"] == ["check-components.md", "implementation.md",
+                               "output-format.md", "usage-examples.md"], \
+        f"the spill shape this node names has changed: {row['siblings']}"
