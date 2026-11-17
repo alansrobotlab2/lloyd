@@ -654,12 +654,19 @@ def test_the_record_is_json_and_carries_the_three_flags_in_every_verdict(tmp_pat
 # ── the shared driver ──────────────────────────────────────────────────────
 
 def _run(tmp_path, *, trees=None, state=None, sleep=None, call=None,
-         recorded=None, diff_paths=None):
+         recorded=None, diff_paths=None, clock=None, sleeps=None):
     """One trial against stand-in trees, with the calls recorded instead of sent.
 
     `sleep` is the window: `run_proof` calls it once for the control window and once for the
     trial's padding, with the same duration, which is how "same-length" is a fact of the
-    driver instead of an assertion about it.
+    driver instead of an assertion about it. Pass a list as `sleeps` to keep those two
+    arguments rather than drop them — the padding is computed from a clock delta, so the only
+    way to see what it was computed TO is to catch the number that was passed.
+
+    `clock` goes straight through to `run_proof`, and left as `None` it stays the routine's
+    own `time.monotonic`, which is what every node that does not care about a duration wants.
+    A node that does care passes a `_ScriptedClock`: "this arm took 0.25 s" cannot be asserted
+    against a clock the test cannot move.
     """
     subject = trees if trees is not None else {
         "memory": _tree(tmp_path, "mem", {"MEMORY.md": "index line\n"}),
@@ -670,10 +677,218 @@ def _run(tmp_path, *, trees=None, state=None, sleep=None, call=None,
         seen.append(name)
         return call(name, arguments) if call else {"tool": name, "ok": True}
 
+    def window(seconds: float) -> None:
+        if sleeps is not None:
+            sleeps.append(seconds)
+        if sleep is not None:
+            sleep(seconds)
+
     return proof.run_proof(state=dict(COPIED_STATE if state is None else state),
                            trees=dict(subject), call_tool=call_tool,
-                           window_seconds=1.0, sleep=sleep or (lambda _s: None),
+                           window_seconds=1.0, sleep=window,
+                           clock=clock or time.monotonic,
                            diff_paths=list(diff_paths or []), trial_id="t_proof")
+
+
+class _ScriptedClock:
+    """A clock the test moves, so a duration in the record is a fact of the driver.
+
+    Reads do not have to change it: with `per_read=0.0` the value moves only when this file
+    moves it through `consume`, so one arm can take 0.25 s and the next 0.5 s and the rows
+    have to say exactly that or the field is not the arm's own time. With `per_read` above
+    zero every read moves it, which is how the aggregate `run_proof` pads against can be made
+    LARGER than the sum of the three per-call values: the routine reads the clock twice for
+    itself around the loop (`start`, and the one read the padding is computed from) and builds
+    a row dict after each call's closing read, so the padding is the aggregate's answer and
+    never a sum of the rows.
+
+    Every figure these nodes use is a multiple of a power of two on a base of 100.0, so the
+    sums are exact in binary floating point and the assertions below can be `==` rather than
+    a tolerance — a `pytest.approx` here would forgive a field that drifted.
+    """
+
+    def __init__(self, *, per_read: float = 0.0, start: float = 100.0) -> None:
+        self.now = start
+        self.per_read = per_read
+        self.reads = 0
+
+    def __call__(self) -> float:
+        self.reads += 1
+        self.now += self.per_read
+        return self.now
+
+    def consume(self, seconds: float) -> None:
+        """Stand in for one arm taking `seconds` before the server answered."""
+        self.now += seconds
+
+
+class _ArmThatNeverAnswered(RuntimeError):
+    """A `call_tool` that dies mid-trial, the way a transport failure does not today."""
+
+
+#: Seconds each arm is made to consume, in the order `PROOF_TOOLS` calls them. Distinct, so
+#: one value pasted into three rows cannot pass, and exact in binary, so `==` is a real pin.
+ARM_SECONDS = {"memory_add": 0.25, "fact_add": 0.5, "backlog_write_task": 0.125}
+
+#: The keys a `tool_calls` row has carried since #3863, plus the one #4212 adds.
+_ROW_KEYS = {"tool", "store", "ok", "session_id", "result_text", "detail", "denial"}
+
+#: Every top-level key a record that reached the calls has carried. #4212 adds none.
+_RECORD_KEYS = {"kind", "trial_id", "session_id", "tools", "isolation_flags",
+                "window_seconds", "write_scope_gap", "missing_isolation_keys",
+                "watched_trees", "trees", "tool_calls", "verdict", "reason", "checks",
+                "control_files", "windows", "copy_side", "live_trees"}
+
+
+def test_each_tool_call_row_records_the_seconds_that_arm_consumed(tmp_path):
+    """#4212 clause 1: the artefact has to say WHICH arm was slow, not only that one was.
+
+    `run_proof` already knew the three calls took time — the aggregate it pads against — and
+    threw that number away, and #3959 step (2) is the cost: a write outstanding at 420 s with
+    nothing in the artefact naming which of the three tools it was. Recovering that from the
+    shipped instrument means another full trial, and a trial is 240 s because
+    `DEFAULT_WINDOW_SECONDS` is 120.0 and both windows are padded to it by construction.
+
+    So the timing goes on the row, and this node drives the clock by arm to prove the number
+    is the arm's own: 0.25 s for `memory_add`, 0.5 s for `fact_add`, 0.125 s for
+    `backlog_write_task`, in call order, with the clock sitting still everywhere else.
+    """
+    assert list(ARM_SECONDS) == [row["tool"] for row in proof.PROOF_TOOLS], (
+        "ARM_SECONDS is no longer in the order the loop calls the arms")
+    clock = _ScriptedClock()
+
+    def call(name: str, arguments: dict) -> dict:
+        clock.consume(ARM_SECONDS[name])
+        return {"tool": name, "ok": True, "text": "wrote"}
+
+    result = _run(tmp_path, call=call, clock=clock)
+    rows = result["tool_calls"]
+    assert [row["tool"] for row in rows] == list(ARM_SECONDS), rows
+    assert [row["seconds"] for row in rows] == [0.25, 0.5, 0.125], rows
+    assert all(isinstance(row["seconds"], float) for row in rows), rows
+    # The owed-check job reads this artefact out of a JSON file, so the field has to survive
+    # the serialisation the record is written through, not just sit in a dict in memory.
+    assert json.loads(json.dumps(result)) == result
+
+
+def test_a_refused_call_still_records_its_seconds_so_a_denial_has_a_cost(tmp_path):
+    """#4212 clause 2, the half that is a record change: a denial is an answer that took time.
+
+    `mcp_tool_call` never raises for a transport error or a guard denial — it converts
+    `URLError`, `OSError` and a malformed body into an `{"ok": False, "detail": …}` row — so a
+    refused arm reaches the same append as a write that landed and its `seconds` is recorded
+    on the same path. That is the deliverable half of the clause. The case it is for is a hung
+    admitted write: `ok: false` says it did not land, the trial's aggregate says time went
+    somewhere, and only the row says which arm spent it.
+
+    The two sleeps are asserted here too: this trial's arms consume the whole 1.0 s window
+    between them (0.125 + 0.75 + 0.125), so the control sleeps for the full window and the
+    padding is asked for 0.0 — the 0.75 s refusal is what ate it, which is exactly the
+    attribution the field exists to make.
+    """
+    clock = _ScriptedClock()
+
+    def call(name: str, arguments: dict) -> dict:
+        clock.consume(0.75 if name == "fact_add" else 0.125)
+        return {"tool": name, "ok": False, "denial": "Tool call denied: out of scope"}
+
+    sleeps: list[float] = []
+    result = _run(tmp_path, call=call, clock=clock, sleeps=sleeps)
+    rows = result["tool_calls"]
+    assert [row["ok"] for row in rows] == [False] * 3, rows
+    assert [row["seconds"] for row in rows] == [0.125, 0.75, 0.125], rows
+    assert all(row["denial"] for row in rows), rows
+    assert sleeps == [1.0, 0.0], sleeps
+
+
+def test_a_call_tool_that_raises_still_propagates_out_of_the_trial(tmp_path):
+    """#4212 clause 2, the half that is NOT a record change: nothing new catches a raise.
+
+    The raising arm cannot be given a `seconds` row as it stands. There is no `try` around the
+    call loop, `main()` catches only `ProofRefused` and `FixtureRefused`, and the record is a
+    local that is never returned once the loop unwinds — so a raising `call_tool` writes no
+    artefact at all, and making its cost visible is a control-flow change, not a field. This
+    round does not make one, so the node pins the opposite: the raise arrives at the caller as
+    the same exception, with the same args, neither swallowed nor re-wrapped. A `try` added
+    around the loop that swallowed it, or that re-raised it as another type, reddens this.
+    """
+    clock = _ScriptedClock()
+
+    def call(name: str, arguments: dict) -> dict:
+        if name == "fact_add":
+            raise _ArmThatNeverAnswered("fact_add never answered")
+        return {"tool": name, "ok": True}
+
+    with pytest.raises(_ArmThatNeverAnswered) as raised:
+        _run(tmp_path, call=call, clock=clock)
+    assert raised.value.args == ("fact_add never answered",), raised.value
+
+
+def test_the_two_window_sleeps_are_equal_and_still_padded_from_the_aggregate(tmp_path):
+    """#4212 clause 3: padding against the rows' sum is the one error this instrument must not have.
+
+    Both windows are `window_seconds` long by construction, and the reason is the driver's own:
+    a trial window shorter than the control saw less background, which forgives a real durable
+    write — the direction #3689's proof exists not to be wrong in. `run_proof` computes the
+    padding from ONE aggregate delta across the three calls, and it has to keep doing that now
+    that three per-call deltas sit in the record looking like the same information. They are
+    not the same information: the aggregate also spans the two reads the routine makes for
+    itself around the loop and the row dict it builds after each call.
+
+    Two clock shapes therefore. Still (only the arms move it): the aggregate is exactly zero,
+    both sleeps are the whole 1.0 s window, and they are equal to the last bit. Ticking (every
+    read moves it 0.0625 s): the aggregate is the 7 reads between `start` and the padding
+    argument, 0.4375 s, while the three rows hold 0.1875 s between them — so the second sleep
+    must be 0.5625, the aggregate's answer, and never the 0.8125 a sum of the rows would give.
+    """
+    still = _ScriptedClock()
+    still_sleeps: list[float] = []
+    _run(tmp_path, clock=still, sleeps=still_sleeps)
+    assert still_sleeps == [1.0, 1.0], still_sleeps
+
+    ticking = _ScriptedClock(per_read=0.0625)
+    ticks: list[float] = []
+    result = _run(tmp_path, clock=ticking, sleeps=ticks)
+    rows = result["tool_calls"]
+    assert [row["seconds"] for row in rows] == [0.0625] * 3, rows
+    assert len(ticks) == 2, ticks
+    assert ticks[0] == 1.0, ticks
+    assert ticks[1] == 0.5625, ticks
+    assert sum(row["seconds"] for row in rows) == 0.1875, rows
+    assert ticks[1] != 1.0 - sum(row["seconds"] for row in rows), ticks
+    assert 1.0 - sum(row["seconds"] for row in rows) == 0.8125, rows
+
+
+def test_seconds_is_the_only_new_key_on_a_tool_call_row(tmp_path):
+    """#4212 clause 4: one added key on the row, and every reader stays where it was.
+
+    `bench_runner_sdk` and the owed-check job both read this artefact, and neither of them was
+    asked to change, so the row's key set is pinned by name in both directions — a renamed or
+    dropped key fails as hard as a second added one. The truncations are pinned in the same
+    breath because they live in the dict literal this change edits: `result_text` at 600,
+    `detail` and `denial` at 400, each fed 900 characters so a lost slice shows up as 900.
+    The record-level key set is pinned the same way, exactly, because "no other schema change"
+    is about the record as much as the row.
+    """
+    def long_answers(name: str, arguments: dict) -> dict:
+        return {"tool": name, "ok": True, "text": "t" * 900, "detail": "d" * 900}
+
+    passed = _run(tmp_path, diff_paths=["lloyd/MEMORY.md"], call=long_answers)
+    assert passed["verdict"] == "PASS", passed["reason"]
+    assert len(passed["tool_calls"]) == 3, passed["tool_calls"]
+    for row in passed["tool_calls"]:
+        assert set(row) == _ROW_KEYS | {"seconds"}, sorted(set(row) ^ (_ROW_KEYS | {"seconds"}))
+        assert len(row["result_text"]) == 600, len(row["result_text"])
+        assert len(row["detail"]) == 400, len(row["detail"])
+    assert set(passed) == _RECORD_KEYS, sorted(set(passed) ^ _RECORD_KEYS)
+
+    def refused(name: str, arguments: dict) -> dict:
+        return {"tool": name, "ok": False, "denial": "n" * 900}
+
+    denied = _run(tmp_path, diff_paths=["lloyd/MEMORY.md"], call=refused)
+    for row in denied["tool_calls"]:
+        assert set(row) == _ROW_KEYS | {"seconds"}, sorted(set(row) ^ (_ROW_KEYS | {"seconds"}))
+        assert len(row["denial"]) == 400, len(row["denial"])
 
 
 
@@ -1125,6 +1340,15 @@ def test_one_whole_trial_against_a_copy_records_pass_and_writes_only_in_the_copy
                                           "state_is_copied": True}, res["isolation_flags"]
         assert res["write_scope_gap"] == [] and res["missing_isolation_keys"] == []
         assert [row["ok"] for row in res["tool_calls"]] == [True] * 3, res["tool_calls"]
+        # The same field across the process boundary this trial really does cross: a
+        # subprocess server, a socket, and `time.monotonic` rather than a scripted clock
+        # (#4212). The scripted nodes pin the arithmetic; only this one can show the shipped
+        # wiring populates the field, because a `seconds` that no `call_tool` ever filled
+        # would still read here as a round trip that cost something but was not free. The
+        # ceiling is the seam's own per-call timeout — `run()` hands `mcp_tool_call` 20.0 s —
+        # so a row over it is a call that should have been a transport failure.
+        assert all(type(row["seconds"]) is float and 0.0 < row["seconds"] < 20.0
+                   for row in res["tool_calls"]), res["tool_calls"]
         assert res["copy_side"]["landed_by_git_diff"] == ["backlog_write_task", "fact_add",
                                                           "memory_add"], res["copy_side"]
         assert res["copy_side"]["not_landed_by_git_diff"] == [], res["copy_side"]

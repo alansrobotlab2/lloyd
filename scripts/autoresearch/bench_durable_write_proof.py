@@ -1275,6 +1275,15 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
     Three writes over the box's own 42-changes-per-120-seconds rate is a boundary the
     padding is there to close rather than to reason about after the fact.
 
+    Every `tool_calls` row additionally carries `seconds`: the monotonic delta the injected
+    `clock` reports across that one `call_tool`, read the moment it returns and before the row
+    is built, so it is the arm's own wait on the server and adds no clock the routine does not
+    already have (#4212). It does not feed the padding. The padding stays computed from the
+    AGGREGATE delta across the whole loop, which also spans the row construction between the
+    calls, so a sum of the three per-call values is a different and shorter number — padding
+    against that sum would quietly shorten the trial window, which is the error the paragraph
+    above exists to prevent.
+
     `session_id` is the caller's preferred id, and it is not taken as-is: it goes through
     `trial_session_id`, which is the sandbox's own rule (`_tool_sandbox.SANDBOXED_ID_PREFIXES`),
     so a bare `abc` reaches the wire as `bench_abc` and a `bench_x`/`pt-eval-x` arrives
@@ -1334,8 +1343,16 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
     live_before = baseline
     start = clock()
     for row in PROOF_TOOLS:
+        call_started = clock()
         call = call_tool(row["tool"], trial_arguments(row["store"], trial_id),
                          session_id=sid)
+        # Read the moment the call returns, BEFORE the row is built, so this is the arm's own
+        # wait on the server and not that wait plus the dict construction. It is a second
+        # reading of the SAME injected clock, so it is monotonic by construction and adds no
+        # new seam: #4212. `calls_seconds` below already showed a trial that hung, but never
+        # WHICH arm hung — #3959 step (2) had a write outstanding at 420 s and the artefact
+        # could not name it, and recovering that costs a whole 240 s window without this field.
+        call_seconds = clock() - call_started
         # `result_text` is kept because the artifact must show WHERE the server says it
         # wrote: a row that records only `ok: true` cannot be checked against the live trees
         # by a later reader, and the record_path is the one field that can be.
@@ -1352,7 +1369,15 @@ def run_proof(*, state: dict[str, Any], trees: dict[str, Path],
                                      # refusals in the FAIL reason, and an artefact carrying
                                      # only `ok: false` could not tell a refusal — a wiring
                                      # fault — from a transport failure.
-                                     "denial": str(call.get("denial", ""))[:400]})
+                                     "denial": str(call.get("denial", ""))[:400],
+                                     # Wall seconds this one arm consumed, monotonic delta from
+                                     # the clock already injected for the windows (#4212). Kept
+                                     # per call because the aggregate cannot say which arm was
+                                     # slow, and it is kept on a refused row too — a denial that
+                                     # cost 120 s is a different fault from one that cost 1 ms,
+                                     # and it is the only timing a raising call leaves behind,
+                                     # since a raise unwinds before this row is ever built.
+                                     "seconds": call_seconds})
     calls_seconds = clock() - start
     sleep(max(0.0, window_seconds - calls_seconds))   # pad: windows are equal length
     trial_seconds = clock() - start
