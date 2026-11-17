@@ -1250,10 +1250,11 @@ class _FactsIdx:
             return []
         entity = self._canonical_key(str(fm.get("entity") or path.parent.name), memo)
         category = str(fm.get("category") or (path.stem.rsplit("-", 1)[-1] if "-" in path.stem else "general"))
-        try:
-            rel = str(path.relative_to(root))
-        except ValueError:
-            rel = str(path)
+        # The one caller is `reindex`, which proves containment before it calls
+        # (`_require_in_root`), so this cannot raise. It used to fall back to
+        # `str(path)`, and that fallback is the half that actually landed the
+        # absolute `/tmp/...` spellings in `file_path` (#4227).
+        rel = str(path.relative_to(root))
         rows = []
         for f in facts:
             text = str(f.get("fact") or "")
@@ -1284,12 +1285,63 @@ class _FactsIdx:
                "file_path, session_id) "
                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
+    #: One fact file's `file_path` spelling is decided here, once, for both
+    #: `reindex`'s `DELETE … WHERE file_path=?` and `_rows_for_file`'s insert.
+    #:
+    #: Literal containment against **the root passed in**, never against
+    #: `VAULT_FACTS_ROOT`: a temp tree is a legitimate root (`reindex(root=tmp_path
+    #: / "facts")` in the tests, and the migrate, repair, quarantine, expiry and
+    #: knowledge-health scripts all name their own), and the spelling accepted here
+    #: is exactly the spelling that gets stored, so a path that passes cannot have
+    #: its delete and its insert disagree on `file_path`. A `..` component is
+    #: refused with the same rule: it sits under the root only as a string, and
+    #: resolves straight out of it — which is why
+    #: `scripts/memory/quarantine_general_facts.py::files_to_clear` refuses to feed
+    #: such a stored path back to `reindex`.
+    #:
+    #: No `resolve()` on either side, deliberately: fact trees are written by
+    #: `atomic_write_text`, so a symlinked entity dir is a spelling the store
+    #: indexes correctly today (both sides of the comparison keep the same
+    #: root-relative string), and resolving here would refuse it.
+    #:
+    #: The rule exists because `reindex` and `_rows_for_file` used to answer a
+    #: `relative_to` ValueError by storing `str(path)` verbatim. That is how 6 rows
+    #: of the live 204,999 came to name `/tmp/blastroute2_u9ny_mb6/{A,B,C,D}.md`
+    #: with `created_at`, `source_doc` and `provenance` NULL (measured 2026-11-17):
+    #: an ad-hoc trial indexed a scratch corpus against the live root. Such a row is
+    #: unattributable, and since `/tmp` is tmpfs here it is also unresurrectable — a
+    #: full `reindex()` walks `root` and can never re-derive a file outside it. The
+    #: residue sweep's `_kg_index_residue` owns the rows that are already there;
+    #: this refuses to add more. `_refuse_stray_create` applies the sibling rule to
+    #: a store FILE's path; nothing had ever applied one to a row's.
+    @staticmethod
+    def _require_in_root(path: Path, root: Path) -> Path:
+        """Return `path` if it sits under `root`; raise `ValueError` naming both if not."""
+        esc = False
+        try:
+            esc = ".." in path.relative_to(root).parts
+        except ValueError:
+            esc = True
+        if esc:
+            raise ValueError(
+                f"refusing to index the fact file {path}: it is not under the facts root "
+                f"{root} it is being indexed against. `facts_idx.file_path` is stored "
+                f"relative to that root, so an out-of-root path would be written verbatim "
+                f"and could never be rebuilt from it (#4227).")
+        return path
+
     def reindex(self, paths: Optional[Iterable[Path]] = None, root: Optional[Path] = None,
                 *, register_entities: bool = True) -> dict[str, int]:
         """Rebuild the index from the markdown files. With `paths`, only those
         files are re-read (rows for each path are replaced); without, the
         whole tree under `root` is walked and the table replaced. Entity dirs
-        seen are registered."""
+        seen are registered.
+
+        With `paths`, every one of them is proven to sit under `root` before the
+        transaction opens (see `_require_in_root`), so a call that refuses one path
+        has neither written nor deleted anything — the whole batch is refused rather
+        than half-applied. The walk (`paths=None`) needs no such proof: a file found
+        under `root` is under it."""
         root = Path(root or VAULT_FACTS_ROOT)
         stats = {"files": 0, "facts": 0, "entities_registered": 0}
         if paths is None:
@@ -1301,7 +1353,7 @@ class _FactsIdx:
                            for p in d.glob("*.md")) if root.exists() else []
             full = True
         else:
-            files = [Path(p) for p in paths]
+            files = [self._require_in_root(Path(p), root) for p in paths]
             full = False
         with self._s.transaction() as c:
             if full:
@@ -1309,10 +1361,10 @@ class _FactsIdx:
             seen_dirs: set[str] = set()
             memo: dict[str, str] = {}     # one call's scope, see `_canonical_key`
             for p in files:
-                try:
-                    rel = str(p.relative_to(root))
-                except ValueError:
-                    rel = str(p)
+                # Containment is settled above (and holds by construction for the
+                # walk), so this never raises: `rel` is always the tree-relative
+                # spelling, which is the only spelling a row may carry.
+                rel = str(p.relative_to(root))
                 if not full:
                     c.execute("DELETE FROM facts_idx WHERE file_path=?", (rel,))
                 if not p.exists():

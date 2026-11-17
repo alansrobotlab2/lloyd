@@ -1294,8 +1294,13 @@ def count_index_ghosts(parsed_paths: dict[Path, int], root: Path,
     - `unopened_rows` — the index holds a `file_path` the walk never opened. Two
       causes live here. A file that no longer exists: 6 rows on four
       `/tmp/blastroute2_u9ny_mb6/*.md` paths, leaked into the live store by an
-      uncommitted script on 2026-10-19, 2 of them still unexpired. And a file the
-      walk cannot reach at all: the fact writer builds
+      uncommitted script on 2026-10-19 and all 6 since retired (4 `invalid_at` of
+      2026-10-19, 2 `expired_at` of 2026-11-09), so `for_entity` reaches none of
+      them — the count is 6 retired, 0 live, not 6 live. The writer that leaked
+      them is closed: `KGStore.facts_idx` now refuses a file outside the root it is
+      given (#4227), and the rows themselves stay for
+      `scripts/groundskeeper/retention-sweep.py::_kg_index_residue` to retire, not
+      to delete. And a file the walk cannot reach at all: the fact writer builds
       `<root>/<entity>/<entity>-<category>.md`, so an entity name containing a `/`
       mkdir-parents a nested tree, while `load_entities()` and
       `KGStore.facts_idx.reindex()` both walk exactly `root.iterdir()` +

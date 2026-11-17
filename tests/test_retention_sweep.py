@@ -12966,8 +12966,18 @@ def test_the_index_residue_selects_on_the_joined_path_not_on_a_count(rs, tmp_pat
     nested = _kg_fact_file(root, "Databricks AI/BI Genie", facts=[{"id": "f1", "fact": "Kept."}])
     outside = _kg_fact_file(tmp_path / "scratch", "Scratch Live",
                             facts=[{"id": "f1", "fact": "Kept."}])
-    for f in (here, nested, outside):
+    for f in (here, nested):
         assert store.facts_idx.update_file(f, root=root) == 1
+    # The absolute key is filed directly, because nothing can index it into
+    # existence any more: #4227 made `update_file`/`reindex` refuse a path outside
+    # the root they index against, which is exactly the writer that left the live
+    # store's 6 `/tmp/blastroute2_u9ny_mb6/*.md` rows. Filing it by hand is both the
+    # only way to get this shape and the honest one — the sweep's job is the rows a
+    # pre-#4227 writer left behind, not the ones a caller can still create.
+    store.conn.execute(
+        "INSERT INTO facts_idx(entity, category, fact_id, text_hash, fact, file_path) "
+        "VALUES (?,?,?,?,?,?)",
+        ("Scratch Live", "state", "f1", "scratch-live-f1", "Kept.", str(outside)))
     assert store.facts_idx.file_row_counts()[str(outside)] == 1, (
         "the absolute key was not stored as an absolute key — this fixture would prove nothing")
     gone = _kg_fact_file(root, "Also Gone", facts=[{"id": "f1", "fact": "Residue."}])
