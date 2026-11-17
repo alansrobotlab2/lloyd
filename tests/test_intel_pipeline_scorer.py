@@ -5564,7 +5564,8 @@ def test_the_dead_feed_count_survives_the_run_and_clears_when_the_feed_fetches(
 # disk, because the thing at risk is a file a later scan cannot lose.
 
 
-def _series_env(tmp_path, monkeypatch, *, fetched, attempted, raw_rows=0, written=0):
+def _series_env(tmp_path, monkeypatch, *, fetched, attempted, raw_rows=0, written=0,
+                gh_attempted=0, gh_failed=0, gh_raw_rows=0, github_scan=None):
     """Point the state, raw and series seams at `tmp_path`, then run one real `main()`.
 
     Every seam is patched where the CALLER reads it: `main()` imports
@@ -5573,10 +5574,19 @@ def _series_env(tmp_path, monkeypatch, *, fetched, attempted, raw_rows=0, writte
     module-level path globals at call time, so redirecting those three globals moves the
     whole run off the live vault. `--scan --write` is the invocation: it runs both stages the
     series row reports on and skips scoring, which would otherwise ask for an LLM.
+
+    The GitHub stage is stubbed here too, which it was not before #4187: every node in this
+    section reached live `api.github.com`, so the GitHub columns could not be pinned to a
+    number. `gh_attempted`/`gh_failed` drive the stub's `RepoCoverage`, and `gh_raw_rows`
+    saves that many `source: github` rows into the SAME day file the YouTube stub writes,
+    because `github_raw_rows` counts that file rather than a return value. A node that wants
+    the real scanner passes `github_scan` — the non-quota failure node does, against a
+    `urlopen` it has already broken.
     """
     from intel_pipeline import state as ist
     from intel_pipeline import __main__ as entry
     from intel_pipeline.scanners import youtube_scanner as ys
+    from intel_pipeline.scanners import github_scanner as gs
 
     feeds = tmp_path / "feeds"
     (feeds / "raw").mkdir(parents=True, exist_ok=True)
@@ -5592,7 +5602,16 @@ def _series_env(tmp_path, monkeypatch, *, fetched, attempted, raw_rows=0, writte
             ist.save_raw_items(items, _utc_today())
         return items, ys.FeedCoverage(fetched=fetched, attempted=attempted)
 
+    def fake_gh_scan(*args, **kwargs):
+        items = [{"id": f"gh-{i}", "source": "github", "title": f"g{i}"}
+                 for i in range(gh_raw_rows)]
+        if items:
+            ist.save_raw_items(items, _utc_today())
+        return items, gs.RepoCoverage(attempted=gh_attempted, failed=gh_failed)
+
     monkeypatch.setattr(ys, "scan_youtube_channels", fake_scan)
+    monkeypatch.setattr(gs, "scan_github_repos_with_coverage",
+                        github_scan or fake_gh_scan)
     from intel_pipeline import vault_writer as vw
     monkeypatch.setattr(vw, "write_all_to_vault", lambda *a, **k: written)
 
@@ -5704,6 +5723,16 @@ def test_two_scans_leave_two_rows_and_the_state_slot_holds_only_the_latest(tmp_p
                         lambda *a, **k: ([], ys.FeedCoverage(fetched=63, attempted=63)))
     monkeypatch.setattr(vw, "write_all_to_vault", lambda *a, **k: 4)
     monkeypatch.setattr(entry, "load_profile", lambda *a, **k: {})
+    # The scanner's slot, seeded. #4187 stubbed the GitHub stage in `_series_env`, and this
+    # file used to exist only because the REAL `scan_github_repos` created it, so guarding
+    # the read below with `if exists()` would have made the assert pass by reading nothing.
+    # Creating the slot with a scanner-shaped entry and asserting the sentinel survives is
+    # what gives the assert its subject back: the bytes read at the end are the ones the run
+    # held. The node's claim is #3873's and is unchanged — `main()` writes no coverage key
+    # into the scanner's slot.
+    state_file = feeds / "scanner-state.json"
+    state_file.write_text(json.dumps(
+        {"github_repos": {"openclaw/openclaw": {"last_sha": "seeded-before-this-scan"}}}))
     assert _run_main(entry, ["intel-pipeline", "--scan", "--write"]) == 0
 
     rows = [json.loads(ln) for ln in
@@ -5717,7 +5746,15 @@ def test_two_scans_leave_two_rows_and_the_state_slot_holds_only_the_latest(tmp_p
     # scanner's single overwritten slot — `test_the_dead_feed_count_survives_the_run_and_clears_when_the_feed_fetches`
     # is the node that pins that slot holding the latest scan alone, and it is untouched by
     # this diff.
-    st = json.loads((feeds / "scanner-state.json").read_text())
+    #
+    # The slot was seeded above, so this read is unconditional: a guarded `if exists()`
+    # would have let the assert pass by reading nothing, which is the vacuity #4187 must not
+    # leave behind. The sentinel is checked too, so the bytes proved below are the ones the
+    # run held rather than a file this node happened to leave untouched.
+    st = json.loads(state_file.read_text())
+    assert st["github_repos"] == {"openclaw/openclaw": {"last_sha": "seeded-before-this-scan"}}, (
+        "the scan rewrote or cleared the seeded slot, so the assert below would be about a "
+        "file this run built, not the scanner's own state")
     assert "youtube_coverage" not in st, st.keys()
 
 
@@ -5831,3 +5868,159 @@ def test_the_budget_still_bounds_a_day_of_three_over_it(redirect_paths):
                for s in scored if s.grade_source == "model")
     assert [s.id for s in scored] == [i.id for i in items], (
         "stage2_score must return the caller's order whatever the allocation did")
+
+# ══ #4187: the series row grows its GitHub half ═════════════════════════════════════
+#
+# The row #3873 introduced reported one of the two feeds it writes: seven keys, none of
+# them GitHub's, while `raw/<date>.jsonl` carried 30-31 GitHub rows a day and the series
+# said nothing about any of them. So the file that answers "when did delivery stop"
+# could answer it for YouTube only, and a day that read 4 repos and wrote 0 GitHub rows
+# was the same row as a day that read none: the GitHub blackout #570 was filed for is
+# still invisible here even after #3981 unfroze the timestamps. The nodes below drive the
+# real `main()`, through the same fixture #3873 used, because the thing at risk is a file
+# a later scan cannot lose — and they read the appended row off disk rather than a
+# function's return value, since the clause is about the row.
+
+
+def test_the_scan_row_reports_the_github_half_beside_the_youtube_half(tmp_path, monkeypatch):
+    """Clause 1: three GitHub columns join the seven, and the seven still mean the same.
+
+    `gh_raw_rows=31` and `raw_rows=2` land in ONE day file, so the two counts are read
+    from the same bytes: 31 rows tagged `github`, 2 tagged `youtube`. That pairing is
+    what makes this node refuse a writer that counted the whole file into both columns,
+    or counted only the half it was written beside — the 2026-11-15 row is the live case,
+    30 GitHub rows in the day file and no GitHub key anywhere near it.
+    """
+    from datetime import datetime
+
+    code, rows, _feeds = _series_env(tmp_path, monkeypatch, fetched=63, attempted=63,
+                                    raw_rows=2, written=4, gh_attempted=4, gh_raw_rows=31)
+    assert code == 0, (code, "both halves healthy, so the exit-code rule is untouched")
+    assert len(rows) == 1, rows
+    row = rows[0]
+
+    assert row["github_repos_attempted"] == 4, row
+    assert row["github_raw_rows"] == 31, row
+    assert row["github_degraded"] is False, row
+
+    assert row["date"] == _utc_today(), row
+    assert row["youtube_feeds_fetched"] == 63 and row["youtube_feeds_attempted"] == 63, row
+    assert row["youtube_degraded"] is False, row
+    assert row["youtube_raw_rows"] == 2, row
+    assert row["items_written"] == 4, row
+    datetime.strptime(row["scanned_at"], "%Y-%m-%dT%H:%M:%S")
+    assert set(row) == {
+        "date", "scanned_at",
+        "youtube_feeds_fetched", "youtube_feeds_attempted", "youtube_degraded",
+        "youtube_raw_rows", "items_written",
+        "github_repos_attempted", "github_raw_rows", "github_degraded",
+    }, "the row's key set is what a reader greps for; anything else is a rename"
+
+
+@pytest.mark.parametrize("kind", ["http_500", "lost_egress"])
+def test_a_github_failure_that_is_not_a_quota_hit_still_degrades_the_row(tmp_path, monkeypatch,
+                                                                        kind):
+    """Clause 2: a 500 or a lost connection degrades the row, not only a 403.
+
+    The real `scan_github_repos_with_coverage` runs against a `urlopen` that fails the
+    way GitHub fails when it is up but unhappy (`HTTPError` 500) and the way it fails
+    when the box has no route (`URLError`) — egress loss, which the item names and which
+    no quota ledger can ever see. Both were invisible before #4187 for the same reason
+    #570 gave for a quota: `fetch_releases`/`fetch_commits`/`fetch_issues` folded every
+    non-quota exception into `[]` and printed a line, so 0 items looked like nothing new.
+
+    Asserted on the appended row, not on a return value, because the row is the witness
+    the item is about; and on `github_repos_attempted == 1`, because "degraded, and it
+    still read a repo" is a different claim from "the stage never reported".
+    """
+    import urllib.error
+    import urllib.request
+    from intel_pipeline.scanners import github_scanner as gs
+
+    cfg = tmp_path / "github-repos.yml"
+    cfg.write_text("repos:\n  - owner: openclaw\n    repo: openclaw\n"
+                   "    track: [commits, issues]\n")
+    monkeypatch.setattr(gs, "CONFIG_PATH", cfg)
+    _gh_credential_absent(monkeypatch)
+
+    def fake_urlopen(req, timeout=None):
+        if kind == "http_500":
+            raise urllib.error.HTTPError(req.full_url, 500, "server error", None, None)
+        raise urllib.error.URLError("Network is unreachable")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    _code, rows, _feeds = _series_env(tmp_path, monkeypatch, fetched=63, attempted=63,
+                                      github_scan=gs.scan_github_repos_with_coverage)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["github_degraded"] is True, (
+        f"{kind}: a repo fetch that failed is reported as a quiet GitHub day again")
+    assert row["github_repos_attempted"] == 1, row
+    assert row["github_raw_rows"] == 0, row
+    assert row["youtube_raw_rows"] == 0, row
+
+
+@pytest.mark.parametrize("fetched,attempted,expected_code", [
+    (63, 63, 0),
+    (1, 63, 1),
+], ids=["youtube_healthy_exit_0", "youtube_below_the_floor_exit_1"])
+def test_a_github_stage_that_never_reports_still_books_its_row_at_todays_exit_code(
+        tmp_path, monkeypatch, fetched, attempted, expected_code):
+    """Clause 3: a GitHub stage that raises books a degraded row and does not move the exit code.
+
+    The GitHub call sits outside the `try` that catches a raising YouTube stage, so before
+    #4187 one unreachable repo or one malformed GitHub response ended the run before the
+    series write — the blackout left no row at all, which is worse than a row saying
+    "nothing new". Now the stage's own failure is caught where it is waited on, and the row
+    says `github_degraded: true` with `github_repos_attempted: 0`: a stage that died, not a
+    quiet GitHub day.
+
+    The exit code is asserted against the rule in force today and unchanged by this item:
+    1 only when YouTube coverage is below `COVERAGE_FLOOR`. That YouTube stays the only
+    floor is a ruling, not an oversight — a GitHub repo list of 4 has no floor to fall
+    through, so the row carries the GitHub reading and the exit code stays YouTube's.
+    """
+    def raising_scan(*args, **kwargs):
+        raise RuntimeError("stub: the GitHub stage died before any repo was read")
+
+    code, rows, _feeds = _series_env(tmp_path, monkeypatch, fetched=fetched,
+                                     attempted=attempted, github_scan=raising_scan)
+    assert code == expected_code, (code, rows, "the exit-code rule is not this item's to change")
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["github_degraded"] is True, row
+    assert row["github_repos_attempted"] == 0, row
+    assert row["github_raw_rows"] == 0, row
+    assert row["youtube_feeds_fetched"] == fetched and \
+        row["youtube_feeds_attempted"] == attempted, row
+    # The floor is the scanner's own constant, not a ratio this node invents: degraded is
+    # `fetched < attempted * COVERAGE_FLOOR` with COVERAGE_FLOOR = 0.5, which is also the
+    # only thing that produces exit 1 here.
+    from intel_pipeline.scanners.youtube_scanner import COVERAGE_FLOOR
+    assert row["youtube_degraded"] is (fetched < attempted * COVERAGE_FLOOR), row
+
+
+def test_the_github_count_is_the_day_files_github_rows_only(tmp_path, monkeypatch):
+    """Clause 4: `github_raw_rows` counts `source == "github"`, the way the YouTube count is source-filtered.
+
+    Both numbers come out of `state.count_raw_rows(date, source)`, so the only way this
+    node goes red is a writer that counted the whole day file, or counted a source it was
+    not asked for. 31 GitHub rows with 0 YouTube rows is the 2026-11-15 shape exactly —
+    `raw/2026-11-15.jsonl` held 30 GitHub rows and no YouTube rows, and the series row for
+    that day reported `youtube_raw_rows: 0` and nothing else, which read as a day the
+    pipeline delivered nothing on.
+    """
+    _code, rows, feeds = _series_env(tmp_path, monkeypatch, fetched=63, attempted=63,
+                                     raw_rows=0, written=0, gh_attempted=4, gh_raw_rows=31)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    day = sorted((feeds / "raw").glob("*.jsonl"))
+    assert len(day) == 1, day
+    lines = [ln for ln in day[0].read_text().splitlines() if ln.strip()]
+    assert len(lines) == 31, "the day file is the denominator both counts read"
+    assert row["github_raw_rows"] == 31, row
+    assert row["youtube_raw_rows"] == 0, row
+    assert row["github_repos_attempted"] == 4, row
+    assert row["github_degraded"] is False, (
+        "31 rows delivered is not a degraded GitHub day")

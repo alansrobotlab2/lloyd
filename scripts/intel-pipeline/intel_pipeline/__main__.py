@@ -87,16 +87,30 @@ def main():
     # writer, which the series records as a zero rather than omitting the key — a row that
     # omits it cannot be averaged against a row that wrote six items.
     items_written = 0
+    # The GitHub half of the same row (#4187), initialized for the same reason and read the
+    # same way: `None` means the stage has not reported, which the row turns into
+    # `github_degraded: false, github_repos_attempted: 0` for a `--write`-only invocation —
+    # a run that never scanned says so with zeros rather than with a missing key, which is
+    # the rule `items_written` above already follows.
+    github_cov = None
+    github_scan_error = None
     if run_all or args.scan:
         print("\n--- Running Scanners ---\n")
         
-        # Import and run GitHub scanner
+        # Import and run GitHub scanner. #4187 kept this `try` doing what it always did —
+        # a raising GitHub stage must not end the run — and changed what the run REMEMBERS
+        # from it: the coverage record and the error text, so the series row below can say
+        # `github_degraded: true` instead of leaving the GitHub half of a blackout out of
+        # the file entirely. Before this, the two readings "GitHub could not be reached"
+        # and "GitHub had nothing new" both arrived as `GitHub scanner: 0 items`.
+        github_items = []
         try:
-            from .scanners.github_scanner import scan_github_repos
-            github_items = scan_github_repos()
+            from .scanners.github_scanner import scan_github_repos_with_coverage
+            github_items, github_cov = scan_github_repos_with_coverage()
             print(f"GitHub scanner: {len(github_items)} items")
         except Exception as e:
             print(f"GitHub scanner error: {e}")
+            github_scan_error = str(e)
             github_items = []
         
         # Import and run YouTube scanner
@@ -169,6 +183,22 @@ def main():
         items_written = count
         print(f"Vault writer: {count} items written")
 
+    # #4187: the GitHub half of the same witness, read from what the scan stage above
+    # remembered — `github_cov` when the stage reported, `github_scan_error` when it raised
+    # before any repo was read, in which case `attempted == 0` arrives WITH the flag rather
+    # than as a bare 0 that would read as "no repos configured". A stage that raised used to
+    # leave no row at all, which is worse than a row saying it could not read GitHub.
+    #
+    # The exit code is deliberately NOT extended to GitHub: `COVERAGE_FLOOR` is a ruling
+    # about the 63-channel YouTube list, and a repo list of four has no floor to fall
+    # through, so the row carries the GitHub reading and the exit stays YouTube's. The gate
+    # below is left exactly as it was too — a run whose YouTube stage raised still books no
+    # row at all, and widening that is a ruling for the owed-check, not a side effect of
+    # adding fields to the row that is written.
+    github_repos = github_cov.attempted if github_cov is not None else 0
+    github_degraded = (github_scan_error is not None
+                       or (github_cov is not None and github_cov.degraded))
+
     # One dated row per scan, appended BEFORE the degraded exit below: the run that could
     # not reach its feeds is the run whose row the series exists to hold, so booking it
     # after the `sys.exit(1)` would record every blackout as a gap — the shape of the
@@ -182,6 +212,12 @@ def main():
             "youtube_degraded": bool(youtube_coverage.degraded),
             "youtube_raw_rows": state.count_raw_rows(date_str, "youtube"),
             "items_written": items_written,
+            # #4187. `github_raw_rows` is the day file's `source == "github"` count read
+            # through the same call and the same filter the YouTube count above uses, so a
+            # day that delivered 31 GitHub rows and no YouTube rows says so in one row.
+            "github_repos_attempted": github_repos,
+            "github_raw_rows": state.count_raw_rows(date_str, "github"),
+            "github_degraded": github_degraded,
         })
     
     # A run that could not reach most of the configured YouTube feeds must not

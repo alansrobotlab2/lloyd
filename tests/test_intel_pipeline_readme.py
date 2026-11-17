@@ -54,7 +54,8 @@ def test_readme_points_at_the_live_invocation_not_the_deleted_vault_tree():
 #: Every key the writer emits, so the table cannot keep its prose while a field is renamed
 #: out of it — which is what a README that only names the FILE would fail to catch.
 SERIES_KEYS = ("youtube_feeds_fetched", "youtube_feeds_attempted", "youtube_degraded",
-               "youtube_raw_rows", "items_written")
+               "youtube_raw_rows", "items_written",
+               "github_repos_attempted", "github_raw_rows", "github_degraded")
 
 
 def test_the_readme_documents_the_scan_series_file_its_counts_and_the_command():

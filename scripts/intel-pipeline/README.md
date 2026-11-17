@@ -253,6 +253,15 @@ Each row is one JSON object per scan, holding the scan `date` and `scanned_at` w
 | `youtube_degraded` | coverage below `COVERAGE_FLOOR`, i.e. the run exited 1 |
 | `youtube_raw_rows` | rows this scan's source appended to `raw/<date>.jsonl` |
 | `items_written` | items the vault writer wrote, `0` for a run that never ran it |
+| `github_repos_attempted` | repos the GitHub scan reached an outcome on — a config entry with no `owner` or no `repo` is not counted (#4187) |
+| `github_raw_rows` | rows this scan's `github` source appended to `raw/<date>.jsonl`, counted the same source-filtered way as `youtube_raw_rows` |
+| `github_degraded` | any repo fetch failed (a `GITHUB_RATE_LIMIT` 403, a 500, or lost egress), or the GitHub stage raised before reading a repo. It is **not** tied to the exit code: `COVERAGE_FLOOR` is a YouTube ruling, so this column carries the GitHub reading and `1` still means YouTube alone |
+
+The GitHub columns say what a `0` in `github_raw_rows` was: `github_repos_attempted: 4`
+beside it is a GitHub day with nothing new, `github_repos_attempted: 0` with
+`github_degraded: true` is a stage that never read a repo. Rows before 2026-11-16 have no
+GitHub key at all — the seven rows that were already in the file are YouTube-only, which is
+the gap #4187 closed.
 
 Read the curve with:
 

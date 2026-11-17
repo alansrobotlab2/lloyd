@@ -10,7 +10,7 @@ import subprocess
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, NamedTuple, Optional, Dict, Any
 import time
 
 from ..models import FeedItem
@@ -247,6 +247,34 @@ def _http_get(url: str, params: Optional[Dict] = None, headers: Optional[Dict] =
         raise Exception(str(e))
 
 
+class RepoCoverage(NamedTuple):
+    """How many repos a GitHub scan tried to read, and how many it failed to read.
+
+    The GitHub half's answer to `youtube_scanner.FeedCoverage`, and the reason the
+    series row can tell a quiet day from a blackout without run-log prose (#4187):
+    `scanned 4 repos, wrote 0` and `read 0 of 4 repos` are different rows.
+
+    `attempted` counts only repos that got an outcome, so a config entry with no
+    owner or no repo is not silently in the denominator — the same rule
+    `FeedCoverage.attempted` states for channels.
+
+    Unlike the YouTube half there is no floor: `degraded` is true when ANY repo
+    failed, because one unreachable repo is already the reading the GitHub series
+    could not make before this record existed, and `attempted == 0` is not
+    degradation — "No GitHub repos configured" has been printed in that case.
+    """
+
+    attempted: int
+    failed: int
+
+    @property
+    def degraded(self) -> bool:
+        return self.failed > 0
+
+    def describe(self) -> str:
+        return f"read {self.attempted - self.failed} repos of {self.attempted} attempted"
+
+
 def fetch_releases(owner: str, repo: str, last_tag: Optional[str] = None) -> List[Dict]:
     """Fetch releases for a repo."""
     url = f"{GITHUB_API_URL}/repos/{owner}/{repo}/releases"
@@ -261,9 +289,9 @@ def fetch_releases(owner: str, repo: str, last_tag: Optional[str] = None) -> Lis
         return releases[:5]  # Limit to 5 most recent new releases
     except GitHubRateLimitError:
         raise  # never fold a quota into "nothing new"
-    except Exception as e:
-        print(f"Error fetching releases for {owner}/{repo}: {e}")
-        return []
+    # No `except Exception: return []` here since #4187: a 500 or a lost connection
+    # folded into "nothing new" is the same silent zero #570 was filed for, and the
+    # caller `_fetch_track` now records it and returns the [] itself.
 
 
 def fetch_commits(owner: str, repo: str, last_sha: Optional[str] = None) -> List[Dict]:
@@ -287,10 +315,7 @@ def fetch_commits(owner: str, repo: str, last_sha: Optional[str] = None) -> List
 
         return commits[:10]  # Limit to 10 commits
     except GitHubRateLimitError:
-        raise
-    except Exception as e:
-        print(f"Error fetching commits for {owner}/{repo}: {e}")
-        return []
+        raise  # see fetch_releases: a non-quota failure is `_fetch_track`'s to record
 
 
 def fetch_issues(owner: str, repo: str, last_ts: Optional[str] = None) -> List[Dict]:
@@ -320,25 +345,42 @@ def fetch_issues(owner: str, repo: str, last_ts: Optional[str] = None) -> List[D
 
         return issues[:5]  # Limit to 5 issues
     except GitHubRateLimitError:
-        raise
-    except Exception as e:
-        print(f"Error fetching issues for {owner}/{repo}: {e}")
-        return []
+        raise  # see fetch_releases: a non-quota failure is `_fetch_track`'s to record
 
 
-def _fetch_track(track: str, fn, *args, rate_limited: Dict[str, str], repo_key: str) -> List[Dict]:
-    """Run one fetch, recording a quota hit against this repo instead of returning [].
+def _fetch_track(track: str, fn, *args, rate_limited: Dict[str, str], repo_key: str,
+                 failures: Dict[str, str]) -> List[Dict]:
+    """Run one fetch, recording ANY failure against this repo instead of returning [].
 
     The point is that the caller still gets a list and the scan still finishes,
-    but a 403 is named — and the caller refuses to advance that repo's stored
-    state, so items missed during the quota window are still reported later.
+    but a failure is named — and a quota hit additionally makes the caller refuse
+    to advance that repo's stored state, so items missed during the quota window
+    are still reported later.
+
+    Two ledgers, deliberately: `rate_limited` is #570's and gates state advance,
+    so only a quota belongs in it; `failures` is #4187's and is everything — a
+    quota 403, a 500, a 404, or a `URLError` from lost egress. The reason it
+    cannot be one dict is the reading each one carries: a 500 on one track of a
+    repo whose other two tracks answered is not a repo whose stored timestamp
+    must not move, and folding it in would have the scan re-report items it
+    already published. `rate_limited` is therefore a subset of `failures`, and
+    `RepoCoverage.failed` counts the repos named in the wider one.
     """
     try:
         return fn(*args)
     except GitHubRateLimitError as e:
         rate_limited[repo_key] = f"{track}: {e}"
+        failures.setdefault(repo_key, f"{track}: {e}")
         print(f"  GITHUB_RATE_LIMIT on {repo_key} ({track}): HTTP {e.status} "
               f"[{e.remaining} of {e.limit} requests left]")
+        return []
+    except Exception as e:
+        # What used to be `except Exception: print; return []` inside fetch_releases,
+        # fetch_commits and fetch_issues. Same list back, one named line to the log,
+        # and now a mark on the scan's coverage: a repo that could not be reached is
+        # no longer reported as a repo with nothing new (#4187).
+        failures.setdefault(repo_key, f"{track}: {e}")
+        print(f"  GITHUB_FETCH_FAILED on {repo_key} ({track}): {e}")
         return []
 
 
@@ -349,10 +391,23 @@ def scan_github_repos() -> List[FeedItem]:
     Returns:
         List of FeedItem objects
     """
+    items, _coverage = scan_github_repos_with_coverage()
+    return items
+
+
+def scan_github_repos_with_coverage() -> "tuple[List[FeedItem], RepoCoverage]":
+    """Scan, and say how much of the configured repo list the scan actually read.
+
+    `scan_github_repos()` is this function's projection onto its items, and the two
+    exist side by side on purpose: four call sites and the README's example unpack a
+    bare list, and #4187 asked the SCAN to report its coverage, not the scanner to
+    change its shape. The pipeline entry point is the caller that reads the second
+    value, which is what puts the GitHub half into `scan-series.jsonl`.
+    """
     repos = load_github_repos_config()
     if not repos:
         print("No GitHub repos configured")
-        return []
+        return [], RepoCoverage(attempted=0, failed=0)
 
     if load_github_token() is None:
         print(f"No GitHub token configured (GITHUB_TOKEN, `token:` in {CONFIG_PATH}, "
@@ -370,6 +425,10 @@ def scan_github_repos() -> List[FeedItem]:
     # repo_key -> "track: reason", so the run report can say which repos were
     # rate limited rather than reporting a quiet day.
     rate_limited: Dict[str, str] = {}
+    # Every failure, quota or not (#4187). Read into RepoCoverage below; see
+    # `_fetch_track` for why this is a second ledger and not the one above.
+    failures: Dict[str, str] = {}
+    repos_attempted = 0
 
     for repo_config in repos:
         owner = repo_config.get("owner", "")
@@ -380,6 +439,7 @@ def scan_github_repos() -> List[FeedItem]:
             continue
 
         repo_key = f"{owner}/{repo}"
+        repos_attempted += 1
         print(f"\nScanning {repo_key}...")
 
         # Get stored state for this repo
@@ -391,7 +451,8 @@ def scan_github_repos() -> List[FeedItem]:
         # Fetch releases
         if "releases" in track:
             releases = _fetch_track("releases", fetch_releases, owner, repo, last_tag,
-                                    rate_limited=rate_limited, repo_key=repo_key)
+                                    rate_limited=rate_limited, repo_key=repo_key,
+                                    failures=failures)
             for release in releases:
                 tag = release.get("tag_name", "")
                 item_id = f"github:{owner}/{repo}:release:{tag}"
@@ -424,7 +485,8 @@ def scan_github_repos() -> List[FeedItem]:
         # Fetch commits
         if "commits" in track:
             commits = _fetch_track("commits", fetch_commits, owner, repo, last_sha,
-                                   rate_limited=rate_limited, repo_key=repo_key)
+                                   rate_limited=rate_limited, repo_key=repo_key,
+                                   failures=failures)
             for commit in commits:
                 sha = commit.get("sha", "")
                 item_id = f"github:{owner}/{repo}:commit:{sha[:8]}"
@@ -459,7 +521,8 @@ def scan_github_repos() -> List[FeedItem]:
         # Fetch issues
         if "issues" in track:
             issues = _fetch_track("issues", fetch_issues, owner, repo, last_ts,
-                                  rate_limited=rate_limited, repo_key=repo_key)
+                                  rate_limited=rate_limited, repo_key=repo_key,
+                                  failures=failures)
             for issue in issues:
                 number = issue.get("number", 0)
                 item_id = f"github:{owner}/{repo}:issue:{number}"
@@ -521,7 +584,16 @@ def scan_github_repos() -> List[FeedItem]:
         state.save_raw_items(all_items, today)
         print(f"\nSaved {len(all_items)} items to raw JSONL")
 
-    return all_items
+    coverage = RepoCoverage(attempted=repos_attempted, failed=len(failures))
+    if coverage.degraded:
+        # The #570 rule one level up: a scan that could not reach its repos has to
+        # be named in the run output and in the row, not reported as a quiet day.
+        print(f"\nGitHub repo coverage: {coverage.describe()} — "
+              f"{len(failures)} repo(s) failed a fetch:")
+        for repo_key, reason in failures.items():
+            print(f"GITHUB_FETCH_FAILED {repo_key} — {reason}")
+
+    return all_items, coverage
 
 
 if __name__ == "__main__":
