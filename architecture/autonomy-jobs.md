@@ -176,7 +176,13 @@ not something a tool enforces. A write **is durable state** when it lands in a
 store the fleet or a human reads back as the system's record: prose under
 `knowledge/`, `memory/` or `backlog/`, a `SKILL.md` in the skills library, the
 derived fact tree, or an appended row of a dated series under `~/lloyd-data/`
-**only when a lane other than its own writer reads it back**. It is **not**
+**only when a lane other than its own writer reads it back**. That second reader
+has to be one that **acts**: the qualifying read is one a job or a person will
+act on, meaning the artefact goes on to file a backlog item, promote a round, or
+change some other lane's state. #100's eval instrument index **scores** a job row
+and publishes a table nobody files, promotes or changes state on, so that scoring
+is **not the read** that makes the writer's artefact durable state, and a row the
+index scores keeps the tier the filing question gives it (#3979). It is **not**
 durable state when it is a job's own scratch — a file under
 `~/obsidian/skills/<skill>/scripts/` that the run rewrites for its own
 bookkeeping, prunes on a timer, and reads back itself, consumed by nothing

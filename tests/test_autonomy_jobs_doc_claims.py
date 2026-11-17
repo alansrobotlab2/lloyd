@@ -9862,3 +9862,244 @@ def test_the_82_passage_describes_the_edge_its_file_declares():
             f"the {label} control rewrote nothing, so it proved nothing")
         assert _82_passage_lies(mutated), (
             f"a passage that {label} still passed the clause-1 predicate")
+
+
+# ── #4195 — the read that makes a write durable is one a lane ACTS on ────────
+#
+# §Write authority's positive clause ended at "**only when a lane other than its own
+# writer reads it back**" (#3445, `db7f458f`) — wording written before any arm of
+# `scripts/eval_instrument_index.py` existed. Read literally it makes all five
+# index-fed rows durable-state writers, while the tier table files all five
+# `Reports only`; §Watch the machinery already concedes the contradiction ("Taken
+# literally, that read-back conjunct would move every report-only row whose artefact
+# #100's index scores"). The unqualified sentence has already produced one landed doc
+# error (`76b5f2d8`, corrected by `b79ca0c5`), and it is the sentence a later round
+# reasons from, so the bound goes into the definition — in the same test §Watch's
+# tier paragraph has applied since #3979 (`ACT_ON_PHRASE`, :1632 and :1642).
+
+#: The consequences that turn a read into an act. All three have to be named: the
+#: bound is what has to exclude #100's scoring, and a bound naming only one of them
+#: leaves the other two readings open — which is the shape of the argument that moved
+#: a row on a score in #3979.
+_BOUND_CONSEQUENCES = ("file", "promote", "state")
+
+
+def test_the_unit_of_account_bound_requires_a_read_a_lane_acts_on():
+    """#4195 clauses 1 and 2: the bound lives in the definition, not near it.
+
+    Scoped to `_unit_of_account_paragraph` because this module's recurring defect
+    (#1520, #1524) is one section's correct wording excusing another's missing one,
+    and §Watch the machinery two pages below already carries the phrase twice. The
+    seeded copy below is what makes that scope real: the bound sentence is deleted
+    from the paragraph while the file still holds `ACT_ON_PHRASE` twice outside it,
+    and the predicate has to come back empty.
+    """
+    text = _text()
+    prose = _rule_prose(text)
+
+    acts = [s for s in _sentences(prose) if ACT_ON_PHRASE in s]
+    assert acts, (
+        "the unit-of-account paragraph states no act-on bound, so a lane that merely "
+        "scores a row is a second reader and every index-fed row is durable state by "
+        f"the definition while the table files it `Reports only`; {ACT_ON_PHRASE!r} "
+        f"occurs {_flat(text).count(ACT_ON_PHRASE)}x in the file and none of those "
+        "occurrences is in the definition")
+    unnamed = [w for w in _BOUND_CONSEQUENCES if w not in " ".join(acts)]
+    assert not unnamed, (
+        f"the bound names a read but not what makes it an act (missing {unnamed}); with "
+        "no consequence named the bound is a synonym for 'reads it back' and excludes "
+        "nothing")
+
+    scored = [s for s in _sentences(prose)
+              if "index" in s.lower() and "score" in s.lower()]
+    assert scored, (
+        "the paragraph never takes up the instrument index's read of a job row, so the "
+        "bound is stated in the abstract and the one real case that contradicts the "
+        "table — #100's scoring of #82 #86 #97 #101 #109 — is left to inference")
+    assert any("not the read" in s and "durable" in s for s in scored), (
+        f"the sentence about the index's scoring carries no verdict "
+        f"({scored[0][:140]!r}); naming the read without ruling it out is how the "
+        "definition ends up implying a placement the tier table denies")
+
+    # The failure this node exists to catch, demonstrated on the paragraph itself:
+    # delete the bound sentence and the index sentence, leave everything else, and
+    # the same predicate goes red while the phrase it shares with §Watch is still in
+    # the file — so the node cannot be satisfied by wording in another section.
+    seeded = prose
+    for s in acts + scored:
+        seeded = seeded.replace(s, " ", 1)
+    assert seeded != prose, (
+        "the seeded deletion took nothing out of the paragraph, so the check below "
+        "would prove nothing")
+    assert not [s for s in _sentences(seeded) if ACT_ON_PHRASE in s] and not any(
+        "not the read" in s and "durable" in s for s in _sentences(seeded)), (
+        "deleting the bound leaves the predicate satisfied inside the definition, so "
+        "this node is matching a sentence it does not own")
+    outside = _flat(text).count(ACT_ON_PHRASE) - _flat(prose).count(ACT_ON_PHRASE)
+    assert outside >= 2, (
+        f"only {outside} use(s) of {ACT_ON_PHRASE!r} live outside the unit-of-account "
+        "paragraph, so the scope this node is argued from has stopped being a real "
+        "distinction — §Watch the machinery's two sentences are the ones it excludes")
+
+    # What has to SURVIVE the seeded deletion, so the red above is a missing bound
+    # and not a wrecked paragraph: #3445's qualifier and #3335's eight literals.
+    assert "only when a lane other than its own writer reads it back" in seeded, (
+        "the seeded deletion took #3445's second-reader qualifier with the bound, so "
+        "the red above would be an unreadable paragraph rather than an unbounded one")
+    dropped = [m for m in _UNIT_OF_ACCOUNT_MUST_NAME if m not in seeded]
+    assert not dropped, (
+        f"the seeded deletion took #3335's literals {dropped} out too, for the same reason")
+
+
+def test_every_job_the_index_reads_back_is_placed_in_the_reports_only_row():
+    """#4195 clause 3: the definition may not imply a placement the table denies.
+
+    The id set comes from the module through `_index_arm_job_ids()` — an arm's
+    `scheduled_by` naming the task file whose artefact that arm scores — because a
+    typed list of five ids is false the day #4169's retirement is followed by another
+    one, and then reads as a doc error rather than as an arm change. What the set is
+    checked against is the table: each of those rows sits in `Reports only`, which is
+    exactly what the unbounded definition denied.
+    """
+    arms = _index_arm_job_ids()
+    tiers = _tiers_from(_text())
+    order = sorted(arms, key=lambda tok: int(tok.lstrip("#")))
+    placed = {job: [t for t, ids in tiers.items() if job in ids] for job in order}
+    bad = {job: hits or ["no tier row at all"]
+           for job, hits in placed.items() if hits != ["Reports only"]}
+    assert not bad, (
+        f"the index reads back {len(arms)} job rows and the table no longer files them "
+        f"all as report-only: {bad}. Either a row moved — out of scope for #4195, and "
+        "owed to the owed-check ruling on #109 — or the definition's bound has stopped "
+        "being the reason they stay")
+
+    # That the placement check can fail is shown: one of these ids, promoted into the
+    # unattended-writer row of a seeded copy, has to show up in two rows.
+    demo = next(job for job, hits in placed.items() if hits == ["Reports only"])
+    seeded = _text().replace("#92 #93 #94 #99 #103 | 29 |",
+                             f"#92 #93 #94 #99 #103 {demo} | 29 |", 1)
+    assert seeded != _text(), (
+        "the seeded promotion rewrote nothing — the top row's id list no longer ends "
+        "'#92 #93 #94 #99 #103 | 29 |', so this demonstration is dead")
+    hits = [t for t, ids in _tiers_from(seeded).items() if demo in ids]
+    assert "Writes durable state unattended" in hits, (
+        f"moving {demo} into the unattended-writer row still reads as {hits}, so the "
+        "placement assertion above is matching something other than the table")
+
+
+def test_the_reword_moved_no_job_and_left_every_row_count_its_own_ids():
+    """#4195 clause 4: the correction is wording, so the tables come out unchanged.
+
+    Three separate things, all of them things a reword can break by accident: every
+    typed `| N |` still counts the ids beside it (the rule, not a frozen 21, which is
+    false the morning a job is rostered); no job id stands in two rows, which is the
+    mechanical form of "nobody was re-tiered"; and the definition still names the
+    eight cases #3335 pinned and still bolds the `own series` definition sentence that
+    every later use of the term rests on. The pre-existing rails beside this node are
+    `test_every_tier_row_count_equals_the_ids_listed_beside_it`,
+    `test_the_tier_table_defines_what_counts_as_durable_state` and
+    `test_91_s_series_is_named_an_own_series_and_the_tracked_code_says_so`; this is
+    the same agreement read once more, scoped to the section the round edited.
+    """
+    text = _text()
+    tiers = _table(TIERS_HEADER)
+    assert len(tiers) == 5, f"expected the five documented tiers, parsed {list(tiers)}"
+    stale = {t: (len(ids), n) for t, (ids, n) in tiers.items()
+             if n is None or int(n) != len(ids)}
+    assert not stale, f"tier rows whose count column disagrees with their own ids: {stale}"
+
+    seen: dict[str, list[str]] = {}
+    for tier, (ids, _) in tiers.items():
+        for job in ids:
+            seen.setdefault(job, []).append(tier)
+    dupes = {job: rows for job, rows in seen.items() if len(rows) > 1}
+    assert not dupes, (
+        f"{sorted(dupes)} appear in more than one tier row ({dupes}); #4195 rewords the "
+        "definition, and a job listed twice is a re-tier smuggled into a table cell")
+
+    for job in _OWN_SERIES_JOBS_KEPT_IN_REPORTS + ("#109",):
+        rows = [t for t, (ids, _) in tiers.items() if job in ids]
+        assert rows == ["Reports only"], f"{job} is in {rows or 'no tier'}; it stayed put"
+    assert [t for t, (ids, _) in tiers.items() if "#68" in ids] == [
+        "Injects expiring context unattended"], "#68 moved out of its own tier row"
+
+    prose = _rule_prose(text)
+    dropped = [m for m in _UNIT_OF_ACCOUNT_MUST_NAME if m not in prose]
+    assert not dropped, (
+        f"the reword dropped {dropped} from the unit-of-account paragraph; the bound "
+        "narrows the second-reader case and leaves every case #3335 named standing")
+    assert "**`own series`**" in text, (
+        "the bolded `own series` definition sentence is gone, so #91's and #90's "
+        "placements are a bare coinage again")
+
+    # That the no-two-rows rule bites is shown, not claimed: #109 written into the
+    # top row of a seeded copy, beside the row it already sits in, has to read as a
+    # duplicate. The count rule's own seeded form is the pre-existing
+    # `test_every_tier_row_count_equals_the_ids_listed_beside_it` — `_table` reads the
+    # file on disk, so a mutated count cannot be fed to it from inside a node.
+    seeded = text.replace("#92 #93 #94 #99 #103 | 29 |",
+                          "#92 #93 #94 #99 #103 #109 | 29 |", 1)
+    assert seeded != text, (
+        "the seeded re-tier rewrote nothing — the top row no longer ends "
+        "'#92 #93 #94 #99 #103 | 29 |', so this demonstration is dead")
+    seeded_rows: dict[str, list[str]] = {}
+    for tier, ids in _tiers_from(seeded).items():
+        for job in ids:
+            seeded_rows.setdefault(job, []).append(tier)
+    assert len(seeded_rows["#109"]) == 2, (
+        f"writing #109 into a second tier row reads as {seeded_rows['#109']}, so the "
+        "duplicate check above is not reading the table")
+
+
+def test_the_act_on_bound_is_stated_once_in_the_definition_and_copied_into_no_row():
+    """#4195 clause 5: one bound, in the definition, and nowhere else in the section.
+
+    Scoped to §Write authority because that is where a copy could do harm — a second
+    statement in the same review unit is the #1524 shape, two wordings of one rule
+    that later disagree. A tier **table row** is the other place a copy would go, and
+    it is worse there, because a cell re-tiers by phrasing while every membership in
+    it is pinned elsewhere in this file. §Watch the machinery keeps its two
+    `ACT_ON_PHRASE` sentences and its earns/denies sentence untouched: the item's
+    paraphrase of the latter ("neither earns nor denies a tier") is not the doc's
+    wording, so this pins the string the file actually carries.
+    """
+    text = _text()
+    section = "\n".join(_fault_line_paragraphs(text))
+    # Flattened, because the doc wraps near 88 columns and the bound's own sentence
+    # breaks inside the phrase (`…a job or a person will` / `act on…`): counting on
+    # raw lines would read a wrap as an absent bound — this module's own oldest
+    # wrap-vs-absence trap, which every sentence matcher here already avoids.
+    flat_section = _flat(section)
+    assert flat_section.count(ACT_ON_PHRASE) == 1, (
+        f"§Write authority states the act-on bound {flat_section.count(ACT_ON_PHRASE)}x; "
+        "the bound belongs in the unit-of-account definition once, and a second copy in "
+        "the same section is how two wordings start disagreeing")
+
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")]
+    assert rows, (
+        "the tier table is no longer inside §Write authority, so the no-copy check "
+        "below would be checking an empty set")
+    copied = [ln.split("|")[1].strip() for ln in rows if ACT_ON_PHRASE in ln]
+    assert not copied, (
+        f"the bound has been copied into tier row(s) {copied}; a cell that argues a "
+        "tier by phrasing re-tiers every job in it, and the placements are pinned by "
+        "membership nodes this round must not touch")
+
+    watch = _flat(_watch_tier_paragraph())
+    assert watch.count(ACT_ON_PHRASE) >= 2, (
+        f"§Watch the machinery now applies the act-on test {watch.count(ACT_ON_PHRASE)}x, "
+        "so the definition's bound and the paragraph's tier argument are no longer one "
+        "test — two criteria for one tier is how the row split stopped meaning anything")
+    earned = [s for s in _tier_paragraph_sentences()
+              if "earns a tier" in s and "denies" in s]
+    assert earned, (
+        "the paragraph lost the sentence saying an artefact the index scores neither "
+        "earns nor denies a tier; the bound in the definition is why that stays true, "
+        "and the paragraph's copy of it is what a reader of the tier finds first")
+    assert any("is not what earns a tier, and not having one is not what denies one"
+               in s for s in earned), (
+        "the earns/denies sentence was reworded by this round, which was told to leave "
+        "it alone; its exact wording is what the #3979 nodes quote")
+    assert any("index" in s.lower() for s in earned), (
+        "the earns/denies sentence no longer names the index, so it reads as a general "
+        "remark about tiers instead of the answer to the arm argument")
