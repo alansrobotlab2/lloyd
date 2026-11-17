@@ -5377,6 +5377,122 @@ def test_a_chapter_list_with_prose_over_it_is_still_kept():
     assert body_mod.strip_link_footer(text) == text, body_mod.strip_link_footer(text)
 
 
+#: The GEMINI 4 SWARM description verbatim out of the row that published it:
+#: `lloyd-data/_pipeline/vault-derived/memory/feeds/raw/2026-11-17.jsonl`, video
+#: `Sc6TriRAGnI`, whose entry opened in the ai-llms digest's `## 2026-11-17` section under
+#: the heading `Gemini 4 Swarm is out of control...`. Twenty lines, of which the classifier
+#: names six as residue — `RELATED VIDEOS:` (line 3), the 46-underscore rule under it (5),
+#: `My Links 🔗` welded to that rule with no blank between them (6), a second rule (8),
+#: `SOURCES:` (10) and `CHAPTERS:` (12) — and the shipped entry published three of them:
+#: the body the four failed nodes read was the prose, then those lines 3, 5 and 6.
+RULE_WELDED_LINKS_FOOTER = (
+    "Google just unleashed Gemini 4 Carbon, Gemini 4 Hydrogen, Gemini Decision-1, "
+    "AlphaProof Code, and Antigravity /swarm in a massive multi-day AI blitz — and to put "
+    "it to the ultimate test, Gemini 4 Carbon autonomously edited this entire 30-minute "
+    "video. \n"
+    "\n"
+    "RELATED VIDEOS:\n"
+    "\n"
+    "______________________________________________\n"
+    "My Links 🔗\n"
+    "\n"
+    "______________________________________________\n"
+    "\n"
+    "SOURCES:\n"
+    "\n"
+    "CHAPTERS:\n"
+    "\n"
+    "00:00 Gemini 4 Carbon\n"
+    "\n"
+    "01:00 AlphaProof & Benchmarks\n"
+    "\n"
+    "02:34 Decision-1 & Naming\n"
+    "\n"
+    "04:02 Gemini 4…")
+
+#: All of that description that is knowledge: its one prose paragraph. `strip_link_footer`
+#: rstrips what it keeps, so the trailing space the channel left after `video.` is gone
+#: from the answer as well as the footer.
+RULE_WELDED_PROSE = RULE_WELDED_LINKS_FOOTER.splitlines()[0].rstrip()
+
+
+def test_a_link_label_welded_under_its_own_rule_is_dropped_by_the_write_path():
+    """#4200: the residue walk stops at a footer whose label has no blank above it.
+
+    `footer_residue_lines` names six lines of the text below on sight, and the walk that
+    is supposed to drop them dies on its very first step, because `My Links 🔗` sits
+    directly under the channel's `______` rule with no blank between them. A label is not
+    in `_FOOTER_RESIDUE_SELF_CONTAINED`, so it has to be set off, `_set_off` sees a line
+    rather than a blank above it, the walk breaks with `strong` still False, and
+    `strip_link_footer` hands the caller the published residue — which is what turned all
+    four shipped-digest nodes red at base `bda05de5`.
+
+    Two guards meet in that tail and only one of them is the hole. The walk is reached at
+    all because `strip_link_footer`'s own rule anchor abstains first: the last set-off rule
+    is the one over `SOURCES:`, chapter rows sit under it, and prose under a rule is
+    #1561's section furniture, so the anchor returns everything to `_url_free_or`. That
+    makes this a `_drop_footer_residue` bug and not a wider predicate: the predicate was
+    naming all six lines the whole time. #3982 repaired the walk's START for a footer
+    sitting over its own table of contents and #3399 repaired the predicate one call
+    earlier; neither reached a block whose first line is welded to the rule above it.
+
+    The fix states the fact `_set_off` was standing in for. A blank proves the line above
+    is prose, and a rule the classifier itself names is not prose — so a residue line
+    whose immediate neighbour `footer_residue_shape` names counts as set off
+    (`_residue_welded_above`). Two nodes below pin what that does NOT buy: a weak shape
+    still opens nothing, and prose with no residue line above it is still prose.
+    """
+    assert body_mod.footer_residue_lines(RULE_WELDED_LINKS_FOOTER) == [
+        (3, "footer-section-label"), (5, "rule"), (6, "footer-label"),
+        (8, "rule"), (10, "footer-section-label"), (12, "footer-label")], (
+        "the read side stopped naming the footer the writer is supposed to drop")
+    out = body_mod.strip_link_footer(RULE_WELDED_LINKS_FOOTER)
+    assert out != RULE_WELDED_LINKS_FOOTER, (
+        "strip_link_footer returned a published footer character for character")
+    assert out == RULE_WELDED_PROSE, out
+    assert body_mod.footer_residue_lines(out) == [], out
+
+
+def test_a_welded_footer_never_reaches_the_digest_through_the_writer():
+    """The same row across the boundary it actually crossed: a feed row in, digest prose out.
+
+    `_entry_body` is what `write_item_to_vault` puts under an entry's Source/Relevance
+    line, so this is the call that published `RELATED VIDEOS:` and `My Links 🔗` into the
+    ai-llms digest. The strip node above proves the classifier and the walk agree; this one
+    proves the writer is the only thing between them and the published file, which is the
+    half that stops the next one arriving.
+    """
+    rendered = vw_mod._entry_body(
+        _yt(id="youtube:UCtest:Sc6TriRAGnI", summary=RULE_WELDED_LINKS_FOOTER))
+    assert "My Links" not in rendered and "______" not in rendered, rendered
+    assert "RELATED VIDEOS" not in rendered and "SOURCES" not in rendered, rendered
+    assert rendered.startswith("Google just unleashed Gemini 4 Carbon"), rendered
+    assert body_mod.footer_residue_lines(rendered) == [], rendered
+
+
+def test_a_rule_welded_under_prose_keeps_its_underline():
+    """The half that must NOT move: the new set-off licence never removes a rule.
+
+    Prose, the channel's rule welded directly under it, the label welded under the rule.
+    The label goes — the line above it is a rule the classifier names, which is exactly
+    #4200's new case — and the rule STAYS: a rule is in `_FOOTER_RESIDUE_WEAK`, so it
+    opens nothing and can only ever be dropped by a walk that is already `strong` and finds
+    the blank #1561's abstention demands. `####Heading` over `______` is ONE heading to a
+    renderer and `_____` under prose is a setext underline, so removing the rule would not
+    return the description, it would re-render it — which is what `_set_off`'s docstring
+    has always said and what this node keeps true one guard further down.
+    """
+    welded_rule = "______________________________________________"
+    text = f"Watch the walkthrough below\n{welded_rule}\nMy Links 🔗"
+    assert body_mod.strip_link_footer(text) == (
+        f"Watch the walkthrough below\n{welded_rule}"), body_mod.strip_link_footer(text)
+    # And a rule that is nothing but a heading's underline, with no residue under it at
+    # all, comes back untouched: the weak-shape guard fires before the new licence is
+    # ever consulted.
+    assert body_mod.strip_link_footer(f"####Heading\n{welded_rule}") == (
+        f"####Heading\n{welded_rule}"), body_mod.strip_link_footer("####Heading")
+
+
 def test_the_live_digests_carry_no_residue_the_write_path_could_have_dropped():
     """#3982 clause 1, stated as the property the three shipped-digest nodes grade.
 

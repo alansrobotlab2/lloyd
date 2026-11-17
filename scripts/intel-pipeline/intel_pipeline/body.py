@@ -450,6 +450,30 @@ def footer_only(text: str) -> bool:
             and any(shape not in _FOOTER_ONLY_INSUFFICIENT for shape in shapes))
 
 
+def _residue_welded_above(lines: list, idx: int) -> bool:
+    """Does the line directly above `idx` name itself as residue (#4200)?
+
+    `_set_off` asks for a blank because a blank is what tells a promo block's first line
+    from the wrapped tail of the paragraph over it. It cannot express the one other case
+    in which the line above is certainly NOT prose: a channel's `______` rule welded to
+    its `My Links 🔗` with no blank between them. That is the shape that published three
+    residue lines into the ai-llms digest's `## 2026-11-17` section, under the entry
+    heading `Gemini 4 Swarm is out of control...` — the classifier named the label, the
+    rule and the `RELATED VIDEOS:` above them the whole time, and the walk died on its
+    very first line because a rule is a line, not a blank. Same class as #3982's chapter
+    trailer and #3399's keycap: the predicate was right and a guard around it was wrong.
+
+    This re-judges nothing: `footer_residue_shape` is the one place these phrases live,
+    and the call only asks it about a second line. And it moves no ruling, because a
+    wrapped paragraph cannot END on a line the closed shape list calls residue — that is
+    what the list is closed for — so a label sitting under a rule has no prose above it
+    to be the tail of, which is the only thing `_set_off` was ever protecting. The setext
+    ruling is untouched as well: the weak-shape guard is tested BEFORE this one, so a
+    rule still opens nothing and `####Heading` over `______` keeps its underline.
+    """
+    return idx > 0 and footer_residue_shape(lines[idx - 1]) is not None
+
+
 def _drop_footer_residue(lines: list) -> list:
     """`lines` with a URL-less footer residue tail taken off, or `lines` itself.
 
@@ -505,7 +529,8 @@ def _drop_footer_residue(lines: list) -> list:
         if shape is None or shape in _FOOTER_RESIDUE_WEAK and not strong:
             break
         if (shape not in _FOOTER_RESIDUE_SELF_CONTAINED
-                and not _set_off(lines, i - 1)):
+                and not (_set_off(lines, i - 1)
+                         or _residue_welded_above(lines, i - 1))):
             break
         strong = True
         i -= 1
