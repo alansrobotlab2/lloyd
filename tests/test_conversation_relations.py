@@ -977,8 +977,15 @@ def test_stage2_stops_before_the_batch_when_the_pin_is_unreadable(cr, tmp_path,
     So the stop has to survive the journey from `resolve_llm_target()` out through
     `cmd_classify()` (`_capturing_llm` cannot be used to check this: it patches
     `resolve_llm_target`, and the resolver is the subject here), and no request may
-    leave the process. Both are asserted: nothing reached `urlopen`, and the raise
+    leave the process. Both are asserted: nothing reached `urlopen`, and the stop
     arrived.
+
+    #4213 changed the spelling of "arrived" from `raises LlmTargetUnresolved` to
+    `SystemExit` with a non-zero code: a bare raise leaving this function reaches the
+    interpreter as a traceback, which is a non-zero exit but an unactionable one, and the
+    same run was pruning the eligible pool on its way out. The prevented batch and the
+    warning are this node's subject and stay exactly as they were; #4213's own node below
+    pins the message and the untouched proposals file.
     """
     import logging
     calls: list[str] = []
@@ -1007,9 +1014,12 @@ def test_stage2_stops_before_the_batch_when_the_pin_is_unreadable(cr, tmp_path,
     monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
 
     with caplog.at_level(logging.WARNING):
-        with pytest.raises(cr.LlmTargetUnresolved):
+        with pytest.raises(SystemExit) as exit_info:
             cr.cmd_classify()
 
+    assert exit_info.value.code != 0, (
+        "the stop arrived as a success status, so the scheduler would record a "
+        "successful night that classified nothing")
     assert calls == [], f"Stage 2 opened requests on an unreadable pin: {calls}"
     assert [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -2503,6 +2513,192 @@ def test_the_band_bounds_are_inclusive_at_the_floor_and_exclusive_at_the_ceiling
     assert not cr.in_acceptance_band(fresh[2])
 
 
+# ── #4213: a Stage 2 that cannot resolve its target must not write ────────────
+
+#: The interpreter Stage 2 needs, spelled the way both the operator message and the skill
+#: page must spell it. One pattern because three surfaces have to agree: the message
+#: `main()` prints when the target cannot resolve, every command line the page prints, and
+#: the scan below. This is the only interpreter on this box with what reading the task's
+#: `model:` pin imports — fastapi at `app/routers/autonomy.py:11`, and mcp through
+#: `app/autonomy.py` into `agent_mcp/_shared.py`.
+VENV_INTERPRETER_RE = re.compile(r"\.venvs/lloyd/bin/python")
+
+#: A printed command line: an interpreter token, then the script. Matching on the
+#: interpreter rather than on the script name is what keeps prose out of the scan — the
+#: page mentions `conversation_relations.py` in six sentences, and a sentence about the
+#: script is not an instruction to run it under some interpreter.
+_COMMAND_LINE_RE = re.compile(
+    r"^(?P<interp>[\w~$./-]*python[\w.]*)\s+.*conversation_relations\.py")
+
+
+def _stage2_world(cr, tmp_path, monkeypatch) -> Path:
+    """One prunable and one classifiable candidate, with the session files the prune
+    reads, and nothing but paths patched — so the real `prune_unclassifiable` and the real
+    `save_proposals` are what the two tests below assert on.
+
+    The no-context row is the row at issue: its session file EXISTS, which is why #1119's
+    prune terminalises it rather than leaving it `pending`, and therefore why a run that
+    classified nothing used to persist that terminal status while dying one statement
+    later at `resolve_llm_target()`.
+    """
+    sessions = tmp_path / "sessions"
+    _session_file(sessions,
+                  _asked("what does knowledge/gamma.md say about knowledge/alpha.md"),
+                  key="ctx_ok")
+    _no_prose_session(sessions, "knowledge/alpha.md", "knowledge/beta.md", "no_prose")
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", sessions)
+
+    props = _stage2_props(tmp_path, [
+        _needle_test_proposal("knowledge/alpha.md", "knowledge/beta.md", "no_prose"),
+        _needle_test_proposal("knowledge/alpha.md", "knowledge/gamma.md", "ctx_ok"),
+    ])
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    return props
+
+
+def _target_unresolvable(monkeypatch, cr) -> None:
+    """Stand the interpreter's missing fastapi in by making the target raise.
+
+    Bare `python3` reaches this same exception one frame lower — `from
+    app.routers.autonomy import autonomy_task_files` at
+    `scripts/memory/conversation_relations.py:567` dies on `ModuleNotFoundError: No module
+    named 'fastapi'` and `_task_files` re-raises it as `LlmTargetUnresolved` — so raising
+    it here is that path with the import already known to fail, and it keeps the node off
+    the interpreter the suite itself runs on.
+    """
+    monkeypatch.setattr(
+        cr, "resolve_llm_target",
+        lambda: (_ for _ in ()).throw(
+            cr.LlmTargetUnresolved(
+                "autonomy task enumeration unavailable (No module named 'fastapi')")))
+
+
+def test_a_classify_that_cannot_resolve_its_target_leaves_the_proposals_file_untouched(
+        cr, tmp_path, monkeypatch, capsys):
+    """#4213 clause 1: no prune is persisted when the target cannot be resolved.
+
+    The order in `cmd_classify` used to be prune → `save_proposals` →
+    `resolve_llm_target`, so the failing run exited non-zero HAVING written: the prune
+    terminalised the no-context row across the WHOLE eligible pool, saved it, and the run
+    then died one statement later. The file is asserted byte-identical rather than
+    "unchanged in meaning" because the defect is a write; the healthy control in the next
+    node pins that this write is still what a resolvable run performs.
+    """
+    props = _stage2_world(cr, tmp_path, monkeypatch)
+    _target_unresolvable(monkeypatch, cr)
+    before = props.read_bytes()
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as exit_info:
+        cr.cmd_classify()
+
+    assert exit_info.value.code != 0, (
+        "a Stage 2 that cannot resolve its target returned success, so the nightly cannot "
+        "tell a lost batch from a clean night")
+    assert props.read_bytes() == before, (
+        "the failed run wrote the proposals file: the prune it persisted terminalises "
+        "proposals the run never classified")
+    rows = json.loads(props.read_text())["proposals"]
+    assert sorted(r["status"] for r in rows) == ["pending", "pending"], rows
+    assert not any(r["status"] == "skipped-no-context" for r in rows), (
+        f"a row reached a terminal status on a run that classified nothing: {rows}")
+
+
+def test_a_classify_whose_target_resolves_still_persists_both_prune_statuses(
+        cr, tmp_path, monkeypatch, capsys):
+    """#4213 clause 2: moving the save did not undo #1119's terminal statuses.
+
+    Both halves are needed. The first batch proves a no-context row is terminalised AND
+    PERSISTED while the classifiable row is classified, which is what keeps one prose-free
+    proposal from holding the `MAX_CLASSIFY_PER_RUN` batch hostage; the second batch proves
+    the pruned row never re-enters it. Both rows sit above `LLM_CLASSIFY_THRESHOLD` and
+    `pending` before the run, so a moved save that lost the prune fails here rather than
+    somewhere downstream.
+    """
+    props = _stage2_world(cr, tmp_path, monkeypatch)
+    # `_classified_by_cr` is the healthy control: it pins `resolve_llm_target` to a
+    # fixture endpoint, which is the very call the node above makes fail, so this node
+    # differs from it in that one fact and nothing else.
+    attempts = _classified_by_cr(monkeypatch, cr)
+    capsys.readouterr()
+
+    cr.cmd_classify()
+
+    rows = {r["target"]: r for r in json.loads(props.read_text())["proposals"]}
+    assert rows["knowledge/beta.md"]["status"] == "skipped-no-context", rows
+    assert rows["knowledge/gamma.md"]["classification_source"] == "llm", rows
+    assert [a["target"] for a in attempts] == ["knowledge/gamma.md"], (
+        "Stage 2 did not classify the one proposal whose window did answer")
+    assert "status=skipped-no-context" in capsys.readouterr().out, (
+        "the run stopped reporting the prune it performed")
+
+    cr.cmd_classify()
+    rows2 = {r["target"]: r for r in json.loads(props.read_text())["proposals"]}
+    assert rows2["knowledge/beta.md"]["status"] == "skipped-no-context", rows2
+    assert len(attempts) == 1, (
+        f"the pruned row re-entered the next batch: {attempts} — the #1119 stuck-batch "
+        "behaviour persisting the status exists to prevent")
+
+
+def test_the_cli_names_the_venv_interpreter_when_the_target_cannot_resolve(
+        cr, tmp_path, monkeypatch, capsys):
+    """#4213 clause 3: the operator sees an interpreter, not only an import error.
+
+    `main()` is the seam that catches; `cmd_classify` only raises, so this node drives the
+    CLI rather than the function. Both streams are read together because the message IS the
+    fix and which stream carries it is not. The literal `.venvs/lloyd/bin/python` is what
+    is pinned: the bare `ModuleNotFoundError: No module named 'fastapi'` reached the board
+    every night and named no interpreter, which is how the page could keep telling the job
+    to run `python3`.
+    """
+    props = _stage2_world(cr, tmp_path, monkeypatch)
+    _target_unresolvable(monkeypatch, cr)
+    # The message names the interpreter of the checkout the module was loaded from, and
+    # under the gate HOME is the round's home, so that checkout is resolved relative to the
+    # suite rather than to the operator: a bare regex hit here could still be a path no one
+    # can run. Pin the constant to the tree this test file is in, so the pattern below is
+    # checking the wording and not the accident of where it ran.
+    monkeypatch.setattr(cr, "VENV_PYTHON", ROOT / ".venvs/lloyd/bin/python")
+    before = props.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["conversation_relations.py", "--classify"])
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as exit_info:
+        cr.main()
+
+    printed = capsys.readouterr()
+    out = printed.out + printed.err
+    assert exit_info.value.code != 0
+    assert VENV_INTERPRETER_RE.search(out), (
+        f"the operator message named no interpreter: {out!r}")
+    assert "No module named 'fastapi'" in out, (
+        f"the operator message dropped the cause the run died on: {out!r}")
+    assert "written nothing" in out, (
+        f"the operator message did not say the proposals file was left alone: {out!r}")
+    assert props.read_bytes() == before, (
+        "the CLI path reached the proposals file after all")
+
+
+def test_no_documented_invocation_of_the_script_uses_a_bare_python3():
+    """#4213 clause 4: every command the page prints names the venv interpreter.
+
+    Scanned over the WHOLE page rather than one step: steps 1, 2, 3 and 4 all invoke the
+    script, and `_skill_section_lines` scopes a claim to a single section — which here would
+    let three sections keep sending the job to an interpreter that cannot run Stage 2. Bare
+    `python3` does get Stage 1 and `--stats` through (neither reaches the task-file
+    enumeration) and kills `--classify` and `--full`, so a page-wide rule is also the rule
+    that costs nothing on the steps that do not need it.
+    """
+    lines = [ln.strip() for ln in _skill_text().splitlines()]
+    commands = [m.group("interp") for ln in lines
+                if (m := _COMMAND_LINE_RE.match(ln))]
+    assert commands, "the skill prints no invocation of the script at all"
+    offenders = [tok for tok in commands if not VENV_INTERPRETER_RE.search(tok)]
+    assert not offenders, (
+        "documented invocations still start at an interpreter with neither fastapi nor "
+        f"mcp, so a run started from this page dies at `_task_files`: {offenders}")
+
+
 #: The skill page task #51's prompt is rendered from. `app/autonomy.py::_build_task_prompt`
 #: splices this file's body into the worker prompt and the task file declares no command of
 #: its own, so the flags on step 4's line are the flags production runs with — and a flag
@@ -2584,7 +2780,11 @@ def test_the_nightly_approve_command_in_the_skill_leaves_the_band_off(cr, monkey
         f"production: {approve_lines}")
 
     doc_argv = approve_lines[0].split()
-    assert doc_argv[0] == "python3", doc_argv
+    # #4213 moved this from `assert doc_argv[0] == "python3"`. The first token is part of
+    # what the page instructs: under bare `python3` the approve run itself is fine, but the
+    # Stage-2 command printed two steps above it dies inside `_task_files`, so a test that
+    # pinned the old spelling would be pinning a command that cannot run.
+    assert VENV_INTERPRETER_RE.search(doc_argv[0]), doc_argv
     assert doc_argv[1].endswith("conversation_relations.py"), doc_argv
     seen: list = []
     monkeypatch.setattr(cr, "cmd_approve", lambda **kw: seen.append(kw))
@@ -2703,7 +2903,12 @@ def test_the_step4_report_block_promises_only_what_a_floor_only_night_prints(
             continue
         if current is not None and ln.strip():
             current.append(ln.strip())
-    subsets = [b for b in blocks if not any(x.startswith("python3") for x in b)]
+    # The command fence is told from the report fence by the script it invokes, not by the
+    # token that starts it: #4213 moved that first token from `python3` to the venv path,
+    # which under the old `startswith("python3")` test read step 4's own command as a
+    # second report subset and failed the `len(subsets) == 1` below.
+    subsets = [b for b in blocks
+               if not any("conversation_relations.py" in x for x in b)]
     assert len(subsets) == 1, f"step 4 fences more than one report subset: {blocks}"
     block = subsets[0]
     assert len(block) == 4, f"step 4's report subset is not four lines: {block}"

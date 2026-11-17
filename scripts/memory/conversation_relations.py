@@ -28,7 +28,7 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from itertools import combinations
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, SESSIONS_DIR, VAULT_FACTS_ROOT_DEFAULT  # noqa: E402
@@ -68,6 +68,18 @@ _SKILL_NAME_LINE_RE = re.compile(
     re.MULTILINE)
 
 logger = logging.getLogger("conversation_relations")
+
+#: The interpreter that can run Stage 2, derived from this file's own location: two parents
+#: up from `scripts/memory/` is the checkout, and `.venvs/lloyd/bin/python` is the venv in it.
+#: Derived rather than spelled because the operator message and the skill page have to name
+#: the same path a reader can run from anywhere — the checkout is not always `~/lloyd`, and a
+#: message that invents a path is worse than no message. The interpreter is a fact of this
+#: script's imports, not of the caller's shell: `resolve_llm_target()` reaches the task file
+#: through `app.routers.autonomy` (needs fastapi) and `app.autonomy` (needs mcp), and the
+#: system `python3` on this box has neither — which is the only reason task #51 ever died at
+#: `_task_files` (#4213).
+VENV_PYTHON = (Path(__file__).resolve().parents[2]
+               / ".venvs" / "lloyd" / "bin" / "python")
 
 # Fallback only, and reachable on exactly one path: no autonomy task file names
 # TASK_SKILL_NAME at all. These used to be THE endpoint and THE model: a hardcoded
@@ -1916,6 +1928,26 @@ def prune_unclassifiable(candidates):
     return with_context, no_session, no_context
 
 
+def _abort_unresolved_target(exc: LlmTargetUnresolved) -> NoReturn:
+    """Stop a Stage 2 that cannot say which model it is talking to, in operator terms.
+
+    The exception's own text is an import failure — under a system `python3`, `No module
+    named 'fastapi'`, because reading the task's `model:` pin goes through
+    `app.routers.autonomy` and `app.autonomy`. True, and not actionable: it named no
+    interpreter, so the nightly's page could go on printing a `python3` command that dies
+    every night while the proposals file is pruned by the run that just died (#4213). So
+    the second line names the interpreter of this checkout, and says what the operator most
+    needs to know — that nothing was written.
+    """
+    print(f"{exc}", file=sys.stderr)
+    print("Stage 2 stops here and has written nothing to the proposals file. Run this "
+          "script under the lloyd venv interpreter — the only one with the fastapi and mcp "
+          f"imports that reading the task's `model:` pin needs: {VENV_PYTHON} "
+          f"{Path(__file__).resolve()} --classify (bare `python3` has neither).",
+          file=sys.stderr)
+    raise SystemExit(1)
+
+
 def cmd_classify():
     """Stage 2: LLM-classify unclassified high-weight proposals."""
     data = load_proposals()
@@ -1929,6 +1961,20 @@ def cmd_classify():
     if not candidates:
         print("Stage 2: No candidates above LLM threshold. Nothing to classify.")
         return
+
+    # Resolve the model BEFORE the first request so a misconfiguration stops the run
+    # instead of quietly sending every call to a default endpoint (#420), and BEFORE
+    # the prune below so a run that cannot classify also cannot write (#4213).
+    # `resolve_llm_target()` reaches the autonomy task file through `app.routers.autonomy`
+    # and `app.autonomy`, so on an interpreter without fastapi/mcp this is where the run
+    # dies — and while it sat below the prune, that prune had already persisted terminal
+    # statuses across the WHOLE eligible pool, so a night that classified nothing
+    # terminalised proposals it never looked at and left no audit trail (the 129 live
+    # `skipped-no-context` rows measured 2026-11-17 are that standing exposure).
+    try:
+        endpoint, model = resolve_llm_target()
+    except LlmTargetUnresolved as exc:
+        _abort_unresolved_target(exc)
 
     # Prune BEFORE the cap is taken (#1119). The old pass marked only proposals whose
     # session files were gone — a condition that catches nothing on this box, where
@@ -1958,7 +2004,6 @@ def cmd_classify():
               f"{MAX_CLASSIFY_PER_RUN} (remaining drain on subsequent runs)")
         candidates = candidates[:MAX_CLASSIFY_PER_RUN]
 
-    endpoint, model = resolve_llm_target()
     print(f"Stage 2: Classifying {len(candidates)} proposals via {model} @ {endpoint}")
     classified = 0
 
