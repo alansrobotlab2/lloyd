@@ -4613,3 +4613,217 @@ def test_an_unreadable_journal_or_an_unheld_window_costs_only_the_pause_clause(
         person_stall)
     assert "claims are held by that pause, not by this scheduler" in person_stall, (
         person_stall)
+
+
+# ── #4210 — the nextrun alert can now see a fleet-level operator pause ───────
+#
+# The published pair this removes, one page and two lines apart:
+# `memory/2026-11-14.md:12` (00:33 PST) reads `the worker pool is PAUSED by operator
+# (person hold), held 27.3 h since 2026-11-13T05:14:28.410328+00:00`, while `:14`
+# (02:02 PST, the same page) posts a 16-task nextrun alert whose cause clause is
+# `nothing holds it; dispatch did not enqueue it`. One fleet, and the same hold ~28.8 h
+# old when the second line was written; the wrong sentence is the one that never read
+# the pause. The reason it never read it is a signature —
+# `_nextrun_alert_message(stalled: list[dict])` is handed the flagged rows and nothing
+# else, so `_operator_pause_clause(queue)` is unreachable from it by construction even
+# though both of its call sites sit inside `tick(queue)`, where the due-ness alarm a
+# few lines above already calls that clause with the same object.
+
+
+def test_a_held_fleet_makes_the_nextrun_alert_name_the_pause(
+        board, monkeypatch, tmp_path):
+    """Clause 1 + 5: a live pause reaches the nextrun message, through the ONE clause.
+
+    Two claims, deliberately separated. The first is observable: on a board whose pool
+    is held, the alert text names the hold — its kind, its hours, and the since-instant
+    the watermark row carries. The hold is `_held_watchdog_queue`'s persisted watermark
+    row, the same fixture #2615's holder-kind node uses, so this is the read the
+    scheduler will actually make and not a flag on an in-memory object.
+
+    The second claim is the one a green string cannot give you: the wording came from
+    `_operator_pause_clause` reading the queue the builder was handed, not from a second
+    pause reader bolted onto this emitter. The spy delegates to the real function and
+    records what it was handed, so a private reimplementation of the read — the shape
+    `_throughput_pause_shape` needed for a DIFFERENT reason, because that alarm counts a
+    day that is already over and needs journal history — would leave `seen` empty and
+    turn this node red while printing identical words. And because the recorded string
+    is what lands in the message, clause 5's "the same figure on both lines" holds by
+    construction: `test_the_stall_alarm_names_the_kind_of_hold_and_keeps_its_hours`
+    pins that same function's output as the due-ness line's clause.
+
+    The per-row `nothing holds it; dispatch did not enqueue it` sentence is asserted to
+    SURVIVE beside the pause clause. That is the item's own bound, not an oversight: its
+    triage records a separate open ruling on whether a live fleet pause should suppress
+    that per-row sentence, and this round keeps it — so the fix adds the fleet's cause
+    and deletes none of dispatch's.
+    """
+    from workers.pool import operator_pause_state
+
+    q_held = _held_watchdog_queue(tmp_path / "held", kind="person")
+    write_task(board, 720, frequency="daily", last_run=None, next_run=_ago(days=2))
+    flagged = {e["id"]: e for e in fw._next_run_stalled(q_held)}
+    assert 720 in flagged, (
+        f"a daily row two days past its next_run is not visible to the scan, so "
+        f"nothing below could fail: {sorted(flagged)}")
+    assert not flagged[720]["hold"], (
+        f"a per-task hold would replace the per-row dispatch sentence for the wrong "
+        f"reason: {flagged[720]['hold']!r}")
+
+    seen: list = []
+    returned: list = []
+    real = fw._operator_pause_clause
+
+    def spy(queue):
+        seen.append(queue)
+        out = real(queue)
+        returned.append(out)
+        return out
+
+    monkeypatch.setattr(fw, "_operator_pause_clause", spy)
+    msg = fw._nextrun_alert_message([flagged[720]], queue=q_held)
+
+    assert seen == [q_held], (
+        "the pause wording did not come from `_operator_pause_clause` being handed the "
+        f"queue, so a second reader is in play: {seen}")
+    assert returned[0] and returned[0] in msg, (
+        f"the clause `_operator_pause_clause` returned is not in the message it "
+        f"returned it to: {msg!r}")
+    assert "the worker pool is PAUSED by operator (person hold)" in msg, msg
+    assert re.search(r"held \d+\.\d h since ", msg), (
+        f"the hours-held figure is not on the line, so a reader cannot weigh the hold: "
+        f"{msg!r}")
+    since = operator_pause_state(q_held)["since"]
+    assert since and f"since {since}" in msg, (
+        f"the line must quote the row's own since-instant, not a restatement: "
+        f"want {since!r} in {msg!r}")
+    assert "nothing holds it; dispatch did not enqueue it" in msg, (
+        f"the pause clause arrived by deleting the per-row sentence: {msg!r}")
+
+
+def test_the_nextrun_alert_is_byte_identical_when_no_pause_is_held(
+        board, monkeypatch, tmp_path):
+    """Clause 2: handing the builder a queue must cost an unheld board nothing.
+
+    Three call shapes are compared against today's one-positional call, which is the
+    shape sixteen existing external callers use: `queue=None`, a queue that was never
+    paused, and a queue whose hold was taken and then RESUMED. The third is the one that
+    matters — `operator_pause_state` answers from the persisted row, a released hold is
+    the overwhelmingly common case on this box, and a clause that leaked into it would
+    both break the guard that greps this file's sentences and blame a person who touched
+    nothing (the reason `_operator_pause_clause` gives for returning ""). A fourth
+    assertion keeps this from passing by not reading: the spy still records exactly one
+    call, so equality below is an empty clause and not a skipped read.
+    """
+    q_free = WorkQueue(tmp_path / "free" / "workers.db")
+    write_task(board, 721, frequency="daily", last_run=None, next_run=_ago(days=2))
+    flagged = {e["id"]: e for e in fw._next_run_stalled(q_free)}
+    entries = [flagged[721]]
+
+    q_resumed = _held_watchdog_queue(tmp_path / "resumed", kind="person")
+    WorkerPool(q_resumed, slots=1).pause(False)
+
+    seen: list = []
+    real = fw._operator_pause_clause
+
+    def spy(queue):
+        seen.append(queue)
+        return real(queue)
+
+    monkeypatch.setattr(fw, "_operator_pause_clause", spy)
+    today = fw._nextrun_alert_message(entries)
+    assert seen == [], (
+        "the one-positional call is no longer the unheld path: the builder reached for "
+        f"a queue it was never handed: {seen}")
+
+    assert fw._nextrun_alert_message(entries, queue=None) == today
+    assert fw._nextrun_alert_message(entries, queue=q_free) == today, (
+        "a queue with no pause appended something to the line")
+    assert fw._nextrun_alert_message(entries, queue=q_resumed) == today, (
+        "a released hold still reads as a live one on the nextrun line")
+    # Two reads, not three: `queue=None` has no object to read and must not reach for
+    # one, so the only calls are the two real queues. The count is what proves the two
+    # equalities above came from an EMPTY clause rather than from the read being skipped.
+    assert len(seen) == 2, (
+        f"the two queue-taking calls did not each read the pause: {seen}")
+    assert fw._operator_pause_clause(q_resumed) == "", (
+        "the resumed fixture is not unheld, which is the case the comparison above "
+        "exists to cover")
+
+
+async def test_a_tick_on_a_held_board_posts_a_nextrun_alert_naming_the_pause(
+        board, monkeypatch, tmp_path):
+    """Clause 3: the alert that actually reaches a person names the pause.
+
+    The seam, not the function. `tick(queue)` already holds the queue object — the
+    due-ness alarm a few lines above the nextrun one calls `_operator_pause_clause(queue)`
+    with it — so the defect is a parameter that was never handed over, and only driving
+    the tick proves the handover at the posted-alert call site. Task 720 is built the
+    way #1682's own pacing node builds its fixture (`last_run` absent, empty queue) so
+    ONLY the `next_run` detector can see it: one posted alert, and the pause wording in
+    that alert cannot have arrived from the other alarm.
+
+    The since-instant is asserted rather than the hours figure, because the row's stamp
+    is fixed and the elapsed figure is a clock reading: `held \\d+\\.\\d h` is pinned for
+    presence by the node above without a test that can lose a rounding boundary.
+    """
+    from workers.pool import operator_pause_state
+
+    _pacing_constants_unchanged()
+    q_held = _held_watchdog_queue(tmp_path / "tick", kind="person")
+    write_task(board, 720, frequency="daily", last_run=None, next_run=_ago(days=2))
+    assert fw._next_run_stalled(q_held), (
+        "the fixture is invisible to the `next_run` detector, so an alert naming the "
+        "pause could only have come from somewhere else")
+
+    _streak_at_alerting_threshold(monkeypatch, stall_streak=0,
+                                  nextrun_streak=0, nextrun_alerted_at=None)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q_held)
+
+    assert len(alerts) == 1, (
+        f"one late task on an idle queue is one alert, and the node below cannot say "
+        f"which line a pause came from if there are two: {alerts}")
+    assert "720" in alerts[0], alerts[0]
+    assert "the worker pool is PAUSED by operator (person hold)" in alerts[0], alerts[0]
+    since = operator_pause_state(q_held)["since"]
+    assert f"since {since}" in alerts[0], (
+        f"the posted line does not quote the hold's own since-instant: want {since!r} "
+        f"in {alerts[0]!r}")
+
+
+async def test_a_held_parked_board_logs_the_nextrun_scan_with_the_pause_too(
+        board, monkeypatch, tmp_path, caplog):
+    """The second call site: the parked-only log line gets the pause as well.
+
+    #1661's grace route posts nothing and logs the same message at WARNING, and that
+    record carries the same cause clause — so if only the posted alert were fixed, the
+    log would go on telling a reader that dispatch failed to enqueue tasks the operator
+    is holding. One late task, declaring its own park, so the branch is reached: no
+    alert, one record, and the record names the hold.
+    """
+    import logging
+
+    _pacing_constants_unchanged()
+    q_held = _held_watchdog_queue(tmp_path / "parked", kind="machine")
+    write_task(board, 722, frequency="daily", status="draft", last_run=None,
+               next_run=_ago(days=3), parked="parked by Alan's standing ruling")
+    flagged = fw._next_run_stalled(q_held)
+    assert [(e["id"], bool(fw._parked_note(e))) for e in flagged] == [(722, True)], (
+        f"the branch below needs a parked-only scan, not an empty one: {flagged}")
+
+    _streak_at_alerting_threshold(monkeypatch, stall_streak=0,
+                                  nextrun_streak=fw._STALL_NEXTRUN_TICKS - 1)
+    alerts = _watch_alerts(monkeypatch)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=fw.logger.name):
+        await fw.tick(q_held)
+
+    assert alerts == [], (
+        f"a board whose only late task declares its park must post nothing, or this "
+        f"node is grading the wrong branch: {alerts}")
+    logged = [r.getMessage() for r in caplog.records
+              if "declared parks only" in r.getMessage()]
+    assert len(logged) == 1, (
+        f"one parked-only scan must be exactly one log record: {logged}")
+    assert "the worker pool is PAUSED by operator (machine hold)" in logged[0], logged[0]

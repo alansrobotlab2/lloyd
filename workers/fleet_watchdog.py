@@ -848,7 +848,8 @@ def _parked_note(entry: dict) -> str:
     return str(entry.get("parked") or "").strip()
 
 
-def _nextrun_alert_message(stalled: list[dict]) -> str:
+def _nextrun_alert_message(stalled: list[dict],
+                           queue: WorkQueue | None = None) -> str:
     """Alert text for the scan above, describing the statuses it actually found.
 
     The count line used to read `N up_next task(s)` unconditionally, which was
@@ -885,7 +886,32 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     one is present the first count would be naming tasks the bound never crossed
     under the very clause that says "more than one period" — the misdescribing-alert
     defect again, one door over. The counts are read off `past_period`, which is the
-    bound's own verdict, and each new clause says what its rows actually are."""
+    bound's own verdict, and each new clause says what its rows actually are.
+
+    #4210 is the `queue` parameter, and it is a reachability fix, not a new opinion.
+    Every cause clause this function prints came out of the row: `_hold_note` answers
+    from `entry["hold"]`, which is `autonomy.hold_reason` — a PER-TASK hold — so on a
+    board whose whole fleet the operator has paused the line still read `nothing holds
+    it; dispatch did not enqueue it`. The published instance is `memory/2026-11-14.md`:
+    `:12` at 00:33 PST states the pool is `PAUSED by operator (person hold), held 27.3 h
+    since 2026-11-13T05:14:28.410328+00:00`, and `:14` at 02:02 PST posts a 16-task
+    alert from this builder blaming dispatch, with that same hold ~28.8 h live. Two
+    lines of one page cannot describe one fleet, and the wrong one is the line that
+    could not read the pause: `_operator_pause_clause(queue)` needs a queue, and this
+    signature never had one, so the call was impossible here no matter what the tick
+    knew — `tick(queue)` hands the clause to the due-ness alarm a few lines above the
+    two call sites below.
+
+    The clause is therefore that same function's output, so one held board prints one
+    holder kind and one held-hours figure on both stall lines. The parameter is optional
+    and the clause is empty whenever no hold is persisted, which is the same rule
+    `_operator_pause_clause` gives for itself: an accusation leaking into the unheld case
+    breaks the guard that greps these sentences and blames a person who touched nothing.
+    What the clause does NOT do is remove the per-row sentence — that is what
+    `test_a_stall_with_no_newer_record_still_blames_dispatch`
+    (`tests/test_fleet_watchdog.py:1428`) exists to catch, and whether a live fleet pause
+    should additionally suppress the per-row dispatch claim is a separate wording ruling
+    this function does not make."""
     suppressed = [e for e in stalled if _parked_note(e)]
     late = [e for e in stalled if not _parked_note(e)]
     # The head sentence claims "more than one period past their own next_run", and a
@@ -921,7 +947,14 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     tail = (f" | {len(suppressed)} task(s) suppressed as declared parked in "
             f"their own file (`parked:`) and not counted above"
             if suppressed else "")
-    return f"{head}: {lines}{tail}" if lines else f"{head}{tail}"
+    body = f"{head}: {lines}{tail}" if lines else f"{head}{tail}"
+    # The fleet's own cause, appended only while a hold is persisted (#4210). Read here,
+    # on the alert path, for the reason `_operator_pause_clause` is read there and not
+    # per tick: an absent hold must cost this line nothing, and an unheld board's bytes
+    # are what `test_the_nextrun_alert_is_byte_identical_when_no_pause_is_held` pins
+    # against all three ways of taking the parameter.
+    pause = _operator_pause_clause(queue) if queue is not None else ""
+    return f"{body} | {pause}" if pause else body
 
 
 def _stall_subject(entry: dict) -> str:
@@ -2339,7 +2372,10 @@ async def tick(queue: WorkQueue) -> None:
                 # the next PROCESS is included in that same sentence (#1735).
                 _record_alert_instant(queue, _NEXTRUN_WM_KEY, nr_now,
                                     "next_run")
-                msg = _nextrun_alert_message(stalled)
+                # The queue is already in scope here — `tick(queue)` reads it for the
+                # due-ness alarm above — and handing it over is the whole fix: without
+                # it this alert cannot see a fleet pause (#4210).
+                msg = _nextrun_alert_message(stalled, queue=queue)
                 logger.error("%s", msg)
                 await _alert(msg)
         else:
@@ -2354,9 +2390,13 @@ async def tick(queue: WorkQueue) -> None:
                     or (nr_now - last_parked_log).total_seconds()
                     >= _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS):
                 _state["nextrun_parked_logged_at"] = nr_now
+                # The same handover as the posted branch (#4210): this record carries
+                # the same cause clause, so a log that named a fleet the alert had just
+                # exonerated would keep the wrong sentence on the surface a reader goes
+                # to when nothing was posted.
                 logger.warning(
                     "nextrun stall alarm not posted, declared parks only: %s",
-                    _nextrun_alert_message(stalled))
+                    _nextrun_alert_message(stalled, queue=queue))
 
     # #4137: the engine-build detector, on its own 6 h cadence. It is the caller
     # `architecture/harness.md` P6(b) used to describe as turning a re-run into
