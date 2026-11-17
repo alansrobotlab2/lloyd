@@ -136,6 +136,83 @@ _default_state_dirs_to_scratch()
 os.environ.setdefault("LLOYD_VAULT_GUARD_PROBE", "1")
 
 
+def _live_data_root() -> Path | None:
+    """`~/lloyd-data` as the ACCOUNT defines it, the anchor under the data guards.
+
+    The reason `_production_tree` gives for the same choice applies here: `$HOME` is
+    exactly what `gate._child_env` moves (it sets `HOME=<round>/home`), so a data
+    root read off `$HOME` would name a round's own scratch on every gate run and the
+    live one on nothing else. `None` rather than a guess when the passwd entry
+    cannot be read: a guard that cannot name the directory it protects has nothing
+    to refuse, and must say so by declining, not by refusing every run.
+    """
+    try:
+        import pwd
+        return (Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd-data").resolve()
+    except Exception:  # pragma: no cover - no passwd entry, or an unresolvable home
+        return None
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    """Is `path` `root` itself, or below it? Resolved on both sides.
+
+    The comparison spans a symlink — `/tmp` is one on some installs, and a `$TMPDIR`
+    spelled `~/lloyd-data/tmp` does not look like the resolved root the guard was
+    handed — and a half-resolved comparison fails in the direction that matters: it
+    reports a path INSIDE the protected root as outside it.
+    """
+    resolved = path.expanduser().resolve()
+    anchor = root.expanduser().resolve()
+    return resolved == anchor or resolved.is_relative_to(anchor)
+
+
+#: The parents `tempfile` itself would create a scratch directory under, in the
+#: order `tempfile._candidate_tempdir_list` consults them: these three environment
+#: variables, then these platform defaults. The helper below walks THIS list and no
+#: other. A guard that read only `TMPDIR` would miss a run that `TEMP` had already
+#: moved, and a guard with an order of its own would move the suite's scratch
+#: somewhere `tempfile` would not have put it — including out of the deliberately
+#: short `TMPDIR` the gate hands its children (`scripts/automod/gate.py::
+#: MAX_CHILD_TMPDIR`, 48 bytes, because Chromium's singleton socket lands 45 bytes
+#: past it), which is how a safety guard breaks every browser test.
+_TEMP_ENV_VARS = ("TMPDIR", "TEMP", "TMP")
+_PLATFORM_TEMP_DIRS = ("/tmp", "/var/tmp", "/")
+
+
+def _test_scratch_dir(prefix: str, live_root: Path | None) -> Path:
+    """`tempfile.mkdtemp(prefix)`, created somewhere that is not inside `live_root`.
+
+    `mkdtemp` honours `$TMPDIR`, and that is the whole of #4239: the guard that keeps
+    the suite out of `~/lloyd-data` called it with no `dir=` at all, so a run
+    launched with `TMPDIR=/home/alansrobotlab/lloyd-data/tmp/triage-4236` created its
+    substitute data root — and a schema-only `workers.db`, 7 tables and 0 data rows,
+    which the guardian reported as shadowing the populated
+    `/home/alansrobotlab/lloyd-data/workers.db` — four directories deep inside the
+    root the guard exists to protect.
+
+    A candidate is skipped for the two reasons `tempfile.gettempdir` skips one (not a
+    directory, not writable) plus the one this helper exists to add: it is under the
+    live root. When there is nowhere left to go the answer is a refusal naming the
+    variable to move, never a directory written into the thing being protected.
+
+    Returns the CREATED directory; registering its removal is the caller's job.
+    """
+    candidates = [Path(os.environ[var]).expanduser() for var in _TEMP_ENV_VARS
+                  if os.environ.get(var)]
+    candidates += [Path(name) for name in _PLATFORM_TEMP_DIRS]
+    for candidate in candidates:
+        if not (candidate.is_dir() and os.access(candidate, os.W_OK)):
+            continue
+        if live_root is not None and _is_under(candidate, live_root):
+            continue
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=str(candidate)))
+    raise pytest.UsageError(
+        f"no temporary directory outside {live_root} to hold the suite's scratch "
+        f"root: {' '.join(_TEMP_ENV_VARS)} and {' '.join(_PLATFORM_TEMP_DIRS)} all "
+        f"resolve inside it. Point TMPDIR at a directory outside that root and run "
+        f"again.")
+
+
 def _data_root_to_scratch() -> None:
     """No pytest run writes into the machine's data root (`~/lloyd-data`).
 
@@ -146,12 +223,14 @@ def _data_root_to_scratch() -> None:
     off the live one. A caller that chose a root of its own (the gate sets the
     round's) keeps it; a caller that chose the LIVE root is refused, with the
     same opt-in as the tree guard below.
+
+    Refusing the root a caller NAMED was never the whole invariant. The replacement
+    now comes from `_test_scratch_dir`, because until #4239 the guard asked
+    `tempfile.mkdtemp` — which answers a path under `$TMPDIR` — and so could place
+    the substitute inside the very root it had just refused, leaving a leftover
+    database for the guardian to file as a shadow of the populated one.
     """
-    try:
-        import pwd
-        live = (Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd-data").resolve()
-    except Exception:  # pragma: no cover
-        live = None
+    live = _live_data_root()
     chosen = os.environ.get("LLOYD_DATA")
     if chosen:
         if (live is not None and Path(chosen).expanduser().resolve() == live
@@ -161,7 +240,7 @@ def _data_root_to_scratch() -> None:
                 f"root. Leave LLOYD_DATA unset and conftest gives the run a scratch "
                 f"root. If you are a human and you mean it, set {LIVE_TREE_OPT_IN}=1.")
         return
-    scratch = Path(tempfile.mkdtemp(prefix="lloyd-test-data-"))
+    scratch = _test_scratch_dir("lloyd-test-data-", live)
     atexit.register(shutil.rmtree, scratch, ignore_errors=True)
     os.environ["LLOYD_DATA"] = str(scratch)
 
