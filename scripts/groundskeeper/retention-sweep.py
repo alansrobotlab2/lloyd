@@ -5522,6 +5522,179 @@ def _kg_index_residue(facts_root: Path, db_path: Path, *,
     return line, marked + removed
 
 
+# ---------------------------------------------------------------------------
+# Store 29 (the 29th line the report prints, and printed LAST): the ceiling's UNREAD
+# per-Bash-call report files under `<data root>/_pipeline/ceiling/` (#4205).
+# ---------------------------------------------------------------------------
+#
+# How the files arise, from the writer. `agent_mcp/_resource_ceiling.py` hands one report
+# per Bash call from the child process to the parent: `_write_report` writes
+# `report.with_suffix(suffix + ".tmp")` and then `tmp.replace(report)` (:601-612), into
+# `REPORT_DIR = _DATA_ROOT / "_pipeline" / "ceiling"` (:177), and `finish()` — after it has
+# appended the sample row and read the report — unlinks ONLY ITS OWN report (docstring
+# :1115). Two residue classes are therefore structural rather than accidental:
+#
+# * a `<unit>.report` whose reader died with the spawn, which no `finish()` ever reaches,
+#   because the process that would have called it is the one that died; and
+# * a `<unit>.report.tmp` left by a crash between the write and the `replace` — a name no
+#   `*.report` glob matches and that nothing in the writer ever renames or unlinks.
+#
+# Nothing bounded either one. `git grep -n "lloyd-bash-ceiling" -- scripts/` before this
+# store returned only this file's own name, and the writer has no `glob`/`iterdir` over
+# `REPORT_DIR` at all, so it cannot reap what it does not list. #2924 measured the same
+# residue and ruled in its own analysis that "the retention entry therefore has to cover
+# both the new JSONL and this existing dir", then shipped only the JSONL arm — the live
+# directory held 631 entries / 242,822 B on 2026-11-16, oldest 2026-10-12 (35 days), with
+# 500 of the 630 `.report` files already past 7 days. A closed item is not an owner.
+#
+# Why an age window is the right bound and why no reader breaks: a `.report` answers one
+# question — what did this one call peak at — and the answer's durable home is the sample
+# row in `ceiling-samples.jsonl`, the store printed 21st, which exists precisely so the
+# distribution survives the process that produced it. Once that row exists the file is
+# unread by construction; and nothing could re-read a report whose reader died anyway, so
+# no "is it still needed" signal is available to a rung here. The unit that grows is the
+# FILE COUNT at ~18 files/day (#1010 and store 24's reason: file count matters on this box
+# and `df -h` never shows it), which is why the window is 7 days and not the 30 the byte
+# stores use — the same horizon the loop's own round dirs (`WORKTREE_DIR_MAX_AGE_DAYS`) and
+# the per-session scratch (`SESSION_CWD_MAX_AGE_DAYS`) hold, and one that steady-states
+# this directory near 130 files at tonight's arrival rate.
+#
+# Three rules this store inherits rather than invents: the directory is never created
+# (#2354 — `CeilingUnit.__init__`'s `REPORT_DIR.mkdir` at :734 owns it, and a sweep that
+# created it would report a box that has never run a Bash call as one whose calls left
+# nothing); a symlink is counted as held and never followed (store 7's rule, and the reason
+# the walk uses `lstat`); `apply=False` decides every byte from the same read an applied run
+# decides from and unlinks nothing (#2005/#2006/#2008).
+CEILING_REPORT_DIR = DATA_ROOT / _CEILING_MODULE.REPORT_DIR.relative_to(
+        _CEILING_MODULE._DATA_ROOT
+)
+
+#: The two name classes, composed from the writer's OWN prefix constant rather than spelled
+#: out again here: `CeilingRun.__init__` names its file `f"{unit}.report"` where every `unit`
+# opens with `_resource_ceiling.UNIT_PREFIX`, and `_write_report` makes its scratch name by
+# appending `.tmp` to that. The tmp half is the crash residue and gets its own count on the
+# line, because a `*.report` glob does not match it and a line that reported only the first
+# class would read as "bounded" over files that are not bounded.
+CEILING_REPORT_GLOB = f"{_CEILING_MODULE.UNIT_PREFIX}-*.report"
+CEILING_REPORT_TMP_GLOB = f"{_CEILING_MODULE.UNIT_PREFIX}-*.report.tmp"
+
+#: Days after which an unread report is residue. ONE knob, named here rather than inlined,
+#: and its value is printed in the line's label so an operator reading `0 deleted` can see
+#: which horizon produced it. See the block above for why 7 and not 30.
+CEILING_REPORT_MAX_AGE_DAYS = 7
+
+
+def sweep_ceiling_reports(apply: bool, now: float, *, root: Path | None = None,
+                          max_age_days: int | None = None) -> dict:
+    """Delete unread ceiling report files past the horizon. Store 29.
+
+    Aged on each file's OWN mtime — the instant that call's writer finished it — and
+    deleting WHOLE files, because the unit the store grows in is one file per spawn that
+    died before its reader ran. `.report` and `.report.tmp` are counted and deleted in
+    separate counters: the tmp half is `_write_report`'s write-then-replace crash residue,
+    which `CEILING_REPORT_GLOB` cannot match, so a single count would silently bound two
+    thirds of the store and report one.
+
+    Four rules, none of them this store's:
+
+    * an absent directory is reported as `present: False` and NEVER created (#2354 — the
+      writer's own `REPORT_DIR.mkdir` owns it);
+    * a NON-DIRECTORY sitting at the store path is reported in `not_a_dir` and never
+      walked: an entry of the wrong type is somebody else's file, and a glob over it would
+      raise out of the whole sweep;
+    * a symlink carrying either name is counted in `held_link` and never followed, never
+      removed, and its `lstat` is the only metadata read (store 7);
+    * `apply=False` decides every byte from the same read and unlinks nothing.
+
+    `root`/`max_age_days` are injection points for the offline tests, which is also why the
+    horizon is a module-level name a test can pass past.
+    """
+    out = {"apply": apply, "present": False, "not_a_dir": None,
+           "files": 0, "stale": 0, "deleted": 0, "kept": 0, "bytes": 0,
+           "tmp_files": 0, "tmp_stale": 0, "tmp_deleted": 0, "tmp_bytes": 0,
+           "held_link": 0, "refused": 0,
+           "horizon_days": CEILING_REPORT_MAX_AGE_DAYS if max_age_days is None
+           else int(max_age_days)}
+    store = Path(root) if root is not None else CEILING_REPORT_DIR
+    if store.is_dir():
+        out["present"] = True
+    elif store.exists():
+        out["not_a_dir"] = store.name
+        return out
+    else:
+        return out
+    cutoff = now - out["horizon_days"] * 86400
+
+    # One loop over both name classes, with the counter pair chosen by which pattern the
+    # name matches — so the two classes cannot be aged by two different rules by accident.
+    for pattern, (n_key, stale_key, del_key, bytes_key) in (
+            (CEILING_REPORT_GLOB, ("files", "stale", "deleted", "bytes")),
+            (CEILING_REPORT_TMP_GLOB, ("tmp_files", "tmp_stale", "tmp_deleted",
+                                       "tmp_bytes"))):
+        for f in sorted(store.glob(pattern)):
+            try:
+                st = f.lstat()       # lstat, not stat: a symlink's own metadata is the
+            except OSError:          # only metadata this rung is allowed to read
+                continue
+            out[n_key] += 1
+            if f.is_symlink():
+                out["held_link"] += 1
+                continue
+            if st.st_mtime >= cutoff:
+                out["kept"] += 1
+                continue
+            out[stale_key] += 1
+            if not apply:            # dry run: the bytes this delete WOULD take, counted
+                out[bytes_key] += st.st_size
+                continue             # from the same read an applied run decides from
+            try:
+                f.unlink()
+            except OSError:          # a file that would not unlink is named on the line,
+                out["refused"] += 1  # and its bytes are not claimed as freed
+                continue
+            out[del_key] += 1
+            out[bytes_key] += st.st_size
+    return out
+
+
+def _ceiling_reports_line(p: dict) -> str:
+    """The report line for store 29, on the capture store's (#3188) verb pair.
+
+    Dry run ends `N would delete, X KiB candidate` and an applied run `N deleted, X KiB
+    freed` — the same two words store 22's captures line uses, so the historical suffix
+    selector counts this line and a dry run never claims bytes it did not free (#1574's
+    `0 deleted` complaint). The facts that are not a count come first: an entry of the wrong
+    type at the store path, then the absent directory (a box that has never finished a Bash
+    call under this build, and one this sweep must never create), then a held symlink named
+    rather than silently skipped (store 7's rule).
+
+    The `.report.tmp` clause prints in every form that reaches it, including beside
+    `0 deleted`: 120 reports and 0 tmp residue and 120 reports and 1 tmp residue are
+    different states of the leak, and a line that folded them would report the second as
+    the first.
+    """
+    label = f"  ceiling report files >{p['horizon_days']}d"
+    tmp = (f"; {p['tmp_files']} write-then-replace residue file(s), "
+           f"{p['tmp_deleted'] if p['apply'] else p['tmp_stale']} "
+           f"{'deleted' if p['apply'] else 'would delete'}, "
+           f"{p['tmp_bytes'] / 1024:.0f} KiB "
+           f"{'freed' if p['apply'] else 'candidate'}")
+    if p["not_a_dir"]:
+        return (f"{label}: REFUSED ({p['not_a_dir']} sits where the report dir belongs"
+                f") — held, nothing walked")
+    if not p["present"]:
+        return f"{label}: no ceiling report dir yet — nothing to bound"
+    tail = f" ({p['refused']} would not unlink, left in place)" if p["refused"] else ""
+    head = (f"of {p['files']} report file(s)"
+            + (f", {p['held_link']} symlink held (never followed)"
+               if p["held_link"] else ""))
+    n = p["deleted"] if p["apply"] else p["stale"]
+    verb = "deleted" if p["apply"] else "would delete"
+    unit = "freed" if p["apply"] else "candidate"
+    return (f"{label}: {head} — {n} {verb}, "
+            f"{p['bytes'] / 1024:.0f} KiB {unit}{tmp}{tail}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -5622,6 +5795,12 @@ def main() -> int:
     # beside the file, so a run from a round's worktree risks nothing here that a run from
     # the live tree does not.
     denials = sweep_safety_denials(args.apply, now)
+    # Store 29 (#4205): the ceiling's unread per-call report files. A data-root store that
+    # DELETES, so it runs outside the automod refusal guard for the same reason stores 20,
+    # 21, 23 and 26 do — the guard declines deletions that could name a production
+    # checkout's refs, and `resolve_data_root_for_tree` has already decided which root this
+    # tree may reach (#1415).
+    ceiling_reports = sweep_ceiling_reports(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -5793,6 +5972,14 @@ def main() -> int:
     # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
     # #3379, #3499, #3789 and #3951 — and this line is the 28th.
     print(_state_rounds_line(measure_state_rounds()))
+    # Store 29 (#4205), printed LAST and outside the refusal guard like the nine lines
+    # above it. It is a data-root store that DELETES, and the guard refuses deletions that
+    # could name a production checkout's refs, which a directory under the root
+    # `resolve_data_root_for_tree` has already decided this tree may reach is not (#1415).
+    # Appending rather than inserting keeps items 1-28 of task 79's enumeration where the
+    # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
+    # #3379, #3499, #3789, #3951 and #4060 — and this line is the 29th.
+    print(_ceiling_reports_line(ceiling_reports))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

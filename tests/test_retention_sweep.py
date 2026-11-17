@@ -246,6 +246,16 @@ def rs(tmp_path, monkeypatch):
         # redirected independently — a node that cares about the join passes both explicitly.
         ("KG_DB_PATH", "kg.sqlite", False),
         ("KG_FACTS_ROOT", "facts", True),
+        # Store 29 (#4205), the ceiling's unread per-call report files. Created, because this
+        # is a directory store the sweep globs and unlinks from: an EMPTY root is the bounded
+        # state every `_store_report` comparison below reads, and the absent case (`no ceiling
+        # report dir yet`) belongs to its own node, which passes `root=` — the same shape
+        # #3188's capture store and #3499's memory-graph store use. Single segment for their
+        # reason too: the mkdir below has no `parents=True`, and the production path
+        # (`<data root>/_pipeline/ceiling`) is two segments deep. It is NOT the same directory
+        # as store 19's `CEILING_SAMPLES_FILE` above (that file sits one level UP, in
+        # `_pipeline/`), so the two redirects are independent by construction.
+        ("CEILING_REPORT_DIR", "ceiling-reports", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1115,7 +1125,16 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
                           # weekly resolution job's recordings from outside every root this
                           # file holds it to. The hazard is a wrongly-resolved PATH, not a
                           # wrongly-chosen pattern, so the five held names do not exempt it.
-                          "MEMORY_GRAPH_DIR"}, \
+                          "MEMORY_GRAPH_DIR",
+                          # #4205's ceiling report store joins for MEMORY_GRAPH_DIR's reason
+                          # above it, and with one extra stake: this rung unlinks files from a
+                          # directory the MCP service mkdir's and writes into, so a
+                          # `CEILING_REPORT_DIR = Path.home() / ...` spelled beside the others
+                          # would have an `--apply` deleting the live per-call reports from
+                          # outside every root this file holds it to — and the store's own
+                          # rationale is that those files are unread, which is exactly what a
+                          # wrongly-resolved root would make silently untrue.
+                          "CEILING_REPORT_DIR"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         if name == "INJECTION_CANARY_DIR":
@@ -1983,14 +2002,14 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 28, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 29, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    # "28 stores", not "28 unbounded-growth stores": the 28th store is held by ruling and
-    # measured, so the skill's description bounds 27 of the 28 and a phrase that said
+    # "29 stores", not "29 unbounded-growth stores": the 28th store is held by ruling and
+    # measured, so the skill's description bounds 28 of the 29 and a phrase that said
     # otherwise would be a count paid for with a falsehood (#4060).
-    assert "28 stores" in text, (
-        "the skill's description states a store count other than 28")
-    assert "28 in all" in text, "the skill's body states a store count other than 28"
+    assert "29 stores" in text, (
+        "the skill's description states a store count other than 29")
+    assert "29 in all" in text, "the skill's body states a store count other than 29"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2075,14 +2094,35 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     assert "deletes nothing" in tq_row.lower(), tq_row
     assert "0 files" in tq_row, tq_row
 
+    # Store 29 (#4205), the ceiling's unread report files. The row has to name BOTH name
+    # classes it takes — `*.report` and the `.report.tmp` write-then-replace residue a
+    # `*.report` glob cannot match — because a row that named only the first would be an
+    # operator reading a bounded store while half the directory stayed unbounded, and it
+    # has to name the constant, since that is the number a `0 deleted` was produced under.
+    ceiling_row = next((ln for store, ln in rows.items()
+                        if "lloyd-bash-ceiling-" in ln), None)
+    assert ceiling_row is not None, (
+        f"no row names the ceiling report dir the sweep now bounds: {sorted(rows)}")
+    assert "CEILING_REPORT_MAX_AGE_DAYS" in ceiling_row, ceiling_row
+    assert f">{rs.CEILING_REPORT_MAX_AGE_DAYS}d" in ceiling_row, ceiling_row
+    assert "lloyd-bash-ceiling-*.report" in ceiling_row, ceiling_row
+    assert ".report.tmp" in ceiling_row, ceiling_row
+    assert "symlink" in ceiling_row.lower(), ceiling_row
+
     # And what a run from anywhere else prints, since that reader holds a report
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "twenty-four store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports twenty-four stores by design: "
-        "the three automod rungs collapse into one refusal line, and the #3789 "
-        "safety-denial store prints there like every data-root store before it")
+    # Twenty-SIX, not twenty-four: the three automod rungs collapse into one refusal line,
+    # so a refused run prints 29 - 3 = 26 store lines, and it went stale twice over on the
+    # way here (#3789 and #3951 each added a store that prints outside the guard). #4205's
+    # store joins the prints-outside-the-guard set, so this is the sentence that has to be
+    # re-derived by the round that appends the next store.
+    assert "twenty-six store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports twenty-six stores by design: "
+        "the three automod rungs collapse into one refusal line, and every data-root "
+        "store — #3789's safety denials and #4205's ceiling reports among them — prints "
+        "there anyway")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2228,6 +2268,11 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # "28 unbounded-growth stores" is graded against the 28 lines the sweep
                       # prints rather than raising `unrecognised store-count numeral`.
                       "28": 28,
+                      # #4205 added the twenty-ninth store (the ceiling's unread per-call
+                      # report files under `_pipeline/ceiling/`), so a vault file saying
+                      # "29 stores are reported" is graded against the 29 lines the sweep
+                      # prints rather than raising `unrecognised store-count numeral`.
+                      "29": 29,
                       "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
@@ -2285,12 +2330,13 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     """
     # #3499 added the twenty-fifth store line (the dated semantic-* recordings), #3789 the
     # twenty-sixth (the guard-refusal journal under `safety/`), #3951 the twenty-seventh (the
-    # kg index residue) and #4060 the twenty-eighth (the HELD `rounds/` store, which is a
-    # line the sweep reports and never bounds), so the census this guard compares prose
-    # against moved from 24 to 25 to 26 to 27 to 28.
-    assert len(_store_report) == 28, (
-        f"the sweep prints {len(_store_report)} store lines, not the 28 its report "
-        f"has had since #4060 added the held rounds store: {_store_report}")
+    # kg index residue), #4060 the twenty-eighth (the HELD `rounds/` store, which is a
+    # line the sweep reports and never bounds) and #4205 the twenty-ninth (the ceiling's
+    # unread report files), so the census this guard compares prose against moved from 24 to
+    # 25 to 26 to 27 to 28 to 29.
+    assert len(_store_report) == 29, (
+        f"the sweep prints {len(_store_report)} store lines, not the 29 its report "
+        f"has had since #4205 added the ceiling report store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2445,7 +2491,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_three_stores_and_o
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 25, f"a refusal run should report twenty-five stores: {report}"
+    assert len(report) == 26, f"a refusal run should report twenty-six stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2657,7 +2703,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 28, (
+    assert len(items) == len(_store_report) == 29, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2727,6 +2773,28 @@ def test_the_task_description_names_every_store_the_sweep_prints(
     assert items[25][0] == 26, items[25]
     assert items[26][0] == 27, items[26]
     assert "safety" in items[25][1] and "denials" in items[25][1], items[25]
+    # #4205's ceiling report store is the new append point: item 29, printed last, named by
+    # the printed label's first and last word (`ceiling`, `files`) like every append since
+    # #2862. The worker that runs the sweep writes the daily report from this enumeration, so
+    # the item has to carry the three things the line cannot: the constant that decides the
+    # window, the `.report.tmp` residue a `*.report` glob never matches (the store's whole
+    # second half, and the reason the item would otherwise re-file itself in six months), and
+    # the `no ceiling report dir yet` wording that is a bounded-empty state rather than a
+    # failure — the same three duties item 25 and item 26 take for their stores.
+    assert items[28][0] == 29, items[28]
+    assert "ceiling" in items[28][1] and "files" in items[28][1], items[28]
+    # The full item text, not `items[28][1]`: the enumerator keeps only the words up to the
+    # first comma, which are the label the positional matcher needs, and everything the
+    # worker actually reads lives after it — the same slice item25 and item26 take.
+    item29 = re.sub(r"\s+", " ", description[description.index("29 ceiling report files"):
+                                             description.index("Report all")])
+    assert "CEILING_REPORT_MAX_AGE_DAYS" in item29, (
+        "the item names no window, so a reader of the prompt cannot tell what ages")
+    assert ".report.tmp" in item29, (
+        f"the item omits the crash residue the sweep now bounds: {item29}")
+    assert "no ceiling report dir yet" in item29, (
+        f"the item never says what an absent store prints, which is the one line the worker "
+        f"must not report as a failure: {item29}")
     item26 = re.sub(r"\s+", " ", description[description.index("26 safety denials"):
                                              description.index("Report all")])
     assert "SAFETY_DENIALS_ARCHIVE_AGE_DAYS" in item26, (
@@ -8179,13 +8247,13 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
     text = skill.read_text(encoding="utf-8")
     front = text.split("---", 2)[1]
     # The count, not the phrase: #4060's 28th store is held rather than bounded, so the
-    # description reads "28 stores, 27 unbounded-growth stores it bounds and one held by
+    # description reads "29 stores, 28 unbounded-growth stores it bounds and one held by
     # ruling", and a node that pinned the old contiguous wording would be grading
     # typography while the thing it is for — does the skill count what the sweep prints —
     # went ungraded. The count itself is checked against the printed lines by the
     # table-row node and by `test_the_task_description_names_every_store_the_sweep_prints`.
-    assert "28 stores" in front, front[:200]
-    assert "28 in all" in text, "the skill's body states a count other than 28"
+    assert "29 stores" in front, front[:200]
+    assert "29 in all" in text, "the skill's body states a count other than 29"
     rows = _skill_table_rows(text)
     hits = [(label, body) for label, body in rows.items()
             if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
@@ -9302,17 +9370,17 @@ def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prin
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 28, f"a production run prints 28 store lines: {lines}"
+    assert len(lines) == 29, f"a production run prints 29 store lines: {lines}"
     # #3499 appended the memory-graph store below it, #3789 the safety-denial store below
     # that, #3951 the kg index residue and #4060 the held rounds store, so this line sits
     # eight from the end.
-    assert lines[-9].split(":")[0].strip().startswith("injection-canary corpus"), lines[-9]
+    assert lines[-10].split(":")[0].strip().startswith("injection-canary corpus"), lines[-10]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 25, (
-        f"a refused run prints twenty-five store lines plus the refusal: {refused}")
-    assert refused[-9].split(":")[0].strip().startswith("injection-canary corpus"), refused[-9]
+    assert len(refused) == 26, (
+        f"a refused run prints twenty-six store lines plus the refusal: {refused}")
+    assert refused[-10].split(":")[0].strip().startswith("injection-canary corpus"), refused[-10]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -9541,12 +9609,12 @@ def test_the_ceiling_sample_store_prints_sixth_last_and_survives_the_refusal(rs,
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 28, f"a production run prints 28 store lines: {report}"
-    assert report[-8].split(":")[0].strip().startswith("ceiling sample rows"), report[-8]
+    assert len(report) == 29, f"a production run prints 29 store lines: {report}"
+    assert report[-9].split(":")[0].strip().startswith("ceiling sample rows"), report[-9]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 25, f"a refused run prints twenty-five store lines: {refused}"
-    assert refused[-8].split(":")[0].strip().startswith("ceiling sample rows"), refused[-8]
+    assert len(refused) == 26, f"a refused run prints twenty-six store lines: {refused}"
+    assert refused[-9].split(":")[0].strip().startswith("ceiling sample rows"), refused[-9]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -9739,12 +9807,12 @@ def test_the_capture_store_prints_fifth_last_and_survives_the_refusal(rs, monkey
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 28, f"a production run prints 28 store lines: {report}"
-    assert report[-7].split(":")[0].strip().startswith("canary tool-call captures"), report[-7]
+    assert len(report) == 29, f"a production run prints 29 store lines: {report}"
+    assert report[-8].split(":")[0].strip().startswith("canary tool-call captures"), report[-8]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 25, f"a refused run prints twenty-five store lines: {refused}"
-    assert refused[-7].split(":")[0].strip().startswith("canary tool-call captures"), refused[-7]
+    assert len(refused) == 26, f"a refused run prints twenty-six store lines: {refused}"
+    assert refused[-8].split(":")[0].strip().startswith("canary tool-call captures"), refused[-8]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -10548,16 +10616,16 @@ def test_the_temp_store_line_prints_third_last_and_survives_the_refusal(rs, monk
     # "one candidate" rather than "the one candidate was held because it is the newest".
     monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 28, f"a production run prints 28 store lines: {report}"
-    last = report[-5]
+    assert len(report) == 29, f"a production run prints 29 store lines: {report}"
+    last = report[-6]
     assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
     assert "1 would delete" in last, last
     assert "inode(s) candidate" in last, last
     assert victim.is_dir(), "the dry run deleted"
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 25, f"a refused run prints twenty-five store lines: {refused}"
-    assert refused[-5].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-5]
+    assert len(refused) == 26, f"a refused run prints twenty-six store lines: {refused}"
+    assert refused[-6].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-6]
 
 
 def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
@@ -10879,8 +10947,8 @@ def test_the_memory_graph_horizon_is_one_constant_quoted_in_the_store_and_regist
     # #3789 appended the safety-denial store below it. What that clause was for — the store is
     # registered and prints in the appended tail, not inserted among items 1-24 — is unchanged,
     # so the position moves to second-to-last and the reason stays on the line.
-    assert lines.index(mg[0]) == len(lines) - 4, (
-        "the store does not print fourth-to-last, the slot #3499's append left it in once "
+    assert lines.index(mg[0]) == len(lines) - 5, (
+        "the store does not print fifth-to-last, the slot #3499's append left it in once "
         "#3789 appended the safety-denial store, #3951 the kg index residue store and #4060 "
         "the held rounds store below it: task 79's numbered enumeration is matched to these "
         "lines positionally")
@@ -12653,10 +12721,10 @@ def test_main_prints_the_index_residue_line_as_the_twenty_seventh_store(rs, caps
     assert len(kg) == 1, f"expected exactly one index-residue line in {lines}"
     # #4060 appended the held-rounds line below this one, so the kg line is second-to-last
     # now — still the 27th store, and still behind every line task 79 enumerates positionally.
-    assert kg[0] == lines[-2], (
-        f"the store is not second-to-last, so the positional enumeration moved: {lines[-3:]}")
+    assert kg[0] == lines[-3], (
+        f"the store is not third-to-last, so the positional enumeration moved: {lines[-4:]}")
     assert "no store yet" in kg[0], kg[0]
-    assert len(lines) == 28, f"a run prints {len(lines)} store lines: {lines}"
+    assert len(lines) == 29, f"a run prints {len(lines)} store lines: {lines}"
 
     argv.append("--apply")
     rs.main()
@@ -12769,3 +12837,397 @@ def test_the_neutrality_tolerance_still_excuses_no_decisions_path(rs):
     for key in (".decisions.promotions.count", ".decisions.per_day",
                 ".decisions.promotions.by_decider.unrecorded"):
         assert key not in rs.LEDGER_NEUTRALITY_TOLERATED_KEYS, key
+
+
+# ── #4205 store 29 (the 29th and LAST printed line): the ceiling's unread report files ──
+#
+# `agent_mcp/_resource_ceiling.py` hands one report per Bash call from the spawn to its
+# parent: `_write_report` writes `report.with_suffix(suffix + ".tmp")` and then
+# `tmp.replace(report)` (:601-612) into `REPORT_DIR` (:177), and `finish()` unlinks only its
+# OWN report after reading it (docstring :1115). Two name classes therefore accumulate there
+# by construction — a `<unit>.report` whose reader died with the spawn, and a
+# `<unit>.report.tmp` left between the write and the replace — and neither was bounded: the
+# live directory held 631 entries / 242,822 B on 2026-11-16, oldest 2026-10-12, with 500 of
+# the 630 `.report` files already past 7 days, arriving at ~18 files a day. #2924 measured it,
+# ruled "Sweep them; convert none", and shipped only the JSONL arm.
+#
+# Every node below passes `root=` explicitly (store 22's and store 25's shape), so each states
+# the directory it measured. The last node is the one that goes through `main()`, which is
+# also where the `rs` fixture's redirect of `CEILING_REPORT_DIR` earns its place.
+
+
+def _ceiling_report(rs, name: str, *, days: float) -> Path:
+    """Plant one ceiling report file of `name` at the store path, `days` old.
+
+    mtime is the whole clock for this store — it is the instant that call's writer finished
+    the file — so the helper sets it directly instead of waiting out a window.
+    """
+    d = Path(rs.CEILING_REPORT_DIR)
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    f.write_text(json.dumps({"unit": name.split(".")[0], "samples": [],
+                             "peaks": {"mem_frac": 0.4}}) * 6, encoding="utf-8")
+    stamp = time.time() - days * 86400
+    os.utime(f, (stamp, stamp))
+    return f
+
+
+def test_the_ceiling_report_store_censuses_the_dir_and_reclaims_the_aged_files_under_apply(rs):
+    """#4205 clause 1: the census the line prints is the census the directory holds, and
+    `--apply` takes the aged files so a second pass over the SAME tree finds none aged.
+
+    Three files at the shape the writer produces: two `lloyd-bash-ceiling-<pid>-<sha>.report`
+    one day and eight days old, plus one `.report.tmp` nine days old. The dry run has to count
+    all three and name the aged ones as candidates without touching them; the applied run has
+    to delete exactly the aged pair and leave the day-old file; the pass after that prints
+    `0 deleted`, which is the end state #4205's check 2 asks the live root to reach after one
+    real `--apply` (`find … -mtime +7 | wc -l` → 0, from 500 today). The round cannot run that
+    against production; on a seeded tree it can be proven rather than promised.
+    """
+    young = _ceiling_report(rs, "lloyd-bash-ceiling-4111-aaaa1111.report", days=1)
+    aged = _ceiling_report(rs, "lloyd-bash-ceiling-4222-bbbb2222.report", days=8)
+    tmp = _ceiling_report(rs, "lloyd-bash-ceiling-4333-cccc3333.report.tmp", days=9)
+    root = Path(rs.CEILING_REPORT_DIR)
+    now = time.time()
+
+    dry = rs.sweep_ceiling_reports(False, now, root=root)
+    line = rs._ceiling_reports_line(dry)
+    assert dry["files"] == 2 and dry["stale"] == 1, f"dry census: {dry}"
+    assert dry["deleted"] == 0, f"a dry run deleted files: {dry}"
+    assert dry["bytes"] == aged.stat().st_size, f"the dry candidate bytes: {dry}"
+    assert dry["tmp_files"] == 1 and dry["tmp_stale"] == 1, f"the tmp census: {dry}"
+    assert dry["tmp_deleted"] == 0, f"a dry run claimed a tmp delete: {dry}"
+    assert "of 2 report file(s)" in line, line
+    assert "would delete" in line and "candidate" in line, line
+    assert "deleted," not in line and "freed" not in line, (
+        f"a dry run used the applied run's verbs: {line}")
+    assert young.exists() and aged.exists() and tmp.exists(), "a dry run unlinked something"
+
+    gone = aged.stat().st_size + tmp.stat().st_size
+    run = rs.sweep_ceiling_reports(True, now, root=root)
+    applied = rs._ceiling_reports_line(run)
+    assert run["deleted"] == 1 and run["tmp_deleted"] == 1, f"applied: {run}"
+    assert not aged.exists(), "an aged .report survived --apply"
+    assert not tmp.exists(), "an aged .report.tmp survived --apply"
+    assert young.exists(), "--apply removed a file inside the window"
+    assert run["bytes"] + run["tmp_bytes"] == gone, f"the freed bytes: {run}"
+    assert "deleted" in applied and "freed" in applied, applied
+    assert "would delete" not in applied, f"an applied run printed the dry verb: {applied}"
+
+    again = rs.sweep_ceiling_reports(True, time.time(), root=root)
+    assert again["files"] == 1 and again["stale"] == 0 and again["deleted"] == 0, again
+    assert again["tmp_files"] == 0 and again["tmp_stale"] == 0, again
+    assert "0 deleted" in rs._ceiling_reports_line(again), rs._ceiling_reports_line(again)
+    assert len(list(root.glob("lloyd-bash-ceiling-*.report"))) == 1, sorted(root.iterdir())
+
+
+def test_the_ceiling_report_census_equals_a_raw_count_of_the_live_directory(rs):
+    """#4205 clause 1's other half, off the seeded tree: on the directory that actually
+    exists, the store's count is the number a raw enumeration of the same names returns.
+
+    The item's check 1 is a shell census of the live directory against the sweep's own
+    number; a node that only seeds fixtures proves the arithmetic and not that the census is
+    the directory's. This runs the store in DRY mode over the LIVE path and compares against an
+    independent `iterdir` count — no `--apply`, nothing touched, and skipped where no such
+    directory exists, which is the absent case the next node owns. The path comes from
+    `app.data_root.PRODUCTION_DATA_ROOT`, not the module's own `DATA_ROOT`, and that difference
+    is load-bearing in this suite: under a gate the module is loaded from a worktree whose
+    `DATA_ROOT` is that worktree's `.lloyd-data`, so a node built on it would skip in the very
+    run that has to prove the census and read a fixture-shaped nothing everywhere else — the
+    failure mode this file's `rs` fixture names for `DATA_ROOT` itself. Dry mode is not merely
+    safe here, it is the point: this is the node that has to read the 631-file residue the item
+    is about rather than a fixture's three, and its aged count (500 of 630 measured 2026-11-16)
+    is the number the item opens with.
+    """
+    live = dr.PRODUCTION_DATA_ROOT / "_pipeline" / "ceiling"
+    if not live.is_dir():
+        pytest.skip(f"no ceiling report dir on this tree: {live}")
+    reports = [p for p in live.iterdir()
+               if p.name.startswith("lloyd-bash-ceiling-") and p.name.endswith(".report")
+               and p.is_file() and not p.is_symlink()]
+    residue = [p for p in live.iterdir()
+               if p.name.startswith("lloyd-bash-ceiling-")
+               and p.name.endswith(".report.tmp")
+               and p.is_file() and not p.is_symlink()]
+
+    m = rs.sweep_ceiling_reports(False, time.time(), root=live)
+    assert m["present"] is True, m
+    assert m["files"] == len(reports), (
+        f"the store counted {m['files']} report files where a raw enumeration finds "
+        f"{len(reports)}: {live}")
+    assert m["tmp_files"] == len(residue), (
+        f"the store counted {m['tmp_files']} `.report.tmp` files where a raw enumeration "
+        f"finds {len(residue)} — the crash-residue class a `*.report` glob never matches")
+    assert m["deleted"] == 0 and m["tmp_deleted"] == 0, f"a dry run deleted: {m}"
+    cutoff = time.time() - rs.CEILING_REPORT_MAX_AGE_DAYS * 86400
+    assert m["stale"] == sum(1 for p in reports if p.stat().st_mtime < cutoff), (
+        f"the aged count is not the mtime census: {m}")
+
+
+def test_the_ceiling_report_window_is_one_named_constant_whose_value_the_line_prints(rs):
+    """#4205 clause 2: exactly one knob, `CEILING_REPORT_MAX_AGE_DAYS = 7`, and the line
+    carries its value so `0 deleted` is never a horizon-less zero.
+
+    Three things, and the value is the least of them:
+      * the constant is 7 — the horizon the loop's own round dirs (`WORKTREE_DIR_MAX_AGE_DAYS`)
+        and the per-session scratch dirs (`SESSION_CWD_MAX_AGE_DAYS`) already hold, which is
+        why 7 and not the 30 the byte stores use;
+      * the printed label quotes it, so the reader of a zero can see which horizon made it;
+      * it is not BORROWED, and the directory is not derived from anything but `DATA_ROOT`.
+        A constant read off another store, or a home-joined path, keeps every fixture node
+        green while a widening elsewhere doubles this store's life or an `--apply` reaches
+        outside the root `resolve_data_root` decided — the two failure modes store 22's
+        horizon node names for its own store, and the reason both lines are pinned here too.
+    """
+    assert rs.CEILING_REPORT_MAX_AGE_DAYS == 7, rs.CEILING_REPORT_MAX_AGE_DAYS
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert "CEILING_REPORT_MAX_AGE_DAYS = 7" in src, (
+        "the horizon is not set by that exact assignment, so there is not one knob to widen")
+    assert "CEILING_REPORT_MAX_AGE_DAYS = _" not in src, (
+        "the horizon became a borrowed constant, so another store's window now decides this "
+        "one's")
+    assert ("CEILING_REPORT_DIR = DATA_ROOT / _CEILING_MODULE.REPORT_DIR.relative_to("
+            in src), (
+            "the report dir is no longer DATA_ROOT-anchored, so the root an `--apply` "
+            "unlinks files in is not the root `resolve_data_root` decided but whatever "
+            "root the writer module happened to import into")
+    assert "CEILING_REPORT_DIR = _CEILING_MODULE.REPORT_DIR\n" not in src, (
+        "the store points at the writer's own absolute REPORT_DIR, which is the same "
+        "mistake the unredirected-paths guard exists to catch")
+
+    p = rs.sweep_ceiling_reports(False, time.time(), root=Path(rs.CEILING_REPORT_DIR))
+    line = rs._ceiling_reports_line(p)
+    assert f">{rs.CEILING_REPORT_MAX_AGE_DAYS}d" in line, line
+    assert p["horizon_days"] == 7, p
+
+
+def test_the_ceiling_report_store_counts_the_write_then_replace_residue_apart(rs):
+    """#4205 clause 3's census half: a `.report.tmp` is a named class with its own numbers on
+    the line, never a rounding error inside the `.report` count.
+
+    `_write_report` builds `report.with_suffix(suffix + ".tmp")` and then `tmp.replace(report)`
+    (`_resource_ceiling.py:601-612`), so a crash between the two leaves a name that
+    `CEILING_REPORT_GLOB` cannot match and that the writer never renames or unlinks again. The
+    live directory holds exactly one today — `lloyd-bash-ceiling-60855-e6aeb67d.report.tmp`,
+    392 B, 2026-10-30, 17 days old when #4205 triaged it — and that single file is the whole
+    argument for a store that bounds `*.report` only to re-file itself in six months.
+    """
+    _ceiling_report(rs, "lloyd-bash-ceiling-5001-dddd4444.report", days=8)
+    tmp = _ceiling_report(rs, "lloyd-bash-ceiling-60855-e6aeb67d.report.tmp", days=17)
+    root = Path(rs.CEILING_REPORT_DIR)
+
+    dry = rs.sweep_ceiling_reports(False, time.time(), root=root)
+    line = rs._ceiling_reports_line(dry)
+    assert dry["files"] == 1, f"the tmp file leaked into the report count: {dry}"
+    assert dry["stale"] == 1, dry
+    assert dry["tmp_files"] == 1 and dry["tmp_stale"] == 1, dry
+    assert dry["tmp_bytes"] == tmp.stat().st_size, dry
+    assert "write-then-replace residue" in line, line
+    assert "1 would delete" in line.split(";", 1)[1], line
+
+    # And the residue printed when it is the ONLY thing there: "120 reports and 0 tmp" and
+    # "120 reports and 1 tmp" are two states of the leak, and a line that folded the second
+    # into the first would report it as the first.
+    aged_report = root / "lloyd-bash-ceiling-5001-dddd4444.report"
+    aged_report.unlink()
+    only = _ceiling_report(rs, "lloyd-bash-ceiling-7007-eeee5555.report.tmp", days=30)
+    bare = rs.sweep_ceiling_reports(True, time.time(), root=root)
+    bare_line = rs._ceiling_reports_line(bare)
+    assert bare["files"] == 0 and bare["tmp_deleted"] == 2, bare
+    assert "write-then-replace residue" in bare_line, bare_line
+    assert not only.exists() and not tmp.exists(), "aged residue survived --apply"
+
+
+def test_a_symlink_at_either_ceiling_report_name_is_held_and_never_followed(rs):
+    """#4205 clause 3's safety half, on store 7's rule: a symlink carrying `*.report` or
+    `.report.tmp` is counted as held, and no path through this store follows or removes it.
+
+    Both name classes get a link, because the store globs both and a hold enforced on one
+    pattern is the shape of the bug this clause is written against. The links point at a file
+    OUTSIDE the store, so a `resolve()`-then-`unlink()` path would delete a file this sweep has
+    no claim on, and a bare `unlink()` of the link would destroy the link itself — which is
+    what an operator's `ln -s` of a mounted capture exists to be.
+    """
+    root = Path(rs.CEILING_REPORT_DIR)
+    target = root.parent / "not-in-the-store.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("keep me", encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    names = ("lloyd-bash-ceiling-9001-ffff6666.report",
+             "lloyd-bash-ceiling-9002-ffff7777.report.tmp")
+    for name in names:
+        link = root / name
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target)
+    _ceiling_report(rs, "lloyd-bash-ceiling-9003-ffff8888.report", days=40)
+
+    dry = rs.sweep_ceiling_reports(False, time.time(), root=root)
+    line = rs._ceiling_reports_line(dry)
+    assert dry["held_link"] == 2, f"the two held links: {dry}"
+    assert dry["files"] == 2 and dry["tmp_files"] == 1, dry
+    assert dry["stale"] == 1, f"a symlink was aged as if it were a file: {dry}"
+    assert dry["tmp_stale"] == 0, f"the tmp symlink was aged: {dry}"
+    assert "symlink held (never followed)" in line, line
+
+    run = rs.sweep_ceiling_reports(True, time.time(), root=root)
+    assert run["deleted"] == 1 and run["held_link"] == 2, run
+    for name in names:
+        assert (root / name).is_symlink(), f"--apply removed the held symlink {name}"
+    assert target.read_text(encoding="utf-8") == "keep me", (
+        "the sweep deleted through a symlink it was told to hold")
+
+
+def test_an_absent_ceiling_report_directory_reports_itself_and_is_never_created(rs,
+                                                                               monkeypatch,
+                                                                               capsys):
+    """#4205 clause 4's first node, store 22's and store 25's shape: an absent store is a fact
+    the line states, and the sweep does nothing about it.
+
+    `CeilingUnit.__init__` lays the directory itself (`_resource_ceiling.py:734`), so a box
+    that has never finished a Bash call under this build has no such path; creating one from a
+    reaper would both report that box as one whose calls left nothing, and hand the next spawn
+    a directory a different owner made. Both routes are pinned because #2354's bug shipped
+    exactly that way — the arm's own unit test passed on an absent path while `main()` still
+    reached a helper that called `mkdir(parents=True)` — so the second half of this node goes
+    through `main()` with the store pointed at a path that does not exist.
+    """
+    absent = Path(rs.CEILING_REPORT_DIR).parent / "never-made-ceiling"
+    if absent.exists():
+        shutil.rmtree(absent)
+    p = rs.sweep_ceiling_reports(True, time.time(), root=absent)
+    assert p["present"] is False and p["files"] == 0, p
+    assert not absent.exists(), "the store CREATED the directory it was reporting as absent"
+
+    line = rs._ceiling_reports_line(p)
+    assert "no ceiling report dir yet" in line, line
+    assert "0 deleted" not in line and "would delete" not in line, (
+        f"an absent store reported a measured zero instead of its absence: {line}")
+
+    monkeypatch.setattr(rs, "CEILING_REPORT_DIR", absent)
+    out = _dry_run_report(rs, monkeypatch, capsys)
+    printed = [ln for ln in _store_report_lines(out)
+               if ln.split(":")[0].strip().startswith("ceiling report files")]
+    assert len(printed) == 1, f"main() printed {len(printed)} ceiling report lines: {printed}"
+    assert "no ceiling report dir yet" in printed[0], printed[0]
+    assert not absent.exists(), (
+        "main() created the store directory it had just reported as absent — #2354's bug, "
+        "which only the whole-sweep route can catch")
+
+
+def test_a_non_directory_at_the_ceiling_report_path_is_held_not_walked(rs):
+    """#4205 clause 4's second node: an entry of the wrong type at the store path is named,
+    held, and never walked — the node store 22 has for its captures.
+
+    The realistic shapes are a `ceiling -> /some/mount` symlink or a regular file a manual
+    move left behind, and either way the answer is the same: say so on the line and keep
+    going. The alternative is a `NotADirectoryError` rising out of the arm and taking the whole
+    report with it at the point where an operator is reading a delete list, or — worse — a
+    silent zero that reads as a bounded store.
+    """
+    path = Path(rs.CEILING_REPORT_DIR)
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.is_symlink() or path.exists():
+        path.unlink()
+    path.write_text("not a directory", encoding="utf-8")
+
+    p = rs.sweep_ceiling_reports(True, time.time(), root=path)
+    line = rs._ceiling_reports_line(p)
+    assert p["not_a_dir"] == path.name, p
+    assert p["present"] is False and p["files"] == 0, p
+    assert "REFUSED" in line and "nothing walked" in line, line
+    assert path.is_file() and path.read_text(encoding="utf-8") == "not a directory", (
+        "the sweep removed or overwrote an entry that is not its store")
+
+
+def test_the_ceiling_report_store_prints_last_and_survives_the_refusal(rs, _store_report,
+                                                                       monkeypatch, capsys):
+    """#4205 clause 5's report-half: the 29th line, printed LAST, in both kinds of run, with
+    items 1-28 unmoved.
+
+    Appended rather than inserted because task 79's numbered enumeration is matched to these
+    lines POSITIONALLY — every one of items 1-28 keeps the rule it already names, which is
+    #2862's reason, inherited through #2924, #3188, #3209, #3379, #3499, #3789, #3951 and
+    #4060. And it prints outside the production-checkout refusal because it is a DATA_ROOT
+    store that deletes: `resolve_data_root` has already decided which tree an `--apply` may
+    reach (#1415), and the guard exists to stop a gate worktree deleting a live checkout's
+    refs, which a directory of unread per-call reports is not. A sweep that only ever ran from
+    a gate would otherwise leave the residue unbounded — which is precisely how this directory
+    reached 631 files under a loop that gates nightly.
+    """
+    _ceiling_report(rs, "lloyd-bash-ceiling-8111-aaaa9999.report", days=30)
+    report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
+    assert len(report) == 29, f"a production run prints 29 store lines: {report}"
+    assert report[-1].split(":")[0].strip().startswith("ceiling report files"), report[-1]
+    assert f">{rs.CEILING_REPORT_MAX_AGE_DAYS}d" in report[-1], report[-1]
+    assert [ln.split(":")[0].strip() for ln in report[:-1]] == \
+        [ln.split(":")[0].strip() for ln in _store_report[:-1]], (
+        "appending the 29th line moved one of items 1-28, which task 79's enumeration is "
+        "matched to by index")
+
+    refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
+    assert len(refused) == 26, f"a refused run prints twenty-six store lines: {refused}"
+    assert refused[-1].split(":")[0].strip().startswith("ceiling report files"), refused[-1]
+def test_the_report_the_writer_actually_writes_is_the_file_this_store_reclaims(rs, tmp_path):
+    """#4205: the process boundary the store exists to sit on, crossed for real.
+
+    Every other node here plants file names as literals, which proves only that the sweep
+    agrees with itself. This bound depends on agreeing with a DIFFERENT process: the MCP
+    server writes `REPORT_DIR / f"{unit}.report"` and `_write_report` composes its scratch
+    name with `with_suffix(suffix + ".tmp")`, in a module this diff never runs. So this node
+    imports that module, calls its REAL writer, and asks the store to reap what came out —
+    layout, report name and tmp name all have to survive the trip.
+
+    The failure this pins is the quiet one. If the writer ever renames its unit prefix or
+    moves its directory, a store holding a restated literal keeps printing
+    `no ceiling report dir yet` (absent) or `0 of 0` (empty) over a directory filling up: a
+    bound that reports success while bounding nothing, which is the one outcome this suite
+    treats as worse than a red line. The store therefore derives both names and the layout
+    from that module's own constants, and this node is what says the derivation still lands
+    on files the writer really made.
+    """
+    import fnmatch
+
+    import agent_mcp._resource_ceiling as ceil
+
+    # The layout, read off the writer rather than repeated: `<root>/_pipeline/ceiling`.
+    # The writer's layout, read off the writer: `<root>/_pipeline/ceiling`. The store's OWN
+    # path is deliberately not compared to it here — the `rs` fixture has already redirected
+    # that attribute into a single-segment directory, and asserting a redirect equals this
+    # layout would be comparing two different things. What is pinned is the behavioural seam
+    # below: a file the writer's code writes AT THIS LAYOUT under a fresh root is a file the
+    # store reclaims when pointed at that root.
+    layout = ceil.REPORT_DIR.relative_to(ceil._DATA_ROOT)
+    assert layout.parts == ("_pipeline", "ceiling"), layout
+    assert rs.CEILING_REPORT_GLOB == f"{ceil.UNIT_PREFIX}-*.report", (
+        "the store restates a report name instead of composing it from the writer's prefix")
+    assert rs.CEILING_REPORT_TMP_GLOB == f"{ceil.UNIT_PREFIX}-*.report.tmp", (
+        "the store restates the residue name instead of composing it from the writer's prefix")
+
+    root = tmp_path / layout
+    root.mkdir(parents=True)
+    unit = f"{ceil.UNIT_PREFIX}-{os.getpid()}-deadbeef"
+    report = root / f"{unit}.report"
+    ceil._write_report(report, {"rc": "0", "mem_peak": "4096", "pids_peak": "3"})
+    assert report.is_file(), "the writer did not produce a report where the store looks"
+    # The crash half: `_write_report` renames its scratch file away on success, so the
+    # residue class is reproduced by leaving that same name in place unreaped.
+    residue = report.with_suffix(report.suffix + ".tmp")
+    residue.write_text("rc=1\n", encoding="utf-8")
+    assert fnmatch.fnmatch(residue.name, rs.CEILING_REPORT_TMP_GLOB), residue.name
+    assert not fnmatch.fnmatch(residue.name, rs.CEILING_REPORT_GLOB), (
+        "the report glob matches the residue name too, so one file would count twice")
+
+    aged = time.time() - (rs.CEILING_REPORT_MAX_AGE_DAYS + 1) * 86400
+    os.utime(report, (aged, aged))
+    os.utime(residue, (aged, aged))
+
+    dry = rs.sweep_ceiling_reports(False, time.time(), root=root)
+    assert (dry["files"], dry["stale"], dry["tmp_files"], dry["tmp_stale"]) == (1, 1, 1, 1), dry
+    assert dry["deleted"] == 0 and report.is_file() and residue.is_file(), dry
+
+    ran = rs.sweep_ceiling_reports(True, time.time(), root=root)
+    assert ran["deleted"] == 1 and ran["tmp_deleted"] == 1, ran
+    assert not report.exists() and not residue.exists(), (
+        "the store could not reclaim a file its own writer wrote")
