@@ -33,6 +33,7 @@ Run: .venvs/lloyd/bin/python -m pytest tests/test_iv_grade_latency.py -q
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shutil
@@ -331,3 +332,129 @@ def test_a_window_with_no_llm_rows_at_all_does_not_raise(tmp_path):
     assert cost["latency_ms_per_call_n"] == 0, cost
     assert cost["latency_ms_per_call_p99"] is None, cost
     assert cost["observer_ms_per_turn"] == 0, cost
+
+
+# ---------------------------------------------------------------------------
+# #4216 clauses 1 and 2 — the token field says which unit it is in, too
+# ---------------------------------------------------------------------------
+
+
+def test_the_token_line_names_its_own_unit_and_still_leaves_exactly_one_summed_line(tmp_path):
+    """`input tokens TOTALLED / turn`, and the value it prints is untouched.
+
+    #995 fixed the millisecond trap and left its twin standing: `input_tokens_per_turn`
+    printed bare as `input tokens / turn`, while being the very same shape — the
+    observer calls' prompt tokens over EVERY review in the window, divided by turns.
+    #4216 is what that cost: `architecture/inner-voice.md` set the ~62k rows the field
+    wrote before R2 against the plan's ~15–20k target, and the field cannot answer
+    that question, because half of any per-turn figure is reviews-per-turn.
+
+    Standard fixture: 11 rows of 1,000 prompt tokens over 2 turns = 5,500 a turn,
+    11 reviews over 2 turns = 5.5 reviews a turn, and 1,000 a review. The three
+    figures are pairwise distinct, so a line that quietly switched to a per-review
+    or a per-call value cannot pass the value assert while keeping the label, and a
+    line that renamed the unit without printing the counts cannot pass the unit
+    asserts.
+
+    The word is TOTALLED, not a second SUMMED. `observer ms SUMMED / turn` is #995's
+    line and `test_the_summed_figure_is_still_printed_and_labelled_summed` pins that
+    exactly one printed line carries that word; a token label borrowing it would
+    break that assertion. So this node pins BOTH halves in one run: the new label,
+    and the one-SUMMED invariant that constrains how it may be worded.
+    """
+    repo = _make_repo(tmp_path)
+    _make_db(repo, STANDARD_ROWS)
+    out = _run(repo).stdout
+
+    hits = _lines_matching(out, r"input tokens")
+    assert len(hits) == 1, f"expected exactly one printed token line: {hits!r}"
+    line = hits[0]
+    assert "TOTALLED" in line, line
+    assert "input tokens / turn" not in line, (
+        f"the bare pre-#4216 label is still on the line ({line!r}) — a label that "
+        "names no unit is what let a doc read a per-review target out of a per-turn "
+        "figure")
+    # The unit itself: reviews in the numerator, turns in the denominator.
+    assert "11 reviews" in line, line
+    assert "2 turns" in line, line
+    assert "NOT one review's prompt" in line, line
+    # Value unchanged, plus the per-review figure that does isolate the prompt.
+    assert "5,500" in line, line
+    assert "per review 1,000" in line, line
+
+    cost = _report(repo)["cost"]
+    assert cost["input_tokens_per_turn"] == 5500, cost
+    assert cost["input_tokens"] == 11000, cost
+    assert cost["llm_calls"] == 11 and cost["turns"] == 2, cost
+
+    summed = _lines_matching(out, r"SUMMED")
+    assert len(summed) == 1, (
+        f"the token label must not add a second SUMMED line — that invariant is "
+        f"#995's, asserted above: {summed!r}")
+
+
+def test_a_window_with_no_llm_calls_still_prints_the_token_line(tmp_path):
+    """Fast-path-only window: 0 reviews, so per review is `not measured`, not 0.
+
+    Three rows whose `input_tokens` are all 0 — every review skipped by the fast
+    path. `input_tokens_per_turn` is arithmetically 0 and true, but the per-review
+    figure would be 0/0, so the line has to print and say the figure is absent
+    rather than fabricate one or raise. The window exits 0 today
+    (`test_a_window_with_no_llm_rows_at_all_does_not_raise`); the new label
+    must not change that.
+    """
+    repo = _make_repo(tmp_path)
+    db = repo / ".lloyd-data" / "usage.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""CREATE TABLE inner_voice_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL, sequence_in_turn INTEGER NOT NULL,
+        trigger TEXT NOT NULL, action TEXT NOT NULL, reason TEXT, content TEXT,
+        related_tool TEXT, input_tokens INTEGER, output_tokens INTEGER,
+        cache_read INTEGER, cache_create INTEGER, latency_ms INTEGER,
+        model TEXT, error TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+    for i in range(3):
+        conn.execute(
+            """INSERT INTO inner_voice_observations
+               (session_id, turn_id, sequence_in_turn, trigger, action, reason,
+                input_tokens, output_tokens, cache_read, cache_create,
+                latency_ms, model, error)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("s1", f"t{i}", i, "pretool", "noop", "fast-path: no candidate",
+             0, 0, 0, 0, 0, "primary", None))
+    conn.commit()
+    conn.close()
+
+    hits = _lines_matching(_run(repo).stdout, r"input tokens")
+    assert len(hits) == 1, f"expected exactly one printed token line: {hits!r}"
+    assert "0 reviews" in hits[0], hits[0]
+    assert "per review not measured" in hits[0], hits[0]
+
+
+def test_the_units_block_defines_the_token_field_end_to_end():
+    """Clause 2: the block that fixed ms now defines the token quantity as well.
+
+    Read off the module docstring of the shipped script through `ast`, so a block
+    parked in a comment — or in the live checkout's copy but not in the file the
+    nightly runs — cannot pass. #4216 asks for three things at the field's source:
+    its numerator (the observer call's own `prompt_tokens`, summed over the window's
+    observation rows), its denominator (DISTINCT `turn_id`s, so one turn that ran
+    five reviews contributes five prompts), and the derived per-review cost
+    `input_tokens_per_turn / (llm_calls/turns)` — the figure that actually isolates
+    the observer prompt from the review count.
+
+    #995's two ms bullets are asserted to survive too: this is an extension of that
+    block, and a rewrite that quietly dropped the millisecond pair would un-pin #995
+    from inside a change that only mentioned tokens.
+    """
+    doc = ast.get_docstring(ast.parse(GRADER.read_text(encoding="utf-8")))
+    assert doc, "iv_grade.py carries no module docstring to hold the units"
+    assert "UNITS —" in doc and "Usage:" in doc, doc[:400]
+    units = doc[doc.index("UNITS —"):doc.index("Usage:")]
+
+    assert "prompt_tokens" in units, units
+    assert "observation row" in units, units
+    assert "distinct" in units.lower() and "turn_id" in units, units
+    assert "input_tokens_per_turn / (llm_calls/turns)" in units, units
+    assert "observer ms SUMMED / turn" in units, units
+    assert "observer ms PER CALL" in units, units

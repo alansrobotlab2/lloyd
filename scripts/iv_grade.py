@@ -21,8 +21,9 @@ message reads like a correction. Neither is ground truth. They are good
 enough to spot a regression and to compare two prompts, which is what the
 tuning loop actually needs.
 
-UNITS — the one thing that used to be wrong here (backlog #995). Two different
-quantities are reported, and only one of them is a round-trip:
+UNITS — the thing that used to be wrong here, in two fields (#995 for
+milliseconds, #4216 for tokens). Three quantities are reported, and only one of
+them is per call:
 
   * `observer ms SUMMED / turn` is a SUM: every LLM millisecond in the window
     divided by turns. A turn costs several calls (measured 09-01..09-17: 1,189
@@ -30,6 +31,24 @@ quantities are reported, and only one of them is a round-trip:
     magnitude larger than any single request.
   * `observer ms PER CALL` is p50/p90/p99 of `latency_ms` over LLM rows that
     carry no error — the actual round-trip distribution.
+  * `input tokens TOTALLED / turn` (key `input_tokens_per_turn`) is the same
+    trap in tokens, and the same shape: its NUMERATOR is the observer calls' own
+    `prompt_tokens` — what `app/inner_voice/observer.py` stamps into
+    `input_tokens` from each call's usage block — totalled over every
+    observation row in the window, terminal and mid-turn reviews alike; its
+    DENOMINATOR is
+    the DISTINCT `turn_id`s in it, so one turn that ran five reviews puts five
+    prompts in the numerator and one turn in the denominator. It is therefore
+    NOT one review's prompt, and it moves with reviews-per-turn as well as with
+    prompt size. The figure that isolates the prompt is the per-review cost,
+    `input_tokens_per_turn / (llm_calls/turns)` — which is `input_tokens /
+    llm_calls` by a longer route. #4216 is this field's own history: the nightly
+    series' pre-R2 rows (~62k a turn) and today's rows share BOTH this numerator
+    and this denominator, so the miss against that plan's ~15–20k a turn is real
+    and dated — but the field cannot also be read as the PROMPT getting that much
+    cheaper, because per review the cost has been flat since R2 landed. Both
+    readings, with their dates, are in `architecture/inner-voice.md`'s
+    `## Verification`.
 
 Every deadline in the subsystem (`inner_voice.observer.timeout_seconds`,
 `async_timeout_seconds`) is PER CALL, so only the second pair may be compared
@@ -465,7 +484,18 @@ def main() -> int:
     print(f"\nCOST  {c['turns']} turns, {c['observations']} observations, "
           f"{c['llm_calls']} LLM calls")
     print(f"  fast-path share        {c['fast_path_share']}")
-    print(f"  input tokens / turn    {c['input_tokens_per_turn']:,}")
+    # #4216: the token field carries #995's trap in tokens. It is the window's
+    # reviews totalled over its turns, so it rises with reviews-per-turn and is NOT
+    # one review's prompt. `TOTALLED` and not a second `SUMMED` — that word belongs
+    # to the ms line below and `tests/test_iv_grade_latency.py` pins that exactly one
+    # printed line carries it. Per review is the figure that isolates the prompt; see
+    # the `UNITS` block in the module docstring for why.
+    per_review = (round(c["input_tokens"] / c["llm_calls"])
+                  if c["llm_calls"] else None)
+    per_review_text = "not measured" if per_review is None else f"{per_review:,}"
+    print(f"  input tokens TOTALLED / turn  {c['input_tokens_per_turn']:,}"
+          f"   ({c['llm_calls']} reviews over {c['turns']} turns —"
+          f" NOT one review's prompt; per review {per_review_text})")
     # Two units, spelled out (#995). The SUMMED line is total LLM ms over turns —
     # a turn costs several calls — and the PER CALL line is the round-trip
     # distribution the observer's per-call deadlines are actually set against.

@@ -22,6 +22,7 @@ Run:
 
 from __future__ import annotations
 
+import ast
 import datetime
 import hashlib
 import importlib.util
@@ -2640,3 +2641,150 @@ def test_the_newly_appended_row_carries_all_three_miss_fields(tmp_path):
     assert row["miss_checked"] == 0 and row["miss_corrected"] == 0
     assert row["miss_rate"] is None
     assert (row["miss_rate"] is None) == (row["miss_checked"] == 0)
+
+
+# ---------------------------------------------------------------------------
+# #4216 — the R2 cost prediction is closed as a measurement, in its own unit
+# ---------------------------------------------------------------------------
+
+#: The live architecture doc — the repo's, not `~/obsidian/architecture/inner-voice.md`,
+#: which is a divergent 2026-08-24 fork whose `## Verification` is a test list carrying
+#: no R2 prediction at all.
+ARCH_DOC = ROOT / "architecture" / "inner-voice.md"
+
+#: The three newest rows of `~/obsidian/knowledge/inner-voice/iv-metrics.jsonl` as they
+#: stood on 2026-11-17, as `(date, turns, llm_calls, input_tokens_per_turn)`, read per row
+#: with `recorded_at, input_tokens_per_turn, turns, llm_calls`. A FROZEN snapshot and not
+#: the live file on purpose: the nightly mirrors a new row the same day, so a test that
+#: recomputed the doc's band from the live series would redden on schedule while pinning
+#: nothing — #4216's own note is that a doc line quoting a moving series cannot be pinned
+#: by a pre-landing test. What IS pinned here is the relation between the figures the doc
+#: quotes and these rows.
+ROWS_4216 = [
+    ("2026-11-15", 7, 17, 26339),
+    ("2026-11-16", 207, 630, 32740),
+    ("2026-11-17", 200, 635, 33135),
+]
+
+
+def _verification_section() -> str:
+    """The body of the doc's `## Verification` section, up to the next `## ` heading.
+
+    Scoped rather than whole-file because the clause is about that section's claim, and
+    an assertion over the whole doc could be satisfied by a sentence that landed
+    somewhere it is not read.
+    """
+    text = ARCH_DOC.read_text(encoding="utf-8")
+    start = text.index("## Verification")
+    rest = text[start + len("## Verification"):]
+    end = rest.find("\n## ")
+    return rest if end == -1 else rest[:end]
+
+
+def _units_block() -> str:
+    """The grader's `UNITS` docstring block, where the field is produced."""
+    doc = ast.get_docstring(ast.parse(GRADER.read_text(encoding="utf-8")))
+    assert doc, "iv_grade.py carries no module docstring to hold the units"
+    return doc[doc.index("UNITS —"):doc.index("Usage:")]
+
+
+def test_the_architecture_doc_states_measured_bands_instead_of_the_r2_prediction():
+    """Clause 3: the forecast is paid, in the field it was written against.
+
+    `## Verification` ended on "After R2 the nightly series should show
+    `input_tokens_per_turn` and `observer_ms_per_turn` falling (predicted ~15–20k tokens
+    a turn against ~62k)", and the 2026-11-17 arch review (`12c42607`) amended it to say
+    out loud that the line had never been squared with the series — an open question
+    handed to #4216. Seven weeks of rows had already passed the prediction by.
+
+    What closes it is a measurement in ONE field, both sides. The same field
+    (`input_tokens_per_turn`), read the same way (`scripts/iv_grade.py`'s cost block,
+    copied verbatim by `scripts/iv_metrics_record.py`), gives 63,356 median across the 12
+    rows dated 2026-09-14 → 2026-09-23 against 23,440 median across the 49 rows dated
+    2026-09-26 → 2026-11-17: R2 landed a ~2.7x cut that still sits ABOVE the ~15–20k
+    target, so the honest outcome is a miss with dates on it, not a passing check. The
+    target band has to stay named in the section — "above it" means nothing without it —
+    and so does the one row (`2026-09-25`) held out of both bands, or the split reads as
+    a chosen cut.
+    """
+    section = _verification_section()
+
+    for stale in ("should show",
+                  "predicted ~15–20k tokens a turn against ~62k",
+                  "open question, not a passing check"):
+        assert stale not in section, (
+            f"the section still carries {stale!r}, which is the unpaid forecast #4216 "
+            "was filed to close out")
+
+    assert "input_tokens_per_turn" in section, section
+    assert "same field" in section, (
+        "the two bands have to be said to come from one field — that is what makes "
+        "comparing them legal, and it is the half the old line got wrong")
+    assert "63,356" in section, section
+    assert "2026-09-23" in section, section
+    assert "23,440" in section and "49 rows" in section, section
+    assert "2026-09-26" in section and "2026-11-17" in section, section
+    assert "26,339" in section and "32,740" in section and "33,135" in section, section
+    assert "15–20k" in section, (
+        "the target band is no longer named, so the stated miss has no reference")
+    assert "2026-09-25" in section, (
+        "the row between the two bands is unmentioned, so the cut looks chosen")
+
+
+def test_the_architecture_doc_carries_the_per_review_figure_and_its_reading():
+    """Clause 4: the section says which of its two numbers can show a prompt change.
+
+    `input_tokens_per_turn` divides the window's reviews by its turns, so it moves with
+    reviews-per-turn as well as with prompt size — the per-review figure is the one that
+    isolates the observer prompt, and it reads 25,991 median before R2 against 10,431
+    after, flat since late September. Without that second number in the section a reader
+    sees 26,339 → 33,135 across 2026-11-15 → -17 and writes "cost regression", which is
+    the reading #4216 exists to make impossible.
+
+    The formula is asserted in BOTH carriers — the doc and the grader's `UNITS` block —
+    because one claim with two carriers that may drift apart is exactly the failure
+    #2964 closed for the 583-events figure.
+    """
+    section = _verification_section()
+
+    assert "10,431" in section and "25,991" in section, section
+    assert "input_tokens_per_turn / (llm_calls/turns)" in section, section
+    assert "reviews-per-turn" in section, section
+    assert "not a prompt-cost regression" in section, (
+        "the section still leaves the three-night rise uninterpreted, which is the "
+        "reading a reader will otherwise take")
+    assert "2.26" in section, (
+        "reviews-per-turn is asserted to be steady across both bands; the measured "
+        "median that says so has to be in the sentence that claims it")
+
+    assert "input_tokens_per_turn / (llm_calls/turns)" in _units_block(), (
+        "the doc states a derivation the code that produces the field does not, so the "
+        "two carriers of the unit can drift")
+
+
+def test_the_three_newest_rows_are_frequency_rising_and_cost_flat_and_the_doc_says_so():
+    """The doc's reading, checked against the rows it names rather than its prose.
+
+    Per review these three nights are 10,845 / 10,757 / 10,436 — a 1.04x spread — while
+    per turn they run 26,339 / 32,740 / 33,135, a 1.26x spread, because turns went 7 →
+    207 → 200 and reviews 17 → 630 → 635. So the rise the doc refuses to call a cost
+    regression is arithmetic, not a judgement: this node holds that arithmetic, and
+    reddens if the rows it quotes are restated in the doc without the same relation, or
+    if the relation stops holding and the doc still says it does.
+    """
+    section = _verification_section()
+
+    per_turn = [row[3] for row in ROWS_4216]
+    per_review = [row[3] / (row[2] / row[1]) for row in ROWS_4216]
+    assert max(per_turn) / min(per_turn) >= 1.2, per_turn
+    assert max(per_review) / min(per_review) <= 1.1, [round(v) for v in per_review]
+
+    for date, _, _, per_turn_value in ROWS_4216:
+        assert f"{per_turn_value:,}" in section, (
+            f"{date}'s row reads {per_turn_value:,} and the doc no longer says so")
+    for value in per_review:
+        assert f"{round(value):,}" in section, (
+            f"one of these rows reads {round(value):,} tokens a review and the section "
+            "does not print it, so the per-turn rise above has nothing to be flat "
+            "against")
+    assert ROWS_4216[0][0] in section, "the section must date the rows it quotes"

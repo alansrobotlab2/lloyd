@@ -363,14 +363,39 @@ observer on reads off the automod ledger joined by `session_id`.
 `tests/test_turn_guards.py` (one test per guard on a worker turn with no
 observer, one through the real loop), `tests/test_iv_one_review.py` (R2/R4),
 `tests/test_iv_measurement.py` (R3), and the existing `tests/test_iv_*`,
-`tests/integration/test_iv_*`, `tests/integration/test_observer.py`. After R2 the nightly series should show
-`input_tokens_per_turn` and `observer_ms_per_turn` falling (predicted ~15–20k
-tokens a turn against ~62k). That prediction has never been squared with the
-series it names: the three newest rows (2026-11-15 → -17) read 26,339 / 32,740 /
-33,135 and 28,238 / 25,766 / 25,305, and both fields are copied verbatim out of
-`iv_grade`'s cost block by the `# cost` rows of `scripts/iv_metrics_record.py`,
-whose denominator may not be the per-review figure the ~62k baseline was measured
-in — so this line is an open question, not a passing check (#4216).
+`tests/integration/test_iv_*`, `tests/integration/test_observer.py`.
+
+The R2 cost prediction is closed as a measurement, not a forecast (#4216).
+`input_tokens_per_turn` is a per-turn TOTAL over reviews: the observer calls' own
+`prompt_tokens`, totalled across every observation row in the window — terminal
+and mid-turn reviews alike — over DISTINCT `turn_id`s (`_cost` in
+`scripts/iv_grade.py`, whose `UNITS` block now states it;
+`scripts/iv_metrics_record.py` copies the field into the nightly series). Both
+bands below are that same field, read on 2026-11-17: the 12 rows dated
+2026-09-14 → 2026-09-23 read min 53,792 / median 63,356 / max 111,989, and the
+49 rows dated 2026-09-26 → 2026-11-17 read min 3,658 / median 23,440 / max
+39,009. No row is dated 2026-09-24, and the one row dated 2026-09-25 is in
+neither band. R2 therefore cut the per-turn figure ~2.7x and left it ABOVE the
+plan's ~15–20k target: a measured miss with dates on it, which is what this
+section owes rather than a passing check.
+
+The per-turn field cannot by itself say whether the prompt got cheaper, because
+half of it is reviews-per-turn — median 2.26 reviews per turn in both bands. The
+figure that isolates the prompt is the per-review cost,
+`input_tokens_per_turn / (llm_calls/turns)`: median 25,991 tokens a review
+before R2 against 10,431 after, interquartile range 10,181–10,655 across those
+49 rows, so per-review cost has been flat since late September. The three newest
+rows (2026-11-15 → -17) read 26,339 / 32,740 / 33,135 a turn while those same
+rows read 10,845 / 10,757 / 10,436 a review, over 7 → 207 → 200 turns: more
+reviews, not a prompt-cost regression. Whether a 23,440 median against ~15–20k
+is a miss worth acting on is a ruling on the observer's prompt and the mid-turn
+review interval, and is owed separately (#4216).
+
+`observer_ms_per_turn` is a SUM over the window's reviews as well, not a
+round-trip (#995). Those same three rows read 28,238 / 25,766 / 25,305 ms a
+turn, which says nothing about the synchronous terminal review a spoken turn
+waits behind; the per-call percentiles would, and
+`scripts/iv_metrics_mirror.py` does not carry them into the series.
 
 ## Review log
 
