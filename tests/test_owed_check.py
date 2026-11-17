@@ -2091,3 +2091,153 @@ def test_a_ruling_names_the_item_it_ruled_on_in_the_run_row(isolated, monkeypatc
         "grammar, not a second decision about which item the run was about")
     assert str(out["meta"]["session_id"]) not in out["artifact_path"], (
         "a transcript handle is not the thing a run produced")
+
+
+# ── What the session is told to measure the ledger over (#4199) ─────────────
+#
+# The owed-check session edits nothing and writes nothing: it rules on what its own
+# greps come back with. So the MEASURE sentence is the entire reach this job has
+# into the automod ledger, and it is the one reader of that store that was never
+# widened to the retention sweep's monthly rotations — `state.ledger_rows_merged`
+# (#3179), `backlog.py`'s `with_archives` (#3612), `board_decisions._replay_rows`
+# (#4039) and `landed_outcomes.ledger_files` (#3079) all got the archive arm. The
+# narrow reading is not hypothetical here: #4198 was filed by owed-check run
+# `20261116_170850_owedcheck_e617` on "1 of 3 post-landing board-steward
+# ConnectTimeout deaths have a ledger row", and the merged join is 3 of 3 — the two
+# "missing" rows are in `promotions-archive-202610.jsonl.gz` and
+# `promotions-archive-202611.jsonl.gz`, both of which predate that run.
+
+_MEASURE_HEAD = "first MEASURE"
+_MEASURE_TAIL = "Then answer with exactly one outcome"
+
+
+def _owe_a_ledger_count(isolated, item_id: int = 4199) -> None:
+    """One draft item whose single due entry is an automod ledger row count — the
+    shape these falsifiers actually arrive in."""
+    write_item(isolated, item_id, extra={
+        "owed": [{"what": "count the event: board_steward rows in the automod "
+                          "ledger for the window and report how many carry a death",
+                  "kind": "check", "since": "2026-11-16T00:00:00"}]})
+
+
+def _ledger_counting_prompt(isolated, item_id: int = 4199) -> str:
+    """One rendered owed-check prompt for that item."""
+    _owe_a_ledger_count(isolated, item_id)
+    (owing,) = O.owing_items()
+    return OC.build_prompt(owing)
+
+
+def _measure_sentence(prompt: str) -> str:
+    """The MEASURE instruction itself — `first MEASURE` up to the outcome list.
+
+    Sliced rather than asserted against the whole prompt, so a string can only pass
+    by sitting where the session is told to look: an item's own body is interpolated
+    into the same prompt, and a rotation glob quoted by the item would otherwise
+    satisfy a clause about the instruction.
+    """
+    start = prompt.index(_MEASURE_HEAD)
+    return prompt[start:prompt.index(_MEASURE_TAIL, start)]
+
+
+def _paragraph(prompt: str, needle: str) -> str:
+    """The whole blank-line-delimited paragraph of a rendered prompt holding `needle`."""
+    for para in prompt.split("\n\n"):
+        if needle in para:
+            return para
+    raise AssertionError(f"no paragraph of the rendered prompt holds {needle!r}")
+
+
+def test_the_measure_sentence_names_the_live_ledger_and_its_rotations(isolated):
+    """Clause 1: the sentence that tells the session where to measure must name BOTH
+    stores, so a row the sweep archived cannot read as never written.
+
+    `LEDGER_ARCHIVE_AGE_DAYS = 14` moves a row out of the live file two weeks after
+    it is written — measured on the live store at triage, 292 `board_steward` rows
+    live against 1,018 in the 202610 rotation alone — so any owed falsifier worded
+    as "grep the live ledger" goes false on a schedule, and this job then rules on
+    it. One file named is the bug; the assertion is on the MEASURE region so the
+    glob has to be in the instruction, not merely somewhere in the prompt.
+    """
+    sentence = _measure_sentence(_ledger_counting_prompt(isolated))
+    assert "~/.local/state/lloyd-automod/promotions.jsonl" in sentence, sentence
+    assert "promotions-archive-" in sentence, (
+        "the rotation glob is absent from the MEASURE sentence, so the session greps "
+        "one file and an archived row counts as absent")
+    assert "both" in sentence.lower(), (
+        "the two stores are named but never joined into one population to count over")
+
+
+def test_the_measure_sentence_names_the_archive_aware_reader(isolated):
+    """Clause 2: the session is handed one call rather than a two-file recipe.
+
+    `ledger_rows_merged` is already the archive-aware reader everywhere else in the
+    loop (`scripts/automod/state.py`), so the instruction has to name it by module
+    too — `ledger_rows_merged` alone would not tell a session that globs the archive
+    pattern itself which of the store's four files to include.
+    """
+    sentence = _measure_sentence(_ledger_counting_prompt(isolated))
+    assert "ledger_rows_merged" in sentence, sentence
+    assert "scripts.automod.state" in sentence, (
+        "the reader is named without its module, so it cannot be imported as written")
+
+
+def test_an_absence_in_the_live_file_alone_is_not_evidence_of_absence(isolated):
+    """Clause 3: the prompt forbids ending an entry on a live-only absence.
+
+    Three outcomes finish an entry on a count — `settled`, `recheck`, and a `work`
+    answer whose `follow_up` files a fresh item — and #4198 is the third one firing:
+    a follow-up item asserting an absence that was purely an artifact of the read.
+    So all three have to be named in the same paragraph as the rule, not scattered.
+    """
+    para = _paragraph(_ledger_counting_prompt(isolated), "NOT evidence of absence")
+    assert "ledger_rows_merged" in para, (
+        "the paragraph forbids the narrow count without naming the wide one")
+    assert "rotation" in para, para
+    for outcome in ("`settled`", "`recheck`", "`follow_up`"):
+        assert outcome in para, f"{outcome} is not covered by the rule: {para}"
+
+
+def test_a_death_row_is_counted_by_died_and_error_class_not_death_class(isolated):
+    """Clause 4: a counting falsifier must be written against a key rows can have.
+
+    `death_class` is written only into the STATE file
+    `~/.local/state/lloyd-automod/board_steward.json`
+    (`workers/sources/board_steward.py:495`, inside `_write_state`), while the ledger
+    row appended just below it carries `died: True` and `error_class` (`:500-503`).
+    Across live + all three rotations, 0 of 1,621 `event: board_steward` rows carry
+    `death_class` (measured 2026-11-16; the only hits anywhere in the store are
+    `event: review` rows quoting the word in prose), so owed-check pass
+    `20261026_214023_owedcheck_dfc2` recorded "0 of 490 rows carry `death_class`" —
+    a correct reading of a permanently empty key, and the wording two items still
+    carry (#3321:90, #3462:130).
+    """
+    para = _paragraph(_ledger_counting_prompt(isolated), "death_class")
+    assert '"died": true' in para, para
+    assert "error_class" in para, para
+    assert "board_steward.json" in para, (
+        "the paragraph names the wrong key but never says which file owns it")
+    assert "state file" in para.lower(), para
+
+
+def test_the_widened_instruction_reaches_the_session_the_job_actually_runs(isolated,
+                                                                          monkeypatch):
+    """The one process boundary this change crosses: `execute()` renders the prompt
+    and hands it to `run_prompt_in_session`, a real backend chat turn with its own
+    tool loop that does the greps. A widened `PROMPT` constant that `execute()` did
+    not pass would still satisfy every assertion above and change no measurement, so
+    the string the session RECEIVES is what gets pinned here.
+    """
+    from workers.sources import _common as C
+    fake = _fake_session({"entries": [{"n": 1, "outcome": "settled",
+                                       "evidence": "3 of 3 death rows over live + rotations"}],
+                          "summary": "counted over both stores"})
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    _owe_a_ledger_count(isolated)
+
+    out = asyncio.run(OC.execute(_Job({"item_id": 4199, "apply": False})))
+    assert out["status"] == "success", out
+    (call,) = fake.calls
+    assert "promotions-archive-" in call["prompt"], (
+        "the rotation glob did not reach the session's prompt")
+    assert "ledger_rows_merged" in call["prompt"], call["prompt"][:200]
+    assert "NOT evidence of absence" in call["prompt"]

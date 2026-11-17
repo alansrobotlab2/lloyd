@@ -131,9 +131,13 @@ status: {status}   board: {board}
 
 For each numbered entry, first MEASURE: look at the live system — run records \
 under ~/lloyd-data/autonomy-runs/, logs in ~/lloyd-data/logs/ (server.err), the \
-automod ledger ~/.local/state/lloyd-automod/promotions.jsonl, the code in \
-~/lloyd (git log, grep), the vault, other backlog items that superseded this \
-one. Cite what you actually saw. Then answer with exactly one outcome:
+automod ledger ~/.local/state/lloyd-automod/promotions.jsonl AND the \
+`promotions-archive-<YYYYMM>.jsonl.gz` rotations beside it (count its rows over \
+BOTH stores, never over the live file alone — `ledger_rows_merged` in \
+`scripts.automod.state` is the one call that reads both), the code in ~/lloyd \
+(git log, grep), the vault, other backlog items that superseded this one. Cite \
+what you actually saw, and name the stores a count was taken over. Then answer \
+with exactly one outcome:
 
 - `settled` — it already happened, or it no longer applies (superseded, the \
 code is gone, a later decision made it moot). The evidence is required.
@@ -178,6 +182,29 @@ and neither is `config.yaml` (comment edits land; so do value changes outside \
 the fenced keys in `spec.CONFIG_DENIED_KEYS`): answer `work` or `reopen`. \
 Deleting or moving data is NOT outside: rule on it, and file the change as \
 `work` so a gated round does it. A decision is never outside: make it.
+
+A row missing from the live ledger is not a row that was never written. The \
+retention sweep folds a `promotions.jsonl` row into a monthly \
+`promotions-archive-<YYYYMM>.jsonl.gz` rotation 14 days after it is written \
+(`LEDGER_ARCHIVE_AGE_DAYS`), so a count taken over the live file alone goes false \
+on a schedule: #4198 was filed on "1 of 3 board-steward ConnectTimeout deaths have \
+a ledger row" when the join over live plus rotations was 3 of 3, and the two \
+absent rows sat in the 202610 and 202611 rotations the whole time. So when an \
+entry's evidence is a ledger row count, an absence seen in `promotions.jsonl` \
+alone is NOT evidence of absence: re-take the count over the rotations with \
+`ledger_rows_merged` BEFORE you answer `settled`, ask a `recheck`, or file a \
+`follow_up` on it — and say in `evidence` which stores you counted over.
+
+The same trap runs on a key's spelling. A board-steward tick that died is recorded \
+in the LEDGER as `"died": true` plus `error_class` \
+(`workers/sources/board_steward.py:500-503`); `death_class` is a key of the STATE \
+file `~/.local/state/lloyd-automod/board_steward.json` (`:495`) and of no ledger \
+row — measured 2026-11-16, 0 of 1,621 `event: board_steward` rows across the live \
+ledger and its three rotations carry it, and the only hits anywhere in the store \
+are `event: review` rows quoting the word in prose. A falsifier stored on an item \
+that greps for a key the ledger never had is a permanent zero: re-word it in your \
+`evidence` — the keys, and the stores it is counted over — and rule on the \
+corrected count, never on the old one.
 
 Evidence and rulings are stored up to 1200 characters. When one would run \
 longer it is cut with a visible marker, so put the decision and its bounds \
