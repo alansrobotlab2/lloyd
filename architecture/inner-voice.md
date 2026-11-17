@@ -2,7 +2,7 @@
 title: Inner Voice — Architecture
 status: implemented
 created: 2026-05-02
-updated: 2026-10-18
+updated: 2026-11-17
 related:
   - ~/obsidian/knowledge/software/lloyd-inner-voice-history-to-v5.4-2026-09-24.md
   - architecture/harness.md
@@ -72,7 +72,7 @@ The senses (pure predicates in `app/inner_voice/guards.py`):
 | `repetition` | the same target queried `threshold`+1 times inside `window` calls (`repetition_verdict`, ambient terms and polling tools excluded) | names the terms; claims nothing about results |
 | `failure_payload` | a non-error result whose head says `[stopped: max_turns]`, a timeout, or an empty response — once per tool name per turn | do not treat it as a result |
 | `todo_gate` | a turn that called `TodoWrite` ends with its own items still open — once per turn | mark them or keep working; do not restate the answer |
-| `round_open` | an unattended turn ends with an automod round it opened still open — once per turn | commit, gate, land or abort |
+| `round_open` | an unattended turn ends with an automod round it opened still open — twice at most, and the second only after the turn did new tool calls (`round_gate_due`, `ROUND_GATE_MAX_FIRES` 2; a second stop straight after the first nudge is not told again) | commit, gate, land or abort |
 | `capability_fault` | the terminal text carries a tool call written as prose (`looks_like_prose_tool_call`) | **no inject**: `logger.error`, a `harness.capability_fault` event, and a guardian `announce(level="warning")` at most every 30 min — more text cannot supply a missing tool pool |
 
 Mechanics:
@@ -98,14 +98,18 @@ Mechanics:
 ## 2. The observer — one terminal review
 
 Opt-in per session (`inner_voice` + `inner_voice_evaluate_user_turns`, or the
-A/B arm below); off for every worker source and, by default, every scheduled
-task. `app/routers/_messages_inner_voice.py::attach_observer_for_turn` wires it.
+A/B arm below). On the worker side it is a per-source key
+(`workers.sources.<name>.inner_voice`): `true` for exactly `autocode` and
+`autotriage` since 2026-09-25 — the section at the foot of this doc — `false`
+for every other source, and `autonomy.inner_voice: false` leaves it off by
+default for scheduled tasks.
+`app/routers/_messages_inner_voice.py::attach_observer_for_turn` wires it.
 
 ### When it is called
 
 | event | what happens |
 |---|---|
-| terminal `assistant_message` (no tool calls) | **the review** — synchronous, because the loop decides whether to continue by whether the list grew. Skipped when a turn guard already injected on this iteration, when the text is a prose tool call, or when the context is under the loop's floor. |
+| terminal `assistant_message` (no tool calls) | **the review** — synchronous, because the loop decides whether to continue by whether the list grew. Skipped when a turn guard already injected on this iteration, when the text is a prose tool call, or when the context is under the loop's floor. Once it is in flight it is awaited only until the turn is cancelled: `_judge_unless_cancelled` stops waiting and returns a `noop` (2026-11-09), because the review holds the turn running and a barge-in was queued behind it — measured 2026-10-31, a cancelled turn still running 6.6 s later and the next spoken request waiting 12.6 s. |
 | non-terminal `assistant_message` | a **mid-turn review**, async, only when due: every `review_interval(max_turns)` iterations (a sixth of the budget, 4–12; `review_every_iterations` pins it), at a silent streak (`silent_iterations_before_review`), or when a todo flip / stalled-progress block is waiting |
 | `pretool` | no judgment, no row — the call is appended to the signature ring and the trajectory |
 | `tool_result` | no judgment, no row — the trajectory entry gets its outcome; todo flips and stalled progress become blocks for the next review |
@@ -196,16 +200,31 @@ edit lands at once, so a prompt change that assumes new code ships with it.
   enrolled. `scripts/iv_ab_report.py` compares the arms from the event log:
   bad-stop rate, tool-error rate, correction proxy (z against the other arm),
   median iterations and duration; a session flipped by hand is `crossed_over`
-  and left out. **This is the acceptance test for the concept.**
+  and left out. **This was built as the acceptance test for the concept; the next
+  bullet records what became of it.**
 - **iv-chat-1 read 0/0, and that closed the keep/change question (2026-10-18).**
   Read over the closed window `[2026-09-25, 2026-10-09)`, `iv_ab_report.py`
   reports **both arms: 0 sessions, 0 turns**, with `crossed_over: 0` and `null`
   in every `z` — the experiment enrolled nobody. So **no arm-level bad-stop,
   tool-error or correction rate exists for iv-chat-1**, and none may ever be
   quoted from it: with zero turns each of those is a division by nothing, and the
-  report prints `null` rather than a number for exactly that reason. Reproduce:
+  report prints `null` rather than a number for exactly that reason. **#3220
+  (2026-10-23) has since put an interpreter on that silence**: `enrollment_gap()`
+  in the same script counts the window's `mission-control` sessions by whether they
+  carry the stamp, and `main` prints an `ENROLLMENT-GAP` line naming the counts and
+  both writers — in the plain run and as `enrollment_gap` under `--json` — whenever
+  any of them lacks one. Re-read live on 2026-11-17 the arms are still 0/0 with
+  every rate and `z` null, and the line reads `29 mission-control sessions in window
+  2026-09-25..2026-10-09, 0 stamped for iv-chat-1, 29 unstamped` — the same 29 files
+  measured on 2026-10-18. Reproduce:
   `.venvs/lloyd/bin/python scripts/iv_ab_report.py --experiment iv-chat-1 --json`
-  (read-only; its only write is its own stdout).
+  (read-only; its only write is its own stdout) — **run from production.** Its
+  `--sessions-dir` default is `app.paths.SESSIONS_DIR`, which anchors to the git
+  worktree the script is imported from, so from a scratch checkout it reads an empty
+  store and prints the same 0/0 with `platform_sessions: 0` and no gap line at all
+  (measured 2026-11-17; #4215). And the gap line only fires while those files are
+  still live `*.json`: `enrollment_gap()` never reads `<id>.json.gz`, so it goes
+  silent once the retention sweep archives the window at 90 days inactive (#4214).
   The condition that reopens the IV authority ruling was recorded in **#2149**:
   *"after the inner_voice.ab window end 2026-10-09, if `iv_ab_report` still reads
   0/0 arms, record-only is permanent."* It has now run against that reading, so
@@ -342,9 +361,14 @@ observer on reads off the automod ledger joined by `session_id`.
 `tests/test_turn_guards.py` (one test per guard on a worker turn with no
 observer, one through the real loop), `tests/test_iv_one_review.py` (R2/R4),
 `tests/test_iv_measurement.py` (R3), and the existing `tests/test_iv_*`,
-`tests/integration/test_iv_*`, `tests/integration/test_observer.py`. After R2
-the nightly series should show `input_tokens_per_turn` and
-`observer_ms_per_turn` falling (predicted ~15–20k tokens a turn against ~62k).
+`tests/integration/test_iv_*`, `tests/integration/test_observer.py`. After R2 the nightly series should show
+`input_tokens_per_turn` and `observer_ms_per_turn` falling (predicted ~15–20k
+tokens a turn against ~62k). That prediction has never been squared with the
+series it names: the three newest rows (2026-11-15 → -17) read 26,339 / 32,740 /
+33,135 and 28,238 / 25,766 / 25,305, and both fields are copied verbatim out of
+`iv_grade`'s cost block by the `# cost` rows of `scripts/iv_metrics_record.py`,
+whose denominator may not be the per-review figure the ~62k baseline was measured
+in — so this line is an open question, not a passing check (#4216).
 
 ## Review log
 
@@ -355,3 +379,20 @@ the nightly series should show `input_tokens_per_turn` and
   closed with its reading owed (#2963); the test-session exclusion re-dated
   (#2964); added the `session_input` fabricated-thinking exclusion (#1656)
   and the vault metrics mirror (#2121).
+- 2026-11-17: stale — §2 said the observer is "off for every worker source",
+  contradicting this doc's own 2026-09-25 section and `workers.sources.autocode` /
+  `autotriage.inner_voice: true`; the guard table's `round_open` said "once per
+  turn" against `ROUND_GATE_MAX_FIRES` 2 and `round_gate_due`; added
+  `_judge_unless_cancelled` (2026-11-09 — a cancelled turn no longer waits out the
+  terminal review) and #3220's `ENROLLMENT-GAP` line with the live 2026-11-17
+  re-read (arms still 0/0, 29 unstamped), plus the two ways that line can read
+  clean for the wrong reason (#4214, #4215); left
+  `app/sessions_io.py:1448` as cited — `tests/test_iv_measurement.py` pins that
+  string verbatim and validates the 1448-onward span, inside which the gated
+  create branch does sit (the `ab import assignment` line is now `:1451`); the R2
+  cost prediction is now read against
+  the series instead of left unpaid (#4216). Everything else verified against the
+  tree at 43e2443c: the six guards and their config, the five install sites, the
+  three levers, the six API routes, the 21-column `inner_voice_observations`
+  schema, the 270-row corpus (242 / 26 / 2, 20 hand-labelled), the mirror, and
+  `abandon_grace_seconds` / `automod.require_inner_voice` both still default off.
