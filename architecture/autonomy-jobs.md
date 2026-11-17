@@ -1709,8 +1709,9 @@ each one looks like an outage from the run record alone:
 - **#99 belongs to this group by its authority, not by its report.** Filed
   2026-10-16, armed since, and it has run: `select count(*), max(started_at) from runs
   where task_id='99'` over `~/lloyd-data/workers.db` was 4 rows, newest
-  2026-11-12T21:30:41Z, on 2026-11-16 (3 rows newest 2026-11-05T16:02:20Z on 2026-11-12) —
-  the one-line `status` flip #2797 owed on
+  2026-11-12T21:30:41Z, on 2026-11-16 — its 4th row is the run that started after #4096
+  measured 3, and the reading it carried then is in that item's own table. The
+  one-line `status` flip #2797 owed on
   2026-10-16 landed, so the standing human decision that still holds #98 (`draft`, also
   0 rows on 2026-11-16) no longer holds this one; it re-runs the
   observed
@@ -1729,13 +1730,15 @@ each one looks like an outage from the run record alone:
 
 **#97's row is a record now.** `select count(*) from runs where task_id=97` over
 `~/lloyd-data/workers.db` returned 27 runs as of 2026-11-16T06:20Z, all
-`status=success`, the oldest in the window 2026-10-17T08:06:26Z and the newest
-2026-11-15T05:23:12Z — the whole `runs` table starts at 2026-10-17T05:33:27Z because the
-retention sweep prunes it, so this is a rolling ~30-day count and not the length of the
-series — and
+`status=success`, the oldest in that window 2026-10-18T08:02:09Z and the newest
+2026-11-15T05:23:12Z — the whole `runs` table starts where the sweep's horizon has reached
+(`select min(started_at) from runs` over `~/lloyd-data/workers.db` printed
+2026-10-18T05:12:55Z on 2026-11-17) because the retention sweep prunes it, so this is a
+rolling ~30-day count and not the length of the series — and
 `~/.local/state/lloyd-automod/landed_outcomes.jsonl` holds 31 dated rows, more than the
-pruned window holds runs, newest `generated_at` 2026-11-15T05:23:17Z; the run before the
-window opened reported
+pruned window holds runs, newest `generated_at` 2026-11-15T05:23:17Z — the ledger's own
+newest row is read from that file and not from `runs`, so it is outside this node's
+re-derivation — and the run before the window opened reported
 `landed-outcomes: rows=4 latest=2026-10-16T08:01:08Z cost=ok latency=ok`. So the
 reads and writes in the row above are confirmed against an artefact and not stated
 from `skills/landed-outcomes-daily-record/SKILL.md` and the module's `record()`
@@ -2183,6 +2186,38 @@ decide what gets worked on next.
   above stayed green); **#4097** (`WATCH_JOBS[105]`'s frozen-field comment and
   `test_watch_105_cadence_is_the_module_not_its_frozen_field`'s docstring still describe
   a field that has moved).
+
+- **2026-11-17 — `current`.** #4096 landed the mechanism that asks the question this
+  section's form rule could not: given a dated run record, does the command the sentence
+  quotes still return the number it quotes? Two `@live_vault` nodes in
+  `tests/test_autonomy_jobs_doc_claims.py` now re-derive every `select count(*) … where
+  task_id=N` claim as of the instant that sentence itself quotes, and bind every
+  unqualified present-tense `status:` claim to the job's own task file, prose and
+  `| #N |` table rows alike — the cell was where #109's row rotted unseen, because the
+  form check above reads prose and skips `|`-prefixed lines. Three claims in §Watch the
+  machinery moved. #99's paragraph no longer carries its 2026-11-12 reading: the count does
+  not reproduce under its own command, whose window the retention sweep had already
+  crossed, and its `newest 2026-11-05T16:02:20Z` was the task file's `last_run:`, 84 s
+  ahead of the `max(started_at)` the sentence named — that reading and its command are
+  #4096's own table now. #97's record now names the command each figure comes from: its
+  oldest row is `2026-10-18T08:02:09.453354Z`, which is what `min(started_at) … task_id=97
+  and started_at < 2026-11-16T06:20Z` returns, where the line had carried
+  `2026-10-17T08:06:26Z` — a row the sweep has since pruned, so the sentence quoted a number
+  no query can reproduce; the table's own floor is stated the same way (`select
+  min(started_at) from runs` printed `2026-10-18T05:12:55.803980Z` on 2026-11-17, where the
+  line said `2026-10-17T05:33:27Z`); the ledger's `generated_at` is named as a different
+  source, so the node does not read it as a row of `runs`; and the 27-run count is waived by
+  the node as retention-uncertain — 26 of #97's rows survive the quoted instant, its oldest
+  sits 2.8 hours above the floor, and its median surviving gap of 1.0 day against a claim 1.1
+  days old says the horizon has advanced further than one #97 run could account for. #109's
+  row is unchanged: its
+  `→ 4, newest 2026-11-15T04:32:34Z` is what `count(*), max(started_at) … started_at <
+  2026-11-16T00:00Z` returns, which is the reading the node applies to a date-only instant.
+  The 2026-11-12 `last_run:` stamps the item named for #109 and #97 had already been
+  superseded on 2026-11-16 by this section's own nightly pass, and the same inversion is
+  one row away still: the file's `last_run:` runs 26–152 s ahead of `max(started_at)` for
+  the same run (#99 151.8 s, #103 56.0 s, #109 26.1 s as measured 2026-11-17), which is why
+  the node reads a claim from the source its own sentence names and never the other.
 
 ## One dispatch pass, one link of a chain (#4135, 2026-11-15)
 

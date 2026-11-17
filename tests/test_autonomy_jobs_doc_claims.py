@@ -56,10 +56,14 @@ job had by then produced. The rule the four nodes at the foot of this file hold 
 therefore about *form*: an undated never-run claim is unfalsifiable until it rots,
 so every one in live prose has to carry the date it was measured and the command
 that re-derives it, and a superseded claim survives only inside a dated §Review log
-entry. No node here asserts a run count: #97 and #98 fire daily, so any number
+entry. No node here freezes a run count: #97 and #98 fire daily, so any number
 typed into a test is false the next morning — which is the same reason the doc
 dates its counts, and why the owed-check re-reads the count instead of a test
-freezing it.
+freezing it. #4096 added the two nodes that do compare a quoted count with the
+queue, and they obey the rule by reading the number out of the sentence rather
+than typing one: each re-derives `select count(*) from runs where task_id=N` as
+of the instant that sentence itself quotes, so a record stays true as the counter
+grows and only a number that never matched any reading goes red.
 
 A fourth contract joined with #2806 (2026-10-16): what `config.yaml` offers as a
 review unit has to be the doc's own list of groups, in both directions. The pair
@@ -93,7 +97,8 @@ import ast
 import json
 import re
 import subprocess
-from datetime import date, datetime, timezone  # `date`: the 2026-10-14 onset row below
+from datetime import date, datetime, timedelta, timezone
+# `date`: the 2026-10-14 onset row below; `timedelta`: #4096's as-of window and retention horizon
 from pathlib import Path
 
 import pytest
@@ -5391,6 +5396,909 @@ def test_every_live_task_file_is_named_once_in_each_membership_table():
     for name, named in _membership_tables():
         _assert_no_unlisted(name, named, live, tasks_dir)
         _assert_listed_once(name, named)
+
+
+# ── #4096 — a doc-stated arming status and a quoted run record are re-derived ──
+#
+# The two membership reconcilers above compare *id sets*: `_assert_no_ghosts`,
+# `_assert_no_unlisted` and `_assert_listed_once` ask which ids a table names. Nothing
+# in this file asked the two questions this section asks — is the `status:` word the doc
+# states still the word that id's task file carries, and is the run count or newest
+# stamp the doc quotes still what its own quoted command returns at the instant that
+# sentence names. #4096 filed four §Watch the machinery rows that had rotted the same
+# way (each describing a job from before it was armed: #99 "still `status: draft` with
+# zero rows in `runs`" against a live `up_next` with runs behind it); `551b6ed9` retyped
+# the prose in place and the mechanism is what stayed owed.
+#
+# Two standing rules set this section's shape rather than qualifying it. The first is
+# the module docstring's: no node here may freeze a run count, because a daily job's
+# number is false the next morning. So the run-record half *re-derives* — it reads the
+# number the doc quotes, reads the instant the doc quotes, and asks the queue how many
+# rows that id had at that instant. Written that way a record cannot rot: it was true at
+# the instant it names and stays true, which is the licence §Watch the machinery has for
+# stating numbers at all. The item's cheaper alternative — refuse a dated count whose
+# date is older than that id's newest `runs` row — is unsatisfiable, and the doc is the
+# witness: #97 fires daily, so its newest row is always older than the day after the
+# record was taken, and that node would go red every single night on a sentence that is
+# correct and must stay.
+#
+# The second rule is that the reading must not invent claims. A prototype of the arming
+# half that bound a `status:` word to the nearest `#N` on the same line reported 4 true
+# agreements and 11 false mismatches over the live doc, every one on a sentence where
+# the word is not predicated of that id: #109's row, "`status: draft` **at filing**, armed
+# since"; the generic explanation "`status: draft` means it is not armed", naming #91, #96,
+# #97 and #94; and one §Writes durable state row naming #98, #24 and #60 where only #98's
+# status is claimed. A scheduled `-m live_vault` red on true prose costs an item plus a
+# triage pass (#2571's note records exactly that cost), so both halves return silence on
+# every ambiguous reading, and the seeded nodes below pin the silence as
+# loudly as they pin the report.
+
+#: The `status:` values a task file's front matter can carry. `app/autonomy.py`'s pools
+#: take `draft`, `up_next` and `in_progress`; `done` and `paused` are in the grammar
+#: because the doc uses them of retired jobs and of items, and a mismatch is still a
+#: mismatch wherever it lands.
+_ARMING_STATUSES = ("draft", "up_next", "in_progress", "done", "paused")
+_ARMING_ALT = "|".join(_ARMING_STATUSES)
+
+#: The two spellings of a stated status. The doc keeps the word inside the code span
+#: (`status: draft`); the split form is what a retype produces, and both bind alike.
+_STATUS_STATED = re.compile(
+    rf"`status: (?P<inside>{_ARMING_ALT})`|`status:`\s+`?(?P<outside>{_ARMING_ALT})`?",
+    re.I)
+
+#: A `status:` word the sentence is *qualifying* — reporting an earlier state, or
+#: explaining the word rather than applying it to a job — states nothing about now. The
+#: set is deliberately generous: over-qualifying costs coverage, the other direction
+#: costs a nightly item (#4096's 11-false-mismatch prototype), and `at filing` and `means`
+#: are both live in the doc today. `was`/`were`/`has been`/`became` are the past forms;
+#: `both`/`neither`/`either` are the plural subjects, under which no single id's status is
+#: being claimed; `since` is the parked-job form ("`status: draft` since Alan's ruling of
+#: 2026-09-17"), which reports a decision's date rather than a current reading.
+_STATUS_QUALIFIED = re.compile(
+    r"\b(at filing|has been|have been|was|were|means|since|originally|became|"
+    r"inside its instructions|both|neither|either)\b",
+    re.I)
+
+#: A stated status that is attached to a counted noun is a census, not a claim about the
+#: job: §The nightly job that watches the backlog's own state reports "`#77`'s census on
+#: 2026-09-26 counted 1,488 `status: done` files of 1,507", which is about backlog item
+#: files and says nothing about job #77, whose own file reads `up_next`. The node found
+#: this one on 2026-11-17, on its own live run — the twelfth false-positive form.
+_STATUS_TALLY = re.compile(r"^\s*(?:of\s+\d+|[\d,]+\s+)?(?:files?|rows?|items?|"
+                           r"entries|tasks?|cards?)\b", re.I)
+
+#: Where a clause ends, for the only question that separates a true binding from the
+#: prototype's 11 false ones: which id is this word predicated of. Full stops, semicolons
+#: and the doc's spaced em-dash are the boundaries its sentences actually use, and a
+#: closing paren is where a parenthetical hands the sentence back.
+_CLAUSE_END = re.compile(r"[.;!?]|\s—\s|[)]")
+
+#: The doc's own re-derivation command, in both spellings it uses (`task_id=97` and
+#: `task_id='99'`) with the optional second column. A run record is graded only when the
+#: sentence carries the command it says it was read with: that command is what a later
+#: reader can re-run, and #4096's defect is precisely a number whose quoted source does
+#: not return it.
+_RUNS_QUERY = re.compile(
+    r"select\s+count\(\*\)(?:\s*,\s*max\(started_at\))?\s+from\s+runs\s+where\s+"
+    r"task_id\s*=\s*'?(?P<id>\d+)'?",
+    re.I)
+
+#: Anything in a run record's neighbourhood that carries a number or an instant. The doc
+#: writes the same reading five ways — "4 rows as of 2026-11-16 (`select … → 4, newest
+#: 2026-11-15T04:32:34Z)", "was 0 on 2026-11-12 and is still 0 on 2026-11-16", "returned
+#: 27 runs as of 2026-11-16T06:20Z … the newest 2026-11-15T05:23:12Z" — and each of these
+#: alternatives is one of them. `verb` needs its lookahead because a bare "was 0" with no
+#: date after it ("`select count(*) … task_id=98` … was 0 that day, as it was on
+#: 2026-10-16") is a reading nobody can re-run, and this node is not the one that grades it.
+_RECORD_TOKEN = re.compile(
+    r"(?P<arrow>→\s*(?P<arrow_n>\d+))"
+    r"|(?P<count>\b(?P<count_n>\d+)\s+(?:runs?|rows?)\b)"
+    r"|(?P<verb>\b(?:was|were|returned|is still)\s+(?P<verb_n>\d+)\b"
+    r"(?=\s+(?:as of|on)\s+20\d\d))"
+    r"|(?P<newest>\bnewest\s*`?(?P<newest_stamp>20\d\d-\d\d-\d\d(?:T[\d:.+]*)?)`?)"
+    r"|(?P<asof>\b(?:as of|on)\s+(?P<instant>20\d\d(?:-\d\d)?(?:-\d\d)?"
+    r"(?:T\d\d(?::\d\d)?(?::\d\d)?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?))"
+    r"|(?P<other>#(?P<other_id>\d+)|task_id\s*=\s*'?(?P<task_id>\d+))",
+    re.I)
+
+#: `2026-11-16`, `2026-11-16T06:20Z`, `2026-10-16T08:01:05.661851+00:00`. The doc quotes
+#: the minute or the second; the live store quotes microseconds and a `+00:00` offset.
+_INSTANT = re.compile(
+    r"^(?P<y>\d{4})(?:-(?P<mo>\d{2}))?(?:-(?P<d>\d{2}))?"
+    r"(?:T(?P<h>\d{2})(?::(?P<mi>\d{2}))?(?::(?P<s>\d{2}))?(?:\.(?P<frac>\d+))?"
+    r"(?P<tz>Z|[+-]\d{2}:?\d{2})?)?$")
+
+#: Seconds in a day: the precision of a date-only quote. A claim's instant is its reading's
+#: own timestamp, so the window is every row strictly before it — the bound the doc's own
+#: records require, since #109's "4 rows as of 2026-11-16 (→ 4, newest 2026-11-15T04:32:34Z)"
+#: lands both its number and its newest row under `< 2026-11-16T00:00Z` and no other bound
+#: reproduces the pair. `_DAY` is also the widest imprecision this node tolerates in a
+#: quoted stamp; #4096's three stamps were wrong by 84 and 52 seconds, so anything finer
+#: than a day is compared at the quoted precision and not forgiven.
+_DAY = 86400
+
+
+def _claim_blocks(doc_text: str) -> list[tuple[int, str, bool]]:
+    """The doc as gradable blocks: `(first line, text with wraps collapsed, is_a_row)`.
+
+    A blank line ends a prose block; a `|` line is its own block, row by row. The rows are
+    split out because #4096's rot lived in a `| #109 | … |` cell and `_live_sentences()`
+    drops every `|`-prefixed line — a reconciler that reused that reader would inherit the
+    exact blind spot the item was filed for.
+    """
+    blocks: list[tuple[int, str, bool]] = []
+    buf: list[str] = []
+    start = 1
+
+    def flush() -> None:
+        if buf:
+            blocks.append((start, _flat(" ".join(buf)), False))
+            del buf[:]
+
+    for no, raw in enumerate(doc_text.splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped:
+            flush()
+            continue
+        if stripped.startswith("|"):
+            flush()
+            blocks.append((no, _flat(stripped), True))
+            continue
+        if not buf:
+            start = no
+        buf.append(stripped)
+    flush()
+    return blocks
+
+
+def _job_ids(text: str, statuses: dict[int, str]) -> list[int]:
+    """The ids in `text` that name a fleet job, in order, repeats kept.
+
+    Filtered through `statuses` because the doc cites backlog items in the same sentences
+    as jobs ("under #3064 to hold it out of every pool", "#2821 … has been `status: done`
+    since 2026-10-16") and a backlog number is not a job whose arming the doc could
+    mis-state. Job ids here are the two- and three-digit ones; the filter is the alias that
+    keeps them from colliding with the four-digit kind.
+    """
+    return [int(n) for n in re.findall(r"#(\d+)", text) if int(n) in statuses]
+
+
+def _clause(block: str, m: re.Match) -> tuple[str, str]:
+    """`(text before the stated word inside its clause, text after it inside the same).`"""
+    before = block[:m.start()]
+    cuts = [x.end() for x in _CLAUSE_END.finditer(before)]
+    head = before[cuts[-1]:] if cuts else before
+    tail = block[m.end():]
+    end = _CLAUSE_END.search(tail)
+    return head, tail[:end.start()] if end else tail
+
+
+def _arming_claims(doc_text: str, statuses: dict[int, str]) -> list[tuple[int, str, int, str]]:
+    """Every status the doc states about a fleet job, as `(job, stated, line, excerpt)`.
+
+    Binding rules, in the order they apply, each one learned from a false positive:
+    a qualified or past form states nothing (§`_STATUS_QUALIFIED`); a table row is bound to
+    its own head-cell id, which is the row's subject, so a row naming #98, #24 and #60
+    claims only #98's status; in prose the clause must contain exactly one job id before
+    the word and no *different* one after it, which is what makes "the armed-only view is
+    49 files …, #98 being `status: draft`; the drawing counts #98's edge anyway" a claim
+    about #98 and "#100 … and #101 … both are `status: draft`" no claim at all.
+    """
+    out: list[tuple[int, str, int, str]] = []
+    for line, block, is_row in _claim_blocks(doc_text):
+        for m in _STATUS_STATED.finditer(block):
+            if _STATUS_QUALIFIED.search(block[max(0, m.start() - 80):m.end() + 80]):
+                continue
+            if _STATUS_TALLY.match(block[m.end():m.end() + 30]):
+                continue
+            stated = (m.group("inside") or m.group("outside")).strip("`").lower()
+            head, tail = _clause(block, m)
+            if is_row:
+                subject = re.match(r"\|\s*#(\d+)\s*\|", block)
+                if not subject or int(subject.group(1)) not in statuses:
+                    continue
+                job = int(subject.group(1))
+            else:
+                before, after = _job_ids(head, statuses), _job_ids(tail, statuses)
+                if len(set(before)) != 1:
+                    continue
+                job = before[0]
+                if any(i != job for i in after):
+                    continue
+            if any(i != job for i in _job_ids(head + tail, statuses)):
+                continue
+            out.append((job, stated, line,
+                        block[max(0, m.start() - 70):m.end() + 70].strip()))
+    return out
+
+
+def _arming_drift(doc_text: str, statuses: dict[int, str]) -> list[str]:
+    """Each stated status that its own task file no longer carries, as report lines.
+
+    `statuses` is `{job id: the status in ~/obsidian/autonomy/NN-*.md}` — read by
+    `_task_statuses`, never typed here, because a status the test types is the next rot.
+    """
+    return [
+        f"#{job}: the doc states `status: {stated}` (line {line}) but "
+        f"~/obsidian/autonomy names that job `status: {statuses[job]}` — the row "
+        f"describes the job from before it was armed: …{excerpt}…"
+        for job, stated, line, excerpt in _arming_claims(doc_text, statuses)
+        if stated != statuses[job]
+    ]
+
+
+def _task_statuses(tasks_dir: Path) -> dict[int, str]:
+    """`{id: status}` from the task files' own front matter.
+
+    Front matter only, the way `nightly-skills-management`'s own trap requires (this file
+    records at §Two traps in the review stage that a body grep reports that skill as a
+    draft on every run because its instructions quote the string): the split on `---` is
+    the guard, not a `status:` search over the whole file.
+    """
+    out: dict[int, str] = {}
+    for path in sorted(tasks_dir.glob("*.md")):
+        m = re.match(r"(\d+)-", path.name)
+        if not m:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        front = text.split("---", 2)[1] if text.startswith("---") else text[:1500]
+        stated = re.search(r"(?m)^status:\s*['\"]?([a-z_]+)", front)
+        if stated:
+            out[int(m.group(1))] = stated.group(1)
+    return out
+
+
+def _parse_instant(raw: str) -> tuple[datetime, int] | None:
+    """`(instant, precision_in_seconds)` for a quoted date, or None if unparseable.
+
+    Naive values are read as UTC — every stamp the doc and the store carry is UTC, and
+    one clock is the rule. An unparseable quote returns None instead of guessing, because
+    the only thing worse than a rot this node misses is a red it invents.
+    """
+    m = _INSTANT.match(raw.strip().rstrip("."))
+    if not m:
+        return None
+    g = m.groupdict()
+    if not g.get("mo"):
+        return None
+    day = date(int(g["y"]), int(g["mo"]), int(g["d"] or 1))
+    micro, seconds = 0, 0
+    if g.get("h"):
+        seconds = int(g["h"]) * 3600 + int(g.get("mi") or 0) * 60 + int(g.get("s") or 0)
+        if g.get("frac"):
+            micro = int(round(float("0." + g["frac"]) * 1_000_000))
+    dt = datetime(day.year, day.month, day.day, tzinfo=timezone.utc) + \
+        timedelta(seconds=seconds, microseconds=micro)
+    tz = g.get("tz")
+    if tz and tz != "Z":
+        sign, rest = (1, tz[1:]) if tz[0] == "+" else (-1, tz[1:])
+        hh, _, mm = rest.partition(":")
+        dt = dt - timedelta(hours=int(hh), minutes=int(mm or 0)) * sign
+    precision = _DAY
+    if g.get("h"):
+        precision = 1 if g.get("s") else (60 if g.get("mi") else 3600)
+    return dt, precision
+
+
+def _parse_stamp(raw: str) -> datetime | None:
+    """A `runs.started_at` value from the store, which is always full-precision ISO."""
+    parsed = _parse_instant(raw)
+    return parsed[0] if parsed else None
+
+
+def _trunc(dt: datetime, precision: int) -> datetime:
+    if precision >= _DAY:
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if precision >= 3600:
+        return dt.replace(minute=0, second=0, microsecond=0)
+    if precision >= 60:
+        return dt.replace(second=0, microsecond=0)
+    return dt.replace(microsecond=0)
+
+
+def _same_instant(quoted: str, actual: datetime) -> bool | None:
+    """Whether a quoted stamp names the same instant as `actual`, to the quoted precision.
+
+    #4096's three retyped claims are exactly this comparison: the doc wrote `16:02:20Z`
+    and `20:12:55Z`, which are those files' `last_run:` values, into sentences citing
+    `max(started_at)`, whose rows read `16:00:56.355446` and `20:12:02.873188` — the
+    dispatch finishes and stamps the file about a minute after the row it points at begins.
+    Comparing at the quoted precision (the second) is what makes a truncated quote pass
+    and a truncated *wrong* one fail.
+    """
+    parsed = _parse_instant(quoted)
+    if parsed is None:
+        return None
+    want, precision = parsed
+    return _trunc(actual, precision) == _trunc(want, precision)
+
+
+def _run_record_claims(doc_text: str) -> list[tuple[int, str | None, str | None, str | None, int]]:
+    """`(job, quoted count, quoted newest, quoted instant, line)` per attributed reading.
+
+    A claim is what one quoted command says, read from just before the command to the
+    first clause boundary after it. The look-back is not decoration: #109's row puts its
+    number *before* the command ("4 rows as of 2026-11-16 (`select … → 4, newest …)"), so a
+    reader that started at the command would find a count with no instant and report
+    nothing. It is cut at the nearest preceding em-dash so the qualified prose behind it
+    cannot reach in. A *different* job id anywhere in the region stops the grading rather
+    than transferring the claim: #103's "3 rows, newest …, same query and date" reuses
+    #102's command and would otherwise be read as #102's reading — a false red on prose
+    that is true, the expensive direction.
+    """
+    out: list[tuple[int, str | None, str | None, str | None, int]] = []
+    for line, block, _row in _claim_blocks(doc_text):
+        for m in _RUNS_QUERY.finditer(block):
+            job = int(m.group("id"))
+            look = block[max(0, m.start() - 90):m.start()]
+            cut = look.rfind(" — ")
+            if cut != -1:
+                look = look[cut + 3:]
+            tail = block[m.end():]
+            end, depth = len(tail), 0
+            for i, ch in enumerate(tail):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    if depth == 0:
+                        end = i
+                        break
+                    depth -= 1
+                elif tail.startswith(" — ", i):
+                    end = i
+                    break
+            region = look + tail[:end]
+            claims: list[list] = []
+            open_claim: list | None = None
+            last_instant: str | None = None
+            foreign = False
+            for tok in _RECORD_TOKEN.finditer(region):
+                other = tok.group("other_id") or tok.group("task_id")
+                if other is not None:
+                    if int(other) != job:
+                        foreign, open_claim = True, None
+                    continue
+                if foreign:
+                    continue
+                n = tok.group("arrow_n") or tok.group("count_n") or tok.group("verb_n")
+                if n is not None:
+                    open_claim = [job, n, None, None, line]
+                    claims.append(open_claim)
+                elif tok.group("instant"):
+                    last_instant = tok.group("instant")
+                    if open_claim is not None and open_claim[3] is None:
+                        open_claim[3] = last_instant
+                elif tok.group("newest_stamp") and open_claim is not None \
+                        and open_claim[2] is None:
+                    open_claim[2] = tok.group("newest_stamp")
+            for claim in claims:
+                if claim[3] is None:
+                    claim[3] = last_instant
+                out.append((claim[0], claim[1], claim[2], claim[3], claim[4]))
+    return out
+
+
+def _run_starts(conn) -> dict[str, list[datetime]]:
+    """Every `runs` row, grouped by task id and parsed — read once, never by a query that
+    could pick up a row the doc's own reading could not have seen."""
+    out: dict[str, list[datetime]] = {}
+    for task_id, started in conn.execute("select task_id, started_at from runs"):
+        stamp = _parse_stamp(started)
+        if stamp is not None:
+            out.setdefault(str(task_id), []).append(stamp)
+    return out
+
+
+def _prunable(own: list[datetime], floor: datetime, newest: datetime,
+              as_of: datetime) -> bool:
+    """Whether this count could have been read off rows the sweep has since eaten.
+
+    `runs` keeps a rolling window — §Watch the machinery says the whole table "starts where
+    the sweep's horizon has reached (`select min(started_at) from runs` over
+    `~/lloyd-data/workers.db` printed 2026-10-18T05:12:55Z on 2026-11-17) because the
+    retention sweep prunes it, so this is a rolling ~30-day count and not the length of the
+    series" — so a row an older reading counted can be gone
+    from the store, and a count that comes out short is then not the prose's fault. Nothing
+    can prove a gone row was there, so the test is whether a gone row is *possible*, and
+    that the store can answer: a pruned row sat below today's floor, so if the gap between
+    this id's oldest surviving row and the floor is too small to hold a row of the cadence
+    the id's own surviving rows show, then no row of this id can have left the store since
+    the reading. Three measurements, all read off `runs`:
+
+    - the gap: oldest surviving row for the id minus the floor;
+    - the cadence: the id's own median surviving gap, the store's evidence of how often it
+      runs (one run, no gap to measure, is treated as a day);
+    - the claim's age on the store's clock: newest row minus the quoted instant, which is
+      how far the horizon can have advanced since the reading.
+
+    Waive when the gap is smaller than one cadence plus that age. Measured 2026-11-17, over
+    a store whose floor is `2026-10-18T05:12:55.803980Z` in a window 30.1 days wide: #97's
+    gap is 0.1 days against a 1.1-day median cadence and a 1.1-day-old claim, so its
+    "27 runs as of 2026-11-16T06:20Z" — 26 rows survive it — is waived, and it really is
+    retention: the horizon has advanced a day since that reading. #109's gap is 22.1 days
+    against a 2.3-day cadence, so its count is graded, and it reproduces. An id with no
+    surviving row is never waived: zero rows before the instant is fully observable and a
+    never-run claim is therefore falsifiable, which is the whole point of #4096.
+    """
+    if not own:
+        return False
+    gap = (min(own) - floor).total_seconds()
+    age = max((newest - as_of).total_seconds(), 0.0)
+    if len(own) >= 2:
+        steps = sorted((b - a).total_seconds() for a, b in zip(own, own[1:]))
+        cadence = steps[len(steps) // 2]
+    else:
+        cadence = _DAY
+    return gap < cadence + age
+
+
+def _run_record_drift(doc_text: str, conn) -> list[str]:
+    """Each run record the doc states that its own quoted command would not reproduce.
+
+    Re-derived as-of the instant the sentence quotes, never against the live total: on a
+    seeded fixture where #97 had 4 rows before `2026-10-16T10:00Z` and 25 after it, a claim
+    of "4 runs as of 2026-10-16T10:00Z" passes, which is the whole point — a daily job's
+    counter growing must never redden a doc that quoted it correctly. A quoted `newest` is
+    checked the same way (`max(started_at)` before that instant), and an id whose pre-instant
+    rows are all gone says nothing instead of reporting an absence it cannot prove.
+    """
+    claims = _run_record_claims(doc_text)
+    if not claims:
+        return []
+    bounds = conn.execute("select min(started_at), max(started_at) from runs").fetchone()
+    floor, newest_run = _parse_stamp(bounds[0]), _parse_stamp(bounds[1])
+    if floor is None or newest_run is None:
+        return []
+    starts = _run_starts(conn)
+    reports: list[str] = []
+    for job, quoted_count, quoted_newest, quoted_instant, line in claims:
+        parsed = _parse_instant(quoted_instant) if quoted_instant else None
+        if parsed is None:
+            continue          # an undated count is `_undated_never_run`'s form, not this one
+        as_of, precision = parsed
+        bound = as_of
+        own = starts.get(str(job), [])
+        if quoted_count is not None and not _prunable(own, floor, newest_run,
+                                    as_of):
+            want = int(quoted_count)
+            got = sum(1 for x in own if x < bound)
+            if got != want:
+                reports.append(
+                    f"#{job}: the doc states {quoted_count} rows as of {quoted_instant} "
+                    f"(line {line}) but `select count(*) from runs where "
+                    f"task_id={job} and started_at < {quoted_instant}` returns {got}")
+        if quoted_newest is not None:
+            before = [x for x in own if x < bound]
+            if before:
+                verdict = _same_instant(quoted_newest, max(before))
+                if verdict is False:
+                    reports.append(
+                        f"#{job}: the doc's newest stamp {quoted_newest} as of "
+                        f"{quoted_instant} (line {line}) is not what `max(started_at)` "
+                        f"returns for that window: "
+                        f"{max(before).isoformat().replace('+00:00', 'Z')} — if the file's "
+                        f"`last_run:` is the wanted value, say so, because it is stamped "
+                        f"when the run finishes and is not this command's output")
+    return reports
+
+
+# ── clause 1, 2, 3 — the arming half, pinned on seeded text ──────────────────
+
+#: One prose sentence per binding rule, plus the two qualified forms the live doc uses.
+#: Written as a dict so a node can name which form it is asking about.
+_SEED_ARMING_PROSE = {
+    "plain": "The nightly job #99 sits `status: draft`, so nothing dispatches it.",
+    "at_filing": "#109 behaviour exhibit (`status: draft` at filing, armed since) is a "
+                 "daily sweep and its row reports what its runs report.",
+    "generic": "`status: draft` means it is not armed: that is #91's, #96's and #97's "
+               "answer and not #94's.",
+    "past": "#24 has been `status: up_next` since its first arm, and #60 was `status: "
+            "draft` when the table was drawn.",
+    "plural": "#100 and #101 join that group on the reporting side, and both are "
+              "`status: draft`, which is #98's precedent.",
+    "two_subjects": "#98 is `status: draft` while #24 is `status: draft`, which is the "
+                    "point of the row.",
+    "no_id": "The task is still `status: draft` and has still never run.",
+    "tally": "#77's census on 2026-09-26 counted 1,488 `status: done` files of 1,507, and "
+             "the same tally on 2026-10-26 is 3,315 done of 3,345.",
+}
+
+#: Two §Watch the machinery-shaped rows: one whose head cell claims the rot, one where the
+#: row names three ids and predicates the status of only its own subject.
+_SEED_WATCH_ROWS = {
+    "rot": "| #109 | daily | Behaviour sweep (`status: draft`, one report a day) | "
+           "nothing | nothing else |\n",
+    "subject": "| #98 | daily | #24 | Repair the one fact-tag defect (#60's rail counts "
+               "it). **Filed and not yet armed:** `status: draft`, so no run exists | "
+               "one snapshot |\n",
+}
+
+
+def test_a_stated_status_that_the_task_file_no_longer_carries_is_reported():
+    """#4096 clause 1, on seeded text and a seeded `{id: status}` map.
+
+    The map is the whole external input, so the node needs no vault and no queue: `#99 sits
+    `status: draft`` against `{99: up_next}` must fail, and name the id, both words, and the
+    line; the same sentence with the live word must pass. This is the half that let #99's row
+    say "still `status: draft` with zero rows in `runs`" while the file read `up_next`.
+    """
+    statuses = {99: "up_next", 24: "up_next", 60: "draft", 98: "draft",
+                91: "up_next", 94: "up_next", 96: "up_next", 97: "up_next",
+                100: "up_next", 101: "up_next", 109: "up_next"}
+    drift = _arming_drift(_SEED_ARMING_PROSE["plain"], statuses)
+    assert len(drift) == 1, (
+        f"a present-tense `status: draft` about a job whose file says `up_next` produced "
+        f"{len(drift)} reports: {drift}")
+    report = drift[0]
+    for wanted in ("#99", "draft", "up_next"):
+        assert wanted in report, f"the report does not name {wanted}: {report}"
+    assert _arming_drift(
+        _SEED_ARMING_PROSE["plain"].replace("`status: draft`", "`status: up_next`"),
+        statuses) == [], "the matching sentence must be silent"
+    job, stated, line, excerpt = _arming_claims(_SEED_ARMING_PROSE["plain"], statuses)[0]
+    assert (job, stated, line) == (99, "draft", 1), (job, stated, line)
+    assert "`status: draft`" in excerpt, excerpt
+
+
+def test_a_qualified_or_plural_status_form_is_left_alone():
+    """#4096 clause 2: the forms the live doc already uses must not be reported.
+
+    These six seeds are the false mismatches the line-proximity reading produced, in
+    the shapes the doc actually contains: #109's "`status: draft` at filing, armed since",
+    the generic explanation "`status: draft` means it is not armed", a past-tense `has been`
+    and `was`, a `both are` with two subjects, and a sentence naming two ids where the word
+    cannot be bound to one. All must be silent — and the node is not vacuous, because the
+    same call over the unqualified `plain` seed in the same dict does report, so a reader
+    can see the silence is a decision and not a broken reader.
+    """
+    statuses = {99: "up_next", 24: "up_next", 60: "draft", 98: "draft",
+                91: "up_next", 94: "up_next", 96: "up_next", 97: "up_next",
+                100: "up_next", 101: "up_next", 109: "up_next"}
+    for form in ("at_filing", "generic", "past", "plural", "two_subjects", "no_id",
+                 "tally"):
+        text = _SEED_ARMING_PROSE[form]
+        assert _arming_drift(text, statuses) == [], (
+            f"the {form} form was reported: {_arming_drift(text, statuses)}\n{text}")
+    assert _arming_drift(_SEED_ARMING_PROSE["plain"], statuses), (
+        "the control: with the silence seeds all clean, the unqualified form must still "
+        "report, or this node is pinning a reader that reads nothing")
+
+
+def test_a_watch_the_machinery_row_is_bound_to_its_own_row_subject():
+    """#4096 clause 3: table rows are graded, and by the id the row is *about*.
+
+    `_live_sentences()` drops every `|`-prefixed line, which is why #109's cell could rot
+    inside the section whose name the form check carries. So a seeded `| #109 | … |` row
+    stating `status: draft` against a live `up_next` must be reported; and the §Writes
+    durable state shape — one row naming #98, #24 and #60, with the status word predicated
+    of #98 alone — must bind to #98, reporting when #98's file says `up_next` and staying
+    silent while it says `draft`.
+    """
+    statuses = {24: "up_next", 60: "draft", 98: "up_next", 109: "up_next"}
+    drift = _arming_drift(_SEED_WATCH_ROWS["rot"], statuses)
+    assert len(drift) == 1 and "#109" in drift[0] and "draft" in drift[0] \
+        and "up_next" in drift[0], (
+        f"a §Watch row whose stated status is stale produced {drift}")
+    row_claims = _arming_claims(_SEED_WATCH_ROWS["subject"], statuses)
+    assert [c[0] for c in row_claims] == [98], (
+        "the row names #98, #24 and #60 but predicates #98's status alone, so exactly one "
+        f"claim may come out of it and it may only be #98's: {row_claims}")
+    row_drift = _arming_drift(_SEED_WATCH_ROWS["subject"], statuses)
+    assert len(row_drift) == 1 and row_drift[0].startswith("#98:"), (
+        f"the stale row reported the wrong subject: {row_drift}")
+    silent = _arming_drift(_SEED_WATCH_ROWS["subject"],
+                           {**statuses, 98: "draft"})
+    assert silent == [], f"#98 is `draft` in this map, so the row is true: {silent}"
+
+
+def _live_task_statuses() -> dict[int, str]:
+    """`{id: status}` over `~/obsidian/autonomy/` as it is on disk."""
+    tasks_dir = _task_dir()
+    statuses = _task_statuses(tasks_dir)
+    assert len(statuses) >= 39, (
+        f"{tasks_dir} yielded statuses for {len(statuses)} task files; the membership "
+        f"nodes above measured 39 live files on 2026-10-13, so the reader is broken "
+        f"rather than the fleet having shrunk")
+    assert "draft" in statuses.values() and "up_next" in statuses.values(), (
+        "no draft and no armed job on this box at once — the reader cannot tell those "
+        "apart, so it cannot grade either")
+    return statuses
+
+
+@live_vault
+def test_every_status_the_doc_states_matches_the_job_its_own_task_file_carries():
+    """#4096's arming half over the live tree: the doc, `~/obsidian/autonomy/`, both.
+
+    Prose and §Watch the machinery rows, §Review log excluded — that section records what
+    was true on the date it names, and #4096's own 2026-11-12 correction lives in it. Reads
+    the live vault, so `@live_vault` and the gate's `not live_vault` deselect it like the
+    two membership nodes beside it; run it with
+    `python -m pytest tests/test_autonomy_jobs_doc_claims.py -m live_vault -k stated_status`
+    from a detached worktree, never from `~/lloyd`.
+
+    The count assertion is the anti-vacuity control: the node must be grading real claims,
+    not a reading that found nothing to compare. Measured 2026-11-17: the live doc states
+    #98's status in §Canonicalize's filed-not-armed contrast, at §The dependency graph's
+    armed-only arithmetic, in §Writes durable state unattended's #98 row and #102's in
+    §Watch the machinery's #102/#103 prose — four claims, all agreeing with the files.
+    """
+    statuses = _live_task_statuses()
+    claims = _arming_claims(_live_prose(), statuses)
+    assert len(claims) >= 3, (
+        f"the live doc yielded {len(claims)} bound status claims "
+        f"{[(c[0], c[1]) for c in claims]}; four were measured on 2026-11-17, so the "
+        f"reader or the doc's form changed and a clean verdict here would mean nothing")
+    drift = _arming_drift(_live_prose(), statuses)
+    assert not drift, "\n".join(drift)
+
+
+# ── clause 4, 5 — the run-record half, pinned on a seeded queue ──────────────
+
+#: #97's record form, in the doc's own words, with the instant it quotes.
+_SEED_RECORD = ("**#97's row is a record now.** `select count(*) from runs where "
+                "task_id=97` over `~/lloyd-data/workers.db` returned {count} runs as of "
+                "{instant}, all `status=success`, and the newest {newest}")
+#: The other three forms the extractor has to read: number before the command (#109's
+#: row), a parenthetical re-reading of the same command (#99), and a `was 0 … is still 0`
+#: pair for a job that has never run (#102, #105).
+_SEED_RECORD_BEFORE = ("armed since — {count} rows as of {instant} (`select count(*), "
+                       "max(started_at) from runs where task_id='{job}'` over "
+                       "`~/lloyd-data/workers.db` → {count}, newest {newest})")
+_SEED_RECORD_ZERO = ("has never run (`select count(*) from runs where task_id='{job}'` "
+                     "over `~/lloyd-data/workers.db` was {count} on {instant} and is "
+                     "still {count} on {later})")
+
+#: The instant and the newest stamp the seeded rows put either side of: four #97 runs on
+#: 2026-10-10 through 13, the claimed reading taken at 10:00Z on the 16th.
+_SEED_INSTANT = "2026-10-16T10:00Z"
+_SEED_NEWEST = "2026-10-13T08:00:33Z"
+
+
+def _runs_db(rows: list[tuple[str, str]]):
+    """An in-memory `runs` table of `(task_id, started_at)`, read only through the reconciler.
+
+    The same two columns and the same ISO stamps as `_queue_age_db` above, and the same
+    reason for in-memory: the live store is pruned and appended to nightly, so a node that
+    reads it cannot pin a comparison. The rows inserted here ARE the whole store, which is
+    what lets a seeded node place the retention floor exactly where the sweep left it.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("create table runs (task_id text, started_at text)")
+    conn.executemany("insert into runs values (?, ?)", rows)
+    return conn
+
+
+def _stamp(day: str, minute: int, second: int = 0) -> str:
+    """A store-shaped stamp: microsecond precision and a `+00:00` offset."""
+    return (f"{day}T{minute // 60:02d}:{minute % 60:02d}:{second:02d}"
+            f".146352+00:00")
+
+
+def _ninety_seven_rows(before: int, after: int) -> list[tuple[str, str]]:
+    """#97 rows around `2026-10-16T10:00Z`, plus an older id holding the floor down.
+
+    `before` rows land on 2026-10-10 onward and `after` rows on the afternoon of the 16th,
+    so the newest pre-instant row is always `_SEED_NEWEST`. The `24` rows matter: the
+    prunable rule reads an id's oldest retained row against the store's floor, so without a
+    second id reaching back further, #97's own oldest row *is* the floor and every count
+    would be waved through as possibly pruned.
+    """
+    rows = [("24", "2026-10-01T08:05:00.146352+00:00"),
+            ("24", "2026-10-02T08:05:00.146352+00:00")]
+    rows += [("97", f"2026-10-{10 + i:02d}T08:00:33.146352+00:00") for i in range(before)]
+    rows += [("97", f"2026-10-16T10:{i:02d}:00.146352+00:00") for i in range(after)]
+    return rows
+
+
+def test_a_dated_run_count_is_re_derived_as_of_the_instant_the_doc_quotes():
+    """#4096 clause 4: as-of the quoted instant, never the live total.
+
+    A seeded #97 with 4 rows before `2026-10-16T10:00Z` and 25 after it must pass the doc's
+    "4 runs as of 2026-10-16T10:00Z", because the counter growing is a daily job doing its
+    work and the record was true at the instant it names; with 3 rows before that instant
+    the same claim must fail. That is the whole reason the doc may state numbers, and it is
+    the half the item named as missing — `_undated_never_run` forces a never-run sentence to
+    carry a date and the count command, and nothing asked whether the number beside that
+    command was still the number.
+    """
+    fields = {"instant": _SEED_INSTANT, "newest": _SEED_NEWEST}
+    ok = _run_record_drift(
+        _SEED_RECORD.format(count="4", **fields), _runs_db(_ninety_seven_rows(4, 25)))
+    assert ok == [], f"a correct as-of record was reported: {ok}"
+    red = _run_record_drift(
+        _SEED_RECORD.format(count="3", **fields), _runs_db(_ninety_seven_rows(4, 25)))
+    assert len(red) == 1 and "3" in red[0] and "4" in red[0], (
+        f"a count that never matched any reading produced {red}")
+    assert "#97" in red[0] and "2026-10-16T10:00Z" in red[0], red[0]
+    # The live total is never the comparison: the same claim read against a store where
+    # nothing after the instant exists at all is still 4, and one where #97 has 29 rows
+    # is still graded as of the instant rather than as 29.
+    assert _run_record_drift(
+        _SEED_RECORD.format(count="29", **fields), _runs_db(_ninety_seven_rows(4, 25))), (
+        "the live total is not what the sentence quoted, so quoting it must not pass")
+
+
+def test_a_quoted_newest_stamp_is_re_derived_from_the_rows_and_not_the_task_file():
+    """#4096 clause 5's mechanism: `max(started_at)`, as of the instant, to the second.
+
+    #4096 measured three claims whose quoted `newest` was the task file's `last_run:` while
+    naming `max(started_at)` as the source — #99's `2026-11-05T16:02:20Z` against a newest
+    row of `16:00:56.355446`, #109's `2026-11-12T20:12:55Z` against `20:12:02.873188` — so
+    the doc's own re-derivation command did not reproduce its own number. Seeded here in
+    both directions: the row's own second passes, the `last_run:` second fails and the
+    report says which value the command returns and how to make the sentence admissible.
+    """
+    rows = _ninety_seven_rows(4, 25)
+    fields = {"count": "4", "instant": _SEED_INSTANT}
+    good = _SEED_RECORD.format(newest=_SEED_NEWEST, **fields)
+    assert _run_record_drift(good, _runs_db(rows)) == [], (
+        "the newest row's own second must be admissible")
+    bad = _SEED_RECORD.format(newest="2026-10-13T08:00:48Z", **fields)
+    drift = _run_record_drift(bad, _runs_db(rows))
+    assert len(drift) == 1 and "#97" in drift[0] and "last_run" in drift[0], (
+        f"a stamp 15 s off the newest row produced {drift}")
+    assert "08:00:33" in drift[0], (
+        f"the report must name the value the command returns: {drift}")
+    # #109's row form: the count and the instant stand *before* the command, and one bound
+    # grades both halves — the cell reproduces under `< 2026-10-16T00:00Z`, as it does live
+    # for `as of 2026-11-16`, which is the date-only form's reading.
+    four = [("109", f"2026-10-{10 + i:02d}T08:00:33.146352+00:00") for i in range(4)]
+    row = _SEED_RECORD_BEFORE.format(job="109", count="4", instant="2026-10-16",
+                                     newest=_SEED_NEWEST)
+    assert _run_record_drift(row, _runs_db(rows + four)) == [], (
+        "a count written before its own command, #109's shape, must be read and graded")
+    assert _run_record_drift(row, _runs_db(rows + four + [
+        ("109", "2026-10-15T04:32:34.498247+00:00")])), (
+        "a fifth run before the claimed instant makes the row's 4 wrong, and it says so")
+
+
+def test_a_zero_run_claim_about_a_never_run_job_is_re_derived_too():
+    """The `was 0 … and is still 0` pair, which is how #102's and #105's rows read.
+
+    Both readings must be re-derived, because the second one is the load-bearing one: #102's
+    row was written when the job had never run and says so again for a later date, and a row
+    that quietly stopped being true is exactly #4096's class. Seeded with an empty population
+    for the id (which the prunable rule cannot wave through — there are no rows to have lost)
+    and with a run for it (which reddens the second reading, not the first).
+    """
+    base = _ninety_seven_rows(4, 25)
+    text = _SEED_RECORD_ZERO.format(job="105", count="0", instant="2026-11-12",
+                                    later="2026-11-16")
+    assert _run_record_drift(text, _runs_db(base)) == [], (
+        "a never-run job's zero count is verifiable and must pass")
+    drift = _run_record_drift(text, _runs_db(base + [("105", _stamp("2026-11-14", 8 * 60))]))
+    assert len(drift) == 1 and "2026-11-16" in drift[0], (
+        f"the later reading went stale unseen: {drift}")
+    assert "2026-11-12" not in drift[0], (
+        f"the earlier reading is still true and must not be reported: {drift}")
+
+
+def _pruning_case_rows(floor_day: str) -> list[tuple[str, int]]:
+    """A daily #97 from 2026-10-16 to 10-23, with the store's floor set by `floor_day`.
+
+    Both retention nodes read the same rows and the same claim; only where the floor sits
+    differs, and that is the whole decision — the sweep's edge, not the number, tells the
+    node whether a short count is a rotting sentence or a row it can no longer see. The
+    `24` row is what holds the floor down: #97's own oldest row must not be the floor, or
+    every count would be waved through as possibly pruned.
+    """
+    rows = [("24", f"{floor_day}T05:12:55.803980+00:00")]
+    rows += [("97", f"2026-10-{16 + i:02d}T08:02:09.453354+00:00") for i in range(8)]
+    return rows
+
+
+#: #97's shape at live scale: seven of its eight rows fall before the claimed instant, so a
+#: claim of eight is short by one, and whether that one is prunable is the question.
+_PRUNE_CLAIM = ("is a record now (`select count(*), max(started_at) from runs where "
+                "task_id=97` over `~/lloyd-data/workers.db` returned 8 runs as of "
+                "2026-10-22T10:00Z, newest 2026-10-22T08:02:09Z)")
+
+
+def test_a_count_that_may_have_been_read_off_pruned_rows_says_nothing():
+    """Retention, not rot: a row the reading saw can be gone from the store.
+
+    #97's live record quotes 27 runs as of `2026-11-16T06:20Z`; 26 of its rows survive that
+    instant today, because the sweep prunes `runs` to a rolling ~30-day window. Its oldest
+    surviving row sits 2.8 hours above the floor while its median surviving gap is 1.1 days
+    and its claim is 1.1 days old — the horizon has advanced further than one #97 run, so a
+    row can have left the store and no re-derivation can see it. The node must call that
+    unverifiable, not wrong. Seeded at the same scale: the floor 2.8 hours below the id's
+    oldest row, a daily cadence, and a claim one row short of the eight the rows hold.
+
+    The paired node below runs the identical claim on the identical rows with the floor eight
+    days lower, so this silence cannot be the whole rule in disguise.
+    """
+    drift = _run_record_drift(_PRUNE_CLAIM, _runs_db(_pruning_case_rows("2026-10-16")))
+    assert drift == [], (
+        "the count below the floor is unverifiable, and reporting it would file an item "
+        "for a sentence that may well be true: " + str(drift))
+    assert _run_record_claims(_PRUNE_CLAIM), (
+        "the claim has to be found at all, or this silence proves nothing")
+
+
+def test_a_count_short_by_more_than_the_store_could_have_pruned_is_reported():
+    """The other edge of the waiver: a gap no plausible cadence explains is not retention.
+
+    Same rows, same claim, same instant — but the floor sits eight days below the id's
+    oldest row while its surviving rows run one a day. A pruned row would have had to sit in
+    that eight-day gap with nothing else in it, so a short count is a defect in the sentence.
+    This is the case the waiver must not swallow: a wrong number on a job with a long
+    surviving tail is the rot #4096 was filed for, not the sweep's doing.
+    """
+    drift = _run_record_drift(_PRUNE_CLAIM, _runs_db(_pruning_case_rows("2026-10-08")))
+    assert len(drift) == 1 and "states 8" in drift[0] and "returns 7" in drift[0], (
+        f"seven rows against a claimed eight, in a store whose floor is eight days below "
+        f"the oldest of them, is a rotting number: {drift}")
+
+
+def test_a_claim_naming_another_job_in_its_region_is_not_graded_as_this_one():
+    """#103's "3 rows, newest …, same query and date" is #103's reading.
+
+    The sentence reuses #102's command text, so a region reader that bound every number in
+    the neighbourhood to the command's id would grade #103's three rows as #102's zero and
+    report a defect in prose that is true — the #4096 false-positive class again, this time
+    on the run half. Silence is the pinned verdict, with the graded case in the same seed as
+    the control that the reader is reading.
+    """
+    rows = [("103", f"2026-10-{11 + i:02d}T08:00:00.000000+00:00") for i in range(3)]
+    text = ("#102 has never run (`select count(*) from runs where task_id=102` over "
+            "`~/lloyd-data/workers.db` was 0 on 2026-10-16) while #103 has been armed and "
+            "has run three times (3 rows, newest 2026-10-13T08:00:00Z, same query and "
+            "date)")
+    assert _run_record_drift(text, _runs_db(rows)) == [], (
+        "silence is the verdict, and it is proof rather than luck: #102 has no rows at all "
+        "and #103 has three before the claimed date, so a reader that leaked #103's number "
+        "into #102's claim would report 3 against 0")
+    graded = _run_record_claims(text)
+    assert [c[0] for c in graded] == [102], (
+        f"only the command's own id should be graded, and #103's own claim is the doc's "
+        f"form for a later node to pick up: {graded}")
+
+
+#: The live store the doc's commands name. `app.paths.WORKERS_DB` resolves through
+#: `LLOYD_DATA`, which the suite's own fixtures relocate, and this node's whole subject is
+#: the file at the path the doc cites — the same reason `_task_dir()` names the account's
+#: home outright instead of importing a resolver.
+WORKERS_DB = Path.home() / "lloyd-data" / "workers.db"
+
+
+@live_vault
+def test_every_run_record_the_doc_quotes_still_comes_out_of_the_command_it_quotes():
+    """#4096's run-record half over the live tree: the doc and `~/lloyd-data/workers.db`.
+
+    Opens the store read-only (`mode=ro`, never a write, and `kg.sqlite`'s one-reader rule
+    is the precedent this follows) and re-derives each dated claim the §Watch the machinery
+    prose and rows carry. `@live_vault` for the same reason as the arming node and the two
+    membership nodes beside it: no round under test controls this queue, and the gate's
+    `TESTS_MARK_EXPR` deselects it, so run it with
+    `python -m pytest tests/test_autonomy_jobs_doc_claims.py -m live_vault -k run_record`
+    from a detached worktree.
+
+    Measured 2026-11-17 against a store whose floor is `2026-10-18T05:12:55Z` and whose
+    newest row is `2026-11-17T08:08:06Z`: #109's "4 rows as of 2026-11-16" reproduces
+    exactly (its 5th row arrived at 07:00:49Z on the 17th), #99's "4 rows, newest
+    2026-11-12T21:30:41Z" reproduces exactly, #102's and #105's zero-run pairs reproduce,
+    and #97's "27 runs as of 2026-11-16T06:20Z" is waived as prunable while its newest
+    stamp reproduces. The one claim that did not reproduce — #99's earlier reading, which
+    quoted the task file's `last_run:` `2026-11-05T16:02:20Z` under a `max(started_at)`
+    sentence whose row reads `16:00:56Z` — is the retype this round made.
+    """
+    import sqlite3
+
+    assert WORKERS_DB.exists(), f"{WORKERS_DB} is not on this box"
+    conn = sqlite3.connect(f"file:{WORKERS_DB}?mode=ro", uri=True)
+    try:
+        claims = _run_record_claims(_live_prose())
+        assert len(claims) >= 4, (
+            f"the live doc yielded {len(claims)} dated run-record claims; #109, #99, #102 "
+            f"and #105 alone give five readings, so the reader or the doc's form changed "
+            f"and a clean verdict here would mean nothing")
+        drift = _run_record_drift(_live_prose(), conn)
+    finally:
+        conn.close()
+    assert not drift, "\n".join(drift)
 
 
 # ── #2632 — no current sentence may claim a task file names the retired slot ──
