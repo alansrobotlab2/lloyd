@@ -14,7 +14,7 @@ tags:
 - knowledge
 - memory
 type: reference
-updated: 2026-10-18
+updated: 2026-11-17
 status: implemented
 ---
 
@@ -38,9 +38,9 @@ in Obsidian. Everything structural lives in one SQLite file.
 
 ```
 _pipeline/vault-derived/
-├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (41,557 files, 2026-10-18)
+├── facts/<Entity>/<Entity>-<category>.md   # THE FACT LAYER (49,472 files, 2026-11-17)
 │                                            # YAML frontmatter + generated body
-└── kg.sqlite                                # THE STORE (149 MB, WAL)
+└── kg.sqlite                                # THE STORE (190 MB, WAL, 2026-11-17)
     ├── entities   name, kind, definition, source_hash, timestamps
     ├── aliases    surface -> canonical, with kind and origin
     ├── edges      typed, with provenance, evidence, supersede chain
@@ -51,8 +51,9 @@ _pipeline/vault-derived/
 There is no `kg` command. The index is rebuilt by calling
 `store().facts_idx.reindex(root=…)` — what `kg_rebuild.py`, `repair_fact_ids.py`,
 `entity-resolution-sweep.py` and `kg_migrate_to_sqlite.py` each do at the end of
-a pass. Two comments in `agent_mcp/facts.py` still tell a reader to run
-`kg reindex`; they mean that call.
+a pass. Two comments in `agent_mcp/facts.py` once told a reader to run
+`kg reindex`; `15bc6fc5` (2026-11-10) removed them, so no comment now points
+at a command that does not exist.
 
 Derived and rebuildable at any time: `facts_idx`, `_pipeline/relations-index.json`
 (document co-occurrence — written by `scripts/memory/rebuild_index.py` and by nothing
@@ -109,7 +110,12 @@ files · 161,168 indexed rows · 85,416 edges with 50,558 active · 15,200
 registered entities · 239 aliases · `created_at` and `source_doc` NULL on 0
 rows.** Re-measured 2026-11-10 (read-only): 17,024 entity dirs · 48,049 fact
 files · 197,898 indexed rows · 101,748 edges with 60,195 active · 17,029
-registered entities · 281 aliases. The provenance gap this section called outstanding is closed — that is
+registered entities · 281 aliases. Re-measured 2026-11-17
+(read-only): **17,480 entity dirs · 49,472 fact files · 204,814 indexed rows ·
+105,666 edges with 62,514 active · 17,485 registered entities · 292 aliases**,
+with `created_at`/`source_doc` NULL on 6 rows again — bench-scratch residue
+indexed from `/tmp` paths outside the fact tree, filed **#4227**.
+The provenance gap this section called outstanding is closed — that is
 exactly what the rebuild bought. What the swap did not re-grow is the
 mechanical alias table (the sweep rebuilds it tier by tier) and the
 conversation-origin edges (#51 below).
@@ -161,7 +167,7 @@ What the store changes:
 |---|---|
 | A write is all-or-nothing | `store.transaction()` — `BEGIN IMMEDIATE`, nestable. A sweep's alias writes and every edge rewrite commit together |
 | Two processes cannot lose a write | WAL + `busy_timeout=30000`; tested with two concurrent writer processes and a `kill -9` mid-write |
-| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade. Since #1236 that covers an *absent* file too: `_open()` mkdirs and `sqlite3.connect`s, which CREATES a database whose every count answers 0, so the module-level reader `store()` calls `_require_database()` first and refuses a path holding no database, naming the resolved path. `KGStore(path)` and `configure(path)` remain the named routes that provision one — inside the data root only beside the declared store, unless `create=True` (2026-10-29) |
+| An unreadable store is not an empty one | `StoreUnavailable` is raised, never the empty schema. Writers abort; ranking-only readers degrade. Since #1236 that covers an *absent* file too: `_open()` mkdirs and `sqlite3.connect`s, which CREATES a database whose every count answers 0, so the module-level reader `store()` calls `_require_database()` first and refuses a path holding no database, naming the resolved path. `KGStore(path)` and `configure(path)` remain the named routes that provision one — inside the data root only beside the declared store, unless `create=True` (2026-10-29); a cwd-relative path is refused on every route, `create=True` included, since 2026-11-03 (#3734) |
 | Nothing is silently overwritten | A merge *expires* each edge and re-adds it, returning `(old_id, new_id)` so a revert is exact. `retype` sets `superseded_edge_id` |
 | Every row says where it came from | `kg_store.ORIGINS` — extractor, sweep, semantic, fact_add, fact_relate, seed, classifier, conversation, revert, migration, manual, legacy — are the *known* writers, not a constraint: the column is free-form, and `schema` (the identity gate) is a real origin that predates nothing in that tuple. `aliases.origin` and `aliases.kind` likewise |
 | Caches cannot go stale | Adjacency, degree and the alias map memoise on `PRAGMA data_version`, which moves when *any* process commits |
@@ -295,7 +301,9 @@ Measured by origin on 2026-09-18, active edges: extractor 33,091, classifier
 again 2026-10-18 on the rebuilt tree: classifier 34,185, extractor 15,733,
 conversation 444, sweep 137, `fact_relate` 47, manual 12, `semantic` still 0 —
 the classifier's retypes now outnumber raw mentions, where pre-rebuild they
-were half. The extractor is still where edges are born, and the classifier is
+were half. Re-measured 2026-11-17 (read-only): classifier 42,367, extractor
+18,850, conversation 987, sweep 164, `fact_relate` 125, manual 21, `semantic`
+still 0. The extractor is still where edges are born, and the classifier is
 what makes the graph typed.
 
 `seed_relationship_edges.py` still exists but is a **backfill tool for trees
@@ -382,9 +390,10 @@ and `vault_recall` read (`retrieval.get_facts_sync` parses the files); `facts_id
 is what the entity router, the Memory page, de-duplication and the health report
 read. Every
 writer of a fact file updates it in the same breath —
-`fact_add` through `facts_idx.update_file`, `fact_resolve` and
+`fact_add` through `facts_idx.update_file`, `fact_resolve_apply` and
 `fact_invalidate` through `facts.py:_reindex_files()`, in the same call, as
-soon as the markdown write returns. `fact_invalidate` did neither until
+soon as the markdown write returns (`fact_resolve` itself has written no file
+since #1326, so it reindexes nothing). `fact_invalidate` did neither until
 2026-09-04 — it wrote `expired_at` to the file and stopped, and it was missing
 the `locked_file` the other two had — so the file said expired while the Memory
 page went on serving the fact as current, and the two disagreed until the next
@@ -455,6 +464,14 @@ things. `fact_invalidate` expires; `fact_resolve_apply` invalidates —
 `fact_resolve`'s `auto_resolve` parameter was removed outright by #1326.
 Retrieval filters both by default; `as_of` reconstructs a past state.
 
+A third route to `expired_at` is open but unarmed: re-extracting a changed note
+can retire the facts its *earlier* bytes produced.
+`knowledge_graph.supersede_on_reextract` ships as `dry_run` (2026-11-10) —
+`agent_mcp.fact_supersede` journals what it would expire to
+`_pipeline/fact-supersede.jsonl` (report `scripts/memory/supersede_report.py`),
+nothing is expired, and `apply` is a proposal adopted only on a measured
+stale-fact gain.
+
 `valid_at` is filled from the model's `event_date` when the fact dates itself,
 and `created_at` stays the extraction time either way — the two answer "when
 was this true" and "when did we learn it", and a fact about last April written
@@ -507,7 +524,12 @@ see *Tools*.
    `--resume <that report>`. A SUFFIX merge needs the semantic gate's unanimous
    verdict *and* a human, and #67 only proposes: a suffix is a claim about meaning,
    so it is never applied on schedule, which is why the tiers are named on the
-   command line rather than inferred.
+   command line rather than inferred — and since 2026-11-16 an `--apply` that
+   names no `--tiers` refuses outright (#4197), so the flag and not the graph is
+   what keeps SUFFIX_SAFE out of the nightly. What waits behind that gate is a
+   human queue with no owner and no ageing signal: 25 gate-SAFE clusters on
+   2026-11-16, the oldest waiting since 2026-09-24, filed **#4228** (#4009 is
+   the current apply carrier).
 3. **Refuse on a degraded graph.** `--apply` and `backup-graph.sh` both compare
    active edges against `graph-baseline.json` and refuse below 50%. The backup
    half no longer fails open on its own missing input: a baseline that is
@@ -753,10 +775,12 @@ The gate passed nine checks and failed one: `eval_category_regression`, hard
 `swap` ran with `--force`, after an ABBA re-measure under the regression lock
 (run spread 0.013, every category delta inside it) and a rule stated *before*
 the result, on Alan's call — recorded in `FORCE-SWAP-REASON.md` beside that
-run's `gate.json`. But `rebuild-state.json` keeps only `gate: false` beside
-`swapped_at`: the override itself leaves no trace in the state every later
-reader reads (**#2967**). The live store today is that rebuild tree — see the
-2026-10-18 re-measure in *Scale*.
+run's `gate.json`. `rebuild-state.json` kept only `gate: false` beside
+`swapped_at` — the override left no trace in the state every later reader
+reads (**#2967**) — until `92bd3797` (2026-10-18) made a forced `swap` record
+`forced`, `force_reason` and `force_overrode` into that state; this swap itself
+predates the record that would have held it. The live store today is that
+rebuild tree — see the 2026-10-18 re-measure in *Scale*.
 
 And the 977 junk-named entity directories went out with the wiped tree rather
 than through review: the rebuild's own gate counted 0 junk dirs before
@@ -811,6 +835,29 @@ overlap heuristic firing on two facts phrased alike. Both tools now take
 
 ## Review log
 
+- **2026-11-17 — stale.** The machinery re-verified whole against the tree —
+  store API, `ORIGINS`/`EDGE_TYPES`/`CATEGORY_VOCAB`, gate order, gate
+  thresholds (100/0/0/0/98/30/0.05), the write-gate constants (NOOP 0.8, UPDATE
+  0.3), tool registrations, cadences (#24 6x-daily, #48/#51/#74 daily, all on
+  the scheduler), and rule 3's floor is moving again (`graph-baseline.json` at
+  62,126, stamped 2026-11-16T16:01Z). But five statements had gone false, three
+  of them behind fixes this document itself filed: the two `kg reindex` comments
+  in `agent_mcp/facts.py` are gone (`15bc6fc5`, 2026-11-10); `fact_resolve` was
+  still listed among the writers reindexing through `_reindex_files()` after
+  #1326 made it report-only (the writer is `fact_resolve_apply` — an internal
+  disagreement with §Tools, which says it marks nothing); and the forced-swap
+  "leaves no trace" sentence (**#2967**) was overtaken by `92bd3797`. Two
+  mechanisms the doc predated are now recorded: `KGStore` refuses a
+  cwd-relative path on every route (#3734) and a bare `--apply` refuses without
+  `--tiers` (#4197), which turns rule 2's human gate into code; and
+  `supersede_on_reextract` (dry_run since 2026-11-10) is a third, unarmed
+  expiry route. Re-measured Scale and the origin table 2026-11-17 (49,472 files
+  / 204,814 rows / 62,514 active edges / 292 aliases; among the 987
+  conversation edges, 0 are the unclassified fallback type, confirming #420).
+  Filed **#4227** (6 `facts_idx` rows
+  index a `/tmp` bench-scratch corpus with no provenance at all) and **#4228**
+  (the human-only SUFFIX_SAFE queue has no owner: 25 clusters, oldest waiting
+  53 days).
 - **2026-10-26 — #3354 fixed: the #51 writer bullet still typed its own edges.**
   §The write chain said co-access pairs from session trajectories landed as plain
   co-access edges, which stopped being true on 2026-09-12 (#420, `e4f6370f`):
