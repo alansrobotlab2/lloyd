@@ -488,8 +488,8 @@ def _names_a_guard(acceptance) -> bool:
     `home/lloyd-data`, so a clause whose last half is a RUN or an emit over runtime
     data belongs under `HUMAN_CLAUSES`/`owed`, not in the acceptance head.
 
-    The cheap direction is still false-False: a round that meets a real rail
-    reports it under `human_paths` and the owed entry is authored then."""
+    The cheap direction is still false-False (#3027). The one exception is #4230 and
+    it is not a path verdict: read `_runtime_root_assertion_holds` below."""
     from scripts.automod import spec
     head = _head_text(acceptance)
     physical = bool(_PHYSICAL_WORDS.search(head.lower()))
@@ -562,7 +562,7 @@ def _names_a_guard(acceptance) -> bool:
                 continue
             if spec.classify(tok) not in ("allowed", "protected"):
                 return True
-    return physical
+    return physical or _runtime_root_assertion_holds(acceptance)
 
 
 #: The words a model writes when it means "no value". #1843's implementer
@@ -9956,3 +9956,89 @@ def close_healed_red_tree_at_pickup(item: Item, probe, *, live_root: Path | None
                     "probe": note}, path=ledger)
     return {"action": "closed", "item_id": item.id, "head": head,
             "reason": f"{len(nodes)} node(s) pass at {head[:12]}"}
+
+
+# ── #4230: a runtime-data-root head that ASSERTS the loop may not run it is a guard ──
+#
+# Appended at the END of the module, and that placement is load-bearing, not laziness.
+# Prose in this repo cites `scripts/automod/backlog.py:1426` (`WITNESS_ARTIFACT_DIR`)
+# and `:1450` (`WITNESS_MAX_BYTES`) by ABSOLUTE line number, and
+# `tests/test_architecture_coverage_doc_claims.py` plus
+# `tests/test_skill_stranded_ruled_sets.py` grade those cites against the file as it
+# stands: five of their nodes went red when this rule first went in beside
+# `is_human_only`, 900 lines above them, over a diff that changed nothing about the
+# witness constants — every line below the insertion had simply moved. A helper this
+# module gains belongs below the cited block unless the round also re-points the cites.
+
+#: The marker's own assertion that NO round, agent or scheduled run may be the thing
+#: that performs the act it names (#4230). The runtime data root is not a DENIAL rail
+#: (#3027) — which is a finding about rails, and silent about a round's CAPABILITY:
+#: `worktree.py::HOME_LINK_SKIP` keeps the account's data root out of every round
+#: tree and `round_data_root()` gives each rung that executes candidate code its own
+#: sandboxed `home/lloyd-data`, so the witness a live-root mutation asks for is one no
+#: round can author. Both halves are required; the path alone keeps #3027's verdict,
+#: which is why a contract that merely EMITS under the root, or names it anywhere
+#: outside the marker head, still answers False.
+#:
+#: The two shapes here are the live rows' own spellings, not one row's: `so no round
+#: may run it` (#3320), `so no round or autonomy task can perform it` (#3656), `no
+#: round may delete them` (#3109), `no round may boot a second time` (#3852), and a
+#: rail's text FORBIDDING a tier `to any agent or scheduled run` (#4009, #4008).
+#: Deliberately unmatched, and that is #3027's accepted false-False direction rather
+#: than an oversight: `no round-landable diff exists` and `no round's diff can
+#: satisfy` describe the ABSENCE of a diff, and a hyphen or apostrophe is where both
+#: branches die; `No automod round may run the write` (#2765) keeps `automod` for its
+#: subject, which this does not rewrite into `round`; `a session permitted to write,
+#: outside a rebuild freeze` (#2757) names who MAY, never who may not; and a bare
+#: modal with no perform verb (`which no round may touch`, `no round can write it`) is
+#: unclaimed here, so it lands on rung 0 or owed-check instead of parking a clause a
+#: round could in fact have done.
+_NO_ROUND_MAY_PERFORM = re.compile(
+    r"\bno\s+round(?:\s+or\s+autonomy\s+task)?\s+"
+    r"(?:may|can|could|must|will|shall)\s+(?:\w+ly\s+)?"
+    r"(?:run|runs|perform|performs|execute|executes|do|does|delete|deletes|unlink|unlinks"
+    r"|remove|removes|boot|boots|start|starts|attempt|attempts|apply|applies|write|writes"
+    r"|touch|touches|merge|merges|satisfy|satisfies)\b"
+    r"|\b(?:forbid|forbids|forbade|forbidding|prohibit|prohibits|prohibited|prohibiting)\b"
+    r"[^.\n]{0,60}\b(?:agent|agents|round|scheduled\s+run|autonomy\s+task)\b")
+
+
+def _asserts_no_round_can_perform(acceptance) -> bool:
+    """Does the marker's value assert that no round/agent/scheduled run may do it?
+
+    Read from the marker onwards in the acceptance's own casing lowered, so a
+    `Done when …` tail can carry the assertion. That is not looseness for its own
+    sake: #4009's assertion lives one clause from its head's first `.` separator, so a
+    head-segment-only read answers False on the very row that motivated this — the
+    text BEFORE the marker is still never read, because it is the contract, not the
+    marker (#1698)."""
+    text = str(acceptance or "")
+    low = text.lower()
+    i = low.find(HUMAN_ONLY_PREFIX)
+    if i < 0:
+        return False
+    return bool(_NO_ROUND_MAY_PERFORM.search(low[i:]))
+
+
+def _runtime_root_assertion_holds(acceptance) -> bool:
+    """Is this marker a runtime-data-root head AND an assertion that the loop may not run it?
+
+    The last clause of `_names_a_guard`, reached only when nothing ABOVE it matched.
+    The root half is HEAD-scoped by construction — it re-reads `_head_text`, never the
+    400-char widen #1909 added for a head with no path in it — so a contract that
+    names the root only in its tail keeps #1909's accepted answer. The harm this
+    closes is #4009's: marker present, head naming
+    `~/lloyd-data/_pipeline/vault-derived/kg.sqlite`, value carrying `forbid the
+    SUFFIX tier to any agent or scheduled run`, and `is_human_only` answering False —
+    so `select_confirmed`, `human_only_ids`, `record_verdict`'s parking, the steward's
+    render and autotriage's hold-on all read one contract as landable and spent its
+    two unattended attempts on 2026-11-09 in two `not_met` rounds, the first of which
+    wrote back that the item needed "a non-executable-clause check on the dispatch
+    side". That is what this is: the dispatch-side check, keyed on what the row ASSERTS
+    about its own executability rather than on the path or on a hands-word."""
+    head = _head_text(str(acceptance or ""))
+    toks = [re.sub(r":\d[\d\-,:]*$", "", t.strip("`'\"()[],;:")).rstrip(".")
+            for t in _PATH_TOKEN.findall(head)]
+    if not any(t and _under_runtime_data_root(t.lower()) for t in toks):
+        return False
+    return _asserts_no_round_can_perform(acceptance)

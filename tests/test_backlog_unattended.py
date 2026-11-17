@@ -1431,6 +1431,253 @@ def test_a_runtime_data_ledger_row_leaves_the_human_only_set_and_is_offered(isol
         "the un-parked runtime-data contract was never offered to the implementer")
 
 
+# ── #4230: a runtime-root head that ASSERTS the loop may not run it is a guard ──
+#
+# #3027 took the runtime data root off the guard table for a good reason — no rail
+# refuses bytes there — and that reason is about a DENIAL, so it says nothing about
+# a CAPABILITY. A round cannot MUTATE the live root either: `round_data_root()`
+# hands every rung that executes candidate code its own `home/lloyd-data`, and
+# `worktree.py::HOME_LINK_SKIP` keeps the account's root out of the symlink farm, so
+# the strongest witness a round can author over `~/lloyd-data/**` is a sandboxed copy
+# its own in-sandbox test passes. When the marker's own value says no round/agent/
+# scheduled run may perform the act, the contract is therefore unexecutable by the
+# loop even though nothing forbids it — and dispatch was reading it as landable.
+# #4009 spent its two unattended attempts on that reading on 2026-11-09 (two
+# finished `backlog_implement` rows, both `not_met`, `landed: False`, and the first
+# one's tail asking for "a non-executable-clause check on the dispatch side").
+
+#: #4009's newest `backlog_triage` acceptance VERBATIM off the live merged ledger
+#: (`~/.local/state/lloyd-automod/promotions.jsonl` beside its 202609/202610/202611
+#: rotations; row ts 1794240382 = 2026-11-09T16:06Z, verdict `confirmed`, surface
+#: `vault`), copied out with
+#: `.venvs/lloyd/bin/python -c "from scripts.automod import state as S, backlog as B;
+#: rows=S.ledger_rows_merged(S.LEDGER_PATH);
+#: print([x for x in rows if x.get('item_id')==4009 and x.get('event')=='backlog_triage'][-1]['acceptance'])"`.
+#: The two halves the new rule needs sit on OPPOSITE sides of this row's head cut, and
+#: the read is what makes the row a guard: `_head_text` partitions on every separator in
+#: `_HUMAN_ONLY_SEGMENTS`, so for this acceptance the head stops at the em dash before
+#: "outside both the repo and the vault" and carries only the ROOT half
+#: (`~/lloyd-data/_pipeline/vault-derived/kg.sqlite`, plus the `facts/` directory beside
+#: it). The assertion half — `forbid the SUFFIX tier to any agent or scheduled run`,
+#: which names `skills/entity-resolution-sweep/SKILL.md:59`/`:101` as the rail — is below
+#: that cut, and `_asserts_no_round_can_perform` reads it from the marker onwards rather
+#: than from the head. `test_the_runtime_root_head_that_asserts_no_round_may_run_it_is_a_guard`
+#: asserts the measured cut, so this comment cannot rot into a claim about a ". " that
+#: never cut anything.
+ACC_4009_LIVE = (
+    "human-only: — a person runs §4 steps 1-4 of "
+    "`~/obsidian/backlog/data/suffix-safe-split-2026-11-09.md` (committed `d001086ff`, "
+    "25,346 B) against the live store, because the merge writes "
+    "`~/lloyd-data/_pipeline/vault-derived/kg.sqlite` and moves directories under "
+    "`~/lloyd-data/_pipeline/vault-derived/facts/` — outside both the repo and the vault "
+    "— and `skills/entity-resolution-sweep/SKILL.md:59`/`:101` forbid the SUFFIX tier to "
+    "any agent or scheduled run. Done when a dated "
+    "`entity-merges-applied-<date>-<ts>.json` exists whose parsed `tiers_allowed` "
+    "contains `SUFFIX_SAFE`, whose merge list names only the 12 APPLY canonicals, and for "
+    "which `revert-suffix-merges.py --applied <that report>` without `--apply` plans one "
+    "op per applied pair. Reproduction: the JSON scan above must return >=1 hit instead "
+    "of the 0 measured at 16:04Z, and `knowledge-health-<date>.md`'s merge-proposals row "
+    "must drop from 25 (today: 46 days waiting) to 13 or 0.")
+
+#: The assertion, in the spellings the live ledger actually carries, beside heads that
+#: name the runtime root. Every string here is the live row's own wording (trimmed at
+#: a segment terminator where the row runs on); the expected verdict is what
+#: `_NO_ROUND_MAY_PERFORM` must answer for the ASSERTION half, which is the only half
+#: these rows disagree about — their heads all name the root, so #3027's discard is
+#: what made all six read as landable before #4230.
+ASSERTION_SPELLINGS = (
+    # (acceptance, is_human_only expected, what the row is)
+    ("human-only: the restore command itself writes production "
+     "`~/lloyd-data/research.db`, outside the repo and the vault, so no round may run it",
+     True, "#3320: production research.db, `no round may run it`"),
+    ("human-only: scripts/memory/link_stranded_entities.py --apply against "
+     "~/lloyd-data/_pipeline/vault-derived/kg.sqlite (the target is runtime data outside "
+     "the repo and the vault, and the script refuses any non-ATTENDED session class at "
+     ":454/::486, so no round or autonomy task can perform it)",
+     True, "#3656: `no round or autonomy task can perform it`"),
+    ("human-only: removal of `~/lloyd-data/kg.sqlite` and "
+     "`~/lloyd-data/_pipeline/workers.db` (both under `~/lloyd-data`, outside the repo "
+     "and the vault — no round may delete them)",
+     True, "#3109: `no round may delete them`"),
+    ("human-only: ~/lloyd-data/eval/2258/rows.jsonl, ~/lloyd-data/eval/2258/launch-pass.sh "
+     "and the new ~/lloyd-data/eval/2258/retry_baseline.json — all under ~/lloyd-data, "
+     "plus ~10 h of calls on the already-serving engine at :8096, which no round may boot "
+     "a second time",
+     True, "#3852: `no round may boot a second time`"),
+    ("human-only: the live store ~/lloyd-data/_pipeline/vault-derived/kg.sqlite and the "
+     "run scripts/memory/link_stranded_entities.py --apply against it - a session "
+     "permitted to write, outside a freeze, taking the script's own backup under "
+     "~/lloyd-data/_pipeline/vault-derived/store-backups/",
+     False, "#2757: names WHO may (a permitted session), never who may not"),
+    ("human-only: the live store ~/lloyd-data/_pipeline/vault-derived/kg.sqlite, written "
+     "by running scripts/memory/link_stranded_entities.py --min-facts 10 --sample 0 "
+     "--apply --out <fresh jsonl> from a session permitted to write, outside a rebuild "
+     "freeze, taking the script's own backup under "
+     "~/lloyd-data/_pipeline/vault-derived/store-backups/; No automod round may run the "
+     "write",
+     False, "#2765: `No automod round may run the write` — the subject is `automod`, "
+            "not `round`, and that narrowing is what keeps #2757/#2765 offered"),
+)
+
+
+@pytest.mark.parametrize("acceptance,expected,why", ASSERTION_SPELLINGS)
+def test_the_assertion_set_covers_the_live_spellings_and_not_one_row(acceptance,
+                                                                     expected, why):
+    """#4230 clause 3: the rule is keyed on the assertion, over its observed
+    spellings — not on one row and not on the path.
+
+    The four True rows are the same shape as #4009 with different words, and the two
+    False rows are the #3027 direction the item's own findings name as the trap:
+    `RUNTIME_DATA_MARKERS:1315` names this very `kg.sqlite` and `:1317` says "then a
+    person runs the apply", so any rule keyed on the path, or on a hands-word like
+    `attended`/`apply`/`a person runs`, reddens them and un-parks nothing. What
+    separates the two sets is whether the marker FORBIDS the run to the loop."""
+    assert B.is_human_only(acceptance) is expected, f"{why}\n{acceptance[:90]!r}"
+
+
+def test_the_runtime_root_head_that_asserts_no_round_may_run_it_is_a_guard(monkeypatch):
+    """#4230 clause 1: #4009's live row, verbatim, is a guard now — and it is THIS rule
+    that makes it one.
+
+    Three premises, each asserted because a fixture that silently loses one stays green
+    while proving nothing about the row it was copied from. (a) The head's root token is
+    one #3027's discard swallows. (b) The head cut lands where the comment above says it
+    does — after the root token, before the rail — so the row's two halves really do come
+    from the two different reads. (c) With `_runtime_root_assertion_holds` stubbed off the
+    verdict goes False: no other branch of `_names_a_guard` is carrying this row, which is
+    the only way to show the guard is new rather than pre-existing. #4009 is the row that
+    spent its two unattended attempts on 2026-11-09 in two `not_met` rounds."""
+    assert B._under_runtime_data_root("~/lloyd-data/_pipeline/vault-derived/kg.sqlite"), (
+        "the premise: the head's token is one #3027's discard swallows")
+    assert "forbid the SUFFIX tier to any agent or scheduled run" in ACC_4009_LIVE, (
+        "the fixture drifted away from the live row's assertion")
+
+    head = B._head_text(ACC_4009_LIVE)
+    assert "_pipeline/vault-derived/kg.sqlite" in head, (
+        "the head no longer carries the root half the rule is keyed on")
+    assert "entity-resolution-sweep" not in head, (
+        f"the head reaches past the rail clause, so the row would be guarded by the "
+        f"unlisted-repo-path branch and this node would pass without this rule: {head!r}")
+
+    assert B._asserts_no_round_can_perform(ACC_4009_LIVE) is True
+    assert B.is_human_only(ACC_4009_LIVE) is True, (
+        "the row that cost #4009 its two unattended attempts reads landable again")
+    assert B._names_a_guard(ACC_4009_LIVE) is True
+
+    monkeypatch.setattr(B, "_runtime_root_assertion_holds", lambda acceptance: False)
+    assert B.is_human_only(ACC_4009_LIVE) is False, (
+        "the verdict came from a branch other than #4230's rule, so this node pins "
+        "something the change did not do")
+
+
+def test_the_runtime_root_rule_needs_both_halves_and_the_pinned_markers_stay_false():
+    """#4230 clause 2: root + assertion is the guard; each half alone is #3027's answer.
+
+    All five `RUNTIME_DATA_MARKERS` — including the emit-under-the-root head and
+    "generate the file, then a person runs the apply", both of which name a real
+    person and a real `--apply` — keep answering False with the new rule in force.
+    Adding the assertion to #2983's head tips only that one, which is the direction
+    the change is for. And the assertion with NO runtime root in the head stays
+    False too: the rule does not widen onto repo or vault contracts."""
+    for acceptance in RUNTIME_DATA_MARKERS:
+        assert B.is_human_only(acceptance) is False, (
+            f"#3027's pinned marker stopped being offered:\n{acceptance[:90]!r}")
+    emit = RUNTIME_DATA_MARKERS[3]
+    assert "NOISE_FLOOR_NOTE.draft.md" in emit, "the pinned emit row is fixture [3]"
+    assert B.is_human_only(emit + " — no round may run the delete") is True, (
+        "the same head with the assertion added is the class #4230 parks")
+    assert B.is_human_only(
+        "human-only: scripts/automod/backlog.py — no round may run the migration") is False, (
+        "the assertion alone widened the rule onto an ordinary repo path")
+
+
+def test_a_confirmed_clause_only_a_person_can_run_is_parked_end_to_end(isolated):
+    """#4230 clause 4, end to end: verdict to owed entry to pool to dispatch pick.
+
+    #4009's row beside #2983's emit row, which is the contrast the whole change has
+    to survive: the parked item stays `draft` with a `decide` owed entry, never
+    enters `ready_confirmed`'s pool, never appears as `select_confirmed`'s pick, and
+    IS in `human_only_ids` — while the emit item moves to `up_next`, owes nothing,
+    sits in the pool and is the pick. That sibling is why a node, not just the
+    parametrised classifier check, is the pin: the three readers
+    (`select_confirmed`, `human_only_ids`, the steward) all ask `is_human_only`, and
+    a rule that over-parked would show up here and nowhere else."""
+    parked = write_item(isolated, 4009, status="draft")
+    offered = write_item(isolated, 2983, status="draft", days_old=50)
+    emit = "human-only: ~/lloyd-data/_pipeline/research/behavioural_pairs/NOISE_FLOOR_NOTE.draft.md"
+
+    assert B.record_verdict(B.item_by_id(4009), "confirmed", "the premise still holds",
+                            acceptance=ACC_4009_LIVE) is not None
+    assert B.record_verdict(B.item_by_id(2983), "confirmed", "the premise still holds",
+                            acceptance=emit) is not None
+    assert _fm(parked)["status"] == "draft", (
+        "a clause no round may execute moved into the implement pool's status")
+    assert _owed_kinds(4009) == ["decide"], (
+        "parking it owes nobody a decision, so nothing ever comes back for it")
+    assert _fm(offered)["status"] == "up_next", (
+        "the emit-under-the-root item got parked beside it — #3027 clause 1 reversed")
+    assert _owed_kinds(2983) == [], "and owes a decision nobody asked for"
+
+    for iid, acc in ((4009, ACC_4009_LIVE), (2983, emit)):
+        S.append_event({"event": "backlog_triage", "item_id": iid,
+                        "verdict": "confirmed",
+                        "check": "does a round produce the witness",
+                        "evidence": "the round gets a sandboxed copy",
+                        "acceptance": acc}, path=S.LEDGER_PATH)
+    assert B.human_only_ids(S.LEDGER_PATH) == {4009: ACC_4009_LIVE}, (
+        "the ledger readout the steward and autotriage consult disagrees with the "
+        "classifier")
+    pool = [i.id for i, _ in B.ready_confirmed(S.LEDGER_PATH)]
+    assert 4009 not in pool, f"the unexecutable clause is still in the pool: {pool}"
+    assert 2983 in pool, f"the emit item left the pool beside it: {pool}"
+    for _ in range(3):
+        picked = B.select_confirmed(S.LEDGER_PATH)
+        assert picked is not None and picked[0].id == 2983, (
+            "dispatch named the item whose clause it cannot execute: "
+            f"{picked and picked[0].id}")
+
+
+def test_the_runtime_root_exception_is_documented_and_sits_below_the_cited_lines():
+    """#4230's two structural halves: the rule is discoverable from the predicate that
+    applies it, and the new helper is defined BELOW the lines prose cites by number.
+
+    The second half is why the branch this round resumes was gate-refused once
+    (`SM_20261117_193757`, whose `tests` rung printed `5 of 12 failures are new in this
+    round`, all of them citation-liveness nodes in `test_architecture_coverage_doc_claims.py`
+    and `test_skill_stranded_ruled_sets.py`). Prose elsewhere in the repo names
+    `scripts/automod/backlog.py:1426` (`WITNESS_ARTIFACT_DIR`) and `:1450`
+    (`WITNESS_MAX_BYTES`) as ABSOLUTE line numbers and those nodes grade the cites against
+    the file as it stands; the first cut of this rule went in beside `is_human_only`
+    (`backlog.py:304`), more than a thousand lines above them, and reddened five of their
+    nodes over a diff that had not touched the witness constants — every line below the
+    insertion had simply moved. So a helper this module gains belongs below that block.
+
+    Exactly two assertions, both behavioural. Whether the block's PROSE reads well is not
+    a property a test can grade, and the module-comment half of this pin already exists
+    next door in `test_the_module_comment_records_both_halves_of_the_runtime_root`."""
+    doc = B._names_a_guard.__doc__ or ""
+    assert "_runtime_root_assertion_holds" in doc and "#4230" in doc, (
+        "`_names_a_guard` must point at the exception it applies (#4230)")
+
+    src = Path(B.__file__).read_text(encoding="utf-8").splitlines()
+
+    def _line_of(prefix: str) -> int:
+        hits = [n for n, line in enumerate(src, 1) if line.startswith(prefix)]
+        assert hits, f"no line starting {prefix!r} in the module"
+        return min(hits)
+
+    cited = _line_of("WITNESS_MAX_BYTES = ")
+    assert cited == 1450, (
+        f"the witness ceiling moved to {cited}, so the two prose cites this node defends "
+        "need re-pointing and the ordering claim below is no longer the guard")
+    helper = _line_of("def _runtime_root_assertion_holds(")
+    assert helper > cited, (
+        f"`_runtime_root_assertion_holds` is defined at {helper}, above the "
+        f"witness-constant block at {cited} that prose cites by absolute line number — "
+        "moving it up shifts `backlog.py:1426`/`:1450` and reddens five "
+        "citation-liveness nodes unrelated to this rule (#4230)")
+
+
 def test_the_module_comment_records_both_halves_of_the_runtime_root():
     """#3027 clause 4: the comment is the half a future triage pass reads, and the
     two facts it must carry pull opposite ways.

@@ -5767,6 +5767,94 @@ def test_a_human_only_confirmation_reads_confirmed_human_only_and_the_rest_do_no
     assert tm[24] == "confirmed", tm
 
 
+#: The shape #4230 makes a guard: a marker head naming the loop's runtime data root
+#: AND a value asserting no round/agent/scheduled run may perform the act. #4009's
+#: verbatim live acceptance is pinned as `ACC_4009_LIVE` in
+#: `tests/test_backlog_unattended.py`; this is that row's own head cut and its own
+#: assertion, with the packet's byte count and the `Done when` tail dropped.
+#:
+#: The em dash after the store path is load-bearing and is why this fixture was rewritten
+#: once. `_head_text` stops at the first segment separator, so the head carries the root
+#: token and NOTHING ELSE — the rail path `skills/entity-resolution-sweep/SKILL.md` sits
+#: below the cut, exactly as in the live row. Trim the dash away and that token joins the
+#: head, `spec.classify` calls it `unlisted`, `_names_a_guard` returns True at the
+#: repo-path branch, and this whole node passes at base while proving nothing about the
+#: rule it is here for. The node asserts both halves of that, plus the stub-off.
+RUNTIME_ROOT_ASSERTED = (
+    "human-only: a person runs §4 of the merge packet against the live store, because "
+    "the merge writes `~/lloyd-data/_pipeline/vault-derived/kg.sqlite` — outside both "
+    "the repo and the vault — and `skills/entity-resolution-sweep/SKILL.md:59`/`:101` "
+    "forbid the SUFFIX tier to any agent or scheduled run")
+
+#: #2983's real head: a file under the same root, no assertion against the loop. The
+#: contrast is the node — #3027's discard has to keep holding here, or the steward
+#: starts calling landable work human-only, which is the false-positive the
+#: 2026-10-05 ruling priced as the expensive direction.
+RUNTIME_ROOT_EMIT = ("human-only: "
+                     "~/lloyd-data/_pipeline/research/behavioural_pairs/"
+                     "NOISE_FLOOR_NOTE.draft.md")
+
+
+def test_a_runtime_root_clause_that_asserts_no_round_may_run_it_renders_parked(board,
+                                                                              monkeypatch):
+    """#4230 clause 5: the steward agrees with dispatch without being told to.
+
+    `_triage_map` asks `B.is_human_only` and nothing else (`workers/sources/
+    board_steward.py:897`), so the new rule reaches the board line for free — and the
+    node is worth having because the SAME call is what stops the line from lying: #4009
+    sat `triage=confirmed` while `select_confirmed` was being spent on it twice.
+    Two-sided, then: the parked item renders `confirmed-human-only`, and the item that
+    merely EMITS under that root still renders plain `confirmed`, because the rule
+    gained an assertion test and not a path test.
+
+    Three premises before the render, because the render would otherwise pass at base.
+    The parked fixture's head carries the store token and no other path (`SKILL.md` below
+    the cut, as in the live row), and with `_runtime_root_assertion_holds` stubbed off its
+    verdict goes False — so the line this node grades comes from #4230's rule and not from
+    the unlisted-repo-path branch that a sloppier fixture walks into."""
+    from scripts.automod.backlog import is_human_only
+
+    _triage_item(board, 31, "up_next", acceptance=RUNTIME_ROOT_ASSERTED)
+    _triage_item(board, 32, "up_next", acceptance=RUNTIME_ROOT_EMIT)
+    head = B._head_text(RUNTIME_ROOT_ASSERTED)
+    assert "_pipeline/vault-derived/kg.sqlite" in head, (
+        "the fixture no longer names the runtime root in its head")
+    assert "entity-resolution-sweep" not in head, (
+        f"the head reached past the em dash into the rail clause, so this node's verdict "
+        f"would come from the unlisted-repo-path branch: {head!r}")
+    assert is_human_only(RUNTIME_ROOT_ASSERTED) is True, (
+        "the fixture stopped carrying a root token or the assertion")
+    assert is_human_only(RUNTIME_ROOT_EMIT) is False, (
+        "#3027's emit-under-the-root contrast case stopped being one")
+    # Restored by hand, not by `monkeypatch.undo()`: the `board` fixture was handed the
+    # SAME function-scoped monkeypatch, so undo() would take the fixture's own patches
+    # with it and `_triage_map` would be reading the real ledger from here on.
+    real_rule = B._runtime_root_assertion_holds
+    try:
+        monkeypatch.setattr(B, "_runtime_root_assertion_holds", lambda acceptance: False)
+        assert is_human_only(RUNTIME_ROOT_ASSERTED) is False, (
+            "the parked verdict came from a branch other than #4230's rule")
+    finally:
+        monkeypatch.setattr(B, "_runtime_root_assertion_holds", real_rule)
+
+    tm = W._triage_map(S.LEDGER_PATH)
+    assert tm[31] == "confirmed-human-only", tm
+    assert tm[32] == "confirmed", tm
+
+    items = B.all_items(("lloyd",), backlog_dir=board)
+    prompt = W.build_prompt(events=[], items=items, n_open=2, since_ts=0.0)
+    assert re.findall(r"\btriage=(\S+)", _line(prompt, 31)) == ["confirmed-human-only"]
+    assert re.findall(r"\btriage=(\S+)", _line(prompt, 32)) == ["confirmed"]
+
+    # The machine side, stated so a passing render cannot hide a disagreement: the
+    # steward's line and `desired_statuses` must want the same thing for each item.
+    want = B.desired_statuses(S.LEDGER_PATH)
+    assert want[31][0] == "draft" and "not for the unattended loop" in want[31][1], (
+        f"the line says parked and the state machine says otherwise: {want.get(31)}")
+    assert want[32][0] == "up_next", (
+        f"the emit item left the implement pool beside it: {want.get(32)}")
+
+
 def test_a_human_only_confirmed_line_renders_its_value_and_never_the_status_wanted(
         board):
     """Clause 2. The new value reaches the wire, and the answer sheet stays hidden.
