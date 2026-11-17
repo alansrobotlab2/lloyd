@@ -180,11 +180,9 @@ async def list_tools():
                     "focus_id": {
                         "type": ["string", "null"],
                         "description": (
-                            "Optional opaque id of an item to focus within the "
-                            "tab (e.g. session id for chat/inner_voice, task id "
-                            "for backlog/autonomy, server name for tools, skill "
-                            "name for skills, vault path or entity name for "
-                            "memory). When omitted, just switches the tab."
+                            "Optional item to focus in the tab; the "
+                            "description lists the id each tab takes. "
+                            "When omitted, just switches the tab."
                         ),
                     },
                 },

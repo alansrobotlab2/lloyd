@@ -5,7 +5,7 @@ Lloyd MCP Server: Browser — full browser control via Playwright.
 Tools (Phase 1): browser_navigate, browser_snapshot, browser_click,
                  browser_scroll, browser_press, browser_tabs
 Tools (Phase 2): browser_screenshot, browser_evaluate, browser_fill, browser_wait
-Tools (Phase 3): browser_select, browser_drag, browser_cookies
+Tools (Phase 3): browser_select, browser_drag, browser_cookies; browser_upload_files (#4236)
 
 `browser_type` was merged into `browser_fill(keystrokes=true)` on 2026-09-23.
 """
@@ -33,7 +33,7 @@ logger = logging.getLogger("lloyd-browser")
 
 CHROMIUM_EXECUTABLE = "/usr/bin/chromium"
 from app.config import CONFIG, service_url  # noqa: E402
-from app.paths import SCREENSHOTS_DIR  # noqa: E402  (was an absolute literal)
+from app.paths import SCREENSHOTS_DIR, VAULT_ROOT  # noqa: E402  (was an absolute literal)
 MAX_SNAPSHOT_CHARS = 8000
 # Every child frame's aria tree is read within a budget of its own rather than
 # sharing the document's: `MAX_SNAPSHOT_CHARS` applied to the whole snapshot
@@ -1386,6 +1386,345 @@ async def _browser_cookies(action: str, domain: str = "", cookies: list | None =
         return json.dumps({"error": f"Cookies operation failed: {exc}"})
 
 
+# ── File-attach policy (#4236) ────────────────────────────────────────────────
+#
+# `browser_upload_files` is the one browser verb that reads a file off this
+# machine and hands its bytes to whatever page happens to be open. That makes
+# it a file-read-and-exfiltrate primitive wearing a form-filling hat: every
+# other browser tool can only put INTO a page bytes the caller already had,
+# while this one can put a private key there. So the policy is default-deny —
+# a path must fall inside `browser.upload_roots` to be attachable at all, and
+# the roots are narrow by default rather than wide with exceptions.
+#
+# The defaults cover the two places a legitimate upload comes from: Lloyd's own
+# runtime data (a generated artifact, a render, a recording awaiting publish)
+# and the browser's Downloads folder. An EMPTY list means those defaults, never
+# "everything" — clearing a list in a config file must not be the widest the
+# policy has ever been.
+#
+# The hard refusals sit ABOVE the roots and are not configurable, because on
+# those paths "the operator allowed it" is not a meaningful answer: the
+# credential read-deny and write-deny sets (`app.harness.protected_paths`) and
+# the vault. Dotfiles and dot-directories go with them — the credential layout
+# of a Unix home is entirely dotted (`.ssh`, `.aws`, `.config/gh`,
+# `.openclaw`), so one component rule covers a family no per-directory list
+# would ever catch up to.
+#
+# Symlinks are resolved BEFORE any comparison, so a link inside an allowed root
+# that points at `/etc/passwd` is judged as `/etc/passwd` — the roots answer
+# where the bytes come from, not what the path is spelled like.
+#
+# And the whole evaluation is fail-CLOSED. That is the opposite of the effect
+# ledger's fail-open rule, on purpose: a ledger that cannot write should not
+# block a send, whereas a policy that cannot be evaluated has no idea where the
+# bytes are going, and there is no retry that takes a private file back out of
+# a web form.
+
+#: Where an attach may read from when `browser.upload_roots` says nothing (or
+#: says nothing). Directories, not globs; `~/Downloads/**` is accepted and
+#: read as `~/Downloads`.
+DEFAULT_UPLOAD_ROOTS: tuple[str, ...] = ("~/lloyd-data", "~/Downloads")
+
+#: A 3.3 GB recording is the measured real use case (the 2026-11-16 RSSC
+#: upload that filed this item), so the ceiling sits above that and below
+#: "unbounded": it exists to stop an accidental multi-terabyte sweep of a
+#: media directory, not to police a deliberate publish.
+DEFAULT_UPLOAD_MAX_BYTES = 8 * 1024 ** 3
+
+
+def _upload_config() -> tuple[list[Path], int]:
+    """The approved roots and the byte ceiling, resolved.
+
+    Raises ValueError when either cannot be evaluated, which the caller turns
+    into a refusal for the whole call. A malformed root entry is refused rather
+    than dropped: a list of five with one typo inside is not a policy that
+    quietly becomes the other four.
+    """
+    browser_cfg = CONFIG.get("browser") or {}
+    raw_roots = browser_cfg.get("upload_roots")
+    if raw_roots is None or (isinstance(raw_roots, (list, tuple)) and not raw_roots):
+        entries: list = list(DEFAULT_UPLOAD_ROOTS)
+    elif isinstance(raw_roots, str):
+        entries = [raw_roots]
+    elif isinstance(raw_roots, (list, tuple)):
+        entries = list(raw_roots)
+    else:
+        raise ValueError(
+            "browser.upload_roots must be a list of directories, got "
+            f"{type(raw_roots).__name__}"
+        )
+
+    roots: list[Path] = []
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(f"browser.upload_roots entry is not a path: {entry!r}")
+        text = re.sub(r"/(?:\*\*?)+$", "", entry.strip()).rstrip("/") or "/"
+        path = Path(os.path.expanduser(text))
+        if not path.is_absolute():
+            raise ValueError(
+                f"browser.upload_roots entry is not absolute: {entry!r}"
+            )
+        roots.append(path.resolve())
+    if not roots:
+        raise ValueError("browser.upload_roots resolved to no directory")
+
+    raw_max = browser_cfg.get("upload_max_bytes", DEFAULT_UPLOAD_MAX_BYTES)
+    try:
+        max_bytes = int(raw_max)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"browser.upload_max_bytes is not a byte count: {raw_max!r}"
+        ) from None
+    if max_bytes <= 0:
+        raise ValueError(f"browser.upload_max_bytes must be positive, got {max_bytes}")
+    return roots, max_bytes
+
+
+def _under_any(path: Path, roots: list[Path]) -> bool:
+    """Is `path` one of `roots` or inside one? Whole components only."""
+    return _covering_root(path, roots) is not None
+
+
+def _covering_root(path: Path, roots: list[Path]) -> Path | None:
+    """The deepest of `roots` that is `path` or contains it, or None.
+
+    Deepest, so the dot rule is judged from the most specific root the operator
+    named: with both `~` and `~/.config/app` listed, a file under the second is
+    measured from it, not from `~` (where `.config` would refuse it).
+    """
+    covering = [root for root in roots if path == root or root in path.parents]
+    return max(covering, key=lambda r: len(r.parts)) if covering else None
+
+
+def _upload_hard_deny(real: str) -> str | None:
+    """The label of the never-attachable root covering `real`, or None.
+
+    Both existing deny-sets are consulted rather than a browser-specific copy of
+    their contents: the credential trees and the write deny-set already decide
+    which paths no tool may touch, and a second list here would be a second
+    answer to that question — one that drifts the day either set grows.
+
+    Imported here, not at module top, so the file's line anchors cited from
+    architecture/*.md above the upload section stay where they were.
+    """
+    from app.harness import protected_paths
+    reason = protected_paths.read_deny_reason(real)
+    if reason:
+        return reason
+    reason = protected_paths.write_deny_reason(real)
+    if reason:
+        return reason
+    if _under_any(Path(real), [_vault_root()]):
+        return "the Obsidian vault is never attachable to a page"
+    return None
+
+
+def _vault_root() -> Path:
+    return Path(str(VAULT_ROOT)).resolve()
+
+
+def _upload_path_policy(raw: object, roots: list[Path],
+                        max_bytes: int) -> tuple[Path | None, str]:
+    """Approve one path for attaching, or say in one line why this one is refused.
+
+    Returns `(resolved_path, "")` or `(None, reason)`. Every reason names the
+    path as the caller spelled it, because that is the string the agent has to
+    correct; a resolved path that differs is named alongside it.
+
+    Order is not arbitrary: the hard-deny roots, the dot rule and the roots
+    check all come before the existence check, so a refusal about a credential
+    tree is a refusal about a credential tree whether or not the file is on
+    disk — a caller cannot learn which files exist outside the approved roots
+    by watching which refusals mention a missing file.
+
+    The dot rule is judged on the components BELOW the approved root the path
+    falls under, not on the root's own spelling. A root the operator listed is
+    attachable whatever its parents are called (the gate runs every test under
+    `~/lloyd-work/.t/<hex>`, and a root there is a root); what the rule exists
+    to catch is a `.ssh` or `.config/gh` reached by walking down from a broad
+    root, which the deny-sets do not enumerate.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None, f"upload path {raw!r} is not a file path"
+    text = raw.strip()
+    expanded = os.path.expanduser(text)
+    if not os.path.isabs(expanded):
+        return None, (
+            f"{raw}: upload paths must be absolute (or start with ~/); the "
+            "server's working directory is not part of this tool's contract"
+        )
+    resolved = Path(expanded).resolve()
+    real = str(resolved)
+
+    hard = _upload_hard_deny(real)
+    if hard:
+        return None, f"{raw}: {hard}"
+    root = _covering_root(resolved, roots)
+    below = resolved.relative_to(root).parts if root is not None else resolved.parts
+    dotted = any(part.startswith(".") for part in below if part not in ("/", ""))
+    if root is None:
+        return None, (
+            f"{raw} resolves to {real}, outside browser.upload_roots "
+            f"({', '.join(str(r) for r in roots)}); "
+            + ("its path runs through a dot-directory or names a dotfile, so "
+               "approve only the exact directory an upload is meant to come "
+               "from, never a parent of it" if dotted else
+               "add that directory to browser.upload_roots if this upload is "
+               "meant to happen")
+        )
+    if dotted:
+        return None, (
+            f"{raw}: dotfiles and dot-directories are never attachable"
+            + ("" if real == text else f" (resolves to {real})")
+        )
+    if not resolved.exists():
+        return None, f"{raw} does not exist" + ("" if real == text else f" (resolves to {real})")
+    if resolved.is_dir():
+        return None, f"{raw} is a directory; name a file inside it"
+    if not resolved.is_file():
+        return None, f"{raw} is not a regular file"
+    size = resolved.stat().st_size
+    if size > max_bytes:
+        return None, (
+            f"{raw} is {size} bytes, over the {max_bytes}-byte "
+            "browser.upload_max_bytes ceiling"
+        )
+    return resolved, ""
+
+
+def _page_origin(page) -> str:
+    """The scheme+host of what is open, for the audit line.
+
+    The path is only half of what an attach discloses; the other half is the
+    site that receives it. `page.url` survives a navigation that never
+    committed as the previous document's URL, which is exactly the imprecision
+    wanted here — it names the page the bytes were handed to as the browser
+    understood it.
+    """
+    try:
+        parts = urllib.parse.urlparse(page.url or "")
+    except ValueError:
+        return "?"
+    if not parts.scheme:
+        return (page.url or "?")[:120]
+    return f"{parts.scheme}://{parts.netloc}" if parts.netloc else parts.scheme
+
+
+async def _browser_upload_files(ref: str = "", paths: object = None,
+                                selector: str = "",
+                                frame_index: int | None = None) -> str:
+    """Put local files into a page's `<input type=file>`.
+
+    Two ways to name the input, because the real one is the awkward one. A page
+    whose upload control is a styled button drives a `display:none` input that
+    the accessibility tree never shows and so never gives a ref for — YouTube
+    Studio's upload dialog among them. `selector` reaches that input directly,
+    which is why the parameter exists and why a ref-only design would have been
+    useless where this is needed. `ref` stays for a visible input.
+
+    The bytes never travel through this process: Playwright hands Chromium the
+    path and the browser reads the file, so a 3.3 GB recording costs the same
+    one call as a 2 KB one. Every path is policy-checked before the input is
+    touched, so a refusal — including one on the third path of a batch — leaves
+    the page exactly as it was.
+    """
+    raws: list = list(paths) if isinstance(paths, (list, tuple)) else (
+        [paths] if isinstance(paths, str) else [])
+    if not raws:
+        return json.dumps({"error": "paths is required: one absolute file path, or a list of them"})
+    if bool(ref) == bool(selector):
+        return json.dumps({
+            "error": "pass exactly one of ref (a snapshot ref to a visible input) "
+                     "or selector (a CSS selector, which is how a display:none "
+                     "input is reached — it has no ref)"
+        })
+    if frame_index is not None and not selector:
+        return json.dumps({
+            "error": "frame_index goes with selector; a snapshot ref already names "
+                     "the frame it was taken from"
+        })
+
+    try:
+        roots, max_bytes = _upload_config()
+    except ValueError as exc:
+        logger.warning("browser_upload_files: refusing every path, upload policy "
+                       "could not be evaluated: %s", exc)
+        return json.dumps({
+            "error": f"upload policy could not be evaluated, so nothing is "
+                     f"attachable: {exc}"
+        })
+
+    approved: list[str] = []
+    reasons: list[str] = []
+    for raw in raws:
+        path, reason = _upload_path_policy(raw, roots, max_bytes)
+        if path is None:
+            reasons.append(reason)
+        else:
+            approved.append(str(path))
+    if reasons:
+        # Nothing has touched the page yet, which is the whole point of checking
+        # the batch up front rather than path by path as it is attached.
+        logger.warning("browser_upload_files: refused %s", "; ".join(reasons))
+        return json.dumps({"error": "; ".join(reasons),
+                           "refused": reasons,
+                           "not_attached": [str(r) for r in raws]})
+
+    page = await _get_page()
+    # Where the bytes go is half the question, so the same landing guard that
+    # stands in front of every read stands in front of this write too. A page
+    # that reached a private host by redirect has no business receiving a local
+    # file, and `browser_upload_files` is the one browser verb where the
+    # disclosure runs the other way: the guard on the read paths stops a LAN
+    # device's content getting out, this stops this machine's content getting in.
+    landed = await _enforce_landing(page)
+    if landed:
+        return json.dumps({"error": f"{landed} — nothing attached"})
+    try:
+        if selector:
+            scope = _frame_at(page, frame_index) if frame_index is not None else page
+            locator = scope.locator(selector)
+            matched = await locator.count()
+            if matched == 0:
+                where = (f"frame {frame_index}" if frame_index is not None
+                         else "the main frame")
+                return json.dumps({
+                    "error": f"no element matches selector '{selector}' in {where} "
+                             f"of {_page_origin(page)}. Call browser_snapshot to see "
+                             "the page, or pass a ref for a visible input."
+                        })
+            if matched > 1:
+                return json.dumps({
+                    "error": f"selector '{selector}' matches {matched} elements; "
+                             "attaching to the first of several would be a guess "
+                             "about which input receives the file. Narrow the "
+                             "selector to one element."
+                        })
+            target = locator.first
+        else:
+            target = await _locate(page, ref)
+        await target.set_input_files(approved, timeout=30000)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    except Exception as exc:
+        return json.dumps({
+            "error": f"Upload failed ({type(exc).__name__}): {str(exc)[:300]}"
+        })
+
+    # The disclosure audit line: which local files, into which origin. Deliberately
+    # INFO — this is the record an operator reads to answer "what did the agent
+    # upload, and to whom", and a refusal above it is a warning.
+    logger.info("browser_upload_files: attached %d file(s) to %s: %s",
+                len(approved), _page_origin(page), ", ".join(approved))
+    return json.dumps({
+        "ok": True,
+        "attached": len(approved),
+        "paths": approved,
+        "target_origin": _page_origin(page),
+        "via": {"selector": selector} if selector else {"ref": ref},
+    })
+
+
 # ── MCP interface ──────────────────────────────────────────────────────────────
 
 async def list_tools():
@@ -1395,8 +1734,7 @@ async def list_tools():
             "Navigate the browser to a URL. Returns the page title and HTTP status. "
             "A document that responds 4xx/5xx comes back with ok:false and a `warning` "
             "naming the status and the page title: the fetch reached a server, but what "
-            "answered is an error page, not the target. A moved or missing page still "
-            "has to be re-found. "
+            "answered is an error page, not the target. "
             "Always call browser_snapshot after navigating to see the page content."
         ), inputSchema={
             "type": "object",
@@ -1430,8 +1768,7 @@ async def list_tools():
             "frame gets its own `### frame <n> <url>` section, and a ref found in "
             "one acts inside that frame. A frame whose content could not be read "
             "is still listed, with the reason, so a partial extraction never reads "
-            "as a complete one. Pass the `<n>` to browser_evaluate's frame_index "
-            "to run script in that frame."
+            "as a complete one."
         ), inputSchema={
             "type": "object",
             "properties": {
@@ -1442,8 +1779,7 @@ async def list_tools():
             },
         }),
         Tool(name="browser_click", description=(
-            "Click an element by its ref ID from the last browser_snapshot. "
-            "Example: browser_click(ref='e3') clicks the element with ref e3."
+            "Click an element by its ref ID from the last browser_snapshot."
         ), inputSchema={
             "type": "object",
             "properties": {
@@ -1519,11 +1855,9 @@ async def list_tools():
                 "frame_index": {
                     "type": "integer",
                     "description": (
-                        "Run in page.frames[frame_index] instead of the main frame. "
-                        "The numbering is page.frames' own, which is the numbering "
-                        "the snapshot's `### frame <n> <url>` headers print; 0 is the "
-                        "main frame and has no header because its tree is the one at "
-                        "the top. Out of range is an error naming the valid range."
+                        "Index into page.frames, as the snapshot's `### frame <n>` "
+                        "headers number them; 0 is the main frame. Out of range is "
+                        "an error."
                     ),
                 },
             },
@@ -1544,10 +1878,8 @@ async def list_tools():
             "required": ["ref", "value"],
         }),
         Tool(name="browser_wait", description=(
-            "Wait for a condition before continuing. "
-            "Conditions: selector (CSS selector appears), text (text appears on page), "
-            "navigation (page load completes), networkidle (no network requests), "
-            "timeout (wait N milliseconds)."
+            "Wait for a condition before continuing: a selector or text to appear, "
+            "navigation, network idle, or a fixed timeout in ms."
         ), inputSchema={
             "type": "object",
             "properties": {
@@ -1615,6 +1947,26 @@ async def list_tools():
             },
             "required": ["action"],
         }),
+        Tool(name="browser_upload_files", description=(
+            "Use this when a page needs a LOCAL FILE in its <input type=file>; pass "
+            "selector='input[type=file]' instead of ref for a hidden input (most "
+            "upload buttons). Any size is one call. Paths must sit inside "
+            "browser.upload_roots; dotfiles, protected trees and the vault are refused."
+        ), inputSchema={
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "Ref of a visible file input."},
+                "paths": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Absolute paths; a call replaces the input's "
+                                   "files, so pass them all at once.",
+                },
+                "selector": {"type": "string", "description": "CSS selector for one file input."},
+                "frame_index": {"type": "integer",
+                                "description": "With selector: search page.frames[n]."},
+            },
+            "required": ["paths"],
+        }),
     ]
 
 
@@ -1671,6 +2023,12 @@ async def call_tool(name: str, arguments: dict):
             arguments.get("action", "get"),
             arguments.get("domain", ""),
             arguments.get("cookies"),
+        ),
+        "browser_upload_files": lambda: _browser_upload_files(
+            arguments.get("ref", ""),
+            arguments.get("paths"),
+            arguments.get("selector", ""),
+            arguments.get("frame_index"),
         ),
     }
     handler = handlers.get(name)

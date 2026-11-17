@@ -414,21 +414,24 @@ def test_browser_page_subscribes_to_the_state_stream():
 
 # ── Regression guards named by the item ───────────────────────────────────────
 
-# Thirteen since 2026-09-23: `browser_type` became `browser_fill(keystrokes=true)`.
+# Fourteen since 2026-11-17, when `browser_upload_files` arrived (#4236).
+# Thirteen before that, since 2026-09-23's `browser_type` became
+# `browser_fill(keystrokes=true)`. The clause these nodes guard is "the served
+# set is this set", so adding a tool must be recorded here, not excused.
 
-def test_still_thirteen_browser_tools_with_unchanged_names():
+def test_still_fourteen_browser_tools_with_unchanged_names():
     src = (ROOT / "agent_mcp" / "browser.py").read_text(encoding="utf-8")
-    assert src.count('Tool(name="browser_') == 13
+    assert src.count('Tool(name="browser_') == 14
 
 
-async def test_tool_schemas_still_expose_the_same_thirteen_tools():
+async def test_tool_schemas_still_expose_the_same_fourteen_tools():
     tools = await browser_module.list_tools()
-    assert len(tools) == 13
+    assert len(tools) == 14
     assert {t.name for t in tools} == {
         "browser_navigate", "browser_snapshot", "browser_click",
         "browser_scroll", "browser_press", "browser_tabs", "browser_screenshot",
         "browser_evaluate", "browser_fill", "browser_wait", "browser_select",
-        "browser_drag", "browser_cookies",
+        "browser_drag", "browser_cookies", "browser_upload_files",
     }
 
 

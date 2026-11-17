@@ -401,6 +401,17 @@ browser:
   # router, the NAS, the printer, every unauthenticated device on it.
   # LLOYD_BROWSER_BLOCK_PRIVATE=0 turns it off for one process.
   block_private_hosts: true
+  # browser_upload_files hands a LOCAL FILE to whatever page is open, so it is
+  # default-deny: a path is attachable only if it sits inside one of these
+  # directories. An empty list means the defaults below, never "everything".
+  # Symlinks are judged by what they resolve to, and credential trees, the vault,
+  # and any dotfile or dot-directory are refused whatever is listed here.
+  upload_roots:
+    - ~/lloyd-data
+    - ~/Downloads
+  # One file's byte ceiling: above the 3.3 GB recording that motivated the tool,
+  # below unbounded, so an accidental sweep of a media directory is refused.
+  upload_max_bytes: 8589934592
 
 code_graph:
   graphify_bin: ~/.local/bin/graphify

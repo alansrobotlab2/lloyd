@@ -109,6 +109,26 @@ def _rows(db) -> list[sqlite3.Row]:
         conn.close()
 
 
+def _rows_or_nothing(db) -> list[sqlite3.Row]:
+    """`_rows`, but a database with no table yet reads as no rows.
+
+    A call that never reaches the ledger does not create the table, so the plain
+    reader raises `OperationalError` on exactly the case a caller most wants to
+    assert. Only the missing table is forgiven; a malformed one still raises.
+    """
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        return list(conn.execute(
+            "SELECT tool, scope, status, suppress_count FROM tool_effects"))
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+    finally:
+        conn.close()
+
+
 def _err(result) -> bool | None:
     """`isError` across the mcp 1.x/2.x split — same reason as
     `agent_mcp.main._result_is_error`: a camelCase read on a 2.x
@@ -818,3 +838,200 @@ def test_the_router_gives_a_chat_turn_a_shadow_scope_and_a_worker_its_item(
     assert R._shadow_effect_scope("worker", "t9", "") == ""
     src = Path(R.__file__).read_text()
     assert "options.effect_scope = _shadow_effect_scope(" in src
+
+
+# ── #4236: a file attach is an effect, on the browser's own surface ──────────
+#
+# Every other node above drives a fake writer, because what they are testing is
+# the ledger's bookkeeping and a fake is the honest instrument for that. These
+# two nodes need more: `browser_upload_files` arrives with the browser module's
+# 13 other tools, and the claim is about a real file landing in a real page. So
+# this drives the real handler against real Chromium and asserts the page's own
+# `files.length` — the same witness that a page would show if a second file were
+# attached twice.
+#
+# The interesting risk is specific to this tool. The other browser verbs live in
+# `REPEAT_EXPECTED`, which exempts a name from the ledger entirely because their
+# repeats converge. An attach does not converge: replayed after an item's
+# timeout it puts a second recording in the form, and a second upload at the
+# publishing site is not a benign repeat. Whether a name lands in that set is
+# therefore a ledger question, and it is asked below of the real annotations.
+
+import importlib.util as _ilu
+from playwright.async_api import async_playwright as _async_playwright
+
+requires_chromium = pytest.mark.skipif(
+    not (Path("/usr/bin/chromium").is_file() and _ilu.find_spec("playwright")),
+    reason="needs playwright and /usr/bin/chromium")
+
+UPLOAD_PAGE = (
+    "<!doctype html><html><body>"
+    "<input id=f type=file multiple style='display:none'>"
+    "<script>const f=document.getElementById('f');"
+    "f.addEventListener('change',()=>{document.title=f.files.length+':'+Array.from("
+    "f.files).map(x=>x.name).join(',');});</script></body></html>"
+)
+FILES_LEN = "document.getElementById('f').files.length"
+ATTACH_ARGS = {"selector": "input[type=file]",
+               "paths": ["/tmp/does-not-matter.bin"]}
+
+
+@pytest.fixture
+async def attach_page(tmp_path, monkeypatch):
+    """Real Chromium on a page with a hidden file input, wired into `agent_mcp.browser`.
+
+    The input is hidden for the same reason the tool has a `selector` parameter:
+    that is the input a real upload control uses. The approved directory is this
+    test's own, so an attach here is inside the policy by construction and a
+    refusal would be a bug rather than a fixture accident.
+    """
+    from agent_mcp import browser as bm
+    from app.config import CONFIG
+
+    root = tmp_path / "uploads"
+    root.mkdir()
+    # Pin HOME so the default roots the policy falls back to live under THIS
+    # test. Under a TMPDIR inside ~/lloyd-data — what the gate's round data root
+    # does — pytest's temp tree is genuinely inside the defaults, and a path
+    # meant to be "outside browser.upload_roots" stops being outside it.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    browser_cfg = dict(CONFIG.get("browser") or {})
+    browser_cfg["upload_roots"] = [str(root)]
+    monkeypatch.setitem(CONFIG, "browser", browser_cfg)
+
+    pw = await _async_playwright().start()
+    chrome = await pw.chromium.launch(
+        executable_path="/usr/bin/chromium", headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage"])
+    context = await chrome.new_context()
+    page = await context.new_page()
+
+    async def _answer(route):
+        await route.fulfill(status=200, body=UPLOAD_PAGE,
+                            content_type="text/html; charset=utf-8")
+
+    await page.route("**/*", _answer)
+    await page.goto("http://127.0.0.1:45173/upload", wait_until="domcontentloaded")
+
+    async def _page():
+        return page
+
+    monkeypatch.setattr(bm, "_context", context)
+    monkeypatch.setattr(bm, "_active_page", page)
+    monkeypatch.setattr(bm, "_get_page", _page)
+    monkeypatch.setattr(bm, "_push_browser_state", lambda tool_name: asyncio.sleep(0))
+    base = dict(getattr(M, "_dispatch", None) or {})
+    base["browser_upload_files"] = bm
+    monkeypatch.setattr(M, "_dispatch", base)
+    try:
+        yield page, root
+    finally:
+        await context.close()
+        await chrome.close()
+        await pw.stop()
+
+
+@requires_chromium
+async def test_one_file_attach_writes_one_row_before_dispatch_and_a_replay_attaches_nothing(
+        attach_page, tmp_path, monkeypatch, ledger):
+    from agent_mcp import browser as bm
+
+    page, root = attach_page
+    probe = root / "recording.bin"
+    probe.write_bytes(b"\0" * 4096)
+    args = {"selector": "input[type=file]", "paths": [str(probe)]}
+
+    # What the ledger looked like at the moment the handler ran. `claim()` opens
+    # the row before dispatch for exactly this reason: the browser attaches the
+    # file and then the process dies, and a row written after a successful
+    # return would describe nothing.
+    seen: list[int] = []
+    real = bm._browser_upload_files
+
+    async def _spy(*a, **k):
+        seen.append(len(_rows(ledger)))
+        return await real(*a, **k)
+
+    monkeypatch.setattr(bm, "_browser_upload_files", _spy)
+
+    first = await M.call_tool("browser_upload_files", args, META)
+    assert not _err(first), _texts(first)
+    assert seen == [1], f"rows open at dispatch: {seen}"
+    assert await page.evaluate(FILES_LEN) == 1, "the file never reached the page"
+
+    rows = _rows(ledger)
+    assert len(rows) == 1, rows
+    assert rows[0]["tool"] == "browser_upload_files"
+    assert rows[0]["scope"] == SCOPE
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["suppress_count"] == 0
+
+    # The replay: the item re-ran, the pool re-issued the same call, and the
+    # page must not gain a second copy of the file.
+    # The replay answers with the FIRST call's result plus the #544 line, and
+    # `isError` stays False because the original was a success — so the witness
+    # that nothing ran again is the handler spy and the page, not a flag.
+    second = await M.call_tool("browser_upload_files", args, META)
+    assert "already fired" in _texts(second), _texts(second)
+    assert await page.evaluate(FILES_LEN) == 1, "the replay attached a second file"
+    assert len(seen) == 1, "the replay reached the handler at all"
+    after = _rows(ledger)
+    assert len(after) == 1 and after[0]["suppress_count"] == 1, after
+
+
+@requires_chromium
+async def test_a_different_file_is_a_different_effect_and_an_unscoped_call_attaches_nothing(
+        attach_page, ledger):
+    """The guard keys on the arguments, not on the tool name.
+
+    Attaching the next recording is a real second effect and must run; asking for
+    the same one again is the repeat that gets suppressed. Both edges matter for
+    this tool: name-only suppression would break a multi-file publish, and
+    argument-blind firing would re-send the one file that already uploaded.
+    """
+    page, root = attach_page
+    one, two = root / "one.bin", root / "two.bin"
+    one.write_bytes(b"a")
+    two.write_bytes(b"b")
+
+    nobody = await M.call_tool("browser_upload_files",
+                               {"selector": "input[type=file]", "paths": [str(one)]})
+    assert _err(nobody) is True, _texts(nobody)
+    assert await page.evaluate(FILES_LEN) == 0, "an unscoped call attached a file"
+    # No row at all — and here that means the table itself was never opened,
+    # because an empty scope takes the call out of the ledger before dispatch.
+    assert _rows_or_nothing(ledger) == []
+
+    assert not _err(await M.call_tool(
+        "browser_upload_files",
+        {"selector": "input[type=file]", "paths": [str(one)]}, META))
+    assert await page.evaluate(FILES_LEN) == 1
+
+    # A second attach REPLACES the input's file list — that is what
+    # `set_input_files` does — so the witness that a different file ran is the
+    # name the page reports, not a count.
+    assert not _err(await M.call_tool(
+        "browser_upload_files",
+        {"selector": "input[type=file]", "paths": [str(two)]}, META))
+    assert "two.bin" in await page.title(), await page.title()
+    assert [r["status"] for r in _rows(ledger)] == ["ok", "ok"]
+
+    replay = await M.call_tool(
+        "browser_upload_files",
+        {"selector": "input[type=file]", "paths": [str(one)]}, META)
+    assert "already fired" in _texts(replay), _texts(replay)
+    assert "one.bin" not in await page.title(), "the repeat re-attached one.bin"
+
+
+def test_a_file_attach_is_not_exempted_from_the_ledger_by_the_browser_family():
+    """`REPEAT_EXPECTED` is where a browser verb goes to be excused.
+
+    Every other `browser_*` name lives there because its repeat converges — a
+    re-click lands on the same page. An attach does not converge: it puts a
+    second file in the form. If the name is ever added to that set, the ledger
+    stops seeing this tool, so the absence is asserted here rather than left to
+    the reader of a frozenset.
+    """
+    assert "browser_click" in A.REPEAT_EXPECTED, "the family is the exempt one"
+    assert "browser_upload_files" not in A.REPEAT_EXPECTED
+    assert A.side_effecting("browser_upload_files") is True

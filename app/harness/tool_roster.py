@@ -71,6 +71,7 @@ REGISTERED_TOOLS: frozenset[str] = frozenset({
     "browser_select",
     "browser_snapshot",
     "browser_tabs",
+    "browser_upload_files",
     "browser_wait",
     "calendar_categories",
     "calendar_create",

@@ -1096,6 +1096,15 @@ RETIRED_TOOLS = frozenset({
 # `fact_relationships` gained `limit` and `vault_search` its pipeline note (22,577);
 # paid back from the fact tools' own prose (a routing line `vault_recall` already
 # carries, a parameter restating the response) to 22,492, every trigger clause kept.
+#
+# 2026-11-17, `browser_upload_files` (#4236, ~210 estimated tokens after its own
+# description was cut from 907 chars to ~330): paid for the same way, by prose that
+# restated a schema or a sibling — `mc_navigate.focus_id` re-listing the per-tab ids
+# its description gives, Grep's description re-listing its own flags,
+# `autonomy_write_task` spelling out the `id` upsert, `browser_wait` re-listing its
+# enum, `browser_evaluate.frame_index` repeating the description's frame note,
+# `browser_snapshot` pointing at evaluate's frame_index (evaluate says it), and
+# `browser_click`'s example. 22,489 over 107 tools; every trigger clause kept.
 INTERNAL_CATALOG_TOKEN_CEILING = 22_500
 
 

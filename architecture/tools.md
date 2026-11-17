@@ -491,7 +491,7 @@ self-evidently a file with a fresh timestamp.
 | `autonomy` | 8 | the scheduled-task fleet ([[autonomy]]) |
 | `autoresearch` | 2 | prompt-variant rounds: their status, and restoring prompts from a snapshot. A round is scheduled by the worker source or run with `scripts.autoresearch.run_round` |
 | `backlog` | 4 | the kanban backlog. `backlog_write_task` runs write-time dedupe ([[backlog]]) |
-| `browser` | 13 | Playwright Chromium, with the SSRF guard on resolved addresses |
+| `browser` | 14 | Playwright Chromium, with the SSRF guard on resolved addresses |
 | `desktop` | 2 | look at Alan's Hyprland desktop and act on it. `desktop_act` needs the lease only Alan grants from Mission Control's Desktop tab; refused outright for a background, worker, bench or eval turn. `architecture/desktop.md` is the authority |
 | `recall_observation` | 1 | one tool, and its own module: read back a tool result that context pressure replaced with an observation stub. Advertised only to a turn whose relief actually writes those stubs (`app/harness/tool_result_spill.py`, #1481) |
 | `code_graph` | 6 | structural navigation over graphify's AST extraction (§9) |
@@ -608,7 +608,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `backlog_get_task` | RO | `task_id` | One item in full: front matter and body |
 | `backlog_write_task` | FX | — | Create or update an item. A create runs write-time dedupe and may merge into an open item, or be refused over a closed one |
 
-#### `browser` (13)
+#### `browser` (14)
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
@@ -625,6 +625,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `browser_select` | OW RX | `ref` | Pick an option in a `<select>` by value or label |
 | `browser_drag` | OW RX | `source_ref`, `target_ref` | Drag one element onto another |
 | `browser_cookies` | OW RX | `action` | Get, set or clear cookies |
+| `browser_upload_files` | OW FX | `paths` | Attach local files to an `<input type=file>` by `ref`, or by `selector` for the hidden input most upload buttons drive (`frame_index` for one in a frame). Chromium reads the file from its path. Default-deny: a path must resolve inside `browser.upload_roots` (default `~/lloyd-data`, `~/Downloads`; an empty list means those); the read/write deny-sets, the vault, and any dot component below the root are refused; the whole batch is checked before the page is touched; a call replaces the input's files rather than appending (#4236) |
 
 #### `desktop` (2)
 

@@ -1,5 +1,5 @@
 {
- "pool": 157,
+ "pool": 158,
  "sources": {
   "arch-review": {
    "declared": false,
@@ -36,8 +36,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "autocode": {
    "declared": false,
@@ -74,8 +74,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "automod-regression": {
    "declared": false,
@@ -112,8 +112,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "autoresearch": {
    "declared": false,
@@ -150,8 +150,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "autotriage": {
    "declared": true,
@@ -174,7 +174,7 @@
    ],
    "n_allowed": 19,
    "reachable_after": 19,
-   "reachable_before": 128
+   "reachable_before": 129
   },
   "backlog-cluster": {
    "declared": false,
@@ -211,8 +211,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "bench-mine": {
    "declared": true,
@@ -235,7 +235,7 @@
    ],
    "n_allowed": 5,
    "reachable_after": 5,
-   "reachable_before": 128
+   "reachable_before": 129
   },
   "board-steward": {
    "declared": false,
@@ -272,8 +272,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "cost-investigate": {
    "declared": false,
@@ -310,8 +310,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "deep-research": {
    "declared": true,
@@ -332,7 +332,7 @@
    ],
    "n_allowed": 20,
    "reachable_after": 20,
-   "reachable_before": 104
+   "reachable_before": 105
   },
   "failure-ledger": {
    "declared": false,
@@ -369,8 +369,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "frontend-probe-canary": {
    "declared": false,
@@ -407,8 +407,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "owed-check": {
    "declared": false,
@@ -445,8 +445,8 @@
     "tasks_update"
    ],
    "n_allowed": null,
-   "reachable_after": 128,
-   "reachable_before": 128
+   "reachable_after": 129,
+   "reachable_before": 129
   },
   "scheduled-task": {
    "declared": true,
@@ -469,7 +469,7 @@
    ],
    "n_allowed": 33,
    "reachable_after": 33,
-   "reachable_before": 128
+   "reachable_before": 129
   },
   "session-distill": {
    "declared": true,
@@ -492,7 +492,7 @@
    ],
    "n_allowed": 11,
    "reachable_after": 11,
-   "reachable_before": 128
+   "reachable_before": 129
   },
   "youtube-digest": {
    "declared": true,
@@ -513,7 +513,7 @@
    ],
    "n_allowed": 23,
    "reachable_after": 23,
-   "reachable_before": 109
+   "reachable_before": 110
   }
  }
 }

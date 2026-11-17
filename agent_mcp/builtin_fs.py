@@ -1720,10 +1720,8 @@ async def list_tools():
             name="Grep",
             description=(
                 "Use to search file contents by pattern; for file names use Glob, for a known path use Read.\n\n"
-                "Search file content with ripgrep. Modes: files_with_matches "
-                "(default, list paths), content (lines), count. Supports "
-                "case-insensitive (-i), line numbers (-n), context (-A/-B/-C), "
-                "glob/type filters, multiline."
+                "Search file content with ripgrep; output_mode and the flags "
+                "below choose what comes back."
             ),
             inputSchema={
                 "type": "object",
