@@ -21,7 +21,7 @@ import inspect
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -2430,3 +2430,248 @@ def test_the_floor_path_the_alarm_names_is_the_path_main_reads():
     src = (ROOT / "scripts/memory/knowledge-health-report.py").read_text(encoding="utf-8")
     assert "PIPELINE_DIR / GRAPH_BASELINE_RELPATH" in src, (
         "main() no longer reads the floor through the constant the alarm quotes")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #4220 — the cohort line's flip date names a crossing the cohort can never make
+#
+# The shipped line ended "…counted in the unevaluable line below, and every one
+# crosses the 60-day threshold on 2026-11-22", sitting directly above the skill's
+# note that "from 2026-11-22 … the rot figure can carry a provenance clause". Read
+# together they forecast the rot count jumping by the cohort's ~82,703 that night.
+# It cannot: `_in_stamp_cohort` carries no age test, so those rows are dropped from
+# `find_stale_facts` before any bucket exists. Measured 2026-11-17 over
+# `_pipeline/vault-derived/facts` through the shipped selectors, the rotted figure is
+# 0 as-of 11-21, 15,784 as-of 11-22 (stamp 15,784, tail 0 — every one of them a row
+# that ALSO holds an `event_date`, so already stale by claim age and only now stale as
+# a record), 19,069 as-of 11-23 (stamp 16,690, tail 2,379) and 36,798 as-of 11-29
+# (stamp 16,691 + tail 20,107 + residual 0). The 82,703 appear in none of them; the
+# movement across 11-23…29 is the tail, one threshold-crossing per tail date.
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: The live cohort's shape as the renderer sees it on 2026-11-17 — 82,703 undated rows
+#: of 204,338 active (40.5%), stamped 2026-09-23, with the seven-day rebuild tail
+#: spelled out because the span the line must name is derived from its two ends and a
+#: comprehension would hide which is which. Hand-built so a node can render the live
+#: line without writing 204,338 records.
+LIVE_COHORT = {
+    "date": "2026-09-23",
+    "date_records": 99_429,
+    "cohort": 82_703,
+    "active_total": 204_338,
+    "flip_date": "2026-11-22",
+    "tail_dates": ["2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27",
+                   "2026-09-28", "2026-09-29", "2026-09-30"],
+}
+
+#: What `_stale_age_split_line` rendered for the rows and cohort below when run at the
+#: round's base commit `4420d662` (`git show 4420d662:scripts/memory/knowledge-health-report.py`,
+#: called on exactly these two objects). #2930's line, byte for byte: the clause the
+#: reader was missing belongs in the COHORT line, so this one must not move.
+SHIPPED_SPLIT_LINE = (
+    "STALE_AGE_SPLIT: 1 arrived already stale — counted by claim age (content), "
+    "recorded inside the 60-day window —, 2 where record age (the record's own "
+    "`created_at`) itself passes 60 days — of which 1 share the 2026-09-23 "
+    "re-derivation stamp and 1 the 2026-09-24…2026-09-30 rebuild tail (rebuild "
+    "provenance, not decay; the residual 0 is the decay signal) (the rot signal), 1 "
+    "with no parseable `created_at` to date the record by. The first count tracks "
+    "INGEST volume, not rot; the second is the one that says knowledge is going stale."
+)
+
+#: One row per bucket of the split, plus one carrying both provenance tags, as
+#: `SHIPPED_SPLIT_LINE` renders them.
+SPLIT_ROWS = [
+    {"age_days": 400, "record_age": 10},
+    {"age_days": 400, "record_age": 200, khr.STALE_STAMP_TAG_KEY: True},
+    {"age_days": 400, "record_age": 200, khr.STALE_STAMP_TAIL_TAG_KEY: True},
+    {"age_days": 400, "record_age": None},
+]
+
+
+def _cohort_line_of(cohort: dict | None) -> str:
+    """The STALE_STAMP_COHORT line as `generate_report` renders it for a hand-built
+    cohort — the live store's shape, which no fixture is going to write 204,338 records
+    for. The renderer is the contract here, not any f-string inside it, and
+    `stale_unevaluable` is passed because the cohort line points at that line: a claim
+    about "the unevaluable line below" needs the line to exist."""
+    report = khr.generate_report(
+        khr.compute_entity_stats({}),
+        khr.compute_relationship_stats([], {}),
+        [], [], NOW,
+        stale_unevaluable=(0, 0) if cohort is None
+        else (cohort["cohort"], cohort["active_total"]),
+        stamp_cohort=cohort)
+    return _cohort_line_from(report)
+
+
+def _cohort_line_from(report: str) -> str:
+    """That same line, pulled out of an already-rendered report."""
+    lines = [ln for ln in report.splitlines() if ln.startswith("STALE_STAMP_COHORT")]
+    assert len(lines) == 1, f"expected one cohort line in the report, got {len(lines)}: {lines}"
+    return lines[0]
+
+
+def test_the_cohort_line_says_its_rows_reach_neither_the_stale_total_nor_the_rot_figure():
+    """Clause 1: the line that prints the cohort count also says that count is not a
+    backlog in waiting. The six facts STAMP_RE pins still render — cohort, percent,
+    active total, stamp date, date-carried count, flip date — so every existing
+    exact-group node above stays green, and the same line now carries the exclusion:
+    while the cohort gate holds, these rows are in neither this section's stale total
+    nor its rot figure. The numbers are the live store's shape today, so the reading
+    reconciled here is the reading a reader of tomorrow's run record gets."""
+    entities = _tail_corpus()
+    cohort = khr.stale_stamp_cohort(entities)
+    assert cohort["cohort"] == COHORT and cohort["date"] == STAMP_DAY, cohort
+
+    section = _stale_section(_stamp_report(entities))
+    line = _cohort_line_from(section)
+    match = STAMP_RE.search(line)
+    assert match is not None, f"STAMP_RE no longer matches the line it was written for: {line!r}"
+    # The six facts, unchanged in kind and position. Two nodes elsewhere —
+    # test_the_section_names_the_stamp_cohort_as_a_counting_gap and
+    # test_the_nightly_run_prints_the_cohort_line_for_the_store_that_produced_it —
+    # assert all six by exact tuple on their own corpora; this one pins the fixture's.
+    assert match.group(1) == f"{COHORT:,}", match.groups()
+    assert match.group(3) == f"{2 * COHORT + 2:,}", match.groups()
+    assert match.group(4) == STAMP_DAY, match.groups()
+    assert match.group(5) == f"{COHORT + 1:,}", match.groups()
+    assert match.group(6) == cohort["flip_date"], match.groups()
+
+    # The exclusion, in the line a reader cannot skip past on the way to the rot figure.
+    assert "neither this section's stale total nor its rot figure" in line, line
+    assert "while the cohort gate holds" in line, line
+    assert "unevaluable by design" in line, line
+    assert "not a count due that night" in line, line
+    # And it comes AFTER the flip date, because that is the position that answers the
+    # misreading: a reader who stops at "crosses the threshold on <date>" has been told
+    # where the rows go by the time they reach the end of the sentence.
+    assert line.index("threshold on") < line.index("neither this section's stale total"), line
+
+    # The line must not over-correct into "nothing moves that night". Something does
+    # arrive, and it names them: the stamp-carriers that also hold an `event_date`.
+    assert "also hold an `event_date`" in line, line
+    assert _balanced(line)
+
+    # The reconciliation the sentence asserts, measured on the same corpus: the section's
+    # total is 1,002 rows, and the 1,000 the cohort line counts are not among them.
+    stale = khr.find_stale_facts(entities, NOW, THRESH)
+    assert len(stale) == COHORT + 2, f"{len(stale)} rows reached the total: {stale[:3]}"
+    assert not any(r["entity"] == "Rebuilt" for r in stale), "a cohort row reached the total"
+    assert f"**{COHORT + 2:,}** in total" in section, section
+
+
+def test_the_cohort_line_names_the_span_the_rot_figure_moves_over():
+    """Clause 2: the movement the flip date was mistaken for has a real owner and a real
+    SPAN. A tail date enters the rotted bucket when its own `created_at` turns
+    STALE_DAYS_THRESHOLD old, so the cohort's `tail_dates` produce one crossing each, and
+    the live tail 2026-09-24…2026-09-30 is the rot movement 2026-11-23…2026-11-29 — the
+    span `stale_age_split`'s attribution fills in night by night, the tail count climbing
+    from 0 to its full 20,107 by the last of them."""
+    shift = timedelta(days=khr.STALE_DAYS_THRESHOLD)
+    first = (date.fromisoformat(LIVE_COHORT["tail_dates"][0]) + shift).isoformat()
+    last = (date.fromisoformat(LIVE_COHORT["tail_dates"][-1]) + shift).isoformat()
+    assert (first, last) == ("2026-11-23", "2026-11-29"), (
+        "the span is the cohort's first and last tail date each + STALE_DAYS_THRESHOLD; "
+        "if this pair moved, so did the figure the owed check reads back")
+
+    line = _cohort_line_of(LIVE_COHORT)
+    assert STAMP_RE.search(line) is not None, line
+    assert (f" The rot figure moves instead over {first}…{last}, as the rebuild tail "
+            "behind this stamp reaches that age in turn.") in line, line
+    # A span, not a night: the sentence is about a range of dates and the cohort's own
+    # flip date stays where STAMP_RE anchors it.
+    assert line.index(f"{first}…{last}") > line.index("threshold on"), line
+
+
+def test_the_rot_span_is_derived_and_absent_rather_than_empty_when_there_is_no_tail():
+    """Clause 2's two failure modes. A one-day tail prints one bare date, because a span
+    of one is not a span and `2026-10-08…2026-10-08` reads as a data error. A cohort with
+    no tail prints no sentence at all: "moves over" beside nothing is the same empty claim
+    the renderer already refuses for the cohort count itself. And nothing in the helper's
+    CODE is a date — the docstring names today's live span as its worked example, but a
+    literal in the body would freeze this line for the next rebuild instead of tracking
+    the one that happened."""
+    src = inspect.getsource(khr._stamp_rot_span)
+    parts = src.split('"""', 2)
+    assert len(parts) == 3, "expected exactly one docstring on the helper"
+    assert re.search(r"\d{4}-\d{2}-\d{2}", parts[0] + parts[2]) is None, (
+        "the span ends must be computed from `tail_dates` + STALE_DAYS_THRESHOLD")
+
+    shift = timedelta(days=khr.STALE_DAYS_THRESHOLD)
+    one_day = (date.fromisoformat(TAIL_DAY) + shift).isoformat()
+    assert khr._stamp_rot_span({"tail_dates": [TAIL_DAY]}) == (
+        f" The rot figure moves instead over {one_day}, as the rebuild tail behind this "
+        "stamp reaches that age in turn.")
+    assert "…" not in khr._stamp_rot_span({"tail_dates": [TAIL_DAY]}), (
+        "a single tail date must print bare, not as D…D")
+
+    for no_tail in (None, {}, {"tail_dates": []}, {"tail_dates": [], "date": STAMP_DAY}):
+        assert khr._stamp_rot_span(no_tail) == "", (
+            f"a cohort with no tail has no span to name, so it must print nothing: {no_tail}")
+
+    line = _cohort_line_of({**LIVE_COHORT, "tail_dates": []})
+    assert STAMP_RE.search(line) is not None, line
+    assert "rot figure moves" not in line, line
+    assert line.endswith("that also hold an `event_date`."), line
+    assert not line.endswith(" —"), line
+    assert not line.endswith(":"), line
+
+
+def test_the_cohort_line_gains_dates_only_and_moves_no_row():
+    """Clause 3: the widening is prose over dates, not a seventh number, and no
+    population changed hands. After the flip date the only digits left in the line are
+    the two dates of the span; `find_stale_facts` still drops the cohort unconditionally,
+    so the split invariant `sum(split[k]) == len(stale_facts)` still closes; and
+    STALE_AGE_SPLIT renders byte-for-byte what the base commit rendered for the same
+    rows, because #2930 fixed that line and this round's whole claim is that it did."""
+    line = _cohort_line_of(LIVE_COHORT)
+    after_flip = line[STAMP_RE.search(line).end(6):]
+    assert re.findall(r"\d{4}-\d{2}-\d{2}", after_flip) == ["2026-11-23", "2026-11-29"], (
+        f"the only digits after the flip date may be the span's two ends: {after_flip!r}")
+    assert not re.search(r"\d", re.sub(r"\d{4}-\d{2}-\d{2}", "", after_flip)), (
+        f"a row count entered the cohort line: {after_flip!r}")
+
+    skip = re.search(r"if _in_stamp_cohort\(fact, cohort\):\s*\n\s*continue",
+                     inspect.getsource(khr.find_stale_facts))
+    assert skip is not None, (
+        "the cohort skip is no longer the unconditional one, so the cohort's rows can "
+        "reach a bucket after all and this line's new sentence is a lie")
+
+    entities = _tail_corpus()
+    stale = khr.find_stale_facts(entities, NOW, THRESH)
+    split = khr.stale_age_split(stale)
+    assert sum(split[k] for k in khr.STALE_AGE_KEYS) == len(stale) == COHORT + 2, split
+    assert split[khr.STALE_ROTTED_TAIL_KEY] == COHORT, (
+        "the tail rows are the population the new span is about; if they left the bucket "
+        "the span names a movement that does not happen")
+
+    cohort = {**LIVE_COHORT, "tail_dates": [f"2026-09-{d:02d}" for d in range(24, 31)]}
+    assert khr._stale_age_split_line(SPLIT_ROWS, cohort) == SHIPPED_SPLIT_LINE, (
+        "STALE_AGE_SPLIT moved: #2930 shipped it, and this round adds its clause to the "
+        "COHORT line only")
+
+
+def test_the_three_docstrings_stop_sending_the_cohort_rows_to_the_rotted_bucket():
+    """Clause 4: these three docstrings ARE the rule a future maintainer reads before
+    touching the gate, and all three used to say the cohort proper turns 60 days old on
+    the flip date and enters the bucket with it. None may still, and each must name who
+    DOES arrive that night — the stamp-carriers that also hold an `event_date`, the only
+    stamp-dated rows `find_stale_facts` returns at all. `STALE_ROTTED_STAMP_KEY`'s comment
+    is deliberately untouched: "2026-11-22 is when it stops being 0" is true of the
+    sub-count precisely because those are the `event_date` rows."""
+    docs = {name: inspect.getdoc(getattr(khr, name)) or ""
+            for name in ("stale_stamp_cohort", "_on_stamp_cohort_date", "find_stale_facts")}
+    assert all(docs.values()), "one of the three functions lost its docstring"
+    for name, doc in docs.items():
+        for claim in ("become stale together",
+                      "every one of those rows turns 60 days old and enters the rotted bucket",
+                      "the day it flips"):
+            assert claim not in doc, f"{name} still asserts {claim!r}"
+        assert "event_date" in doc, (
+            f"{name} must name the stamp-carriers that also hold an `event_date` as the "
+            "population arriving on the flip date, instead of leaving the cohort in its place")
+
+    src = (ROOT / "scripts/memory/knowledge-health-report.py").read_text(encoding="utf-8")
+    assert "2026-11-22 is when it stops being 0" in src, (
+        "STALE_ROTTED_STAMP_KEY's comment is the one flip-date claim that stays true of "
+        "the count it describes, and this round leaves it alone")

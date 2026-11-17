@@ -592,9 +592,15 @@ def stale_stamp_cohort(entities: dict) -> dict | None:
     cross 60 days through `event_date` — of the 20,825 facts the section reports, 0
     have a null `event_date`, and 80,673 active facts have no age signal but the stamp.
     `stale_coverage` reported `(2, 130115)` over them, because the stamp parses as a
-    perfectly usable date. Those 80,673 do not become reviewable one by one; they
-    become stale together on 2026-11-22, and no nightly pass will ever watch them age,
-    because the next full re-derivation resets the field to that run's date.
+    perfectly usable date. Those 80,673 do not become reviewable one by one, and they do
+    not become STALE either: `find_stale_facts` drops them at `_in_stamp_cohort`, which
+    carries no age test, so they enter neither the stale total nor the rotted bucket for
+    as long as this gate holds — the pass that would show them aging is the one that skips
+    them, and the next full re-derivation resets the field to that run's date anyway
+    (#4220). `flip_date` is therefore not a day this cohort arrives on. What it is the
+    threshold for is the OTHER population dated by that run: the rows that carry an
+    `event_date` beside the stamp, which age normally and cross 60 days of RECORD age on
+    it, moving from `arrived_stale` into the rotted bucket.
 
     A date the store shares is provenance loss, not freshness, so the cohort is
     reported as undated and given the day it would flip. Which facts are NOT in it:
@@ -657,11 +663,14 @@ def _on_stamp_cohort_date(fact: dict, cohort: dict | None) -> bool:
     """Did this fact's own `created_at` land on the stamp cohort's dominant date?
 
     A fact stamped 2026-09-23 was not recorded on 2026-09-23: that is the day the
-    field was re-derived (#2179), and 64.8% of active rows carry it. On 2026-11-22
-    every one of those rows turns 60 days old and enters the rotted bucket of
-    `stale_age_split` in a single night, which is what this tag is for — the split is
-    allowed to name that part as provenance without moving a single row out of the
-    count.
+    field was re-derived (#2179), and 64.8% of active rows carry it. The rows this tag
+    can fire on are the stamp-carriers that ALSO hold an `event_date`, because those are
+    the only stamp-dated rows `find_stale_facts` returns at all — the cohort proper is
+    dropped by `_in_stamp_cohort` upstream and can never reach a bucket here (#4220). On
+    2026-11-22 those `event_date` rows turn 60 days old as RECORDS and cross from
+    `arrived_stale` into the rotted bucket of `stale_age_split` in a single night, which is
+    what this tag is for: the split names that part as provenance without moving a single
+    row out of the count.
 
     False whenever the attribution would be a guess: no cohort (the hand-written
     corpus, the store whose dates are genuinely spread), or no parseable `created_at`
@@ -708,8 +717,11 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
     Neither is a fact in the stamp cohort (#2179): its only date is a `created_at`
     `STALE_DOMINANT_DATE_SHARE` of the store shares, which measures the rebuild, not
     the claim. Returning it would dress provenance loss up as a review backlog of
-    80,673 rows appearing in one night; the cohort is reported on its own line with
-    the day it flips, and counted unevaluable by `stale_coverage`.
+    80,673 rows appearing in one night; the cohort is reported on its own line and
+    counted unevaluable by `stale_coverage`. The skip carries no age test, so it does not
+    lapse on the cohort's flip date, and that date is not a due date for this function
+    (#4220): what does arrive on it is the stamp-dated rows that ALSO carry an
+    `event_date`, which age from that date and reach 60 days of record age then.
     """
     cohort = stale_stamp_cohort(entities)
     stale = []
@@ -910,6 +922,37 @@ def _stale_tail_span(tail_dates) -> str:
     """
     first, last = tail_dates[0], tail_dates[-1]
     return first if first == last else f"{first}…{last}"
+
+
+def _stamp_rot_span(cohort: dict | None) -> str:
+    """The cohort line's clause naming when the ROT figure actually moves, or `""`.
+
+    The cohort's own rows never move it: `_in_stamp_cohort` drops them from
+    `find_stale_facts` with no age test, so while the gate holds they are in neither the
+    section's stale total nor its rotted bucket, on the flip date or any date after it
+    (#4220). What moves the rot figure is the rebuild tail behind the stamp, and it moves
+    over a SPAN: a tail day enters the bucket when its own `created_at` turns
+    `STALE_DAYS_THRESHOLD` old, so each of `tail_dates` contributes on its own day and the
+    two ends are the first and last of them, each shifted by the threshold. The live tail
+    2026-09-24…2026-09-30 is therefore the rot movement 2026-11-23…2026-11-29 — a span of
+    dates, not the cohort's single flip date.
+
+    Both ends are COMPUTED from the cohort dict the section already measured, shifted by
+    the shipped constant; no date is written here, so a re-derivation on a different day
+    moves this span with it. `_stale_tail_span` formats the two shifted ends and prints a
+    single-day tail bare rather than as `D…D`. `tail_dates` empty, missing, or no cohort at
+    all yields `""`, which is the renderer's signal to leave the sentence out entirely —
+    a store with no tail has no span to name, and printing "over " beside nothing is the
+    same empty claim as the cohort line's own count going missing.
+    """
+    tail_dates = sorted((cohort or {}).get("tail_dates") or ())
+    if not tail_dates:
+        return ""
+    shift = timedelta(days=STALE_DAYS_THRESHOLD)
+    ends = [(date.fromisoformat(tail_dates[0]) + shift).isoformat(),
+            (date.fromisoformat(tail_dates[-1]) + shift).isoformat()]
+    return (f" The rot figure moves instead over {_stale_tail_span(ends)}, as the rebuild "
+            f"tail behind this stamp reaches that age in turn.")
 
 
 def _stale_age_split_line(stale_facts: list[dict],
@@ -1999,7 +2042,10 @@ def generate_report(
             f"{stamp_cohort['date_records']:,} of them share — a re-derivation stamp, "
             "not a recording date. Undated, not fresh: counted in the unevaluable line "
             f"below, and every one crosses the {STALE_DAYS_THRESHOLD}-day threshold on "
-            f"{stamp_cohort['flip_date']}.")
+            f"{stamp_cohort['flip_date']}. Those rows reach neither this section's stale "
+            "total nor its rot figure while the cohort gate holds — counted unevaluable "
+            "by design, not a count due that night; the stamp-carriers that DO arrive "
+            f"that night are the ones that also hold an `event_date`.{_stamp_rot_span(stamp_cohort)}")
         lines.append("")
 
     # The clean verdict is earned only when both numbers are zero. An unmeasured
