@@ -39,11 +39,13 @@ Usage:
   # dry-run (default):
   python entity-resolution-sweep.py
 
-  # apply Tier 1:
-  python entity-resolution-sweep.py --apply
+  # apply Tier 1 — --tiers is REQUIRED of an apply since #4197, and the form below is
+  # the one the nightly job runs; a bare `--apply` refuses, because it used to mean
+  # "every tier", SUFFIX_SAFE included:
+  python entity-resolution-sweep.py --apply --tiers CASE,PUNCT
 
   # also drop inherited alias entries that are pipeline noise:
-  python entity-resolution-sweep.py --apply --rebuild-aliases
+  python entity-resolution-sweep.py --apply --tiers CASE,PUNCT --rebuild-aliases
 
   # finish an apply that died between the transaction and the moves (#1558):
   python entity-resolution-sweep.py --resume <entity-merges-applied-*.json>
@@ -1757,8 +1759,11 @@ def _resume_apply(args, st, facts_root: Path) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="Apply SAFE merges")
-    ap.add_argument("--tiers", default=",".join(ALL_TIERS),
-                    help="Tiers allowed to auto-merge (default: all; SUFFIX_SAFE still needs the gate)")
+    ap.add_argument("--tiers", default=None,
+                    help="Tiers allowed to auto-merge. Omitted, a DRY RUN classifies all "
+                         f"of {','.join(ALL_TIERS)} (SUFFIX_SAFE still needs the gate); an "
+                         "APPLY refuses until it is passed, because the apply that means "
+                         "is never 'all three' (see ALL_TIERS)")
     ap.add_argument("--no-gate", action="store_true",
                     help="Skip the semantic gate: every SUFFIX_SAFE cluster goes to review")
     ap.add_argument("--allow-degraded", action="store_true",
@@ -1789,6 +1794,47 @@ def main() -> int:
                          "run's (old_edge_id, new_edge_id) pairs so revert stays exact by id")
     args = ap.parse_args()
 
+    # An `--apply` that names no tiers is refused (#4197), HERE, before a store is
+    # opened, a gate built, a plan written, an alias committed or a report saved:
+    # `--tiers` used to default to `ALL_TIERS`, so a bare `--apply` — a typo away from
+    # the nightly form — was an unattended merge of every gate-approved SUFFIX_SAFE
+    # cluster. On 2026-11-16 that queue held 25 clusters, the oldest waiting 53 days
+    # (since 2026-09-24), and one of them was `Hermes`(degree 68) ← `Hermes Agent`(26):
+    # gate `SAME`, total 94, inside HIGH_VALUE_GATE = 150, so nothing below this line
+    # would have stopped it. `--tiers CASE,PUNCT` is what the 16:01Z nightly apply
+    # passed and is the reason today's executed plan held 0 suffix rows while the
+    # 16:00Z dry run held 25: the flag, not the graph, is what stopped the merge, and
+    # the only other thing that stopped it was prose in SKILL.md:59.
+    #
+    # The default stays all-tier for a dry run, because a plan that silently
+    # un-classifies SUFFIX_SAFE is worse than the exposure: `kg_hygiene.py` counts
+    # approved suffix clusters from the written plan, and a row that is not there
+    # reads as a clean bill of health. So the refusal fires on OMISSION with --apply
+    # only, and `--apply --tiers SUFFIX_SAFE` remains the human route.
+    if args.apply and args.tiers is None:
+        # The form is ONE line, and it is on the first line the operator reads. It used
+        # to sit two lines below a line that itself says `--apply` ("REFUSING --apply:
+        # …" / "…means every tier" / then the bullet), which is how a reader — or a
+        # grep — talks themselves into the literal being `--apply` here and
+        # `CASE,PUNCT` there. This file's own oldest trap is a phrase made invisible by
+        # a line break; a refusal whose repair is a command line is the worst place to
+        # rediscover it, because the repair is the one thing the message exists to give.
+        print("\nREFUSING --apply: --tiers was not given. Name the tiers you mean — the "
+              "form is --apply --tiers CASE,PUNCT")
+        print("  An apply that names no tiers means every tier ("
+              + ", ".join(ALL_TIERS) + "), and SUFFIX_SAFE in that set is the whole "
+              "reason for this guard.")
+        print("    --apply --tiers CASE,PUNCT      # the nightly form; SUFFIX_SAFE is "
+              "never drained unattended")
+        print("    --apply --tiers SUFFIX_SAFE     # an explicit human decision about "
+              "the suffix queue")
+        print("  A dry run without --tiers still classifies all three, so a bare plan "
+              "and the section-A queue a reviewer reads are unchanged.")
+        return 4
+
+    allowed_tiers = set(ALL_TIERS) if args.tiers is None else {
+        t.strip() for t in args.tiers.split(",") if t.strip()}
+
     facts_root = Path(args.facts_dir)
     out_dir = Path(args.out_dir)
 
@@ -1801,7 +1847,6 @@ def main() -> int:
         {d.name for d in facts_root.iterdir() if d.is_dir()} if facts_root.exists() else set()
     )
 
-    allowed_tiers = {t.strip() for t in args.tiers.split(",") if t.strip()}
     gate = None
     if not args.no_gate:
         try:

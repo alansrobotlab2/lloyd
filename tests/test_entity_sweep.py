@@ -301,10 +301,22 @@ def _seed_floor(out, db):
 
 
 
-def _run(root, db, out, *extra, floor="auto"):
+def _run(root, db, out, *extra, floor="auto", tiers="CASE,PUNCT"):
     """Run the sweep against the fixture. `floor` is the state of graph-baseline.json.
 
-    `"auto"` (the default) seeds the floor with THIS store's own live count when the file
+    `tiers` is what gets passed as `--tiers`, and since #4197 it cannot simply be left
+    out of an apply: `--apply` with no `--tiers` now refuses, because that argv used to
+    mean "merge every tier", SUFFIX_SAFE included. The default is the nightly #48 form,
+    `CASE,PUNCT`, so the ~39 apply fixtures below keep exercising the merge path instead
+    of the new refusal. That costs no coverage here: `--no-gate` is hardcoded two lines
+    down, so no SUFFIX_SAFE cluster in this file is ever SAFE, and the tier set the flag
+    could re-admit was already exactly the mechanical ones — `decide_merge` lets
+    CASE/PUNCT/IDENTICAL through on shape alone and nothing else does, while
+    `classify_pair` returns IDENTICAL only for `a == b`, which no fixture here builds
+    (every name pair it writes is distinct). `tiers=None` reaches the omitted state,
+    which is the argv #4197 refuses; another set exercises a tier restriction directly.
+
+    `"auto"` (the default for `floor`) seeds the floor with THIS store's own live count when the file
     is not already there. That is what a healthy previous night leaves behind —
     `update_baseline` is max-only and, since #3221, runs again on every apply that gets
     past its guard, so a store that has not lost edges sits exactly at its floor. On the
@@ -325,6 +337,8 @@ def _run(root, db, out, *extra, floor="auto"):
         _write_floor(out, floor)
     cmd = [sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
            "--out-dir", str(out), "--no-gate", *extra]
+    if tiers is not None:
+        cmd += ["--tiers", tiers]      # `tiers=None` reaches the omitted state (#4197)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
 def test_apply_refuses_on_a_degraded_graph(tmp_path):
@@ -782,7 +796,14 @@ def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     reports = list(out.glob("entity-merges-applied-*.json")); assert len(reports) == 1
     rep = json.loads(reports[0].read_text())
     assert rep["ledger"]["argv"] and rep["ledger"]["pid"] and "cwd" in rep["ledger"]
-    assert rep["tiers_allowed"] == ["CASE", "PUNCT", "SUFFIX_SAFE"]
+    # ["CASE", "PUNCT"] since #4197: `_run` now spells `--tiers CASE,PUNCT` (the nightly
+    # #48 argv), where it used to spell nothing and the report echoed all three. The
+    # field is an echo of the run's own width, so it follows the argv; the omitted-flag
+    # case that used to produce all three is refused before it can report, and the all-
+    # tiers value itself is pinned by explicit argv in
+    # `test_explicit_suffix_tier_still_merges_the_gate_approved_cluster` and
+    # `test_the_bare_dry_run_still_classifies_a_suffix_cluster_as_safe`.
+    assert rep["tiers_allowed"] == ["CASE", "PUNCT"]
     assert Path(rep["store_backup"]).exists()
     assert json.loads((out / "graph-baseline.json").read_text())["active_edges"] == 2
     # the plan carries the suffix cluster as review, with the reason
@@ -1111,8 +1132,12 @@ def test_a_kill_between_the_transaction_and_the_report_leaves_no_dangling_pointe
             raise OSError("simulated kill after the store transaction")
         return real_dump(obj, fh, *a, **kw)
 
+    # `--tiers` spelled out: #4197 refuses an --apply that omits it, and this node's
+    # subject is the ORDER after the guard, not the guard. CASE,PUNCT is what the
+    # fixture's SAFE clusters are (`--no-gate` keeps every suffix cluster in review).
     monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
-                                     "--out-dir", str(out), "--no-gate", "--apply"])
+                                     "--out-dir", str(out), "--no-gate", "--apply",
+                                     "--tiers", "CASE,PUNCT"])
     monkeypatch.setattr(json, "dump", dying_dump)
     with pytest.raises(OSError):
         ers.main()
@@ -1154,8 +1179,12 @@ def test_the_gate_cache_path_is_plumbed_to_the_gate(tmp_path, monkeypatch):
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
     _seed_floor(out, db)   # in-process main(): #2968 refuses an apply with no floor
     cache = tmp_path / "hermetic-verdicts.jsonl"
+    # `--tiers` spelled out, for a reason specific to this node: it passes no
+    # `--no-gate`, so the gate really is constructed here, and the #4197 refusal returns
+    # BEFORE that construction — an omitted `--tiers` would leave the assertion below
+    # reading an empty `seen` and pass as a plumbing bug rather than as a refusal.
     monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
-                                     "--out-dir", str(out), "--apply",
+                                     "--out-dir", str(out), "--apply", "--tiers", "CASE,PUNCT",
                                      "--gate-cache", str(cache)])
     assert ers.main() == 0
     assert seen["cache_path"] == cache, "the flag did not reach the gate"
@@ -1178,8 +1207,12 @@ def test_the_default_gate_cache_is_left_alone_when_a_run_names_its_own(tmp_path,
     monkeypatch.setitem(sys.modules, "entity_semantic_gate", fake)
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
     _seed_floor(out, db)   # in-process main(): #2968 refuses an apply with no floor
+    # `--tiers CASE,PUNCT` spelled out. Without it the #4197 refusal returns before the
+    # gate is built, `seen` stays empty, and `seen["cache_path"] is None` below would
+    # pass for the wrong reason — the assertion is about which cache_path the
+    # CONSTRUCTED gate was handed, which requires construction to have happened.
     monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
-                                     "--out-dir", str(out), "--apply"])
+                                     "--out-dir", str(out), "--apply", "--tiers", "CASE,PUNCT"])
     assert ers.main() == 0
     assert seen["cache_path"] is None        # the gate's own default, untouched
 
@@ -1629,15 +1662,21 @@ def _stamp_of(name: str) -> dt.datetime:
     return dt.datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc)
 
 
-def _run_tz(root, db, out, tz: str, *extra):
+def _run_tz(root, db, out, tz: str, *extra, tiers="CASE,PUNCT"):
     """The CLI in a SUBPROCESS whose `TZ` is forced. Pinning it is the whole point:
     `TZ` is read at `datetime.now()` call time, so on a box whose clock is already
-    UTC every one of the assertions below would hold with the bug still in place."""
+    UTC every one of the assertions below would hold with the bug still in place.
+
+    `tiers` exists for the same reason as `_run`'s since #4197: all three callers pass
+    `--apply`, and that argv now has to name its tiers or the run refuses before naming
+    any artefact — which is exactly the thing these nodes are trying to observe."""
     if not (out / "graph-baseline.json").exists():
         _seed_floor(out, db)   # #2968: an apply with no floor refuses, and this
                               # node is naming artefacts under a forced zone
     cmd = [sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
            "--out-dir", str(out), "--no-gate", *extra]
+    if tiers is not None:
+        cmd += ["--tiers", tiers]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                           env=dict(os.environ, TZ=tz))
 
@@ -1935,3 +1974,279 @@ def test_the_witness_bytes_still_carry_the_gap_the_item_quotes():
     if vault.exists():
         assert vault.read_bytes() == WITNESS.read_bytes(), (
             f"the committed copy and {vault} are no longer the same bytes")
+
+
+# ── #4197 — an --apply that omits --tiers refuses ────────────────────────────
+#
+# `--tiers` used to default to `",".join(ALL_TIERS)` (`06f0e410`, 2026-09-03), so a
+# bare `--apply` — the shape `skills/semantic-entity-resolution/SKILL.md:47` and `:196`
+# still print — allowed every tier, SUFFIX_SAFE included, and the only thing standing
+# between that argv and an unattended suffix merge was caller discipline in
+# `skills/entity-resolution-sweep/SKILL.md:59`. Measured on the live store the day this
+# shipped: today's bare dry-run plan held 25 rows at `tier: SUFFIX_SAFE,
+# status: SAFE`, and the plan the 16:01Z nightly apply actually executed from held 0 —
+# because it passed `--tiers CASE,PUNCT`. One of those 25 is `Hermes`(degree 68) ←
+# `Hermes Agent`(degree 26), gate SAME, total 94, inside HIGH_VALUE_GATE = 150, so no
+# other guard on the apply path would have refused it.
+#
+# The guard fires on the OMISSION, not on a tier: the default still resolves to
+# ALL_TIERS for a dry run, because a plan that quietly classifies two tiers less than
+# the reviewer has always seen is a false zero — the exact defect at
+# `scripts/memory/kg_hygiene.py:547`.
+
+#: The tier-restricted form the refusal has to name: the argv in every apply report's
+#: ledger, and the one the nightly #48 job runs.
+DAILY_APPLY_ARGV = "--apply --tiers CASE,PUNCT"
+
+
+def _gate_that_agrees(monkeypatch, decisions=("SAME",)):
+    """Install a fake `entity_semantic_gate` whose verdicts come back SAME.
+
+    A SAME is what a gate-approved suffix cluster looks like to `build_plan`
+    (:608), and it is the only route to a SUFFIX_SAFE row marked SAFE — under the
+    `--no-gate` that the rest of this file passes, every suffix cluster is review,
+    which is why the two nodes that need a SAFE suffix cluster cannot use `_run`.
+    """
+    calls = {"built": 0, "i": 0, "decisions": list(decisions)}
+
+    class AgreeGate:
+        def __init__(self, root, cache_path=None):
+            calls["built"] += 1
+
+        def verdict(self, a, b):
+            d = calls["decisions"][calls["i"] % len(calls["decisions"])]
+            calls["i"] += 1
+            return {"decision": d, "judges": {"a": d, "b": d, "c": d}}
+
+    fake = types.ModuleType("entity_semantic_gate")
+    fake.SemanticGate = AgreeGate
+    monkeypatch.setitem(sys.modules, "entity_semantic_gate", fake)
+    return calls
+
+
+def test_apply_without_tiers_refuses_and_names_the_restricted_form(tmp_path):
+    """Clause 1: a bare `--apply` exits non-zero, says the restricted form, writes nothing.
+
+    `--no-gate` is passed on purpose: the point is that the refusal is about the TIER
+    SET, so nothing on the gate path may be what the run stops for. The out dir is real
+    and writable, so an absent report is a refused write and not an absent dir.
+
+    The literal gets three assertions because the first draft satisfied "in stdout" and
+    still failed the clause's purpose: it printed `REFUSING --apply: --tiers was not
+    given…` on line one and put the form two lines lower, so the only line carrying the
+    word `--apply` was the refusal sentence, and anything reading the output line by
+    line — a human in a terminal, a grep, or a reviewer — could assemble the repair as
+    `--apply` here and `CASE,PUNCT` there. That is this module's own oldest defect, a
+    phrase made invisible by a line break, and a repair command is the worst place to
+    meet it. So the form has to be on the FIRST emitted line, and it has to be one
+    contiguous string in the script's own text, where a reader who reaches for
+    `git grep --apply` instead of the terminal is looking.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)   # so the refusal cannot be #2968's floor guard wearing this hat
+    r = _run(root, db, out, "--apply", "--no-gate", tiers=None)
+    assert r.returncode != 0, f"a bare --apply still runs:\n{r.stdout}"
+    assert DAILY_APPLY_ARGV in r.stdout, (
+        f"the refusal does not name the form to use instead ({DAILY_APPLY_ARGV!r}):\n"
+        f"{r.stdout[-900:]}")
+    first = r.stdout.lstrip().splitlines()[0]
+    assert DAILY_APPLY_ARGV in first, (
+        f"the form is not on the refusal's first emitted line, the line an operator "
+        f"reads before doing anything else: {first!r}")
+    src = SWEEP.read_text()
+    assert DAILY_APPLY_ARGV in src, (
+        f"{DAILY_APPLY_ARGV!r} is not one contiguous string in {SWEEP.name}, so a reader "
+        "or a reviewer grepping the script for the form finds nothing even though the "
+        "run prints it")
+    assert list(out.glob("entity-merges-applied-*.json")) == [], (
+        "an apply that refused still wrote an apply report, so a reviewer of the out "
+        "dir cannot tell a refusal from a merge")
+    st = KGStore(db)
+    try:
+        assert st.aliases.resolve("vllm") is None, (
+            "the refusal left an alias behind: the store was written after the decision")
+    finally:
+        st.close()
+
+
+def test_the_refusal_precedes_the_store_open_and_the_gate_build(tmp_path, monkeypatch, capsys):
+    """Clause 2: the refusal is before EVERY effect, not just before the merge.
+
+    `main()` reached `KGStore(Path(args.db))` nine lines after parsing and built the
+    semantic gate nine lines after that, both long before `if not args.apply` — so a
+    guard bolted beside the degraded-graph check would have opened the store, built a
+    judge and written the plan JSONL on its way to refusing. Two independent witnesses
+    say it does not: the `--db` path is under a parent directory that does not exist, so
+    a store open surfaces here as a raised exception rather than as a refusal
+    (`KGStore` creates the sqlite file, so checking only for the file would not tell an
+    open from a create), and a fake gate module counts its own instantiations.
+
+    It runs `ers.main()` in process rather than through `_run` because a
+    monkeypatched `sys.modules` entry does not cross a subprocess boundary: a child
+    would import the real `entity_semantic_gate`, the counter would stay at zero for a
+    reason that has nothing to do with the guard, and the node would pass on a bug.
+    """
+    built = _gate_that_agrees(monkeypatch)
+    root, db = _tree(tmp_path)
+    db = tmp_path / "no-store-here" / "kg.sqlite"     # parent absent: an open would raise
+    out = tmp_path / "out"; out.mkdir()
+    monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                                      "--out-dir", str(out), "--apply"])
+    rc = ers.main()
+    say = capsys.readouterr().out
+    assert rc != 0, f"a bare --apply still returns {rc}"
+    assert DAILY_APPLY_ARGV in say, say[-900:]
+    assert built["built"] == 0, (
+        "the semantic gate was constructed on a run that refused, so the guard sits "
+        "after the gate build and an --apply that omits --tiers still starts a judge")
+    assert not (tmp_path / "no-store-here").exists(), (
+        "the refusal left the --db parent behind: the store was opened (or created) "
+        "before refusing, which is the side effect this node exists to catch")
+    assert list(out.glob("entity-merges-*")) == [], (
+        "the refused run wrote plan or report artefacts into the out dir")
+
+
+def _suffix_pair_tree(tmp_path):
+    """`_tree` plus one gate-approvable suffix cluster: `Voice Pipeline` ← `voice`.
+
+    Both names get a fact file in `_tree`'s own shape, and each gets two edges, because
+    two degree guards sit between a SUFFIX_SAFE pair and a SAFE marking:
+    `SUFFIX_DEGREE_GUARDS["suffix_min_degree"]` (2) refuses a cluster with any variant
+    below it — a zero-degree ghost here would produce a review row and a node silently
+    asserting nothing — and `HIGH_VALUE_GATE` (150) refuses one above it. Two plus two
+    is 4, so neither guard is what approves this cluster; only the gate's SAME is.
+    """
+    root, db = _tree(tmp_path)
+    for name in ("Voice Pipeline", "voice"):
+        d = root / name; d.mkdir(parents=True)
+        fm = {"type": "facts", "entity": name, "category": "state",
+              "facts": [{"entity": name, "fact": f"{name} exists.", "confidence": 0.9,
+                         "category": "state"}]}
+        (d / f"{name}-state.md").write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name} - state\n")
+    st = KGStore(db)
+    for name in ("Voice Pipeline", "voice"):
+        st.entities.register(name)
+    for _ in range(2):
+        st.edges.add({"source": "Voice Pipeline", "target": "Whisper", "type": "mentions"},
+                     origin="test")
+        st.edges.add({"source": "voice", "target": "Whisper", "type": "mentions"},
+                     origin="test")
+    st.close()
+    return root, db
+
+
+def _plan_rows(out: Path) -> list[dict]:
+    """The rows of the run's plan JSONL, which is what kg_hygiene's reader counts."""
+    plans = sorted(out.glob("entity-merges-*.jsonl"))
+    assert plans, "the run wrote no plan file"
+    return [json.loads(l) for l in plans[-1].read_text().splitlines() if l.strip()]
+
+
+def test_the_bare_dry_run_still_classifies_a_suffix_cluster_as_safe(tmp_path, monkeypatch):
+    """Clause 3: omitting `--tiers` on a dry run is still the all-tier plan.
+
+    The false-zero this assertion defends is named in
+    `scripts/memory/kg_hygiene.py:535-547`: a reviewer counts suffix clusters in the
+    plan by reading its rows, so a default that quietly dropped SUFFIX_SAFE from a dry
+    run reports an EMPTY QUEUE on a store holding one — and on the live store that day,
+    25. The resolution therefore lives in `main()` and not in the argparse default:
+    ALL_TIERS for the run that only looks, refusal for the run that writes.
+    `kg_hygiene.py:547` is the read this keeps from going silently to zero.
+
+    In process, with the fake agreeing gate, because `--no-gate` (which `_run` hardcodes)
+    puts every suffix cluster in review by design and the tier flag would never be
+    exercised.
+    """
+    _gate_that_agrees(monkeypatch)
+    root, db = _suffix_pair_tree(tmp_path)
+    out = tmp_path / "out"; out.mkdir()
+    monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                                      "--out-dir", str(out)])
+    assert ers.main() == 0
+    rows = _plan_rows(out)
+    safe = [x for x in rows if x.get("status") == "SAFE" and x.get("tier") == "SUFFIX_SAFE"]
+    assert safe, (
+        "the bare dry-run plan holds no SAFE SUFFIX_SAFE row, so the queue a reviewer "
+        "counts at kg_hygiene.py:547 is empty while the store has one waiting")
+    voice = [x for x in safe if "voice" in json.dumps(x).lower()]
+    assert len(voice) == 1, f"expected the voice pair among {safe}"
+    assert "SUFFIX_JUDGED" in voice[0]["decision"], voice[0]["decision"]
+    # Which of the two names is canonical is the sweep's own pick, not this node's claim.
+    assert {voice[0]["canonical"], *("" if not voice[0].get("variants") else
+            [v[0] for v in voice[0]["variants"]])} >= {"voice", "Voice Pipeline"}, voice[0]
+    # The negative control, in the flag's own words: `build_plan` marks a cluster it
+    # demoted with `tier <TIER> excluded by --tiers` (:628). No row may carry it, because
+    # a bare dry run that resolved to fewer than three tiers would say so here in the
+    # plan a reviewer reads — and only here: a dry run writes no report, so the plan's
+    # rows are the whole record of what the run was permitted to consider.
+    assert not [x for x in rows if "excluded by --tiers" in x.get("decision", "")], (
+        "the bare dry run demoted a cluster the way an explicit `--tiers` does, so "
+        "omitting the flag no longer means all three tiers")
+    assert list(out.glob("entity-merges-applied-*.json")) == [], (
+        "a dry run with no --tiers wrote an apply report")
+
+
+def test_the_daily_apply_argv_still_merges_and_reports_its_two_tiers(tmp_path):
+    """Clause 4: `--apply --tiers CASE,PUNCT` — the argv in every report's ledger — is untouched.
+
+    This is the run that has to keep working, so it is asserted at the two ends of it:
+    the store change and the alias rows (the merge happened), and `tiers_allowed`
+    (what the reviewer of the report is told the run was permitted to do). `_run`
+    spells exactly this argv by default now, so every apply fixture in this file is a
+    second copy of the same claim; this node is the one that says so out loud.
+    """
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    # `_run` appends `--tiers CASE,PUNCT` by default, so this is the nightly argv
+    # assembled in one place; `rep["ledger"]["argv"]` below is the witness that the flag
+    # really reached the process, which is why the node does not also spell it by hand.
+    r = _run(root, db, out, "--apply")
+    assert r.returncode == 0, f"the nightly argv no longer applies:\n{r.stdout}{r.stderr}"
+    rep = _applied_report(out)
+    assert rep["tiers_allowed"] == ["CASE", "PUNCT"], rep["tiers_allowed"]
+    assert "CASE,PUNCT" in rep["ledger"]["argv"], rep["ledger"]["argv"]
+    assert not (root / "vllm").exists() and (root / "Intel Pipeline").exists()
+    st = KGStore(db)
+    try:
+        assert st.aliases.resolve("vllm") == "vLLM", "the CASE merge did not land"
+    finally:
+        st.close()
+
+
+def test_explicit_suffix_tier_still_merges_the_gate_approved_cluster(tmp_path, monkeypatch):
+    """Clause 5: the guard is on the OMISSION only — the named human route survives.
+
+    Same fixture and same agreeing gate as clause 3, with `--tiers SUFFIX_SAFE` spelled
+    out. If this run refuses, the guard has become a tier ban rather than an
+    omission-check, and the one merge path that a gate-approved suffix cluster has —
+    `skills/entity-resolution-sweep/SKILL.md:101`, the person-only apply of #4009 — is
+    closed by a flag whose help text never says so.
+    """
+    _gate_that_agrees(monkeypatch)
+    root, db = _suffix_pair_tree(tmp_path)
+    out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)   # the #2968 floor guard must not be what this run stops for
+    monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                                      "--out-dir", str(out), "--apply",
+                                      "--tiers", "SUFFIX_SAFE"])
+    rc = ers.main()
+    assert rc == 0, (
+        "--apply --tiers SUFFIX_SAFE was refused, so the guard fires on a tier rather "
+        f"than on an omitted flag (rc={rc})")
+    rep = _applied_report(out)
+    assert rep["tiers_allowed"] == ["SUFFIX_SAFE"], rep["tiers_allowed"]
+    assert rep["report_status"] == "complete", rep["report_status"]
+    assert rep["applied_merges"] >= 1, rep["applied_merges"]
+    assert "SUFFIX_SAFE" in " ".join(rep["ledger"]["argv"]), rep["ledger"]["argv"]
+    assert (root / "vllm").exists(), (
+        "a SUFFIX_SAFE-only apply merged the CASE cluster too, so the flag has stopped "
+        "restricting anything")
+    left = [n for n in ("voice", "Voice Pipeline") if (root / n).exists()]
+    assert len(left) == 1, (
+        f"the gate-approved pair survived as {left}; an apply naming its tier has to "
+        "collapse it into one directory")
+    gone = "voice" if left == ["Voice Pipeline"] else "Voice Pipeline"
+    st = KGStore(db)
+    try:
+        assert st.aliases.resolve(gone) == left[0], rep
+    finally:
+        st.close()

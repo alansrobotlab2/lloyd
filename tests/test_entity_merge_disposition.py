@@ -199,8 +199,14 @@ def test_a_real_sweep_apply_is_the_disposition_the_audit_reports(tmp_path):
     # now carries the whole text of that guard reason instead of an audit mismatch.
     (out / "graph-baseline.json").write_text(json.dumps(
         {"active_edges": 1, "recorded_at": "2026-01-01T00:00:00+00:00"}))
+    # `--tiers CASE,PUNCT` since #4197, for the same reason as the floor above: an
+    # apply that names no tiers now exits 4 before it opens the store, and this node
+    # measures what the AUDIT says about a merge that really happened. The one edge is
+    # vLLM↔vllm, a CASE pair, so naming the two mechanical tiers leaves the plan this
+    # node depends on exactly as it was.
     r = subprocess.run([sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
-                        "--out-dir", str(out), "--no-gate", "--apply"],
+                        "--out-dir", str(out), "--no-gate", "--apply",
+                        "--tiers", "CASE,PUNCT"],
                        capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stdout + r.stderr
     a = _audit(db, out, out / "disposition.json")
