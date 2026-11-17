@@ -1606,6 +1606,25 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _EDGES = 53416
 
 
+def _clock_frozen_at(moment: datetime):
+    """A `datetime` name for the report script whose `now()` is one pinned instant.
+
+    `main()` decides its own absent-night window from `now = datetime.now(timezone.utc)`,
+    while the fixture this section builds is anchored to whatever instant it is handed.
+    Two clocks in one node is the #4194 red: the report's window moves with the wall
+    clock and the fixture's files do not, so the row names a night nothing ever skipped
+    on every UTC day except the one the fixture was written for.
+
+    Subclasses the real class, so every other call reached through that name — the four
+    `datetime.fromisoformat` sites in the script — still behaves exactly as before.
+    """
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001 - mirrors the real signature
+            return moment if tz is None else moment.astimezone(tz)
+    return _Frozen
+
+
 def _window(now: datetime, days: int) -> list[str]:
     """The ISO dates a window covers: the `days` UTC days BEFORE `now`'s own day."""
     return [(now.date() - timedelta(days=back)).isoformat()
@@ -1762,7 +1781,8 @@ class _Store:
         return {"edges_active": _EDGES, "edges_total": _EDGES}
 
 
-def _run_main(tmp_root: Path, monkeypatch) -> tuple[int, list, Path]:
+def _run_main(tmp_root: Path, monkeypatch,
+              *, now: datetime = _FIXED_NOW) -> tuple[int, list, Path]:
     """One `main()` over an empty facts tree, reading `tmp_root/reflection`.
 
     Returns (rc, alarms posted, the report the run wrote). `PIPELINE_DIR` is what
@@ -1772,6 +1792,11 @@ def _run_main(tmp_root: Path, monkeypatch) -> tuple[int, list, Path]:
     store — so an `rc` of `EXIT_OK` is a verdict about this row, not the absence of a
     comparison. `_alert` is captured rather than allowed to write the vault's alert
     file: the whole point of the node is that it is never called.
+
+    `now` pins the clock `main()` reads (see `_clock_frozen_at`, and #4194 for why a run
+    that reads the wall clock instead cannot be graded against a fixture built for one
+    instant). It also dates the graph floor, seven hours before the run, so no input of
+    this helper carries a literal calendar day.
     """
     import json
 
@@ -1783,7 +1808,8 @@ def _run_main(tmp_root: Path, monkeypatch) -> tuple[int, list, Path]:
     floor = pipeline / khr.GRAPH_BASELINE_RELPATH
     floor.parent.mkdir(parents=True, exist_ok=True)
     floor.write_text(json.dumps({"active_edges": _EDGES,
-                                 "recorded_at": "2026-11-16T05:00:00+00:00"}))
+                                 "recorded_at": (now - timedelta(hours=7)).isoformat()}))
+    monkeypatch.setattr(khr, "datetime", _clock_frozen_at(now))
     monkeypatch.setattr(khr, "PIPELINE_DIR", pipeline)
     monkeypatch.setattr(khr, "DEFAULT_OUTPUT_DIR", pipeline / "reflection")
     monkeypatch.setattr(khr, "_kg_store", lambda: _Store())
@@ -1810,33 +1836,49 @@ def test_absent_nights_raise_no_alarm_and_do_not_change_the_exit_code(tmp_path,
     whatever tree this rung happens to run in, where the equality is a claim about this
     row. The row is then asserted to have FIRED on the second run, or the equality
     above would be two runs that measured nothing.
+
+    The pair then runs at three instants (#4194), because the window `main()` measures is
+    its own `now` minus one through minus `REPORT_CYCLE_LOOKBACK_DAYS` and the fixture is
+    built for a given instant: run against the wall clock while the fixture holds still,
+    and the row names a night nothing skipped. `_FIXED_NOW` is the day this node was
+    written, the one day a two-clock version could pass; `_FIXED_NOW + 1 day` is the next
+    UTC day, which is when this node went red on `main` and stayed red; the third is the
+    live wall clock, the instant clause 1 is measured at. Every case pins `main()`'s clock
+    to the fixture's instant, so a later edit that drops the pin fails the second case
+    rather than rotting silently for a day and then looking like a code bug.
     """
-    real_now = datetime.now(timezone.utc)
-    skipped = _window(real_now, ra.REPORT_CYCLE_LOOKBACK_DAYS)[-2:]
-    # The fixture goes under `pipeline/` because that is where `_run_main` points
-    # `DEFAULT_OUTPUT_DIR`, which is the directory `main()` measures. A fixture built
-    # anywhere else is a run that measured an empty directory — which still exits 0,
-    # and is exactly how this node looked green while measuring nothing.
-    complete_root = tmp_path / "complete"
-    _health_fixture(complete_root / "pipeline")
-    rc_complete, alarms_complete, report_complete = _run_main(complete_root, monkeypatch)
+    for case_no, now in enumerate((_FIXED_NOW, _FIXED_NOW + timedelta(days=1),
+                                   datetime.now(timezone.utc))):
+        # The window's two OLDEST days, taken from the instant the fixture is built for —
+        # an expected set derived from a different clock is the #4194 defect itself.
+        skipped = _window(now, ra.REPORT_CYCLE_LOOKBACK_DAYS)[-2:]
+        # The fixture goes under `pipeline/` because that is where `_run_main` points
+        # `DEFAULT_OUTPUT_DIR`, which is the directory `main()` measures. A fixture built
+        # anywhere else is a run that measured an empty directory — which still exits 0,
+        # and is exactly how this node looked green while measuring nothing.
+        complete_root = tmp_path / f"case{case_no}-complete"
+        _health_fixture(complete_root / "pipeline", now=now)
+        rc_complete, alarms_complete, report_complete = _run_main(
+            complete_root, monkeypatch, now=now)
 
-    gap_root = tmp_path / "with-gaps"
-    _health_fixture(gap_root / "pipeline", skip=skipped)
-    rc_gaps, alarms_gaps, report_gaps = _run_main(gap_root, monkeypatch)
+        gap_root = tmp_path / f"case{case_no}-with-gaps"
+        _health_fixture(gap_root / "pipeline", skip=skipped, now=now)
+        rc_gaps, alarms_gaps, report_gaps = _run_main(
+            gap_root, monkeypatch, now=now)
 
-    assert rc_complete == rc_gaps, (
-        f"a skipped night changed the exit code: {rc_complete} complete vs {rc_gaps} "
-        f"with absent days")
-    assert rc_complete == khr.EXIT_OK, (
-        "the complete-window run did not exit clean, so the equality above proves "
-        "nothing about this row — the fakes no longer hold the tree's own alarms back")
-    assert alarms_complete == [] and alarms_gaps == [], (
-        f"a skipped night posted alarms: {alarms_gaps!r}")
-    row = _absent_row(_section(report_gaps.read_text(encoding="utf-8")))
-    assert set(_DATE_RE.findall(row)) == set(skipped), row
-    assert _DATE_RE.search(_absent_row(_section(
-        report_complete.read_text(encoding="utf-8")))) is None
+        assert rc_complete == rc_gaps, (
+            f"a skipped night changed the exit code at {now:%Y-%m-%d}: {rc_complete} "
+            f"complete vs {rc_gaps} with absent days")
+        assert rc_complete == khr.EXIT_OK, (
+            "the complete-window run did not exit clean, so the equality above proves "
+            "nothing about this row — the fakes no longer hold the tree's own alarms back")
+        assert alarms_complete == [] and alarms_gaps == [], (
+            f"a skipped night posted alarms: {alarms_gaps!r}")
+        row = _absent_row(_section(report_gaps.read_text(encoding="utf-8")))
+        assert set(_DATE_RE.findall(row)) == set(skipped), (
+            f"run at {now:%Y-%m-%d}, whose window skipped {sorted(skipped)}: {row}")
+        assert _DATE_RE.search(_absent_row(_section(
+            report_complete.read_text(encoding="utf-8")))) is None
 
 
 def test_the_alarm_function_cannot_see_the_absent_days(tmp_path):
