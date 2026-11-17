@@ -8713,17 +8713,27 @@ def test_an_apply_pass_deletes_pause_journal_rows_past_the_horizon(rs, tmp_path,
         "promise the skill's table documents")
     assert _seed_pause_journal(rs.WORKERS_DB,
                                ages_days=[45.0, 31.0, 29.0, 1.0]) == 4
-    # Measured over the database AS STORED — the main file plus its `-wal` sibling — rather
-    # than over the main file alone. The queue opens the store in WAL mode, so the rows this
-    # prune deletes live mostly in the WAL, and a checkpoint moves those bytes from one file
-    # into the other without changing what the store costs on disk. Whether a checkpoint has
-    # happened by the time `main()` returns is decided by when the interpreter finalises the
-    # last connection, which is decided by allocation counts, which is decided by what else
-    # the sweep does: reading only the main file, this node flipped from 4,096 to 61,440 on a
-    # diff that adds a store nowhere near this table (#3379, measured by running the node
-    # against both trees), so it was grading the interpreter's GC and not the prune. The
-    # bytes-on-disk bound this clause states is invariant under exactly that move.
+    # Measured over the database AS STORED — the main file plus its `-wal` sibling — but
+    # with the WAL FOLDED INTO THE MAIN FILE FIRST, on both samples. The queue opens the
+    # store in WAL mode, so the pages this prune rewrites sit in the WAL until something
+    # checkpoints them, and #3379 already established that letting that something be the
+    # interpreter's GC was wrong: reading only the main file, this node flipped from
+    # 4,096 to 61,440 on a diff that adds a store nowhere near this table, so it was
+    # grading allocation counts and not the prune. Summing both files fixed the double
+    # reading but not the dependency, because `before` and `after` are taken on two sides
+    # of a fold that may or may not happen in between: measured 2026-11-17 at full-file
+    # order the WAL was still holding the prune's pages, `214248 <= 206008 + 4096` went
+    # red by 8,240 bytes for a prune that had actually removed rows, and the same node
+    # passed in a three-file order where a fold had landed inside the window. A
+    # `wal_checkpoint(TRUNCATE)` before each sample makes both sides the same quantity —
+    # the store as it would cost on disk — and leaves the bound itself exactly as
+    # #2615 clause 5 states it, so a prune that really grows the file still goes red.
     def _stored_bytes() -> int:
+        conn = sqlite3.connect(str(rs.WORKERS_DB))
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
         return sum(f.stat().st_size
                    for f in (rs.WORKERS_DB, Path(str(rs.WORKERS_DB) + "-wal"))
                    if f.exists())
@@ -13329,6 +13339,24 @@ def test_the_ceiling_report_store_censuses_the_dir_and_reclaims_the_aged_files_u
     assert len(list(root.glob("lloyd-bash-ceiling-*.report"))) == 1, sorted(root.iterdir())
 
 
+def _ceiling_name_census(live: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The two name-classes of this store, as one raw enumeration of `live` sees them.
+
+    Same four predicates the census node has always applied — the unit prefix, the two
+    suffixes, a real file, not a symlink — returned sorted so two calls are comparable
+    as a snapshot identity, not as two counts that happen to agree.
+    """
+    reports = sorted(p.name for p in live.iterdir()
+                     if p.name.startswith("lloyd-bash-ceiling-")
+                     and p.name.endswith(".report")
+                     and p.is_file() and not p.is_symlink())
+    residue = sorted(p.name for p in live.iterdir()
+                     if p.name.startswith("lloyd-bash-ceiling-")
+                     and p.name.endswith(".report.tmp")
+                     and p.is_file() and not p.is_symlink())
+    return tuple(reports), tuple(residue)
+
+
 def test_the_ceiling_report_census_equals_a_raw_count_of_the_live_directory(rs):
     """#4205 clause 1's other half, off the seeded tree: on the directory that actually
     exists, the store's count is the number a raw enumeration of the same names returns.
@@ -13346,19 +13374,42 @@ def test_the_ceiling_report_census_equals_a_raw_count_of_the_live_directory(rs):
     safe here, it is the point: this is the node that has to read the 631-file residue the item
     is about rather than a fixture's three, and its aged count (500 of 630 measured 2026-11-16)
     is the number the item opens with.
+
+    The window has to be quiet, and the node now says so out loud. This store is not a
+    fixture: `agent_mcp/_resource_ceiling.py` writes one report per Bash-tool spawn into
+    the very directory this node reads, and its reader unlinks it again — measured on
+    2026-11-17 at 639 entries with the newest file stamped 1 minute old while the suite
+    was running. So the raw enumeration and the sweep's glob are two reads of a directory
+    somebody is writing between them, and an equality asserted across that gap was
+    grading when the unlink landed: the node passed alone and failed inside a multi-file
+    run (#4231's base probe, 2026-11-17) on a diff that touches neither this store nor
+    its writer. The fix is not a tolerance on the count — the count is still asserted
+    exactly, against a name-for-name enumeration — it is that the equality is only
+    GRADED over a window in which the two enumerations bracketing the sweep are the same
+    set. A directory that never holds still for the length of one dry pass is reported
+    as such, which is a real finding, not a pass.
     """
     live = dr.PRODUCTION_DATA_ROOT / "_pipeline" / "ceiling"
     if not live.is_dir():
         pytest.skip(f"no ceiling report dir on this tree: {live}")
-    reports = [p for p in live.iterdir()
-               if p.name.startswith("lloyd-bash-ceiling-") and p.name.endswith(".report")
-               and p.is_file() and not p.is_symlink()]
-    residue = [p for p in live.iterdir()
-               if p.name.startswith("lloyd-bash-ceiling-")
-               and p.name.endswith(".report.tmp")
-               and p.is_file() and not p.is_symlink()]
 
-    m = rs.sweep_ceiling_reports(False, time.time(), root=live)
+    # Bracket the dry pass with two raw enumerations and keep the attempt only if the
+    # directory did not move underneath it. Six tries at 0.25 s is the bound: the writer
+    # emits one report per spawn, so a spawn that lands mid-window costs one retry and
+    # nothing more.
+    for attempt in range(6):
+        before = _ceiling_name_census(live)
+        m = rs.sweep_ceiling_reports(False, time.time(), root=live)
+        if _ceiling_name_census(live) == before:
+            break
+        time.sleep(0.25)
+    else:
+        pytest.fail(
+            "the live ceiling report directory never held still long enough for one dry "
+            f"pass to be graded against an enumeration of it: {live} churned on all 6 "
+            "windows, so the census cannot be checked here rather than being wrong")
+
+    reports, residue = before
     assert m["present"] is True, m
     assert m["files"] == len(reports), (
         f"the store counted {m['files']} report files where a raw enumeration finds "
@@ -13368,7 +13419,8 @@ def test_the_ceiling_report_census_equals_a_raw_count_of_the_live_directory(rs):
         f"finds {len(residue)} — the crash-residue class a `*.report` glob never matches")
     assert m["deleted"] == 0 and m["tmp_deleted"] == 0, f"a dry run deleted: {m}"
     cutoff = time.time() - rs.CEILING_REPORT_MAX_AGE_DAYS * 86400
-    assert m["stale"] == sum(1 for p in reports if p.stat().st_mtime < cutoff), (
+    assert m["stale"] == sum(1 for name in reports
+                             if (live / name).stat().st_mtime < cutoff), (
         f"the aged count is not the mtime census: {m}")
 
 

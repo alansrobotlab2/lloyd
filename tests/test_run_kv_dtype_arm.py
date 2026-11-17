@@ -28,6 +28,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -103,6 +104,11 @@ class Stub:
         self.step = tmp_path / "canary-step.log"
         self.step.write_text("", encoding="utf-8")
         self.pause_reads = 0
+        # How many `/api/workers/status` reads have been ANSWERED as paused. A test that
+        # wants to lift a hold once the window has SEEN it synchronizes on this rather
+        # than on a wall clock: the window is a subprocess, and its first poll lands
+        # roughly two seconds after `Popen` no matter when the test armed the timer.
+        self.held_reads = 0
         self.posts: list[dict] = []
         self.lock = threading.Lock()
 
@@ -127,6 +133,9 @@ class Stub:
 
             def _pool_status(self):
                 st = self._pool_state()
+                if st["paused"]:
+                    with outer.lock:
+                        outer.held_reads += 1
                 running = int(outer.fleet.get("running", 0))
                 pending = int(outer.fleet.get("pending", 0) or 0)
                 deferred = int(outer.fleet.get("deferred", 0) or 0)
@@ -941,8 +950,22 @@ def test_an_observation_window_that_does_not_settle_refuses_before_staging(tree)
 def test_a_promoter_hold_that_lifts_is_waited_out_rather_than_refused(tree):
     """A landing pauses and drains the pool, so its hold is when the fleet first looks clear.
     The third #3188 window (2026-10-30) read that as clear, reached for the hold, and was
-    refused on `+automod` in one tick of a 6 h wait. A hold that lifts is waited out."""
-    import threading
+    refused on `+automod` in one tick of a 6 h wait. A hold that lifts is waited out.
+
+    The lift is armed on the window's own poll, not on a timer. It used to be
+    `threading.Timer(1.0, lift)` beside a 20 s wait, which raced the thing this node is
+    not about: the window is a subprocess and its first `/api/workers/status` lands ~2 s
+    after `Popen` (the imports alone), so on this box the hold was always already gone
+    when the waiter looked. The window then logged `fleet clear before the take` without
+    ever seeing `held_by:automod`, booted both legs, and the node died on a box that was
+    merely slow — measured 2026-11-17, red in 3.5 s both alone and in a three-file run
+    (#4231's base probe), while the same node had passed when interpreter start was
+    under a second. Lifting only after the stub has answered `held_reads` polls as paused
+    takes the clock out of the test without taking anything out of the claim: the hold is
+    still there when the window first looks at it, and it is still gone by the time the
+    window needs to boot. A window that regressed to refusing on the first held read
+    (#3188's bug) would stop polling, never reach `held_reads` 3, and fail on the rc
+    assert below rather than passing silently."""
     stub = tree["stub"]
     stub.holders = ["automod"]
     WorkQueue(stub.db).wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "1")
@@ -951,12 +974,28 @@ def test_a_promoter_hold_that_lifts_is_waited_out_rather_than_refused(tree):
         stub.holders = []
         WorkQueue(stub.db).wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "0")
 
-    timer = threading.Timer(1.0, lift)
-    timer.start()
+    # Three held reads, so the window has not just seen the hold once but looped over it
+    # — the behaviour #3188 says a window owes a promoter's pause.
+    HELD_READS_BEFORE_LIFT = 3
+
+    def lift_once_seen(deadline_s: float = 30.0) -> bool:
+        deadline = time.monotonic() + deadline_s
+        while time.monotonic() < deadline:
+            with stub.lock:
+                seen = stub.held_reads
+            if seen >= HELD_READS_BEFORE_LIFT:
+                lift()
+                return True
+            time.sleep(0.05)
+        return False
+
+    threading.Thread(target=lift_once_seen, daemon=True).start()
     try:
         proc, out, env = _win(tree, KV_ARM_FLEET_WAIT_S="20")
     finally:
-        timer.cancel()
+        # Idempotent, and it is what makes the post-hoc `resumed()` read mean something
+        # even when the window never got as far as waiting.
+        lift()
     assert proc.returncode == 0, _fail(proc, out)
     assert "held_by:automod" in out, "the wait never saw the promoter's hold"
     assert stub.restarts.read_text().count("\n") == 2, stub.restarts.read_text()

@@ -345,6 +345,27 @@ def test_the_guardrail_predicate_fires_on_the_prose_this_item_fixed():
         assert mutated != body, f"anchor {anchor!r} is not in the skill anymore"
         return _skill_problems(mutated)
 
+    def _readd_guardrail_bullet(bullet: str) -> list[str]:
+        """Put a stale sentence back as a NEW Guardrails bullet.
+
+        For a mutation whose point is "this framing came back" rather than "this
+        sentence changed", the splice needs an anchor a prose pass cannot move.
+        The phrase this node used to splice into — ``watch for a `timed out
+        after` line`` — was rewritten out of the file by vault `5f6c6e69e`
+        (#4209, 2026-11-17), after which the assertion was grading whether its
+        own anchor still existed and never reaching the predicate. The section
+        heading is the anchor that survives a rewrite: the page must keep it for
+        `_section(body, "Guardrails")` to read the section at all, which every
+        check in this module already depends on.
+        """
+        lines = body.splitlines()
+        heading = [i for i, ln in enumerate(lines)
+                   if ln.strip().lower() == "## guardrails"]
+        assert heading, ("the skill has no `## Guardrails` heading to splice into, "
+                         "so no Guardrails mutation can be constructed")
+        lines.insert(heading[0] + 1, bullet)
+        return _skill_problems("\n".join(lines))
+
     assert any("proving command" in p for p in
                _mutate(PROVING_COMMAND, "time <the extractor script>"))
     assert any("script wall clock is stated" in p for p in
@@ -355,10 +376,11 @@ def test_the_guardrail_predicate_fires_on_the_prose_this_item_fixed():
     # Every mention of the peak reverts to the stale figure: the run clock the
     # cap is sized against is no longer stated anywhere in Guardrails.
     assert any(RUN_PEAK_SECONDS in p for p in _mutate(RUN_PEAK_SECONDS, "219"))
-    assert any("floor" in p for p in
-               _mutate("watch for a `timed out after` line",
-                       "treat 219 s as a floor for the new shape and watch for "
-                       "a `timed out after` line"))
+    # The stale floor framing returns as a bullet of its own — the shape a
+    # future prose pass would actually write it back in — and the predicate that
+    # reads "219 s is called a floor again" has to fire on it.
+    assert any("floor" in p for p in _readd_guardrail_bullet(
+        "- Treat **219 s** as a floor for the new shape rather than the answer."))
     assert any("900 s timeout" in p for p in
                _mutate("never the script", "and the script too"))
 
