@@ -5060,6 +5060,234 @@ SAFETY_DENIALS_ARCHIVE_AGE_DAYS = 30
 #: store's line, and at the measured rate a month gz is tens of KB (~0.5 MB/year).
 SAFETY_DENIALS_ARCHIVE_PREFIX = "denials-archive-"
 
+#: Name of this store's dated SHAPE record, written beside the journal it measures (#4189).
+#: The journal folds daily and is archive-only, so every figure a report quotes off it stops
+#: being reproducible within a month: six items (#2988 #3245 #3429 #3442 #3484 #3975) each
+#: spent a full automod round pinning ONE such number, because the only daily reading lived in
+#: `autonomy-runs/79/run_79_*.md`, which this same sweep deletes at
+#: `RUN_RECORD_MAX_AGE_DAYS = 30`. One row per `--apply` fold here turns that into a series.
+#:
+#: It is a SNAPSHOT AT THE FOLD INSTANT, and nothing more: the file is unmeasured between runs
+#: and today routinely sits above `SAFETY_DENIALS_LIVE_MAX_BYTES` mid-day (818,199 B measured
+#: 2026-11-16T13:29 PST against a 786,432 B bound the fold only reaches at run time), so a
+#: witness figure quoted at another instant is still unreproducible from it. Its value is the
+#: daily series, and #4189's owed entry is the ruling on whether that is enough.
+#:
+#: RESOLVED FROM THE JOURNAL'S OWN PARENT, never from a second root constant: the store's rule
+#: is that the live journal is NEVER CREATED, so the sidecar is written only by a fold that
+#: found a journal, and deriving the path from the same `journal` the fold opened is what makes
+#: "beside the journal it measures" true in a test that redirects `SAFETY_DENIALS_JOURNAL` and
+#: in production alike. Restating `DATA_ROOT / "safety"` here would be a second path to keep in
+#: step, and the one failure mode it buys is writing the witness next to a file nobody reads.
+SAFETY_DENIALS_SHAPE_NAME = "denials-shape.jsonl"
+
+#: Days after which one SHAPE row is deleted by this store's own prune. The item's bound half
+#: — "the new store is bounded by its own sweeper" — had to be built rather than inherited:
+#: nothing in this sweep pruned anything in `safety/` before this change (the month gzips are
+#: explicitly unpruned, #3789), so an appending file with no prune is unbounded from day one.
+#: 180 is six times the 30-day horizon this sweep already DELETES run records at, and a shape
+#: row is ~450 B, so the store is bounded at roughly 80 KB no matter what the refusal rate does.
+#:
+#: DELETED, not gzipped, and that is a different rule from the store's `ARCHIVE OUT, never
+#: delete` — deliberately. That rule protects the guard refusals, which are an audit trail.
+#: These rows are derived measurements of that store, six months of them is 80 KB, and the one
+#: thing this store must not do is add a second family of unpruned files to a directory whose
+#: existing gzips already have no pruner (#3789) — a "safer" archive here would make the store
+#: LESS bounded, which is the opposite of the clause.
+SAFETY_DENIALS_SHAPE_MAX_AGE_DAYS = 180
+
+#: The substring store 26's report line gains on a run that recorded a shape row. Held as a
+#: constant because the skill's store table cites it VERBATIM and the doc guard compares it
+#: against what the line actually printed — a phrase restated in prose is a phrase that drifts.
+#: It names the file so the line alone says where the record went.
+SAFETY_DENIALS_SHAPE_PHRASE = "shape row recorded to denials-shape.jsonl"
+
+
+def _denial_journal_caps() -> tuple[int | None, int | None]:
+    """(FULL_CMD_CHARS, EXCERPT_CHARS) exactly as the journal's WRITER defines them (#4189).
+
+    Imported, never restated, and for store 15's reason sharpened: the two numbers are what
+    make a shape row mean something ("34 rows sit at the command cap"), and a copy of them here
+    keeps printing a confident count the afternoon the writer moves a cap — the count and the
+    cap are then two different facts wearing one number.
+
+    Loaded from the FILE rather than with `from app.harness.denial_journal import ...`, because
+    that spelling executes `app/harness/__init__.py`, which imports the loop, the hooks and
+    pydantic_ai: exactly what this script must not need when cron, autonomy task #79 or an
+    `sh -c` child runs it on a bare interpreter. Store 19's precedent states the criterion —
+    "the module drags nothing in ... which is what makes this safe from cron" — and this file
+    satisfies it on its own: `denial_journal.py`'s only module-level imports are the standard
+    library (its `app.paths` and `app.harness.*` reads are all inside functions), so
+    `spec_from_file_location` gives the real, live constants without the package.
+
+    `(None, None)` when the file cannot be loaded at all. The count fields then go null rather
+    than falling back to remembered numbers: a shape row that says `null` is visibly silent, a
+    shape row that says `1200` after the writer moved the cap is a lie with a date on it. The
+    fold itself never depends on this — a measurement does not get to abort the sweep.
+    """
+    import importlib.util                            # noqa: PLC0415 - see docstring
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_lloyd_denial_journal_caps",
+            _TREE / "app" / "harness" / "denial_journal.py")
+        if spec is None or spec.loader is None:
+            return None, None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return (module.FULL_CMD_CHARS, module.EXCERPT_CHARS)
+    except Exception:                                   # noqa: BLE001 - see docstring
+        return None, None
+
+
+def _denials_shape_path(journal: Path) -> Path:
+    """The shape record that belongs to `journal`: its sibling, always (#4189)."""
+    return journal.parent / SAFETY_DENIALS_SHAPE_NAME
+
+
+def _denials_row_at(line: bytes) -> str | None:
+    """A denial/shape row's own `at` AS STORED, or None — the head/tail measure (#4189).
+
+    Returned verbatim rather than normalised: the row is a witness, and the question a reader
+    asks of `head_at` is "does this equal what `head -1 | jq -r .at` answers", which a
+    reformatted stamp would break for any row written with an offset instead of `Z`.
+    """
+    try:
+        row = json.loads(line)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(row, dict):
+        return None
+    value = row.get("at")
+    return value if isinstance(value, str) else None
+
+
+def _denials_shape_row(journal: Path, res: dict, now: float) -> dict:
+    """ONE dated measurement of the live journal as it stands after this fold.
+
+    Measured off a single fresh read of the settled file — rows, bytes, head, tail and sha256
+    all from the same bytes — because the whole point of the record is to answer a question
+    someone asks later with a terminal: `wc -l -c` and `sha256sum` on that file. Two reads, or
+    a row count taken from the fold's in-memory `kept` list, is how a record drifts from the
+    file it claims to describe; #2251's off-by-one is the same failure one level lower. A row
+    that lands between the fold and this read is IN the record and in the printed `after` too,
+    because both read this one measurement.
+
+    `rows_after` counts NEWLINE BYTES, which is exactly what `wc -l` counts, not
+    "non-empty lines": clause 3's equality is against that command, and on a file whose last
+    line lost its terminator the two answers differ — the command's is the one the clause
+    promises. The content counts below walk the lines themselves, since a blank line carries no
+    fields to count either way.
+    """
+    raw = journal.read_bytes()
+    full_caps, excerpt_caps = _denial_journal_caps()
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    # None rather than 0 when the cap could not be read: `0` is a measurement that says
+    # "nothing sits at the cap", which is exactly the false reassurance a null exists to avoid.
+    # `rows_with_full_command` needs no cap and stays a real count whatever happens above.
+    commands: list[str] = []
+    excerpts: list[str] = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        command = row.get("full_command")
+        if isinstance(command, str) and command:
+            commands.append(command)
+        else:
+            # The complement, spelled as the item spells it: a row that carries NO whole
+            # command and whose 200-char excerpt is itself at the cap is the row whose command
+            # was cut and never stored — the population #3874's field exists to describe.
+            excerpt = row.get("excerpt")
+            if isinstance(excerpt, str):
+                excerpts.append(excerpt)
+    at_command_cap = (None if full_caps is None
+                      else sum(1 for c in commands if len(c) == full_caps))
+    at_excerpt_cap = (None if excerpt_caps is None
+                      else sum(1 for e in excerpts if len(e) == excerpt_caps))
+    return {
+        "at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
+        "rows_before": res["before_rows"], "bytes_before": res["before"],
+        "rows_after": raw.count(b"\n"), "bytes_after": len(raw),
+        "head_at": _denials_row_at(lines[0]) if lines else None,
+        "tail_at": _denials_row_at(lines[-1]) if lines else None,
+        "archive_files": res["archive_files"], "archive_bytes": res["archive_bytes"],
+        "backstop": res["backstop"], "moved": res["moved"], "refused": res["refused"],
+        "rows_with_full_command": len(commands),
+        "rows_full_command_at_cap": at_command_cap,
+        "rows_without_command_excerpt_at_cap": at_excerpt_cap,
+        "full_cmd_chars": full_caps, "excerpt_chars": excerpt_caps,
+        "sha256": __import__("hashlib").sha256(raw).hexdigest(),
+    }
+
+
+def _prune_shape_rows(existing: bytes, now: float) -> tuple[list[bytes], int, int]:
+    """Split shape rows into (keep, pruned count, undated count) at the 180-day horizon.
+
+    An unparseable stamp is KEPT and counted apart, store 26's own rule for the journal it
+    measures (#1975's `promotions-archive-None.jsonl.gz` is the precedent named in that
+    docstring): a row whose date cannot be read cannot be proved old, and deleting a witness on
+    the strength of a parse failure is the failure every store in this file was written against.
+    """
+    keep: list[bytes] = []
+    pruned = undated = 0
+    horizon = SAFETY_DENIALS_SHAPE_MAX_AGE_DAYS * 86400
+    for line in existing.splitlines(keepends=True):
+        seconds = _iso_seconds(_denials_row_at(line))
+        if seconds is None:
+            undated += 1
+            keep.append(line)
+        elif now - seconds > horizon:
+            pruned += 1
+        else:
+            keep.append(line)
+    return keep, pruned, undated
+
+
+def _append_denials_shape(journal: Path, res: dict, now: float) -> None:
+    """Rewrite the shape record as its surviving rows plus this fold's one new row (#4189).
+
+    Prune and append in ONE atomic replace rather than an append plus a separate rewrite: two
+    writes to a witness file means a window in which a crash leaves either the row missing or
+    the rows it should have pruned back, and `os.replace` over a fsynced temp — store 13's
+    shape, and the reason the temp file reuses `.{name}.archiving` — gives exactly one new row
+    and one prune per run, or the file as it was. `wc -l` on the record therefore goes up by
+    one on every fold that prunes nothing, which is what the clause asks and what an operator
+    can check without reading this function.
+
+    Raises `OSError` (the caller reports it on the store's line and lets the fold stand): the
+    fold already happened, and a measurement that can turn its own failure into a failed sweep
+    is worse than no measurement — `append_denial`'s fail-open rule, aimed at the reader rather
+    than the writer.
+    """
+    row = _denials_shape_row(journal, res, now)
+    shape = _denials_shape_path(journal)
+    try:
+        existing = shape.read_bytes()
+    except OSError:
+        existing = b""                       # no record yet: this fold writes the first row
+    keep, pruned, undated = _prune_shape_rows(existing, now)
+    res["shape_pruned"] = pruned
+    res["shape_undated"] = undated
+    body = b"".join(keep) + (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+    tmp = shape.parent / f".{shape.name}.archiving"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(body)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, shape)
+    except OSError:
+        _unlink_quietly(tmp)
+        raise
+    res["shape_recorded"] = True
+    # The line's `Y bytes live` and the row's `bytes_after` become one measurement, printed and
+    # recorded from the same read: two reads of a file another process appends to is how a
+    # report and its witness disagree about the same second.
+    res["after"] = row["bytes_after"]
+
 
 def _safety_denial_seconds(line: bytes) -> float | None:
     """Seconds for a denial row's own `at`, or None when it has no readable one.
@@ -5152,13 +5380,31 @@ def sweep_safety_denials(apply, now, *, journal=None, on_attempt=None) -> dict:
     out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
            "moved": 0, "archived": 0, "undated": 0, "kept_newest": 0,
            "backstop": 0, "backstop_bytes": 0, "kept_bytes": 0, "over_bound": False,
-           "archive_files": 0, "archive_bytes": 0, "refused": None}
+           "archive_files": 0, "archive_bytes": 0, "refused": None,
+           # #4189's shape record: set by `_append_denials_shape` on the one path that writes
+           # it, and read by `_safety_denials_line` to decide whether the line says so.
+           "before_rows": 0, "shape_recorded": False, "shape_pruned": 0, "shape_undated": 0,
+           "shape_refused": None}
 
     def with_archives(res: dict) -> dict:
         # Taken on EVERY return, including the absent-journal one: an operator deciding
         # whether the fold is working reads the archive total, and it is the archives that
         # exist, not the ones written since they last looked.
         res["archive_files"], res["archive_bytes"] = _denials_archive_tally(journal)
+        # ... and this is the ONE place the shape record is written, on purpose (#4189). The
+        # fold returns from five places — absent journal, nothing to move, a dry run, a refused
+        # archive append, a refused rewrite — and the clause is that an `--apply` run appends
+        # exactly one row whatever the fold did. Hooked here rather than at the end of the
+        # function, the early returns silently lose the zero-moved run (the common case on a
+        # quiet day, and the one the clause names) and both refusals, which are exactly the runs
+        # a witness is worth having for. `present` gates the store's own NEVER-CREATED rule: no
+        # journal means no measurement of it, and no sidecar claiming one; `apply` keeps a dry
+        # run as dry as the byte-identity node already holds it to.
+        if res["present"] and apply:
+            try:
+                _append_denials_shape(journal, res, now)
+            except OSError as exc:
+                res["shape_refused"] = f"{type(exc).__name__}: {exc}"
         return res
 
     try:
@@ -5167,6 +5413,9 @@ def sweep_safety_denials(apply, now, *, journal=None, on_attempt=None) -> dict:
         return with_archives(out)          # absent journal: a guard that has never refused
     out["present"] = True
     out["before"] = out["after"] = len(raw)
+    # Newlines, not `len(lines)`: the shape row's `rows_after` is measured the same way so the
+    # two ends of the fold's own arithmetic are the same measurement as `wc -l` (#4189 clause 3).
+    out["before_rows"] = raw.count(b"\n")
 
     lines = raw.splitlines(keepends=True)
     stamps: list[float | None] = []
@@ -5306,19 +5555,35 @@ def _safety_denials_line(p: dict) -> str:
     if p["over_bound"]:
         bs += (f" — STILL ABOVE IT at {p['kept_bytes']} B kept "
                f"(the newest row and {p['undated']} undated row(s) never fold)")
+    # #4189: the shape record is reported on the store's OWN line, never as a store of its own.
+    # A 29th line would need a 29th table row and a 29th item in two documents' enumerations
+    # (`tests/test_retention_sweep.py` pins `len(report) == 28`, the literal `28 stores` and the
+    # SKILL.md<->autonomy/79 parity node) for a file that only exists to qualify the line below
+    # it. The phrase is a constant because the skill cites it verbatim; the parenthetical is
+    # conditional because a prune that fired has to be visible, and one that did not must not
+    # leave the reader hunting for a number that was never there.
+    shape = ""
+    if p["shape_refused"]:
+        shape = f" — SHAPE RECORD FAILED ({p['shape_refused']})"
+    elif p["shape_recorded"]:
+        shape = f" — {SAFETY_DENIALS_SHAPE_PHRASE}"
+        if p["shape_pruned"] or p["shape_undated"]:
+            shape += (f" ({p['shape_pruned']} pruned >"
+                      f"{SAFETY_DENIALS_SHAPE_MAX_AGE_DAYS}d, "
+                      f"{p['shape_undated']} shape row(s) kept undated)")
     if not p["present"]:
         return f"{label}: no journal yet — nothing to bound{arch}"
     if p["refused"]:
         return (f"{label}: REFUSED ({p['refused']}) — live journal intact, "
-                f"{p['archived']} row(s) already archived{arch}")
+                f"{p['archived']} row(s) already archived{shape}{arch}")
     verb = "archived" if p["apply"] else "would archive"
     if p["moved"] == 0:
-        return f"{label}: 0 {verb} ({p['before']} bytes live){bs}{tail}{arch}"
+        return f"{label}: 0 {verb} ({p['before']} bytes live){bs}{tail}{shape}{arch}"
     if not p["apply"]:
         return (f"{label}: {p['moved']} {verb} ({p['before']} bytes live, "
                 f"{p['bytes']} B of it){bs}{tail}{arch}")
     return (f"{label}: {p['moved']} {verb} ({p['before']} -> {p['after']} bytes live, "
-            f"{p['bytes']} B out){bs}{tail}{arch}")
+            f"{p['bytes']} B out){bs}{tail}{shape}{arch}")
 
 
 # ── #3815: the microcompact reduction sidecar ────────────────────────────────────
