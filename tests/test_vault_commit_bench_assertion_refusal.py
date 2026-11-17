@@ -35,6 +35,14 @@ pinned below rather than asserted in prose.
   #2415's owed ruling 2 withheld, which #3870's ruling named as the thing to avoid. So the
   sidecar rung's shape (#3236): `git reset -q --` the path (bytes untouched on disk), one
   column-0 line naming it and the table it needs, and the rest of the commit goes through.
+* **A drop is a report, and a report nobody is obliged to copy is a drop that goes
+  unrecorded forever** (#4185). So the summary line ends with the sentence #1070 put inside
+  the unattributed dirty-state report (`vault-commit.sh:720`, "copy this exact list into the
+  job's run record"), naming the lloyd repo's `eval/autoresearch_assertions.yaml` as where the
+  rows have to land, and the two nightly skills that run this pre-flight carry the matching
+  clause — `test_both_pre_flight_skills_carry_the_copy_duty_the_report_asks_for` reads that
+  prose from the vault's HEAD, so the report's ask and the skill's duty are pinned against each
+  other rather than against a grep nobody re-runs.
 * **Fails closed on its own missing rail**, where the four siblings fail open by ruling. An
   unimportable `app.harness.bench_authoring` (exit 4) is the guard going blind: never
   transient, never a writer's fault, and committing through it is a clean-looking reading
@@ -620,3 +628,150 @@ def test_the_wrapper_still_parses_and_the_new_rung_is_silent_on_ordinary_traffic
     assert "BENCH ASSERTION" not in proc.stderr, proc.stderr
     assert "CHECK FAILED" not in proc.stderr, proc.stderr
     assert "memory/x.md" in _commit_paths(vault_repo)
+
+
+# ── #4185: the drop report carries #1070's run-record duty, so a card dropped on every
+# ── nightly run cannot go unrecorded on every nightly run
+def test_the_drop_summary_line_hands_the_invoking_job_its_run_record_duty(vault_repo):
+    """A printed drop is only a record if some job is obliged to keep one (#4185).
+
+    #1070 solved this exact permanence for the unattributed dirty-state list by putting
+    "copy this exact list into the job's run record" INSIDE the report
+    (`vault-commit.sh:720`) rather than only in the skills that invoke it: a skill sentence
+    is read by the job that remembers to look for it, while the report is read by the job
+    that has just dropped something. This pins the same shape on the rung's own summary
+    line. Two keyless cards are staged so the count and the duty are distinguishable — the
+    duty is one sentence per invocation, not one per card — and it has to come after the
+    statement of what was dropped, naming the lloyd repo's table as where the rows go.
+    """
+    _add_card(vault_repo)
+    _add_card(vault_repo, name="lloyd/bench/bench_98_second_repro.md")
+    _git(vault_repo, "add", "-A")
+    out = _run_shim(vault_repo)
+    assert out.returncode == 1, f"exit {out.returncode}\n{out.stderr}"
+    summary = [l for l in out.stderr.splitlines() if l.startswith("BENCH ASSERTION:")]
+    assert len(summary) == 1, f"expected one summary line:\n{out.stderr}"
+    line = summary[0]
+    assert line.startswith("BENCH ASSERTION: 2 bench card(s) added under lloyd/bench/"), \
+        f"the report of WHAT was dropped changed: {line[:80]!r}"
+    assert "out of this commit" in line, line
+    low = line.lower()
+    assert "run record" in low, f"no run-record duty on the drop summary: {line!r}"
+    assert "copy" in low, line
+    assert "eval/autoresearch_assertions.yaml" in line, \
+        f"the duty must name where the assertion rows have to land: {line!r}"
+    assert "lloyd repo" in line, line
+    assert line.index("out of this commit") < line.index("run record"), \
+        "the duty has to follow the drop it is a duty about"
+    assert low.count("run record") == 1, \
+        f"the duty belongs once per invocation, not once per card: {line!r}"
+    # The line to be copied VERBATIM has to be one line about THIS invocation, so card paths
+    # stay where they already are: the shim's per-card lines above, and stdout. A duty line
+    # carrying a path reads like data, and a job that paraphrases "a card was dropped" into its
+    # run record would satisfy every keyword check while the verbatim line was the thing lost.
+    assert CARD_PATH not in line, \
+        f"the duty line embeds a card path, so it is not the one line to copy: {line!r}"
+
+
+def test_the_duty_line_stays_off_stdout_and_reaches_the_job_through_the_door(vault_repo):
+    """The two halves of that sentence's address, measured across the door's seam (#4185).
+
+    Stdout is the list the door parses — `vault-commit.sh` reads the rung's stdout line by
+    line and `git reset`s each one — so a duty sentence printed THERE is unstaged as if it
+    were a path, which is exactly what the stdout contract exists to prevent. And no job
+    runs this rung by hand: it runs the wrapper, whose stderr the rung inherits, so the
+    duty is decoration unless it survives that hand-off. Both sides are behaviour at a
+    process boundary, so both are measured from a subprocess, not by reading source.
+    """
+    import json
+
+    other = "lloyd/bench/bench_98_second_repro.md"
+    _add_card(vault_repo)
+    _add_card(vault_repo, name=other)
+    _git(vault_repo, "add", "-A")
+    (vault_repo / "notes.md").write_text("notes changed\n", encoding="utf-8")
+    out = _run_shim(vault_repo)
+    assert out.returncode == 1, f"exit {out.returncode}\n{out.stderr}"
+    assert out.stdout.splitlines() == sorted([CARD_PATH, other]), \
+        f"stdout is the door's path list and nothing else: {out.stdout!r}"
+    # The duty is on stderr in BOTH modes, so `--json`'s contract holds too: JSON on
+    # stdout, prose on stderr. A stdout duty would break this mode as loudly as the door's.
+    js = _run_shim(vault_repo, "--json")
+    assert js.returncode == 1, f"exit {js.returncode}\n{js.stderr}"
+    assert [r["path"] for r in json.loads(js.stdout)] == sorted([CARD_PATH, other]), \
+        f"--json stdout is still only the JSON: {js.stdout[:200]!r}"
+    # Lowercased exactly as the node above does it: two spellings of one check on one sentence
+    # is how a later rewording breaks a single node and reads as an unrelated failure.
+    assert "run record" in js.stderr.lower(), \
+        "the duty must ride the summary line, not the stdout branch"
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: pre-flight 2026-11-09")
+    assert proc.returncode == 0, proc.stderr
+    duty = [l for l in proc.stderr.splitlines()
+            if l.startswith("BENCH ASSERTION:") and "run record" in l]
+    assert duty, f"the run-record duty never reached the invoking job's stderr:\n{proc.stderr}"
+    assert CARD_PATH not in _commit_paths(vault_repo)
+    assert other not in _commit_paths(vault_repo)
+
+
+def test_a_card_the_vault_already_committed_keyless_is_not_a_drop_and_says_nothing(
+        vault_repo):
+    """The fix's bound, measured rather than assumed: the duty fires on an ADD, nothing else.
+
+    A card committed unkeyed before this rail existed stays in the vault unkeyed and is never
+    reported — the rung's scope is `git diff --cached --diff-filter=A` with `exists_at_head`,
+    so an edit to a card HEAD already holds is not a drop and produces no line at all. That is
+    why the observation owed on #4185 can only ever see NEW cards, and why the ~30 cards
+    already in `lloyd/bench/` without a key are the table's to absorb, not this sentence's to
+    surface. The node pins the boundary so a later reader does not upgrade the duty into a
+    backlog sweep — or, the other way, assume an old card was reported and go looking for a
+    record that was never asked for.
+
+    Two belts keep this card quiet — the rung's `--diff-filter=A` scope, which never lists a
+    modification, and the rail's one-way `exists_at_head` arm. They are redundant by design, so
+    breaking one alone leaves this node green; breaking BOTH (scope widened to `ACM` and
+    `exists_at_head` pinned false) fails it, measured. The node pins the boundary, and its
+    failure message names the drift the module docstring warns about: a rung that counts the
+    whole tree blames a card whose author never staged it.
+    """
+    card = _add_card(vault_repo)
+    _git(vault_repo, "add", "-A")
+    _git(vault_repo, "commit", "-qm", "a bench card, committed unkeyed before this rail")
+    assert _head_has(vault_repo, CARD_PATH)
+    card.write_text(CARD_BODY + "\nEdited afterwards, which stays committable.\n",
+                    encoding="utf-8")
+    _git(vault_repo, "add", "-A")
+    out = _run_shim(vault_repo)
+    assert out.returncode == 0, (
+        f"an edit to an already-committed keyless card was treated as a drop, so the duty "
+        f"would be reprinted for a card nobody is adding: {out.stdout!r} {out.stderr!r}")
+    assert "BENCH ASSERTION" not in out.stderr, out.stderr
+
+
+def test_both_pre_flight_skills_carry_the_copy_duty_the_report_asks_for():
+    """#4185 clauses 4 and 5, pinned from this side: the vault prose against the line it cites.
+
+    The gate's review graded both clauses `partial` and downgraded them because no node in a
+    changed test file pinned them — `grep -rn 'BENCH ASSERTION' ~/obsidian/skills` was the only
+    instrument, and a grep nobody re-runs is a claim, not a test. The prose is read from the
+    vault's HEAD for the same reason `tests/test_autonomy_data_pipeline_skill.py` reads its
+    #1070 block from HEAD: a working-tree copy lets a reverted skill keep reading as landed.
+
+    The token is the rung's own prefix, so the two surfaces cannot drift apart: a skill that
+    starts saying "benchmark drop" pins nothing. `verbatim` is the duty itself — a job that
+    SUMMARISES the line into one more sentence still loses the card, which is the failure the
+    clause exists to stop.
+    """
+    for rel in ("skills/nightly-reflection-signals/SKILL.md",
+                "skills/autonomy-data-pipeline/SKILL.md"):
+        proc = subprocess.run(["git", "-C", str(Path.home() / "obsidian"), "show", f"HEAD:{rel}"],
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, (
+            f"#4185 clause unreadable: `git -C ~/obsidian show HEAD:{rel}` failed "
+            f"({proc.stderr.strip()[:200]}) — a clause cannot be graded from an artifact that "
+            f"cannot be read")
+        assert "BENCH ASSERTION" in proc.stdout, (
+            f"{rel} no longer carries the copy duty, so a job running this pre-flight may "
+            f"again leave a drop line in a terminal and record nothing")
+        assert "verbatim" in proc.stdout.lower(), (
+            f"{rel} names a BENCH ASSERTION line but never says to copy it verbatim into the "
+            f"run record — summarising it is the failure the clause exists to stop")

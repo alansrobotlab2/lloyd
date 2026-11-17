@@ -51,6 +51,19 @@ through this door while it is keyless — which is the property #3974 asks for �
 cost is that a permanently keyless card is dropped repeatedly rather than screaming, which
 is what the post-landing owed check watches over real nightly traffic.
 
+AND THE DROP IS REPORTED AS A DUTY, NOT ONLY AN EVENT (#4185). The summary line states the
+count, and then tells the invoking job to copy that line into its run record — #1070's own
+fix for exactly this permanence, which put the instruction INSIDE the report of the
+unattributed dirty state instead of only in the skills that invoke it, because the report is
+read by the job that has just carried (or just dropped) the path and the skill is read by
+whichever job remembers to look. A keyless card is dropped on every nightly run until its
+rows land, and the only trace of the first drop was a line on a stderr that goes to a
+`/tmp` tee nobody re-reads, so nothing obliged anyone to record it and the state could
+persist unrecorded forever. The two nightly skills that run this door are asked to carry the
+same clause; that half is held by #4193, so the report itself is where the duty has to live. It goes to STDERR with the summary and never to stdout: stdout is the path list the
+door parses and `git reset`s line by line, so a sentence printed there is unstaged as if it
+were a path.
+
 FAILS CLOSED ON ITS OWN MISSING RAIL, which is the other deliberate divergence, and the
 four siblings fail open by ruling (`vault-commit.sh` prints `CHECK FAILED (exit N);
 committing whatever the index holds` for them). An unimportable
@@ -257,6 +270,20 @@ def _load_rail():
     return RAIL
 
 
+def table_rel() -> str:
+    """The rail's own repo-relative path to the assertion table, for a report naming it.
+
+    Asked of the rail rather than spelled here because a second copy of the filename is a
+    second rule that can drift from the one the writers apply — which is the same reason
+    `dropped_cards` takes its table from `RAIL.TABLE_REL` and the sibling check
+    `test_the_shim_restates_no_stem_pattern_and_no_table_lookup` refuses the literal here.
+    Only ever called after a non-empty drop, so the rail is already imported and this
+    cannot reach its re-exec arm; callers still guard it, because an uncaught raise from
+    `main` exits 1 with empty stdout — the door's drop branch on no paths at all.
+    """
+    return _load_rail().TABLE_REL
+
+
 def _git(vault: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(vault), *args],
                           capture_output=True, text=True)
@@ -381,7 +408,9 @@ def main(argv: list[str] | None = None) -> int:
                          "app.data_root.vault_root(): $LLOYD_VAULT_ROOT, $LLOYD_VAULT, "
                          "~/obsidian)")
     ap.add_argument("--json", action="store_true",
-                    help="print the findings to stdout instead of the dropped-path list")
+                    help="print the findings as JSON on stdout instead of the dropped-path "
+                         "list; the drop's summary line and its run-record duty are stderr "
+                         "in BOTH modes, so stdout holds one thing only either way")
     args = ap.parse_args(argv)
     # The root comes from the resolver, never from a home-joined `obsidian` spelled in this
     # file: `tests/test_no_runtime_paths_in_code.py::
@@ -426,8 +455,32 @@ def main(argv: list[str] | None = None) -> int:
         # a round; the caller of THIS door has no round, and the door's own column-0 line
         # is what tells it where the rows actually have to go.
         print(rec["text"], file=sys.stderr)
+    # #4185 gives this line #1070's run-record duty, for #1070's own reason: the duty lived
+    # only in the skills that invoke this door, so the one reader guaranteed to be present at
+    # the moment of a drop — this report — said nothing about recording it, and a card that
+    # stays keyless was dropped on every nightly run while every one of those runs reported
+    # nothing. #1070 fixed exactly that asymmetry for the unattributed dirty-state list by
+    # putting the instruction in the report itself (`vault-commit.sh`'s `copy this exact list
+    # into the job's run record`). The two nightly skills that run this door are asked to
+    # carry the matching clause too; that half is held by #4193 because both of their bodies
+    # sit past the skill body cap the vault route refuses to grow, which is why the duty is
+    # printed HERE — the report is the surface this round could actually land.
+    # It goes to STDERR with the summary and never to stdout: stdout is the path list the
+    # door parses and `git reset`s line by line, so a sentence printed there is unstaged as
+    # if it were a path. One sentence per invocation, not per card — the invocation is what
+    # the job records, and the count above is already the per-card part.
+    table = "the lloyd repo's assertion table"
+    try:
+        table = table_rel()
+    except Exception:  # noqa: BLE001 — a named remedy outlives a failed naming of it
+        pass
     print(f"BENCH ASSERTION: {len(records)} bench card(s) added under {BENCH_DIR}/ "
-          f"with no assertion set behind their stem; they are out of this commit.",
+          f"with no assertion set behind their stem; they are out of this commit. Copy this "
+          f"exact line into the invoking job's run record: nothing else records a drop, and "
+          f"a card left keyless is dropped again by every later pre-flight commit. The "
+          f"remedy is one repo change — the card's assertion rows have to be added to "
+          f"{table} in the lloyd repo, and once that is merged this door carries the card "
+          f"again.",
           file=sys.stderr)
     if not args.json:
         # The contract with `vault-commit.sh`: stdout carries the dropped paths and nothing
