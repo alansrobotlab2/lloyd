@@ -5960,6 +5960,267 @@ def _ceiling_reports_line(p: dict) -> str:
             f"{p['bytes'] / 1024:.0f} KiB {unit}{tmp}{tail}")
 
 
+# ── #4206: the fact write-gate's decision journal ───────────────────────────
+# `agent_mcp/fact_write_gate.py::log_decision` appends one row per ASKED fact write,
+# under no lock and with no retention of its own: the writer's last two statements are
+# `FACT_WRITE_GATE_LOG.parent.mkdir(parents=True, exist_ok=True)` and
+# `open(FACT_WRITE_GATE_LOG, "a")`, and
+# `git grep -nE 'RETENTION|MAX_|unlink|truncate|rotate|prune|archive|gz' -- agent_mcp/fact_write_gate.py`
+# exits 1. Nothing else bounded it either — `git grep -c fact-write-gate --` this file was
+# 0 and `git log -S'fact-write-gate' --` it has never named it — and it does not ride into
+# the daily backup, which tars named files only (`scripts/backup/backup-graph.sh:22-25`:
+# `vault-derived/facts`, a `kg.sqlite` snapshot, `memory-graph`). So it reached
+# 86,197,460 bytes / 86,706 rows over 52 dated days (2026-09-26 to 2026-11-17T05:26Z,
+# #4206's triage measure), 1,657,643 B a day on average by its own rows and 884,542 B/day
+# across the last seven. This is store 14's provenance journal (#2225), store 15's turn
+# rows (#2273) and store 26's denials (#3789) a fourth time: a store missing from this
+# table is a store nothing bounds, whatever its size on the day somebody noticed.
+#
+# The path is joined from `DATA_ROOT` like every other store here, and NOT read off
+# `app.paths.FACT_WRITE_GATE_LOG`, for the two standing reasons: `app.paths` is not
+# importable when cron, task #79 or an `sh -c` child runs this file without the project
+# venv (the `app.data_root` import at the top of this file exists for that), and a constant
+# that only names the live root cannot be redirected into a fixture (#1010 — that is how a
+# test about deleting a 2.7 MB tree deleted the tree instead). The test file pins agreement
+# with `app/paths.py:334`'s `VAULT_KG_DB.parent / "fact-write-gate.jsonl"` by the RELATIVE
+# join, never the absolute.
+FACT_WRITE_GATE_RELATIVE = "_pipeline/vault-derived/fact-write-gate.jsonl"
+FACT_WRITE_GATE_JOURNAL = DATA_ROOT / FACT_WRITE_GATE_RELATIVE
+
+#: Archive a write-gate row once its OWN `ts` is older than this — never the file mtime,
+#: which on an append-only journal is the newest write, so an mtime window keeps every row
+#: and prints a clean sweep (store 13's argument, verbatim).
+#:
+#: THE FLOOR ON THIS CONSTANT IS NOT THE HOUSE STYLE, IT IS A NUMBER IN config.yaml.
+#: `tests/test_fact_write_gate.py::test_the_quoted_supersede_count_is_at_most_what_the_live_log_holds`
+#: reads the PRODUCTION journal whole and asserts that the figure `config.yaml`'s
+#: `write_gate:` comment pins (402 `'"verdict": "update"'` rows as of 2026-10-08) is at most
+#: what the live file still holds. Measured 2026-11-17 on that file: 2,079 update rows in
+#: all, and 155 / 252 / 430 / 684 / 1,019 of them inside a 7 / 10 / 14 / 21 / 30-day window.
+#: So a fold survives only at 14 days or wider (430 against the 402 the prose pins), and at
+#: 30 days the live journal keeps 1,019 — 2.5x the pin, room for a quiet fortnight of asked
+#: writes before that node has to be re-measured. 30 is also the house window (stores 13,
+#: 14, 26 and 29 all use it) and it is wider than every window anyone runs over this
+#: journal: the two committed measurements draw labelled samples (400 writes, 60 rows) and
+#: take no calendar span at all. A fold that moved rows a reader is about to count would
+#: silently zero the store it exists to bound — #2225's rule, and why this paragraph is here
+#: rather than a bare `= 30`.
+#:
+#: There is deliberately NO byte backstop beside this window, unlike store 26. At the
+#: measured 884,542 B/day the post-fold steady state is ~26 MB live, and any ceiling under
+#: that starts cutting into the update-row count above, so a size rail here would break the
+#: very node the window exists to keep green. The live journal therefore stays over the
+#: 1,048,576-byte witness ceiling after a fold, and the sanctioned way to read it stays the
+#: committed extract at `backlog/data/fact-write-gate.jsonl` (#2167), exactly as before.
+FACT_WRITE_GATE_ARCHIVE_AGE_DAYS = 30
+
+#: Each month's file is named by the UTC month of the ROW's own stamp, never the month the
+#: sweep ran, so "open September's archive" keeps its meaning. The prefix is cut out of the
+#: glob rather than written twice, so the name the fold writes and the name the tally reads
+#: cannot drift apart (#2225).
+FACT_WRITE_GATE_ARCHIVE_PREFIX = "fact-write-gate-archive-"
+
+#: The write-gate verdict the one prose figure cites, spelled exactly as the journal spells
+#: it. `tests/test_fact_write_gate.py::
+#: test_the_quoted_supersede_count_is_at_most_what_the_live_log_holds` counts this substring in
+#: the PRODUCTION journal and asserts the pinned 402 fits inside it, so it is the count a fold
+#: of this store moves — named as a constant here so the window's floor is ONE measurement both
+#: files read, not two string literals that drift apart (#2225).
+FACT_WRITE_GATE_UPDATE_VERDICT = '"verdict": "update"'
+
+
+def _fact_write_gate_seconds(line: bytes) -> float | None:
+    """Seconds for a write-gate row's own `ts`, or None when it has no readable one.
+
+    `log_decision` stamps `ts` with `datetime.now(timezone.utc).isoformat()` — the
+    microsecond form `_iso_seconds` parses, with the `Z` spelling it also tolerates kept
+    available for anything hand-written — and the parse goes through that one helper rather
+    than a second one written here. A row that is not JSON, or carries no `ts`, or an
+    unparseable one, is NEVER an archive candidate: it stays in the live file and is counted
+    undated, which is the rule that keeps #1975's `promotions-archive-None.jsonl.gz` — rows
+    filed under the literal string `None` because the month key came off a stamp the row did
+    not have — from ever being written again here.
+    """
+    try:
+        row = json.loads(line)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(row, dict):
+        return None
+    return _iso_seconds(row.get("ts"))
+
+
+def _fact_write_gate_archive_tally(journal: Path) -> tuple[int, int]:
+    """(files, bytes) of the month archives sitting beside `journal`.
+
+    Counted from the directory and not from what this run wrote, store 26's reason: the
+    fold must not move unbounded growth one file over, and the only way an operator can see
+    that is a number which includes the gzips this run did not touch. Symlinks are neither
+    followed nor counted.
+    """
+    files = 0
+    total = 0
+    try:
+        candidates = sorted(journal.parent.glob(
+            f"{FACT_WRITE_GATE_ARCHIVE_PREFIX}*.jsonl.gz"))
+    except OSError:
+        return 0, 0
+    for path in candidates:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            files += 1
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return files, total
+
+
+def sweep_fact_write_gate(apply, now, *, journal=None, on_attempt=None) -> dict:
+    """Fold write-gate rows older than FACT_WRITE_GATE_ARCHIVE_AGE_DAYS into month gzips.
+
+    #4206, and store 26's shape rather than a new one. One row per ASKED fact write is
+    appended by `log_decision` and nothing has ever removed one; this moves the rows whose
+    own `ts` is older than the window into `fact-write-gate-archive-<YYYYMM>.jsonl.gz`,
+    bucketed by the UTC month of that stamp, and leaves every other byte where it is.
+
+    ARCHIVE ONLY, store 13's order: every candidate is appended to its month's gzip BEFORE
+    the live file is rewritten, and the live journal is never unlinked — `os.replace` over
+    it, so a fold cannot lose a row on the way. A fold of an absent journal reports
+    `no journal yet` and touches nothing: the writer's `mkdir` owns the path, and a sweep
+    that created the file would be producing evidence its own writer never wrote.
+
+    Store 14's mechanism is reused rather than restated. `_archive_append` appends (a month
+    bucket from an earlier run grows, and it skips lines the gzip already holds, because a
+    rewrite that then refuses leaves every candidate in both places), and
+    `_rewrite_live_ledger` renames the kept bytes over the journal only once it has stopped
+    growing, with `noun="journal"` for the reason store 14 gives: `log_decision` holds no
+    lock across its `open("a")`, so the graft-and-retry is what keeps a decision appended
+    while the archives were being built from being renamed out of existence (#1975/#2251's
+    race, one implementation). `on_attempt` is that graft hook, passed straight through for
+    the test that proves it; production never passes it.
+
+    Two rules are this store's own, both inherited. A row with no parseable `ts` is kept and
+    counted apart — age cannot be read off it and the file mtime is no substitute. And the
+    row with the NEWEST parseable stamp is never archived however old it is (store 19's
+    rule, and store 26's): a window measured against `now` which excludes the newest row
+    excludes the ENTIRE file, so on a box whose gate has not been asked in months folding it
+    would empty the journal and destroy the one row that says the capability is wired up at
+    all. Keeping it costs one row.
+    """
+    journal = Path(journal) if journal is not None else FACT_WRITE_GATE_JOURNAL
+    out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
+           "moved": 0, "archived": 0, "rows": 0, "undated": 0, "kept_newest": 0,
+           "archive_files": 0, "archive_bytes": 0, "refused": None}
+
+    def with_archives(res: dict) -> dict:
+        # Taken on EVERY return, including the absent-journal one, store 26's reason: the
+        # number an operator reads to decide whether the fold is working is the archive
+        # total, which is the gzips that EXIST and not the ones written since they looked.
+        res["archive_files"], res["archive_bytes"] = _fact_write_gate_archive_tally(journal)
+        return res
+
+    try:
+        raw = journal.read_bytes()
+    except OSError:
+        return with_archives(out)          # absent journal: a gate that has never been asked
+    out["present"] = True
+    out["before"] = out["after"] = len(raw)
+    # Newlines, not `len(lines)`: the count the line reports has to be the count `wc -l`
+    # answers on this file, which is how a reader checks a fold against the store (#4189's
+    # reasoning, and the reason `splitlines(keepends=True)` below keeps every byte).
+    out["rows"] = raw.count(b"\n")
+
+    lines = raw.splitlines(keepends=True)
+    stamps: list[float | None] = []
+    newest_at: float | None = None
+    newest_index = -1
+    for index, line in enumerate(lines):
+        seconds = _fact_write_gate_seconds(line)
+        stamps.append(seconds)
+        if seconds is None:
+            out["undated"] += 1
+        # `>=`, not `>`: on a tie the LATER line is the later append of an append-only file,
+        # and that is the newest row in the sense a reader means.
+        elif newest_at is None or seconds >= newest_at:
+            newest_at, newest_index = seconds, index
+
+    buckets: dict[str, list[bytes]] = {}
+    kept_idx: list[int] = []
+    for index, line in enumerate(lines):
+        seconds = stamps[index]
+        if seconds is None:
+            kept_idx.append(index)                    # undated: stays, counted apart
+            continue
+        if index == newest_index:
+            out["kept_newest"] = 1
+            kept_idx.append(index)                    # never archived, however old
+            continue
+        if now - seconds <= FACT_WRITE_GATE_ARCHIVE_AGE_DAYS * 86400:
+            kept_idx.append(index)                    # inside the window
+            continue
+        buckets.setdefault(time.strftime("%Y%m", time.gmtime(seconds)), []).append(line)
+
+    out.update({"moved": sum(len(rows) for rows in buckets.values()),
+                "bytes": sum(len(ln) for rows in buckets.values() for ln in rows)})
+    if not buckets or not apply:
+        return with_archives(out)
+
+    # Archives FIRST, live file second — the order that makes loss impossible.
+    try:
+        for month in sorted(buckets):
+            _archive_append(journal.parent
+                            / f"{FACT_WRITE_GATE_ARCHIVE_PREFIX}{month}.jsonl.gz",
+                            buckets[month])
+    except OSError as exc:
+        out["refused"] = (f"archive append failed ({type(exc).__name__}: {exc}); "
+                          f"live journal intact")
+        return with_archives(out)
+
+    # The kept bytes are the original byte strings re-emitted, never a `json.dumps` of the
+    # parsed row — which would rewrite key order and separators and turn a fold into a
+    # rewrite of every line the store kept. `len(raw)`, the snapshot's OWN end, is handed to
+    # the helper rather than a size re-read after that gzip loop: a re-read moves the
+    # graft's baseline past any row `log_decision` landed while the archives were being
+    # built, and that row would sit in neither the body nor the grafted tail while
+    # `os.replace` renamed the file over it (#2251's off-by-one, named in the helper).
+    kept = [lines[i] for i in kept_idx]
+    settled, refusal = _rewrite_live_ledger(journal, b"".join(kept), len(raw),
+                                            on_attempt=on_attempt, noun="journal")
+    if not settled:
+        out["refused"] = refusal
+        return with_archives(out)
+    out["after"] = len(journal.read_bytes()) if journal.is_file() else 0
+    out["archived"] = out["moved"]
+    return with_archives(out)
+
+
+def _fact_write_gate_line(p: dict) -> str:
+    """The report line for store 30, in store 14's shape: the count in the field before the
+    parenthesis, then `(X -> Y bytes live, Z B out)`, the `no journal yet` branch for an
+    absent store, and the month archives named on every branch — the bytes a fold moved AND
+    the ones already parked beside the store, because an archive-only store's only promise
+    is that the rows went somewhere readable."""
+    label = f"  fact-write-gate rows >{FACT_WRITE_GATE_ARCHIVE_AGE_DAYS}d"
+    arch = (f" [{p['archive_files']} month archive(s), {p['archive_bytes']} B archived]"
+            if p["archive_files"] else " [no month archive yet]")
+    tail = (f" — {p['undated']} undated row(s) kept (no parseable `ts`)"
+            if p["undated"] else "")
+    if not p["present"]:
+        return f"{label}: no journal yet — nothing to bound{arch}"
+    if p["refused"]:
+        return (f"{label}: REFUSED ({p['refused']}) — live journal intact, "
+                f"{p['archived']} row(s) already archived{arch}")
+    verb = "archived" if p["apply"] else "would archive"
+    if p["moved"] == 0:
+        return f"{label}: 0 {verb} ({p['before']} bytes live){tail}{arch}"
+    if not p["apply"]:
+        return (f"{label}: {p['moved']} {verb} ({p['before']} bytes live, "
+                f"{p['bytes']} B of it){tail}{arch}")
+    return (f"{label}: {p['moved']} {verb} ({p['before']} -> {p['after']} bytes live, "
+            f"{p['bytes']} B out){tail}{arch}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -6066,6 +6327,13 @@ def main() -> int:
     # checkout's refs, and `resolve_data_root_for_tree` has already decided which root this
     # tree may reach (#1415).
     ceiling_reports = sweep_ceiling_reports(args.apply, now)
+
+    # Store 30 (#4206), the fact write-gate's decision journal. A DATA_ROOT file that
+    # ARCHIVES, so it sits outside the automod refusal like the two journal folds it is
+    # modelled on: the guard declines deletions that could name a production checkout's
+    # refs, and `resolve_data_root_for_tree` has already decided which root this tree may
+    # reach (#1415).
+    fact_write_gate = sweep_fact_write_gate(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -6245,6 +6513,14 @@ def main() -> int:
     # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
     # #3379, #3499, #3789, #3951 and #4060 — and this line is the 29th.
     print(_ceiling_reports_line(ceiling_reports))
+    # Store 30 (#4206), printed LAST and outside the refusal guard like the ten lines above
+    # it. It is a data-root journal that ARCHIVES, and the guard refuses deletions that could
+    # name a production checkout's refs, which a file under the root
+    # `resolve_data_root_for_tree` has already decided this tree may reach is not (#1415).
+    # Appending rather than inserting keeps items 1-29 of task 79's enumeration where the
+    # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
+    # #3379, #3499, #3789, #3951, #4060 and #4205 — and this line is the 30th.
+    print(_fact_write_gate_line(fact_write_gate))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

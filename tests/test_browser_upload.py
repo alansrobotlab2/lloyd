@@ -313,17 +313,68 @@ def test_the_policy_says_which_paths_it_would_approve(tmp_path, monkeypatch):
 
 
 def test_an_empty_upload_roots_list_falls_back_to_the_defaults(monkeypatch):
-    """Clearing the list must not be the widest the policy has ever been."""
+    """Clearing the list must not be the widest the policy has ever been.
+
+    Both sides of each `==` are canonical, because `_upload_config` returns
+    resolved roots (`agent_mcp/browser.py` `_upload_config`: `roots.append(path
+    .resolve())`) and the resolved form is what `_upload_path_policy` later
+    compares a candidate against. Asserting the bare `Path.home()` spelling was
+    green in a login shell and red under the gate: the tests rung runs with
+    `HOME` at the round's own home (`scripts/automod/worktree.py`
+    `ensure_round_home`), a symlink farm that links every entry of the real home
+    except `lloyd` and `lloyd-data`, so `~/Downloads` there is a symlink into
+    production and resolves somewhere else. The canonicalisation itself is
+    pinned by `test_the_fallback_roots_are_the_two_directories_not_their_spellings
+    `, which symlinks BOTH defaults.
+    """
     browser_cfg = dict(CONFIG.get("browser") or {})
     browser_cfg["upload_roots"] = []
     monkeypatch.setitem(CONFIG, "browser", browser_cfg)
     roots, _ceiling = bm._upload_config()
-    assert roots == [Path.home() / "lloyd-data", Path.home() / "Downloads"]
+    assert roots == [(Path.home() / "lloyd-data").resolve(),
+                     (Path.home() / "Downloads").resolve()]
 
     browser_cfg["upload_roots"] = ["~/Downloads/**"]
     monkeypatch.setitem(CONFIG, "browser", browser_cfg)
     globbed, _ = bm._upload_config()
-    assert globbed == [Path.home() / "Downloads"], "the ** spelling is a directory"
+    assert globbed == [(Path.home() / "Downloads").resolve()], \
+        "the ** spelling is a directory"
+
+
+def test_the_fallback_roots_are_the_two_directories_not_their_spellings(tmp_path,
+                                                                        monkeypatch):
+    """The gate's home is a symlink farm, so the fallback has to name directories.
+
+    #4237's node above fails at that home and nowhere else, which is a weak thing
+    for a policy node to depend on. This one builds the same shape hermetically —
+    a home whose `lloyd-data` AND `Downloads` are both symlinks to real
+    directories elsewhere — so a root that stopped being canonicalised is caught
+    on either entry rather than on the one the farm happens to link. It is a
+    real bite, not a tautology: return the unresolved spelling and the two sides
+    differ, and drop the fallback for a wider one (`~`, `/`) and the named
+    targets above disappear — the names themselves are pinned by the node above,
+    which is why the expected pair here is spelled out instead of derived from
+    `DEFAULT_UPLOAD_ROOTS`.
+    """
+    real = tmp_path / "real"
+    data = real / "lloyd-data"
+    downloads = real / "Downloads"
+    data.mkdir(parents=True)
+    downloads.mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "lloyd-data").symlink_to(data)
+    (home / "Downloads").symlink_to(downloads)
+    monkeypatch.setenv("HOME", str(home))
+
+    browser_cfg = dict(CONFIG.get("browser") or {})
+    browser_cfg["upload_roots"] = []
+    monkeypatch.setitem(CONFIG, "browser", browser_cfg)
+    roots, _ceiling = bm._upload_config()
+    assert roots == [data.resolve(), downloads.resolve()], (
+        "an empty list falls back to the two default directories, named as the "
+        "canonical paths the policy compares a candidate against"
+    )
 
 
 @pytest.mark.parametrize("bad", [

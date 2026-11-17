@@ -422,6 +422,78 @@ def test_the_quoted_supersede_count_is_at_most_what_the_live_log_holds():
     assert as_of <= datetime.date.today(), as_of
 
 
+# The sweep script, from THIS checkout: inside a round's worktree ROOT is the round's own tree,
+# the same retarget `tests/test_retention_sweep.py::_SWEEP_TREE` makes. The floor node below
+# only execs it and asks it for constants — it never passes apply=True and never names the live
+# journal as a target — so nothing there can reach production.
+SWEEP = ROOT / "scripts" / "groundskeeper" / "retention-sweep.py"
+
+
+def _sweep_store():
+    """Load the sweep script (a hyphenated filename, so by path the way
+    `tests/test_retention_sweep.py::_load` does) and hand back its module.
+
+    Deliberately not `agent_mcp.fact_write_gate`: the store whose window is being measured must
+    not be the thing that measures its own floor, and that module's `log_decision` appends to the
+    very journal this node reads. The sweep module IS the file under test, and loading it is the
+    point.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_fact_write_gate_floor", SWEEP)
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)
+    return rs
+
+
+@pytest.mark.skipif(
+    not LIVE_LOG.is_file(),
+    reason="the supersede-count floor is a property of the live journal",
+)
+def test_the_archive_window_leaves_the_live_journal_holding_the_pinned_supersede_count():
+    """#4206 clause 5: the fold's window must stay WIDER than the reach of the number this file's
+    own prose pins, or the sweep voids the one figure a reader cites from this journal.
+
+    `test_the_quoted_supersede_count_is_at_most_what_the_live_log_holds` above counts
+    `'"verdict": "update"'` rows in the PRODUCTION file and asserts the 402 pinned at
+    `config.yaml:2788` is at most that count. A fold ages every row by its OWN `ts`, so after one
+    the live count IS the count inside the window — which makes this node the real floor on
+    `FACT_WRITE_GATE_ARCHIVE_AGE_DAYS`. The item's CHECK 5 reasoned that 30 days was safe because
+    "the two committed measurements use 400-write and 60-row labelled samples"; that named the
+    wrong constraint, and this is the constraint.
+
+    Measured on the live file 2026-11-17 (87,504 rows, 86,987,606 bytes): 2,088 rows carry the
+    marker and 1,015 of them sit inside 30 days of the newest stamped row — 2.5x the pinned
+    figure, and the sweep's own dry run of the new store says `42317 would archive` against an
+    independently counted 42,317 rows past the window. Both numbers are re-derived below rather
+    than quoted, so the node stays true as the file grows and goes red the moment the window
+    stops covering the prose. The horizon is the newest STAMPED row rather than wall clock, so
+    the answer is a property of these bytes and not of the minute the node happens to run.
+    """
+    rs = _sweep_store()
+    window = rs.FACT_WRITE_GATE_ARCHIVE_AGE_DAYS
+    marker = rs.FACT_WRITE_GATE_UPDATE_VERDICT
+    stamp = rs._fact_write_gate_seconds
+    lines = [ln + "\n" for ln in LIVE_LOG.read_text(encoding="utf-8").splitlines()]
+
+    newest = max((s for s in (stamp(ln) for ln in lines) if s is not None), default=None)
+    assert newest is not None, "the live journal holds no parseable `ts` to age a fold against"
+
+    total = sum(1 for ln in lines if marker in ln)
+    kept = sum(1 for ln in lines
+               if marker in ln
+               and (s := stamp(ln)) is not None
+               and newest - s <= window * 86400)
+    pinned, _as_of = _pinned_citation(_write_gate_comment())
+
+    assert kept <= total, f"a {window}d window cannot keep {kept} of {total} rows"
+    assert kept >= pinned, (
+        f"a {window}d fold leaves the live journal holding {kept} of the {total} `{marker}` "
+        f"rows, under the {pinned} the write_gate comment pins: the fold would void the figure "
+        f"that prose cites, which is #2225's failure — a fold that moves rows a reader is about "
+        f"to count silently zeroes the store it exists to bound")
+
+
 def test_the_quoted_count_is_re_derivable_from_the_committed_witness():
     pinned, as_of = _pinned_citation(_write_gate_comment())
     rows = _witness_rows()
