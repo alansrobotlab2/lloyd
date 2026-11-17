@@ -84,15 +84,34 @@ _SHOWN_EVENTS = {
     "amend_clause", "reopen", "backlog_confirm_released",
 }
 
-#: The ceilings one tick's answer may carry, read ONCE by both the grammar and
-#: the parser. `parse_steward` cut notes to 300 characters and summaries to 400
-#: long before the schema said anything about length, so these are not new
-#: limits: they name the limits the source already had, in one place, so the two
-#: surfaces cannot drift (#2197). A grammar cap ABOVE a parse ceiling would be a
-#: cap the parser silently contradicts — the model writes 450 characters, the
-#: grammar permits it and `parse_steward` throws 50 away — so every string cap
-#: here is exactly the ceiling the parse path imposes, and a reply at the caps
-#: survives it unchanged.
+#: The ceilings one tick's answer may carry. `parse_steward` cut notes to 300
+#: characters and summaries to 400 long before the schema said anything about
+#: length, so these are not new limits: they name the limits the source already
+#: had, in one place, so the two surfaces cannot drift (#2197). Each one is
+#: still exactly the number `_fit_prose` is called with, and that pairing is the
+#: one that has to stay one number — the value the steward ships is at or under
+#: these, whatever the grammar let through.
+#:
+#: The grammar, though, sits `GRAMMAR_HEADROOM` characters ABOVE each prose
+#: ceiling (#4233), which is the relation #2240 and #2444 set for `REVIEW_SCHEMA`
+#: and `CONFIRM_SCHEMA`: the reader stays the cut that decides what is stored. With
+#: the two numbers EQUAL the parser's cut was unreachable in production — vLLM
+#: enforces `maxLength` in the grammar (`app/harness/finalizer.py`, measured on
+#: the primary, which is what the steward runs on), so no answer longer than the
+#: ceiling could ever arrive, and `_fit_prose` only ever acts on text LONGER
+#: than its limit. The 2026-11-17 scan of 1,931 `board_steward` ledger rows is
+#: the proof: since #3991 landed, 179 values sit at exactly their cap and NONE
+#: carries the "..." marker, while 6 end on a lone CJK codepoint ("…l carries
+#: tri价", 2026-11-17) — the shape a blind slice leaves, which is exactly what
+#: #3991's word-boundary cut exists to replace. Headroom is what makes that guard
+#: fire: any positive margin admits an over-ceiling answer, and 32 keeps the
+#: widest admissible field inside one line of its ceiling, so a degenerate draw
+#: still cannot run away inside the grammar (#1706).
+#:
+#: `MOVES_MAX`, `TAGS_MAX` and `TAG_MAX` keep the EQUAL relation on purpose and
+#: must not be widened with the prose: a tag is a key the board matches by
+#: string, so a word-boundary cut would corrupt it rather than shorten it, and a
+#: count cap has nothing to cut.
 #:
 #: The numbers, from the 378 `board_steward` rows in the promotion ledger: the
 #: largest legitimate reply anyone has produced is 27 moves, notes and reasons
@@ -114,6 +133,15 @@ TAG_MAX = 40
 NOTE_MAX = 300
 REASON_MAX = 300
 SUMMARY_MAX = 400
+
+#: How far `STEWARD_SCHEMA`'s prose caps sit above those three ceilings, for the
+#: reason the block above gives: the grammar has to ADMIT an over-ceiling answer
+#: or `parse_steward`'s cut never runs. It applies to the three prose fields and
+#: to nothing else.
+GRAMMAR_HEADROOM = 32
+NOTE_GRAMMAR_MAX = NOTE_MAX + GRAMMAR_HEADROOM
+REASON_GRAMMAR_MAX = REASON_MAX + GRAMMAR_HEADROOM
+SUMMARY_GRAMMAR_MAX = SUMMARY_MAX + GRAMMAR_HEADROOM
 
 # Every node in this schema now carries a finite cap (#2197), which is the whole
 # reason for the change and not a style rule. `app.harness.finalizer` reads an
@@ -145,7 +173,7 @@ STEWARD_SCHEMA: dict = {
                              "items": {"type": "string", "maxLength": TAG_MAX}},
                 "tags_remove": {"type": "array", "maxItems": TAGS_MAX,
                                 "items": {"type": "string", "maxLength": TAG_MAX}},
-                "note": {"type": "string", "maxLength": NOTE_MAX,
+                "note": {"type": "string", "maxLength": NOTE_GRAMMAR_MAX,
                          "description": "One sentence, for the item's activity log."},
             },
             "required": ["item_id", "status", "tags_add", "tags_remove", "note"],
@@ -156,8 +184,8 @@ STEWARD_SCHEMA: dict = {
                       "description": ("The up_next item autocode should implement next, or 0 "
                                       "when none is ready. Prefer a first re-offer whose branch "
                                       "still holds the work, then the oldest confirmed item.")},
-        "next_pick_reason": {"type": "string", "maxLength": REASON_MAX},
-        "summary": {"type": "string", "maxLength": SUMMARY_MAX,
+        "next_pick_reason": {"type": "string", "maxLength": REASON_GRAMMAR_MAX},
+        "summary": {"type": "string", "maxLength": SUMMARY_GRAMMAR_MAX,
                     "description": "One sentence on the board's state."},
     },
     "required": ["moves", "next_pick", "next_pick_reason", "summary"],
@@ -1241,10 +1269,14 @@ def _fit_prose(text: str, limit: int) -> str:
 
     A field that FITS — its whitespace-normalised form is AT or UNDER `limit` —
     comes back byte-identical: no reflow, no marker, and any legitimate non-ASCII
-    in it survives. The trigger is `len(text) > limit`, never `>=`, because #2197
-    made the schema caps and the parse ceilings one number so that an answer legal
-    at the caps is recorded as the answer given; `>=` would re-cut a legitimate
-    300-character note and contradict `STEWARD_SCHEMA`'s own `maxLength`.
+    in it survives. The trigger is `len(text) > limit`, never `>=`, because a
+    field at exactly the ceiling is the answer the steward gave and has to be
+    recorded as the answer it gave; `>=` would re-cut a legitimate 300-character
+    note into 297 characters plus a marker and claim a truncation that never
+    happened. `STEWARD_SCHEMA` no longer contradicts that: its prose caps are
+    `GRAMMAR_HEADROOM` characters above these limits, so a note at the ceiling is
+    well inside what the grammar admitted, and only text OVER it reaches the cut
+    below (#4233).
 
     A field that overflows is cut by `shorten_summary` (#1606, the mechanism
     `runs.summary` already uses): at the last word boundary fitting inside
@@ -1287,15 +1319,21 @@ def _fit_prose(text: str, limit: int) -> str:
 def parse_steward(structured: Any) -> dict | None:
     """Validated and clamped, or None. `done` can never come out of here.
 
-    Every clamp is one of `STEWARD_SCHEMA`'s caps (#2197): the grammar stops a
-    field at the number and so makes a truncation here something the model was
-    never asked to produce, and the clamp stays because guided decoding is a
-    request, not a guarantee. The two have to be one number: an answer that is
-    legal at the caps has to come out of here unchanged, or the record of what
-    the steward decided is not the answer it gave. The three prose fields go
-    through `_fit_prose`, which keeps that property (it only ever touches text
-    LONGER than the cap) while cutting an overflow on a word boundary instead of
-    at the character the cap happens to fall on (#3991).
+    Every clamp here is one of the ceilings `STEWARD_SCHEMA` was built from
+    (#2197), and for the prose this function is the cut that decides what gets
+    stored: the schema's `maxLength` is `GRAMMAR_HEADROOM` characters ABOVE
+    `NOTE_MAX`/`REASON_MAX`/`SUMMARY_MAX` (#4233), so an over-ceiling answer is
+    admissible and arrives here rather than being sliced by the grammar at the
+    ceiling. The clamp stays for the same reason it stayed when the two numbers
+    were equal — guided decoding is a request, not a guarantee — and the cap it
+    applies is still the number the schema names, so a field that fits the
+    ceiling comes out of here unchanged and the record of what the steward
+    decided is the answer it gave. The three prose fields go through
+    `_fit_prose`, which keeps that property (it only ever touches text LONGER
+    than the ceiling) while cutting an overflow on a word boundary instead of at
+    the character the ceiling happens to fall on (#3991). Boundedness for the
+    finalizer's diagnosis is unaffected: `_schema_is_bounded` asks only whether a
+    `maxLength` is present, not what it equals (#2197).
     """
     if not isinstance(structured, dict):
         return None

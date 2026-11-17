@@ -716,9 +716,17 @@ def test_every_node_of_the_steward_schema_is_bounded():
     for name in ("tags_add", "tags_remove"):
         assert move_props[name]["maxItems"] == W.TAGS_MAX > 0, name
         assert move_props[name]["items"]["maxLength"] == W.TAG_MAX > 0, name
-    assert move_props["note"]["maxLength"] == W.NOTE_MAX > 0
-    assert props["next_pick_reason"]["maxLength"] == W.REASON_MAX > 0
-    assert props["summary"]["maxLength"] == W.SUMMARY_MAX > 0
+    # #4233: the three prose caps are `GRAMMAR_HEADROOM` ABOVE the parse ceilings,
+    # so an over-ceiling answer is admissible and `parse_steward` stays the cut
+    # that decides what is stored. The literal is pinned beside the constant so a
+    # cap widened further still has to be signed off twice.
+    assert move_props["note"]["maxLength"] == W.NOTE_MAX + W.GRAMMAR_HEADROOM == 332
+    assert (props["next_pick_reason"]["maxLength"]
+            == W.REASON_MAX + W.GRAMMAR_HEADROOM == 332)
+    assert props["summary"]["maxLength"] == W.SUMMARY_MAX + W.GRAMMAR_HEADROOM == 432
+    assert move_props["tags_add"]["items"]["maxLength"] == W.TAG_MAX == 40, (
+        "the tag cap widened with the prose — a tag is a key the board matches by "
+        "string, so a word-boundary cut would corrupt it, not shorten it")
 
     for path in _STRING_CAP_SITES:
         probe = copy.deepcopy(W.STEWARD_SCHEMA)
@@ -748,10 +756,13 @@ def test_the_caps_sit_above_the_largest_reply_a_real_tick_ever_sent():
     one move is 2, across 12 distinct tag names whose longest is
     `review-disagreement` at 19 characters. So `MOVES_MAX` 40 is above the
     observed 27, `TAGS_MAX` 6 above the observed 2 and `TAG_MAX` 40 above the
-    observed 19, while the three prose caps are the parse ceilings themselves: a
-    cap ABOVE a parse ceiling would let the grammar admit text the parser then
-    throws away, and the record of the steward's decision would stop being the
-    answer it gave."""
+    observed 19. The three prose GRAMMAR caps now sit `GRAMMAR_HEADROOM` (32)
+    characters above the parse ceilings (#4233), so the parser and not the grammar
+    is the cut — and what this node pins is the ceiling beside that: a reply AT
+    300/300/400, the size the longest legitimate note, reason and summary in the
+    ledger sit at, still comes back byte for byte the answer the steward gave,
+    because `_fit_prose` is called with these ceilings, never with the grammar
+    caps."""
     for length in (300, 400, W.NOTE_MAX, W.REASON_MAX, W.SUMMARY_MAX):
         built = _normalised(length)
         assert len(built) == length and built == " ".join(built.split()), (
@@ -957,6 +968,180 @@ def test_a_field_at_or_under_its_cap_is_stored_byte_identical():
     assert len(short) < W.NOTE_MAX
     assert W.parse_steward(_reply_with_prose(note=short))["moves"][0]["note"] == short, (
         "legitimate non-ASCII in a field that fits must survive untouched")
+
+
+# ---------------------------------------------------------------------------
+# #4233: `STEWARD_SCHEMA` caps its prose 32 characters ABOVE the ceilings
+# `_fit_prose` cuts to, so an over-ceiling answer ARRIVES at the parser instead of
+# being sliced by the grammar at the ceiling. With the two numbers equal, #3991's
+# cut could not run: over 1,931 `board_steward` ledger rows only 2 carry the "..."
+# marker (both before #3991 landed), while 179 post-landing values sit at exactly
+# their cap and 6 end on a lone CJK codepoint — the newest booked 2026-11-17.
+# ---------------------------------------------------------------------------
+
+def _admissible_overflow(ceiling: int, grammar_max: int) -> str:
+    """Whole-word prose strictly OVER `ceiling` and AT OR UNDER `grammar_max`.
+
+    Whole 5-character words on a 6-character stride, so a length of `6n - 1`: the
+    shortest such length past the ceiling. Whole words because the shipped value
+    has to be judgeable against a WORD boundary, and inside `grammar_max` because
+    a fixture the widened grammar still rejects would be testing an answer the
+    decoder could never have sent.
+    """
+    text = " ".join(["alpha"] * ((ceiling + 4) // 6 + 1))
+    assert ceiling < len(text) <= grammar_max, (
+        f"{len(text)} characters is neither over the ceiling {ceiling} nor inside "
+        f"the grammar cap {grammar_max}: the fixture stopped being admissible")
+    return text
+
+
+def _tick_with_prose(board, monkeypatch, note: str, reason: str, summary: str) -> dict:
+    """One real steward tick whose model answer carries exactly these three prose
+    fields; returns its `board_steward` ledger row, read back off the file.
+
+    `run_prompt_in_session` is the only fake: the parse path, the row writer and
+    the ledger are production, because what is under test is what a live tick books
+    once the grammar stops cutting first.
+    """
+    from workers.sources import _common as C
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": _reply_with_prose(note=note, reason=reason,
+                                                summary=summary)}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "success", out
+    return [e for e in S.read_events(path=S.LEDGER_PATH)
+            if e.get("event") == "board_steward"][-1]
+
+
+def test_the_grammar_admits_an_answer_over_each_prose_ceiling():
+    """#4233 clause 1 (with clause 2's ceiling): the schema caps the three prose
+    fields `GRAMMAR_HEADROOM` above the ceiling `_fit_prose` is called with, that
+    ceiling still bounds everything shipped, and the comment that used to forbid
+    the gap is gone.
+
+    The RELATION is the half that matters: `GRAMMAR_HEADROOM` has to be positive or
+    the grammar slices at the ceiling first and `_fit_prose`'s `len(text) > limit`
+    is never true in production. The count caps and the tag cap stay EXACTLY at
+    their parse ceilings, and the assertion here is what keeps them there — a tag
+    is a key the board matches by string, so a word-boundary cut would corrupt it
+    rather than shorten it, and a count has nothing to cut.
+
+    Clause 2 is measured rather than read off the source: every length from one
+    character past a ceiling out to its grammar cap goes through `parse_steward`
+    and comes back at or under the ceiling. Handing `_fit_prose` the grammar cap
+    instead of the ceiling would ship a 332-character note, and this loop is red on
+    the first such field.
+    """
+    import inspect
+
+    assert W.GRAMMAR_HEADROOM == 32 > 0, (
+        "a headroom of 0 puts the grammar back at the ceiling, where its own slice "
+        "makes _fit_prose's word-boundary cut unreachable")
+    for name, kw, ceiling, grammar_max in (
+            ("note", "note", W.NOTE_MAX, W.NOTE_GRAMMAR_MAX),
+            ("next_pick_reason", "reason", W.REASON_MAX, W.REASON_GRAMMAR_MAX),
+            ("summary", "summary", W.SUMMARY_MAX, W.SUMMARY_GRAMMAR_MAX)):
+        assert grammar_max == ceiling + W.GRAMMAR_HEADROOM, name
+        for length in (ceiling + 1, ceiling + 8, grammar_max):
+            text = _normalised(length)
+            assert len(text) == length and text == " ".join(text.split())
+            parsed = W.parse_steward(_reply_with_prose(**{kw: text}))
+            got = parsed["moves"][0]["note"] if name == "note" else parsed[name]
+            assert len(got) <= ceiling, (
+                f"a {name} of {length} characters — admissible grammar, over the "
+                f"ceiling — shipped {len(got)} characters, over {ceiling}")
+            assert got, f"a {name} of {length} characters shipped empty"
+
+    src = inspect.getsource(W)
+    for stale in ("exactly the ceiling the parse path imposes",
+                  "The two have to be one number"):
+        assert stale not in src, (
+            f"{stale!r} is back: that is the equal-caps rule #4233 reversed, and "
+            "the next reader who trusts it re-breaks the guard")
+
+
+def test_the_parse_ceilings_and_the_three_cap_comments_stay_where_they_are():
+    """#4233 clause 1 (placement) and clause 2 (the call sites): `_fit_prose` is
+    still called with `NOTE_MAX`/`REASON_MAX`/`SUMMARY_MAX` — 300/300/400 — and the
+    three places that document the relation name the parser as the cutter.
+
+    The source form is what this node can pin that the behaviour loop above cannot:
+    `parse_steward` has three `_fit_prose` call sites, and the failure it is here
+    for is one of them quietly switching to the grammar cap while the other two
+    stay. The discrimininator is exact — `NOTE_MAX)` cannot match inside
+    `NOTE_GRAMMAR_MAX)` — so a call site widened to the grammar cap drops the
+    count for that ceiling to 0 and this node is red.
+    """
+    import inspect
+
+    assert (W.NOTE_MAX, W.REASON_MAX, W.SUMMARY_MAX) == (300, 300, 400)
+    src = inspect.getsource(W.parse_steward)
+    for ceiling in ("NOTE_MAX", "REASON_MAX", "SUMMARY_MAX"):
+        assert src.count(f"{ceiling})") == 1, (
+            f"`parse_steward` no longer hands _fit_prose exactly one {ceiling}, so "
+            "a shipped field can be longer than the ceiling the ledger scan reads")
+    for fn in (W._fit_prose, W.parse_steward):
+        doc = fn.__doc__ or ""
+        assert "#4233" in doc, f"{fn.__name__}'s docstring stopped stating the rule"
+        assert "GRAMMAR_HEADROOM" in doc, (
+            f"{fn.__name__} no longer names the headroom that makes its own branch "
+            "reachable")
+
+
+def test_an_admissible_over_ceiling_answer_is_booked_already_cut(board, monkeypatch):
+    """#4233 clauses 3 and 4, across the seam this round opened: prose longer than
+    its ceiling but inside the widened grammar goes through a real tick and is
+    booked cut at a word boundary, under the ceiling, ending on the ASCII marker
+    with no trailing non-ASCII run — while a field that fits the ceiling is booked
+    byte for byte, marker-free, CJK tail and all.
+
+    Driving `parse_steward` directly cannot show this, because what changed is what
+    the grammar lets reach it: the ledger the item was filed from is the proof the
+    old order never produced a cut value. The tick is the seam — model answer,
+    parse, row, ledger — so a guard that only fires in the unit test would leave
+    this red.
+    """
+    from workers.queue import SUMMARY_MARKER
+    _ten_item_board(board)
+
+    fields = (("note", W.NOTE_MAX, W.NOTE_GRAMMAR_MAX),
+              ("next_pick_reason", W.REASON_MAX, W.REASON_GRAMMAR_MAX),
+              ("summary", W.SUMMARY_MAX, W.SUMMARY_GRAMMAR_MAX))
+    texts = {name: _admissible_overflow(ceiling, grammar_max)
+             for name, ceiling, grammar_max in fields}
+    row = _tick_with_prose(board, monkeypatch, note=texts["note"],
+                           reason=texts["next_pick_reason"],
+                           summary=texts["summary"])
+    for name, ceiling, _grammar_max in fields:
+        got = (row["moves"][0]["note"] if name == "note" else row[name])
+        text = texts[name]
+        assert len(text) > ceiling, f"the {name} fixture stopped overflowing"
+        assert got.endswith(SUMMARY_MARKER), (
+            f"a {name} over the ceiling was booked uncut, so the reader cannot tell "
+            "a truncation from a sentence")
+        body = got[:-len(SUMMARY_MARKER)]
+        assert len(got) < ceiling, (
+            f"a {name} sits at {len(got)} == {ceiling}: that is the grammar's blind "
+            f"slice, not a word-boundary cut. tail {got[-12:]!r}")
+        assert text.startswith(body) and text[len(body)] == " ", (
+            f"the {name} cut landed mid-word: tail {got[-12:]!r}")
+        assert all(ord(c) <= 127 for c in got), (
+            f"a cut {name} ends {got[-8:]!r} — non-ASCII at the tail is the shape "
+            "the ledger scan counted")
+
+    fits = _normalised(W.NOTE_MAX - 2) + "机器"
+    assert len(fits) == W.NOTE_MAX
+    kept = _tick_with_prose(board, monkeypatch, note=fits,
+                            reason=_normalised(W.REASON_MAX),
+                            summary=_normalised(W.SUMMARY_MAX))
+    assert kept["moves"][0]["note"] == fits, (
+        f"a note AT the ceiling was re-cut (tail {kept['moves'][0]['note'][-10:]!r})")
+    assert SUMMARY_MARKER not in kept["moves"][0]["note"], "a field that fits got a marker"
+    assert kept["next_pick_reason"] == _normalised(W.REASON_MAX)
+    assert kept["summary"] == _normalised(W.SUMMARY_MAX)
 
 
 def _degenerate_prose_reply() -> dict:
@@ -1451,8 +1636,14 @@ def test_the_budget_the_caps_and_the_resample_guard_are_untouched(board, monkeyp
     move_props = props["moves"]["items"]["properties"]
     assert props["moves"]["maxItems"] == W.MOVES_MAX == 40
     assert (move_props["note"]["maxLength"], props["next_pick_reason"]["maxLength"],
-            props["summary"]["maxLength"]) == (W.NOTE_MAX, W.REASON_MAX, W.SUMMARY_MAX) \
-        == (300, 300, 400)
+            props["summary"]["maxLength"]) == (W.NOTE_GRAMMAR_MAX,
+                                               W.REASON_GRAMMAR_MAX,
+                                               W.SUMMARY_GRAMMAR_MAX) \
+        == (332, 332, 432), "the schema's prose caps moved off #4233's headroom"
+    assert (W.NOTE_MAX, W.REASON_MAX, W.SUMMARY_MAX) == (300, 300, 400), (
+        "the parse ceilings above the schema caps are what `_fit_prose` still cuts "
+        "to; the 32-character gap between the two sets is what makes that cut "
+        "reachable at all (#4233)")
     for name in ("tags_add", "tags_remove"):
         assert move_props[name]["maxItems"] == W.TAGS_MAX == 6, name
         assert move_props[name]["items"]["maxLength"] == W.TAG_MAX == 40, name
@@ -2319,7 +2510,12 @@ def test_the_clamp_left_every_input_of_the_stewards_tick_alone(board, monkeypatc
     assert W.STEWARD_SCHEMA["properties"]["moves"]["maxItems"] == W.MOVES_MAX == 40, (
         "the schema and the parser's move cap are no longer one number, or the "
         "number is no longer 40 (#2197)")
-    assert W.STEWARD_SCHEMA["properties"]["summary"]["maxLength"] == W.SUMMARY_MAX == 400
+    assert (W.STEWARD_SCHEMA["properties"]["summary"]["maxLength"]
+            == W.SUMMARY_GRAMMAR_MAX == 432), (
+        "the schema's summary cap moved off its #4233 headroom over the parse "
+        "ceiling")
+    assert (W.SUMMARY_MAX, W.NOTE_MAX, W.REASON_MAX) == (400, 300, 300), (
+        "the parse ceilings `parse_steward` shares with the schema moved (#2197)")
     assert W.STEWARD_STATUSES == ("draft", "up_next", "in_progress")
 
 
