@@ -18,7 +18,10 @@ to quote `confidence` while `eval/run_eval.py` writes `ci` quotes nothing.
 
 The vault is read-only and gitignored state is not in this checkout, so the file
 is resolved the way the audit resolves its baselines: an override, else the live
-checkout.
+checkout. Since #4192 the unit being read is that file *plus the sibling `.md` files
+beside it*, because #4190 spills sections out of it to get under the vault's size cap;
+`tests/skill_folder.py` is the reader and the `#4192` section at the end of this file is
+what the widening keeps.
 """
 import os
 import re
@@ -26,12 +29,51 @@ from pathlib import Path
 
 import pytest
 
+from tests.skill_folder import disk_skill_folder
+
 ROOT = Path(__file__).resolve().parent.parent
-SKILL = Path(os.environ.get("LLOYD_VAULT", Path.home() / "obsidian")) / "skills" / "retrieval-eval" / "SKILL.md"
+
+
+def _vault_skill_dir() -> Path:
+    """The `skills/retrieval-eval` folder the override (else the live vault) points at.
+
+    A function, where this used to be one inline `Path(...)`: a node has to be able to
+    point `LLOYD_VAULT` at a temp folder and resolve the same path this module resolved at
+    import, and that is how #4192's sibling-union clauses are pinned without re-importing
+    this file and re-running the `summarize()` passes below.
+    """
+    return (Path(os.environ.get("LLOYD_VAULT", Path.home() / "obsidian"))
+            / "skills" / "retrieval-eval")
+
+
+SKILL = _vault_skill_dir() / "SKILL.md"
 
 pytestmark = pytest.mark.skipif(not SKILL.exists(), reason=f"vault skill not present at {SKILL}")
 
-TEXT = SKILL.read_text()
+#: `SKILL.md` by itself, and that file widened to the sibling `.md` files in its folder
+#: (#4192). Whole-file assertions read `TEXT`; `section()` reads both, because a section's
+#: *existence* is a claim about `SKILL.md` alone while its *content* may have been spilled
+#: to a sibling. With one file in that folder — the state of the vault today — `TEXT` is
+#: `SKILL_MAIN` byte for byte, so the widening costs nothing until a section actually moves.
+SKILL_MAIN, TEXT = disk_skill_folder(_vault_skill_dir())
+
+
+def _section(main: str, union: str, label: str, heading: str) -> str:
+    """The span under `heading` in `union`, gated on `heading` existing in `main`.
+
+    The gate is what keeps existence pinned to `SKILL.md`: a heading that appears only in
+    a sibling is a section the nightly cannot find by following the page it was told to
+    run, so it is the `no section headed …` failure, not a pass.
+    """
+    m = re.search(rf"^#{{2,3}} {re.escape(heading)}.*$", main, re.MULTILINE)
+    assert m, f"no section headed {heading!r} in {label}"
+    # Every heading line of `main` survives into `union` — `splice_union` only ever inserts
+    # text, it never rewrites or deletes one — so a heading found in `main` is found here
+    # too, and no second `assert` is needed on the union text.
+    at = re.search(rf"^#{{2,3}} {re.escape(heading)}.*$", union, re.MULTILINE)
+    rest = union[at.end():]
+    nxt = re.search(r"^#{2,3} ", rest, re.MULTILINE)
+    return rest[: nxt.start()] if nxt else rest
 
 
 def section(heading: str) -> str:
@@ -40,12 +82,14 @@ def section(heading: str) -> str:
     Bounded on purpose: a keyword scanned across the whole file would pass on a
     mention in `## Notes` while Step 3 said something else, and Step 3 is where
     the verdict gets authored.
+
+    The span is taken across `SKILL.md` and its siblings (#4192), which is what lets
+    #4190 move a section's prose to a sibling under the same heading without moving the
+    keyword out of the section that owns it. The bound survives the widening — the union is
+    spliced section by section, not concatenated — so a keyword parked under some other
+    heading is still invisible here, whether that heading is in `SKILL.md` or in a sibling.
     """
-    m = re.search(rf"^#{{2,3}} {re.escape(heading)}.*$", TEXT, re.MULTILINE)
-    assert m, f"no section headed {heading!r} in {SKILL}"
-    rest = TEXT[m.end():]
-    nxt = re.search(r"^#{2,3} ", rest, re.MULTILINE)
-    return rest[: nxt.start()] if nxt else rest
+    return _section(SKILL_MAIN, TEXT, str(SKILL), heading)
 
 
 # ── the trigger is an interval ───────────────────────────────────────────────
@@ -377,3 +421,124 @@ def test_step_four_windows_the_figures_that_retired_the_delta_rule():
     # The retirement conclusion survived the re-wording, word for word.
     for kept in ("resolution limit", "not a threshold", "pre-#608", "Do not reintroduce it"):
         assert kept in bullet, f"the retirement conclusion lost {kept!r}"
+
+
+# ── #4192: the section span spans the FOLDER, and keeps both its boundaries ────
+#
+# The three nodes below grade `tests/skill_folder.py` through this module's own reader, on
+# a skill folder built in `tmp_path` — never on the live vault, which today holds one file
+# and therefore cannot show a sibling being read at all. Each of the three is the failure a
+# simpler widening would have allowed: (1) a sibling's prose never reaching the section that
+# owns it, (2) somebody else's prose reaching it, (3) a heading that only a sibling has
+# reading as a section the nightly can follow.
+
+#: A `SKILL.md` in the shape a spill leaves behind: every heading present, its own prose
+#: thin, `## Notes` carrying something no other section may borrow.
+_SPILL_MAIN = """# retrieval-eval
+
+## Step 3: Test each night-over-night move
+Spilled-to-sibling marker: only the pointer line survived here.
+
+## Step 4: Report
+A pointer line here too; the prose moved out.
+
+## Notes
+Notes-only marker: never a substitute for a step.
+"""
+
+#: The sibling half of the spill: the SAME `## Step 3` heading, carrying the prose that
+#: moved out of `SKILL.md`.
+_SPILL_SIBLING = """## Step 3: Test each night-over-night move
+The interval excludes zero, and `unpaired-drift-unknown` is the fallback label.
+"""
+
+#: A second spilled section, whose prose must stay inside Step 4's span: `[SILENT]` is a
+#: token Step 4 owns and Step 3 must never be allowed to borrow.
+_SPILL_SIBLING_STEP4 = """## Step 4: Report
+Never answer [SILENT] here.
+"""
+
+
+def _spilled_folder(tmp_path: Path, siblings: dict[str, str]) -> Path:
+    """Build `skills/retrieval-eval/SKILL.md` plus the named siblings under `tmp_path`."""
+    folder = tmp_path / "skills" / "retrieval-eval"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(_SPILL_MAIN, encoding="utf-8")
+    for name, body in siblings.items():
+        (folder / name).write_text(body, encoding="utf-8")
+    return folder
+
+
+def test_a_spilled_section_reads_its_keywords_from_the_sibling_that_carries_them(
+        tmp_path, monkeypatch):
+    """Clause 1: `section()` returns the folder's text for a heading, not one file's.
+
+    `unpaired-drift-unknown` exists only in the sibling's copy of `## Step 3`, which is
+    exactly what #4190's spill produces: the heading and a pointer stay in `SKILL.md`, the
+    sentence moves. The node reaches the folder through `LLOYD_VAULT`, so the path it grades
+    is the path this module resolves at import, and the last two lines run the real
+    `section()` with this module pointed at that folder — the delegation from `section()` to
+    `_section()` is itself part of what clause 1 asks for.
+    """
+    monkeypatch.setenv("LLOYD_VAULT", str(tmp_path))
+    folder = _spilled_folder(tmp_path, {"step3-detail.md": _SPILL_SIBLING})
+    assert folder == _vault_skill_dir(), (
+        "LLOYD_VAULT is not the knob the module reads, so nothing below grades it")
+
+    main, union = disk_skill_folder(folder)
+    assert "unpaired-drift-unknown" not in main
+    # The invariant the two `TEXT[TEXT.index(...) : …]` reads above depend on. It is NOT
+    # that `union` starts with `SKILL.md` — splicing into the middle of a section breaks
+    # that, and an assert written on the assumption would fail on the first real spill. It
+    # is that a sibling's prose lands INSIDE the region its heading owns: a slice taken
+    # between two of `SKILL.md`'s own headings still bounds that section, now holding both
+    # files' prose for it and nothing from any other.
+    step3_slice = union[union.index("## Step 3"):union.index("## Step 4")]
+    assert "Spilled-to-sibling marker" in step3_slice, step3_slice
+    assert "unpaired-drift-unknown" in step3_slice, step3_slice
+    assert "Notes-only marker" not in step3_slice, step3_slice
+    assert "unpaired-drift-unknown" in _section(main, union, "SKILL.md", "Step 3")
+
+    monkeypatch.setitem(globals(), "SKILL_MAIN", main)
+    monkeypatch.setitem(globals(), "TEXT", union)
+    assert "unpaired-drift-unknown" in section("Step 3")
+
+
+def test_a_keyword_under_the_wrong_heading_in_a_sibling_still_fails_the_section(tmp_path):
+    """Clause 2: the widening keeps the bound `section()`'s docstring names its reason for.
+
+    Both directions are graded, because concatenating the files instead of splicing them
+    section by section would pass both: `step4-detail.md`'s prose must not stand in for
+    Step 3's while `step3-detail.md`'s does arrive, and `SKILL.md`'s own `## Notes` prose —
+    the original 09-09 failure the docstring describes — must not either.
+    """
+    folder = _spilled_folder(tmp_path, {"step3-detail.md": _SPILL_SIBLING,
+                                        "step4-detail.md": _SPILL_SIBLING_STEP4})
+    main, union = disk_skill_folder(folder)
+    step3 = _section(main, union, "SKILL.md", "Step 3")
+    assert "excludes zero" in step3, (
+        "the sibling's Step 3 prose did not arrive in Step 3's span: the union is not "
+        "being spliced under the shared heading")
+    assert "[SILENT]" not in step3, (
+        "Step 4's prose from a sibling reached Step 3 — a concatenated union")
+    assert "Notes-only marker" not in step3, (
+        "`## Notes` prose reached Step 3 again, which is the failure `section()` was "
+        "written to refuse")
+    assert "[SILENT]" in _section(main, union, "SKILL.md", "Step 4"), (
+        "the sibling's prose went nowhere: Step 4's own span is where it belongs")
+
+
+def test_a_heading_only_a_sibling_carries_is_still_a_missing_section(tmp_path):
+    """Clause 3: existence stays a claim about `SKILL.md` alone.
+
+    A nightly told to run `SKILL.md` cannot follow a heading that page does not have, so the
+    union is not allowed to answer for it. `Step 9` is still visible in the whole-file text
+    — a spilled section's prose does not vanish from the file-level assertions — and is still
+    the `no section headed …` failure from a section-scoped one.
+    """
+    folder = _spilled_folder(tmp_path, {"step9-detail.md":
+                                        "## Step 9: Ghost section\nOnly a sibling has this.\n"})
+    main, union = disk_skill_folder(folder)
+    assert "Ghost section" in union, "the sibling's prose vanished from the whole-file text"
+    with pytest.raises(AssertionError, match="no section headed 'Step 9'"):
+        _section(main, union, str(folder / "SKILL.md"), "Step 9")

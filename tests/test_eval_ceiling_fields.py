@@ -36,7 +36,11 @@ ROOT = Path(__file__).resolve().parent.parent
 _VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
 PY = _VENV if _VENV.exists() else Path(sys.executable)
 SCRIPT = ROOT / "eval" / "run_eval.py"
-SKILL = Path.home() / "obsidian" / "skills" / "retrieval-eval" / "SKILL.md"
+SKILL_DIR = Path.home() / "obsidian" / "skills" / "retrieval-eval"
+SKILL = SKILL_DIR / "SKILL.md"
+#: This module as an object, so a node can point `SKILL_DIR`/`SKILL` at a throwaway folder
+#: and still call the real vault-reading node below — the only way to pin #4192's skip arm.
+_SELF = sys.modules[__name__]
 
 sys.path.insert(0, str(ROOT))
 # Imported at module level on purpose. `tests/conftest.py` points LLOYD_DATA at a
@@ -46,6 +50,19 @@ sys.path.insert(0, str(ROOT))
 from app.paths import EVAL_BASELINES_DIR as BASELINES  # noqa: E402
 import eval.run_eval as ev  # noqa: E402
 import eval.label_agreement_ceiling as lac  # noqa: E402
+from tests.skill_folder import disk_skill_folder  # noqa: E402
+
+
+def skill_folder_text(folder: Path) -> str:
+    """The skill's text as `SKILL.md` plus the sibling `.md` files beside it (#4192).
+
+    #4190 spills whole sections of `SKILL.md` into those siblings to get the body under the
+    vault's size cap, so a reader of one file starts reporting the spilled keywords as
+    deleted prose. The folder is read off disk, exactly as this module always read it — not
+    from HEAD, which would be a second change to what a pass here means; the two
+    HEAD-reading fixtures are widened in `tests/test_eval_trend_stats.py` instead.
+    """
+    return disk_skill_folder(folder)[1]
 
 CI = os.environ.get("LLOYD_CI", "") == "1"
 #: Said out loud at every skip because nothing on this box sets that variable: the
@@ -989,10 +1006,14 @@ def test_the_skill_names_the_ceiling_and_the_veto():
     """Clause 5. The report is where the next reader learns which ceiling is which and
     what a low agreement forbids, so it lives in the skill, not only in code. Skipped
     when the vault is not mounted here; the same arrangement as
-    `tests/test_automod_skill_maps_the_radius`, which asserts on vault prose too."""
+    `tests/test_automod_skill_maps_the_radius`, which asserts on vault prose too.
+
+    #4192: the text is the whole skill folder, so a token #4190 spills to a sibling is
+    still named here. `tests/test_a_spilled_ceiling_token_still_names_the_ceiling` is the
+    pin that this widening kept all four tokens rather than quietly losing one of them."""
     if not SKILL.exists():
         pytest.skip("no vault skills tree here")
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_folder_text(SKILL_DIR)
     assert lac.CEILING_KIND in text, "the skill names the gold-side ceiling"
     assert "anchorless" in text, "and names the seed-side ceiling beside it"
     assert "entity_label_agreement" in text
@@ -1759,3 +1780,81 @@ def test_every_refused_ceiling_node_names_the_invocation_and_its_owner(tmp_path,
     # The stub refusal still points at its own flag as well: the remediation node is in
     # addition to that reason, never instead of it.
     assert "allow-stub-ceiling" in states["stub read as a measurement"]["ceiling"]["reason"]
+
+
+# ── #4192: the folder read keeps every token and keeps its skip ───────────────
+#
+# Widening a reader can always be done by weakening it, so the two nodes below are the
+# difference between the two: a token that lives only in a sibling still satisfies the
+# ceiling node, and a missing vault is still a skip rather than a pass. Both run on a folder
+# in `tmp_path` — the live vault holds one file today, so it can show neither. The
+# section-scoped half of the widening (a keyword under the WRONG heading must not count) is
+# pinned where the section helper lives, in
+# `tests/test_retrieval_eval_skill_ci_contract.py`; this module's ceiling node always made
+# a whole-file claim about four tokens, and a whole-file claim is what it still grades.
+
+#: One `SKILL.md` in the shape #4190's spill leaves: the headings and a pointer remain, the
+#: Step 2b prose — with two of the four tokens — lives in the sibling.
+_SPILL_MAIN = """# retrieval-eval
+
+## Step 2b: Read each number against the gold-side ceiling (#654)
+The ceiling and the veto are specified in `step2b-detail.md`.
+
+## Notes
+`anchorless` is the seed-side ceiling, a different thing. 0.80 appears here too, as a
+historical note about another number.
+"""
+
+_SPILL_STEP2B = """## Step 2b: Read each number against the gold-side ceiling (#654)
+The ceiling is `gold_label_surrogate`; below `entity_label_agreement` 0.80 the veto holds.
+"""
+
+
+def _spilled_folder(tmp_path: Path, siblings: dict[str, str]) -> Path:
+    folder = tmp_path / "skills" / "retrieval-eval"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(_SPILL_MAIN, encoding="utf-8")
+    for name, body in siblings.items():
+        (folder / name).write_text(body, encoding="utf-8")
+    return folder
+
+
+def test_a_spilled_ceiling_token_still_names_the_ceiling(tmp_path, monkeypatch):
+    """Clause 5: the real ceiling node, run against a folder whose tokens are split.
+
+    This calls `test_the_skill_names_the_ceiling_and_the_veto` itself, with this module's two
+    paths pointed at the throwaway folder — not at the reader helper, which would stay green
+    while the node still opened one file. An earlier shape of this node asserted against
+    `skill_folder_text(folder)` and did exactly that; measured, reverting the node's own read
+    to `SKILL.read_text()` failed nothing until this shape was in place.
+
+    All four of the node's tokens are here. `lac.CEILING_KIND` (`gold_label_surrogate`) and
+    `entity_label_agreement` live only in the sibling, `0.80` in the sibling and in
+    `## Notes`, and `anchorless` only in `SKILL.md` — so the node passes on the folder and
+    would fail on either file alone, from two directions.
+    """
+    folder = _spilled_folder(tmp_path, {"step2b-detail.md": _SPILL_STEP2B})
+    main = (folder / "SKILL.md").read_text(encoding="utf-8")
+    assert "gold_label_surrogate" not in main and "entity_label_agreement" not in main, (
+        "the throwaway spill kept the tokens in `SKILL.md`, so nothing below is graded")
+    assert "anchorless" in main and "anchorless" not in _SPILL_STEP2B, (
+        "the fixture's `SKILL.md`-only token moved, so a one-file read would pass")
+    monkeypatch.setattr(_SELF, "SKILL_DIR", folder)
+    monkeypatch.setattr(_SELF, "SKILL", folder / "SKILL.md")
+    test_the_skill_names_the_ceiling_and_the_veto()
+
+
+def test_no_vault_still_skips_the_ceiling_node(tmp_path, monkeypatch):
+    """Clause 5's other half: the widening did not turn the skip arm into a pass.
+
+    The real node is called, with this module's two paths pointed at an empty folder —
+    `pytest.skip` inside it surfaces as `Skipped` here, which is the whole assertion. A
+    version of this node catching `FileNotFoundError` instead would pass while the skip was
+    being replaced by an error, which is the difference this assert names.
+    """
+    empty = tmp_path / "no-such-skill"
+    empty.mkdir()
+    monkeypatch.setattr(_SELF, "SKILL_DIR", empty)
+    monkeypatch.setattr(_SELF, "SKILL", empty / "SKILL.md")
+    with pytest.raises(pytest.skip.Exception):
+        test_the_skill_names_the_ceiling_and_the_veto()

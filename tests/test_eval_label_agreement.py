@@ -38,6 +38,10 @@ _VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
 PY = _VENV if _VENV.exists() else Path(sys.executable)
 
 import eval.label_agreement_ceiling as lac  # noqa: E402
+# The skill is read as a FOLDER — `SKILL.md` plus whatever siblings a spill moved sections
+# to — and from HEAD, never the worktree. `tests/skill_folder.py` is the shared reader;
+# `tests/test_eval_trend_stats.py` carries the two nodes that pin its HEAD-only contract.
+from tests.skill_folder import git_skill_folder  # noqa: E402
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -990,22 +994,22 @@ def test_http_labeler_sends_temperature_to_an_endpoint_that_takes_it():
 # ── seam 3: the skill's documented command -> the parser ─────────────────────
 
 VAULT = Path.home() / "obsidian"
-SKILL_RELPATH = "skills/retrieval-eval/SKILL.md"
+SKILL_DIR_RELPATH = "skills/retrieval-eval"
+SKILL_RELPATH = f"{SKILL_DIR_RELPATH}/SKILL.md"
 
-# Read the skill the way `tests/test_eval_trend_stats.py:810-826` does — from the
-# vault's committed HEAD, via git, and FAIL when HEAD is unreadable rather than
-# skip: a skipped acceptance check is a gate that reads green because nobody could
+# Read the skill the way the `skill_text` fixture in `tests/test_eval_trend_stats.py`
+# does — from the vault's committed HEAD, via git, and FAIL when HEAD is unreadable rather
+# than skip: a skipped acceptance check is a gate that reads green because nobody could
 # look. Same residual limit, same admission: the vault is its own tree, so its HEAD
-# advances independently of this commit.
+# advances independently of this commit. #4192 widened the unit from one file to the
+# folder, enumerated by `git ls-tree HEAD` so a sibling that exists only in the working
+# tree satisfies nothing here; `tests/test_eval_trend_stats.py` pins that both modules read.
 @pytest.fixture(scope="module")
 def skill_text() -> str:
-    proc = subprocess.run(["git", "-C", str(VAULT), "show", f"HEAD:{SKILL_RELPATH}"],
-                          capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        pytest.fail(
-            f"clause 5 is unverifiable: `git -C {VAULT} show HEAD:{SKILL_RELPATH}` "
-            f"failed ({proc.stderr.strip()[:200]})")
-    return proc.stdout
+    _main, union, error = git_skill_folder(VAULT, SKILL_DIR_RELPATH)
+    if error:
+        pytest.fail(f"clause 5 is unverifiable: {error}")
+    return union
 
 
 _FLAG = re.compile(r"(?:^|\s)(--[\w-]+)")

@@ -63,6 +63,10 @@ from scripts.eval_trend_stats import (  # noqa: E402
     required_n,
     wilson_interval,
 )
+# The skill is read as a FOLDER — `SKILL.md` plus whatever siblings a spill moved sections
+# to — and from HEAD, never the worktree. `tests/skill_folder.py` says why both halves
+# matter; the two nodes at the end of this file are what pin them.
+from tests.skill_folder import git_skill_folder  # noqa: E402
 
 IDS = tuple(f"q{i}" for i in range(1, 9))
 
@@ -854,9 +858,16 @@ def test_wilson_interval_is_the_score_interval_not_the_normal_one():
 # drafted. The residual limit — the vault is its own tree, so HEAD advances
 # independently of this commit — is named in each failure message rather than
 # implied away.
+#
+# #4192 widened the *unit* read from one file to the folder, and the same argument
+# applies to every file in it: a sibling is enumerated with `git ls-tree HEAD` and read
+# with `git show HEAD:<sibling>`, so a spill that was drafted in the working tree and
+# then reverted cannot leave this fixture reading green. An uncommitted sibling is
+# invisible here on purpose, which is the first of the two nodes at the end of this file.
 
 VAULT = Path.home() / "obsidian"
-SKILL_RELPATH = "skills/retrieval-eval/SKILL.md"
+SKILL_DIR_RELPATH = "skills/retrieval-eval"
+SKILL_RELPATH = f"{SKILL_DIR_RELPATH}/SKILL.md"
 
 # The exact instruction #608 retires. It is quoted here so that restoring it is
 # caught, while the new text may still *discuss* 0.05 — it must, to explain why
@@ -865,17 +876,24 @@ RETIRED_INSTRUCTION = re.compile(
     r"call out any metric that moved more than 0\.05", re.IGNORECASE)
 
 
+def skill_text_from_head(vault: Path) -> str:
+    """The skill folder as committed at `HEAD`: `SKILL.md` plus each committed sibling.
+
+    A function rather than the fixture body, because clause 4's two pins have to point it
+    at a throwaway vault; the fixture below is the same call against the live one.
+    """
+    _main, union, error = git_skill_folder(vault, SKILL_DIR_RELPATH)
+    if error:
+        pytest.fail(
+            f"clause 5 is unverifiable: {error} The nightly reporting contract is this "
+            f"item's fifth clause; it must not read green because the artifact it grades "
+            f"could not be read.")
+    return union
+
+
 @pytest.fixture(scope="module")
 def skill_text() -> str:
-    proc = subprocess.run(["git", "-C", str(VAULT), "show", f"HEAD:{SKILL_RELPATH}"],
-                          capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        pytest.fail(
-            f"clause 5 is unverifiable: `git -C {VAULT} show HEAD:{SKILL_RELPATH}` "
-            f"failed ({proc.stderr.strip()[:200]}). The nightly reporting contract "
-            f"is this item's fifth clause; it must not read green because the "
-            f"artifact it grades could not be read.")
-    return proc.stdout
+    return skill_text_from_head(VAULT)
 
 
 def test_the_skill_points_the_nightly_runner_at_the_audit(skill_text):
@@ -2590,3 +2608,73 @@ def test_the_writer_s_own_artifact_is_what_the_reader_is_measured_on(tmp_path):
     # so its query is attributed `{}` — a MISS the reader must count as 0 and not skip.
     assert prev.scores["q-miss"]["entity_legs"] == {}, prev.scores["q-miss"]
     assert t.legs["entity_hit"]["cur_rate"] == pytest.approx(2 / 3), t.legs["entity_hit"]
+
+
+# ── #4192: the skill folder is read from HEAD, including its siblings ─────────
+#
+# #4190 spills sections of `SKILL.md` into sibling `.md` files beside it, so the two
+# commit-reading `skill_text` fixtures in this file and in
+# `tests/test_eval_label_agreement.py` have to see those siblings or the spilled keywords
+# read as deleted prose. The widening must not cost them the property they were written
+# for: they grade the vault's COMMITTED state, because a spill drafted in the working tree
+# and reverted must not leave the contract looking landed. The nodes below build a
+# throwaway vault and point `skill_text_from_head` at it — never the live vault, which has
+# one file and so cannot show either property.
+
+
+def _tmp_vault(tmp_path: Path, files: dict[str, str], commit: bool = True) -> Path:
+    """A git repo holding `skills/retrieval-eval/<name>` for each entry, committed or not."""
+    folder = tmp_path / "skills" / "retrieval-eval"
+    folder.mkdir(parents=True)
+    for name, body in files.items():
+        (folder / name).write_text(body, encoding="utf-8")
+    if not commit:
+        return tmp_path
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), *args],
+                       capture_output=True, text=True, timeout=60, check=True)
+    git("init", "-q")
+    git("add", "-A")
+    git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "skill")
+    return tmp_path
+
+
+def test_a_committed_sibling_joins_skill_text_and_an_uncommitted_one_does_not(tmp_path):
+    """Clause 4: siblings widen the text, but only committed ones.
+
+    Both halves are one node because the failure mode is one instrument reading two
+    different states: `step3-detail.md` is committed and its prose must arrive;
+    `reverted-draft.md` exists only in the working tree and its prose must not. A reader
+    built from `iterdir()` would pass the first and fail the second.
+    """
+    vault = _tmp_vault(tmp_path, {
+        "SKILL.md": "# retrieval-eval\n\n## Step 3: Test each night-over-night move\n"
+                    "Spilled out; the pointer stayed.\n",
+        "step3-detail.md": "## Step 3: Test each night-over-night move\n"
+                           "committed-sibling-prose is what moved here.\n"})
+    main, union, error = git_skill_folder(vault, SKILL_DIR_RELPATH)
+    assert error is None, error
+    assert "committed-sibling-prose" not in main, (
+        "the throwaway `SKILL.md` already carried the sibling's prose, so the asserts "
+        "below would grade nothing")
+    assert "committed-sibling-prose" in union, (
+        "a committed sibling did not reach the text: the spill's keywords would read as "
+        "deleted prose")
+
+    (vault / "skills" / "retrieval-eval" / "reverted-draft.md").write_text(
+        "uncommitted-sibling-prose was drafted and reverted.\n", encoding="utf-8")
+    assert "uncommitted-sibling-prose" not in git_skill_folder(vault, SKILL_DIR_RELPATH)[1], (
+        "the reader fell through to the working tree, so a reverted spill still reads "
+        "as landed")
+
+
+def test_an_unreadable_head_fails_the_fixture_rather_than_skipping(tmp_path):
+    """Clause 4's other arm: a folder that cannot be read from HEAD is a failure, not a pass.
+
+    `pytest.fail` raises `Failed`, which is neither a skip nor an error, so the node has to
+    name the exception type it expects — a `pytest.skip` here would silently turn #608's
+    fifth clause into the green nobody could look at.
+    """
+    vault = _tmp_vault(tmp_path, {"SKILL.md": "# retrieval-eval\n"}, commit=False)
+    with pytest.raises(pytest.fail.Exception):
+        skill_text_from_head(vault)
