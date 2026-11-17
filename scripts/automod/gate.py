@@ -3068,20 +3068,50 @@ class Gate:
         sha-guarded per-turn pre-images); nothing at the landing decision asks
         whether a restore of the state THIS round changed would work.
 
-        Deterministic, stdlib, read-only, and it blocks nothing — on #679's
-        precedent and for #679's reason: the honest verdict today is almost
-        always `unevaluated`, because no rung applies the candidate and unwinds
-        it (#3930 step 3 is deferred), and a check that cannot fail yet must not
-        dress up as one that passed. The record rides the ledger event through
-        `REC.to_event`, the way `vet`'s and `pyright`'s do, because a verdict
-        that only survives in `gate.json` has no denominator.
+        For the three FILE-SCOPE surfaces it now does (#4082): this rung supplies a
+        disposable copy, and `REC.build_recovery_record` applies the round's own
+        changed bytes — read out of `self.worktree`, the round's committed tree —
+        to that copy and unwinds them there, so the verdict for
+        supervisor-program-definitions, systemd-user-unit-set and
+        effective-runtime-config is a measured round-trip rather than a
+        declaration. The copy is the only thing it writes: the live tree, the real
+        unit directory and both stores are never written, and the rehearsal execs
+        nothing — the `runner` it is handed raises if called, so no `supervisorctl
+        reread`, no `systemctl --user daemon-reload`, no restart is reachable from
+        here. The two stores and the guardian snapshot keep their old answers
+        (`unevaluated`: the restore is coarser than one round; `unrecoverable`).
+
+        Deterministic, stdlib, and it blocks nothing — on #679's precedent and for
+        #679's reason: a verdict that cannot fail yet must not dress up as one that
+        passed, and a `failed` rehearsal is an alert, not a veto, until a person
+        rules on the split. So a crash inside the instrument is recorded as
+        `unevaluated` and the round stands, exactly as `code_rules` handles its own
+        runner raising: failing a round for the fault of a check that may not block
+        is the inverse of the gap this rung exists to close. The record rides the
+        ledger event through `REC.to_event`, the way `vet`'s and `pyright`'s do,
+        because a verdict that only survives in `gate.json` has no denominator — and
+        `to_event` carries the PER-SURFACE verdicts, which is the only form in which
+        a rehearsal outlives the round.
 
         The cost is bounded to the contract: a round that declares no surface
-        performs no witness read at all, which is what keeps an ordinary code
-        round paying ~0 for it on a box whose RAM gates are already tight.
+        performs no witness read at all and makes no copy, and the scratch copy is
+        made only for a surface that has a file-level undo to rehearse.
         """
-        rec = REC.build_recovery_record(list(self.report.changed_paths or []),
-                                        live_root=self.live)
+        paths = list(self.report.changed_paths or [])
+        scratch = None
+        if any(s.op in REC.SCRATCH_INVERSES for s in REC.declare_surfaces(paths)):
+            scratch = Path(tempfile.mkdtemp(prefix=f"recovery-{self.round_id}-"))
+        try:
+            rec = REC.build_recovery_record(paths, live_root=self.live,
+                                            scratch_root=scratch,
+                                            candidate_root=self.worktree)
+        except Exception as exc:                       # noqa: BLE001 — see above
+            return True, (f"observe-only: RECOVERY UNEVALUATED (the runner raised "
+                          f"{type(exc).__name__}: {str(exc)[:200]}) — no verdict of "
+                          "any kind"), {}
+        finally:
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
         detail = REC.record_summary(rec)
         if rec["verdict"] == REC.FAILED:
             # Still `True`: observe-only. The word has to be in the detail

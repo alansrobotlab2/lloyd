@@ -84,7 +84,17 @@ def recovery_records(events: Iterable[dict], round_ids: Iterable[str]) -> dict[s
 
 def census(events: Iterable[dict], *, last: int = 50,
            ledger: Path | str | None = None) -> dict:
-    """The census as data: the table, the per-surface declaration counts, the split."""
+    """The census as data: the table, the per-surface declaration counts, the split.
+
+    Two denominators, and they are not the same number. `verdicts` counts ROUNDS at
+    the record level, the way #3930 step 6 published it; `restores` counts SURFACES
+    from the per-surface verdicts #4082 puts on the event. A round that rehearses
+    one surface and cannot rehearse a store aggregates to `unevaluated`, so a
+    measured round-trip is invisible in the first count and is exactly what the
+    second one is for. Both are printed: a `verified=0` in the round column does not
+    mean no round-trip was ever measured, and saying only the first would let that
+    misreading stand.
+    """
     events = list(events)
     rounds = window_rounds(events, last)
     records = recovery_records(events, rounds)
@@ -96,11 +106,23 @@ def census(events: Iterable[dict], *, last: int = 50,
                     for rec in records.values())
     verdicts = Counter(str(rec.get("verdict") or R.UNEVALUATED)
                        for rec in records.values())
+    surface_verdicts: Counter = Counter()
+    with_verdicts = 0
+    for rec in records.values():
+        per = rec.get("surface_verdicts")
+        if not isinstance(per, dict) or not per:
+            continue                      # an event from before #4082: no denominator
+        with_verdicts += 1
+        for name, verdict in per.items():
+            surface_verdicts[(str(name), str(verdict))] += 1
     surfaces = [{"surface": s.name,
                  "digest": s.digest,
                  "inverse": s.inverse or "none",
                  "rounds": declared.get(s.name, 0),
-                 "unrecoverable_rounds": unrecoverable.get(s.name, 0)}
+                 "unrecoverable_rounds": unrecoverable.get(s.name, 0),
+                 "verified": surface_verdicts.get((s.name, R.VERIFIED), 0),
+                 "failed": surface_verdicts.get((s.name, R.FAILED), 0),
+                 "unevaluated": surface_verdicts.get((s.name, R.UNEVALUATED), 0)}
                 for s in R.SURFACES]
     return {"window": last,
             "rounds_in_window": len(rounds),
@@ -112,6 +134,10 @@ def census(events: Iterable[dict], *, last: int = 50,
             "verdicts": {"verified": verdicts.get(R.VERIFIED, 0),
                          "failed": verdicts.get(R.FAILED, 0),
                          "unevaluated": verdicts.get(R.UNEVALUATED, 0)},
+            "restores": {"verified": sum(s["verified"] for s in surfaces),
+                         "failed": sum(s["failed"] for s in surfaces),
+                         "unevaluated": sum(s["unevaluated"] for s in surfaces),
+                         "events_with_surface_verdicts": with_verdicts},
             "ledger": str(ledger or S.LEDGER_PATH)}
 
 
@@ -123,17 +149,23 @@ def render(c: dict) -> str:
            f"rounds with a recovery record: {c['rounds_with_record']} "
            f"of {c['rounds_in_window']}",
            "",
-           f"{'surface':<32} {'rounds':>6} {'unrec':>5}  digest -> inverse"]
+           f"{'surface':<32} {'rounds':>6} {'unrec':>5} {'v/f/u':>9}  digest -> inverse"]
     for row in c["surfaces"]:
         out.append(f"{row['surface']:<32} {row['rounds']:>6} "
-                   f"{row['unrecoverable_rounds']:>5}  {row['digest']} -> "
-                   f"{row['inverse']}")
+                   f"{row['unrecoverable_rounds']:>5} "
+                   f"{row['verified']}/{row['failed']}/{row['unevaluated']:>7}  "
+                   f"{row['digest']} -> {row['inverse']}")
+    r = c["restores"]
     out += ["",
             f"rounds with an empty effect contract: {c['contracts']['empty']}",
             f"rounds declaring at least one surface: {c['contracts']['declared']}",
             f"verifier verdicts: verified={c['verdicts']['verified']} "
             f"failed={c['verdicts']['failed']} "
             f"unevaluated={c['verdicts']['unevaluated']}",
+            f"measured restores (per surface, #4082): verified={r['verified']} "
+            f"failed={r['failed']} unevaluated={r['unevaluated']} — over "
+            f"{r['events_with_surface_verdicts']} of {c['rounds_with_record']} "
+            f"round(s) whose ledger row carries per-surface verdicts",
             f"surfaces with no inverse: "
             f"{', '.join(c['no_inverse']) if c['no_inverse'] else 'none'}"]
     return "\n".join(out)

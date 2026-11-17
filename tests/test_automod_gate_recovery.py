@@ -9,10 +9,16 @@ Every rung but `recovery` is stubbed, so the code that runs for real is
 `Gate._rung` (which is where the ledger event is written) plus
 `Gate.rung_recovery` plus the record builder it calls. The changed-path list comes
 from a real scratch git repo, because the declaration being driven by preflight's
-resolved diff is the process boundary here. The witness READERS are injected, and
-that is deliberate: a test must never digest the live tree or open a live store —
-measurement belongs to a scratch root, which is the same rule #3930's risk section
-writes for the rehearsal.
+resolved diff is the process boundary here. The witness READERS are injected where a
+test is about the ledger shape or an unreadable surface, and left REAL — reading a
+scratch root inside `tmp_path` — wherever a test is about #4082's rehearsal, because
+a rehearsal measured through a reader that ignores its root proves nothing. Either
+way no test digests the live checkout or opens a live store: measurement belongs to a
+scratch root, which is the same rule #3930's risk section writes for the rehearsal.
+
+Clause 4 of #3930 is the row and the ladder line; the #4082 clauses are that the rung
+supplies the disposable copy and deletes it, that it writes nothing outside it, and
+that a rehearsal which comes back `failed` still leaves the round passing.
 """
 from __future__ import annotations
 
@@ -69,16 +75,28 @@ class _Stub(G.Gate):
 
     Deliberately built without calling `Gate.__init__`, like `_StubGate` in
     `test_automod_gate.py`: the constructor resolves live-tree paths (the venv,
-    pyright) that a unit test has no business touching. The two attributes the
-    recovery rung actually reads — `report.changed_paths` and `self.live` — are
-    set explicitly, from the scratch repo and a scratch root.
+    pyright) that a unit test has no business touching. The three attributes the
+    recovery rung actually reads — `report.changed_paths`, `self.live` and
+    (since #4082) `self.worktree`, whose bytes the rehearsal applies — are set
+    explicitly, from a scratch root and, for a file-scope round, a scratch
+    worktree that really holds the round's changed files.
     """
 
-    def __init__(self, changed: list[str], *, live_root: Path):
+    def __init__(self, changed: list[str], *, live_root: Path,
+                 worktree: Path | None = None):
         self.round_id = "SM_RECOVERY"
         self.base = "a" * 40
-        self.worktree = Path("/nonexistent-worktree")   # noqa: S106 — never read
+        # A round that declares a FILE-scope surface makes the rung copy and read
+        # this, so such a round must pass a real tree; a pure-code round never does.
+        self.worktree = Path(worktree or "/nonexistent-worktree")
         self.live = Path(live_root)
+        self.skip_smoke = False
+        self._canary = None
+        self.item_id = None
+        self.report = G.GateReport(round_id=self.round_id, base=self.base,
+                                   head="b" * 40)
+        self.report.changed_paths = list(changed)
+        self.calls: list[str] = []
         self.skip_smoke = False
         self._canary = None
         self.item_id = None
@@ -117,6 +135,20 @@ def isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "promotions.jsonl")
+    # `Gate._reuse_path` is `W.round_dir(round_id)/gate-state/rung_cache.json`, and
+    # every stub in this file shares the round id `SM_RECOVERY`, so unpatched the
+    # rung cache of one test is the next test's `REUSED (nothing committed since)`
+    # line within `REUSE_MAX_AGE_S` — and the write lands in the real ~/lloyd-work.
+    # A recovery test that reports a REUSED verdict is measuring the previous test.
+    monkeypatch.setattr(W, "WORK_ROOT", tmp_path / "lloyd-work")
+    # And no rung is carried over from a previous round: `_reuse_inner` reads the
+    # cache through `W.WORK_ROOT` too, so with the root redirected to a fresh
+    # `tmp_path` there is nothing to read and `rung_recovery` really runs.
+    monkeypatch.setattr(G, "_gate_cfg",
+                        lambda key, default=None: {
+                            "reuse_rungs": False,
+                            "skip_smoke": False,
+                            "reuse_max_age_s": 0}.get(key, default))
     events: list[dict] = []
     monkeypatch.setattr(S, "append_event", lambda entry, *a, **k: events.append(dict(entry)))
     return events
@@ -133,12 +165,15 @@ def _readers(calls: list[str]):
 
 
 def _run(tmp_path, monkeypatch, isolate, *, changed: list[str], calls=None,
-         readers=None):
+         readers=None, worktree: Path | None = None):
+    # `unit_dir` is in the signature because the rehearsal asks `default_readers`
+    # for a reader over a SCRATCH copy of the unit directory: a seam that dropped
+    # the root would silently measure the live machine (#4082).
     monkeypatch.setattr(REC, "default_readers",
-                        lambda root: dict(readers if readers is not None
-                                          else _readers(calls if calls is not None
-                                                        else [])))
-    g = _Stub(changed, live_root=tmp_path / "live")
+                        lambda root, unit_dir=None: dict(
+                            readers if readers is not None
+                            else _readers(calls if calls is not None else [])))
+    g = _Stub(changed, live_root=tmp_path / "live", worktree=worktree)
     report = g.run()
     return g, report, [e for e in isolate if e.get("rung") == "recovery"]
 
@@ -147,6 +182,32 @@ def _recovery_event(events: list[dict]) -> dict:
     hits = [e for e in events if e.get("rung") == "recovery"]
     assert len(hits) == 1, f"expected exactly one recovery row, got {len(hits)}"
     return hits[0]
+
+
+CONF_REL = "agent-services/supervisor/conf.d/lloyd-backend.conf"
+
+
+def _live_and_candidate(tmp: Path, rel: str = CONF_REL,
+                        base: str = "command=/old/start\n",
+                        head: str = "command=/new/start\n") -> tuple[Path, Path]:
+    """A scratch machine and a scratch round, as two directories.
+
+    `live` is what the box holds before the landing; `cand` is the round's own
+    worktree, which is where #4082's rehearsal reads the changed bytes from. Both
+    are inside the test's tmp_path, so the rung's readers — the REAL ones, not
+    injected — can be used without ever pointing at the live checkout. That is the
+    point: the gate test exercises the rung, and a rung whose scratch root is a
+    `/nonexistent` stub measures nothing.
+    """
+    live, cand = tmp / "live", tmp / "cand"
+    for root, body in ((live, base), (cand, head)):
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return live, cand
+
+
+CONF_REL = "agent-services/supervisor/conf.d/lloyd-backend.conf"
 
 
 # ── the rung is on the ladder, and the round still passes ───────────────────
@@ -168,23 +229,79 @@ def test_the_recovery_rung_runs_on_every_round_and_never_fails_it(tmp_path, monk
     assert ev["event"] == "gate" and ev["ok"] is True
 
 
-def test_the_record_rides_the_durable_event_in_the_shape_the_census_reads(
-        tmp_path, monkeypatch, isolate):
+def test_the_record_rides_the_durable_event_in_the_shape_the_census_reads(tmp_path,
+                                                                          isolate):
     """Field by field, on the row that outlives the worktree. `gate.json` is
     deleted with the round dir, so #3930's published split can only be counted
-    from here — the same reason `vet`'s and `pyright`'s records are copied."""
-    _, _, events = _run(tmp_path, monkeypatch, isolate,
-                        changed=["agent-services/supervisor/conf.d/x.conf",
-                                 "app/gate.py"])
-    rec = _recovery_event(events)["recovery"]
+    from here — the same reason `vet`'s and `pyright`'s records are copied.
+
+    This test used to assert `unevaluated` and `rehearsed: False`, because the rung
+    had no scratch to work in. #4082 gave it one, so the row this rung writes for a
+    file-scope round is a MEASURED round-trip, and the per-surface verdicts are on
+    the event too — which is the only form in which the census can count it.
+    """
+    live, cand = _live_and_candidate(tmp_path)
+    g = _Stub(["app/gate.py", CONF_REL], live_root=live, worktree=cand)
+    report = g.run()
+    assert report.ok, [r.detail for r in report.rungs if not r.ok]
+    rec = _recovery_event(isolate)["recovery"]
     assert rec["observe_only"] is True
     assert rec["contract"] == REC.CONTRACT_DECLARED
     assert rec["declared"] == ["supervisor-program-definitions"]
     assert rec["unrecoverable"] == []
-    assert rec["verdict"] == REC.UNEVALUATED, \
-        "nothing is applied-and-unwound yet, so no round may be credited a restore"
-    assert rec["rehearsed"] is False
+    assert rec["verdict"] == REC.VERIFIED, \
+        "the rung supplies a scratch copy now, so a file-scope round is credited " \
+        "with the round-trip it was measured, not left at `unevaluated`"
+    assert rec["rehearsed"] is True
+    assert rec["surface_verdicts"] == {"supervisor-program-definitions":
+                                       REC.VERIFIED}
     assert rec["witness_captured"] == {"supervisor-program-definitions": True}
+
+
+def test_a_round_with_no_file_scope_surface_makes_no_scratch_copy(tmp_path, monkeypatch,
+                                                                 isolate):
+    """The cost clause: the copy exists only for a round that has a file-level undo
+    to rehearse, so an ordinary code round still pays nothing for this rung."""
+    made: list[Path] = []
+    real = G.tempfile.mkdtemp
+    monkeypatch.setattr(G.tempfile, "mkdtemp",
+                        lambda *a, **k: (made.append(Path(real(*a, **k))) or
+                                         made[-1]))
+    _, report, _ = _run(tmp_path, monkeypatch, isolate,
+                        changed=["app/gate.py", "tests/test_x.py"], calls=[])
+    assert report.ok
+    assert made == [], "a round declaring no surface must not get a scratch copy"
+
+
+def test_the_rung_makes_its_scratch_copy_under_temp_and_removes_it(tmp_path, monkeypatch,
+                                                                  isolate):
+    """Where the rehearsal worked, and that it cleaned up afterwards.
+
+    The rung is the caller that supplies the disposable copy, so two things have to
+    hold on the gate's own path: the directory is a fresh temp dir rather than
+    anything under the live tree, and it is gone when the rung returns. A scratch
+    rehearsal that left its applied bytes behind would be a gate littering the box
+    with a copy of its own service definitions.
+    """
+    live, cand = _live_and_candidate(tmp_path)
+    made: list[Path] = []
+    real = G.tempfile.mkdtemp
+
+    def spy(*a, **k):
+        d = Path(real(*a, **k))
+        made.append(d)
+        return d
+
+    monkeypatch.setattr(G.tempfile, "mkdtemp", spy)
+    before = (live / CONF_REL).read_text()
+    g = _Stub([CONF_REL], live_root=live, worktree=cand)
+    report = g.run()
+    assert report.ok
+    assert len(made) == 1, f"one copy per round that declares one: {made}"
+    assert not made[0].exists(), "the rung must remove the copy it made"
+    assert (live / CONF_REL).read_text() == before, \
+        "the live tree is seeded into the copy and never written by it"
+    assert _recovery_event(isolate)["recovery"]["verdict"] == REC.VERIFIED
 
 
 def test_a_pure_code_round_still_gets_a_record_and_reads_no_witness(
@@ -221,19 +338,49 @@ def test_a_recovery_mismatch_is_reported_and_still_does_not_change_the_verdict(
     precisely the case a reader would otherwise take as fine."""
     monkeypatch.setattr(
         G.REC, "build_recovery_record",
-        lambda paths, *, readers=None, live_root=None: {
+        lambda paths, *, readers=None, live_root=None, **kw: {
             "observe_only": True, "contract": REC.CONTRACT_DECLARED,
             "declared": ["knowledge-graph-store"], "unrecoverable": [],
             "verdict": REC.FAILED, "rehearsed": True,
             "surfaces": [{"name": "knowledge-graph-store", "has_inverse": True,
                           "witness_captured": True, "verdict": REC.FAILED,
-                          "reason": "kg_rows 41820 -> 41821"}]})
+                          "rehearsed": True,
+                          "reason": "kg_rows 41820 -> 41821",
+                          "mismatch": ["kg_rows"]}]})
     _, report, events = _run(tmp_path, monkeypatch, isolate, changed=["app/kg_store.py"])
     assert report.ok, "clause 4: its presence never changes the round's pass/fail"
     rung = next(r for r in report.rungs if r.name == "recovery")
     assert rung.ok is True
     assert rung.detail.startswith("RECOVERY MISMATCH")
     assert _recovery_event(events)["recovery"]["verdict"] == REC.FAILED
+
+
+def test_a_failed_rehearsal_on_the_rungs_own_path_still_leaves_the_round_passing(
+        tmp_path, monkeypatch, isolate):
+    """Clause 4, with no synthetic record: the rehearsal REALLY runs, its undo is
+    stubbed to a no-op, the verdict comes back `failed`, and the round is untouched.
+
+    The one thing this rung must never do is fail a build — so `report.ok` stays
+    True and the ladder line says `observe-only` in the same breath as the mismatch,
+    because a green build beside a red 'undo' is exactly what a reader would
+    otherwise take as fine.
+    """
+    live, cand = _live_and_candidate(tmp_path)
+    monkeypatch.setitem(REC.SCRATCH_INVERSES, "supervisor_conf",
+                        lambda ctx: (lambda: None))
+    g = _Stub([CONF_REL], live_root=live, worktree=cand)
+    report = g.run()
+
+    assert report.ok, "clause 4: its presence never changes the round's pass/fail"
+    rung = next(r for r in report.rungs if r.name == "recovery")
+    assert rung.ok is True
+    assert rung.detail.startswith("RECOVERY MISMATCH — observe-only:"), rung.detail
+    rec = _recovery_event(isolate)["recovery"]
+    assert rec["verdict"] == REC.FAILED
+    assert rec["rehearsed"] is True
+    assert rec["surface_verdicts"] == {"supervisor-program-definitions": REC.FAILED}
+    assert rec["mismatch"] == {"supervisor-program-definitions": ["tree"]}, \
+        "the field that did not come back has to survive on the event"
 
 
 def test_a_surface_that_cannot_be_read_is_unevaluated_and_never_clean(

@@ -3429,7 +3429,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
     seeded = text.replace("eval/run_eval.py:2716", "eval/run_eval.py:2055")
-    seeded = seeded.replace("scripts/automod/gate.py:3511", "scripts/automod/gate.py:1590")
+    seeded = seeded.replace("scripts/automod/gate.py:3541", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2055", "scripts/automod/gate.py:1590"], (
@@ -3448,8 +3448,11 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 #: Kept as a constant because the negative control needs the *previous* number, not a
 #: number invented for the control: it is the one value the rail refused for real.
 #: 3043 then; 3064 since preflight's clean-worktree check moved `rung_pyright` down 21;
-#: 3140 since #4074's `pre_replay` loader moved the whole file below line 330 down 76.
-_PRE_3770_PROMPT_SURFACE_ANCHOR = 3140
+#: 3140 since #4074's `pre_replay` loader moved the whole file below line 330 down 76;
+#: 3170 since #4082's scratch rehearsal grew `rung_recovery` and moved `rung_pyright`
+#: down another 30 — the control has to be re-measured every time, which is the whole
+#: reason it is a constant with this lineage attached rather than a number inline.
+_PRE_3770_PROMPT_SURFACE_ANCHOR = 3170
 
 
 def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
@@ -3690,7 +3693,7 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
 THREAT_AUTOMOD_ANCHORS = (
     ("scripts/automod/spec.py:748", "check_scope"),     # what classifies the diff
     (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
-    ("scripts/automod/gate.py:4320", "rung_review"),    # the second reader
+    ("scripts/automod/gate.py:4350", "rung_review"),    # the second reader
 )
 
 #: The numbers those rows carried, which sit in definitions unrelated to them.

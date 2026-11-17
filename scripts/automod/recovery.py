@@ -39,10 +39,16 @@ An empty field list is NEVER read as verified. That is the same lesson the `vet`
 rung and `guard_vacuity` already carry: a check whose missing input looks like a
 pass is a check that reports OK on its own absence.
 
-Stdlib only, deterministic, and nothing here writes: the witness readers are
-read-only, and the apply/restore pair in :func:`rehearse_restore` is injected by
-the caller, so this module can be exercised against a scratch fixture and never
-touches a live store. Run the table by hand::
+Stdlib only and deterministic. The witness readers are read-only, and the
+apply/restore pair in :func:`rehearse_restore` is injected by the caller, so this
+module can be exercised against a scratch fixture and never touches a live store.
+Since #4082 the module DOES write — and only inside a directory the caller supplied
+and is expected to delete: that is where :func:`_rehearse_surface` copies a
+file-scope surface's affected paths, applies the round's changed bytes to the copy
+and runs the surface's scratch undo. It execs nothing: `ScratchCtx.runner` is the
+callable a `supervisorctl reread`, a `systemctl --user daemon-reload` or a service
+restart would go through, every scratch inverse receives it and none reads it, and
+the default is :func:`_refuse_daemon_call`, which raises. Run the table by hand::
 
     .venvs/lloyd/bin/python -m scripts.automod.recovery --surfaces
 """
@@ -50,6 +56,8 @@ touches a live store. Run the table by hand::
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,6 +188,278 @@ SURFACES: tuple[Surface, ...] = (
 CONFIG_KEYS: tuple[str, ...] = ("automod.enabled",
                                "automod.gate.reuse_rungs",
                                "automod.landing.skip_restart")
+
+# ── step 3: the file-scope rehearsal in a disposable copy (#4082) ───────────
+#: surface `op` → the repo-relative paths whose bytes this surface's witness
+#: reads, so a rehearsal can copy exactly those and nothing else. Only these
+#: three are copyable: a store's state is not a set of files this process may
+#: duplicate, and the guardian snapshot's only undo is a unit restart, which a
+#: gate must never perform.
+SCRATCH_AFFECTED: dict[str, tuple[str, ...]] = {
+    "supervisor_conf": ("agent-services/supervisor",),
+    "systemd_units": ("agent-services/systemd",),
+    "runtime_config": ("config.yaml",),
+}
+
+#: surface `op` → why the available restore is COARSER than one round. These two
+#: restores are real and they are bulk: running one would restore the backup
+#: rather than undo the round, restoring rows some other process wrote since. That
+#: is the distinction #3930 step 3 refuses to blur, so these surfaces are never
+#: rehearsed and say what they actually have.
+COARSER_RESTORE: dict[str, str] = {
+    "kg_rows": "coarser than one round — day-granular: the daily `kg.sqlite` "
+               "tarball restores the whole store, not one round's rows",
+    "queue_rows": "coarser than one round — hour-granular: the hourly read-only "
+                  "btrfs snapshot reverts the whole data root, not one round's rows",
+}
+
+#: Where a scratch rehearsal reads the user manager's unit directory from when the
+#: caller does not say. Same default `read_systemd_units` uses, so the copy is of
+#: the directory the real link set actually lives in.
+DEFAULT_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
+
+
+def _refuse_daemon_call(*argv: object, **kw: object) -> None:
+    """The default `runner`: the rehearsal has no route to a daemon call.
+
+    `build_recovery_record` threads a `runner` down into every scratch inverse so a
+    caller can hand it a callable that RAISES on any call and prove, from the
+    verdict alone, that nothing invoked it. Left unset, THIS is what a scratch undo
+    would call — and it raises, naming what it was asked to run, so an accidental
+    `supervisorctl reread`, `systemctl --user daemon-reload` or service restart
+    inside the rehearsal is a loud failure rather than a live state change made
+    from inside a gate.
+    """
+    raise RuntimeError(f"the scratch rehearsal runs nothing: {argv!r}")
+
+
+@dataclass(frozen=True)
+class ScratchCtx:
+    """The disposable copy one surface's rehearsal is confined to.
+
+    `work` is the copy the candidate's bytes get applied to; `base` is the pristine
+    snapshot the inverse re-stages from, which is what a `git revert` + re-stage
+    would put back. `unit_dir`/`unit_base` are the same pair for the scratch copy of
+    the user manager's unit directory, `candidate` is the round's own tree, `touched`
+    the repo-relative paths this round changed under this surface. `runner` is
+    carried so the caller can prove nothing execs: the inverse builders below
+    receive it and never read it.
+    """
+    work: Path
+    base: Path
+    candidate: Path
+    touched: tuple[str, ...]
+    unit_dir: Path | None = None
+    unit_base: Path | None = None
+    runner: Callable = _refuse_daemon_call
+
+
+def _gone(path: Path) -> bool:
+    """True when an entry is absent, INCLUDING a dangling symlink."""
+    return not os.path.lexists(str(path))
+
+
+def _remove(path: Path) -> None:
+    """Delete one entry and follow nothing: a link goes, its target stays."""
+    if os.path.islink(str(path)):
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    elif os.path.lexists(str(path)):
+        path.unlink()
+
+
+def _stage(src: Path, dst: Path) -> None:
+    """Copy one file, symlink (raw target, not resolved) or directory tree into
+    place, replacing whatever is there. The unit of both the copy and the undo."""
+    _remove(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir() and not src.is_symlink():
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def _copy_paths(src_root: Path, dst_root: Path, rels: Iterable[str]) -> int:
+    """Copy the named repo-relative paths from SRC into DST. How many landed."""
+    n = 0
+    for rel in rels:
+        src = src_root / rel
+        if _gone(src):
+            continue
+        _stage(src, dst_root / rel)
+        n += 1
+    return n
+
+
+def _copy_dir(src_dir: Path, dst_dir: Path) -> bool:
+    """Copy the CONTENTS of one directory. False when there is no such directory."""
+    if not src_dir.is_dir():
+        return False
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(src_dir.iterdir()):
+        _stage(entry, dst_dir / entry.name)
+    return True
+
+
+def _restore_paths(ctx: ScratchCtx) -> None:
+    """Re-stage every path this round touched from the pristine snapshot, and
+    delete what the round created. The file-level undo a revert would perform."""
+    for rel in ctx.touched:
+        src = ctx.base / rel
+        if _gone(src):
+            _remove(ctx.work / rel)      # the round created it: undo is to delete
+        else:
+            _stage(src, ctx.work / rel)
+
+
+def _restore_links(src_dir: Path, dst_dir: Path) -> None:
+    """Put DST back to exactly the entries SRC holds, links with their raw targets.
+
+    Byte-equality of `resolve()`d targets is what the witness digests, so restoring
+    the raw target restores the measured state — and a dangling link the base held
+    comes back dangling, which is what a re-link from the tracked tree would make it.
+    """
+    for entry in sorted(dst_dir.iterdir()):
+        _remove(entry)
+    for entry in sorted(src_dir.iterdir()):
+        _stage(entry, dst_dir / entry.name)
+
+
+def _inverse_restage_files(ctx: ScratchCtx) -> Callable[[], None]:
+    """Undo for a surface whose whole file-level effect is its files' bytes: the
+    supervisor confs (the file half of `supervisorctl reread`/`update`,
+    promote.py:706-709) and `config.yaml` (the bytes a restart would re-read). The
+    commands themselves are not the half a gate may run, so `ctx.runner` is unused.
+    """
+    def undo() -> None:
+        _restore_paths(ctx)
+    return undo
+
+
+def _inverse_relink_units(ctx: ScratchCtx) -> Callable[[], None]:
+    """Undo for the systemd surface: re-stage the unit files the candidate wrote,
+    then re-link the scratch unit dir to exactly the entries it held before the
+    apply. That is the file half of promote.py:768-802 without its
+    `systemctl --user daemon-reload`, which a gate must never issue.
+    """
+    def undo() -> None:
+        _restore_paths(ctx)
+        if ctx.unit_dir is not None and ctx.unit_base is not None:
+            _restore_links(ctx.unit_base, ctx.unit_dir)
+    return undo
+
+
+#: surface `op` → scratch-undo factory. A surface absent here has no file-level
+#: undo to rehearse — the two stores' restores are coarser than one round and the
+#: guardian's is a unit restart — so it keeps the declare-and-witness verdict.
+SCRATCH_INVERSES: dict[str, Callable[[ScratchCtx], Callable[[], None]]] = {
+    "supervisor_conf": _inverse_restage_files,
+    "systemd_units": _inverse_relink_units,
+    "runtime_config": _inverse_restage_files,
+}
+
+
+def _link_unit(unit_file: Path, unit_dir: Path) -> None:
+    """One symlink into the unit directory, made the way promote.py:768-782 makes
+    it: drop any entry that is there — a plain file or a link to somewhere else —
+    then link, never write through it."""
+    dst = unit_dir / unit_file.name
+    _remove(dst)
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    os.symlink(unit_file, dst)
+
+
+def _apply_candidate(ctx: ScratchCtx) -> None:
+    """Reproduce, inside the scratch copy ONLY, what landing does to the files.
+
+    The candidate's bytes replace the base's at every touched path, and a unit file
+    the round changed gets linked into the scratch unit directory exactly as
+    `promote._apply_service_changes` links `agent-services/systemd/<name>` into
+    `~/.config/systemd/user` (promote.py:768-782), including its skip of a path
+    below that tree's `system/` subdir, which the installer never links. What it
+    does NOT do is the rest of that function: no `supervisorctl reread`/`update`, no
+    `daemon-reload`, no guardian re-staging, no restart. `ctx.runner` is the
+    callable that would run them and this never touches it — the guarantee #4082
+    clause 1 pins with a runner that raises.
+    """
+    for rel in ctx.touched:
+        src = ctx.candidate / rel
+        if _gone(src):
+            _remove(ctx.work / rel)      # the round deleted the path
+        else:
+            _stage(src, ctx.work / rel)
+    if ctx.unit_dir is None:
+        return
+    unit_tree = ctx.work / "agent-services" / "systemd"
+    for rel in ctx.touched:
+        if not rel.endswith(".service"):
+            continue
+        unit_file = ctx.work / rel
+        if unit_file.parent != unit_tree or not unit_file.is_file():
+            continue                     # below system/, or deleted: not linked
+        _link_unit(unit_file, ctx.unit_dir)
+
+
+def _rehearse_surface(surface: Surface, touched: list[str], *,
+                      live_root: Path, candidate_root: Path | None,
+                      scratch_root: Path | None, unit_dir: Path | None,
+                      runner: Callable,
+                      inverses: dict) -> dict | None:
+    """Apply-and-unwind one file-scope surface inside a caller-supplied copy.
+
+    Copies the surface's affected paths out of `live_root` TWICE — once as the
+    working copy, once as the pristine snapshot the undo re-stages from — applies
+    the round's changed bytes to the working copy, runs the surface's
+    `scratch_inverse` there, and hands the pair to `rehearse_restore`, which digests
+    pre, refuses to credit a match when the apply moved nothing, and compares post
+    against pre. Every witness read goes through
+    `default_readers(work, unit_dir=scratch unit dir)`, so the measured state is the
+    copy's: the live tree is read once, to seed the copy, and written never, and the
+    user manager's real unit directory is copied, never re-linked.
+
+    Returns None — so the caller keeps the declare-and-witness verdict rather than
+    inventing one — only when there is nothing to rehearse: no copy or no candidate
+    tree supplied, or the surface declares no file-level undo. A rehearsal that ran
+    and came back vacuous reports that itself.
+    """
+    builder = inverses.get(surface.op)
+    if builder is None or scratch_root is None or candidate_root is None:
+        return None
+    scratch_dir, live_root = Path(scratch_root), Path(live_root)
+    work, base = scratch_dir / "work", scratch_dir / "base"
+    affected = SCRATCH_AFFECTED[surface.op]
+    if not (_copy_paths(live_root, work, affected)
+            and _copy_paths(live_root, base, affected)):
+        return {"verdict": UNEVALUATED, "witness_captured": False, "mismatch": [],
+                "reason": "no scratch rehearsal: none of the affected paths "
+                          f"{list(affected)} was present under {live_root} to copy"}
+
+    s_unit: Path | None = None
+    s_unit_base: Path | None = None
+    if surface.op == "systemd_units":
+        # The witness is the manager's LINK set, so the rehearsal needs a copy of
+        # it to move and to put back. Refuse rather than measure the live one:
+        # a rehearsal whose inverse cannot run is not a rehearsal.
+        src_units = Path(unit_dir) if unit_dir else DEFAULT_UNIT_DIR
+        s_unit, s_unit_base = scratch_dir / "units", scratch_dir / "units_base"
+        if not (_copy_dir(src_units, s_unit) and _copy_dir(src_units, s_unit_base)):
+            return {"verdict": UNEVALUATED, "witness_captured": False,
+                    "mismatch": [],
+                    "reason": f"no scratch rehearsal: {src_units} could not be "
+                              "copied, so the link set has no disposable copy"}
+    ctx = ScratchCtx(work=work, base=base, candidate=Path(candidate_root),
+                     touched=tuple(touched), unit_dir=s_unit, unit_base=s_unit_base,
+                     runner=runner)
+    readers = default_readers(work, unit_dir=s_unit)
+    rec = rehearse_restore(readers.get(surface.op), lambda: _apply_candidate(ctx),
+                           builder(ctx), surface=surface.name)
+    if rec["verdict"] == FAILED and rec["mismatch"]:
+        # The ladder line and the ledger row carry the reason, so the field that
+        # failed to come back has to be IN it, not only in a `mismatch` key that
+        # dies with `gate.json`.
+        rec["reason"] = f"{rec['reason']}: {', '.join(rec['mismatch'][:4])}"
+    return rec
 
 
 def declare_surfaces(changed_paths: Iterable[str]) -> tuple[Surface, ...]:
@@ -465,11 +745,17 @@ def read_runtime_config(live_root: Path) -> dict[str, str]:
 #: surface `op` → live reader. `build_recovery_record` looks names up here, and a
 #: test injects its own mapping to exercise the same code paths on a scratch
 #: fixture. An op missing from this map yields `unevaluated`, not a crash.
-def default_readers(live_root: Path) -> dict[str, Callable[[], dict[str, str]]]:
+#:
+#: `unit_dir` exists for the scratch rehearsal (#4082): it is how the reader is
+#: pointed at a disposable copy of the user manager's unit directory instead of
+#: `~/.config/systemd/user`, which is the only live path any of these readers
+#: would otherwise reach. Every other reader is already root-relative.
+def default_readers(live_root: Path,
+                    unit_dir: Path | None = None) -> dict[str, Callable[[], dict[str, str]]]:
     live_root = Path(live_root)
     return {
         "supervisor_conf": lambda: read_supervisor_conf(live_root),
-        "systemd_units": lambda: read_systemd_units(live_root),
+        "systemd_units": lambda: read_systemd_units(live_root, unit_dir),
         "guardian_snapshot": None,   # type: ignore[dict-item]  # no reader: see SURFACES
         "kg_rows": read_kg_rows,
         "queue_rows": read_queue_rows,
@@ -484,26 +770,61 @@ def _clip(text: str, cap: int) -> str:
     return str(text)[:cap]
 
 
+def _touched_for(op: str, changed_paths: Iterable[str]) -> list[str]:
+    """The changed paths lying under one surface's affected roots — the bytes a
+    scratch rehearsal of THAT surface has to move. A path that reaches this
+    surface only through a config KEY it consumes (a .py file) is not one of them:
+    the rehearsal applies files, so such a round comes back `unevaluated` with the
+    vacuity guard's own reason rather than a rehearsal that pretends to apply it.
+    """
+    roots = SCRATCH_AFFECTED.get(op) or ()
+    return [s for s in (str(p) for p in changed_paths)
+            if any(s == r or s.startswith(r.rstrip("/") + "/") for r in roots)]
+
+
 def build_recovery_record(changed_paths: Iterable[str],
                           *, readers: dict | None = None,
-                          live_root: Path | None = None) -> dict:
+                          live_root: Path | None = None,
+                          scratch_root: Path | None = None,
+                          candidate_root: Path | None = None,
+                          unit_dir: Path | None = None,
+                          runner: Callable | None = None,
+                          scratch_inverses: dict | None = None) -> dict:
     """The one record a round gets for its state outside the diff. Observe-only.
 
-    At this stage the record is a **declaration plus a witness**, never a
-    rehearsal: no rung applies the candidate and unwinds it, because #3930 step 3
-    (apply-and-unwind in a disposable copy) was deferred — the drill already
-    reuses the canary's fixed ports across two concurrent gates, and a second
-    scratch environment is a wall-clock cost to decide later. So every declared
-    surface whose witness CAN be read comes back `unevaluated` with that reason
-    rather than `verified`, which is why the rung may not block anything yet.
+    Three states per declared surface, and the record says which one it got:
 
-    Nothing is read at all for a round that declares no surface, which is what
-    keeps the rung free on the ordinary code round: the cost is bounded to the
-    contract, exactly as the item's risk section asks.
+      * **rehearsed** (#4082, when the caller supplies `scratch_root` +
+        `candidate_root`): for a surface with a `scratch_inverse` — the three
+        file-scope ones — the affected paths are copied out of `live_root` into the
+        caller's disposable directory, the round's changed bytes are applied THERE,
+        the inverse undoes them THERE, and the witness decides. `verified` or
+        `failed` with `rehearsed: True`, from `rehearse_restore`, which refuses to
+        call a digest match a round-trip when the apply moved nothing.
+      * **coarser than one round**: `kg.sqlite` and `workers.db` have real restores
+        and they are day- and hour-granular bulk snapshots of the whole store, so
+        unwinding one would not undo THIS round — it would restore rows every later
+        writer had written. `unevaluated`, saying so.
+      * **no inverse at all**: `guardian-pinned-snapshot` — its only undo is a unit
+        restart, which a gate must never issue. `unrecoverable: <surface>`.
+
+    `runner` is threaded to every scratch inverse so a caller can hand the builder a
+    callable that RAISES on any call and prove from the verdict that the rehearsal
+    never execed supervisorctl, systemctl or a restart; unset it is
+    `_refuse_daemon_call`, which raises the same way. `scratch_inverses` replaces the
+    declared inverses for one call — the seam that proves the rehearsal can FAIL.
+
+    Nothing is read at all for a round that declares no surface, and no scratch copy
+    is made for one that declares no rehearseable surface: the cost is bounded to
+    the contract, exactly as the item's risk section asks.
     """
     declared = declare_surfaces(changed_paths)
     readers = readers if readers is not None else default_readers(
         live_root or Path(__file__).resolve().parent.parent.parent)
+    live_root = Path(live_root) if live_root else \
+        Path(__file__).resolve().parent.parent.parent
+    inverses = scratch_inverses if scratch_inverses is not None else SCRATCH_INVERSES
+    changed = [str(p) for p in changed_paths]
     surfaces: list[dict] = []
     unrecoverable: list[str] = []
     for surface in declared:
@@ -511,6 +832,7 @@ def build_recovery_record(changed_paths: Iterable[str],
             unrecoverable.append(surface.name)
             surfaces.append({"name": surface.name, "has_inverse": False,
                              "witness_captured": False, "verdict": UNEVALUATED,
+                             "rehearsed": False,
                              # The reason names the surface and the fact, not a
                              # clipped copy of the digest: what the state IS lives
                              # in the table, and a half-sentence in the ledger is
@@ -519,12 +841,33 @@ def build_recovery_record(changed_paths: Iterable[str],
                                        f"has no declared inverse to rehearse"})
             continue
         w = capture_witness(readers.get(surface.op))
-        reason = (f"witness unreadable: {_first_error(w)}" if not w.readable
-                  else "no rehearsal: the gate does not apply-and-unwind the "
-                       "candidate (#3930 step 3 deferred)")
+        rehearsal = None
+        if w.readable and surface.op in inverses:
+            rehearsal = _rehearse_surface(
+                surface, _touched_for(surface.op, changed),
+                live_root=live_root, candidate_root=candidate_root,
+                scratch_root=scratch_root, unit_dir=unit_dir,
+                runner=runner or _refuse_daemon_call, inverses=inverses)
+        if rehearsal is not None:
+            entry = {"name": surface.name, "has_inverse": True,
+                     "witness_captured": w.readable,
+                     "verdict": rehearsal["verdict"],
+                     # Rehearsed means the undo actually RAN and was graded. An
+                     # apply that moved no witness never reached it, so it is not
+                     # credited with a rehearsal it did not perform.
+                     "rehearsed": rehearsal["verdict"] in (VERIFIED, FAILED),
+                     "reason": rehearsal["reason"],
+                     "mismatch": list(rehearsal["mismatch"])}
+            surfaces.append(entry)
+            continue
+        reason = f"witness unreadable: {_first_error(w)}" if not w.readable else (
+            f"no scratch rehearsal: the available restore is {COARSER_RESTORE[surface.op]}"
+            if surface.op in COARSER_RESTORE else
+            "no scratch rehearsal: the caller supplied no scratch copy to apply and "
+            "unwind the candidate in")
         surfaces.append({"name": surface.name, "has_inverse": True,
                          "witness_captured": w.readable, "verdict": UNEVALUATED,
-                         "reason": reason})
+                         "rehearsed": False, "reason": reason, "mismatch": []})
 
     verdict = UNEVALUATED
     if surfaces and all(s["verdict"] == VERIFIED for s in surfaces):
@@ -537,7 +880,7 @@ def build_recovery_record(changed_paths: Iterable[str],
         "declared": [s["name"] for s in surfaces][:NAME_CAP],
         "unrecoverable": unrecoverable[:NAME_CAP],
         "verdict": verdict,
-        "rehearsed": False,
+        "rehearsed": any(s.get("rehearsed") for s in surfaces),
         "surfaces": [{**s, "reason": _clip(s["reason"], REASON_CAP)}
                      for s in surfaces[:NAME_CAP]],
     }
@@ -566,15 +909,28 @@ def to_event(rec: dict) -> dict:
     non-blocking observation preserved only there has no denominator, and #3930's
     step 6 split (verified restore / unrecoverable / empty contract) is a count
     over landings that has to be answerable months later.
+
+    `surface_verdicts` is the per-SURFACE verdict, which is the only form in which
+    #4082's rehearsal result survives the round: the record-level `verdict` is one
+    value per round and a round that rehearses one surface and cannot rehearse a
+    store still aggregates to `unevaluated`. So the census's verified-restore count
+    is a count over `surface_verdicts`, and without this field it would have no
+    denominator at all.
     """
+    surfaces = rec["surfaces"][:NAME_CAP]
     ev: dict = {"observe_only": True,
                 "contract": rec["contract"],
                 "verdict": rec["verdict"],
                 "rehearsed": bool(rec.get("rehearsed")),
                 "declared": list(rec["declared"])[:NAME_CAP],
                 "unrecoverable": list(rec["unrecoverable"])[:NAME_CAP],
+                "surface_verdicts": {s["name"]: s["verdict"] for s in surfaces},
                 "witness_captured": {s["name"]: bool(s["witness_captured"])
-                                     for s in rec["surfaces"][:NAME_CAP]}}
+                                     for s in surfaces}}
+    mismatched = {s["name"]: list(s.get("mismatch") or [])[:NAME_CAP]
+                  for s in surfaces if s.get("mismatch")}
+    if mismatched:
+        ev["mismatch"] = mismatched
     if any(not s["witness_captured"] for s in rec["surfaces"]):
         ev["unevaluated_reasons"] = {s["name"]: _clip(s["reason"], REASON_CAP)
                                      for s in rec["surfaces"][:NAME_CAP]

@@ -18,10 +18,28 @@ Clauses this file pins:
 Clause 3 is the one that matters. A recovery check that passes whatever happens is
 the same instrument #703's drill had to carry a broken-path clause for, and the
 reason `vet` refuses an empty diff: a guard reporting OK on its own missing input.
+
+Clauses added by #4082 (#3930 step 3, scoped to file scope), pinned at the bottom
+of this file:
+
+  4. a round touching a FILE-scope surface — supervisor-program-definitions,
+     systemd-user-unit-set or effective-runtime-config — is applied to a copy of the
+     affected paths and unwound there, and comes back `verified` with
+     `rehearsed: True`, while a `runner` that raises on any call is never invoked and
+     no path outside the copy is created or modified;
+  5. on the same fixture, stubbing that surface's `scratch_inverse` as a no-op makes
+     the rehearsal return `failed` and name the mismatched witness field — the
+     rehearsal cannot pass unconditionally;
+  6. a round touching only a STORE surface keeps `unevaluated` with the reason that
+     the available restore is coarser than one round, and
+     `agent-services/guardian/**` keeps `unrecoverable: guardian-pinned-snapshot`,
+     whether or not a scratch copy is on offer.
 """
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 
 import pytest
 
@@ -295,8 +313,14 @@ def test_a_declared_surface_gets_its_witness_recorded_per_surface():
                                   readers=readers)
     assert rec["contract"] == R.CONTRACT_DECLARED
     assert rec["declared"] == ["supervisor-program-definitions"]
+    # This used to read "no rehearsal exists yet". #4082 built the rehearsal, so the
+    # sentence here is about THIS call: it supplied no scratch copy, and a surface
+    # nobody applied-and-unwound in a copy may not be reported as verified either.
     assert rec["verdict"] == R.UNEVALUATED, \
-        "no rehearsal exists yet, so nothing may be reported as verified"
+        "no scratch copy was supplied to this call, so nothing may be reported " \
+        "as verified: #4082 rehearses only inside a directory the caller provides"
+    assert rec["surfaces"][0]["rehearsed"] is False
+    assert "no scratch copy" in rec["surfaces"][0]["reason"]
     assert rec["surfaces"][0]["witness_captured"] is True
     assert calls == ["supervisor_conf"]
 
@@ -356,3 +380,336 @@ def test_the_event_form_keeps_the_reason_when_the_could_not_is_the_point():
     assert ev["witness_captured"] == {"knowledge-graph-store": False}
     assert "kg.sqlite absent" in ev["unevaluated_reasons"]["knowledge-graph-store"]
     assert len(ev["unevaluated_reasons"]["knowledge-graph-store"]) <= R.REASON_CAP
+
+
+# ── #4082 clauses 4-6: the file-scope rehearsal in a disposable copy ─────────
+#
+# Every fixture below is a REAL tree of bytes, and that is the point. A reader that
+# returns a constant dict whatever the root gives pre == post no matter what the
+# scratch copy holds, and `rehearse_restore` then answers `unevaluated` ("the applied
+# change moved no witness field") — so a no-op-inverse falsifier built on one would
+# pass without proving the rehearsal can fail. These fixtures put different bytes at
+# the round's changed paths, so a real apply moves the digest and the only thing that
+# can hold it back is an inverse that does not put them back.
+
+CONF = "agent-services/supervisor/conf.d/lloyd-backend.conf"
+UNIT = "agent-services/systemd/lloyd-backend.service"
+KEEP = "agent-services/systemd/lloyd-guardian.service"
+NOUNIT = "agent-services/systemd/README.md"   # under the surface root, not a unit
+OTHER = "lloyd-guardian.service"        # the link already in the manager's dir
+OLD, NEW = "command=/old/start\n", "command=/new/start\n"
+CONFIG_OLD = "automod:\n  enabled: false\n"
+CONFIG_NEW = "automod:\n  enabled: true\n"
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def _scratch_roots(tmp_path: Path) -> dict:
+    """live/ = the machine before the round, cand/ = the round's own tree,
+    units/ = a stand-in for ~/.config/systemd/user, scratch/ = the copy the
+    rehearsal is confined to (and the only thing it may write).
+
+    The candidate differs from live at exactly the three file-scope surfaces' paths,
+    so the applied change demonstrably moves every witness it should. The unit
+    directory starts with only the guardian's link: the round's unit is not linked
+    yet, which is the state a rehearsal has to reproduce and then take back.
+    """
+    live, cand = tmp_path / "live", tmp_path / "cand"
+    for root, (a, b, c, d) in ((live, (OLD, OLD, CONFIG_OLD, "one line\n")),
+                               (cand, (NEW, NEW, CONFIG_NEW, "another line\n"))):
+        _write(root / CONF, "[program:lloyd-backend]\n" + a)
+        _write(root / UNIT, "[Service]\nExecStart=" + b)
+        _write(root / KEEP, "[Service]\nExecStart=/guardian/keep\n")
+        _write(root / NOUNIT, "# units\n" + d)
+        _write(root / "config.yaml", c)
+    units = tmp_path / "units"
+    units.mkdir(parents=True)
+    os.symlink(str(live / KEEP), str(units / OTHER))
+    return {"root": tmp_path, "live": live, "cand": cand, "units": units,
+            "scratch": tmp_path / "scratch"}
+
+
+def _snapshot(root: Path, skip: Path | None = None) -> dict:
+    """relpath -> what the entry IS, for every path under ROOT except under SKIP.
+    Bytes by hash, links by raw target, directories and files by mtime and size:
+    the witness that no path outside the scratch copy was created or modified."""
+    out: dict[str, tuple] = {}
+    for p in sorted(root.rglob("*")):
+        if skip is not None and (p == skip or skip in p.parents):
+            continue
+        rel = str(p.relative_to(root))
+        if p.is_symlink():
+            out[rel] = ("link", os.readlink(str(p)))
+        elif p.is_dir():
+            out[rel] = ("dir", p.stat().st_mtime_ns)
+        else:
+            out[rel] = ("file", p.stat().st_mtime_ns, p.stat().st_size,
+                        hashlib.sha256(p.read_bytes()).hexdigest())
+    return out
+
+
+class _NeverRunner:
+    """A `runner` that fails the call if the rehearsal execs anything.
+
+    The clause is "no supervisorctl, no systemctl --user daemon-reload, no service
+    restart", and the only way to pin a callable's ABSENCE is to hand the builder one
+    that raises and record whether it was reached.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def __call__(self, *argv, **kw):
+        self.calls.append((argv, kw))
+        raise AssertionError(f"the scratch rehearsal ran something: {argv!r}")
+
+
+def _noop_inverses() -> dict:
+    """`scratch_inverse` stubbed to do nothing, for every surface that has one: the
+    same apply, the same reader, the same machinery, and no undo."""
+    return {op: (lambda ctx: (lambda: None)) for op in R.SCRATCH_INVERSES}
+
+
+@pytest.mark.parametrize("changed,surface,mismatched", [
+    (CONF, "supervisor-program-definitions", "tree"),
+    (UNIT, "systemd-user-unit-set", "unit_links"),
+    ("config.yaml", "effective-runtime-config", "config_sha"),
+])
+def test_a_file_scope_surface_is_rehearsed_in_the_copy_and_comes_back_verified(
+        tmp_path, changed, surface, mismatched):
+    """Clause 1: the round's bytes are applied to a caller-supplied copy, the
+    surface's `scratch_inverse` undoes them there, and the re-digest equals pre.
+
+    `rehearse_restore` is what compares the digests, so `verified` here is the
+    statement that the copy's witness moved on the apply AND came back byte-equal
+    after the undo — not that an inverse was invoked.
+    """
+    t = _scratch_roots(tmp_path)
+    boom = _NeverRunner()
+    before = _snapshot(t["root"], skip=t["scratch"])
+
+    rec = R.build_recovery_record([changed], live_root=t["live"],
+                                 candidate_root=t["cand"],
+                                 scratch_root=t["scratch"],
+                                 unit_dir=t["units"], runner=boom)
+
+    s = rec["surfaces"][0]
+    assert s["name"] == surface
+    assert s["verdict"] == R.VERIFIED, s["reason"]
+    assert s["rehearsed"] is True
+    assert rec["verdict"] == R.VERIFIED
+    assert rec["rehearsed"] is True
+    assert s["reason"] == "all captured fields came back byte-equal"
+    # The rehearsal execs nothing: not `supervisorctl reread`, not `systemctl --user
+    # daemon-reload`, not a restart. `boom` would have raised and recorded the call.
+    assert boom.calls == []
+    # Confined to the copy: live/, cand/, units/ and every other path the test owns
+    # are byte-for-byte and mtime-for-mtime what they were.
+    assert _snapshot(t["root"], skip=t["scratch"]) == before
+    # And the copy really is where it happened: it exists, and after the undo it
+    # holds the BASE bytes again, not the candidate's.
+    assert (t["scratch"] / "work" / changed).is_file()
+    assert mismatched not in s["mismatch"]
+
+
+def test_the_rehearsal_links_the_unit_into_its_own_copy_not_the_live_unit_dir(tmp_path):
+    """Clause 1 again, on the surface whose undo is a re-LINK (#3930's risk).
+
+    The unit witness is the user manager's link set, so a rehearsal that only
+    restored files would leave a fresh symlink in ~/.config/systemd/user — the gate
+    creating a service definition that outlives the round. Here the manager's
+    directory is the fixture's, and it must still hold exactly the guardian's link
+    afterwards while the scratch copy is what gained and lost one.
+    """
+    t = _scratch_roots(tmp_path)
+    boom = _NeverRunner()
+    rec = R.build_recovery_record([UNIT], live_root=t["live"],
+                                 candidate_root=t["cand"],
+                                 scratch_root=t["scratch"],
+                                 unit_dir=t["units"], runner=boom)
+
+    s = rec["surfaces"][0]
+    assert s["name"] == "systemd-user-unit-set"
+    assert s["verdict"] == R.VERIFIED, s["reason"]
+    assert s["rehearsed"] is True
+    assert boom.calls == []
+    assert sorted(os.listdir(t["units"])) == [OTHER], \
+        "the live unit directory must be exactly as it was: the rehearsal has no " \
+        "route to the manager's directory, only to a copy of it"
+    scratch_units = t["scratch"] / "units"
+    assert sorted(os.listdir(scratch_units)) == [OTHER], \
+        "the copy is what the apply linked into and the inverse un-linked"
+    assert not (scratch_units / "lloyd-backend.service").exists()
+
+
+@pytest.mark.parametrize("changed,surface,mismatched", [
+    (CONF, "supervisor-program-definitions", "tree"),
+    (UNIT, "systemd-user-unit-set", "unit_links"),
+    ("config.yaml", "effective-runtime-config", "config_sha"),
+])
+def test_a_no_op_scratch_inverse_makes_the_same_rehearsal_come_back_failed(
+        tmp_path, changed, surface, mismatched):
+    """Clause 2: same fixture, same apply, no-op undo — `failed`, not `unevaluated`,
+    and it names the witness field that did not come back.
+
+    The word `failed` is the whole falsifiability claim. A reader that ignored the
+    scratch root would report `unevaluated` ("the applied change moved no witness
+    field") and this test would pass having proved nothing, so the fixture's bytes
+    differ between live/ and cand/ and the apply demonstrably moves the digest.
+    """
+    t = _scratch_roots(tmp_path)
+    boom = _NeverRunner()
+    before = _snapshot(t["root"], skip=t["scratch"])
+    rec = R.build_recovery_record([changed], live_root=t["live"],
+                                 candidate_root=t["cand"],
+                                 scratch_root=t["scratch"],
+                                 unit_dir=t["units"], runner=boom,
+                                 scratch_inverses=_noop_inverses())
+
+    s = rec["surfaces"][0]
+    assert s["name"] == surface
+    assert s["verdict"] == R.FAILED, \
+        f"a no-op undo must be a failure, not a shrug: {s['reason']}"
+    assert s["rehearsed"] is True
+    assert rec["verdict"] == R.FAILED
+    assert mismatched in s["mismatch"], s["mismatch"]
+    # The field has to be in the REASON too: `mismatch` is a gate.json key, and
+    # gate.json dies with the worktree.
+    assert mismatched in s["reason"], s["reason"]
+    assert boom.calls == []
+    # The apply really did happen inside the copy, the undo did not undo it, and
+    # nothing at all escaped the copy.
+    assert (t["scratch"] / "work" / changed).read_text() == \
+        (t["cand"] / changed).read_text(), \
+        "the copy must still hold the candidate's bytes: a no-op undid nothing"
+    assert _snapshot(t["root"], skip=t["scratch"]) == before
+
+
+def test_the_scratch_copy_holds_the_candidate_bytes_and_the_undo_returns_the_base(tmp_path):
+    """Where the rehearsal physically worked, read out of the copy afterwards.
+
+    A `verified` verdict is consistent with the rehearsal having quietly done
+    nothing, so this reads the copy: the undo left the BASE bytes at the changed
+    path, and the live tree still holds the base bytes it started with.
+    """
+    t = _scratch_roots(tmp_path)
+    rec = R.build_recovery_record([CONF], live_root=t["live"],
+                                 candidate_root=t["cand"],
+                                 scratch_root=t["scratch"])
+    assert rec["verdict"] == R.VERIFIED
+    work_conf = t["scratch"] / "work" / CONF
+    assert work_conf.read_text() == (t["live"] / CONF).read_text()
+    assert (t["live"] / CONF).read_text().find(OLD) >= 0
+    assert (t["cand"] / CONF).read_text().find(NEW) >= 0
+
+
+def test_a_change_the_witness_cannot_see_is_not_credited_a_rehearsal(tmp_path):
+    """The vacuity guard, on the round that really meets it: a file under the
+    systemd surface's root that is not a unit. The witness is the link set plus the
+    count of `*.service`, so editing `README.md` there moves nothing — and
+    `rehearse_restore` refuses to call an unchanged digest a round-trip. `unevaluated`
+    with the guard's own reason, and `rehearsed` False, which is why a surface whose
+    undo ran is credited and one that never got to run is not."""
+    t = _scratch_roots(tmp_path)
+    rec = R.build_recovery_record([NOUNIT], live_root=t["live"],
+                                 candidate_root=t["cand"],
+                                 scratch_root=t["scratch"], unit_dir=t["units"])
+    s = rec["surfaces"][0]
+    assert s["name"] == "systemd-user-unit-set"
+    assert s["verdict"] == R.UNEVALUATED
+    assert s["rehearsed"] is False
+    assert "moved no witness field" in s["reason"], s["reason"]
+    # The apply DID happen — the copy holds the candidate's README — and the
+    # rehearsal still declined to report a restore, because nothing was measured.
+    assert (t["scratch"] / "work" / NOUNIT).read_text() == \
+        (t["cand"] / NOUNIT).read_text()
+
+
+def test_a_store_surface_says_the_available_restore_is_coarser_than_one_round(tmp_path):
+    """Clause 3: `app/kg_store.py` and `workers/queue.py` keep `unevaluated`, but the
+    reason now names what they actually have — a day- and an hour-granular snapshot —
+    instead of the step-3-deferred placeholder. Supplied a scratch copy and still
+    unevaluated: a rehearsal is not on offer for a store's rows."""
+    t = _scratch_roots(tmp_path)
+    for changed, op, gran in (("app/kg_store.py", "kg_rows", "day-granular"),
+                              ("workers/queue.py", "queue_rows", "hour-granular")):
+        readers, _ = _counting_readers(names=(op,))
+        rec = R.build_recovery_record([changed], readers=readers,
+                                      live_root=t["live"],
+                                      candidate_root=t["cand"],
+                                      scratch_root=t["scratch"],
+                                      unit_dir=t["units"])
+        s = rec["surfaces"][0]
+        assert s["verdict"] == R.UNEVALUATED
+        assert s["rehearsed"] is False
+        assert gran in s["reason"], s["reason"]
+        assert "coarser" in s["reason"], s["reason"]
+        assert "step 3 deferred" not in s["reason"]
+
+
+def test_the_guardian_surface_keeps_its_unrecoverable_verdict_with_a_copy_present(tmp_path):
+    """Clause 3 again: `agent-services/guardian/**` still answers
+    `unrecoverable: guardian-pinned-snapshot`. Its only undo is a unit restart, so
+    the rehearsal the other three surfaces get is not offered to it, and a scratch
+    copy on the table changes nothing about that."""
+    t = _scratch_roots(tmp_path)
+    rec = R.build_recovery_record(["agent-services/guardian/guardian.sh"],
+                                 live_root=t["live"], candidate_root=t["cand"],
+                                 scratch_root=t["scratch"], unit_dir=t["units"])
+    s = rec["surfaces"][0]
+    assert s["name"] == "guardian-pinned-snapshot"
+    assert s["has_inverse"] is False
+    assert s["verdict"] == R.UNEVALUATED
+    assert s["rehearsed"] is False
+    assert s["reason"].startswith("unrecoverable: guardian-pinned-snapshot")
+    assert rec["unrecoverable"] == ["guardian-pinned-snapshot"]
+
+
+def test_the_rehearsal_never_writes_outside_the_directory_the_caller_supplied(tmp_path):
+    """Clause 1's confinement stated as the strongest form: one call, three
+    surfaces, every witness read for real, and the ONLY path that differs
+    afterwards is the scratch directory the test handed it."""
+    t = _scratch_roots(tmp_path)
+    boom = _NeverRunner()
+    before = _snapshot(t["root"], skip=t["scratch"])
+
+    rec = R.build_recovery_record([CONF, UNIT, "config.yaml"],
+                                 live_root=t["live"], candidate_root=t["cand"],
+                                 scratch_root=t["scratch"],
+                                 unit_dir=t["units"], runner=boom)
+
+    assert rec["verdict"] == R.VERIFIED, [s["reason"] for s in rec["surfaces"]]
+    assert rec["rehearsed"] is True
+    assert [s["verdict"] for s in rec["surfaces"]] == [R.VERIFIED] * 3
+    assert boom.calls == []
+    assert _snapshot(t["root"], skip=t["scratch"]) == before
+    assert sorted(os.listdir(t["units"])) == [OTHER]
+
+
+def test_the_rehearsal_verdict_reaches_the_event_so_the_ledger_keeps_it():
+    """The per-surface verdict is the only form in which a rehearsal outlives the
+    round: `gate.json` is copied into the round directory and deleted with the
+    worktree, so `to_event` has to carry it per surface, not just one word for the
+    whole record."""
+    ev = R.to_event({"observe_only": True, "contract": R.CONTRACT_DECLARED,
+                     "verdict": R.FAILED, "rehearsed": True,
+                     "declared": ["supervisor-program-definitions",
+                                  "knowledge-graph-store"],
+                     "unrecoverable": [],
+                     "surfaces": [
+                         {"name": "supervisor-program-definitions",
+                          "has_inverse": True, "witness_captured": True,
+                          "verdict": R.FAILED, "rehearsed": True,
+                          "reason": "differed after restore: tree",
+                          "mismatch": ["tree"]},
+                         {"name": "knowledge-graph-store", "has_inverse": True,
+                          "witness_captured": True, "verdict": R.UNEVALUATED,
+                          "rehearsed": False, "reason": "coarser", "mismatch": []}]})
+    assert ev["surface_verdicts"] == {"supervisor-program-definitions": R.FAILED,
+                                      "knowledge-graph-store": R.UNEVALUATED}
+    assert ev["rehearsed"] is True
+    assert ev["mismatch"] == {"supervisor-program-definitions": ["tree"]}
+    assert ev["verdict"] == R.FAILED
