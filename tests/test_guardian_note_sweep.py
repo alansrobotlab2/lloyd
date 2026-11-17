@@ -1570,3 +1570,456 @@ def test_the_dating_is_the_only_change_and_no_note_line_is_dropped_or_reworded()
     post_lines = tail_out.splitlines()
     assert _dated_numbers(post_lines)[-1] < _line_numbers(
         post_lines, lambda l: l.strip() == "---")[-1], "the stamp sits at or below the `---`"
+
+
+# ── #4229: the placement audit, and moving the datings #3993 left lying below the rule ────────
+#
+# `0b0789a4` fixed where a NEW retraction is spliced. It could not fix the ones already spliced:
+# `already_sealed` is a substring test over the whole span, and a stranded marker lies inside its
+# own span, so `block_is_refuted` short-circuits and the block is never re-stamped. Measured on
+# this box 2026-11-17 by reading the live vault with the module's own `_guardian_sections`,
+# `SPAN_TAIL` and `stamp_position`: 14 markers over 11 notes, each under the `---` rule (or nested
+# heading) its span swallows and the `### Session …` digest after it. The destructive instruction
+# each one retracts therefore still read as unretracted, which is the whole defect #3993 was about.
+#: `~/obsidian/memory/<name>` and how many misplaced markers each held when the audit was run on
+#: 2026-11-17. The names and the counts are the audit's own output, in the per-note distribution it
+#: produced, so a fixture corpus can carry the quoted 14-over-11 arithmetic without pinning a
+#: snapshot the daily sweep is free to change.
+STRAY_CORPUS = {
+    "2026-09-06.md": 2, "2026-09-07.md": 1, "2026-09-08.md": 1, "2026-09-09.md": 3,
+    "2026-09-11.md": 1, "2026-09-14.md": 1, "2026-09-16.md": 1, "2026-10-15.md": 1,
+    "2026-10-16.md": 1, "2026-10-20.md": 1, "2026-11-04.md": 1,
+}
+#: The two positions the item sanctions and nothing here may move: each sits in a span holding no
+#: `---` and no nested heading, which is where the sweep has always put a stamp and still does.
+SANCTIONED = (("2026-10-15.md", 77), ("2026-10-16.md", 113))
+#: The supervisor table that refutes a `Service down` block: the alarm is refuted by the service
+#: being up, which is the reading the audit's fixture blocks are written against.
+RUNNING_BACKEND = {"lloyd-mc:lloyd-backend"}
+#: The stranded stamp `memory/2026-09-06.md:295` carries, in the shape the sweep writes.
+LONG_MOVE_STAMP = ("dated: 2026-10-05: `supervisorctl status` reports `lloyd-mc:lloyd-backend` "
+                   "RUNNING (service is up and the halt flag has cleared)")
+
+
+def _long_move_note(stray: str = LONG_MOVE_STAMP, *, digest: int = 120,
+                    blank_above_stray: bool = True, glued_tail: bool = False,
+                    trailing: str = "", placed: bool = False) -> str:
+    """The `memory/2026-09-06.md:149-295` shape: a stamp stranded ~120 lines under its own block.
+
+    The block's content ends, the human's `---` and the auto-captured digest after it are swallowed
+    into the span, and the marker was appended at the end — so the relocation is a long move, not a
+    nudge, and "the note's lines are a permutation" is load-bearing rather than decorative (#4229
+    clause 3). The switches are the shapes the live corpus and its writer contain: a `dated:` from
+    the sweep or a `cleared:` (`stray=`), a rule with no blank line above it, which is what
+    `stamp_position`'s `pad` is for (`glued_tail`), a stray appended with no separator above it
+    (`blank_above_stray=False`), a note that keeps going after the stray (`trailing`), and the same
+    note with the stamp spliced where #3993 writes it, which is the control the audit must read 0
+    (`placed=True`).
+    """
+    head = ("# Daily note\n\n"
+            "## Self-mod guardian: Service down, but no promotion to revert\n"
+            "`supervisorctl status` reports `lloyd-mc:lloyd-backend` RUNNING.\n")
+    rule = "---\n" if glued_tail else "\n---\n"
+    body = "".join(f"- auto-captured digest line {i}\n" for i in range(digest))
+    if placed:
+        return f"{head}\n{stray}\n{rule}{body}"
+    lead = "\n" if blank_above_stray else ""
+    return f"{head}{rule}{body}{lead}{stray}\n{trailing}"
+
+
+def _live(name: str) -> "str | None":
+    """The live bytes of `~/obsidian/memory/<name>`, or None where no vault exists.
+
+    The gate runs with `$HOME` at the round home, which holds `lloyd` and no `obsidian`; a node
+    that opened a live note unguarded would fail there for the wrong reason. Every clause below
+    also has a fixture witness that runs everywhere, which is why the live nodes skip rather than
+    fail — and why none of them is ever the only witness for anything.
+    """
+    path = SWEEP.vault_root() / "memory" / name
+    return path.read_text(encoding="utf-8") if path.is_file() else None
+
+
+def _marker_numbers(text: str) -> list[int]:
+    """1-based line numbers of every marker LINE in `text` — not of a prose mention of one."""
+    return [text.count("\n", 0, m.start()) + 1 for m in SWEEP.MARKER_LINE.finditer(text)]
+
+
+def _placement(text: str) -> list[tuple[int, int, int]]:
+    """(marker_line, last_body_line, tail_line) per marker in a span that HAS a tail.
+
+    The neighbourhood all the placement clauses speak: the marker belongs strictly under the
+    block's own content and strictly above the rule or heading that swallows the digest.
+    """
+    rows, out = [], []
+    off = 0
+    for i, line in enumerate(text.splitlines(), 1):
+        rows.append((i, line, off))
+        off += len(line) + 1
+    for title, start, end in SWEEP._guardian_sections(text):
+        tail = SWEEP.span_tail(text, start, end)
+        if tail is None:
+            continue
+        for m in SWEEP.MARKER_LINE.finditer(text, start, tail.start()):
+            body = [i for i, line, o in rows if start <= o < m.start() and line.strip()]
+            out.append((text.count("\n", 0, m.start()) + 1, body[-1],
+                        text.count("\n", 0, tail.start()) + 1))
+    return out
+
+
+def _setext_hazards(text: str) -> list[int]:
+    """Lines holding a `---` that sits directly under a text line, which markdown reads as a
+    setext underline rather than a thematic rule — the corruption `stamp_position`'s `pad` is for."""
+    lines = text.splitlines()
+    return [i + 1 for i in range(1, len(lines))
+            if lines[i].strip() == "---" and lines[i - 1].strip()]
+
+
+def test_the_audit_counts_a_marker_only_at_or_below_its_own_span_tail():
+    """Clause 1, the boundary: one line above the rule is where the stamp belongs, one below is a
+
+    finding. The same note twice with the stamp either spliced where #3993 puts it or appended
+    where the pre-#3993 offset put it — a `>` written where the clause says "at or below" reads the
+    stranded note as 0, and a count that ignores the tail reads the well-placed note as 1.
+    """
+    stranded = _long_move_note()
+    found = SWEEP.misplaced_markers(stranded)
+    assert len(found) == 1, [(f.line, f.marker[:40]) for f in found]
+    assert found[0].line == _marker_numbers(stranded)[0] == 128, found[0]
+    assert found[0].kind == "dated:" and found[0].marker == LONG_MOVE_STAMP
+    assert (found[0].stamp_line, found[0].dest_line) == (5, 6), (
+        "the destination is the splice point plus the blank the stamp keeps above it: reporting "
+        "the offset itself would name a blank line as a marker's destination")
+
+    # The seam between the audit and the writer: the relocation moves a marker to the offset
+    # `stamp_position` answers with for that span — the one `date_note` splices at — and not to a
+    # second arithmetic that merely usually agrees with it. Two definitions of where a retraction
+    # goes is the defect #3993 names, and the audit reporting 0 would not catch it: an offset placed
+    # anywhere above the tail audits clean, while the daily writer would go on putting stamps
+    # somewhere else in the same span.
+    at, pad = SWEEP.stamp_position(stranded, found[0].span_start, found[0].span_end)
+    assert (at, pad) == (found[0].stamp_at, found[0].pad), (
+        "the audit's destination is not the writer's offset")
+    assert stranded[at:at + len(LONG_MOVE_STAMP)] != LONG_MOVE_STAMP, (
+        "the destination already holds a marker, so the fixture is not the stranded shape")
+
+    placed = _long_move_note(placed=True)
+    assert _marker_numbers(placed) == [6] and _placement(placed) == [(6, 4, 8)], \
+        "the control note is not the well-placed shape: body, stamp, blank, rule"
+    assert SWEEP.misplaced_markers(placed) == [], (
+        "a stamp directly under the block it retracts and above the human's rule is exactly where "
+        "#3993 writes it, and the audit must read 0 there")
+
+    untiled = UNTILED_NOTE + f"\n{LONG_MOVE_STAMP}\n"
+    assert SWEEP.span_tail(untiled, *list(SWEEP._guardian_sections(untiled))[0][1:]) is None
+    assert SWEEP.misplaced_markers(untiled) == [], (
+        "a span holding no rule and no nested heading has no position that is below anything: "
+        "2026-10-15.md:77 and 2026-10-16.md:113 are that shape and the item sanctions both")
+
+
+def test_the_audit_counts_a_marker_line_in_either_word_and_never_a_prose_mention():
+    """Clause 1's other edge: the audit is line-anchored while `already_sealed` is a substring test.
+
+    A note line that discusses a `cleared:` marker is prose about a marker: it must not be counted,
+    moved or silenced. A line that IS a `cleared:` must be counted even though the dating pass only
+    ever writes `dated:` — the 2026 corpus holds both words. Both edges fall out of `MARKER_LINE`,
+    and both would be wrong with the pattern `already_sealed` uses, which is why the module keeps
+    two patterns rather than one.
+    """
+    said = _long_move_note("The cleared: marker sits under the rule, so nobody sees it retract.")
+    assert SWEEP.misplaced_markers(said) == [], "prose about a marker is not a marker"
+    assert SWEEP.already_sealed(said[len("# Daily note\n\n"):]), (
+        "`already_sealed` reads the same words as a substring and must keep doing so: a block is "
+        "left alone when the note mentions its retraction, anchored or not")
+
+    cleared = _long_move_note("cleared: 2026-10-05: `supervisorctl status` says RUNNING")
+    found = SWEEP.misplaced_markers(cleared)
+    assert len(found) == 1 and found[0].kind == "cleared:", found
+    out, n, _why = SWEEP.relocate_markers(cleared)
+    assert n == 1 and _marker_numbers(out) == [6] and SWEEP.misplaced_markers(out) == []
+
+
+def test_the_relocated_marker_sits_under_the_body_it_retracts_and_above_the_rule():
+    """Clause 2's shape: body, blank, stamp, blank, rule — what `date_note` writes, on a note that
+    had the stamp on the wrong side of the rule.
+
+    Asserted as an offset neighbourhood rather than a bare line number because the point is the
+    relationship: strictly below the block's last body line, strictly above its swallowed rule, with
+    the note's own blank line on both sides so the `---` stays a thematic break and not the stamp's
+    setext underline.
+    """
+    pre = _long_move_note()
+    out, n, why = SWEEP.relocate_markers(pre)
+    assert n == 1 and len(why) == 1, why
+    (ml, last_body, tail_line), = _placement(out)
+    assert (last_body, ml, tail_line) == (4, 6, 8), (last_body, ml, tail_line)
+    lines = out.splitlines()
+    assert lines[ml - 2] == "" and lines[ml] == "", (
+        "the blank line the stray was appended under travelled with it, so the note keeps the one "
+        "blank above the rule it already had and invents nothing")
+    assert out.count("\n") == pre.count("\n") and _setext_hazards(out) == []
+    assert SWEEP.misplaced_markers(out) == []
+    assert SWEEP.count_refutations(out, NO_PROGRAMS, ABOVE) == 0
+
+
+def test_relocation_permutes_the_lines_of_the_long_move_and_writes_no_new_prose():
+    """Clause 3: the note's sorted line multiset is byte-identical across a 122-line move.
+
+    `memory/2026-09-06.md:295` is the hardest of the 14 and the reason this node exists: its span's
+    own content ends at :155 and the marker sits at :295, below the swallowed `---` at :156 and the
+    run of `### Session …` digests after it, so the relocation lifts it across ~140 lines of
+    somebody else's record. A node that tested only a nudge would pass on an implementation that
+    appended a copy and left the original, or that ate a digest line on the way up.
+    """
+    pre = _long_move_note()
+    out, n, _why = SWEEP.relocate_markers(pre)
+    assert n == 1
+    assert sorted(out.splitlines()) == sorted(pre.splitlines()), (
+        "the relocation is a permutation of the note's lines: every line that stood in the note "
+        "stands in it afterwards, byte for byte, including the 120 digest lines it crossed")
+    before, after = _marker_numbers(pre), _marker_numbers(out)
+    assert before == [128] and after == [6], (before, after)
+    assert before[0] - after[0] == 122, "the fixture stopped being the long move"
+    assert out.count(LONG_MOVE_STAMP) == 1, "no copy left behind, and the text moved unchanged"
+    assert len(_marker_numbers(out)) == len(_marker_numbers(pre)) == 1, \
+        "the relocation wrote a marker of its own instead of moving the one it was given"
+    assert len(out.splitlines()) == len(pre.splitlines())
+    for pred in (lambda l: l.strip() == "---", lambda l: l.startswith("- auto-captured digest"),
+                 lambda l: l.startswith("## "), lambda l: l.startswith("# ")):
+        assert len(_line_numbers(out.splitlines(), pred)) \
+            == len(_line_numbers(pre.splitlines(), pred)), pred
+
+
+def test_relocation_pays_for_its_separator_out_of_the_blanks_and_refuses_when_there_are_none():
+    """The three shapes that decide where the stamp lands, and the one that must not be moved.
+
+    A span whose `---` is glued to the block's last line is that line's setext heading, not a rule,
+    so `stamp_position` answers with its `pad` and the stamp needs a blank UNDER it. The only blanks
+    a stranded marker owns are the ones it is sitting in, so: with a blank below it that one pays
+    (`trailing`), with a blank above it that one pays (`glued_tail`), and with neither the relocation
+    must refuse — adding a line would break the permutation the item asks for, and moving the stamp
+    anyway would turn the human's rule into a heading.
+
+    `blank_above_stray=False` is the fourth shape and the one with no `pad`: there is no blank to
+    lift, so only the marker line travels and it lands at the splice point itself.
+    """
+    glued = _long_move_note(glued_tail=True)
+    assert _setext_hazards(glued) == [5], "the fixture is not the glued-rule shape any more"
+    out, n, _why = SWEEP.relocate_markers(glued)
+    assert n == 1 and _marker_numbers(out) == [5]
+    assert (out.splitlines()[4], out.splitlines()[5], out.splitlines()[6][:3]) == (
+        LONG_MOVE_STAMP, "", "---"), "stamp, then the paid-for blank, then the rule"
+    assert _setext_hazards(out) == [] and SWEEP.misplaced_markers(out) == []
+    assert sorted(out.splitlines()) == sorted(glued.splitlines())
+
+    below = _long_move_note(glued_tail=True, blank_above_stray=False, trailing="\n")
+    out2, n2, _why = SWEEP.relocate_markers(below)
+    assert n2 == 1 and _marker_numbers(out2) == [5] and _setext_hazards(out2) == []
+    assert sorted(out2.splitlines()) == sorted(below.splitlines())
+    assert SWEEP.misplaced_markers(out2) == []
+
+    broke = _long_move_note(glued_tail=True, blank_above_stray=False)
+    found = SWEEP.misplaced_markers(broke)
+    assert len(found) == 1 and not found[0].movable, found
+    same, n3, why = SWEEP.relocate_markers(broke)
+    assert same == broke and n3 == 0, why
+    assert "NOT moved" in why[0] and "pay" in why[0], why
+    assert _setext_hazards(same) == [5], "the refusal left the human's rule exactly as it was"
+
+    tight = _long_move_note(blank_above_stray=False)
+    assert _marker_numbers(tight) == [127]
+    out4, n4, _why = SWEEP.relocate_markers(tight)
+    assert n4 == 1 and _marker_numbers(out4) == [5] and SWEEP.misplaced_markers(out4) == []
+    assert sorted(out4.splitlines()) == sorted(tight.splitlines())
+    assert out4.splitlines()[-1] == "- auto-captured digest line 119", (
+        "with no blank above it only the marker line may travel: the digest line that stood over it "
+        "stays where it was")
+
+
+def test_a_second_relocation_pass_changes_no_byte_and_the_audit_still_reads_zero():
+    """Clause 4: idempotency, on one stray and on two in one note.
+
+    A relocated marker lies above its span's rule and inside the span, so the audit stops counting
+    it while `already_sealed` keeps counting the block as sealed: the second pass has nothing to
+    move and nothing to date. An implementation that left a marker on both sides of the rule, or
+    that put one outside its span, would either loop or re-date the block every day.
+    """
+    one = _long_move_note()
+    once, n1, _ = SWEEP.relocate_markers(one)
+    again, n2, why2 = SWEEP.relocate_markers(once)
+    assert again == once and n2 == 0 and why2 == []
+    assert SWEEP.misplaced_markers(again) == []
+
+    two = _long_move_note() + "\n" + _long_move_note(
+        "cleared: 2026-10-06: `supervisorctl status` says RUNNING", digest=40)
+    assert len(SWEEP.misplaced_markers(two)) == 2
+    once2, n3, _ = SWEEP.relocate_markers(two)
+    assert n3 == 2 and SWEEP.misplaced_markers(once2) == []
+    assert sorted(once2.splitlines()) == sorted(two.splitlines())
+    again2, n4, _ = SWEEP.relocate_markers(once2)
+    assert again2 == once2 and n4 == 0
+    assert SWEEP.count_refutations(again2, NO_PROGRAMS, ABOVE) == 0, (
+        "both spans still read as sealed after the move: one that stopped sealing its block would "
+        "date a fresh retraction on top of it every pass")
+
+
+def test_the_cli_prints_the_audit_on_its_own_line_and_keeps_the_headline_the_skill_parses(
+        tmp_path, capsys):
+    """Clause 5, and the 14-over-11 arithmetic, on a fixture corpus.
+
+    The script's headline is what `skills/guardian-note-sweep-daily/SKILL.md:42` parses, and what it
+    composes into the `note-sweep: refutable=<N> dated=<M> result=…` line that
+    `autonomy/110-guardian-note-sweep-daily.md:9` pins by regex — so the audit count cannot join it.
+    This node asserts the headline's exact text in both modes, the separate
+    `AUDIT TOTAL: N markers over M notes` line beside it, and that the counting pass wrote nothing.
+    The corpus is the 11 live note names holding 14 planted strays: the quoted count, in the
+    per-note distribution that produced it, without pinning a number the daily sweep may change.
+    """
+    for name, count in STRAY_CORPUS.items():
+        blocks = [_long_move_note(f"dated: 2026-11-{i + 1:02d}: marker {i}", digest=8)
+                  for i in range(count)]
+        # Each stray needs a span of its own to be counted: a second `## Self-mod guardian:` heading
+        # is what closes the first block, and without one the note reads as one span holding the
+        # last stray only — 11 counted instead of 14, which is the arithmetic this node pins.
+        note = blocks[0] + "".join(b[b.index("## Self-mod guardian"):] for b in blocks[1:])
+        (tmp_path / name).write_text(note, encoding="utf-8")
+    pre = {p.name: p.read_bytes() for p in tmp_path.glob("*.md")}
+    assert sum(len(SWEEP.misplaced_markers(t.decode())) for t in pre.values()) == 14, pre
+
+    def run(*argv):
+        return SWEEP.main(["--notes", str(tmp_path), "--day", DAY, *argv],
+                          running_reader=lambda conf: NO_PROGRAMS,
+                          fraction_reader=lambda path: ABOVE,
+                          tripwire_reader=lambda: {}, snapshot_reader=lambda: None)
+
+    assert run() == 0
+    dry = capsys.readouterr().out.splitlines()
+    heads = [l for l in dry if l.startswith("refutable blocks: ")]
+    assert len(heads) == 1 and heads[0].startswith("refutable blocks: 0 (RUNNING: ; "), dry
+    assert "AUDIT TOTAL: 14 markers over 11 notes" in dry, dry
+    assert all("AUDIT TOTAL" not in l for l in heads), (
+        "the audit count has its own line: appending it to the headline breaks the skill's parse "
+        "and the autonomy job's regex")
+    assert sum(1 for l in dry if ": MISPLACED " in l) == 14, dry
+    assert "belongs at L6" in [l for l in dry if ": MISPLACED " in l][0], dry
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.md")} == pre, \
+        "a pass without --apply wrote a note"
+
+    assert run("--apply") == 0
+    applied = capsys.readouterr().out.splitlines()
+    heads = [l for l in applied if l.startswith("dated blocks: ")]
+    assert len(heads) == 1 and heads[0].startswith("dated blocks: 0 (RUNNING: ; "), applied
+    assert "relocated markers: 14" in applied, applied
+    assert "AUDIT TOTAL: 0 markers over 0 notes" in applied, applied
+    posts = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.glob("*.md")}
+    assert sum(len(SWEEP.misplaced_markers(t)) for t in posts.values()) == 0
+    assert sum(len(_marker_numbers(t)) for t in posts.values()) == 14, (
+        "14 markers in, 14 markers out: the pass moved them and deleted none")
+    for name, was in pre.items():
+        assert sorted(posts[name].splitlines()) == sorted(was.decode().splitlines()), name
+    after_first = {p.name: p.read_bytes() for p in tmp_path.glob("*.md")}
+    assert run("--apply") == 0
+    second = capsys.readouterr().out.splitlines()
+    assert not any(l.startswith("relocated markers:") for l in second), second
+    assert "AUDIT TOTAL: 0 markers over 0 notes" in second, second
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.md")} == after_first, (
+        "a second --apply pass over already-relocated notes changed a byte")
+
+
+def test_a_relocated_marker_still_seals_its_block_so_the_dating_pass_writes_nothing_over_it(
+        tmp_path):
+    """The `--apply` gate, and the item's other prohibition: never delete a marker to rewrite it.
+
+    The relocation repairs somebody's note, so it is `--apply`-gated exactly as the dating is: the
+    audit is the counting pass and must not touch a byte. And where a moved marker lands it has to
+    keep doing its job. `already_sealed` is a substring test over the span and the marker is inside
+    its span on both sides of the rule, which is exactly why the sweep could never move it — so the
+    set of blocks the dating pass finds refutable is IDENTICAL before and after, and the block stays
+    un-dateable. That is the property that matters: a move that unsealed the block would let
+    `date_note` write a fresh retraction dated today over one naming the day the reading was taken,
+    which is the honesty claim the word `dated:` exists to keep.
+    """
+    note = _long_move_note()
+    dest = tmp_path / "2026-09-06.md"
+    dest.write_text(note, encoding="utf-8")
+    before = dest.read_bytes()
+    assert SWEEP.main(["--notes", str(tmp_path), "--day", DAY],
+                      running_reader=lambda conf: RUNNING_BACKEND,
+                      fraction_reader=lambda path: ABOVE,
+                      tripwire_reader=lambda: {}, snapshot_reader=lambda: None) == 0
+    assert dest.read_bytes() == before, "a pass without --apply moved a line of the note"
+
+    stranded = SWEEP.misplaced_markers(note)
+    assert len(stranded) == 1 and stranded[0].line == 128 and stranded[0].movable, stranded
+    moved, n, _why = SWEEP.relocate_markers(note)
+    assert n == 1
+    assert SWEEP.count_refutations(moved, RUNNING_BACKEND, ABOVE) \
+        == SWEEP.count_refutations(note, RUNNING_BACKEND, ABOVE) == 0, (
+        "the relocation changed which blocks the dating pass can see: the stranded marker sealed "
+        "its own block from below the rule and must still seal it from above it")
+    assert [SWEEP.already_sealed(moved[s:e]) for _t, s, e in SWEEP._guardian_sections(moved)] \
+        == [SWEEP.already_sealed(note[s:e]) for _t, s, e in SWEEP._guardian_sections(note)], (
+        "the moved marker stopped sealing its own block, so the next --apply would date it again")
+
+    out, dated, _notes = SWEEP.date_note(moved, RUNNING_BACKEND, DAY, ABOVE)
+    assert dated == 0 and out == moved, (
+        "the dating pass wrote over a retraction it should have left sealed")
+    moved_marker = [l for l in moved.splitlines() if SWEEP.MARKER_LINE.match(l)][0]
+    assert out.count(moved_marker) == 1, "the retraction was duplicated or dropped, not moved"
+    assert len(_marker_numbers(out)) == 1, _marker_numbers(out)
+
+
+
+def test_the_live_corpus_reads_zero_after_one_pass_and_leaves_the_two_sanctioned_lines():
+    """Clause 2 and clause 4 over the vault's own bytes: one pass drives the audit to 0, and the
+    pass that finds nothing writes nothing.
+
+    The 14 markers the item was filed from were relocated in the vault by sha `f7acb2f41` on
+    2026-11-17, so the live corpus reads 0 today. That 14 is a snapshot, not a constant — the daily
+    sweep can still write a pre-#3993-shaped stamp — so nothing here pins a count. What is pinned is
+    the shape, which holds identically at 14 and at 0: for each of the 11 named notes the relocation
+    moves every marker the audit counted (none refused), the audit then reads 0, the note's sorted
+    line multiset is byte-identical, no `---` ends up glued under a text line, every marker in a
+    span that HAS a tail sits strictly below its block's last body line and strictly above that
+    tail, and a note the audit finds nothing in comes back byte for byte. That last assertion is
+    the live witness of clause 4: it is the shape of every one of these notes now.
+
+    Each note must also still carry at least the number of marker lines the audit counted in it on
+    2026-11-17 — `STRAY_CORPUS` — because the prohibition is against deleting a retraction to have
+    it rewritten. The two sanctioned positions are asserted because the diff the item forbids is a
+    diff to a note nobody asked to change, and 2026-10-15.md:77 / 2026-10-16.md:113 are the two
+    positions a relocation pass must leave exactly where they stand.
+
+    Skips where no vault exists (the gate has none), which is the whole reason each clause above has
+    a fixture witness too.
+    """
+    texts = {name: _live(name) for name in STRAY_CORPUS}
+    if any(t is None for t in texts.values()):
+        pytest.skip("no ~/obsidian/memory on this tree: the live half is the box's witness, and "
+                    "every clause has a fixture witness that ran here")
+    for name, counted in STRAY_CORPUS.items():
+        assert len(_marker_numbers(texts[name])) >= counted, (
+            f"{name} held {counted} misplaced markers on 2026-11-17 and now carries only "
+            f"{len(_marker_numbers(texts[name]))} marker lines in total: a relocation that deletes "
+            f"a retraction instead of moving it")
+    for name, text in texts.items():
+        found = SWEEP.misplaced_markers(text)
+        out, n, why = SWEEP.relocate_markers(text)
+        assert n == len(found), (name, n, len(found), why)
+        assert SWEEP.misplaced_markers(out) == [], name
+        assert sorted(out.splitlines()) == sorted(text.splitlines()), name
+        assert len(_setext_hazards(out)) <= len(_setext_hazards(text)), name
+        assert (out == text) == (not found), (
+            name, "a note with nothing to move was rewritten, or one with something to move was not")
+        for ml, last_body, tail_line in _placement(out):
+            assert last_body < ml < tail_line, (name, ml, last_body, tail_line)
+    for name, line in SANCTIONED:
+        text = texts[name]
+        rows = text.splitlines()
+        assert SWEEP.MARKER_LINE.match(rows[line - 1]), f"{name}:{line} is not a marker line"
+        offset = len("\n".join(rows[:line - 1])) + (1 if line > 1 else 0)
+        assert not [f for f in SWEEP.misplaced_markers(text) if f.start == offset], (
+            f"the audit counted the sanctioned position {name}:{line}, which the item exempts "
+            f"because its span holds no rule and no nested heading")
+        out, _n, _why = SWEEP.relocate_markers(text)
+        assert out.splitlines()[line - 1] == rows[line - 1], (
+            f"the pass moved the sanctioned marker at {name}:{line}")

@@ -63,6 +63,20 @@ root per pass (`tripwire_reader=`), because the data root is a 705,803-file walk
 stamp names the halt flag as a second measurement rather than assuming the halt was lifted:
 the tree measuring whole is not the same fact as nobody holding a pause.
 
+The placement audit, and why fixing the writes was not enough
+-------------------------------------------------------------
+`0b0789a4` (#3993) fixed where a retraction is WRITTEN. It could not fix the ones already
+written: `already_sealed` is a substring test over the whole span, and a stray `dated:` below the
+span's swallowed `---` is still inside that span, so `block_is_refuted` short-circuits and the
+block is never re-stamped — the marker stays under the human's digest, and the destructive
+instruction it retracts keeps reading as unretracted. Measured 2026-11-17: 14 such markers over
+11 notes. So the sweep now audits its own placements read-only on every pass
+(`misplaced_markers`) and prints `AUDIT TOTAL: N markers over M notes` on its own line beside the
+dating count, and an `--apply` pass moves each counted marker to the offset `stamp_position`
+answers for that span (`relocate_markers`). The move is a PERMUTATION of the note's lines with the
+blank line above the stray travelling with it: nothing added, deleted or reworded, so
+`grep -c '^dated:'` still counts the same marker in the same note, one line higher.
+
 What it deliberately does not do
 --------------------------------
 It never edits a block that already carries `cleared:` or `dated:`, so a second run writes
@@ -122,6 +136,12 @@ GUARDIAN_TITLE = "Self-mod guardian:"
 #: swallowed tail put a retraction below Alan's own digest, where the destructive instruction the
 #: block retracts reads as unretracted to anyone reading the block (#3993).
 SPAN_TAIL = re.compile(r"(?m)^(?:---[ \t]*$|#{1,6}[ \t])")
+#: A line that IS a marker, line-anchored. `already_sealed` tests the same two prefixes as
+#: SUBSTRINGS because there a mention in prose is grounds to leave the block alone; the
+#: placement audit of #4229 names a POSITION in a note, and a `cleared:` discussed in the body
+#: is not a marker sitting at that position, so the two readings cannot share one pattern.
+MARKER_LINE = re.compile(r"(?m)^(?:%s|%s)" % (notify.DAILY_DATED_PREFIX,
+                                              notify.DAILY_CLEARED_PREFIX))
 # Two properties this line has to keep, and both are measured by the corpus it fixes rather
 # than by taste. It names the DATE and the read, because a refutation is a session and not a
 # second. And apart from its own `dated:` prefix it contains NEITHER marker word: #2221's
@@ -590,13 +610,188 @@ def stamp_position(text: str, start: int, end: int) -> tuple[int, str]:
     tail = SPAN_TAIL.search(text, heading_end + 1, end)
     if tail is None:
         return end, ""
-    cut = tail.start()
-    # Back over the BLANK lines only — a blank line is a newline whose predecessor is also a
-    # newline — so the block's own terminating newline stays with the block, and the stamp is
-    # spliced after it with the note's own blank line as the separator below.
-    while cut > heading_end + 1 and text[cut - 1] == "\n" and text[cut - 2] == "\n":
+    return _stamp_offset(text, heading_end + 1, tail.start())
+
+
+def _stamp_offset(text: str, floor: int, tail_start: int) -> "tuple[int, str]":
+    """(offset, padding) for a stamp that has to sit ABOVE the tail beginning at `tail_start`.
+
+    The offset is found by walking back from the tail over BLANK lines only — a blank line is a
+    newline whose predecessor is also a newline — so the block's own terminating newline stays
+    with the block and the stamp is spliced after it with the note's own blank line as the
+    separator below. `floor` is how far back that walk may go. `padding` is non-empty only where
+    the swallowed rule had no blank line above it at all: a `---` sitting directly under a text
+    line is that line's setext heading, not a thematic rule, so there the stamp is followed by an
+    inserted newline.
+
+    One definition of this arithmetic, and `stamp_position` is its only other caller, because
+    #4229's relocation has to place a marker at the SAME offset `date_note` would have used and
+    two walks that disagree about it would move a retraction to a position the writer's own audit
+    then reports as misplaced.
+    """
+    cut = tail_start
+    while cut > floor and text[cut - 1] == "\n" and text[cut - 2] == "\n":
         cut -= 1
-    return cut, "" if text[cut:tail.start()] else "\n"
+    return cut, "" if text[cut:tail_start] else "\n"
+
+
+class Misplaced(NamedTuple):
+    """One marker line lying at or below the tail of its own guardian span (#4229).
+
+    Every offset here is measured on the note as it stands NOW, and `line`/`stamp_line` are
+    1-based line numbers in that same text — so `stamp_line` is where the marker WILL be after a
+    relocation, never where it already is.
+    """
+
+    kind: str          # which prefix the line carries: `dated:` or `cleared:`
+    marker: str        # the line itself, newline excluded
+    line: int
+    start: int         # offset of the line's first character
+    end: int           # offset just past the line's terminating newline (or EOF)
+    span_title: str
+    span_start: int    # body start of the span that owns it, as `_guardian_sections` gives it
+    span_end: int
+    tail_start: int    # the span's first SPAN_TAIL match: the thing the marker sits under
+    stamp_at: int      # the offset `stamp_position` would write at for this span
+    stamp_line: int
+    pad: str           # non-empty when the tail has no blank line above it
+    cut_start: int     # the lines that travel with the marker begin here…
+    cut_end: int       # …and end here, so the move cannot add or lose a line
+    chunk: str         # the text moved; empty when the marker cannot pay for its separator
+    movable: bool
+
+    @property
+    def dest_line(self) -> int:
+        """The line the marker occupies after `relocate_markers`, in the SAME numbering.
+
+        The offset is where the chunk is spliced, and the chunk usually leads with the blank line
+        the stamp keeps between its block's body and itself — so the marker is one line under the
+        splice point, except where the `pad` shape puts the blank below it instead. Naming the
+        offset would report a blank line as a marker's destination, and naming a fixed +1 would be
+        wrong for the padded shape: this is read off the chunk the relocation will actually move.
+        """
+        return self.stamp_line + (1 if self.chunk.startswith("\n") else 0)
+
+
+def span_tail(text: str, start: int, end: int):
+    """The first line inside the span `text[start:end]` that is not the block's own prose.
+
+    `None` is a real answer and a sanctioned position: 88 of the 125 guardian spans of the 2026
+    notes hold no `---` rule and no nested heading at all, and a marker at the end of one of
+    those spans is exactly where the sweep has always put it and still puts it (#3993).
+    """
+    return SPAN_TAIL.search(text, start, end)
+
+
+def misplaced_markers(text: str) -> "list[Misplaced]":
+    """The audit: markers a reader cannot see retracting the block they retract (#4229).
+
+    A `dated:`/`cleared:` line counts as misplaced when it lies AT OR BELOW `span_tail()` of the
+    guardian span that owns it — below the note's own `---` rule and the `### Session …`
+    auto-captured digest after it, which is the shape `0b0789a4` stopped writing and never
+    cleaned up. Counted over the module's OWN span and offset arithmetic (`_guardian_sections`,
+    `SPAN_TAIL`, `_stamp_offset`) rather than a second reading of the note, so the audit and the
+    writer cannot disagree about where a block ends.
+
+    Read-only, and it has to stay that way: this is the number the daily report prints and the
+    number the relocation is measured against, 14 before and 0 after. It also records the plan —
+    the lines that will travel with each marker — because where a marker lands depends on whether
+    it can take a blank line with it, and two functions deciding that separately is how a report
+    starts naming a line the relocation then does not move the marker to.
+    """
+    out: list[Misplaced] = []
+    for title, start, end in _guardian_sections(text):
+        tail = span_tail(text, start, end)
+        if tail is None:
+            continue                                    # sanctioned position: nothing to be under
+        at, pad = _stamp_offset(text, start, tail.start())
+        for m in MARKER_LINE.finditer(text, tail.start(), end):
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            nl = text.find("\n", m.start(), len(text))
+            line_end = len(text) if nl < 0 else nl + 1
+            prev_blank = line_start >= 2 and text[line_start - 1] == "\n" \
+                and text[line_start - 2] == "\n"
+            next_blank = text[line_end:line_end + 1] == "\n"
+            marker = text[line_start:line_end]
+            cut_start, cut_end, chunk = line_start, line_end, marker
+            if pad:
+                # The stamp needs a blank UNDER it here or the swallowed `---` becomes its setext
+                # heading, and the splice point has none: pay for it out of the stray's own blank,
+                # from below where there is one and from above otherwise. With neither there is no
+                # way to move it that does not add a line or corrupt the rule, so it stays.
+                if next_blank:
+                    cut_end, chunk = line_end + 1, marker + pad
+                elif prev_blank:
+                    cut_start, chunk = line_start - 1, marker + pad
+                else:
+                    chunk = ""
+            elif prev_blank:
+                # The blank the stamp keeps ABOVE it, travelling with the marker: the note already
+                # has that blank line, so the move spends it here instead of adding one there.
+                cut_start, chunk = line_start - 1, "\n" + marker
+            out.append(Misplaced(
+                kind=text[m.start():m.start() + len(m.group(0))],
+                marker=marker.rstrip("\n"),
+                line=text.count("\n", 0, line_start) + 1,
+                start=line_start, end=line_end, span_title=title, span_start=start,
+                span_end=end, tail_start=tail.start(), stamp_at=at,
+                stamp_line=text.count("\n", 0, at) + 1, pad=pad,
+                cut_start=cut_start, cut_end=cut_end, chunk=chunk, movable=bool(chunk)))
+    return out
+
+
+def relocate_markers(text: str) -> "tuple[str, int, list[str]]":
+    """Move every marker `misplaced_markers` counts up to its block: (text, n, notes).
+
+    The offset is the one `stamp_position` answers with for that span, so a relocated marker ends
+    up strictly below the block's last body line and strictly above the swallowed rule or heading
+    that used to bury it — the position #3993 fixed for the writes that had not happened yet.
+
+    Nothing is written, invented, deleted or reworded: the operation is a PERMUTATION of the
+    note's lines, so `sorted(text.splitlines())` is byte-identical across the move. The unit being
+    moved is the marker line plus the blank line it was appended under — the only spare line a
+    stranded marker owns — and that blank is what makes the destination the shape `date_note`
+    writes: body, blank, stamp, blank, swallowed rule. Where the span's tail has no blank above it
+    (`stamp_position` answers with its `pad`) the stamp needs its separator BELOW it instead, since
+    a `---` directly under a text line is that line's setext heading and not a rule; the blank that
+    pays for it comes from under the stray when it has one and from above it otherwise, and a stray
+    with no blank on either side cannot pay, so it is left where it is and the audit goes on
+    counting it. Adding a blank line would break the permutation, and leaving the rule glued under
+    the stamp is the corruption `stamp_position`'s second return value exists to refuse.
+
+    A second pass moves nothing: the marker now sits above its span's tail, so the audit does not
+    count it and the bytes are returned untouched.
+    """
+    strays = misplaced_markers(text)
+    if not strays:
+        return text, 0, []
+
+    ops: list[tuple[int, int, str]] = []          # (start, end, replacement), cursor-applied
+    additions: dict[int, list[str]] = {}          # stamp_at -> chunks, in document order
+    notes: list[str] = []
+    moved = 0
+    for m in strays:
+        if not m.movable:
+            notes.append(f"L{m.line} NOT moved: `{m.span_title}` swallows a rule with no blank "
+                         f"line above it and this marker has no blank line to pay for one")
+            continue
+        ops.append((m.cut_start, m.cut_end, ""))
+        additions.setdefault(m.stamp_at, []).append(m.chunk)
+        moved += 1
+        notes.append(f"L{m.line} -> L{m.dest_line} of `{m.span_title}`: {m.marker[:60]}")
+
+    for at, chunks in additions.items():
+        ops.append((at, at, "".join(chunks)))
+    if not ops:
+        return text, 0, notes
+    out: list[str] = []
+    cursor = 0
+    for start, end, replacement in sorted(ops):
+        out.append(text[cursor:start])
+        out.append(replacement)
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out), moved, notes
 
 
 def date_note(text: str, running: set[str], day: str, fraction: float | None = None,
@@ -827,15 +1022,38 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
               file=sys.stderr)
 
     total = 0
+    # The placement audit (#4229): counted on every pass, read-only, and printed on its own line
+    # below, because the skill parses the headline and the autonomy job's regex pins it. The
+    # relocation is `--apply`-gated for the same reason the dating is: a counting pass must not
+    # move a line of somebody's note.
+    audit_found = 0
+    audit_notes = 0
+    moved_total = 0
     for path in sorted(Path(args.notes).glob("20*.md")):
         text = path.read_text(encoding="utf-8")
-        if not count_refutations(text, running, fraction, tripwire, snapshot):
+        strays = misplaced_markers(text)
+        for stray in strays:
+            print(f"{path.name}: MISPLACED {stray.kind} L{stray.line} sits under the rule or "
+                  f"heading at L{text.count(chr(10), 0, stray.tail_start) + 1} of "
+                  f"`{stray.span_title}` (belongs at L{stray.dest_line})")
+        new = text
+        if strays and args.apply:
+            new, moved, _why = relocate_markers(new)
+            moved_total += moved
+        # Counted on the bytes the pass LEAVES behind, so the line means what it says: 14 with no
+        # `--apply`, 0 once a relocation moved them, and still 14 where one was refused.
+        post = misplaced_markers(new)
+        audit_found += len(post)
+        audit_notes += 1 if post else 0
+        if not count_refutations(new, running, fraction, tripwire, snapshot):
+            if args.apply and new != text:
+                path.write_text(new, encoding="utf-8")
             continue
-        new, n, notes = date_note(text, running, args.day, fraction, tripwire, snapshot)
+        new, n, notes = date_note(new, running, args.day, fraction, tripwire, snapshot)
         total += n
-        for s in notes:
-            print(f"{path.name}: {s}")
-        if args.apply:
+        for note_line in notes:
+            print(f"{path.name}: {note_line}")
+        if args.apply and new != text:
             path.write_text(new, encoding="utf-8")
     if fraction is None:
         witness = "`tmpwatch.measure` unread; no block of that family dateable"
@@ -857,6 +1075,12 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
                     + ("" if snapshot.sha else " (no HEAD)")
                     + ("" if snapshot.sha is None else f" at {snapshot.sha[:8]}")
                     + ("" if snapshot.owned else f" — repo {snapshot.repo} is NOT the vault's"))
+    # Its own line, never appended to the headline: `guardian-note-sweep-daily` parses
+    # `refutable blocks: N (` / `dated blocks: N (` to compose the job's `note-sweep: …` summary,
+    # and `autonomy/110-guardian-note-sweep-daily.md` pins that summary's shape (#4229 clause 5).
+    print(f"AUDIT TOTAL: {audit_found} markers over {audit_notes} notes")
+    if moved_total:
+        print(f"relocated markers: {moved_total}")
     print(f"{'dated' if args.apply else 'refutable'} blocks: {total} "
           f"(RUNNING: {', '.join(sorted(running))}; {witness})")
     return 2 if partial else 0
