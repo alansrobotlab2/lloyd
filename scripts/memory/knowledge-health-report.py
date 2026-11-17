@@ -1105,7 +1105,8 @@ def _trace_coverage_cell(tc: tuple[int, int] | None) -> str:
 
 
 def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
-                    baseline_path=None, merge_queue_dir=None) -> dict:
+                    baseline_path=None, merge_queue_dir=None,
+                    suffix_packet_dir=None) -> dict:
     """Contamination, untagged records, near-duplicate clusters and regrowth.
 
     Also carries `merge_queue`: the two proposal queues that only a person can
@@ -1122,6 +1123,16 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
     formats for every human surface, counts AND the baseline they are a delta
     against, so this row can no longer print `1 of 12027 new dirs` with the
     12,027 being the whole store (#1535).
+
+    `merge_queue` also carries `suffix_review` and `suffix_packet` (#4228): the
+    ageing summary the Hygiene row and the daily-note line quote, and the dated
+    review packet that lists every waiting gate-approved SUFFIX cluster oldest
+    first. The row used to end "left for a person" while naming no file — a
+    reader was told a queue existed and handed nothing to work from. Building the
+    packet opens the plan JSONL and writes one markdown file: no store, no fact
+    directory, no merge. It is written into `suffix_packet_dir`, which defaults
+    to `merge_queue_dir`; the queue directory itself is still read-only, so
+    pointing the packet elsewhere keeps that promise wherever it matters.
     """
     import importlib.util
     here = Path(__file__).resolve().parent
@@ -1152,7 +1163,7 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
     queue_dir = (Path(merge_queue_dir) if merge_queue_dir is not None
                  else PIPELINE_DIR / MEMORY_GRAPH_RELPATH)
 
-    return {
+    hygiene = {
         "contaminated": contaminated,
         "contaminated_dirs": c["dirs"],
         "foreign_facts": c["foreign_facts"],
@@ -1173,14 +1184,87 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
         "baseline_at": r.get("baseline_at"),
         "dirs_at_baseline": r.get("dirs_at_baseline"),
         "provenance": kg_hygiene.provenance_coverage(root),
-        # The queue that CANNOT be zero by any job's action: #48's approved
-        # suffix tier and #67's merge proposals, both waiting on a person who
-        # until now was never told the queue existed, how big it was, or how old
-        # its oldest entry. Read-only, and deliberately absent from `_alarms`
-        # (#3407) — the alarm channel is for counts a job can repair.
-        "merge_queue": kg_hygiene.merge_queue_report(
-            queue_dir, today=now.date() if hasattr(now, "date") else now),
     }
+    queue_today = now.date() if hasattr(now, "date") else now
+    # The queue that CANNOT be zero by any job's action: #48's approved
+    # suffix tier and #67's merge proposals, both waiting on a person who
+    # until now was never told the queue existed, how big it was, or how old
+    # its oldest entry. Read-only, and deliberately absent from `_alarms`
+    # (#3407) — the alarm channel is for counts a job can repair.
+    merge_queue = kg_hygiene.merge_queue_report(queue_dir, today=queue_today)
+    # The suffix half of that queue, LISTED and not only counted (#4228). The row
+    # printed "gate-approved suffix clusters: 25 (waiting 54 days)" and ended "left
+    # for a person", but a reader cannot dispose of a cluster from a count, and no
+    # surface anywhere carried the clusters, their gate verdicts, or the command
+    # that drains them. `suffix_review` is the ageing tally the row and the note
+    # quote; `suffix_packet` is a dated file listing every waiting cluster oldest
+    # first with its verdict, age and apply command. Written nightly by this job,
+    # so the file the row names is as fresh as the row beside it; building it
+    # opens the plan JSONL and writes one markdown file — no store, no fact
+    # directory, no merge.
+    merge_queue["suffix_review"] = kg_hygiene.suffix_review_summary(
+        queue_dir, today=queue_today)
+    merge_queue["suffix_packet"] = str(kg_hygiene.write_suffix_review_packet(
+        queue_dir, today=queue_today,
+        out_dir=(Path(suffix_packet_dir) if suffix_packet_dir is not None
+                 else queue_dir)))
+    hygiene["merge_queue"] = merge_queue
+    return hygiene
+
+
+def suffix_queue_note(hygiene: dict) -> str | None:
+    """One line for today's daily note while the suffix queue is overdue (#4228).
+
+    The queue was invisible by construction, in three ways at once. `merge_queue`
+    is deliberately absent from `_alarms`, so no age can raise it to the exit code;
+    the one alert route in this script (`_alert`, below) posts to a Discord channel
+    `config.yaml` keeps unset by standing ruling; and the row that measures the
+    queue lands in `_pipeline/reflection/`, a machine directory no human opens.
+    Measured 2026-11-17: tonight's row read "25 gate-approved suffix clusters
+    (waiting 54 days ...)" in `knowledge-health-2026-11-17.md` while the day's
+    note under `~/obsidian/memory/` carried zero mentions of the queue.
+
+    So the line goes to the note a human reads, and says the three things needed
+    to act: how many are waiting, how long the oldest has waited, and which file
+    lists them with their gate verdicts and the apply command.
+
+    A NOTE, never an alarm: nothing here reaches `_alarms`, so the report's exit
+    code cannot move because the queue is old. That is #3407's decision and #4228
+    keeps it — the alarm channel is for counts a job can repair, and no job may
+    repair this one.
+    """
+    queue = hygiene.get("merge_queue") or {}
+    review = queue.get("suffix_review") or {}
+    if not review.get("over_threshold"):
+        return None
+    return (f"{review['waiting']} gate-approved suffix merge clusters are waiting "
+            f"for a person: {review['over_threshold']} of them over "
+            f"{review['threshold_days']} days, the oldest "
+            f"{review['oldest_age_days']} days (first approved "
+            f"{review['oldest_first_approved']}). The suffix review packet — "
+            f"oldest first, "
+            f"each cluster with its gate verdict and apply command: "
+            f"{queue.get('suffix_packet')}. A person applies with "
+            f"`{review['apply_form']}` — a report, not an alarm: no job can drain "
+            f"this queue, and its age changes nothing about this run.")
+
+
+def write_suffix_queue_note(hygiene: dict) -> bool:
+    """Append that line to today's daily note. Never raises.
+
+    An unreachable vault must not fail a hygiene report — the report's own row is
+    the record either way — so the whole call is guarded. Returns whether the line
+    was written AND read back, the contract `append_daily_alert_line` already has,
+    so a caller can tell "none was due" from "the vault was unreachable".
+    """
+    line = suffix_queue_note(hygiene)
+    if line is None:
+        return False
+    try:
+        from app.autonomy import append_daily_alert_line
+        return bool(append_daily_alert_line(line))
+    except Exception:
+        return False
 
 
 def _facts_root_for(entities: dict) -> Path:
@@ -1564,6 +1648,15 @@ def _merge_queue_cell(mq: dict | None) -> str:
         # 63 on 2026-10-26) is the number a reader would otherwise arrive at.
         suffix += (f"; the {mq['suffix_refused']} gate-REFUSED clusters of the "
                    f"{mq['suffix_tier_total']} sharing the tier are excluded")
+    review = mq.get("suffix_review") or {}
+    if review:
+        # The ageing (#4228). The row already said the queue was "left for a
+        # person", and the person it named had nothing to open: no count of how
+        # long the wait had become, and no list of the clusters. The threshold is
+        # quoted with the count so the reader can see the bar it is measured
+        # against rather than trust the number.
+        suffix += (f"; {review['over_threshold']} of them waiting longer than "
+                   f"{review['threshold_days']} days")
     if mq.get("suffix_no_data"):
         suffix += f" — no data: {mq['suffix_no_data']}"
     proposals = (f"{mq['merge_proposals']} #67 merge proposal"
@@ -1573,8 +1666,13 @@ def _merge_queue_cell(mq: dict | None) -> str:
         proposals += f"; {mq['alias_only']} `alias_only` proposals excluded"
     if mq.get("proposals_no_data"):
         proposals += f" — no data: {mq['proposals_no_data']}"
+    # The packet goes last (#4228): the row is a markdown table cell, and a path
+    # dropped between the two queues would be read as belonging to whichever one it
+    # landed next to. As a clause of its own it says plainly which queue it serves.
+    packet = (f" — suffix review packet: {mq['suffix_packet']}"
+              if mq.get("suffix_packet") else "")
     return (f"{suffix}, and {proposals} — left for a person, "
-            f"report-only and never an alarm")
+            f"report-only and never an alarm{packet}")
 
 
 #: #94's referential-integrity ledger: the one report of the only job that notices
@@ -2787,6 +2885,15 @@ def main():
              "the merge itself live with the jobs that write them.",
     )
     parser.add_argument(
+        "--suffix-packet-dir",
+        type=Path,
+        default=None,
+        help="Where to write the dated SUFFIX_SAFE review packet #4228 builds each run "
+             "(default: --output-dir, beside the report whose Hygiene row names it). "
+             "The packet is this job's only write besides its own report, and it "
+             "contains no merge: the apply stays a person's command.",
+    )
+    parser.add_argument(
         "--no-alarm-exit", action="store_true",
         help="Always exit 0, even on an alarm condition (for ad-hoc runs)",
     )
@@ -2835,7 +2942,9 @@ def main():
     # this walks the parsed dict, not the tree.
     stamp_cohort = stale_stamp_cohort(entities)
 
-    hygiene = compute_hygiene(entities, now, merge_queue_dir=args.merge_queue_dir)
+    hygiene = compute_hygiene(entities, now, merge_queue_dir=args.merge_queue_dir,
+                              suffix_packet_dir=(args.suffix_packet_dir
+                                                 or args.output_dir))
     fact_dups = fact_duplicate_stats()
     dup_id_files = _duplicate_id_files(entities)
     # Over the entities already parsed above — no second walk of the tree.
@@ -2947,6 +3056,13 @@ def main():
         _alert(alarms, output_file)
         if not args.no_alarm_exit:
             rc = EXIT_ALARM
+
+    # The daily-note line for the human-only queue: after the alarm block, and
+    # outside it (#4228). The merge queue is no input to `_alarms`, so no age can
+    # move the exit code, and `--no-alarm-exit` does not silence the line either —
+    # that flag is for operators muting noise they can repair, and this is a queue
+    # only a person may repair.
+    write_suffix_queue_note(hygiene)
     emit_exit_sentinel("knowledge-health-report.py", rc)
     return rc
 

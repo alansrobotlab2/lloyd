@@ -5,6 +5,7 @@ held facts about another entity, every one from a suffix merge.
 """
 import importlib.util
 import datetime as dt
+import json
 import os
 import re
 import sys
@@ -625,3 +626,227 @@ def test_the_repair_agrees_with_the_rail_record_for_record_and_the_floor_holds(
                     repair.append((str(f), rec.get("fact")))
     assert rail == repair, (set(rail) ^ set(repair))
     assert len(rail) == 6, rail
+
+
+# ---------------------------------------------------------------------------
+# #4228 clauses 1 and 2 — the waiting SUFFIX queue, listed and packeted
+# ---------------------------------------------------------------------------
+
+TODAY = dt.date(2026, 11, 17)
+
+#: The apply form a person runs. Stated as a literal here, on purpose: a packet that
+#: silently followed a renamed constant would stop telling the reviewer how to drain
+#: the queue, and #4197 (3ead517a) is what made naming the tier the only route.
+APPLY_FORM = "--apply --tiers SUFFIX_SAFE"
+
+
+def _suffix_row(canonical: str, norm_key: str, variants: list[tuple[str, int]],
+                status: str = "SAFE", tier: str = "SUFFIX_SAFE",
+                decision: str = "SUFFIX_JUDGED — every judge: SAME",
+                reason: str = "Both refer to the same thing by two names.") -> dict:
+    """One plan row shaped like a real `entity-merges-*.jsonl` sweep record.
+
+    `variants` is `[name, degree]` pairs and `gate` maps a variant to its decision
+    plus the per-judge `reason`, because those are the shapes the live plans carry
+    (measured on the 2026-11-17 plans: `Hermes` carries `[["Hermes", 68], ["Hermes
+    Agent", 26]]` and a reason naming Nous Research). A fixture built on invented
+    shapes would pass against a packet that could not read the real files.
+    """
+    return {"canonical": canonical, "norm_key": norm_key,
+            "variants": [list(v) for v in variants], "tier": tier,
+            "status": status, "decision": decision,
+            "gate": {name: {"decision": "SAME" if status == "SAFE" else "DIFFERENT",
+                            "judges": {"j1": {"verdict": ("SAME" if status == "SAFE"
+                                                          else "DIFFERENT"),
+                                              "reason": reason}}}
+                     for name, _ in variants}}
+
+
+def _queue_graph(tmp_path: Path) -> Path:
+    """A graph dir whose plans hold three approved clusters, one refusal and one off-tier.
+
+    Three run dates, so "waiting" and "oldest" are both measurable and cannot be
+    confused: `Hermes` is approved on the FIRST date (54 days by TODAY), `Decider
+    Service` on the second (43 days), and `Young Pair` only on the newest plan, which
+    makes it 2 days old and the one record that must NOT be flagged overdue.
+    `Ghost` was approved and has since been REFUSED by the gate on the newest plan,
+    and `Ambiguous One` sits in tier SUFFIX_AMBIGUOUS — neither belongs in the packet.
+    """
+    graph = tmp_path / "memory-graph"
+    graph.mkdir()
+    hermes = _suffix_row("Hermes", "hermes", [("Hermes", 68), ("Hermes Agent", 26)],
+                         reason="Both refer to the same open-source agent framework "
+                                "by Nous Research.")
+    decider = _suffix_row("Decider Service", "decider service",
+                          [("Decider Service", 9), ("Decider", 7)])
+    young = _suffix_row("Young Pair", "young pair",
+                        [("Young Pair", 4), ("Young Pairing", 3)])
+    # Approved on the two early plans and refused on the newest one: this is the
+    # shape that makes the REFUSED exclusion sharp. A cluster the gate only ever
+    # refused would be excluded by two rules at once and prove neither.
+    ghost_approved = _suffix_row("Ghost", "ghost",
+                                 [("Ghost", 5), ("Ghost Service", 2)])
+    ghost_refused = _suffix_row("Ghost", "ghost",
+                                [("Ghost", 5), ("Ghost Service", 2)],
+                                status="REFUSED",
+                                decision="semantic gate: DIFFERENT",
+                                reason="One is a process, the other a persona.")
+    ambiguous = _suffix_row("Ambiguous One", "ambiguous one",
+                            [("Ambiguous One", 3), ("Ambigous One", 3)],
+                            tier="SUFFIX_AMBIGUOUS",
+                            decision="SUFFIX_SAFE — semantic gate: review")
+    plans = {
+        "entity-merges-2026-09-24-20260924T030000Z.jsonl": [hermes, ghost_approved],
+        "entity-merges-2026-10-05-20261005T030000Z.jsonl":
+            [hermes, decider, ghost_approved],
+        "entity-merges-2026-11-15-20261115T030000Z.jsonl":
+            [hermes, decider, young, ghost_refused, ambiguous],
+        # The pointer, which `_plan_date` deliberately refuses so a run still writing
+        # is never read as the newest document. Its contents are inert: were this file
+        # read as the newest plan, the packet would be `Hermes` alone.
+        "entity-merges-latest.jsonl": [hermes],
+    }
+    for name, rows in plans.items():
+        (graph / name).write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return graph
+
+
+def test_suffix_review_packet_lists_every_waiting_cluster_oldest_first(tmp_path):
+    """Clause 1: the packet is the queue, one record per cluster, SAFE rows only.
+
+    The queue measured 25 clusters with the oldest waiting 54 days as at 2026-11-17,
+    and every one of those gate verdicts reads SAME; `merge_queue_report` says how
+    many, which is not something a reviewer can act on. This node pins the fields a
+    decision needs and the two exclusions that matter: a cluster the gate has since
+    REFUSED (the plans held 42 of those as at 2026-11-17) must never reach a human
+    told to apply, and a row of another tier must not inflate the list.
+
+    Ages come from the FIRST plan that approved the cluster, not from the newest row
+    that repeats it, or every cluster would read as one day old forever.
+    """
+    graph = _queue_graph(tmp_path)
+
+    records = kg_hygiene.suffix_review_packet(graph, today=TODAY)
+
+    assert [r["canonical"] for r in records] == ["Hermes", "Decider Service",
+                                                 "Young Pair"], records
+    assert [r["age_days"] for r in records] == [54, 43, 2], records
+    assert [r["first_approved"] for r in records] == ["2026-09-24", "2026-10-05",
+                                                      "2026-11-15"], records
+
+    hermes = records[0]
+    assert hermes["variants"] == ["Hermes", "Hermes Agent"], hermes
+    assert hermes["gate_decision"] == "SUFFIX_JUDGED — every judge: SAME", hermes
+    assert "Nous Research" in hermes["gate_reasons"]["Hermes Agent"], hermes
+    assert hermes["overdue"] is True and records[-1]["overdue"] is False, records
+
+    assert "Ghost" not in [r["canonical"] for r in records], (
+        "a cluster the gate refused on the newest plan is in the apply packet")
+    assert "Ambiguous One" not in [r["canonical"] for r in records], (
+        "a row outside tier SUFFIX_SAFE is in the packet")
+    assert all(r["gate_decision"].startswith("SUFFIX_JUDGED") for r in records), records
+
+    # `today=None` is what the nightly passes: the ages must be measured against the
+    # real clock, not against a fixture, and the dates must not move.
+    live = kg_hygiene.suffix_review_packet(graph)
+    assert [r["first_approved"] for r in live] == [r["first_approved"]
+                                                   for r in records], live
+    assert live[0]["age_days"] == (dt.date.today() - dt.date(2026, 9, 24)).days, live
+
+
+def test_the_packet_is_a_dated_file_that_states_the_apply_command_and_reads_only_plans(
+        tmp_path, monkeypatch):
+    """Clause 2: the packet is a file a person can work, and it opens nothing else.
+
+    The call returns the path so the nightly row can name it, and the filename is
+    dated so a reviewer can tell which night's queue they are holding.
+
+    "Opens only the plan JSONL" is checked by instrumenting `open` for the whole
+    call rather than by reading the code: the store (`kg.sqlite`) and a fact
+    directory are planted in the tree FIRST, so an implementation that reached for
+    either is caught by name. The rule is not style. Draining this queue means
+    writing `vault-derived/kg.sqlite` and moving fact dirs, which is #4009 and
+    person-only — a round that was refused on 2026-11-09 for trying
+    (`review_premise_unsound: true`). A reporting artifact that could touch the
+    store would put a round one import away from the thing the guard exists to stop.
+
+    The packet must also merge nothing: the plan files are asserted byte-identical
+    after the call, and no merged fact dir appears.
+    """
+    graph = _queue_graph(tmp_path)
+    store = tmp_path / "kg.sqlite"
+    store.write_bytes(b"not a database, a witness")
+    facts = tmp_path / "facts" / "Hermes"
+    facts.mkdir(parents=True)
+    (facts / "hermes-state.md").write_text("---\ntype: facts\n---\n", encoding="utf-8")
+    plan_bytes = {p: p.read_bytes() for p in sorted(graph.glob("*.jsonl"))}
+    # Only the dated plans are readable: `entity-merges-latest.jsonl` is a pointer
+    # `_plan_date` refuses, so the writer must never open it.
+    dated_plans = [p for p in plan_bytes if p.name != "entity-merges-latest.jsonl"]
+    before = sorted((tmp_path / "facts").iterdir())
+
+    opened: list[str] = []
+    real_path_open = Path.open
+
+    def spy(self, *args, **kwargs):
+        opened.append(str(self))
+        return real_path_open(self, *args, **kwargs)
+
+    # `Path.open`, not `builtins.open`: both the plan reads (`Path.read_text`) and
+    # the packet write go through this one route, so spying on `open` alone would
+    # watch nothing and pass whatever the writer touched.
+    monkeypatch.setattr(Path, "open", spy)
+    path = kg_hygiene.write_suffix_review_packet(graph, today=TODAY,
+                                                 out_dir=tmp_path / "packets")
+    monkeypatch.undo()
+
+    assert path.is_file(), path
+    assert path.name == "suffix-review-2026-11-17.md", path
+    text = path.read_text(encoding="utf-8")
+
+    assert text.count(APPLY_FORM) == 4, (
+        f"expected the apply form once in the preamble and once per cluster (3): "
+        f"{text.count(APPLY_FORM)}")
+    assert "Hermes" in text and "Decider Service" in text, text
+    assert "2026-09-24" in text and "54 days" in text, text
+    assert "OVERDUE" in text, text
+    assert "Writing this packet applied" in text and "never the store" in text, (
+        "the packet does not say it changed nothing, so holding it reads as a done "
+        "decision")
+
+    strays = [p for p in opened
+              if "kg.sqlite" in p or "/facts/" in p
+              or (p.endswith(".jsonl") and "/memory-graph/" not in p)]
+    assert not strays, f"the packet writer opened a non-plan file: {strays}"
+    assert {p for p in opened if p.endswith(".jsonl")} == {str(p) for p in dated_plans}, (
+        f"the writer read plan files it should not have: {opened}")
+    assert {p: p.read_bytes() for p in plan_bytes} == plan_bytes, (
+        "writing the packet changed a plan file")
+    assert sorted((tmp_path / "facts").iterdir()) == before, (
+        "writing the packet changed the fact tree")
+    assert store.read_bytes() == b"not a database, a witness", "the store was opened"
+
+
+def test_the_packet_survives_a_sweep_run_that_excluded_the_tier(tmp_path):
+    """The queue cannot be a count in one surface and zero in the other.
+
+    A sweep writes several plans on one run date, and the last can be a run that
+    excluded the tier: every status is then rewritten to AMBIGUOUS while the keys
+    stay put. Measured on the live directory 2026-11-17, which holds three plans at
+    16:00:37Z / 16:00:53Z / 16:01:01Z — 24 SAFE rows, 24 SAFE rows, then 0. Reading
+    only the final file prints a Hygiene row of 24 clusters beside an empty packet,
+    which is the failure this node forbids: the row and the packet are the same 24.
+    """
+    graph = _queue_graph(tmp_path)
+    excluded = _suffix_row("Hermes", "hermes", [("Hermes", 68), ("Hermes Agent", 26)],
+                           status="AMBIGUOUS",
+                           decision="tier SUFFIX_SAFE excluded by --tiers")
+    (graph / "entity-merges-latest-excluded.jsonl").write_text(
+        json.dumps(excluded) + "\n", encoding="utf-8")
+
+    records = kg_hygiene.suffix_review_packet(graph, today=TODAY)
+
+    assert [r["canonical"] for r in records] == ["Hermes", "Decider Service",
+                                                 "Young Pair"], records
+    assert kg_hygiene.suffix_review_summary(graph, today=TODAY)["waiting"] == len(records)

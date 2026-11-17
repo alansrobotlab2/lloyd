@@ -1837,3 +1837,200 @@ def test_the_walk_returns_every_record_so_the_reconciliation_prints_zero_short(t
         assert "1 in files the walk never opened over 1 path(s)" in row, row
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# #4228 clauses 3 and 4 — the queue reaches a human surface
+# ---------------------------------------------------------------------------
+
+
+def _aged_graph(root, *, ages):
+    """A memory-graph dir whose waiting clusters are exactly `ages` days old.
+
+    Built relative to TODAY because the row's whole subject is ageing: plan files
+    dated N days back make a cluster's age N by the definition `merge_queue_report`
+    uses (the earliest plan that carried it SAFE), so a fixture states its own
+    expected numbers instead of inheriting the clock. `ages` must include 0 — the
+    newest plan is what makes a cluster WAITING at all.
+    """
+    graph = Path(root) / "memory-graph"
+    graph.mkdir(parents=True, exist_ok=True)
+    today = _dt.date.today()
+    names = [f"Cluster {i}" for i in range(len(ages))]
+    by_day: dict[_dt.date, list[str]] = {}
+    for name, age in zip(names, ages):
+        for back in range(0, age + 1):
+            by_day.setdefault(today - _dt.timedelta(days=back), []).append(name)
+    for day, names_on in sorted(by_day.items()):
+        stamp = day.strftime("%Y%m%dT120000Z")
+        rows = [_sweep_row(n) for n in dict.fromkeys(names_on)]
+        _plan_rows(graph / f"entity-merges-{day.isoformat()}-{stamp}.jsonl", rows)
+    return graph
+
+
+def _run_nightly(tmp_path, graph, vault, *extra):
+    """`main()` as the nightly job runs it, with the VAULT redirected to a fixture.
+
+    `LLOYD_VAULT_ROOT` is the redirect `app.paths` already offers, so clause 4 is
+    crossed through the real process and the real daily-note writer rather than by
+    monkeypatching the call away: what is asserted is a file under the fixture vault.
+    """
+    import os
+    import subprocess
+    from app import kg_store
+
+    root = tmp_path / "facts"
+    _facts(root, "vLLM", "state", [("vLLM", "serves openai api")])
+    db = tmp_path / "kg.sqlite"
+    st = kg_store.configure(db)
+    st.facts_idx.reindex(sorted(root.rglob("*.md")), root=root)
+    kg_store.reset()
+
+    out = tmp_path / "out"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/memory/knowledge-health-report.py"),
+         "--facts-dir", str(root), "--output-dir", str(out),
+         "--merge-queue-dir", str(graph), *extra],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "LLOYD_KG_DB": str(db), "LLOYD_FACTS_ROOT": str(root),
+             "LLOYD_DATA": str(tmp_path), "LLOYD_VAULT_ROOT": str(vault),
+             # `tests/conftest.py` points this at its own scratch dir, and the
+             # route outranks `VAULT_ROOT/memory` in the note writer, so without
+             # naming it here the line would land in the suite's scratch tree and
+             # the read-back below would be looking at the wrong filesystem.
+             "LLOYD_DAILY_NOTE_DIR": str(vault / "memory")})
+    dated = next(out.glob("knowledge-health-*.md"))
+    run_date = _dt.datetime.strptime(
+        dated.name[len("knowledge-health-"):][:10], "%Y-%m-%d").date()
+    return proc, dated.read_text(), run_date
+
+
+def test_the_merge_queue_row_names_the_packet_and_the_over_threshold_count(tmp_path):
+    """Clause 3: the row that says "left for a person" now says where the work is.
+
+    The row used to end `left for a person, report-only and never an alarm` over a
+    queue of 25 clusters, the oldest waiting 54 days — true, and useless to the person
+    it named, because nothing anywhere listed the clusters or said what to run. Two
+    things must now be in the row: how many have waited LONGER than the threshold,
+    and the path of the file that lists them.
+
+    3 clusters dated 60 and 12 days back means exactly 1 over 30 days — the count is
+    not the queue size and not the oldest age, and a row that printed either instead
+    would pass a weaker node than this one.
+    """
+    graph = _aged_graph(tmp_path, ages=(60, 12, 0))
+    proc, text, run_date = _run_script(tmp_path, graph)
+
+    assert proc.returncode == 0, proc.stderr
+    row = _report_line(text, "Merge proposals left for a human")
+    assert "3 gate-approved suffix clusters" in row, row
+    assert "1 of them waiting longer than 30 days" in row, row
+    assert "suffix review packet: " in row, row
+
+    packet = _queue_packet(row, run_date)
+    assert packet, f"the row does not carry a packet path: {row!r}"
+
+
+def _queue_packet(row: str, run_date) -> str:
+    """The packet path the Hygiene row names, or the empty string.
+
+    Read out of the row rather than reconstructed from the run date, so the node
+    proves the row NAMES a file that exists, not that such a file could be built.
+    """
+    hit = re.search(r"suffix review packet: (\S+)", row)
+    return hit.group(1).rstrip("|").strip() if hit else ""
+
+
+def test_the_packet_the_row_names_lists_every_waiting_cluster(tmp_path):
+    """The row's path must open onto the queue itself, oldest first, with the command.
+
+    A named path that pointed at an empty or unreadable file would satisfy the row
+    and still leave the reviewer with nothing, so this node follows the path the row
+    printed and reads it: 3 clusters, the 60-day one above the 12-day one, each with
+    the apply form and its age.
+    """
+    graph = _aged_graph(tmp_path, ages=(60, 12, 0))
+    proc, text, run_date = _run_script(tmp_path, graph)
+    assert proc.returncode == 0, proc.stderr
+
+    packet = Path(_queue_packet(_report_line(text, "Merge proposals left for a human"),
+                                run_date))
+    assert packet.is_file(), packet
+    body = packet.read_text(encoding="utf-8")
+    assert "3 gate-approved SUFFIX cluster(s)" in body, body
+    assert "more than 30 days" in body, body
+    assert body.count("--apply --tiers SUFFIX_SAFE") == 4, (
+        f"the apply form must appear once per cluster and once in the preamble: {body}")
+
+    ages = [int(a) for a in re.findall(r"waiting (\d+) days", body)]
+    assert ages == sorted(ages, reverse=True) and len(ages) == 3, (
+        f"the packet is not oldest-first: {ages}")
+
+
+def test_an_overdue_suffix_queue_reaches_the_daily_note_without_an_alarm(tmp_path):
+    """Clause 4: one line on the surface a human reads, and the exit code unmoved.
+
+    The nightly row lands in `_pipeline/reflection/`, which no human opens; the
+    daily note under `memory/` is where alarms already live. So an overdue queue
+    writes ONE line there, naming the count, the oldest age and the packet path, and
+    it does that through `app.autonomy.append_daily_alert_line` in the real child
+    process — the fixture vault is redirected by `LLOYD_VAULT_ROOT`, so nothing here
+    patches the writer or touches `~/obsidian`.
+
+    The other half is what must NOT happen. `merge_queue` is deliberately out of
+    `_alarms` (#3407): the exit-code channel is for counts a job can repair, and no
+    job can drain this queue — only a person can. So the run exits 0 WITHOUT
+    `--no-alarm-exit`, and stderr carries no ALARM block, while the note line is
+    written. Age is allowed to be visible; it is not allowed to become a failure.
+    """
+    graph = _aged_graph(tmp_path, ages=(60, 12, 0))
+    vault = tmp_path / "vault"
+    (vault / "memory").mkdir(parents=True)
+
+    proc, text, run_date = _run_nightly(tmp_path, graph, vault)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "ALARM" not in proc.stderr, proc.stderr
+
+    notes = sorted((vault / "memory").glob("*.md"))
+    assert len(notes) == 1, notes
+    body = notes[0].read_text(encoding="utf-8")
+    hits = [ln for ln in body.splitlines() if "SUFFIX_SAFE" in ln]
+    assert len(hits) == 1, f"expected exactly one queue line in the note: {hits}"
+    line = hits[0]
+    assert "3" in line and "60 days" in line, line
+    assert "suffix review packet" in line, line
+    assert "not an alarm" in line, (
+        "the note line must say what it is not, or a reader files it as an alarm")
+
+
+def test_an_aged_but_unapproved_queue_writes_no_daily_note_line(tmp_path):
+    """The threshold is the gate, and an empty queue stays silent.
+
+    Two shapes that must not write: a queue whose clusters are all younger than the
+    threshold (12 days back, so nothing is overdue), and a directory with no plans at
+    all. Printing a line every night regardless is how an alarm becomes wallpaper —
+    the same reason `gap_line` is suppressed when there is no gap (#3220).
+    """
+    young = _aged_graph(tmp_path / "young", ages=(12, 0))
+    vault = tmp_path / "vault"
+    (vault / "memory").mkdir(parents=True)
+
+    proc, _text, _d = _run_nightly(tmp_path / "run1", young, vault)
+    assert proc.returncode == 0, proc.stderr
+    # The writer creates the note only when it has something to say, so "no file"
+    # and "a file that never mentions the queue" are both the correct silence.
+    bodies = [p.read_text(encoding="utf-8") for p in (vault / "memory").glob("*.md")]
+    assert all("SUFFIX_SAFE" not in b for b in bodies), bodies
+
+    empty = tmp_path / "empty-graph"
+    empty.mkdir()
+    vault2 = tmp_path / "vault2"
+    (vault2 / "memory").mkdir(parents=True)
+    proc2, text2, _d2 = _run_nightly(tmp_path / "run2", empty, vault2)
+    assert proc2.returncode == 0, proc2.stderr
+    assert "0 gate-approved suffix clusters" in _report_line(
+        text2, "Merge proposals left for a human")
+    bodies2 = [p.read_text(encoding="utf-8")
+               for p in (vault2 / "memory").glob("*.md")]
+    assert all("SUFFIX_SAFE" not in b for b in bodies2), bodies2

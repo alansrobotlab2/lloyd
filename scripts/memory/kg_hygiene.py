@@ -652,6 +652,193 @@ def merge_queue_report(memory_graph_dir: Path,
     }
 
 
+#: The command a person runs to apply one cluster from the review packet (#4228).
+#: #4197 (3ead517a) made naming the tier the ONLY route — an `--apply` with no
+#: `--tiers` now refuses and returns 4 — so a list of clusters waiting for a human has
+#: to state the tier with every row, and the packet cannot be read as a command to run
+#: unattended.
+SUFFIX_APPLY_FORM = "--apply --tiers SUFFIX_SAFE"
+
+#: A gate-approved SUFFIX cluster that has waited this long with no decision is
+#: overdue (#4228). 30 is the item's contract choice, not a measurement: the ageing
+#: threshold is Alan's call, so every surface that uses it names the number it used.
+SUFFIX_AGE_THRESHOLD_DAYS = 30
+
+
+def suffix_review_packet(memory_graph_dir: Path,
+                         today: dt.date | None = None) -> list[dict]:
+    """One record per WAITING gate-approved SUFFIX cluster, oldest first (#4228).
+
+    `merge_queue_report` answers "how big is the queue"; this answers "what is in it",
+    because a reviewer handed a count of 24 cannot dispose of one. Each record carries
+    what a decision needs: the canonical and variant names, the semantic gate's
+    decision and its per-judge reasons, the first date the cluster was approved, how
+    long it has waited since, and the apply command that drains it.
+
+    The population is `merge_queue_report`'s, re-derived the same way from the same
+    files, so the two can never disagree about who is waiting: rows of tier
+    SUFFIX_SAFE with status SAFE in the plan that wins the walk (the last
+    `_plan_date`-bearing file, apply plans excluded), keyed by `norm_key` then
+    canonical then old, first approved in some earlier plan, and never since refused.
+    A REFUSED row is the gate having answered no — 42 of the tier as at 2026-11-17 —
+    and a person working this packet must never be handed one.
+
+    `SAFE` is the semantic gate's unanimous SAME, which is why every record's
+    `gate_decision` reads `SUFFIX_JUDGED — every judge: SAME`. Opens the same plan
+    JSONL files and nothing else: no `kg.sqlite`, no fact directory, no merge.
+    """
+    today = today or dt.date.today()
+    memory_graph_dir = Path(memory_graph_dir)
+
+    dated = []
+    for path in sorted(memory_graph_dir.glob(MERGE_QUEUE_PLANS_GLOB)):
+        if MERGE_QUEUE_APPLY_MARKER in path.name:
+            continue
+        date = _plan_date(path.name)
+        if date is not None:
+            dated.append((date, path))
+    if not dated:
+        return []
+    newest = max(date for date, _ in dated)
+
+    # Every plan file of that date, not just the last one. A sweep writes several
+    # plans per run date (measured 2026-11-17: three, at 160037Z/160053Z/160101Z) and
+    # the last can be a run that EXCLUDED the tier, which rewrites all 66 statuses to
+    # AMBIGUOUS while leaving the keys alone. `merge_queue_report` counts those keys as
+    # waiting anyway, so reading only the final file would print a queue of 24 and
+    # packet 0 clusters — the two surfaces have to be the same 24.
+    newest_safe: dict[str, dict] = {}
+    for date, path in dated:
+        if date != newest:
+            continue
+        for row in _jsonl_rows(path):
+            if row.get("tier") != SUFFIX_TIER or row.get("status") != "SAFE":
+                continue
+            key = str(row.get("norm_key") or row.get("canonical")
+                      or row.get("old") or "").strip()
+            if key:
+                newest_safe.setdefault(key, row)
+
+    first_approved: dict[str, dt.date] = {}
+    ever_refused: set[str] = set()
+    for date, path in sorted(dated):
+        for row in _jsonl_rows(path):
+            if row.get("tier") != SUFFIX_TIER:
+                continue
+            key = str(row.get("norm_key") or row.get("canonical")
+                      or row.get("old") or "").strip()
+            if not key:
+                continue
+            if row.get("status") == "SAFE" and key not in first_approved:
+                first_approved[key] = date
+            if row.get("status") == "REFUSED":
+                ever_refused.add(key)
+
+    out: list[dict] = []
+    for key, row in newest_safe.items():
+        if key not in first_approved or key in ever_refused:
+            continue
+        first = first_approved[key]
+        out.append({
+            "key": key,
+            "canonical": str(row.get("canonical") or row.get("old") or ""),
+            "variants": [str(v[0]) for v in (row.get("variants") or [])
+                         if isinstance(v, (list, tuple)) and v],
+            "gate_decision": str(row.get("decision") or ""),
+            # The plan nests a variant's reason at gate[variant]["judges"][judge]
+            # ["reason"] (measured on the live 2026-11-17 plans), one judge per
+            # cluster here, and gate[variant]["decision"] is that judge's own
+            # verdict. Flattened to one string per variant because the reviewer
+            # reads a sentence, not a dict.
+            "gate_reasons": {
+                str(name): "; ".join(
+                    str(judge.get("reason") or "")
+                    for judge in ((gate or {}).get("judges") or {}).values()
+                    if judge.get("reason"))
+                for name, gate in (row.get("gate") or {}).items()},
+            "first_approved": first.isoformat(),
+            "age_days": (today - first).days,
+            "overdue": (today - first).days > SUFFIX_AGE_THRESHOLD_DAYS,
+            "apply": SUFFIX_APPLY_FORM,
+        })
+    out.sort(key=lambda r: (r["first_approved"], r["canonical"], r["key"]))
+    return out
+
+
+def suffix_review_summary(memory_graph_dir: Path,
+                          today: dt.date | None = None) -> dict:
+    """The queue as a reviewer needs it: how many, how long, and where the packet is.
+
+    `over_threshold` counts clusters waiting LONGER than `SUFFIX_AGE_THRESHOLD_DAYS`,
+    strictly — a cluster at exactly 30 days is not yet overdue. `oldest_age_days` is
+    the age of the longest wait, 0 when nothing waits.
+    """
+    records = suffix_review_packet(memory_graph_dir, today=today)
+    return {
+        "waiting": len(records),
+        "over_threshold": sum(1 for r in records if r["overdue"]),
+        "threshold_days": SUFFIX_AGE_THRESHOLD_DAYS,
+        "apply_form": SUFFIX_APPLY_FORM,
+        "oldest_age_days": records[0]["age_days"] if records else 0,
+        "oldest_first_approved": records[0]["first_approved"] if records else None,
+    }
+
+
+def write_suffix_review_packet(memory_graph_dir: Path,
+                               today: dt.date | None = None,
+                               out_dir: Path | None = None) -> Path:
+    """Write the waiting queue as a dated human-readable packet; return its path.
+
+    The queue is gate-approved and still sitting there: 24 clusters as at 2026-11-17,
+    the oldest waiting since 2026-09-24, every one already judged SAFE by the semantic
+    gate. `architecture/knowledge-graph.md` rule 2 says a SUFFIX merge "is never
+    applied on schedule" and the write-chain ends "a SUFFIX merge waits for a human" —
+    true, and the corollary was never scheduled: nothing listed the waiting clusters
+    with the command a person would run, and the only printed row went to a machine
+    directory under `_pipeline/` that no human reads (#4228).
+
+    Every record states `--apply --tiers SUFFIX_SAFE`, so the packet is executable by
+    a person and cannot be mistaken for something to run without the tier (#4197
+    refuses that). The writer opens only plan JSONL files and writes one markdown
+    file; it never opens `kg.sqlite`, never touches a fact directory, and merges
+    nothing — draining the queue stays a human act (#4009).
+    """
+    today = today or dt.date.today()
+    records = suffix_review_packet(memory_graph_dir, today=today)
+    dest = Path(out_dir) if out_dir is not None else Path(memory_graph_dir)
+    path = dest / f"suffix-review-{today.isoformat()}.md"
+    overdue = [r for r in records if r["overdue"]]
+    oldest = records[0]["age_days"] if records else 0
+    lines = [
+        f"# SUFFIX_SAFE review packet - {today.isoformat()}",
+        "",
+        f"{len(records)} gate-approved SUFFIX cluster(s) are waiting for a person. "
+        f"{len(overdue)} of them have waited more than "
+        f"{SUFFIX_AGE_THRESHOLD_DAYS} days; the oldest has waited {oldest}. "
+        "Oldest first.",
+        "",
+        "Every cluster below has already been judged SAFE by the semantic gate. The",
+        "rule is that a SUFFIX merge is never applied on schedule",
+        "(`architecture/knowledge-graph.md` rule 2), so each one waits here until a",
+        f"person runs `{SUFFIX_APPLY_FORM}` for it. Writing this packet applied",
+        "nothing: it opens only the entity-merge plan files, never the store.",
+        "",
+    ]
+    for i, rec in enumerate(records, start=1):
+        variants = ", ".join(f"`{v}`" for v in rec["variants"]) or "(none named)"
+        lines.append(f"{i}. `{rec['canonical']}` <- {variants}")
+        lines.append(
+            f"   - gate decision: {rec['gate_decision'] or '(none recorded)'}; "
+            f"first approved {rec['first_approved']}; waiting {rec['age_days']} days"
+            + (" - OVERDUE" if rec["overdue"] else ""))
+        for name, reason in sorted(rec["gate_reasons"].items()):
+            lines.append(f"   - judge reason ({name}): {reason}")
+        lines.append(f"   - to apply: `{SUFFIX_APPLY_FORM}`")
+        lines.append("")
+    dest.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--json", action="store_true")
