@@ -490,7 +490,9 @@ record carries `turn_start.microcompact_sidecar`, through the same two keys
 of 13,114 in the 672 h block — which is what it has to find, because both windows close
 before #3641 flipped `RunOptions.microcompact_reduction_sidecar` to True on 2026-10-31.
 Nothing here therefore mixes the sidecar regime with the inert one, and the on-versus-off
-pair, which needs a knob-on row, is a different measurement this page does not hold.
+half is a separate measurement with rows of its own: the block
+`The knob, measured on against off` at the end of this section, whose window opens after
+that flip.
 
 Per mechanism, `usage_store.reprefill_attribution(hours=168)` (its `["report"]` is
 the text to print; `python -m pytest tests/test_reprefill_attribution.py` runs it in
@@ -520,13 +522,17 @@ have its previous turn's in-turn reduction re-applied at read time
 (`apply_reduction_sidecar`, behind the `RunOptions.microcompact_reduction_sidecar` knob)
 rather than clearing from disk again — the same repeat front break this row owns,
 reached by the other path. The window above holds no such turn: over its 3,868 rows the
-number of knob-on rows is 0, because the knob's shipped default is off. Re-derive that
+number of knob-on rows is 0, and the cause is the window's own close — it ends
+`REPREFILL_WITNESS_UNTIL` = `2026-10-01T16:28:38`, thirty days before the 2026-10-31 flip
+that set the default to True — and not the default as it now ships. Re-derive that
 with `usage_store.reprefill_attribution(since=REPREFILL_WITNESS_SINCE,
 until=REPREFILL_WITNESS_UNTIL)` and read the `sidecar` block its report prints beside
 the table — rows per regime, a per-regime `turn_start:microcompact` share, and an
 explicit *unmeasured* line for a window holding no knob-on row. So **60.6% is what
 microcompaction costs with the read-time sidecar off**, not the price of the mechanism
-as built; the on-versus-off pair is owed once the knob runs on real traffic (#3576).
+as built. The on-versus-off half is no longer outstanding: it was measured over a closed
+window on each side of the flip and is published at the end of this section as
+`The knob, measured on against off`.
 
 The three freeing buckets account for 95,213,811 tokens exactly — all of arm `B` —
 and every bucket sums to the named total to the token (the function prints the gap,
@@ -572,6 +578,69 @@ on 2026-10-02, by #2027's owed-check pass, in the same pass as the pairing above
 it decided was to leave that fraction at **0.72**, which is still what `config.yaml`'s
 `compaction.microcompact` block carries. Nothing here changes a threshold, and no ruling is owed on
 this one.
+
+### The knob, measured on against off
+
+The label above prices the knob-off regime. These are the knob-on rows. The knob shipped
+on in `1f6bf5c7` (Sat Oct 31 07:44:26 2026 -0700), which is `2026-10-31T14:44:26` in the
+naive UTC the store's `ts` column is written in, so a closed seven-day window on each side
+of that minute is a pair rather than a promise. Both bounds are quoted literally, in that
+spelling, because an offset-bearing one selects a different window:
+
+- **knob on — the flip window:** `2026-10-31T14:44:26` ≤ ts < `2026-11-07T14:44:26`,
+  2,788 rows, named total 120,092,175 re-prefilled tokens, and `turn_start:microcompact`
+  at n=7 Σ=0 — a **0.0%** share.
+- **knob off — the equal-length control:** `2026-10-24T14:44:26` ≤ ts <
+  `2026-10-31T14:44:26`, 2,876 rows, named total 78,658,468, and `turn_start:microcompact`
+  at n=118 Σ=43,496,493 — a **55.3%** share.
+
+Re-derive either line with `usage_store.reprefill_attribution(since=…, until=…)` over that
+window's own two bounds — `since='2026-10-31T14:44:26', until='2026-11-07T14:44:26'` for
+the flip window, the control's two bounds for the control — and read the regimes off the
+same call's `sidecar` block, which is `usage_store.sidecar_regime`'s two flags counted
+over the window: the flip window splits knob_on 2,271 rows, of which knob_on_and_applied
+217, and knob_off 517, while the control splits knob_on 0 and knob_off 2,876, which is
+what makes the control the knob-off half of the pair rather than a second sample of the
+regime the table above prices. The flip window's own buckets, same call — six rows, all of
+them printed by that call, and the first is the pair's own headline:
+`turn_start:microcompact` n=7 Σ=0, `turn_start:other` n=211 Σ=64,825,999 (54.0%),
+`relief:tool_results` n=110 Σ=31,609,818 (`fired_` 416), `relief:reasoning` n=85
+Σ=11,304,121 (`fired_` 13,559), `ran_noop` n=1,880 Σ=8,269,603, `no_compaction_record`
+n=495 Σ=4,082,634. Those six are exhaustive: they sum to the window's 2,788 rows and to its
+named total to the token, with the gap the function prints sitting at 0.0%. Each bucket's
+share is a division of one of those Σ figures by the named total above, and the replay
+prints them; what these bytes answer is a count, a Σ or a share, and a replay over them
+answers nothing about prompt size, and prints a zero mean prompt for both windows because
+the column is absent rather than because the week was cheap.
+
+**What that pair does not say.** The fall from 55.3% to 0.0% is measured, and so is where
+the price went: `turn_start:other` holds n=211 with Σ=64,825,999, a 54.0% share, and that
+Σ is equal to the `knob_on_and_applied` regime's Σ. The counts are not equal, and the
+difference is accounted for to the row: of the 217 rows whose `turn_start.microcompact_sidecar`
+flag records the reduction applied, 211 are every row `turn_start:other` holds, and the
+other 6 sit in `turn_start:microcompact` carrying no re-prefill token between them — that
+bucket's n=7 is those 6 plus one knob-on row the reduction was never applied to, and its
+Σ=0 is why the two Σ's match while the two counts do not. So `attribution_bucket` credits a
+sidecar-applied row outside `turn_start:microcompact`, and what the share's fall measures
+is those rows leaving the bucket: a **lower bound** on what the sidecar moved, not a
+measurement of it. Nothing here says the repeat break got cheaper with the knob on, and
+nothing here says it did not. Answering that needs `_freeing_evidence`/`attribution_bucket`
+to credit sidecar-applied rows to `turn_start:microcompact`, which moves the table above
+and is a ruling of its own, with the input that would restore its published figure named
+in it.
+
+The bytes are committed, so both lines re-derive without this box:
+`~/obsidian/backlog/data/2026-11-07.4150-lloyd-data-usage.jsonl` — 961,585 B, inside the
+1,048,576 B `WITNESS_MAX_BYTES` ceiling — and its sibling
+`~/obsidian/backlog/data/2026-11-07.4150-lloyd-data-usage-witness.md`, replayed by
+`tests/test_remeasured_pairing_extract.py` through `usage_store.replay_usage_extract` +
+`reprefill_attribution(since=…, until=…)` + `usage_store.sidecar_regime` to the rows, the
+named total and the three regime counts. It holds both windows so that one reader answers
+the pair, and it is a projection rather than the store: the arm flags and the rung names
+are kept, and what is dropped is the token magnitudes inside `compaction` and the
+prompt-size column named in the paragraph above. The table above keeps its own extract;
+these bytes price these two windows, and they are not checked by recomputing them from the
+live store.
 
 ## The prompt that goes out
 

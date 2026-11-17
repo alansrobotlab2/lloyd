@@ -11730,20 +11730,30 @@ def test_authority_row_count_prose_counts_the_ladder_the_ceiling_row_made():
 # not owed on a closed item (#3574, 2026-10-30)
 # --------------------------------------------------------------------------- #
 
-#: The four sentences-in-shape #3574 retires, in the two spellings the page carried.
-#: `cc45c4ae^`'s pair advertised the pairing as OWED outright ("is owed on #2027",
-#: "are owed on #2027"); the arch-review pass that filed this item's wording rewrote
-#: them into a deferral to a live item ("no live item owns publishing it — that is
+#: The sentences-in-shape this rail retires, in the spellings the page carried.
+#: `cc45c4ae^`'s pair advertised the within-session pairing as OWED outright ("is owed on
+#: #2027", "are owed on #2027"); the arch-review pass that filed this item's wording
+#: rewrote them into a deferral to a live item ("no live item owns publishing it — that is
 #: #3574", "the other half of #3574"), which is the same rotted ownership wearing a
 #: name that had not been closed yet. Both spellings are pinned out: an item that is
 #: `status: done` (backlog/2027-…md:2, closed 2026-10-02T00:07:20) cannot own work, and
 #: a page that says a finished measurement is still owed is what makes the next pass
 #: book an absence that already closed — the #2371 → #2379 → #2397 chain and #2933's
 #: sweep prose are the same failure twice.
+#:
+#: #4150 adds the two that deferred the on-versus-off half: "the on-versus-off pair is
+#: owed once the knob runs on real traffic (#3576)" pointed at an item that had already
+#: closed, and "a different measurement this page does not hold" described a pair the page
+#: could have published all along — it had simply not run the query since #3641 shipped the
+#: knob on. Both sentences are gone and the pair is on the page, so both spellings join the
+#: list. The knob ships on now; a page that says its on-versus-off half is outstanding
+#: books an absence that closed the week the flip landed.
 RETIRED_OWNERSHIP_CLAIMS = ("is owed on #2027",
                             "are owed on #2027",
                             "no live item owns publishing it",
-                            "the other half of #3574")
+                            "the other half of #3574",
+                            "pair is owed",
+                            "this page does not hold")
 
 #: The section, bounded at the next `## ` exactly as
 #: `test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command` bounds it: a
@@ -11794,10 +11804,21 @@ def test_the_rewrite_cost_page_no_longer_owes_a_measurement_it_published():
         "is threshold × 0.72 = 151,303 — on 2026-10-02, by #2027's owed-check pass, in "
         "the same pass as the paired ratio; both sit in that item's now-closed log "
         "rather than in a measurement anyone can re-run, which is the other half of "
-        "#3574.")
+        "#3574. "
+        # #4150 clause 4: the two sentences that deferred the ON-versus-OFF half, quoted
+        # as this page carried them. The knob has shipped on since 1f6bf5c7, so a page
+        # still saying its on-versus-off pair is outstanding is booking an absence that
+        # closed the week the flip landed — and an absence assertion with no sentence
+        # behind it would have gone green either way.
+        "The on-versus-off pair is owed once the knob runs on real traffic (#3576). "
+        "That is a different measurement this page does not hold.")
+    unfired = [p for p in RETIRED_OWNERSHIP_CLAIMS if p not in stale]
+    assert not unfired, (
+        f"{unfired} fired on nothing, so the absence asserted above is at least partly a "
+        "pattern that could never have matched this page")
     assert _ownership_claim_gaps(stale) == list(RETIRED_OWNERSHIP_CLAIMS), (
-        "none of the retired phrases fired on the sentences they were taken out of, so "
-        "the absence asserted above is a pattern that could never have matched this page")
+        "the fixture sentences did not all fire through the same reader the page is read "
+        "with, so the green above is not the evidence it looks like")
 
 
 #: What the 2026-10-02 owed-check pass returned and the section now publishes, quoted
@@ -14163,3 +14184,229 @@ def test_the_mover_citation_rail_is_shown_reading_the_drift_it_bans():
                                         table={ghost: ("a file this round deleted",
                                                        re.compile("."))})), \
         "a citation to a file that does not exist was reported as resolved"
+
+
+# --------------------------------------------------------------------------- #
+# The knob, measured on against off (#4150)
+# --------------------------------------------------------------------------- #
+
+#: How the page titles the block that carries the on-versus-off pair, and the two closed
+#: windows it publishes there. Each figure below is the answer of
+#: `usage_store.reprefill_attribution(since=…, until=…)` over the bounds named beside it;
+#: `tests/test_remeasured_pairing_extract.py` re-derives every one of them from the vault
+#: projection the block cites. The literals live here because this file grades the PAGE:
+#: a page whose figures are checked only against a live store cannot be graded where no
+#: store exists, and a page that states a figure no test holds is the shape #3576 was
+#: filed on.
+KNOB_BLOCK_HEADING = "The knob, measured on against off"
+FLIP_WINDOW = ("2026-10-31T14:44:26", "2026-11-07T14:44:26")
+FLIP_CONTROL_WINDOW = ("2026-10-24T14:44:26", "2026-10-31T14:44:26")
+
+#: What the block publishes, keyed by the thing each figure is. A value that is a tuple
+#: names two bounds rather than one number.
+KNOB_BLOCK_PUBLISHED: dict[str, "tuple[str, ...] | str"] = {
+    "the flip window's bounds, in naive UTC": (f"`{FLIP_WINDOW[0]}`",
+                                               f"`{FLIP_WINDOW[1]}`"),
+    "the flip window's rows": "2,788 rows",
+    "the flip window's named total": "named total 120,092,175",
+    "the knob_on regime count": "knob_on 2,271",
+    "the applied-regime count": "knob_on_and_applied 217",
+    "the knob_off regime count": "knob_off 517",
+    "the knob-on microcompact bucket": "n=7 Σ=0 — a **0.0%**",
+    "the control's bounds, in naive UTC": (f"`{FLIP_CONTROL_WINDOW[0]}`",
+                                           f"`{FLIP_CONTROL_WINDOW[1]}`"),
+    "the control's rows": "2,876 rows",
+    "the control's microcompact bucket": "n=118 Σ=43,496,493 — a **55.3%**",
+    "the flip window's other bucket": "`turn_start:other` n=211 Σ=64,825,999 (54.0%)",
+    "the re-derive command": "reprefill_attribution(since=…, until=…)",
+}
+
+#: The two vault artifacts the block cites, and the module that replays them. Spelled as
+#: code spans carrying the vault prefix, which is the only spelling that resolves the same
+#: way on every machine.
+FLIP_EXTRACT_CITATION = ("`~/obsidian/backlog/data/2026-11-07.4150-lloyd-data-usage"
+                         ".jsonl`")
+FLIP_MARKER_CITATION = ("`~/obsidian/backlog/data/2026-11-07.4150-lloyd-data-usage"
+                        "-witness.md`")
+
+
+def _knob_block() -> str:
+    """The `### The knob, measured on against off` block, bounded at the next heading.
+
+    Cut from the same slice `_section` gives every other node here, so a block moved out
+    of §What a rewrite costs fails these nodes rather than being read somewhere else.
+    """
+    sec = _section(_text("context-window.md"), REWRITE_COST_HEADING)
+    m = re.search(rf"^### {re.escape(KNOB_BLOCK_HEADING)}.*?$(.*?)(?=^### |^## |\Z)",
+                  sec, re.MULTILINE | re.DOTALL)
+    assert m, (f"§{REWRITE_COST_HEADING} has no '### {KNOB_BLOCK_HEADING}' block, so the "
+                "on-versus-off pair this page publishes has moved or gone, and the "
+                "figures pinned below are read by nobody")
+    return m.group(1)
+
+
+def test_the_knob_block_publishes_the_measured_pair_with_its_own_bounds():
+    """Clause 1: the flip window and its control are on the page, each with both bounds
+    quoted in naive-UTC spelling, and the block names the call that re-derives them.
+
+    The loop reads the literals off the page and a seeded tamper after it proves the loop
+    is reading rather than reciting: moving one digit of the flip window's row count has
+    to drop exactly one figure from the set, the failure #4150 was filed on was a page
+    labelling a flagship figure with a regime that no longer shipped, and a page can only
+    be trusted with a window it states.
+    """
+    flat = _flat(_knob_block())
+    for what, figures in KNOB_BLOCK_PUBLISHED.items():
+        wanted = (figures,) if isinstance(figures, str) else figures
+        for figure in wanted:
+            assert _flat(figure) in flat, (
+                f"the block no longer states {what} as {figure!r}; a published figure "
+                "without its window is the shape #3576 retired, and one without its "
+                "bounds cannot be re-derived at all")
+    # Every occurrence, not the first: the block states the row count twice (its
+    # bullet, and the sentence showing the six buckets sum to it), and tampering one
+    # of two identical mentions would leave the figure present and the loop vacuous.
+    tampered = flat.replace("2,788 rows", "2,799 rows")
+    assert tampered != flat, "the seeded row-count tamper did not take"
+    missing = [what for what, figures in KNOB_BLOCK_PUBLISHED.items()
+               for figure in ((figures,) if isinstance(figures, str) else figures)
+               if _flat(figure) not in tampered]
+    assert missing == ["the flip window's rows"], (
+        f"tampering one figure moved {missing} — the loop above is not comparing the "
+        "page's digits to these constants")
+    # The two windows are equal-length and adjacent, which is what makes the pair a pair;
+    # a reader must be able to see that from the bounds alone.
+    from datetime import datetime
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    assert datetime.strptime(FLIP_WINDOW[0], fmt) - datetime.strptime(
+        FLIP_CONTROL_WINDOW[0], fmt) == datetime.strptime(FLIP_WINDOW[1], fmt) - \
+        datetime.strptime(FLIP_CONTROL_WINDOW[1], fmt), (
+        "the two windows named here are no longer the same length, so the 55.3% is not "
+        "the control of the 0.0% and the pair is two unrelated weeks")
+    assert FLIP_CONTROL_WINDOW[1] == FLIP_WINDOW[0], (
+        "the control no longer ends where the flip window starts; a gap or an overlap "
+        "between the two halves of the pair is a different comparison")
+
+
+def test_the_knob_block_states_the_bucket_rule_as_measured_and_not_as_a_saving():
+    """Clause 2: the caveat is a measurement, and the block never claims a saving.
+
+    The pair's headline is a fall from 55.3% to 0.0%, and the honest reading is narrower:
+    `attribution_bucket` credits a sidecar-applied row outside `turn_start:microcompact`,
+    so the applied rows' tokens were counted in `turn_start:other` all along. That is not
+    a warning to hedge with — it is a measured equality the block has to carry:
+    `turn_start:other`'s Σ over the flip window is the `knob_on_and_applied` regime's Σ.
+    And because it holds, no sentence here may read as proving the break cheaper; every
+    occurrence of the word is checked to sit inside a denial.
+
+    The equality is in Σ and NOT in the row counts — 211 rows against 217 — and the block
+    has to carry the split that reconciles them, because `tests/test_remeasured_pairing_extract.py`
+    measures it out of the committed projection: 211 of the applied rows sit in
+    `turn_start:other` (every row that bucket holds), the other 6 in `turn_start:microcompact`
+    with zero re-prefill tokens between them. A block that wrote the two sets as identical
+    would print 211 = 217, and a reader who checked the arithmetic would be right to stop
+    trusting the 60.6% beside it.
+    """
+    flat = _flat(_knob_block())
+    for phrase in ("n=211 with Σ=64,825,999",
+                   "a 54.0% share",
+                   "is equal to the `knob_on_and_applied` regime's Σ",
+                   "credits a sidecar-applied row outside `turn_start:microcompact`",
+                   "lower bound"):
+        assert _flat(phrase) in flat, (
+            f"the block no longer states {phrase!r}. Without it the fall from 55.3% to "
+            "0.0% reads as the sidecar's saving, and it is not one: the applied rows left "
+            "the bucket, which is a lower bound, not a measurement")
+    for phrase in ("The counts are not equal",
+                   "of the 217 rows",
+                   "211 are every row `turn_start:other` holds",
+                   "the other 6 sit in `turn_start:microcompact`"):
+        assert _flat(phrase) in flat, (
+            f"the block no longer states {phrase!r}, which leaves 211 rows against the 217 "
+            "applied rows as a contradiction a reader cannot resolve from the page")
+    for overclaim in ("are exactly the rows", "exactly the rows this bucket rule put"):
+        assert _flat(overclaim) not in flat, (
+            f"the block is back to writing the applied rows and the `turn_start:other` rows "
+            f"as one set ({overclaim!r}). They are not one set: 6 of the 217 sit in "
+            "`turn_start:microcompact`, and their zero tokens are exactly why the two Σ's "
+            "agree")
+    cheaper = [s for s in re.split(r"(?<=[.!?])\s+", flat) if "cheaper" in s]
+    assert cheaper, (
+        "the block stopped mentioning the cheaper-reading at all, so the denial below is "
+        "grading an absence no sentence ever asserted")
+    for sentence in cheaper:
+        assert "not" in sentence, (
+            f"the block asserts a saving: {sentence!r}. The bucket rule cannot support "
+            "one, and this node exists because 0.0% against 55.3% is exactly the pair a "
+            "reader would otherwise read as proof")
+
+
+def test_the_regime_label_blames_its_window_and_not_the_shipped_default():
+    """Clause 3: the false present-tense cause is gone, and the count the label carries
+    is still there for the node that re-derives it.
+
+    `RunOptions.microcompact_reduction_sidecar` defaults True, so "the knob's shipped
+    default is off" is false in the present tense while the sentence sat there in the
+    present tense — #3641's own review rung booked that defect and nobody fixed it. The
+    true cause is the witness window's own close. The fixture below is the sentence as the
+    page carried it, read by the same reader, because an absence assertion whose pattern
+    could never have matched the page is a green light permanently fixed on.
+    """
+    sec = _flat(_section(_text("context-window.md"), REWRITE_COST_HEADING))
+
+    def stale_cause(text: str) -> bool:
+        return "the knob's shipped default is off" in text
+
+    assert not stale_cause(sec), (
+        "the section is back to attributing its zero knob-on rows to a default that "
+        "ships on. The default is True; the cause is the window.")
+    stale_sentence = ("over its 3,868 rows the number of knob-on rows is 0, because the "
+                      "knob's shipped default is off.")
+    assert stale_cause(stale_sentence), (
+        "the reader cannot detect the sentence it was written to detect, so the absence "
+        "above is vacuous")
+
+    m = re.search(r"number of knob-on rows is (\d+)", sec)
+    assert m, (
+        "the count left the section, and `sidecar_regime`'s re-derivation of it — the "
+        "node that replays the 2026-10-01 witness extract and compares — has nothing "
+        "left to grade")
+    sentence = next(s for s in re.split(r"(?<=[.!?])\s+", sec)
+                    if "number of knob-on rows is" in s)
+    assert "REPREFILL_WITNESS_UNTIL" in sentence and "2026-10-31" in sentence, (
+        f"the sentence no longer names the window close as the cause: {sentence!r}")
+    assert int(m.group(1)) == 0, (
+        "the section's own count moved off zero, which means the window it prices is no "
+        "longer the pre-flip one and every regime label beside it is about another week")
+
+
+def test_the_knob_block_defers_to_no_item_and_points_at_the_bytes_it_re_derives_from():
+    """Clause 4's other half: the published pair owns itself.
+
+    A block that publishes a measurement must not also name an item as the thing still
+    owing it — #3576 and #3641 are both closed, and "owed on #<closed>" is the rot
+    `RETIRED_OWNERSHIP_CLAIMS` was written for. The retired spellings cover the two
+    sentences #4150 deleted; this node covers the new block, where a fresh deferral would
+    otherwise land beside figures that need none. What the block may do is name the
+    projection its figures re-derive from and the module that replays it.
+    """
+    body = _flat(_knob_block())
+    gaps = _ownership_claim_gaps(body)
+    assert not gaps, f"the block defers its own publication: {gaps}"
+    assert not re.search(r"#\d{3,4}", body), (
+        f"the block cites an item as part of its claim: {re.findall(r'#\\d{3,4}', body)}. "
+        "An item that closes takes the citation with it and leaves the block reading as "
+        "though something is still owed")
+    assert "owed" not in body, (
+        "the block says something is owed about a measurement it has just published")
+    for citation in (FLIP_EXTRACT_CITATION, FLIP_MARKER_CITATION,
+                     "`tests/test_remeasured_pairing_extract.py`",
+                     "`usage_store.replay_usage_extract`",
+                     "`usage_store.sidecar_regime`"):
+        assert _flat(citation) in body, (
+            f"the block no longer names {citation}, so its figures have no route from the "
+            "page to the bytes they came off")
+    assert "live store" in body, (
+        "the block no longer says where its figures are NOT checked from; a gate worktree "
+        "has no usage database, and a reader who reaches for one gets an empty answer "
+        "rather than a refutation")

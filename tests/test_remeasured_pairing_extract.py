@@ -45,6 +45,7 @@ instead of failing the next author for the previous writer's change.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import re
 import sqlite3
@@ -752,3 +753,657 @@ def test_the_page_cites_the_committed_extract_and_names_this_module_as_the_recom
             "window's median is not a correction of the published one, and quoting it "
             "here would put a figure on the page that no measurement of that window "
             "produced")
+
+
+# --------------------------------------------------------------------------- #
+# The second extract: #4150's knob-on-versus-knob-off pair
+# --------------------------------------------------------------------------- #
+
+#: #4150 publishes a second pair at the end of `architecture/context-window.md` §What a
+#: rewrite costs: a closed seven-day window on each side of the 2026-10-31 flip that set
+#: `RunOptions.microcompact_reduction_sidecar` True (`1f6bf5c7`, Sat Oct 31 07:44:26 2026
+#: -0700 — `2026-10-31T14:44:26` in the naive UTC the store writes, which is the spelling
+#: `reprefill_attribution` compares against). The store rotates and retention sweeps
+#: `backlog/data/`, so the rules are the ones above: the projection is a vault artifact, a
+#: missing one SKIPS, and the only thing this repo commits is the reader.
+#:
+#: This one is NOT the store, which is what keeps it under `WITNESS_MAX_BYTES`. The builder
+#: kept `ts`, `reprefill_tokens` and a reduced `compaction` — the arm and regime flags, the
+#: `truncated` and `image_aged_out` selectors, and rung NAMES only, every `freed_tokens`
+#: magnitude collapsed to the `> 0` answer `attribution_bucket` actually consults, with the
+#: first freeing pass left as its own entry so a later pass's rung cannot answer for its
+#: absence. Dropped: the magnitudes, `turn_start.tokens_freed`, and the prompt-size column,
+#: because no figure on the page is a mean. Both losses are the sibling marker's prose, and
+#: the node that reads that marker checks it against these bytes.
+
+#: The instrument, imported the way this module already imports nothing-at-module-level
+#: things: through `importlib`, so the reader under test is the same object the page's
+#: named call resolves to and not a second import of the same name.
+importlib = __import__("importlib")
+usage_store = importlib.import_module("app.usage_store")
+
+#: This module as an object, so a node can point one of its own readers somewhere else:
+#: `monkeypatch.setattr` needs a target, and a test that reimplements a helper to steer it
+#: ends up testing the reimplementation.
+_SELF = __import__("sys").modules[__name__]
+
+FLIP_BASENAME = "2026-11-07.4150-lloyd-data-usage"
+FLIP_EXTRACT_BASENAME = FLIP_BASENAME + ".jsonl"
+FLIP_MARKER_BASENAME = FLIP_BASENAME + "-witness.md"
+FLIP_EXTRACT_PATH = "backlog/data/" + FLIP_EXTRACT_BASENAME
+FLIP_MARKER_PATH = "backlog/data/" + FLIP_MARKER_BASENAME
+
+#: The two published windows, in the naive-UTC spelling the page quotes. Closed at both
+#: ends, equal length, the control ending exactly where the flip window starts.
+FLIP_WINDOW = ("2026-10-31T14:44:26", "2026-11-07T14:44:26")
+FLIP_CONTROL_WINDOW = ("2026-10-24T14:44:26", "2026-10-31T14:44:26")
+
+#: Every figure the page publishes for each window. `rows` and `total` are the rows
+#: themselves; `regimes` is `usage_store.sidecar_regime` counted row by row; `buckets` is
+#: the bucket table `usage_store.reprefill_attribution(since=…, until=…)` prints, as
+#: `(n, Σ, share_pct)`; `unrecorded` counts the rows whose `compaction` column is JSON null,
+#: which is what `no_compaction_record` is made of. Each window's published buckets are
+#: exhaustive — they sum to `rows` and to `total` and the instrument reports a 0.0% gap —
+#: so a seventh name or a shifted count here is a window that moved.
+FLIP_PUBLISHED = {
+    FLIP_WINDOW: {
+        "rows": 2_788,
+        "total": 120_092_175,
+        "unrecorded": 495,
+        "regimes": {"knob_on": 2_271, "knob_on_and_applied": 217, "knob_off": 517},
+        "buckets": {
+            "turn_start:microcompact": (7, 0, 0.0),
+            "turn_start:other": (211, 64_825_999, 54.0),
+            "relief:tool_results": (110, 31_609_818, 26.3),
+            "relief:reasoning": (85, 11_304_121, 9.4),
+            "ran_noop": (1_880, 8_269_603, 6.9),
+            "no_compaction_record": (495, 4_082_634, 3.4),
+        },
+    },
+    FLIP_CONTROL_WINDOW: {
+        "rows": 2_876,
+        "total": 78_658_468,
+        "unrecorded": 602,
+        "regimes": {"knob_on": 0, "knob_on_and_applied": 0, "knob_off": 2_876},
+        "buckets": {
+            "relief:tool_results": (81, 14_536_719, 18.5),
+            "relief:reasoning": (84, 11_336_652, 14.4),
+            "turn_start:microcompact": (118, 43_496_493, 55.3),
+            "ran_noop": (1_991, 8_114_802, 10.3),
+            "no_compaction_record": (602, 1_173_802, 1.5),
+        },
+    },
+}
+
+
+def _flip_extract() -> Path:
+    """Path to #4150's projection, or a skip. The same rule as `_extract`, for the same two
+    reasons: a retention sweep ages `backlog/data/` out, and a checkout with no vault data
+    dir must not go red over an artifact that is not a repo file.
+    """
+    path = _vault_root() / "backlog" / "data" / FLIP_EXTRACT_BASENAME
+    if not path.is_file():
+        pytest.skip(f"no flip-window projection at {path}; it is a vault artifact, and "
+                    "this repo carries the reader, not the bytes")
+    return path
+
+
+def _flip_rows(path: Path) -> "list[dict]":
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _flip_projection(rows: "list[dict]", db_path: Path) -> Path:
+    """Write `rows` out as a projection file and load it through the module's OWN schema.
+
+    The controls are written and replayed exactly as the published artifact is, so a
+    control that fails is not failing on a shortcut the real reading never takes.
+    """
+    src = db_path.parent / f"{db_path.stem}.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return usage_store.replay_usage_extract(src, db_path=db_path)
+
+
+def _flip_expect(conn: "sqlite3.Connection", since: str, until: str,
+                 label: str) -> dict:
+    """One window read two ways: the instrument's answer, and a row-by-row count.
+
+    `reprefill_attribution(since=…, until=…)` is the call the page names — rows, named
+    total, buckets, its own regime block. The regimes recomputed here are the same question
+    answered without the report, through `usage_store.sidecar_regime`, because the
+    published pair's regime half is a flag counted and a reader has to be able to see
+    WHICH flag. `compaction` is a JSON TEXT column, so it is parsed here exactly as
+    `attribution_bucket` parses it.
+    """
+    rows = conn.execute(
+        "SELECT ts, reprefill_tokens, compaction FROM usage"
+        " WHERE ts >= ? AND ts < ? ORDER BY ts", (since, until)).fetchall()
+    if not rows:
+        pytest.fail(f"the projection holds no {label} row in {since} <= ts < {until}, so "
+                    "the pair published beside the 60.6% table cannot be re-derived from "
+                    "these bytes")
+    regimes = {"knob_on": 0, "knob_on_and_applied": 0, "knob_off": 0}
+    total = 0
+    unrecorded = 0
+    for ts, reprefill, compaction in rows:
+        total += int(reprefill or 0)
+        rec = json.loads(compaction) if isinstance(compaction, str) else compaction
+        if rec is not None and not isinstance(rec, dict):
+            pytest.fail(f"a {label} row at {ts} carries a compaction record that is "
+                        "neither an object nor null, so the replay cannot answer it")
+        if rec is None:
+            # Counted, not skipped: `sidecar_regime` reads an absent record as
+            # `(False, False)`, which is exactly how the instrument's own regime block
+            # counts it — so the 495 rows this window has no record for are knob_off
+            # rows, and `knob_on + knob_off = rows` holds for the same reason it holds
+            # in the marker. Skipping them would under-count knob_off by every row
+            # whose evidence is absent.
+            unrecorded += 1
+        consulted, applied = usage_store.sidecar_regime(rec)
+        # `knob_on` is every row that consulted the knob, applied INCLUDED — the
+        # instrument's own rule, and the marker says so, because a reader who adds
+        # `knob_on` and `knob_on_and_applied` would otherwise count 217 of the
+        # window twice.
+        if consulted:
+            regimes[usage_store.SIDECAR_ON] += 1
+            if applied:
+                regimes[usage_store.SIDECAR_APPLIED] += 1
+        else:
+            regimes[usage_store.SIDECAR_OFF] += 1
+    attr = usage_store.reprefill_attribution(since=since, until=until)
+    return {"rows": len(rows), "total": total, "unrecorded": unrecorded,
+            "regimes": regimes, "attr": attr,
+            "instrument_regimes": attr["sidecar"]["regimes"],
+            "buckets": {b["bucket"]: (b["n"], b["reprefill_tokens"], b["share_pct"])
+                        for b in attr["buckets"] if b["n"]}}
+
+
+def _tmp_db(tmp_path: Path) -> Path:
+    """Mount the published projection as the module's store and return the database."""
+    return usage_store.replay_usage_extract(_flip_extract(), db_path=tmp_path / "usage.db")
+
+
+def test_the_flip_projection_is_tracked_holds_one_projection_and_fits_the_ceiling():
+    """The second artifact obeys the first one's three rules — `git add -N` tracked, one
+    `projection` table, at or under `WITNESS_MAX_BYTES` — and adds a fourth: its basename is
+    the day its later window CLOSES, not the day it was cut.
+
+    That fourth rule is what makes the pair safe to re-cut. The windows are fixed, so a
+    re-cut must produce these bytes again; an extract named for the day it was cut
+    re-appears under a NEW name at every re-cut while the window stays the same, and no
+    reader can tell a re-cut from a second measurement of a different week. The day the
+    later window closes is the only date here that cannot move while the window holds.
+    """
+    assert FLIP_BASENAME.startswith(FLIP_WINDOW[1][:10]), (
+        f"{FLIP_BASENAME} is not named after the close of its later window "
+        f"({FLIP_WINDOW[1][:10]}); naming an extract for the day it was cut is how one "
+        "window ends up published twice under two names")
+    path = _flip_extract()
+    assert _tracked(path), (
+        f"{FLIP_EXTRACT_PATH} exists in the vault but is not tracked, so the gate's "
+        "witness clause cannot resolve it through git and refuses any clause that cites "
+        "it — the state that made #3631's headline a comment on bytes no gate could see")
+    size = path.stat().st_size
+    assert size <= WITNESS_MAX_BYTES, (
+        f"the flip-window projection is {size:,} B, over the {WITNESS_MAX_BYTES:,} B "
+        "ceiling: a gate comment may not demand a read of a whole store, which is #2267")
+    rows = _flip_rows(path)
+    want = sum(w["rows"] for w in FLIP_PUBLISHED.values())
+    assert len(rows) == want, (
+        f"the projection holds {len(rows):,} rows against the two published windows' "
+        f"{want:,}: rows outside them make this a store by another name, and its "
+        "counts would be answering a window nobody published")
+    # The shape `replay_usage_extract` reads: one JSON object per line carrying `ts`,
+    # `reprefill_tokens` and `compaction`. A row missing one of those three is not a
+    # slower read, it is a row the loader drops, and a dropped row still counts in the
+    # store-side total — which is how a projection is caught being wrong.
+    for r in rows[:1] + rows[-1:]:
+        assert {"ts", "reprefill_tokens", "compaction"} <= set(r), (
+            f"a projected row carries {sorted(r)}; the loader reads `ts`,"
+            " `reprefill_tokens` and `compaction`, so a row without them cannot be "
+            "replayed")
+
+
+def test_the_flip_projection_recomputes_the_published_knob_pair(tmp_path, monkeypatch):
+    """Clause 5: every figure §The knob, measured on against off publishes re-derives from
+    committed bytes — through `replay_usage_extract`, then
+    `reprefill_attribution(since=…, until=…)`, then `sidecar_regime`.
+
+    The projection is MOUNTED as the module's store for the duration, because the call the
+    page names reads `usage_store.DB_PATH` and nothing else: `reprefill_attribution` is a
+    query, so bytes that are not the module's store answer nothing. Two of the assertions
+    below carry the clause. The flip window's `knob_on` count is what makes it the knob-ON
+    half — the 60.6% table above it is labelled knob-off precisely because that window holds
+    no knob-on row at all — and the recomputed split must equal the instrument's own, or
+    the page and the tool have quietly agreed on two different rules.
+    """
+    db = _tmp_db(tmp_path)
+    monkeypatch.setattr(usage_store, "DB_PATH", db, raising=True)
+    conn = _open(db)
+    try:
+        for window, label in ((FLIP_WINDOW, "flip"), (FLIP_CONTROL_WINDOW, "control")):
+            want = FLIP_PUBLISHED[window]
+            got = _flip_expect(conn, window[0], window[1], label)
+            assert got["rows"] == want["rows"], (
+                f"{label}: these bytes hold {got['rows']:,} rows in "
+                f"{window[0]} <= ts < {window[1]}; the page prints {want['rows']:,}")
+            assert got["total"] == want["total"], (
+                f"{label}: the named total over these bytes is {got['total']:,}, the page "
+                f"prints {want['total']:,}")
+            assert got["attr"]["rows"] == want["rows"] and \
+                got["attr"]["window_total_reprefill_tokens"] == want["total"], (
+                f"{label}: `reprefill_attribution(since=…, until=…)` answers "
+                f"{got['attr']['rows']:,} rows totalling "
+                f"{got['attr']['window_total_reprefill_tokens']:,}, disagreeing with the "
+                "row-by-row count over the same rows — the two readers are not applying "
+                "the published bounds the same way")
+            assert got["attr"]["gap_pct"] == 0.0, (
+                f"{label}: the instrument reports a {got['attr']['gap_pct']}% gap between "
+                "its named total and its bucket Σ, so the buckets the page sums to the "
+                "window's total do not in fact sum to it")
+            assert got["unrecorded"] == want["unrecorded"], (
+                f"{label}: {got['unrecorded']:,} rows carry no compaction record against "
+                f"the published {want['unrecorded']:,} — `no_compaction_record` is that "
+                "count, so the published split is not this column's")
+            assert got["regimes"] == want["regimes"], (
+                f"{label}: `sidecar_regime` counts {got['regimes']} against the published "
+                f"{want['regimes']}. The flip window's knob_on count is the only thing "
+                "that makes it the knob-ON half of the pair")
+            assert got["regimes"] == {k: v["rows"]
+                                      for k, v in got["instrument_regimes"].items()}, (
+                f"{label}: the recomputed regimes {got['regimes']} are not the "
+                f"instrument's own {got['instrument_regimes']}, so the rule the page's "
+                "counts come from and the rule its report comes from have drifted apart")
+            assert set(got["buckets"]) == set(want["buckets"]), (
+                f"{label}: these bytes answer {sorted(got['buckets'])} and the page "
+                f"publishes {sorted(want['buckets'])}; a bucket published with no rows, or "
+                "a measured one left unprinted, is a window that moved")
+            for name, triple in want["buckets"].items():
+                assert got["buckets"][name] == triple, (
+                    f"{label}: {name} recomputes to n={got['buckets'][name][0]} "
+                    f"Σ={got['buckets'][name][1]:,} ({got['buckets'][name][2]}%), the page "
+                    f"prints n={triple[0]} Σ={triple[1]:,} ({triple[2]}%)")
+    finally:
+        conn.close()
+
+
+def test_bending_one_row_s_regime_flag_moves_the_published_regime_count(tmp_path,
+                                                                        monkeypatch):
+    """Control on the regime half: one applied row's `microcompact_sidecar` turned off
+    inside that row moves both knob counts by exactly one and leaves the window's Σ alone.
+
+    Without this the node above could stay green on a projection whose flags had been
+    stripped — every row would land in `knob_off`, only the page's `knob_off` number would
+    be wrong, and its knob-on figures would never have been compared to anything.
+    """
+    db = _tmp_db(tmp_path)
+    monkeypatch.setattr(usage_store, "DB_PATH", db, raising=True)
+    flip_rows = [r for r in _flip_rows(_flip_extract())
+                 if FLIP_WINDOW[0] <= r["ts"] < FLIP_WINDOW[1]]
+    target = next((r for r in flip_rows
+                   if isinstance(r.get("compaction"), dict)
+                   and isinstance(r["compaction"].get("turn_start"), dict)
+                   and r["compaction"]["turn_start"].get("microcompact_sidecar") is True
+                   and int(r["compaction"]["turn_start"].get("microcompact_reduced") or 0)
+                   > 0), None)
+    assert target is not None, (
+        "no flip-window row carries both `microcompact_sidecar: true` and a positive "
+        "`microcompact_reduced`, so the applied-regime count the page publishes is not "
+        "being read from those two flags by anything in this file")
+    target["compaction"]["turn_start"]["microcompact_sidecar"] = False
+    bent_db = _flip_projection(flip_rows, tmp_path / "bent.db")
+    monkeypatch.setattr(usage_store, "DB_PATH", bent_db, raising=True)
+    conn = _open(bent_db)
+    try:
+        got = _flip_expect(conn, FLIP_WINDOW[0], FLIP_WINDOW[1], "bent")
+    finally:
+        conn.close()
+    want = FLIP_PUBLISHED[FLIP_WINDOW]
+    assert got["total"] == want["total"] and got["rows"] == want["rows"], (
+        "bending a regime flag moved the window's rows or its Σ. The flag is a label and "
+        "not a token source, and a control that changes the total is not isolating it")
+    assert got["regimes"][usage_store.SIDECAR_APPLIED] == \
+        want["regimes"][usage_store.SIDECAR_APPLIED] - 1, (
+        f"an applied row stopped consulting the knob and the applied count is still "
+        f"{got['regimes'][usage_store.SIDECAR_APPLIED]}")
+    assert got["regimes"][usage_store.SIDECAR_ON] == \
+        want["regimes"][usage_store.SIDECAR_ON] - 1, (
+        "`knob_on` did not move when a row stopped consulting the knob, so the count the "
+        "page prints is not this flag counted")
+    assert got["regimes"][usage_store.SIDECAR_OFF] == \
+        want["regimes"][usage_store.SIDECAR_OFF] + 1, (
+        "the bent row went somewhere other than `knob_off`, so the three regime names are "
+        "not the exhaustive split the page's `knob_on + knob_off = rows` relies on")
+
+
+def test_collapsing_the_compaction_records_moves_every_row_out_of_the_buckets(
+        tmp_path, monkeypatch):
+    """Second control, on evidence the projection is NOT: every flip window's `compaction`
+    object collapsed to JSON null, with `ts` and `reprefill_tokens` left exactly as they
+    were.
+
+    The instrument must then call every row an unmeasured turn, and the window's rows and
+    Σ must not move by one. That is the shape of the failure a "harmless" slimming pass
+    causes: the counts and the total stay published-correct while every mechanism bucket
+    quietly empties, which is precisely how a page ends up printing a mechanism's price as
+    zero.
+    """
+    db = _tmp_db(tmp_path)
+    monkeypatch.setattr(usage_store, "DB_PATH", db, raising=True)
+    want = FLIP_PUBLISHED[FLIP_WINDOW]
+    live = _flip_expect(_open(db), FLIP_WINDOW[0], FLIP_WINDOW[1], "live")
+    stripped = [dict(r, compaction=None) for r in _flip_rows(_flip_extract())
+                if FLIP_WINDOW[0] <= r["ts"] < FLIP_WINDOW[1]]
+    assert len(stripped) == want["rows"]
+    null_db = _flip_projection(stripped, tmp_path / "null-compaction.db")
+    monkeypatch.setattr(usage_store, "DB_PATH", null_db, raising=True)
+    conn = _open(null_db)
+    try:
+        got = _flip_expect(conn, FLIP_WINDOW[0], FLIP_WINDOW[1], "null-compaction")
+    finally:
+        conn.close()
+    assert got["rows"] == want["rows"] and got["total"] == want["total"], (
+        f"collapsing the records moved the window to {got['rows']:,} rows totalling "
+        f"{got['total']:,} against {want['rows']:,} / {want['total']:,}: the control must "
+        "remove the evidence and nothing else")
+    assert got["attr"]["rows"] == want["rows"], (
+        f"the instrument measures {got['attr']['rows']:,} of {want['rows']:,} rows once "
+        "the records are gone, so `measured` was never the rows themselves")
+    # Read through `_flip_expect`'s own bucket dict, which is keyed by bucket name and
+    # holds only buckets with a row in them — the same reader the published table is
+    # graded by above. `attr["buckets"]` is the instrument's report, a LIST of per-bucket
+    # dicts; indexing it by a name is a TypeError, and a control that dies on its own
+    # indexing never reaches the assertion it was written to make.
+    assert got["buckets"]["no_compaction_record"][0] == want["rows"], (
+        f"with every record gone only {got['buckets']['no_compaction_record'][0]:,} of "
+        f"{want['rows']:,} rows landed in `no_compaction_record`, so an absent record is "
+        "not what that bucket is made of")
+    for name in ("turn_start:microcompact", "turn_start:other",
+                 "relief:tool_results", "relief:reasoning"):
+        assert name not in got["buckets"], (
+            f"{name} still holds {got['buckets'][name]} rows with no compaction evidence "
+            "at all, so the published mechanism split was not being decided by this column")
+    assert live["buckets"]["turn_start:microcompact"] == \
+        want["buckets"]["turn_start:microcompact"], (
+        "the un-stripped reading no longer agrees with the published microcompact figures, "
+        "so this control is comparing against a page that has already moved")
+
+
+#: The three cross-tab cells the page's caveat sentence publishes: bucket × regime → rows
+#: and Σ. `attribution_bucket` credits an applied row outside `turn_start:microcompact`, so
+#: 211 of the window's 217 applied rows land in `turn_start:other` and the other 6 stay in
+#: `turn_start:microcompact` — with ZERO re-prefill tokens between them, which is the whole
+#: reason `turn_start:other`'s Σ (64,825,999) equals the applied regime's Σ while the row
+#: counts (211 and 217) do not. The third cell is the one knob-on row that was never
+#: applied and also carries nothing; it completes that bucket's n=7.
+FLIP_CROSS_TAB = {("turn_start:other", "applied"): (211, 64_825_999),
+                  ("turn_start:microcompact", "applied"): (6, 0),
+                  ("turn_start:microcompact", "on_not_applied"): (1, 0)}
+
+
+def _flip_crosstab(conn: "sqlite3.Connection", since: str,
+                   until: str) -> "dict[tuple[str, str], tuple[int, int]]":
+    """`attribution_bucket` × `sidecar_regime` counted row by row over one window.
+
+    Both are the module's own readers — the same two calls `reprefill_attribution` applies
+    internally to every row — so a cell here that disagrees with the printed bucket table is
+    the instrument disagreeing with its own parts, which is the only way a published caveat
+    can be checked without re-implementing the rule it describes.
+    """
+    tab: "dict[tuple[str, str], tuple[int, int]]" = {}
+    for raw, reprefill in conn.execute(
+            "SELECT compaction, reprefill_tokens FROM usage"
+            " WHERE ts >= ? AND ts < ?", (since, until)):
+        consulted, applied = usage_store.sidecar_regime(raw)
+        regime = "applied" if applied else ("on_not_applied" if consulted else "off")
+        key = (usage_store.attribution_bucket(raw), regime)
+        rows, total = tab.get(key, (0, 0))
+        tab[key] = (rows + 1, total + int(reprefill or 0))
+    return tab
+
+
+def test_the_applied_rows_split_over_two_buckets_so_the_sums_match_and_the_counts_do_not(
+        tmp_path, monkeypatch):
+    """Clause 2's arithmetic, measured out of the bytes rather than asserted on the page.
+
+    The published caveat is an equality in Σ and an inequality in rows at the same time,
+    and only this cross-tab makes both true at once: 211 applied rows in `turn_start:other`
+    carrying 64,825,999, 6 applied rows in `turn_start:microcompact` carrying 0. Get the Σ
+    without the split and the page's "211" is wrong; get the split without the zero and the
+    0.0% microcompact share is unexplained. The control is checked too, and inversely: it
+    holds no applied row and no `turn_start:other` row at all, which is what keeps the 55.3%
+    a knob-off figure instead of a partly-credited one.
+    """
+    db = _tmp_db(tmp_path)
+    monkeypatch.setattr(usage_store, "DB_PATH", db, raising=True)
+    conn = _open(db)
+    try:
+        flip = _flip_crosstab(conn, FLIP_WINDOW[0], FLIP_WINDOW[1])
+        control = _flip_crosstab(conn, FLIP_CONTROL_WINDOW[0], FLIP_CONTROL_WINDOW[1])
+    finally:
+        conn.close()
+    want = FLIP_PUBLISHED[FLIP_WINDOW]
+    for cell, published in FLIP_CROSS_TAB.items():
+        assert flip.get(cell) == published, (
+            f"the flip window's {cell} cell recomputes to {flip.get(cell)!r} against the "
+            f"published {published!r} — the caveat sentence's arithmetic is these cells")
+    assert (flip[("turn_start:microcompact", "applied")][1]
+            == flip[("turn_start:microcompact", "on_not_applied")][1] == 0), (
+        "a row in `turn_start:microcompact` carries re-prefill tokens, so the window's "
+        "0.0% share is no longer the whole of that bucket and the Σ equality below is a "
+        "coincidence rather than a rule")
+    assert flip[("turn_start:other", "applied")][1] == \
+        want["buckets"]["turn_start:other"][1], (
+        "`turn_start:other`'s Σ moved off the published 64,825,999, which is the figure the "
+        "page says equals the applied regime's Σ")
+    applied_rows = sum(n for (b, r), (n, _) in flip.items() if r == "applied")
+    applied_sum = sum(t for (b, r), (_, t) in flip.items() if r == "applied")
+    assert applied_rows == want["regimes"]["knob_on_and_applied"] == 217, (
+        f"the applied rows counted across every bucket are {applied_rows}, not the 217 the "
+        "page publishes as `knob_on_and_applied` — the regime count and the cross-tab are "
+        "two readings of the same flag and must agree")
+    assert applied_sum == flip[("turn_start:other", "applied")][1], (
+        f"the applied regime's Σ ({applied_sum:,}) is not `turn_start:other`'s Σ, so the "
+        "equality the caveat is built on has gone and the fall from 55.3% to 0.0% has to be "
+        "restated as a partial credit, not a bucket move")
+    others = sorted({r for (b, r) in flip if b == "turn_start:other"})
+    assert others == ["applied"], (
+        f"`turn_start:other` holds {others}, not only applied rows, so 'every row that "
+        "bucket holds is an applied row' is false and the 54.0% is no longer the sidecar's "
+        "price moved out of the bucket")
+    polluted = sorted(k for k in control if k[1] == "applied"
+                      or k[0] == "turn_start:other")
+    assert not polluted, (
+        f"the control grew {polluted}. A knob-off week with an applied row or an "
+        "`turn_start:other` row is not the control of the flip window, and the 55.3% beside "
+        "the 0.0% is a different week")
+    assert sum(n for n, _ in flip.values()) == want["rows"] and \
+        sum(t for _, t in flip.values()) == want["total"], (
+        "the cross-tab does not cover the window — "
+        f"{sum(n for n, _ in flip.values()):,} rows totalling "
+        f"{sum(t for _, t in flip.values()):,} against {want['rows']:,} / {want['total']:,}. "
+        "A caveat priced on a subset of the window is a caveat about nothing")
+
+
+def test_a_missing_flip_projection_skips_and_never_reddens(tmp_path, monkeypatch):
+    """Clause 5's last words: a missing artifact SKIPS, it does not redden.
+
+    Nothing else in this file demonstrates that, and an absent file and a broken figure
+    otherwise look identical from a gate report — the confusion that lets a retention sweep
+    read as a refutation of the pair. The vault is pointed at an empty directory, so what is
+    exercised is the reader's behaviour and not a comment about it.
+    """
+    monkeypatch.setattr(_SELF, "_vault_root", lambda: tmp_path, raising=True)
+    with pytest.raises(pytest.skip.Exception) as caught:
+        _flip_extract()
+    assert "vault artifact" in str(caught.value), (
+        "the skip fired for a reason that does not say what the artifact is, so a gate "
+        "report reading it cannot tell a sweep from a fault")
+    src = inspect.getsource(_flip_extract)
+    assert "is_file()" in src and "pytest.skip" in src, (
+        "the reader no longer tests for the file before opening it, so the skip above is "
+        "an accident of an empty directory rather than a rule")
+
+
+def test_the_flip_sibling_marker_names_the_keys_the_reader_and_what_the_bytes_cannot_answer(
+        tmp_path, monkeypatch):
+    """The projection answers some questions about these rows and not others, and the
+    sibling marker is the only place that says which.
+
+    The list is not house style. `replay_usage_extract` reads the prompt-size column, which
+    these bytes DROP, so a reader who runs the pairing query over this artifact gets a zero
+    mean prompt for both windows and could publish it as a measurement of the week;
+    `no_record` is a key the projection preserves and is what keeps a missing-record row out
+    of the freed-evidence arms; and the regime counts are flags counted, which is why the
+    marker has to say the flip window's `knob_on` rows INCLUDE the applied ones instead of
+    leaving a reader to add 2,271 and 217 and double-count 217 of the window.
+    """
+    marker = _vault_root() / "backlog" / "data" / FLIP_MARKER_BASENAME
+    if not marker.is_file():
+        pytest.skip(f"no sibling marker at {marker}; like the projection it is a vault "
+                    "artifact, and a missing one is a sweep, not a regression")
+    flat = " ".join(marker.read_text(encoding="utf-8").split())
+    for phrase in ("`projection` table", "`no_record`", "`microcompacted`",
+                   "microcompact_sidecar", "microcompact_reduced", "attribution_bucket",
+                   "flags counted", "No `compaction` magnitudes", "No prompt sizes",
+                   FLIP_EXTRACT_BASENAME, "2026-10-01.2027-reprefill-witness.jsonl"):
+        assert phrase in flat, (
+            f"the marker no longer states {phrase!r}. It is the only statement of what "
+            "these bytes can be asked, and silence here reads as an answer")
+    for key in ("`rows`", "`Σ`", "`measured`", "`regimes`", "`buckets`", "`unrecorded`"):
+        assert key in flat, (
+            f"the marker no longer names {key} among the keys its window figures are, so "
+            "the figures the page publishes have no definition to be checked against")
+
+    db = _tmp_db(tmp_path)
+    monkeypatch.setattr(usage_store, "DB_PATH", db, raising=True)
+    conn = _open(db)
+    try:
+        for window in FLIP_PUBLISHED:
+            got = _flip_expect(conn, window[0], window[1], str(window[0]))
+            assert got["attr"]["rows"] == got["rows"], (
+                f"{window[0]}: the instrument measures {got['attr']['rows']:,} of "
+                f"{got['rows']:,} projected rows, so a row in the projection never reaches "
+                "the query — the marker says `measured` is `rows`, and reading it would "
+                "make the published counts wrong by that row's tokens")
+            reg = got["regimes"]
+            assert reg["knob_on"] == got["rows"] - reg["knob_off"], (
+                f"{window[0]}: knob_on is not `rows - knob_off`, so the marker's "
+                "statement that the applied rows sit INSIDE knob_on is false and a reader "
+                "adding the two regime numbers is double-counting them")
+            assert reg["knob_on_and_applied"] <= reg["knob_on"], (
+                f"{window[0]}: more rows report the reduction applied than consulted the "
+                "knob, which is the subset reading the marker describes in reverse")
+            assert got["buckets"]["no_compaction_record"][0] == got["unrecorded"], (
+                f"{window[0]}: `no_compaction_record` is "
+                f"{got['buckets']['no_compaction_record'][0]} against "
+                f"{got['unrecorded']} rows with no record, so the marker's `unrecorded` "
+                "key is not that bucket")
+    finally:
+        conn.close()
+
+
+def test_the_flip_pair_recomputation_never_opens_the_live_store(monkeypatch, tmp_path):
+    """The same refusal the first extract is held to, on the second one — installed and
+    then shown to fire, because the harness-level ban exists only where a data root does.
+
+    `tests/conftest.py` refuses a suite that mounts the store only when that file EXISTS, so
+    on a checkout with no data root a green from there is no evidence at all. The fixture
+    below is the unconditional version — it refuses by RESOLVING each path, which also
+    catches the relative spelling a worktree's default data dir actually has — and the
+    assertions after it are its control: pointed at the real store it raises, and the
+    published count is still reachable with the projection mounted in its place.
+    """
+    from app import paths
+    if not os.path.isfile(paths.USAGE_DB):
+        pytest.skip(f"no usage database at {paths.USAGE_DB} on this machine, so the "
+                    "refusal below could not be shown to fire on it — the same condition "
+                    "that makes tests/conftest.py's own ban conditional")
+    live_path = os.path.realpath(paths.USAGE_DB)
+    real_connect = sqlite3.connect
+    opened: "list[str]" = []
+
+    def guard(uri, *a, **k):
+        text = uri[5:] if isinstance(uri, str) and uri.startswith("file:") else str(uri)
+        try:
+            if os.path.exists(text):
+                opened.append(os.path.realpath(text))
+        except OSError:
+            pass
+        return real_connect(uri, *a, **k)
+
+    monkeypatch.setattr(usage_store, "sqlite3",
+                        type("Bounded", (), {"connect": staticmethod(guard)}),
+                        raising=True)
+    db = _tmp_db(tmp_path)
+    monkeypatch.setattr(usage_store, "DB_PATH", db, raising=True)
+    win = _flip_expect(_open(db), FLIP_WINDOW[0], FLIP_WINDOW[1], "guard")
+    assert all(p != live_path for p in opened), (
+        f"a live-root path reached the guard after all: {opened}")
+    assert win["rows"] == FLIP_PUBLISHED[FLIP_WINDOW]["rows"], (
+        "the published count is not reachable without the live store, which means it was "
+        "never a claim about these bytes")
+    monkeypatch.setattr(usage_store, "DB_PATH", paths.USAGE_DB, raising=True)
+    with pytest.raises(pytest.fail.Exception):
+        usage_store.reprefill_attribution(since=FLIP_WINDOW[0], until=FLIP_WINDOW[1])
+    assert any(p == live_path for p in opened), (
+        "the mounted-store case never reached the real file, so the refusal above had "
+        "nothing to refuse")
+
+
+def test_the_page_names_the_flip_projection_and_its_own_recomputer():
+    """The block cites its projection and its marker as vault code spans, names the module
+    that replays them and the three calls that answer, states its own live-store refusal,
+    and publishes no mean prompt figure — because the bytes it cites cannot answer one.
+
+    The refusal is the clause that can only be graded against the page. A gate worktree's
+    own usage database is a file of its own holding none of these rows, and a window query
+    against it returns zero rows: a reader who reaches for it gets an empty answer to a
+    question about a week that is not empty, and the page has to say so where the figures
+    are.
+    """
+    doc = (Path(__file__).resolve().parent.parent / "architecture" / "context-window.md")
+    text = doc.read_text(encoding="utf-8")
+    m = re.search(r"^### The knob, measured on against off.*?$(.*?)(?=^### |^## |\Z)",
+                  text, re.MULTILINE | re.DOTALL)
+    assert m, (f"{doc} has no '### The knob, measured on against off' block, so the "
+               "pair #4150 publishes has moved or gone and the projection pinned here is "
+               "cited by nobody")
+    body = m.group(1)
+    flat = " ".join(body.split())
+    for span in (f"`{VAULT_PREFIX}{FLIP_EXTRACT_PATH}`",
+                 f"`{VAULT_PREFIX}{FLIP_MARKER_PATH}`", MODULE_CITATION):
+        assert span in body, (
+            f"the block no longer cites {span} as a code span, so a reader holding the "
+            "page alone cannot resolve where these figures came from")
+    for basename in (FLIP_EXTRACT_BASENAME, FLIP_MARKER_BASENAME):
+        strays = [flat[max(0, j - 24):j + len(basename)]
+                  for j in (x.start() for x in re.finditer(re.escape(basename), flat))
+                  if not flat[:j].endswith(f"{VAULT_PREFIX}backlog/data/")]
+        assert not strays, (
+            f"the block mentions {basename} in a spelling that does not name the vault: "
+            f"{strays}. A bare `backlog/data/…` resolves against the reader's own "
+            "directory and a literal home path bakes this machine's username into a doc")
+    for call in ("reprefill_attribution(since=…, until=…)",
+                 "usage_store.replay_usage_extract", "usage_store.sidecar_regime"):
+        assert f"`{call}`" in body, (
+            f"the block no longer names `{call}` as part of how its figures re-derive, so "
+            "the published pair has bounds and counts but no command anyone runs")
+    assert LIVE_STORE_BAN in flat, (
+        f"the block no longer carries its own {LIVE_STORE_BAN!r} refusal. A gate "
+        "worktree's usage.db is its own empty file and answers zero rows for a window that "
+        "is not empty, so a missing store there reads as a refutation")
+    for phrase in ("prompt size", "absent"):
+        assert phrase in flat, (
+            f"the block no longer says {phrase!r}: its projection drops the prompt-size "
+            "column, a replay prints a zero for it, and that reads as a measurement of a "
+            "week the block does price")
+    for figure in ("mean input", "mean_input_tokens"):
+        assert figure not in flat, (
+            f"the block publishes a {figure} figure over bytes that drop the column it "
+            "comes from. A zero in a token column reads as a measurement of nothing, and "
+            "this page prices prompt size from a different extract")
+    for figure in TRUNCATED_BLOCK_FIGURES:
+        assert figure not in flat, (
+            f"{figure} is a single-rank reading of the truncated 2026-10-02 block over "
+            "these bytes; it belongs in this comment and not on the page")
