@@ -33,6 +33,7 @@ Read-only: session files and event logs are read, nothing is written.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import statistics
@@ -57,12 +58,104 @@ def _text(msg: dict) -> str:
                    if isinstance(ch, dict) and ch.get("type") == "text")
 
 
+#: The archived form of a transcript, named as `app/uptake.py:622` names it. The
+#: retention sweep (`scripts/groundskeeper/retention-sweep.py::sweep_sessions`) gzips
+#: `<id>.json` to `<id>.json.gz` once `last_active` passes `SESSION_ARCHIVE_AGE_DAYS`
+#: (90) and unlinks the original, on a policy that is *gzip and never delete* — so past
+#: that horizon an archive is the ONLY copy a session will ever have. Both readers here
+#: globbed `*.json`, which made the weekly sweep an eraser of this report's own
+#: evidence: a window older than 90 days reported `0 vs 0` arms with every rate null AND
+#: `enrollment_gap_line: null` — the exact silent reading #3220 exists to make
+#: impossible — because `main` prints the line only `if gap["unstamped"]` and an
+#: archived window has no unstamped file it can see. Measured 2026-11-17, the store held
+#: 10187 `.json` against 13891 `.json.gz`: two thirds of the corpus invisible. The
+#: precedent is uptake's own (#1848, the same store): `app/uptake.py:626` enumerates
+#: both forms and `:655` reads them gzip-transparently (#4214).
+SESSION_ARCHIVE_SUFFIX = ".json.gz"
+SESSION_SUFFIXES = (".json", SESSION_ARCHIVE_SUFFIX)
+#: A turn-log sibling in either form: `[{turn}, ...]`, not a session.
+#: `enrollment_gap` has always skipped the `.json` spelling, and the skip has to be
+#: archive-aware or widening the glob re-admits every turn log as a chat.
+TURNLOG_SUFFIXES = ("-turnlog.json", "-turnlog.json.gz")
+
+
+class UnreadableTranscript(Exception):
+    """A transcript whose bytes cannot be read or parsed at all.
+
+    The shapes are the ones uptake measured on the same store (`app/uptake.py:655-672`):
+    a live file whose JSON is corrupt, an archive cut mid-write (`EOFError`), bytes
+    behind a `.json.gz` name that were never a gzip stream (`BadGzipFile`, an `OSError`),
+    and a valid header over a broken deflate stream, which leaves the decompressor as
+    `zlib.error` and is the only one of those that is not an `OSError`. Named as a class
+    rather than caught inline because both readers have to distinguish "I could not read
+    this" from "this is not the experiment's session" — collapsing them is what made a
+    wiped store and an unreadable store print the same line.
+    """
+
+
+def session_id_of(path: Path) -> str:
+    """The session id a transcript names, with either suffix.
+
+    NOT `path.stem`: for an archive that is `<id>.json`, which matches no session id
+    anywhere in the store.
+    """
+    name = path.name
+    for suffix in (SESSION_ARCHIVE_SUFFIX, ".json"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def session_transcripts(sessions_dir: Path) -> list[Path]:
+    """Every session transcript in the store, live or archived, ordered by name, turn
+    logs excluded — the ONE population both readers of this report walk.
+
+    A session held in BOTH forms is the state a sweep interrupted between its
+    `gzip.open()` and its `path.unlink()`; it resolves to the live file, which is the
+    current prose, exactly as `app/uptake.py:626-639` resolves it. Counting the pair
+    twice would inflate a window's population out of one half-finished write.
+    """
+    by_id: dict[str, Path] = {}
+    for suffix in SESSION_SUFFIXES:                 # ".json" first, and it wins
+        for path in sessions_dir.glob(f"*{suffix}"):
+            if path.name.endswith(TURNLOG_SUFFIXES):
+                continue
+            by_id.setdefault(session_id_of(path), path)
+    return sorted(by_id.values())
+
+
+def read_transcript(path: Path):
+    """One parsed transcript, gzip-transparent.
+
+    Raises `UnreadableTranscript` when the file cannot be read or parsed; a document
+    that parses but is not a session object comes back as it stands, which is what this
+    script reported before archives existed.
+    """
+    try:
+        if path.name.endswith(SESSION_ARCHIVE_SUFFIX):
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                return json.load(fh)
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — one rotten file must never end the walk,
+                              # and both readers counted "could not read" long before
+                              # any of them could name the exception
+        raise UnreadableTranscript(f"{path.name}: {type(exc).__name__}: {exc}") from exc
+
+
 def load_sessions(sessions_dir: Path, experiment: str) -> list[dict]:
+    """Every session stamped for `experiment`, live or archived.
+
+    Walks `session_transcripts`, the same population `enrollment_gap` counts, so an
+    aged window can never empty the arms while still naming a gap in the line below
+    them (#4214).
+    """
     out = []
-    for p in sorted(sessions_dir.glob("*.json")):
+    for path in session_transcripts(sessions_dir):
         try:
-            data = json.loads(p.read_text())
-        except Exception:  # noqa: BLE001 — an unreadable file is not in the experiment
+            data = read_transcript(path)
+        except UnreadableTranscript:  # an unreadable file is not in the experiment
+            continue
+        if not isinstance(data, dict):
             continue
         ab = data.get("inner_voice_ab") or {}
         if ab.get("experiment") != experiment or ab.get("arm") not in ("on", "off"):
@@ -226,8 +319,13 @@ def enrollment_gap(sessions_dir: Path, experiment: str, since: str = "",
     `load_sessions` selects solely on the stored stamp, so an unstamped chat is invisible
     to it and a window that enrolled nobody prints the same 0/0 with null rates that a
     window where the treatment did nothing would. This walks the same population that
-    function globs — top-level `*.json`, turn logs excluded — and reports what it could
-    not read.
+    function walks — `session_transcripts`, every transcript in the store live or
+    archived (`<id>.json` and `<id>.json.gz`), turn logs excluded — and reports what it
+    could not read. Reading only the live half would have this counter fall silent at
+    exactly the horizon the report exists to be read at: the sweep archives a window at
+    90 days inactive, `main` prints the line only `if gap["unstamped"]`, and an all
+    archived window then renders as the clean 0/0 that #3220 was built to make
+    impossible (#4214).
 
     Window: `--since`/`--until` when both bound it, else the experiment's own
     `inner_voice.ab` start/end, else all time. End-exclusive, the convention of
@@ -243,12 +341,10 @@ def enrollment_gap(sessions_dir: Path, experiment: str, since: str = "",
             lo, hi, source = cfg_lo, cfg_hi, "config inner_voice.ab"
 
     in_window = stamped = undated = unreadable = 0
-    for path in sorted(sessions_dir.glob("*.json")):
-        if path.name.endswith("-turnlog.json"):
-            continue
+    for path in session_transcripts(sessions_dir):
         try:
-            rec = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+            rec = read_transcript(path)
+        except UnreadableTranscript:
             unreadable += 1
             continue
         if not isinstance(rec, dict) or rec.get("platform") != ENROLLED_PLATFORM:

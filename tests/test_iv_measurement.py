@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import gzip
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import yaml
@@ -424,7 +426,7 @@ def test_section_3_says_the_arms_are_unrecoverable_and_where_to_stamp():
     s = _flat(_section_3(DOC.read_text()))
 
     assert "inner_voice_ab" in s and "stamp" in s
-    assert ":67" in s and ":144" in s, "the two lines that make the arms unrecoverable"
+    assert ":160" in s and ":237" in s, "the two lines that make the arms unrecoverable"
     assert "cannot be reconstructed after the fact" in s
     assert "future window must stamp at the single create writer (create_session)" in s
 
@@ -432,8 +434,8 @@ def test_section_3_says_the_arms_are_unrecoverable_and_where_to_stamp():
     assert "assignment(" not in report_src, \
         "the report recomputes now, so the doc's unrecoverability claim is stale"
     assert "inner_voice_ab" in _py_function("load_sessions", "scripts/iv_ab_report.py")
-    assert "inner_voice_ab" in _cited_span("scripts/iv_ab_report.py", 67, 67)
-    assert "inner_voice_ab" in _cited_span("scripts/iv_ab_report.py", 144, 144)
+    assert "inner_voice_ab" in _cited_span("scripts/iv_ab_report.py", 160, 160)
+    assert "inner_voice_ab" in _cited_span("scripts/iv_ab_report.py", 237, 237)
 
 
 def test_the_owed_sentence_is_gone_and_the_ruling_is_read_from_the_repo_doc():
@@ -522,7 +524,7 @@ def _report_mod():
 
 def _mc_session(tmp_path: Path, sid: str, *, created_at: str,
                 platform: str = "mission-control", stamp: dict | None = None,
-                with_message: bool = True) -> Path:
+                with_message: bool = True, extra: dict | None = None) -> Path:
     """One session file as the store holds it, with the two keys only the create path
     writes (`id`, `created_at`) so it is a real candidate for enrolment."""
     p = tmp_path / f"{sid}.json"
@@ -531,8 +533,54 @@ def _mc_session(tmp_path: Path, sid: str, *, created_at: str,
                                if with_message else [])}
     if stamp is not None:
         data["inner_voice_ab"] = stamp
+    data.update(extra or {})
     p.write_text(json.dumps(data), encoding="utf-8")
     return p
+
+
+def _mc_archive(tmp_path: Path, sid: str, *, created_at: str,
+                platform: str = "mission-control", stamp: dict | None = None,
+                extra: dict | None = None) -> Path:
+    """The same session as `_mc_session`, left in the only form a session older than
+    `SESSION_ARCHIVE_AGE_DAYS` (90d) has: `retention-sweep.py::sweep_sessions` gzips
+    `<id>.json` to `<id>.json.gz` and unlinks the original, and the policy is gzip and
+    never delete, so nothing else is coming back for it (#4214)."""
+    src = _mc_session(tmp_path, sid, created_at=created_at, platform=platform,
+                      stamp=stamp, extra=extra)
+    dst = tmp_path / f"{sid}.json.gz"
+    dst.write_bytes(gzip.compress(src.read_bytes()))
+    src.unlink()
+    return dst
+
+
+def _turnlog(tmp_path: Path, sid: str, gzipped: bool) -> Path:
+    """A turn-log sibling of `sid` in either form. Written as a session-SHAPED dict —
+    platform and `created_at` and all — so a reader that fails to exclude it by NAME
+    cannot hide behind "it did not parse" (#4214 clause 3)."""
+    name = f"{sid}-turnlog.json" + (".gz" if gzipped else "")
+    body = json.dumps({"id": sid, "platform": "mission-control",
+                       "created_at": "2026-10-01T09:00:00.000000",
+                       "turns": [{"turn_id": "t0"}]}).encode()
+    path = tmp_path / name
+    path.write_bytes(gzip.compress(body) if gzipped else body)
+    return path
+
+
+def _truncated_archive(tmp_path: Path, sid: str) -> Path:
+    """An archive that died mid-write: a real gzip stream cut in half, which is the
+    shape `gzip.open` answers with `EOFError` rather than with content."""
+    whole = gzip.compress(json.dumps({"id": sid, "platform": "mission-control",
+                                      "created_at": "2026-10-01T09:00:00.000000",
+                                      "messages": []}).encode())
+    (tmp_path / f"{sid}.json.gz").write_bytes(whole[: len(whole) // 2])
+    return tmp_path / f"{sid}.json.gz"
+
+
+def _not_gzip_archive(tmp_path: Path, sid: str) -> Path:
+    """An archive whose bytes are not a gzip stream at all — the `.json.gz` name with
+    no magic, which `gzip.open` answers with `BadGzipFile` (an `OSError`)."""
+    (tmp_path / f"{sid}.json.gz").write_bytes(b"{\"id\": not really compressed")
+    return tmp_path / f"{sid}.json.gz"
 
 
 def _stamp(arm: str = "on", experiment: str = "iv-chat-1") -> dict:
@@ -545,10 +593,13 @@ def _window_cfg(start: str = _IV_WINDOW[0], end: str = _IV_WINDOW[1]) -> dict:
 
 
 def test_enrollment_gap_counts_the_population_load_sessions_globs(tmp_path, monkeypatch):
-    """Clause 1: the count is over the same set `load_sessions` reads — top-level
-    `*.json`, turnlog siblings excluded — and only the window's platform sessions,
-    split by whether the named experiment's stamp is on the file. "Named experiment"
-    is load-bearing: a stamp naming a different experiment does not enrol this one."""
+    """Clause 1: the count is over the same set `load_sessions` reads — every transcript
+    in the store, live `*.json` or archived `*.json.gz`, turnlog siblings excluded — and
+    only the window's platform sessions, split by whether the named experiment's stamp is
+    on the file. "Named experiment" is load-bearing: a stamp naming a different
+    experiment does not enrol this one. The fixture here is all-live, so its counts are
+    the ones this node has always asserted; the archived half of that population is
+    pinned by the four nodes below."""
     m = _report_mod()
     monkeypatch.setattr(ab, "ab_config", _window_cfg)
     in_w, out_w = "2026-10-01T09:00:00.000000", "2026-11-01T09:00:00.000000"
@@ -705,6 +756,177 @@ def test_the_diagnostic_announces_itself_without_moving_the_verdict(tmp_path, mo
     # And a diagnostic that writes is a second instrument nobody asked for.
     assert sorted(p.name for p in store.iterdir()) == before, (before,
                                                                sorted(store.iterdir()))
+
+
+# ---------------------------------------------------------------------------
+# #4214: the store is 2/3 archive, and a window older than 90 days read its own
+# erasure. `retention-sweep.py::sweep_sessions` gzips `<id>.json` to
+# `<id>.json.gz` once `last_active` passes `SESSION_ARCHIVE_AGE_DAYS` (90) and
+# unlinks the original, so past that horizon an archive is the ONLY copy a session
+# ever has. Both readers here globbed `*.json`, which made the sweep erase the
+# evidence: `enrollment_gap()` counted `platform_sessions: 0`, `main` suppressed the
+# line (it prints only `if gap["unstamped"]`), and the run returned exactly the
+# clean 0/0, all-rates-null, `enrollment_gap_line: null` reading #3220 exists to
+# make impossible. Measured on 2026-11-17 with one identical unstamped
+# mission-control window session: live, the run printed the gap line naming 1;
+# archived, the same command printed `sessions 0 0` with `platform_sessions: 0` and
+# `enrollment_gap_line: None`. These nodes pin the widening — one gzip-transparent
+# population, the `app/uptake.py:622-674` precedent, read by BOTH readers.
+# ---------------------------------------------------------------------------
+
+
+def test_enrollment_gap_counts_an_archived_window_session(tmp_path, monkeypatch, capsys):
+    """Clause 1: a window session stored only as `<id>.json.gz` is in the population.
+    One live plus one archived unstamped window session is TWO sessions and two
+    unstamped, in the plain line, in `--json`, and across the CLI process boundary."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    live = _mc_session(tmp_path, "mc-live", created_at="2026-10-02T09:00:00.000000")
+    arch = _mc_archive(tmp_path, "mc-arch", created_at="2026-10-01T09:00:00.000000")
+    # Archived AND outside the window: the widening must not turn the count into
+    # "every archive in the store", or the window stops meaning anything.
+    _mc_archive(tmp_path, "mc-after-window", created_at="2026-11-01T09:00:00.000000")
+    assert (live.name, arch.name) == ("mc-live.json", "mc-arch.json.gz"), (live, arch)
+
+    gap = m.enrollment_gap(tmp_path, "iv-chat-1")
+
+    assert gap["platform_sessions"] == 2, gap
+    assert (gap["stamped"], gap["unstamped"]) == (0, 2), gap
+    line = m.gap_line(gap)
+    assert " 2 mission-control sessions" in line, line
+    assert "2 unstamped" in line, line
+
+    # The `--json` surface, so the two views cannot disagree about an archived window.
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(tmp_path),
+                   "--event-logs", str(tmp_path / "no-logs"), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["enrollment_gap"]["platform_sessions"] == 2, payload["enrollment_gap"]
+    assert payload["enrollment_gap_line"] and "2 unstamped" in payload["enrollment_gap_line"]
+
+    # And across the real process boundary: the nightly invokes this file as a script
+    # over the live store, so "importable and correct" is not the shipped shape.
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "iv_ab_report.py"),
+         "--experiment", "iv-chat-1", "--sessions-dir", str(tmp_path),
+         "--event-logs", str(tmp_path / "no-logs")],
+        capture_output=True, text=True, cwd=ROOT, timeout=180)
+    assert proc.returncode == 0, proc.stderr[-500:]
+    assert "ENROLLMENT-GAP: 2 mission-control sessions" in proc.stdout, proc.stdout
+    assert "2 unstamped" in proc.stdout, proc.stdout
+
+
+def test_load_sessions_counts_an_archived_stamped_session(tmp_path):
+    """Clause 2: the arms themselves, not only the gap line. `load_sessions` selects on
+    the stored stamp, so a stamped session that archived vanished from its arm and an
+    aged window reported `0 vs 0, not enough data` — the erasure #2149's permanence
+    ruling is read from. Three stamped sessions, one live and two archived, are three
+    sessions with their turns, so an older-than-90d window still reports a population."""
+    from scripts.iv_ab_report import load_sessions, report
+
+    sessions, logs = tmp_path / "s", tmp_path / "e"
+    sessions.mkdir()
+    logs.mkdir()
+
+    def make(sid: str, arm: str, stops: list[str], *, archived: bool):
+        writer = _mc_archive if archived else _mc_session
+        writer(sessions, sid, created_at="2026-10-01T09:00:00.000000",
+               stamp={"experiment": "iv-chat-1", "arm": arm},
+               extra={"session_id": sid, "inner_voice": arm == "on"})
+        lines = [json.dumps({"event": "brain1.result_message", "turn_id": f"t{i}",
+                             "data": {"stop_reason": s, "num_turns": 3,
+                                      "duration_ms": 2000}})
+                 for i, s in enumerate(stops)]
+        (logs / f"{sid}.events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    make("live-on", "on", ["stop", "stop"], archived=False)
+    make("aged-on", "on", ["stop"], archived=True)
+    make("aged-off", "off", ["max_turns"], archived=True)
+
+    loaded = load_sessions(sessions, "iv-chat-1")
+    assert sorted(str(s.get("id")) for s in loaded) == ["aged-off", "aged-on",
+                                                        "live-on"], loaded
+    rep = report(loaded, logs)
+    assert rep["arms"]["on"]["sessions"] == 2, rep["arms"]["on"]
+    assert rep["arms"]["on"]["turns"] == 3, rep["arms"]["on"]
+    assert rep["arms"]["off"]["sessions"] == 1, rep["arms"]["off"]
+    assert rep["arms"]["off"]["turns"] == 1, rep["arms"]["off"]
+    # The archived turn is the arm's only bad stop, so a rate exists at all only
+    # because the archive was read: 1/1 on the off arm against 0/3 on.
+    assert rep["arms"]["off"]["bad_stop_rate"] == 1.0, rep["arms"]["off"]
+    assert rep["arms"]["on"]["bad_stop_rate"] == 0, rep["arms"]["on"]
+
+
+def test_turn_logs_stay_excluded_from_the_archived_population(tmp_path, monkeypatch):
+    """Clause 3: the widening must not re-admit what today's
+    `name.endswith("-turnlog.json")` skip keeps out. Both fixtures are session-SHAPED
+    dicts — `platform: mission-control`, `created_at` inside the window — so an
+    exclusion that only knows the `.json` spelling cannot hide behind a parse failure:
+    the gzipped one would simply count."""
+    from scripts.iv_ab_report import load_sessions
+
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    _mc_session(tmp_path, "one", created_at="2026-10-01T09:00:00.000000")
+    _turnlog(tmp_path, "one", gzipped=False)
+    _turnlog(tmp_path, "two", gzipped=True)
+
+    probe = json.loads(gzip.decompress((tmp_path / "two-turnlog.json.gz").read_bytes()))
+    assert probe["platform"] == "mission-control", probe
+    assert probe["created_at"].startswith("2026-10-01"), probe
+
+    gap = m.enrollment_gap(tmp_path, "iv-chat-1")
+    assert gap["platform_sessions"] == 1, gap        # `two-turnlog.json.gz` is not a session
+    assert (gap["stamped"], gap["unstamped"]) == (0, 1), gap
+    assert gap["unreadable"] == 0, gap               # and is skipped by name, not by failing
+    assert load_sessions(tmp_path, "iv-chat-1") == []
+
+
+def test_a_damaged_archive_is_counted_and_named(tmp_path, monkeypatch, capsys):
+    """Clause 4: two archives that cannot be read — a stream cut in half (`EOFError`)
+    and bytes that were never a gzip stream (`BadGzipFile`, an `OSError`) — are added to
+    the figure the line already caveats, never dropped as though they were stamped or
+    absent. A silent archive is how #4214 got here in the first place."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    _mc_archive(tmp_path, "whole", created_at="2026-10-01T09:00:00.000000")
+    _truncated_archive(tmp_path, "rotten")
+    _not_gzip_archive(tmp_path, "fake")
+
+    gap = m.enrollment_gap(tmp_path, "iv-chat-1")
+    assert gap["platform_sessions"] == 1, gap        # the broken two are not sessions
+    assert (gap["stamped"], gap["unstamped"]) == (0, 1), gap
+    assert gap["unreadable"] == 2, gap               # counted, not dropped
+    assert "2 did not parse" in m.gap_line(gap), m.gap_line(gap)
+
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(tmp_path),
+                   "--event-logs", str(tmp_path / "no-logs")]) == 0
+    out = capsys.readouterr().out
+    assert "ENROLLMENT-GAP:" in out, out
+    assert "2 did not parse" in out, out
+
+
+def test_a_session_in_both_forms_counts_once_and_reads_as_the_live_file(tmp_path,
+                                                                       monkeypatch):
+    """The rule the shared iterator inherits from `app/uptake.py::_session_transcripts`:
+    a session present in BOTH forms is the state a sweep interrupted between its
+    `gzip.open()` and its `path.unlink()`, and it is ONE session — the live file, which
+    is the current prose. Counting the pair as two would inflate the window's population,
+    and letting the archive win would report text the session has since outgrown."""
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    # Archive first: `_mc_archive` writes the live file, gzips it and unlinks it, so the
+    # unstamped live file below is the one that stands at the end.
+    _mc_archive(tmp_path, "dup", created_at="2026-10-01T09:00:00.000000",
+                stamp=_stamp("on"))
+    _mc_session(tmp_path, "dup", created_at="2026-10-01T09:00:00.000000")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["dup.json", "dup.json.gz"]
+
+    gap = m.enrollment_gap(tmp_path, "iv-chat-1")
+    assert gap["platform_sessions"] == 1, gap        # one session, not two files
+    assert (gap["stamped"], gap["unstamped"]) == (0, 1), gap   # the live file wins
 
 
 def test_the_config_block_carries_the_precondition_as_comment_only():

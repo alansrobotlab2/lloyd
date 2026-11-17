@@ -222,9 +222,11 @@ edit lands at once, so a prompt change that assumes new code ships with it.
   `--sessions-dir` default is `app.paths.SESSIONS_DIR`, which anchors to the git
   worktree the script is imported from, so from a scratch checkout it reads an empty
   store and prints the same 0/0 with `platform_sessions: 0` and no gap line at all
-  (measured 2026-11-17; #4215). And the gap line only fires while those files are
-  still live `*.json`: `enrollment_gap()` never reads `<id>.json.gz`, so it goes
-  silent once the retention sweep archives the window at 90 days inactive (#4214).
+  (measured 2026-11-17; #4215). The line no longer dies at the archive either: both
+  readers now walk every transcript in the store, live `<id>.json` and archived
+  `<id>.json.gz` alike, so a window older than `SESSION_ARCHIVE_AGE_DAYS` (90 days
+  inactive) still names its real population instead of rendering its own erasure as a
+  clean 0/0 (#4214, landed 2026-11-17).
   The condition that reopens the IV authority ruling was recorded in **#2149**:
   *"after the inner_voice.ab window end 2026-10-09, if `iv_ab_report` still reads
   0/0 arms, record-only is permanent."* It has now run against that reading, so
@@ -251,7 +253,7 @@ edit lands at once, so a prompt change that assumes new code ships with it.
   advertises that an arm is a pure function of the session id and so recomputable
   without trusting a stored field, but the reading half does not do it:
   `scripts/iv_ab_report.py` selects its sessions solely from the stored
-  `inner_voice_ab` stamp (`:67` filters on its `experiment`, `:144` indexes its
+  `inner_voice_ab` stamp (`:160` filters on its `experiment`, `:237` indexes its
   `arm`), so an experiment nobody stamped reads 0/0 forever. **A future window
   must stamp at the single create writer (`create_session`) or it cannot be read
   at all** — and re-arming is a decision that needs weeks of real chat traffic to
