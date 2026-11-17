@@ -45,7 +45,7 @@ from typing import Any
 _LLOYD_HOME = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_LLOYD_HOME))
 
-from app.paths import EVENT_LOGS_DIR, SESSIONS_DIR  # noqa: E402
+from app.paths import EVENT_LOGS_DIR, SESSIONS_DIR, describe_tree  # noqa: E402
 from scripts.iv_grade import _CORRECTION_RE  # noqa: E402
 from scripts.iv_outcome_score import GOOD_STOPS, _ERROR_PREFIXES, _result_head  # noqa: E402
 
@@ -381,6 +381,77 @@ def gap_line(gap: dict) -> str:
             f"writes no stamp, so this window cannot be read as an experiment.")
 
 
+#: What a void run exits with (#4215). Distinct from argparse's usage error (2) and from
+#: the 1 a traceback leaves, so a caller can branch on "the store named nothing" without
+#: parsing prose, and a wrapper that ignores the difference cannot mistake the two.
+VOID_EXIT = 3
+
+
+def void_reason(sessions_dir: Path) -> str | None:
+    """Why this sessions store measures NOTHING, or None when it holds sessions.
+
+    `app.paths` anchors `SESSIONS_DIR` to the tree it is imported from (#733), so run
+    this script from a linked worktree — an automod round, an arch-review checkout, an
+    agent scratch tree — and the default store is a path inside that tree which was
+    never created. The report then printed both arms at 0 sessions / 0 turns with every
+    rate, z and median null, `enrollment_gap_line: null` and exit 0, over a store that
+    holds ~10,000 sessions in production: a clean no-gap reading of a store that is not
+    there. Nothing caught it because `enrollment_gap` counts only files it finds, and a
+    walk of a missing directory finds none — an absent store and a healthy one took the
+    same path, and `main` suppresses the gap line whenever `unstamped == 0`.
+
+    Two shapes, one verdict: the directory is not there, or nothing in it parses. The
+    walk SHORT-CIRCUITS at the first transcript that parses, because the question is
+    "is the count zero" and the production store holds ~10,000 transcripts; a full
+    re-parse to answer it on a healthy store would cost the report its own runtime.
+    """
+    if not sessions_dir.is_dir():
+        return f"the resolved sessions dir does not exist: {sessions_dir}"
+    for path in session_transcripts(sessions_dir):
+        try:
+            read_transcript(path)
+        except UnreadableTranscript:
+            continue
+        return None
+    return f"no session transcript in the resolved sessions dir parses: {sessions_dir}"
+
+
+def _void_payload(sessions_dir: Path, event_logs: Path, experiment: str,
+                  reason: str) -> dict:
+    """The JSON of a void run: the marker, the reason, the tree — and no measurement.
+
+    Deliberately NOT the report shape. `arms`, `z`, `enrollment_gap` and
+    `enrollment_gap_line` are ABSENT rather than null, because those nulls are precisely
+    the payload a doc or a later run cites; a void artifact that carried them would
+    still be quotable as "the experiment did nothing" (#3220's shape, #4215's route).
+    """
+    return {"void": True,
+            "void_reason": reason,
+            "sessions_dir": str(sessions_dir),
+            "event_logs": str(event_logs),
+            "event_logs_exist": event_logs.is_dir(),
+            "experiment": experiment,
+            "tree": describe_tree()}
+
+
+def _print_void(reason: str, sessions_dir: Path, event_logs: Path) -> None:
+    """The plain-mode void report: which directory, which kind of tree, why it voids.
+
+    `describe_tree()` is #733's line and it is the only thing that distinguishes an
+    absent worktree store from an empty real one, so it travels here as well as in the
+    JSON rather than only on stderr as an import warning a caller may never grep.
+    """
+    print("VOID — the Inner Voice A/B reading measured nothing.")
+    print(f"  reason:      {reason}")
+    print(f"  sessions:    {sessions_dir}")
+    print(f"  tree:        {describe_tree()}")
+    if not event_logs.is_dir():
+        print(f"  event logs:  {event_logs} (does not exist)")
+    print("\n  No session in that store could be read, so every count this report would\n"
+          "  print is a zero of an empty walk, not a measurement. Run it from the main\n"
+          "  checkout, or pass --sessions-dir naming the real store.\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -396,6 +467,19 @@ def main(argv: list[str] | None = None) -> int:
     if not name:
         from app.inner_voice.ab import ab_config
         name = ab_config()["name"]
+    # #4215, before anything is computed: a store that cannot be read is not a window
+    # with nothing in it. Keyed on the SESSIONS STORE ALONE — the event-log root is named
+    # in both views below but never voids a run, because #3220's clause 4 runs a real
+    # store against an absent log root and requires the verdict and the exit code to
+    # stay put.
+    reason = void_reason(args.sessions_dir)
+    if reason:
+        if args.json:
+            print(json.dumps(_void_payload(args.sessions_dir, args.event_logs,
+                                           name, reason), indent=2))
+        else:
+            _print_void(reason, args.sessions_dir, args.event_logs)
+        return VOID_EXIT
     rep = report(load_sessions(args.sessions_dir, name), args.event_logs,
                  since=args.since, until=args.until)
     rep["experiment"] = name
@@ -405,7 +489,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps({**rep, "enrollment_gap": gap,
                           "enrollment_gap_line": (gap_line(gap)
-                                                  if gap["unstamped"] else None)},
+                                                  if gap["unstamped"] else None),
+                          # The three corpus fields, so an artifact says what it was
+                          # measured over: `void` is the machine-readable answer to
+                          # #4215, and the tree is #733's distinction.
+                          "void": False,
+                          "sessions_dir": str(args.sessions_dir),
+                          "event_logs": str(args.event_logs),
+                          "event_logs_exist": args.event_logs.is_dir(),
+                          "tree": describe_tree()},
                          indent=2))
         return 0
     print(f"\nInner Voice A/B — experiment {name}"
@@ -433,6 +525,13 @@ def main(argv: list[str] | None = None) -> int:
     # would teach the reader to ignore the line.
     if gap["unstamped"]:
         print(f"\n  {gap_line(gap)}\n")
+    # Named, never fatal (#4215). An absent log root leaves every outcome unverifiable,
+    # which the reader is entitled to know, and the nulls above are then a null of that
+    # and not of the arms. A populated store read against one is still a run whose exit
+    # code belongs to the store alone (#3220 clause 4).
+    if not args.event_logs.is_dir():
+        print(f"\n  Event logs: {args.event_logs} does not exist, so no turn's outcome "
+              f"was readable and every rate above is a null of that, not of the arms.\n")
     print("  Outcomes come from the event log; nothing the observer wrote decides one.\n")
     return 0
 

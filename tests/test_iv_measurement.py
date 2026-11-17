@@ -969,3 +969,240 @@ def test_the_config_block_carries_the_precondition_as_comment_only():
     body = yaml.safe_load(stripped)["inner_voice"]["ab"]
     assert body == ab.ab_config(), body
     assert yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))["inner_voice"]["ab"] == body
+
+
+# ---------------------------------------------------------------------------
+# #4215 — a store that cannot be read is a VOID run, not a null result
+# ---------------------------------------------------------------------------
+#
+# Run this script from any linked worktree and `app.paths` sends SESSIONS_DIR inside
+# that tree, where `.lloyd-data` was never created. Until now it then printed both
+# arms at 0 sessions / 0 turns, every rate and z null, `enrollment_gap_line: null`
+# and exit 0 — over a store that holds ~10,000 sessions in production — which is a
+# false claim about the world ("no sessions existed in that window at all") and
+# reads as the clean no-gap result #3220 was built to make impossible. `app.paths`
+# prints its worktree warning on import (#733), but that is advisory: the JSON view a
+# later reader cites was still a clean reading. These nodes make the run itself
+# refuse, and pin that the exit code is driven by the SESSIONS STORE ALONE — the
+# event-log root is named, never fatal, because #3220's clause 4
+# (`test_the_diagnostic_announces_itself_without_moving_the_verdict`) runs a
+# populated store against `tmp_path / "no-logs"` and must keep returning 0.
+
+
+def test_a_missing_sessions_dir_exits_non_zero_in_the_plain_run(tmp_path, capsys):
+    """Clause 1: `--sessions-dir` naming a directory that does not exist is void.
+
+    Today this returns 0 with a printed table. The fixture is the worktree shape:
+    a path that is simply not there, over the same experiment the nightly reads.
+    """
+    m = _report_mod()
+    missing = tmp_path / "no-store"
+
+    rc = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(missing),
+                 "--event-logs", str(tmp_path / "no-logs")])
+    out = capsys.readouterr().out
+
+    assert rc != 0, f"a void run returned {rc}, the #4215 defect"
+    assert rc == m.VOID_EXIT, rc
+    assert "VOID" in out, out
+
+
+def test_json_of_a_missing_sessions_dir_exits_non_zero_instead_of_reporting(tmp_path,
+                                                                           capsys):
+    """Clause 2: `--json` is the surface a doc or later run cites, so it voids too.
+
+    The pre-fix payload for this exact call was a full report — both arms
+    `{"sessions": 0, "turns": 0}`, all three rates null, all three z's null,
+    `enrollment_gap` all zeros, `enrollment_gap_line: null` — and exit 0. The JSON
+    branch is a separate `return` from the plain one (`iv_ab_report.py:401` and
+    `:440`), so a guard that only reached the table would leave the cited surface
+    clean: hence a node of its own for each mode.
+    """
+    m = _report_mod()
+    missing = tmp_path / "no-store"
+
+    capsys.readouterr()
+    rc = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(missing),
+                 "--event-logs", str(tmp_path / "no-logs"), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc != 0, f"a void --json run returned {rc}, the #4215 defect"
+    assert rc == m.VOID_EXIT, rc
+    assert payload["void"] is True, payload
+
+
+def test_a_store_with_no_parseable_session_record_is_void_in_both_modes(tmp_path,
+                                                                       capsys):
+    """Clause 3: an empty or unreadable store is the same void, in both modes.
+
+    Three shapes, one verdict, because the defect is "the run measured nothing"
+    and not "the path was absent":
+      * an existing directory holding nothing at all;
+      * a directory holding only a `.json` that does not parse (`{not json`);
+      * a directory holding only a `.json.gz` whose bytes are not a gzip stream —
+        the `.json.gz` name with no magic, which `gzip.open` answers `BadGzipFile`.
+    Every one printed 0/0 and exit 0 before the fix. A store where ONE record
+    parses is a different case and stays exit 0, which the last block pins: with
+    one good transcript and two broken ones the run is a measurement, and the
+    unreadable files are counted by `enrollment_gap`, not silenced.
+    """
+    m = _report_mod()
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    bad_json = tmp_path / "bad-json"
+    bad_json.mkdir()
+    (bad_json / "broken.json").write_text("{not json", encoding="utf-8")
+    bad_gz = tmp_path / "bad-gz"
+    bad_gz.mkdir()
+    _not_gzip_archive(bad_gz, "fake")
+
+    for store in (empty, bad_json, bad_gz):
+        capsys.readouterr()
+        rc_plain = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                           "--event-logs", str(tmp_path / "no-logs")])
+        assert rc_plain != 0, f"{store.name}: plain returned {rc_plain}"
+        assert "VOID" in capsys.readouterr().out, store.name
+
+        capsys.readouterr()
+        rc_json = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                          "--event-logs", str(tmp_path / "no-logs"), "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert rc_json != 0, f"{store.name}: --json returned {rc_json}"
+        assert payload["void"] is True, payload
+
+    # The other edge: one transcript that parses is a store, even among broken ones.
+    live = tmp_path / "one-good"
+    live.mkdir()
+    _mc_session(live, "ok", created_at="2026-10-01T09:00:00.000000")
+    (live / "broken.json").write_text("{not json", encoding="utf-8")
+    _not_gzip_archive(live, "fake")
+
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(live),
+                   "--event-logs", str(tmp_path / "no-logs")]) == 0
+    out = capsys.readouterr().out
+    assert "VOID" not in out, out
+    assert "ENROLLMENT-GAP:" in out and "2 did not parse" in out, out
+
+
+def test_a_void_run_names_the_resolved_store_and_the_tree_it_resolved_in(tmp_path,
+                                                                        monkeypatch,
+                                                                        capsys):
+    """Clause 4: the void report says WHICH directory and in WHICH kind of tree.
+
+    `app.paths.describe_tree()` is the string #733 added for exactly this — it
+    carries `tree=worktree` when the checkout is a linked git worktree, which is
+    the only way a reader can tell an absent worktree store from an empty real one.
+    `IS_WORKTREE` is patched rather than assumed so the assertion is deterministic
+    from whichever tree the suite runs in; the function reads the global at call
+    time, so the patched value is what ships in the line.
+
+    Both carriers are pinned: the plain line and the `--json` field, because the
+    second is what survives into an artifact and the first is what a human sees.
+    """
+    from app import paths
+
+    m = _report_mod()
+    monkeypatch.setattr(paths, "IS_WORKTREE", True)
+    missing = tmp_path / "no-store"
+
+    capsys.readouterr()
+    rc = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(missing),
+                 "--event-logs", str(tmp_path / "no-logs")])
+    out = capsys.readouterr().out
+    assert rc != 0, rc
+    assert str(missing) in out, out
+    assert "tree=worktree" in out, out
+    assert paths.describe_tree() in out, out
+
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(missing),
+                   "--event-logs", str(tmp_path / "no-logs"), "--json"]) != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sessions_dir"] == str(missing), payload
+    assert payload["tree"] == paths.describe_tree(), payload
+    assert "tree=worktree" in payload["tree"], payload
+
+
+def test_a_void_run_never_emits_the_clean_shape(tmp_path, capsys):
+    """Clause 5: the void payload cannot be mistaken for a measurement of nothing.
+
+    The shape #4215 is about is `enrollment_gap_line: null` beside all-zero counts
+    at exit 0. So the void run carries an explicit `void: true` marker AND does not
+    emit that shape at all: no `arms`, no `z`, no `enrollment_gap`, no
+    `enrollment_gap_line` — a void run produced no measurement to cite. Both halves
+    are needed: a marker a consumer can branch on, and the absence of the fields
+    whose nulls a doc would otherwise quote.
+
+    The control at the end is the reading that must NOT change: the same script over
+    a store with unstamped sessions exits 0 and prints the ENROLLMENT-GAP line.
+    That is the live iv-chat-1 reading (29 platform sessions, 0 stamped, 29
+    unstamped) in miniature, and it is why void is keyed on the store rather than on
+    the arms being empty — an experiment that enrolled nobody is a finding, an
+    absent store is not a finding at all.
+    """
+    m = _report_mod()
+    missing = tmp_path / "no-store"
+
+    capsys.readouterr()
+    rc = m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(missing),
+                 "--event-logs", str(tmp_path / "no-logs"), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc != 0, rc
+    assert payload["void"] is True, payload
+    assert payload["void_reason"], payload
+    for key in ("arms", "z", "enrollment_gap", "enrollment_gap_line"):
+        assert key not in payload, f"{key} survived into a void payload: {payload}"
+
+    store = tmp_path / "store"
+    store.mkdir()
+    _mc_session(store, "unstamped", created_at="2026-10-01T09:00:00.000000")
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                   "--event-logs", str(tmp_path / "no-logs")]) == 0
+    out = capsys.readouterr().out
+    assert "ENROLLMENT-GAP:" in out and "1 unstamped" in out, out
+    assert "VOID" not in out, out
+
+
+def test_an_absent_event_log_root_is_named_but_never_voids_the_run(tmp_path, capsys,
+                                                                  monkeypatch):
+    """The event-log half of the acceptance: named, not fatal.
+
+    `report()` walks the event-log root independently of the sessions store, so an
+    absent root is the same class of nothing — but making it void would contradict
+    #3220's clause 4, which runs a populated store against `tmp_path / "no-logs"`
+    and asserts exit 0 with the verdict unchanged. So the root travels in the
+    report as `event_logs` / `event_logs_exist` and a plain line, and the exit code
+    stays driven by the sessions store alone.
+    """
+    m = _report_mod()
+    monkeypatch.setattr(ab, "ab_config", _window_cfg)
+    store = tmp_path / "store"
+    store.mkdir()
+    _mc_session(store, "u1", created_at="2026-10-01T09:00:00.000000")
+    logs = tmp_path / "no-logs"
+
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                   "--event-logs", str(logs)]) == 0
+    out = capsys.readouterr().out
+    assert "VOID" not in out, out
+    assert str(logs) in out, out
+
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                   "--event-logs", str(logs), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["event_logs"] == str(logs), payload
+    assert payload["event_logs_exist"] is False, payload
+    assert payload["void"] is False, payload
+
+    real = tmp_path / "logs"
+    real.mkdir()
+    capsys.readouterr()
+    assert m.main(["--experiment", "iv-chat-1", "--sessions-dir", str(store),
+                   "--event-logs", str(real), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["event_logs_exist"] is True
