@@ -180,7 +180,7 @@ def _host_block_reason(url: str) -> str | None:
     """The one decision. Returns a message to refuse with, or None to allow.
 
     Every place that can put a URL in front of Chromium calls this, and so
-    does the route interceptor, which is what covers the three lanes an
+    does the connection gate, which is what covers the three lanes an
     entry-point check cannot see: a redirect to a private address, a click on
     a link, and a subresource fetched by a page that is itself public.
     """
@@ -208,7 +208,7 @@ def _host_block_reason(url: str) -> str | None:
     return None
 
 
-# The most recent refusal, so a navigation killed by the interceptor can say
+# The most recent refusal, so a navigation killed by the connection gate can say
 # why. Aborting a redirect leaves `page.goto` waiting for a load that will
 # never arrive, and it surfaces as a bare 30s timeout — a message that sends
 # the agent looking for a slow site instead of telling it the hop was refused.
@@ -235,7 +235,7 @@ async def _prewarm_host(url: str) -> None:
     `socket.getaddrinfo` blocks, and the two hot callers are coroutines on the
     aggregator's loop — the same loop that dispatches every MCP tool call.
     A literal IP costs microseconds because it never leaves the resolver, but
-    a cold hostname is a network round trip, and the route interceptor sees
+    a cold hostname is a network round trip, and the connection gate sees
     one per unique host on every page. `egress._resolve_addrs` is lru_cached, so
     warming it here makes the `_host_block_reason` call that follows free.
     """
@@ -260,38 +260,38 @@ async def _host_block_reason_async(url: str) -> str | None:
     return _host_block_reason(url)
 
 
-async def _guard_route(route) -> None:
-    """Route interceptor. Covers fresh requests, and NOT redirects.
+def _guard_connect(host: str, port: int, url: str = "") -> tuple:
+    """The connection gate. `_browser_proxy.GuardProxy` asks it before dialling.
 
-    Measured, not assumed: `route.continue_()` hands the request to Chromium's
-    network stack, which follows a 3xx internally and never re-enters
-    interception. Instrumenting the handler against a loopback server that
-    302s to this box's own LAN address shows the redirected request arriving
-    as a `request` *event* while the route handler is called exactly once, for
-    the first hop. So this layer stops a direct navigation, a clicked link and
-    a subresource; `_enforce_landing` below is what stops a redirect.
+    Returns `(reason, ())` to refuse, or `(None, addresses)` to allow — and the
+    proxy then dials one of THOSE addresses, so the address judged is the one
+    reached. Covers every connection Chromium makes: a navigation, a clicked
+    link, a subresource, a websocket, and a redirect's next hop, which the
+    route interceptor this replaced never re-entered for. `_enforce_landing`
+    below still asks where the page ended up; it is now the second answer to
+    that question instead of the only one.
 
-    Fails OPEN on an internal error. A bug in here would otherwise break every
-    page load in the process, and the entry-point checks still stand — this
-    layer is defence in depth, so its failure mode should be losing depth, not
-    losing the browser.
+    It was an interceptor (`context.route`) until 2026-11-17. Any interceptor
+    makes Chromium ship every request BODY over the automation pipe before the
+    request may leave: a 600 MiB upload fell from 771 MiB/s to 1-15 MiB/s, and
+    a 3.48 GB YouTube upload was projected at 2.5 hours. Measurements are in
+    `agent_mcp/_browser_proxy.py`. Never put a `context.route` back.
+
+    Called on the proxy's executor thread, so the blocking resolver is fine
+    here. A raise is the proxy's to handle: it fails OPEN with a warning, the
+    interceptor's own trade — a bug here should cost depth, not the browser.
+    An unresolvable name returns no addresses and the proxy answers 502.
     """
-    try:
-        reason = await _host_block_reason_async(route.request.url)
-    except Exception as exc:
-        logger.warning("browser: route guard failed open on %s: %s",
-                       route.request.url[:120], exc)
-        reason = None
-    try:
-        if reason:
-            logger.warning("browser: %s (%s)", reason, route.request.url[:120])
-            _record_block(route.request.url, reason)
-            await route.abort("blockedbyclient")
-        else:
-            await route.continue_()
-    except Exception:
-        # The page navigated away mid-flight and the route is already dead.
-        pass
+    bare = f"[{host}]" if ":" in host else host
+    target = url or f"http://{bare}:{port}/"
+    reason = _host_block_reason(f"http://{bare}:{port}/")
+    if reason:
+        logger.warning("browser: %s (%s)", reason, target[:120])
+        _record_block(target, reason)
+        return reason, ()
+    if host.lower() == "localhost":
+        return None, ("127.0.0.1", "::1")
+    return None, egress._resolve_addrs(host)
 
 
 # The word both fail-closed checks put at the front of their refusal. A caller
@@ -345,7 +345,7 @@ async def _enforce_landing(page) -> str | None:
     content. It neither blanks nor records: the check never learned where the
     page is, so navigating it somewhere on the strength of that guess is a second
     guess, and recording it would report a redirect to a private host that was
-    never observed. `_guard_route` stays the only deliberate fail-open in this
+    never observed. `_guard_connect` stays the only deliberate fail-open in this
     file, because it sits *behind* these checks; this one is the entry point.
     """
     url = "<unknown>"
@@ -432,6 +432,7 @@ async def _launch_browser_locked():
     from playwright.async_api import async_playwright
     _pw = await async_playwright().start()
     _browser = await _pw.chromium.launch(
+        proxy={"server": _guard_proxy_url()},
         executable_path=CHROMIUM_EXECUTABLE,
         headless=_resolve_headless(),
         args=[
@@ -448,11 +449,10 @@ async def _launch_browser_locked():
             "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
         ),
     )
-    # Armed at launch rather than per page, so a tab the agent opens by
-    # clicking a target=_blank link is covered too. Checked once here: the
-    # flag is read per request inside `_host_block_reason` anyway, so a
-    # config change takes effect on the next navigation, not the next launch.
-    await _context.route("**/*", _guard_route)
+    # The private-host guard is the proxy above, not an interceptor: it is asked
+    # per connection, so a tab opened by a target=_blank click is covered, and
+    # the flag is read per connection, so a config change needs no relaunch.
+    # No `context.route` here — see `_guard_connect` for what one costs.
     return _context
 
 
@@ -703,7 +703,7 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
     # #628: the destination decision, before `_get_page()` — so a refused
     # navigation never launches Chromium, and the refusal is the grant shape
     # rather than the 30s timeout a blocked route would have surfaced as. The
-    # private-host checks below it (`_host_block_reason`, `_guard_route`,
+    # private-host checks below it (`_host_block_reason`, `_guard_connect`,
     # `_enforce_landing`) are untouched: this adds a destination axis, it does
     # not replace the address floor, and the floor runs first so an allow-list
     # entry naming a private address cannot reopen it.
@@ -1128,7 +1128,7 @@ async def _capture_state(tool_name: str) -> dict | None:
     # content, and the tab is a surface a human reads. Same rule as snapshot.
     #
     # Fails CLOSED on an internal error, which is the opposite of
-    # `_guard_route` above — and deliberately so. That layer is defence in
+    # `_guard_connect` above — and deliberately so. That layer is defence in
     # depth sitting behind the entry-point checks, so its failure mode should
     # be losing depth; this call *is* the entry-point check for the
     # screenshot path, the only thing between a LAN device's UI and the
@@ -1144,7 +1144,7 @@ async def _capture_state(tool_name: str) -> dict | None:
         # `url` is still the sentinel when reading it was itself the raiser —
         # a page mid-teardown that cannot name its own host is exactly the
         # case this drops, so the sentinel is the honest thing to log. The
-        # second field is `_guard_route`'s `%s` slot carrying the type as well
+        # second field is the proxy's fail-open `%s` slot carrying the type as well
         # as `str(exc)`: a guard exception built with no message — `OSError()`
         # from a teardown, `KeyError` from a resolver bug — would otherwise
         # render a line naming nothing, and naming nothing is the gap this
@@ -2261,7 +2261,7 @@ async def input_from_ui(event: dict) -> dict:
     Never launches a browser: input with no page open has nothing to land on,
     and reviving a browser the agent closed is the state mirror's rule too.
     Every navigation an event causes passes the same host checks a tool call's
-    does — the context-wide interceptor for the request, `_enforce_landing` for
+    does — the connection gate for the request, `_enforce_landing` for
     wherever it ended up. A click that opens a tab moves the view to that tab,
     or the viewer would be left on the page they clicked away from. The frame is
     awaited before returning and tagged `user_input`.
@@ -2423,3 +2423,26 @@ async def _aria_snapshot_masked(target) -> str:
                      type(exc).__name__)
         secrets, mask_all = [], True
     return _mask_password_values(raw, secrets, mask_all=mask_all)
+
+
+# ── The connection gate's proxy ───────────────────────────────────────────────
+#
+# At the end of the module for the same reason as the block above. One proxy for
+# the life of the process: a relaunched browser reuses it, and it holds nothing
+# but a listening socket on 127.0.0.1.
+
+_guard_proxy = None
+
+
+def _guard_proxy_url() -> str:
+    """Start the gate on first use and return its address.
+
+    Raises when it cannot bind, and the launch fails with it: a browser with no
+    gate in front of it is the one configuration this module must never run.
+    """
+    global _guard_proxy
+    if _guard_proxy is None:
+        from agent_mcp._browser_proxy import GuardProxy
+        _guard_proxy = GuardProxy(
+            lambda host, port, url: _guard_connect(host, port, url)).start()
+    return _guard_proxy.url

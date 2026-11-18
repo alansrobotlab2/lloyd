@@ -163,7 +163,11 @@ async def test_launch_and_context_args_are_unchanged_so_verification_stays_on(mo
     ], "chromium.launch args changed; #1241 requires them unchanged"
     assert "ignore_https_errors" not in launch, launch
     assert "ignore_https_errors" not in captured["context_kwargs"], captured["context_kwargs"]
-    assert context is not None and captured["route"][0] == "**/*"
+    # The private-host guard rides the launch as a proxy (2026-11-17), never as
+    # an interceptor on the context: one throttles every upload body.
+    assert context is not None and "route" not in captured, \
+        "a context.route interceptor is back; it ships every request body over the pipe"
+    assert launch["proxy"]["server"].startswith("http://127.0.0.1:"), launch.get("proxy")
 
 
 # ── State frame ───────────────────────────────────────────────────────────────
@@ -526,8 +530,17 @@ def test_the_guard_is_actually_wired_into_every_url_entry_point():
     # The URL bar inherits it through _browser_navigate rather than repeating
     # the check; assert the delegation exists so it cannot quietly stop.
     assert "_browser_navigate" in ui.split("\nasync def ", 1)[0]
-    assert 'await _context.route("**/*", _guard_route)' in src, \
-        "the context interceptor covers clicks and subresources"
+    # The connection gate (2026-11-17): Chromium's only route out is the proxy,
+    # and the proxy asks `_guard_connect`. An interceptor is what it replaced —
+    # one makes every request body cross the automation pipe (a 3.48 GB upload
+    # projected at 2.5 h), so its return is a regression this pins too.
+    assert 'proxy={"server": _guard_proxy_url()}' in src, \
+        "the launch must put the guard proxy in front of every connection"
+    gate = src.split("def _guard_connect", 1)[1].split("\nasync def ", 1)[0]
+    assert "_host_block_reason(" in gate and "_record_block(" in gate
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    assert ".route(" not in code.replace("`context.route`", ""), \
+        "no route interceptor in browser.py: it throttles every upload"
     # And the layer that covers what interception cannot: see the redirect
     # test below for why these two are not the same guard.
     for fn in ("_browser_snapshot", "_browser_evaluate"):
@@ -544,7 +557,7 @@ def test_the_guard_is_actually_wired_into_every_url_entry_point():
     # `_frame_sections` is #424's addition and `frame_index` is a new way to name
     # a document: a frame has a host of its own, and a guard that lives on only
     # some of the surfaces that read a URL is not a guard.
-    for fn in ("_guard_route", "_enforce_landing", "_capture_state",
+    for fn in ("_enforce_landing", "_capture_state",
                "_frame_sections", "_browser_evaluate"):
         body = src.split(f"async def {fn}", 1)[1].split("\nasync def ", 1)[0]
         assert "_host_block_reason_async" in body, f"{fn} must use the async check"
@@ -721,7 +734,7 @@ async def _host_check_that_raises(url):
 async def test_a_frame_is_dropped_when_the_host_check_cannot_answer(monkeypatch, caplog):
     """On the one path that cannot be un-pushed, an inconclusive check refuses.
 
-    `_guard_route` fails open, and says so, because it sits behind the
+    The connection gate fails open, and says so, because it sits behind the
     entry-point checks and a bug in it should cost depth rather than the
     browser. `_capture_state` is not the deep layer: for a screenshot this
     check *is* the entry point, and the module already decided the same
@@ -740,7 +753,7 @@ async def test_a_frame_is_dropped_when_the_host_check_cannot_answer(monkeypatch,
     assert page.shots == 0, "a screenshot was taken for a host nobody checked"
     warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert len(warns) == 1, f"expected exactly one warning about the dropped frame: {warns}"
-    # `_guard_route`'s shape — `browser: <which guard> <which way> on <url>:
+    # The gate's shape — `browser: <which guard> <which way> on <url>:
     # <why>` — with the second slot carrying the exception *type* too, so a
     # fault with an empty message still names something. Without the record a
     # Browser tab that stops refreshing reads as a dead page rather than as a

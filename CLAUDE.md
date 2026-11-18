@@ -512,7 +512,8 @@ version.
   `tests/test_mc_tab_parity.py`. `_summarize_browser` never carries the
   screenshot or snapshot.
 - Browser SSRF: the check is on **resolved** addresses; `_enforce_landing`
-  covers redirects, which route interception never sees.
+  covers redirects. The request guard is a proxy (`_browser_proxy.py`);
+  **never add a `context.route`** (it throttled uploads ~100×).
 - Browser tab input (`/browser/input`) carries credentials: log only an
   exception's type; every aria read goes through `_aria_snapshot_masked`
   (Chromium puts password values in the tree in plain text).

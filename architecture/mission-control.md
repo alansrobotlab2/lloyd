@@ -431,7 +431,7 @@ It is the URL bar's seam for the URL bar's reason — a route, never an MCP call
 so a human's input is not written into the transcript as something the model
 did — and it inherits that path's guards: no event launches a browser (input
 with no page open is refused, as the state mirror refuses to revive one), and a
-click or key that navigates goes through the context-wide interceptor and then
+click or key that navigates goes through the connection gate and then
 `_enforce_landing`. A click that opens a tab moves `_active_page` to it, or the
 viewer is left on the page they clicked away from. Each event awaits its frame
 (tagged `user_input`); a click, key or wheel also schedules one trailing frame a
@@ -488,13 +488,19 @@ printer. The check is on **resolved** addresses (`_resolve_addrs`,
 encoding that beat the old regex list, and a name like `router.local` is
 classified at all. The policy mirrors `http_request` rather than `http_fetch`,
 and the browser is not the weak link for loopback: an injected prompt that
-wants it has Bash and the whole MCP surface already. Route interception
-does not see redirects — `route.continue_()` hands the request to Chromium,
-which follows a 3xx internally — and that is measured, not assumed: against a
-loopback server that 302s to this box's own LAN address the handler fires
-exactly once, for the first hop, while the redirected request arrives only as a
-`request` event. So the interceptor covers a clicked link and a subresource,
-and `_enforce_landing` asks where the page actually ended up and blanks it on a
+wants it has Bash and the whole MCP surface already. The per-request guard is a
+**connection gate**: Chromium's only route out is a loopback forward proxy
+(`agent_mcp/_browser_proxy.py`), which asks `browser._guard_connect` before it
+dials and then dials the address that was judged, never the name again. It
+covers a clicked link, a subresource, a websocket and a redirect's next hop.
+Until 2026-11-17 this was a Playwright route interceptor, which never saw a
+redirect and — the reason it was replaced — made Chromium ship every request
+body over the automation pipe before the request could leave: a 600 MiB upload
+to a loopback sink ran at 771-927 MiB/s without it and 1-15 MiB/s with it, and
+a 3.48 GB YouTube upload was projected at 2.5 hours (through the proxy the same
+600 MiB runs at 870-1240 MiB/s). An interceptor also switches the HTTP cache
+off. **Never add a `context.route` to this browser.** Behind the gate,
+`_enforce_landing` asks where the page actually ended up and blanks it on a
 hit, which needs no enumeration of lanes and so also catches a meta-refresh and
 a `window.location`; leaving the page parked would let the next
 `browser_snapshot` read it and the state mirror push a screenshot of it. `_browser_snapshot` and `_browser_evaluate`
@@ -504,7 +510,7 @@ when `_host_block_reason_async` itself raises, `_capture_state` logs
 `browser: state guard failed closed on <url>: <ExcType>: <message>` and returns
 no frame, so a bug in the guard costs the Browser tab one stale thumbnail until
 the next tool call instead of publishing a LAN device's UI that nobody checked
-and nothing can un-push. It is the opposite of the interceptor above, and
+and nothing can un-push. It is the opposite of the connection gate above, and
 deliberately: that one fails open and says so because it sits *behind* the
 entry-point checks, so its failure should cost depth rather than the browser,
 while for a screenshot this check is the entry point — the same call
