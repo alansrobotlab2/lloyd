@@ -2311,3 +2311,55 @@ def test_the_exempt_rows_are_named_by_key_in_the_prose_and_from_one_constant():
         assert f"'{key}'" not in probe, (
             f"'{key}' is spelled as a literal inside the probe, so the probe and "
             "SHADOW_BOOKKEEPING_KEYS are now two lists that can drift apart")
+
+
+# ── #4244 clause 1: the body publishes its measurement, and no cause ──────────────────
+
+
+def test_the_shadow_alert_publishes_no_cause_the_check_never_measured(tmp_path):
+    """#4244 clause 1: what a person reads states bytes, rows and the store to trust, and
+    never says who made the file.
+
+    The body used to end "Then find the writer: each of these was a command run with the
+    data root as its cwd against a bare database name (#3109, #3481)". That sentence is a
+    claim about a cause `data_root_shadows` does not measure: a finding carries a path, a
+    byte size, a table count and a row count, and no field for who wrote the file. The live
+    finding #4244 was filed on proves the sentence false rather than merely unproven — the
+    `workers.db` under `~/lloyd-data/tmp/triage-4236/` was laid by a test run's substitute
+    data root, four directories inside a `TMPDIR` somebody had pointed into the data root,
+    which `tests/conftest.py`'s `_test_scratch_dir` docstring records and has since refused.
+    No command ran there against a bare database name, so the instruction sent a reader
+    hunting for a cwd mistake that had not happened. `#3124`'s own rule, restated on
+    `RUNTIME_DATA_SHADOW_ALERT_TITLE`, is that this wording "may not name who made it".
+
+    The phrases are banned as strings, not against a constant, for the reason #3124's node
+    gives: the clause is about what a reader can no longer be told. "cwd" is banned whole
+    because a wrong cwd is the mechanism the sentence named, and a re-word that kept the
+    mechanism while dropping the accusation would still tell a reader how the file got
+    there. What the clause REQUIRES is asserted off the check's own numbers — the rendered
+    line is compared against `stat()` of the fixture and against `len(KG_DATA_TABLES)`, so
+    a body that dropped the rows or the bytes fails here rather than in the daily note.
+    """
+    import guardian as gmod
+
+    data = tmp_path / "lloyd-data"
+    repo = _shipped_layout_repo(tmp_path)
+    shadow = _provisioned(data / "kg.sqlite")
+    trusted = _provisioned(data / SHIPPED_KG, facts_rows=3)
+
+    findings = _shadows(data, repo)
+    assert len(findings) == 1, f"the fixture has to produce exactly one shadow: {findings}"
+    body = gmod._shadow_alert_body(str(data), findings, NOW)
+
+    # The measurement half, read off the fixture rather than typed into the assertion.
+    assert (f"- empty `{shadow}` ({shadow.stat().st_size:,} bytes, "
+            f"0 rows in {len(KG_DATA_TABLES)} tables)") in body, body
+    assert f"`{trusted}` ({trusted.stat().st_size:,} bytes)" in body, body
+    assert "moves and deletes NOTHING" in body, body
+    assert str(data) in body, "the root that was measured has to be named (#1536)"
+
+    for phrase in ("find the writer", "bare database name", "was a command run",
+                   "created by", "someone ran", "cwd"):
+        assert phrase not in body, (
+            f"the body publishes {phrase!r}, a statement about how the file came to "
+            f"exist, and this check measures only bytes, rows and paths:\n{body}")

@@ -173,8 +173,8 @@ RUNTIME_DATA_ALERT_TITLE = "Runtime data is being written into the code tree"
 #: The same hourly check's title when the DATA root is all it found (#3124), and the
 #: reason it exists. `datawatch.data_root_shadows` reports a regular file at 0 bytes,
 #: untouched for `INERT_MIN_AGE_SECONDS`, with no `-wal`/`-shm` beside it, whose name a
-#: populated store deeper under the same root answers with bytes. That is residue of a
-#: command run once with the wrong cwd — `sqlite3` creates the file on connect — so the
+#: populated store deeper under the same root answers with bytes. #3109's residue was a
+#: wrong-cwd `sqlite3` (it creates the file on connect), #4244's a test's scratch root, so the
 #: shared title above was asserting two things this finding never measured: that the file
 #: is in the code tree, and that something is writing it. On 2026-10-21 it toasted hourly
 #: from 06:49 to 10:49 PT over four files all dated Oct 1-19 and every path under
@@ -475,7 +475,7 @@ def _shadow_alert_body(data_root: str, shadows, now: float) -> str:
         f"file{'s' if len(shadows) != 1 else ''}, checked "
         f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))}). An empty database is a "
         "valid SQLite database, so opening one answers a count with 0 instead of failing: "
-        "a probe run with the wrong cwd reports an empty store while the real one is "
+        "a probe that resolves to the empty file reports an empty store while the real one is "
         "populated. Emptiness is measured as rows, not bytes — the file can hold a full "
         "schema and every page of it, and a byte size is not a statement about its "
         "content (#3481). This check moves and deletes NOTHING — a file under the data "
@@ -520,8 +520,8 @@ def _shadow_alert_body(data_root: str, shadows, now: float) -> str:
         " content). No other open, and no shell step either: any other one re-stamps the store's"
         " `-shm` index, which is the writer evidence this check reasons from (#3559). If the"
         " `-wal` holds bytes an immutable read calls a populated store empty — treat the file as"
-        " live and do not verify it by hand. Then find the writer: each of these was a command run"
-        " with the data root as its cwd against a bare database name (#3109, #3481).")
+        " live and do not verify it by hand. Nothing here says what made the file: this check"
+        " measures bytes, rows and paths, and #3124's rule is that it may not name a writer.")
     return "\n\n".join(paras)
 
 

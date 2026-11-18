@@ -3028,3 +3028,61 @@ def test_a_name_carrying_arrivals_heading_is_cleared_on_both_alert_surfaces(
         f"posted headings:\n{note[:800]}")
     assert _walked() == [title, ARR, second, ARR], (
         f"the second clean pass walked {_walked()[-2:]} instead of {[second, ARR]}")
+
+
+# ── #4244 clause 2: the re-worded body still hands over exactly one paste-able query ──
+
+
+def test_the_confirmation_step_offers_exactly_one_paste_able_query_string():
+    """#4244 clause 2: one query string, and it is the one `datawatch._read_open` picks.
+
+    #4244 takes a cause sentence out of this paragraph. A re-word can quietly damage the
+    half that has to survive it: the query a reader copies out of the daily note IS the
+    instruction, and a body that split it into `mode=ro` beside `immutable=1`, or added a
+    second open beside it, would still read as the same advice while pointing at an open
+    that takes a lock. Any open but the immutable one re-stamps a WAL-mode store's `-shm`
+    index, which is the writer evidence `datawatch` reasons from (#3559, #3481), so a
+    second query in the paragraph is a mutation offered as a verification step.
+
+    That is why this node counts the query-shaped tokens rather than only searching for
+    one: the two nodes above assert that `mode=ro&immutable=1` appears, which a paragraph
+    carrying a SECOND, mutating query alongside it would satisfy. It renders the same
+    WAL-mode finding those nodes use — `journal_mode`/`sidecars` included, because the
+    journal mode is what makes the immutable open the only inert one.
+
+    A "paste-able query string" is a backticked span shaped like a URI query, one or more
+    `key=value` pairs: the form the body uses and the only form a reader can drop onto the
+    end of a `file:` path. Prose spans (`meta`, `select count(*) from <table>`,
+    `datawatch._read_open`) carry no `=`, so they are not counted and are not banned.
+    """
+    import guardian as G
+
+    finding = {
+        "shadow": "/home/alansrobotlab/lloyd-data/kg.sqlite",
+        "name": "kg.sqlite", "depth": 1,
+        "trusted": ("/home/alansrobotlab/lloyd-data/_pipeline/vault-derived/kg.sqlite"),
+        "trusted_depth": 3, "trusted_size": 172_789_760,
+        "declared": True, "declared_relative": "_pipeline/vault-derived/kg.sqlite",
+        "shadow_size": 81_920, "data_tables": 4, "data_rows": 0,
+        "journal_mode": "wal", "sidecars": ["-shm", "-wal"],
+    }
+    body = G._shadow_alert_body("/home/alansrobotlab/lloyd-data", [finding], _NOW)
+
+    query = re.compile(r"[A-Za-z_]\w*=[^\s`]+(?:&[^\s`]+)*")
+    spans = re.findall(r"`([^`]*)`", body)
+    queries = [s for s in spans if query.fullmatch(s)]
+    assert queries == ["mode=ro&immutable=1"], (
+        "the body has to hand the reader exactly one paste-able query, the one "
+        f"`datawatch._read_open` picks; the backticked spans are {spans}")
+    assert body.count("mode=ro&immutable=1") == 1, body
+
+    # The rest of the shape the paragraph has to keep through any re-word.
+    assert "_read_open" in body, (
+        "the body no longer points at the shipped function that makes this choice, so "
+        "the instruction and the code that measures can drift apart: " + body)
+    assert "sqlite3" not in body, (
+        "an `sqlite3` CLI step is back as the verification step, and every such open of "
+        "a WAL-mode store re-stamps its -shm: " + body)
+    assert ".tables" not in body, (
+        "the shell metacommand is back, and it opens the file exactly as the flag did: "
+        + body)
