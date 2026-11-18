@@ -1844,18 +1844,38 @@ def test_the_walk_returns_every_record_so_the_reconciliation_prints_zero_short(t
 # ---------------------------------------------------------------------------
 
 
+def _plan_run_date():
+    """The day a plan file is named by. UTC, because that is the day the WRITER uses.
+
+    `entity-resolution-sweep.run_stamps` builds both halves of a plan filename from
+    one `utc_now()` instant, and its comment at :109-114 is the standing ruling on
+    exactly this: "after 17:00 PDT the local day named in the same filename is the UTC
+    *yesterday*", which is why the name may never be stamped from a second reading.
+    `merge_queue_report` ages on the same instant (kg_hygiene.py:580). So a corpus
+    dated on `_dt.date.today()` is a corpus the real writer cannot produce between
+    16:00 and 24:00 local on this UTC-8 box, and the product reads it correctly: a
+    cluster the fixture meant as 60 days reads as 61, which is what made
+    `test_an_overdue_suffix_queue_reaches_the_daily_note_without_an_alarm` fail at
+    base 0d84684b — it fails every day in that window and passes the rest of the day,
+    because outside it the two dates happen to be equal.
+    """
+    return _dt.datetime.now(_dt.timezone.utc).date()
+
+
 def _aged_graph(root, *, ages):
     """A memory-graph dir whose waiting clusters are exactly `ages` days old.
 
-    Built relative to TODAY because the row's whole subject is ageing: plan files
-    dated N days back make a cluster's age N by the definition `merge_queue_report`
-    uses (the earliest plan that carried it SAFE), so a fixture states its own
-    expected numbers instead of inheriting the clock. `ages` must include 0 — the
-    newest plan is what makes a cluster WAITING at all.
+    Built relative to `_plan_run_date()` — the UTC day a plan is named by — because
+    the row's whole subject is ageing: plan files dated N days back make a cluster's
+    age N by the definition `merge_queue_report` uses (the earliest plan that carried
+    it SAFE), so a fixture states its own expected numbers instead of inheriting a
+    clock. It must inherit the SAME clock though, which is what this helper is for;
+    see its docstring for the hour at which the difference was observable. `ages` must
+    include 0 — the newest plan is what makes a cluster WAITING at all.
     """
     graph = Path(root) / "memory-graph"
     graph.mkdir(parents=True, exist_ok=True)
-    today = _dt.date.today()
+    today = _plan_run_date()
     names = [f"Cluster {i}" for i in range(len(ages))]
     by_day: dict[_dt.date, list[str]] = {}
     for name, age in zip(names, ages):
@@ -2002,6 +2022,56 @@ def test_an_overdue_suffix_queue_reaches_the_daily_note_without_an_alarm(tmp_pat
     assert "suffix review packet" in line, line
     assert "not an alarm" in line, (
         "the note line must say what it is not, or a reader files it as an alarm")
+
+
+def test_the_aged_fixture_is_dated_on_the_day_a_plan_is_named_and_ages_as_it_claims(tmp_path):
+    """The fixture's ages are the ages the product reports, on the product's OWN clock.
+
+    #4246. This file was red at base 0d84684b for one reason: `_aged_graph` dated its
+    plan files on the local date while `run_stamps` names every real plan by the UTC
+    date and `merge_queue_report` ages by it too. Between 16:00 and 24:00 local on this
+    UTC-8 box those are different days, so a corpus claiming "60 days back" named a
+    day the writer could not have named, and the report answered 61 — which is what the
+    daily-note node asserts against. Outside that window the two dates are equal, so
+    the file passed all morning and failed by evening: a clock bug, not a logic bug.
+
+    Two claims, both read out of the fixture's own bytes and the product's own answer:
+
+    (a) every plan filename's `%Y-%m-%d` half agrees with the `%Y%m%dT%H%M%SZ` stamped
+        beside it — the invariant `run_stamps` exists to hold, checked here on the
+        fixture because the fixture is the thing that had two clocks;
+    (b) called with NO `today`, so the default clock is the product's and not the
+        test's, `merge_queue_report` returns the ages the fixture declared: the oldest
+        waiting cluster 60, the queue 3 clusters, and `measured_on` the same day the
+        newest plan is named for.
+
+    (b) is what breaks if the fixture's reference day drifts off the writer's, and (a)
+    is what breaks if someone "fixes" the drift by changing the stamp instead.
+    """
+    graph = _aged_graph(tmp_path, ages=(60, 12, 0))
+
+    names = sorted(p.name for p in graph.glob("entity-merges-*.jsonl"))
+    assert len(names) == 61, f"expected a plan per day for 60 days back: {len(names)}"
+    for name in names:
+        halves = re.fullmatch(
+            r"entity-merges-(\d{4}-\d{2}-\d{2})-(\d{8})T\d{6}Z\.jsonl", name)
+        assert halves, f"not a run_stamps-shaped plan name: {name}"
+        assert halves.group(1) == "-".join(
+            (halves.group(2)[:4], halves.group(2)[4:6], halves.group(2)[6:8])), (
+            f"the two halves of a plan name disagree: {name}")
+
+    report = _kg_hygiene().merge_queue_report(graph)
+    utc_today = _dt.datetime.now(_dt.timezone.utc).date()
+    assert report["measured_on"] == utc_today.isoformat(), report["measured_on"]
+    assert report["newest_plan_date"] == report["measured_on"], (
+        "the fixture's newest plan is not dated on the day the product ages from: "
+        f"{report['newest_plan_date']} vs {report['measured_on']}")
+    assert report["suffix_clusters"] == 3, report
+    assert report["suffix_age_days"] == 60, (
+        f"a cluster dated 60 days back read as {report['suffix_age_days']}: the "
+        "fixture and the report are on different clocks")
+    assert report["suffix_oldest_date"] == (
+        (utc_today - _dt.timedelta(days=60)).isoformat()), report["suffix_oldest_date"]
 
 
 def test_an_aged_but_unapproved_queue_writes_no_daily_note_line(tmp_path):
