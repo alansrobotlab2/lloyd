@@ -433,12 +433,25 @@ did — and it inherits that path's guards: no event launches a browser (input
 with no page open is refused, as the state mirror refuses to revive one), and a
 click or key that navigates goes through the connection gate and then
 `_enforce_landing`. A click that opens a tab moves `_active_page` to it, or the
-viewer is left on the page they clicked away from. Each event awaits its frame
-(tagged `user_input`); a click, key or wheel also schedules one trailing frame a
-second later, superseded by the next event, for the menu that animates open or
-the SPA route that fetches after the settle. A double-click arrives as the two
-clicks it is, the second with `count: 2`, and is applied as one press at that
-count — `mouse.click(click_count=2)` would press twice more.
+viewer is left on the page they clicked away from. An event answers as soon as
+it is delivered (~30 ms measured, against ~400 ms when each one awaited a settle,
+the landing check and a full frame under the input lock): the tab switch, the
+landing check and the `user_input` frame are paid by one settle task per burst
+(`_schedule_ui_settle`), which a newer event supersedes, with one trailing frame
+a second later for the menu that animates open or the route that fetches late. A
+double-click arrives as the two clicks it is, the second with `count: 2`, and is
+applied as one press at that count — `mouse.click(click_count=2)` would press
+twice more.
+
+**The view is live** (2026-11-17). Chromium's screencast pushes a frame whenever
+the pixels change and `browser._live_loop` forwards the newest as a light frame
+(`live: true`, pixels only, at most ~8 a second — the screencast ack is the
+throttle). The backend keeps the merge (`_publish`: tree, title and `tool` stay
+from the last full frame) and fans out the light frame; the tab merges the same
+way. The answer to each post carries the subscriber count, so with nobody
+watching the screencast stops and the loop takes one screenshot every 3 s. Live
+frames pass the same fail-closed host check as `_capture_state`. Kill switch:
+`browser.live_view: false` or `LLOYD_BROWSER_LIVE=0`.
 
 **What is typed here is a credential, so nothing on this path writes it
 down.** No log line or returned error carries the text or a Playwright message

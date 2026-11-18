@@ -85,7 +85,9 @@ export default function BrowserPage() {
   const seq = useRef(0)
   const applyFrame = useCallback((next: BrowserFrame) => {
     seq.current += 1
-    setFrame(next)
+    // A live frame is pixels only; the tree, refs and title stay from the
+    // last full frame until the next one replaces them.
+    setFrame(prev => (next.live && prev ? { ...prev, ...next } : next))
     setError(null)
   }, [])
 

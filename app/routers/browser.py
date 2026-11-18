@@ -49,9 +49,9 @@ _MCP_INPUT_URL = aggregator_route("browser_input")
 # A navigation is a page load (up to 30s in the tool) plus a screenshot and
 # an aria snapshot, and the viewer is watching a spinner for all of it.
 _NAVIGATE_TIMEOUT_S = 45.0
-# An input event is a click or a few keystrokes, a settle of at most 3 s when it
-# started a navigation, and the frame. Short, because the tab queues events
-# behind each other and one stuck request would hold every keystroke after it.
+# An input event is a click or a few keystrokes; the aggregator answers once it
+# is delivered and settles the frame afterwards. Short, because the tab queues
+# events behind each other and one stuck request would hold every keystroke.
 _INPUT_TIMEOUT_S = 15.0
 
 
@@ -73,12 +73,21 @@ def _publish(frame: dict) -> None:
     slow link gets the newest frame, not a backlog of stale screenshots.
     """
     global _latest
-    _latest = frame
+    live = bool(frame.get("live"))
+    # A live frame is pixels only (the aggregator's screencast, ~8 a second).
+    # What is KEPT is the merge, so a late subscriber, `/frame` and the prompt
+    # summary still have the tree, the title and who drove it; what is FANNED
+    # OUT is the light frame, and the tab does the same merge.
+    _latest = {**_latest, **frame} if live and _latest is not None else frame
     dead: list[asyncio.Queue] = []
     for q in list(_subscribers):
         try:
             q.put_nowait(frame)
         except asyncio.QueueFull:
+            if live:
+                # A slow viewer skips pixels; it is not dropped for them. The
+                # full frames it has queued stay queued.
+                continue
             dead.append(q)
     for q in dead:
         _subscribers.discard(q)

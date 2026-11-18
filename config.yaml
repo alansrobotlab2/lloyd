@@ -401,6 +401,10 @@ browser:
   # router, the NAS, the printer, every unauthenticated device on it.
   # LLOYD_BROWSER_BLOCK_PRIVATE=0 turns it off for one process.
   block_private_hosts: true
+  # Stream the page to Mission Control's Browser tab as it changes (Chromium's
+  # screencast, ~8 frames a second while someone is watching, one screenshot
+  # every 3 s when nobody is). false leaves a frame per tool call and per input.
+  live_view: true
   # browser_upload_files hands a LOCAL FILE to whatever page is open, so it is
   # default-deny: a path is attachable only if it sits inside one of these
   # directories. An empty list means the defaults below, never "everything".

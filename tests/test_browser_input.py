@@ -265,6 +265,9 @@ async def live_page(monkeypatch):
     monkeypatch.setattr(bm, "_get_page", _page)
     monkeypatch.setattr(bm, "_push_browser_state", _push)
     monkeypatch.setattr(bm, "_UI_TRAILING_PUSH_S", 0.05)
+    monkeypatch.setattr(bm, "_UI_SETTLE_S", 0.02)
+    monkeypatch.setattr(bm, "_ui_before", None)
+    monkeypatch.setattr(bm, "_ui_first_frame", None)
     try:
         yield page, frames
     finally:
@@ -301,7 +304,9 @@ async def test_a_human_logs_in_and_no_read_carries_the_password(live_page, caplo
 
     # And no read hands the values on: not the frame Mission Control gets, not
     # the snapshot the model gets, not a log line.
-    assert frames, "every event pushes a frame"
+    # An event returns once it is delivered; its frame follows off the request.
+    await bm._ui_settled()
+    assert frames, "every burst of events pushes a frame"
     last = frames[-1]
     assert last["tool"] == "user_input"
     assert "alan@example.com" in last["snapshot"]
@@ -335,6 +340,7 @@ async def test_enter_submits_and_a_double_click_is_one_double_click(live_page):
 async def test_a_click_that_opens_a_tab_moves_the_view_to_it(live_page):
     page, frames = live_page
     await bm.input_from_ui({"kind": "click", **await _center(page, "#pop")})
+    await bm._ui_settled()
     assert bm._active_page is not page
     assert len(bm._context.pages) == 2
     # The trailing frame lands after the burst, on the new tab.
@@ -349,3 +355,97 @@ async def test_scroll_and_clamped_coordinates(live_page):
     out = await bm.input_from_ui({"kind": "scroll", "x": 9999, "y": -5, "dx": 0, "dy": 700})
     assert out["ok"]
     await page.wait_for_function("window.scrollY > 0", timeout=2000)
+
+
+# ── Input does not wait for its frame, and the view is live ───────────────────
+
+@requires_chromium
+async def test_an_event_returns_before_its_frame_and_the_frame_still_arrives(live_page, monkeypatch):
+    """Until 2026-11-17 every event awaited a settle, a landing check and a full
+    frame under the input lock (~0.4 s a click, serialised), which is what made
+    the tab feel like remote desktop over a modem."""
+    page, frames = live_page
+    monkeypatch.setattr(bm, "_UI_SETTLE_S", 0.3)
+    out = await bm.input_from_ui({"kind": "click", **await _center(page, "#u")})
+    assert out == {"ok": True, "kind": "click"}
+    assert frames == [], "the event waited for its frame"
+    # A burst is one settle, not one per key.
+    for ch in "abc":
+        await bm.input_from_ui({"kind": "key", "key": ch})
+    monkeypatch.setattr(bm, "_UI_SETTLE_S", 0.02)
+    await bm.input_from_ui({"kind": "key", "key": "d"})
+    await bm._ui_settled()
+    assert len(frames) == 1 and frames[0]["tool"] == "user_input"
+    assert await page.locator("#u").input_value() == "abcd"
+
+
+@requires_chromium
+async def test_the_live_view_streams_a_page_that_changes_by_itself(live_page, monkeypatch):
+    """No tool call and no input: the pixels still arrive, light, and stop being
+    hauled when the backend says nobody is watching."""
+    page, _ = live_page
+    posts: list[dict] = []
+    watchers = {"n": 1}
+
+    class _Resp:
+        def json(self):
+            return {"ok": True, "subscribers": watchers["n"]}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, **k):
+            posts.append(json)
+            return _Resp()
+
+    monkeypatch.setattr(bm.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(bm, "_LIVE_MIN_INTERVAL_S", 0.02)
+    monkeypatch.setattr(bm, "_LIVE_IDLE_POLL_S", 0.2)
+    monkeypatch.setenv("LLOYD_BROWSER_LIVE", "1")
+    await page.evaluate("""() => { let n = 0; setInterval(() => {
+        document.getElementById('w').textContent = 'tick ' + (n++) }, 50) }""")
+    bm._ensure_live(page)
+    try:
+        await asyncio.sleep(1.0)
+        assert len(posts) >= 3, f"a changing page produced {len(posts)} live frames"
+        assert all(f["live"] is True and f["screenshot_b64"] for f in posts)
+        assert all("snapshot" not in f and "refs" not in f for f in posts), \
+            "a live frame carries pixels, never the accessibility tree"
+        # Nobody watching: the stream drops to the idle poll.
+        watchers["n"] = 0
+        await asyncio.sleep(0.3)
+        before = len(posts)
+        await asyncio.sleep(0.7)
+        assert len(posts) - before <= 5, "still streaming with no viewer"
+    finally:
+        bm._live["task"].cancel()
+        await asyncio.gather(bm._live["task"], return_exceptions=True)
+
+
+def test_a_live_frame_keeps_the_tree_for_late_readers_and_fans_out_light(monkeypatch):
+    monkeypatch.setattr(browser_router, "_latest", None)
+    monkeypatch.setattr(browser_router, "_subscribers", set())
+    q = browser_router.subscribe()
+    full = {"tool": "browser_click", "url": "https://a.test/", "title": "A", "ts": 1.0,
+            "screenshot_b64": "OLD", "snapshot": "- button", "refs": [{"ref": "e1"}]}
+    browser_router._publish(full)
+    browser_router._publish({"live": True, "url": "https://a.test/", "ts": 2.0,
+                             "mime": "image/jpeg", "screenshot_b64": "NEW"})
+    kept = browser_router._latest
+    assert kept["screenshot_b64"] == "NEW" and kept["snapshot"] == "- button"
+    assert kept["tool"] == "browser_click" and kept["title"] == "A"
+    assert browser_router.latest_frame_summary()["driven_by"] == "browser_click"
+    q.get_nowait()
+    sent = q.get_nowait()
+    assert "snapshot" not in sent and sent["live"] is True, "the stream must stay light"
+    # A full queue costs a slow viewer pixels, never its subscription.
+    for i in range(40):
+        browser_router._publish({"live": True, "screenshot_b64": str(i)})
+    assert q in browser_router._subscribers

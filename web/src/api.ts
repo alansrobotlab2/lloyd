@@ -520,6 +520,8 @@ export interface BrowserFrame {
   /** Frame JSON as delivered by GET /api/browser/frame carries `active`; the
    *  SSE `state` event does not. Both shapes arrive here. */
   active?: boolean
+  /** Pixels only, from the aggregator's screencast: merge over the last full frame. */
+  live?: boolean
   tool?: string
   url?: string
   title?: string

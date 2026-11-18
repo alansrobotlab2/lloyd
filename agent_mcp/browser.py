@@ -1209,6 +1209,7 @@ async def _push_browser_state(tool_name: str) -> None:
             return
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(f"{LLOYD_API}/api/browser/state", json=frame)
+        _ensure_live(_existing_page())
     except Exception as exc:
         logger.debug("browser state push failed: %s", exc)
 
@@ -2209,9 +2210,16 @@ _UI_MODIFIERS = frozenset({"Shift", "Control", "Alt", "Meta", "ControlOrMeta"})
 # Serialises input from every open tab, so two viewers' keystrokes interleave
 # per event rather than per character inside one `keyboard.type`.
 _ui_input_lock = asyncio.Lock()
-# One trailing frame per burst: a click's effect often lands after the settle
-# (a menu animating open, a SPA route fetching), and a newer event supersedes it.
+# What an event owes after it lands — the tab it may have opened, where the page
+# ended up, the frame with its accessibility tree — is paid off the request, by
+# one task per burst that a newer event supersedes. The pixels do not wait for
+# it: the live view (`_live_loop`, below) is already streaming them. Until
+# 2026-11-17 every event awaited all of this under the input lock, so a click
+# cost ~0.4 s and a burst of keys queued behind each other.
 _ui_trailing_push: asyncio.Task | None = None
+_ui_before: list | None = None
+_ui_first_frame: asyncio.Event | None = None
+_UI_SETTLE_S = 0.15
 _UI_TRAILING_PUSH_S = 1.0
 
 
@@ -2233,16 +2241,48 @@ def _ui_number(value: object, lo: float, hi: float) -> float | None:
     return max(lo, min(hi, float(value)))
 
 
-def _schedule_ui_trailing_push() -> None:
-    global _ui_trailing_push
+def _schedule_ui_settle(kind: str) -> None:
+    global _ui_trailing_push, _ui_first_frame
     if _ui_trailing_push is not None and not _ui_trailing_push.done():
         _ui_trailing_push.cancel()
+    superseded, _ui_first_frame = _ui_first_frame, asyncio.Event()
+    if superseded is not None:
+        superseded.set()  # release a waiter onto the burst that replaced it
+    done = _ui_first_frame
 
     async def _later() -> None:
-        await asyncio.sleep(_UI_TRAILING_PUSH_S)
+        global _active_page, _ui_before
+        # A click or a key may have started a navigation or opened a tab. Give
+        # it a moment to commit.
+        await asyncio.sleep(_UI_SETTLE_S)
+        before, _ui_before = _ui_before, None
+        page = _existing_page()
+        if _context is not None and before is not None:
+            opened = [p for p in _context.pages if p not in before and not p.is_closed()]
+            if opened:
+                page = _active_page = opened[-1]
+        if page is not None:
+            await _enforce_landing(page)
         await _push_browser_state("user_input")
+        done.set()
+        if kind != "type":
+            # A click's effect often lands late (a menu animating open, a SPA
+            # route fetching); the tree wants one more read.
+            await asyncio.sleep(_UI_TRAILING_PUSH_S)
+            await _push_browser_state("user_input")
 
     _ui_trailing_push = asyncio.create_task(_later())
+
+
+async def _ui_settled() -> None:
+    """Wait until the newest burst has pushed its first frame. For tests."""
+    while True:
+        done = _ui_first_frame
+        if done is None:
+            return
+        await done.wait()
+        if done is _ui_first_frame:
+            return
 
 
 async def input_from_ui(event: dict) -> dict:
@@ -2263,13 +2303,15 @@ async def input_from_ui(event: dict) -> dict:
     Every navigation an event causes passes the same host checks a tool call's
     does — the connection gate for the request, `_enforce_landing` for
     wherever it ended up. A click that opens a tab moves the view to that tab,
-    or the viewer would be left on the page they clicked away from. The frame is
-    awaited before returning and tagged `user_input`.
+    or the viewer would be left on the page they clicked away from. Returns as
+    soon as the event is delivered: the landing check, the tab switch and the
+    `user_input` frame follow in `_schedule_ui_settle`, and the live view shows
+    the pixels meanwhile.
 
     An error never carries Playwright's message: for `type` that message would
     quote the text, and for the others the type name is enough to act on.
     """
-    global _active_page
+    global _ui_before
     if not isinstance(event, dict):
         return {"error": "event must be an object"}
     kind = event.get("kind")
@@ -2294,7 +2336,8 @@ async def input_from_ui(event: dict) -> dict:
             return {"error": "no page is open — type a URL first"}
         viewport = page.viewport_size or {"width": 1280, "height": 800}
         vw, vh = viewport["width"] - 1, viewport["height"] - 1
-        before = list(_context.pages) if _context is not None else []
+        if _ui_before is None and _context is not None:
+            _ui_before = list(_context.pages)
         try:
             if kind in ("click", "scroll"):
                 x = _ui_number(event.get("x"), 0, vw)
@@ -2327,27 +2370,8 @@ async def input_from_ui(event: dict) -> dict:
             logger.warning("browser/input: %s failed: %s", kind, type(exc).__name__)
             return {"error": f"{kind} failed ({type(exc).__name__})"}
 
-        # A click or a key may have started a navigation or opened a tab. Give it
-        # a moment to commit; typing into a field changes nothing to wait for.
-        if kind in ("click", "key"):
-            await asyncio.sleep(0.15)
-            if _context is not None:
-                opened = [p for p in _context.pages if p not in before and not p.is_closed()]
-                if opened:
-                    page = _active_page = opened[-1]
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=3000)
-            except Exception:
-                pass
-
-        result: dict = {"ok": True, "kind": kind}
-        landed = await _enforce_landing(page)
-        if landed:
-            result = {"error": landed}
-        await _push_browser_state("user_input")
-    if kind != "type":
-        _schedule_ui_trailing_push()
-    return result
+    _schedule_ui_settle(kind)
+    return {"ok": True, "kind": kind}
 
 
 # ── Password values in the accessibility tree ─────────────────────────────────
@@ -2446,3 +2470,141 @@ def _guard_proxy_url() -> str:
         _guard_proxy = GuardProxy(
             lambda host, port, url: _guard_connect(host, port, url)).start()
     return _guard_proxy.url
+
+
+# ── The live view ─────────────────────────────────────────────────────────────
+#
+# A frame used to exist only after a tool call or a viewer's own input, so a
+# page that changed by itself — a progress bar, a slow load, a menu animating —
+# was invisible until somebody poked it. Chromium's screencast pushes a frame
+# whenever the pixels change; this loop forwards the newest one to the backend
+# as a LIGHT frame (`live: true`, no accessibility tree), and the full frame
+# with the tree still follows each tool call and each input burst.
+#
+# Three rules:
+# - The ack is the throttle. Chromium sends the next frame only after the last
+#   is acknowledged, so acking after the post caps the stream at
+#   `_LIVE_MIN_INTERVAL_S` instead of hauling 60 fps of JPEG through the driver.
+# - Nobody watching, nothing streaming. The backend's answer to every post
+#   carries its subscriber count; at zero the screencast stops and the loop
+#   falls back to one cheap screenshot every `_LIVE_IDLE_POLL_S`, which is also
+#   how it learns a viewer arrived.
+# - The same host check as `_capture_state`, failing closed the same way: a
+#   frame of a host nobody could vouch for is dropped, not pushed.
+
+_LIVE_MIN_INTERVAL_S = 0.12
+_LIVE_IDLE_POLL_S = 3.0
+_LIVE_QUIET_BEAT_S = 5.0
+_LIVE_JPEG_QUALITY = 55
+_live: dict = {"page": None, "task": None}
+
+
+def _resolve_live_view() -> bool:
+    """`browser.live_view` in config.yaml, LLOYD_BROWSER_LIVE in the env. On by default."""
+    raw = os.environ.get("LLOYD_BROWSER_LIVE")
+    if raw is None or not raw.strip():
+        configured = (CONFIG.get("browser") or {}).get("live_view")
+        if configured is None:
+            return True
+        raw = str(configured)
+    return raw.strip().lower() not in _FALSY
+
+
+def _ensure_live(page) -> None:
+    """Stream `page` to the Browser tab, replacing a stream of any other page."""
+    if page is None or not _resolve_live_view():
+        return
+    task = _live.get("task")
+    if _live.get("page") is page and task is not None and not task.done():
+        return
+    if task is not None and not task.done():
+        task.cancel()
+    _live["page"] = page
+    _live["task"] = asyncio.create_task(_live_loop(page))
+
+
+async def _live_loop(page) -> None:
+    cdp = None
+    casting = False
+    pending: dict = {"data": None, "session": None}
+    wake = asyncio.Event()
+
+    def _on_frame(params: dict) -> None:
+        pending["data"] = params.get("data")
+        pending["session"] = params.get("sessionId")
+        wake.set()
+
+    try:
+        cdp = await page.context.new_cdp_session(page)
+        cdp.on("Page.screencastFrame", _on_frame)
+        viewers = 1  # optimistic: the push that started this loop had a reason
+        full_url = page.url
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            while not page.is_closed() and _active_page is page:
+                if viewers > 0 and not casting:
+                    vp = page.viewport_size or {"width": 1280, "height": 800}
+                    await cdp.send("Page.startScreencast", {
+                        "format": "jpeg", "quality": _LIVE_JPEG_QUALITY,
+                        "maxWidth": vp["width"], "maxHeight": vp["height"],
+                        "everyNthFrame": 1})
+                    casting = True
+                elif viewers == 0 and casting:
+                    await cdp.send("Page.stopScreencast")
+                    casting = False
+                    pending["data"] = pending["session"] = None
+                    wake.clear()
+
+                if casting:
+                    try:
+                        await asyncio.wait_for(wake.wait(), _LIVE_QUIET_BEAT_S)
+                    except asyncio.TimeoutError:
+                        pass
+                    wake.clear()
+                else:
+                    await asyncio.sleep(_LIVE_IDLE_POLL_S)
+                data, session = pending["data"], pending["session"]
+                pending["data"] = pending["session"] = None
+                if data is None:
+                    # A still page while watched, or the idle poll: one shot,
+                    # mostly to ask the backend whether anyone is looking.
+                    shot = await cdp.send("Page.captureScreenshot", {
+                        "format": "jpeg", "quality": _LIVE_JPEG_QUALITY,
+                        "optimizeForSpeed": True})
+                    data = shot.get("data")
+
+                url = page.url
+                try:
+                    blocked = await _host_block_reason_async(url)
+                except Exception as exc:
+                    logger.warning("browser: live guard failed closed on %s: %s",
+                                   url[:120], f"{type(exc).__name__}: {exc}")
+                    blocked = "unchecked"
+                if not blocked and data:
+                    if url != full_url:
+                        # The page moved with nobody driving it; the tree and
+                        # the title are stale until a full frame says otherwise.
+                        full_url = url
+                        _schedule_state_push("live")
+                    try:
+                        r = await client.post(f"{LLOYD_API}/api/browser/state", json={
+                            "live": True, "url": url, "ts": time.time(),
+                            "mime": "image/jpeg", "screenshot_b64": data})
+                        viewers = int((r.json() or {}).get("subscribers") or 0)
+                    except Exception as exc:
+                        logger.debug("browser live: post failed: %s", type(exc).__name__)
+                        viewers = 0
+                await asyncio.sleep(_LIVE_MIN_INTERVAL_S)
+                if session is not None and casting:
+                    await cdp.send("Page.screencastFrameAck", {"sessionId": session})
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # The page closed under the stream, most often. The next push restarts it.
+        logger.debug("browser live: stream ended: %s", type(exc).__name__)
+    finally:
+        if cdp is not None:
+            try:
+                # Bounded: a detach on a browser that is already gone never answers.
+                await asyncio.wait_for(cdp.detach(), 2)
+            except Exception:
+                pass
