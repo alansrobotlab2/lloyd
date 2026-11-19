@@ -179,6 +179,16 @@ tracked config (a gate the loop must not be able to disarm); "The primary
 reachability hold" below is the long form (#1465). All three report beside
 `pool.kv_gate` in `/api/workers/status`, and `WorkerPool._claim_holds` is
 the one call site that unions them into the claim query's `NOT IN`.
+**`data_trip_hold`** is the fourth gate, armed by default since #4359 with the class
+in code (`DEFAULT_DATA_TRIP_DELETER_TASKS`), and the only one that is not about the
+engine: while the guardian's `data-tripped.json` stands it holds *task ids*, not
+sources, because the retention sweep dispatches under `scheduled-task` — the name of
+every autonomy task — so a source hold for one bulk deleter would freeze the whole
+scheduled lane (2026-11-19: a pause release started that sweep 331.8 ms later and it
+deleted from the root the guardian had refused to snapshot). Hence `claim_next`'s
+second list, `exclude_tasks`, applied in the same SQL: `held_tasks` never joins
+`held_source_names()`, so a reader of the source union alone sees it as absent. It
+holds the claim, never the release, and writes no journal row — `_data_trip_hold_held`.
 
 It exists because of what the 09-09 stall turned out to be
 (`vllm.md`): long-lived agent loops evicting each

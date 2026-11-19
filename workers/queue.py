@@ -953,11 +953,29 @@ class WorkQueue:
         worker_id: str,
         max_inflight_per_source: dict[str, int] | None = None,
         exclude_sources: list[str] | None = None,
+        exclude_tasks: list[str] | None = None,
     ) -> Optional[QueueItem]:
         """Claim the highest-priority claimable item. Atomic under the queue lock.
 
         If max_inflight_per_source is given, sources at or above their inflight
         quota (claimed + running) are excluded.
+
+        `exclude_tasks` is the second, narrower list: task ids whose rows are held
+        while their SOURCE stays open. The data-trip hold (#4359) needs it because
+        the retention sweep dispatches under `scheduled-task`, the name every other
+        autonomy task dispatches under, so a source-level hold for one bulk deleter
+        would freeze the whole scheduled lane. It is the payload's `task_id` cast to
+        text and compared against the pool's normalised form
+        (`workers/pool.py:_task_id_of`'s `str(...)`), because `payload_json` carries
+        whichever type the enquemer had; a row whose payload names no task is a
+        member of no class and stays claimable. The predicate is `NOT json_valid
+        (payload_json) OR ... NOT IN (...)` rather than a bare `json_extract` for the
+        reason `:1871` records — over a non-JSON string `json_extract` raises
+        `malformed JSON`, and here the query that would die is the CLAIM, so one
+        corrupt row would stop every dispatch in the fleet. Like `exclude_sources`
+        it is applied IN THE QUERY, not to a window of results: a held row that
+        stays in the result set hides the claimable row behind it, which is the bug
+        this method's own headline documents for the inflight quota.
 
         **The quota is applied in SQL, not to a window of results.** This used
         to `SELECT ... LIMIT 50` and then skip over-quota rows in Python, which
@@ -1033,6 +1051,17 @@ class WorkQueue:
             if excluded:
                 sql += f" AND source NOT IN ({','.join('?' * len(excluded))})"
                 args.extend(excluded)
+            # The narrower list, and the reason it is a second predicate rather than
+            # more names in the one above: `scheduled-task` is the source of every
+            # autonomy task, so holding it to stop the retention sweep would hold
+            # the fleet's scheduled lane with it (#4359).
+            held_tasks = sorted({str(t) for t in (exclude_tasks or ())})
+            if held_tasks:
+                sql += (" AND (NOT json_valid(payload_json)"
+                        " OR COALESCE(CAST(json_extract(payload_json,"
+                        " '$.task_id') AS TEXT), '')"
+                        f" NOT IN ({','.join('?' * len(held_tasks))}))")
+                args.extend(held_tasks)
             # Age-adjusted, then the two terms this ordering has always had. The
             # computed term is why `enqueued_at` survives as a SECOND tiebreak rather
             # than as the aging mechanism: inside one priority band it was already

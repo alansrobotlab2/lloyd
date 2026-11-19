@@ -20,9 +20,11 @@ import json
 import contextvars
 import logging
 import math
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from pathlib import Path
 from typing import Any, Optional
 
 from app import cost_outlier, engine_pressure
@@ -268,6 +270,119 @@ def primary_hold_config() -> dict[str, Any]:
         return dict((CONFIG.get("workers") or {}).get("primary_hold") or {})
     except Exception:
         return {}
+
+
+# Data-trip hold — see `WorkerPool._data_trip_hold_held`. The fourth claim gate, and
+# the only one that is not about the engine.
+#
+# 2026-11-19: `pause_journal` id 71 (the guardian's data trip, 01:01:22Z, "top-level
+# folder 'tmp' (77 files) vanished") was released by id 72 at 01:34:58.141759Z by
+# mission-control. `~/lloyd-data/autonomy-runs/79/run_79_20261119_013458.md` has
+# `started_at 01:34:58.473575Z` — 331.8 ms later — APPLYing a retention sweep that
+# deleted 898 session-spill dirs (71,784 KiB), 68 task logs, 1,126 `runs` rows and
+# 1,120 `queue` rows, under the same open trip and while `snapshot-data.sh` was
+# refusing to snapshot that very root. A released pause is not a resumption of the
+# old rhythm: the 21.8 h hold had starved the sweep, and the release is a burst. Five
+# earlier #79 runs all fired near 06:00Z; this one fired at 01:34Z.
+#
+# So the two halves of one protection disagreed. `scripts/backup/snapshot-data.sh:35`
+# reads the marker and refuses to snapshot a root under incident — the RESTORE path
+# is switched off — while the DELETE path never asked. This gate is the delete half
+# catching up. It deliberately does NOT block the resume: `guardian.py:2787-2804`
+# says a trip's hold carries no `holder_kind` on purpose so that it defaults to
+# `person`, the kind nothing auto-releases, and a person resuming after restoring the
+# root is the intended END of a trip. What waits is the deleter's CLAIM.
+DATA_TRIP_MARKER_NAME = "data-tripped.json"
+#: The override `snapshot-data.sh:28` honours (`GSTATE="${LLOYD_GUARDIAN_STATE:-
+#: $HOME/.local/state/lloyd-guardian}"`) and `agent-services/guardian/policy.py:627-629`
+#: binds in Python. Three readers of one marker must mean one path.
+GUARDIAN_STATE_ENV = "LLOYD_GUARDIAN_STATE"
+DEFAULT_GUARDIAN_STATE_DIR = ".local/state/lloyd-guardian"
+
+#: The class this hold covers with no config: `autonomy/79-retention-sweep.md`, the
+#: job that ran 331.8 ms into the incident. Absence from config means THIS set and not
+#: "off" — the #1101 lesson in `round_hold_exempt_bound` above, where a mechanism that
+#: shipped armed read as inert for a year because no key existed and no key meant
+#: nothing. `workers.data_trip_hold.deleter_tasks` in config.yaml replaces the set
+#: outright, which is where the ruling on the rest of the groundskeeper's bulk-deleters
+#: lands (item #4359 owes it); `deleter_tasks: []` is how a person empties it.
+DEFAULT_DATA_TRIP_DELETER_TASKS: tuple[str, ...] = ("79",)
+
+
+def data_trip_hold_config() -> dict[str, Any]:
+    try:
+        from app.config import CONFIG
+        return dict((CONFIG.get("workers") or {}).get("data_trip_hold") or {})
+    except Exception:
+        return {}
+
+
+def guardian_state_dir() -> Path:
+    """Where the guardian keeps its markers, resolved per call.
+
+    Per call, not at import: the guardian's own `policy.py` binds a module-level
+    `GUARDIAN_STATE`, and a copy of that would freeze whatever the environment said
+    when `workers.pool` was first imported — which in a pytest process is the live
+    box's directory, and in the backend is unchangeable. The path decides whether an
+    incident is in force, so it has to be re-read every time it is asked.
+    """
+    raw = os.environ.get(GUARDIAN_STATE_ENV)
+    return (Path(raw).expanduser() if raw
+            else Path.home() / DEFAULT_GUARDIAN_STATE_DIR)
+
+
+def data_trip_marker_path() -> Path:
+    """`<guardian state dir>/data-tripped.json` — the file `datawatch.py:1945` writes."""
+    return guardian_state_dir() / DATA_TRIP_MARKER_NAME
+
+
+def data_trip_open() -> tuple[bool, str]:
+    """`(tripped, detail)` for the marker as it stands right now.
+
+    Existence is the verdict and the body is only the detail, because that is what
+    the other reader does (`snapshot-data.sh:35`'s `[[ -f ... ]]`) and because the
+    process that writes a marker may have died writing it. A hold that required
+    parseable JSON would fail OPEN on a half-written trip — marker standing, deleter
+    dispatched, root unrestorable — which is the one outcome this gate exists to
+    prevent. `detail` is the marker's own `tripped_at` and `reason` when they parse,
+    else the first 200 bytes of the file, so the log line always says something.
+
+    A missing marker is `(False, ...)`. An unreadable one — a directory where the
+    file should be, a permission refusal — is `(True, ...)`, because a guardian that
+    cannot be asked is not a guardian that says the root is fine.
+    """
+    path = data_trip_marker_path()
+    try:
+        if not path.exists():
+            return False, ""
+        body = path.read_text(errors="replace")[:200]
+    except OSError as exc:
+        return True, f"{path} unreadable ({type(exc).__name__}: {exc})"
+    try:
+        doc = json.loads(body)
+        if isinstance(doc, dict):
+            bits = [str(doc[k]) for k in ("tripped_at", "reason") if doc.get(k)]
+            return True, " ".join(bits) or f"{path.name} present (no keys)"
+    except (ValueError, TypeError):
+        pass
+    return True, body.strip() or f"{path.name} present (unparseable)"
+
+
+def data_trip_deleter_tasks(cfg: dict[str, Any] | None = None) -> list[str]:
+    """The deleter class this hold covers, as normalised task ids.
+
+    `cfg` is the caller's, already read, so the gate's one config read per claim
+    decides both the switch and the set. A key naming a non-list is treated as the
+    default, not as an empty class: `deleter_tasks: "79"` is a person's typo for the
+    set, and reading a typo as "hold nothing" is how a safety gate dies.
+    """
+    cfg = data_trip_hold_config() if cfg is None else cfg
+    if "deleter_tasks" not in cfg:
+        return sorted(DEFAULT_DATA_TRIP_DELETER_TASKS)
+    raw = cfg.get("deleter_tasks")
+    if not isinstance(raw, (list, tuple)):
+        return sorted(DEFAULT_DATA_TRIP_DELETER_TASKS)
+    return sorted({str(t).strip() for t in raw if str(t).strip()})
 
 
 def primary_engine_answering(timeout: float = _PRIMARY_PROBE_TIMEOUT_S) -> tuple[bool, str]:
@@ -914,6 +1029,17 @@ class WorkerPool:
             "last_probe": 0.0,
             "probing": False,
         }
+        # Data-trip hold. See `_data_trip_hold_held`. `held_tasks` is task ids, not
+        # source names, which is why this dict is not unioned into
+        # `held_source_names()` and why it reaches `claim_next` as its own argument.
+        self._data_trip_hold: dict[str, Any] = {
+            "engaged": False,
+            "engaged_since": None,
+            "engagements": 0,
+            "held_tasks": [],
+            "marker": None,
+            "last_detail": None,
+        }
 
     @property
     def worker_ids(self) -> list[str]:
@@ -1355,6 +1481,7 @@ class WorkerPool:
             "kv_gate": self.kv_gate_status(),
             "round_hold": self.round_hold_status(),
             "primary_hold": self.primary_hold_status(),
+            "data_trip_hold": self.data_trip_hold_status(),
         }
 
     def kv_gate_status(self) -> dict[str, Any]:
@@ -1704,6 +1831,86 @@ class WorkerPool:
             st.update(engaged=False, engaged_since=None, held_sources=[])
         return held
 
+    def data_trip_hold_status(self) -> dict[str, Any]:
+        """What the data-trip hold reports: the class, and the last decision.
+
+        A pure read like the other three, so `/api/workers/status` never becomes the
+        reason a claim waited — the one syscall this gate makes belongs on the claim
+        path, where the pool already decided to pay for a poll.
+        """
+        cfg = data_trip_hold_config()
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "deleter_tasks": data_trip_deleter_tasks(cfg),
+            **self._data_trip_hold,
+            "held_tasks": list(self._data_trip_hold["held_tasks"]),
+        }
+
+    def _data_trip_hold_held(self) -> list[str]:
+        """Task ids this claim must skip because a data-damage trip stands.
+
+        The fourth gate, and the only one that is not about the engine: it asks
+        whether the root these jobs write to is currently under an unresolved damage
+        trip. Its reason for existing is 2026-11-19, when a pause release at
+        01:34:58.141759Z started the retention sweep 331.8 ms later and it deleted
+        898 session-spill dirs (71,784 KiB), 68 task logs, 1,126 `runs` rows and 1,120
+        `queue` rows from the same root the guardian had refused to snapshot since
+        01:01:22Z — while that
+        incident's own 77 vanished files were still unexplained.
+
+        Two deliberate narrownesses:
+
+        - **Task level, not source level.** The sweep dispatches under
+          `scheduled-task`, which is the name of every autonomy task, so a source
+          hold here would freeze the fleet's whole scheduled lane to stop one
+          deleter. Hence `held_tasks` and `claim_next`'s `exclude_tasks`, and hence
+          this list is NOT unioned into `held_source_names()`.
+        - **It holds the claim, never the release.** The trip's `pause_journal` row
+          deliberately carries no `holder_kind` so it defaults to `person` — the kind
+          nothing auto-releases — precisely so a stale machine lease cannot resume
+          dispatch mid-incident (`guardian.py:2787-2804`). A person resuming after
+          restoring the root is how a trip is meant to END. So the resume proceeds,
+          everything that is not a deleter dispatches on the next tick, and the
+          sweep waits for the marker to go away.
+
+        One INFO/WARNING line per transition, never per poll, and deliberately NO
+        `_journal_gate` row: `hold_journal` is the three source gates' ledger and
+        `pause_journal` counts the times the fleet was held, and clause 4 of #4359
+        keeps both meaning what they already mean. `workers.data_trip_hold.enabled:
+        false` is the operator's kill switch and releases an engaged hold, not just a
+        future one.
+        """
+        cfg = data_trip_hold_config()
+        st = self._data_trip_hold
+        if not bool(cfg.get("enabled", True)):
+            if st["engaged"]:
+                logger.info("Data-trip hold released: the gate is disabled in config "
+                            "(marker was %s)", st["marker"])
+                st.update(engaged=False, engaged_since=None, held_tasks=[])
+            return []
+
+        tripped, detail = data_trip_open()
+        st["marker"] = str(data_trip_marker_path())
+        if not tripped:
+            if st["engaged"]:
+                logger.info("Data-trip hold released: %s is gone — %s claimable again",
+                            st["marker"], ", ".join(st["held_tasks"]) or "nothing")
+                st.update(engaged=False, engaged_since=None, held_tasks=[])
+            st["last_detail"] = None
+            return []
+
+        held = data_trip_deleter_tasks(cfg)
+        st["last_detail"] = detail
+        st["held_tasks"] = held
+        if not st["engaged"]:
+            st.update(engaged=True, engagements=int(st["engagements"]) + 1,
+                      engaged_since=datetime.now(timezone.utc).isoformat())
+            logger.warning(
+                "Data-trip hold engaged: %s (%s) — holding deleter task %s until the "
+                "marker clears; every other job still dispatches",
+                st["marker"], detail, ", ".join(held) or "nobody")
+        return held
+
     async def _claim_holds(self, registry: dict[str, Any]) -> list[str]:
         """Every reason this claim must skip a source, unioned.
 
@@ -1714,11 +1921,20 @@ class WorkerPool:
         Async because the third gate asks the engine a question. The other two
         read a background sampler and a cached marker (both refreshed off the
         loop) so a claim never waits on the network or a directory walk.
+
+        The fourth gate, `_data_trip_hold_held`, is EVALUATED here and contributes
+        nothing to this list: it holds named TASKS rather than whole sources, so it
+        travels to `claim_next` as `exclude_tasks` (see its docstring for why a
+        source-level hold there would be wrong). It is called from this one place so
+        that "did every gate get asked this poll" stays a question with one answer —
+        `_worker_loop` reads the decision it recorded, the way `held_source_names()`
+        reads the other three.
         """
         held = set(await self._primary_hold_held(registry))
         held |= set(self._kv_gate_held(registry))
         await _refresh_landing_probe(self)
         held |= set(self._round_hold_held(registry))
+        self._data_trip_hold_held()
         return sorted(held)
 
     def _kv_gate_held(self, registry: dict[str, Any]) -> list[str]:
@@ -2054,8 +2270,13 @@ class WorkerPool:
             # what stops an autocode round being claimed against a primary that
             # is still loading and then booked as an attempt it never used.
             held = await self._claim_holds(SOURCE_REGISTRY)
+            # The fourth gate is evaluated by that call and holds TASKS, not sources
+            # (#4359), so it rides to the claim query on its own argument: the
+            # retention sweep shares the source name `scheduled-task` with every other
+            # autonomy task, and holding the source would starve them all.
             item = await asyncio.to_thread(
-                self.queue.claim_next, worker_id, max_inflight, held)
+                self.queue.claim_next, worker_id, max_inflight, held,
+                list(self._data_trip_hold["held_tasks"]))
             if not item:
                 await asyncio.sleep(self.poll_idle_seconds)
                 continue

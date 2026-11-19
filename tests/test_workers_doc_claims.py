@@ -3208,11 +3208,11 @@ def test_section6_says_which_watermark_is_a_sweep_and_which_is_the_pool_ask():
     # claims about the tree, and a doc-claims file that only greps the doc grades
     # prose against prose.
     pool = (ROOT / "workers" / "pool.py").read_text(encoding="utf-8").splitlines()
-    assert "last_enqueue_check" in pool[1851], (
-        f"workers/pool.py:1852 no longer stamps the pool's attempt key ({pool[1851]!r}) "
+    assert "last_enqueue_check" in pool[2067], (
+        f"workers/pool.py:2068 no longer stamps the pool's attempt key ({pool[2067]!r}) "
         "while §6 cites that line for it")
-    assert "OK_WM_KEY" in pool[1862], (
-        f"workers/pool.py:1863 no longer stamps the clean-return key ({pool[1862]!r})")
+    assert "OK_WM_KEY" in pool[2078], (
+        f"workers/pool.py:2079 no longer stamps the clean-return key ({pool[2078]!r})")
     src = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
         encoding="utf-8").splitlines()
     assert "WATERMARK_LAST_SWEEP" in src[273], (

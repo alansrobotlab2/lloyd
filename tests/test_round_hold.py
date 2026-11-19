@@ -47,11 +47,19 @@ def pool(monkeypatch):
     p._primary_hold = {"engaged": False, "engaged_since": None, "engagements": 0,
                        "held_sources": [], "answering": None, "last_detail": None,
                        "last_probe": 0.0, "probing": False}
+    p._data_trip_hold = {"engaged": False, "engaged_since": None, "engagements": 0,
+                         "held_tasks": [], "marker": None, "last_detail": None}
     # The KV gate is a separate question; keep it out of these assertions.
     monkeypatch.setattr(P, "kv_gate_config", lambda: {"enabled": False})
     # And so is reachability: disabled here means the decider never probes the
     # engine, which is the other reason these tests do not need a fake HTTP.
     monkeypatch.setattr(P, "primary_hold_config", lambda: {"enabled": False})
+    # And the same for the data-trip hold, for a sharper reason: it reads a real
+    # file, and on 2026-11-19 the live `data-tripped.json` has stood since
+    # 01:01:22Z. Left enabled, every node below would depend on the state of an
+    # incident it knows nothing about. The trip's own nodes re-enable it and
+    # point `LLOYD_GUARDIAN_STATE` at a temp dir (`gstate`).
+    monkeypatch.setattr(P, "data_trip_hold_config", lambda: {"enabled": False})
     # The exempt list is pinned, not read from config.yaml: on 2026-09-15
     # `autotriage` joined it there and two of these tests went red on main.
     # No `exempt_bound` key, which since #2152 means the code default is in
@@ -1131,3 +1139,290 @@ def test_held_source_names_is_the_same_union_the_claim_query_is_handed(pool, mon
         f"the attribution read names {sorted(pool.held_source_names())} while the claim "
         f"query excludes {sorted(claim_excludes)} — a gate in the second set and not the "
         f"first has its waiting rows published as starvation")
+
+
+# ---------------------------------------------------------------------------
+# Data-trip hold — #4359. A released pause is a dispatch burst, and the first
+# job a resume starts can be a bulk deleter.
+#
+# Measured 2026-11-19: `pause_journal` id 71 (guardian data trip, 01:01:22Z)
+# was released by id 72 at 01:34:58.141759Z, and run
+# `run_79_20261119_013458.md` has `started_at 01:34:58.473575Z` — 331.8 ms
+# later — running APPLY over 898 session-spill dirs (71,784 KiB), 68 task logs,
+# 1,126 `workers.db` `runs` rows and 1,120 `queue` rows, while the incident that
+# lost 77 files was open and while `snapshot-data.sh` refused to snapshot the
+# same root. The restore path consulted the marker and the delete path did not.
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from workers.queue import WorkQueue  # noqa: E402
+
+#: `autonomy/79-retention-sweep.md` — the deleter that fired 331.8 ms into the
+#: 2026-11-19 incident, and the default member of the class.
+SWEEP_TASK_ID = 79
+#: Another `scheduled-task` item, dispatched under the SAME source name. The
+#: clause this whole section exists for is that it must keep running.
+SIBLING_TASK_ID = 83
+
+
+@pytest.fixture
+def gstate(tmp_path, monkeypatch):
+    """An empty guardian state dir, so no real trip can leak into a node.
+
+    The env var is the whole seam: `snapshot-data.sh:28` resolves
+    `${LLOYD_GUARDIAN_STATE:-$HOME/.local/state/lloyd-guardian}` and the hold
+    resolves the same pair, so pointing it here is what makes an incident
+    testable instead of only survivable.
+    """
+    d = tmp_path / "lloyd-guardian-state"
+    d.mkdir()
+    monkeypatch.setenv("LLOYD_GUARDIAN_STATE", str(d))
+    monkeypatch.setattr(P, "data_trip_hold_config", lambda: {})
+    return d
+
+
+def _take_trip(gstate):
+    """Write the marker the watchdog writes, in the shape it writes it.
+
+    `datawatch.py:1945` names the file; the two keys below are the live trip's
+    own (`tripped_at` in local time with its offset, and the reason naming the
+    vanished folder), because a hold that only recognised a prettier shape would
+    be a hold that never engages on a real incident.
+    """
+    marker = gstate / "data-tripped.json"
+    marker.write_text(json.dumps({
+        "tripped_at": "2026-11-18T17:01:22-0800",
+        "reason": "top-level folder 'tmp' (77 files) vanished",
+    }))
+    return marker
+
+
+def _seed_two_scheduled_tasks(q):
+    """The sweep and a sibling, both under source `scheduled-task`.
+
+    The sweep gets priority 10 and the sibling 30, so with the hold OFF the sweep
+    is the row the claim would take first: a node that passed only because the
+    sweep happened to sort second would pin nothing.
+    """
+    sweep = q.enqueue("scheduled-task", "run",
+                      {"task_id": SWEEP_TASK_ID, "name": "Retention sweep"},
+                      priority=10)
+    sibling = q.enqueue("scheduled-task", "run",
+                        {"task_id": SIBLING_TASK_ID, "name": "KG maintenance"},
+                        priority=30)
+    return sweep, sibling
+
+
+def test_an_open_trip_holds_the_deleter_and_still_dispatches_the_rest(
+        pool, gstate, tmp_path):
+    """Clause 1, across the one boundary this change crosses: gate → queue.
+
+    `claim_next` is where a row's `attempts` rises and its state leaves `queued`,
+    so holding it must leave BOTH alone — the same property
+    `test_the_skipped_claim_stays_queued_with_its_attempt_intact` pins for the
+    primary hold, for the same reason: a sweep that was never offered must be
+    offered again when the incident closes, and one that was claimed-and-discarded
+    has spent an attempt for a decision the pool made.
+    """
+    q = WorkQueue(tmp_path / "workers.db")
+    pool.queue = q
+    sweep, sibling = _seed_two_scheduled_tasks(q)
+
+    _take_trip(gstate)
+    held_tasks = pool._data_trip_hold_held()
+    assert str(SWEEP_TASK_ID) in held_tasks, (
+        f"the gate holds {held_tasks}; the retention sweep is the one job the "
+        f"2026-11-19 incident needed it for")
+
+    claimed = q.claim_next("worker-0", {}, [], held_tasks)
+    assert claimed is not None and int(claimed.payload["task_id"]) == SIBLING_TASK_ID, (
+        "the sibling `scheduled-task` row must be the one this pass claims")
+    row = q.get(sweep)
+    assert row.state == "queued" and int(row.attempts or 0) == 0, (
+        "the held deleter was consumed rather than delayed")
+
+    # And the claim pass that held it named it, so a reader of the row can tell
+    # "not yet" from "never": the hold is a decision on the table, not a vanished row.
+    assert q.get(sibling).state == "claimed"
+
+
+def test_the_marker_path_is_the_guardian_state_dir_plus_the_marker_name(
+        gstate, monkeypatch):
+    """Clause 2: the override, and the default, resolved the way the snapshot is.
+
+    `scripts/backup/snapshot-data.sh:28` is
+    `GSTATE="${LLOYD_GUARDIAN_STATE:-$HOME/.local/state/lloyd-guardian}"` and
+    `agent-services/guardian/policy.py:627-629` is the same pair in Python. Two
+    readers of one marker had better mean one path, or the half of the protection
+    that runs in bash and the half that runs in the pool disagree — which is the
+    #4359 defect in a different costume.
+
+    Resolved per call, not at import: the guardian's own `policy.py` binds its
+    module-level `GUARDIAN_STATE` at import time, and a gate that copied that
+    could not be aimed at a temp dir by a test that imported the module first.
+    """
+    assert P.guardian_state_dir() == gstate
+    assert P.data_trip_marker_path() == gstate / "data-tripped.json"
+
+    monkeypatch.delenv("LLOYD_GUARDIAN_STATE", raising=False)
+    assert P.guardian_state_dir() == Path.home() / ".local/state/lloyd-guardian"
+    assert P.data_trip_marker_path() == (
+        Path.home() / ".local/state/lloyd-guardian/data-tripped.json")
+
+
+def test_the_hold_engages_only_by_marker_existence_and_survives_a_malformed_body(
+        pool, gstate):
+    """Existence is the verdict and the body is only the detail.
+
+    `snapshot-data.sh:35` asks `[[ -f ... ]]` and nothing more, because the
+    process that writes the marker is the process that may have died writing it.
+    A hold that required parseable JSON would fail OPEN — the marker standing, the
+    deleter dispatched, the root unrestorable — which is the exact failure this
+    gate is for.
+    """
+    (gstate / "data-tripped.json").write_text('{"tripped_at": "2026-11-18T1')
+    assert str(SWEEP_TASK_ID) in pool._data_trip_hold_held(), (
+        "a half-written marker is still a trip")
+    assert pool._data_trip_hold["last_detail"], (
+        "the gate still reports what it found, malformed or not")
+
+
+def test_a_resume_under_an_open_trip_lifts_the_pause_and_journals_nothing(
+        pool, gstate, tmp_path):
+    """Clause 4: the hold is on the CLAIM, never on the release.
+
+    `guardian.py:2787-2804` says a trip's `pause_journal` row carries NO
+    `holder_kind` on purpose, so it defaults to `person` — the kind nothing ever
+    auto-releases — precisely so a stale `machine` lease cannot "have the next
+    boot resume dispatch in the middle of the incident it is halted for". A person
+    resuming after restoring the root (`actor=mission-control`, journal id 72) is
+    the intended END of a trip. So the resume must proceed and the deleter must
+    wait: a pool-wide block on the marker would make the guardian's own design
+    jointly unsatisfiable.
+
+    And the gate writes nothing to either journal. `hold_journal` is where the
+    three source gates record themselves and `pause_journal` counts the times the
+    fleet was held; this hold is neither event, and clause 4 says it stays that
+    way — one INFO line each way and no row, so `pause_journal_holds()` keeps
+    meaning "how many times was the fleet held".
+    """
+    q = WorkQueue(tmp_path / "workers.db")
+    pool.queue = q
+    # `pause()` reads the two hold flags and the automod lease, none of which the
+    # `__new__` fixture builds.
+    pool._paused_operator = False
+    pool._paused_automod = False
+    pool._automod_pause_until = 0.0
+    sweep, sibling = _seed_two_scheduled_tasks(q)
+    assert q.pause_journal_holds() == []
+
+    # The guardian's trip hold, then the person's release of it — the two rows
+    # the 2026-11-19 incident actually wrote (ids 71 and 72).
+    pool.pause(True, owner="operator", actor="guardian-data-trip")
+    assert pool.paused is True
+    _take_trip(gstate)
+    pool.pause(False, owner="operator", actor="mission-control")
+    assert pool.paused is False, "the resume still resumes with the marker standing"
+
+    # The next tick, exactly as `_worker_loop` runs it: the union, then the claim.
+    held = asyncio.run(pool._claim_holds(REGISTRY))
+    claimed = q.claim_next("worker-0", {}, held,
+                           list(pool._data_trip_hold["held_tasks"]))
+    assert claimed is not None and int(claimed.payload["task_id"]) == SIBLING_TASK_ID, (
+        "a resumed pool under an open trip must still dispatch the non-deleter work")
+    assert q.get(sweep).state == "queued"
+
+    holds = q.pause_journal_holds()
+    assert [h["actor"] for h in holds] == ["guardian-data-trip"], (
+        f"the trip hold wrote {holds}; the gate adds no hold row of its own — the "
+        f"only take row is the guardian's pre-existing one")
+    with q._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM hold_journal").fetchone()[0] == 0, (
+            "the data-trip hold wrote a `hold_journal` row; clause 4 says the record "
+            "is the INFO line, not a journal entry")
+
+
+def test_removing_the_marker_clears_the_hold_and_logs_one_line_each_way(
+        pool, gstate, tmp_path, caplog):
+    """Clause 5: a released marker must free the deleter on the NEXT claim pass.
+
+    Starvation is the other failure mode, and it is the one this file has already
+    been written about: `held_source_names`'s own docstring names an `owed-check`
+    that waited 8 h 53 m behind a gate nobody could see. A hold that outlived the
+    marker would be worse than no hold, because the sweep's whole job is to run
+    eventually.
+
+    The log bound is the other half: the pool polls every couple of seconds, so a
+    gate that logged per poll would write ~1,800 lines an hour and bury the two
+    lines anyone needed — the same reason `_kv_gate_held` and
+    `_primary_hold_held` log only on a transition.
+    """
+    import logging
+
+    q = WorkQueue(tmp_path / "workers.db")
+    pool.queue = q
+    sweep, sibling = _seed_two_scheduled_tasks(q)
+    marker = _take_trip(gstate)
+
+    with caplog.at_level(logging.INFO, logger="lloyd-workers.pool"):
+        for _ in range(5):
+            assert str(SWEEP_TASK_ID) in pool._data_trip_hold_held()
+        engaged = [r for r in caplog.records if "Data-trip hold" in r.getMessage()]
+        assert len(engaged) == 1, (
+            f"five claim passes wrote {len(engaged)} trip-hold lines; the clause is "
+            f"one on engage and one on clear")
+        assert "77 files" in engaged[0].getMessage(), (
+            "the engage line must carry the marker's own reason, or a reader of the "
+            "log cannot tell which trip held the sweep")
+
+        assert pool._data_trip_hold["engagements"] == 1, (
+            "a hold that counts polls counts the poll, not the incident")
+
+        marker.unlink()
+        assert pool._data_trip_hold_held() == []
+        released = [r for r in caplog.records if "Data-trip hold" in r.getMessage()]
+        assert len(released) == 2, (
+            f"expected one engage and one clear, got {[r.getMessage() for r in released]}")
+        assert pool._data_trip_hold["engagements"] == 1
+
+    # And the row the hold stood on is claimable on the very next pass, unspent.
+    # It is the MORE urgent of the two (priority 10 against 30), so it is also the
+    # first one back — a hold whose release left the item behind its less urgent
+    # sibling would be a hold that quietly re-queued the deleter.
+    held = asyncio.run(pool._claim_holds(REGISTRY))
+    before = q.get(sweep)
+    assert before.state == "queued" and int(before.attempts or 0) == 0, (
+        f"the sweep reached the release as {before.state}/attempts "
+        f"{before.attempts}; being held must not spend anything")
+    assert held == [], "the trip hold leaked a SOURCE name into the claim union"
+    claimed = q.claim_next("worker-0", {}, held,
+                           list(pool._data_trip_hold["held_tasks"]))
+    assert claimed is not None and int(claimed.payload["task_id"]) == SWEEP_TASK_ID, (
+        "the sweep stayed starved after its marker was cleared")
+    assert int(q.get(sweep).attempts or 0) == 1, (
+        "the delay cost the item an attempt it never ran")
+
+
+def test_no_trip_means_no_hold_and_no_task_is_held_by_default(pool, monkeypatch,
+                                                             tmp_path):
+    """The gate is inert until a trip exists, and the class is a named set.
+
+    `enabled: false` under `workers.data_trip_hold` is the operator's kill switch,
+    the same shape as the other three gates, and it releases an already-engaged
+    hold rather than only refusing to engage — the pattern
+    `test_the_kill_switch_releases_an_engaged_hold` pins for the round hold.
+    """
+    assert pool._data_trip_hold_held() == []
+    assert pool._data_trip_hold["engaged"] is False
+
+    monkeypatch.setattr(P, "data_trip_hold_config",
+                        lambda: {"enabled": True, "deleter_tasks": [1234]})
+    monkeypatch.setenv("LLOYD_GUARDIAN_STATE", str(tmp_path / "nonexistent"))
+    assert pool._data_trip_hold_held() == []
+
+    (tmp_path / "nonexistent").mkdir()
+    _take_trip(tmp_path / "nonexistent")
+    assert pool._data_trip_hold_held() == ["1234"], (
+        "the config's own list is the class; the code default is the floor, not the cage")

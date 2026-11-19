@@ -3104,3 +3104,114 @@ def test_a_row_with_no_age_to_publish_adds_no_key_to_the_run_meta(q):
 
     assert queue_age_meta(item) == {}, (
         f"an unreadable stamp contributed a key: {queue_age_meta(item)!r}")
+
+
+# ---------------------------------------------------------------------------
+# `exclude_tasks` — the claim seam's task-level hold (#4359)
+#
+# The pool's three older gates hold whole SOURCES, and `claim_next` implements
+# that as one `source NOT IN (...)`. The guardian's data-trip hold cannot use it:
+# the retention sweep dispatches under source `scheduled-task`, the same name
+# every other autonomy task dispatches under (witness:
+# `run_scheduled-task_20261119_021926_45f24e | source=scheduled-task |
+# task_id=83`), so a source-level hold would freeze the fleet's whole scheduled
+# lane to stop one bulk deleter. Hence a second list, keyed by the payload's
+# `task_id` and applied in the same SQL for the same reason the source list is:
+# a filtered-out row must not hide a claimable row behind it.
+# ---------------------------------------------------------------------------
+
+
+def test_holding_one_task_still_dispatches_its_source_mates(q):
+    """Clause 3: the hold is per task, not per source.
+
+    All three rows are `scheduled-task` and the held one is the most urgent, so
+    this node fails if the filter is absent (the sweep is claimed) and also fails
+    if the hold is written at source level (nothing is claimed at all). The
+    row with no `task_id` at all is the third case a claim must keep: a queue
+    shared by sources whose payload names no task — `youtube-digest`, `autocode`,
+    every tick of a source that has no autonomy task behind it — must not be
+    emptied by a hold that only ever meant autonomy task 79.
+    """
+    sweep = q.enqueue("scheduled-task", "run",
+                      {"task_id": 79, "name": "Retention sweep"}, priority=10)
+    sibling = q.enqueue("scheduled-task", "run",
+                        {"task_id": 83, "name": "KG maintenance"}, priority=30)
+    sourceless = q.enqueue("scheduled-task", "run", {"name": "no task"}, priority=40)
+
+    first = q.claim_next("worker-0", {}, [], ["79"])
+    assert first is not None and int(first.payload["task_id"]) == 83, (
+        "a held task must not block its own source's other rows")
+    second = q.claim_next("worker-0", {}, [], ["79"])
+    assert second is not None and second.id == sourceless, (
+        "a row whose payload names no task is not a member of any task class")
+    assert q.claim_next("worker-0", {}, [], ["79"]) is None, (
+        "the held row must not be handed out by a later poll")
+
+    row = q.get(sweep)
+    assert row.state == "queued" and int(row.attempts or 0) == 0, (
+        "the held row was claimed-and-discarded, spending an attempt on a "
+        "refusal made before the claim")
+    assert q.get(sibling).state == "claimed" and q.get(sourceless).state == "claimed"
+
+    # Removing the hold is all it takes: nothing is revived, cleared or un-poisoned,
+    # because the row was never taken.
+    late = q.claim_next("worker-0", {}, [], [])
+    assert late is not None and late.id == sweep, (
+        "the held task stayed unclaimable after the hold was lifted")
+
+
+def test_the_task_filter_survives_a_payload_that_is_not_json(q):
+    """The guard beside the filter, and why a bare `json_extract` is not enough.
+
+    A comment in this same file, above the `state != 'succeeded'` clause of
+    `_do_maintain`, already records that `json_extract` over a column
+    holding a non-JSON string raises `malformed JSON` and takes the whole query
+    with it — there it surfaced as `/api/workers/health` answering nothing at all.
+    Here the query that would die is the CLAIM, and the predicate is global: one
+    corrupt row would raise for every source in the fleet, not just for its own.
+    So the filter asks `json_valid` first, and an unparseable payload is simply
+    not a member of any task class.
+
+    What this node therefore pins is that healthy work still claims while a
+    corrupt row sits in the queue with the hold on. The corrupt row's own fate is
+    NOT decided here and is unchanged by this change: `QueueItem.from_row` raises
+    on a payload it cannot decode, poison that predates #4359 and is recorded on
+    the item rather than fixed by it.
+    """
+    healthy = q.enqueue("scheduled-task", "run", {"task_id": 83}, priority=10)
+    corrupt = q.enqueue("scheduled-task", "run", {"task_id": 99}, priority=30)
+    with q._connect() as conn:
+        conn.execute("UPDATE queue SET payload_json='not json at all' WHERE id=?",
+                     (corrupt,))
+        conn.commit()
+
+    got = q.claim_next("worker-0", {}, [], ["79"])
+    assert got is not None and got.id == healthy, (
+        "a row with unparseable payload_json made every claim fail — the filter\'s "
+        "json_valid guard is what keeps a single bad row inside its own row")
+    # Read the row without decoding it: `q.get`/`from_row` raises on this payload,
+    # which is the pre-existing poison named above and not this filter's doing.
+    with q._connect() as conn:
+        state = conn.execute("SELECT state FROM queue WHERE id=?",
+                             (corrupt,)).fetchone()[0]
+    assert state == "queued", (
+        "the corrupt row was claimed while unclassifiable; it belongs to no class")
+
+
+def test_the_task_filter_takes_a_string_or_an_int_task_id(q):
+    """`payload_json` stores what each enquemer had: an int or a string.
+
+    `scheduled_task.enqueue_if_due` passes `{"task_id": task.get("id")}` straight
+    from the task file's front matter, and `workers/pool.py:_task_id_of` has
+    always normalised it with `str(...)`. A SQL comparison that trusted the JSON
+    type would silently hold nothing at all for one of the two spellings — the
+    worst kind of miss for a hold, because the hold reads as working and the
+    deleter still runs.
+    """
+    as_int = q.enqueue("scheduled-task", "run", {"task_id": 79}, priority=10)
+    as_str = q.enqueue("scheduled-task", "run", {"task_id": "79"}, priority=12)
+    other = q.enqueue("scheduled-task", "run", {"task_id": 83}, priority=30)
+
+    assert q.claim_next("w", {}, [], ["79"]).id == other
+    assert q.claim_next("w", {}, [], ["79"]) is None
+    assert q.get(as_int).state == "queued" and q.get(as_str).state == "queued"
