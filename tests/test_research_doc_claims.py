@@ -1989,3 +1989,141 @@ def test_section_2s_archived_row_states_the_restored_reading():
         + row.strip()[len('| `archived` |'):][:90])
     assert "§1" in row, (
         "and it still cross-references §1, the section that owns the reading")
+
+
+# ── #4272: §2 now names what makes a `written` claim durable ─────────────────
+#
+# The clause asks for a §2 sentence saying a `written` row's claim holds "only
+# until the next nightly vault commit" to be replaced. That sentence is not in this
+# doc and never was: at the round's base commit `9aec6a92`, `grep -n
+# 'nightly\|commit\|durable' architecture/research-pipeline.md` returns four
+# `nightly` lines — the #65 producer row (:20), §2's error-visibility line (:140),
+# §2's `pipeline: nightly-reflection` alert shape (:189) and §5's retirement note
+# (:360) — and no line containing `commit` or `durab`. What §2 said was weaker than
+# the clause assumes: it documented verification at settle time (`_require_real_note`)
+# and re-reading at `stats()` (`artifact_on_disk`) and said nothing about the bytes
+# in between — which is exactly where eleven notes went missing (`research_store
+# stats` → `missing_artifacts.count: 11` on 2026-11-19, the newest gone inside three
+# minutes of settling). So these nodes pin the half the doc could not have carried
+# before the code existed, plus the property the missing sentence would have denied.
+
+
+def _rp_section(heading: str) -> str:
+    """One `## ` section of the doc, bounded by the next heading and cut at the
+    Review log, in the body-slicing shape the §2 and §5 nodes above use."""
+    body = DOC.read_text(encoding="utf-8").split("## Review log", 1)[0]
+    return body.split(heading, 1)[1].split("\n## ", 1)[0]
+
+
+def _rp_para(needle: str, heading: str = "## 2. The registry") -> str:
+    section = _rp_section(heading)
+    para = next((p for p in section.split("\n\n") if needle in p), None)
+    assert para is not None, f"{heading!r} no longer carries a paragraph on {needle!r}"
+    return " ".join(para.split())
+
+
+def test_the_durability_paragraph_is_a_pinned_claim_with_a_route_and_a_number():
+    """>= 250 chars: a `written` row's claim about disk is worth the route that
+    verifies it, and §2's `finish`/`artifact_path` citations are that route. The
+    number is the one that made the leak a finding instead of a hypothesis."""
+    node = _rp_para("A `written` settle is durable at the moment it is verified")
+    assert len(node) >= 250, (
+        f"the durability paragraph is {len(node)} chars, under the 250 a `written` "
+        "row's claim about disk is worth")
+    assert "finish" in node and "artifact_path" in node, (
+        "the paragraph names no route a reader can follow, which the header's rule "
+        "for a §2 claim requires")
+    assert "Eleven `written` rows" in node
+    # It is §2's paragraph, not a block that happens to repeat the words: §2 is the
+    # section that defines what a `written` row claims, and the section's own
+    # `_require_real_note` citation is the control that this is that section.
+    assert "`_require_real_note`" in _rp_section("## 2. The registry")
+    assert "artifact_on_disk" in _rp_section("## 2. The registry")
+
+
+def test_section_two_states_the_copy_and_the_module_still_does_what_it_says():
+    """Six claims, each checked against `app/research_store.py`, and the sixth is
+    an absence: the module cannot run a git command at all, which is what makes the
+    snapshot a second copy rather than a second name for the same file."""
+    import inspect
+
+    from app import research_store as R
+    src = inspect.getsource(R)
+    node = _rp_para("A `written` settle is durable at the moment it is verified")
+
+    # 1. Where the copy goes, and the doc may not name a directory the code does not.
+    #    Spelled as a NAME and not a trailing-slash path on purpose: the directory is
+    #    created by the first settle under the data root and is not in the checkout,
+    #    so `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree
+    #    [research-pipeline.md]` reads a slash form as a path citation that exists
+    #    under none of its four roots. The value is pinned from the code, so the doc
+    #    cannot drift from it whichever way it is written.
+    assert "`NOTE_SNAPSHOT_DIRNAME`" in node
+    assert R.NOTE_SNAPSHOT_DIRNAME in node, (
+        "the paragraph names the constant but not the directory it names, so a "
+        "reader has to open the module to find the copies")
+    assert f'NOTE_SNAPSHOT_DIRNAME = "{R.NOTE_SNAPSHOT_DIRNAME}"' in src, (
+        f"§2 says {R.NOTE_SNAPSHOT_DIRNAME!r}; the constant is elsewhere")
+
+    # 2. WHEN: inside the verified moment, between the verify and the UPDATE. The
+    #    doc's ordering claim and the source's statement order are one claim.
+    assert "`_require_real_note`" in node and "`UPDATE`" in node
+    finish_src = inspect.getsource(R.ResearchStore.finish)
+    assert finish_src.index("self._require_real_note(") \
+        < finish_src.index("self._snapshot_note(artifact_path)") \
+        < finish_src.index("UPDATE topics"), (
+        "§2 puts the copy between the verify and the settle; the source now runs it "
+        "somewhere else, so either the doc moved or the window the doc closes opened "
+        "up again")
+
+    # 3. Recovery answers from the row's own path, with the note already gone.
+    assert "`recover_note(artifact_path)`" in node
+    assert "def recover_note(self, artifact_path" in src
+
+    # 4. An injectable root — the parameter a test uses to keep out of the live
+    #    vault, which is why this is a constructor parameter and not a constant.
+    assert "`note_store=`" in node and "configure(..., note_store=)" in node
+    assert "note_store: Optional[str | Path] = None" in src, (
+        "`ResearchStore.__init__` lost the keyword §2 says a test injects")
+    assert "note_store: Optional[Path | str] = None" in src, (
+        "`configure` lost the keyword §2 says a test injects")
+
+    # 5. The failure record, and where a reader who did not run the failing settle
+    #    goes to find it.
+    assert "`note_durable: False`" in node and "`undurable_notes`" in node
+    assert '"undurable_notes"' in src and "note_durable" in src
+
+    # 6. The absence, with its control. `git add` appears in this module exactly
+    #    once and it is prose: the code imports no subprocess, so it cannot stage
+    #    or commit anything anywhere — the trap at `scripts/automod/backlog.py:2153`
+    #    and `scripts/autoresearch/promote.py:1432` is a test that ran `git add`
+    #    against a live vault, and no test of this mechanism can.
+    assert "Nothing here runs `git add`" in node
+    assert "import subprocess" not in src and "subprocess.run" not in src, (
+        "the module runs a subprocess, so §2's sentence that the nightly commit "
+        "pass has no reach into the snapshot store is prose over a mechanism that "
+        "could reach it")
+
+
+def test_section_two_conditions_nothing_on_the_nightly_vault_commit():
+    """The clause's other half, and the false premise with it.
+
+    There is no nightly-commit sentence to delete — measured at base `9aec6a92`, no
+    line of this file contains `commit` or `durab` — so what is pinned is the
+    property that sentence would have denied: §2's durability is not conditioned on
+    the vault's commit pass, and the paragraph says where the copy lives instead.
+    """
+    section = _rp_section("## 2. The registry")
+    for phrasing in ("next nightly commit", "until the nightly", "nightly vault commit"):
+        assert phrasing not in section, (
+            f"§2 made a durable `written` note wait on the vault's commit pass "
+            f"({phrasing!r}), which is the claim #4272 exists to retire")
+
+    node = _rp_para("A `written` settle is durable at the moment it is verified")
+    assert "the nightly commit pass has no reach into it" in node, (
+        "the paragraph stopped saying where the copy is safe from, which is the "
+        "whole difference between a second copy and a second name")
+    # Positive control on the section bounds: `## 5. Known limits` is NOT inside
+    # the text these assertions scanned, so a limit stated there cannot satisfy or
+    # defeat them by being nearby.
+    assert "Known limits" not in section

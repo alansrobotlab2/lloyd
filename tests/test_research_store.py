@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import sqlite3
+import subprocess
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -870,3 +871,232 @@ def test_a_truncated_note_is_not_counted_as_missing(s, note):
     assert s.stats()["missing_artifacts"]["count"] == 0, (
         "a small file on disk is present; the size rule belongs to `finish`")
     assert R.artifact_on_disk(str(art)) is True
+
+
+# ---------------------------------------------------------------------------
+# #4272 — a `written` settle makes its own claim durable
+#
+# Base measurement for this whole block, taken with the shipped read path at the
+# round's base commit 9aec6a92:
+#
+#     cd ~/lloyd && .venvs/lloyd/bin/python -m app.research_store stats
+#     → missing_artifacts.count: 11   (11 of 171 `written` rows, 522 topics)
+#
+# Eleven notes that `finish` had verified against `MIN_NOTE_BYTES` and settled
+# `written` were no longer on disk, the newest of them (topic 829, `finished_at`
+# 2026-11-19T02:16:11Z) gone within three minutes of settling, and none of the
+# eleven ever entered the vault's git history. The row's claim was durable only as
+# long as some other process let the file sit there, so the tests below pin the
+# copy that now happens inside the verified moment.
+# ---------------------------------------------------------------------------
+
+
+def test_a_written_note_deleted_from_the_working_tree_is_still_recoverable(tmp_path):
+    """Clause 1. The note lives in a directory standing in for the vault; the
+    registry and its snapshot store live somewhere else entirely, which is the
+    point: the copy is not a second name for the same file.
+
+    The registry is written by the worker and read by a chat turn in another
+    process, so recovery is exercised through a second store object on the same
+    db rather than through the one that settled the row.
+    """
+    vault = tmp_path / "vault"
+    data = tmp_path / "lloyd-data"
+    store = ResearchStore(data / "research.db",
+                          note_store=data / R.NOTE_SNAPSHOT_DIRNAME)
+    art = vault / "knowledge" / "research" / "2026-11-19-a-note.md"
+    art.parent.mkdir(parents=True)
+    art.write_bytes(b"# A note\n" + b"body line\n" * 60)
+    assert art.stat().st_size >= R.MIN_NOTE_BYTES
+
+    tid = store.propose("a topic whose note is deleted minutes after it settles")["id"]
+    store.claim(tid, by="w")
+    settled = store.finish(tid, "written", artifact_path=str(art))
+    assert settled["status"] == "written"
+
+    art.unlink()
+    assert store.stats()["missing_artifacts"] == {"count": 1, "paths": [str(art)]}, (
+        "the working-tree loss stopped being reported, which would read as a "
+        "clean vault rather than as a note that still has a copy")
+
+    recovered = ResearchStore(data / "research.db",
+                              note_store=data / R.NOTE_SNAPSHOT_DIRNAME
+                              ).recover_note(str(art))
+    assert recovered is not None, "the settle left no durable copy of its own note"
+    assert recovered.stat().st_size >= R.MIN_NOTE_BYTES, (
+        f"the recovered copy is {recovered.stat().st_size} bytes, under the "
+        f"{R.MIN_NOTE_BYTES} the settle verified against")
+    assert recovered.read_bytes().startswith(b"# A note\n"), (
+        "the recovered bytes are not the note that was verified")
+    # The store the nightly vault commit pass owns holds nothing: the copy is
+    # outside the vault tree it snapshots and reverts.
+    assert vault not in recovered.parents
+
+    # Positive control. A `rejected` settle carries an artifact path too, and gets
+    # no copy — the snapshot belongs to `written`, which is the only status whose
+    # claim is that a note exists. Without this line the assertions above would
+    # also pass if the copy were keyed on "any status with a path".
+    other = vault / "knowledge" / "research" / "2026-11-19-other.md"
+    other.write_bytes(b"y" * R.MIN_NOTE_BYTES)
+    tid2 = store.propose("a topic that is rejected rather than written")["id"]
+    store.claim(tid2, by="w")
+    store.finish(tid2, "rejected", artifact_path=str(other), note="not actionable")
+    assert store.recover_note(str(other)) is None, (
+        "a rejected settle snapshotted its artifact, so the copy is not keyed to "
+        "the `written` claim this exists to protect")
+    assert store.stats()["undurable_notes"] == {"count": 0, "ids": []}
+
+
+def test_the_snapshot_root_is_an_injected_value_and_stages_nothing_in_the_vault(tmp_path):
+    """Clause 2, and the trap the item names: a unit test must never run `git add`
+    against the live vault (the precedent is recorded at
+    `scripts/automod/backlog.py:2153` and `scripts/autoresearch/promote.py:1432`).
+
+    So the vault here is a real temporary git repo and the note is a file it has
+    never tracked — the exact state topic 829's note was in when it vanished. The
+    assertions that matter are the two `git status` readings: the note is untracked
+    before the settle and STILL untracked after it. The durability step copies; it
+    never stages, so no test of this mechanism can put anything into a vault's
+    index, live or otherwise.
+    """
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(vault), *args], capture_output=True,
+                              text=True, check=True).stdout
+
+    vault = tmp_path / "vault-repo"
+    vault.mkdir()
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "test")
+    # `knowledge/research/` has to be a TRACKED directory before the note appears,
+    # or `git status --porcelain` collapses it to `?? knowledge/research/` and the
+    # reading below cannot tell "this note is untracked" from "this whole folder
+    # is", which is the distinction the clause turns on.
+    (vault / "knowledge" / "research").mkdir(parents=True)
+    (vault / "knowledge" / "research" / "2026-11-18-committed.md").write_text("x\n")
+    git("add", "knowledge/research/2026-11-18-committed.md")
+    git("commit", "-q", "-m", "seed the research dir")
+
+    data = tmp_path / "lloyd-data"
+    store = ResearchStore(data / "research.db", note_store=tmp_path / "snapshots")
+    art = vault / "knowledge" / "research" / "2026-11-19-uncommitted.md"
+    art.write_bytes(b"# Uncommitted\n" + b"line\n" * 80)
+
+    assert git("status", "--porcelain").split()[:2] == ["??", "knowledge/research/2026-11-19-uncommitted.md"], (
+        "the fixture's note is not the untracked-and-never-committed file this "
+        "reproduces, so nothing below measures the case")
+    assert git("log", "--all", "--", str(art.relative_to(vault))) == "", (
+        "the note already has history, which the lost notes never had")
+
+    tid = store.propose("a topic whose note is untracked in the vault")["id"]
+    store.claim(tid, by="w")
+    store.finish(tid, "written", artifact_path=str(art))
+
+    assert git("status", "--porcelain").split()[:2] == ["??", "knowledge/research/2026-11-19-uncommitted.md"], (
+        "the durability step staged or committed the note: it must copy to its own "
+        "store and leave the vault's index exactly as it found it")
+    assert git("log", "--all", "--", str(art.relative_to(vault))) == ""
+    assert store.recover_note(str(art)) is not None
+    assert (tmp_path / "snapshots").is_dir(), (
+        "the copy ignored the injected root and went somewhere else")
+    assert not (data / R.NOTE_SNAPSHOT_DIRNAME).exists(), (
+        "the injected root was ignored in favour of the derived one")
+
+    # The derived default, which is what production gets: a sibling of the
+    # registry, so a registry redirected by `configure()` or `LLOYD_RESEARCH_DB`
+    # carries its snapshots with it instead of writing beside the live one.
+    assert ResearchStore(data / "research.db").note_store \
+        == data / R.NOTE_SNAPSHOT_DIRNAME
+    reconfigured = R.configure(data / "research.db",
+                               note_store=tmp_path / "other-snaps")
+    assert reconfigured.note_store == tmp_path / "other-snaps"
+    assert R.store().note_store == tmp_path / "other-snaps", (
+        "`store()` returned a cached object still pointing at the old root, so the "
+        "reconfiguration would be reported and not applied")
+
+
+def test_a_failed_snapshot_still_settles_the_row_and_stats_names_it(tmp_path):
+    """Clause 3. The failure is made unfakeable: the snapshot root is the path of
+    an existing regular FILE, so `mkdir` raises `FileExistsError` — an `OSError`
+    the durability step catches — on every attempt, by any user, without relying on
+    a mode bit a root-run test would ignore.
+
+    The settle is the stronger claim: a note that cleared `MIN_NOTE_BYTES` and a
+    row that must reach its terminal state outrank a copy that could not be
+    written. Refusing here would instead leave a research run holding a real note
+    and an unsettled row, and `finish` refuses to move a `written` row afterwards,
+    so a refused settle would be permanent.
+    """
+    data = tmp_path / "lloyd-data"
+    data.mkdir()
+    blocker = data / R.NOTE_SNAPSHOT_DIRNAME
+    blocker.write_bytes(b"not a directory")
+    store = ResearchStore(data / "research.db", note_store=blocker)
+
+    art = tmp_path / "vault" / "knowledge" / "research" / "note.md"
+    art.parent.mkdir(parents=True)
+    art.write_bytes(b"z" * R.MIN_NOTE_BYTES)
+
+    tid = store.propose("a topic whose snapshot cannot be written")["id"]
+    store.claim(tid, by="w")
+    settled = store.finish(tid, "written", artifact_path=str(art))
+
+    assert settled["status"] == "written", (
+        "a durability failure refused the settle, which is the one outcome this "
+        "clause exists to forbid")
+    assert settled["extra"]["note_durable"] is False
+    assert settled["extra"]["note_durable_error"], (
+        "the row says only that it is not durable, not why")
+
+    stats = store.stats()
+    assert stats["undurable_notes"] == {"count": 1, "ids": [tid]}, stats
+    # Named separately from the missing-artifact finding: the note IS on disk here,
+    # so a reader told it is missing would go looking for a file that is there.
+    assert stats["missing_artifacts"] == {"count": 0, "paths": []}
+
+    # Positive control: the same registry, same note, one row whose copy DID land.
+    # Without it the count of 1 would also be produced by a step that never
+    # succeeds, and `note_durable: False` would be a constant rather than a verdict.
+    good = ResearchStore(data / "research.db", note_store=data / "snaps")
+    art2 = tmp_path / "vault" / "knowledge" / "research" / "note2.md"
+    art2.write_bytes(b"z" * R.MIN_NOTE_BYTES)
+    tid2 = good.propose("a topic whose snapshot lands")["id"]
+    good.claim(tid2, by="w")
+    settled2 = good.finish(tid2, "written", artifact_path=str(art2))
+    assert settled2["extra"]["note_durable"] is True
+    after = good.stats()
+    assert after["undurable_notes"] == {"count": 1, "ids": [tid]}, (
+        "the durable row was named too, or the undurable one was not")
+    art2.unlink()
+    assert good.recover_note(str(art2)) is not None
+
+
+def test_a_row_that_recorded_no_flag_is_not_counted_as_undurable(tmp_path):
+    """The control that makes the count above mean something.
+
+    Every `written` row settled before this mechanism shipped — all 171 of them at
+    the round's base — recorded neither verdict, and a `stats()` that read their
+    silence as failure would report the whole registry broken the night this
+    landed. Three shapes must all stay unnamed: no `extra` at all, an `extra` with
+    some other key, and an `extra` that is not parseable JSON.
+    """
+    store = ResearchStore(tmp_path / "research.db", note_store=tmp_path / "snaps")
+    ids = []
+    for topic in ("settled before the snapshot existed",
+                  "settled with an unrelated extra key",
+                  "settled with an unreadable extra"):
+        tid = store.propose(topic)["id"]
+        store.claim(tid, by="w")
+        ids.append(tid)
+        with store._connect() as conn:
+            conn.execute("UPDATE topics SET status='written', finished_at=?, "
+                         "session_id='s' WHERE id=?",
+                         (R._now(), tid))
+    with store._connect() as conn:
+        conn.execute("UPDATE topics SET extra='{\"review_id\": 7}' WHERE id=?", (ids[1],))
+        conn.execute("UPDATE topics SET extra='not json' WHERE id=?", (ids[2],))
+
+    stats = store.stats()
+    assert stats["undurable_notes"] == {"count": 0, "ids": []}, stats
+    assert stats["by_status"]["written"] == 3, (
+        "the fixture settled no rows, so the count above would prove nothing")

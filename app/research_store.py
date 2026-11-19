@@ -30,8 +30,10 @@ cross-process safety that comes from the SQL shape rather than from the lock.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import threading
@@ -84,6 +86,38 @@ STALE_QUEUED_DAYS = 60
 #: test_research_store.py` pins the worker's copy to this one so the two cannot
 #: drift apart.
 MIN_NOTE_BYTES = 400
+
+#: Where a verified note is copied the moment `finish` settles it `written`
+#: (#4272). A sibling directory of `research.db`, so it is under `DATA_ROOT` for
+#: the same reason the registry is — a canary booting from a worktree writes
+#: beside its own empty registry — and NOT inside the vault, which is the tree
+#: that was losing the notes: `research_store stats` reported
+#: `missing_artifacts.count: 11` on 2026-11-19 — re-measured at this change's base
+#: as 11 of 171 `written` rows over 522 topics — one of them the registry's own
+#: `last_written`, whose note had vanished within three minutes of settling.
+#: The copy lives where the nightly vault commit
+#: pass has no reach: that pass owns `~/obsidian`'s history and nothing here, so
+#: a snapshot cannot be dropped by whatever dropped the working-tree file, and
+#: nothing here runs `git add` against the vault.
+NOTE_SNAPSHOT_DIRNAME = "research-note-snapshots"
+
+
+def _extra_flag(raw: Any) -> Any:
+    """The `note_durable` value recorded in a row's `extra`, or None.
+
+    None means the row recorded nothing, which is the state of every `written` row
+    settled before #4272 shipped — and a corrupt or non-JSON `extra` reads the same
+    way, because a reader cannot distinguish "did not record" from "recorded
+    something unreadable" and neither is a failed snapshot. Never raises: this runs
+    inside `stats()`, which answers a health question and has no business failing
+    over one malformed row."""
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed.get("note_durable")
 
 
 def artifact_on_disk(artifact_path: str) -> bool:
@@ -224,8 +258,18 @@ class ResearchStore:
     only this process holds.
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *,
+                 note_store: Optional[str | Path] = None):
+        """`note_store` is the root of the durability snapshots (#4272), and it is
+        a parameter rather than a constant because a test that settles a `written`
+        row must never copy anything into the live tree: it points at a temporary
+        directory, and production gets the sibling of `research.db`. Passing
+        nothing derives it from `db_path`, so a registry pointed elsewhere by
+        `configure()` or by `LLOYD_RESEARCH_DB` carries its snapshots with it
+        instead of writing beside the live registry."""
         self.path = Path(db_path).expanduser()
+        self.note_store = (Path(note_store).expanduser() if note_store
+                           else self.path.parent / NOTE_SNAPSHOT_DIRNAME)
         self._lock = threading.RLock()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -466,6 +510,64 @@ class ResearchStore:
             conn.commit()
             return self.get(int(topic_id))
 
+    # -- note durability -----------------------------------------------------
+
+    def snapshot_path_for(self, artifact_path: str) -> Path:
+        """Where this artifact's verified bytes live, whether or not they do.
+
+        Keyed on the absolute artifact path plus its name, so `recover_note` finds
+        the copy from the row's stored `artifact_path` alone — the file itself may
+        be gone by then, which is the whole case this exists for. The digest is of
+        the path string, not of `resolve()`: two topics settled on the same day
+        under the same note name in different directories must not collide, and a
+        name-only key would let one overwrite the other.
+        """
+        text = str(artifact_path or "").strip()
+        absolute = os.path.abspath(os.path.expanduser(text or "(none)"))
+        digest = hashlib.sha1(absolute.encode("utf-8")).hexdigest()[:16]
+        name = Path(absolute).name or "(unnamed)"
+        return self.note_store / f"{digest}-{name}"
+
+    def _snapshot_note(self, artifact_path: str) -> tuple[bool, str]:
+        """Copy a just-verified note into `self.note_store`. Returns
+        `(durable, error)` and NEVER raises: the caller has a verified note and a
+        row to settle, and a snapshot that cannot be written is a weaker fact than
+        that. Written to a temporary file and `os.replace`d, so a reader either
+        sees the whole note or nothing.
+
+        The read is repeated here rather than passed in from `_require_real_note`
+        so that the bytes copied are the bytes that cleared `MIN_NOTE_BYTES` at
+        this moment, and the verify step stays a pure predicate with one job.
+        """
+        src = Path(str(artifact_path or "").strip())
+        try:
+            data = src.read_bytes()
+        except (OSError, ValueError) as exc:
+            # OSError: vanished in the gap since the verify, or unreadable.
+            # ValueError: a path no syscall accepts.
+            return False, f"read refused: {exc}"
+        dst = self.snapshot_path_for(str(src))
+        try:
+            self.note_store.mkdir(parents=True, exist_ok=True)
+            tmp = dst.with_name(dst.name + ".part")
+            tmp.write_bytes(data)
+            os.replace(tmp, dst)
+        except (OSError, ValueError) as exc:
+            return False, f"snapshot write refused: {exc}"
+        return True, ""
+
+    def recover_note(self, artifact_path: str) -> Optional[Path]:
+        """The snapshot copy of a note, or None when nothing was snapshotted.
+
+        The read side of #4272: after a working-tree note is deleted this is where
+        its bytes still are, and it answers from the row's `artifact_path` with the
+        file already gone. A caller that wants the old rule — at least
+        `MIN_NOTE_BYTES` — applies it to the returned file exactly as
+        `_require_real_note` applied it to the original.
+        """
+        path = self.snapshot_path_for(artifact_path)
+        return path if path.is_file() else None
+
     def _require_real_note(self, status: str, artifact_path: str) -> None:
         """Gate the one terminal status that claims a file exists (#1276).
 
@@ -537,9 +639,25 @@ class ResearchStore:
             # stays wherever it was, so a refused `written` on a `researching`
             # topic is still reclaimable.
             self._require_real_note(status, artifact_path)
+            # Inside the same verified moment, before the UPDATE: a `written` row
+            # is a claim about disk, and until #4272 the bytes it claimed were
+            # durable only as long as the vault's working tree kept them — eleven
+            # rows on 2026-11-19 named a file that no longer existed, the newest
+            # gone within three minutes of settling. Copying after the UPDATE would
+            # leave a window in which the row is terminal and the copy is not yet
+            # there. A refusal here NEVER reaches the caller: the settle is the
+            # stronger claim, and what a failed snapshot costs is a row that says
+            # so (`note_durable: False`, named by `stats()`).
+            durable: Optional[bool] = None
+            if status == "written":
+                durable, snap_error = self._snapshot_note(artifact_path)
             merged = dict(self._row(row)["extra"])
             if extra:
                 merged.update(extra)
+            if durable is not None:
+                merged["note_durable"] = durable
+                if not durable:
+                    merged["note_durable_error"] = snap_error[:300]
             conn.execute(
                 "UPDATE topics SET status=?, finished_at=?, artifact_path=?, "
                 "outcome_note=?, duplicate_of=?, session_id=?, extra=? WHERE id=?",
@@ -702,6 +820,18 @@ class ResearchStore:
                 "SELECT artifact_path FROM topics "
                 "WHERE status='written' OR COALESCE(artifact_path, '') <> '' "
                 "ORDER BY id").fetchall()]
+            # #4272's own account of its failures: a `written` row that could not be
+            # snapshotted records `note_durable: False`, and only that record is
+            # judged here. A row with no flag is NOT counted — the 170 rows settled
+            # before this mechanism shipped recorded nothing either way, and reading
+            # their silence as "not durable" would report the whole registry as
+            # broken the night this lands. `is False`, not falsy: a missing key and
+            # a durable row are both answers, and neither is a failure.
+            undurable = [r["id"] for r in conn.execute(
+                "SELECT id, extra FROM topics "
+                "WHERE status='written' AND COALESCE(extra, '') <> '' "
+                "ORDER BY id").fetchall()
+                if _extra_flag(r["extra"]) is False]
             top_domains = {r["domain"] or "(none)": r["n"] for r in conn.execute(
                 "SELECT domain, COUNT(*) AS n FROM topics "
                 "WHERE status NOT IN ('archived') GROUP BY domain "
@@ -736,6 +866,15 @@ class ResearchStore:
             # whose disappearance read as a payload that never mentioned it.
             "missing_artifacts": {"count": len(missing_artifacts),
                                   "paths": missing_artifacts},
+            # Always a mapping with both keys, same rule as `missing_artifacts`
+            # (#3085): a registry whose snapshots all landed is `count: 0`, never an
+            # absent field. Separate from `missing_artifacts` on purpose — that one
+            # counts a note that is gone from the working tree, which is a finding
+            # about the vault, while this one names a settle whose own copy failed
+            # to land, which is a finding about this store. A row can appear in
+            # neither, and an older row appears in neither whatever happened to its
+            # note, because it recorded no flag.
+            "undurable_notes": {"count": len(undurable), "ids": undurable},
             "domains": top_domains,
         }
 
@@ -930,6 +1069,12 @@ def _resolve_artifact(raw: str) -> str:
 _default_lock = threading.Lock()
 _default: Optional[ResearchStore] = None
 _default_path: Path = RESEARCH_DB
+#: Process-wide override for the durability snapshot root (#4272). None derives it
+#: from `_default_path`, which is what makes the tests safe without touching this:
+#: `tests/conftest.py::_isolate_research_store` redirects `_default_path` into a
+#: temporary directory for every test, and the snapshots follow it. Set this only
+#: when the notes must live apart from the registry.
+_default_note_store: Optional[Path] = None
 
 
 def store() -> ResearchStore:
@@ -941,25 +1086,40 @@ def store() -> ResearchStore:
     """
     global _default
     with _default_lock:
-        if _default is None or _default.path != _default_path:
-            _default = ResearchStore(_default_path)
+        # The snapshot root is compared too, not just the db: `configure()` may
+        # point the registry at the same file with the snapshots moved elsewhere,
+        # and handing back the cached instance would keep writing them to the old
+        # root while reporting the new one.
+        wanted = (_default_note_store if _default_note_store is not None
+                  else Path(_default_path).expanduser().parent / NOTE_SNAPSHOT_DIRNAME)
+        if _default is None or _default.path != Path(_default_path).expanduser() \
+                or _default.note_store != wanted:
+            _default = ResearchStore(_default_path, note_store=_default_note_store)
         return _default
 
 
-def configure(path: Path | str) -> ResearchStore:
-    """Point the process default at `path` (tests, rebuilds). Returns it."""
-    global _default_path, _default
+def configure(path: Path | str, *,
+              note_store: Optional[Path | str] = None) -> ResearchStore:
+    """Point the process default at `path` (tests, rebuilds). Returns it.
+
+    `note_store` places the #4272 durability snapshots; None derives them from
+    `path`, which is why every existing caller that redirects the registry away
+    from the live file is already keeping its snapshots out of the vault tree.
+    """
+    global _default_path, _default_note_store, _default
     with _default_lock:
         _default_path = Path(path)
+        _default_note_store = Path(note_store) if note_store else None
         _default = None
     return store()
 
 
 def reset() -> None:
     """Forget the default store (next `store()` reopens it)."""
-    global _default
+    global _default, _default_note_store
     with _default_lock:
         _default = None
+        _default_note_store = None
 
 
 def _main(argv: list[str]) -> int:  # pragma: no cover - operator entry point

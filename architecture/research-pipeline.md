@@ -125,7 +125,7 @@ from the lock, which only one process holds.
 |---|---|
 | `queued` | proposed, waiting. `not_before` may hold it back after a failure |
 | `researching` | a worker has it. `reclaim_stale` returns what a crashed turn left stuck here, swept at twice the source's `max_duration_seconds` |
-| `written` | a note exists on disk, verified by `finish` itself: `_require_real_note` refuses any `artifact_path` that is not a file holding at least `MIN_NOTE_BYTES` (400) bytes, raising `ValueError` before the `UPDATE` so the row stays `researching` and `reclaim_stale` can retry it. The worker's `deep_research._note_is_real` applies the same bar and is now belt-and-braces (#1276) |
+| `written` | a note exists on disk, verified by `finish` itself: `_require_real_note` refuses any `artifact_path` that is not a file holding at least `MIN_NOTE_BYTES` (400) bytes, raising `ValueError` before the `UPDATE` so the row stays `researching` and `reclaim_stale` can retry it. The worker's `deep_research._note_is_real` applies the same bar and is now belt-and-braces (#1276). The bytes that clear it are copied to the snapshot store in the same moment, so the claim outlives the vault's working tree (#4272, below) |
 | `nothing_found` | searched, found nothing — a real answer, and the one that stops it coming back |
 | `duplicate` | the vault already covers it; names what does |
 | `archived` | imported from the retired checklist; dedup corpus only — the 314 restored rows (§1) |
@@ -192,6 +192,28 @@ the date that count was taken, and the one
 repeats; a 2026-11-19 `grep` for a line beginning `pipeline:` finds 91 markdown
 files, an upper bound on the same population, so the exemption's reasoning holds
 while its number is dated) is untouched.
+
+A `written` settle is durable at the moment it is verified, which is #4272's half
+of the same claim. Eleven `written` rows named no file on 2026-11-19 — one of them
+the registry's own `last_written`, its note gone inside three minutes of settling —
+and every one of them was a note the vault had never committed, so the store's
+verification could not notice a deletion that came after it. `finish` therefore
+copies the note into the directory named by `NOTE_SNAPSHOT_DIRNAME` —
+`research-note-snapshots`, a sibling of `research.db` under `DATA_ROOT`, created
+on the first settle rather than carried in the checkout — in the interval between
+`_require_real_note` clearing the bytes and the `UPDATE` that settles the row.
+`recover_note(artifact_path)` answers from the row's stored path with the
+working-tree file already gone, keyed on a digest of the absolute path so two
+same-named notes in different directories cannot overwrite each other. The root is
+a constructor parameter (`note_store=`, and `configure(..., note_store=)` for the
+process default) precisely so a test can settle a `written` row without touching
+the live tree. Nothing here runs `git add`: the snapshot store is not the vault and
+the nightly commit pass has no reach into it, which is what makes it a second copy
+rather than a second name for the first one. A snapshot that cannot be written
+never refuses the settle — the row keeps `note_durable: False` in its `extra`, and
+`stats()` names it in `undurable_notes` as `{count, ids}`, held apart from
+`missing_artifacts` because that one is a finding about the vault's working tree
+while this one is a finding about this store.
 
 `propose` also **refuses** rather than queues once `MAX_QUEUED` (40) topics are
 waiting, returning the depth and "research them before proposing more" in place
