@@ -957,7 +957,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 cache_read=stream_stats["cache_read"],
                 cost_usd=0.0,
                 duration_ms=stream_stats.get("duration_ms"),
-                duration_api_ms=None,
+                # duration_api_ms (#4240) comes from turn_telemetry.row()
                 num_turns=stream_stats.get("num_turns") or current_iteration,
                 # The turn died but its prompt was real: the tokens were spent
                 # with these skills in front of the model (#783), and a
@@ -1525,7 +1525,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         cache_read=cache_read_tokens,
                         cost_usd=0.0,
                         duration_ms=duration_ms,
-                        duration_api_ms=None,
+                        # duration_api_ms (#4240) comes from turn_telemetry.row()
                         num_turns=num_turns_val,
                         reprefill_tokens=miss_summary["reprefill_tokens"],
                         prefix_misses=miss_summary["prefix_misses"],

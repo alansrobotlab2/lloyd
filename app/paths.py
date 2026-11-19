@@ -513,3 +513,21 @@ SKILL_EMBED_CACHE_PATH = PIPELINE_DIR / "skill-embeddings.json"
 # `eval/run_vault_search_eval.py` artifacts: vault_search scored per document
 # pipeline. Its own directory so the nightly baseline readers never glob them.
 EVAL_VAULT_SEARCH_DIR = DATA_ROOT / "eval" / "vault-search"
+# One dated row set per sweep of the engine's share of turn wall clock (#4240):
+# `engine_ms / turn_ms` per job class with p50, p90, n and the coverage figure,
+# plus the decision sentence that prices the open throughput arms. Declared LAST,
+# after the siblings it belongs to, because `app/paths.py` line numbers are
+# anchors — `tests/test_architecture_coverage_doc_claims.py` and
+# `tests/test_retention_sweep.py` resolve citations like `app/paths.py:334`
+# against this file's own lines, and an insertion in the middle of the file moves
+# the binding out from under every citation below it without changing a line of
+# code. `app/engine_share.py` owns the schema, writes exactly one
+# `<YYYY-MM-DD>.json` per run, and prunes its own files past
+# `engine_share.RETENTION_DAYS` — the same self-bounding shape as
+# `TOOL_QUALITY_DIR` above, for the same reason: the retention sweep's table is a
+# vault file a code round cannot stage (#2615), so a store that waited for that
+# row would be unbounded until someone wrote it. And it is report-only, like the
+# instrument index: no gate, promotion rule or rollback path reads this file —
+# the item's whole point is that a human reads the number before spending effort
+# on #2144/#3771/#4128/#2019.
+ENGINE_SHARE_DIR = DATA_ROOT / "eval" / "engine-share"

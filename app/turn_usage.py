@@ -127,6 +127,14 @@ class TurnTelemetry:
         self.stop_reason: str | None = None
         self.wrapped_up: bool | None = None
         self.result_reasoning_tokens: int | None = None
+        # #4240: the engine's own share of the turn, one span per iteration
+        # number. Keyed by iteration, so a stream retry that re-runs an
+        # iteration REPLACES its span instead of adding a second one, and one
+        # turn books one measurement per iteration it actually asked the engine
+        # for. `app/engine_share.py` de-duplicates the persisted rows by the
+        # same `(turn_id, iteration)` rule, which is what makes this column and
+        # that report's numerator the same quantity rather than two clocks.
+        self._engine_ms: dict[Any, int] = {}
         # Running token totals from the per-iteration events, for a turn
         # that never reaches `result` (D12): peak prompt, summed output.
         self._peak_input = 0
@@ -147,6 +155,14 @@ class TurnTelemetry:
 
     def note_assistant(self, evt: dict[str, Any]) -> None:
         self._iterations += 1
+        # #4240: `duration_ms` on this event is the harness's own span of one
+        # model request (`app/harness/loop.py`: `it.started_at` to
+        # `iteration_ended_at`), so it is engine time and stops before tool
+        # dispatch. An engine that never stamps it leaves the dict empty and the
+        # column NULL — unmeasured, not zero.
+        duration = evt.get("duration_ms")
+        if isinstance(duration, int) and not isinstance(duration, bool):
+            self._engine_ms[evt.get("iteration")] = max(0, duration)
         ttft = evt.get("ttft_ms")
         if isinstance(ttft, int) and not isinstance(ttft, bool):
             self.ttfts.append(max(0, ttft))
@@ -178,6 +194,20 @@ class TurnTelemetry:
         if isinstance(rt, int) and not isinstance(rt, bool):
             self.result_reasoning_tokens = max(0, rt)
 
+    def engine_ms_total(self) -> int | None:
+        """The de-duplicated engine time of this turn, or None if unmeasured.
+
+        #4240's numerator as the writer sees it: the sum of the iteration spans
+        the engine itself reported, one per iteration number. NULL when no
+        iteration stamped a duration, because a turn whose engine never
+        measured itself must not book `0 ms` — that would read as an engine that
+        answers instantly, and it would flow into the SUM at
+        `app/usage_store.py:446` and the dashboard's own engine-time panel.
+        """
+        if not self._engine_ms:
+            return None
+        return sum(self._engine_ms.values())
+
     def row(self) -> dict[str, Any]:
         """The P11 columns, as `usage_store.record_usage` keyword arguments."""
         reasoning = (self.result_reasoning_tokens
@@ -192,6 +222,11 @@ class TurnTelemetry:
             "tool_errors": self.tool_errors,
             "tool_errors_by_class": dict(self.tool_errors_by_class),
             "tool_ms_total": self.tool_ms_total,
+            # #4240: the column that has been declared, inserted and summed
+            # since it was added (`app/usage_store.py:78`/`:362`/`:446`) while
+            # both writers passed `None`. It is emitted here so the two writers
+            # that splat this dict cannot drift apart on it.
+            "duration_api_ms": self.engine_ms_total(),
             "wrapped_up": (None if self.wrapped_up is None
                            else int(self.wrapped_up)),
         }
