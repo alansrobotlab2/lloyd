@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, frontend, dashboard]
 type: reference
 status: implemented
-date: 2026-10-19
+date: 2026-11-19
 ---
 
 # Mission Control
@@ -27,7 +27,7 @@ each backed by a router under `app/routers/`.
 | `backlog` | `app/routers/backlog.py` | the markdown kanban in `~/obsidian/backlog/` |
 | `memory`, `graph` | `app/routers/memory.py`, `entities.py` | facts, and the entity graph — which renders *inside* `memory`; the `graph` tab itself is still a stub page, with no sidebar button, reachable only by `mc_navigate` |
 | `skills`, `tools` | `skills.py`, `tools.py` | vault skills; tool toggles persisted to `$LLOYD_DATA/data/tool_overrides.yaml` (`app/paths.py::TOOL_OVERRIDES_PATH`) |
-| `services` | `services.py` → `app/supervisor_client.py` | supervisord status |
+| `services` | `services.py` → `app/supervisor_client.py` | supervisord status, and the GPU power switch (`GET`/`POST /api/services/gpu-power`) that pauses the pool, stops every GPU program and brings them back |
 | `settings` | `system.py`, `models.py` | config view, model identity |
 | `architecture` | `architecture.py` | a **source import-graph browser** for `.py`/`.ts`, not these docs |
 | `ide` | `ide.py`, `lsp.py` | file view with LSP diagnostics |
@@ -107,7 +107,8 @@ Rules that keep the endpoint honest:
   `sessions/`, not the vault — and the automod scorecard at
   `_SCORECARD_TTL_S` 60 s, since its numbers move per round, not per poll;
 - the recent-chats scan opens only the newest files by mtime and stops at
-  `_RECENT_KEPT` (8) user rows or `_RECENT_CEILING` (400) files opened —
+  `_RECENT_KEPT` (8) conversation rows or `_RECENT_CEILING` (400) files
+  opened —
   background sessions (four-part ids) are skipped unread, and `_RECENT_SHOWN`
   (2) survive the live filter, which is applied *outside* the cache so a chat
   that just started never reads as finished for ten seconds;
@@ -145,11 +146,20 @@ profile put 62% of the backend's samples in `_backlog` (47% in `board_health`,
 ~10-13 s a call; the rest re-parsing 3,760 items' front matter every 10 s) and
 14% in `_autonomy`, while `/health` stalled for up to 5 s. Two changes, both
 at the end of `app/routers/dashboard.py` so no cited line moved:
-`_frontmatter` is memoised per (path, mtime, size) (a pass went from 1.5 s to
-16 ms), and on production data `board_health` runs in a child process
-(`app/board_health_offload.py`), the same CPU on another core. Off production
-data (tests, the gate) it stays in-process, where fixtures can patch it. A new
-heavy section belongs in one of those two shapes, not on a thread of its own.
+`_frontmatter` is memoised per (path, mtime, size) — the store is
+`app/frontmatter.py::FM_MEMO`, shared with the scorecard's own walk of the same
+board, and `dashboard.py` keeps the `_frontmatter` binding so the anchors hold
+(a pass went from 1.5 s to 16 ms) — and on production data `board_health` runs
+in a child process (`app/board_health_offload.py`), the same CPU on another
+core. Off production data (tests, the gate) it stays in-process, where
+fixtures can patch it. A third shape arrived on 2026-11-12 for the slow 60 s
+halves: `board_health` and the automod scorecard are read through
+`_cached_swr`, which serves an expired entry as it stands and recomputes it on
+a background thread, so the ~14 s cold `board_health` call no longer sets the
+render time of a page that has sat unpolled for a minute (an EMPTY entry still
+computes inline — a backend that just booted has nothing to serve). A new
+heavy section belongs in one of those three shapes, not on a thread of its
+own.
 
 ### The traps behind those rules
 
@@ -158,10 +168,14 @@ index; the wording is the incident record, kept whole.
 
 **`recent` is the cached section with a trap.** A session JSON carries its
 whole transcript (100 files, 7.5 MB when this was written), so the scan is
-bounded twice: files are opened newest-**mtime** first and the walk stops at
-`_RECENT_KEPT` (8) user rows or `_RECENT_CEILING` (400) files opened —
-background ids are skipped by name without opening them — and the parse is
-cached for 10 s. (The flat `_RECENT_CANDIDATES` mtime slice this section once
+bounded twice: it enumerates `sessions_io.session_head_files`, which keeps a
+microcompact reduction sidecar out of the walk and out of the read budget
+altogether (#3815); files are then opened newest-**mtime** first and the walk
+stops at `_RECENT_KEPT` (8) conversation rows or `_RECENT_CEILING` (400) files
+opened — background ids are skipped by name without opening them, and a
+three-part name that survives is judged by
+`sessions_io.is_conversation_session`, not by `is_user_session` — and the
+parse is cached for 10 s. (The flat `_RECENT_CANDIDATES` mtime slice this section once
 named was replaced by that two-sided bound; the rules above always described
 the newer shape.) The mtime ordering is safe only because
 mtime is never *earlier* than `last_active` — background writers (the titler,
@@ -304,9 +318,17 @@ the reboot, not the pool wait.
 ## Sessions, titles, activity
 
 `app/sessions_io.py` is the only session writer (`create_session`) and the one
-definition of "is a human reading this"
-(`is_user_session`;
-`NON_USER_PLATFORMS = {autonomy, worker}`). `POST /api/sessions/create` used to
+home of "is a human reading this" — which is **two** predicates, not one:
+`is_user_session` is the DELIVERY deny-list (`NON_USER_PLATFORMS = {autonomy,
+worker}`, deliberately a deny-list so a client it has never heard of keeps its
+briefs), and `is_conversation_session` is the LISTINGS' allow-list
+(`INTERACTIVE_PLATFORMS = {mission-control, browser}` *and* a chat-shaped id),
+which is what the chat history, the `recent` panel and the markdown export
+apply. Answering the listing question with the delivery bool is how
+`e2e-harness` and the gate's `canary` turns came to sit in the user's chat
+history and export into the embedded corpus.
+`POST /api/sessions/create` validates a caller's `platform` against
+`known_platforms()`, the union of the two, rather than a copy of one. `POST /api/sessions/create` used to
 mint its stub JSON itself — a bare `write_text` with a field set missing `id`,
 `title` and `source`, a third session shape on disk — but since #1275 it calls
 `sessions_io.create_session` like every other path, so the superset field set
@@ -647,6 +669,27 @@ steady 60 fps.
 
 ## Review log
 
+- 2026-11-19 — **current, corrected in place.** Re-checked the paths, counts,
+  cadences, config keys and routes against `a638b1a2` and the live `:8080`
+  routes: `/api/workers/health` and `/api/autonomy/health` both returned
+  `window_clamped_to_hours` and `oldest_input` as `null`, so the 7-day figures
+  really did span 7 days. What had moved under the doc: `_cached_swr`
+  (2026-11-12) now serves the two slow halves stale-and-refreshing, so the cost
+  section's two shapes became three and its cold-render sentence is dated; the
+  front-matter memo's store left this module for `app/frontmatter.py::FM_MEMO`,
+  with only the `_frontmatter` binding kept here so the anchors hold; the
+  `recent` walk enumerates `session_head_files` (#3815) and classifies by
+  `is_conversation_session`, so the doc's one definition of "is a human reading
+  this" is now two predicates (#2649) and `is_user_session` is the delivery
+  bool; the Services tab gained the GPU power switch; and the `Layout.tsx`
+  cites moved again (+4 on the map, +11 on the guard and the sticky mounts) —
+  the reason #3041 says retire them rather than re-point. The tab lists (17 in
+  `Page`, 16 buttons counting `BOTTOM_ITEMS`, 14 `PAGES` keys, 3 sticky), the
+  twelve `_gather` sections with every TTL and bound, the drain hold (2.5 s
+  poll, 10-minute ceiling, `X-Lloyd-Landing`), the connection-gate section and
+  its live-view constants, the inert `clientCertHeaders`, `PRE_AUTH_PATHS`, and
+  the Memory graph's `MIN_PINNED_SHARE` and `active_endpoints` all hold. Filed
+  #4267 #4268; appended today's re-measurement to #3041.
 - 2026-10-19 — **stale, corrected in place.** Re-checked every path, line
   number, count, cadence and route against `641cf23a` and the live `:8080`
   routes (the twelve dashboard sections and `/api/workers/health`'s clamp
