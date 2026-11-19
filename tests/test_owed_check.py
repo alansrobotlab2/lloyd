@@ -572,7 +572,12 @@ def test_the_owed_check_row_carries_amended_empty_so_a_summary_is_checkable(isol
     out = asyncio.run(OC.execute(_Job({"apply": True})))
     assert out["status"] == "success" and "answers collide on #1" in out["summary"]
     row = _events("owed_check")[-1]
-    assert row["result"] == {"remaining": 1, "filed": [], "moved": "", "amended": []}
+    # #4242 widened the projection with a fifth key, so this equality is the check
+    # that it is present-and-empty rather than absent: a carrier refusal is a
+    # `moved: ""` outcome like a hand-run hold, and only a key that appears on the
+    # quiet passes too can be added up over a week of them.
+    assert row["result"] == {"remaining": 1, "filed": [], "moved": "", "amended": [],
+                             "carrier_guard": []}
     assert row["collided"] == [1], "the row itself names the collision, beside `remaining: 0`"
     assert row["ok"] is True
     assert not _events("clause_amended")
@@ -2241,3 +2246,332 @@ def test_the_widened_instruction_reaches_the_session_the_job_actually_runs(isola
         "the rotation glob did not reach the session's prompt")
     assert "ledger_rows_merged" in call["prompt"], call["prompt"][:200]
     assert "NOT evidence of absence" in call["prompt"]
+
+
+# ── The carrier guard (#4242) ───────────────────────────────────────────────
+#
+# #3812 went `draft → done: closed by owed-check: every owed entry is settled` at
+# 2026-11-09T07:29 through the #1909 empty-list branch while the one person-only
+# step it carried lived ONLY in its `human_clauses:` (:111) — it had no
+# `owed_outside:` row at all — and no other open item named that step. After the
+# close no open backlog file named it anywhere. A close moves one item's status,
+# but the step it leaves behind lives on that item's front matter, so the closer
+# has to look at the rest of the board before it moves it. `close_item` refused on
+# exactly four tests before this (#4242's triage at c1f2095e: unparsed front
+# matter, already `done`, a pending hand-run, #3931's lost discharge) and not one
+# of them was cross-item.
+
+_CARRIER_STEP = "A person merges the two Voice-Loop entity rows by hand"
+_CARRIER_OWE = "merge the Voice-Loop rows, then rule the item closed"
+
+
+def _carrier_step_item(isolated: Path, item_id: int, *, status: str = "draft",
+                       clause: str | None = _CARRIER_STEP,
+                       outside: list | None = None,
+                       owe: str = _CARRIER_OWE) -> Path:
+    """An OPEN item owing one `decide` entry, plus the human-only step under test.
+
+    `clause=None` leaves `human_clauses` off entirely, which is the #3812 reading
+    of "no human-only step"; `outside` is an `owed_outside` list written as the
+    item would carry it (a row with `done` is a discharged one)."""
+    extra: dict = {"owed": [{"what": owe, "kind": "decide",
+                             "since": "2026-11-08T00:00:00"}]}
+    if clause is not None:
+        extra["human_clauses"] = [clause]
+    if outside is not None:
+        extra["owed_outside"] = outside
+    return write_item(isolated, item_id, status=status, extra=extra)
+
+
+def test_the_last_open_carrier_of_a_human_clause_is_not_closed(isolated):
+    """#4242 clause 1, the #3812 shape: an open item whose only human-only step is
+    its own `human_clauses` entry, and no OTHER open item carries it, is not
+    closed. The status is left exactly as it was — a held close, not a close
+    nobody attempted."""
+    p = _carrier_step_item(isolated, 3812)
+    assert O.close_item(p, "every owed entry is settled") is False
+    fm = fm_of(p)
+    assert fm["status"] == "draft" and not fm.get("completed"), "the status is untouched"
+
+
+def test_the_last_open_carrier_of_an_undischarged_outside_row_is_not_closed(isolated):
+    """The same guard read off the other surface a human-only step is stored on.
+
+    #4008's ruling named a step only a person can run and owed-check filed it as
+    an `owed_outside` row; closing the item that holds the only such row drops the
+    step the same way #3812's `human_clauses` close did, so both shapes are refused
+    by one measurement (`human_steps_of`), not by two guards that can drift."""
+    p = _carrier_step_item(isolated, 3813, clause=None, outside=[
+        {"what": _CARRIER_STEP, "needs": "an edit in Alan's editor",
+         "since": "2026-11-08T00:00:00"}])
+    assert O.close_item(p, "the ruling says the step is moot") is False
+    assert fm_of(p)["status"] == "draft"
+
+
+def test_a_discharged_outside_row_leaves_no_step_to_carry(isolated):
+    """The control that proves the guard reads the ROW'S STATE, not its presence:
+    the identical item with `done` on the row has no human-only step left, so the
+    close proceeds and #3931's revisit route stays open."""
+    p = _carrier_step_item(isolated, 3814, clause=None, outside=[
+        {"what": _CARRIER_STEP, "needs": "an edit in Alan's editor",
+         "since": "2026-11-08T00:00:00", "done": "2026-11-10T03:01:07Z"}])
+    assert O.close_item(p, "the discharge was verified this pass") is True
+    assert fm_of(p)["status"] == "done"
+
+
+def test_an_open_item_carrying_the_same_step_key_is_a_carrier(isolated):
+    """#4242 clause 2, arm 1: another open item carries the step through key EQUALITY,
+    so this close is the ordinary one.
+
+    The pair is the one `_clause_key` exists for: #3812 carried `2. A person merges…`
+    and `clean_clauses` strips a self-numbered list's enumerator ONLY when every row is
+    numbered (`_self_numbered` → `all`, backlog.py:1638), so a lone numbered row keeps
+    its `2. ` and text equality does NOT match the unnumbered carrier. `test_a_sole_…`
+    and `test_…_differ` already pin the strip-and-strip / re-add-and-re-add half, so
+    what is pinned HERE is precisely the asymmetric pair: a numbered closing item, an
+    unnumbered open carrier, and the one guard that sees them as the same step."""
+    p = _carrier_step_item(isolated, 4001, clause=f"2. {_CARRIER_STEP}")
+    assert f"2. {_CARRIER_STEP}" in (p.read_text(encoding="utf-8")), \
+        "the stored clause must keep its enumerator, or this node has drifted back " \
+        "into testing the strip-and-strip half every other node already pins"
+    write_item(isolated, 4002, status="draft", name="The merge itself",
+               extra={"human_clauses": [_CARRIER_STEP]})
+    assert O.close_item(p, "every owed entry is settled") is True
+    assert fm_of(p)["status"] == "done"
+
+
+def test_an_undischarged_owed_outside_row_alone_holds_a_close(isolated):
+    """#4242 clause 1's other shape, told apart from the clause shape rather than
+    assumed identical to it.
+
+    A `human_clauses` entry and an `owed_outside` row without `done` reach the guard
+    through different loaders (`B.human_clauses_of` vs `O.outside_entries`) and mean
+    different things — the first is a step the item's contract states, the second a
+    person-only discharge owed-check has booked as owed. `test_the_last_open_carrier_of_a_
+    human_clause_…` and `test_the_last_open_carrier_of_an_undischarged_outside_row_…` each
+    refuse a close on one shape; what is pinned HERE is that the two loaders really are
+    different reads, so an item can carry the step in exactly one of them and the guard
+    still sees it. That is the #1909 route's state: once the clause text has been ruled
+    on, only `owed_outside` still names the step. If a future edit folded one arm into
+    the other — or dropped `outside_entries`, whose `done`-less rows are the only
+    undischarged-discharge signal there is — the middle assert below fails on a board
+    with no clause at all."""
+    q = _carrier_step_item(isolated, 4022, clause=None, outside=[
+        {"what": _CARRIER_STEP, "needs": "an editor", "done": "",
+         "since": "2026-11-08T00:00:00"}])
+    assert B.human_clauses_of(None, fm_of(q)) == [], "this item carries no clause"
+    assert [e["what"] for e in O.outside_entries(fm_of(q))] == [_CARRIER_STEP]
+    assert O.uncarried_human_steps(fm_of(q), path=q) == [_CARRIER_STEP], \
+        "the row alone is a human-only step: the clause loader cannot supply it"
+    assert O.close_item(q, "every owed entry is settled") is False
+    assert fm_of(q)["status"] == "draft"
+
+
+def test_an_open_item_naming_the_closing_item_is_a_carrier_though_the_texts_differ(isolated):
+    """#4242 clause 2, arm 2: the #4008/#4009 shape, where key equality cannot see
+    the carrier at all.
+
+    #4008's clause is "A person executes §4 steps 1-4 …" and #4009's is "Person
+    runs §4 Step 1: copy … semantic-verdicts.jsonl …" — NOT text-equal, so a
+    `_clause_key`-only guard would refuse the very close #4008's ruling says is
+    legitimate. What makes #4009 the carrier is that it NAMES #4008: its title is
+    literally "Blocks #4008 — PERSON-ONLY: run the 12-pair SUFFIX_SAFE apply of §4".
+    A citation in a successor's name or body therefore carries the step. Both
+    spellings are pinned: 4009 names it in the heading, 4109 in its prose only."""
+    p = _carrier_step_item(isolated, 4008)
+    write_item(isolated, 4009, status="draft",
+               name="Blocks #4008 — PERSON-ONLY: run the SUFFIX_SAFE apply",
+               extra={"human_clauses": ["Person runs §4 Step 1: copy semantic-verdicts.jsonl"]})
+    assert O.close_item(p, "a successor carries the step") is True
+    assert fm_of(p)["status"] == "done"
+
+    p2 = _carrier_step_item(isolated, 4108)
+    succ = write_item(isolated, 4109, status="draft", name="The apply that is left")
+    succ.write_text(succ.read_text(encoding="utf-8")
+                    + "\nBlocks #4108 — the person-only §4 apply, still unrun.\n",
+                    encoding="utf-8")
+    assert O.close_item(p2, "a successor carries the step in its body") is True
+    assert fm_of(p2)["status"] == "done"
+
+
+def test_an_item_citing_the_closing_item_that_is_closed_or_self_is_not_a_carrier(isolated):
+    """The citation arm's two negatives, because an arm keyed on prose is easy to
+    satisfy with a string that matches nothing real: a CLOSED item citing #4008 is
+    not an open carrier — that is the whole meaning of "the last OPEN carrier", and
+    it is why #3812's own close could not be excused by some done item's prose — and
+    an item whose id merely begins with the digits is not one either (#40081 is not
+    #4008)."""
+    p = _carrier_step_item(isolated, 4008)
+    write_item(isolated, 4010, status="done", name="Done and citing #4008",
+               extra={"completed": "2026-11-11T00:00:00"})
+    write_item(isolated, 40081, status="draft", name="Unrelated 40081 work")
+    assert O.close_item(p, "no open item carries the step") is False
+    assert fm_of(p)["status"] == "draft"
+
+
+def test_the_carrier_decision_reads_the_board_and_no_store(isolated, monkeypatch):
+    """#4242 clause 2's other half: the decision is made from backlog front matter
+    alone, so it is not hostage to a ledger or a database.
+
+    Pinned by making every SQLite open in the process raise while the guard runs, and
+    by a ledger written at the module-level path BEFORE the scan whose only row makes
+    the carrier CLOSED — a guard that read the promote ledger instead of the front
+    matter would answer "un-carried" where the board answers "carried".
+
+    SM_20261119_001957 pinned only the first arm, and the review found it vacuous on
+    this tree: `sqlite3.connect` is never called during the scan, so its message could
+    not fire. That is why the trip wire below runs first — a negative pinned by a
+    sentinel the code never reaches constrains nothing, and this is the exact pattern
+    this very branch fixed two functions away (`test_the_carrier_scan_walks_…` asserts
+    the sentinel is MISSING because a real bug made a probe useless)."""
+    import sqlite3
+
+    trips = []
+
+    def _no_store(*args, **kwargs):
+        trips.append("sqlite3.connect called during the carrier scan")
+        raise AssertionError("the carrier guard read a store, not the backlog board")
+
+    monkeypatch.setattr(sqlite3, "connect", _no_store)
+    # The trip wire: a connect that must NOT happen, so a green run proves the hook
+    # fires on a call rather than on the absence of any call at all.
+    try:
+        sqlite3.connect(":memory:")
+    except AssertionError:
+        pass
+    assert trips == ["sqlite3.connect called during the carrier scan"], \
+        "the store-blindness sentinel is inert — it cannot prove anything is unread"
+
+    p = _carrier_step_item(isolated, 4011)
+    write_item(isolated, 4012, status="draft",
+               name="Blocks #4011 — PERSON-ONLY: the merge",
+               extra={"human_clauses": [_CARRIER_STEP]})
+    assert not S.LEDGER_PATH.exists(), "the fixture never writes a ledger row"
+    assert O.uncarried_human_steps(fm_of(p), path=p) == [], \
+        "the carrier on the board is seen from its front matter alone"
+
+    # Ledger-blind in the other direction: a ledger whose ONLY row says the carrier
+    # closed, written where a ledger is usually found. Front matter must win.
+    S.append_event({"event": "backlog_implement", "item_id": 4012, "phase": "done",
+                    "status": "done"})
+    assert S.LEDGER_PATH.exists(), "there is now a ledger for the guard to read"
+    assert O.uncarried_human_steps(fm_of(p), path=p) == [], \
+        "the guard decided from the board, not from a store that says 4012 closed"
+    assert trips == ["sqlite3.connect called during the carrier scan"], \
+        "the carrier scan opened a database: " + ", ".join(trips)
+
+
+def test_a_human_step_with_no_carrier_is_named_by_the_guard(isolated):
+    """The guard's own readout, used by the close and by the fleet row: the steps
+    nobody else carries, verbatim, and no key at all on an item with no human step.
+    An item whose clauses are YAML payload junk (`1.`, `1]}],`) yields nothing, the
+    same filter `human_clauses_of` already applies (#3504)."""
+    p = _carrier_step_item(isolated, 4013)
+    assert O.uncarried_human_steps(fm_of(p), path=p) == [_CARRIER_STEP]
+    junk = write_item(isolated, 4014, status="draft",
+                      extra={"human_clauses": ["1.", "1]}],"]})
+    assert O.uncarried_human_steps(fm_of(junk), path=junk) == [], \
+        "payload junk is not a step, so it cannot hold an item open"
+    quiet = write_item(isolated, 4015, status="draft", name="no human step here")
+    assert O.uncarried_human_steps(fm_of(quiet), path=quiet) == []
+
+
+def test_an_item_with_no_human_step_still_closes_through_the_empty_list_branch(isolated):
+    """#4242 clause 3: the blast radius the item measured — 2297 of 4131 `done`
+    items carry `human_clauses:` — is exactly why the guard must fire only on the
+    human-step shape. An item with no human-only step closes through #1909's
+    empty-owed-list branch exactly as it did before this guard existed, and says so
+    with an empty `carrier_guard`."""
+    p, entries = _owing(isolated, 1909, ["decide: is the CA check still owed?"],
+                        status="draft")
+    out = O.apply_verdict(p, entries,
+                          [{"n": 1, "outcome": "settled", "evidence": "exited 0 on 09-28"}],
+                          item_id=1909)
+    fm = fm_of(p)
+    assert out["moved"] == "closed" and fm["status"] == "done"
+    assert fm["closed_by"] == "owed-check" and out["carrier_guard"] == []
+
+
+def test_a_refused_carrier_close_names_the_step_and_the_remedy_and_books_the_pass(isolated):
+    """#4242 clause 4: the refusal is self-clearing, not terminal.
+
+    The triage measured that a ruling and a discharged step are indistinguishable
+    in front matter — both sit in `owed_settled`, only an `owed_outside` row gets
+    `done` written — so the guard WILL refuse closes it should honour. That is
+    survivable only if the note states a remedy a reader can act on (file the carrier
+    item, which is `apply_verdict`'s own `follow_up` route) and says who acts on it,
+    and only if the pass's owed/owed_settled bookkeeping is written anyway: a terminal
+    refusal that also lost the ruling would leave an open item with an empty `owed`
+    list, the very hole owed.py's #1909 branch exists to close.
+
+    What the note must NOT claim is a next pass that comes back for this item: with
+    `owed` emptied, `owing_items` did not offer the refused item again on either shape
+    when measured 2026-11-19, which is why the remedy names a person."""
+    p, entries = _owing(isolated, 3812, [_CARRIER_OWE], status="draft")
+    B.update_frontmatter(p, {"human_clauses": [_CARRIER_STEP]})
+    out = O.apply_verdict(p, entries,
+                          [{"n": 1, "outcome": "settled",
+                            "evidence": "ruled 11-09: the merge is all that is left"}],
+                          item_id=3812)
+    fm = fm_of(p)
+    assert out["moved"] == "" and out["remaining"] == 0
+    assert fm["status"] == "draft" and not fm.get("completed")
+    assert out["carrier_guard"] == [_CARRIER_STEP]
+    assert not O.entries_of(fm), "the entry really is gone from `owed`"
+    assert [r["outcome"] for r in fm["owed_settled"]] == ["settled"], \
+        "the ruling is booked even though the close was refused"
+    act = str((fm.get("activity_log") or [])[-1])
+    # `update_frontmatter` stamps every activity line it appends as `**ts** — <msg>`,
+    # exactly as #3017's hand-run hold note is stamped, so the phrase the clause pins
+    # is what the MESSAGE begins with — `owed_check.py`'s own `_activity` reader
+    # strips that same prefix to decide a line is owed-check's.
+    message = act.split("— ", 1)[1] if "— " in act else act
+    assert message.startswith("owed-check close refused: carrier guard"), act
+    assert _CARRIER_STEP in act, "the note names the step it is holding the item open for"
+    assert "file" in act.lower() and "carrier item" in act.lower(), \
+        f"the note has to state the remedy that clears it: {act}"
+    assert "a person" in act.lower(), \
+        f"a refused close is a hold someone must act on; the note has to say who: {act}"
+    # And it must not promise a pass that will not come back for the item. Measured
+    # 2026-11-19 on a one-item probe board: after a refusal `owing_items` did not offer
+    # the refused item again on EITHER human-step shape — the `human_clauses` shape
+    # because `owed` is now empty and `derived_entries` reads a CLOSED item only, the
+    # `owed_outside` shape because the entry its undischarged row synthesises is not
+    # `_due` and `owing_items` claims due entries only. SM_20261119_001957 shipped the
+    # words "then the next pass may close" here; they were unreachable.
+    assert "next pass" not in act.lower(), \
+        f"the note promises a pass that does not re-offer this item: {act}"
+
+
+def test_a_refused_carrier_close_is_cleared_by_filing_the_carrier_item_it_names(isolated):
+    """The remedy half, run end to end: filing the carrier item is what changes the
+    guard's answer, because the filed child is now the open item that cites the parent.
+
+    The remedy is only a remedy if running it changes the answer, and the filing route
+    already exists (owed.py's `follow_up`). The first pass is the incident's shape — a
+    settle that empties the list and a close that is refused — so the child is filed by
+    hand here the way a `work` ruling would file it.
+
+    Named for what is actually demonstrated, not for a scheduler's next pass: the close
+    that goes through afterwards is `close_item` called again, which is what a person or
+    a later ruling does. `owing_items` did NOT offer #3820 again after the refusal when
+    measured 2026-11-19 (both human-step shapes), so a name promising that the next pass
+    closes would be a claim this node does not run — see the note's own wording at
+    `carrier_guard_note`."""
+    p, entries = _owing(isolated, 3820, [_CARRIER_OWE], status="draft")
+    B.update_frontmatter(p, {"human_clauses": [_CARRIER_STEP]})
+    first = O.apply_verdict(p, entries,
+                            [{"n": 1, "outcome": "settled", "evidence": "ruled on"}],
+                            item_id=3820)
+    assert first["moved"] == "" and first["carrier_guard"] == [_CARRIER_STEP]
+    child = B.new_item(f"Blocks #3820 — PERSON-ONLY: {_CARRIER_STEP}",
+                       "The step owed-check refused to orphan.", status="draft")
+    assert fm_of(p)["status"] == "draft"
+
+    assert O.uncarried_human_steps(fm_of(p), path=p) == [], \
+        "filing the carrier is what changes the guard's answer"
+    assert O.close_item(p, "the successor was filed for the step") is True
+    assert fm_of(p)["status"] == "done"
+    child_path = B._item_path(child.id)
+    assert child_path is not None and fm_of(child_path)["status"] == "draft", \
+        "the step is now carried by an open item, which is the point"

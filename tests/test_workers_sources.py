@@ -3898,3 +3898,100 @@ def test_a_fallback_cap_names_itself_in_the_log_and_on_the_run_row(
         f"so a fleet-wide halving reads as a task that timed out early: {out['meta']}")
     assert want_reason in caplog.text, (
         f"{state}: no WARNING named the fallback that produced this cap")
+
+
+# ---------------------------------------------------------------------------
+# owed-check — the carrier guard reaches the fleet row (#4242 clause 5)
+# ---------------------------------------------------------------------------
+
+
+def _carrier_board(tmp_path, monkeypatch, *, item_id: int = 4242,
+                   successor: bool = False):
+    """A board holding one open item that is the last carrier of a person-only
+    step, and on `successor` a second open item naming it — the #4008/#4009 pair.
+
+    Isolated the way `tests/test_owed_check.py` isolates it: the board directory,
+    the ledger, and owed.py's citation roots all point at `tmp_path`, so the pass
+    neither reads nor writes the live vault, repo or board."""
+    from scripts.automod import backlog as B, owed as O, state as S
+
+    board = tmp_path / "backlog"
+    board.mkdir(exist_ok=True)
+    monkeypatch.setattr(B, "BACKLOG_DIR", board)
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(O, "CITE_ROOTS",
+                        {"vault": tmp_path / "no-vault", "repo": tmp_path / "no-repo"})
+    monkeypatch.setattr(O, "_cite_revision", lambda: "")
+
+    step = "A person merges the two Voice-Loop entity rows by hand"
+    fm = {"status": "draft", "priority": "medium", "board": "lloyd",
+          "created": "2026-11-15T00:00:00+00:00", "tags": ["backlog"],
+          "owed": [{"what": "merge the Voice-Loop rows, then rule the item closed",
+                    "kind": "decide", "since": "2026-11-08T00:00:00"}],
+          "human_clauses": [step]}
+    path = board / f"{item_id}-the-sole-carrier.md"
+    path.write_text(f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n"
+                    f"# The sole carrier of a person-only step\n\nBody.\n", encoding="utf-8")
+    if successor:
+        succ = {"status": "draft", "priority": "medium", "board": "lloyd",
+                "created": "2026-11-16T00:00:00+00:00", "tags": ["backlog"]}
+        (board / f"{item_id + 1}-blocks-the-carrier.md").write_text(
+            f"---\n{yaml.dump(succ, default_flow_style=False)}---\n\n"
+            f"# Blocks #{item_id} — PERSON-ONLY: run the merge\n\nThe step, still owed.\n",
+            encoding="utf-8")
+    return path, step
+
+
+def _owed_check_pass(tmp_path, monkeypatch, item_id: int, evidence: str) -> dict:
+    """Run one apply pass of the owed-check job over that board with a session that
+    rules the single owed entry `settled`, and hand back the ledger row it wrote."""
+    from scripts.automod import state as S
+
+    async def fake(prompt, **kw):
+        return {"structured": {"entries": [{"n": 1, "outcome": "settled",
+                                            "evidence": evidence}],
+                               "summary": "the entry is settled"},
+                "session_id": "sess_carrier", "stop_reason": "stop"}
+
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+
+    from workers.sources import owed_check as OC
+    # the file's own row helper, so the source is driven by a real `QueueItem` and
+    # not by a stub that could drift from what the queue actually hands `execute`.
+    out = asyncio.run(OC.execute(_item({"item_id": item_id, "apply": True})))
+    assert out["status"] == "success", out
+    rows = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "owed_check"]
+    assert rows, "the pass wrote no owed_check row at all"
+    return rows[-1]
+
+
+def test_the_owed_check_row_carries_the_carrier_guard_that_held_the_close(tmp_path, monkeypatch):
+    """#4242 clause 5: the refusal is on the row, not only on the item.
+
+    The fleet event projects `result` through a whitelist, so a key `apply_verdict`
+    returns but the whitelist does not name never reaches a reader — which is
+    exactly how #3908's summary came to claim a clause rewrite no `clause_amended`
+    event backed. `carrier_guard` is therefore named beside `remaining`, `filed`,
+    `moved` and `amended`: the row alone answers "how many closes did the guard
+    refuse this week", which is what the item's owed-after-landing check needs."""
+    path, step = _carrier_board(tmp_path, monkeypatch)
+    row = _owed_check_pass(tmp_path, monkeypatch, 4242,
+                           "ruled 11-18: the merge is all that is left")
+    assert row["result"]["carrier_guard"] == [step], \
+        f"the row must carry the step it refused to orphan: {row['result']}"
+    assert row["result"]["moved"] == "", "the item stayed open, and the row says so"
+    assert row["result"]["remaining"] == 0 and row["result"]["filed"] == []
+    assert "owed-check close refused: carrier guard" in path.read_text(encoding="utf-8"), \
+        "the item a human reads and the row a query reads tell the same story"
+
+
+def test_the_owed_check_row_says_nothing_was_refused_when_the_close_proceeds(tmp_path, monkeypatch):
+    """The same key read the other way, which is what makes it countable: an open
+    successor naming the closing item is a carrier, the close proceeds, and the row
+    says `carrier_guard: []` rather than omitting the field — a missing key and an
+    empty list differ the moment somebody adds up a week of passes."""
+    path, _step = _carrier_board(tmp_path, monkeypatch, successor=True)
+    row = _owed_check_pass(tmp_path, monkeypatch, 4242, "ruled 11-18 with a successor on the board")
+    assert row["result"]["carrier_guard"] == [], row["result"]
+    assert row["result"]["moved"] == "closed"
+    assert "carrier guard" not in path.read_text(encoding="utf-8")

@@ -805,7 +805,165 @@ def _hold_note(block: dict, why: str) -> str:
         f"'{_text(block['receipt'], 400)}' {why}", 650)
 
 
-def close_item(path: Path, why: str, *, require_rows_discharged: bool = False) -> bool:
+# ── The carrier guard (#4242) ───────────────────────────────────────────────
+#
+# A close moves ONE item's status, but a human-only step lives on that item's front
+# matter, so closing the last open item that names a step deletes the only place the
+# step was written down. #3812 did exactly that at 2026-11-09T07:29: it went
+# `draft → done: closed by owed-check: every owed entry is settled` through #1909's
+# empty-list branch while its person-only step lived ONLY in `human_clauses` (:111 —
+# the item had no `owed_outside:` row at all) and no other open item named it. After
+# the close, no open backlog file named the step anywhere. `close_item`'s four
+# existing refusals (unparsed front matter, already `done`, a pending hand-run
+# #3017, #3931's lost discharge) all read THIS item's file; none could see that one.
+#
+# Scope, stated rather than slipped: this is owed-check's route to `done`. Three
+# other routes reach `done` — the landing sweep's close branch, the member-fold and
+# `desired_statuses`' met-landing branch (`backlog.py:5920-5927`, enumerated in
+# `hand_run_pending`'s docstring) — and they read no carrier guard. #3017 made its
+# predicate a shared four-closer check with a cross-surface test; widening this one
+# the same way is the ruling #4242 owes after landing, not a decision to sneak in.
+
+CARRIER_GUARD_PREFIX = "owed-check close refused: carrier guard"
+
+
+def human_steps_of(fm: dict) -> list[str]:
+    """Every step on this item that only a person's hands can do, as one list.
+
+    Two surfaces, because the incident's step lived on the one a guard keyed on
+    `owed_outside` alone would have missed: `human_clauses` (#2055's stranded
+    clauses, and #3812's only record of its merge) and an `owed_outside` row that has
+    NOT been discharged. A row carrying `done` is a step somebody already ran —
+    #3931's revisit route exists to re-verify that claim, not to hold the item open
+    — so it is not a step to carry, which is what keeps the discharged-row closes
+    #3931 measured running.
+
+    The text is `human_clauses_of`'s cleaned form, so a YAML payload fragment that is
+    not a clause (`1.`, `1]}],` — #3504) cannot hold an item open."""
+    from scripts.automod import backlog as B
+    rows = [r for r in (fm.get(OUTSIDE_KEY) or []) if isinstance(r, dict) and not r.get("done")]
+    out: list[str] = []
+    seen: set[str] = set()
+    for what in list(B.human_clauses_of(None, fm)) + [_text(r.get("what")) for r in rows]:
+        key = _clause_key(what)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _cites_item(text: str, item_id: int) -> bool:
+    """Whether `text` names item `item_id` as `#<id>`.
+
+    Bounded on both sides: `#4008` must not match inside `#40081`, and a bare `4008`
+    in prose is a number, not a citation."""
+    return re.search(rf"(?<![0-9])#{int(item_id)}(?![0-9])", text or "") is not None
+
+
+def _item_id_of_path(path: Path | None) -> int | None:
+    """The id an item file's name carries, by `load_item`'s own pattern
+    (`backlog.py:3445`), so the guard needs no second parse of the file."""
+    if path is None:
+        return None
+    # `path.name`, not the whole path: `load_item` matches the item file's NAME, and
+    # matching the full path instead found no id at all — which silently UN-skipped
+    # the closing item in the scan, so it was its own carrier and the guard never
+    # fired. A guard that reads its own id off a string form has to read the same
+    # string its caller does.
+    m = re.match(r"^(\d+)[-_]", Path(path).name)
+    return int(m.group(1)) if m else None
+
+
+def carrier_guard_note(steps: list[str], item_id: int | None) -> str:
+    """The line a refused close leaves on the item, remedy included.
+
+    The guard cannot tell a step a person actually ran from one a ruling made moot:
+    after a ruling both sit in `owed_settled`, and only an `owed_outside` row gets
+    `done` written (the write at `apply_verdict`'s `settled` branch). So it WILL
+    refuse closes it should honour, and the remedy has to be part of the sentence:
+    filing the carrier item (this module's `follow_up` route, or a person doing it)
+    is what changes the guard's answer.
+
+    What the sentence does NOT do is promise "the next pass may close", which is what
+    SM_20261119_001957 wrote here; the review found that promise unpinned, and measuring
+    it 2026-11-19 on a one-item probe board found it false for the incident's own shape.
+    After a refusal `owing_items` offers the refused item again only on the
+    `owed_outside` shape, and only once the synthesised entry's `recheck_after` (+1 day)
+    arrives; on the `human_clauses` shape — #3812's, the one with no `owed_outside:` row
+    at all — the `owed` list is now empty and `derived_entries` synthesises nothing
+    because `_open_item` answers [] for the CLOSED item the caller just marked done, so
+    the queue never offers it again. The refusal is therefore a HOLD for a person or a
+    carrier item, not a deferral the job will revisit, and the note says who acts.
+
+    The step text is capped at 150 and the measured worst case is 597 chars, because the
+    remedy is the part a reader acts on and it must not fall off the 600 bound every
+    other activity line this module writes shares."""
+    more = "" if len(steps) < 2 else f" (+{len(steps) - 1} more)"
+    who = f"#{item_id}" if item_id is not None else "This item"
+    return _text(
+        f"{CARRIER_GUARD_PREFIX}: {who} is the last open carrier of a human-only "
+        f"step: {_text(steps[0], 150)}{more}. No other open backlog item carries that "
+        "step or names this one, so closing here leaves the step with no open item to "
+        "wait on. Remedy: file the carrier item that owns it (owed-check's `follow_up` "
+        f"route, or a person can); with an open carrier on the board, closing {who} is "
+        f"allowed again. Nothing here re-owes {who}: a person may have to close it.", 600)
+
+
+def uncarried_human_steps(fm: dict, *, path: Path | None = None,
+                          boards: tuple[str, ...] | None = None) -> list[str]:
+    """The human-only steps on this item that NO OTHER OPEN backlog item carries.
+
+    Empty means a close orphans nothing: the item has no human-only step, or some
+    open item still names each one. Non-empty means closing here would leave the
+    named step with no open item to wait on — the #3812 shape.
+
+    A step counts as carried by EITHER arm, because #4008's ruling makes both
+    legitimate and they do not overlap:
+
+      * another open item carries a step whose `_clause_key` is equal — the match
+        that survives 109be9ea stripping `N.` enumerators off stored clauses
+        (#3002), which is why exact text stopped matching at all;
+      * another open item NAMES the closing item. #4009's title is literally
+        "Blocks #4008 — PERSON-ONLY: run the 12-pair SUFFIX_SAFE apply of §4", and
+        its own clause text ("Person runs §4 Step 1: copy … semantic-verdicts
+        .jsonl …") is NOT text-equal to #4008's, so arm 1 alone would have refused
+        the very close #4008's ruling says is legitimate.
+
+    It reads backlog files and nothing else — `B.all_items`, `B.front_matter_of`,
+    no ledger, no `workers.db`, no `kg.sqlite` — so the decision comes from the same
+    board a human reads and can never be served a store a sweep has not written. The
+    scan covers the whole board rather than the closing item's own `board:` value on
+    purpose: a false refusal is the only harm this guard can do (the triage measured
+    2297 of 4131 `done` items carrying `human_clauses:`), and a carrier is a carrier
+    whatever board it sits on.
+
+    `path` supplies the closing item's id for arm 2; without one arm 2 is inert and
+    the guard degrades to arm 1, never the other way round."""
+    from scripts.automod import backlog as B
+    steps = human_steps_of(fm or {})
+    if not steps:
+        return []
+    item_id = _item_id_of_path(path)
+    uncarried = list(steps)
+    for other in B.all_items(boards):
+        if not _open_item({"status": other.status}):
+            continue
+        if item_id is not None and other.id == item_id:
+            continue
+        if item_id is not None and (_cites_item(other.name, item_id)
+                                    or _cites_item(other.body, item_id)):
+            return []
+        carried = {_clause_key(w) for w in human_steps_of(B.front_matter_of(other.path))}
+        remaining = [s for s in uncarried if _clause_key(s) not in carried]
+        if len(remaining) != len(uncarried):
+            uncarried = remaining
+            if not uncarried:
+                return []
+    return uncarried
+
+
+def close_item(path: Path, why: str, *, require_rows_discharged: bool = False,
+               refusal: dict | None = None) -> bool:
     """Close an open item on Lloyd's own ruling. The status move goes through
     the shared recorder, so `completed` and the activity line are the ones
     every other closer writes.
@@ -823,6 +981,23 @@ def close_item(path: Path, why: str, *, require_rows_discharged: bool = False) -
     non-zero, the status is left exactly as it was, and the refusal is written to
     the item's activity log naming the failing receipt, so a reader of the item
     can tell "held" from "nobody tried".
+
+    The carrier guard (#4242) refuses it a fifth way, and it is the only refusal
+    that reads another item: `uncarried_human_steps` names this item's human-only
+    steps, and if some OTHER open item does not carry each one the close is held —
+    closing the last open carrier of a person-only step deletes the only place the
+    step was written down, which is how #3812's merge went unwritten on 2026-11-09.
+    The refusal is on the item's activity log with its remedy, and when the caller
+    passes a `refusal` dict it also learns WHY the close was refused: the steps land
+    under `carrier_guard` there, which is the only route by which
+    `apply_verdict`'s result — and so the fleet row — can tell this refusal from a
+    hand-run hold. Both #1909's empty-list branch and the explicit `close` outcome
+    pass it, so one measurement decides both.
+
+    It sits AFTER #3931's lost-discharge test on purpose: an undischarged
+    `owed_outside` row is both a lost discharge and an uncarried step, and the
+    reader of that item needs to be told the discharge went away, which is the
+    narrower and more actionable of the two readings.
 
     The replace goes through the store's one write path (`backlog._write_item`:
     cross-process lock, re-read inside it, temp-then-`os.replace`), because this
@@ -851,6 +1026,14 @@ def close_item(path: Path, why: str, *, require_rows_discharged: bool = False) -
                           "discharge since the read"
                           + (f": {lost[0]}" if lost else " — the rows are gone"))[:600])
             return False
+    uncarried = uncarried_human_steps(fm, path=path)
+    if uncarried:
+        if refusal is not None:
+            refusal["carrier_guard"] = uncarried
+        B.update_frontmatter(
+            path, {},
+            activity=carrier_guard_note(uncarried, _item_id_of_path(path)))
+        return False
     if not record_status_move(fm, "done", f"closed by owed-check: {why}"[:600],
                               remove_tags=(B.NEEDS_HUMAN_TAG,)):
         return False
@@ -1158,6 +1341,10 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
     # Set only when the close being ruled rides on a discharge (#3931): the write
     # then re-reads the rows and refuses if any has lost its `done` since the read.
     close_needs_rows = False
+    # #4242: filled by `close_item` when the carrier guard is what refused this
+    # pass's close, so the step it held is knowable by the caller instead of only
+    # readable off the item. Both close sites below pass it; at most one runs.
+    close_refusal: dict = {}
     stamp = _stamp()
     is_open = str(fm.get("status") or "") != "done"
     # One receipt read for the whole pass, on the item as it stands now: an
@@ -1396,7 +1583,8 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                 else f"reopen refused: {exc}"[:200]
     elif item_move == "close" and is_open:
         moved = "closed" if close_item(path, move_why,
-                                      require_rows_discharged=close_needs_rows) else ""
+                                       require_rows_discharged=close_needs_rows,
+                                       refusal=close_refusal) else ""
     elif is_open and settled and not keep and not outside:
         # #1909: the sweep that empties the list is the sweep that closes. An open
         # item with nothing owed was a hole, not a neutral state — #1751 sat in it
@@ -1415,9 +1603,19 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             path, "every owed entry is settled — the last "
                   f"({last['outcome']}) at {str(last['at'])[:10]}: "
                   f"{last.get('evidence') or last.get('ruling') or 'no detail given'}"[:400],
-        ) else ""
+            # #4242: this is the branch #3812 closed through — `draft → done: closed
+            # by owed-check` with its person-only step in `human_clauses` and no open
+            # successor — so the carrier guard has to be on it exactly as much as on
+            # the explicit `close` outcome. A guard on one of two routes to the same
+            # status is not a guard.
+            refusal=close_refusal) else ""
+    # `carrier_guard` is the steps this pass REFUSED to orphan. Empty on every
+    # ordinary pass, which is what makes it countable: the item's owed-after-landing
+    # check asks how many closes a week of passes refused, and a key that only
+    # appeared on a refusal could not answer "zero".
     return {"remaining": len(keep), "settled": len(settled), "outside": len(outside),
-            "filed": filed, "moved": moved, "notes": notes, "amended": amended}
+            "filed": filed, "moved": moved, "notes": notes, "amended": amended,
+            "carrier_guard": close_refusal.get("carrier_guard") or []}
 
 
 def outside_list(boards: tuple[str, ...] | None = None) -> list[dict]:

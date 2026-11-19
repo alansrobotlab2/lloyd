@@ -964,6 +964,16 @@ CLAUSE_FIXTURE_ROWS_UNDER_TEST = {
         "the same two phantoms on the owed side, tests/test_owed_check.py",
     ("test_a_closed_item_whose_human_clauses_are_payload_keys_derives_nothing", "1]}],"):
         "the same two phantoms on the owed side, tests/test_owed_check.py",
+    # #4242's carrier guard derives its steps through `human_clauses_of`, so the same
+    # filter has to hold on that path too — a payload row read as a step would hold
+    # an item open for ever instead of merely failing to close it. The node's
+    # assertion IS the refusal of these two rows, so migrating them to real demands
+    # would delete the thing it tests.
+    ("test_a_human_step_with_no_carrier_is_named_by_the_guard", "1."):
+        "#3504's first phantom, planted on the carrier guard's own read path to prove "
+        "a payload row yields no step and therefore cannot hold an item open",
+    ("test_a_human_step_with_no_carrier_is_named_by_the_guard", "1]}],"):
+        "#3504's second phantom, same node, same proof",
     ("test_the_structured_path_carries_clauses_too", "none"):
         "the placeholder clause row that node asks `parse_review` to drop",
     ("test_clause_entries_that_are_not_objects_are_still_unreadable", "met"):

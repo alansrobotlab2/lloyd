@@ -474,9 +474,19 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # event, because the row kept only `remaining`, `filed` and `moved`. A rewrite
     # claim is now checked against the clause numbers the writer actually applied,
     # not against the prose that made it.
+    #
+    # `carrier_guard` is #4242's, and it is that same defect read forward instead of
+    # back: when the carrier guard refuses a close that would have orphaned the last
+    # open carrier of a human-only step, the refusal is real on the item but this
+    # whitelist decides what a query can ever see. A key `apply_verdict` returns and
+    # this line does not name never reaches a reader, so the standing
+    # owed-after-landing measurement — closes the guard refused this week, and the
+    # stuck-carrier shape beside it — would have to be rebuilt by hand from item
+    # prose. An empty list on an ordinary pass is what makes it countable.
     S.append_event({"event": "owed_check", "item_id": owing.item.id, "apply": apply, "ok": True,
                     "outcomes": [{"n": a["n"], "outcome": a["outcome"]} for a in parsed["entries"]],
-                    "result": {k: result.get(k) for k in ("remaining", "filed", "moved", "amended")},
+                    "result": {k: result.get(k) for k in
+                               ("remaining", "filed", "moved", "amended", "carrier_guard")},
                     "collided": collided,
                     "session_id": run.get("session_id"), "summary": parsed["summary"]})
     counts: dict[str, int] = {}
