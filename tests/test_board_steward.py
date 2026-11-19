@@ -8,6 +8,7 @@ never the steward's: it cannot set `done`.
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import sqlite3
@@ -3092,6 +3093,287 @@ def test_the_alarm_body_states_a_dry_run_flag_when_the_tick_wrote_nothing(board,
     assert out is not None
     body = _filed(board)[0].body
     assert "apply: false (dry run" in body, body
+
+
+# ── the DIRECTION sentence: which leg fired is what the body says (#4251) ───
+#
+# `_create`'s header used to be ONE unconditional f-string declaring the trailing-7-day
+# judgement "was measured **below** owed-check's flip floor". The revert leg is reached
+# only AFTER the volume floor and the rate floor have both passed (`below_floor`, and its
+# docstring's "A CLEARED window with a revert in it is the case this alarm was kept alive
+# for"), so every revert-leg filing printed the opposite of its own figures. Both
+# post-flip filings the flip has produced read that way — #4184 (`rate` 0.968) and #4247
+# (`rate` 0.9691), each printing "below … floor" against a floor of 0.9 in the same body
+# whose `board_steward_disagreement` ledger row, written by the same call, recorded
+# `leg: "post-flip revert"`. The reader of that body is the reader of `config.yaml`'s
+# 7-day stop condition for the apply flip, so a false direction is a false reading of the
+# flip's health. These nodes pin the branch, the one derivation behind both surfaces, and
+# the scope of what may NOT change.
+
+#: The sub-floor header sentence exactly as HEAD 9156e6f9 rendered it for `_window7()`,
+#: frozen as a literal rather than re-derived: clauses 2 and 5 ask that a below-floor
+#: filing keep the text it has, so the thing to compare against is the old bytes, not a
+#: second copy of the rule.
+RATE_LEG_HEADER = (
+    "Filed by `workers/board_disagreement.py` at the end of a board-steward tick whose "
+    "trailing-7-day judgement was measured **below** owed-check's flip floor: "
+    "`judged=127` (the leg it needs is 50) with agree `rate=0.7953` against a floor of "
+    "0.9, over the window since 2026-10-20T23:49:13+00:00. The volume leg is cleared, so "
+    "this is a measured disagreement and not an unmeasured one — which is the case "
+    "nothing used to read."
+)
+
+#: Below-floor wording, as one constant, so a node asserting its ABSENCE is asserting the
+#: absence of the exact sentence that shipped and not of a paraphrase of it.
+BELOW_FLOOR_CLAIM = "measured **below** owed-check's flip floor"
+
+
+def _header_para(body: str) -> str:
+    """The filing's DIRECTION paragraph alone, whatever titles ride above it.
+
+    Scoped by the next paragraph's own opening words rather than by a line count, so a
+    rewrap of the header cannot move the window the assertions read through. The last block
+    before that marker, rather than everything before it, because `new_item` writes its own
+    H1 above the body the filer composes and the filer's body starts with one too — the
+    loaded item's `body` carries the title twice, and neither title is the sentence under
+    test.
+    """
+    head, sep, _rest = body.partition("\n\nEach row names BOTH sides")
+    assert sep, f"the body's second paragraph moved; can't scope the header:\n{body[:400]}"
+    return head.rsplit("\n\n", 1)[-1]
+
+
+def _leg_rows(ledger):
+    """The `leg` field of every disagreement row in a ledger, in the order written."""
+    return [e["leg"] for e in S.read_events(path=ledger)
+            if e.get("event") == D.EVENT]
+
+
+def _new_board(tmp_path, name):
+    d = tmp_path / name
+    d.mkdir()
+    return d
+
+
+def test_a_revert_leg_filing_on_a_cleared_window_says_cleared_not_below_floor(board,
+                                                                             tmp_path):
+    """Clause 1: the direction the body states is the direction that actually fired.
+
+    The window here is `_post_flip_window()` — `judged` 140 over the volume floor of 50 and
+    `rate` 0.9714 over the agree-rate floor of 0.90 — so BOTH floors cleared, and the only
+    thing that can file is the revert pair `_flip_ledger` writes. The header must therefore
+    say the window cleared both floors and name the post-flip revert as what fired, and must
+    not print the below-floor claim at all, anywhere in the body.
+    """
+    led = _flip_ledger(tmp_path / "revert-body")
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_post_flip_window(), backlog_dir=board, ledger=led)
+    assert out is not None and out["action"] == "filed", out
+    body = _filed(board)[0].body
+    para = _header_para(body)
+    assert BELOW_FLOOR_CLAIM not in para, para
+    assert BELOW_FLOOR_CLAIM not in body, body
+    assert "cleared both" in para, para
+    assert "the volume leg and the agree-rate leg" in para, (
+        "the header never names WHICH floors cleared inside its own cleared clause. The "
+        "word `volume` alone proves nothing: `The volume leg is cleared` prints on BOTH "
+        f"legs, so only this naming clause constrains the revert header:\n{para}")
+    assert D.LEG_REVERT in para, f"the header never names the leg that fired:\n{para}"
+    assert "`judged=140`" in para and "`rate=0.9714`" in para, (
+        f"the cleared reading's own figures are gone from the header:\n{para}")
+    assert "against a floor of 0.9" in para, (
+        "the floor it cleared is not stated. Bare `0.9` would be satisfied by the "
+        f"`rate` figure itself, so it proves nothing:\n{para}")
+
+
+def test_a_sub_floor_filing_keeps_the_measured_below_floor_header(board, tmp_path):
+    """Clause 2 and clause 5's create half: the rate leg's text is not touched.
+
+    `_window7()` is the 2026-10-27 published reading — `judged` 127 (volume cleared),
+    `rate` 0.7953 (under the 0.90 the flip needs) — which is the filing the below-floor
+    wording describes. The whole direction paragraph is compared for equality against the
+    bytes HEAD 9156e6f9 wrote, so "unchanged in substance" is checked as "unchanged", and a
+    branch that re-worded the rate leg to share the revert leg's sentence fails here.
+    """
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+                           backlog_dir=board, ledger=tmp_path / "rate-body.jsonl")
+    assert out is not None and out["action"] == "filed", out
+    para = _header_para(_filed(board)[0].body)
+    assert para == RATE_LEG_HEADER, (
+        "the sub-floor header moved: clause 2 asks that this filing keep today's wording "
+        f"and its figures.\n--- filed ---\n{para}\n--- frozen ---\n{RATE_LEG_HEADER}")
+    assert BELOW_FLOOR_CLAIM in para
+    assert "`judged=127`" in para and "`rate=0.7953`" in para and "floor of 0.9" in para
+
+
+def test_the_bodies_direction_and_the_ledger_leg_are_one_derivation(board, tmp_path,
+                                                                    monkeypatch):
+    """Clause 3: the body's wording and the ledger row's `leg` cannot contradict.
+
+    Three parts, because "one derivation" is a claim about code shape and only a patch can
+    show it. FIRST the key itself: the derivation reads the `below_floor` trigger string, so
+    the sentence `below_floor` emits has to be the one the prefix selects, in both
+    directions — a re-worded revert reason that stopped starting with the prefix would
+    silently re-label every revert filing as a rate filing. SECOND, one real filing per leg,
+    read back from BOTH stores that call writes: the backlog file and the ledger row, with
+    the two direction surfaces compared. THIRD, `leg_from_trigger` is patched to answer for
+    a sub-floor window, and both surfaces move together — which is the only way to show a
+    reader that neither one keeps its own copy of the rule.
+    """
+    hit, revert_reason = D.below_floor(_post_flip_window(), _flip_ledger(tmp_path / "k1"))
+    assert hit is True and revert_reason.startswith(D.REVERT_TRIGGER_PREFIX), revert_reason
+    hit2, rate_reason = D.below_floor(_post_flip_window(rate=0.5))
+    assert hit2 is True and not rate_reason.startswith(D.REVERT_TRIGGER_PREFIX), rate_reason
+    assert D.leg_from_trigger(revert_reason) == D.LEG_REVERT
+    assert D.leg_from_trigger(rate_reason) == D.LEG_RATE
+    assert D.leg_from_trigger("") == D.LEG_RATE, "an absent trigger is not a revert"
+
+    rev_board, rev_led = _new_board(tmp_path, "b-revert"), _flip_ledger(tmp_path / "l-rev")
+    filed_r = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                               window=_post_flip_window(), backlog_dir=rev_board,
+                               ledger=rev_led)
+    assert filed_r is not None and filed_r["action"] == "filed", filed_r
+    rate_board, rate_led = _new_board(tmp_path, "b-rate"), tmp_path / "l-rate.jsonl"
+    filed_v = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                               window=_window7(), backlog_dir=rate_board, ledger=rate_led)
+    assert filed_v is not None and filed_v["action"] == "filed", filed_v
+
+    rev_leg, rate_leg = _leg_rows(rev_led)[0], _leg_rows(rate_led)[0]
+    rev_body, rate_body = _filed(rev_board)[0].body, _filed(rate_board)[0].body
+    assert rev_leg == D.LEG_REVERT and rate_leg == D.LEG_RATE, (rev_leg, rate_leg)
+    # The invariant clause 3 asks for: no filing whose body says below while its row says
+    # revert, or the reverse. Stated once per surface pair rather than as two separate
+    # "not in" asserts, so a future leg name cannot satisfy one and break the other.
+    for leg, body in ((rev_leg, rev_body), (rate_leg, rate_body)):
+        assert (leg == D.LEG_REVERT) == (BELOW_FLOOR_CLAIM not in body), (
+            f"a filing whose ledger leg is {leg!r} carries the below-floor claim in its "
+            f"body: the two direction surfaces are derived twice\n{body[:400]}")
+
+    monkeypatch.setattr(D, "leg_from_trigger", lambda trigger: D.LEG_REVERT)
+    patched_board, patched_led = _new_board(tmp_path, "b-patched"), tmp_path / "l-p.jsonl"
+    filed_p = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                               window=_window7(), backlog_dir=patched_board,
+                               ledger=patched_led)
+    assert filed_p is not None and filed_p["action"] == "filed", filed_p
+    patched_body = _filed(patched_board)[0].body
+    assert _leg_rows(patched_led)[0] == D.LEG_REVERT, (
+        "patching the one derivation did not move the ledger row, so `_event` derives the "
+        "leg somewhere else")
+    assert BELOW_FLOOR_CLAIM not in patched_body and "cleared both" in _header_para(
+        patched_body), (
+        "patching the one derivation did not move the body, so `_create` words its header "
+        "from somewhere else")
+
+
+def test_a_widening_names_the_leg_that_widened_it_and_keeps_its_figures(board, tmp_path):
+    """Clause 4, and clause 5's merge half: `### Added` says which leg widened it.
+
+    `_merge` already forwards `trigger` to `_event`, so the ledger row for a widening always
+    recorded its leg while the appended text named nothing — a reader of a merged body saw
+    the ORIGINAL create's leg and could not tell a revert-leg widening from a rate-leg one.
+    One item is widened twice, once per leg, so the two headings sit in one file and have to
+    be distinguishable from each other. The heading's `judged`/`rate` figures are matched
+    against the exact prefix today's bytes produce: clause 5 says only the leg text is
+    added, the numbers do not move.
+    """
+    led = _flip_ledger(tmp_path / "merge-leg")
+    first = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=_window7(), backlog_dir=board, ledger=led)
+    assert first is not None and first["action"] == "filed", first
+    path = _filed(board)[0].path
+    assert _leg_rows(led)[-1] == D.LEG_RATE, "the create was not a rate-leg filing"
+
+    moves2 = DIS_MOVES + [{"item_id": 3119, "status": "draft",
+                           "note": "the vec0 index needs a hand-side copy rebuild"}]
+    want2 = dict(DIS_EXPECTED)
+    want2[3119] = ("up_next", "in_progress by no round, ready by its acceptance")
+    second = D.file_or_update(_agree(3119), moves2, want2, window=_post_flip_window(),
+                              backlog_dir=board, ledger=led)
+    assert second is not None and second["action"] == "merged", second
+
+    moves3 = DIS_MOVES + [{"item_id": 3201, "status": "draft",
+                           "note": "no triage verdict in its history"}]
+    want3 = dict(DIS_EXPECTED)
+    want3[3201] = ("up_next", "has a confirmed triage with acceptance text")
+    third = D.file_or_update(_agree(3201), moves3, want3, window=_window7(rate=0.70),
+                             backlog_dir=board, ledger=led)
+    assert third is not None and third["action"] == "merged", third
+
+    body = path.read_text(encoding="utf-8")
+    added = [ln for ln in body.splitlines() if ln.startswith("### Added")]
+    assert len(added) == 2, f"expected one heading per widening:\n{added}"
+    assert D.LEG_REVERT in added[0], (
+        f"a revert-leg widening names nothing but the original create's leg:\n{added[0]}")
+    assert D.LEG_RATE in added[1], f"the rate-leg widening is unlabelled:\n{added[1]}"
+    assert re.match(r"^### Added \S+ \(window `judged=140`, `rate=0\.9714`\)", added[0]), (
+        f"the widening's figures stopped printing as they printed today:\n{added[0]}")
+    assert re.match(r"^### Added \S+ \(window `judged=127`, `rate=0\.7`\)", added[1]), (
+        f"the widening's figures stopped printing as they printed today:\n{added[1]}")
+    assert _leg_rows(led) == [D.LEG_RATE, D.LEG_REVERT, D.LEG_RATE], _leg_rows(led)
+
+
+def test_only_the_direction_phrase_moves_between_the_two_legs_bodies(tmp_path):
+    """Clause 5: with the window held fixed, the ONLY difference is the direction.
+
+    Both bodies are `_create`'s own output for the same window, the same rows and the same
+    stamp, differing in nothing but the trigger sentence — and both triggers are the real
+    `below_floor` output, not invented text. Both bodies come back through the real reader,
+    so what is compared is the file a person opens. The direction paragraph and the
+    `**What tripped it**` line (which necessarily differs: it quotes the trigger) are cut
+    out, and everything else has to be byte-identical — the check that the `## Coverage`
+    window line, the both-sides prose, the `What to decide` section and the flag-state line
+    were not rewritten along the way. The cleared-versus-below wording is the only thing
+    clause 5 lets move.
+    """
+    w = _window7()
+    _hit, revert_trigger = D.below_floor(_post_flip_window(), _flip_ledger(tmp_path / "sk"))
+    _hit2, rate_trigger = D.below_floor(w)
+    assert revert_trigger.startswith(D.REVERT_TRIGGER_PREFIX), revert_trigger
+    assert not rate_trigger.startswith(D.REVERT_TRIGGER_PREFIX), rate_trigger
+
+    def create(name, trigger):
+        d = _new_board(tmp_path, name)
+        out = D._create(B, DIS_AGREE, DIS_MOVES, DIS_EXPECTED, w,
+                        "2026-11-18T00:00:00+00:00", backlog_dir=d,
+                        ledger=tmp_path / f"{name}.jsonl", trigger=trigger)
+        assert out["action"] == "filed", out
+        return _filed(d)[0].body
+
+    rate_body, rev_body = create("b-rate-only", rate_trigger), create("b-rev-only",
+                                                                      revert_trigger)
+    assert BELOW_FLOOR_CLAIM in rate_body and BELOW_FLOOR_CLAIM not in rev_body
+
+    def skeleton(text):
+        """The body with its direction paragraph and its trigger line cut out."""
+        head, sep, rest = text.partition("\n\nEach row names BOTH sides")
+        assert sep, f"the body's second paragraph moved:\n{text[:400]}"
+        before, sep2, _tail = rest.partition("**What tripped it**")
+        assert sep2, f"no `What tripped it` line to cut the body at:\n{text[:400]}"
+        return head.rsplit("\n\n", 1)[0] + before
+
+    if skeleton(rate_body) != skeleton(rev_body):
+        diff = "\n".join(list(difflib.unified_diff(skeleton(rate_body).splitlines(),
+                                                   skeleton(rev_body).splitlines(),
+                                                   "rate-leg", "revert-leg", lineterm=""))
+                         [:60])
+        raise AssertionError(
+            "the two filings differ somewhere outside the direction sentence and the "
+            f"trigger line:\n{diff}")
+
+    window_line = (f"- the window itself: {w['judged']} judged, `rate={w['rate']}` "
+                   f"against owed-check's {D.FLIP_MIN_RATE} floor, since "
+                   f"{w['window_since']}.")
+    assert window_line in rate_body and window_line in rev_body, (
+        "the `## Coverage` window line stopped printing the same figures on one leg")
+    cleared = ("The volume leg is cleared, so this is a measured disagreement and not an "
+               "unmeasured one")
+    assert cleared in rate_body and cleared in rev_body, (
+        "the volume clause is true on both legs and had to survive on both")
+    tripped_r = [ln for ln in rate_body.splitlines() if ln.startswith("**What tripped it**")]
+    tripped_v = [ln for ln in rev_body.splitlines() if ln.startswith("**What tripped it**")]
+    assert len(tripped_r) == len(tripped_v) == 1, (tripped_r, tripped_v)
+    assert tripped_r[0] != tripped_v[0]
+    assert rate_trigger in tripped_r[0] and revert_trigger in tripped_v[0]
 
 
 def test_the_post_flip_leg_silences_itself_on_a_missing_ledger_or_window(tmp_path):

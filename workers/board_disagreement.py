@@ -71,6 +71,36 @@ NAME = ("board-steward disagreed with the state machine and nobody has ruled "
 FLIP_MIN_JUDGED = 50
 FLIP_MIN_RATE = 0.90
 
+#: The two names one filing's direction takes — the ledger row's `leg` field AND the
+#: wording of the created body's header. One pair of spellings, chosen so the string a
+#: reader SELECTs out of `promotions.jsonl` is the same string that reader sees on the
+#: item (#4251).
+LEG_REVERT = "post-flip revert"
+LEG_RATE = "pre-flip rate"
+
+#: The prefix of the reason `below_floor` returns from its post-flip leg, and the ONLY key
+#: `leg_from_trigger` reads. The reason is built FROM this constant so the two cannot drift
+#: by editing one of them; a re-worded reason that moved the prefix would otherwise
+#: silently re-label every revert filing as a rate filing, in both surfaces at once.
+#: Pinned in `tests/test_board_steward.py` against the string `below_floor` really emits.
+REVERT_TRIGGER_PREFIX = "steward_move applied"
+
+
+def leg_from_trigger(trigger: str) -> str:
+    """Which leg of `below_floor` filed this, derived from the trigger it returned.
+
+    The ONE derivation of the direction, read by every surface that publishes it: the
+    `leg` field of the `_event` ledger row, the created body's header sentence, and the
+    `### Added` heading a widening writes. Before #4251 only the ledger row derived
+    anything — the header was one unconditional f-string declaring the judgement "measured
+    **below** owed-check's flip floor", so a revert-leg filing on a window that had CLEARED
+    both floors printed the opposite of its own `rate`, beside a row that said
+    `post-flip revert`. The body's reader is the reader of `config.yaml`'s 7-day stop
+    condition, which is why both surfaces now answer through this one function.
+    """
+    return (LEG_REVERT if str(trigger or "").startswith(REVERT_TRIGGER_PREFIX)
+            else LEG_RATE)
+
 #: Rows one filing may write. A tick is capped at `MOVES_MAX` (40) moves by
 #: `parse_steward`, so this is not a truncation in practice; it is the bound that
 #: keeps a malformed `disagree` list from writing an unbounded body.
@@ -252,8 +282,11 @@ def below_floor(window: dict, ledger: Path | None = None) -> tuple[bool, str]:
         # own reading, so the post-flip leg below can only ADD a firing, never re-word one.
         return True, f"judged {window['judged']} with rate {rate} under the {FLIP_MIN_RATE} floor"
     for rev in reverted_moves(window, ledger):
+        # Built FROM `REVERT_TRIGGER_PREFIX`: the same string is what `leg_from_trigger`
+        # keys on, and a drift between the two would mislabel the direction in the body,
+        # the ledger row and the widening heading together. The rendered text is unchanged.
         return True, (
-            f"steward_move applied to #{rev['item_id']} as `{rev['applied']}` was moved "
+            f"{REVERT_TRIGGER_PREFIX} to #{rev['item_id']} as `{rev['applied']}` was moved "
             f"back to `{rev['reverted_to']}` by the state machine on {rev['at']} "
             f"(reason: {rev['reason'] or 'unrecorded'}): the steward's applied move was "
             f"undone inside the window, which is the disagreement `rate` can no longer "
@@ -862,15 +895,34 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
             trigger: str = "",
             abstained: dict[int, str] | None = None) -> dict:
     rows = disagreement_rows(ids, moves, expected)
+    # The direction sentence, derived (#4251). This used to be one unconditional f-string
+    # declaring the window "measured **below** owed-check's flip floor", which is FALSE of
+    # every revert-leg filing: `below_floor` reaches that leg only after the volume floor and
+    # the rate floor have both PASSED, so #4184 (`rate` 0.968) and #4247 (`rate` 0.9691) each
+    # printed "below … a floor of 0.9" against their own above-floor figures, while the ledger
+    # row written in the same call said `post-flip revert`. Only the direction moves: the
+    # volume clause after this sentence is true on both legs, and the rate leg's bytes are
+    # untouched — `tests/test_board_steward.py` compares the sub-floor header against the
+    # exact text this file shipped at HEAD.
+    leg = leg_from_trigger(trigger)
+    if leg == LEG_REVERT:
+        head = ("tick whose trailing-7-day judgement **cleared both** of owed-check's flip "
+                "floors — the volume leg and the agree-rate leg —")
+        fired = (f"What fired is the **{LEG_REVERT}** leg: inside that window the state "
+                 f"machine moved back a status the steward had applied, which is the "
+                 f"disagreement the agree `rate` can no longer score post-flip. ")
+    else:
+        head = ("tick whose trailing-7-day judgement was measured **below** owed-check's "
+                "flip floor:")
+        fired = ""
     body = (
         f"# {NAME}\n\n"
         f"Filed by `workers/board_disagreement.py` at the end of a board-steward "
-        f"tick whose trailing-7-day judgement was measured **below** owed-check's flip "
-        f"floor: `judged={window.get('judged')}` (the leg it needs is "
+        f"{head} `judged={window.get('judged')}` (the leg it needs is "
         f"{FLIP_MIN_JUDGED}) with agree `rate={window.get('rate')}` against a floor of "
-        f"{FLIP_MIN_RATE}, over the window since {window.get('window_since')}. The volume "
-        f"leg is cleared, so this is a measured disagreement and not an unmeasured one — "
-        f"which is the case nothing used to read.\n\n"
+        f"{FLIP_MIN_RATE}, over the window since {window.get('window_since')}. {fired}"
+        f"The volume leg is cleared, so this is a measured disagreement and not an "
+        f"unmeasured one — which is the case nothing used to read.\n\n"
         f"Each row names BOTH sides of one disagreement: what the "
         f"steward proposed for that item, and what `desired_statuses` "
         f"(`scripts/automod/backlog.py`) wants, with its reason. Both sides outlive the "
@@ -996,8 +1048,15 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
     # human's ruling on a disagreement is ever rewritten. Composing it here is what made
     # the "kept their text" claim false: `_write_body` re-reads under the lock and appends
     # to THAT read instead. #3677.
+    # The leg is named in the heading (`leg_from_trigger`, the same call `_event` makes for
+    # its `leg` field, #4251). `_merge` already forwarded `trigger` to the ledger row, so the
+    # widening's leg was recorded and never published: a reader of a merged body saw the
+    # ORIGINAL create's direction and nothing for the widening, which is how a revert-leg
+    # widening under a rate-leg create reads as more of the same. The figures keep their
+    # exact position and format; only the trailing clause is new.
     appended = (f"### Added {stamp} (window `judged={window.get('judged')}`, "
-                f"`rate={window.get('rate')}`)\n\n" + "\n".join(rows) + "\n\n"
+                f"`rate={window.get('rate')}`) — widened by the "
+                f"**{leg_from_trigger(trigger)}** leg\n\n" + "\n".join(rows) + "\n\n"
                 + _coverage(named, window, merged=True,
                             unrecoverable=unrecoverable, dropped=dropped,
                             distinct=distinct, unruled=unruled, recorded=recorded,
@@ -1150,14 +1209,12 @@ def _event(ledger: Path | None, *, item_id: int | None, action: str,
         "window_since": window.get("window_since"),
         "tick_item_ids": ids,
         "new_item_ids": new_ids if new_ids is not None else ids,
-        # Which leg fired, as a field rather than prose: the 7-day stop condition is read
-        # off this store by a later job, and a reader must be able to select the revert-leg
-        # rows without parsing a sentence.
         # Which leg fired, as a FIELD rather than prose: the 7-day stop condition is read
         # off this store by a later job, which must be able to SELECT the revert-leg rows
-        # without parsing a sentence or re-measuring a window that has since aged. One
-        # derivation site, keyed on the `below_floor` sentence it was filed on.
-        "leg": ("post-flip revert" if trigger.startswith("steward_move applied")
-                else "pre-flip rate"),
+        # without parsing a sentence or re-measuring a window that has since aged. The value
+        # comes from `leg_from_trigger`, the one derivation the created body's direction and
+        # a widening's heading read too (#4251), so no filing can print "below" while its own
+        # row says "post-flip revert".
+        "leg": leg_from_trigger(trigger),
         "at": stamp,
     }, path=ledger)
