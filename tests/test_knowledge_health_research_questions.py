@@ -428,3 +428,89 @@ def test_the_thin_table_still_lists_the_fragments_and_counts_them(tmp_path):
         assert f"| {name} |" in table, name
     # 11 Gap-Shape + jail.nix + 2 fragments + 2 capitalized = 16 thin entities
     assert "**16** in total" in table, table[:400]
+
+
+# ── #4361: a clipped table cell gets no research question ────────────────────
+# 24 of the 17,624 entity dirs on the live facts root are a table cell cut short:
+# `comm...` comes from `projects/lloyd/channel-eval/ai-engineer.md:780`, whose own
+# text ends `… — Gus Iwanaga, comm…`, and the extractor made the clipped
+# attribution the subject. Because the shape was not in this file's filter, the
+# pair `- What does **comm...** relate to?` / `- Is **comm...** still relevant?`
+# landed in the live report at `knowledge-health-2026-11-19.md:367-368` (and at
+# `:337-338` on 11-17), which is the section
+# `skills/research-queue-generator/SKILL.md` Step 2.1 reads as its input — a
+# question no researcher can act on, offered every night the row is listed.
+#
+# The names below are live dir names. `Dan ...` carries a space before the dots;
+# `Greg Pstru…` is the truncation in the character the source note writes (U+2026),
+# which 0 live dirs carry because the mint rewrites it into three ASCII dots — the
+# read side refuses both spellings so it cannot be behind the mint.
+ELLIPSIS_NAMES = ["comm...", "Dan ...", "Greg Pstru...", "Greg Pstru…"]
+
+#: Written independently of the module, as the shapes at the top of this file are.
+ELLIPSIS_RE = re.compile(r"(?:\.{3,}|…)$")
+
+
+def _ellipsis_fixture(tmp_path):
+    """12 researchable thin entities plus the 4 clipped ones. The clipped names
+    carry the NEWEST facts, as the previous night's mis-minted names do, so
+    without the rule they would lead the section rather than sit at its edge."""
+    root = tmp_path / "facts"
+    usable = {f"Gap-Cell-{i:02d}": [i + 10] for i in range(12)}
+    entities = _load(root, {**usable, **{n: [0] for n in ELLIPSIS_NAMES}})
+    return _report(entities), usable
+
+
+def test_a_clipped_table_cell_gets_no_research_question(tmp_path):
+    """12 usable names + 4 clipped cells: 12 questions, and not one truncation
+    among them. Each clipped name would otherwise have contributed two lines —
+    `- What does **comm...** relate to?` and `- Is **comm...** still relevant?` —
+    which is the exact pair the live 11-19 section carries."""
+    report, usable = _ellipsis_fixture(tmp_path)
+    section = _section(report, "## Suggested Research Questions")
+    questions = _questions(report)
+
+    assert len(questions) == 12
+    assert set(questions) == set(usable)
+    assert [q for q in questions if ELLIPSIS_RE.search(q)] == []
+    for name in ELLIPSIS_NAMES:
+        assert f"**{name}**" not in section, name
+    # The section rendered a ranking: 12 survivors is above the floor of 10, so
+    # the rejection happened while the section works, not only when it gives up.
+    assert "RESEARCH_QUESTIONS_UNEVALUABLE" not in section
+
+
+def test_a_name_ending_in_one_full_stop_keeps_both_questions(tmp_path):
+    """`Insight.PA.` ends in a full stop the way 240 live entity dirs do
+    (`Tobin et al.`, `Kim, H.-B.`), and this rule does not touch it: the arm is
+    three ASCII dots or U+2026, never "the name ends in a dot". Same section,
+    opposite verdict — the clipped cell beside it is gone."""
+    root = tmp_path / "facts"
+    usable = {f"Gap-Cell-{i:02d}": [i + 10] for i in range(11)}
+    entities = _load(root, {**usable, "Insight.PA.": [3],
+                            **{n: [0] for n in ELLIPSIS_NAMES}})
+    report = _report(entities)
+    section = _section(report, "## Suggested Research Questions")
+
+    assert [ln for ln in section.splitlines() if "**Insight.PA.**" in ln] == [
+        "- What does **Insight.PA.** relate to?",
+        "- Is **Insight.PA.** still relevant?",
+    ]
+    assert "**comm...**" not in section
+    assert "RESEARCH_QUESTIONS_UNEVALUABLE" not in section
+
+
+def test_thin_entities_table_still_lists_the_clipped_cell_names(tmp_path):
+    """The same fixture: the questions drop to 12 while the table still prints a
+    row for every clipped name and its total says 16, not 12. The table is the
+    surface on which a regrowth in junk minting becomes visible — #743's signal,
+    and the reason `is_extraction_artifact_name` is applied to the questions and
+    not to the population. 24 clipped dirs are evidence only while they are
+    printed."""
+    report, _ = _ellipsis_fixture(tmp_path)
+    table = _table_names(report)
+
+    assert set(ELLIPSIS_NAMES) <= set(table)
+    assert "**16** in total" in _section(report, "## Thin Entities")
+    # The table kept them; only the questions lost them.
+    assert [q for q in _questions(report) if ELLIPSIS_RE.search(q)] == []

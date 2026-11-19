@@ -2093,3 +2093,167 @@ def test_a_fact_whose_own_entity_is_junk_is_held_back_not_handed_to_the_primary(
     assert out["entity"] == "Lloyd"
     assert [f["fact"] for f in out["facts"]] == ["runs on the primary slot"]
     assert out["held_back"] == 1
+
+
+# ── #4361: a clipped table cell is not an entity name ────────────────────────
+# The extractor promoted a table cell that had been cut short to an entity. The
+# row at `projects/lloyd/channel-eval/ai-engineer.md:780` reads
+# `…Architecting Intent-Driven UX — Gus Iwanaga, comm…` — the speaker's own
+# affiliation is clipped at the cell boundary, the source ellipsis is U+2026
+# (bytes `e2 80 a6`) and the minted directory carries three ASCII dots (bytes
+# `2e 2e 2e`), so something between the cell and the mkdir rewrites one into the
+# other. What that left on the live tree is `facts/comm.../comm...-overview.md`
+# (`source_fact_count: 1`, no relationships file) defining "comm... is a synthetic
+# query-to-target evaluation set designed for skill and tool routing", with
+# `comm...-state.md` stat-001 "comm... manufactures a synthetic query-to-target
+# eval set…" — the truncated attribution promoted to the subject of its own facts.
+# It is a class and not one row: 24 of the 17,624 entity dirs on the facts root
+# end in three ASCII dots (`Dan ...`, `Ne...`, `Cloudfl...`, `Safia Abda...` …),
+# and two of the 24 (`Kathryn Grayson Na...` and `Kathryn Grayson N...`) are one
+# person minted twice, because the cell was cut in two places.
+
+#: Truncated names in both spellings. Every three-dots name here is a real dir on
+#: the live facts root; the U+2026 name is the spelling the source notes write and
+#: the one 0 live dirs carry, because the mint rewrites it — an arm that matched
+#: only U+2026 would pass all 24 rows, which is why the clause demands both.
+ELLIPSIS_SPELLINGS = (
+    "comm...",                # the dir the knowledge health report asks about
+    "Dan ...",                # a space before the dots
+    "Greg Pstru...",          # a clipped speaker attribution
+    "Greg Pstru…",            # the same truncation in the source's own character
+    "Cloudfl...",
+    "Kathryn Grayson Na...",  # one of the two dirs minted for one person
+)
+
+#: The note the 24 dirs were minted from, verbatim as `source_doc` reaches the gate.
+CHANNEL_EVAL_NOTE = "projects/lloyd/channel-eval/ai-engineer.md"
+
+
+# ── clause 1: the predicate refuses an ellipsis-terminated name, both spellings ──
+
+def test_a_name_ending_in_an_ellipsis_is_junk_in_either_spelling():
+    for name in ELLIPSIS_SPELLINGS:
+        assert en.looks_like_junk_entity(name) is True, name
+        assert en.is_ellipsis_truncated_name(name) is True, name
+    assert en.is_valid_entity_name("comm...") is False
+    # The acceptance check's own call, carrying the `source_doc` of the row that
+    # minted it: triage measured `False` here on 2026-11-19, and the 24 dirs are
+    # what that `False` produced.
+    assert en.looks_like_junk_entity("comm...", source_doc=CHANNEL_EVAL_NOTE) is True
+
+
+def test_the_ellipsis_rule_is_not_exempted_by_a_project_note():
+    """All 24 dirs came out of a `projects/lloyd/channel-eval/` note, so a rule
+    that consulted `source_doc` would exempt the entire population it exists to
+    refuse — the reason #743 gives for a citation, and the same here. The last two
+    lines are the positive control that `source_doc` is not simply ignored by this
+    module: the pipeline-exhaust rule still bends for a project note."""
+    for source_doc in (None, "", CHANNEL_EVAL_NOTE, PROJECT_NOTE):
+        for name in ELLIPSIS_SPELLINGS:
+            assert en.looks_like_junk_entity(name, source_doc) is True, (name, source_doc)
+    assert en.looks_like_junk_entity("Sweep Run 313") is True
+    assert en.looks_like_junk_entity("Sweep Run 313", PROJECT_NOTE) is False
+
+
+# ── clause 2: precision — a full stop is not an ellipsis ─────────────────────
+
+def test_a_single_trailing_dot_or_dots_held_mid_string_stay_writable():
+    """240 of the 17,624 live entity dirs end in exactly one full stop —
+    `Tobin et al.`, `Kim, H.-B.`, `Insight.PA.` are bibliography names, and a rule
+    that refused "ends in a dot" would take that class with it. Dots inside a name
+    belong to the sentence rather than to the name, so `Node.js`, `U.S. Robots`
+    and `J. et al. (2026)` stay writable, and so does a name that QUOTES a clipped
+    cell without being one: the arm is end-anchored, three ASCII dots or U+2026."""
+    for name in ("Insight.PA.", "J. et al. (2026)", "Node.js", "U.S. Robots",
+                 "jail.nix", "Tobin et al.", "Kim, H.-B.", "PyTorch 2.7",
+                 "Gus Iwanaga, comm… on stage", "comm... is a synthetic eval set"):
+        assert en.is_ellipsis_truncated_name(name) is False, name
+        assert en.looks_like_junk_entity(name) is False, name
+    # Positive control: the refusals above are this arm firing on the shape and
+    # not the module refusing every name that carries a dot.
+    assert en.looks_like_junk_entity("comm...") is True
+
+
+# ── clause 3: the mint drops the candidate, so no directory is created ────────
+
+def test_extraction_mints_no_directory_for_an_ellipsis_suffixed_name(extractor,
+                                                                     sidecar,
+                                                                     monkeypatch):
+    """The mint boundary and not the predicate. The walk that put
+    `facts/comm.../comm...-overview.md` on disk runs `extract_from_document` →
+    `_gate_entity` → `_is_junk_entity`, and a clipped cell now leaves the way a
+    filename candidate does: the fact is dropped, no entity dir appears, and the
+    name is never registered. A declared `entity_type` buys the name no way in —
+    `concept` is a legal schema type and was what these rows carried."""
+    e = extractor
+    truncated = "comm..."
+    monkeypatch.setattr(e, "_call_llm", _answer({
+        "entity": "Lloyd", "entity_type": "system", "category": "state",
+        "facts": [_fact("comm... manufactures a synthetic query-to-target eval set",
+                        entity=truncated, entity_type="concept")]}))
+
+    out = e.extract_from_document(Path(CHANNEL_EVAL_NOTE), "one clipped table row\n")
+
+    assert out["facts"] == [], "the truncated-entity fact was filed anyway"
+    assert out["held_back"] == 1
+    assert kg_store.store().entities.lookup(truncated) is None
+
+    # Positive control, load-bearing: a real name through the same extractor does
+    # get a directory, so the `not exists()` below is evidence and not a tree that
+    # writes nothing at all.
+    control = "Zephyr Intent Evals"
+    assert e.write_fact_file(control, "state", {"facts": [_fact("x")]},
+                             source_doc=CHANNEL_EVAL_NOTE) is not None
+    assert (e.facts_dir / control).is_dir(), (
+        "the control wrote no directory, so the assertions below prove nothing")
+
+    # The gate route, which is how a filename candidate is refused today by
+    # `test_junk_entity_is_rejected_before_registration`: a caller that skips
+    # extraction gets the same verdict, under the U+2026 spelling as well.
+    assert e.write_fact_file(truncated, "state", {"facts": [_fact("x")]},
+                             source_doc=CHANNEL_EVAL_NOTE) is None
+    assert not (e.facts_dir / truncated).exists(), (
+        "the mint still created facts/comm.../ — the dir on the live tree")
+    assert e.write_fact_file("Greg Pstru…", "state", {"facts": [_fact("x")]},
+                             source_doc=CHANNEL_EVAL_NOTE) is None
+    assert not (e.facts_dir / "Greg Pstru…").exists()
+    assert kg_store.store().entities.lookup("Greg Pstru…") is None
+
+
+def test_the_mcp_fact_add_route_refuses_an_ellipsis_suffixed_name(tmp_path, monkeypatch):
+    """One process further out than clause 3's mint: `fact_add` runs in the MCP
+    server and applies this same predicate at `agent_mcp/facts.py:601`, so a turn
+    filing interactively under a clipped cell is now refused `INVALID_PARAM` and
+    leaves nothing behind. Driven through the real handler because the facts tree
+    and the entity store are on the far side of that boundary — a call to the
+    predicate is not a call across it — and both copies of `FACTS_ROOT` are
+    redirected, since the handler resolves every path from its own module global
+    (`agent_mcp._shared`, which `app.paths` anchors at the REAL vault tree). The
+    accepted control name is what makes the two refusals below evidence."""
+    from agent_mcp import _shared, facts as mcp_facts
+
+    root = tmp_path / "mcp-facts"
+    root.mkdir()
+    kg_store.configure(tmp_path / "kg.sqlite")
+    monkeypatch.setattr(_shared, "FACTS_ROOT", root)
+    monkeypatch.setattr(mcp_facts, "FACTS_ROOT", root)
+    _shared._invalidate_entity_dirs_cache()
+
+    control = "Zephyr Attribution Rules"
+    ok = mcp_facts._fact_add({"entity": control, "category": "state",
+                              "fact": "the control entity got its fact"})
+    assert ok.get("success") and "error" not in ok, ok
+    assert (root / control).is_dir(), (
+        "the control wrote no directory, so the assertions below would pass on an "
+        "unwritable tree and prove nothing")
+
+    result = mcp_facts._fact_add({"entity": "comm...", "category": "state",
+                                  "fact": "comm... manufactures a synthetic eval set",
+                                  "source_doc": CHANNEL_EVAL_NOTE})
+    assert result.get("code") == "INVALID_PARAM", result
+    assert "comm..." in result["error"]
+    assert not (root / "comm...").exists()
+    assert kg_store.store().entities.lookup("comm...") is None
+    monkeypatch.undo()
+    kg_store.reset()
+    _shared._invalidate_entity_dirs_cache()

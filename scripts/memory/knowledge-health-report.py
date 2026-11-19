@@ -30,6 +30,10 @@ from app.paths import (PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB,
                        VAULT_ROOT)
 from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
                           store as _kg_store)
+# The mint gate's own truncated-name decision, imported rather than re-spelled as a
+# second regex here: the report and `looks_like_junk_entity` must not hold different
+# spellings of the shape, and this file already carries its own list (#4361).
+from app.entity_naming import is_ellipsis_truncated_name
 from scripts.reflection_archive import (EXPECTED_MTIME_WITNESSES,
                                         REPORT_CYCLE_LOOKBACK_DAYS,
                                         RETIRED_COPY_WINDOW_DAYS,
@@ -254,14 +258,22 @@ def is_extraction_artifact_name(name: str) -> bool:
     underscore-bearing dotted path and a bare number — which is why the section's
     verdict line can call everything it rejects "artifact-shaped". #2000 adds
     one that is not a pattern: an all-lowercase name of several words
-    (`is_lowercase_prose_fragment`).
+    (`is_lowercase_prose_fragment`). #4361 adds the clipped table cell — a name
+    whose last characters are an ellipsis (`comm...`, `Dan ...`) — which is not a
+    pattern of this file's either but the extractor's own
+    `is_ellipsis_truncated_name`, so the mint gate and this read-side filter
+    cannot drift to two different shapes. The 24 such dirs on the live tree put
+    `- What does **comm...** relate to?` into the 2026-11-17 and 2026-11-19
+    sections, a question no researcher can act on, and `research-queue-generator`
+    reads this section as its input.
 
     Only the questions are filtered by this. The `## Thin Entities` table is not:
     it is the surface on which a regrowth in `#NNN` minting becomes visible, so
     hiding those rows would destroy the very signal #743 needs.
     """
     return (any(pattern.search(name) for pattern in EXTRACTION_ARTIFACT_NAME_RES)
-            or is_lowercase_prose_fragment(name))
+            or is_lowercase_prose_fragment(name)
+            or is_ellipsis_truncated_name(name))
 
 
 def is_lowercase_prose_fragment(name: str) -> bool:

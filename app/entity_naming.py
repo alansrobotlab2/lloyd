@@ -156,17 +156,67 @@ _DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}")
 # Any data/artefact extension at the end, whatever its case (`Config.YAML`).
 _ANY_EXT_RE = re.compile(r"\.(?:json|jsonl|bak|txt|log|ya?ml|csv|tsv|out)$", re.IGNORECASE)
 
+# ── Truncated names (#4361) ──────────────────────────────────────────────────
+# A table cell clipped to fit its column ends in an ellipsis, and the extractor
+# promoted the clipped cell to an entity. `facts/comm.../comm...-overview.md` on
+# the live tree defines "comm... is a synthetic query-to-target evaluation set
+# designed for skill and tool routing", minted from the row at
+# `projects/lloyd/channel-eval/ai-engineer.md:780`, whose own text is
+# `…Architecting Intent-Driven UX — Gus Iwanaga, comm…` — the attribution is
+# itself cut off at the cell boundary, and the fact file made it the subject
+# (`comm...-state.md` stat-001: "comm... manufactures a synthetic query-to-target
+# eval set…").
+#
+# Measured on the live facts root 2026-11-19: 24 of its 17,624 entity dirs end in
+# three ASCII dots — `comm...`, `Dan ...`, `Greg Pstru...`, `Cloudfl...`, and the
+# same person twice over as `Kathryn Grayson Na...` beside `Kathryn Grayson N...`,
+# two truncations of one name and so two entities — while 0 end in U+2026. That
+# split is why the arm carries BOTH spellings: the source documents write the
+# single character (bytes `e2 80 a6`) and every minted directory carries three
+# ASCII dots (bytes `2e 2e 2e`), so something normalises one into the other between
+# the cell and the mkdir, and an arm matching only U+2026 would pass every live row.
+#
+# Three ASCII dots or one U+2026, and nothing looser. A single trailing dot is how
+# a bibliography name ends — 240 of those 17,624 dirs (`Tobin et al.`,
+# `Kim, H.-B.`, `Insight.PA.`) — and dots held mid-string are prose
+# (`J. et al. (2026)`, `Node.js`, `U.S. Robots`), so both stay writable. Like the
+# citation rules above and unlike `_EXHAUST_RE`, this one ignores `source_doc`: an
+# ellipsis marks where a name was CUT, whoever wrote the note it was cut from.
+_TRUNCATED_ELLIPSIS_RE = re.compile(r"(?:\.{3,}|…)$")
+
+
+def is_ellipsis_truncated_name(name: str) -> bool:
+    """True when the LAST characters of `name` are an ellipsis — three or more
+    ASCII dots, or one U+2026 — with or without a space before them.
+
+    The shape behind the entry in :func:`looks_like_junk_entity`, exposed because
+    the knowledge-health report's own artifact-name filter (#954/#1542/#2000)
+    needs the same decision on the read side and does not import this module's
+    junk predicate. One predicate for both ends: the report's
+    `Suggested Research Questions` section and the extractor's mint must not
+    disagree about what a truncated cell looks like, and a second regex written
+    beside the first is how that disagreement starts.
+
+    Anchored at the end and nowhere else: `comm...` is the clipped cell, while
+    `Gus Iwanaga, comm… on stage` is prose QUOTING a clipped cell and dots
+    mid-string belong to the sentence, not to the name.
+    """
+    return bool(_TRUNCATED_ELLIPSIS_RE.search((name or "").strip()))
+
 
 def looks_like_junk_entity(name: str, source_doc: str | None = None) -> bool:
-    """True if `name` is a leaked filename / code fragment / template / this
-    pipeline's own exhaust, rather than a real entity.
+    """True if `name` is a leaked filename / code fragment / template / a table
+    cell clipped to an ellipsis / this pipeline's own exhaust, rather than a real
+    entity.
 
     High precision by design (see module note). Legit entities pass: plain
     names, and single-token doc slugs ending in `.md` with no interior space.
 
     `source_doc` (a vault-relative path) relaxes the pipeline-exhaust rule:
     a note under `projects/` may legitimately be about a task or a run. That
-    rule only — a tracker citation is refused whatever `source_doc` says (#743).
+    rule only — a tracker citation is refused whatever `source_doc` says (#743),
+    and so is a name whose last characters are an ellipsis (#4361), because every
+    one of those names was minted FROM a `projects/` note.
     """
     if not name:
         return True
@@ -186,6 +236,16 @@ def looks_like_junk_entity(name: str, source_doc: str | None = None) -> bool:
     # above the `.md` short-circuit and above the `projects/` exemption below,
     # because neither may excuse it: this rule ignores `source_doc` entirely (#743).
     if is_backlog_citation_entity(s):
+        return True
+    # A truncated table cell / clipped attribution whose last characters are an
+    # ellipsis (#4361): `comm...`, `Dan ...`, `Greg Pstru…`. Called through
+    # `is_ellipsis_truncated_name` so the report's questions filter and this mint
+    # gate cannot hold different spellings of the same shape, and placed above the
+    # `.md` short-circuit and the `projects/` exemption for the reason #743 gave
+    # for a citation: a truncation is a truncation whoever wrote the note. All 24
+    # live dirs were minted from `projects/lloyd/channel-eval/` notes, so an arm
+    # that consulted `source_doc` would exempt every row it exists to refuse.
+    if is_ellipsis_truncated_name(s):
         return True
     # Function/method-call fragment: `query()`, `models.load_lora_adapter()`.
     m = _CODE_CALL_RE.search(s)

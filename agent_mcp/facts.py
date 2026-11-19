@@ -600,8 +600,9 @@ def _fact_add(params: dict) -> dict:
         )
     if _is_junk_entity(raw_entity, source_doc):
         return _err(
-            f"'{raw_entity}' looks like a filename, a code fragment or a pipeline "
-            "run, not an entity; use a concept/project/person name",
+            f"'{raw_entity}' looks like a filename, a code fragment, a table cell "
+            "clipped to an ellipsis or a pipeline run, not an entity; use a "
+            "concept/project/person name",
             ErrorCode.INVALID_PARAM,
         )
     declared_raw = params.get("entity_type")
