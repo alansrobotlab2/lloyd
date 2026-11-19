@@ -3991,3 +3991,135 @@ async def test_a_run_killed_under_a_fallback_cap_names_the_fallback(q, monkeypat
     assert meta.get(worker_pool.CAP_FALLBACK_META_KEY) == "key_absent", (
         f"a run killed at a guessed cap left no trace of it being guessed: {meta}")
     assert "TimeoutError" in runs[0]["summary"], runs[0]["summary"]
+
+
+# ---------------------------------------------------------------------------
+# #4381: a source's reply has to reach `runs.response_json`
+# ---------------------------------------------------------------------------
+#
+# `pool.py:2426` books `response_json=norm["response"]`, and `normalize_result`
+# defaults a missing key at `pool.py:526` with `str(result.get("response") or "")`, so
+# a source that never sets the key is stored as an empty string and nothing anywhere
+# errors. That is how all 913 board-steward rows came to hold nothing, and why
+# `workers/board_disagreement.py:317` can publish "the model's raw reply is stored
+# nowhere" as a known limit. `autoresearch` has always set it (`sources/autoresearch.py:107`)
+# and its 160 rows are all non-empty, which is what makes this a missing key rather
+# than an unreachable column. These two nodes run the REAL source through the REAL
+# pool writer and read the stored row back, because the boundary is the pool.
+
+
+_STEWARD_REPLY = "Item 7 is confirmed with an acceptance, so it goes up_next."
+_STEWARD_ANSWER = {
+    "moves": [{"item_id": 7, "status": "up_next", "note": "confirmed, ready",
+               "tags_add": [], "tags_remove": []}],
+    "next_pick": 7, "next_pick_reason": "oldest confirmed item",
+    "summary": "1 move, nothing held"}
+
+
+async def _one_steward_run(q, tmp_path, monkeypatch, *,
+                           text=_STEWARD_REPLY, answer=_STEWARD_ANSWER,
+                           structured_error=""):
+    """One board-steward run through a real pool, with the engine turn the only fake.
+
+    The board and ledger are `test_board_steward`'s own fixture and helpers, imported
+    rather than re-implemented: a second copy of the board writer here would be a
+    fixture that can drift from the source's own tests and quietly stop exercising
+    the path. `run_prompt_in_session` is faked because this cannot boot an engine;
+    the parse, the returned record, `normalize_result` and the INSERT are production.
+    """
+    from scripts.automod import backlog as B
+    from workers.sources import _common as C
+    from workers.sources import board_steward as BS
+    from tests.test_board_steward import S, _ten_item_board
+
+    d = tmp_path / "backlog"
+    d.mkdir()
+    monkeypatch.setattr(B, "BACKLOG_DIR", d)
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
+    _ten_item_board(d)
+
+    async def turn(prompt, **kw):
+        return {"text": text, "session_id": "sess-steward", "stop_reason": "stop",
+                "num_turns": 3, "structured": answer,
+                "structured_error": structured_error}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+
+    q.enqueue(BS.NAME, "tick", payload={"apply": False})
+    return await _drain_one(q, monkeypatch, BS, source_name=BS.NAME)
+
+
+def _json_valid(db_path, source):
+    """`json_valid()` as the fleet measures it — the predicate `WorkQueue.run_rollup_by_source` uses."""
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            "select count(*) from runs where source=? and json_valid(response_json)",
+            (source,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+async def test_a_board_steward_run_stores_its_reply_where_sql_can_read_it(
+        q, tmp_path, monkeypatch):
+    """#4381 clause 2: the stored row, not the returned dict.
+
+    The reader that wanted this is `workers/board_disagreement.py`, which files a
+    steward/state-machine disagreement and can only attach the steward's `moves` and
+    the machine's `disagree_sides` — ruling either side needs the reply, and today
+    every board-steward row answers `""`. Asserted through `json_valid` rather than
+    `json.loads` alone because the fleet's own liveness measure is that SQL predicate
+    (`WorkQueue.run_rollup_by_source`): a value that is not JSON is invisible to the check the
+    column exists to satisfy.
+
+    The `source` name is asserted too, and in both spellings: the run row is
+    `board-steward` with a hyphen and the ledger event kind is `board_steward`, so a
+    query written with the underscored one returns 0 rows and reads as "no
+    board-steward runs exist".
+    """
+    runs = await _one_steward_run(q, tmp_path, monkeypatch)
+
+    assert runs[0]["status"] == "success", runs[0]["status"]
+    stored = runs[0]["response_json"]
+    assert stored, (
+        "the empty string every board-steward row has held: the source set no "
+        "`response` key and `normalize_result` defaults it to \"\"")
+    doc = json.loads(stored)
+    assert doc["text"] == _STEWARD_REPLY, "the raw reply, not the summary"
+    assert doc["structured"]["next_pick"] == 7
+    assert doc["structured"]["summary"] == "1 move, nothing held"
+    assert doc["structured"]["moves"][0]["item_id"] == 7
+
+    assert q.list_runs(source="board-steward", limit=5), "the row's source is hyphenated"
+    assert not q.list_runs(source="board_steward", limit=5), (
+        "an underscored source name matches no run row — the naming trap the item "
+        "warns about, kept in the assertion so a future reader meets it here")
+    assert _json_valid(q.db_path, "board-steward") == 1, (
+        "the reply has to satisfy the same predicate the fleet counts liveness with")
+
+
+async def test_an_over_long_board_steward_reply_is_cut_and_the_run_still_succeeds(
+        q, tmp_path, monkeypatch):
+    """#4381 clause 4: the bound, end to end, with the run kept.
+
+    `queue.record_run` slices `response_json[:50000]` blind, and `normalize_result`
+    slices at the same width one frame earlier: a long reply used to be cut at
+    whatever character 50000 happened to be, which for a JSON document means
+    `json_valid()` goes to 0 — the row is lost exactly when it is biggest. Now the
+    source fits its own payload inside the bound and shortens the prose, so the
+    stored row still parses, still says it was cut, and the run is still booked
+    `success` rather than raising inside a worker.
+    """
+    runs = await _one_steward_run(q, tmp_path, monkeypatch, text="q" * 60_000)
+
+    assert runs[0]["status"] == "success", runs[0]["status"]
+    stored = runs[0]["response_json"]
+    assert len(stored) <= 50_000, f"{len(stored)} characters stored over the bound"
+    doc = json.loads(stored)
+    from workers.sources import board_steward as BS
+    assert doc["truncated"] is True and doc["text"].endswith(BS.RESPONSE_TRUNCATED_MARK)
+    assert doc["structured"]["summary"] == "1 move, nothing held", (
+        "the prose is the field that pays for the bound, not the answer")
+    assert _json_valid(q.db_path, "board-steward") == 1, (
+        "a cut that breaks the JSON is a row the fleet's liveness measure stops seeing")

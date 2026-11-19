@@ -7235,3 +7235,181 @@ def test_both_abstentions_are_published_in_the_same_block_and_the_same_row(board
         "the mis-bound move was written on an applied tick, which is clause 1 undone")
     assert "1 abstained (the board moved mid-tick)" in out["summary"], out["summary"]
     assert "1 mis-bound to another item's round" in out["summary"], out["summary"]
+
+
+# ── #4381: the reply the model gave has to reach the run record ───────────
+#
+# `pool.py:2426` writes `response_json=norm["response"]` for every source, and
+# `pool.py:526` defaults a missing key to `""` — so a source that never sets the
+# key stores an empty string and nothing ever complains. That is how all 913
+# board-steward rows came to hold no reply (`workers/pool.py`'s writer vs
+# `workers/sources/autoresearch.py:107`, which has always set it). What is stored
+# here is the half the ledger does not keep: the `board_steward` event holds the
+# moves as APPLIED and, since #3677, the machine's `disagree_sides`; the reply is
+# what `workers/board_disagreement.py:317` says it never had.
+
+
+def _one_reply_tick(board, monkeypatch, *, text, structured, structured_error=""):
+    """One real steward tick whose engine call returns exactly this answer.
+
+    `run_prompt_in_session` is the only fake: the parse, the ledger row and the
+    record handed back to the pool are production, because what is under test is
+    the record — the three fields `steward_response` builds and the status and
+    summary that must not move.
+    """
+    from workers.sources import _common as C
+
+    async def turn(prompt, **kw):
+        return {"text": text, "session_id": "sess-1", "stop_reason": "stop",
+                "num_turns": 3, "structured": structured,
+                "structured_error": structured_error}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    return asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+
+
+def _steward_ledger_row():
+    return [e for e in S.read_events(path=S.LEDGER_PATH)
+            if e.get("event") == "board_steward"][-1]
+
+
+def test_a_successful_tick_returns_the_reply_as_parseable_json(board, monkeypatch):
+    """#4381 clause 1: the record carries what the model ANSWERED, as JSON.
+
+    The reply has to survive as parseable JSON rather than as prose, because the
+    reader is SQL: `WorkQueue.run_rollup_by_source` counts liveness with
+    `json_valid(response_json)`, and a value that is not JSON is invisible to the
+    check this column exists to satisfy.
+
+    The stored `structured` is the finalizer's dict BEFORE `parse_steward` clamped
+    it, and the ledger's copy after: a ruler comparing the steward against the
+    state machine has to see what was said, not what fitted. The note here is
+    deliberately over `NOTE_MAX` so the two copies differ and the difference is
+    the assertion.
+    """
+    _ten_item_board(board)
+    long_note = _admissible_overflow(W.NOTE_MAX, W.NOTE_GRAMMAR_MAX)
+    answered = {"moves": [{"item_id": 7, "status": "up_next", "note": long_note,
+                           "tags_add": [], "tags_remove": []}],
+                "next_pick": 7, "next_pick_reason": "oldest ready item",
+                "summary": "one move, no objections"}
+    said = "Item 7 is confirmed with an acceptance, so it goes up_next."
+    out = _one_reply_tick(board, monkeypatch, text=said, structured=answered)
+
+    assert out["status"] == "success", out
+    blob = out.get("response")
+    assert blob, "absent `response` is what booked an empty column for 913 runs"
+    stored = json.loads(blob)
+    assert stored["text"] == said, "the raw reply, not a restatement of it"
+    assert stored["structured"]["next_pick"] == 7
+    assert stored["structured"]["summary"] == "one move, no objections"
+    assert stored["structured"]["moves"][0]["note"] == long_note, (
+        "the run record is the answer as given; clamping it here would make the "
+        "two copies indistinguishable and the seam untestable")
+    row = _steward_ledger_row()
+    assert row["moves"][0]["note"] != long_note and len(row["moves"][0]["note"]) < len(long_note), (
+        "the ledger half stayed the clamped answer, so the two copies are one value")
+    assert "truncated" not in stored, "a reply inside the bound must not read as cut"
+
+
+def test_a_rejected_reply_is_returned_with_the_validators_complaint(board, monkeypatch):
+    """#4381 clause 3: a bad answer is inspectable too.
+
+    The `no structured answer` path is the one a ruler most needs the reply for —
+    it is where the steward said something the finalizer could not shape — and all
+    it recorded was that a divergence happened. The status, summary and meta stay
+    exactly as #2370 and #3088 left them (`test_a_diverged_tick_still_returns_the_
+    record_it_returned_before` pins the rest); the reply is additive.
+    """
+    _ten_item_board(board)
+    complaint = "structured output does not match the schema: 'moves' is required"
+    out = _one_reply_tick(board, monkeypatch,
+                          text="I think item 7 should go up_next, but here is prose.",
+                          structured=None, structured_error=complaint)
+
+    assert out["status"] == "failed", out
+    stored = json.loads(out["response"])
+    assert stored["structured_error"] == complaint, (
+        "the complaint is what tells a ruler the reply was malformed, not absent")
+    assert stored["text"] == "I think item 7 should go up_next, but here is prose."
+    assert stored["structured"] is None, (
+        "there was no structured answer, and an empty dict would invent one")
+
+
+def test_the_three_returns_without_a_reply_keep_an_empty_response(board, monkeypatch):
+    """#4381 clause 5: no turn, no reply — and no invented one.
+
+    The skipped, drain-skip and timeout returns happen before or without a `run`,
+    so their `response` stays the pool's default `""`, which is what every
+    historical board-steward row holds. `""` is also what must NOT be readable as
+    an empty reply from a turn that ran: the two are told apart by `status`.
+    Asserted as whole dicts, because a stray key here is the same bug in reverse.
+    """
+    from workers.pool import normalize_result
+    from workers.queue import WorkQueue
+    from workers.sources._common import DrainActive, TurnTimeout
+
+    # (a) skipped: nothing happened since the last pass — an empty ledger and no
+    # item ready to move, so the tick never reaches the engine at all.
+    _write(board, 12, "draft")
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out == {"status": "skipped",
+                   "summary": "nothing happened since the last pass"}, out
+
+    def _raise(exc):
+        from workers.sources import _common as C
+
+        async def turn(prompt, **kw):
+            raise exc
+        monkeypatch.setattr(C, "run_prompt_in_session", turn)
+        return asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+
+    _ten_item_board(board)                      # now there IS something to consider
+    drained = _raise(DrainActive("draining for a landing"))
+    assert drained == {"status": "skipped", "summary": "draining for a landing"}, drained
+    timed = _raise(TurnTimeout("900 s elapsed"))
+    assert timed == {"status": "failed", "summary": "steward turn timed out: 900 s elapsed"}, timed
+
+    for record in (out, drained, timed):
+        assert "response" not in record, record
+
+    # The pool's own default is what those three rows get: an absent key becomes
+    # `""`, so `runs.response_json` keeps the value it has always had for them.
+    q = WorkQueue(board.parent / "w.db")
+    item = q.get(q.enqueue(source=W.NAME, kind="tick", payload={}))
+    for record in (out, drained, timed):
+        assert normalize_result(item, record)["response"] == "", record
+
+
+def test_an_over_bound_reply_is_cut_without_breaking_the_json():
+    """#4381 clause 4's policy, at the unit: the cap is fitted to, not hit.
+
+    `queue.record_run` slices `response_json[:50000]` and `pool.normalize_result`
+    slices at the same width one frame earlier. A value that arrives over it is cut
+    mid-JSON, and `json_valid()` — the very predicate `run_rollup_by_source` measures with
+    — goes to 0 for the biggest replies, which is the worst possible time to lose
+    the row. So `steward_response` shortens `text` first and keeps the object whole.
+    """
+    blob = W.steward_response(text="q" * (W.RESPONSE_MAX_CHARS + 5_000),
+                              structured={"moves": [], "next_pick": 4, "summary": "net 0"})
+    assert len(blob) <= W.RESPONSE_MAX_CHARS, len(blob)
+    stored = json.loads(blob)
+    assert stored["truncated"] is True
+    assert stored["text"].endswith(W.RESPONSE_TRUNCATED_MARK), "the cut is marked, not silent"
+    assert stored["structured"]["summary"] == "net 0", (
+        "the cheapest field is the one cut: the answer outlives the prose")
+
+
+def test_an_answer_too_big_to_fit_still_stays_parseable():
+    """The shrink arm behind `text`: prose and complaint together can still exceed
+    the bound, and the last field has to be cuttable too — collapsed to its JSON
+    text, which is what lets it be sliced at all — rather than left for the writer's
+    blind slice.
+    """
+    blob = W.steward_response(text="t" * 1_000,
+                              structured={"moves": [{"note": "z" * 60_000}]},
+                              structured_error="e" * 20_000)
+    assert len(blob) <= W.RESPONSE_MAX_CHARS, len(blob)
+    stored = json.loads(blob)
+    assert stored["truncated"] is True
+    assert isinstance(stored["structured"], str), (
+        "an answer too big to fit is kept as its own JSON text, so it is kept")

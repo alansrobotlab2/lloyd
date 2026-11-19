@@ -1647,6 +1647,76 @@ def apply_moves(moves: list[dict], *, round_id: str = "", tick: str = "") -> lis
     return done
 
 
+# ── what the run record stores about the reply ───────────────────────────
+
+#: The width the store already truncates at. `workers/queue.py::_insert_run`
+#: slices `response_json[:50000]` and `pool.normalize_result` slices at the same
+#: number one frame earlier, so a value built to this width is never the one the
+#: writer cuts.
+RESPONSE_MAX_CHARS = 50_000
+RESPONSE_TRUNCATED_MARK = "…[truncated]"
+
+
+def steward_response(*, text: Any = None, structured: Any = None,
+                     structured_error: Any = "") -> str:
+    """One tick's reply, as the JSON that goes into `runs.response_json`.
+
+    Three fields. `text` is what the model said — `_common.run_prompt_in_session`
+    puts the engine's `done` event `response` there — `structured` is the answer the
+    finalizer gave BEFORE `parse_steward` clamped it, and `structured_error` is the
+    validator's complaint on a tick that produced no usable answer, so a bad reply
+    is as inspectable as a good one.
+
+    The ledger already holds the other half: the `board_steward` event's `moves`
+    list and `agreement.disagree_sides` (#3677) are what the steward ASKED FOR and
+    what the machine thought of it. What a ruler needs to decide which of the two is
+    wrong — and what `workers/board_disagreement.py:317` says it does not have — is
+    what the model was shown and what it ANSWERED. `pool.py:2426` writes
+    `response_json=norm["response"]` for every source, and `autoresearch` has always
+    filled that key; this source never did, so all 913 board-steward rows booked the
+    `""` that `pool.py:526` silently defaults a missing key to.
+
+    Built to FIT `RESPONSE_MAX_CHARS` rather than be cut by it. The store's own cap
+    is a blind slice, and a sliced value is no longer parseable — `json_valid
+    (response_json)` is exactly what `WorkQueue.run_rollup_by_source` measures
+    liveness with, and an unparseable row would be invisible to the check this
+    change exists to satisfy. So an over-large reply is shortened field by field, cheapest first
+    (`text`, then `structured_error`, then `structured`, collapsed to its JSON text
+    so that it can be cut at all), and the row says so with `"truncated": true`.
+
+    A tick that never reached the engine has no reply and passes nothing: the
+    skipped, drain-skip and timeout returns leave the key out and keep the pool's
+    default `""`, which is the only honest value for a turn that did not happen.
+    """
+    payload: dict[str, Any] = {
+        "text": str(text or ""),
+        "structured": structured,
+        "structured_error": str(structured_error or ""),
+    }
+    blob = json.dumps(payload, default=str)
+    if len(blob) <= RESPONSE_MAX_CHARS:
+        return blob
+    payload["truncated"] = True
+    for field in ("text", "structured_error", "structured"):
+        if len(blob) <= RESPONSE_MAX_CHARS or payload[field] is None:
+            continue
+        keep = (payload[field] if isinstance(payload[field], str)
+                else json.dumps(payload[field], default=str))
+        for _ in range(8):
+            payload[field] = keep
+            blob = json.dumps(payload, default=str)
+            if len(blob) <= RESPONSE_MAX_CHARS:
+                break
+            over = len(blob) - RESPONSE_MAX_CHARS
+            keep = keep[:max(0, len(keep) - over - len(RESPONSE_TRUNCATED_MARK))]
+            keep += RESPONSE_TRUNCATED_MARK if keep else ""
+    # Only reachable if the JSON shell alone were over the bound, which at three
+    # keys it is not; the last line is here so the function cannot promise a value
+    # the writer would then slice.
+    return blob if len(blob) <= RESPONSE_MAX_CHARS \
+        else json.dumps({"truncated": True}, default=str)
+
+
 # ── the source ───────────────────────────────────────────────────────────
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
@@ -1764,6 +1834,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                            session_id=run.get("session_id"),
                            err_text=str(err) if err is not None else "")
         return {"status": "failed", "summary": f"no structured answer: {err}",
+                # #4381: the rejected reply, with the validator's complaint, is the
+                # thing a ruler needs on this path — the ledger row records that the
+                # tick diverged, not what came back.
+                "response": steward_response(text=run.get("text"),
+                                             structured=run.get("structured"),
+                                             structured_error=err),
                 "meta": {"session_id": run.get("session_id")}}
 
     # Threaded because the guard reads the ledger to decide it (#3752): the same
@@ -1901,6 +1977,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     return {"status": "success",
             "summary": (f"{parsed['summary']} — {counts}"
                         if parsed["summary"] else counts),
+            # #4381: the reply, as answered rather than as applied. `structured` is
+            # the finalizer's dict before `parse_steward` clamped it — the ledger's
+            # `moves` list is the clamped half — so the row can be read next to the
+            # disagreement it is filed against.
+            "response": steward_response(text=run.get("text"),
+                                         structured=run.get("structured")),
             "artifact_path": (backlog_artifact(parsed["moves"][0]["item_id"])
                               if parsed["moves"] else NO_ARTIFACT),
             "meta": {"session_id": run.get("session_id"), "agreement": agree}}
