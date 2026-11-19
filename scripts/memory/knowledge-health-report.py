@@ -1643,6 +1643,21 @@ def _merge_queue_cell(mq: dict | None) -> str:
     suffix = (f"{mq['suffix_clusters']} gate-approved suffix cluster"
               f"{'' if mq['suffix_clusters'] == 1 else 's'} "
               f"({_age_phrase(mq.get('suffix_age_days'), mq.get('suffix_oldest_date'))})")
+    # The applied figure, named on the same breath as the waiting one (#4369). The
+    # waiting count alone moves by −1 when 12 clusters are merged, because the plans of
+    # the newest run date refill with freshly-approved clusters while the age of the
+    # survivors keeps rising: measured across the 2026-11-19 01:09Z apply of 12, the row
+    # went 25 (waiting 53 days) → 24 (waiting 56 days), which reads as a queue that
+    # barely moved. A count of what has been MERGED, with the date of that apply, is
+    # what makes the apply legible — without it #4196 and #4008 were able to close
+    # asserting the apply had never run.
+    applied = int(mq.get("suffix_applied") or 0)
+    if not applied:
+        suffix += ", none applied on record"
+    elif mq.get("suffix_applied_on"):
+        suffix += f", {applied} applied {mq['suffix_applied_on']}"
+    else:
+        suffix += f", {applied} applied (apply date unknown)"
     if mq.get("suffix_refused"):
         # Names the exclusion, because the tier total (23 approved + 40 refused =
         # 63 on 2026-10-26) is the number a reader would otherwise arrive at.

@@ -1756,6 +1756,73 @@ def _resume_apply(args, st, facts_root: Path) -> int:
     return 0
 
 
+# ── Gate evidence durability ─────────────────────────────────────────────────
+
+def _durable_gate_dir() -> Path:
+    """Where gate verdicts survive: the gate module's own `DURABLE_DIR`.
+
+    Read from the gate rather than re-derived, so the guard and the store cannot
+    drift into different directories; the pipeline fallback exists for a caller that
+    cannot import the gate, and is the same path on this box.
+    """
+    try:
+        from entity_semantic_gate import DURABLE_DIR
+        return Path(DURABLE_DIR)
+    except Exception:
+        return Path(PIPELINE_DIR) / "memory-graph"
+
+
+def gate_cache_durability_refusal(cache, tiers, *, durable_dir=None) -> str | None:
+    """Why this gate cache cannot carry an apply of `tiers`, or None when it can.
+
+    A SUFFIX apply is the one merge this fleet makes on the strength of a model
+    judgement, and the judgement lives only in the cache it was written to. The
+    2026-11-19 01:09Z apply of 12 clusters judged against
+    `/tmp/claude-1000/…/scratchpad/suffix-hold-cache.jsonl` — tmpfs on this box, so
+    the entire evidence for 12 irreversible merges was one reboot from never having
+    existed, and `--gate-cache` accepted it without a word (#4369).
+
+    Only `SUFFIX_SAFE` is guarded: a CASE or PUNCT merge is decided by the name
+    comparison in `classify_pair`, which reads nothing but the two names, so a
+    private cache is not evidence for it and the nightly `--apply --tiers CASE,PUNCT`
+    keeps its scratch cache. `cache=None` is the gate's own default file, which IS
+    the durable store, and passes. A cache resolving anywhere inside `durable_dir`
+    passes, whatever it is named.
+    """
+    if "SUFFIX_SAFE" not in set(tiers or ()):
+        return None
+    if cache is None:
+        return None
+    target = Path(str(cache)).expanduser()
+    home = Path(durable_dir) if durable_dir is not None else _durable_gate_dir()
+    try:
+        resolved, inside = target.resolve(), home.resolve()
+    except OSError:                                    # unreadable link target
+        resolved, inside = target.absolute(), home.absolute()
+    if resolved == inside or resolved.parent == inside or inside in resolved.parents:
+        return None
+    moved = inside / target.name
+    # The same command line with the cache path swapped for the durable one, so the
+    # repair is a paste rather than a reconstruction: this refusal's job is to get an
+    # operator back to work, and #4197's lesson is that a refusal whose repair has to
+    # be re-typed by hand is a refusal that gets worked around.
+    rerun = [str(moved) if tok in (str(cache), f"--gate-cache={cache}") else tok
+             for tok in sys.argv]
+    return (
+        "REFUSING --apply --tiers SUFFIX_SAFE: the gate cache is outside the durable "
+        "verdict store.\n"
+        f"  gate cache   {resolved}\n"
+        f"  durable store {inside}/ — the only place a SUFFIX verdict outlives the run "
+        "that judged it\n"
+        "  The 12 merges applied at 2026-11-19T01:09Z were judged against a cache in a "
+        "session scratchpad on tmpfs. On a reboot the store keeps those merges and the "
+        "evidence for them is gone, with nothing left to say which verdict was which.\n"
+        f"  Repair — copy the cache in and re-run against the copy:\n"
+        f"    cp {resolved} {moved}\n"
+        f"    {' '.join(rerun)}"
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="Apply SAFE merges")
@@ -1775,9 +1842,13 @@ def main() -> int:
     )
     ap.add_argument("--gate-cache", default=None,
                     help="semantic-gate verdict cache to read/write. Default: the pipeline's "
-                         "own cache. Pass a private path (a tmp dir) for a hermetic run — "
-                         "without this, a test that runs the CLI with the gate on silently "
-                         "reads production verdicts it never earned.")
+                         "own cache. A private path (a tmp dir) makes a DRY RUN hermetic — "
+                         "without one, a test that runs the CLI with the gate on silently "
+                         "reads production verdicts it never earned. It may not carry an "
+                         "APPLY of SUFFIX_SAFE: `--apply --tiers SUFFIX_SAFE` refuses unless "
+                         "the cache resolves inside the durable verdict store "
+                         f"({_durable_gate_dir()}), because a verdict on tmpfs cannot "
+                         "outlive the run that earned it (#4369).")
     ap.add_argument("--db", default=str(VAULT_KG_DB), help="knowledge-graph store")
     ap.add_argument("--facts-dir", default=str(FACTS_ROOT))
     ap.add_argument("--out-dir", default=str(OUT_DIR))
@@ -1834,6 +1905,17 @@ def main() -> int:
 
     allowed_tiers = set(ALL_TIERS) if args.tiers is None else {
         t.strip() for t in args.tiers.split(",") if t.strip()}
+
+    # Gate evidence has to outlive the run that produced it (#4369). Checked here,
+    # before the store is opened and before a single merge is planned, so a refused
+    # run writes no report and touches no directory. `--resume` is NOT routed through
+    # this: a resume finishes moving fact dirs an earlier judged apply left half-done,
+    # and refusing it would strand the store in the state the guard exists to avoid.
+    if args.apply and not args.resume:
+        refusal = gate_cache_durability_refusal(args.gate_cache, allowed_tiers)
+        if refusal:
+            print(f"\n{refusal}")
+            return 4
 
     facts_root = Path(args.facts_dir)
     out_dir = Path(args.out_dir)

@@ -13,7 +13,17 @@ Measured on the 78 suffix pairs from that day: each judge alone caught 14 of
 17 verified-bad merges, with complementary misses; requiring agreement caught
 16 and left ~33 pairs for review.
 
-Verdicts are cached by (a, b, definition-hash) so re-runs are free.
+Verdicts are cached by (a, b, definition-hash) so re-runs are free, and each row
+carries `judged_at` — the UTC instant the judgement was MADE. The date belongs on the
+verdict itself because nothing else in this fleet records one: the queue's "first
+approved" had to be reconstructed from plan FILENAMES, and an apply could not be
+placed in time at all (#4369). Rows written before the field existed simply lack it,
+which is a missing date rather than today's date.
+
+`DEFAULT_CACHE` is also the location a SUFFIX apply is required to judge against: the
+sweep refuses `--apply --tiers SUFFIX_SAFE` whose `--gate-cache` resolves outside
+`DURABLE_DIR`, because the 2026-11-19 01:09Z apply judged 12 merges against a cache in
+a session scratchpad on tmpfs, one reboot away from never having existed.
 """
 from __future__ import annotations
 
@@ -23,6 +33,7 @@ import os
 import re
 import sys
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -30,6 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT  # noqa: E402
 
 DEFAULT_CACHE = PIPELINE_DIR / "memory-graph" / "semantic-verdicts.jsonl"
+#: The directory gate evidence must resolve inside to survive a reboot: the default
+#: cache's own, which is `lloyd-data/_pipeline/memory-graph/` on the live tree. Named
+#: here rather than in the sweep so the gate states where its own record lives.
+DURABLE_DIR = DEFAULT_CACHE.parent
 
 SYSTEM_PROMPT = (
     "You decide whether two entity names from a personal knowledge graph refer to the SAME "
@@ -184,7 +199,16 @@ class SemanticGate:
         decision = "SAME" if judges and all(j["verdict"] == "SAME" for j in judges.values()) else "REVIEW"
         _shadow_djev(a, b, da, db, decision, judges)
         rec = {"key": key, "a": a, "b": b, "decision": decision, "judges": judges,
-               "def_a": da[:160], "def_b": db[:160]}
+               "def_a": da[:160], "def_b": db[:160],
+               # When this judgement was MADE, in UTC — the same field name
+               # `semantic-entity-resolution.py:1552` writes on its pair rows, so one
+               # reader can date either store (#4369). This is the fresh-verdict path
+               # only: a cached pair returns the stored row, whose `judged_at` is the
+               # day it was first judged, and a pair re-judged under changed
+               # definitions has a new key, a new row and a new date. A row written
+               # before this field existed stays without one, so a missing date reads
+               # as unknown rather than as today.
+               "judged_at": datetime.now(timezone.utc).isoformat()}
         self._cache[key] = rec
         if self.cache_path:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)

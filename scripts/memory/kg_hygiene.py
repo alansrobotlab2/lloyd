@@ -40,6 +40,7 @@ import argparse
 import datetime as dt
 import importlib.util
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -467,6 +468,16 @@ MERGE_QUEUE_PROPOSALS_FILENAME = "semantic-proposals-latest.jsonl"
 #: The tier `--apply` never touches on schedule, so every approval in it is by
 #: construction waiting on a person.
 SUFFIX_TIER = "SUFFIX_SAFE"
+#: The sweep's APPLY REPORT — one per run that merged anything, holding
+#: `variant_to_canonical`, the pair set it committed. A plan says what the gate
+#: APPROVED and stays on disk afterwards, so a plan-only reading keeps presenting
+#: a merged pair as waiting: measured 2026-11-19, 12 of the 24 rows the review
+#: packet printed named a pair the 01:09Z SUFFIX apply had already committed,
+#: each still ending `to apply: --apply --tiers SUFFIX_SAFE` (#4369).
+MERGE_APPLY_REPORTS_GLOB = "entity-merges-applied-*.json"
+#: An ISO day anywhere in a name or field. Matched for "is this value already a
+#: date", searched for "what day does this filename say".
+_DATE_RE = re.compile(r"(20\d\d-\d\d-\d\d)")
 
 
 def _plan_date(name: str) -> dt.date | None:
@@ -526,6 +537,138 @@ def _parse_seen(value) -> dt.date | None:
         return None
 
 
+def applied_merges(memory_graph_dir: Path) -> dict[str, dict]:
+    """Every merge the sweep has ACTUALLY APPLIED, keyed by normalised variant name.
+
+    The source is the apply report (`entity-merges-applied-*.json`), not a plan:
+    a plan records an approval and outlives the merge, so after an apply the plan
+    is a stale document that still tells a person to run the command that has
+    already run. Each report's `variant_to_canonical` is the pair set that run
+    committed — 12 pairs in `entity-merges-applied-2026-11-19-20261119T010911Z.json`.
+
+    Keys go through the sweep's own `normalize_punct`, the normaliser that mints a
+    plan row's `norm_key` (`entity-resolution-sweep.py:632`), so a name spelled
+    slightly differently in the two artifacts still meets; `normalize_full` is
+    deliberately NOT used because it strips the safe suffixes, which would collapse
+    `agent-supervisord` onto `agent-supervisord.service` and let one apply silence
+    every cluster that shares a root word. `applied_on` is the EARLIEST report date
+    naming the pair — the day it stopped being applicable. An unreadable report is
+    skipped rather than raised: the queue's shape must not take the report down
+    (#3407 clause 4).
+    """
+    out: dict[str, dict] = {}
+    for path in sorted(Path(memory_graph_dir).glob(MERGE_APPLY_REPORTS_GLOB)):
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        pairs = report.get("variant_to_canonical") if isinstance(report, dict) else None
+        if not isinstance(pairs, dict):
+            continue
+        # The report carries its own `date`; a report written without that field is
+        # dated by the ISO day inside its own filename — SEARCHED, not sliced at a
+        # fixed offset, because this glob's names put `applied-` between the shared
+        # `entity-merges-` prefix and the day.
+        day = str(report.get("date") or "")
+        if not _DATE_RE.match(day):
+            found = _DATE_RE.search(path.name)
+            day = found.group(0) if found else ""
+        for variant, canonical in pairs.items():
+            key = sweep().normalize_punct(str(variant))
+            if not key:
+                continue
+            # One entry per applied variant, and the EARLIEST date among reports that
+            # name it: two reports saying a pair was merged cannot move the date of the
+            # merge forward, and an undated report never overwrites a dated one.
+            prev = out.get(key)
+            if prev is None or (day and (not prev["applied_on"] or day < prev["applied_on"])):
+                out[key] = {"variant": str(variant), "canonical": str(canonical),
+                            "applied_on": day or None, "report": path.name}
+    return out
+
+
+def _row_merge_variants(row: dict) -> list[str]:
+    """The names a plan row would consume, as an apply report names them.
+
+    `merges` is the sweep's own list of what it would merge, and its entries are the
+    same names that end up as the keys of an apply report's `variant_to_canonical`.
+    When it is present it is the whole answer, and the canonical is deliberately NOT
+    matched: a report that merged some other variant INTO this cluster's canonical left
+    this cluster's own merge unmade, and excluding it would cost the queue a real item.
+
+    Plans written before `merges` existed carry only `variants`, which also holds the
+    sweep's chosen canonical, and there is no way to tell from them which name the merge
+    consumed — so any name that appears as applied drops the row. The asymmetry is
+    deliberate in both directions: an old row cannot prove its merge is still owed, and a
+    new row can.
+    """
+    named = [str(m.get("variant")) for m in (row.get("merges") or [])
+             if isinstance(m, dict) and m.get("variant")]
+    if named:
+        return named
+    # A row with no `merges` list names no variant to consume, so EVERY name it
+    # carries is as likely to be the one that was merged, canonical included: a
+    # report entry `"Session Enrichment Pipeline" -> "Session enrichment"` consumes
+    # that directory and leaves an alias, and a plan row that still offers either
+    # name describes a merge that cannot be made again.
+    return [str(v[0]) for v in (row.get("variants") or []) if isinstance(v, (list, tuple)) and v]
+
+
+def _row_applied_record(row: dict, applied: dict[str, dict]) -> dict | None:
+    """The apply record that consumed one of this row's names, or None.
+
+    Which names count is `_row_merge_variants`' decision, so the count and the packet
+    join a plan row to a report the same way. When a row's several names were applied on
+    different days the LATEST record is returned: that is the most recent moment the
+    queue lost this cluster, which is the date a reader of the row needs.
+    """
+    if not applied:
+        return None
+    norm = sweep().normalize_punct
+    hits = [applied[norm(v)] for v in _row_merge_variants(row) if norm(v) in applied]
+    if not hits:
+        return None
+    return max(hits, key=lambda r: r["applied_on"] or "")
+
+
+def suffix_apply_ledger(memory_graph_dir: Path) -> dict[str, dict]:
+    """Clusters a SUFFIX plan APPROVED and an apply report has since COMMITTED.
+
+    Keyed by the plan row's own key (`norm_key`, else `canonical`, else `old`), so a
+    caller holding the plan population can subtract or annotate it without a second
+    normalisation step. This is ONE definition of "already applied", read by the
+    count, the packet and the packet's preamble alike: two readings of that phrase is
+    how the Hygiene row and the packet came to disagree about who was waiting.
+
+    The intersection is with the plan population on purpose. An apply report names
+    every pair its run merged, including the CASE and PUNCT tiers #48 drains nightly,
+    and those clusters were never in the human queue — counting them would inflate the
+    number that exists to say "a SUFFIX apply happened".
+    """
+    applied = applied_merges(memory_graph_dir)
+    out: dict[str, dict] = {}
+    if not applied:
+        return out
+    for path in sorted(Path(memory_graph_dir).glob(MERGE_QUEUE_PLANS_GLOB)):
+        if _plan_date(path.name) is None:
+            continue
+        for row in _jsonl_rows(path):
+            if row.get("tier") != SUFFIX_TIER or row.get("status") != "SAFE":
+                continue
+            key = row.get("norm_key") or row.get("canonical") or row.get("old")
+            if not key:
+                continue
+            hit = _row_applied_record(row, applied)
+            if hit is None:
+                continue
+            prev = out.get(key)
+            if prev is None or (hit["applied_on"] or "") > (prev["applied_on"] or ""):
+                out[key] = {"key": key, "canonical": str(row.get("canonical") or ""),
+                            "variant": hit["variant"], "applied_on": hit["applied_on"],
+                            "report": hit["report"]}
+    return out
+
+
 def merge_queue_report(memory_graph_dir: Path,
                        *,
                        today: dt.date | None = None) -> dict[str, Any]:
@@ -558,8 +701,19 @@ def merge_queue_report(memory_graph_dir: Path,
         plan that holds the 23). The applied plan is a subset of its run's dry
         plan, so a union across one date cannot invent a cluster the dry plan
         lacked.
+        A cluster that an apply report has since MERGED is not waiting and is not
+        counted here — see `suffix_applied`, which carries that number instead.
+        Measured 2026-11-19: the plans of the newest date held 24 approved suffix
+        clusters and 12 of them had been committed by the 01:09Z SUFFIX apply, so
+        this figure is 12 and not 24.
         Age: the earliest DATED plan in which each waiting cluster appears
         approved; the figure carries the oldest of those.
+    `suffix_applied` / `suffix_applied_on` — how many clusters of this tier an
+        `entity-merges-applied-*.json` report has committed, and the most recent
+        apply DATE among them. The plans and the packet are both assembled from the
+        plan files, so before this field existed there was no number anywhere that
+        an apply had happened at all: #4196 and #4008 closed asserting "the apply
+        has never run" while 12 suffix merges were live in the store (#4369).
     `merge_proposals` — rows of `semantic-proposals-latest.jsonl` whose `action`
         is `merge`. `alias_only` rows are excluded: they ask for an alias, not a
         merge, and reach the same human at a different cost.
@@ -586,6 +740,16 @@ def merge_queue_report(memory_graph_dir: Path,
             plans.setdefault(day, []).append(path)
     newest = max(plans) if plans else None
 
+    # The queue is what is LEFT after the applies, so the apply reports are read
+    # alongside the plans (#4369). Measured 2026-11-19: 24 suffix clusters passed as
+    # waiting while `entity-merges-applied-2026-11-19-20261119T010911Z.json` had
+    # already committed 12 of them, so the row netted to −1 (25 → 24) for an apply of
+    # 12, and the closed items #4196 and #4008 could still assert "the apply has
+    # never run" because nothing in the human-facing surfaces could see it.
+    ledger = suffix_apply_ledger(graph)
+    applied_keys = set(ledger)
+    applied_dates = [r["applied_on"] for r in ledger.values() if r["applied_on"]]
+
     first_approved: dict[str, dt.date] = {}
     waiting: set[str] = set()
     refused: set[str] = set()
@@ -606,6 +770,11 @@ def merge_queue_report(memory_graph_dir: Path,
                         waiting.add(key)
                 elif day == newest:
                     refused.add(key)
+
+    # Subtracted after the walk, and against EVERY dated plan rather than the newest
+    # one only: a merged cluster drops out of the next day's plan, so an apply read
+    # against the newest file alone would become invisible one run after it landed.
+    waiting -= applied_keys
 
     approved_dates = [first_approved[k] for k in waiting if k in first_approved]
     oldest_approved = min(approved_dates) if approved_dates else None
@@ -636,6 +805,13 @@ def merge_queue_report(memory_graph_dir: Path,
         "suffix_clusters": len(waiting),
         "suffix_oldest_date": oldest_approved.isoformat() if oldest_approved else None,
         "suffix_age_days": _age(oldest_approved),
+        # The other half of #4369: the row is the only place a SUFFIX apply is
+        # visible to a human, so it states what HAS been merged and when, beside
+        # what waits. A count that only ever goes down cannot distinguish "12 applied"
+        # from "the gate changed its mind", which is how an apply that ran read as
+        # "never ran" to the two items that closed on that premise.
+        "suffix_applied": len(applied_keys),
+        "suffix_applied_on": max(applied_dates) if applied_dates else None,
         # The refused set is counted so the printed figure can say what it
         # EXCLUDED: the most likely misreading of this number is the tier total.
         "suffix_refused": len(refused - waiting),
@@ -684,8 +860,17 @@ def suffix_review_packet(memory_graph_dir: Path,
     and a person working this packet must never be handed one.
 
     `SAFE` is the semantic gate's unanimous SAME, which is why every record's
-    `gate_decision` reads `SUFFIX_JUDGED — every judge: SAME`. Opens the same plan
-    JSONL files and nothing else: no `kg.sqlite`, no fact directory, no merge.
+    `gate_decision` reads `SUFFIX_JUDGED — every judge: SAME`. Opens the plan JSONL
+    files and the sweep's APPLY REPORTS and nothing else: no `kg.sqlite`, no fact
+    directory, no merge.
+
+    A cluster an apply report has committed is NOT a row here (#4369). The plans are
+    the only other thing the packet used to read, and a plan keeps a merged cluster in
+    its population for as long as the file is on disk, so the 2026-11-19 13:00Z packet
+    printed 24 rows of which 12 named a pair the 01:09Z apply had already merged — each
+    still headed `OVERDUE` and each ending with the command to re-run the whole tier.
+    A queue that never loses a row is not a queue, and a person following its top rows
+    would have been told to merge 12 clusters that are already merged.
     """
     today = today or dt.date.today()
     memory_graph_dir = Path(memory_graph_dir)
@@ -707,6 +892,11 @@ def suffix_review_packet(memory_graph_dir: Path,
     # AMBIGUOUS while leaving the keys alone. `merge_queue_report` counts those keys as
     # waiting anyway, so reading only the final file would print a queue of 24 and
     # packet 0 clusters — the two surfaces have to be the same 24.
+    # Same keys `merge_queue_report` subtracts, so the two surfaces cannot disagree
+    # about who is waiting — and the exclusion is the ledger's, so a row dropped here
+    # is a row an apply report says is MERGED, never a row that merely aged out.
+    already_merged = set(suffix_apply_ledger(memory_graph_dir))
+
     newest_safe: dict[str, dict] = {}
     for date, path in dated:
         if date != newest:
@@ -716,7 +906,7 @@ def suffix_review_packet(memory_graph_dir: Path,
                 continue
             key = str(row.get("norm_key") or row.get("canonical")
                       or row.get("old") or "").strip()
-            if key:
+            if key and key not in already_merged:
                 newest_safe.setdefault(key, row)
 
     first_approved: dict[str, dt.date] = {}
@@ -799,12 +989,20 @@ def write_suffix_review_packet(memory_graph_dir: Path,
 
     Every record states `--apply --tiers SUFFIX_SAFE`, so the packet is executable by
     a person and cannot be mistaken for something to run without the tier (#4197
-    refuses that). The writer opens only plan JSONL files and writes one markdown
-    file; it never opens `kg.sqlite`, never touches a fact directory, and merges
-    nothing — draining the queue stays a human act (#4009).
+    refuses that). The writer opens the plan JSONL files and the sweep's apply reports
+    and writes one markdown file; it never opens `kg.sqlite`, never touches a fact
+    directory, and merges nothing — draining the queue stays a human act (#4009).
+
+    The header states what has ALREADY been applied, with its date, so a reader can
+    tell a queue that has been worked from one that has never been touched. The
+    2026-11-19 13:00Z packet could not: it announced 24 waiting clusters twelve hours
+    after 12 of them had been merged, and every one of those 12 rows told the reader to
+    run the tier apply that had just run (#4369).
     """
     today = today or dt.date.today()
     records = suffix_review_packet(memory_graph_dir, today=today)
+    ledger = suffix_apply_ledger(memory_graph_dir)
+    applied_dates = sorted({r["applied_on"] for r in ledger.values() if r["applied_on"]})
     dest = Path(out_dir) if out_dir is not None else Path(memory_graph_dir)
     path = dest / f"suffix-review-{today.isoformat()}.md"
     overdue = [r for r in records if r["overdue"]]
@@ -817,11 +1015,15 @@ def write_suffix_review_packet(memory_graph_dir: Path,
         f"{SUFFIX_AGE_THRESHOLD_DAYS} days; the oldest has waited {oldest}. "
         "Oldest first.",
         "",
+        f"{len(ledger)} cluster(s) of this tier are ALREADY APPLIED"
+        + (f" - most recent apply {applied_dates[-1]}" if applied_dates else ""),
+        "",
         "Every cluster below has already been judged SAFE by the semantic gate. The",
         "rule is that a SUFFIX merge is never applied on schedule",
         "(`architecture/knowledge-graph.md` rule 2), so each one waits here until a",
         f"person runs `{SUFFIX_APPLY_FORM}` for it. Writing this packet applied",
-        "nothing: it opens only the entity-merge plan files, never the store.",
+        "nothing: it opens the entity-merge plan files and the apply reports that",
+        "say which clusters have already been merged, never the store.",
         "",
     ]
     for i, rec in enumerate(records, start=1):

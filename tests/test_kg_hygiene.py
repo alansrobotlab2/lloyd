@@ -850,3 +850,242 @@ def test_the_packet_survives_a_sweep_run_that_excluded_the_tier(tmp_path):
     assert [r["canonical"] for r in records] == ["Hermes", "Decider Service",
                                                  "Young Pair"], records
     assert kg_hygiene.suffix_review_summary(graph, today=TODAY)["waiting"] == len(records)
+
+
+# ---------------------------------------------------------------------------
+# #4369 — a cluster an apply report committed is not a cluster waiting
+# ---------------------------------------------------------------------------
+
+APPLIED_ON = dt.date(2026, 11, 19)
+APPLY_REPORT_NAME = "entity-merges-applied-2026-11-19-20261119T010911Z.json"
+
+#: The 12 pairs exactly as `entity-merges-applied-2026-11-19-20261119T010911Z.json`
+#: carries them in `variant_to_canonical` (variant -> canonical). They are §4's APPLY
+#: list of `backlog/data/suffix-safe-split-2026-11-09.md`, run at 01:09Z with
+#: `--apply --tiers SUFFIX_SAFE`, and every one of the 12 variant directories is gone
+#: from `vault-derived/facts/` as a result. Invented names would let a matcher pass on
+#: a shape the real reports do not have.
+APPLIED_PAIRS = {
+    "auto-reply": "auto-reply system",
+    "Tester Agent": "Tester",
+    "lloyd-tool-mcp.service": "lloyd-tool-mcp",
+    "agent-supervisord": "agent-supervisord.service",
+    "automod system": "automod",
+    "Session Enrichment Pipeline": "Session enrichment",
+    "remobi.app": "Remobi",
+    "OCI Generative AI": "OCI Generative AI service",
+    "Hermes Agent": "Hermes",
+    "intelligent adversary": "Intelligent adversary agent",
+    "autoresearch system": "Autoresearch",
+    "Feature Enablement System": "FeatureEnablement",
+}
+
+#: The 12 clusters the 16:00Z plan of the same day still holds as SAFE — the queue a
+#: person actually had left. The variant names are stand-ins (`<canonical> System`);
+#: what this file pins is the count and the identity of what is dropped.
+QUEUE_AFTER_APPLY = ["Reviewer Agent", "Planner Agent", "Anomaly Detection System",
+                     "Skill System", "rig-agent", "Verifier Agent", "Tessl Agent",
+                     "youtube-content", "Decider", "Workers", "Autolink System",
+                     "S2S Authentication"]
+
+
+def _pair_row(variant: str, canonical: str, **over) -> dict:
+    """A plan row carrying the `merges` list a real sweep writes.
+
+    `merges[].variant` is the name the run would consume, which is the key the apply
+    report is later written under — the join between a plan and a report.
+    """
+    row = _suffix_row(canonical, kg_hygiene.sweep().normalize_punct(canonical),
+                      [(canonical, 9), (variant, 4)], **over)
+    row["merges"] = [{"variant": variant, "canonical": canonical,
+                      "tier": "SUFFIX_SAFE", "action": "merge"}]
+    return row
+
+
+def _apply_report(graph: Path, pairs: dict[str, str], *, name: str = APPLY_REPORT_NAME,
+                  date: str | None = "2026-11-19",
+                  tiers: list[str] | None = None) -> Path:
+    """An apply report of `pairs`, shaped like the real one (variant_to_canonical + date)."""
+    body = {"tiers_allowed": tiers or ["SUFFIX_SAFE"], "applied_clusters": len(pairs),
+            "alias_writes": len(pairs), "report_status": "complete",
+            "variant_to_canonical": dict(pairs)}
+    if date is not None:
+        body["date"] = date
+    path = graph / name
+    path.write_text(json.dumps(body), encoding="utf-8")
+    return path
+
+
+def _queue_after_an_apply(tmp_path: Path) -> Path:
+    """The live shape of 2026-11-19: 24 approved suffix clusters in the plans, 12 of
+    them committed by the 01:09Z SUFFIX apply.
+
+    Both plans carry all 24 rows — the 09-24 plan so that the survivors still date to
+    2026-09-24, which is the half of the acceptance test the old row could not pass:
+    the surviving HOLD clusters are the oldest in the queue, so the age RISES when the
+    middle of the queue is merged away.
+    """
+    graph = tmp_path / "memory-graph"
+    graph.mkdir()
+    rows = ([_pair_row(v, c) for v, c in APPLIED_PAIRS.items()]
+            + [_pair_row(f"{c} System", c) for c in QUEUE_AFTER_APPLY])
+    for name in ("entity-merges-2026-09-24-20260924T160000Z.jsonl",
+                 "entity-merges-2026-11-19-20261119T160035Z.jsonl"):
+        (graph / name).write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                                  encoding="utf-8")
+    _apply_report(graph, APPLIED_PAIRS)
+    return graph
+
+
+def test_the_packet_drops_every_cluster_an_apply_report_says_is_merged(tmp_path):
+    """Clause 1: 12 rows, not 24 — measured on the live store the same way.
+
+    The packet was assembled from the plan files and nothing else, so a merged cluster
+    stayed in it for as long as the plan that approved it was on disk. The 13:00Z packet
+    of 2026-11-19 held 24 rows and 12 of them named a pair the 01:09Z apply had already
+    committed, each still headed `first approved 2026-09-24; waiting 56 days - OVERDUE`
+    and each ending `to apply: --apply --tiers SUFFIX_SAFE`: a person working the top
+    rows would have been told to re-merge 12 clusters that are merged. Deleting the
+    report and getting 24 back is what shows the reports, and not some other rule, are
+    what dropped those 12.
+    """
+    graph = _queue_after_an_apply(tmp_path)
+
+    records = kg_hygiene.suffix_review_packet(graph, today=APPLIED_ON)
+
+    assert len(records) == 12, [r["canonical"] for r in records]
+    assert sorted(r["canonical"] for r in records) == sorted(QUEUE_AFTER_APPLY), records
+    named = {v for r in records for v in r["variants"]}
+    assert not (named & set(APPLIED_PAIRS)), named & set(APPLIED_PAIRS)
+
+    (graph / APPLY_REPORT_NAME).unlink()
+    assert len(kg_hygiene.suffix_review_packet(graph, today=APPLIED_ON)) == 24, \
+        "without the report the plans still hold 24; the exclusion is the reports"
+
+
+def test_a_merged_cluster_leaves_the_packet_by_its_variant_name(tmp_path):
+    """The join is the name the merge consumed, on the ordinary queue fixture.
+
+    `Hermes` is one of the three waiting clusters of `_queue_graph`; a report naming
+    only its variant `Hermes Agent` removes it, and the other two are untouched. The
+    fixture's rows carry no `merges` list — the shape of the plans written before that
+    field existed — so this also pins that a row with no list of consumed variants is
+    matched by any name it carries, canonical included.
+    """
+    graph = _queue_graph(tmp_path)
+    _apply_report(graph, {"Hermes Agent": "Hermes"})
+
+    records = kg_hygiene.suffix_review_packet(graph, today=TODAY)
+
+    assert [r["canonical"] for r in records] == ["Decider Service", "Young Pair"], records
+
+
+def test_a_cluster_that_only_lends_its_canonical_name_stays_in_the_packet(tmp_path):
+    """Over-exclusion is the failure mode on the other side, and it costs a real item.
+
+    `Reviewer Agent` is one of the 12 still waiting. A report that merged some OTHER
+    name into it — here `Reviewer Agent` appearing as the DESTINATION of a pair — does
+    not make this cluster's own pending merge (`Reviewer Agent System` -> `Reviewer
+    Agent`) already done: its directory is live and its variant is still on disk. A row
+    that lists the variants it consumes is matched only by those names, or the queue
+    would shrink every time one of its names shows up as somebody else's destination.
+    """
+    graph = _queue_after_an_apply(tmp_path)
+    _apply_report(graph, {"Reviewer": "Reviewer Agent"},
+                  name="entity-merges-applied-2026-11-19-20261119T020857Z.json")
+
+    records = kg_hygiene.suffix_review_packet(graph, today=APPLIED_ON)
+
+    assert len(records) == 12, [r["canonical"] for r in records]
+    assert "Reviewer Agent" in [r["canonical"] for r in records], records
+
+
+def test_the_suffix_count_is_the_live_queue_after_the_apply(tmp_path):
+    """Clause 2: `suffix_clusters` counts what a person can still apply: 12, not 24.
+
+    The row is the one surface that printed a number for this queue, and it printed 25
+    on 2026-11-16, 25 on 2026-11-17 and 24 on 2026-11-19 — a −1 for an apply of 12,
+    because the newest plan refills with freshly-approved clusters and the survivors are
+    the oldest ones. `suffix_applied` is the figure that cannot net away: 12 clusters of
+    this tier are committed, on 2026-11-19.
+    """
+    graph = _queue_after_an_apply(tmp_path)
+
+    q = kg_hygiene.merge_queue_report(graph, today=APPLIED_ON)
+
+    assert q["suffix_clusters"] == 12, q
+    assert q["suffix_applied"] == 12 and q["suffix_applied_on"] == "2026-11-19", q
+    assert q["suffix_oldest_date"] == "2026-09-24" and q["suffix_age_days"] == 56, q
+
+    (graph / APPLY_REPORT_NAME).unlink()
+    before = kg_hygiene.merge_queue_report(graph, today=APPLIED_ON)
+    assert (before["suffix_clusters"], before["suffix_applied"],
+            before["suffix_applied_on"]) == (24, 0, None), before
+
+
+def test_a_mechanical_tier_apply_does_not_borrow_the_suffix_applied_number(tmp_path):
+    """The count is the tier's own: an applied CASE pair is not a SUFFIX apply.
+
+    #48 applies CASE and PUNCT nightly — `entity-merges-applied-2026-11-19-
+    20261119T020857Z.json` (GPT-6 -> GPT 6) and `…T160411Z.json` (Autoresearch Bench ->
+    autoresearch-bench) are two such reports on the live tree. Those clusters were never
+    in the human queue, so a count that read every report's pairs would print a
+    nightly-apply number as though a person's work had been done. `GPT 6` here is a
+    gate-REFUSED row of the suffix tier, which is the shape that would be counted by a
+    ledger that intersected with the tier instead of with its SAFE rows.
+    """
+    graph = _queue_after_an_apply(tmp_path)
+    refused = _pair_row("GPT-6", "GPT 6", status="AMBIGUOUS",
+                        decision="tier SUFFIX_SAFE excluded by --tiers")
+    (graph / "entity-merges-2026-11-19-20261119T160153Z.jsonl").write_text(
+        json.dumps(refused) + "\n", encoding="utf-8")
+    _apply_report(graph, {"GPT-6": "GPT 6"},
+                  name="entity-merges-applied-2026-11-19-20261119T020857Z.json",
+                  tiers=["CASE"])
+
+    q = kg_hygiene.merge_queue_report(graph, today=APPLIED_ON)
+
+    assert q["suffix_applied"] == 12 and q["suffix_clusters"] == 12, q
+    assert q["suffix_refused"] == 1, q
+    assert "GPT 6" not in str(kg_hygiene.suffix_apply_ledger(graph))
+
+
+def test_the_written_packet_states_what_has_already_been_applied(tmp_path):
+    """The packet's own header has to say the queue has been worked (#4369 clause 1).
+
+    The 2026-11-19 13:00Z packet announced 24 waiting clusters twelve hours after 12 of
+    them were merged and never said so. The header now names the applied count and the
+    date of the most recent apply beside the waiting count, and only the 12 rows a
+    person can still act on are numbered.
+    """
+    graph = _queue_after_an_apply(tmp_path)
+
+    path = kg_hygiene.write_suffix_review_packet(graph, today=APPLIED_ON)
+    text = path.read_text(encoding="utf-8")
+
+    assert "12 cluster(s) of this tier are ALREADY APPLIED" in text, text.splitlines()[:8]
+    assert "most recent apply 2026-11-19" in text, text.splitlines()[:8]
+    numbered = [l for l in text.splitlines() if re.match(r"^\d+\. `", l)]
+    assert len(numbered) == 12, numbered
+
+
+def test_an_unreadable_apply_report_never_shrinks_the_queue(tmp_path):
+    """A torn report is skipped, and the queue keeps the rows it cannot disprove.
+
+    A report that failed to parse is not evidence that 12 clusters are merged; reading
+    it that way would empty the human queue on a truncated write, which is the same
+    class of failure as the row that went silent (#3407 clause 4). The same node pins
+    the other degradation: a report with no `date` field is still dated by the ISO day
+    in its own filename, because that is where the run date always lives.
+    """
+    graph = _queue_after_an_apply(tmp_path)
+    (graph / APPLY_REPORT_NAME).write_text('{"variant_to_canonical": {"auto', encoding="utf-8")
+
+    q = kg_hygiene.merge_queue_report(graph, today=APPLIED_ON)
+    assert (q["suffix_clusters"], q["suffix_applied"]) == (24, 0), q
+    assert len(kg_hygiene.suffix_review_packet(graph, today=APPLIED_ON)) == 24
+
+    _apply_report(graph, APPLIED_PAIRS, date=None)
+    dated = kg_hygiene.merge_queue_report(graph, today=APPLIED_ON)
+    assert dated["suffix_applied"] == 12, dated
+    assert dated["suffix_applied_on"] == "2026-11-19", dated

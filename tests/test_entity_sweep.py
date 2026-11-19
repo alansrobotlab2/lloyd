@@ -21,6 +21,11 @@ from app.kg_store import KGStore, parse_fact_file  # noqa: E402
 SWEEP = ROOT / "scripts" / "memory" / "entity-resolution-sweep.py"
 _spec = importlib.util.spec_from_file_location("ers_test", SWEEP)
 ers = importlib.util.module_from_spec(_spec); sys.modules["ers_test"] = ers; _spec.loader.exec_module(ers)
+# The REAL gate module, bound here so a test that swaps a stub into
+# `sys.modules["entity_semantic_gate"]` cannot move this name with it. The sweep resolves
+# it by name at call time, which is what lets those stubs work; the durability tests need
+# the module a subprocess would actually find, where no stub exists.
+import entity_semantic_gate as esg  # noqa: E402
 
 
 class FakeGate:
@@ -2250,3 +2255,237 @@ def test_explicit_suffix_tier_still_merges_the_gate_approved_cluster(tmp_path, m
         assert st.aliases.resolve(gone) == left[0], rep
     finally:
         st.close()
+
+
+# ── #4369: gate evidence must outlive the run that produced it ───────────────
+#
+# The 12 SUFFIX merges of `entity-merges-applied-2026-11-19-20261119T010911Z.json`
+# were judged against `--gate-cache
+# /tmp/claude-1000/-home-alansrobotlab-lloyd/bed9670b-…/scratchpad/suffix-hold-cache.jsonl`.
+# `/tmp` is tmpfs on this box (`df -T /tmp`), so the store now holds 12 merges whose
+# verdicts exist nowhere durable: one reboot and the record of WHY each was allowed is
+# gone, with nothing in the tree to say which merges had evidence and which did not.
+# One of the 12 (`Feature Enablement System` -> `FeatureEnablement`) had no row in the
+# pairs store at all, so for that pair the tmpfs file was the whole of the evidence.
+# Two fixes, both here: the apply refuses a cache outside the durable store, and the
+# verdict row itself carries the date it was made.
+
+#: Where gate evidence has to live. Read from the gate module rather than spelled out,
+#: so this file cannot drift from the store the sweep actually checks against.
+DURABLE = Path(esg.DURABLE_DIR)
+
+
+def test_a_suffix_apply_judged_outside_the_durable_store_applies_nothing(tmp_path):
+    """Clause 5, first half: the CLI refuses, exits non-zero, and touches nothing.
+
+    Run as a subprocess through `_run`, because the refusal has to hold against the REAL
+    gate module: the in-process nodes in this file replace `entity_semantic_gate` in
+    `sys.modules` with a stub that has no `DURABLE_DIR`, and a guard tested only against
+    that stub would pass by being unable to find its own store.
+
+    `--no-gate` is what `_run` passes, and it stays: the guard is about WHERE the verdict
+    evidence lives, so nothing on the gate path may be the reason the run stops. The out
+    dir is real and writable, so an absent report is a refused write rather than an
+    absent directory — the same shape #4197's refusal node is held to.
+    """
+    root, db = _suffix_pair_tree(tmp_path)
+    out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)   # the #2968 floor guard must not be what this run stops for
+    cache = tmp_path / "scratchpad" / "suffix-hold-cache.jsonl"
+    r = _run(root, db, out, "--apply", "--tiers", "SUFFIX_SAFE",
+             "--gate-cache", str(cache), tiers=None)
+
+    assert r.returncode != 0, (
+        f"a SUFFIX apply judged against {cache} still ran (rc={r.returncode}):\n"
+        f"{r.stdout[-900:]}")
+    assert "outside the durable verdict store" in r.stdout, r.stdout[-900:]
+    assert str(DURABLE) in r.stdout, (
+        "the refusal does not name the directory the cache has to be inside, so the "
+        f"operator cannot repair it: {r.stdout[-900:]}")
+    assert not list(out.glob("entity-merges-applied-*.json")), (
+        "the run wrote an apply report, so a SUFFIX apply is on the record even though "
+        "this guard refused it")
+    for name in ("voice", "Voice Pipeline"):
+        assert (root / name).is_dir(), f"{name} was moved by a run that refused"
+    st = KGStore(db)
+    try:
+        assert st.aliases.resolve("voice") is None, "a refused apply wrote an alias"
+    finally:
+        st.close()
+
+
+def test_a_suffix_apply_judged_inside_the_durable_store_still_runs(tmp_path, monkeypatch):
+    """The other half of the same clause: the durable spelling is not a tier ban.
+
+    `--gate-cache` inside the store, everything else exactly the human apply of #4009.
+    If this run refuses, the guard has become a ban on the only apply route a
+    gate-approved suffix cluster has, and the person following `SKILL.md:101` is told to
+    do the thing the tool now refuses.
+    """
+    _gate_that_agrees(monkeypatch)
+    root, db = _suffix_pair_tree(tmp_path)
+    out = tmp_path / "out"; out.mkdir()
+    _seed_floor(out, db)
+    cache = DURABLE / "test-durable-verdicts.jsonl"
+    monkeypatch.setattr(sys, "argv", [str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+                                      "--out-dir", str(out), "--apply",
+                                      "--tiers", "SUFFIX_SAFE", "--gate-cache", str(cache)])
+    rc = ers.main()
+
+    assert rc == 0, (
+        f"--apply --tiers SUFFIX_SAFE with a cache inside {DURABLE} was refused "
+        f"(rc={rc}); the guard is a location check, not a ban on the tier")
+    assert _applied_report(out)["report_status"] == "complete"
+
+
+def test_the_durability_guard_joins_the_default_store_by_resolution(tmp_path):
+    """The guard's OWN store, with no `durable_dir` passed: resolution, not string match.
+
+    Every arm calls the guard without `durable_dir`, so the directory being joined is
+    the real `entity_semantic_gate.DURABLE_DIR` — the one the CLI uses when an operator
+    names no cache at all — and the arms are the cases a `startswith` check gets wrong:
+    * the gate's own default file and a path under a subdirectory of the store, both
+      legitimate, and refusing them would stop the nightly and any tidy operator;
+    * a sibling whose NAME carries the store's prefix (`memory-graph-archive`), which is
+      exactly as ephemeral as `/tmp` and must be refused;
+    * a link standing OUTSIDE the store whose target is inside it. Resolution follows
+      the link to the store, and the guard accepts: the rule is where the BYTES live,
+      and there the verdicts survive a reboot.
+
+    The mirror arm — a link inside the store pointing at a tmpfs file, which resolution
+    must refuse — is `test_the_guard_accepts_only_a_cache_resolved_inside_the_store`,
+    which builds its store under `tmp_path`. This node writes nothing into the real
+    store and never creates a path inside it: gate SM_20261119_195639 caught this node
+    failing on its second run (`FileExistsError` from `link.symlink_to`, the first run's
+    `points-elsewhere.jsonl` still standing in the store), which is what a test that
+    writes into the directory its own guard protects does — it pollutes the store it is
+    meant to defend and then trips over its own residue.
+    """
+    inside = DURABLE / "semantic-verdicts.jsonl"
+    assert ers.gate_cache_durability_refusal(inside, {"SUFFIX_SAFE"}) is None
+    assert ers.gate_cache_durability_refusal(DURABLE / "gates" / "x.jsonl",
+                                             {"SUFFIX_SAFE"}) is None
+    assert ers.gate_cache_durability_refusal(DURABLE, {"SUFFIX_SAFE"}) is None
+
+    refused = ers.gate_cache_durability_refusal(
+        DURABLE.parent / (DURABLE.name + "-archive") / "v.jsonl", {"SUFFIX_SAFE"})
+    assert refused and "outside the durable verdict store" in refused, (
+        f"a directory named like the store but not the store was accepted: {refused!r}")
+
+    from_outside = tmp_path / "convenient-link.jsonl"
+    from_outside.symlink_to(inside)
+    assert ers.gate_cache_durability_refusal(from_outside, {"SUFFIX_SAFE"}) is None, (
+        "a link whose target is the durable store was refused, so the guard is "
+        "comparing names rather than asking where the verdicts are written")
+
+
+def test_the_guard_accepts_only_a_cache_resolved_inside_the_store(tmp_path):
+    """What counts as "inside", with the store pinned to a directory under tmp_path.
+
+    The arms are the cases a naive prefix test gets wrong, and the store is passed in so
+    the node never writes into the real one:
+    * the gate's own default file, a subdirectory of the store, and the directory itself
+      — all legitimate, and refusing them would stop the nightly and any tidy operator;
+    * a sibling whose NAME shares the store's prefix (`memory-graph-archive`) — a
+      startswith test waves it through, and it is exactly as ephemeral as /tmp;
+    * a symlink standing inside the store that points at a file outside it — resolution
+      follows the link, because the question is where the BYTES live, not where the name
+      is. The same resolution is what makes a `/tmp` symlinked into the store fail rather
+      than pass.
+    """
+    store = tmp_path / "_pipeline" / "memory-graph"
+    store.mkdir(parents=True)
+    outside = tmp_path / "scratchpad"
+    outside.mkdir()
+
+    assert ers.gate_cache_durability_refusal(store / "semantic-verdicts.jsonl",
+                                             {"SUFFIX_SAFE"},
+                                             durable_dir=store) is None
+    assert ers.gate_cache_durability_refusal(store / "gates" / "x.jsonl",
+                                             {"SUFFIX_SAFE"},
+                                             durable_dir=store) is None, \
+        "a cache in a subdirectory of the store was refused, though its verdicts survive"
+    assert ers.gate_cache_durability_refusal(store, {"SUFFIX_SAFE"},
+                                             durable_dir=store) is None
+
+    sibling = store.parent / "memory-graph-archive"
+    sibling.mkdir()
+    refused = ers.gate_cache_durability_refusal(sibling / "v.jsonl", {"SUFFIX_SAFE"},
+                                                durable_dir=store)
+    assert refused and "outside the durable verdict store" in refused, (
+        f"a directory named like the store but not the store was accepted: {refused!r}")
+
+    real = outside / "on-tmpfs.jsonl"
+    real.write_text("{}\n", encoding="utf-8")
+    link = store / "points-elsewhere.jsonl"
+    link.symlink_to(real)
+    linked = ers.gate_cache_durability_refusal(link, {"SUFFIX_SAFE"}, durable_dir=store)
+    assert linked and "outside the durable verdict store" in linked, (
+        "a symlink inside the store pointing outside it was accepted, which makes the "
+        "directory a formality rather than a guarantee")
+
+
+def test_the_durability_guard_only_bites_where_suffix_can_be_applied(tmp_path):
+    """Silent where the tier cannot be applied, so the nightly is not stopped.
+
+    #48 runs `--apply --tiers CASE,PUNCT` on schedule and may legitimately name a scratch
+    cache; SUFFIX_SAFE is in `ALL_TIERS`, so the default tier set CAN reach a suffix
+    apply and is guarded. An unset `--gate-cache` is the gate's own default file, inside
+    the store, and is the nightly's shape — it must never be refused.
+    """
+    outside = tmp_path / "scratch" / "v.jsonl"
+    assert ers.gate_cache_durability_refusal(outside, {"CASE", "PUNCT"}) is None
+    guarded = ers.gate_cache_durability_refusal(outside, set(ers.ALL_TIERS))
+    assert guarded and "SUFFIX_SAFE" in guarded, (
+        "the default tier set, which includes SUFFIX_SAFE, was waved through")
+    assert ers.gate_cache_durability_refusal(None, set(ers.ALL_TIERS)) is None, (
+        "an unset --gate-cache, which is the gate's own durable default, was refused")
+
+
+def test_a_gate_verdict_written_to_the_durable_cache_carries_its_judgement_date(tmp_path):
+    """Clause 5, second half: the verdict row is dated, like the pairs store's rows.
+
+    `grep -c '"judged_at"' lloyd-data/_pipeline/memory-graph/semantic-verdicts.jsonl`
+    returns 0 over 311,627 bytes, while every row of `semantic-verdicts-pairs.jsonl`
+    carries one. With no date on a verdict, "first approved 2026-09-24" can only be
+    reconstructed from plan FILENAMES, which is why an apply could not be placed in time
+    and why #4196 could close on "the apply has never run".
+
+    The cached re-run is the half that matters: the row is written once and returned
+    again by key, so its `judged_at` is the date of the FIRST judgement of this
+    (a, b, definitions) triple and a re-run must not quietly renew it.
+    """
+    facts = tmp_path / "facts"
+    for name, definition in (("Morning Briefing", "An automated daily digest task."),
+                             ("Morning Briefing System",
+                              "A proactive system that surfaces staleness in the "
+                              "daily digest.")):
+        d = facts / name
+        d.mkdir(parents=True)
+        fm = {"type": "overview", "entity": name, "category": "overview",
+              "definition": definition}
+        (d / f"{name}-overview.md").write_text(
+            f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# Summary\n\n{definition}\n",
+            encoding="utf-8")
+    cache = tmp_path / "memory-graph" / "semantic-verdicts.jsonl"
+    cache.parent.mkdir()
+
+    def _gate():
+        return esg.SemanticGate(facts, cache, judge_fns={
+            "a": lambda p: "SAME — the same digest", "b": lambda p: "SAME — yes"})
+
+    verdict = _gate().verdict("Morning Briefing System", "Morning Briefing")
+    assert verdict["decision"] == "SAME", verdict["judges"]
+
+    rows = [json.loads(l) for l in cache.read_text(encoding="utf-8").splitlines() if l]
+    assert len(rows) == 1, rows
+    assert "judged_at" in rows[0], (
+        "a gate verdict is undatable, so an apply judged from it cannot be placed in "
+        "time — the defect #4369 exists for")
+    stamp = dt.datetime.fromisoformat(rows[0]["judged_at"])
+    assert stamp.tzinfo is not None, "a naive stamp is read as UTC by every later reader"
+
+    again = _gate().verdict("Morning Briefing System", "Morning Briefing")
+    assert again["cached"] is True and again["judged_at"] == rows[0]["judged_at"], again
+    rows2 = [json.loads(l) for l in cache.read_text(encoding="utf-8").splitlines() if l]
+    assert len(rows2) == 1, "the cached pair was re-judged and re-dated"

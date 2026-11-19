@@ -1035,6 +1035,64 @@ def test_a_torn_plan_line_is_skipped_and_the_section_stands(tmp_path):
     assert "## Hygiene" in body and "| Provenance coverage" in body
 
 
+def _apply_report(graph, pairs, *, day="2026-11-16",
+                  name="entity-merges-applied-2026-11-16-20261116T010911Z.json"):
+    """An apply report of `pairs`, the way `entity-resolution-sweep.py` writes one."""
+    (graph / name).write_text(
+        json.dumps({"tiers_allowed": ["SUFFIX_SAFE"], "applied_clusters": len(pairs),
+                    "alias_writes": len(pairs), "report_status": "complete",
+                    "date": day, "variant_to_canonical": dict(pairs)}),
+        encoding="utf-8")
+    return graph
+
+
+def _row_for(graph, today=QUEUE_TODAY):
+    """The Hygiene row as the nightly report prints it, for one graph directory."""
+    q = _kg_hygiene().merge_queue_report(graph, today=today)
+    return _report_line(_report(_hygiene(merge_queue=q)),
+                        "| Merge proposals left for a human")
+
+
+def test_an_apply_moves_the_row_because_the_row_states_the_applied_count(tmp_path):
+    """#4369 clause 3: the applied number, with its date, beside the waiting number.
+
+    Measured on the live reports across the 2026-11-19 01:09Z apply of 12 SUFFIX
+    clusters, `knowledge-health-2026-11-16.md:299` read `25 gate-approved suffix
+    clusters (waiting 53 days)`, and `knowledge-health-2026-11-19.md:299` — written
+    13:00Z, some twenty hours AFTER that apply — read `24 … (waiting 56 days)`. Minus
+    one, with a RISEN age: the row counts the gate-approved set of the newest plan, which
+    had refilled with 11 freshly-approved clusters, and the clusters still waiting are the
+    oldest in the store. §5's acceptance sentence, "down by N (=12) with a REDUCED oldest
+    age", was unreachable for any apply, and the apply stayed invisible on the one surface
+    a person reads.
+
+    This fixture is that arithmetic at its smallest: three approved clusters in
+    `_queue_store`, one of them (`Alpha`) now committed by an apply report. The waiting
+    count goes 3 → 2 and the applied count goes absent → stated, with the day of the
+    apply. The waiting figure may net against refills; the applied figure cannot.
+    """
+    graph = _apply_report(_queue_store(tmp_path), {"Alpha": "Alpha service"})
+
+    row = _row_for(graph)
+
+    assert "2 gate-approved suffix clusters" in row, row
+    assert ", 1 applied 2026-11-16" in row, row
+
+
+def test_a_row_with_no_applies_states_none_rather_than_omitting_the_field(tmp_path):
+    """The field is always there, so a missing apply never reads as no apply happened.
+
+    "none applied on record" is the state #4196 and #4008 asserted in their closures —
+    "0 of 50 applied reports carry a SUFFIX tier", "Apply never ran" — and which was false
+    31 hours after #4196 closed. Printing the sentence every run is what turns the first
+    apply into a change in the row rather than a new field nobody notices.
+    """
+    row = _row_for(_queue_store(tmp_path, proposals=False))
+
+    assert "3 gate-approved suffix clusters" in row, row
+    assert "none applied on record" in row, row
+
+
 def test_the_merge_queue_is_never_fed_to_the_alarm_channel():
     """A non-empty queue is the DESIGNED state, so it must not exit 2.
 
