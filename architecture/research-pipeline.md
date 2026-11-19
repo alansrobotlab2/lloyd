@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, research]
 type: reference
 status: implemented
-date: 2026-10-20
+date: 2026-11-19
 ---
 
 # The research registry
@@ -82,7 +82,8 @@ Bounding the file would have fixed that and left the real problems:
 The 314 unique topics were imported as `archived` rows. They were the dedup
 corpus and nothing else: `archived` never counts toward a daily budget and
 never appears in `recent()`. **That corpus is in the registry that runs today,
-and `stats()` says so as a number: `archived: 314` (474 rows total).** It
+and `stats()` says so as a number: `archived: 314` (522 rows total, measured
+2026-11-19; 474 at the 2026-11-02 re-tense).** It
 reported `archived: 314` on 2026-09-20; the store measured on 2026-10-20 held
 117 rows whose ids ran 1..117 — a restarted `AUTOINCREMENT` sequence, so the
 file the 2026-09-22 data-home move carried across was replaced by an empty one
@@ -185,7 +186,12 @@ front-matter `pipeline:` of exactly `research`, because the lost card's
 that write — and both write surfaces ask it: `agent_mcp/vault.py` and
 `agent_mcp/builtin_fs.py`. It runs before either lane's `mkdir`, so a refused
 card leaves no file and no directory, and a note declaring a *job* pipeline
-(`pipeline: nightly-reflection`, the shape 67 vault files carry) is untouched.
+(`pipeline: nightly-reflection`, the shape 67 vault files carried on 2026-10-23 —
+the date that count was taken, and the one
+`scripts/vault/research_route.py`'s comment still
+repeats; a 2026-11-19 `grep` for a line beginning `pipeline:` finds 91 markdown
+files, an upper bound on the same population, so the exemption's reasoning holds
+while its number is dated) is untouched.
 
 `propose` also **refuses** rather than queues once `MAX_QUEUED` (40) topics are
 waiting, returning the depth and "research them before proposing more" in place
@@ -253,8 +259,9 @@ passes its `run_id` into `execute`, so the queue id is the link.
 - **A `queued` topic is never expired automatically.** `stats()` reports
   `stale_queued` past 60 days (`STALE_QUEUED_DAYS`); retiring one stays a
   human's decision. That threshold is loose enough to hide the ordinary
-  state — at 40 queued against a `daily_max` of 3, the head sits for nearly
-  two weeks with `stale_queued: 0` — so since 2026-09-24 the same payload
+  state — at 40 queued against a `daily_max` of 3 the queue holds nearly two
+  weeks of *work*, but the head can wait far longer than that and still read
+  `stale_queued: 0` — so since 2026-09-24 the same payload
   also carries `max_queued`, `queued_fraction`, `at_cap` and `head_age_days`
   (#1277), which is what lets the generator's "at its cap → stop" rule fire
   from `research_stats` instead of from a refusal. The two questions that item
@@ -263,8 +270,14 @@ passes its `run_id` into `execute`, so the queue id is the link.
   nobody can read as intent — and a capped night that executed keeps reporting
   `success`. The starved priority cohort that item named went with the registry
   reset above; a 55-weighted one is filling in again (23 of 32 queued, measured
-  2026-10-20) and `next()` still drains `priority ASC`, so whether it is reached
-  depends only on the 50s ahead of it clearing.
+  2026-10-20) and `next()` still drains the stored `priority ASC` — nothing ages
+  it, unlike `workers/queue.py`'s `AGING_PERIOD_HOURS` — so whether it is reached
+  depends only on the 50s ahead of it clearing, and at 2026-11-19 they are not
+  clearing: the same payload reads `queued: 36`, `queued_fraction: 0.9`,
+  `done_today: 2` and `head_age_days: 50.0` beside `stale_queued: 0`. A source
+  with twelve days of drain behind it is still not reaching a head fifty days
+  old, and the two freshness numbers in one payload disagree about the same queue
+  in the same read (#4274).
 - **The generator is still an autonomy task**, so it inherits that path's
   timeout semantics rather than the pool's — #65 at `timeout_seconds: 1500`,
   under `scheduled-task`'s 3600 s pool cap so the task's own timer is the one
@@ -279,6 +292,33 @@ passes its `run_id` into `execute`, so the queue id is the link.
 
 ## Review log
 
+- **2026-11-19 — `current`.** Every mechanism in the unit still runs, and every
+  symbol, path, constant and cadence verified against the tree: the seven
+  `STATUSES`, `propose`'s `ON CONFLICT(key) DO NOTHING RETURNING id` and `claim`'s
+  `UPDATE ... RETURNING`, `MAX_QUEUED` 40 / `MIN_NOTE_BYTES` 400 /
+  `STALE_QUEUED_DAYS` 60 / `workers.max_attempts` 3 / `interval_seconds` 3600 /
+  `daily_max` 3 / `inner_voice: false`, the `2 * max_duration_seconds` reclaim,
+  §3's returned-versus-raised arm re-read whole in `workers/pool.py` (the returned
+  arm settles the queue row exactly once, and the queue's failure call appears only
+  in the two exception arms), `research_route_refusal` asked by both write lanes
+  (`vault_write`, and `Write`/`Edit` in `builtin_fs.py`; the aggregator exposes no
+  third vault write surface, so there is nothing unguarded beside these two), and
+  `deep_research.execute` as the only `store.claim` caller in `workers/`. What had
+  moved is three measured numbers, each corrected to dated record rather than
+  deleted: `stats()` now counts 522 rows beside `archived: 314` (§1), the exempt
+  `pipeline:` population has grown from the 67 files counted 2026-10-23 to 91 by a
+  2026-11-19 grep (§2), and §5's drain estimate is now contradicted by the very
+  payload it cites — `head_age_days: 50.0` beside `stale_queued: 0` at 36 queued,
+  so the bullet says which of the two numbers is the queue's age and which is its
+  backlog. All three read through the shipped route,
+  `python -m app.research_store stats`, never `sqlite3`. Filed: #4272 (11
+  `written` rows name a note that is gone — none of them in vault git history, and
+  the count grew from the 6 measured 2026-11-06, so the loss is live and
+  unexplained), #4273 (nothing outside a chat `research_stats` call reads
+  `missing_artifacts`, which is how the 11 stayed unseen), #4274 (the starved head,
+  against `workers/queue.py`'s aging rule that `next()` does not have). Both health
+  routes were read unclamped at `days=7` — `window_clamped_to_hours` and
+  `oldest_input` null on each — and this unit states no fleet figure to carry.
 - **2026-10-20 — `stale`.** Every mechanism still runs, but three things the body
   asserted as present tense had moved. §3's retry rule was describing the wrong
   record: an in-band `{"status": "failed"}` writes a **failed run** and a
