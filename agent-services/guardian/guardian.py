@@ -118,6 +118,20 @@ DATA_TRIP_ALERT_TITLE = "Lloyd data root damaged — promotions halted"
 #: still ordering a restore. `_vault_snapshot_stream` carries the two causes.
 VAULT_SNAPSHOT_ALERT_TITLE = "Vault snapshots are not arriving"
 
+#: #4360: the counter for the window the data rail above creates. `check_data` does not
+#: raise `Data snapshots are not arriving` while the data tripwire stands, on the design
+#: assumption that the critical trip page starts a repair inside the
+#: `policy.SNAPSHOT_MAX_AGE_SECONDS` the store may go without a copy. Measured 2026-11-19:
+#: a trip paged at 01:01Z and still stood at 13:16Z, so for roughly nine of those hours the
+#: second protection layer was down past its own bound with nothing saying so — the age
+#: alarm was railed, the trip's page had aged at the first minute, and `tripped_at` had no
+#: reader anywhere in tracked code. This title is that missing reader. Deliberately a title
+#: of its own rather than a second copy of the age alarm: `tests/test_data_home.py` pins the
+#: rail precisely because a second page for one refusal is how an alert gets ignored, and a
+#: distinct title is what lets `Guardian.alert`'s same-title suppression and
+#: `Notifier.resolve` tell the two claims apart.
+DATA_TRIP_SNAPSHOT_AGE_TITLE = "Data snapshot layer down while the data tripwire stands"
+
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [guardian] {msg}", flush=True)
@@ -2696,18 +2710,31 @@ class Guardian:
         # `Result=success` after refusing, and pruning never deletes the newest
         # snapshot, so the entry count keeps looking alive (#1416). Not while the
         # data tripwire is set: refusing then is the intended behaviour and the
-        # critical alert for it has already been paged.
+        # critical alert for it has already been paged. That rail stays exactly as
+        # #1416 left it — what it also did was mute the FACT of the outage with no
+        # replacement, on the assumption that a page already raised is a bounded
+        # outage. On 2026-11-19 a trip paged at 01:01Z and still stood twelve hours
+        # later, so the reading is now taken on every poll whether or not the marker
+        # stands and merely ROUTED: no marker → #1416's page; marker set → #4360's
+        # duration readout, which names how long the second layer has been down
+        # instead of saying nothing. One poll, one reading of the directory, two
+        # possible sentences about it — no second age measurement anywhere.
         if (now - self._snapshots_checked_at >= policy.SNAPSHOT_CHECK_SECONDS
-                and not self.data.tripped()
                 and os.path.isfile(os.path.join(policy.DATA_ROOT, datawatch.ROOT_MARKER))):
             self._snapshots_checked_at = now
+            # Read once and hand the same dict to both branches: `tripped()` re-reads the
+            # file rather than caching, so two calls could straddle a `clear` running in
+            # another process and raise a readout for a trip a human has just closed.
+            trip = self.data.tripped()
             try:
                 snap_fresh, snap_why = datawatch.snapshot_report(
                     policy.DATA_SNAPSHOTS, policy.SNAPSHOT_MAX_AGE_SECONDS)
             except Exception as exc:  # noqa: BLE001
                 log(f"snapshot freshness check failed (continuing): {exc}")
                 snap_fresh, snap_why = True, ""
-            if not snap_fresh:
+            if self._snapshot_age_trip is not None and trip is None:
+                self._retract_snapshot_age_readout(snap_fresh, snap_why)
+            if not snap_fresh and trip is None:
                 self.alert("error", "Data snapshots are not arriving",
                            f"{snap_why}.\n\nThe hourly read-only snapshot of {policy.DATA_ROOT} is "
                            "layer 2 under the data tripwire, and a stream that stopped is "
@@ -2720,6 +2747,10 @@ class Guardian:
                            "The script refuses while the data tripwire is set, or when the root "
                            "shrank below its last healthy measurement. `~/lloyd/scripts/backup/"
                            "restore-data.sh` lists the store and prints the newest stamp's age.")
+            elif not snap_fresh:
+                # Stale store AND a standing marker: the page above is the one the rail
+                # keeps silent, so what the tick owns is the duration of that silence (#4360).
+                self._snapshot_age_readout(trip, snap_why, now)
         try:
             why, snap = self.data.tick()
         except Exception as exc:  # noqa: BLE001
@@ -2771,6 +2802,110 @@ class Guardian:
             f"  /usr/bin/python3 {policy.published_watchdog_script(datawatch.__file__)} clear\n"
             f"Snapshots are refused until then. Marker: {marker}",
             coalesce=True)
+
+    #: Which trip this process has already reported an exposure for, by the marker's
+    #: own `tripped_at`. A class default for the same reason `_tick_errors` has one —
+    #: several test homes build a Guardian with `__new__` and set only the fields they
+    #: use — and keyed on the stamp rather than a boolean so a NEW trip is a new
+    #: exposure and gets its own readout. Not durable: a restarted guardian re-states
+    #: an open exposure once, which is the point of the alarm, and the 15-minute
+    #: throttle plus `Guardian.alert`'s own same-title suppression is what keeps that
+    #: re-statement to one line rather than a stream.
+    _snapshot_age_trip: str | None = None
+
+    def _snapshot_age_readout(self, trip: dict, snap_why: str, now: float) -> None:
+        """How long has the second layer been down, and say it once (#4360).
+
+        The rail in `check_data` is deliberate: `snapshot-data.sh` refuses to take a
+        snapshot while the data tripwire stands, so a stale stamp mid-incident is the
+        intended behaviour and the trip's critical page is the alert for it. What the
+        rail never replaced is the measurement. It rests on one assumption — that a
+        paged page starts a repair inside the
+        `policy.SNAPSHOT_MAX_AGE_SECONDS` the store may go without a copy — and on
+        2026-11-19 that assumption ran out quietly: the trip paged at 01:01:22Z and the
+        newest snapshot directory still stood at `20261119T010120Z` twelve hours later,
+        so for roughly nine of those hours the layer was down past its own bound with
+        nothing saying so. The one alert that covered it had aged at the first minute,
+        and `tripped_at` — written into the marker since `vaultwatch.trip` was born —
+        had no reader anywhere in tracked code: `datawatch.py status` dumped the raw
+        JSON, so a human at a terminal saw a start stamp and never a duration, and no
+        unattended surface saw even the stamp.
+
+        So this is a readout over a measurement that already exists, not a new probe:
+        `vaultwatch.tripped_ago` answers the trip's age from the marker's offset-bearing
+        stamp (`-0800` on this box, where reading that string as naive local time or as
+        naive UTC is wrong by eight hours in opposite directions — the #3932 family), and
+        `snap_why` is the same string #1416's page would have carried, because it IS the
+        same `snapshot_report` call on the same poll. An unreadable stamp is age UNKNOWN
+        and raises nothing: `0 m` is the most reassuring thing this sentence could say,
+        and it is what a marker written before the field existed, or hand-edited, would
+        produce if an absent stamp were allowed to mean "just now".
+
+        `error`, not `critical`: the trip's page is the thing that pages, and a second
+        critical for the same incident is how an alert gets ignored (#1416's own reason
+        for the rail). Whether this should escalate once the bound is passed twice over
+        is a standing question for Alan, recorded as owed on the item.
+        """
+        stamp = trip.get("tripped_at")
+        if stamp is not None and self._snapshot_age_trip == stamp:
+            return                        # this trip has already been read out loud
+        stood = vaultwatch.tripped_ago(trip, now)
+        if stood is None:
+            # Journalled and silent: the marker exists, its start stamp does not
+            #, and an elapsed age built on that gap would be a fabricated number.
+            log(f"data trip marker holds no readable `tripped_at` ({stamp!r}); the "
+                "snapshot layer is railed with no duration to report")
+            return
+        self._snapshot_age_trip = stamp
+        self.alert(
+            "error", DATA_TRIP_SNAPSHOT_AGE_TITLE,
+            f"The data tripwire has stood {datawatch.age_text(stood)} — tripped at {stamp} "
+            f"— and {snap_why}.\n\n"
+            "That is the second protection layer under the tripwire down for the whole of "
+            f"that window, past the {policy.SNAPSHOT_MAX_AGE_SECONDS / 3600.0:g} h a stale "
+            "stamp is allowed to run. Its own alarm is muted while the marker stands on "
+            "purpose (`check_data`: the snapshot script refuses during an incident, so a "
+            "stale stamp is intended, and the trip's critical page was the alert for it) — "
+            "and what that design assumed is a repair inside the bound. Nothing else "
+            "counted the window: the trip's page said its piece once at the moment it "
+            "fired, and this number has never been computed anywhere. It is one alert per "
+            "trip, not one per check.\n\n"
+            "Check the trip against the newest snapshot above, restore into a side "
+            "directory with `~/lloyd/scripts/backup/restore-data.sh` (never in place) if "
+            "the root is wrong, then clear the tripwire with\n"
+            # `policy.published_watchdog_script`, not this process's `__file__`: an alert
+            # body is a directive, and the tree a round-rooted watchdog loaded its module
+            # from is the round's own copy, which gets deleted while this section is still
+            # open on the daily note (#3795).
+            f"  /usr/bin/python3 {policy.published_watchdog_script(datawatch.__file__)} clear\n"
+            "Snapshots resume only after that. This alarm reports the exposure; it "
+            "restores nothing and refuses nothing.",
+            # Retractable on the tick the marker is cleared — see
+            # `_retract_snapshot_age_readout`. Not decoration: without the marker
+            # `notify.DAILY_STILL_OPEN` writes, `Notifier.resolve` has no open section to
+            # seal and answers True over the block, which is #3882's finding.
+            coalesce=True)
+
+    def _retract_snapshot_age_readout(self, snap_fresh: bool, snap_why: str) -> None:
+        """Close the exposure readout on the tick this same poll measures the marker gone.
+
+        The daily note is where the alarm lives, and an unretracted section there is a
+        standing order to restore a tree that is fine — the #3882 finding, which this
+        title is coalesced specifically so a `resolve` can reach it. The clear condition is
+        the marker, not the store: while the marker stands, snapshots cannot arrive
+        whatever the directory says, so a fresh-looking stamp under a standing marker is
+        not an ending. Once the marker is gone the rail lifts with it, and if the store is
+        still stale the #1416 page takes over in the same poll — which is why the body
+        below quotes this poll's reading rather than claiming the stream recovered.
+        """
+        self._notify("resolve", DATA_TRIP_SNAPSHOT_AGE_TITLE,
+                     f"The data tripwire marker is gone, so the snapshot rail lifted and "
+                     f"this exposure ended as of this reading: {snap_why or 'no store to read'}"
+                     + (" — and the stream is delivering again." if snap_fresh else
+                        ", but the store is STILL stale: `Data snapshots are not arriving` "
+                        "is the live alarm from this tick onward, not this one")
+                     + ". This retires a readout; it restores nothing.")
+        self._snapshot_age_trip = None
 
     def _stop_sync(self) -> str:
         try:

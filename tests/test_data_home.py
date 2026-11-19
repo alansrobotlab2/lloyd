@@ -51,6 +51,7 @@ sys.path.insert(0, str(GUARDIAN_DIR))
 import datawatch as DW  # noqa: E402
 import guardian as G  # noqa: E402
 import policy  # noqa: E402
+import vaultwatch as VW  # noqa: E402
 
 
 # ── the resolver ─────────────────────────────────────────────────────────────
@@ -412,6 +413,182 @@ def test_the_snapshot_alert_is_quiet_while_the_data_tripwire_is_set(guardian):
     g._snapshots_checked_at = 0.0
     g.check_data()
     assert [a[0] for a in acted["alerts"]] == ["error"]   # the marker was all that muted it
+
+
+# ── how long has the railed second layer been down? (backlog #4360) ──────────
+#
+# The node above pins the rail: while `data-tripped.json` stands, the snapshot-age
+# alarm is silent, because `snapshot-data.sh` refuses then by design. That design
+# rests on one assumption — the critical trip page starts a repair inside the
+# `policy.SNAPSHOT_MAX_AGE_SECONDS` the store is allowed to be stale — and on
+# 2026-11-19 a trip stood over 12 hours, so the second protection layer was down
+# for 9 of them past its own bound with nothing saying so. These nodes pin the
+# readout that counts that window. It is a distinct title, never a second
+# "Data snapshots are not arriving" page, and it reads the age the railled poll
+# already measures rather than taking a second reading.
+
+
+def _trip_marker(g, age_seconds: float, *, offset_hours: int = -8) -> str:
+    """Write `data-tripped.json` in the shape `vaultwatch.trip` writes it, stamped
+    `age_seconds` ago on a box `offset_hours` from UTC, and return the stamp.
+
+    The offset is the point of the parameter. This box is UTC-8, so a stamp
+    `age_seconds` old is written as a wall clock 8 hours BEHIND UTC; a reader that
+    parsed that string as a naive local time reads it correctly, while one that
+    parsed it as naive UTC is wrong by the offset — it would call a 3 h 10 m trip
+    an 11 h 10 m trip. Changing `offset_hours` moves the wrong answer to a
+    different number, so no test can pass by accident. The format string is
+    `VW.TRIP_STAMP_FMT`, the writer's own constant, so a drifted format fails
+    here rather than silently producing "age unknown" in production.
+    """
+    import datetime as dt
+    instant = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=age_seconds)
+    stamp = instant.astimezone(dt.timezone(dt.timedelta(hours=offset_hours))).strftime(
+        VW.TRIP_STAMP_FMT)
+    (g.gdir / "data-tripped.json").write_text(
+        json.dumps({"tripped_at": stamp,
+                    "reason": "900 of 1000 data files disappeared"}), encoding="utf-8")
+    return stamp
+
+
+def test_a_standing_data_trip_names_how_long_it_and_the_snapshot_gap_have_stood(guardian):
+    """#4360 clause 1: the railed window gets a duration readout, stating both the
+    trip's own age and the age of the newest snapshot, in one alert.
+
+    The trip is 3 h 10 m old and the store 2 days: two different ages, both of
+    which a reader needs — the first says how long the exposure has run, the
+    second says how far back the last good copy goes.
+    """
+    g, _, acted = guardian
+    [stale] = _snap_store(Path(policy.DATA_SNAPSHOTS), TWO_DAYS)
+    stamp = _trip_marker(g, 3 * 3600 + 600)
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+
+    [(level, title, body)] = acted["alerts"]
+    assert level == "error"
+    assert title == G.DATA_TRIP_SNAPSHOT_AGE_TITLE
+    assert title != "Data snapshots are not arriving"      # the rail stays the rail
+    assert stamp in body                                   # the trip it speaks about
+    assert "3 h 10 m" in body                              # its age, offset honoured
+    assert "11 h 10 m" not in body                         # the naive-UTC misreading
+    assert stale in body and "2 d" in body                 # the snapshot age, one reading
+    assert str(policy.DATA_SNAPSHOTS) in body
+
+
+def test_a_trip_the_watch_wrote_itself_is_readable_by_the_readout(guardian):
+    """#4360 across the real process seam: a marker this node does NOT hand-write.
+
+    `trip()` stamps `tripped_at` in the guardian's own local zone with `%z`, so on
+    this UTC-8 box a marker written a moment ago is a wall clock 8 hours in the
+    past. A reader that ignored the offset computes a negative age and — per the
+    node below — reports nothing, so this node fails the moment the writer's format
+    and the reader's parser drift apart. It also pins that the trip's own critical
+    page and this readout are two alerts, one per condition, on the tick both are
+    true.
+    """
+    import shutil
+
+    g, root, acted = guardian
+    g.check_data()                                        # arms the watch; store is fresh
+    _snap_store(Path(policy.DATA_SNAPSHOTS), TWO_DAYS)    # the stream stops delivering
+    shutil.rmtree(root / "sessions")
+    g.check_data()                                        # the real trip writes the marker
+    assert [t for (_, t, _) in acted["alerts"]] == [G.DATA_TRIP_ALERT_TITLE]
+
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    _, title, body = acted["alerts"][-1]
+    assert title == G.DATA_TRIP_SNAPSHOT_AGE_TITLE
+    assert g.data.tripped()["tripped_at"] in body         # the writer's stamp, echoed
+    assert "0 m" in body                                  # and an age read off it
+
+
+def test_a_trip_marker_that_cannot_say_when_it_stood_reports_no_age(guardian):
+    """#4360 clause 2: an absent, empty, naive or unparseable `tripped_at` is
+    "age unknown" — never an elapsed age of zero, and never an alert.
+
+    The first case is the marker the rail's own node seeds, so this is also the
+    proof that a readout cannot light up a marker that pre-dates the field. A
+    naive stamp is in the same class: guessing it as local or as UTC is an 8-hour
+    guess, and a duration alert built on a guess is worse than silence.
+    """
+    g, _, acted = guardian
+    _snap_store(Path(policy.DATA_SNAPSHOTS), TWO_DAYS)
+    marker = g.gdir / "data-tripped.json"
+    for stamp in (None, "", "2026-11-18T17:01:22", "yesterday", "not a timestamp"):
+        body = {"reason": "900 of 1000 data files disappeared"}
+        if stamp is not None:
+            body["tripped_at"] = stamp
+        marker.write_text(json.dumps(body), encoding="utf-8")
+        assert g.data.tripped()
+        g._snapshots_checked_at = 0.0
+        g.check_data()
+        assert not acted["alerts"], stamp
+
+
+def test_a_fresh_snapshot_store_under_a_standing_trip_raises_nothing(guardian):
+    """#4360 clause 3: the readout is gated on the same measurement as the alarm it
+    stands in for, so a store that is still delivering under a standing trip is
+    silent. The fixture's store is one minute old; only the marker is added.
+    """
+    g, _, acted = guardian
+    _trip_marker(g, 2 * 24 * 3600.0)
+    assert g.data.tripped()
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert not acted["alerts"]
+
+
+def test_a_standing_trip_gets_one_duration_readout_not_one_per_check(guardian):
+    """#4360 clause 4: three snapshot-check ticks over one trip are one alert.
+
+    The tick is 5 s and the poll 15 minutes, so a per-check readout is 96 sections
+    a day on the daily note for one incident nobody has cleared yet — the reason
+    the age alarm it stands in for is throttled in the first place. The latch is
+    keyed on the marker's stamp, so a NEW trip gets its own readout, and clearing
+    the marker hands the microphone back to the age alarm the rail muted.
+    """
+    g, _, acted = guardian
+    _snap_store(Path(policy.DATA_SNAPSHOTS), TWO_DAYS)
+    _trip_marker(g, 5 * 3600.0)
+    for _ in range(3):
+        g._snapshots_checked_at = 0.0                     # each pass is a fresh poll
+        g.check_data()
+    assert [t for (_, t, _) in acted["alerts"]] == [G.DATA_TRIP_SNAPSHOT_AGE_TITLE]
+
+    (g.gdir / "data-tripped.json").unlink()               # the human clears the trip
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert [t for (_, t, _) in acted["alerts"]] == [G.DATA_TRIP_SNAPSHOT_AGE_TITLE,
+                                                    "Data snapshots are not arriving"]
+
+
+def test_the_duration_readout_is_closed_when_the_trip_is_cleared(guardian, monkeypatch):
+    """An alarm that lives only on the surface a human reads, with no retraction, is
+    the #3882 finding recurring: the surviving record of a finished incident becomes
+    an instruction to restore a tree that is fine. The readout is coalesced, so the
+    tick that measures the exposure gone seals its own section.
+    """
+    g, _, acted = guardian
+    seen: list = []
+    real_notify = g._notify
+    monkeypatch.setattr(g, "_notify",
+                        lambda method, *a, **k: (seen.append((method, a[0] if a else None)),
+                                                 real_notify(method, *a, **k))[1])
+    _snap_store(Path(policy.DATA_SNAPSHOTS), TWO_DAYS)
+    _trip_marker(g, 5 * 3600.0)
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert [t for (_, t, _) in acted["alerts"]] == [G.DATA_TRIP_SNAPSHOT_AGE_TITLE]
+    assert ("resolve", G.DATA_TRIP_SNAPSHOT_AGE_TITLE) not in seen
+
+    (g.gdir / "data-tripped.json").unlink()               # the human clears the trip...
+    _snap_store(Path(policy.DATA_SNAPSHOTS), 60.0)        # ...and snapshots resume
+    g._snapshots_checked_at = 0.0
+    g.check_data()
+    assert not acted["alerts"][1:]
+    assert ("resolve", G.DATA_TRIP_SNAPSHOT_AGE_TITLE) in seen
 
 
 def test_an_empty_snapshot_directory_alerts_where_a_data_root_exists(guardian):

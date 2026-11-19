@@ -36,6 +36,7 @@ Stdlib only, like everything the guardian imports. Also a CLI:
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import subprocess
@@ -301,6 +302,47 @@ def evaluate(history: list[Snapshot], current: Snapshot | None, *,
     return None
 
 
+#: The one format `trip` writes into the marker's `tripped_at`, and the one a reader
+#: may parse. `%z` is not decoration: the stamp is local wall clock PLUS its offset,
+#: so the instant is recoverable without knowing the zone of the box that wrote it —
+#: and on a UTC-8 box, reading this string as a naive local time or as naive UTC is
+#: wrong by 8 hours in opposite directions. `tripped_ago` is the only reader, and
+#: `tests/test_data_home.py` seeds markers through this constant so a format drift
+#: between the writer and the reader fails a test instead of silently reporting
+#: "age unknown" forever (#4360).
+TRIP_STAMP_FMT = "%Y-%m-%dT%H:%M:%S%z"
+
+
+def tripped_ago(marker: "dict | None", now: float | None = None) -> float | None:
+    """Seconds this trip has stood, or None when the marker cannot say.
+
+    #4360 asked for a duration readout of the window in which the data snapshot-age
+    alarm is railled, and the input already existed: `trip` has stamped `tripped_at`
+    since it was written, and nothing in tracked code read it — `datawatch.py status`
+    dumps the raw JSON, so a human at a terminal saw the start stamp and never a
+    duration, and no unattended surface saw even the stamp.
+
+    None means *age unknown*, and that is the whole point of returning it rather than
+    0.0: an absent, empty, naive or malformed stamp is not a trip that began this
+    second, and reporting zero would turn a broken reading into the most reassuring
+    number available. A stamp in the future is None too — the clock disagrees with the
+    marker, which is a different fact from an elapsed age, and a reader that clamped
+    it to zero would also be the reader that silently mis-parses the zone offset.
+    """
+    stamp = (marker or {}).get("tripped_at")
+    if not isinstance(stamp, str) or not stamp.strip():
+        return None
+    try:
+        then = dt.datetime.strptime(stamp.strip(), TRIP_STAMP_FMT)
+    except ValueError:
+        return None
+    if then.tzinfo is None:  # unreachable for this format; a hand-written marker is not
+        return None          # an invitation to guess which zone it meant
+    now = time.time() if now is None else now
+    age = now - then.timestamp()
+    return age if age >= 0 else None
+
+
 class VaultWatch:
     """The guardian-side state machine: history, latch, persistence."""
 
@@ -552,7 +594,7 @@ class VaultWatch:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         before = self.history[-1] if self.history else None
         body = {
-            "tripped_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "tripped_at": time.strftime(TRIP_STAMP_FMT),  # the reader is `tripped_ago` (#4360)
             "reason": reason,
             "before": before.to_dict() if before else None,
             "after": snap.to_dict() if snap else None,

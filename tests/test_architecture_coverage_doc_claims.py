@@ -3184,11 +3184,25 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # takes the whole +190. 3552 → 3650 is that review's second pass (refused-revert
     # settle, resume bookkeeping, flapping-settle warning), again all below
     # `evaluate_liveness`.
-    assert heads[guardian]["main"] == 3650, (
-        f"`main` moved off :3650 ({heads[guardian]['main']}) — if it is gone "
+    # 3650 → 3785 AND 1021 → 1035 is #4360: FOUR hunks, net +135 (138 added, 3 removed).
+    # Unlike the four above it, the FIRST one is above `evaluate_liveness` —
+    # `@@ -118,6 +118,20 @@`, +14, the `DATA_TRIP_SNAPSHOT_AGE_TITLE` constant and its
+    # comment landed between `VAULT_SNAPSHOT_ALERT_TITLE` and `RETIRED_ALERT_TITLES`
+    # because that is the block every other alert title lives in — so this is the round
+    # that moves the T-26 row: `evaluate_liveness` goes 1021 → 1035 and
+    # `architecture/threat-model.md`'s T-26 cell is re-pointed in the same commit. The
+    # other three (`@@ -2696,18 +2710,31 @@` +13, `@@ -2720,6 +2747,10 @@` +4,
+    # `@@ -2772,6 +2803,110 @@` +107) are inside `check_data` and the two new methods after
+    # it, so `main` takes +135 in total. Re-check: `git diff <the round's base> <its
+    # landing commit> -- agent-services/guardian/guardian.py | grep '^@@'` answers those
+    # four hunks and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1035 with 3785 below it.
+    assert heads[guardian]["main"] == 3785, (
+        f"`main` moved off :3785 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
-    assert heads[guardian]["evaluate_liveness"] == 1021, (
-        f"`evaluate_liveness` moved off :1021 "
+    assert heads[guardian]["evaluate_liveness"] == 1035, (
+        f"`evaluate_liveness` moved off :1035 "
         f"({heads[guardian]['evaluate_liveness']}) — `architecture/threat-model.md`'s "
         "T-26 cell cites this head, so that row moves with it")
     assert heads[lease]["grant"] == 89

@@ -256,7 +256,9 @@ def test_an_unreachable_backend_alerts_nothing_and_advances_no_streak(tmp_path, 
 
 def test_the_cooldown_survives_a_guardian_restart(tmp_path):
     """`Guardian.alert`'s repeat-suppression is a dict in memory (`_alert_seen`,
-    guardian.py:129), so a guardian that restarts mid-silence has forgotten that it
+    guardian.py:574 — re-pointed 2026-11-19 by #4360's title block, which landed above
+    it; the cite had been pointing at `sd_notify` since well before that), so a guardian
+    that restarts mid-silence has forgotten that it
     alerted. The instant goes into the guardian state dir instead, and a fresh watch
     over that dir reads it back."""
     first = PW.PoolWatch(tmp_path, base_url=BACKEND)
