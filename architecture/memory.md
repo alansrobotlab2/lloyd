@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, memory]
 type: reference
 status: implemented
-date: 2026-10-19
+date: 2026-11-19
 ---
 
 # Memory: the `improve` loop and the memory tool surface
@@ -43,7 +43,9 @@ Naming an entity is still not a decision about its entire history.
 `fact_invalidate` refuses without `fact_substring` or `category`, the reasoning
 that also took `auto_resolve` out of `fact_resolve` altogether: it is a report
 now, and the write verb is a separate one, `fact_resolve_apply`, which keys each
-mark on `(source_file, fact_id)` through `app.fact_ids.fact_identity`.
+mark on `(source_file, fact_id)` through `agent_mcp.facts.fact_identity` — not
+`app.fact_ids`, which is the *other* half of the story: the module that numbers an
+id within one file and so is why an id alone names nothing.
 
 ## 2. `improve`: the detector is evidence, never a verdict
 
@@ -274,7 +276,7 @@ That defect is closed at the writers, and the loop moved with it: `apply_action`
 no longer calls `fact_invalidate` but the marking route underneath it,
 `agent_mcp/facts.py::_apply_fact_marks`, which `fact_resolve_apply` and
 `fact_invalidate` also share, so there is one front-matter writer again and it
-keys every mark on `(file, id)` (`app.fact_ids.fact_identity`). A `confidence`
+keys every mark on `(file, id)` (`agent_mcp.facts.fact_identity`). A `confidence`
 action whose loser carries an attribution is aimed by that identity, which is the
 only route allowed to attach the `conflicts_with` trace (#1817); a `superseded`
 action keeps the substring route — `_aim_substring` grows 60 → 120 → full text and
@@ -314,7 +316,7 @@ was never opened (the record's `isolated`, `facts_root` and `kg_db` say which
 copies a score came from). There *was* a knob trap here, and it is closed at the
 source rather than by remembering: `run_eval()`'s signature defaults
 (`eval/run_eval.py`) are now the same `RECALL_*` constants its argparse
-defaults use (`:2312`, `:2329`), imported at `:46-48` — #498 (`0a7c239e`,
+defaults use (`:787`, `:2282`), imported at `:41-49` — #498 (`0a7c239e`,
 2026-09-14) deleted the restated literals, one of which, `rerank_alpha=0.5`
 against production's 0.3, is what made this section's first version measure a
 configuration nothing served. The knobs are still passed explicitly, so the
@@ -327,7 +329,9 @@ this arm `expand_graph_matches_production` is False while
 (`7389a1fc`, 2026-09-22) removed `and not args.no_graph` from that conjunction — a
 `store_true` flag compared with its own absence, which could only ever switch the
 verdict off — and gave the knob its own field instead, as
-`tests/test_eval_scorer.py:774` pins. Production's own default,
+`tests/test_eval_scorer.py:1404` pins (the node is
+`expand_graph_matches_production`; the line number this sentence carried at the last
+review was 774, some 620 lines out, which is #4259). Production's own default,
 `RECALL_EXPAND_GRAPH = False` (`agent_mcp/vault.py:564`), is not a recent change
 either: that commit *named* the literal that was already there
 (`params.get("expand_graph", False)` → the constant), so nothing flipped, and what
@@ -365,9 +369,15 @@ compare against: `fact_entity_recall` **0.421** — 20 queries, 19 answered, `er
 `seed_top_k=10`, `semantic_seeding={'enabled': True, 'k': 3}`, and `expand_graph=True`
 (the one knob above that is not production's). Command:
 `cd ~/lloyd && PYTHONDONTWRITEBYTECODE=1 .venvs/lloyd/bin/python -c 'from agent_mcp import fact_improvement as fi; d = fi._fact_entity_recall_detail(20); print(d["score"], d["queries_answered"], d["errors"], d["run_config"])'`.
-One measurement of a corpus that moves daily, not a trend line — and while #3004
-stands the nightly record keeps no score at all, so this paragraph is where today's
-number lives.
+One measurement of a corpus that moves daily, not a trend line, and one arm of two:
+the improvement pass scores nothing itself — its shipped invocation never passes
+`--report-eval`, and every nightly record back to 2026-10-03 now says so in the open
+as `fact_entity_recall_status: not_requested` (#3008) — while the standing daily
+measurement of this metric is autonomy task #82's: production defaults, `expand_graph`
+off, written to `~/lloyd-data/eval/baselines/nightly-*.json`, `0.523` on the 2026-11-17
+row over a 53-file series. The two arms differ by the one knob named above, so reading
+this figure against that series measures `expand_graph` and not the loop; which of the
+two is #376's bar is #4258's to settle.
 
 An intermediate unguarded pass over the four entities that dominate the
 queries' fact pools moved the metric **0.35 → 0.30** — a regression, and the
@@ -402,8 +412,9 @@ expired 8 more — 18 of those 30 refused outright as god-nodes — including
 feature". Two findings say the criterion is mis-aimed rather than the code dead:
 
 1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:3324`,
-   nested in `_vault_recall_base` at `:2697`, over the pool `_collect` builds at
-   `:2933`) caps the returned fact list at `FACT_RANK_CAP_SEED=10`
+   nested in `_vault_recall_base` at `:3050`, over the pool `_collect` builds at
+   `:3286` — all three re-pointed 2026-11-19; `_rank`'s own number was still true and
+   the other two were some 350 lines out) caps the returned fact list at `FACT_RANK_CAP_SEED=10`
    (`agent_mcp/retrieval.py:119`; graph-expanded neighbours get their own
    `FACT_RANK_CAP_GRAPH=5`, `:120`, on the leg production does not run while
    `RECALL_EXPAND_GRAPH` is False) across *all* seed entities — the only per-entity
@@ -445,9 +456,16 @@ Both of those figures are history now, and the shape is the part to keep: the
 tree (`scripts/memory/quarantine_general_facts.py`) — and its
 `fact_entity_recall` and `fact_entity_recall_detail` were both **null**, as they
 are in every record back to 2026-10-03, because the shipped invocation does not
-pass `--report-eval`. The metric named as the acceptance bar is therefore measured
-only when someone remembers to ask for it, which is what #3004 is about; the
-fields' existence is not evidence that a score was taken.
+pass `--report-eval`, and a record since #3008 lands that reason as
+`fact_entity_recall_status: not_requested` rather than a bare null pair — measured on
+the live store 2026-11-18: `not_requested`, 0 actions, on every pass through 11-17.
+What that does NOT mean is "nobody measures the metric": the sentence this paragraph
+used to carry — that the acceptance bar is scored only when someone remembers to ask —
+is false and #3004 closed `stale` on precisely that ground the same day this page was
+last edited. The daily scorer is autonomy task #82 (`retrieval-eval`), on production
+defaults, whose series §4's current-figure paragraph above cites. The fields' existence
+is not evidence that a score was taken; their absence in this record is no longer
+either, because there is a second scorer to look for.
 
 Filed out of this round, so the next reader does not re-derive them: **#659**
 (the metric is insensitive to the mechanism — what to measure instead), **#660**
@@ -464,7 +482,7 @@ a day before its code half).
 | `agent_mcp/fact_improvement.py` | the loop: signals → plan → apply → record |
 | `scripts/memory/fact-improvement.py` | CLI; exits 2 on an unreadable store, 3 when the run's action budget is overrun, **4** when the apply loop halted on the blast-radius guard, with `LLOYD_SCRIPT_EXIT: fact-improvement.py exit=4` on both streams so the halt reaches `meta_json.script_alarm` / `script_alarm_runs` instead of exiting 0 unseen (#3006). The halt is reachable only from the **text route whose `loser_source_file` is empty** — scope `entity_dir.glob("*.md")`, one mark per file, so a phrase two category files share marks one in each; the `(file, id)` identity route is capped at one mark and cannot trip it (§3) |
 | `tests/test_memory_improvement.py` | the suite that pins the loop. **No count is stated for it here** — every count this page has carried for it has been contradicted by the collector within days of its own date stamp, and nothing on this box enforces a count, so ask the collector instead: `PYTHONDONTWRITEBYTECODE=1 .venvs/lloyd/bin/python -m pytest tests/test_memory_improvement.py --collect-only -q`, whose last line is the number. What it pins: the one-fact-per-action and near-duplicate guards, the per-category rescan's scope rules (#1251), the exit-code ladder and the blast-radius halt's 4 + sentinel line (#3006), and the schedule wiring (task armed + script named by the skill exists) |
-| `skills/fact-improvement/SKILL.md` + `autonomy/84-fact-improvement.md` | the scheduled consumer — armed `up_next`, daily, window 14:00 local, plan mode only |
+| `~/obsidian/skills/fact-improvement/SKILL.md` + `~/obsidian/autonomy/84-fact-improvement.md` | the scheduled consumer — both files live in the vault, not in this repo (neither tree exists at HEAD; `skills/` went in `533f69f5`, so a repo-relative read of either lands on nothing) — armed `up_next`, daily, window 14:00 local, plan mode only |
 
 ## Review log
 
@@ -497,3 +515,43 @@ a day before its code half).
   (2026-09-11) and semantic seeding #1486 (`dbfde750`) — so the pass now stamps
   `fact_entity_recall_detail.run_config` from `eval/run_eval.py::build_run_config`
   over the same parsed namespace it scores with (#3009).
+
+- 2026-11-19 — **stale**. The mechanism is all still as described, and was re-verified
+  against `9156e6f9` rather than against this page: `_detect_contradictions_sync` and
+  `_reindex_files` still at the two `agent_mcp/facts.py` lines §2 names, the three
+  `FACT_*` bounds still at `50`/`10`/`5` in `agent_mcp/retrieval.py`,
+  `RECALL_EXPAND_GRAPH = False` still where §4 cites it in `agent_mcp/vault.py`,
+  `REQUIRE_OPPOSING_TERMS`
+  on, `MAX_ACTIONS_PER_ENTITY = 5` and `MAX_ACTIONS_PER_RUN = 25` split exactly as §2 says,
+  the 2/3/4 exit ladder with its sentinel, `apply_action`'s two scopes and
+  `stop_after_first` as §3 and §5 describe them, and task #84 armed `up_next` on the
+  14:00 window with 5 clean runs over a 7-day store that did cover the window asked for.
+  What had moved was pointers and one sentence about who measures the metric. Pointers:
+  `fact_identity` is `agent_mcp.facts.fact_identity` and has never been in `app.fact_ids`
+  — §1 and §3 both sent a reader to the module that *numbers* an id within one file,
+  which is the opposite of the one that keys a mark to a file — two of §4's three
+  `agent_mcp/vault.py` numbers were some 350 lines out while `_rank`'s was still true, and
+  the `test_eval_scorer.py` line §4 quoted is not where the parity flag is pinned. Each
+  wrong number is now the true one rather than gone, and that is not a preference: the
+  population of un-named line citations across these docs is pinned to an exact count by
+  `NAMED_SYMBOL_UNNAMED_CEILING`, and the node that shows that bound biting can only bite
+  with the corpus sitting exactly on it, so clearing an anchor requires lowering the
+  constant in the same commit — a test-file edit no review of a document is allowed to
+  make. Filed **#4266**: a bound that reddens when a doc cites fewer bare line numbers
+  leaves a correction pass only the option of replacing each wrong number with a new one,
+  which is what this pass did, and the instrument that prices the pile also blocks tidying
+  it. The sentence: §4 used to close by saying the acceptance metric "is measured only
+  when someone remembers to ask for it, which is what #3004 is about". #3004 closed
+  `stale` the very day this page was last edited, on the ground that autonomy task #82
+  scores that metric nightly on production defaults — and it still does: `0.523` on
+  `nightly-20261117-20261117-060426.json`, a 53-file series, read here 2026-11-18. Task
+  #84's own records meanwhile stopped being silent: they carry
+  `fact_entity_recall_status: not_requested` (#3008, landed `d409b662`) with 0 actions,
+  which is the state §2 already describes as that field's purpose. So §4 now names #82 as
+  the standing scorer and says outright that its own `0.421` and #82's `0.523` are two
+  arms and not a trend. Filed **#4258** (two live arms, no ruling on which is #376's bar),
+  **#4259** (the doc-grading test carries the same wrong `test_eval_scorer.py` pointer in
+  its own comment, where no doc edit can reach it) and **#4260** (§2's
+  `36 of 1,028 facts` / `3.5%` is a corpus measurement pinned as a literal needle by a
+  node that never re-counts the store — it rots green, and correcting it from here would
+  mean editing a #3007 acceptance clause, which is why this pass left §2's figure alone).
