@@ -108,8 +108,8 @@ autoresearch bench runner passes one; what it may put there is bounded by
 `_canonical_prompt_paths()` in `scripts/autoresearch/common.py`, today
 SOUL.md / MEMORY.md / USER.md, so no variant has ever carried a skill)
 plus every root `_skill_walk_roots()` answers
-(`app/prompt_builder.py:258` — the walker's `SKILLS_DIRS`, one built-in root plus
-whatever `skills.directories` adds),
+(`app/prompt_builder.py:_skill_walk_roots:258` — the walker's `SKILLS_DIRS`, one
+built-in root plus whatever `skills.directories` adds),
 dedupes by directory name (first root wins) and emits the advertised list —
 with descriptions **on** since 2026-09-25 (`skills.index.descriptions: true`;
 the P5 eval reached the right skill as often as the names-only line at the same
@@ -473,8 +473,8 @@ Two gates now, deliberately at different cadences:
   code and `config.yaml` for never existing, and because the module fixture
   `pytest.skip`s on an empty walk (`:187-192`) while a round's `tests` rung runs
   with `HOME` pointed at the round home (`_child_env(isolate_home=True)`,
-  `scripts/automod/gate.py:3779`, and `worktree.py:104` keeps the vault out of
-  it), the
+  called at `scripts/automod/gate.py:_run_suite:3779`, and
+  `scripts/automod/worktree.py:ensure_round_home:104` keeps the vault out of it), the
   fence contributes a **skip** there rather than a check — filed as #4362.
   Fails on any banned name where it does run. `KNOWN_UNFIXED` is **empty and stays empty**: a new entry means
   a regression, not a grandfathering. A second test guards the guard, asserting
