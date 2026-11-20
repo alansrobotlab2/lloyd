@@ -404,8 +404,13 @@ id), not idempotent (never re-sent), and side-effecting (ledgered).
 | Effect-ledgered | FX | the sets | `_tool_effects.claim` |
 | Badged destructive | DX | the annotation | nothing reads it today: carried on the wire only |
 
-The first three read the frozenset in-process. The next two read the hint as
-it crossed the wire. They agree except where a module set its own annotation.
+The first three read the frozenset in-process. The next two read the hint as it
+crossed the wire — except the overlap row, which additionally reads
+`subagents.<type>.parallel_safe` out of the shipped config. That makes it the one
+decision in this table that is not annotation-only, and the reason its Where cell
+carries two shipped states rather than one (`tests/test_tools_doc_claims.py`
+pins both halves to the config, not to this page). The sets otherwise agree except
+where a module set its own annotation.
 
 Before the plan-mode rule was derived from these sets, plan mode blocked only
 `Write`, `Edit` and `Bash`. `email_send`, `vault_write`, `fact_add`,
@@ -1133,7 +1138,13 @@ it with anything else still runs sequentially — but the P8 arm of the overlap 
 overlap, and `config.yaml` marks the `read-only` profile that way today. So one turn
 can hold up to `parallel_tool_calls_max_concurrency` (4) live children in a single
 iteration: depth 1 caps nesting, not breadth, and the KV-pressure argument above has
-a 4-child peak in it, not a 1-child one (#4434). What deep delegation is
+a 4-child peak in it, not a 1-child one (#4434). The breadth bound this section
+used to carry was written in `fa94f9da` (#1515, 2026-09-25) — a day **after** P8
+shipped in `8ac6f4a8` (2026-09-24), so it read as false the day it was committed,
+and nothing but this section's authority kept it credible afterwards. That is why
+the bound is now stated as two numbers, and why `tests/test_tools_doc_claims.py`
+pins them to the shipped config rather than to a sentence here. What deep
+delegation is
 usually wanted for — handing the next step the whole working state instead of
 a summary — is delivered here without nesting by resuming the same child with
 its `task_id`. **No per-level cost has been measured**; the ruling is
@@ -1435,7 +1446,7 @@ stops being executable is caught in the suite rather than at a reader's keyboard
   Corrected the counts in all five places prose carries (front matter, intro, §5,
   §6's two tables, §8: 152 config-only / 137 here), added the nine §6 rows, and
   marked §11's `bridge=40` total as the mis-attribution it now is. Two claims the
-  tree refutes outright: §5 and §9's "at most one live child at a time" — the P8
+  tree refutes outright: §5 and §9's one-live-child-per-turn bound — the P8
   arm (`loop._is_task_fanout`, `subagents.read-only.parallel_safe: true`) overlaps a
   batch of fresh `Task` calls at `max_concurrency` 4 **while general parallel
   dispatch is still off**, so depth 1 caps nesting and not breadth (#4434); and §1's
