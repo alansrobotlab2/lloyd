@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import ast
 import collections
+import functools
 import json
 import os
 import re
@@ -14973,3 +14974,411 @@ def test_the_knob_block_defers_to_no_item_and_points_at_the_bytes_it_re_derives_
         "the block no longer says where its figures are NOT checked from; a gate worktree "
         "has no usage database, and a reader who reaches for one gets an empty answer "
         "rather than a refutation")
+
+
+# ── #4436: the two Bash screens, and what §1 and §4 are allowed to claim ──────
+
+#: #4129 (`f83a8791`, 2026-11-15) armed `install_default_safety_hook` on the two
+#: dispatch paths that had built a `HookRegistry` missing it, and that round
+#: updated `architecture/guard-coverage.md` and added
+#: `tests/test_safety_lane_parity.py` — but never touched this page, whose §1
+#: bullet justified the aggregator's copy of the destructive-command check by
+#: exactly those two paths lacking a hook. The retired premise has therefore
+#: survived three later edits of the page. Every spelling below is one this page
+#: or the item has actually published, hedged or not: a past-tense hedge is still
+#: the sentence a skimming reader takes as today's state, which is the difference
+#: between this bullet and `vault-protection.md`'s correctly-dated incident line.
+RETIRED_FLOOR_CLAIMS = (
+    "never installed the harness safety hook",  # the sentence #4436 was filed on
+    "having no harness safety hook",            # this page's own 2026-11 hedge
+    "no harness safety hook at all",
+    "installs no safety hook",
+    "no safety hook at all",
+)
+
+#: What the bullet says instead. The aggregator's copy was never justified by two
+#: paths lacking a hook: a caller's registry is the caller's, and `call_tool`
+#: answers for a script that built none at all.
+FLOOR_HOLDER_PHRASE = "the one that holds whatever the caller's registry looks like"
+
+#: The two paths #4129 armed, and the installer they gained. The bullet names them
+#: and each is re-checked against the tree: a path the page credits with the floor
+#: that has stopped calling the installer is the same drift, in the other
+#: direction, and is exactly as wrong.
+FLOOR_PATHS_ARMED_BY_4129 = ("app/autonomy.py", "workers/sources/_common.py")
+FLOOR_INSTALLER = "install_default_safety_hook"
+
+#: Who owns the guard-arm matrix. `tests/test_harness_doc_claims.py`'s
+#: `_POINTER_ROWS` routes `guard_arm_matrix` to `guard-coverage.md`, so this page
+#: may point at the derivation and must not run a second copy of it: a matrix
+#: restated here is a matrix that goes stale on the next installer edit with
+#: nothing in the tree left to re-derive it from.
+GUARD_MATRIX_DOC = "architecture/guard-coverage.md"
+GUARD_MATRIX_MODULE = "app/harness/guard_arm_matrix.py"
+MATRIX_TABLE_HEADER = "| dispatch path |"
+
+#: §4's harness step 3, and the guards that arrived beside the floor.
+#: `install_turn_guards` is a harness hook with its own kill switch; the page
+#: described the Inner Voice piece only as "the Inner Voice observer's pre-tool
+#: hook when the session is observed", which is the shape from before the
+#: deterministic senses moved out of the observer's `install_observer` closure.
+TURN_GUARD_INSTALLER = "install_turn_guards"
+TURN_GUARD_MODULE = "app/harness/turn_guards.py"
+TURN_GUARD_KILL_SWITCH = "inner_voice.turn_guards.enabled"
+TURN_GUARD_TEST = "tests/test_turn_guards.py"
+
+#: Which `platform=` each dispatch path hands the installer, read off the call and
+#: required of the page: that argument is what an operator greps for when a guard
+#: intervenes on a scheduled turn and nobody can say whose turn it was.
+TURN_GUARD_PLATFORMS = {"app/autonomy.py": "autonomy",
+                        "workers/sources/_common.py": "worker"}
+
+#: §4's aggregator step 2, and the one real difference between the two Bash
+#: screens. `check_bash_command(..., at_dispatch=True)` skips every label in
+#: `_HOOK_ONLY_LABELS`, so those labels have exactly one enforcement lane. The
+#: page said only that the `sudo` rule "is skipped", which reads as a
+#: false-positive workaround and hides the coverage difference underneath it.
+HOOK_ONLY_SET = "_HOOK_ONLY_LABELS"
+HOOK_LANE_PHRASE = "hook lane"
+LANE_PARITY_TEST = "tests/test_safety_lane_parity.py"
+
+#: Directories that hold a dispatch path. `app/harness/` is the installers' own
+#: package and is excluded from every call-site scan below: its `def` lines, and
+#: `install_default_safety_hook`'s own body arming the content gate, are
+#: definitions rather than paths that arm anything.
+_DISPATCH_SOURCE_DIRS = ("app", "agent_mcp", "workers")
+
+
+def _plain(text: str) -> str:
+    """`_flat`, with markdown emphasis removed. The page bolds half of what it
+    says, and a needle that has to guess where each `**` falls fails on a
+    re-emphasis rather than on a changed claim."""
+    return _flat(text).replace("**", "")
+
+
+@functools.lru_cache(maxsize=8)
+def _installer_call_sites(installer: str) -> frozenset[str]:
+    """Every dispatch source that *calls* `installer`, repo-relative.
+
+    A call, not a mention: `from app.harness.safety import
+    install_default_safety_hook` names the installer and arms nothing, so the
+    pattern needs the open paren — and the lookbehind drops the installer's own
+    `def` line wherever it is read. Cached because a node reaches it three times
+    and the scan is the whole cost of the node.
+    """
+    call = re.compile(rf"(?<!def ){re.escape(installer)}\(")
+    found: set[str] = set()
+    for d in _DISPATCH_SOURCE_DIRS:
+        for p in (ROOT / d).rglob("*.py"):
+            rel = p.relative_to(ROOT).as_posix()
+            if rel.startswith("app/harness/"):
+                continue
+            if call.search(p.read_text(encoding="utf-8", errors="replace")):
+                found.add(rel)
+    return frozenset(found)
+
+
+def _split_gates_bullet() -> str:
+    """§1's first bullet — the one that argues for splitting the gates."""
+    text = _text("tools.md")
+    start = text.find("- **The gates are split")
+    assert start > 0, "§1 no longer carries the bullet that argues for the split"
+    end = text.find("\n- ", start + 10)
+    assert end > start, "§1's split-gates bullet runs to the next `##`, so the" \
+                        " bullet boundary the reader follows is gone"
+    return _plain(text[start:end])
+
+
+def _step_between(start: str, end: str) -> str:
+    """One numbered step of §4, sliced by its own opening markers, flattened."""
+    text = _text("tools.md")
+    i = text.find(start)
+    assert i > 0, f"§4 no longer has a step opening {start!r}"
+    j = text.find(end, i)
+    assert j > i, f"the step opening {start!r} no longer runs to {end!r}"
+    return _plain(text[i:j])
+
+
+def _hook_step() -> str:
+    """§4's harness step 3 — the PreToolUse hook list."""
+    return _step_between("3. **PreToolUse hooks.**", "4. **Invoke.**")
+
+
+def _dispatch_check_step() -> str:
+    """§4's aggregator step 2 — the destructive-command check."""
+    return _step_between("2. **The destructive-command check",
+                         "3. **A state-changing call")
+
+
+def _hook_only_labels() -> set[str]:
+    """The labels the dispatch pass declines, read off the assignment itself."""
+    src = (ROOT / "app/harness/safety.py").read_text(encoding="utf-8")
+    for node in ast.parse(src).body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == HOOK_ONLY_SET
+                        for t in node.targets)):
+            value = node.value
+            if isinstance(value, ast.Call):
+                value = value.args[0]
+            return {e.value for e in value.elts}
+    raise AssertionError(
+        f"app/harness/safety.py no longer assigns {HOOK_ONLY_SET}, so the page's"
+        " sentence about the skipped labels has no source to be true about")
+
+
+def _turn_guard_platforms(rel: str) -> set[str]:
+    """The `platform=` values `rel` hands `install_turn_guards`, from its calls."""
+    src = (ROOT / rel).read_text(encoding="utf-8")
+    return set(re.findall(
+        r'install_turn_guards\([^)]*?platform="([a-z_]+)"', src, re.DOTALL))
+
+
+def _matrix_guard_columns() -> set[str]:
+    """The guards the derived matrix has a column for, from its own table."""
+    src = (ROOT / GUARD_MATRIX_MODULE).read_text(encoding="utf-8")
+    m = re.search(r"GUARD_INSTALLERS[^\n]*=\s*\{(.*?)\n\}", src, re.DOTALL)
+    assert m, (f"{GUARD_MATRIX_MODULE} no longer declares GUARD_INSTALLERS as a"
+               " literal, so nothing here can say which guards it covers")
+    return set(re.findall(r'"([a-z_]+)":', m.group(1)))
+
+
+def _split_gates_gaps(bullet: str, page: str) -> list[str]:
+    """Every way §1's split-gates bullet can fail the claim it now makes.
+
+    A predicate over text rather than asserts in the node, so the control below
+    can drive it on the sentence that was wrong and not only accept the one that
+    is right.
+    """
+    gaps = [f"states the retired premise: {claim!r}"
+            for claim in RETIRED_FLOOR_CLAIMS if _plain(claim) in bullet]
+    if _plain(FLOOR_HOLDER_PHRASE) not in bullet:
+        gaps.append("no longer says what the aggregator's copy is — the screen "
+                    f"{_plain(FLOOR_HOLDER_PHRASE)}")
+    armed = _installer_call_sites(FLOOR_INSTALLER)
+    for rel in FLOOR_PATHS_ARMED_BY_4129:
+        if rel not in bullet:
+            gaps.append(f"does not name {rel}, the path #4129 armed with the floor")
+        elif rel not in armed:
+            gaps.append(f"names {rel} as arming the floor, and that file no longer"
+                        f" calls {FLOOR_INSTALLER}")
+    if FLOOR_INSTALLER not in bullet:
+        gaps.append(f"never names {FLOOR_INSTALLER}, so a reader has nothing to"
+                    " grep for and has to take the claim on faith")
+    if _plain(GUARD_MATRIX_DOC) not in bullet:
+        gaps.append(f"does not point at {GUARD_MATRIX_DOC} for which path arms"
+                    " which guard")
+    if MATRIX_TABLE_HEADER in page:
+        gaps.append(f"runs a guard-arm matrix of its own, which {GUARD_MATRIX_DOC}"
+                    " derives and owns")
+    gate_armers = (_installer_call_sites("install_outbound_content_gate")
+                   | _installer_call_sites("install_policy_hook"))
+    unbacked = sorted(gate_armers - armed)
+    if unbacked:
+        gaps.append(f"{unbacked} arm the payload or grant gate without the floor —"
+                    " the state #4129 ended, which the bullet no longer allows")
+    return gaps
+
+
+def test_the_shape_section_stops_justifying_the_aggregator_floor_by_a_missing_hook():
+    """source: architecture/tools.md §1, the first "two properties" bullet.
+    claim: no current dispatch path is said to lack the harness safety hook; the
+           aggregator's copy is the screen that holds whatever the caller's
+           registry looks like; `app/autonomy.py` and
+           `workers/sources/_common.py` are named as the paths #4129 armed; and
+           the who-arms-what derivation is pointed at, not copied.
+    verdict: #4129 retired the premise the bullet was built on, and the round
+             that retired it edited the guard-coverage page and added the lane
+             parity test without touching this one — so for three later edits the
+             page's argument for its own backstop has been resting on a false
+             statement about the tree.
+
+    The tree half is what makes this more than a wording pin. `armed` is derived
+    from the call sites, so a page that still credits a path which stopped
+    calling the installer reddens here, and so does a path that arms the payload
+    or grant gate while the floor goes unarmed — the invariant #4129 created,
+    graded against the claim this bullet makes for it.
+    """
+    page = _text("tools.md")
+    bullet = _split_gates_bullet()
+    gaps = _split_gates_gaps(bullet, page)
+    assert not gaps, gaps
+
+    # Can this node fail? The bullet exactly as it read at this round's base —
+    # the arch-review hedge that replaced the original sentence without retiring
+    # its premise — through the same reader.
+    stale = _plain(
+        "- **The gates are split across two processes, on purpose.** What depends "
+        "on the *turn* runs in the harness. What must hold *whoever calls* runs in "
+        "`call_tool`, the one function every call passes through. This used to be "
+        "justified by `autonomy.run_task` and `run_prompt_on_primary` having no "
+        "harness safety hook at all; since #4129 every path installs it "
+        "(`app/autonomy.py`, `workers/sources/_common.py`, and a `Task` child all "
+        "call `install_default_safety_hook`). The aggregator's copy is therefore "
+        "not the only floor on those paths — it is the one that holds **whatever** "
+        "the caller's registry looks like.")
+    assert _split_gates_gaps(stale, page) == [
+        "states the retired premise: 'having no harness safety hook'",
+        "states the retired premise: 'no harness safety hook at all'",
+        f"does not point at {GUARD_MATRIX_DOC} for which path arms which guard"], (
+        _split_gates_gaps(stale, page))
+
+
+def _turn_guard_gaps(step: str) -> list[str]:
+    """Every way §4's hook list can fail to account for the turn guards."""
+    gaps = []
+    if TURN_GUARD_INSTALLER not in step:
+        gaps.append(f"never names {TURN_GUARD_INSTALLER}: the Inner Voice piece is "
+                    "still described only as the observer's pre-tool hook, which is "
+                    "the shape from before the deterministic senses moved out of it")
+    if _plain(TURN_GUARD_MODULE) not in step:
+        gaps.append(f"does not cite {TURN_GUARD_MODULE}, where the installer is")
+    if TURN_GUARD_KILL_SWITCH not in step:
+        gaps.append(f"does not name the kill switch {TURN_GUARD_KILL_SWITCH}, the "
+                    "one thing an operator can pull when a guard misfires")
+    for rel, platform in sorted(TURN_GUARD_PLATFORMS.items()):
+        if rel not in step:
+            gaps.append(f"does not say the guards are armed on {rel}")
+        elif f'platform="{platform}"' not in step:
+            gaps.append(f"arms the guards on {rel} without naming "
+                        f'platform="{platform}", which is what that call passes')
+        elif platform not in _turn_guard_platforms(rel):
+            gaps.append(f"{rel} no longer hands install_turn_guards "
+                        f'platform="{platform}"')
+    if _plain(TURN_GUARD_TEST) not in step:
+        gaps.append(f"does not name {TURN_GUARD_TEST} as what pins the guards")
+    if "guard_arm_matrix" in step and "turn_guards" not in _matrix_guard_columns():
+        gaps.append("cites the guard-arm matrix beside the turn guards, and the "
+                    f"matrix has no such column — it covers "
+                    f"{sorted(_matrix_guard_columns())}")
+    return gaps
+
+
+def test_the_harness_hook_list_names_the_turn_guards_alongside_the_floor():
+    """source: architecture/tools.md §4, the harness's step 3.
+    claim: the PreToolUse list names `install_turn_guards`
+           (`app/harness/turn_guards.py`, kill switch
+           `inner_voice.turn_guards.enabled`) as armed on the autonomy and worker
+           paths with the platform each call passes, beside the grant gate and
+           the observer sentences, and names `tests/test_turn_guards.py`.
+    verdict: the guards are harness hooks now and run on every unattended turn;
+             the page still documents only the observer, so an operator reading
+             §4 to find why a scheduled turn was steered finds no hook that could
+             have done it — and no switch to turn it off.
+
+    The matrix clause is here because the obvious citation is the wrong one: the
+    derived guard-arm matrix answers "which guards can this path arm" for four
+    guards and `turn_guards` is not among them, so pointing at it for the fifth
+    would read as coverage while checking nothing. The check is conditional on
+    the matrix's own column list, which is why it can be satisfied by *adding* a
+    column rather than only by deleting the citation.
+    """
+    step = _hook_step()
+    gaps = _turn_guard_gaps(step)
+    assert not gaps, gaps
+
+    # The step's Inner Voice sentence exactly as published at this round's base.
+    stale = _plain(
+        "3. **PreToolUse hooks.** The chat path installs "
+        "`install_default_safety_hook`, which carries four Bash checks. It "
+        "installs the #534 grant gate for background platforms, the Inner Voice "
+        "observer's pre-tool hook when the session is observed, and skill "
+        "dispatch. A denial becomes a tool result the model reads.")
+    assert _turn_guard_gaps(stale) == [
+        f"never names {TURN_GUARD_INSTALLER}: the Inner Voice piece is still "
+        "described only as the observer's pre-tool hook, which is the shape from "
+        "before the deterministic senses moved out of it",
+        f"does not cite {TURN_GUARD_MODULE}, where the installer is",
+        f"does not name the kill switch {TURN_GUARD_KILL_SWITCH}, the one thing an "
+        "operator can pull when a guard misfires",
+        "does not say the guards are armed on app/autonomy.py",
+        "does not say the guards are armed on workers/sources/_common.py",
+        f"does not name {TURN_GUARD_TEST} as what pins the guards"], (
+        _turn_guard_gaps(stale))
+
+    # And the wrong instrument, through the same reader: a citation that sends a
+    # reader to a table with no turn_guards column is a gap, not a citation.
+    assert _turn_guard_gaps(
+        _plain("see `app/harness/guard_arm_matrix.py` for which path arms it")) == [
+        f"never names {TURN_GUARD_INSTALLER}: the Inner Voice piece is still "
+        "described only as the observer's pre-tool hook, which is the shape from "
+        "before the deterministic senses moved out of it",
+        f"does not cite {TURN_GUARD_MODULE}, where the installer is",
+        f"does not name the kill switch {TURN_GUARD_KILL_SWITCH}, the one thing an "
+        "operator can pull when a guard misfires",
+        "does not say the guards are armed on app/autonomy.py",
+        "does not say the guards are armed on workers/sources/_common.py",
+        f"does not name {TURN_GUARD_TEST} as what pins the guards",
+        "cites the guard-arm matrix beside the turn guards, and the matrix has no "
+        f"such column — it covers {sorted(_matrix_guard_columns())}"], (
+        _turn_guard_gaps(_plain(
+            "see `app/harness/guard_arm_matrix.py` for which path arms it")))
+
+
+def _lane_gaps(step: str) -> list[str]:
+    """Every way §4's aggregator step 2 can fail to state the lanes' difference."""
+    gaps = []
+    if HOOK_ONLY_SET not in step:
+        gaps.append(f"does not name {HOOK_ONLY_SET}: the two screens are presented "
+                    "as the same check run twice, which is false of the labels")
+    if _plain(HOOK_LANE_PHRASE) not in step:
+        gaps.append("does not say which lane is left refusing those labels")
+    labels = _hook_only_labels()
+    assert labels, f"{HOOK_ONLY_SET} is empty, so the sentence has nothing to grade"
+    gaps.extend(f"does not name {label!r}, which only the hook lane refuses"
+                for label in sorted(labels - _labels_named_by(step)))
+    if _plain(LANE_PARITY_TEST) not in step:
+        gaps.append(f"does not name {LANE_PARITY_TEST} as the parity pin, so the "
+                    "reader has no way to check the lanes still agree")
+    return gaps
+
+
+def _labels_named_by(step: str) -> set[str]:
+    """Which hard-deny labels the step text names, as backticked words."""
+    return {m.group(1) for m in re.finditer(r"`([a-z0-9_ -]+)`", step)}
+
+
+def test_the_dispatch_check_step_states_which_labels_only_the_hook_lane_refuses():
+    """source: architecture/tools.md §4, the aggregator's step 2.
+    claim: the dispatch pass and the hook pass are the same function over
+           different label sets — `check_bash_command(..., at_dispatch=True)`
+           skips every label in `_HOOK_ONLY_LABELS`, so only the hook lane
+           refuses those — and `tests/test_safety_lane_parity.py` is what keeps
+           the shapes' enforced labels equal.
+    verdict: the page reduced the difference to "the `sudo` rule is skipped,
+             because it matches the word inside grep text", which explains a
+             false positive and hides the coverage hole under it: while a dispatch
+             path carried no hook, that label was refused on a chat turn and ran
+             on a scheduled one. An operator deciding whether an unattended turn
+             can run such a command reads this paragraph for the answer.
+
+    The label list comes out of `app/harness/safety.py`'s own assignment, so the
+    page has to name every label the dispatch pass declines; adding one to the
+    frozenset reddens this node until the paragraph says it too, which is the
+    same trap #4129 closed, moved from the code to the doc.
+    """
+    step = _dispatch_check_step()
+    gaps = _lane_gaps(step)
+    assert not gaps, gaps
+
+    # Step 2 exactly as published at this round's base, through the same reader.
+    stale = _plain(
+        "2. **The destructive-command check, for every session.** The same "
+        "`check_bash_command` the harness hook runs, with `at_dispatch=True`: this "
+        "is where the command actually executes. At dispatch the regex table's "
+        "`sudo` rule is skipped, because it matches the word inside grep text.")
+    assert _lane_gaps(stale) == [
+        f"does not name {HOOK_ONLY_SET}: the two screens are presented as the same "
+        "check run twice, which is false of the labels",
+        "does not say which lane is left refusing those labels",
+        f"does not name {LANE_PARITY_TEST} as the parity pin, so the reader has no "
+        "way to check the lanes still agree"], _lane_gaps(stale)
+
+    # And the label half can fail on its own: drop the only label the set holds
+    # and the paragraph stops telling an operator what the dispatch pass lets by.
+    assert "does not name 'sudo', which only the hook lane refuses" in _lane_gaps(
+        _plain("2. **The destructive-command check.** The dispatch pass skips "
+               "`_HOOK_ONLY_LABELS`, so only the hook lane refuses them. See "
+               "`tests/test_safety_lane_parity.py`.")), _lane_gaps(
+        _plain("2. **The destructive-command check.** The dispatch pass skips "
+               "`_HOOK_ONLY_LABELS`, so only the hook lane refuses them. See "
+               "`tests/test_safety_lane_parity.py`."))

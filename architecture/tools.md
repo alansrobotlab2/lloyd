@@ -94,13 +94,19 @@ Two properties of this layout drive most of what follows:
   runs in the harness, which knows the turn. What must hold *whoever calls*
   (the bench sandbox, the destructive-command check, the no-session refusal,
   the effect ledger) runs in `call_tool`, the one function every call passes
-  through. This used to be justified by `autonomy.run_task` and
-  `run_prompt_on_primary` having no harness safety hook at all; since #4129 every
-  path installs it (`app/autonomy.py`, `workers/sources/_common.py`, and a `Task`
-  child all call `install_default_safety_hook`). The aggregator's copy is therefore
-  not the only floor on those paths — it is the one that holds **whatever** the
-  caller's registry looks like, including a script that built no registry at all
-  (#4436 asks what the two screens now mean for one worker turn).
+  through. Every dispatch path arms the harness floor too, on its own registry:
+  #4129 armed `app/autonomy.py` and `workers/sources/_common.py` with
+  `install_default_safety_hook`, the same floor the chat path installs, and a
+  `Task` child gets it from `agent_mcp/builtin_task.py`. So the aggregator's copy
+  of the destructive-command check is not the only screen an unattended turn
+  passes — it is the one that holds **whatever** the caller's registry looks
+  like, including a script that built no registry at all. Where the two screens
+  differ is §4's aggregator step 2, which is a difference in labels, not in
+  wording. Who arms what on which path is derived from the installer call sites
+  by `app/harness/guard_arm_matrix.py` and published by
+  `architecture/guard-coverage.md`, which owns that table: this page points at
+  the derivation rather than copying a table that goes stale on the next
+  installer edit.
 - **Everything the aggregator knows about a call arrives in `_meta`**, never
   in `arguments`. The SDK validates `arguments` against each tool's
   `inputSchema` before the handler runs, and the repetition guard and the
@@ -244,7 +250,22 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    `sync_registration`, `service_control`) and the outbound content gate
    (#1136: deny credential-shaped payloads, report PII-shaped ones). It installs
    the #534 grant gate for background platforms, the Inner Voice observer's
-   pre-tool hook when the session is observed, and skill dispatch. The grant
+   pre-tool hook when the session is observed, and skill dispatch. The
+   deterministic turn guards arrive beside the floor, by their own installer:
+   `install_turn_guards` (`app/harness/turn_guards.py`, kill switch
+   `inner_voice.turn_guards.enabled` plus one per guard) runs on the chat route
+   (`app/routers/messages.py`), the autonomy task turn (`app/autonomy.py`,
+   `platform="autonomy"`), the direct worker path (`workers/sources/_common.py`,
+   `platform="worker"`) and inside every `Task` child
+   (`agent_mcp/builtin_task.py`), which passes no platform on purpose — that
+   string is read against `sessions_io.NON_USER_PLATFORMS` to decide whether the
+   turn is a machine's, and a subagent's terminating text *is* its answer. They
+   are the stall rescue, the repetition guard, the failure-payload escalation and
+   the open-todo and open-round gates: the same senses the observer used to carry
+   inside its `install_observer` closure, moved out after the 2026-09-12 cut
+   switched the observer off for unattended turns, so an unattended turn keeps
+   them whether or not anything is observing it. `tests/test_turn_guards.py` pins
+   them. The grant
    gate is `policy.install_policy_hook`, and since #724 it is also the
    reversibility-tier gate: `TIER2_TOOLS`/`TIER3_TOOLS` plus
    `effective_tier()`, which demotes an `autonomy_write_task` call that moves
@@ -321,8 +342,17 @@ a call that was never allowed to run is never recorded as an `unknown` effect.
    refusing Bash for every attended turn is an outage, not a guard.
 2. **The destructive-command check, for every session.** The same
    `check_bash_command` the harness hook runs, with `at_dispatch=True`: this is
-   where the command actually executes. At dispatch the regex table's `sudo`
-   rule is skipped, because it matches the word inside grep text.
+   where the command actually executes. The two screens are not the same screen:
+   the dispatch pass skips every label in `_HOOK_ONLY_LABELS`
+   (`app/harness/safety.py`) — today `sudo`, whose pattern also fires on the word
+   inside grep or echo text — so those labels are refused by the hook lane and by
+   nothing here. That split was a hole rather than a design for as long as a
+   dispatch path armed no hook: before #4129 a `sudo` command was refused on a
+   chat turn and ran on a scheduled one. `tests/test_safety_lane_parity.py` is
+   the pin that keeps the shapes equal — it fires one command per hard-deny label
+   at the armed registry of each dispatch shape and refuses a union of enforced
+   labels that differs between them, so the next label added to that frozenset
+   cannot re-open the gap on one shape alone.
 3. **A state-changing call with no session id is refused** (#1053). An empty
    id cannot be a bench id, so before this rule, dropping `lloyd/session_id`
    from `_meta` was itself a way to read as "not sandboxed". Read-only tools
@@ -1503,3 +1533,25 @@ stops being executable is caught in the suite rather than at a reader's keyboard
   worst it can do is accept a declared name that then fails at dispatch, "visible, not
   silent". Renames reach it on the next live refresh, which is a `:8500` restart the
   owed-check for this item already waits on.
+- **2026-11-20 — `current` (#4436).** Landed the §1 fix #4436 was filed for. The
+  split-gates bullet no longer argues the aggregator's copy of the
+  destructive-command check into existence by way of a dispatch path that lacks
+  the harness floor: #4129 armed `app/autonomy.py` and `workers/sources/_common.py`
+  with `install_default_safety_hook`, so the bullet now carries only what survives
+  that retirement — the aggregator's copy is the screen that holds whatever the
+  caller's registry looks like — and points at `architecture/guard-coverage.md` for
+  the who-arms-what derivation `app/harness/guard_arm_matrix.py` computes, rather
+  than copying a table nobody re-derives here. §4 got the two things the retirement
+  left owed. Step 3 names `install_turn_guards` (`app/harness/turn_guards.py`, kill
+  switch `inner_voice.turn_guards.enabled`, pinned by `tests/test_turn_guards.py`)
+  among what the autonomy and worker paths install, beside the grant gate and the
+  observer sentence — the guards are harness hooks now and the page documented only
+  the observer. Step 2 states the one difference between the two Bash screens that
+  is real: the dispatch pass skips every label in `_HOOK_ONLY_LABELS`, so those are
+  refused by the hook lane and by nothing at dispatch, and
+  `tests/test_safety_lane_parity.py` is the pin that keeps the shapes equal. The
+  item's own sub-claim — that the two lanes' refusals read differently — is false
+  and is deliberately not written into the page: both build the same
+  `harness safety: blocked …` reason and both surface it as `Tool call denied:`,
+  which `tests/test_tool_failure_baseline.py` pins from both sides. What the
+  double screen changes is coverage, not wording.
