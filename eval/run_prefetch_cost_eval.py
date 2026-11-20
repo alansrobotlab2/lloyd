@@ -98,6 +98,7 @@ import random
 import re
 import statistics
 import sys
+from contextlib import contextmanager
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,8 +126,16 @@ ARM_DESC_PULL = "desc_pull"
 ARM_INJECTED_PRUNED = "injected_pruned"
 ARM_SCOPED = "scoped"
 ARM_NO_INDEX = "no_index"
+#: The tenth arm, and the only one that changes the TEXT inside a description rather
+#: than who is granted one, whether the body is pushed, or who is advertised. Every
+#: arm above renders the committed `description:` bytes through
+#: `prompt_builder.clip_skill_description`, so the premise #4373 is built on — that a
+#: trigger inside the 100-char clip beats the same trigger at character 800 — was not
+#: answerable by any instrument in this repo, and `skills-index-2026-09-25.md` cannot
+#: be re-read as bearing on it. (#4375.)
+ARM_DESC_FRONTLOAD = "desc_frontload"
 ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA, ARM_DESC_PUSH, ARM_DESC_PULL,
-        ARM_INJECTED_PRUNED, ARM_SCOPED, ARM_NO_INDEX)
+        ARM_INJECTED_PRUNED, ARM_SCOPED, ARM_NO_INDEX, ARM_DESC_FRONTLOAD)
 #: What a bare run does: the #562 arms. The P5 arms are asked for by name.
 DEFAULT_ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA)
 #: Arms whose prompt is the injected rendering minus these sections.
@@ -301,6 +310,215 @@ def split_by_advertisement(arm: str,
     return kept, tail
 
 
+#: The trigger vocabulary `scripts/skill_lint.py:92` uses for its DRIFT rule, spelled
+#: out rather than imported: importing skill_lint drags that module's skill walker into
+#: an eval module the suite loads for every arm, and
+#: `tests/test_prefetch_cost_eval.py` pins the two lists against each other so a change
+#: to the lint's own definition shows up as a red node instead of an arm that has
+#: silently started measuring a different property. Matched whole-word and
+#: case-insensitively exactly as the lint matches it, so `\buse\b` does not match
+#: "used" or "useful".
+TRIGGER_WORDS = frozenset({
+    "use", "when", "whenever", "trigger", "triggered", "triggers",
+    "before", "after", "if", "unless",
+    "each", "every",
+})
+
+_TRIGGER_WORD_RE = re.compile(
+    r"\b(" + "|".join(sorted(map(re.escape, TRIGGER_WORDS))) + r")\b", re.IGNORECASE)
+
+#: Where a description is cut for the index. Read from the renderer's own setting rather
+#: than hard-coded, so the arm cannot decide for itself what "inside the clip" means;
+#: production's value today is 100 (`skills.index.max_description_chars`).
+def index_clip_chars() -> int:
+    from app.prompt_builder import _skills_index_settings
+
+    return int(_skills_index_settings()["max_description_chars"])
+
+
+#: Splits on a clause boundary and CAPTURES the separator, so re-joining the pieces in
+#: any order reproduces the original byte for byte: `[clause, sep, clause, sep, clause]`.
+#: Only the spaced forms split — a bare comma inside `path/to/x, y` or a decimal is not
+#: a clause boundary, and a wrong split is a rewrite nobody described.
+_CLAUSE_SPLIT = re.compile(r"(; |\.\s+|\)\s+(?=[A-Z])|,\s+(?=[a-zA-Z]{2,}))")
+
+
+def frontload_clauses(text: str) -> list[tuple[str, str]]:
+    """The description as (clause, separator-after-it) pairs, joinable by `"".join`.
+
+    The group is CAPTURING, so `split` returns [clause, sep, clause, sep, clause]
+    with no trailing separator; pairing positionally and defaulting the last
+    separator to "" makes every join a permutation of the same
+    pieces. That is why the rewrite cannot change a length, cannot invent punctuation and
+    cannot lose a space: the separator that FOLLOWED a moved clause travels with it, so
+    no clause is left with two glued on and none is left without one.
+    """
+    pieces = _CLAUSE_SPLIT.split(text)
+    return [(pieces[i], pieces[i + 1] if i + 1 < len(pieces) else "")
+            for i in range(0, len(pieces), 2)]
+
+
+def trigger_position(text: str) -> int:
+    """Where the first trigger word starts, or -1 when there is none."""
+    match = _TRIGGER_WORD_RE.search(text)
+    return -1 if match is None else match.start()
+
+
+def frontload_description(text: str, clip_chars: int | None = None) -> str:
+    """The frontload rewrite: production's bytes unless a move makes a trigger visible.
+
+    The population this measures is #4373's "buried trigger": a description whose
+    trigger clause is not at the front, so the clip the index shows never reaches it.
+    The arm moves the first clause whose trigger word lands inside `clip_chars` of its
+    OWN start to the front of the description — the same bytes, the same length, only
+    the order changed. That is the cheapest deterministic version of what #4373 does to
+    the vault, and it is what makes the pair comparable: the hypothesis is that a
+    trigger the reader can see beats the same trigger past the cut.
+
+    Three properties make the measurement mean something:
+
+    * **Nothing fires when the trigger is already visible.** A description that leads
+      with a trigger inside the clip comes back byte-identical, and so does one with no
+      trigger word that the clip could show. The arm is not a rewrite-everything arm:
+      editing those too would make a measured difference a text edit rather than a
+      change of position.
+    * **The rewrite is length-exact by construction.** A permutation of clauses cannot
+      change a length, and length is what the budget walk measures when it decides
+      which skills get a description at all (12,000 chars, granted in usage-rank order).
+      A shorter rewrite could silently move WHO is described — the other question, about
+      the names-only population — and the run would be unattributable. The
+      `len(joined) == len(text)` guard is the belt to that bracing: on any mismatch the
+      arm returns the committed bytes rather than measure a rewrite nobody chose.
+    * **It is idempotent.** After a move the trigger sits at the front and inside the
+      clip, so the visibility test passes and a second call returns its input. Without
+      that, a prompt rebuilt twice would be rewritten twice and the variant would not be
+      one fixed text.
+    """
+    clip = index_clip_chars() if clip_chars is None else clip_chars
+    pairs = frontload_clauses(text)
+    starts: list[int] = []
+    offset = 0
+    for clause, sep in pairs:
+        starts.append(offset)
+        offset += len(clause) + len(sep)
+    for index, (clause, _sep) in enumerate(pairs):
+        position = trigger_position(clause)
+        if position < 0:
+            continue                          # no trigger word in this clause
+        if starts[index] + position < clip:
+            return text                       # the clip already reaches it: no rewrite
+        joined = "".join(c + t for c, t in
+                         [pairs[index]] + pairs[:index] + pairs[index + 1:])
+        # Moving the clause puts its trigger word at `position`, so the move is worth
+        # making only when that is inside the clip; a clause longer than the clip before
+        # its trigger cannot be rescued by reordering, and rewriting it would be an
+        # edit, not a change of position.
+        if position < clip and len(joined) == len(text):
+            return joined
+        return text
+    return text
+
+
+def frontload_stats(text: str, clip_chars: int | None = None) -> str:
+    """`rewritten` / `already_visible` / `no_visible_trigger`, for the tally."""
+    if frontload_description(text, clip_chars) != text:
+        return "rewritten"
+    clip = index_clip_chars() if clip_chars is None else clip_chars
+    pairs = frontload_clauses(text)
+    offset = 0
+    for clause, sep in pairs:
+        position = trigger_position(clause)
+        if position >= 0:
+            return ("already_visible" if offset + position < clip
+                    else "no_visible_trigger")
+        offset += len(clause) + len(sep)
+    return "no_visible_trigger"
+
+
+#: What the most recent frontload render touched — `total` descriptions seen, how many
+#: were `rewritten`, `already_visible` or had `no_visible_trigger`. Written by the arm,
+#: read by the report, never read by the transformation: a run whose rewrite stopped
+#: firing has to be able to say so with a number, and "rewritten 0" is the difference
+#: between an arm that measured nothing and one that measured a null.
+FRONTLOAD_LAST_TALLY: dict[str, object] = {}
+#: The arm's no-op switch, and the seam the disabled-variant test drives. Read at call
+#: time, never captured at import, so a run can flip it and the report can say out loud
+#: that the rewrite was off instead of leaving two equal rows to be misread as a null.
+#: `--frontload off` on the command line sets it.
+FRONTLOAD_ENABLED = True
+
+@contextmanager
+def frontloaded_index_render(enabled: bool | None = None):
+    """Patch `prompt_builder.skill_index_description` for the duration of one build.
+
+    The one hook the renderer offers: `_skills_index_lines` derives every advertised
+    line from `skill_index_description(skill.frontmatter)` (app/prompt_builder.py:1495)
+    before `clip_skill_description` sees it (:1375), so swapping that symbol is exactly
+    `run_skill_match_eval.py:112 with_pseudo_queries()` — whose docstring states the
+    requirement this arm inherits: "the arm needs no config edit and cannot leak into
+    another arm". The vault is never touched, so running this arm cannot be mistaken
+    for #4373's vault rewrite, and the patch is restored in the `finally`, so a
+    `desc_push` built after it is production's bytes.
+
+    `enabled=False` swaps nothing, which is the arm's demonstrable no-op: the prompt it
+    returns is then production's bytes, and `frontload_report` says so.
+    """
+    from app import prompt_builder
+
+    on = FRONTLOAD_ENABLED if enabled is None else enabled
+    tally = {"total": 0, "rewritten": 0, "already_visible": 0,
+             "no_visible_trigger": 0,
+             "enabled": bool(on)}
+    original = prompt_builder.skill_index_description
+    if not on:
+        yield tally
+        return
+
+    def frontloaded_index_description(frontmatter: dict) -> str:
+        text = original(frontmatter)
+        tally["total"] += 1
+        tally[frontload_stats(text)] += 1
+        return frontload_description(text)
+
+    prompt_builder.skill_index_description = frontloaded_index_description
+    try:
+        yield tally
+    finally:
+        prompt_builder.skill_index_description = original
+
+
+def resolve_arms(raw: str, fail) -> tuple[str, ...]:
+    """The arms a `--arms` string selects, refusing any name that is not in `ARMS`.
+
+    Extracted from `main` for one reason: the accepted set is clause 1 of #4375, and
+    checking it through `main` means running the eval. `fail` is `ArgumentParser.error`
+    in production, so the refusal message and exit code are exactly what they were
+    before the extraction — the message is what every operator script here matches on,
+    including the ones that learned a mis-spelled arm name from it.
+    """
+    chosen = tuple(a.strip() for a in raw.split(",") if a.strip())
+    unknown = set(chosen) - set(ARMS)
+    if unknown:
+        fail(f"unknown arms {sorted(unknown)}")
+    return chosen
+
+
+def described_skill_names(block: str) -> set[str]:
+    """The skill names carrying a description in a rendered index block.
+
+    Read out of the block the arm actually renders, not out of the settings: the
+    question clause 4 asks is whether the budget walk moved WHO is described, and the
+    only trustworthy answer is the one taken from the prompt that was built.
+    """
+    out: set[str] = set()
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- ") or " — " not in stripped:
+            continue
+        out.add(stripped[2:].split(" — ", 1)[0].strip())
+    return out
+
+
 def system_prompt_for(arm: str) -> str:
     """The system prompt one arm runs under — production's unless it is a variant.
 
@@ -310,9 +528,28 @@ def system_prompt_for(arm: str) -> str:
     `prefetch.skills.push`; an ADVERTISE_VARIANTS arm (#4027) adds one key to `skills.index`
     and deliberately does not write `prefetch.skills` at all, because the set is the only
     thing it is allowed to change.
+
+    #4375's arm is neither kind of variant and enters no config block at all: it renders
+    production's own settings with `skill_index_description` swapped for the duration of
+    the build, so its index is production's index with each granted description's clauses
+    permuted — the same skills, the same description lengths, a different order. That is
+    what makes clause 4's comparison of the two blocks mean something: every difference
+    between them is text position and nothing else. One caveat the suite pins rather than
+    trusts: a line the renderer CLIPS ends in an ellipsis after rstripping its cut point,
+    so moving a clause can move the cut onto or off a run of spaces and shift THAT LINE
+    by up to two characters, which is why the test asserts the whole block's total length
+    and the described set, and caps a single line's delta — description text, which is
+    what the budget walk measures, is length-exact on every skill.
     """
     from app.config import CONFIG
     from app.prompt_builder import build_system_prompt
+
+    if arm == ARM_DESC_FRONTLOAD:
+        with frontloaded_index_render() as tally:
+            prompt = build_system_prompt()
+        FRONTLOAD_LAST_TALLY.clear()
+        FRONTLOAD_LAST_TALLY.update(tally)
+        return prompt
 
     variant = SYSTEM_VARIANTS.get(arm)
     extra = ADVERTISE_VARIANTS.get(arm)
@@ -452,6 +689,17 @@ def summarize(records: list[dict]) -> dict:
         kept, tail = split_by_advertisement(arm, scored_rows(records, arm))
         per_arm[arm]["advertised_index_chars"] = len(advertised_index_block(arm))
         per_arm[arm]["advertised_skill_count"] = len(advertised_skill_names(arm))
+        # #4375: the number clause 4 asks to be visible in a published run. A run whose
+        # variant described a different set of skills than production is not measuring
+        # description text, it is measuring the budget walk, and the two counts sitting
+        # side by side in the JSON are what make that visible without re-rendering.
+        per_arm[arm]["described_skill_count"] = len(described_skill_names(
+            advertised_index_block(arm)))
+        if arm == ARM_DESC_FRONTLOAD:
+            per_arm[arm]["frontload_rewrite_enabled"] = bool(FRONTLOAD_ENABLED)
+            per_arm[arm]["frontload_prompt_equals_production"] = (
+                system_prompt_for(ARM_DESC_FRONTLOAD) == system_prompt_for(ARM_DESC_PUSH))
+            per_arm[arm]["frontload_lines"] = dict(FRONTLOAD_LAST_TALLY)
         for label, rows in (("advertised", kept), ("tail", tail)):
             per_arm[arm][f"right_skill_reached_{label}_rate"] = _mean(
                 int(row[2]) for row in rows)
@@ -891,7 +1139,13 @@ def main() -> int:
                     help="merge artifacts' arms per query into OUT (compact)")
     ap.add_argument("--rejudge", default=None,
                     help="judge again every arm of an artifact whose judge failed")
+    ap.add_argument("--frontload", choices=("on", "off"), default="on",
+                    help="off runs the desc_frontload arm with its rewrite DISABLED, "
+                         "which must render production's bytes — the arm's no-op proof")
+    global FRONTLOAD_ENABLED
+    FRONTLOAD_ENABLED = True
     args = ap.parse_args()
+    FRONTLOAD_ENABLED = args.frontload == "on"
 
     if args.merge:
         out_path, *ins = args.merge
@@ -919,10 +1173,7 @@ def main() -> int:
     if args.only:
         wanted = {w.strip() for w in args.only.split(",")}
         queries = [q for q in queries if q.get("id") in wanted]
-    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
-    unknown = set(arms) - set(ARMS)
-    if unknown:
-        ap.error(f"unknown arms {sorted(unknown)}")
+    arms = resolve_arms(args.arms, ap.error)
 
     path = Path(args.out_dir) / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -946,8 +1197,122 @@ def main() -> int:
     path.write_text(json.dumps(out, indent=2, default=str))
     print(f"[info] wrote {path}")
     print(json.dumps(summary, indent=2, default=str))
+    if ARM_DESC_FRONTLOAD in arms:
+        # The verdict is printed, not merely computable: a table whose variant row
+        # equals production's, with no sentence saying WHICH case produced it, reads
+        # as a null result when it is a disabled arm.
+        front = frontload_report(summary)
+        print("\n## desc_frontload (#4375) — " + front["verdict"])
+        for line in front["lines"]:
+            print(line)
     return 0
 
 
+def frontload_report(summary: dict, frontload_lines: dict | None = None) -> dict:
+    """The #4375 verdict, in the only terms the standing rule allows.
+
+    Reads a `summarize()` dict — so it works on a finished run's artifact, on a
+    checkpoint, and on `--summarize` output, with no engine in sight. Its test builds
+    records shaped as `run` writes them and calls `summarize()` to get them, rather than
+    typing a summary dict by hand: a hand-typed fixture can invent a key this function
+    reads and the code never writes, which is precisely how the `judge_mean`/
+    `judge_score_avg` mismatch survived a green suite.
+
+    The rule is this file's own, stated in its header and inherited rather than invented:
+    a variant is better only if `right_skill_reached_rate` exceeds production's by MORE
+    THAN THE A/A SPREAD — the gap between `injected` and `injected_aa`, two arms that
+    render the same prompt — with the judge score not lower. The A/A spread is the
+    measurement's own noise floor; a gain inside it is the same prompt measured twice.
+    `injected` and `desc_push` render byte-identically, so that spread is this arm's noise
+    floor unchanged. Both conditions are conjunction, so a missing judge score or a
+    missing rate yields `incomplete`, never `better`.
+
+    The tail split is printed with its `n`, but read it for what #4027 built it to count:
+    QUERIES whose expected skill falls outside the arm's advertised set. This arm advertises
+    exactly what production advertises, so its tail is empty by construction, and the
+    library-wide question the item raises — the skills granted no description at all — is
+    carried by `described_skill_count`, not by this line.
+    """
+    arms = summary.get("arms") or {}
+    prod = arms.get(ARM_DESC_PUSH) or {}
+    aa = arms.get(ARM_AA) or {}
+    inj = arms.get(ARM_INJECTED) or {}
+    var = arms.get(ARM_DESC_FRONTLOAD) or {}
+    # Rounded to the precision the report publishes, and deliberately so: both rates are
+    # means over the same denominator, so a variant that gains EXACTLY the noise floor
+    # differs from it only in float representation error — measured here, where 13/20
+    # minus 12/20 came out above 12/20 minus 11/20 and a no-gain run would have been
+    # printed as a win. The decision and the printed numbers can no longer disagree.
+    spread = round(abs((inj.get("right_skill_reached_rate") or 0.0)
+                       - (aa.get("right_skill_reached_rate") or 0.0)), 6)
+    prod_rate = prod.get("right_skill_reached_rate")
+    var_rate = var.get("right_skill_reached_rate")
+    # `judge_score_avg` is the key summarize() writes in its per-arm block. Reading a key
+    # that file does not emit was not a cosmetic slip: the first cut read `judge_mean`, so
+    # on a real artifact both judges came back None and the old `(var_judge or 0) >=
+    # (prod_judge or 0)` was vacuously true — an artifact whose variant judge fell from 3.0
+    # to 1.0 printed "better … with judge not lower". The None branch below is the durable
+    # half of that fix: a missing judge makes the rule unmeasurable, never satisfied.
+    prod_judge, var_judge = prod.get("judge_score_avg"), var.get("judge_score_avg")
+    identical = bool(var.get("frontload_prompt_equals_production"))
+    tally = frontload_lines if frontload_lines is not None else (
+        var.get("frontload_lines") or FRONTLOAD_LAST_TALLY)
+    lines = [
+        f"- right_skill_reached_rate {prod_rate} -> {var_rate}; A/A noise spread "
+        f"{round(spread, 4)}; judge {prod_judge} -> {var_judge}",
+        # The population this file's tail metric actually holds: QUERIES whose expected
+        # skill is outside the arm's advertised set (split_by_advertisement over
+        # scored_rows), not the skills that were granted no description. This arm changes
+        # no advertised set, so its tail is empty by construction and the real tail
+        # question — the names-only skills — is answered by described_skill_count, not here.
+        f"- tail (queries whose expected skill is outside the arm's advertised set): "
+        f"{prod.get('right_skill_reached_tail_rate')} -> "
+        f"{var.get('right_skill_reached_tail_rate')} "
+        f"(n={var.get('right_skill_reached_tail_n')})",
+        f"- described skills: {prod.get('described_skill_count')} -> "
+        f"{var.get('described_skill_count')}; rewrite touched "
+        f"{tally.get('rewritten', 0)} of {tally.get('total', 0)} lines "
+        f"(already visible in the clip {tally.get('already_visible', 0)}, none in the "
+        f"clip {tally.get('no_visible_trigger', 0)})",
+    ]
+    if identical or not FRONTLOAD_ENABLED:
+        verdict = ("not measured: the variant's rendered prompt is byte-identical to "
+                   "production's, so this arm differs from desc_push in nothing but "
+                   "the switch and the numbers above are two renders of one prompt")
+        lines.append("- THE REWRITE WAS DISABLED: the arm's rendered system prompt is "
+                     "byte-identical to production's desc_push prompt. Any equality in "
+                     "the rows above is the disabled case, not a null result.")
+    elif prod_rate is None or var_rate is None:
+        verdict = "incomplete: one of the two arms has no clean sample"
+    elif prod_judge is None or var_judge is None:
+        # Reached only on a real artifact whose judge never came back: the rule is a
+        # conjunction, and a condition that cannot be measured has to be reported as
+        # unmeasured rather than defaulted into being satisfied.
+        verdict = (f"incomplete: the judge score is missing (production {prod_judge}, "
+                   f"variant {var_judge}), so 'judge not lower' cannot be checked and "
+                   f"the rule cannot be satisfied")
+    elif round(var_rate - prod_rate, 6) > spread and var_judge >= prod_judge:
+        verdict = (f"better: right_skill_reached exceeds production by "
+                   f"{round(var_rate - prod_rate, 4)}, more than the A/A spread "
+                   f"{round(spread, 4)}, with judge not lower")
+    else:
+        why = (f"judge fell {prod_judge} -> {var_judge}" if var_judge < prod_judge
+               else "a gain inside the A/A spread is one prompt measured twice")
+        verdict = (f"not better: right_skill_reached moved by "
+                   f"{round(var_rate - prod_rate, 4)} against an A/A "
+                   f"spread of {round(spread, 4)} and judge "
+                   f"{prod_judge} -> {var_judge}; {why}")
+    return {"production_rate": prod_rate, "variant_rate": var_rate,
+            "aa_spread": round(spread, 6), "production_judge": prod_judge,
+            "variant_judge": var_judge, "prompt_equals_production": identical,
+            "verdict": verdict, "lines": lines}
+
+
+# The entrypoint stays the LAST statement of this file. Script mode executes `main()`
+# AT this line, so any helper main() calls has to be bound above it: with `frontload_report`
+# appended below the guard, `--arms desc_frontload` raised NameError at the one line that
+# prints the #4375 verdict, after the run had spent its turns and written its artifact.
+# tests/test_prefetch_cost_eval.py::test_main_calls_only_helpers_defined_above_the_entrypoint
+# pins the rule for every helper main() calls, not just this one.
 if __name__ == "__main__":
     raise SystemExit(main())

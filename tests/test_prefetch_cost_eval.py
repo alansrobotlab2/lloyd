@@ -423,3 +423,421 @@ def test_the_arms_help_lists_the_pruned_arm() -> None:
                           "--help"], capture_output=True, text=True, timeout=180)
     assert out.returncode == 0, out.stderr[-400:]
     assert "injected_pruned" in out.stdout, out.stdout[-600:]
+
+
+# ─────────────── #4375: the arm that varies description TEXT (`desc_frontload`) ─
+#
+# Every arm this file shipped before this item varied WHO is granted a description
+# (`skills.index.descriptions`), whether the body is pushed (`prefetch.skills.push`),
+# or WHICH skills are advertised (`advertise_top_n`). None varied the text inside the
+# 100 characters `clip_skill_description` keeps, so the premise #4373 rests on — that a
+# trigger inside the clip beats the same trigger at character 800 — could not be asked
+# of any instrument in the repo.
+#
+# Numbers below are re-measured on this tree, not copied from the item, because the
+# item's own triage records that both of its quoted figures had aged: the labelled set
+# is 78 records / 24 expected-empty, not the 51 the two published notes ran, and the
+# names-only population is ~140 of 209 index lines, not 137. Neither is asserted here;
+# only the arm's invariants are. What IS measured live: production's index is 209 lines
+# and 11,989 characters with 73 skills carrying a description, and the rewrite fires on
+# 21 of the 208 descriptions the render sees.
+class _FixtureSkill:
+    """Just enough of an `iter_active_skills` record for `_skills_index_lines`."""
+
+    def __init__(self, name: str, description: str) -> None:
+        self.name = name
+        self.frontmatter = {"description": description}
+
+
+BURIED_TRIGGER = "use when the nightly census job has failed or gone silent"
+#: Long enough that the trigger sits past character 100 of the folded description.
+BURIED_HEAD = ("Renders the weekly fleet census across the supervisor sockets and "
+               "writes the rollup into the vault knowledge tree with the counts "
+               "table and the per-task gap columns, ")
+
+
+def _fixture_skills():
+    buried = BURIED_HEAD + BURIED_TRIGGER + "."
+    assert len(BURIED_HEAD) > 100, (
+        "the fixture only exercises the clip if its trigger is past character 100")
+    assert trigger_pos(buried) >= 100
+    leading = "Use when a systemd unit is missing, to file the socket instead."
+    return [(_FixtureSkill("census-skill", buried), BURIED_HEAD + BURIED_TRIGGER + "."),
+            (_FixtureSkill("unit-skill", leading), leading)]
+
+
+def trigger_pos(text: str) -> int:
+    ev = _load_eval()
+    return ev.trigger_position(text)
+
+
+def _fixture_index(arm: str) -> list[str]:
+    """Render the fixture through the REAL renderer under one arm's treatment."""
+    ev = _load_eval()
+    from app import prompt_builder
+    settings = prompt_builder._skills_index_settings()
+    skills = [skill for skill, _ in _fixture_skills()]
+    if arm == ev.ARM_DESC_FRONTLOAD:
+        with ev.frontloaded_index_render():
+            return prompt_builder._skills_index_lines(
+                skills, {}, budget=settings["budget_chars"],
+                max_desc=settings["max_description_chars"])
+    return prompt_builder._skills_index_lines(
+        skills, {}, budget=settings["budget_chars"],
+        max_desc=settings["max_description_chars"])
+
+
+def test_desc_frontload_is_a_selectable_arm_and_a_typo_still_exits():
+    """Clause 1. The name is in `ARMS`, which is what `--help` prints; `--arms
+    desc_frontload` resolves; and an unknown name still exits through argparse with
+    `unknown arms [...]`. Arm selection is extracted into `resolve_arms(raw, fail)` so
+    this is checkable without running the eval — and `fail` is `ArgumentParser.error`
+    in production, so the refusal is the same message and exit code it was before the
+    extraction, which is what every operator script here matches on."""
+    ev = _load_eval()
+    assert ev.ARM_DESC_FRONTLOAD == "desc_frontload"
+    assert "desc_frontload" in ev.ARMS, f"ARMS = {ev.ARMS}"
+    assert ev.resolve_arms("desc_frontload,desc_push", lambda m: None) == (
+        "desc_frontload", "desc_push")
+    refused: list[str] = []
+    with pytest.raises(SystemExit):
+        ev.resolve_arms("desc_frontloa", _fail_with(refused))
+    assert refused and "unknown arms ['desc_frontloa']" in refused[0], refused
+
+
+def test_the_real_cli_still_refuses_an_unknown_arm_name() -> None:
+    """Clause 1's other half, across the process boundary an operator actually crosses.
+
+    `resolve_arms(raw, fail)` is production's arm selection now, and the node above hands
+    it its own `fail` — which proves the function refuses but not that `main` still passes
+    `ArgumentParser.error` as that `fail`. If the wiring were dropped, unit tests stay
+    green while a run under a mis-spelled arm name silently proceeds with the default
+    arms, and the exit code 2 plus the `unknown arms [...]` text that operator scripts
+    match on are gone. So launch the script the way a measured run is launched, with an
+    arm name one character off the new one, and read the refusal off the process.
+    """
+    import subprocess
+
+    out = subprocess.run([sys.executable,
+                          str(REPO / "eval" / "run_prefetch_cost_eval.py"),
+                          "--arms", "desc_frontloa"],
+                         capture_output=True, text=True, timeout=180)
+    assert out.returncode == 2, f"exit {out.returncode}, stderr {out.stderr[-400:]}"
+    assert "unknown arms ['desc_frontloa']" in out.stderr, out.stderr[-400:]
+
+
+def _fail_with(sink):
+    def fail(message: str):
+        sink.append(message)
+        raise SystemExit(2)
+    return fail
+
+
+def test_the_frontload_line_leads_with_the_trigger_and_other_lines_are_unchanged():
+    """Clause 2, over a fixture: production's line buries the trigger outside the
+    clip, the arm's line opens with it, and the line whose trigger already led is
+    untouched.
+
+    `_skills_index_lines` is the production renderer, called with the settings
+    production reads, so this grades the real clip path rather than a re-implementation
+    of it. Description text length is asserted per line because the arm's whole claim to
+    be measuring text POSITION is that it changed nothing the budget walk can see."""
+    ev = _load_eval()
+    from app import prompt_builder
+    clip = prompt_builder._skills_index_settings()["max_description_chars"]
+    # [0] is the index header; the skill lines follow it alphabetically.
+    production = _fixture_index(ev.ARM_DESC_PUSH)[1:]
+    variant = _fixture_index(ev.ARM_DESC_FRONTLOAD)[1:]
+    assert len(production) == len(variant) == 2, production
+
+    prod_desc = production[0].split(" — ", 1)[1]
+    var_desc = variant[0].split(" — ", 1)[1]
+    # The position that matters is where the trigger sits in the UNCLIPPED description
+    # the renderer was handed; production's line is the clip of that, so the assertion
+    # is "beyond the clip", not "at index >= 100 of the line", which a truncated line
+    # can never satisfy.
+    full_description = BURIED_HEAD + BURIED_TRIGGER + "."
+    assert ev.trigger_position(full_description) >= clip, (
+        f"the fixture must bury its trigger past the clip (got "
+        f"{ev.trigger_position(full_description)} against clip {clip})")
+    assert ev.trigger_position(prod_desc) < 0, (
+        f"production's clipped line must not contain the trigger at all: {prod_desc!r}")
+    assert ev.trigger_position(var_desc) < clip, (
+        f"the arm's line must put the trigger inside the clip: {var_desc!r}")
+    assert var_desc.startswith(BURIED_TRIGGER[:12]), var_desc
+    # What is length-exact is the DESCRIPTION the renderer was handed, and that is the
+    # quantity the budget walk measures. The rendered LINE can differ by up to two
+    # characters even when nothing was re-spaced: the clip rstrips its cut point, so
+    # moving a clause can land the cut on a space or on a word. Fixture: production's
+    # cut falls after "vault" (rstripped to 99), the variant's mid-word at 99+ellipsis.
+    assert len(full_description) == len(
+        ev.frontload_description(full_description)), (
+        "the rewrite changed a description's length, so the budget walk could move "
+        "who is described and the comparison stops being about text position")
+    assert abs(len(var_desc) - len(prod_desc)) <= 2, (
+        f"a rendered line may move only by the clip's rstrip artefact: "
+        f"{len(var_desc)} vs {len(prod_desc)}")
+    assert variant[1] == production[1], (
+        "a line whose trigger already leads must come through byte for byte — the arm "
+        "is not a rewrite-everything arm")
+
+
+def test_the_rewrite_is_applied_around_the_build_and_restored_after_it():
+    """Clause 3: the patch swaps one symbol for the duration of one build.
+
+    Three failure modes, three asserts. (a) A spy on the renderer sees the swapped
+    symbol only while the arm's own prompt is being built — proof the arm reaches the
+    renderer instead of post-editing a string. (b) Every OTHER arm's prompt is
+    byte-identical before and after the arm builds its own: a leaked patch would show up
+    as `desc_push` quietly gaining the rewrite, which is the failure that voids a
+    published comparison without any test of the variant noticing. (c) The skills tree
+    is untouched — the item's constraint is that the rewrite lives in memory, so a run
+    of this arm can never be mistaken for the vault edit #4373 has not been measured
+    for."""
+    import hashlib
+
+    ev = _load_eval()
+    from app import prompt_builder
+
+    original = prompt_builder.skill_index_description
+    real_lines = prompt_builder._skills_index_lines
+    seen: list[str] = []
+
+    def spy(active, counts, **kw):
+        seen.append(getattr(prompt_builder.skill_index_description, "__name__", "?"))
+        return real_lines(active, counts, **kw)
+
+    def fingerprints() -> dict[str, str]:
+        root = Path.home() / "obsidian" / "skills"
+        return {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in sorted(root.rglob("SKILL.md"))}
+
+    def other_arms() -> dict[str, str]:
+        return {arm: ev.system_prompt_for(arm)
+                for arm in ev.ARMS if arm != ev.ARM_DESC_FRONTLOAD}
+
+    vault_before = fingerprints()
+    before = other_arms()
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(prompt_builder, "_skills_index_lines", spy)
+    try:
+        arm_prompt = ev.system_prompt_for(ev.ARM_DESC_FRONTLOAD)
+        ev.system_prompt_for(ev.ARM_DESC_PUSH)
+    finally:
+        monkey.undo()
+
+    assert seen == ["frontloaded_index_description", "skill_index_description"], (
+        f"the renderer must see the swapped symbol during the arm's build and the real "
+        f"one during every other arm's: {seen}")
+    assert prompt_builder.skill_index_description is original, (
+        "the patch leaked: the symbol is still swapped after the arm finished, so "
+        "every later prompt would carry the rewrite")
+    assert other_arms() == before, (
+        "another arm's prompt changed once the new arm existed — a control that "
+        "absorbs the variant's text measures nothing")
+    assert fingerprints() == vault_before, (
+        "the arm wrote under ~/obsidian/skills/")
+    assert "Available skills" in arm_prompt
+
+
+def test_the_frontload_arm_describes_exactly_the_skills_desc_push_describes():
+    """Clause 4, over the live corpus: the set of skills carrying a description is
+    production's set, the block's total length is unchanged, and the arm rewrites
+    something — the last being what stops the first two being satisfied by an arm that
+    does nothing.
+
+    The confound the item names: `budget_chars` is 12,000 and descriptions are granted
+    in usage-rank order while the whole index fits, each candidate measured by its
+    clipped length. A rewrite that shortened 30 descriptions would let more skills in,
+    and a measured gain would then be about who got described — the ~140 names-only
+    question — not about where the trigger sits. The rewrite is a permutation, so
+    description lengths are identical by construction; the one residual is the clip's
+    rstrip artefact on a cut line, pinned at two characters per line and netting to zero
+    across the block."""
+    ev = _load_eval()
+    production = ev.advertised_index_block(ev.ARM_DESC_PUSH)
+    variant = ev.advertised_index_block(ev.ARM_DESC_FRONTLOAD)
+    prod_named = ev.described_skill_names(production)
+    var_named = ev.described_skill_names(variant)
+
+    assert len(prod_named) > 20, (
+        f"production grants a description to only {len(prod_named)} skills — the "
+        "comparison would be vacuous")
+    assert var_named == prod_named, (
+        f"the arm moved WHO is described (+{sorted(var_named - prod_named)} "
+        f"-{sorted(prod_named - var_named)}); the measured difference would be about "
+        f"the budget walk, not about description text")
+    assert len(variant) == len(production), (
+        f"the advertised block changed total length ({len(variant)} vs "
+        f"{len(production)}) while the described set stayed equal")
+    worst = max((abs(len(a) - len(b)) for a, b in
+                 zip(production.splitlines(), variant.splitlines())), default=0)
+    assert worst <= 2, (
+        f"a rendered line moved by {worst} characters; the only permitted drift is the "
+        f"clip's rstrip of its cut point, which is at most two")
+
+    changed = sum(1 for a, b in zip(production.splitlines(), variant.splitlines())
+                  if a != b)
+    tally = dict(ev.FRONTLOAD_LAST_TALLY)
+    assert changed > 0 and tally.get("rewritten", 0) > 0, (
+        f"the arm rewrote nothing ({changed} lines changed, tally {tally}) — an arm "
+        f"that never fires would satisfy every other clause in this file")
+
+
+def _frontload_records(*, var_reached: int = 14, prod_judge: int = 3,
+                       var_judge: int = 4, with_judge: bool = True) -> list[dict]:
+    """Twenty labelled turns, shaped exactly as `run` writes them, for the #4375 verdict.
+
+    Every number the verdict reads is one `summarize()` COMPUTES from these records: the
+    rates from `right_skill_reached` flags (injected 12/20, `injected_aa` 11/20 for the
+    A/A spread, `desc_push` 12/20, the variant `var_reached`/20) and the judge from
+    `judge_score`. That is deliberate, and it is the correction the review rung forced:
+    the first fixture here was a hand-typed summary dict that invented the key
+    `judge_mean`, while `summarize()` writes `judge_score_avg` — so the report read a key
+    no artifact has, both judges came back None, the judge condition passed vacuously, and
+    the test stayed green on a rule that could not fail against a real run. Building the
+    input through `summarize()` means a key rename here goes red instead of silently
+    testing a shape no artifact will ever have.
+    """
+    expected = sorted(ev.advertised_skill_names(ev.ARM_INJECTED))[0]
+    reached = {ev.ARM_INJECTED: 12, ev.ARM_AA: 11, ev.ARM_DESC_PUSH: 12,
+               ev.ARM_DESC_FRONTLOAD: var_reached}
+    judge = {ev.ARM_INJECTED: prod_judge, ev.ARM_AA: prod_judge,
+             ev.ARM_DESC_PUSH: prod_judge, ev.ARM_DESC_FRONTLOAD: var_judge}
+    records: list[dict] = []
+    for i in range(20):
+        arms: dict[str, dict] = {}
+        for arm, hits in reached.items():
+            arm_rec: dict = {"completed": 1, "doc_hit": 0, "injected_tokens": 100,
+                             "iterations": 1, "tool_calls": 0, "seconds": 0.5,
+                             "right_skill_reached": int(i < hits)}
+            if with_judge:
+                arm_rec["judge_score"] = judge[arm]
+            arms[arm] = arm_rec
+        records.append({"id": f"q{i:02d}", "category": "skill", "query": f"q{i:02d}",
+                        "expected_skills": [expected], "arms": arms})
+    return records
+
+
+def test_a_disabled_rewrite_renders_production_and_the_report_says_so():
+    """Clause 5. With the rewrite off the arm's prompt is production's bytes AND the
+    report says so; with it on, the per-arm report carries the metrics the shipped rule
+    names and states that rule — including that a judge it cannot see is never read as a
+    judge that passed.
+
+    The byte-equality is the anti-no-op proof: an arm whose transformation silently
+    stopped firing would otherwise keep reporting a number forever. The report has to SAY
+    that equality out loud too, because a table whose variant row equals production's,
+    with no sentence naming which case produced it, reads as a null result when it is a
+    disabled arm. The disabled flag it reads is the one `summarize()` computed for itself
+    under `FRONTLOAD_ENABLED = False`, not one this test typed in.
+    """
+    ev = _load_eval()
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(ev, "FRONTLOAD_ENABLED", False)
+    disabled_prompt = ev.system_prompt_for(ev.ARM_DESC_FRONTLOAD)
+    disabled_summary = ev.summarize(_frontload_records())
+    monkey.undo()
+
+    assert disabled_prompt == ev.system_prompt_for(ev.ARM_DESC_PUSH), (
+        "a disabled variant must equal production byte for byte; if it differs, the arm "
+        "differs from production in something besides description text")
+    computed = disabled_summary["arms"][ev.ARM_DESC_FRONTLOAD]
+    assert computed["frontload_prompt_equals_production"] is True, (
+        "summarize() did not itself compute the disabled arm's prompt as production's, so "
+        "the flag the report reads would be a test's assertion rather than a measurement")
+    assert computed["frontload_rewrite_enabled"] is False
+
+    # FRONTLOAD_ENABLED is back to True here: the report has to reach the disabled
+    # sentence from the flag IN the artifact, which is what a real `--frontload off` run
+    # publishes and its reader sees.
+    shown = ev.frontload_report(disabled_summary)
+    shown_text = "\n".join(shown["lines"])
+    assert shown["verdict"].startswith("not measured"), shown["verdict"]
+    assert "THE REWRITE WAS DISABLED" in shown_text, shown_text
+    assert "byte-identical" in shown_text.lower(), shown_text
+
+    summary = ev.summarize(_frontload_records())
+    report = ev.frontload_report(summary)
+    text = "\n".join(report["lines"])
+    arm = summary["arms"][ev.ARM_DESC_FRONTLOAD]
+    prod = summary["arms"][ev.ARM_DESC_PUSH]
+    # The rates the verdict is built on, read back out of what summarize() computed:
+    # injected 12/20 and injected_aa 11/20 make a 0.05 A/A spread, desc_push 12/20 is
+    # production's 0.6, and the variant's 14/20 is a 0.1 gain over it.
+    assert report["production_rate"] == prod["right_skill_reached_rate"] == 0.6, report
+    assert report["variant_rate"] == arm["right_skill_reached_rate"] == 0.7, report
+    assert report["aa_spread"] == 0.05, report
+    assert report["production_judge"] == prod["judge_score_avg"] == 3.0, report
+    assert report["variant_judge"] == arm["judge_score_avg"] == 4.0, report
+    assert report["verdict"].startswith("better"), report["verdict"]
+    assert "more than the A/A spread" in report["verdict"], report["verdict"]
+    for needle in (f"right_skill_reached_rate {report['production_rate']} -> "
+                   f"{report['variant_rate']}",
+                   f"A/A noise spread {report['aa_spread']}",
+                   f"judge {report['production_judge']} -> {report['variant_judge']}",
+                   f"(n={arm['right_skill_reached_tail_n']})",
+                   f"described skills: {prod['described_skill_count']} -> "
+                   f"{arm['described_skill_count']}"):
+        assert needle in text, f"missing from the report: {needle!r}\n{text}"
+
+    # A gain of exactly the A/A spread is one prompt measured twice, not a result.
+    inside = ev.frontload_report(ev.summarize(_frontload_records(var_reached=13)))
+    assert inside["verdict"].startswith("not better"), inside["verdict"]
+    assert "inside the A/A spread" in inside["verdict"], inside["verdict"]
+
+    # Judge lower: the rule is a conjunction, and this is the case the old
+    # `(var_judge or 0) >= (prod_judge or 0)` could not fail on a real artifact.
+    lower = ev.frontload_report(ev.summarize(
+        _frontload_records(var_reached=14, var_judge=2)))
+    assert lower["verdict"].startswith("not better"), lower["verdict"]
+    assert "judge fell" in lower["verdict"], lower["verdict"]
+
+    # The hole the review found: an artifact whose judge never came back has
+    # `judge_score_avg: None` on both sides, and must NEVER read as a win.
+    no_judge = ev.frontload_report(ev.summarize(_frontload_records(with_judge=False)))
+    assert no_judge["production_judge"] is None and no_judge["variant_judge"] is None
+    assert not no_judge["verdict"].startswith("better"), no_judge["verdict"]
+    assert no_judge["verdict"].startswith("incomplete"), no_judge["verdict"]
+
+
+def test_main_calls_only_helpers_defined_above_the_entrypoint() -> None:
+    """`main()` runs AT the `if __name__ == "__main__"` line in script mode, so every
+    helper it calls has to be bound ABOVE that line — which means the guard has to be the
+    last statement in the file.
+
+    This is #4375's own bug, found on this round and not in the item. `frontload_report`
+    was appended below the guard, so `--arms desc_frontload` raised
+    `NameError: name 'frontload_report' is not defined` at the one statement that prints
+    the verdict — AFTER the run had spent its GPU turns and written its artifact. Every
+    test above passes regardless, because importing the module for a test executes the
+    whole body including the late def; only script mode hits it. Script mode is how the
+    measured run #4375 owes will actually be invoked.
+
+    Pinned structurally rather than by launching the script: the failure costs a full
+    eval run to reach, and a subprocess of this script inside the suite would either run
+    turns through an engine or depend on query-set contents to reach the print.
+    """
+    import ast
+
+    tree = ast.parse((REPO / "eval" / "run_prefetch_cost_eval.py").read_text())
+
+    def is_main_guard(node: ast.stmt) -> bool:
+        return (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == "__name__"
+                and any(isinstance(c, ast.Constant) and c.value == "__main__"
+                        for c in node.test.comparators))
+
+    guard = next((i for i, n in enumerate(tree.body) if is_main_guard(n)), None)
+    assert guard is not None, "the script's entrypoint guard is gone from the file"
+    assert any(isinstance(n, ast.FunctionDef) and n.name == "main"
+               for n in tree.body[:guard]), "main() is not defined above the guard"
+    late = [getattr(n, "name", type(n).__name__)
+            for n in tree.body[guard + 1:]
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    assert not late, (
+        f"{late} sit below the `if __name__ == \"__main__\"` guard, so script mode has "
+        f"not bound them when main() runs — a run under `--arms desc_frontload` dies at "
+        f"the line that prints its verdict, after the artifact is already on disk")
