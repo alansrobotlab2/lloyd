@@ -300,15 +300,18 @@ async def _primary_state() -> dict[str, Any]:
 # position, but it can never demote a fresh one out of the window.
 _RECENT_SHOWN = 2
 _RECENT_KEPT = 8
-#: How many files the walk may open before giving up. This replaced a flat
-#: `[:24]` slice of the newest files by mtime, which was the whole budget when
-#: every file in the directory was a chat. On 2026-09-10, before autonomy runs
-#: were recorded at all, 22 of the newest 24 were already background, and
-#: recording adds ~170 a day more against ~14 chats. The walk now
-#: skips background ids by NAME without opening them and stops at
-#: `_RECENT_KEPT` user rows or this ceiling — bounded either way, and no
-#: longer bounded by the fleet's throughput.
-_RECENT_CEILING = 400
+#: The read budget is NOT this module's to own (#4267). It used to be
+#: `_RECENT_CEILING` (400), a number that replaced a flat `[:24]` slice of the
+#: newest files by mtime — that slice was the whole budget when every file in the
+#: directory was a chat, and on 2026-09-10, before autonomy runs were recorded at
+#: all, 22 of the newest 24 were already background while recording adds ~170 a day
+#: against ~14 chats. The budget still does that job; it is now
+#: `sessions_io.SESSION_SCAN_CEILING`, the one value the Chat brief and the
+#: Background brief budget the same directory with, so the three whole-file walks
+#: cannot budget three different numbers of reads of one store. The walk skips
+#: background ids by NAME without opening them and stops at `_RECENT_KEPT` user rows
+#: or that ceiling — bounded either way, and no longer bounded by the fleet's
+#: throughput.
 _RECENT_TTL_S = 10.0
 
 
@@ -331,7 +334,6 @@ def _caption_rate(data: dict) -> dict[str, int] | None:
 
 def _scan_recent_sessions() -> list[dict[str, Any]]:
     """Parse the newest session files into rows, newest conversation first."""
-    import json
     from datetime import datetime, timezone
 
     from app.paths import SESSIONS_DIR
@@ -341,70 +343,64 @@ def _scan_recent_sessions() -> list[dict[str, Any]]:
     # `last_active` rather than on the mtime it selected candidates by.
     from app.routers.sessions import _last_active_ts
 
+    rows: list[dict[str, Any]] = []
     try:
-        paths = sorted(
-            sessions_io.session_head_files(SESSIONS_DIR),   # #3815: a sidecar is not a session
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
+        # #3815: a sidecar is not a session, and #4267: this enumeration and its
+        # read budget are the same ones both Mission Control briefs take — see
+        # `sessions_io.scan_session_heads`. The walk is lazy, so hitting
+        # `_RECENT_KEPT` rows stops it opening anything further, which is what keeps
+        # the row cap and the read budget from being two competing `break`s.
+        for path, data in sessions_io.scan_session_heads(
+                SESSIONS_DIR, sessions_io.SESSION_SCAN_CEILING,
+                skip_names=is_background_session_name):
+            # The filename fast path. A background run's id has four parts and a
+            # chat's has three, so most of the directory can be skipped without
+            # opening it — which is what keeps this scan bounded now that ~240
+            # background sessions a day land in the same directory. For a
+            # four-part id the shape is the whole decision here: it is skipped
+            # unread, before the walk spends a unit on it. That is safe only while
+            # nothing that creates a user session mints one, which
+            # `tests/test_session_platform_checks.py` pins at the creators. A
+            # three-part id is still judged below, by the same
+            # predicate `/api/sessions` applies.
+            # Scheduled tasks have their own panel, and so do worker jobs. They
+            # are not chats, and neither is a machine run that was named like a
+            # chat: this panel used `is_user_session`, a deny-list tuned for brief
+            # delivery, so `e2e-harness` and the gate's `canary` turns were
+            # "recent chats" here while they were nothing a person had read. One
+            # definition (`sessions_io.is_conversation_session`) rather than a
+            # literal per reader — this one had never learned about `worker`,
+            # which was already 479 of the directory's 643 files on 2026-09-10.
+            if not is_conversation_session(path.name, data):
+                continue
+            goal = data.get("goal") if isinstance(data.get("goal"), dict) else {}
+            ts = _last_active_ts(path, data)
+            rows.append({
+                "session_id": data.get("session_id") or path.stem,
+                "title": (data.get("title") or "").strip(),
+                "preview": (data.get("preview") or "")[:160],
+                # Explicit UTC: `last_active` on disk is a naive *local* stamp,
+                # and handing that to `new Date()` in a browser on any other
+                # offset silently shifts every row.
+                "last_active": datetime.fromtimestamp(ts, timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "message_count": data.get("message_count") or 0,
+                "platform": data.get("platform", ""),
+                "inner_voice": bool(data.get("inner_voice")),
+                "model": data.get("model", ""),
+                "goal": goal.get("text", ""),
+                "goal_achieved": bool(goal.get("achieved_at")),
+                "todo_counts": _count_todos(data.get("todos") or []),
+                # None until a turn records it — an old session predates the
+                # counters and must not render as 0/0, which reads as a failure.
+                "captions": _caption_rate(data),
+                "_ts": ts,
+            })
+            if len(rows) >= _RECENT_KEPT:
+                break
     except OSError:
         return []
-
-    rows: list[dict[str, Any]] = []
-    opened = 0
-    for path in paths:
-        # The filename fast path. A background run's id has four parts and a
-        # chat's has three, so most of the directory can be skipped without
-        # opening it — which is what keeps this scan bounded now that ~240
-        # background sessions a day land in the same directory. For a
-        # four-part id the shape is the whole decision here: it is skipped
-        # unread. That is safe only while nothing that creates a user session
-        # mints one, which `tests/test_session_platform_checks.py` pins at the
-        # creators. A three-part id is still judged below, by the same
-        # predicate `/api/sessions` applies.
-        if is_background_session_name(path.name):
-            continue
-        if len(rows) >= _RECENT_KEPT or opened >= _RECENT_CEILING:
-            break
-        opened += 1
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        # Scheduled tasks have their own panel, and so do worker jobs. They
-        # are not chats, and neither is a machine run that was named like a
-        # chat: this panel used `is_user_session`, a deny-list tuned for brief
-        # delivery, so `e2e-harness` and the gate's `canary` turns were
-        # "recent chats" here while they were nothing a person had read. One
-        # definition (`sessions_io.is_conversation_session`) rather than a
-        # literal per reader — this one had never learned about `worker`,
-        # which was already 479 of the directory's 643 files on 2026-09-10.
-        if not is_conversation_session(path.name, data):
-            continue
-        goal = data.get("goal") if isinstance(data.get("goal"), dict) else {}
-        ts = _last_active_ts(path, data)
-        rows.append({
-            "session_id": data.get("session_id") or path.stem,
-            "title": (data.get("title") or "").strip(),
-            "preview": (data.get("preview") or "")[:160],
-            # Explicit UTC: `last_active` on disk is a naive *local* stamp,
-            # and handing that to `new Date()` in a browser on any other
-            # offset silently shifts every row.
-            "last_active": datetime.fromtimestamp(ts, timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z"),
-            "message_count": data.get("message_count") or 0,
-            "platform": data.get("platform", ""),
-            "inner_voice": bool(data.get("inner_voice")),
-            "model": data.get("model", ""),
-            "goal": goal.get("text", ""),
-            "goal_achieved": bool(goal.get("achieved_at")),
-            "todo_counts": _count_todos(data.get("todos") or []),
-            # None until a turn records it — an old session predates the
-            # counters and must not render as 0/0, which reads as a failure.
-            "captions": _caption_rate(data),
-            "_ts": ts,
-        })
 
     rows.sort(key=lambda row: row["_ts"], reverse=True)
     for row in rows:

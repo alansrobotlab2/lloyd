@@ -107,8 +107,9 @@ Rules that keep the endpoint honest:
   `sessions/`, not the vault — and the automod scorecard at
   `_SCORECARD_TTL_S` 60 s, since its numbers move per round, not per poll;
 - the recent-chats scan opens only the newest files by mtime and stops at
-  `_RECENT_KEPT` (8) conversation rows or `_RECENT_CEILING` (400) files
-  opened —
+  `_RECENT_KEPT` (8) conversation rows or `sessions_io.SESSION_SCAN_CEILING` (400)
+  files opened — the walk and the ceiling it shares with both Mission Control
+  briefs since #4267, no longer its own `_RECENT_CEILING` —
   background sessions (four-part ids) are skipped unread, and `_RECENT_SHOWN`
   (2) survive the live filter, which is applied *outside* the cache so a chat
   that just started never reads as finished for ten seconds;
@@ -168,11 +169,14 @@ index; the wording is the incident record, kept whole.
 
 **`recent` is the cached section with a trap.** A session JSON carries its
 whole transcript (100 files, 7.5 MB when this was written), so the scan is
-bounded twice: it enumerates `sessions_io.session_head_files`, which keeps a
-microcompact reduction sidecar out of the walk and out of the read budget
-altogether (#3815); files are then opened newest-**mtime** first and the walk
-stops at `_RECENT_KEPT` (8) conversation rows or `_RECENT_CEILING` (400) files
-opened — background ids are skipped by name without opening them, and a
+bounded twice: it walks `sessions_io.scan_session_heads`, the ONE newest-first
+whole-file enumeration of the directory (#4267), which keeps a microcompact
+reduction sidecar out of the walk and out of the read budget altogether (#3815) and
+takes the ceiling as a parameter — `SESSION_SCAN_CEILING` (400), the same value the
+Chat brief and the Background brief budget themselves with, where this used to be
+`_RECENT_CEILING`, there `_CHAT_SCAN_CEILING`, and in the Background brief a bare
+`400`; the walk stops at `_RECENT_KEPT` (8) conversation rows or that ceiling —
+background ids are skipped by name without opening them, and a
 three-part name that survives is judged by
 `sessions_io.is_conversation_session`, not by `is_user_session` — and the
 parse is cached for 10 s. (The flat `_RECENT_CANDIDATES` mtime slice this section once
@@ -403,6 +407,23 @@ context on every move. `screenshot_b64` and `snapshot` are ~124 KB of base64
 plus 8 KB of accessibility tree; it reads
 `browser_router.latest_frame_summary()`, which exists to make leaving them out
 the default rather than a thing each caller remembers.
+
+**A brief must count what its tab shows.** `_summarize_background` was a second
+walk over `sessions/` with no bench filter, so it put bench trials — which
+`GET /api/background/sessions` withholds by default (#2648) and reports under
+`bench_hidden` — into the `sessions_total` and `by_source` it handed the model:
+measured on the live store 2026-11-18, `sessions_total: 395` with `'bench': 40`
+there against `count 150, total 9143, bench_hidden 8` from the endpoint over the
+SAME directory. The brief now omits `sessions_io.is_bench_source` rows and reports
+them beside its total, and the identity that survives one surface being a bounded
+window and the other a pass over the store is
+`brief.sessions_total + brief.bench_hidden == envelope.total` — pinned against
+`total` and never against `count` (rows returned) by
+`tests/test_mc_background_brief_parity.py`. It is a fixture-pinned invariant, not a
+live bug: `mc_navigate` appears 0 times in the 9,514 retained sessions (2026-09-22 to
+2026-11-18; control `Bash` 181,379), and `GET /api/background/sessions` 2 times across
+11 rotated server logs. What the same consolidation does reach in traffic is the walk
+itself — see the `recent` trap below.
 
 Why the tab lists are tested (the incident, from CLAUDE.md): until
 `tests/test_mc_tab_parity.py` nothing made them agree, and drift is silent in

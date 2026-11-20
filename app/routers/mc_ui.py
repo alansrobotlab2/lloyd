@@ -23,8 +23,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import mc_state
 from app.paths import LLOYD_HOME, SESSIONS_DIR
-from app.sessions_io import (is_background_session_name, is_conversation_session,
-                             is_session_head)
+from app.sessions_io import (SESSION_SCAN_CEILING, is_background_session_name,
+                             is_bench_source, is_conversation_session,
+                             is_session_head, scan_session_heads,
+                             session_head_files)
 # The Memory tab's file count walks the same segment set the recall searches and
 # Mission Control's memory search asks qmd for. #3160: this router used to keep
 # its own tuple of seven names — `agents` among them, which no qmd index declares
@@ -304,49 +306,54 @@ def _summarize_background() -> dict:
     "what has been running unattended", and at ~240 a day a list would be
     a wall of near-identical titles in the model's context every time it
     navigates here.
+
+    Bench-family trials are counted as the TAB counts them: withheld from
+    `by_source`/`sessions_total` and reported beside them under `bench_hidden`
+    (#2648, and #4267 for the brief). That is not a cosmetic agreement — the tab
+    serves `GET /api/background/sessions`, whose default listing refuses a
+    `source: bench` row, while this brief counted every one it read. Measured over
+    the live store on 2026-11-18 the two disagreed on the same directory:
+    `sessions_total: 395` with `'bench': 40` here against `count 150, total 9143,
+    bench_hidden 8` there, so the number the model was handed described neither the
+    panel's window nor the directory. `tests/test_mc_background_brief_parity.py`
+    pins the one identity that can hold between a bounded listing and a count of a
+    pass over it: `sessions_total + bench_hidden == the envelope's total`, never
+    against `count`, which is rows returned.
     """
     by_source: dict[str, int] = {}
     rows: list[dict] = []
-    opened = 0
+    bench_hidden = 0
     try:
-        paths = sorted(SESSIONS_DIR.glob("*.json"),
-                       key=lambda f: f.stat().st_mtime, reverse=True)
+        # One walk, one read budget, sidecars excluded inside it (#3815): this is
+        # the third copy of that enumeration — see `sessions_io.SESSION_SCAN_CEILING`.
+        for sf, data in scan_session_heads(SESSIONS_DIR, SESSION_SCAN_CEILING):
+            # The complement of the chat half below, by the same predicate
+            # `/api/background/sessions` uses: this used to skip every three-part
+            # name unread and then drop anything `is_user_session` allowed, which
+            # left a machine run with a chat-shaped id (`e2e-harness`, `canary`)
+            # counted as a chat here while a four-part run stamped
+            # `mission-control` was counted as neither.
+            if is_conversation_session(sf.name, data):
+                continue
+            # AFTER the conversation test, because the envelope's `total` excludes a
+            # conversation from its denominator too: a row that is in neither
+            # listing must be counted by neither surface either, and hiding it first
+            # would move the identity by one in the wrong direction.
+            if is_bench_source(data.get("source")):
+                bench_hidden += 1
+                continue
+            source = str(data.get("source") or data.get("platform") or "unknown")
+            by_source[source] = by_source.get(source, 0) + 1
+            if len(rows) < 8:
+                rows.append({"id": data.get("session_id", sf.stem),
+                             "title": (data.get("title") or "")[:80],
+                             "source": source})
     except OSError:
-        return {"sessions_total": 0, "by_source": {}, "recent": []}
-    for sf in paths:
-        if opened >= 400:
-            break
-        if not is_session_head(sf.name):
-            # #3815: a reduction sidecar holds no `source` and no `platform`, so the
-            # `unknown` bucket below was collecting one row per sidecar per turn that ran
-            # relief, and the Background tab's `sessions_total` was a count of
-            # bookkeeping files. Skipped before the read, so it also stops eating the
-            # 400-file read budget.
-            continue
-        opened += 1
-        try:
-            data = json.loads(sf.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        # The complement of the chat half below, by the same predicate
-        # `/api/background/sessions` uses: this used to skip every three-part
-        # name unread and then drop anything `is_user_session` allowed, which
-        # left a machine run with a chat-shaped id (`e2e-harness`, `canary`)
-        # counted as a chat here while a four-part run stamped
-        # `mission-control` was counted as neither.
-        if is_conversation_session(sf.name, data):
-            continue
-        source = str(data.get("source") or data.get("platform") or "unknown")
-        by_source[source] = by_source.get(source, 0) + 1
-        if len(rows) < 8:
-            rows.append({"id": data.get("session_id", sf.stem),
-                         "title": (data.get("title") or "")[:80],
-                         "source": source})
+        return {"sessions_total": 0, "by_source": {}, "recent": [],
+                "bench_hidden": 0}
     return {"sessions_total": sum(by_source.values()),
-            "by_source": by_source, "recent": rows}
-
-
-_CHAT_SCAN_CEILING = 400
+            "by_source": by_source, "recent": rows,
+            "bench_hidden": bench_hidden}
 
 
 def _summarize_chat() -> dict:
@@ -358,34 +365,27 @@ def _summarize_chat() -> dict:
     skipped the same way for the same reason (#3815) — `is_conversation_session`
     refuses its name too now, but the two chat-shaped sidecars on disk would
     otherwise each cost a read out of the ceiling below. The walk stops at
-    five rows or `_CHAT_SCAN_CEILING` files opened, so a directory with fewer
+    five rows or `SESSION_SCAN_CEILING` files opened, so a directory with fewer
     than five chats does not read every file it holds.
+
+    The walk itself is `sessions_io.scan_session_heads` (#4267) — the same
+    newest-first enumeration and the same read budget the dashboard's recent-chat
+    panel and the Background brief now take, where this function used to keep its
+    own `_CHAT_SCAN_CEILING` (400) beside `_summarize_background`'s unnamed 400.
     """
     sessions = []
-    opened = 0
-    for sf in sorted(SESSIONS_DIR.glob("*.json"),
-                      key=lambda f: f.stat().st_mtime, reverse=True):
-        if is_background_session_name(sf.name):
+    for sf, data in scan_session_heads(SESSIONS_DIR, SESSION_SCAN_CEILING,
+                                       skip_names=is_background_session_name):
+        # One predicate with `/api/sessions`, so the summary the model
+        # reads about the Chat tab can never disagree with what the tab
+        # itself shows.
+        if not is_conversation_session(sf.name, data):
             continue
-        if not is_session_head(sf.name):
-            continue
-        if opened >= _CHAT_SCAN_CEILING:
-            break
-        opened += 1
-        try:
-            data = json.loads(sf.read_text(encoding="utf-8"))
-            # One predicate with `/api/sessions`, so the summary the model
-            # reads about the Chat tab can never disagree with what the tab
-            # itself shows.
-            if not is_conversation_session(sf.name, data):
-                continue
-            sessions.append({
-                "id": data.get("session_id", sf.stem),
-                "preview": (data.get("preview") or "")[:120],
-                "model": data.get("model", ""),
-            })
-        except Exception:
-            continue
+        sessions.append({
+            "id": data.get("session_id", sf.stem),
+            "preview": (data.get("preview") or "")[:120],
+            "model": data.get("model", ""),
+        })
         if len(sessions) >= 5:
             break
     return {
@@ -395,9 +395,7 @@ def _summarize_chat() -> dict:
         # every microcompact reduction sidecar sits in the same glob. The rule is
         # `app.harness.microcompact.is_reduction_sidecar`, reached through
         # `sessions_io.is_session_head`; the sidecars are not sessions and never count.
-        "total_session_count": sum(
-            1 for sf in SESSIONS_DIR.glob("*.json") if is_session_head(sf.name)
-        ),
+        "total_session_count": len(session_head_files(SESSIONS_DIR)),
         "recent_sessions": sessions,
     }
 

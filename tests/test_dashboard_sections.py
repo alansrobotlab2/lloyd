@@ -810,8 +810,8 @@ def test_background_runs_do_not_starve_the_panel(sessions, no_live_turns,
 
     Background ids have four underscore-separated parts, so they are skipped
     by NAME without being opened. That is what keeps the walk bounded: it now
-    stops at `_RECENT_KEPT` user rows or `_RECENT_CEILING` files opened,
-    neither of which is the fleet's throughput.
+    stops at `_RECENT_KEPT` user rows or `sessions_io.SESSION_SCAN_CEILING`
+    files opened, neither of which is the fleet's throughput.
     """
     import time
     now = time.time()

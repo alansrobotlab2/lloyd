@@ -473,15 +473,25 @@ incident that motivated the rule, not as live rows to go looking for.
 `_scan_recent_sessions` used to keep the newest 24 files by mtime and only
 then drop non-user rows, which with 22 of the newest 24 already background
 rendered a nearly empty panel. It now walks mtime order, skips by name, and
-stops at `_RECENT_KEPT` user rows or `_RECENT_CEILING` (400) files opened.
+stops at `_RECENT_KEPT` user rows or `sessions_io.SESSION_SCAN_CEILING` (400)
+files opened. Since #4267 that walk is `sessions_io.scan_session_heads`, the one
+newest-first bounded enumeration of the directory — its read ceiling arrives as a
+parameter, and the two Mission Control briefs below take the same call rather than
+each re-globbing the store with its own bound (the dashboard's `_RECENT_CEILING`, the
+Chat brief's `_CHAT_SCAN_CEILING`, the Background brief's unnamed `400`, three numbers
+on one store). `app/routers/sessions.py::_BACKGROUND_PLATFORM_SCAN_CEILING` (600)
+stays separate on purpose: it budgets 2 KB head reads of the chat-shaped half only and
+`continue`s rather than breaking.
 
 The fifth reader is `mc_ui._summarize_chat`, the Chat tab's summary. It is
 reached only from `mc_navigate` (`post_mc_navigate` → `_summarize_tab`); the
-frontend's debounced state report never runs it. It walks mtime order, skips a
+frontend's debounced state report never runs it. It walks that same shared
+enumeration, skips a
 background-named file unread like the scans above (#1228), and stops at five
-chat rows or 400 files opened, so its cost scales with the background share of
+chat rows or `SESSION_SCAN_CEILING` (400) files opened, so its cost scales with the background share of
 the directory rather than its size: 5 files opened and ~5 ms against 580
-session files on 2026-09-24. `total_session_count` is a second glob, not a read.
+session files on 2026-09-24. `total_session_count` is a second listing
+(`sessions_io.session_head_files`), not a read.
 
 ### Post-capture and the titler
 

@@ -1576,3 +1576,71 @@ def session_head_files(directory) -> list:
     on disk: #3815 changes what is COUNTED, not what exists.
     """
     return [f for f in sorted(directory.glob("*.json")) if is_session_head(f.name)]
+
+
+#: How many session files a whole-file walk may open. One number for the three
+#: walkers that read TRANSCRIPTS (`app/routers/dashboard.py::_scan_recent_sessions`,
+#: `app/routers/mc_ui.py::_summarize_background`, `app/routers/mc_ui.py::_summarize_chat`),
+#: which until #4267 each spelled its own: `400` bare at the top of the background
+#: brief's loop, `_CHAT_SCAN_CEILING` (400) below it and `_RECENT_CEILING` (400) in
+#: the dashboard. All three agreed by coincidence, so a change to one — the only
+#: one anyone would ever make, because the store grows — silently left the other
+#: two budgeting a different number of reads of the same directory.
+#:
+#: `app/routers/sessions.py::_BACKGROUND_PLATFORM_SCAN_CEILING = 600` deliberately
+#: stays OUT and keeps its own value: it budgets 2 KB head reads of the
+#: chat-shaped half only (`_read_head`) and its loop `continue`s rather than
+#: breaking, so a file past the budget is unclassified rather than absent — the
+#: semantics `tests/test_session_platform_checks.py` pins through #1064's
+#: mis-labelled-exemption fixtures. Folding it in would move a bound those tests
+#: grade, which is a decision of its own, not a consolidation.
+SESSION_SCAN_CEILING = 400
+
+
+def scan_session_heads(directory, ceiling: int = SESSION_SCAN_CEILING, *,
+                       skip_names=None):
+    """Walk a session store newest-first, opening at most `ceiling` files.
+
+    The ONE whole-file enumeration of `SESSIONS_DIR`. Yields ``(path, data)`` for
+    every session HEAD whose JSON parses, in mtime-descending order, and consumes
+    one unit of `ceiling` per file it opens — a unit is a READ, so the
+    sidecars #3815 and any name `skip_names` refuses cost the walk nothing.
+
+    Lazily, deliberately: a caller that stops after its own row cap (`_RECENT_KEPT`
+    chats, the Chat brief's 5 rows, the Background brief's walk) leaves the
+    generator un-advanced and reads nothing further. That is what makes a row
+    cap and a read budget two different things in one loop instead of two
+    competing `break`s that disagree about which files were opened.
+
+    Every caller skips differently AFTER the read — the dashboard and the Chat
+    brief refuse a background-shaped NAME before opening it, the Background brief
+    wants those and refuses a conversation instead — so the skip is a parameter
+    (`skip_names`, a predicate on the filename, applied before the read) and the
+    classification is the caller's. What is NOT parameterised is the order and the
+    budget, which is the point: before #4267 the two chat walkers and the dashboard
+    each re-implemented the same mtime sort of `session_head_files()` and each
+    decided on its own line when to stop, and the Background brief globbed the raw
+    directory, sidecars included, and hard-coded `400`.
+
+    An unreadable or unparseable file is skipped and still spends its unit: it was
+    opened, and the budget is about I/O. A payload that is not an object is skipped
+    too, because every caller reads it as one.
+    """
+    paths = sorted(directory.glob("*.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    opened = 0
+    for path in paths:
+        if not is_session_head(path.name):
+            continue
+        if skip_names is not None and skip_names(path.name):
+            continue
+        if opened >= ceiling:
+            break
+        opened += 1
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        yield path, data
