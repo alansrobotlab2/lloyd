@@ -19,7 +19,7 @@ summary: GPU 2's structured-decision engine — how it is served, its wire
   that say rank with it and do not gate on it.
 type: reference
 status: implemented
-date: 2026-10-21
+date: 2026-11-20
 ---
 
 # djev — the structured-decision engine on GPU 2
@@ -325,8 +325,9 @@ them (§4):
   takes one read. If any question's first-read entropy is above
   `auto_threshold` 0.1, it takes `auto_max − 1` (3) more at once, so a chunk
   costs 1 read or 4. A caller that passes no `samples` gets that default; the
-  recall ranker passes `samples=1` (§8.1), and the tools pass one only when the
-  model does.
+  recall ranker passes `samples=1` (§8.1), `djev_rank` pins `samples=1`
+  unconditionally (#3377, `agent_mcp/djev.py:164`), and `djev_decide` forwards a
+  count only when the caller names one (§8.1).
   The call above took four reads in 156 ms, and the first live shadow rows
   have a median of ~160 ms for 1–3 questions. The ~40 ms figure in §7.1 is
   `samples=1`.
@@ -1799,3 +1800,27 @@ djev on Lloyd's traffic; the recall eval decides.
   leak still live (#1324). `scripts/service_health_check.py` is added to the
   consumer table. The 20-query caveat on the §8 arm table is now also a stale
   denominator, since the gold set grew to 87 queries in `98fa216b` (#1319).
+- **2026-11-20 (arch review): `stale`.** One shipped sentence was false, and it
+  was the one §3.3 kept about the tools: since #3377 (2026-10-26)
+  `agent_mcp/djev.py:164` passes `samples=1` to `djev.rank` unconditionally, so
+  "the tools pass one only when the model does" contradicted both §8.1's "rank
+  pins one read" and the code — §3.3 now states the three callers separately.
+  Everything else re-read clean against the live tree at fa5298e0: `:8010`/`:8011`/
+  `:5300` and the `/health` route answering `{"status": "ok"}`, the conf's
+  `canvas_length` 128 / `max_new_tokens` 16 / `max_num_seqs` 1 / 5300 /
+  `bfloat16` / `allow_paths`, the six-schema registry with its thresholds
+  (0.208 / 0.263 / 0.217) and floors (0.50 / 0.40 / 0.80 / 0.60),
+  `shadow.structurally_dark` answering with `rerank` and `shadow.seam_log`
+  holding **9 `rerank` rows, newest 2026-10-11T17:44Z, dark**, which is §6.1
+  unchanged, `RECALL_RERANKER = "qmd"` with the `djev` arm and kill switch wired,
+  the 0.7 addressee gate, `action_review.mode: shadow` with `warn` out of
+  `MODES`, `nightly: 4800.0`, `SHUTDOWN_FLUSH_S = 5.0` through the MODULES hook,
+  and `SERVICES["agent-djev"]` declaring `"port": 8011`. The name-prior result
+  also holds seven weeks on: `name_prior_2026-11-16.json` reads nonce 5/38
+  (0.132), identical repeat 0/38, inverted 14/38 (0.368) — one row above the
+  13/38 §7.4 quotes, same verdict, and the agent-decider claim in §14 is now
+  history rather than a caveat: `cb15665d` deleted `agent-decider.conf` and
+  `start-decider.sh`, so nothing on this machine is aimed at `:8012`. Filed #4410:
+  `djev.shadow.max_log_mb` is a bound with no reader anywhere in the tree, and
+  `shadow.jsonl` is 476 MB — 1.9x the cap its own config key declares, and a
+  store the retention sweep does not cover either.
