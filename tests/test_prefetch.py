@@ -416,9 +416,41 @@ def test_continuation_regex(text, is_cont):
     ("status 500 on /query", set()),
     ("dated 20260421", set()),
     ("task 311 needs a look", {311}),
+    # #4393: the `#` arm's right boundary and its 6-digit budget. A hashtagged
+    # run longer than the budget yields NO candidate — the old `#(\d{2,4})`
+    # matched the run's first four digits and the existence gate then confirmed
+    # the truncated id. The bare arm stays capped at 3-4 digits.
+    ("#20260421 what happened", set()),
+    ("#20261119123045 stamp", set()),
+    ("#1234567 too long", set()),
+    ("20260421", set()),
+    ("#299", {299}),
+    ("#4393", {4393}),
+    ("#123456 inside the budget", {123456}),
 ])
 def test_task_ref_candidates(text, expected):
     assert prefetch._task_ref_candidates(text) == expected
+
+
+def test_five_digit_hash_ref_cites_no_truncated_task():
+    # #4393: `#10000 status` used to capture `1000`, and because 1000 is a live
+    # task the existence gate confirmed it — one confident line for an
+    # unrelated task. With the right boundary the run yields no candidate, so
+    # nothing is cited against the live index.
+    assert 1000 in prefetch._get_backlog_index()  # the truncated prefix is real
+    assert prefetch._search_backlog_refs("#10000 status") == []
+
+
+def test_hash_ref_budget_reaches_a_five_digit_id(monkeypatch):
+    # #4393: once the board crosses 10000 a real 5-digit ref must resolve to
+    # itself, not to its first four digits. Synthetic id because the board's
+    # max id is 4394 today, so no live traffic exercises this leg yet.
+    index = {12345: {"title": "Five-digit task", "status": "open",
+                     "priority": "high", "board": "lloyd",
+                     "body_excerpt": ""}}
+    monkeypatch.setattr(prefetch, "_get_backlog_index", lambda: index)
+    refs = prefetch._search_backlog_refs("id #12345")
+    assert len(refs) == 1 and "[Task #12345]" in refs[0]
 
 
 # ── Skill scoring memo ────────────────────────────────────────────────────────

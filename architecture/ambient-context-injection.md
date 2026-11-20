@@ -23,11 +23,13 @@ are named by file, not by count: `tests/test_session_queue.py` and
 `tests/test_ambient_prefetch_retention.py` and `tests/test_session_doc_claims.py`
 over this page's own sentences, and the ambient cases in `tests/test_prefetch.py`.
 Re-measured 2026-11-12 by `--collect-only -q` on each file — collected nodes, not
-passing ones, so the figure ages rather than reassures:
+passing ones, so the figure ages rather than reassures (only the
+`tests/test_prefetch.py` figure has been re-measured since, on 2026-11-20):
 `tests/test_session_queue.py` 20, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
 `tests/test_session_doc_claims.py` 15 (56 across those four), and
-`tests/test_prefetch.py` 107 — six arrived with #4032, which pinned which query the
+`tests/test_prefetch.py` 116 — nine arrived with #4393, which gave the task-ref `#`
+arm a right boundary and a 6-digit budget; six arrived with #4032, which pinned which query the
 facts and skills legs receive on a short follow-up under the off-by-default
 `prefetch.followup.focus_legs` key; four had arrived with #3081, the subliminal `notes`
 badge for `<next-session-notes>` and the guards around it, and three more with

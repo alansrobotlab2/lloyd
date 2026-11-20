@@ -434,13 +434,19 @@ Task IDs in user text ("what's left on #294", "302 is resolved") consistently lo
 the fact-lookup competition to entities sharing common words. This is a
 precision-first parallel source that sidesteps that entirely.
 
-- **Method:** regex `(?:#(\d{2,4})|(?<!\d)(\d{3,4})(?!\d))` casts a wide net; the
-  precision gate is **existence in the live backlog index**. Unknown numbers are
-  dropped silently. The negative lookarounds mean a **bare** `20260421` yields no
-  match — but they guard that arm only. `#(\d{2,4})` has no right boundary, so
-  `#20260421` captures `2026`, and because the id space is dense the existence gate
-  confirms the truncated number instead of rejecting it: measured, `#20260421` and
-  `#10000` each render a real but unrelated task (#4393).
+- **Method:** regex `(?:#(\d{2,6})(?!\d)|(?<!\d)(\d{3,4})(?!\d))` casts a wide net;
+  the precision gate is **existence in the live backlog index**. Unknown numbers
+  are dropped silently. Both arms end in the right-boundary lookahead `(?!\d)`,
+  so a digit run longer than the arm's budget yields **no** candidate rather
+  than a truncated one: the pre-#4393 `#(\d{2,4})` had no right boundary, so a
+  hashtagged date or timestamp matched its own first four digits and, the id
+  space being dense, the existence gate confirmed that truncated id as a real
+  but unrelated task. The `#` arm's budget is 6 digits because `#` makes an id
+  unambiguous; the **bare** arm is deliberately left capped at 3-4 digits,
+  because a bare 5-6 digit run is usually a year, a port or a timestamp and
+  nothing tells it apart. What the boundary does not reach is a date written
+  with separators: `#2026-04-21` and `dated 2026-04-21` each still capture
+  `2026`, an open precision hole recorded on #4393.
   Live IDs span 9–4391 (9–387 when this was written, 9–3080 on 2026-10-20 —
   roughly 1,300 new ids a month), which collides with HTTP status codes and millisecond
   values, so a **bare** number is also rejected when followed by a unit

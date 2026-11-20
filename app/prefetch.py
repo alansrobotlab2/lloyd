@@ -261,9 +261,15 @@ VAULT_LEX_MAX_CALLS = 6         # hard cap on daemon round-trips per turn
 # injection is a precision-first parallel source: cast a wide net with a
 # regex, filter by live-task existence, inject current title/status/priority
 # directly. No dependency on whether a fact entity exists for the task.
-# Regex captures `#(\d{2,4})` OR plain 3-4 digit numeric tokens surrounded
-# by non-digits (so `20260421` yields no matches — both sides digit).
-_TASK_REF_RE = re.compile(r'(?:#(\d{2,4})|(?<!\d)(\d{3,4})(?!\d))')
+# Regex captures `#(\d{2,6})(?!\d)` OR plain 3-4 digit numeric tokens
+# surrounded by non-digits (so a bare `20260421` yields no matches — both
+# sides digit). The `#` arm's right boundary matters as much as its budget:
+# without it `#20260421` captured `2026`, and the existence gate in
+# `_search_backlog_refs` then CONFIRMED the truncated id instead of rejecting
+# it, because live task ids are dense (#4393). `#` is unambiguous, so that
+# arm's budget reaches 6 digits; the bare arm is deliberately left capped at
+# 3-4, since a bare 5-6 digit run is usually a year, a port or a timestamp.
+_TASK_REF_RE = re.compile(r'(?:#(\d{2,6})(?!\d)|(?<!\d)(\d{3,4})(?!\d))')
 # Bare (un-hashed) numbers are additionally rejected when the surrounding
 # text marks them as a unit or a code rather than a task id. Live task ids
 # span 9..387, which collides with HTTP status codes and millisecond values
