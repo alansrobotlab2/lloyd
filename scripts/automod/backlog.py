@@ -6440,9 +6440,29 @@ def _steward_claims(ledger: Path) -> dict[int, tuple[float, str, str]]:
     skipped: this is a status answer, and `done` is not the steward's to give —
     closing stays `close_settled_items`'s alone, which is why `STEWARD_STATUSES` has
     no `done` in it either.
+
+    ARCHIVE-AWARE, because the thing it abstains on is a permanent fact (#4412).
+    The retention sweep folds rows older than `LEDGER_ARCHIVE_AGE_DAYS = 14` out of
+    the live file and into `promotions-archive-<YYYYMM>.jsonl.gz`, and the
+    confirmation this claim defers to was already read over live PLUS those
+    rotations (`confirmed_verdicts(ledger, with_archives=True)`, below in
+    `desired_statuses`). Read live-only, the claim therefore dies fourteen days
+    after the steward wrote it while the verdict it outranks keeps counting — so
+    the table re-derives the status the steward wrote, `reconcile_statuses` moves
+    the item back, and #3467's guarantee expires on a schedule. Measured on the live
+    store at this round's start: the five items churning hardest
+    (`3024`, `3041`, `3196`, `3284`, `3877`) each carry exactly one `steward_move` row,
+    all dated 2026-11-08T03:48Z — twelve days before the reading, so the next fold two
+    days out retires all five claims at once. Four of them are named in the #3612 comment
+    inside `desired_statuses` as the items the 2026-11-03..07 folds parked the same way
+    one read earlier; this is that defect one row later, and the fold that lands it is
+    scheduled, not hypothetical.
+    The comparison this row feeds is `claim[0] >= machine_event.get(iid, 0.0)`, so
+    `_machine_event_ts` reads the same corpus for the same reason: two sides of one
+    inequality may not be measured over two different sets of rows.
     """
     out: dict[int, tuple[float, str, str]] = {}
-    for d in _ledger_events(ledger, "steward_move"):
+    for d in _ledger_events(ledger, "steward_move", merged=True):
         try:
             iid = int(d["item_id"])
         except (TypeError, ValueError):
@@ -6468,6 +6488,16 @@ def _machine_event_ts(ledger: Path, confirmed: dict[int, dict]) -> dict[int, flo
     point of the change: that row is the very move the claim exists to stop, so a
     machine that could end the abstention by writing it would end it by doing the
     thing the abstention forbids, and the steward's write would last one poll.
+
+    All three resolve over live PLUS the rotations, because this returns one side of
+    the inequality `claim[0] >= machine_event.get(iid, 0.0)` and the other side
+    (`_steward_claims`, #4412) does. Measuring a claim over 60k rows and the events
+    that retire it over 20k would let a claim outrank an event that is simply
+    filed elsewhere: `3024`/`3041`/`3196`/`3284`/`3877` each have their `done`
+    `backlog_implement` row — and with it the round their `promoted` row joins
+    through — in `promotions-archive-202610.jsonl.gz` while their `steward_move`
+    row is still live, so a live-only read here would leave a claim that a landed
+    round had already answered standing over the table for ever.
     """
     out: dict[int, float] = {}
 
@@ -6475,14 +6505,14 @@ def _machine_event_ts(ledger: Path, confirmed: dict[int, dict]) -> dict[int, flo
         if ts > out.get(iid, 0.0):
             out[iid] = ts
 
-    for d in _ledger_events(ledger, "item_landed"):
+    for d in _ledger_events(ledger, "item_landed", merged=True):
         _note(int(d["item_id"]), float(d.get("ts") or 0.0))
     by_round: dict[str, int] = {}
-    for d in _ledger_events(ledger, "backlog_implement"):
+    for d in _ledger_events(ledger, "backlog_implement", merged=True):
         rid = str(d.get("round_id") or "")
         if rid:
             by_round[rid] = int(d["item_id"])
-    for d in _ledger_events(ledger, "promoted", require_item=False):
+    for d in _ledger_events(ledger, "promoted", merged=True, require_item=False):
         iid = by_round.get(str(d.get("round_id") or ""))
         if iid is not None:
             _note(iid, float(d.get("ts") or 0.0))
@@ -6505,7 +6535,30 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     the reconciler passes it, the migration passes what it can see.
     `retriage_enabled` is `workers.sources.autocode.retriage_spent`: with it
     off, a spend is a person's at once, as before the second life existed.
+
+    One asymmetry is settled before the loop rather than inside it (#4412). Every arm of
+    this function except the last two fires on a row it FOUND, so a decode that hands back
+    no rows leaves only the `not triaged here` and `never triaged` arms reachable, and they
+    fire for every item in the implement pool — the pile the next healthy read then pulls
+    back. The witness that a store HAS history is a rotation beside it: rows are only ever
+    in `promotions-archive-<YYYYMM>.jsonl.gz` because something wrote them, so a store with
+    a rotation that decodes NOTHING end to end has failed to read, because
+    `state._decode_ledger` swallows each shape a mid-rotation leaves and returns `[]` for
+    it — a live file caught empty by an in-place rewrite, and a `.gz` whose stream is cut,
+    which raises `EOFError` out of zlib rather than `OSError`. That one case answers
+    nothing. It is kept that narrow on purpose: a live file empty with NO rotation beside
+    it is a genuine absence, pinned by
+    `tests/test_archived_confirmation_stays_in_the_pool.py::test_a_row_that_is_gone_rather_than_archived_does_move_it`
+    (#3612's negative control), and a board with no ledger and no rotation is a fresh
+    install; both still answer, including a never-triaged item parked as
+    `never triaged; autotriage reads draft`.
     """
+    ledger = Path(ledger)
+    from scripts.automod import state as _S
+    archives = _S.ledger_archives(ledger)
+    if archives and not _S.ledger_rows(ledger) \
+            and not any(_S.ledger_rows(a) for a in archives):
+        return {}
     # Archive-aware, like `held`, `verdicts` and `outcomes` beside it. Read from
     # the live file alone, a confirmation whose row the 14-day fold had rotated
     # was missing here while `triaged_ids` still said "confirmed": the item fell
@@ -6701,8 +6754,14 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             # it outrank them would give the ledger row a power the writer denied the
             # move that produced it. It expires the moment the machine does something
             # of its own after the row — see `_machine_event_ts`.
+            # The note goes in whole, not sliced (#4412). `parse_steward` caps a note
+            # at 400 characters and `apply_moves` prefixes `board steward: `, so this
+            # is the whole reason the steward gave. The `[:60]` cut it mid-sentence:
+            # item 3068's abstention lines read `...; last event ` and stopped, which
+            # is how a complete ledger note came to be filed as a claim the steward
+            # had left unfinished.
             out[iid] = (claim[1], f"the board steward moved it to {claim[1]} "
-                                  f"(`steward_move`: {claim[2][:60]}); the machine abstains "
+                                  f"(`steward_move`: {claim[2]}); the machine abstains "
                                   f"until this item lands, is promoted or is re-triaged")
         elif landed and not partial and landed_outcome.get(iid, {}).get("acceptance") == "not_met":
             # Documented rule: "a landed round with a not_met clause is offered

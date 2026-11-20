@@ -7413,3 +7413,45 @@ def test_an_answer_too_big_to_fit_still_stays_parseable():
     assert stored["truncated"] is True
     assert isinstance(stored["structured"], str), (
         "an answer too big to fit is kept as its own JSON text, so it is kept")
+
+
+# ── #4412 clause 4: the abstention reason quotes the steward, not 60 characters of it ──
+
+def test_the_abstention_reason_carries_the_steward_note_in_full(tmp_path, monkeypatch):
+    """`desired_statuses` quotes a `steward_move` note whole, so the item's own activity
+    line says why the steward moved it.
+
+    The note here is copied from the live ledger row for item 3068 —
+    `draft with triage=confirmed and round_flag=none; last event is the confirmation, so
+    the verdict moves it (#898).` — 111 characters, which is why the old `claim[2][:60]`
+    read so much like a claim the steward had left unfinished: the slice lands on exactly
+    60 characters and ends `...; last event `. A reader of the item concluded from it that
+    the steward believed `triage=confirmed` while the machine's own confirmed map did not,
+    and filed that as the root cause of the round-trip (#4412's own triage had to correct
+    it). Nothing was truncated on the steward's side; only the quote was.
+
+    `parse_steward` caps a note at 400 characters, so the reason stays bounded without a
+    slice at the call site."""
+    from scripts.automod import state as S
+    d = tmp_path / "backlog"
+    d.mkdir()
+    monkeypatch.setattr(B, "BACKLOG_DIR", d)
+    led = tmp_path / "promotions.jsonl"
+    (d / "9999-churning-item.md").write_text(
+        "---\nstatus: up_next\npriority: medium\nboard: lloyd\ntags: [backlog]\n"
+        "created: '2026-11-01T00:00:00+00:00'\n---\n\n# Churning item\n\nBody.\n",
+        encoding="utf-8")
+    note = ("draft with triage=confirmed and round_flag=none; last event is the "
+            "confirmation, so the verdict moves it (#898).")
+    assert len(note) == 112, "the slice under test cuts at 60; this note must clear it"
+    S.append_event({"event": "backlog_triage", "item_id": 9999, "verdict": "unverifiable",
+                    "check": "grep -n x", "evidence": "unreadable store"}, path=led)
+    S.append_event({"event": "steward_move", "item_id": 9999, "from": "draft",
+                    "to": "up_next", "note": note, "tick": "board-steward:tick#3068",
+                    "ts": time.time() + 600}, path=led)
+
+    want = B.desired_statuses(led, None)
+    assert want[9999][0] == "up_next", want[9999]
+    why = want[9999][1]
+    assert note in why, why
+    assert f"{note[:60]});" not in why, f"the note is sliced at 60 again: {why}"
