@@ -3208,9 +3208,17 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # whole +6. Re-check: `git diff <base> <head> -- agent-services/guardian/guardian.py
     # | grep '^@@'` answers that one hunk and nothing else, and
     # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
-    # prints 1035 with 3791 below it.
-    assert heads[guardian]["main"] == 3791, (
-        f"`main` moved off :3791 ({heads[guardian]['main']}) — if it is gone "
+    # printed 1035 with 3791 below it then; #4368 moved `main` again, below.
+    # 3791 -> 3826 is #4368: TWO hunks in `check_vault` and TWO in `check_data`, net
+    # +35 (the `TripSupersededByClear` arms at both trip sites, the widened second
+    # `trip()` catch, and the #3154 holder-kind docstring line that claimed
+    # `datawatch.py` prints no resume curl — it does now). `evaluate_liveness` is above
+    # every hunk and keeps :1035, so the T-26 row in the vault threat model still points
+    # at a real line and nothing in `knowledge/` needs re-pointing; this number is
+    # re-derivable with the command in the docstring below, which prints 1035 with 3826
+    # under it.
+    assert heads[guardian]["main"] == 3826, (
+        f"`main` moved off :3826 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1035, (
         f"`evaluate_liveness` moved off :1035 "

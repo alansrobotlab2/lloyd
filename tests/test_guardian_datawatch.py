@@ -3351,3 +3351,274 @@ def test_a_note_that_cannot_reconcile_says_which_of_its_two_totals_is_which():
     assert reconciled == (
         "top-level folder 'job-9' (30 files) vanished"
         "; per folder: job-9 -30 of -30 files"), reconciled
+
+
+# --------------------------------------------------------------------------- #
+# #4368 — a `clear` that lands while a tick is walking must win that race, and
+# the clear must say what its own trip left standing.
+# --------------------------------------------------------------------------- #
+
+def _race_guardian(tmp_path: Path, lost: str = "tmp", n_lost: int = 77):
+    """A `Guardian` over a fixture data root, ARMED and not yet tripped, with the effects real.
+
+    Shaped like `_tripwire` above (the same `_root`/`_fill`/`_watch` parts, the same
+    throttle of the stray-sweep and snapshot-age legs) with two differences these clauses
+    need. Nothing is deleted here, because what these tests are about is the ORDER a
+    delete, a tick and a `clear` happen in; and `state` is a real `AutomodState` over
+    `tmp_path/automod`, so "promotions-halted was not written" is a claim about a file the
+    code under test really would have written — not about a stub that was never called.
+    The pool pause and the alert stay recordings: no test box runs a backend, and neither
+    effect is what this diff changes.
+    """
+    import guardian as G
+    import gstate
+
+    root = _root(tmp_path)
+    _fill(root / lost, n_lost)
+    _fill(root / "logs", 12)
+    g = G.Guardian.__new__(G.Guardian)
+    g.data = _watch(root, tmp_path)
+    g.data.history = [VW.Snapshot.from_dict(
+        {**g.data.history[-1].to_dict(), "first_seen": {}})]
+    g._strays_checked_at = time.time() + 1e9
+    g._snapshots_checked_at = time.time() + 1e9
+    g.state = gstate.AutomodState(tmp_path / "automod")
+    g._paused: list = []
+    g._alerts: list = []
+    g._pause_workers = lambda actor: (g._paused.append(actor), "paused (HTTP 200)")[1]
+    g._vault_evidence = lambda stamp: str(tmp_path / "evidence")
+    g.alert = lambda level, title, body, **kw: g._alerts.append((level, title, body, kw))
+    return g, root
+
+
+def _ledger_rows(g) -> list[dict]:
+    """What the trip path booked, read back off the fixture automod ledger."""
+    if not g.state.ledger.exists():
+        return []
+    return [json.loads(line) for line in
+            g.state.ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _clear_mid_walk(g, root, state_dir):
+    """A `tick` that lets a SECOND process clear itself between the walk and the latch.
+
+    The 2026-11-19 07:43:08 sequence in three lines: the operator's `datawatch.py clear`
+    unlinked `data-tripped.json` and re-persisted `data_watch.json`, and the guardian tick
+    that had already walked 724,539 files against the PRE-clear baseline wrote a NEW marker
+    in that same second, re-paused the pool and re-halted promotions — then logged
+    `baseline reloaded ... (a clear)` seven seconds later, at 07:43:15. The real gap is
+    measured, not guessed: `V.measure('/home/alansrobotlab/lloyd-data',
+    skip_top=CACHE_DIRS)` took 1.60 s at `total=724539`, so a clear arriving anywhere in
+    that window (longer on a cold cache) is invisible to a check made at tick entry, which
+    is where `_reload_if_rebaselined` has lived alone since `49aefea0`. Injecting the clear
+    where the walk ends IS that window. It runs through a second `DataWatch` over the same
+    state directory, as the operator's process does: an in-process `clear()` on the same
+    object would move the timestamp the guard reads and prove nothing about two processes.
+    """
+    real_tick = g.data.tick
+
+    def tick_then_clear():
+        why, snap = real_tick()
+        D.DataWatch(root=str(root), state_dir=state_dir).clear()
+        return why, snap
+
+    return tick_then_clear
+
+
+def test_a_clear_landing_between_the_walk_and_the_latch_abandons_the_trip(tmp_path,
+                                                                        monkeypatch,
+                                                                        capsys):
+    """Clause 1: the clear wins, and the tick takes NOTHING.
+
+    Every effect is asserted absent — the latch, the halt flag, the pause, the
+    `data_tripwire` ledger row, the critical alert — because the 07:43:08 re-trip did all
+    five in the same second the operator cleared, and promotions then stayed halted for
+    another ~14.7 h with 125 jobs sitting `up_next`. The log line is asserted too: a tick
+    that returns quietly is indistinguishable from one that found nothing, and that
+    silence is how the re-halt went unnoticed for most of a day.
+    """
+    g, root = _race_guardian(tmp_path)
+    state = tmp_path / "state"
+    assert g.check_data() is None                       # armed; nothing vanished yet
+    assert not g.state.halted.exists(), "arming must not trip"
+    shutil.rmtree(root / "tmp")
+    monkeypatch.setattr(g.data, "tick", _clear_mid_walk(g, root, state))
+
+    assert g.check_data() is None
+
+    assert not (state / "data-tripped.json").exists(), (
+        "the re-latch this clause exists to stop: the clear and the new marker landed in "
+        "the same second, 2026-11-19 07:43:08")
+    assert not g.state.halted.exists(), "a trip the clear cancelled must not halt"
+    assert g._paused == [], "a trip the clear cancelled must not pause the pool"
+    assert g._alerts == [], f"a trip the clear cancelled must not alert: {g._alerts}"
+    rows = [e for e in _ledger_rows(g) if e.get("event") == "data_tripwire"]
+    assert rows == [], f"a trip the clear cancelled still booked a ledger row: {rows}"
+    out = capsys.readouterr().out
+    assert "DATA TRIPWIRE abandoned" in out, out
+    assert "clear" in out, f"the log must blame the clear, not stay silent: {out}"
+    assert "tmp" in out, f"and name the folder it stopped latching on: {out}"
+
+
+def test_a_trip_no_clear_cancelled_still_halts_when_its_marker_cannot_be_written(
+        tmp_path, monkeypatch, capsys):
+    """Clause 1's second half: 'abandoned' and 'write failed' stay two distinct signals.
+
+    Both trip sites already survive an unwritable marker by alarming anyway, and that is
+    right — an unwritable marker has never once meant the loss was not real, which is
+    what `check_data`'s own `except OSError` and the vault twin's marker-refusal node in
+    `tests/test_guardian_vaultwatch.py` already pin. So the
+    abandonment needs its own exception type and its own log line: read an abandoned trip
+    as a failed write and the fleet is halted on a trip its own clear cancelled; read a
+    failed write as an abandoned one and a real wipe is swallowed. The third leg of that
+    trichotomy — a plain trip, no clear and a writable marker — is the next node.
+    """
+    import guardian as G
+
+    g, root = _race_guardian(tmp_path, lost="kg", n_lost=40)
+    assert g.check_data() is None
+    shutil.rmtree(root / "kg")
+    # No clear in sight: the baseline on disk is still the one this process wrote.
+    monkeypatch.setattr(g.data, "_rebaselined_since_judging", lambda: False)
+    real_write_text = Path.write_text
+
+    def refusing(self, *args, **kwargs):
+        if Path(self).name == "data-tripped.json":
+            raise OSError(30, "Read-only file system")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refusing)
+    assert g.check_data() is None
+
+    assert g.state.halted.exists(), "an unwritable marker must still halt (#3208)"
+    events = [e["event"] for e in _ledger_rows(g)]
+    assert events == ["promotion_halt_set", "data_tripwire"], events
+    assert g._paused == [G.DATA_TRIP_ACTOR], g._paused
+    assert [(a[0], a[1]) for a in g._alerts] == [("critical", G.DATA_TRIP_ALERT_TITLE)], (
+        g._alerts)
+    assert not (tmp_path / "state" / "data-tripped.json").exists()
+    out = capsys.readouterr().out
+    assert "could not write data marker" in out, out
+    assert "abandoned" not in out, (
+        "one line per condition — a journal reader has to be able to tell a trip the "
+        "clear cancelled from a latch that could not be recorded")
+
+
+def test_with_no_clear_in_sight_a_vanished_folder_still_trips_fully(tmp_path,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """Clause 3 — the check the tripwire exists for: the suppression weakens nothing.
+
+    The same delete as the first node, with the abandonment made impossible
+    (`_rebaselined_since_judging` → False, exactly the state of a root nobody cleared).
+    Marker, reason, halt, pause, alert and ledger row all have to be there and name the
+    folder: this is the node that stops the race fix from being a mute button, which is
+    the failure mode a "skip the trip when a clear happened" change invites.
+    """
+    import guardian as G
+
+    g, root = _race_guardian(tmp_path)
+    state = tmp_path / "state"
+    assert g.check_data() is None
+    shutil.rmtree(root / "tmp")
+    monkeypatch.setattr(g.data, "_rebaselined_since_judging", lambda: False)
+
+    assert g.check_data() is None
+
+    marker = json.loads((state / "data-tripped.json").read_text(encoding="utf-8"))
+    assert "tmp" in marker["reason"], marker
+    assert "77 files" in marker["reason"], marker
+    assert g.state.halted.exists(), "promotions must halt"
+    assert "data tripwire" in g.state.halted.read_text(encoding="utf-8")
+    assert g._paused == [G.DATA_TRIP_ACTOR], (
+        "the pause is what kept the queue dispatching into a wiped root")
+    assert [(a[0], a[1]) for a in g._alerts] == [("critical", G.DATA_TRIP_ALERT_TITLE)], (
+        g._alerts)
+    assert "tmp" in g._alerts[0][2], g._alerts[0][2]
+    events = [e["event"] for e in _ledger_rows(g)]
+    assert events == ["promotion_halt_set", "data_tripwire"], events
+    assert "tmp" in capsys.readouterr().out
+
+
+def test_clear_names_every_effect_its_trip_left_standing(tmp_path, monkeypatch,
+                                                         capsys):
+    """Clause 4: `datawatch.py clear` prints each still-standing effect and its lift.
+
+    Both lifts are asserted as runnable strings in the shape this tree already uses —
+    `python3 -m scripts.automod.round recover --by` for the halt (the only lift that
+    books a `promotion_halt_clear` row), and the resume curl in the exact form
+    `vaultwatch.py`'s own `clear` prints. The pool read is injected because no test box
+    runs a backend, and its failure case is pinned in the same node: an unreadable pool
+    gets an `unknown:` line and never a claimed resume. Nothing here adds an HTTP route
+    or a pool-status constant — #4008's person-only clause stays; `main` is pointed at a
+    fixture watch so the real `~/lloyd-data` is never walked.
+    """
+    g, root = _race_guardian(tmp_path)
+    state = tmp_path / "state"
+    w = _watch(root, tmp_path)
+    w.trip("top-level folder 'tmp' (77 files) vanished", w.history[-1], {})
+    g.state.set_halted("data tripwire: top-level folder 'tmp' (77 files) vanished",
+                       by="datawatch")
+    monkeypatch.setattr(D.P, "AUTOMOD_STATE", tmp_path / "automod")
+    monkeypatch.setattr(D, "DataWatch", lambda: w)
+    monkeypatch.setattr(
+        D, "pool_pause_state",
+        lambda url=None, timeout=2.0: {"paused": True, "paused_by": "guardian",
+                                       "paused_since": "2026-11-19T15:43:08Z"})
+
+    assert D.main(["datawatch.py", "clear"]) == 0
+    out = capsys.readouterr().out
+    assert "data tripwire cleared" in out, out
+    assert str(g.state.halted) in out, f"the halt must name the flag it left: {out}"
+    assert "python3 -m scripts.automod.round recover --by" in out, out
+    # The curl, in the form `vaultwatch.py`'s own `clear` prints it (verb, header casing,
+    # body) — but addressed through policy rather than a re-typed `localhost:8080`,
+    # because `_pause_workers` took the pause on the sink `workers_pause_url` resolves
+    # (#3154) and a portmange round's pause sits on its own port (#2549). A lift pointed
+    # at the wrong port is the silence this clause is about, again.
+    assert ("curl -X POST " + D.P.workers_pause_url(D.P.BACKEND_HEALTH_URL)
+            + " -H 'content-type: application/json'"
+            + ' -d \'{"paused": false}\'') in out, out
+    assert D.P.WORKERS_PAUSE_PATH in out, out
+    assert "2026-11-19T15:43:08Z" in out, (
+        f"the take time is what proves the hold is THIS trip's: {out}")
+    assert out.count("still held") == 2, f"two effects standing, two named: {out}"
+
+    # The halt lifted and the pool unreadable: nothing about an effect measured as
+    # absent, and an effect that cannot be measured says `unknown:` rather than being
+    # read as "not held" — the reassuring answer about a dead backend is the one a
+    # halted fleet would never hear about.
+    capsys.readouterr()
+    assert g.state.clear_halted(by="test") is True
+    w.trip("top-level folder 'logs' (11 files) vanished", w.history[-1], {})
+    def dead(url=None, timeout=2.0):
+        raise OSError("backend down")
+    monkeypatch.setattr(D, "pool_pause_state", dead)
+    assert D.main(["datawatch.py", "clear"]) == 0
+    out = capsys.readouterr().out
+    assert "still held: promotions" not in out, out
+    assert "unknown:" in out and "backend down" in out, (
+        f"a dead backend must read as unknown, never as \"nothing is held\": {out}")
+    assert D.P.WORKERS_PAUSE_PATH in out, out
+    assert not (state / "data-tripped.json").exists(), "the clear still clears"
+
+
+def test_an_unlatched_clear_asks_the_pool_nothing(tmp_path, monkeypatch, capsys):
+    """The readout is for a trip that happened, not a cost on every invocation.
+
+    `clear` on a watch that was never latched is what a nervous operator and a
+    half-remembered habit both run. Making a status call there and printing a lift for
+    effects nobody took would be a new way to mislead, so `existed` — did a latch come
+    down under this command — is the only gate."""
+    g, root = _race_guardian(tmp_path)
+    w = _watch(root, tmp_path)
+
+    def explode(url=None, timeout: float = 2.0):
+        raise AssertionError("an un-latched clear must not ask the pool anything")
+
+    monkeypatch.setattr(D, "DataWatch", lambda: w)
+    monkeypatch.setattr(D, "pool_pause_state", explode)
+    assert D.main(["datawatch.py", "clear"]) == 0
+    out = capsys.readouterr().out
+    assert "was not set" in out, out
+    assert "still held" not in out and "unknown:" not in out, out

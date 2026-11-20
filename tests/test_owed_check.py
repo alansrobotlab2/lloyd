@@ -1730,6 +1730,167 @@ def test_the_revisit_closes_only_on_rows_the_writer_re_reads_as_discharged(isola
         "with the restated ask, not the discharged one"
 
 
+# ── A close that rides on a discharge settles the clauses it answered (#4368) ────
+#
+# #4009 is the shape, and the fixture below is it. The item closed 2026-11-19T01:09Z
+# on ONE discharged `owed_outside` row whose `done_note` covers §4 steps 1-4 of
+# `backlog/data/suffix-safe-split-2026-11-09.md` — 55 cached `SAME` rows flipped to
+# REVIEW in a private cache, a dry run, `--apply --tiers SUFFIX_SAFE` with the gate on
+# (report `entity-merges-applied-2026-11-19-20261119T010911Z.json`: 12 dir ops, 37
+# edges rewritten), and a revert plan of 12 ops. That discharge wrote `done` and
+# `done_note` on the ROW and the close wrote the status; neither said one word about
+# the item's `human_clauses`, and `derived_entries` closes a CLOSED item's clauses
+# against the TEXT recorded in `owed` / `owed_settled` / `owed_outside`, so prose
+# inside one row's note covers nothing. owed-check 20261119_032459 therefore
+# re-derived all four §4 steps and filed four NEW `owed_outside` rows — each `since:
+# '2026-11-19T11:26:01.198392'`, each `done_note` naming itself as "re-filed by
+# owed-check 20261119_032459 from human_clauses H1-H4 that the earlier discharge never
+# marked settled" — putting a finished item back on Mission Control's list.
+#
+# #4242's carrier guard landed AFTER that historical close, so reproducing the close
+# today needs the carrier the guard's own remedy names: an open item citing the
+# closing one. The real pair cited each other both ways (#4009's name is "Blocks
+# #4008 …"), and owed-check's `follow_up` route writes "Filed by owed-check from
+# #<id>'s owed entry" into every child it files, so a carrier naming its parent is
+# the normal board state, not a fixture trick.
+
+#: H1-H4 of #4009, verbatim off
+#: `~/obsidian/backlog/4009-blocks-4008-person-only-run-the-12-pair-suffix-saf.md`.
+#: The live item carries three more clauses (a pinned-plan carrier question, a
+#: dispatch ruling, and a `kg.sqlite` extract bound); none is one of the four §4 steps
+#: this discharge answered, so only these four are in the fixture.
+_SUFFIX_H1 = ("Person runs §4 Step 1: copy `~/lloyd-data/_pipeline/memory-graph/"
+              "semantic-verdicts.jsonl` to a private path and set REVIEW over the 13 "
+              "HOLD pairs' cached `SAME` rows — expect `flipped ~= 50`, not 13 (the "
+              "cache keeps history per definition hash; only the current-hash row is "
+              "consulted).")
+_SUFFIX_H2 = ("§4 Step 2, dry run, `--tiers SUFFIX_SAFE --gate-cache <private>`, and "
+              "require the printed `── SAFE merges ──` block to name exactly the 12 "
+              "APPLY canonicals and no HOLD name — trust the printed block over any "
+              "record's row count, and re-run it on the apply day after the hour-16 "
+              "dry plan lands (today's is `…T160109Z`, md5 `422ba362…`; never read the "
+              "SAFE count off `entity-merges-latest.jsonl`, which points at the "
+              "tiers-excluded apply-path plan and reads 0).")
+_SUFFIX_H3 = ("§4 Step 3: apply with that private cache, gate on — no `--no-gate`, no "
+              "`--allow-degraded`, never a bare `--apply` "
+              "(`entity-resolution-sweep.py:94`/`:1731` would merge all 25, HOLD pairs "
+              "included).")
+_SUFFIX_H4 = ("§4 Step 4: `revert-suffix-merges.py --applied <report>` without "
+              "`--apply` must plan one op per applied pair; then the next #60 Hygiene "
+              "row's gate-approved suffix count must drop from 25 by the applied "
+              "number with a reduced oldest age, or read 0 with its explicit no-data "
+              "reason, row still printed, exit 0 "
+              "(`tests/test_knowledge_health_hygiene.py::"
+              "test_an_empty_suffix_queue_still_prints_a_zero`) — compare against a "
+              "plan up to a day older, since #60 runs at hour 4 and #48 at hour 16.")
+
+#: The discharge as the attended session left it on #4009's row: `done_note`, not
+#: `discharge` — the hand route has always written the note, which is why the settle
+#: reads both.
+_SUFFIX_DISCHARGE = (
+    "attended 2026-11-18 17:09 PST (Claude Code at Alan's request): §4 of "
+    "suffix-safe-split-2026-11-09.md run. Step 1 flipped 55 cached SAME->REVIEW for "
+    "the 13 HOLD pairs in a private cache. Step 2 dry run printed 13, not 12, so the "
+    "re-run named exactly the 12 APPLY canonicals. Step 3 --apply --tiers SUFFIX_SAFE "
+    "(gate on): report entity-merges-applied-2026-11-19-20261119T010911Z.json, 12 dir "
+    "ops, 37 edges rewritten. Step 4 revert-suffix-merges.py dry plan = 12 merges.")
+
+
+def _closed_on_discharge(isolated, item_id) -> Path:
+    """#4009 as the close found it: four §4 `human_clauses`, and as its only debt one
+    `owed_outside` row that already carries `done`."""
+    return write_item(isolated, item_id, status="draft",
+                      name="Blocks #4008 — PERSON-ONLY: run the 12-pair SUFFIX_SAFE apply",
+                      extra={"human_clauses": [_SUFFIX_H1, _SUFFIX_H2, _SUFFIX_H3,
+                                               _SUFFIX_H4],
+                             "owed_outside": [
+                                 {"what": "its unattended attempts are spent; "
+                                          "owed-check decides whether to grant another "
+                                          "(reopen) or close it as tried",
+                                  "needs": "At a terminal, run §4 steps 1-4 of "
+                                           "backlog/data/suffix-safe-split-2026-11-09.md "
+                                           "against the live store",
+                                  "since": "2026-11-09T18:04:35.553589",
+                                  "done": "2026-11-18T17:09:30.707152",
+                                  "done_note": _SUFFIX_DISCHARGE}]})
+
+
+def test_a_close_on_a_discharge_settles_the_clauses_that_discharge_answered(isolated):
+    """#4368 clause 5: the discharge that CLOSES an item is the reason its
+    `human_clauses` are not owed, so the close has to write it as their
+    `owed_settled` evidence — or the next pass re-derives them and re-files them,
+    which is exactly what owed-check 20261119_032459 did to #4009."""
+    now = datetime.now(timezone.utc)
+    # The carrier #4242's guard asks for: an OPEN item naming #4009, which is what
+    # owed-check's own `follow_up` route writes into a child it files.
+    write_item(isolated, 4411, name="Carrier for the §4 apply, filed from #4009")
+    p = _closed_on_discharge(isolated, 4009)
+
+    # Before the close the four clauses are not debt at all: `derived_entries`
+    # derives a CLOSED item's clauses only (#2055).
+    assert O.derived_entries(fm_of(p)) == [], "an open item derives nothing (#2055)"
+
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 4009]
+    out = O.apply_verdict(p, owing.entries,
+                          [{"n": 1, "outcome": "close",
+                            "evidence": "report entity-merges-applied-2026-11-19-"
+                                        "20261119T010911Z.json, tiers_allowed="
+                                        "[SUFFIX_SAFE], 12 dir ops",
+                            "ruling": "§4 steps 1-4 ran; the item is done"}],
+                          item_id=4009)
+    assert out["moved"] == "closed", "a carrier is open, so the close lands"
+    assert out["clauses_settled"] == [_SUFFIX_H1, _SUFFIX_H2, _SUFFIX_H3, _SUFFIX_H4], \
+        "the four clauses the discharge answered are what it booked"
+
+    fm = fm_of(p)
+    # The entry's own `close` settle is written first by `apply_verdict`; what this
+    # clause is about is the four `settled` lines that follow it.
+    settled = [r for r in fm["owed_settled"] if r["outcome"] == "settled"]
+    assert [r["what"] for r in fm["owed_settled"] if r["outcome"] == "close"] == \
+        ["its unattended attempts are spent; owed-check decides whether to grant "
+         "another (reopen) or close it as tried"], "the entry itself still closes"
+    assert [r["what"] for r in settled] == [_SUFFIX_H1, _SUFFIX_H2, _SUFFIX_H3,
+                                            _SUFFIX_H4], \
+        f"one settled line per clause, in the item's own order: {settled}"
+    assert all(r.get("at") for r in settled), \
+        "each is a settle carrying the time it was booked"
+    for line in settled:
+        assert "entity-merges-applied-2026-11-19-20261119T010911Z.json" in line["evidence"] \
+            and "55 cached SAME->REVIEW" in line["evidence"], \
+            "the why is the discharge itself, so a later reader can check it"
+
+    # The point of the whole exercise: the next pass sees nothing to file.
+    assert O.derived_entries(fm) == [], "the next pass derives no owed_outside row"
+    assert O.entries_of(fm) == [], "the closed item owes nothing at all"
+    assert O.outside_list() == [], "and Mission Control's list gains no row"
+
+
+def test_a_close_that_rode_on_no_discharge_still_derives_its_clauses(isolated):
+    """#2055 must stay shut: the settle is keyed on a close that rode on a DISCHARGE,
+    not on any close. An item closed over an ordinary `owed` entry keeps its
+    unrecorded `human_clauses` derivable — #1999 was closed by a hand sweep with three
+    clauses and no landing section and sat invisible to the job that rules on them."""
+    now = datetime.now(timezone.utc)
+    write_item(isolated, 4412,
+               name="Carrier that keeps #4010's step from being orphaned")
+    p = write_item(isolated, 4010, status="draft",
+                   name="An item closed over an ordinary owed entry",
+                   extra={"human_clauses": [_SUFFIX_H3],
+                          "owed": [{"what": "confirm the nightly run reports it",
+                                    "kind": "check", "since": "2026-11-01T00:00:00"}]})
+    (owing,) = [o for o in O.owing_items(now=now) if o.item.id == 4010]
+    out = O.apply_verdict(p, owing.entries,
+                          [{"n": 1, "outcome": "close",
+                            "evidence": "read the run log at 03:12Z",
+                            "ruling": "the entry is answered; close the item"}],
+                          item_id=4010)
+    assert out["moved"] == "closed"
+    assert out["clauses_settled"] == [], "no discharge rode along, so nothing is settled"
+    derived = O.derived_entries(fm_of(p))
+    assert [e["what"] for e in derived] == [_SUFFIX_H3], \
+        f"#2055's derivation still fires: {derived}"
+
+
 # ── The pending hand-run (#3017) ────────────────────────────────────────────
 #
 # A decision can be RULED and still not EXECUTED. PS-3 is the case: seven entity

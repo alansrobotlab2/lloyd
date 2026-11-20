@@ -1983,6 +1983,16 @@ class Guardian:
         actions: dict = {"evidence": None}
         try:
             self.vault.trip(why, snap, actions)
+        except vaultwatch.TripSupersededByClear as exc:
+            # A `vaultwatch.py clear` replaced the baseline this judgement was made
+            # against, between the walk and this write (#4368). The tick ENDS here:
+            # no sync stop, no pool pause, no halt, no ledger row, no alert — every
+            # one of those is an effect on the live fleet for a loss a human has just
+            # certified away, and none of them can be un-taken afterwards. The
+            # `OSError` below is NOT this: an unwritable marker never once meant the
+            # loss was unreal, so that branch logs and carries on halting.
+            log(f"VAULT TRIPWIRE abandoned: {exc}")
+            return
         except OSError as exc:
             log(f"could not write vault marker: {exc}")
         actions["sync"] = self._stop_sync()
@@ -1995,7 +2005,13 @@ class Guardian:
         actions["evidence"] = self._vault_evidence(stamp)
         try:
             marker = self.vault.trip(why, snap, actions)
-        except OSError:
+        except (OSError, vaultwatch.TripSupersededByClear):
+            # Past this point the effects are FACTS, not intentions: sync is stopped,
+            # the pool is paused, promotions are halted. A marker that cannot be
+            # written, or that a `clear` unlinked in the millisecond after the first
+            # one went down, does not undo a single one of them — so the alert still
+            # goes out, and `marker` is only where it would have been. Silence here is
+            # the failure #4368 clause 3 is about: a halted fleet with no record.
             marker = self.vault.marker
         before = self.vault.history[-1].total if self.vault.history else "?"
         after = snap.total if snap else "missing"
@@ -2698,7 +2714,9 @@ class Guardian:
         back into the code tree, and ask the snapshot directory how old its
         newest snapshot is — the layer the tripwire cannot watch, and the one
         that refuses without leaving a trace anywhere else. Never raises into
-        the tick."""
+        the tick. One tick takes nothing at all: a `datawatch.py clear` that
+        re-baselined the watch while this tick was walking it abandons the trip
+        rather than re-latching over the folder the clear just blessed (#4368)."""
         now = time.time()
         if now - self._strays_checked_at >= policy.STRAY_CHECK_SECONDS:
             self._strays_checked_at = now
@@ -2768,6 +2786,18 @@ class Guardian:
         actions: dict = {"evidence": None}
         try:
             self.data.trip(why, snap, actions)
+        except vaultwatch.TripSupersededByClear as exc:
+            # The 2026-11-19 07:43:08 shape: the operator's `datawatch.py clear`
+            # unlinked the marker and re-baselined at 07:43:08, and in that same
+            # second this tick — which had already walked 724,539 files against the
+            # pre-clear baseline — wrote a NEW marker, re-paused the pool and
+            # re-halted promotions (#4255's ledger row is `already_halted: true`). It
+            # reloaded the baseline it had been cleared into seven seconds later, at
+            # 07:43:15. The tick ENDS here instead: no marker, no pause, no halt, no
+            # `data_tripwire` ledger row, no critical alert. An `OSError` below is a
+            # different condition and still halts — see `vaultwatch.trip`.
+            log(f"DATA TRIPWIRE abandoned: {exc}")
+            return
         except OSError as exc:
             log(f"could not write data marker: {exc}")
         actions["workers"] = self._pause_workers(DATA_TRIP_ACTOR)
@@ -2779,7 +2809,11 @@ class Guardian:
         actions["evidence"] = self._vault_evidence(stamp)
         try:
             marker = self.data.trip(why, snap, actions)
-        except OSError:
+        except (OSError, vaultwatch.TripSupersededByClear):
+            # The rule stated at the vault site above, and the reason it is the same
+            # rule here: the pool is paused and promotions are halted by this point,
+            # so a marker that will not be written changes what the human can READ,
+            # not what has been DONE. The alert still goes out.
             marker = self.data.marker
         before = self.data.history[-1].total if self.data.history else "?"
         after = snap.total if snap else "missing"
@@ -2940,8 +2974,9 @@ class Guardian:
         `MACHINE_LEASE_STALE_SECONDS` (300 s) releases it as a dead setter's
         (`_release_dead_machine_pause`). Nothing beats a trip's lease once the take
         is written: `vaultwatch.py` prints the resume curl for a human to run, and
-        `datawatch.py` prints none at all — each trip ends with a person restoring
-        the root and clearing the watch. Naming a kind here would therefore have the
+        `datawatch.py clear` prints the same curl among the effects its trip left
+        standing (#4368) — each trip ends with a person restoring the root and
+        clearing the watch. Naming a kind here would therefore have the
         next boot resume dispatch in the middle of the incident it is halted for.
 
         Two more things happen before the socket is opened (#3154). This module must BE

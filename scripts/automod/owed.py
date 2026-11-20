@@ -1308,6 +1308,54 @@ def answer_collisions(answers: list[dict]) -> set[int]:
     return {n for n, count in seen.items() if count > 1}
 
 
+def settle_clauses_under_discharge(path: Path, evidence: str) -> list[str]:
+    """Record a just-closed item's still-stranded `human_clauses` as settled, under
+    the discharge that closed it (#4368 clause 5). Returns the clauses it booked.
+
+    The hole this closes: a discharge writes fields on the `owed_outside` ROW
+    (`done`, `discharge`, `recheck_after` — the `settled` branch of
+    `apply_verdict`'s `owed_outside` arm) and a close on the revisit entry writes the
+    status. Neither one says anything about the item's `human_clauses`, so on the next
+    pass `derived_entries` — which closes a CLOSED item's clauses against the TEXT of
+    what is recorded in `owed`, `owed_settled` and `owed_outside` and finds prose in one
+    row's `discharge` nowhere in that comparison — re-derived every one of them and the
+    pass re-filed them as fresh asks. #4009 is that shape exactly: closed
+    2026-11-19T01:09Z on one discharged row whose note covers §4 steps 1-4, and owed-check
+    20261119_032459 put four new `owed_outside` rows on Mission Control's list for
+    clauses that item had finished, each one naming itself as re-filed from H1-H4.
+
+    The settle happens at the CLOSE, and only under a close that rode on a discharge
+    (`_is_discharge_revisit`), which is what keeps #2055 shut: an item closed some other
+    way still derives its unrecorded clauses, because nothing here booked them. It reads
+    the front matter the caller just wrote rather than the caller's stale copy, and asks
+    `derived_entries` — the ONE measurement of what is stranded — so this cannot record a
+    different set of clauses than the next pass would have re-filed.
+
+    `evidence` names the discharge, so each settled line carries the reason it is not
+    owed: the row's own text plus what proved it. A clause that is genuinely still owed
+    (not in `derived_entries` because something already records it) is never touched.
+    """
+    from scripts.automod import backlog as B
+    fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
+    stranded = [_text(e.get("what")) for e in derived_entries(fm)]
+    if not stranded:
+        return []
+    have = [dict(r) for r in (fm.get(SETTLED_KEY) or []) if isinstance(r, dict)]
+    stamp = _stamp()
+    why, cut = _bounded(evidence)
+    for what in stranded:
+        record = {"what": what, "outcome": "settled", "at": stamp, "evidence": why}
+        if cut:
+            record["artifact"] = str(path)
+        have.append(_compact(record))
+    B.update_frontmatter(path, {SETTLED_KEY: have},
+                         activity=(f"owed-check: closed on a discharge that covers "
+                                   f"{len(stranded)} human_clause(s) with no entry of "
+                                   f"their own, settled here under that discharge: "
+                                   f"{'; '.join(stranded)}")[:600])
+    return stranded
+
+
 def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_id: int,
                   session_id: str = "", spawn_cap: int = 3, now: datetime | None = None,
                   revision: str | None = None) -> dict:
@@ -1341,6 +1389,9 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
     # Set only when the close being ruled rides on a discharge (#3931): the write
     # then re-reads the rows and refuses if any has lost its `done` since the read.
     close_needs_rows = False
+    # The close that rode on it, remembered so the clauses the discharge answered can
+    # be settled AFTER the status move lands (#4368 clause 5). None otherwise.
+    discharge_close: dict | None = None
     # #4242: filled by `close_item` when the carrier guard is what refused this
     # pass's close, so the step it held is knowable by the caller instead of only
     # readable off the item. Both close sites below pass it; at most one runs.
@@ -1560,6 +1611,18 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             item_move, move_why = "close", record.get("ruling") or evidence
             if _is_discharge_revisit(e):
                 close_needs_rows = True
+                # Remembered for the write after the close LANDS (#4368 clause 5): a
+                # close refused by the carrier guard or a pending hand-run settles
+                # nothing, because the discharge did not close the item.
+                rows = [r for r in outside if isinstance(r, dict) and r.get("done")]
+                # `discharge` is what `apply_verdict`'s own `settled` arm writes;
+                # `done_note` is what a hand discharge leaves behind, and #4009's row
+                # is that second shape. Reading only the first would book the four
+                # clauses under an empty why.
+                discharge_close = ("; ".join(
+                    f"{_text(r.get('what'))} — discharged: "
+                    f"{_text(r.get('discharge') or r.get('done_note'))}"
+                    for r in rows) or _text(move_why))[:600]
         settled.append(record)
         notes.append(f"#{n} {out}: " + (record.get("ruling") or evidence)[:200]
                      + (f" -> #{record['follow_up']}" if record.get("follow_up") else ""))
@@ -1609,12 +1672,27 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             # the explicit `close` outcome. A guard on one of two routes to the same
             # status is not a guard.
             refusal=close_refusal) else ""
+    # #4368 clause 5: a discharge that CLOSED the item is the reason the item's
+    # `human_clauses` are no longer owed, and that reason has to be on the record or the
+    # next pass re-derives them and re-files them as fresh asks (#4009's four §4 rows).
+    # Both conditions matter: `discharge_close` is set only by a close that rode on a
+    # discharge, so an item closed any other way still derives its clauses and #2055's
+    # hole stays shut, and `moved == "closed"` means the status move actually landed, so
+    # a close the carrier guard or a pending hand-run refused settles nothing.
+    clauses_settled: list[str] = []
+    if moved == "closed" and discharge_close is not None:
+        clauses_settled = settle_clauses_under_discharge(path, discharge_close)
+        if clauses_settled:
+            notes.append(f"#{item_id} settled {len(clauses_settled)} human_clause(s) "
+                         "under the discharge that closed this item, instead of "
+                         "re-filing them")
     # `carrier_guard` is the steps this pass REFUSED to orphan. Empty on every
     # ordinary pass, which is what makes it countable: the item's owed-after-landing
     # check asks how many closes a week of passes refused, and a key that only
     # appeared on a refusal could not answer "zero".
     return {"remaining": len(keep), "settled": len(settled), "outside": len(outside),
             "filed": filed, "moved": moved, "notes": notes, "amended": amended,
+            "clauses_settled": clauses_settled,
             "carrier_guard": close_refusal.get("carrier_guard") or []}
 
 

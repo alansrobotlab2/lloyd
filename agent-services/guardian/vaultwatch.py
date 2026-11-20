@@ -155,6 +155,27 @@ SNAPSHOT_BEAT_FILE = "lloyd-last-count"
 CHECKOUT_MAX_DEPTH = 2
 
 
+class TripSupersededByClear(RuntimeError):
+    """This trip's judgement is stale: a `clear` re-baselined the watch under it (#4368).
+
+    Raised by `VaultWatch.trip` INSTEAD OF writing the marker, so the caller skips the
+    halt, the pool pause, the ledger row and the critical alert a trip announces. A
+    `clear` is a human saying "the tree as it is now is the tree I want"; latching on
+    the folder that clear had removed 0 seconds earlier is the 2026-11-19 07:43:08
+    re-trip, which held promotions for another ~14.7 h after the operator had already
+    cleared the trip.
+
+    Deliberately NOT an `OSError` subclass, and that distinction is load-bearing. Both
+    callers already survive an `OSError` out of `trip` by alarming anyway — "could not
+    write data marker" — because an unwritable marker has never once meant the loss was
+    not real. Reading an abandoned trip as a failed write would halt the fleet on a trip
+    its own clear had just cancelled; reading a failed write as an abandoned one would
+    swallow a real wipe. Each condition keeps its own exception type and its own log
+    line, so the journal says which of the two happened.
+    """
+    pass
+
+
 @dataclass
 class Snapshot:
     ts: float
@@ -610,6 +631,29 @@ class VaultWatch:
         # which is the very harm that docstring names.
         self._state_ns = self._state_ns_now()
 
+    def _rebaselined_since_judging(self) -> bool:
+        """Has the on-disk baseline stopped being the one this process last wrote?
+
+        The same `mtime_ns` comparison `_reload_if_rebaselined` makes at tick ENTRY
+        (#3095), asked again at the one moment it still changes anything: after the
+        walk, before the latch. Entry is too early to be the whole guard — `measure`
+        of `~/lloyd-data` took 1.60 s over 724,539 files when #4368 was measured, so
+        a `datawatch.py clear` that lands during the walk or in the judgement that
+        follows it is invisible to a check made before both. The marker write is the
+        point of no return: everything the caller does on the strength of a
+        non-None `trip()` result — halt, pause, ledger row, critical alert — is
+        written after it and cannot be un-written.
+
+        Strictly greater, exactly as the tick-entry check does. `self._state_ns` is
+        the timestamp of OUR OWN last write (`_persist`, `_load`), so a later one can
+        only be another process replacing the baseline. Nothing here re-reads or
+        re-judges: this is a re-stat, not a reload — the walk is already over and the
+        trip is being abandoned, not corrected.
+        """
+        now_ns = self._state_ns_now()
+        return (now_ns is not None and self._state_ns is not None
+                and now_ns > self._state_ns)
+
     def _excuse_vanished(self, name: str, count: int,
                          before: Snapshot) -> "str | None":
         """Why this vanished top-level folder may NOT be, or None if it never may.
@@ -684,6 +728,17 @@ class VaultWatch:
                         excuse_vanished=self._excuse_vanished, excused=excused)
 
     def trip(self, reason: str, snap: Snapshot | None, actions: dict) -> Path:
+        # Last look, immediately before the point of no return (#4368). `tick` reloads a
+        # baseline that another process replaced, but it does that at ENTRY, and the walk
+        # it is judging took 1.60 s measured over 724,539 files — a `clear` inside that
+        # window, or in the judgement that follows it, is invisible to that reload and
+        # cannot be undone by anything the caller does later. So the latch is what is
+        # gated: everything downstream of a returned marker — halt, pool pause, ledger
+        # row, critical alert — is an effect on the running fleet.
+        if self._rebaselined_since_judging():
+            raise TripSupersededByClear(
+                f"a clear replaced the {self.what} baseline this trip judged "
+                f"({self.state_file}); abandoning instead of re-latching on {reason}")
         self.state_dir.mkdir(parents=True, exist_ok=True)
         before = self.history[-1] if self.history else None
         body = {

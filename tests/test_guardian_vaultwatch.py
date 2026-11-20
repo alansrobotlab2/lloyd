@@ -1257,3 +1257,49 @@ def test_the_clear_command_names_the_watch_that_tripped(tmp_path):
         "if two watches share a command, the name is coming from the module again")
     assert vault_clear != data_clear, (
         "the exact pair the 2026-11-18 data marker got wrong, asked in one assertion")
+
+
+# --------------------------------------------------------------------------- #
+# #4368 clause 2 — the same abandonment at the VAULT trip site.
+# --------------------------------------------------------------------------- #
+
+def test_a_vault_clear_landing_between_the_walk_and_the_latch_abandons_the_trip(
+        guardian, monkeypatch, capsys):
+    """A `vaultwatch.py clear` arriving mid-walk ends the tick with nothing taken.
+
+    The data-root fix lives in the shared `VaultWatch.trip`, so the vault half of the
+    same second is a separate process boundary to pin: `check_vault` is the caller, and
+    every effect it takes on a returned marker is the fleet's — the sync service is
+    stopped, the pool is paused under `guardian-vault-trip`, promotions are halted, the
+    ledger row is booked and a CRITICAL alert is posted. A clear that re-baselined the
+    vault while this tick was walking it means a human has just certified the tree as
+    correct, so all five are wrong. The `OSError` path above (`trip` raising) is NOT
+    this one and still proceeds to halt, which is why the branch order matters.
+    """
+    g, vault, acted = guardian
+    g.check_vault()                                # arms the baseline
+    assert g.vault.tripped() is None
+    shutil.rmtree(vault / "backlog")
+
+    real_tick = g.vault.tick
+
+    def tick_then_clear():
+        why, snap = real_tick()
+        # The operator's process: a second VaultWatch over the same state directory,
+        # clearing between this tick's walk and its latch.
+        VW.VaultWatch(str(vault), g.vault.state_dir).clear()
+        return why, snap
+
+    monkeypatch.setattr(g.vault, "tick", tick_then_clear)
+    g.check_vault()
+
+    assert not g.vault.marker.exists(), (
+        "the vault latch was re-written over the folder the clear had just blessed")
+    assert acted["sync"] == 0, "a cancelled trip must not stop vault-sync"
+    assert acted["workers"] == 0, "a cancelled trip must not pause the pool"
+    assert acted["pause_actors"] == [], acted["pause_actors"]
+    assert not g.state.halted.exists(), "a cancelled trip must not halt promotions"
+    assert acted["alerts"] == [], f"a cancelled trip must not alert: {acted['alerts']}"
+    out = capsys.readouterr().out
+    assert "VAULT TRIPWIRE abandoned" in out, out
+    assert "clear" in out, f"the log must blame the clear, not stay silent: {out}"

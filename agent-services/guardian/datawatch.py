@@ -2175,6 +2175,96 @@ def snapshot_report(snaps_dir: str, max_age_seconds: float,
     return state["fresh"], state["text"]
 
 
+#: What a data trip takes that `clear()` does not give back. `VaultWatch.clear`
+#: unlinks the latch and re-persists the baseline — nothing more — while
+#: `guardian.check_data` on the way to that latch paused the worker pool and halted
+#: promotions. On 2026-11-19 the operator ran the clear at 07:43:08, and both effects
+#: stayed exactly where they were: `pause_journal` row 74 lifted the pool at 15:44:12Z
+#: and the `promotion_halt_clear` row is stamped 15:44:06Z, both by an attended session
+#: that unlinked the flag by hand, while autocode kept logging `not queueing —
+#: promotions are halted` against a trip it was told had been cleared. The clear's only
+#: output was one line about the baseline.
+#:
+#: The lift is deliberately NOT folded into `clear()`: a command that clears a safety
+#: halt from the same keystroke that clears the latch deletes the human's verification
+#: step, and the halt's own ledger row exists to name an actor. So the clear reports
+#: each surviving effect and prints the command that lifts it.
+def promotions_halt_flag(automod_state: "Path | str | None" = None) -> Path:
+    """The automod halt flag, as the guardian writes it. `gstate.AutomodState.halted`
+    is the same path from the same `policy.AUTOMOD_STATE`; `scripts/automod/state.py`
+    's `HALTED_PATH` is the promoter's half of the pair, and a reader of one is a
+    reader of the other."""
+    return Path(automod_state or P.AUTOMOD_STATE) / "promotions-halted"
+
+
+def pool_pause_state(url: "str | None" = None, timeout: float = 2.0) -> dict:
+    """What the backend says about the pool hold, without taking or lifting one.
+
+    `GET` on `policy.workers_pause_url` — the very route `_pause_workers` POSTs the
+    hold to, which answers both verbs (#2498). No new endpoint and no new path
+    constant: the trip's pause and this reading cannot drift apart because they are
+    one URL built by one function from one base.
+
+    Raises on an unreachable backend or a non-JSON body; `still_held` turns that into
+    an `unknown:` line rather than a silent "nothing is held".
+    """
+    import json as _json
+    import urllib.request
+    target = url or P.workers_pause_url()
+    req = urllib.request.Request(target, method="GET")
+    # Never route a loopback read through a proxy — `probes.probe`'s rule.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
+        return _json.loads(resp.read(65536).decode("utf-8", "replace"))
+
+
+def still_held(backend_health_url: "str | None" = None,
+               automod_state: "Path | str | None" = None,
+               pool_state: "dict | None" = None,
+               timeout: float = 2.0) -> list[str]:
+    """One line per effect a data trip took that is STILL standing, plus its lift.
+
+    `pool_state` is the caller's read, for a test or a caller that already asked; with
+    None this function asks the backend itself. Two effects are ever in scope, because
+    two are what `check_data` takes: the halt and the pool pause. An effect measured as
+    NOT standing prints nothing — the readout is the list of what is left to do, not a
+    status page — and an effect that could not be measured prints `unknown:`, because
+    the reassuring reading of a dead backend is "nothing is held".
+    """
+    lines: list[str] = []
+
+    flag = promotions_halt_flag(automod_state)
+    try:
+        held = flag.read_text(encoding="utf-8").strip()
+    except OSError:
+        held = ""
+    if held:
+        lines.append(f"still held: promotions are halted — {flag} says {held!r}")
+        lines.append('  lift: cd ~/lloyd && /usr/bin/python3 -m scripts.automod.round '
+                     'recover --by "<who is lifting it>"')
+
+    if pool_state is None:
+        try:
+            pool_state = pool_pause_state(P.workers_pause_url(backend_health_url),
+                                         timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — an unreachable pool is a reading, not a crash
+            lines.append("unknown: the worker pool's pause state could not be read "
+                         f"from {P.workers_pause_url(backend_health_url)} ({exc}); if "
+                         "the trip paused it, resume with: curl -X POST "
+                         f"{P.workers_pause_url(backend_health_url)} "
+                         "-H 'content-type: application/json' "
+                         "-d '{\"paused\": false}'")
+            return lines
+    if pool_state.get("paused"):
+        who = str(pool_state.get("paused_by") or "").strip()
+        since = str(pool_state.get("paused_since") or "").strip()
+        detail = "".join([f" by {who}" if who else "", f" since {since}" if since else ""])
+        lines.append(f"still held: the worker pool is paused{detail}")
+        lines.append(f"  lift: curl -X POST {P.workers_pause_url(backend_health_url)} "
+                     "-H 'content-type: application/json' -d '{\"paused\": false}'")
+    return lines
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "status"
     w = DataWatch()
@@ -2189,6 +2279,15 @@ def main(argv: list[str]) -> int:
         existed = w.clear()
         print("data tripwire cleared; baseline reset to the data root as it is now" if existed
               else "data tripwire was not set; baseline refreshed")
+        if existed:
+            # The vault twin prints its resume curl for exactly this reason
+            # (`vaultwatch.py`'s own `clear`); the data twin printed nothing, and on
+            # 2026-11-19 the halt and the pool pause this trip had taken both stood
+            # until an attended session lifted them by hand 58 s later. Read-only, and
+            # only when a latch actually came down — an un-latched `clear` costs no
+            # HTTP call.
+            for line in still_held():
+                print(line)
         return 0
     if cmd == "snapshot-gate":
         ok, why = snapshot_gate()
