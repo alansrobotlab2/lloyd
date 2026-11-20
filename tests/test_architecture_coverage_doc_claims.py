@@ -3198,8 +3198,19 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # four hunks and nothing else, and
     # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
     # prints 1035 with 3785 below it.
-    assert heads[guardian]["main"] == 3785, (
-        f"`main` moved off :3785 ({heads[guardian]['main']}) — if it is gone "
+    # 3785 → 3791 is #4255: ONE hunk, `@@ -2796,10 +2796,16 @@`, 10 added and 4 removed
+    # for a net +6 — the `check_data` alert body's clear line replaced by
+    # `self.data.clear_command` plus the comment naming the two different commands one
+    # 2026-11-18 trip had printed for the same incident (`…/bin/vaultwatch.py clear` in
+    # the marker, `datawatch.py clear` in the body). The hunk is inside `check_data`, in
+    # the window between the two anchors and below `evaluate_liveness`, so
+    # `evaluate_liveness` keeps :1035, the T-26 row does not move, and `main` takes the
+    # whole +6. Re-check: `git diff <base> <head> -- agent-services/guardian/guardian.py
+    # | grep '^@@'` answers that one hunk and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1035 with 3791 below it.
+    assert heads[guardian]["main"] == 3791, (
+        f"`main` moved off :3791 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1035, (
         f"`evaluate_liveness` moved off :1035 "

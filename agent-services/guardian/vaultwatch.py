@@ -298,7 +298,15 @@ def evaluate(history: list[Snapshot], current: Snapshot | None, *,
                     excused.append(why)
                 continue
             state = "vanished" if now_count is None else "emptied"
-            return f"top-level folder {name!r} ({count} files) {state}"
+            # The delta note travels with the verdict (#4255) because this string
+            # is what lands in the marker's `reason`, in the critical alert body
+            # and in the halt string: naming one folder and its count beside a
+            # root-wide file total is how a 77-file scratch deletion got reported
+            # as 726k files damaged. Appended, never a substitute — the test that
+            # trips here, and so the folder the watcher never saw arrive, are
+            # unchanged.
+            return (f"top-level folder {name!r} ({count} files) {state}"
+                    + _delta_note(last, current))
     return None
 
 
@@ -343,6 +351,63 @@ def tripped_ago(marker: "dict | None", now: float | None = None) -> float | None
     return age if age >= 0 else None
 
 
+#: How many folders the delta note names before folding the rest (#4255). A wipe
+#: that touches the whole root is a different emergency from one that touches a
+#: single folder, and naming eight of them is enough to tell them apart.
+DELTA_NOTE_FOLD_AT = 8
+
+
+def _delta_note(before: Snapshot, current: Snapshot) -> str:
+    """Per-folder file-count deltas and the total, for a trip's reason (#4255).
+
+    The 2026-11-18 data trip's report read ``top-level folder 'tmp' (77 files)
+    vanished`` and ``Files: 726104 → 726026``, and nothing between the two said
+    that the named folder accounted for 77 of the 78 and the remaining 1 was a
+    single file in ``_pipeline`` — so the reader was handed a 726k-file number
+    beside a 77-file folder and wrote a task ordering a snapshot restore and a
+    stack-stopped swap-in for a scratch directory that a session had deleted
+    (#4255). The two numbers were always in the marker's own ``before``/``after``
+    maps; they were never in the sentence a human reads.
+
+    Signed per folder, most-negative first, so an arrival beside a loss stays
+    visible (`event_logs +1` beside `triage-3087 -3347` is the difference between
+    a wipe and a deletion). The stated total is the ROOT-wide one — `current.total
+    - before.total`, the same subtraction the alert's `Files: 726104 → 726026`
+    line performs — and not the sum of the folder deltas. The two are equal for
+    anything `measure` wrote, because that walk puts every counted file in exactly
+    one bucket and skips the same names in both passes; they are not equal for a
+    baseline whose folder counts do not add up to its own total — a state file
+    measured under a different `skip_top`, or a `top` that arrived truncated — and
+    printing the folder sum there would put a lower bound beside the alert's
+    number where the reader expects a reconciliation. When they differ, the note
+    says both figures rather than choosing one.
+
+    Folded at `DELTA_NOTE_FOLD_AT` folders, named most-negative first, so the list
+    stays the eight worst and the tail counts the rest: a root-wide wipe reads as
+    a fold, a one-folder deletion as a single named delta. Both arguments are
+    `Snapshot`s as `evaluate` holds them — `evaluate` dereferences `current.ts` and
+    `last.top` before this is reached, so no caller can hand it a dict.
+    """
+    b, c = before.top or {}, current.top or {}
+    deltas = {k: int(c.get(k, 0)) - int(b.get(k, 0))
+              for k in set(b) | set(c)
+              if int(c.get(k, 0)) != int(b.get(k, 0))}
+    if not deltas:
+        return ""
+    order = sorted(deltas.items(), key=lambda kv: (kv[1], kv[0]))
+    shown = order[:DELTA_NOTE_FOLD_AT]
+    note = ", ".join(f"{name} {delta:+d}" for name, delta in shown)
+    extra = len(order) - len(shown)
+    if extra:
+        note += f", and {extra} more folder" + ("" if extra == 1 else "s")
+    named = sum(deltas.values())
+    root_wide = int(current.total) - int(before.total)
+    if named == root_wide:
+        return f"; per folder: {note} of {root_wide:+d} files"
+    return (f"; per folder: {note} of {named:+d} in those folders, "
+            f"{root_wide:+d} root-wide")
+
+
 class VaultWatch:
     """The guardian-side state machine: history, latch, persistence."""
 
@@ -360,6 +425,34 @@ class VaultWatch:
     skip_top: frozenset[str] = frozenset({"_pipeline"})
     state_file = STATE_FILE
     marker_file = MARKER_FILE
+    #: Which watchdog a human is told to run to clear THIS watch's trip, as a
+    #: file name (#4255). `trip()` and `clear_command` below are defined once, on
+    #: this class, and `DataWatch` inherits both — so deriving the name from
+    #: `__file__` there could only ever answer `vaultwatch.py`, whichever watch
+    #: tripped. The 2026-11-18 `data-tripped.json` did exactly that, while ALERT.md
+    #: written by the same trip said `datawatch.py clear`; a human running the
+    #: marker's command unlinks the VAULT marker and re-baselines the vault —
+    #: which suppresses `sync_report.py`'s silent-sync alarm (#1606) — while the
+    #: data trip stays armed and promotions stay halted. A subclass that trips
+    #: must set this; the base keeps the vault name.
+    watch_script = "vaultwatch.py"
+
+    @property
+    def clear_command(self) -> str:
+        """The command a trip tells a human to run, in the ONE form both of its
+        surfaces print: the `clear_with` field of the marker and the body of the
+        critical alert (#4255, clause 3). `published_watchdog_script` maps the
+        name into the state directory when the tree it lives in is a copy that
+        gets deleted while the alarm is still open (#3795); the name itself comes
+        from `watch_script`, so it cannot be the wrong watchdog for the watch
+        that tripped. The path is built as `<this file's directory>/<watch_script>`
+        rather than passed as a name because `published_watchdog_script` takes a
+        MODULE FILE and maps its basename (#3795's contract is about the
+        directory); `datawatch.py` is that file's sibling in every tree — the
+        checkout, a round's worktree, and the promoted `bin/`."""
+        script = P.published_watchdog_script(
+            str(Path(__file__).with_name(self.watch_script)))
+        return f"/usr/bin/python3 {script} clear"
 
     def __init__(self, root: str = VAULT_ROOT, state_dir: Path = GUARDIAN_STATE):
         self.root = root
@@ -599,11 +692,14 @@ class VaultWatch:
             "before": before.to_dict() if before else None,
             "after": snap.to_dict() if snap else None,
             "actions": actions,
-            # Never `__file__`: for a round-rooted watchdog that is the round's own copy,
-            # and the marker outlives the round — `sync_gate` below quotes this value at
-            # whoever runs `ob sync`, so a worktree path here is a dead command on the
+            # One string, one source: the same property the alert body prints for
+            # this trip, so the marker and the alert cannot disagree about which
+            # watchdog clears it (#4255). And never `__file__` verbatim: for a
+            # round-rooted watchdog that is the round's own copy, and the marker
+            # outlives the round — `sync_gate` below quotes this value at whoever
+            # runs `ob sync`, so a worktree path here is a dead command on the
             # refusal a human reads. #3795.
-            "clear_with": f"/usr/bin/python3 {P.published_watchdog_script(__file__)} clear",
+            "clear_with": self.clear_command,
         }
         self.marker.write_text(json.dumps(body, indent=2), encoding="utf-8")
         return self.marker

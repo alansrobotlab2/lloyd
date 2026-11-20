@@ -2796,10 +2796,16 @@ class Guardian:
             f"Hourly read-only snapshots are in {policy.DATA_SNAPSHOTS}. Restore into "
             "a side directory with `~/lloyd/scripts/backup/restore-data.sh` (never in "
             "place), check it, swap it in with the stack stopped, then clear with\n"
-            # The data twin of the two vault bodies: `datawatch.__file__` is wherever this
-            # import landed, which for a round-rooted or pytest-rooted process is a tree
-            # that gets removed while the alarm it published is still open (#3795).
-            f"  /usr/bin/python3 {policy.published_watchdog_script(datawatch.__file__)} clear\n"
+            # The same property the marker's `clear_with` was built from (#4255),
+            # so the alert and the marker cannot name different commands for one
+            # trip. It resolves through `published_watchdog_script`, which is also
+            # why it is not `datawatch.__file__` written out here: that is wherever
+            # this import landed, which for a round-rooted or pytest-rooted process
+            # is a tree that gets removed while the alarm it published is still
+            # open (#3795). The old spelling named `<repo>/agent-services/guardian/
+            # datawatch.py` here while the marker said `vaultwatch.py clear` — two
+            # different commands, and the wrong one on the paper a human follows.
+            f"  {self.data.clear_command}\n"
             f"Snapshots are refused until then. Marker: {marker}",
             coalesce=True)
 

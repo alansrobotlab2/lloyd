@@ -1943,6 +1943,18 @@ class DataWatch(V.VaultWatch):
     skip_top = CACHE_DIRS
     state_file = "data_watch.json"
     marker_file = "data-tripped.json"
+    #: The watchdog a human must run to clear a data trip (#4255). `trip()` and
+    #: `clear_command` are defined on `VaultWatch` and inherited here, so before
+    #: this attribute existed the name in `clear_with` came from the file that
+    #: defines them and every data marker said `vaultwatch.py clear`. The 2026-11-18 one
+    #: did: `data-tripped.json` named `/usr/bin/python3
+    #: ~/.local/state/lloyd-guardian/bin/vaultwatch.py clear` while `ALERT.md` in
+    #: the same incident directory said `datawatch.py clear`. Running the marker's
+    #: command unlinks `vault-tripped.json` and re-baselines the vault — which
+    #: silences `sync_report.py`'s silent-sync alarm (#1606) — while the data
+    #: marker stays armed, hourly snapshots keep being refused
+    #: (`scripts/backup/snapshot-data.sh:35-36`) and `promotions-halted` stays set.
+    watch_script = "datawatch.py"
 
     def __init__(self, root: str = DATA_ROOT, state_dir: Path = V.GUARDIAN_STATE):
         super().__init__(root, state_dir)

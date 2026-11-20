@@ -32,6 +32,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -204,7 +205,8 @@ def test_the_replay_exercises_the_rule_that_actually_fired():
     assert lost / INCIDENT_BEFORE["total"] < VW.DROP_FRACTION, (
         "the drop rule was never what fired here")
     raw = VW.evaluate([before], after, what="data")
-    assert raw == "top-level folder 'triage-3087' (3347 files) vanished", (
+    assert raw == ("top-level folder 'triage-3087' (3347 files) vanished"
+                   "; per folder: triage-3087 -3347, event_logs +1 of -3346 files"), (
         "this is the reason string the 14:24:14 alert carried, quoted from ALERT.md; "
         "if the fixture cannot reproduce it, the node above is proving nothing")
 
@@ -217,7 +219,8 @@ def test_the_same_measurement_without_the_flag_still_trips(tmp_path):
     w.history = [before]
     excused: list[str] = []
     why = w.judge(_snap(INCIDENT_AFTER), excused)
-    assert why == "top-level folder 'triage-3087' (3347 files) vanished"
+    assert why == ("top-level folder 'triage-3087' (3347 files) vanished"
+                   "; per folder: triage-3087 -3347, event_logs +1 of -3346 files")
     assert excused == []
 
 
@@ -243,7 +246,8 @@ def test_a_state_file_written_before_this_change_still_loads(tmp_path):
         "and an unknown folder is treated as not-a-checkout, never as scratch")
     excused: list[str] = []
     assert w.judge(_snap(INCIDENT_AFTER), excused) == (
-        "top-level folder 'triage-3087' (3347 files) vanished")
+        "top-level folder 'triage-3087' (3347 files) vanished"
+        "; per folder: triage-3087 -3347, event_logs +1 of -3346 files")
 
 
 def test_the_serialised_snapshot_carries_the_flag_through_the_state_file(tmp_path):
@@ -273,7 +277,8 @@ def test_a_store_that_vanishes_still_trips(tmp_path):
 
     shutil.rmtree(root / "sessions")
     reason, _snap = w.tick(now=time_plus(w.history[-1].ts, 60))
-    assert reason == "top-level folder 'sessions' (30 files) vanished", (
+    assert reason == ("top-level folder 'sessions' (30 files) vanished"
+                      "; per folder: sessions -30 of -30 files"), (
         "the root's own stores are never excused, whatever else is going on in the "
         "tree — this is the alarm the tripwire exists to raise")
 
@@ -542,8 +547,9 @@ def test_a_scratch_folder_emptied_is_excused_as_well_as_one_deleted(tmp_path):
     # The same pair of measurements through the same rule with the exemption hook left
     # out — `evaluate`'s default, which is what the vault runs — so the state being
     # excused is named rather than assumed.
-    assert VW.evaluate(w.history, after, what="data") == \
+    assert VW.evaluate(w.history, after, what="data") == (
         "top-level folder 'job-88' (30 files) emptied"
+        "; per folder: job-88 -30 of -30 files")
 
     excused: list[str] = []
     assert w.judge(after, excused) is None
@@ -567,7 +573,8 @@ def test_an_aged_folder_that_vanishes_still_trips_with_the_folder_rule(tmp_path)
 
     shutil.rmtree(root / name)
     reason, _snap = w.tick(now=aged + 30.0)
-    assert reason == "top-level folder 'recovered' (30 files) vanished", reason
+    assert reason == ("top-level folder 'recovered' (30 files) vanished"
+                      "; per folder: recovered -30 of -30 files"), reason
     assert not (tmp_path / "state" / VW.EXCUSED_LOG).exists(), (
         "and nothing was waved through on the way there")
 
@@ -613,7 +620,8 @@ def test_a_runtime_name_is_never_excused_by_age_however_young_it_is(tmp_path):
 
     shutil.rmtree(root / "logs")
     reason, _snap = w.tick(now=w.history[-1].ts + 30.0)
-    assert reason == "top-level folder 'logs' (30 files) vanished", reason
+    assert reason == ("top-level folder 'logs' (30 files) vanished"
+                      "; per folder: logs -30 of -30 files"), reason
     assert not (tmp_path / "state" / VW.EXCUSED_LOG).exists()
 
 
@@ -632,7 +640,8 @@ def test_a_folder_the_watcher_never_saw_being_born_is_not_excused(tmp_path):
             "top": {".": 1, "sessions": 40_000, "job-9": 30}}
     missing = {"ts": 2_030.0, "total": 40_001, "inode": 7,
                "top": {".": 1, "sessions": 40_000}}
-    verdict = "top-level folder 'job-9' (30 files) vanished"
+    verdict = ("top-level folder 'job-9' (30 files) vanished"
+               "; per folder: job-9 -30 of -30 files")
 
     assert _snap(gone).first_seen == {}, "a baseline with no births recorded loads as such"
     w.history = [_snap(gone)]
@@ -3086,3 +3095,259 @@ def test_the_confirmation_step_offers_exactly_one_paste_able_query_string():
     assert ".tables" not in body, (
         "the shell metacommand is back, and it opens the file exactly as the flag did: "
         + body)
+
+
+# ── #4255: what a data trip tells the reader to run, and what it lost ──────────
+#
+# The 2026-11-18 trip wrote `data-tripped.json` whose `clear_with` named
+# `vaultwatch.py clear` while `ALERT.md` from the same trip named `datawatch.py
+# clear`, and its body reported `top-level folder 'tmp' (77 files) vanished` above
+# `Files: 726104 → 726026` with nothing between the two saying the named folder was
+# 77 of the 78. So the task written from that report ordered a 726k-file snapshot
+# restore and a stack-stopped swap-in for a scratch directory a session had
+# deleted, and a human following the marker would have unlinked the VAULT marker
+# (`VaultWatch.clear` re-baselines the vault, which silences `sync_report.py`'s
+# silent-sync alarm #1606) while the data marker stayed armed, hourly snapshots
+# stayed refused, and `promotions-halted` stayed set. These fixtures reproduce that
+# trip at the incident's own arithmetic: `tmp` 77 files, `_pipeline` down 1, total
+# down 78.
+
+INCIDENT_LOST_FOLDER = "tmp"
+INCIDENT_LOST_FILES = 77
+INCIDENT_KEEP_FOLDER = "_pipeline"
+INCIDENT_KEEP_FILES = 12
+INCIDENT_DELTA_NOTE = "; per folder: tmp -77, _pipeline -1 of -78 files"
+
+
+def _tripwire(tmp_path: Path):
+    """A `Guardian` armed over a fixture data root, tripped by the incident's delete.
+
+    Returns `(guardian, root)`. The baseline carries an empty `first_seen` because
+    that is the arm of the rule the item names — a folder this watcher never
+    measured being born is not scratch and trips on the same test as ever — and
+    because the real `tmp` had been visible for 109,129 s (30.3 h), past the 24 h
+    `SCRATCH_HORIZON_SECONDS`, which is #3153's owed ruling and this round does not
+    touch. `DataWatch.skip_top` is `CACHE_DIRS` (`code-graph` only), so `_pipeline`
+    is judged here exactly as it was judged on the live root.
+
+    Only `check_data`'s tripping half is driven, and its three effects on the
+    machine are recordings: the worker-pool pause, `set_halted` (the live
+    `promotions-halted` flag this round must not touch) and the vault evidence
+    copy; the alert is recorded instead of sent. The marker, its `reason` and its
+    `clear_with` are the real ones — two artifacts naming one clear command is what
+    is being checked.
+    """
+    import guardian as G
+
+    root = _root(tmp_path)
+    _fill(root / INCIDENT_LOST_FOLDER, INCIDENT_LOST_FILES)
+    _fill(root / INCIDENT_KEEP_FOLDER, INCIDENT_KEEP_FILES)
+    g = G.Guardian.__new__(G.Guardian)
+    g.data = _watch(root, tmp_path)
+    g.data.history = [VW.Snapshot.from_dict(
+        {**g.data.history[-1].to_dict(), "first_seen": {}})]
+    g._strays_checked_at = time.time() + 1e9      # the stray-sweep leg stays out
+    g._snapshots_checked_at = time.time() + 1e9   # and the snapshot-age leg too
+    g._halting: list = []
+    g._paused: list = []
+    g._alerts: list = []
+    g.state = types.SimpleNamespace(ledger=tmp_path / "guardian-ledger.jsonl",
+                                    set_halted=g._halting.append)
+    g._pause_workers = lambda actor: (g._paused.append(actor), "paused (HTTP 200)")[1]
+    g._vault_evidence = lambda stamp: str(tmp_path / "evidence")
+    g.alert = lambda level, title, body, **kw: g._alerts.append((level, title, body, kw))
+    shutil.rmtree(root / INCIDENT_LOST_FOLDER)
+    next((root / INCIDENT_KEEP_FOLDER).iterdir()).unlink()   # one file, as measured
+    return g, root
+
+
+def test_a_data_trip_names_datawatch_clear_in_its_marker(tmp_path):
+    """Clause 1: a data trip's `clear_with` ends in `datawatch.py clear`.
+
+    `trip()` is defined on `VaultWatch` and inherited unchanged, and it used to
+    build this field from `__file__` — which for an inherited method is the file
+    that DEFINES it, so every data marker in history has named the wrong watchdog.
+    The command is what a human types when the terminal is full of red, so the two
+    halves of that string matter: the script must be the one whose `clear()`
+    unlinks THIS marker, and its path must still be the promoted `bin/` copy
+    (#3795), not a worktree that gets deleted under the reader.
+    """
+    g, _root_ = _tripwire(tmp_path)
+    g.check_data()
+    marker = json.loads(g.data.marker.read_text(encoding="utf-8"))
+    assert marker["clear_with"].endswith("datawatch.py clear"), marker["clear_with"]
+    assert "vaultwatch" not in marker["clear_with"], marker["clear_with"]
+    assert g.data.marker.name == "data-tripped.json", g.data.marker
+    assert not (g.data.state_dir / "vault-tripped.json").exists(), (
+        "a data trip publishes the data marker and no vault marker. This is the "
+        "harm the wrong name in `clear_with` did: `VaultWatch.clear` unlinks "
+        "`vault-tripped.json`, so a human typing the command the 2026-11-18 marker "
+        "printed destroyed the evidence of a vault trip that had not happened and "
+        "left the armed data marker standing")
+
+
+def test_a_vault_trip_says_so_in_its_own_marker(tmp_path):
+    """Clause 2, from the data side: one `trip()` body, two right answers.
+
+    The name must follow the class that tripped, so the base keeps `vaultwatch.py`
+    and only `DataWatch` overrides it — pinned here from the other direction so a
+    "fix" that hardcoded `datawatch.py` into `trip()` itself cannot pass clause 1
+    and silently rename the vault's marker command.
+    """
+    g, _root_ = _tripwire(tmp_path)
+    g.check_data()
+    vault_watch = VW.VaultWatch(root=str(tmp_path / "vault"),
+                                state_dir=tmp_path / "vault-state")
+    vault_watch.clear()
+    vmarker = json.loads(vault_watch.trip("400 of 401 vault files disappeared",
+                                         None, {}).read_text(encoding="utf-8"))
+    dmarker = json.loads(g.data.marker.read_text(encoding="utf-8"))
+    assert vmarker["clear_with"].endswith("vaultwatch.py clear"), vmarker["clear_with"]
+    assert dmarker["clear_with"].endswith("datawatch.py clear"), dmarker["clear_with"]
+    assert vmarker["clear_with"] != dmarker["clear_with"], (
+        "one `trip()` body, two watches: if both markers name the same script, the "
+        "name is coming from the module again and one of them is a lie")
+
+
+def test_the_alert_and_the_marker_of_one_trip_name_the_same_clear_command(tmp_path):
+    """Clause 3: the clear line in the critical alert body IS the marker's
+    `clear_with`, character for character, for the same trip.
+
+    Before #4255 the two were built in different places from different inputs: the
+    body inlined `<repo>/agent-services/guardian/datawatch.py` (a tree a pytest or
+    a round process can delete while the alarm it published is still open — #3795)
+    and the marker said `vaultwatch.py clear`. Neither was the command that clears
+    the trip the alert is announcing. One `clear_command` property feeds both, so
+    this asks for the clear line in the body and demands it equal the marker field.
+    """
+    g, _root_ = _tripwire(tmp_path)
+    g.check_data()
+    assert len(g._alerts) == 1, g._alerts
+    level, title, body, kw = g._alerts[0]
+    assert (level, title, kw.get("coalesce")) == (
+        "critical", "Lloyd data root damaged — promotions halted", True), (level, title, kw)
+    clear_lines = [line.strip() for line in body.splitlines()
+                   if line.strip().startswith("/usr/bin/python3 ")
+                   and line.strip().endswith(" clear")]
+    assert len(clear_lines) == 1, f"expected one clear command, got {clear_lines}"
+    marker = json.loads(g.data.marker.read_text(encoding="utf-8"))
+    # Three spellings of one string, from three different places: the property,
+    # the marker field built from it, and the line the alert body interpolated into
+    # its prose. `clear_command` is named here so a future edit cannot make the
+    # two surfaces agree by coincidence — each used to be built independently, and
+    # the pair they produced on 2026-11-18 was
+    # `/usr/bin/python3 …/bin/vaultwatch.py clear` in the marker against
+    # `/usr/bin/python3 <repo>/agent-services/guardian/datawatch.py clear` in the
+    # body: one trip, two commands, neither of them the one that clears it.
+    assert clear_lines[0] == marker["clear_with"] == g.data.clear_command, (
+        clear_lines[0], marker["clear_with"], g.data.clear_command)
+    assert clear_lines[0].endswith("datawatch.py clear"), clear_lines[0]
+    assert clear_lines[0].startswith("/usr/bin/python3 "), clear_lines[0]
+
+
+def test_a_folder_trip_states_which_folders_the_delta_touched(tmp_path):
+    """Clause 4: the reason carries the per-folder deltas beside the total drop.
+
+    The incident's report was `top-level folder 'tmp' (77 files) vanished` over
+    `Files: 726104 → 726026`: 78 files gone, one named folder of 77, and the
+    remaining 1 — a single file in `_pipeline` — invisible, so the reader could not
+    tell a scratch deletion from a damaged root and ordered the restore. The two
+    numbers were always in the marker's own `before`/`after` maps; they were never
+    in the sentence. Here the fixture deletes exactly that: `tmp` 77 and one
+    `_pipeline` file of 78, with the folder never seen arriving so it is not
+    excused and the rule fires unchanged — the note rides along, it does not
+    replace the verdict. And it reaches both artifacts a human reads: the marker
+    `reason` and the first line of the alert body.
+    """
+    g, root = _tripwire(tmp_path)
+    assert g.data.history[-1].first_seen == {}, (
+        "the fixture is on the arm the clause names: this watcher never measured "
+        "the folder being born, so no scratch exemption is available to it and the "
+        "note must ride along with a trip that fires anyway")
+    g.check_data()
+    marker = json.loads(g.data.marker.read_text(encoding="utf-8"))
+    reason = marker["reason"]
+    # One exact string, in two halves. Everything before the note is the verdict
+    # the incident's `ALERT.md` carried verbatim — `top-level folder 'tmp' (77
+    # files) vanished` — so "unchanged" here is checkable rather than asserted:
+    # the note is appended to the old sentence, never substituted for it, and the
+    # folder rule still fires on a folder with no recorded birth.
+    assert reason == (
+        f"top-level folder '{INCIDENT_LOST_FOLDER}' ({INCIDENT_LOST_FILES} files) "
+        f"vanished{INCIDENT_DELTA_NOTE}"), reason
+    assert not (root / INCIDENT_LOST_FOLDER).exists(), (
+        "the folder really is gone from the fixture root, so the note is describing "
+        "a deletion that happened and not a hand-written snapshot")
+    _level, _title, body, _kw = g._alerts[0]
+    assert reason == body.splitlines()[0], (body.splitlines()[0], reason)
+    assert f"Files: {marker['before']['total']} → {marker['after']['total']}." in body
+    assert marker["before"]["top"][INCIDENT_LOST_FOLDER] == INCIDENT_LOST_FILES
+    assert INCIDENT_LOST_FOLDER not in (marker["after"]["top"] or {})
+    assert (marker["before"]["top"][INCIDENT_KEEP_FOLDER]
+            - marker["after"]["top"][INCIDENT_KEEP_FOLDER]) == 1
+    assert g._halting == [f"data tripwire: {reason}"], g._halting
+
+
+def test_a_wipe_that_touches_nine_folders_names_eight_and_counts_the_ninth(tmp_path):
+    """The clause-4 note over a root-wide wipe: a fold, not a list.
+
+    One deleted folder is the incident's shape and the note names it. A wipe that
+    reaches nine top-level folders is a different emergency, and the note must say
+    so without turning into a paragraph: `DELTA_NOTE_FOLD_AT` names the eight worst
+    and counts the rest. Built as a real measurement — 20 files gone with `gone`,
+    one to eight files unlinked from `f1`..`f8` — so the ordering is the rule's own
+    and not a fixture's: most-negative first, which is why `f1` (-1) is the folder
+    that falls off the end and the 20-file loss leads the line. The total stays
+    root-wide (-56 = 20 + 36), and the total drop is far below `DROP_MIN`, so what
+    fires here is the folder rule with its note, not the percentage rule.
+    """
+    root = _root(tmp_path)
+    _fill(root / "gone", 20)
+    for i in range(1, 9):
+        _fill(root / f"f{i}", 25)
+    w = _watch(root, tmp_path)
+    w.history = [VW.Snapshot.from_dict(
+        {**w.history[-1].to_dict(), "first_seen": {}})]   # none of these arrived on camera
+
+    shutil.rmtree(root / "gone")
+    for i in range(1, 9):
+        for j in range(i):                              # f1 loses 1 file, f8 loses 8
+            (root / f"f{i}" / f"f{j}.txt").unlink()
+    reason, _snap = w.tick(now=w.history[-1].ts + 60)
+    assert reason == (
+        "top-level folder 'gone' (20 files) vanished"
+        "; per folder: gone -20, f8 -8, f7 -7, f6 -6, f5 -5, f4 -4, f3 -3, f2 -2,"
+        " and 1 more folder of -56 files"), reason
+
+
+def test_a_note_that_cannot_reconcile_says_which_of_its_two_totals_is_which():
+    """The delta note's total is the alert's total, or the note says both.
+
+    The clause's whole job is to stop a reader over-committing to a restore on the
+    strength of a file count, so the number it prints beside the per-folder deltas
+    has to be the number the alert's `Files: 726104 → 726026` line means. Nothing
+    `measure` writes can disagree — that walk puts every counted file in exactly one
+    bucket — so this is a guard on the arithmetic, not a replay of an observed
+    incident: a baseline whose folders do not add up to its own total (a state file
+    from a build that counted a different set of top-level names, or a truncated
+    `top`) must not get the folder sum printed where the reader will read it as the
+    root-wide figure. The paired case below is the shape every real measurement
+    takes, and it keeps the short form.
+    """
+    unreconciled = VW.evaluate(
+        [_snap({"ts": 1_000.0, "total": 500,
+                "top": {".": 1, "sessions": 40, "job-9": 30}})],
+        _snap({"ts": 1_060.0, "total": 480, "top": {".": 1, "sessions": 40}}),
+        what="data")
+    assert unreconciled == (
+        "top-level folder 'job-9' (30 files) vanished"
+        "; per folder: job-9 -30 of -30 in those folders, -20 root-wide"), unreconciled
+
+    reconciled = VW.evaluate(
+        [_snap({"ts": 1_000.0, "total": 71,
+                "top": {".": 1, "sessions": 40, "job-9": 30}})],
+        _snap({"ts": 1_060.0, "total": 41, "top": {".": 1, "sessions": 40}}),
+        what="data")
+    assert reconciled == (
+        "top-level folder 'job-9' (30 files) vanished"
+        "; per folder: job-9 -30 of -30 files"), reconciled

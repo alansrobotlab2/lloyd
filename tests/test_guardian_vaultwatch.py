@@ -988,7 +988,8 @@ def test_a_clear_from_another_process_reaches_the_watcher_before_it_judges(tmp_p
     running.clear()
     shutil.rmtree(vault / "backlog")
     reason, snap = running.tick()
-    assert reason == "top-level folder 'backlog' (150 files) vanished"
+    assert reason == ("top-level folder 'backlog' (150 files) vanished"
+                      "; per folder: backlog -150 of -150 files")
     # `tick()` only judges; writing the latch marker is the CALLER's act, and the
     # guardian is the only caller — `Guardian.check_vault` calls `trip()` with the
     # actions it took. So the actions are stated here rather than left out, and the
@@ -1180,7 +1181,8 @@ def test_the_vault_still_excuses_no_folder_however_young_it_was(tmp_path):
 
     shutil.rmtree(v / "job-4471")
     why, _snap = w.tick(now=1020.0)
-    assert why == "top-level folder 'job-4471' (30 files) vanished", (
+    assert why == ("top-level folder 'job-4471' (30 files) vanished"
+                   "; per folder: job-4471 -30 of -30 files"), (
         "and the vault acts on none of it. The same folder, one tick old, is excused "
         "at the data root by `DataWatch._excuse_vanished` and trips here")
     assert not (state / VW.EXCUSED_LOG).exists(), (
@@ -1189,3 +1191,69 @@ def test_the_vault_still_excuses_no_folder_however_young_it_was(tmp_path):
     assert w._excuse_vanished("job-4471", 30, bore) is None, (
         "the hook itself, asked about the one folder whose birth this watcher "
         "measured, still answers that nothing is excusable at the vault")
+
+
+# ── #4255: which watchdog a trip tells the reader to run ───────────────────────
+
+def test_the_clear_command_names_the_watch_that_tripped(tmp_path):
+    """Clause 2: `clear_with` is the tripping watch's own script, so the vault's
+    still says `vaultwatch.py clear` while the data one says `datawatch.py clear`.
+
+    `trip()` and `clear_command` live on `VaultWatch` and `DataWatch` inherits both
+    without overriding them, so the name in that field came from `__file__` — the
+    DEFINING module — and every data marker in history named the vault watchdog. On
+    2026-11-18 the data marker told a human to run
+    `/usr/bin/python3 ~/.local/state/lloyd-guardian/bin/vaultwatch.py clear`;
+    `VaultWatch.clear` unlinks `vault-tripped.json` and re-baselines the vault,
+    which silences `sync_report.py`'s silent-sync alarm (#1606), while the data
+    marker stayed armed, the hourly snapshots stayed refused
+    (`scripts/backup/snapshot-data.sh:35-36`) and `promotions-halted` stayed set.
+    So both directions are pinned in one test: the base keeps the vault's name (a
+    subclass that chooses none is a vault watch), and a subclass that names itself
+    gets its own command — one body, three right answers.
+    """
+    import datawatch as DW
+
+    state = tmp_path / "state"
+
+    vault = _vault(tmp_path / "vault", files=400)
+    vw = VW.VaultWatch(root=str(vault), state_dir=state)
+    vw.clear()
+    vault_clear = json.loads(vw.trip("400 of 401 vault files disappeared", None,
+                                     {"workers": "paused (HTTP 200)"})
+                             .read_text(encoding="utf-8"))["clear_with"]
+    assert vault_clear.endswith("vaultwatch.py clear"), vault_clear
+
+    class OtherWatch(VW.VaultWatch):          # names itself, as DataWatch does
+        marker_file = "other-tripped.json"
+        watch_script = "otherwatch.py"
+
+    other = OtherWatch(root=str(vault), state_dir=state)
+    other_clear = json.loads(other.trip("fixture trip", None, {})
+                             .read_text(encoding="utf-8"))["clear_with"]
+    assert other_clear.endswith("otherwatch.py clear"), other_clear
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / DW.ROOT_MARKER).write_text("real data root\n", encoding="utf-8")
+    dw = DW.DataWatch(root=str(data), state_dir=state)
+    dw.clear()
+    data_clear = json.loads(dw.trip("top-level folder 'tmp' (77 files) vanished",
+                                    None, {}).read_text(encoding="utf-8"))["clear_with"]
+    assert data_clear.endswith("datawatch.py clear"), data_clear
+
+    def where(command: str) -> str:
+        return str(Path(command.split()[1]).parent)
+
+    assert where(vault_clear) == where(data_clear), (
+        "two watches, one directory: the promoted `bin/` copy or this tree's "
+        "source, never a round's worktree that is deleted while the alarm it "
+        "published is still open (#3795) — only the script name may differ. "
+        "`otherwatch.py` is left out on a measured fact: the published `bin/` "
+        "holds vaultwatch.py and datawatch.py, so those two commands resolve into "
+        "~/.local/state/lloyd-guardian/bin, while a name nothing publishes falls "
+        "back to the live checkout's `agent-services/guardian/`")
+    assert len({vault_clear, other_clear, data_clear}) == 3, (
+        "if two watches share a command, the name is coming from the module again")
+    assert vault_clear != data_clear, (
+        "the exact pair the 2026-11-18 data marker got wrong, asked in one assertion")
