@@ -2648,7 +2648,7 @@ def fallback_decision(text: str) -> list[dict]:
     open: `named_symbol` returns None unless an identifier sits within six
     non-word characters of the citation, and with no name the verdict degrades to
     "the line falls inside SOME definition". #3580's two drifts passed exactly
-    that way — `eval/run_eval.py:2055` lands inside `print_failures`, and
+    that way — `eval/run_eval.py:2134` lands inside `print_failures`, and
     `scripts/automod/gate.py:1590` is the `def` line of `_green_full_tests_data`,
     which the doc never mentions — so a citation pointing at an unrelated
     function inside a long file was graded as fine by both nodes.
@@ -2754,7 +2754,7 @@ def unnamed_anchor_ceiling_report(rows: list[tuple[str, dict]]) -> str:
         + "Each anchor above cites a line with no symbol beside it, so the only "
         "verdict that could be reached was \"the line falls inside SOME definition\" "
         "— which is how both of #3580's drifts stayed green. Write the enclosing "
-        "definition's name beside the citation (`main` at `eval/run_eval.py:2716`, "
+        "definition's name beside the citation (`main` at `eval/run_eval.py:2947`, "
         "not the bare span) so that symbol's own span grades it. If you cleared "
         "one, lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit — that is what "
         "records the shrink.")
@@ -3357,10 +3357,10 @@ def test_the_named_symbol_rail_reports_an_anchor_the_containment_fallback_decide
 
     The node above pins the shipped rule's silence as its boundary; this is the
     rail that closes it where the corpus opted in. Three synthetic sentences over
-    one real anchor, `eval/run_eval.py:2716` — the baseline write inside `main` —
+    one real anchor, `eval/run_eval.py:2947` — the baseline write inside `main` —
     so the graded line itself never moves and cannot go stale:
 
-      * named:      `main` at `eval/run_eval.py:2716` → the #3047 verdict decided
+      * named:      `main` at `eval/run_eval.py:2947` → the #3047 verdict decided
         it, which is what a rail doc must contain;
       * unnamed:    the bare path cite → nothing to grade against, so the
         containment fallback decided, and #3580's two drifts passed exactly here;
@@ -3373,10 +3373,10 @@ def test_the_named_symbol_rail_reports_an_anchor_the_containment_fallback_decide
         imported here, not assigned) → the sentence looks named and is not, so
         containment decided this one too.
     """
-    named = "the record is written by `main` at `eval/run_eval.py:2716`.\n"
-    unnamed = "it goes to `eval/run_eval.py:2716`, beside the script.\n"
-    mispicked = "`print_failures` at `eval/run_eval.py:2716` writes it.\n"
-    misnamed = "`EVAL_BASELINES_DIR` at `eval/run_eval.py:2716` writes it.\n"
+    named = "the record is written by `main` at `eval/run_eval.py:2947`.\n"
+    unnamed = "it goes to `eval/run_eval.py:2947`, beside the script.\n"
+    mispicked = "`print_failures` at `eval/run_eval.py:2947` writes it.\n"
+    misnamed = "`EVAL_BASELINES_DIR` at `eval/run_eval.py:2947` writes it.\n"
     for text, want in ((named, "named"), (unnamed, "unnamed"),
                        (mispicked, "mispicked"), (misnamed, "unnamed")):
         rows = fallback_decision(text)
@@ -3407,7 +3407,7 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 
     The doc must then carry no fallback-decided anchor at all. All six of its
     graded spans are re-typed to satisfy that — the five the item names
-    (`app/paths.py:121`, `eval/run_eval.py:2716`, `scripts/automod/gate.py:3435`,
+    (`app/paths.py:121`, `eval/run_eval.py:2947`, `scripts/automod/gate.py:3435`,
     and the stale pair) plus `eval/run_tool_choice_eval.py:498`, which the item's
     count missed because it appears twice and named nothing either time.
     `EVAL_BASELINES_DIR`, `main` and `rung_prompt_surface` now stand beside their
@@ -3461,11 +3461,11 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
         "measurement.md")
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
-    seeded = text.replace("eval/run_eval.py:2716", "eval/run_eval.py:2055")
+    seeded = text.replace("eval/run_eval.py:2947", "eval/run_eval.py:2134")
     seeded = seeded.replace("scripts/automod/gate.py:3541", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
-    assert sorted(flagged) == ["eval/run_eval.py:2055", "scripts/automod/gate.py:1590"], (
+    assert sorted(flagged) == ["eval/run_eval.py:2134", "scripts/automod/gate.py:1590"], (
         f"the two drifts #3580 was filed with came back {flagged}; the rail is not "
         "reading the names these sentences now carry")
     assert sorted(anchor_span_report(seeded)[1]) == sorted(flagged), (
@@ -3610,7 +3610,7 @@ def test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling():
 #: module scope because #4266 gave `_CEILING_SEEDED_DOCS` a second user —
 #: `CEILING_SHRINK_SLUG` below — which calls this control while holding its own seed, so
 #: the two controls must never pick the same doc.
-CEILING_SEED_SLUG, CEILING_SEED_SPAN = "autonomy-jobs.md", "eval/run_eval.py:2716"
+CEILING_SEED_SLUG, CEILING_SEED_SPAN = "autonomy-jobs.md", "eval/run_eval.py:2947"
 
 
 def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():

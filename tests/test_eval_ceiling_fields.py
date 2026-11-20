@@ -1702,9 +1702,9 @@ def test_predating_the_builder_key_cannot_blank_the_agreement(tmp_path, monkeypa
 #: already content-checks the first. This file's own change is the second writer to that
 #: file, so the same property is asserted here for the whole set.
 CITED_PROSE_LINES: list[tuple[int, str]] = [
-    (122, "def _corpus_provenance"),        # architecture/retrieval.md:87
-    (2478, '"matches_production_defaults": ('),  # architecture/autonomy-jobs.md:1236
-    (2716, "EVAL_BASELINES_DIR"),           # architecture/measurement.md:38
+    (128, "def _corpus_provenance"),        # architecture/retrieval.md:87
+    (2702, '"matches_production_defaults": ('),  # architecture/autonomy-jobs.md:1274
+    (2947, "EVAL_BASELINES_DIR"),           # architecture/measurement.md:38
 ]
 
 
@@ -1714,8 +1714,8 @@ def test_the_harness_stays_line_count_neutral_for_cited_prose():
     The first shape of this change added fifteen lines to `eval/run_eval.py` — a docstring
     and a three-line dict entry — and the suite went red on
     `test_the_doc_s_citation_still_lands_on_the_conjunction`, because
-    `architecture/autonomy-jobs.md:1236` cites `eval/run_eval.py:2478` for the knob
-    conjunction and 2478 had become `djev_rerank`. The doc bucket is not editable from a
+    `architecture/autonomy-jobs.md:1274` cites `eval/run_eval.py:2702` for the knob
+    conjunction and 2702 had become `djev_rerank`. The doc bucket is not editable from a
     `code` round, so the cheaper and better instrument is the code: the refused `ceiling`
     node gains its `remediation` in one changed line, and the prose that carries the
     rationale lives in `eval/label_agreement_ceiling.py`, the module that owns the
@@ -1723,10 +1723,13 @@ def test_the_harness_stays_line_count_neutral_for_cited_prose():
     `architecture/` AND this list, in the commit that does it.
     """
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2735, (
-        f"eval/run_eval.py is {len(lines)} lines, not the 2,735 every `architecture/` "
-        "line citation was written against — re-number architecture/*.md and this "
-        "assertion together, or make the change line-neutral like #4050's")
+    assert len(lines) == 2975, (
+        f"eval/run_eval.py is {len(lines)} lines, not the 2,975 every `architecture/` "
+        "line citation and this list were re-numbered to on 2026-11-20, when #4404's "
+        "episodic-floor leg grew it from 2,735 — behaviour, not prose, so the rule was "
+        "the re-number this node documents rather than line-neutrality. Re-number in the "
+        "one commit that moves the harness again, or make the change line-neutral like "
+        "#4050's")
     for n, fragment in CITED_PROSE_LINES:
         assert fragment in lines[n - 1], (
             f"architecture/ cites eval/run_eval.py:{n} for {fragment!r} and that line "

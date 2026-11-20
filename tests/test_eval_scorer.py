@@ -1029,7 +1029,7 @@ def test_the_knobs_header_names_every_key_and_counts_nothing():
 
 def test_the_doc_s_citation_still_lands_on_the_conjunction():
     """Clause 4, from the code side. `architecture/autonomy-jobs.md` cites
-    `eval/run_eval.py:2478` for the conjunction itself, and editing the comment
+    `eval/run_eval.py:2702` for the conjunction itself, and editing the comment
     block above it can move that line silently: the #3292/#2971 rail in
     tests/test_architecture_coverage_doc_claims.py will not notice, because a
     `path:NNN` citation only has to be shorter than the file. So the number is
@@ -1042,7 +1042,7 @@ def test_the_doc_s_citation_still_lands_on_the_conjunction():
     that is what the loop below still demands."""
     doc = _source("architecture/autonomy-jobs.md")
     cited = [int(n) for n in re.findall(r"`eval/run_eval\.py:(\d+)`", doc)]
-    assert 2478 in cited, f"the doc no longer cites :2478 for the conjunction: {cited}"
+    assert 2702 in cited, f"the doc no longer cites :2702 for the conjunction: {cited}"
     lines = _source("eval/run_eval.py").splitlines()
     for n in cited:
         assert '"matches_production_defaults": (' in lines[n - 1], (

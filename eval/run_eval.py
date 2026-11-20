@@ -48,6 +48,12 @@ from agent_mcp.vault import (
     RECALL_RERANK_ALPHA,
     RECALL_SEED_TOP_K,
     _vault_recall,
+    # The floor's own switch, read through the ONE accessor that resolves it
+    # (override → kill env → config, fails closed). The nightly's floor leg
+    # records the state it scored under (#4404); reconstructing that precedence
+    # here would be a second reader, which is what `recall_episodic_floors`'
+    # docstring exists to prevent.
+    recall_episodic_floors,
 )
 from agent_mcp.facts import _extract_entities_from_query
 from agent_mcp.retrieval import (
@@ -965,29 +971,101 @@ def _attach_counterfactual(rec: dict, spec: dict, result: dict, seeds: list[str]
         rec["counterfactual_error"] = f"{type(e).__name__}: {e}"
 
 
-#: The eval-corpus root for one returned slot path. Retrieval answers with a path
-#: RELATIVE TO THE COLLECTION it came from (`skills/foo/SKILL.md`,
-#: `backlog/12-some-finding.md`) — which is why the scorer's own gold labels are
-#: written that way too — so the first segment picks the root: anything under a
-#: vault segment directory resolves inside the vault, and anything else (the
-#: keyword leg can return `app/x.py`, the session leg a `sessions/<d>/<run>.md`)
-#: resolves against the code root. A path that resolves under neither counts as
-#: unreadable; reading it as empty text instead would make an unreadable corpus
-#: measure as a twin-free one, which is the wrong finding to invent.
-def _eval_corpus_root(path: str) -> Path:
+#: ── #4404: where a returned slot path actually lives ────────────────────────
+#: Retrieval answers with a path RELATIVE TO THE COLLECTION it came from
+#: (`skills/foo/SKILL.md`, `backlog/12-some-finding.md`) — which is why the
+#: scorer's own gold labels are written that way too — so the first segment picks
+#: the root. Until #4404 this file knew exactly two roots, the vault and the code
+#: checkout, and sent everything else to the checkout. That is wrong for every
+#: deployed collection rooted in neither, and the case that mattered is `sessions`:
+#: the episodic floor (#1485, ON in production via `config.yaml:2888`) returns
+#: `sessions/<date>/<run>.md`, and that collection is rooted at
+#: `~/lloyd-data/_pipeline/vault-derived/sessions` (278 transcripts measured
+#: 2026-11-20) while `~/obsidian/sessions` EXISTS and holds 0 `.md` files (same
+#: measurement). So every transcript the floor returned resolved to a file that is
+#: not there, `_slot_text` returned None, and the slot was dropped into
+#: `dup_slot_unreadable`: the nightly could not read one transcript of the leg it
+#: scores, which is the same blindness #4404 is about, one layer down. The
+#: comment here used to claim such a path "resolves against the code root";
+#: `~/lloyd/sessions` does not exist either, so it resolved under neither root.
+#:
+#: Which collections exist, and where, is a fact about the DEPLOYMENT, so the map
+#: is read from the index the run scores — the same source and for the same reason
+#: `indexed_paths` above reads it for collection EXISTENCE (#1599: no config in
+#: this repo is the deployment). A first segment that names no deployed
+#: collection still falls through to the vault/code pair, which is what an
+#: `app/x.py` keyword-leg path and any un-deployed name need.
+_COLLECTION_ROOTS_CACHE: dict[str, dict[str, Path]] = {}
+
+
+def collection_roots(index_path: Path | str | None = None) -> dict[str, Path]:
+    """`{collection name: root}` for the collections THIS run's index serves.
+
+    Keyed by `_norm`, the same normalisation a returned path is matched with, so
+    `lloyd-architecture` and `lloyd_architecture` are one name here and in the
+    scorer. Cached per index file because `_slot_text` runs once per returned slot
+    (up to 20 slots per query per arm) and one sqlite open per slot would price
+    the dup stage in file descriptors; the key is the path, so a pinned run naming
+    its own snapshot through `doc_corpus.INDEX_PATH_ENV` never inherits the live
+    index's map. An index that cannot be named or read yields `{}` — no roots, so
+    nothing resolves by collection — and is NOT cached, so a daemon that comes up
+    mid-run is not frozen out for the rest of the night.
+    """
+    path = doc_corpus.index_path_for(index_path)
+    if path is None:
+        return {}
+    key = str(path)
+    cached = _COLLECTION_ROOTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    rows = doc_corpus.deployed_collections(path)
+    if not rows:
+        return {}
+    roots: dict[str, Path] = {}
+    for row in rows:
+        name = _norm(str(row.get("name") or ""))
+        raw = str(row.get("root") or "")
+        if name and raw:
+            roots.setdefault(name, Path(raw).expanduser())
+    _COLLECTION_ROOTS_CACHE[key] = roots
+    return roots
+
+
+def _eval_corpus_root(path: str) -> tuple[Path, str] | None:
+    """`(root, path relative to that root)` for one returned slot path, or None.
+
+    A tuple, not a bare root: a collection root is joined with the path with the
+    collection segment REMOVED (`sessions` + `2026-09-22/x.md`), while the vault
+    and code roots are joined with the path as returned. Returning only a root is
+    what made the old code wrong twice over — the joined path was right for a
+    vault segment and nonsense for any collection that is not a vault directory.
+    A path with no collection and no vault segment resolves against the code
+    checkout, so the keyword leg's `app/x.py` still reads; a path that exists
+    under none of them reads as unreadable, which is the honest answer — reading
+    it as empty text instead would make an unreadable corpus measure as a
+    twin-free one, the wrong finding to invent.
+    """
     p = str(path or "").strip().lstrip("/")
+    if not p:
+        return None
     first = p.split("/")[0] if "/" in p else ""
-    if first and (VAULT_ROOT / first).is_dir():
-        return VAULT_ROOT
-    return LLOYD_CODE_ROOT
+    if first:
+        root = collection_roots().get(_norm(first))
+        if root is not None and root.is_dir():
+            return root, p.split("/", 1)[1]
+        if (VAULT_ROOT / first).is_dir():
+            return VAULT_ROOT, p
+    return LLOYD_CODE_ROOT, p
 
 
 def _slot_text(path: str):
     """The text of one returned slot, or None when it cannot be read."""
-    if not path:
+    resolved = _eval_corpus_root(path)
+    if resolved is None:
         return None
+    root, rel = resolved
     try:
-        return (_eval_corpus_root(path) / path).read_text(errors="replace")
+        return (root / rel).read_text(errors="replace")
     except OSError:
         return None
 
@@ -2279,6 +2357,152 @@ def print_table(records: list[dict], summary: dict) -> None:
               f"fER={_fmt_rate3(s['fact_entity_recall_avg'])}")
 
 
+#: ── #4404: the episodic-floor leg ───────────────────────────────────────────
+#: The artifact field this section writes, and the knobs that bound its cost.
+EPISODIC_FLOOR_KEY = "episodic_floor_leg"
+#: How deep the leg asks the recall to go, per proxy item: the standalone
+#: script's own `--k` default (`eval/run_episodic_recall_eval.py:251`), so this
+#: leg and the 2026-09-25 measurement count hits over the same window. The doc
+#: leg's default seed depth is a different knob with a different meaning.
+EPISODIC_FLOOR_K = 10
+#: One recall call per proxy item, so this is the leg's whole cost. Bounded by the
+#: doc leg's measured price of a call — 971 ms average, the `latency_ms_avg` of
+#: `nightly-20261120-20261120-060404.json` — which puts 60 items under a minute;
+#: the leg's own proxy calls measured 4 items in 2.4 s (0.6 s each) on
+#: 2026-11-20, since an episodic query needs no entity leg, so the doc figure is
+#: the conservative one to hold the nightly's timeout against. The generated set
+#: holds 66 items on 2026-11-20, so the cap trims the tail rather than deciding
+#: the number; a `--limit`-shaped knob of its own is deliberately NOT declared —
+#: this is a leg, not a second corpus.
+EPISODIC_LEG_MAX_ITEMS = 60
+#: How far back, in MINUTES, a captured summary may reach its transcript
+#: candidate inside the same day — `episodic_items`' own default, restated as a
+#: named constant so a later change is a decision with a name rather than a magic
+#: 90 in a call. It is NOT a lookback over days: the generator reads every daily
+#: note in the memory dir and this window only bounds, per capture, which
+#: transcripts of that day it will consider (#1319's label rule).
+EPISODIC_LEG_WINDOW_MIN = 90
+
+
+def episodic_proxy_items(memory_dir: Path, sessions_root: Path, *,
+                         window_min: int = EPISODIC_LEG_WINDOW_MIN,
+                         max_items: int = EPISODIC_LEG_MAX_ITEMS) -> list[dict]:
+    """The generated past-chat proxy set, from `run_episodic_recall_eval`.
+
+    Imported as the package module and called as an attribute, so a test that
+    patches `eval.run_episodic_recall_eval.episodic_items` sees the call — and so
+    that there is one module object holding the generator, not one per import
+    spelling.
+
+    `episodic_items` is the generated path and the only one this leg may use: it
+    reads the real `### Session HH:MM <name> — Auto-captured` blocks out of the
+    daily notes and labels each with the transcript that holds at least half its
+    content words. `synth_items()` is never named on this path — it asks the
+    primary model to invent questions, and #1319 measured 59 of 68 never-surfaced
+    rows as label bugs, so a synthetic leg would report the model's phrasing and
+    not the floor's recall. It is also slower: one model call per item, every
+    night. The nightly's invocation therefore carries no `--synth-file` argument
+    at all — it runs in-process, and that absence is asserted in
+    `tests/test_episodic_nightly_leg.py`.
+    """
+    try:
+        from eval import run_episodic_recall_eval as epi
+    except ImportError:  # pragma: no cover - script-dir invocation
+        import run_episodic_recall_eval as epi
+    items = epi.episodic_items(Path(memory_dir), Path(sessions_root), window_min)
+    return list(items)[-int(max_items):]
+
+
+def attach_episodic_floor_leg(out: dict, *, memory_dir: Path | str | None = None,
+                             sessions_root: Path | str | None = None,
+                             recall_fn=None, k: int = EPISODIC_FLOOR_K,
+                             window_min: int = EPISODIC_LEG_WINDOW_MIN,
+                             max_items: int = EPISODIC_LEG_MAX_ITEMS) -> dict:
+    """Score the past-chat proxy set into `out["episodic_floor_leg"]` and return `out`.
+
+    Why a leg at all: no gold row in `eval/vault_recall_queries.yaml` can name a
+    sessions document — `sessions` is a scoped-only collection, pinned twice
+    (`tests/test_eval_corpus_guard.py:1767` dead-label check, `:3265` unrecalled-
+    collection check). So the floor could stop returning transcripts entirely and
+    every nightly doc-leg number would stay exactly flat; the floor's live
+    behaviour had been measured once, by hand, on 2026-09-25. This leg is the
+    route the corpus cannot be: it scores the generated proxy set and publishes
+    the number.
+
+    Two rules the shape of the field encodes:
+
+      * **Report-only.** Nothing here raises, and the caller writes the artifact
+        whatever the leg says. `tests/conftest.py:815` sets
+        `LLOYD_RECALL_EPISODIC=0`, so no pytest node can observe floor-on
+        behaviour and no test can gate on it; the pin is this field's own value,
+        and the witness that the nightly can now see the floor is a live run
+        scored twice, with and without `LLOYD_RECALL_EPISODIC=0`.
+      * **An unrun leg is not a zero.** `doc_hit: 0.0` over zero items and a floor
+        that stopped returning transcripts are the same reading, which is the very
+        indistinguishability this item is about. So an empty proxy set or an
+        undeployed collection gives `ran: false`, null numbers and a `reason`.
+
+    `episodic_floors_on` records the switch state THIS run scored under, read
+    through `recall_episodic_floors()` — the one accessor that resolves it. It is
+    NOT a claim that the floor is on: production says True (`config.yaml:2888`),
+    pytest says False, and an artifact that implied the production state from a
+    test run would be a fabricated witness.
+
+    A hit uses `_doc_satisfied_by`, the scorer's own doc-label rule, rather than a
+    second matcher — the same reason `score_corpus_with_second_label` reuses it.
+    """
+    memory_dir = Path(memory_dir) if memory_dir else Path(VAULT_ROOT) / "memory"
+    root = Path(sessions_root) if sessions_root else collection_roots().get("sessions")
+    leg: dict = {"k": int(k), "window_min": int(window_min),
+                 "max_items": int(max_items), "item_source": "episodic_items",
+                 "n_items": 0, "doc_hit": None, "mrr": None, "n_errors": 0,
+                 "sessions_slots": 0,
+                 "episodic_floors_on": bool(recall_episodic_floors()),
+                 "ran": False, "reason": None}
+    out[EPISODIC_FLOOR_KEY] = leg
+
+    if root is None or not Path(root).is_dir():
+        leg["reason"] = ("no qmd `sessions` collection root is deployed for the index "
+                         "this run scores, so no transcript can be labelled")
+        return out
+    try:
+        items = episodic_proxy_items(memory_dir, Path(root),
+                                     window_min=window_min, max_items=max_items)
+    except Exception as exc:  # noqa: BLE001 — a report-only leg never kills a run
+        leg["reason"] = f"proxy set failed to build: {type(exc).__name__}: {exc}"
+        return out
+
+    leg["n_items"] = len(items)
+    if not items:
+        leg["reason"] = ("the proxy set is empty: no auto-captured session block in a "
+                         f"daily note under {memory_dir} resolved to a transcript under "
+                         f"{root} within a {window_min}-minute capture window")
+        return out
+
+    fn = recall_fn or _vault_recall
+    hits: list[float] = []
+    rrs: list[float] = []
+    for item in items:
+        exps = [_norm(item["expect"])]
+        paths: list[str] = []
+        try:
+            res = fn({"query": item["query"], "limit": k,
+                      "include_facts": False, "grep_code": True})
+            paths = _doc_paths(res or {})
+        except Exception:  # noqa: BLE001 — counted; the leg still reports n_items
+            leg["n_errors"] += 1
+        rank = next((i for i, p in enumerate(paths, 1)
+                     if _doc_satisfied_by(exps, _norm(p))), None)
+        hits.append(1.0 if rank else 0.0)
+        rrs.append(1.0 / rank if rank else 0.0)
+        leg["sessions_slots"] += sum(1 for p in paths
+                                     if _norm(p).startswith("sessions/"))
+    leg.update({"ran": True,
+                "doc_hit": round(sum(hits) / len(hits), 4),
+                "mrr": round(sum(rrs) / len(rrs), 4)})
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI's parser, as a function so a test can read its real defaults.
 
@@ -2713,11 +2937,27 @@ def main() -> int:
         # compares quality and this compares against a fixed number.
         "latency_budget": over_budget(summary["overall"], CONTEXT_NIGHTLY),
     }
+    # The episodic-floor leg (#4404). Runs AFTER the doc leg, so nothing here can
+    # touch what the corpus was scored on, and it is report-only in the strongest
+    # sense: no value below reads the field, and `attach_episodic_floor_leg` never
+    # raises. This is the nightly's only sight of the sessions floor, which no gold
+    # label may name; the cost is bounded by EPISODIC_LEG_MAX_ITEMS recall calls
+    # (~60 s at this corpus's measured 971 ms per call).
+    floor_leg = attach_episodic_floor_leg(out)[EPISODIC_FLOOR_KEY]
     out_path = EVAL_BASELINES_DIR / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2, default=str))
     print(f"[info] wrote {out_path}")
     print(_corpus_line(corpus))
+    # Printed beside the corpus line because the nightly's report is written from
+    # this output. An unrun leg says why rather than reading as a 0.000 (#4404).
+    if floor_leg["ran"]:
+        print(f"Episodic floor leg ({floor_leg['item_source']}, "
+              f"n={floor_leg['n_items']}, floor_on={floor_leg['episodic_floors_on']}): "
+              f"doc_hit={_fmt_rate3(floor_leg['doc_hit'])}  "
+              f"mrr={_fmt_rate3(floor_leg['mrr'])}")
+    else:
+        print(f"Episodic floor leg: NOT RUN — {floor_leg['reason']}")
 
     print_table(records, summary)
     verdict = out["latency_budget"]

@@ -497,3 +497,134 @@ def test_the_committed_threshold_is_the_lowest_highest_agreement_on_the_grid():
     assert grid[0.55] == "34/35" and grid[0.50] == "33/35", grid
     assert grid[0.75] == "30/35" and grid[0.85] == "26/35", grid
     assert dd.first_argmax_threshold(cal) == dd.DUP_JACCARD_THRESHOLD
+
+
+# ── #4404: a slot path resolves where the INDEX says its collection lives ─────
+#
+# The metric above counts a slot as unreadable when `_slot_text` cannot open it,
+# and until #4404 `_eval_corpus_root` knew exactly two roots — the vault and the
+# code checkout — so a `sessions/<date>/<run>.md` path returned by the episodic
+# floor (ON in production, `config.yaml:2888`) was joined onto
+# `~/obsidian/sessions`, a directory that EXISTS and holds 0 `.md` files, while
+# the qmd collection of the same name is rooted at
+# `~/lloyd-data/_pipeline/vault-derived/sessions` (278 transcripts measured
+# 2026-11-20). Every floor-returned transcript therefore landed in
+# `dup_slot_unreadable`, and the nightly silently could not read one document of
+# the leg it scores. The node below is the witness in both directions: a fixture
+# index that names a root makes the path readable and drops the unreadable count
+# to zero, and an index that does not name it leaves the slot counted — the old
+# behaviour, now pinned as a failure mode rather than as the design.
+#
+# The roots are read from the index the run scores, through
+# `app.doc_corpus.deployed_collections` — the owner module, the same route
+# #1599 established for collection EXISTENCE — and never from a path list kept in
+# `eval/`. The fixture supplies its own index file by the env var that owner
+# module documents (`doc_corpus.INDEX_PATH_ENV`), so no test here opens the live
+# index or the knowledge store.
+
+_DATE = "2026-09-22"
+_RUN = "20260922_203910_iv4437.md"
+_TRANSCRIPT_TEXT = (
+    "user: the retention sweep kept reporting a clean fleet while the grounding "
+    "pass never ran, so check the scheduler row before the sweep itself\n"
+    "assistant: the sweep is healthy and the scheduler had that job parked in "
+    "draft, which is why every per-task number stayed flat across the window\n"
+)
+
+
+def _collection_index(tmp_path: Path, roots: dict[str, str]) -> Path:
+    """A qmd-shaped index file whose `store_collections` says `roots`.
+
+    One table, the one `qmd status` answers with and the one
+    `doc_corpus.deployed_collections` reads. Named per fixture so the root map
+    cannot leak between tests through `run_eval`'s per-index-path cache.
+    """
+    import sqlite3
+
+    db = tmp_path / "fixture-index.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("create table store_collections (name text, path text)")
+    con.executemany("insert into store_collections values (?, ?)",
+                    sorted(roots.items()))
+    con.commit()
+    con.close()
+    return db
+
+
+def _sessions_collection(tmp_path: Path) -> tuple[Path, str]:
+    """A deployed `sessions` collection holding one real transcript. Returns (root, slot)."""
+    root = tmp_path / "vault-derived" / "sessions"
+    (root / _DATE).mkdir(parents=True)
+    (root / _DATE / _RUN).write_text(_TRANSCRIPT_TEXT, encoding="utf-8")
+    return root, f"sessions/{_DATE}/{_RUN}"
+
+
+def test_a_floor_returned_transcript_resolves_to_its_collections_root(tmp_path, monkeypatch):
+    """`sessions/<date>/<run>.md` reads from the collection root, not the empty vault dir.
+
+    Both halves of the clause: the resolved path is the one that exists on disk,
+    and the slot is no longer counted in `dup_slot_unreadable`. The second half
+    is the one that was silently true before: five floor slots and a
+    `dup_slot_share` of 0.0 over nothing at all.
+    """
+    import eval.run_eval as ev
+    from app import doc_corpus
+
+    root, slot = _sessions_collection(tmp_path)
+    monkeypatch.setenv(doc_corpus.INDEX_PATH_ENV,
+                       str(_collection_index(tmp_path, {"sessions": str(root)})))
+
+    resolved = ev._eval_corpus_root(slot)
+    assert resolved == (root, f"{_DATE}/{_RUN}"), (
+        "a collection root is joined with the path MINUS the collection segment; "
+        f"got {resolved}")
+    assert (resolved[0] / resolved[1]).is_file(), "the resolved path must be the file"
+    assert resolved[0] != ev.VAULT_ROOT, (
+        "the vault's `sessions` directory is not this collection's root")
+    assert ev._slot_text(slot) == _TRANSCRIPT_TEXT
+
+    out = ev._dup_metrics_for_paths([slot, slot.replace(_RUN, "absent.md")])
+    assert out["dup_slot_unreadable"] == 1, (
+        "the readable transcript no longer joins the unreadable count; the one "
+        "that is not on disk still must, or the count means nothing")
+    assert out["dup_slot_n"] == 1
+
+
+def test_an_unnamed_collection_still_falls_back_and_the_slot_stays_unreadable(tmp_path, monkeypatch):
+    """The fallback that the two-root design existed for is intact, and so is the count.
+
+    An index that does not name `sessions` must not conjure a root: the slot
+    resolves against the vault if a directory of that first segment lives there
+    (it does — and it is empty, which is how this went unnoticed), and otherwise
+    against the code checkout. Either way the read fails and the slot is counted,
+    which is the honest answer. The `app/x.py` keyword-leg case and a vault
+    segment are asserted in the same fixture because the bug class here is a
+    resolver that quietly stops answering for the paths it was not aimed at.
+    """
+    import eval.run_eval as ev
+    from app import doc_corpus
+
+    root, slot = _sessions_collection(tmp_path)
+    # A deployed collection named something the corpus never uses as a label root,
+    # so the check below cannot pass by `knowledge` being resolved as a collection.
+    monkeypatch.setenv(doc_corpus.INDEX_PATH_ENV,
+                       str(_collection_index(tmp_path, {"autonomy-runs": str(root)})))
+    monkeypatch.setattr(ev, "VAULT_ROOT", tmp_path / "vault")
+    (tmp_path / "vault" / "knowledge").mkdir(parents=True)
+    (tmp_path / "vault" / "knowledge" / "a.md").write_text(_SHARED, encoding="utf-8")
+    monkeypatch.setattr(ev, "LLOYD_CODE_ROOT", tmp_path / "checkout")
+    (tmp_path / "checkout" / "app").mkdir(parents=True)
+    (tmp_path / "checkout" / "app" / "x.py").write_text("x = 1\n", encoding="utf-8")
+
+    # The live condition, reproduced: the first segment IS a vault directory, an
+    # empty one, and the transcript lives in neither root.
+    (tmp_path / "vault" / "sessions").mkdir()
+    assert ev._eval_corpus_root(slot) == (ev.VAULT_ROOT, slot)
+    assert ev._slot_text(slot) is None, (
+        "no deployed root was named, so the transcript is unreachable and the "
+        "slot must read as unreadable rather than as empty text")
+    assert ev._dup_metrics_for_paths([slot])["dup_slot_unreadable"] == 1
+    # The two roots that were always there still resolve.
+    assert ev._eval_corpus_root("knowledge/a.md") == (ev.VAULT_ROOT, "knowledge/a.md")
+    assert ev._slot_text("knowledge/a.md") == _SHARED
+    assert ev._slot_text("app/x.py") == "x = 1\n"

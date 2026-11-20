@@ -4900,9 +4900,17 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: of them content-checked by
 #: `tests/test_eval_scorer.py::test_the_doc_s_citation_still_lands_on_the_conjunction`;
 #: `tests/test_eval_ceiling_fields.py::test_the_harness_stays_line_count_neutral_for_cited_prose`
-#: now pins all three. The anchor names `fa88f11f`, the commit carrying the field, whose
-#: projection is byte-identical to this tree.
-RUN_EVAL_CODE_ANCHOR = "fa88f11f"
+#: now pins all three. #4404 moved it a fourth time, and this time the move is the whole
+#: point of the change rather than a side effect of one: `eval/run_eval.py` gained the
+#: episodic-floor leg (`attach_episodic_floor_leg`, its `episodic_proxy_items` helper and
+#: the `main()` call that files `episodic_floor_leg` into the artifact) plus the
+#: collection-rooted slot resolver, so the harness genuinely scores and reads a surface
+#: `fa88f11f` never had. No gold label was added to reach it — the corpus is still 86 `- id:` rows
+#: with 0 `sessions/` labels — so the executable surface moved while the scored population
+#: did not. The anchor names `d0eed5d6`, the commit carrying the leg, stamped in the commit
+#: beside it because a commit cannot carry its own name; that object holds the bytes this
+#: tree has, and the projection compares the file against itself by that name.
+RUN_EVAL_CODE_ANCHOR = "d0eed5d6"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
@@ -5368,3 +5376,73 @@ def test_the_prose_edit_left_both_corpus_function_bodies_untouched():
             f"docstring was cleared to change: "
             f"{[(i, b, a) for i, (b, a) in enumerate(zip(before[name], after[name])) if b != a][:3]}"
             " — move RUN_EVAL_CODE_ANCHOR in the commit that changes behaviour instead")
+
+
+# ── #4404: the episodic-floor leg legalises no gold label ────────────────────
+
+def test_the_episodic_floor_leg_legalises_no_gold_label():
+    """The nightly now scores `sessions/…` transcripts, and the corpus still may not.
+
+    #4404 gives the nightly a floor leg because no gold row can name a sessions
+    document: `sessions` is scoped-only, and the two guards above pin that
+    twice over. The leg runs OUTSIDE the corpus, in the artifact field
+    `episodic_floor_leg`, so the corpus's doc-leg means cannot move because their
+    population did. This node is what refuses the tempting shortcut — the leg's
+    own label shape, `sessions/<date>/<run>.md`, is asserted to be exactly the
+    shape `_labels_the_recall_cannot_request` refuses, so a future "just add a
+    few sessions rows to the new leg's corpus" fails here rather than silently
+    re-basing every doc-leg number in the trend (`eval/vault_recall_queries.yaml`
+    header, the re-base rule at lines 75-84).
+
+    Four facts, all re-read, none carried:
+      1. the leg exists, and it is a field in the artifact rather than a corpus;
+      2. the corpus still holds ZERO labels rooted at `sessions`, and the string
+         `sessions/` appears nowhere in the file at all;
+      3. `sessions` is still served-but-unrecalled and still absent from the
+         recall's named collections — the leg did not widen `VAULT_SEGMENTS`;
+      4. the size the header states is still the count of `- id:` rows, and that
+         count is still the 86 the leg was added against.
+    """
+    import eval.run_eval as ev
+
+    text = CORPUS.read_text()
+
+    # 1 — a leg, not a second corpus.
+    assert ev.EPISODIC_FLOOR_KEY == "episodic_floor_leg"
+    assert ev.EPISODIC_FLOOR_KEY not in text, (
+        "the leg lives in the run artifact; a corpus that names it has become a "
+        "second benchmark with a second denominator")
+
+    # 2 — no sessions-rooted label, and no `sessions/` string anywhere in the file.
+    assert text.count("sessions/") == 0, (
+        "the corpus names the sessions collection, which the recall never requests")
+    pairs = _gold_label_pairs()
+    sessions_labels = sorted({lab for _, lab in
+                              (p.split(" -> ", 1) for p in pairs)
+                              if _label_root(lab) == "sessions"})
+    assert sessions_labels == [], f"_sessions-rooted gold labels: {sessions_labels}_"
+
+    # 3 — the collection is still scoped-only: served, unrecalled, and NOT one of
+    # the segments the recall puts in an unrestricted payload.
+    assert "sessions" in COLLECTIONS_INDEXED_BUT_NOT_RECALLED
+    named = _recall_named_collections()
+    assert "sessions" not in named, (
+        "the floor leg is a reason to leave `sessions` out of VAULT_SEGMENTS, not "
+        "a reason to add it: putting chat transcripts into every unrestricted "
+        "search is the state the guard documents as deliberate")
+
+    # 4 — the corpus's stated size still matches its rows, and is still 86.
+    shape = _gold_set_shape_report()
+    stated = re.search(r"GOLD SET SIZE: (\d+) queries", text)
+    assert stated, f"{CORPUS} lost the GOLD SET SIZE line the guard re-counts"
+    assert int(stated.group(1)) == shape["n_queries"] == 86, (
+        f"header says {stated.group(1)}, the rows count {shape['n_queries']}, and "
+        "the floor leg was added against 86. A growth is allowed but it is a "
+        "re-base point and must update the header and this count together")
+
+    # The leg's own label shape is what the guards refuse — this is the clause's
+    # teeth: the leg scores labels of exactly the class the corpus may never hold.
+    leg_label = "sessions/2026-09-22/20260922_203910_iv4437.md"
+    assert _label_root(leg_label) == "sessions"
+    assert _labels_the_recall_cannot_request({f"floor-leg -> {leg_label}"}, named) == [
+        ("floor-leg", leg_label)]
