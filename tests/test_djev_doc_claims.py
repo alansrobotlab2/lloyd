@@ -2067,3 +2067,185 @@ def test_the_4141_reword_is_comment_only_and_moves_no_value_the_loader_sees():
         assert figure in queue_max_now, (
             f"the probe above `queue_max:` lost {figure!r}, which #3326 pinned and "
             "clause 2 excludes from this change")
+
+
+# ---------------------------------------------------------------------------
+# §15's #4410 passage: the byte cap is enforced now, so the doc may not say otherwise
+# ---------------------------------------------------------------------------
+
+def _cap_claim_problems(text: str, *, enforced: bool, prefix: str, stamp_fmt: str,
+                        max_backups: int, read_through: str) -> list[str]:
+    """Grade the doc's `max_log_mb` passage against the recorder's own facts.
+
+    Every value the passage asserts is passed in from the module rather than written
+    here, because the failure this exists for is the two drifting apart in either
+    direction: the doc claiming a bound the code does not enforce, and the code changing
+    its backup name or ceiling out from under a doc that still describes the old one.
+    """
+    folded = " ".join(text.split())   # the passage wraps mid-sentence
+    out: list[str] = []
+    # The key is written `djev.shadow.max_log_mb`, so the closing backtick is what sits
+    # beside the name; the second form catches the claim however it is introduced.
+    if ("max_log_mb` is a bound with no reader" in folded
+            or "is a bound with no reader anywhere in the tree" in folded):
+        out.append("the doc still states in the present tense that nothing reads "
+                   "`max_log_mb` — #4410 is the item that made the key mean something")
+    if not enforced:
+        out.append("the doc says `_write` enforces the cap and `_write` does not call "
+                   "`_enforce_cap`, which is exactly the claim #4410 was filed about")
+    for token, why in (
+            (f"`{prefix}<YYYYMMDD>`", "the dated backup name the rotation produces"),
+            (f"`{read_through}()`", "where the cap is read from at write time"),
+            (f"`MAX_BACKUPS` = {max_backups}", "the ceiling on accumulated backups")):
+        if token not in folded:
+            out.append(f"the passage no longer names {why}: {token!r}")
+    if stamp_fmt not in _rotate_source():
+        out.append(f"the doc writes the backup stamp as `{stamp_fmt}` but `_rotate` "
+                   "no longer formats it that way")
+    return out
+
+
+def _rotate_source() -> str:
+    import inspect
+    from app import djev_shadow
+    return inspect.getsource(djev_shadow._rotate)
+
+
+def test_the_max_log_mb_passage_describes_the_rotation_the_code_performs():
+    """#4410 clause 4: `architecture/djev.md` used to record that
+    `djev.shadow.max_log_mb` "is a bound with no reader anywhere in the tree", which was
+    true — `git grep -n max_log_mb` returned the `DEFAULTS` line and that sentence and
+    nothing else, while the store it bounds stood at 478,739,826 bytes, 1.78x the cap the
+    key declared. The bound is enforced now, so the sentence is retired and what replaces
+    it is pinned to the code that has to keep it true.
+    """
+    import inspect
+    from app import djev_shadow
+
+    write_src = inspect.getsource(djev_shadow._write)
+    problems = _cap_claim_problems(
+        _doc_text(),
+        enforced="_enforce_cap(" in write_src,
+        prefix=djev_shadow.BACKUP_PREFIX,
+        stamp_fmt="%Y%m%d",
+        max_backups=djev_shadow.MAX_BACKUPS,
+        read_through="config")
+    assert problems == [], "the #4410 passage and the recorder disagree:\n  " + \
+        "\n  ".join(problems)
+
+    retired = ("  `djev.shadow.max_log_mb` is a bound with no reader anywhere in the "
+               "tree, and")
+    seeded = _doc_text().replace(
+        "`djev.shadow.max_log_mb` used to be a bound with no reader anywhere in",
+        retired)
+    assert seeded != _doc_text(), (
+        "this control's anchor moved, so the retired claim could come back and this "
+        "node would still pass")
+    assert _cap_claim_problems(
+        seeded, enforced=True, prefix=djev_shadow.BACKUP_PREFIX, stamp_fmt="%Y%m%d",
+        max_backups=djev_shadow.MAX_BACKUPS,
+        read_through="config"), (
+        "putting the present-tense claim back into the doc changed nothing, so the "
+        "sentence #4410 retired is not actually pinned")
+
+
+# ---------------------------------------------------------------------------
+# §15's #4410 passage: the log's byte cap, and what the doc may claim about it
+# ---------------------------------------------------------------------------
+
+def _cap_passage(text: str) -> str:
+    """The doc's own sentences about `djev.shadow.max_log_mb`, folded onto one line.
+
+    Folded because the passage wraps mid-sentence: read a line at a time and the
+    retired claim arrives split as "…is a bound with no reader anywhere in" and "the
+    tree, and…", which is two strings and grades as neither.
+    """
+    at = text.index("max_log_mb")
+    return " ".join(text[max(0, at - 400):at + 2000].split())
+
+
+def _cap_passage_problems(text: str, *, enforced: bool, prefix: str,
+                          max_backups: int) -> list[str]:
+    """Every way the passage can stop matching the recorder, as a list of sentences.
+
+    A function returning problems rather than a bare assert, so the control below can
+    aim it at a seeded copy: a doc-claims node whose green means "the scan found
+    nothing" is the instrument #1372 was filed against.
+    """
+    passage = _cap_passage(text)
+    out: list[str] = []
+    # The key is written `djev.shadow.max_log_mb`, so a leading backtick would never
+    # match it — and the words that decide this claim are not the phrase at all but the
+    # two in front of it: "used to be a bound with no reader" is history, "is a bound
+    # with no reader" is a live assertion that the recorder ignores its own cap.
+    for hit in re.finditer(r"a bound with no reader", passage):
+        head = passage[max(0, hit.start() - 40):hit.start()]
+        if "used to" not in head:
+            out.append("the doc asserts in the present tense that nothing reads the "
+                       f"cap — {head[-32:]!r} + 'a bound with no reader' — which is the "
+                       "claim #4410 was filed to end")
+            break
+    if not enforced:
+        out.append("`_write` no longer calls `_enforce_cap`, so the doc's account of "
+                   "the write path is the one #4410 removed")
+    for token, why in ((f"`{prefix}<YYYYMMDD>`", "the dated backup name it rotates to"),
+                       ("`config()`", "where the cap is read from"),
+                       (f"`MAX_BACKUPS` = {max_backups}", "the backup ceiling"),
+                       ("newest row per seam", "what survives the cut")):
+        if token not in passage:
+            out.append(f"the passage no longer names {why}: {token!r}")
+    return out
+
+
+def test_the_max_log_mb_passage_describes_the_bound_the_code_enforces():
+    """#4410 clause 4: `architecture/djev.md` said `djev.shadow.max_log_mb` "is a bound
+    with no reader anywhere in the tree", and at filing that was exactly true — `git grep
+    -n max_log_mb` returned the `DEFAULTS` line and this sentence and nothing else, while
+    the store it bounds stood at 478,739,826 bytes, 1.78x the cap its own key declared.
+
+    The key is enforced now, so the sentence has moved into the past tense and the rest
+    of the passage describes the rotation. Both halves are pinned to the recorder rather
+    than to copies of its constants: the name the backup is written under, the ceiling on
+    how many are kept, and the fact that the write path calls the enforcement at all.
+    """
+    import inspect
+
+    from app import djev_shadow
+
+    facts = dict(enforced="_enforce_cap(" in inspect.getsource(djev_shadow._write),
+                 prefix=djev_shadow.BACKUP_PREFIX,
+                 max_backups=djev_shadow.MAX_BACKUPS)
+    problems = _cap_passage_problems(_doc_text(), **facts)
+    assert problems == [], "the doc and the recorder disagree:\n  " + "\n  ".join(problems)
+
+    # Clause 2's other half, on the code side: the cap has to be read as MB AT WRITE
+    # TIME. A constant baked into the module would keep every assertion above green.
+    cfg_src = inspect.getsource(djev_shadow._cap_bytes)
+    assert "1024 * 1024" in cfg_src, (
+        "`_cap_bytes` no longer converts the config value from MB to bytes, so the "
+        "shipped 256 would mean 256 bytes and rotate on every append")
+    assert "config()" in inspect.getsource(djev_shadow._enforce_cap), (
+        "`_enforce_cap` no longer reads `config()`, so the cap is a module constant "
+        "again and `djev.shadow.max_log_mb` has gone back to being a comment")
+
+    shipped = _doc_text()
+    retired = shipped.replace(
+        "`djev.shadow.max_log_mb` used to be a bound with no reader anywhere in\n"
+        "  the tree",
+        "`djev.shadow.max_log_mb` is a bound with no reader anywhere in\n  the tree")
+    assert retired != shipped, (
+        "the anchor this control seeds is gone from the doc, so the retired claim could "
+        "come back and this node would not notice")
+    assert _cap_passage_problems(retired, **facts), (
+        "restoring the present-tense claim about the cap changed nothing, so the "
+        "sentence #4410 retired is not actually pinned")
+
+    over_ceiling = _cap_passage(shipped).replace(
+        f"`MAX_BACKUPS` = {djev_shadow.MAX_BACKUPS}", "`MAX_BACKUPS` = 9")
+    assert over_ceiling != _cap_passage(shipped), "the seed did not land"
+    widened = shipped.replace(
+        f"keeps at most `MAX_BACKUPS` = {djev_shadow.MAX_BACKUPS} of them",
+        "keeps at most `MAX_BACKUPS` = 9 of them")
+    assert _cap_passage_problems(widened, **facts), (
+        "the doc could claim a backup ceiling the module does not implement and this "
+        "node would stay green")

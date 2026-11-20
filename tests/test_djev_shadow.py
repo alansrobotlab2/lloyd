@@ -9,9 +9,11 @@ three.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -235,6 +237,184 @@ def test_log_rows_is_none_when_unreadable_not_zero(monkeypatch, tmp_path):
     assert djev_shadow._log_rows() == 0
     monkeypatch.setattr(djev_shadow, "SHADOW_LOG", tmp_path)   # a directory
     assert djev_shadow._log_rows() is None
+
+
+# ---------------------------------------------------------------------------
+# The log's own byte cap (#4410)
+# ---------------------------------------------------------------------------
+
+#: 20 bytes. The cap is a config value in MB, so asking for "over the cap" means a
+#: cap smaller than one row, not a file big enough to fill a disk.
+_TINY_MB = 20 / (1024 * 1024)
+
+
+def _cap(monkeypatch, mb):
+    monkeypatch.setattr(djev_shadow, "config",
+                        lambda: {**djev_shadow.DEFAULTS, "seams": {},
+                                 "max_log_mb": mb})
+
+
+def _seed(tmp_path, *raw_lines) -> None:
+    """Put these lines in the log exactly as written, so a test can ask whether the
+    rotation changed one byte of them."""
+    (tmp_path / "shadow.jsonl").write_text(
+        "".join(ln + "\n" for ln in raw_lines), encoding="utf-8")
+
+
+def _log_lines(tmp_path) -> list[str]:
+    p = tmp_path / "shadow.jsonl"
+    return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+
+
+def _backups(tmp_path):
+    return sorted(tmp_path.glob("shadow.jsonl.bak-*"))
+
+
+def test_an_over_cap_log_is_rotated_aside_before_the_new_row_lands(monkeypatch, tmp_path):
+    """#4410: `max_log_mb` was a comment. `git grep -n max_log_mb` returned only the
+    `DEFAULTS` line and a doc note while the live store reached 478,739,826 bytes —
+    1.78x the cap its own key declared — because `_write` opened `"a"` and appended with
+    no size check of any kind, and no logrotate stanza, tmpfiles entry or timer covered
+    the path either.
+
+    The cap is read through `config()` at write time, so BOTH directions are asked here
+    against the same little file: a small monkeypatched value must rotate, and the
+    shipped 256 must not. A node that only ever shrank the cap would pass with the
+    number hard-coded to anything smaller than a row.
+    """
+    seeded = ('{"ts": 1780000000.0, "seam": "dedupe", "n_questions": 1}',
+              '{"ts": 1780000001.0, "seam": "entity", "n_questions": 2}')
+    _seed(tmp_path, *seeded)
+    _cap(monkeypatch, _TINY_MB)
+
+    djev_shadow._write({"ts": 1780000002.0, "seam": "action_review"})
+
+    baks = _backups(tmp_path)
+    assert len(baks) == 1, f"expected exactly one backup, got {[b.name for b in baks]}"
+    # The dated name the store's own hand rotation already used (`bak-20260927`), and
+    # asserted by shape rather than against a date this test computed, which would flake
+    # across a UTC midnight.
+    assert baks[0].name.startswith("shadow.jsonl.bak-")
+    stamp = baks[0].name[len("shadow.jsonl.bak-"):]
+    assert len(stamp) == 8 and stamp.isdigit(), f"the backup is not dated: {baks[0].name}"
+    assert baks[0].read_text(encoding="utf-8") == "".join(s + "\n" for s in seeded), (
+        "the rotated file is not the file that was there; a rotation that loses the "
+        "history it moved aside is a deletion wearing a rename")
+
+    assert [r["seam"] for r in _rows(tmp_path)] == ["dedupe", "entity", "action_review"], (
+        "the fresh log has to be the carried rows plus the new row, oldest first — the "
+        "rename happens before the append, so the reader's tail window is never a short "
+        "read of a file it already measured")
+
+    # The other side of the same boundary. The filler matters: the shipped cap is 256
+    # **MB**, and a three-row log also sits under 256 *bytes*, so it would stay green if
+    # `_cap_bytes` lost the MB-to-byte conversion and began rotating on every append —
+    # the failure mode its docstring names as the reason a garbage value has to mean
+    # "do not bound" rather than "rotate always".
+    grown = ['{"ts": %r, "seam": "rerank", "raw": "%s"}' % (1780000010.0 + k, "y" * 400)
+             for k in range(20)]
+    _seed(tmp_path, *grown)
+    size = djev_shadow.SHADOW_LOG.stat().st_size
+    assert 4096 < size < 256 * 1024 * 1024, (
+        f"the under-cap fixture is {size} bytes, which no longer separates a cap read "
+        "as MB from one read as bytes")
+    before = _log_lines(tmp_path)
+
+    _cap(monkeypatch, djev_shadow.DEFAULTS["max_log_mb"])
+    djev_shadow._write({"ts": 1780000003.0, "seam": "action_review"})
+    assert len(_backups(tmp_path)) == 1, (
+        f"the shipped 256 MB cap rotated a {size}-byte file")
+    assert _log_lines(tmp_path)[:len(before)] == before, (
+        "an under-cap log was rewritten by a write that should only have appended")
+    assert len(_rows(tmp_path)) == len(before) + 1
+
+
+def test_a_rotation_carries_the_newest_row_per_seam_so_no_seam_goes_dark(monkeypatch,
+                                                                        tmp_path):
+    """The cut must not manufacture a #1372 alarm. `seam_log_stats` marks a seam `dark`
+    on `rows == 0`, so a rotation that dropped the whole file would report EVERY seam dark
+    at once — destroying the one liveness signal the recorder exists to publish.
+
+    What is carried is the NEWEST row per seam, selected on the row's own `ts`, and it is
+    carried as the raw line: the row IS the observation, and re-dumping it would rewrite
+    the distribution the label-mass floors are read off. Rows the reader cannot use are
+    not carried — a torn line, a seam this build does not know, a row with no timestamp —
+    because carrying them would claim a liveness `seam_log_stats` does not grant them.
+    """
+    now = 1_780_000_100.0
+    old = now - 200_000                    # older than DARK_AFTER_S (86400)
+    dedupe_newest = ('{"seam": "dedupe", "actual": {"merged_into": 4}, '
+                     '"schema": "abc\\u00e9f", "ts": %s, "n_questions": 1}' % now)
+    _seed(tmp_path,
+          '{"ts": %s, "seam": "dedupe", "n_questions": 9}' % old,
+          dedupe_newest,
+          '{"ts": %s, "seam": "entity", "meta": {"k": "only row, and stale"}}' % old,
+          '{"ts": 1780000000, "seam": "rerank" oops a torn line',
+          '{"ts": %s, "seam": "future_seam"}' % now,
+          '{"seam": "rerank", "note": "no ts at all"}')
+    _cap(monkeypatch, _TINY_MB)
+
+    djev_shadow._write({"ts": now + 1, "seam": "rerank"})
+
+    kept = _log_lines(tmp_path)
+    assert len(kept) == 3, f"one row per carried seam plus the new one, got: {kept}"
+    assert dedupe_newest in kept, (
+        "the newest `dedupe` row was rewritten instead of carried: key order, the "
+        "`\\u00e9` escape and the field set all have to survive the cut, because the "
+        "rows are the sample the floors are measured on")
+    assert not any('"n_questions": 9' in ln for ln in kept), (
+        "an older row was carried for a seam that has a newer one — one row per seam is "
+        "what keeps the new file small enough to be worth the rotation")
+    assert not any("future_seam" in ln for ln in kept), (
+        "a seam this build does not know was carried, so it would hold a row while "
+        "being invisible to every verdict `seam_log_stats` reports")
+    assert not any("no ts at all" in ln for ln in kept)
+
+    seam = djev_shadow.seam_log_stats(now=now + 1)
+    assert seam["dedupe"]["rows"] == 1 and seam["dedupe"]["dark"] is False, (
+        "a seam whose newest row is one second old read dark across a rotation")
+    assert seam["entity"]["rows"] == 1 and seam["entity"]["dark"] is True, (
+        "carrying a row is not the same as carrying a live one: a seam whose only row "
+        "is older than `DARK_AFTER_S` has to stay dark, or the bound would silently "
+        "switch every genuinely quiet seam to healthy")
+    assert seam["rerank"]["rows"] == 1 and seam["rerank"]["dark"] is False
+    assert djev_shadow.stats()["log_rows"] == 3, (
+        "`log_rows` counts the whole file, so past a cut it must count the new one; a "
+        "total that still includes the history that moved aside is a wrong number")
+    assert len(_backups(tmp_path)) == 1
+
+
+def test_a_third_backup_prunes_the_oldest_by_mtime_not_by_name(monkeypatch, tmp_path):
+    """Two is the ceiling `MAX_BACKUPS` declares — the precedent on disk
+    (`shadow.jsonl.bak-20260927`, 12,477,488 bytes) is a hand rotation that has pruned
+    nothing since, so a rotation that copied it would only move the leak sideways.
+
+    And the deletion is ordered by `st_mtime`, not by name: a second rotation the same
+    day is named `.bak-<YYYYMMDD>-2`, which string-sorts BEFORE the plain-dated file it
+    actually followed, so a name-ordered prune keeps the stale backup and throws away the
+    history written last.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    plain = tmp_path / f"shadow.jsonl.bak-{stamp}"
+    suffixed = tmp_path / f"shadow.jsonl.bak-{stamp}-2"
+    for p in (plain, suffixed):
+        p.write_text('{"ts": 1780000000.0, "seam": "dedupe"}\n', encoding="utf-8")
+    stale = time.time() - 7_200
+    os.utime(plain, (stale + 7_200, stale + 7_200))     # newest by name…
+    os.utime(suffixed, (stale, stale))                  # …oldest by mtime
+    _seed(tmp_path, '{"ts": 1780000001.0, "seam": "dedupe", "n_questions": 3}')
+    _cap(monkeypatch, _TINY_MB)
+
+    djev_shadow._write({"ts": 1780000002.0, "seam": "entity"})
+
+    assert len(_rows(tmp_path)) == 2, "the rotation did not happen at all"
+    survivors = [b.name for b in _backups(tmp_path)]
+    assert len(survivors) == 2, f"more than MAX_BACKUPS survived: {survivors}"
+    assert suffixed.name not in survivors, (
+        f"the deleted backup was the newest by name, not the newest by mtime: "
+        f"{survivors}. `-2` sorts before the plain-dated file it followed, so ordering "
+        "the prune by name keeps the stale copy and discards the newer history")
+    assert plain.name in survivors
 
 
 def test_the_worker_exits_instead_of_spinning_when_its_queue_is_cleared(monkeypatch):

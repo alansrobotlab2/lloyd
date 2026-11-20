@@ -1821,7 +1821,15 @@ djev on Lloyd's traffic; the recall eval decides.
   (0.132), identical repeat 0/38, inverted 14/38 (0.368) — one row above the
   13/38 §7.4 quotes, same verdict, and the agent-decider claim in §14 is now
   history rather than a caveat: `cb15665d` deleted `agent-decider.conf` and
-  `start-decider.sh`, so nothing on this machine is aimed at `:8012`. Filed #4410:
-  `djev.shadow.max_log_mb` is a bound with no reader anywhere in the tree, and
-  `shadow.jsonl` is 476 MB — 1.9x the cap its own config key declares, and a
-  store the retention sweep does not cover either.
+  `start-decider.sh`, so nothing on this machine is aimed at `:8012`. Filed #4410, and
+  fixed by it: `djev.shadow.max_log_mb` used to be a bound with no reader anywhere in
+  the tree, and `shadow.jsonl` stood at 476 MB — 1.9x the cap its own config key
+  declared — in a store the retention sweep does not cover either. `_write` now reads
+  that key through `config()` on every append: when the log plus the incoming row would
+  pass the cap it renames the log to `shadow.jsonl.bak-<YYYYMMDD>` beside it (the
+  `bak-20260927` form this store already carried by hand) and refills it with the newest
+  row per seam, so a rotation never leaves a seam reading `dark` for want of a row, and
+  keeps at most `MAX_BACKUPS` = 2 of them. What the bound does not touch is the cost of
+  reading the store: `stats()` still walks every line — measured 4.3-4.7 s warm against
+  the 477 MB file on 2026-11-20 — synchronously on every `djev_status`, and whether
+  capping the file is enough there is still open.

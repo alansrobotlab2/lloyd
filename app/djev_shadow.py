@@ -102,8 +102,23 @@ DEFAULTS: dict[str, Any] = {
     #: pool, an item body).
     "timeout_seconds": 20.0,
     #: Rows are small; this is a guard against a runaway seam, not retention.
+    #: #4410 was filed because nothing read this number: the store it bounds reached
+    #: 478,739,826 bytes on 2026-11-20 — 1.78x the cap the key declared — while
+    #: `_write` appended unconditionally, and no logrotate stanza, tmpfiles entry or
+    #: timer covered it either. It is now enforced, on the write path, by
+    #: `_enforce_cap` below.
     "max_log_mb": 256,
 }
+
+#: How many dated backups a rotation may leave accumulating. The precedent on disk
+#: (`shadow.jsonl.bak-20260927`, 12,477,488 bytes) is a hand rotation that has pruned
+#: nothing in the seven weeks since, which is the same unbounded store moved sideways;
+#: a rotation that copied that behaviour would only relocate the leak #4410 is about.
+MAX_BACKUPS = 2
+
+#: Suffix for a backup name: `shadow.jsonl.bak-<YYYYMMDD>`, and `-2`, `-3` … for a
+#: second rotation the same day. The date is UTC because the name is machine-facing.
+BACKUP_PREFIX = "shadow.jsonl.bak-"
 
 #: Per-seam switches live under `djev.shadow.seams`. A seam absent from the
 #: config is ON: adding a seam and forgetting its flag must not be the same as
@@ -307,6 +322,143 @@ _first_row_pending = threading.Event()
 _first_row_pending.set()
 
 
+def _cap_bytes(cfg: dict) -> int | None:
+    """`max_log_mb` as a byte count, or `None` when it is not a usable number.
+
+    `None` means do not bound, and that has to be the answer for a broken value:
+    reading a garbage `max_log_mb` as `0` would rotate on every append, and a recorder
+    that renames the file per row keeps nothing while looking busy.
+    """
+    try:
+        mb = float(cfg.get("max_log_mb", DEFAULTS["max_log_mb"]))
+    except (TypeError, ValueError):
+        return None
+    return int(mb * 1024 * 1024) if mb > 0 else None
+
+
+def _newest_row_per_seam() -> list[str]:
+    """The newest raw line for each seam this build knows, oldest-first.
+
+    A rotation that drops the whole file reports `dark` for EVERY seam, because
+    `seam_log_stats` flips a seam dark on `rows == 0` — so the cut that bounds the
+    store would also destroy the #1372 liveness signal, which is the one thing on this
+    route a reader acts on. Carrying the newest row per seam keeps that verdict.
+
+    Raw lines, not re-serialised rows: the row is the observation, and a rotation that
+    re-dumps it rewrites the distribution the floors are read off. Selection is by the
+    row's own `ts`, so a row with no usable timestamp is not carried — it is not a
+    liveness signal to `seam_log_stats` either, which skips the same rows for the same
+    reason. A seam this build does not know is likewise left behind, matching the
+    reader's "its rows are not this build's verdict".
+
+    `errors="replace"` is deliberate and is the one place this can rewrite a byte: a
+    line holding bytes that are not valid UTF-8 cannot be emitted byte-for-byte by a
+    UTF-8 text write anyway, and sanitising it is what keeps the NEW file readable by
+    the strict reader `stats()` uses, which reports `rows: None` for the whole log the
+    moment one byte is undecodable.
+    """
+    newest: dict[str, tuple[float, str]] = {}
+    try:
+        with SHADOW_LOG.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                raw = line.rstrip("\n")
+                if not raw.strip():
+                    continue
+                try:
+                    row = json.loads(raw)
+                except Exception:  # noqa: BLE001 — a torn line is not a seam's row
+                    continue
+                seam = row.get("seam")
+                if seam not in SEAMS:
+                    continue
+                ts = row.get("ts")
+                if not isinstance(ts, (int, float)):
+                    continue
+                if seam not in newest or ts > newest[seam][0]:
+                    newest[seam] = (float(ts), raw)
+    except Exception as exc:  # noqa: BLE001 — carry nothing rather than lose the row
+        logger.debug("djev shadow: could not read rows to carry: %s", exc)
+        return []
+    return [raw for _, raw in sorted(newest.values(), key=lambda t: t[0])]
+
+
+def _backup_path(stamp: str) -> Path:
+    """The next free backup name: `bak-<YYYYMMDD>`, then `-2`, `-3` …
+
+    The suffix is why `_prune_backups` orders by `st_mtime` and not by name: a `-2`
+    string-sorts BEFORE the plain-dated file it came after.
+    """
+    candidate = STATE_DIR / f"{BACKUP_PREFIX}{stamp}"
+    n = 1
+    while candidate.exists():
+        n += 1
+        candidate = STATE_DIR / f"{BACKUP_PREFIX}{stamp}-{n - 1}"
+    return candidate
+
+
+def _prune_backups() -> None:
+    """Keep the newest `MAX_BACKUPS` backups and delete the rest, by `st_mtime`."""
+    try:
+        baks = [p for p in STATE_DIR.glob(f"{BACKUP_PREFIX}*") if p.is_file()]
+        baks.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in baks[MAX_BACKUPS:]:
+            stale.unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001 — a leaked backup is not a lost row
+        logger.debug("djev shadow: could not prune backups: %s", exc)
+
+
+def _rotate(now: float | None = None) -> bool:
+    """Rename the over-cap log aside and refill it with one row per seam.
+
+    Rename first, then append: the recorder has a live read-only reader under `eval/`
+    that walks this file's tail window, and a truncate-in-place would hand it a short
+    read of a file it already measured. An append after the rename cannot clobber a
+    concurrent writer either — the worst a second process can do is create the fresh
+    file itself, and then both rows are in it.
+
+    Returns whether the log moved out of the way.
+    """
+    carried = _newest_row_per_seam()
+    stamp = datetime.fromtimestamp(time.time() if now is None else now,
+                                   timezone.utc).strftime("%Y%m%d")
+    backup = _backup_path(stamp)
+    os.replace(SHADOW_LOG, backup)
+    if carried:
+        with SHADOW_LOG.open("a", encoding="utf-8") as fh:
+            for raw in carried:
+                fh.write(raw + "\n")
+    _prune_backups()
+    return True
+
+
+def _enforce_cap(incoming_bytes: int, cfg: dict | None = None) -> bool:
+    """Rotate when the log plus this row would pass the cap. Does the bound belong
+    to the recorder, and the recorder is the only thing that has ever read this key.
+
+    The comparison is `size + incoming > cap`, not `size > cap`: a check that runs
+    after the append bounds nothing at the boundary, and the incoming row's length is
+    already in hand, so there is no reason to be a row late.
+    """
+    try:
+        cap = _cap_bytes(cfg or config())
+        if cap is None:
+            return False
+        size = SHADOW_LOG.stat().st_size
+    except OSError:
+        return False                      # no log yet: nothing to bound
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("djev shadow: cap check failed: %s", exc)
+        return False
+    if size + incoming_bytes <= cap:
+        return False
+    try:
+        return _rotate()
+    except Exception as exc:  # noqa: BLE001 — a failed rotation never costs a row
+        _bump("errors")
+        logger.debug("djev shadow: rotation failed, appending over the cap: %s", exc)
+        return False
+
+
 def _write(row: dict) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -315,8 +467,13 @@ def _write(row: dict) -> None:
             lost = _take_pending_drops()
             if lost:
                 row["dropped_at_shutdown"] = lost
+        line = json.dumps(row, default=str) + "\n"
+        # The cap is read here, per write, through `config()`: a value frozen at
+        # import would keep bounding (or stop bounding) the log at whatever
+        # `config.yaml` said when the process started.
+        _enforce_cap(len(line.encode("utf-8")))
         with SHADOW_LOG.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, default=str) + "\n")
+            fh.write(line)
         _bump("written")
     except Exception as exc:  # noqa: BLE001
         _bump("errors")
