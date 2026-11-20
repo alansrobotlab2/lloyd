@@ -5525,3 +5525,123 @@ def test_the_live_digests_carry_no_residue_the_write_path_could_have_dropped():
             if (shape := body_mod.footer_residue_shape(text)) is not None:
                 hits.append((i, text[:40], shape))
         assert hits == [], f"{rel}: residue still published: {hits}"
+
+
+# ── #4402 — the instrument flagged a rule the writer is forbidden to remove ───
+#
+# Two shipped-digest nodes went red on 2026-11-20 over one line: a 46-underscore
+# separator welded between two sentences of ONE body paragraph of the
+# `### Google's Neon is wild...` entry, published under the `## 2026-11-20` section
+# of `knowledge/ai-llms/youtube-digest.md` and sitting at line 5967 of that file.
+# It is not a leak the write path made. `_FOOTER_RESIDUE_WEAK` says a rule is residue
+# only in company: #1561's abstention lets `_drop_trailing_residue` take one only when
+# a shape that cannot be prose comes with it, and #2737 clause 2's leading walk drops
+# only `_FOOTER_RESIDUE_SELF_CONTAINED` shapes — this file's own node on that clause
+# calls a leading rule "section furniture, not a residue drop". A mid-body rule is
+# therefore published by settled ruling, so the read side was reporting a line no write
+# path is permitted to remove: a false alert, and an unfixable one, since the only
+# available repair was hand-deleting published bytes. The fix is in
+# `digest_structural_line`, driven by the weak set rather than `_RULE_LINE_RE`, so the
+# two sides read one measurement and neither node above needed editing. These two nodes
+# pin the arm's boundary: the first over the shipped shape table, the second over every
+# line the published digests actually carry.
+
+#: One line per shape in the shipped table, each verified to report the shape it is
+#: filed under. `For business inquiries: labs@ai-engineer.tv` is the email
+#: representative rather than a bare address because `_FOOTER_LABEL_RE` is tried first
+#: and claims a naked `x@y.ai` line as a `footer-label`.
+_SHAPE_REPRESENTATIVES: tuple = (
+    ("orphan-handle", "   / @aidotengineer"),
+    ("hashtag-run", "#dgxspark #nvidia #llm"),
+    ("tag-mention-line", "@granola_so #ad"),
+    ("footer-label", "My Links \U0001f517"),
+    ("footer-section-label", "MY RELATED VIDEOS:"),
+    ("footer-phrase", "\U0001f4f1LET'S CONNECT ON SOCIAL MEDIA"),
+    ("channel-greeting", "Welcome to my channel"),
+    ("email", "For business inquiries: labs@ai-engineer.tv"),
+    ("promo-heading", "\U0001f6d2 Gear Links \U0001f6d2"),
+    ("rule", "_" * 46),
+)
+
+
+def test_the_furniture_arm_skips_only_the_weak_shape_of_every_shape_the_writer_knows():
+    """#4402 clause 2, and the #2737 guard restated as a property of the table.
+
+    #2737's rule is that a skip list may never be wide enough to swallow a shape the
+    write path drops, so the check cannot be a spot check on the rule that moved: it
+    asks every shape the shipped table knows. Each representative must report its own
+    shape (a rep that quietly stopped matching turns this red instead of turning the
+    skip green), the reps must cover EXACTLY the names in `_FOOTER_RESIDUE_SHAPES` (a
+    shape added there fails this node until it is represented, which is the tripwire
+    that keeps the arm from being widened by omission), and `digest_structural_line`
+    must accept a representative if and only if its shape is in `_FOOTER_RESIDUE_WEAK`
+    — the set whose definition is "the writer will not drop this alone".
+
+    So `______` ×46, the line that made the shipped note read dirty, is furniture, and
+    the hashtag run, the label, the handle, the greeting, the email and the promo
+    heading beside it are not: every shape that could be an un-dropped leak stays as
+    visible to the instrument as #2509, #3121 and #3399 left it.
+    """
+    table_names = [name for name, _ in body_mod._FOOTER_RESIDUE_SHAPES]
+    assert [name for name, _ in _SHAPE_REPRESENTATIVES] == table_names, (
+        "the shape table changed and this node did not follow it: a new shape is "
+        "invisible to the furniture arm until it has a representative here")
+
+    for name, line in _SHAPE_REPRESENTATIVES:
+        reported = body_mod.footer_residue_shape(line)
+        assert reported == name, f"{line!r} reported {reported}, expected {name}"
+        assert body_mod.digest_structural_line(line) is (
+            name in body_mod._FOOTER_RESIDUE_WEAK), (
+            f"{name}: {line!r} — only a weak shape may be digest structure, because "
+            f"only a weak shape is one the writer refuses to drop on its own")
+
+    # The two spellings #2509 and #3121 added to `_RULE_LINE_RE` are furniture on the
+    # same arm as the underscores, so the arm cannot depend on one character class.
+    for other_rule in ("\u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014 \u2014",
+                       "=" * 46):
+        assert body_mod.footer_residue_shape(other_rule) == "rule", other_rule
+        assert body_mod.digest_structural_line(other_rule) is True, other_rule
+
+
+def test_the_furniture_arm_hid_nothing_but_rules_across_the_published_digests():
+    """#4402, measured over the corpus rather than over fixtures.
+
+    A new arm in a skip list is exactly the change #2737 was written for, so the claim
+    is checked against every line the shipped digests carry instead of asserted in
+    prose. A line counts here only if the new arm is what skips it: the prefixes
+    `write_item_to_vault` emits and `_MD_HEADING_RE` are subtracted, because those
+    arms already existed and one of them already has a pre-existing quirk this node is
+    not about — the `### Chapter 1 - Section 2 - Robotic arm structural part assembly`
+    heading in `knowledge/robotics/youtube-digest.md` is a `###` chapter heading
+    that `footer_residue_shape` reports as a `footer-label`, hidden by the heading arm,
+    which is a finding for the item rather than a thing the furniture arm touched.
+
+    Of what the new arm does skip, every shape must be weak, and the ai-llms divider
+    must actually be in the set: a node that reported an empty set would satisfy the
+    first assert and prove nothing, which is the escape hatch #3497 deleted.
+    """
+    import board_presence
+
+    prefixes = body_mod.DIGEST_STRUCTURAL_PREFIXES
+    skipped = []
+    for rel in ("knowledge/ai-llms/youtube-digest.md",
+                "knowledge/robotics/youtube-digest.md"):
+        lines = (board_presence.vault_root() / rel).read_text(
+            errors="replace").splitlines()
+        for i, ln in enumerate(lines, 1):
+            text = ln.strip()
+            if not text or text.startswith(prefixes):
+                continue
+            if body_mod._MD_HEADING_RE.match(text):
+                continue
+            shape = body_mod.footer_residue_shape(text)
+            if shape is not None and body_mod.digest_structural_line(text):
+                skipped.append((f"{rel}:{i}", text, shape))
+
+    assert {shape for _, _, shape in skipped} <= set(
+        body_mod._FOOTER_RESIDUE_WEAK), skipped
+    assert ("_" * 46, "rule") in [(text, shape) for _, text, shape in skipped], (
+        "the 46-underscore divider in the `### Google's Neon is wild...` entry under the "
+        "`## 2026-11-20` day section of knowledge/ai-llms/youtube-digest.md is the "
+        "line this arm exists for; if it is not here the arm did not land and the two "
+        "shipped-digest nodes are green for some other reason")

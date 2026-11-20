@@ -351,21 +351,43 @@ DIGEST_STRUCTURAL_PREFIXES: tuple[str, ...] = ("**Source:**", "[Link]", "---")
 #: What `digest_structural_line` accepts, in words, for a report that has to name
 #: its denominator's exclusions without importing a regular expression.
 DIGEST_STRUCTURAL_SKIPS: tuple[str, ...] = (
-    *DIGEST_STRUCTURAL_PREFIXES, "markdown heading")
+    *DIGEST_STRUCTURAL_PREFIXES, "markdown heading", "separator rule")
 
 
 def digest_structural_line(line: str) -> bool:
     """Is this digest line STRUCTURE the writer emits around a body (#2737)?
 
-    Blanks, the entry separator, the source/relevance line, the item's link, and a
-    real markdown heading. A tag or mention run is NOT structure — that is the
-    point of shipping this: `footer_residue_shape` calls such a line residue, and
-    until now the read side had a skip list wide enough to swallow it, so the
-    instrument certified as clean the exact shape the write path leaks.
+    Blanks, the entry separator, the source/relevance line, the item's link, a real
+    markdown heading, and a WEAK residue shape — a separator rule alone on its line
+    (#4402). A tag or mention run is NOT structure — that is the point of shipping
+    this: `footer_residue_shape` calls such a line residue, and until now the read
+    side had a skip list wide enough to swallow it, so the instrument certified as
+    clean the exact shape the write path leaks.
+
+    The weak-shape arm cannot widen that blind spot, because it is drawn from
+    `_FOOTER_RESIDUE_WEAK` and not from `_RULE_LINE_RE`: a weak shape is by that
+    set's own definition the one shape the WRITE path refuses to drop on its own.
+    #1561's abstention holds it in the tail walk (`_drop_trailing_residue` takes a
+    rule only when a shape that cannot be prose came with it) and #2737 clause 2 holds
+    it at the front, where only `_FOOTER_RESIDUE_SELF_CONTAINED` shapes may open a body
+    — a node in this very suite calls the leading case "section furniture, not a
+    residue drop". So a rule a description carries mid-paragraph is published BY
+    DESIGN, and the instrument was reporting it as the writer's failure: a 46-underscore
+    divider welded between two sentences of one 2026-11-20 description sat at
+    `knowledge/ai-llms/youtube-digest.md`, the `### Google's Neon is wild...` entry under
+    the `## 2026-11-20` day section, and every reading of the count — the
+    sweep and both shipped-digest nodes — called the published corpus dirty over a line
+    no write path is permitted to remove. Asking the shipped weak set instead of a
+    pattern is what keeps the two sides on one measurement: a shape joins the skip only
+    by joining the set that already instructs the writer to keep it, and the non-weak
+    shapes stay exactly as visible as #2737 left them.
     """
     text = line.strip()
-    return (not text or text.startswith(DIGEST_STRUCTURAL_PREFIXES)
-            or bool(_MD_HEADING_RE.match(text)))
+    if not text or text.startswith(DIGEST_STRUCTURAL_PREFIXES):
+        return True
+    if _MD_HEADING_RE.match(text):
+        return True
+    return footer_residue_shape(text) in _FOOTER_RESIDUE_WEAK
 
 
 def footer_residue_shape(line: str) -> "str | None":

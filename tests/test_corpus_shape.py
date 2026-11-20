@@ -879,10 +879,22 @@ def test_the_count_follows_the_shipped_callable_and_never_its_own_phrases(
     `flagged=2`, shapes `{rule, footer-label}`. The discriminator moved to where the
     phrases already live — `intel_pipeline.body.digest_structural_line` decides
     heading-or-tag and `DIGEST_STRUCTURAL_SKIPS` names the exclusions the report prints —
-    so four lines are checked now, three are residue, and the shape that arrives is
+    so the block's tag run reaches the classifier and the shape that arrives is
     `hashtag-run`: the one the count could not see while the writer could already drop
     it, which is exactly the #2011 inversion (an instrument spelling its own rule and
     disagreeing with the guard it reports on).
+
+    #4402 moved the two numbers this node reports, by one line each, and moved them on
+    the WRITER's side rather than this file's: the block's opening
+    `— — — — — — — — —` is a WEAK shape, the one shape the write path is forbidden to
+    drop on its own (#1561's abstention in the tail walk, #2737 clause 2's at the front),
+    so `digest_structural_line` now passes it as furniture and three lines are checked,
+    two are residue. That is the pair #4402 exists for: an instrument flagging a line no
+    write path could have removed is a false alert, not a caught leak. The #2011 guard
+    this node was written for is untouched — the tag run is still counted, and the shape
+    is still the callable's answer — and
+    `test_a_weak_shape_is_digest_furniture_and_every_droppable_shape_is_not` is the node
+    that pins WHICH line left the count, so the drop cannot quietly become a blind spot.
     """
     vault = _promo_vault(tmp_path, "A real paragraph about the box.\n\n"
                                    + FOOTER_BLOCK)
@@ -894,13 +906,15 @@ def test_the_count_follows_the_shipped_callable_and_never_its_own_phrases(
 
     rep = {"promo_residue": cs.promo_residue_sweep(vault, classify=spy)}
     per, flags, any_flagged = cs.promo_residue_lines(rep)
-    assert any_flagged and rep["promo_residue"]["total_flagged"] == 3, per
-    assert "lines_checked=4 flagged=3" in per[0], per[0]
+    assert any_flagged and rep["promo_residue"]["total_flagged"] == 2, per
+    assert "lines_checked=3 flagged=2" in per[0], per[0]
     assert "knowledge/ai-llms/youtube-digest.md" in per[0], per[0]
     assert "A real paragraph about the box." in cap, (
         "the callable was never asked about the prose line")
     shapes = {h["shape"] for h in rep["promo_residue"]["files"][0]["hits"]}
-    assert shapes == {"rule", "footer-label", "hashtag-run"}, shapes
+    assert shapes == {"footer-label", "hashtag-run"}, (
+        f"the rule line is furniture now (#4402); anything else missing here is the "
+        f"#2737 blind spot coming back: {shapes}")
     # The skip set the count ran on is the writer's, read off the shipped constant and
     # not re-spelled here. A bare `"#"` in this file would satisfy the count above and
     # re-open the blind spot in the same edit, so the assertions are on the NAME
@@ -909,17 +923,56 @@ def test_the_count_follows_the_shipped_callable_and_never_its_own_phrases(
     assert rep["promo_residue"]["skips"] == list(
         _body_mod().DIGEST_STRUCTURAL_SKIPS), rep["promo_residue"]["skips"]
     assert "markdown heading" in _body_mod().DIGEST_STRUCTURAL_SKIPS
+    assert "separator rule" in _body_mod().DIGEST_STRUCTURAL_SKIPS
     assert not any(s == "#" for s in _body_mod().DIGEST_STRUCTURAL_SKIPS), (
         "a bare hash prefix is what made a tag run read as a heading")
     assert _body_mod().digest_structural_line("#dgxspark") is False
     assert _body_mod().digest_structural_line("### Heading") is True
+    # The fixture's own opening line, named off the fixture rather than re-spelled:
+    # this is the #4402 line, and the one assert that says why THIS count lost a line
+    # while `#dgxspark` did not.
+    assert _body_mod().digest_structural_line(FOOTER_BLOCK.splitlines()[0]) is True
 
     nothing = cs.promo_residue_sweep(vault, classify=lambda line: None)
     assert nothing["total_flagged"] == 0, nothing
     everything = cs.promo_residue_sweep(vault, classify=lambda line: "whatever")
-    assert everything["total_flagged"] == 4, everything
+    assert everything["total_flagged"] == 3, everything
     assert cs.promo_residue_lines({"promo_residue": nothing})[2] is False
     assert cs.promo_residue_lines({"promo_residue": everything})[2] is True
+
+
+def test_a_separator_rule_welded_inside_a_body_is_furniture_a_tag_run_is_not(tmp_path):
+    """#4402, end to end through the sweep: the published shape that made the shipped
+    note read dirty now counts 0, and the shape a real leak is still 1.
+
+    The body is the 2026-11-20 entry's shape, not its text: two sentences of ONE
+    paragraph with a 46-underscore separator welded between them and no blank line on
+    either side. That position is why the write path never had a route to it — #2737's
+    leading walk drops only a self-contained shape at the FRONT and #1561's abstention
+    takes a rule only in a footer's company — so the instrument was alerting on a line
+    the writer was instructed to keep. `_promo_vault` wraps the body in exactly the bytes
+    `write_item_to_vault` emits around one, so the reading is the sweep's own and not a
+    walk spelled here. `lines_checked == 2` is the anti-vacuity half: the two prose
+    lines are still offered to the classifier, so a zero here is the rule leaving the
+    count and not the whole body leaving the denominator.
+
+    The seeded half is what keeps this from being a green nothing could turn red: put a
+    hashtag run where the rule sits and the same sweep must flag it, because a tag run is
+    a shape the writer CAN drop and #2737's whole ruling is that this skip set may never
+    swallow one.
+    """
+    divider = "_" * 46
+    body = ("I'm not affiliated with anyone here, nothing to buy.\n"
+            + divider + "\n"
+            "Google is back, and you can see it in the release dates.")
+    rep = cs.promo_residue_sweep(_promo_vault(tmp_path, body))
+    assert rep["total_flagged"] == 0, rep["files"][0]["hits"]
+    assert rep["files"][0]["lines_checked"] == 2, rep["files"][0]
+
+    leaked = cs.promo_residue_sweep(
+        _promo_vault(tmp_path / "leak", body.replace(divider, "#ai #aitools")))
+    assert leaked["total_flagged"] == 1, leaked["files"][0]["hits"]
+    assert leaked["files"][0]["hits"][0]["shape"] == "hashtag-run", leaked["files"][0]
 
 
 # #2509 clauses 1 and 2 (the shipped digest: residue gone, every entry still
