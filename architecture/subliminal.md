@@ -291,9 +291,10 @@ facts@6ms vault@140ms` shows when each one arrived.
   what about the other one?" reduces the skills query to the token `other` while
   the fuzzy entity matcher answers `one` with `Checkmate-in-One` and `Capital One`.
   It is **off** in `config.yaml` (`followup.focus_legs: false`) and its A/B is
-  unrecorded as of 2026-11-20 — the decision sits with #4296, and the command
-  `config.yaml:1813` names for it (`--arms`) is not the flag the runner takes
-  (`--arm`, #4394): `eval/run_prefetch_followup_eval.py --arm raw,focus`
+  unrecorded as of 2026-11-20 — the decision sits with #4296, and the command the
+  `followup.focus_legs` comment block in `config.yaml` names for it (`--arms`) is
+  not the flag the runner takes (`--arm`, #4394):
+  `eval/run_prefetch_followup_eval.py --arm raw,focus`
   over `eval/prefetch_followup_queries.yaml` decides, and nothing has written the
   promised `eval/measurements/prefetch-followup-<date>.md`. `_search_recent_sessions`
   and `_search_backlog_refs` never take the enriched query — a temporal regex and a
@@ -326,8 +327,9 @@ facts@6ms vault@140ms` shows when each one arrived.
   2026-11-10): the shipped value is `both`, and `apply_architecture_collection`
   applies that to `agent_mcp.vault.VAULT_SEGMENTS` — the explicit tools' fan-out,
   twelve names on this host including `lloyd-architecture` (this checkout's live
-  `architecture/*.md`). `prefetch.VAULT_COLLECTIONS` follows only the `repo` arm
-  (`app/prefetch.py:234-235`), so under `both` the ninth name above is still the
+  `architecture/*.md`). Prefetch's own list follows only the `repo` arm:
+  `VAULT_COLLECTIONS` at `app/prefetch.py:230` is rewritten only under that
+  condition, so under `both` the ninth name above is still the
   vault's `architecture` collection — `~/obsidian/architecture`, a 36-file clone of
   these docs that is refreshed only in patches (its `subliminal.md` is a
   9,791-byte file dated 2026-08-23 against this page's 1,080 lines) — and prefetch
@@ -758,9 +760,10 @@ Background tasks fired via `asyncio.ensure_future` after a turn completes
 1. Skips already-`captured` sessions — but **only for the summary half.** Since
    #1159 fact extraction has its own per-session `fact_watermark` and is *not*
    suppressed by `captured`; a summary is written once, extraction follows the
-   turns that arrive after it. The gate is `FACT_EXTRACT_MIN_NEW_USER_MSGS = 3`
-   (`app/post_capture.py:323`) — the same threshold the old
-   `_MIN_TURNS_FOR_EXTRACTION` carried, but applied to the human turns **past the
+   turns that arrive after it. The gate is 3 human turns past the watermark —
+   `FACT_EXTRACT_MIN_NEW_USER_MSGS` at `app/post_capture.py:323` — the same
+   threshold the old `_MIN_TURNS_FOR_EXTRACTION` carried, but applied to the human
+   turns **past the
    watermark** rather than to the session total, which is what makes it an event
    gate instead of a per-turn one — and since #1647 it counts human turns
    (`_human_user_messages` / `_machine_user_row`, which exclude `[System: Background task ...`
