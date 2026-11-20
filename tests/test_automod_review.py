@@ -234,9 +234,11 @@ def test_a_met_without_evidence_is_downgraded_in_python(wt, bad, tests_passed):
 
 # ── the three shapes a `met` may stand on besides a changed test ─────────────
 
-def _met(wt, *, tests_passed=True, changed_paths=("app/x.py", "tests/test_x.py"), **clause):
+def _met(wt, *, tests_passed=True, changed_paths=("app/x.py", "tests/test_x.py"),
+         clause_texts=(), **clause):
     parsed = RV.parse_review(_obj(**clause), worktree=wt, changed_tests=["tests/test_x.py"],
-                             n_clauses=1, tests_passed=tests_passed, changed_paths=list(changed_paths))
+                             n_clauses=1, tests_passed=tests_passed, changed_paths=list(changed_paths),
+                             clause_texts=list(clause_texts))
     return parsed["clauses"][0]
 
 
@@ -272,19 +274,23 @@ def harness_wt(wt):
     return wt
 
 
-def _harness_met(wt, *, tests_passed=True, **clause):
+def _harness_met(wt, *, tests_passed=True, clause_texts=(), **clause):
     changed = ["app/harness/loop.py", "app/harness/tests/test_x.py"]
     parsed = RV.parse_review(_obj(**clause), worktree=wt, changed_tests=changed[1:], n_clauses=1,
-                             tests_passed=tests_passed, changed_paths=changed)
+                             tests_passed=tests_passed, changed_paths=changed,
+                             clause_texts=list(clause_texts))
     return parsed, parsed["clauses"][0]
 
 
 def test_a_met_pinned_in_a_changed_harness_test_stands(harness_wt):
     """SM_20260921_030016: all five clauses graded met, four downgraded
-    because their tests lived in app/harness/tests/."""
+    because their tests lived in app/harness/tests/. And nothing was waived to get
+    there (#4420 clause 3): the changed-file branch needs no waiver, so `accepted`
+    is empty — the branch the absence hold lives beside is never reached."""
     parsed, c = _harness_met(harness_wt, test_node_id="app/harness/tests/test_x.py::test_y",
                              how_verified="read", tests_passed=False)
     assert c["verdict"] == "met" and "downgraded" not in c and parsed["downgraded"] == []
+    assert "accepted" not in c
 
 
 def test_an_unchanged_harness_node_needs_a_run_and_a_green_rung(harness_wt):
@@ -307,6 +313,125 @@ def test_an_existing_test_outside_the_diff_stands_when_it_was_run(wt):
     c = _met(wt, test_node_id="tests/test_old.py::test_before", how_verified="ran")
     assert c["verdict"] == "met" and "existing test" in c["accepted"][0]
     assert _met(wt, test_node_id="tests/test_old.py", how_verified="ran")["verdict"] == "met"
+
+
+# ── #4420: a clause that a test file is UNCHANGED is pinned by the diff itself ──
+#
+# SM_20261120_102303 was a doc-only round whose clause 5 read "The diff touches no
+# test file: `tests/test_architecture_coverage_doc_claims.py` is byte-unchanged" and
+# cited a node in that file with `how_verified: read` — the only honest evidence for
+# a claim whose whole subject is `git diff --name-only`. Both review attempts read it
+# correctly and the rail still downgraded it, because no test node can pin the ABSENCE
+# of an edit. These five pin the hold and the four edges that keep it from becoming a
+# general licence to `read`.
+
+UNCHANGED_CLAUSE = ("The diff touches no test file: `tests/test_old.py` is byte-unchanged "
+                    "(`NAMED_SYMBOL_UNNAMED_CEILING` stays 187, no `WITNESS_EXEMPTIONS` entry)")
+POSITIVE_CLAUSE = ("The node rail keeps its refusal, so the loop retries a refused turn "
+                   "twice — see `tests/test_old.py`")
+DOC_ONLY_CLAUSE = "`architecture/djev.md` is byte-unchanged by this diff"
+ABSENCE_WAIVER = ("absence claim: `tests/test_old.py` is outside the diff and the graded "
+                  "contract says it is unchanged, so the diff itself is the measurement")
+
+
+def test_a_clause_that_a_test_file_is_unchanged_is_pinned_by_the_diff_itself(wt):
+    """#4420 clause 1: `read` is not nothing measured when the claim is about the
+    file list, and the file list is the gate's own measurement."""
+    c = _met(wt, test_node_id="tests/test_old.py::test_before", how_verified="read",
+             clause_texts=[UNCHANGED_CLAUSE])
+    assert c["verdict"] == "met" and "downgraded" not in c
+    # The whole sentence: a waiver that stopped naming the file it held, or the
+    # reason it held, is a decision nobody reading gate.json could audit.
+    assert c["accepted"] == [ABSENCE_WAIVER], c
+    # The rail answers the same way asked directly, with no parse_review between: the
+    # contract reaches it through the `clause_texts` seam `gate.rung_review` already
+    # passes (gate.py: `clause_texts=contract["clauses"]`), so this round adds no seam.
+    holds, reason = RV._node_rail("tests/test_old.py::test_before", worktree=wt,
+                                 changed={"tests/test_x.py"}, how="read",
+                                 tests_passed=True, clause_texts=[UNCHANGED_CLAUSE])
+    assert holds and reason == ABSENCE_WAIVER, reason
+    # And a run that was actually run keeps reporting the run, not the absence: the
+    # stronger evidence is the one that is recorded.
+    holds, reason = RV._node_rail("tests/test_old.py::test_before", worktree=wt,
+                                 changed={"tests/test_x.py"}, how="ran",
+                                 tests_passed=True, clause_texts=[UNCHANGED_CLAUSE])
+    assert holds and "outside the diff ran and the tests rung passed" in reason, reason
+
+
+def test_a_read_citation_of_an_untouched_file_for_a_positive_claim_still_refuses(wt):
+    """#4420 clause 2: the carve-out is for an absence claim and nothing else. A
+    positive behavioural claim read off a file the diff did not change is still
+    nothing measured, and `test_an_unchanged_harness_node_needs_a_run_and_a_green_rung`
+    and `test_a_suite_level_run_the_grader_only_read_is_partial` pin that this did not
+    move for the shapes already in the rail."""
+    for clause_texts in ([POSITIVE_CLAUSE], [DOC_ONLY_CLAUSE]):
+        c = _met(wt, test_node_id="tests/test_old.py::test_before", how_verified="read",
+                 clause_texts=clause_texts)
+        assert c["verdict"] == "partial", clause_texts
+        assert c["downgraded"] == ["test_node_id not in a test file this diff changed"], clause_texts
+        assert "accepted" not in c
+    # Two more ways the marker alone must not carry it: no contract at all (a caller
+    # that passes nothing gets today's verdict unchanged), and an UNRUN tests rung —
+    # the diff shape says nothing about whether the cited test is green.
+    assert _met(wt, test_node_id="tests/test_old.py::test_before",
+                how_verified="read")["verdict"] == "partial"
+    assert _met(wt, tests_passed=False, test_node_id="tests/test_old.py::test_before",
+                how_verified="read", clause_texts=[UNCHANGED_CLAUSE])["verdict"] == "partial"
+
+
+def test_a_changed_test_file_never_takes_the_absence_hold(wt, harness_wt):
+    """#4420 clause 3: the hold fires only on the far side of the changed-file
+    branch. A node in a file the diff DID change holds exactly as it always did and
+    records no absence waiver — two waivers in one `accepted` list is a clause
+    pinned by nothing."""
+    c = _met(wt, test_node_id="tests/test_x.py::test_it", how_verified="read",
+             clause_texts=["`tests/test_x.py` is byte-unchanged"])
+    assert c["verdict"] == "met" and "accepted" not in c, c
+    # The same shape under the tree's other testpath (#1322), where the rail's
+    # `changed` set is the harness file rather than a root one.
+    _, c = _harness_met(harness_wt, test_node_id="app/harness/tests/test_x.py::test_y",
+                        how_verified="read",
+                        clause_texts=["`app/harness/tests/test_x.py` is byte-unchanged"])
+    assert c["verdict"] == "met" and "accepted" not in c, c
+
+
+def test_an_unchanged_file_clause_citing_a_red_test_file_keeps_the_pre_existing_refusal(wt):
+    """#4420 clause 4: the veto that a file already red at base proves nothing sits
+    ABOVE the hold. `git diff --name-only` says an untouched file was not edited no
+    matter whether its tests pass, so the diff shape cannot rescue a clause resting
+    on a failure this diff never touched."""
+    parsed = RV.parse_review(_obj(test_node_id="tests/test_old.py::test_before",
+                                  how_verified="read"), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1,
+                             tests_passed=True, changed_paths=["app/x.py", "tests/test_x.py"],
+                             pre_existing_failures={"tests/test_old.py::test_before"},
+                             clause_texts=[UNCHANGED_CLAUSE])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial"
+    assert c["downgraded"] == ["test_node_id cites a test that fails at base too "
+                               "(pre-existing, not this diff's)"], c
+    assert "accepted" not in c
+    holds, reason = RV._node_rail("tests/test_old.py::test_before", worktree=wt,
+                                 changed={"tests/test_x.py"}, how="read", tests_passed=True,
+                                 pre_existing={"tests/test_old.py::test_before"},
+                                 clause_texts=[UNCHANGED_CLAUSE])
+    assert (holds, reason) == (False, "")
+
+
+def test_the_absence_hold_does_not_also_waive_a_missing_evidence_path(wt):
+    """#4420 clause 5: `node_holds and not reason` is what gates the
+    evidence-of-absence path waiver, and the hold returns a reason — so a clause
+    that holds on the diff shape and cites no evidence path is still downgraded for
+    the path. Two waivers pin nothing."""
+    c = _met(wt, test_node_id="tests/test_old.py::test_before", how_verified="read",
+             evidence_path="", clause_texts=[UNCHANGED_CLAUSE])
+    assert c["verdict"] == "partial"
+    assert c["downgraded"] == ["evidence_path missing or not on disk"], c
+    assert "accepted" not in c
+    # The same clause WITH a real path keeps its `met`, so what is being refused here
+    # is the missing path and not the hold.
+    assert _met(wt, test_node_id="tests/test_old.py::test_before", how_verified="read",
+                clause_texts=[UNCHANGED_CLAUSE])["verdict"] == "met"
 
 
 # ── a test that fails at base too is not evidence for this diff ──────────────

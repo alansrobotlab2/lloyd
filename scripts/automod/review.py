@@ -3431,8 +3431,41 @@ def _cites_pre_existing(node: str, pre_existing) -> bool:
     return cited in pre or file_part in pre or file_part in files
 
 
+#: The words a contract uses to say that a file received no edit. Deliberately a
+#: closed list of surface forms rather than a notion of "sounds like an absence
+#: claim": the rule below fires only beside a named file, so what is being matched
+#: is the clause's own claim about THAT file, and an open-ended match would let a
+#: positive behavioural clause borrow the waiver by proximity ("the untouched file
+#: still passes").
+_ABSENCE_CLAIM_MARKERS = ("unchanged", "byte-identical", "byte identical", "unmodified",
+                          "not changed", "has not changed", "does not change",
+                          "touches no", "untouched", "not edited", "no edit")
+
+
+def _clause_claims_file_unchanged(node_path: str, clause_texts) -> bool:
+    """Whether the graded contract contains a clause that says THAT file is unchanged.
+
+    `clause_texts` is the whole contract's clause list — the same list `gate.rung_review`
+    hands the sha rail — so this is a search over the input the grader was shown, not over
+    what it wrote. Two conditions, both required: the clause names this exact file (its path
+    or its bare filename), and the clause carries one of
+    :data:`_ABSENCE_CLAIM_MARKERS`. A clause about a different file cannot hold a citation of
+    this one, and a clause about this file that claims behaviour ("the file's tests still
+    pass") carries no marker and is judged by the ordinary rail.
+    """
+    if not node_path or not clause_texts:
+        return False
+    low, name = node_path.lower(), node_path.rsplit("/", 1)[-1].lower()
+    for text in clause_texts:
+        t = str(text).lower()
+        if (low not in t and name not in t) or not any(m in t for m in _ABSENCE_CLAIM_MARKERS):
+            continue
+        return True
+    return False
+
+
 def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
-               tests_passed: bool, pre_existing=frozenset()) -> tuple[bool, str]:
+               tests_passed: bool, pre_existing=frozenset(), clause_texts=()) -> tuple[bool, str]:
     """`(holds, accepted_reason)` for a `met` clause's `test_node_id`.
 
     A node in a test file this diff changed holds, as it always has. Two more
@@ -3460,11 +3493,16 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
     The path must be under one of `pytest.ini`'s testpaths and exist: the
     tests rung runs bare `pytest`, so those are what it ran — root `tests/`
     and `app/harness/tests/` alike (#1322). `read` is not enough for either —
-    nothing was measured.
+    nothing was measured — with one exception, and it is a claim about the diff
+    rather than about behaviour: a clause whose own contract text says the cited
+    file is unchanged is answered by the diff shape itself, because no test node
+    can pin the absence of an edit (#4420, `_clause_claims_file_unchanged`). It is
+    a hold like the others and is recorded under `accepted`.
 
     A node in `pre_existing` — or in a file that holds one — never holds,
-    whatever `how` says: it fails at base with the diff absent, and the tests
-    rung passed over it, not through it.
+    whatever `how` says, and that veto sits above every hold here including
+    #4420's: it fails at base with the diff absent, and the tests rung passed
+    over it, not through it.
     """
     if not node:
         return False, ""
@@ -3491,6 +3529,23 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
     if not (worktree / node_path).exists():
         return False, ""
     if how != "ran" or not tests_passed:
+        # #4420: one shape where the diff itself is the measurement. A clause can
+        # assert that a test file was NOT edited, and no test node pins the absence
+        # of an edit — the file list the gate computed from
+        # `git diff --name-only <base>..<head>` is the only measurement that exists
+        # for it, and reaching this line means that list does not name the file. The
+        # clause's own words have to ask for this (`_clause_claims_file_unchanged`),
+        # so a positive behavioural claim read off an untouched file still refuses
+        # below exactly as it always did: this is a hold for an honest `read` of an
+        # absence claim, not a widening of `read`. It stands beside a green `tests`
+        # rung like the two holds above it, so no waiver is ever recorded over a red
+        # suite. SM_20261120_102303 clause 5 is the round that wrote the only true
+        # sentence it could and was downgraded twice for it, aborting a doc-only
+        # change with the doc fix unlanded.
+        if tests_passed and _clause_claims_file_unchanged(node_path, clause_texts):
+            return True, (f"absence claim: `{node_path}` is outside the diff and the "
+                          "graded contract says it is unchanged, so the diff itself "
+                          "is the measurement")
         return False, ""
     if "::" not in node:
         return True, f"suite-level run `{node[:120]}` ran and the tests rung passed"
@@ -3551,13 +3606,17 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     base too: a `met` whose node is one of them, or sits in a file with one, is
     downgraded to `partial` (`_cites_pre_existing`).
 
-    `clause_texts` is the graded contract's own clause texts, and it reaches only
-    the sha rail, as the third way a cited commit can be corroborated
+    `clause_texts` is the graded contract's own clause texts. It reached only the
+    sha rail at first, as the third way a cited commit can be corroborated
     (`_clause_stated_tokens`): a grader quoting a literal its clause named is
-    quoting input it was handed, and #2567 is the round that says so. It is the
+    quoting input it was handed, and #2567 is the round that says so. Since #4420 it
+    reaches the node rail too, where a clause saying a test file is unchanged is what
+    lets a `read` citation of that file stand (`_clause_claims_file_unchanged`). It is the
     whole contract's clause list, not the one clause this entry answers — a note
     freely quotes a different clause than the one it is filed under, and a token the
     grader was plainly handed is corroborated wherever in the contract it came from.
+    The node rail is the one place that reads it per clause instead of as one corpus,
+    because there the claim being judged belongs to a single clause.
     Default `()`: a caller that passes nothing gets today's verdict unchanged, which
     is why `review_tools.grade_commit` and `grade_vault` need no edit to stay as
     they were.
@@ -3735,7 +3794,8 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             if require_tests:
                 node_holds, reason = _node_rail(node, worktree=worktree, changed=changed,
                                                 how=how, tests_passed=tests_passed,
-                                                pre_existing=pre_existing_failures)
+                                                pre_existing=pre_existing_failures,
+                                                clause_texts=clause_texts)
                 # The same resolution the rail just applied, so a bare name that
                 # resolves into a file holding a pre-existing failure is reported as
                 # resting on that failure and not as a node nobody can find — the two
