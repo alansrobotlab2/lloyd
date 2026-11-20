@@ -1452,13 +1452,20 @@ stops being executable is caught in the suite rather than at a reader's keyboard
   dispatch is still off**, so depth 1 caps nesting and not breadth (#4434); and §1's
   premise that the unattended paths have no harness safety hook, retired by #4129
   (#4436). Added the `POST /browser/input` row §2's route table had never carried
-  (#4435), and fixed one drifted line citation (`browser.py:1015` → `:1075`). The
+  (#4435), and fixed one drifted line citation in `agent_mcp/browser.py` — the
+  SCREENSHOTS_DIR.mkdir anchor §5 names had moved from 1015 to 1075. The
   rest re-derived clean: the dispatch order and `_meta` keys, the 660 s + 30 s bound
   and the five declared timeouts, the 50k/2k spill, `TOOL_NAME_MAX` 64, `ttl_ms`
   60 000, the subagent store bounds, the depth-cap enforcement points, the
   `REPEAT_EXPECTED` non-check, `DX` unread-on-purpose, and every §11 line citation
-  (`OPEN_PATHS:95`, `AUTH_ERROR_CODE:77`, `:140`, `main.py:1171`,
-  `thunderbird.py:55/378`, `paths.py:7`, `agent-services/.gitignore:72`).
-  `tests/test_tools_md_inventory_parity.py`, `test_tools_md_regeneration_claims.py`,
-  `test_task_depth_cap.py` and `test_architecture_coverage_doc_claims.py` all pass
-  against the edited page (351 tests).
+  (`OPEN_PATHS:95`, `AUTH_ERROR_CODE:77`, `:140`, `agent_mcp/main.py` and
+  `agent_mcp/thunderbird.py` at 55 and 378, `app/paths.py`, and
+  `agent-services/.gitignore:72` — the numbers those pointers assert are §11's, and
+  this log re-derives them there rather than quoting them twice).
+  `tests/test_tools_md_inventory_parity.py`, `test_tools_md_regeneration_claims.py`
+  and `test_task_depth_cap.py` pass against the edited page. The same claim for
+  `test_architecture_coverage_doc_claims.py` did not hold, and this log is why: three
+  of the spans listed above were written as a bare basename plus a line number, the
+  spelling #3292 refuses because no rail can read it, and a review log quoting a
+  citation is that citation — so its own sweep node reported `tools.md` dirty until
+  #4437 wrote them as pointers instead.
