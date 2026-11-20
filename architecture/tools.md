@@ -17,12 +17,12 @@ relations:
   - autonomy/38-nightly-reflection-signals.md
   - architecture/autonomy-jobs.md
 tags: [architecture, tools, mcp]
-summary: The lloyd-mcp aggregator — 147 tools across 29 modules behind one
+summary: The lloyd-mcp aggregator — 158 tools across 29 modules behind one
   Server("lloyd") on :8500/mcp, the dispatch path every call takes, and every
   tool with its properties.
 type: reference
 status: implemented
-date: 2026-10-21
+date: 2026-11-20
 ---
 
 # MCP tools
@@ -34,13 +34,14 @@ and no gateway. The in-process harness (`app/harness/`) is the client that
 dispatches tools. The Tools page's discovery (`app/mcp_discovery.py`) opens its
 own session to list them, and the backend reads the side routes in §2.
 
-**147 tools, 29 modules**, from an offline `list_tools()` on 2026-09-27 (107 in
-the tree plus the Thunderbird bridge's 40), which the live `:8500/health` agrees
-with once `Scratchpad` is listed — it read 146/28 the morning before. The model is
+**158 tools, 29 modules**, measured 2026-11-20 on `:8500/health` and a
+token-bearing `tools/list`, which agree exactly (109 in the tree plus the
+Thunderbird bridge's 49 — nine of those 49 are still served under the bridge's own
+`tb_*` names, unmapped and unclassified (§6, #4433)). The model is
 shown fewer: `_BackgroundTaskDrain` is never advertised, `recall_observation` is
 offered only to a turn whose relief writes observation stubs (#1481), and the four
-`discord_*` tools sit in `disabled_tools`, so a chat turn sees 141 on config.yaml
-alone, and 126 on this box, where the live override disables fifteen mail verbs
+`discord_*` tools sit in `disabled_tools`, so a chat turn sees 152 on config.yaml
+alone, and 137 on this box, where the live override disables fifteen mail verbs
 more (§8). Twelve were retired on
 2026-09-23 as duplicates of, or subsumed by, a tool that stays: `fact_check`
 (`fact_resolve`), `fact_profile` (`fact_get`, which took its cap and `query`
@@ -93,9 +94,13 @@ Two properties of this layout drive most of what follows:
   runs in the harness, which knows the turn. What must hold *whoever calls*
   (the bench sandbox, the destructive-command check, the no-session refusal,
   the effect ledger) runs in `call_tool`, the one function every call passes
-  through. `autonomy.run_task` and `run_prompt_on_primary` never installed the
-  harness safety hook. The aggregator's copy of that check is the one that
-  cannot be forgotten.
+  through. This used to be justified by `autonomy.run_task` and
+  `run_prompt_on_primary` having no harness safety hook at all; since #4129 every
+  path installs it (`app/autonomy.py`, `workers/sources/_common.py`, and a `Task`
+  child all call `install_default_safety_hook`). The aggregator's copy is therefore
+  not the only floor on those paths — it is the one that holds **whatever** the
+  caller's registry looks like, including a script that built no registry at all
+  (#4436 asks what the two screens now mean for one worker turn).
 - **Everything the aggregator knows about a call arrives in `_meta`**, never
   in `arguments`. The SDK validates `arguments` against each tool's
   `inputSchema` before the handler runs, and the repetition guard and the
@@ -150,6 +155,7 @@ Two properties of this layout drive most of what follows:
 | `GET /state` | Mission Control's agent panel: `subagents`, `background_tasks` (`active` and `recent`), `tsc`, `qmd`, `changes`, `tools`, `tool_sandbox` (the bench runner refuses to start unless this reads enforced), `protected_path_sandbox` (`enforcing`, or `fallback` when Bash is running without the read-only binds — #2109) |
 | `POST /loaded` | which of the given paths this process has imported. The promoter asks both processes before a landing; a commit neither has loaded needs no restart (`app/loaded_paths.py`) |
 | `POST /browser/navigate` | the Browser tab's URL bar. A route and not a tool, because the user typing a URL is not the agent calling something |
+| `POST /browser/input` | the same tab's pointer and keyboard input into the live Playwright session (`{kind, …}`; `agent_mcp/main.py`, `browser_input`). Route for the same reason as the row above, and credential-guarded like it — `OPEN_PATHS` is `/health` alone — but it bypasses every harness gate by design, which §2's other rows each say and this one should too (#4435) |
 | `GET /changes` | what a turn wrote (`?session=&turn=`), from the change ledger |
 | `POST /changes/revert` | undo a turn's writes per file, refusing by name any file that moved since |
 | `POST /subagents/{task_id}/{verb}` | steer or cancel one in-flight `Task` by id (§Subagents). Credential-guarded. The backend's own `/api/subagents/...` route is a thin proxy onto this, and `Task` refuses to spawn a child the caller cannot steer (§9) |
@@ -366,7 +372,7 @@ correlate.
 
 Each tool carries MCP `ToolAnnotations`, built from one central table in
 `agent_mcp/annotations.py` rather than on each `Tool(...)`. The classification
-is security-relevant and easier to review as one ordered file than as 147
+is security-relevant and easier to review as one ordered file than as 158
 constructor calls. The sets are explicit rather than pattern-matched: a regex
 over names gets `email_apply_filters` and `autonomy_get_task` wrong in
 opposite directions. `annotate()` is a default, not an override. A module that
@@ -394,7 +400,7 @@ id), not idempotent (never re-sent), and side-effecting (ledgered).
 | Callable in a bench/eval session | RO (Bash only inside bwrap, never in background) | the `READ_ONLY` set | `_tool_sandbox.refusal` |
 | Callable with no session id | RO | the `READ_ONLY` set | `main.call_tool` |
 | Re-sent after a transport failure | `readOnlyHint` or `idempotentHint` | the annotation, as discovered | `MCPPool._retry_safe` |
-| May overlap in one iteration | every call in the batch `readOnlyHint` | the annotation, as discovered | `loop.py` parallel dispatch (**ships off**) |
+| May overlap in one iteration | every call in the batch `readOnlyHint`, **or** the batch is nothing but fresh `Task` calls to a `parallel_safe` profile (P8) | the annotation, as discovered, plus `subagents.<type>.parallel_safe` | `loop.py` `_batch_is_read_only`/`_is_task_fanout`. General dispatch (`harness.parallel_tool_calls.enabled`) **ships off**; the P8 fan-out arm **ships on** — `config.yaml` sets `parallel_safe: true` on the `read-only` profile today, so a batch of those `Task` calls overlaps at `max_concurrency` 4 (#4434) |
 | Effect-ledgered | FX | the sets | `_tool_effects.claim` |
 | Badged destructive | DX | the annotation | nothing reads it today: carried on the wire only |
 
@@ -465,7 +471,7 @@ Pinned by `tests/test_autonomy_config_write.py`, `tests/test_tool_sandbox.py`,
 `tests/test_memory_improvement.py`. One name in the class is still open by
 decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`agent_mcp/annotations.py:84`)
 and its handler `mkdir`s the screenshot directory and writes a PNG on every call
-(`agent_mcp/browser.py:1015`). It is a derived artifact, like the code graph's cache
+(`agent_mcp/browser.py`, `SCREENSHOTS_DIR.mkdir` at :1075). It is a derived artifact, like the code graph's cache
 `annotations.py` explicitly justifies a few lines above — but that comment covers
 only `graph_*`, and `_retry_safe` re-sends it, so a dropped transport leaves two
 PNGs. Low severity: no vault state, no authority, and the duplicate is
@@ -507,7 +513,7 @@ self-evidently a file with a fresh timestamp.
 | `automod` | 10 | a thin surface over `scripts/automod/`. There is no `automod_write_code`: a round is a worktree path plus ordinary Edit/Write/Bash. While `automod.enabled` is false every tool refuses except `automod_status` and `automod_abort` ([[automod]]) |
 | `skills` | 2 | the skill library ([[skills]]) |
 | `http_tools` | 3 | web search, fetch and raw requests (§9) |
-| `thunderbird` | 40 | mail (26), calendar (6), to-dos (3), contacts (5), through a Node bridge over stdio. Zero tools, and still `ok`, when Thunderbird is not running. The proxy rewrites the bridge's prose, never its schema structure: bridge function names become Lloyd's, and repeated or long parameter text is replaced (`PARAM_DESCRIPTION_OVERRIDES`) |
+| `thunderbird` | 49 | mail (34), calendar (7), to-dos (3), contacts (5), through a Node bridge over stdio. Zero tools, and still `ok`, when Thunderbird is not running. The proxy rewrites the bridge's prose, never its schema structure: bridge function names become Lloyd's, and repeated or long parameter text is replaced (`PARAM_DESCRIPTION_OVERRIDES`) — **for the 40 names in `TOOL_NAME_MAP` only.** Nine have arrived since and are passed through under the bridge's own camelCase names (`tb_getMessageHeaders` … `tb_dryRunCompose`), so neither the rename nor the description rewrite reaches them, and none is in an annotations table: all nine read as FX, five of them are pure reads, and `tb_deleteVirtualFolder` destroys a view without a `DX` mark (#4433) |
 
 ### Every tool
 
@@ -772,7 +778,10 @@ re-implements the caps.
 | `http_fetch` | RO OW | `url` | Fetch a public page (or PDF) as markdown or text. GET only; private hosts refused |
 | `http_request` | OW RX | `method`, `url` | Raw request, any verb, headers and body. Private hosts refused except loopback |
 
-#### `thunderbird` (40)
+#### `thunderbird` (49)
+
+The first 40 are the names `TOOL_NAME_MAP` gives Lloyd. The last nine are the bridge's
+own names, passed through unmapped, and carry no classification at all (#4433).
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
@@ -816,6 +825,15 @@ re-implements the caps.
 | `email_reorder_filters` | OW FX | `accountId`, `fromIndex`, `toIndex` | Move a filter in the run order |
 | `email_apply_filters` | OW FX | `accountId`, `folderPath` | Run filters over a folder |
 | `email_account_access` | RO OW | — | Which accounts the bridge may touch |
+| `tb_getMessageHeaders` | FX | `messageId`, `folderPath` | One message's header fields only — no body, no MIME parse. A read, unclassified, so it is effect-ledgered in a worker scope and a re-read inside that scope replays the first answer |
+| `tb_batchGetMessageHeaders` | FX | `messageIds`, `folderPath` | Headers for up to 200 messages in one folder, in one round trip; the point is to avoid N `email_read` calls. Same unclassified-read consequence |
+| `tb_searchAttachments` | FX | — | Find messages by attachment filename or Content-Type, from the local snapshot only; never decrypts |
+| `tb_refreshFolder` | FX | `folderPath` | Ask one IMAP/Exchange/Owl folder to sync now; reports before/after counts and `netMessageDelta` |
+| `tb_refreshCalendar` | FX | — | Refresh one calendar, or all enabled refreshable ones, through its provider |
+| `tb_createVirtualFolder` | FX | `name`, `parentFolderPath`, `searchFolderPaths`, `conditions` | Create a saved search (a live view over several folders; nothing is moved) |
+| `tb_listVirtualFolders` | FX | — | The saved searches with their scope and conditions. A read, unclassified |
+| `tb_deleteVirtualFolder` | FX | `folderPath` | Remove a saved-search view, keeping the messages. Destroys state and is not `DX`-marked, unlike `email_delete_folder` |
+| `tb_dryRunCompose` | FX | `to`, `subject`, `body` | Preflight an `email_send`: recipient counts and attachment checks, no delivery. A read, unclassified |
 
 ---
 
@@ -862,8 +880,10 @@ comparison against a real box's two files.
 - Tool level: `mcp_servers.<name>.disabled_tools: [bare_tool_name, ...]`.
   In config.yaml today: the four `discord_*` tools. The live override on this
   box carries fifteen more — the Thunderbird mail mutators, `email_delete` and
-  `email_empty_trash` among them — which is why a chat turn resolves to 126
-  tools here against the 141 config.yaml implies (measured 2026-10-21), and why
+  `email_empty_trash` among them — which is why a chat turn resolves to 137
+  tools here against the 152 config.yaml implies (measured 2026-11-20 against the
+  158 of the intro: minus the internal drain, minus the conditional
+  `recall_observation`, minus the four `discord_*`, minus the fifteen), and why
   a rebuild boots mail mutation this machine has switched off (#3128).
 
 config.yaml holds the hand-edited defaults and is read-only at boot. The Tools
@@ -1106,9 +1126,14 @@ primary whose parent sits blocked on the tool call, so its 100-200k prefix has
 to survive in the engine's free KV pool meanwhile (the cold re-prefill failure
 of `vllm.md`), its `Task` call budget has to nest inside its parent's, and —
 since nothing outside the process can stop a wedged child (below) — each level
-multiplies the un-killable work a single stuck call can hold. At depth 1, and
-with `Task` not `readOnlyHint` so a batch containing it runs sequentially, one
-turn delegates to at most one live child at a time. What deep delegation is
+multiplies the un-killable work a single stuck call can hold. What caps breadth is
+**not** the annotation any more. `Task` is not `readOnlyHint`, so a batch that mixes
+it with anything else still runs sequentially — but the P8 arm of the overlap rule
+(§5) lets a batch that is nothing but fresh `Task` calls to a `parallel_safe` profile
+overlap, and `config.yaml` marks the `read-only` profile that way today. So one turn
+can hold up to `parallel_tool_calls_max_concurrency` (4) live children in a single
+iteration: depth 1 caps nesting, not breadth, and the KV-pressure argument above has
+a 4-child peak in it, not a 1-child one (#4434). What deep delegation is
 usually wanted for — handing the next step the whole working state instead of
 a summary — is delivered here without nesting by resuming the same child with
 its `task_id`. **No per-level cost has been measured**; the ruling is
@@ -1217,13 +1242,14 @@ curl -s http://127.0.0.1:8500/health | python3 -m json.tool   # tools, modules, 
 The names with their annotations also come from `tools/list` on the same server,
 which since #1053 needs `X-Lloyd-Aggregator-Token: $(cat ~/.local/state/lloyd/aggregator-token)`
 on the request header. **Neither route is the only one that sees the Thunderbird
-bridge's rows, and this one is not the richer of the two.** The dump below prints all 40
+bridge's rows, and this one is not the richer of the two.** The dump below prints all 49
 whenever the bridge is reachable, because `agent_mcp/thunderbird.py` opens its *own*
 `node mcp-bridge.cjs` stdio session inside the module (`_get_pool`, :367-390), so any
 process that imports `agent_mcp.main` reaches the bridge: #1053 gated the HTTP routes
 only (`OPEN_PATHS = frozenset({"/health"})`, `agent_mcp/aggregator_auth.py:95`), and an
-offline dump never crosses HTTP. Measured 2026-10-21 with Thunderbird up, the two
-routes print the same 147 names — 147 vs 147, zero names in either direction — so
+offline dump never crosses HTTP. Measured 2026-11-20 with Thunderbird up, `:8500/health`
+and a token-bearing `tools/list` print the same 158 names — 158 vs 158, zero names in
+either direction — so
 `tools/list` is the cross-check that the running server *serves* what the tree
 dispatches, not the only way to enumerate it.
 
@@ -1247,7 +1273,7 @@ checkout (`git ls-files agent-services/services/thunderbird-mcp/` → 0 files), 
 … exporting no tools" and caches `[]` (:419-421). **With Thunderbird not running**,
 which is the degrade path §6's Modules table already states ("Zero tools, and still
 `ok`, when Thunderbird is not running"). In both cases the aggregator in `~/lloyd` still
-serves all 40 rows, and the block at the end of this section reads them.
+serves all 49 rows, and the block at the end of this section reads them.
 
 Offline, this prints every tool with its module, its marks and its required arguments.
 §6 is this output plus a hand-written "Does" column. The last line emits the two counts
@@ -1285,12 +1311,15 @@ against the same dispatch table it compares §6 to, so a regeneration that stops
 printing the number is caught rather than quietly copied.
 
 When the bridge is invisible to the tree you are standing in — an automod worktree, or
-Thunderbird closed — the aggregator in `~/lloyd` still holds all 40 rows, and this is
+Thunderbird closed — the aggregator in `~/lloyd` still holds all 49 rows, and this is
 the command that reads them. It prints the same four columns in the same order as the
 dump above, so the two compare name for name: the module column carries `thunderbird`
 for the bridge's rows (the names `thunderbird.py:TOOL_NAME_MAP` maps are tracked even
 though the bridge itself is not) and `-` for every other row, because the wire
-attributes no module; `RO`/`DX`/`ID`/`OW` come off the wire and `RX`/`FX`/`PM` are
+attributes no module. **Read that last clause as a live defect, not a formatting note:**
+the set is built from `TOOL_NAME_MAP`, so the nine unmapped `tb_*` rows (§6) print `-`
+and this block's `bridge=` total reads 40 while the server serves 49 — a regeneration
+that trusts that column mis-attributes nine tools (#4433). `RO`/`DX`/`ID`/`OW` come off the wire and `RX`/`FX`/`PM` are
 recomputed here from the same `agent_mcp/annotations.py` the dump above uses. The
 substitute-interpreter caveat applies: `.venvs/` is gitignored, so inside a worktree run
 it with the round's own interpreter. Compare the two dumps under **one** collation —
@@ -1300,7 +1329,9 @@ it with the round's own interpreter. Compare the two dumps under **one** collati
 
 — because this box's default `en_US.UTF-8` collation is punctuation-insensitive and
 sorts `_BackgroundTaskDrain` first while Python's `sorted()` puts `Bash` first, which
-between two otherwise identical 147-name dumps reads as 134 phantom differences.
+between two otherwise identical dumps of the one catalog reads as 134 phantom
+differences (counted 2026-10-21 against the 147-name catalog; it scales with the
+catalog, so do not re-quote 134 as today's number).
 
 ```bash
 PYTHONPATH=. .venvs/lloyd/bin/python - <<'EOF'
@@ -1395,3 +1426,28 @@ stops being executable is caught in the suite rather than at a reader's keyboard
   string, so the doc was holding a number the test forbade moving (#3130) — the
   number is gone rather than moved, and what the pin holds now is the function and
   the refusal string §9 quotes.
+- **2026-11-20 — `stale` (arch review).** Against `88867ed8` and the live
+  aggregator (`:8500/health` and a token-bearing `tools/list`, both 158 tools /
+  29 modules, agreeing name for name). The catalog had grown eleven tools with the
+  page still at 147: nine of them Thunderbird's, and the bridge exports **49**, not
+  the 40 §6 carried — `TOOL_NAME_MAP` is still 40 entries, so the nine arrive under
+  the bridge's own `tb_*` names, unclassified, un-renamed and unre-written (#4433).
+  Corrected the counts in all five places prose carries (front matter, intro, §5,
+  §6's two tables, §8: 152 config-only / 137 here), added the nine §6 rows, and
+  marked §11's `bridge=40` total as the mis-attribution it now is. Two claims the
+  tree refutes outright: §5 and §9's "at most one live child at a time" — the P8
+  arm (`loop._is_task_fanout`, `subagents.read-only.parallel_safe: true`) overlaps a
+  batch of fresh `Task` calls at `max_concurrency` 4 **while general parallel
+  dispatch is still off**, so depth 1 caps nesting and not breadth (#4434); and §1's
+  premise that the unattended paths have no harness safety hook, retired by #4129
+  (#4436). Added the `POST /browser/input` row §2's route table had never carried
+  (#4435), and fixed one drifted line citation (`browser.py:1015` → `:1075`). The
+  rest re-derived clean: the dispatch order and `_meta` keys, the 660 s + 30 s bound
+  and the five declared timeouts, the 50k/2k spill, `TOOL_NAME_MAX` 64, `ttl_ms`
+  60 000, the subagent store bounds, the depth-cap enforcement points, the
+  `REPEAT_EXPECTED` non-check, `DX` unread-on-purpose, and every §11 line citation
+  (`OPEN_PATHS:95`, `AUTH_ERROR_CODE:77`, `:140`, `main.py:1171`,
+  `thunderbird.py:55/378`, `paths.py:7`, `agent-services/.gitignore:72`).
+  `tests/test_tools_md_inventory_parity.py`, `test_tools_md_regeneration_claims.py`,
+  `test_task_depth_cap.py` and `test_architecture_coverage_doc_claims.py` all pass
+  against the edited page (351 tests).
