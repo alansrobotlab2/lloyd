@@ -3,10 +3,14 @@ segment: architecture
 tags: [architecture, lloyd, vault, safety, guardian, autoresearch, sync]
 type: reference
 status: implemented
-date: 2026-10-21
+date: 2026-11-20
 ---
 
-# Vault protection: four layers, none of which trusts the prompt
+# Vault protection: the layers, none of which trusts the prompt
+
+Six mechanisms, in §2.1–§2.6, and the heading used to count them. It said
+"four layers" while §2.2 and §2.6 existed and grew, which is a published number
+nobody can keep current (#4441 files the four other documents still carrying it).
 
 The vault (`~/obsidian`) was deleted from inside Lloyd twice in three days, and
 both times Obsidian Sync pushed the deletions to the cloud copy. This doc is the
@@ -102,7 +106,23 @@ check, and older copies of the runner live in automod worktrees.
   bench honest: a trial that reaches for Bash on the destructive prompt still
   fails `tool_not_called`, and the delete gets EROFS.
 - **Everything that is not `readOnlyHint` is refused**, with a `Tool call
-  denied:` reason so the bench files it under `denied_calls`.
+  denied:` reason so the bench files it under `denied_calls`, and `desktop_*`
+  is refused outright whatever its annotation says — a capture is a screenshot
+  of Alan's real desktop taken in-process, where no bwrap applies.
+- **One conditional exemption exists, and it is keyed to a copy, not to a
+  name** (#3403). A trial may declare the stateful tools its task's outcome
+  *is* a write of, through `LLOYD_BENCH_WRITE_SCOPE`
+  (`scripts/autoresearch/bench_fixture.py` builds the disposable state,
+  `bench_side_effects.py` reads what landed in it). `refusal` honours a declared
+  name only while `state_is_copied()` holds — this process resolves a
+  **non-production data root AND a non-production vault**, both, because they
+  are two roots and moving one would leave `vault_write` on the live vault while
+  the trial row still said "sandboxed". An unimportable `app.paths` answers
+  False, an unscoped trial behaves exactly as before, and `Bash` is in no
+  declared scope, so its `--ro-bind / /` mount is untouched. What the sandbox
+  hides from a trial is also now explicit: the aggregator token file and the
+  `lloyd_rpc` variables are covered and unset, so a read-only trial cannot even
+  read the credential it has no network to use (#1053, P9).
 - **One read is refused too: a trial reading its own grading corpus.** Since
   #651 (`app/harness/bench_corpus.py`, landed `7128d756`) the same
   `_tool_sandbox.refusal` consults `bench_corpus.deny_reason` *before* the
@@ -167,13 +187,31 @@ It is still one definition, now with two enforcement points: the harness hook
 and the aggregator's `call_tool`. The aggregator check matters because a caller
 that builds its own `HookRegistry` without the safety hook is still checked.
 
-The module now answers **two questions, and each is enforced on every lane that
-can land the write**:
+The module now answers **four questions, and each is enforced on every lane that
+can land its kind of write**: what may be destroyed, what may be written, what an
+untrusted-input turn may read (its own "THIRD policy"), and what a shell redirect
+may create inside the vault (its own "FOURTH policy", quoting the module, not
+this doc). `architecture/authority-surfaces.md` row 3 is the map of this module
+and still counts three, filed as #4439, because a count spelled in prose is
+exactly what #3131 stopped letting anybody keep:
 
 | Predicate | Question | Enforced by |
 |---|---|---|
-| `protected_roots()` / `check_protected_delete` | does this command *take out* the vault, the lloyd tree or `$HOME`? | the Bash lane: the hook and `main.call_tool` |
+| `protected_roots()` / `check_protected_delete` | does this command *take out* the vault, the lloyd tree, the lloyd data roots or `$HOME`? | the Bash lane: the hook and `main.call_tool` |
+| `PROTECTED_SHELL_RO_ROOTS` (2.1) | can a shell *child* write there at all, whatever it spelled? | the kernel, on every non-sandboxed Bash spawn |
 | `PROTECTED_WRITE_ROOTS` / `write_deny_reason` | may this file be *written* at all? | three lanes, one predicate: the file tools `agent_mcp/builtin_fs._gate_check` (#1049, landed `485fa6c0`), Bash via `check_bash_write_denied` (#1620), and `vault_write` via `agent_mcp/vault._protected_write_refusal` (#1757). `automod_vault_land` is the remaining exemption — it validates before it writes, which is what the refusal text routes a writer to |
+| `PROTECTED_READ_ROOTS` / `read_deny_reason` (#3524, #3846) | may an untrusted-input turn *read* this at all? | `app/harness/secret_read_deny.py`'s hook, armed per source and lifted by no grant. Not a vault surface — it is `~/lloyd/.env`, `~/.ssh`, `~/.config/gh`, `~/.openclaw` and the credential registry |
+
+The read row is in this doc because the module carries it and this is the doc
+that says what the module guards, and it is the one row that is *not* the vault.
+The vault's own share of the growth is the policy the write row cannot reach:
+`VAULT_BASH_WRITE_ROOT` / `bash_vault_write_denial` (#3701), asked last inside
+`check_bash_write_denied`, refuses a redirect that **creates** a file under
+`~/obsidian` — the Bash lane only, because the nightly's sanctioned route for
+`USER.md` is the file lane. On 2026-11-01 an unattended session ran
+`cat >> ~/obsidian/backlog/<guessed>.md` and minted a board file with no front
+matter; nothing below `write_deny_reason` refused it, because the deny-set covers
+one vault *file* and no vault tree.
 
 The write deny-set is five entries — `~/.openclaw`, `~/lloyd/agent-services`,
 `~/lloyd/.venvs`, `~/.local/share/uv/python` (all five lloyd venvs link one
@@ -190,8 +228,12 @@ file, `automod_vault_land`, validates the named path against the prompt-surface
 contract and commits it with a `git` subprocess without calling `write_deny_reason`
 at all.
 It is deliberately *not* `protected_roots()`: those roots are the vault, the
-lloyd tree and `$HOME`, and refusing writes under them refuses every ordinary
-note. **The asymmetry is shut**: `write_deny_reason` is now asked by every lane
+lloyd tree (and an automod worktree), the lloyd data roots — `~/lloyd-data`,
+whichever `DATA_ROOT`/`PRODUCTION_DATA_ROOT` this process resolves, and
+`~/.lloyd-data-snapshots`, because a `mv` of the directory holding them hides
+every one — and `$HOME`; refusing writes under them refuses every ordinary note.
+#4440 covers the same three-root under-statement in `safety.py`'s own lane-2
+prose. **The asymmetry is shut**: `write_deny_reason` is now asked by every lane
 that can land a write — fs (#1049), Bash since #1620 (`check_bash_write_denied`,
 fifth in `check_bash_command`), `vault_write` since #1757 — and on the Bash lane
 the kernel enforces the superset list (2.1's `--ro-bind` layer), so an
@@ -202,14 +244,15 @@ cannot build its mounts is parser-only by policy.
 At dispatch the aggregator enforces the whole regex table except `sudo`,
 whose `\bsudo\b` matches the word inside grep text. The hook-less paths ran
 seven such commands harmlessly, and sudo needs a password on this host.
-Until this change `autonomy.run_task` and `run_prompt_on_primary` installed
-no safety hook at all.
+`autonomy.run_task` and `run_prompt_on_primary` installed no safety hook at all
+until this change; since #4129 both direct dispatch paths install it once each,
+so the hook backs the `at_dispatch` floor up there instead of being absent.
 
 It parses rather than pattern-matches: it splits simple commands, follows `cd`,
 expands `~`/`$HOME`, lets `shlex` strip quoting, resolves relative paths and
 peels wrappers (`env`, `timeout`, `nohup`, `xargs`, `bash -c`). It then asks
 whether a delete, move, `find -delete`, `rsync --delete` or `git clean -f`
-takes out the vault, the lloyd tree or `$HOME`. "Takes out" means the root,
+takes out one of those roots. "Takes out" means the root,
 anything above it, a top-level folder of it that exists, or a glob over those.
 In an interpreter (`python -c`, a heredoc) it refuses `rmtree`-family calls
 naming a protected root **on the same line**, and scans string literals as
@@ -241,7 +284,7 @@ for a stronger reason: a wipe must be caught while paused, while BROKEN, with
 supervisord unreachable, and with nothing under observation. The existing
 `evaluate_data_damage` counted vault files only inside a promotion's window.
 
-The walk costs ≈15 ms for 8.6k files (re-measured 2026-10-21) and skips `.git`,
+The walk costs ≈16 ms for 10.7k files (re-measured 2026-11-20) and skips `.git`,
 which churns thousands of loose objects. It trips on:
 
 - a missing vault root;
@@ -307,7 +350,11 @@ the whole layer died for four days — 370 timer fires each exiting 128, the tim
 enabled and firing, nobody asking. The next run now clears holder-less locks
 older than 15 minutes itself, and #3078 priced staleness beside it: a newest
 commit over 3 h old (twelve missed cycles), or no readable HEAD commit at all,
-reads not-fresh from `vaultwatch.snapshot_age_state`. #3132 seated that reading on
+reads not-fresh from `vaultwatch.snapshot_age_state`. #3184 added the third
+witness beside those two — the producer's per-run beat, `lloyd-last-count` in the
+backup repo — and a missing beat is read as *no witness*, never as a live one,
+because every refusal path in `backup-vault.sh` exits before the beat is written,
+which is exactly the shape the 2026-10-16→10-20 freeze's 370 failed runs left. #3132 seated that reading on
 the guardian's vault check — the layer that can act on it, because the tripwire
 watches the vault and a vault nobody is copying away looks untouched, the script's
 refusals exit 0, and a `Type=oneshot` timer reports success over a refusal.
@@ -404,13 +451,22 @@ that pass so Lloyd's own writes do not read as downloads.
   deny-set is now asked by every MCP lane that can land a path — the file
   tools, Bash since #1620, and `vault_write` since #1757, which was the open
   hole (#1049's remaining half) — and the Bash lane has the kernel superset
-  behind the parser, except in fallback. What is left: a write during that
-  fallback, a writer that never reaches the aggregator at all (in-process code
+  behind the parser, except in fallback, plus #3701's vault-tree redirect refusal
+  and #2286's bench assertion rail on the same resolved targets. What is left: a
+  write during that fallback, a writer that never reaches the aggregator at all
+  (in-process code
   paths), or the sanctioned
   `automod_vault_land` / autoresearch promotion routes, which validate by contract
-  instead of by location.
+  instead of by location. And one new conditional: a bench trial holding
+  #3403's write scope does land writes, in the fixture — the exposure is not that
+  it can, it is that everything depends on `state_is_copied()` resolving both
+  roots off-production, so a fixture that was handed the live `VAULT_ROOT` while
+  the data root moved would be graded on the house. `bench_fixture.py` rule 1
+  refuses a destination inside a live tree, which is the second net, not the
+  first.
 
 ## Review log
 
 - **2026-09-21 — `stale`.** All four layers are live and verified against the tree (tripwire on every tick, sync start-gate, 15-min timer last snapshot 09:00:49, `require_tool_sandbox` reporting `enforced`/`bwrap` true), but three things landed after 09-14 and are now written in: the bench-corpus read deny (#651) and the sessionless-write refusal (#1053) in 2.1, and `protected_paths`' second predicate — the write deny-set (#1049), which 2.3 now tabulates against the delete predicate, including the open asymmetry that the Bash lane does not consult it. Corrected: the §3 claim that the suite pins both id producers (it pins only the bench runner; #1333), and the tripwire walk cost, re-measured at ≈12 ms over 5.8k files.
 - **2026-10-21 — `stale`.** All layers live; the tree moved after 09-21 in ways the prose missed. The write deny-set is **five** entries (uv interpreter store, `b8322052`) and §2.3 said four; #1620 and #1757 shut the Bash- and `vault_write`-lane halves of the asymmetry §2.3 still called open — a paragraph contradicting its own table above it; and #2109 landed a kernel layer the doc never described: `agent_mcp/_path_sandbox.py` (`b3b652b6`) ro-binds the deny-set plus `USER.md`/`MEMORY.md` into every ordinary Bash spawn, deliberately failing open with `/state protected_path_sandbox.fallback`. Also corrected: an unresolvable `task:*` parent now sandboxes (#2025); the eval-driver id mint is pinned, so the §3 #1333 bullet is closed; `agent_mcp/main.py` re-pointed to `call_tool`'s third numbered refusal; walk cost re-measured ≈15 ms over 8.6k files; #3078 gave the backup repo dead-lock self-clear and a 3 h stale-snapshot bound. Filed: #3131 (`check_bash_command` counts itself as "five checks" while chaining six), #3132 (the stale-snapshot verdict has no poller), #3133 (three silent-green paths in `tests/test_path_sandbox.py`).
+- **2026-11-20 — `stale`.** All six mechanisms (§2.1–§2.6) still live, and every path, ordinal and threshold re-checked clean (lane 3 = `check_sync_registration`, lane 5 = `check_bash_write_denied`, `_HOOK_ONLY_LABELS` = `{sudo}`, 10%/200-file/20-file/900 s tripwire, 90 % and 900 s in `backup-vault.sh`, `SNAPSHOT_CHECK_SECONDS` 900 s). The H1's "four layers" is the oldest unkept count in the file — it predated §2.2 and §2.6 — so the heading now carries no number (#4441 files the four other docs still stating it). What moved since 10-21: `protected_paths` answers **four** questions, not the two §2.3 tabulated — the read deny-set (#3524, `PROTECTED_READ_ROOTS`) and the vault's Bash-only write root (#3701) are now in the table; `protected_roots()` covers the lloyd **data** roots and `~/.lloyd-data-snapshots`, so §2.3's three-root sentence under-stated its own guard in two places; §2.1's "everything that is not `readOnlyHint` is refused" grew a conditional the doc never recorded (#3403's `LLOYD_BENCH_WRITE_SCOPE`, keyed to `state_is_copied()` on both roots), along with the desktop refusal and the sandboxed credential non-inheritance; #4129 armed the hook on both direct dispatch paths; #3184 added the backup producer's beat as the stale-snapshot reading's third witness. Corrected the walk re-measurement to ≈16 ms / 10.7k files. Filed: #4438 (`check_bash_write_denied`'s docstring still refuses on the grant contextvar #3563 deleted), #4439 (`authority-surfaces.md` row 3 counts three policies for a module declaring four), #4440 (`safety.py`'s lane-2 prose names three protected roots where `protected_roots()` returns six).
