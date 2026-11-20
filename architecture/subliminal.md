@@ -305,11 +305,14 @@ facts@6ms vault@140ms` shows when each one arrived.
 
 - **Source:** QMD daemon on `:8181` — BM25 (`lex`) + vector (`vec`) search
 - **Collections:** `memory, knowledge, projects, lloyd, work, sessions,
-  architecture, autonomy, backlog`. facts and skills are excluded (dedicated
+  architecture, autonomy, backlog` — nine **slots**, and the `architecture` one is
+  filled by the switch the next bullet describes, so the request this host sends is
+  **ten collections**. facts and skills are excluded (dedicated
   workers); personal and people are left to the explicit tool. The last three
   were added 2026-09-03: 8 of 20 eval queries expect docs there, and the
   agent's own design docs and task notes are what it needs mid-task. Warm lex
-  cost for 6 → 9 collections: +5–30 ms.
+  cost for 6 → 9 collections: +5–30 ms; the tenth is unmeasured and owed on
+  #4392, since the daemon serializes.
   This list is also what keeps prefetch on qmd's **per-collection** path, and
   since #504 so does everyone else's: `_qmd_daemon_search` used to send
   `collections: []` for a caller whose list was a superset of `VAULT_SEGMENTS`
@@ -317,26 +320,39 @@ facts@6ms vault@140ms` shows when each one arrived.
   widening is now **reversed** — an unrestricted search names `VAULT_SEGMENTS`
   outright, because a global top-k starved the small collections (`autonomy` is
   ~1% of the corpus and lost 5 of 5 expected docs at a 40-row pool). Prefetch's
-  nine omit `personal`, `people` and `skills`
-  and add `sessions`, so it is a scope-restricted request either way: its own
+  list omits `personal`, `people` and `skills` at every mode — widening the
+  architecture slot to two names cannot make it a superset of `VAULT_SEGMENTS` —
+  and adds `sessions`, so it is a scope-restricted request either way: its own
   subset, `[:limit]` back with no fold, its pool equal to its answer, and none of
   the global fusion or per-collection-floor payload the recall path sends. That
   is the intended trade, not an oversight — prefetch is scoped deliberately and
   is on a latency budget.
 - **Which `architecture` corpus it means** (`vault_search.architecture`, #1662,
-  2026-11-10): the shipped value is `both`, and `apply_architecture_collection`
-  applies that to `agent_mcp.vault.VAULT_SEGMENTS` — the explicit tools' fan-out,
-  twelve names on this host including `lloyd-architecture` (this checkout's live
-  `architecture/*.md`). Prefetch's own list follows only the `repo` arm:
-  `VAULT_COLLECTIONS` at `app/prefetch.py:230` is rewritten only under that
-  condition, so under `both` the ninth name above is still the
-  vault's `architecture` collection — `~/obsidian/architecture`, a 36-file clone of
-  these docs that is refreshed only in patches (its `subliminal.md` is a
-  9,791-byte file dated 2026-08-23 against this page's 1,080 lines) — and prefetch
-  never reaches the live ones. The `both` decision was priced on the recall path
-  (+0.061 mrr_doc over the 79 doc-gold queries,
-  `eval/measurements/architecture-collection-2026-11-10.md`); the path that injects
-  into every turn was not in the measurement.
+  2026-11-10; the prefetch half of it fixed by #4392, 2026-11-20): the shipped value
+  is `both`, and `agent_mcp.vault.architecture_collections` is now the one place
+  that turns that setting into names — `["architecture"]` for `vault`,
+  `["lloyd-architecture"]` for `repo`, both for `both`. Both lists are built from
+  that one call: `apply_architecture_collection` edits
+  `agent_mcp.vault.VAULT_SEGMENTS` (the explicit tools' fan-out, twelve names on
+  this host) and `app.prefetch` splices it into `VAULT_COLLECTION_SLOTS` in place of
+  the architecture slot. So under `both` the leg that injects `<vault-context>` into
+  every turn searches **both** corpora: the qmd `architecture` collection —
+  `~/obsidian/architecture`, 32 `.md` files on disk as of 2026-11-19 (qmd's index
+  still reports 36 for it) and none newer than 2026-10-31, a clone of these docs
+  refreshed only in patches, whose `subliminal.md` is a 9,791-byte file dated
+  2026-08-23 — and `lloyd-architecture`, `~/lloyd/architecture`, this checkout's live
+  pages, edited and landed as code. Before #4392 `app.prefetch` mapped mode→name
+  itself with a `== "repo"` ternary that honoured one of the three modes, so under
+  `both` every turn was handed the stale clone and none of the live docs. The
+  widening
+  changed no request shape — the list is still not a superset of `VAULT_SEGMENTS`,
+  so the ask stays pool-equals-limit, which
+  `tests/test_prefetch.py::test_vault_leg_sends_both_architecture_corpora_to_the_daemon`
+  reads off the wire. What it cost is still open: the `both` decision was priced on
+  the recall path only (+0.061 mrr_doc over the 79 doc-gold queries,
+  `eval/measurements/architecture-collection-2026-11-10.md`), and the 86-query
+  prefetch eval has not been re-run with the tenth collection in scope, nor the
+  vault leg's wall time taken against the 300 ms budget — both owed on #4392.
 - **Two legs, sequenced:**
   - **3a `lex` only** — 6–50 ms per call once the terms are warm, 0.5–1.3 s
     on a term's first sight. Waited on for at most 150 ms after the other

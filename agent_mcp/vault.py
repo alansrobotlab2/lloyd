@@ -100,12 +100,18 @@ VAULT_DIR_SEGMENTS = list(VAULT_SEGMENTS)
 # `architecture/index.md` lists as retired, holding guaranteed floor slots in every
 # recall. The current docs, `~/lloyd/architecture/*.md`, were indexed by nothing.
 # `lloyd-architecture` is the collection over the checkout's docs; which of the two
-# the fan-out names is `vault_search.architecture` (`vault` | `repo`), swapped in
-# place by `apply_architecture_collection` so every importer of these lists sees
-# one answer. `vault_read` serves `lloyd-architecture/<doc>.md` from the checkout,
-# read-only — the docs are code, edited and landed like code.
+# the fan-out names is `vault_search.architecture` (`vault` | `repo` | `both`).
+# `architecture_collections` below is the one export of that decision:
+# `apply_architecture_collection` edits this module's fan-out from it and
+# `app.prefetch` splices it into its own narrower list, so a reader of either list
+# is reading the same switch rather than a second copy of it. `vault_read` serves
+# `lloyd-architecture/<doc>.md` from the checkout, read-only — the docs are code,
+# edited and landed like code.
 REPO_ARCHITECTURE_COLLECTION = "lloyd-architecture"
 REPO_ARCHITECTURE_DIR = Path(__file__).resolve().parent.parent / "architecture"
+#: The two spellings of "the architecture docs", in the order mode `both` names
+#: them: the vault's clone, which is the slot `VAULT_SEGMENTS` ships with, then the
+#: checkout's live docs. `architecture_collections("both")` returns it whole.
 _ARCH_PAIR = ("architecture", REPO_ARCHITECTURE_COLLECTION)
 # Over-request factor for the unrestricted path in `_qmd_daemon_search`, and the
 # ceiling on it. `limit` is the size of the *answer*; these size the *pool* it is
@@ -295,7 +301,9 @@ RECALL_DJEV_FLOOR = {"autonomy": 2, "architecture": 2, "skills": 2}
 
 
 def architecture_collection_mode() -> str:
-    """`vault_search.architecture`: `repo` (the checkout's docs) or `vault`."""
+    """`vault_search.architecture`: `repo` (the checkout's docs), `vault` (the
+    qmd `architecture` collection) or `both`. Anything else reads as `vault`, and
+    `architecture_collections` is what turns the answer into collection names."""
     try:
         from app.config import CONFIG
         mode = str(((CONFIG or {}).get("vault_search") or {}).get("architecture", "vault"))
@@ -304,25 +312,59 @@ def architecture_collection_mode() -> str:
     return mode if mode in ("vault", "repo", "both") else "vault"
 
 
-def apply_architecture_collection(mode: str) -> None:
-    """Name `lloyd-architecture` (mode `repo`) or `architecture` (`vault`) in the
-    search fan-out and the recall floors — or, `both`, keep `architecture` with its
-    floors and add `lloyd-architecture` to the fan-out with none. In place, so
-    `from agent_mcp.vault import VAULT_SEGMENTS` elsewhere (prefetch, the memory
-    router, the eval) follows."""
+def architecture_collections(mode: str | None = None) -> list[str]:
+    """The architecture collection name(s) `vault_search.architecture` names:
+    `["architecture"]` for `vault`, `["lloyd-architecture"]` for `repo`, and both
+    for `both`, in `_ARCH_PAIR`'s order. `mode` defaults to the config's value.
+
+    This is the only place that turns that setting into a collection name. It
+    exists because the mapping used to be written twice — here, and as a
+    `== "repo"` ternary in `app/prefetch.py` — and the second copy honoured one of
+    the three modes, so the deployed `both` reached the explicit tools' fan-out and
+    never reached the leg that injects `<vault-context>` into every turn, which
+    kept serving the vault's stale clone of these docs (#4392). An importer that
+    needs a narrower list than `VAULT_SEGMENTS` splices *this* into it, as prefetch
+    does; anything that maps mode→name itself is the same bug returning."""
+    mode = architecture_collection_mode() if mode is None else mode
     if mode == "both":
-        apply_architecture_collection("vault")
-        VAULT_SEGMENTS.append(REPO_ARCHITECTURE_COLLECTION)
-        return
-    if REPO_ARCHITECTURE_COLLECTION in VAULT_SEGMENTS and "architecture" in VAULT_SEGMENTS:
-        VAULT_SEGMENTS.remove(REPO_ARCHITECTURE_COLLECTION)   # leaving `both`
-    old, new = _ARCH_PAIR if mode == "repo" else _ARCH_PAIR[::-1]
-    for i, seg in enumerate(VAULT_SEGMENTS):
-        if seg == old:
-            VAULT_SEGMENTS[i] = new
+        return list(_ARCH_PAIR)
+    if mode == "repo":
+        return [_ARCH_PAIR[1]]
+    return [_ARCH_PAIR[0]]
+
+
+def apply_architecture_collection(mode: str) -> None:
+    """Name the collections `architecture_collections(mode)` returns in the search
+    fan-out and the recall floors. In place, so `from agent_mcp.vault import
+    VAULT_SEGMENTS` elsewhere (the memory router, the eval) follows.
+
+    The fan-out's architecture slot keeps its position and takes the first returned
+    name — `architecture`, except under `repo`, where it is the checkout's — and a
+    second name (`both`) is appended, which is where the fan-out has always carried
+    it. The recall floors follow the slot, never the second name: under `both` the
+    checkout copy is searched with no floor, which is what the #1662 A/B measured."""
+    wanted = architecture_collections(mode)
+    head, *added = wanted
+    rebuilt: list[str] = []
+    slot_taken = False
+    for seg in VAULT_SEGMENTS:
+        if seg in _ARCH_PAIR:
+            if not slot_taken:
+                rebuilt.append(head)          # the slot keeps its position
+                slot_taken = True
+            continue                          # a second slot from a prior `both`
+        rebuilt.append(seg)
+    rebuilt.extend(name for name in added if name not in rebuilt)
+    VAULT_SEGMENTS[:] = rebuilt
+    # The floored quota belongs to the slot, not to the spelling that held it, so
+    # it moves with `head` and never lands on the appended `both` name.
     for floors in (RECALL_COLLECTION_FLOOR, RECALL_DJEV_FLOOR):
-        if old in floors:
-            floors[new] = floors.pop(old)
+        quota = 0
+        for name in _ARCH_PAIR:
+            if name in floors:
+                quota += floors.pop(name)
+        if quota:
+            floors[head] = quota
 
 
 apply_architecture_collection(architecture_collection_mode())
@@ -998,8 +1040,10 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     the justification, and the re-measurement is a finding on #504.
 
     A **scope-restricted** search is untouched: its own subset, `[:limit]` back
-    with no fold, and its pool equal to its answer — so `prefetch`'s nine-collection
-    request on the turn-critical path does not inherit the widened ask.
+    with no fold, and its pool equal to its answer — so `prefetch`'s scoped request
+    (nine slots, ten collections on a host running `vault_search.architecture:
+    both`, since `architecture_collections` fills the architecture slot with both
+    names) does not inherit the widened ask.
 
     History, as recorded: the switch to empty was made against published 2.8.3,
     where it read as 4.2s -> 269ms; the fork closed most of that gap on its own, and

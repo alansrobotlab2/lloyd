@@ -332,7 +332,7 @@ verdict off — and gave the knob its own field instead, as
 `tests/test_eval_scorer.py:1404` pins (the node is
 `expand_graph_matches_production`; the line number this sentence carried at the last
 review was 774, some 620 lines out, which is #4259). Production's own default,
-`RECALL_EXPAND_GRAPH = False` (`agent_mcp/vault.py:564`), is not a recent change
+`RECALL_EXPAND_GRAPH = False` (`agent_mcp/vault.py:606`), is not a recent change
 either: that commit *named* the literal that was already there
 (`params.get("expand_graph", False)` → the constant), so nothing flipped, and what
 the eval adds is a knob the caller may pass rather than a configuration nothing
@@ -411,7 +411,7 @@ expired 8 more — 18 of those 30 refused outright as god-nodes — including
 #376's acceptance says "a change that cannot move that metric is not this
 feature". Two findings say the criterion is mis-aimed rather than the code dead:
 
-1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:3324`,
+1. **The metric is pool-composition-bound.** `_rank` (`agent_mcp/vault.py:3368`,
    nested in `_vault_recall_base` at `:3050`, over the pool `_collect` builds at
    `:3286` — all three re-pointed 2026-11-19; `_rank`'s own number was still true and
    the other two were some 350 lines out) caps the returned fact list at `FACT_RANK_CAP_SEED=10`

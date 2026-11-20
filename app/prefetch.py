@@ -35,8 +35,7 @@ from agent_mcp.facts import (
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import (_SESSION_EXPORT_RE, _qmd_daemon_search,
                              _qmd_strip_stopwords, strip_qmd_snippet)
-from agent_mcp.vault import REPO_ARCHITECTURE_COLLECTION as _REPO_ARCH
-from agent_mcp.vault import architecture_collection_mode as _vault_arch_mode
+from agent_mcp.vault import architecture_collections
 from app.prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
 from app.event_log import log_event
 from app.sessions_io import ambient_clock_stamp, is_background_session_name
@@ -227,12 +226,35 @@ VAULT_MIN_QUERY_LEN = 25        # skip vault search for short/vague messages
 # architecture/autonomy/backlog were added 2026-09-03 — 8 of the 20 eval
 # queries expect docs there, and the agent's own design docs and task notes
 # are exactly what it needs mid-task. Warm lex cost 6→9 collections: +5-30ms.
-VAULT_COLLECTIONS = ["memory", "knowledge", "projects", "lloyd", "work", "sessions",
-                     "architecture", "autonomy", "backlog"]
-# `architecture` names the checkout's docs (`lloyd-architecture`) when
-# `vault_search.architecture` is `repo` — one switch for prefetch and the tools.
-if _vault_arch_mode() == "repo":
-    VAULT_COLLECTIONS = [_REPO_ARCH if c == "architecture" else c for c in VAULT_COLLECTIONS]
+#
+# `"architecture"` below is a SLOT, not a name that reaches the daemon: it is
+# replaced at import by whatever `architecture_collections()` says the one
+# `vault_search.architecture` switch names — `architecture` alone under `vault`,
+# `lloyd-architecture` alone under `repo`, and both under the deployed `both`,
+# which makes this a ten-name request on this host. The mapping used to live here
+# as a `== "repo"` ternary, which honoured one of the three modes, so `both`
+# widened the explicit tools' fan-out and left this leg searching the vault's
+# stale clone of the architecture docs as though it were current (#4392). A list
+# narrower than `VAULT_SEGMENTS` is still the right shape here — prefetch stays
+# scope-restricted: its own subset, `[:limit]` back with no fold, none of the
+# global-fusion payload — but the architecture half of it is the switch's
+# decision read through the export, never a second copy of it.
+VAULT_COLLECTION_SLOTS = ["memory", "knowledge", "projects", "lloyd", "work", "sessions",
+                          "architecture", "autonomy", "backlog"]
+
+
+def _derive_vault_collections(mode: str | None = None) -> list[str]:
+    """`VAULT_COLLECTION_SLOTS` with its `architecture` slot replaced by the
+    name(s) `vault_search.architecture` decides — one under `vault` or `repo`, both
+    under `both`, in `agent_mcp.vault`'s order. `mode` overrides the config for a
+    reader asking what the other arms would name; production passes nothing."""
+    out: list[str] = []
+    for slot in VAULT_COLLECTION_SLOTS:
+        out.extend(architecture_collections(mode) if slot == "architecture" else [slot])
+    return out
+
+
+VAULT_COLLECTIONS = _derive_vault_collections()
 VAULT_CARRY_MAX_AGE_S = 900.0   # max age of a carried-over vault result (either leg)
 # The lex leg is waited on for at most this long once every other required
 # worker has landed. A term the daemon has never seen costs 0.5-1.3s on

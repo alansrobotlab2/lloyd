@@ -673,6 +673,82 @@ def test_wire_spelling_with_the_vault_root_is_stripped_too(monkeypatch):
     assert "[... truncated]" in out
 
 
+# ── #4392: the injected leg searches the architecture corpus the switch names ──
+#
+# `vault_search.architecture` is `both` on this host, which widened the explicit
+# tools to twelve collections and left this leg on nine: prefetch mapped mode→name
+# itself with a `== "repo"` ternary, so under `both` it searched the qmd
+# `architecture` collection — `~/obsidian/architecture`, the vault's clone of these
+# docs, last refreshed ~2026-10-31 — and never `lloyd-architecture`, the checkout's
+# live ones. The list is now derived from `agent_mcp.vault.architecture_collections`.
+
+def test_prefetch_names_both_architecture_corpora_under_the_deployed_mode():
+    assert vault_mod.architecture_collection_mode() == "both"
+    assert "architecture" in prefetch.VAULT_COLLECTIONS
+    assert "lloyd-architecture" in prefetch.VAULT_COLLECTIONS
+    assert prefetch.VAULT_COLLECTIONS.count("architecture") == 1
+    assert prefetch.VAULT_COLLECTIONS.count("lloyd-architecture") == 1
+    # The slot is exactly one slot, and `both` widens the shipped list by exactly
+    # one name over it — a derivation that replaced rather than widened, or named
+    # the checkout twice, fails here without restating the list above.
+    assert prefetch.VAULT_COLLECTION_SLOTS.count("architecture") == 1
+    assert len(prefetch.VAULT_COLLECTIONS) == len(prefetch.VAULT_COLLECTION_SLOTS) + 1
+    # the slot is filled, not duplicated: the other two arms name one corpus each
+    assert prefetch._derive_vault_collections("vault") == prefetch.VAULT_COLLECTION_SLOTS
+    assert prefetch._derive_vault_collections("vault").count("architecture") == 1
+    repo = prefetch._derive_vault_collections("repo")
+    assert "architecture" not in repo
+    assert repo.count("lloyd-architecture") == 1
+    assert len(repo) == len(prefetch.VAULT_COLLECTION_SLOTS)
+
+
+def test_prefetch_takes_its_architecture_names_from_vaults_export(monkeypatch):
+    # The third clause is a deletion — prefetch no longer maps mode→name itself —
+    # so it is pinned by what the deletion made impossible. Stubbing the shared
+    # export and asking for the derivation has to hand back the sentinel: a
+    # prefetch-side re-map that spelled `architecture` / `lloyd-architecture`
+    # itself would still pass the shipped-list node above (the deployed mode makes
+    # those the right strings) and fail here. That second copy is how #4392
+    # started, and it is what this node exists to keep out.
+    monkeypatch.setattr(prefetch, "architecture_collections",
+                        lambda mode=None: ["sentinel-arch"])
+    derived = prefetch._derive_vault_collections("both")
+    assert "sentinel-arch" in derived
+    assert "architecture" not in derived
+    assert "lloyd-architecture" not in derived
+    assert len(derived) == len(prefetch.VAULT_COLLECTION_SLOTS)
+
+
+def test_vault_leg_sends_both_architecture_corpora_to_the_daemon(monkeypatch):
+    # The process boundary: the qmd daemon is a loopback HTTP POST and
+    # `collections` is what arrives there. Patching `_qmd_post` reads the request
+    # prefetch actually sends rather than what its own module attribute says, so a
+    # widening that never reached the wire would fail here.
+    seen: dict = {}
+
+    def fake_post(payload):
+        seen.update(payload)
+        return []
+
+    monkeypatch.setattr(vault_mod, "_qmd_post", fake_post)
+    prefetch._search_vault(_PROBE_QUERY)
+    assert seen, "_search_vault sent nothing to the daemon"
+    assert seen["collections"] == prefetch.VAULT_COLLECTIONS
+    assert {"architecture", "lloyd-architecture"} <= set(seen["collections"])
+    # Read across the seam from `agent_mcp.vault`, not from prefetch: the names on
+    # the wire are what the one export names, in its order. This is the assertion
+    # that fails if prefetch ever spells the corpora itself again.
+    assert [c for c in seen["collections"]
+            if c in ("architecture", "lloyd-architecture")] == vault_mod.architecture_collections()
+    # Still a scope-restricted request, not a widened one that tipped onto the
+    # unrestricted global path: prefetch's list is never a superset of
+    # `VAULT_SEGMENTS` (no personal, people or skills), so the ask stays
+    # pool-equals-limit — five documents out of a five-document pool.
+    assert not set(vault_mod.VAULT_SEGMENTS) <= set(seen["collections"])
+    assert seen["limit"] == prefetch.VAULT_MAX_RESULTS
+    assert seen["candidateLimit"] == prefetch.VAULT_MAX_RESULTS
+
+
 # ── #994: qmd's diff formatting comes off before the cap ────────────────────
 #
 # The daemon hands back a snippet as a diff hunk. vault_search stripped the

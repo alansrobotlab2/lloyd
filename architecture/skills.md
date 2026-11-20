@@ -207,7 +207,7 @@ nested `metadata: openclaw: status: archived` a retirement and missed a
 
 `app/prefetch.py` scores the *user's message* against every skill and injects the
 winner's body into a `<context>` block ahead of the turn. Thresholds
-(`app/prefetch.py:129`):
+(`app/prefetch.py:128`):
 
 | | value |
 |---|---|

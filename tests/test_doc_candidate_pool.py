@@ -335,8 +335,10 @@ def test_scope_restricted_search_keeps_its_own_shape(wire):
 
     A caller that scoped to `backlog` is asking for exactly the hits a wide scan might
     drop, and it gets `[:limit]` back with no fold — so the pool belongs to the
-    unrestricted path only. `prefetch` runs nine collections (including `sessions`)
-    through this function on the latency-critical turn path and must not inherit it.
+    unrestricted path only. `prefetch` runs nine slots through this function on the
+    latency-critical turn path — ten collections on a host whose
+    `vault_search.architecture` is `both`, and `sessions` among them — and must not
+    inherit it.
     """
     vault._qmd_daemon_search("guardian rollback", 10, ["backlog", "architecture"])
     assert wire[0]["collections"] == ["backlog", "architecture"]

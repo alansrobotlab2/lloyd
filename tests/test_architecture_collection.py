@@ -56,6 +56,61 @@ def test_the_deployed_mode_is_both():
     assert "lloyd-architecture" in vault.VAULT_SEGMENTS
 
 
+# ── #4392: one export of the mode, so no importer re-maps it ──────────────────
+#
+# The mapping used to be written twice: here, and as a `== "repo"` ternary in
+# `app/prefetch.py`. That second copy honoured one of the three modes, so the
+# deployed `both` reached this module's fan-out and never the leg that injects
+# `<vault-context>` into every turn — which went on searching the vault's stale
+# clone of the architecture docs beside none of the checkout's live ones. These pin
+# the single export both sides read, and that the fan-out is built from it.
+
+def test_architecture_collections_names_the_two_corpora_of_each_mode():
+    assert vault.architecture_collections("vault") == ["architecture"]
+    assert vault.architecture_collections("repo") == ["lloyd-architecture"]
+    # `both` in this order: the vault clone holds the slot, the checkout is appended.
+    assert vault.architecture_collections("both") == ["architecture", "lloyd-architecture"]
+    # An unrecognised value falls back the way `architecture_collection_mode`
+    # falls back — to the vault's copy, never to an empty fan-out.
+    assert vault.architecture_collections("sideways") == ["architecture"]
+
+
+def test_architecture_collections_without_a_mode_reads_the_deployed_switch():
+    assert vault.architecture_collection_mode() == "both"
+    assert vault.architecture_collections() == ["architecture", "lloyd-architecture"]
+
+
+def test_the_fan_out_names_exactly_what_the_export_names(restore):
+    for mode in ("vault", "repo", "both"):
+        vault.apply_architecture_collection(mode)
+        named = [s for s in vault.VAULT_SEGMENTS
+                 if s in ("architecture", "lloyd-architecture")]
+        assert named == vault.architecture_collections(mode), mode
+    # Two transitions the loop above cannot catch, because its last arm is `both`.
+    # Re-applying `both` must not name the checkout's docs a second time, and
+    # leaving `both` for a single-name mode must drop the appended one — a fan-out
+    # that only ever appended would pass every loop assertion and then ask the
+    # daemon for the same collection twice, or keep searching a corpus the switch
+    # has stopped naming.
+    both_shape = list(vault.VAULT_SEGMENTS)
+    vault.apply_architecture_collection("both")
+    assert vault.VAULT_SEGMENTS == both_shape
+    vault.apply_architecture_collection("vault")
+    assert [s for s in vault.VAULT_SEGMENTS
+            if s in ("architecture", "lloyd-architecture")] == ["architecture"]
+    # The floors follow the fan-out's architecture slot, never the appended name:
+    # under `both` the checkout's docs are searched with no floor, which is the
+    # shape the #1662 A/B measured (+0.061 mrr_doc over the 79 doc-gold queries).
+    vault.apply_architecture_collection("repo")
+    assert set(vault.RECALL_DJEV_FLOOR) == {"autonomy", "lloyd-architecture", "skills"}
+    assert set(vault.RECALL_COLLECTION_FLOOR) == {"autonomy", "lloyd-architecture", "skills"}
+    vault.apply_architecture_collection("both")
+    assert set(vault.RECALL_DJEV_FLOOR) == {"autonomy", "architecture", "skills"}
+    assert set(vault.RECALL_COLLECTION_FLOOR) == {"autonomy", "architecture", "skills"}
+    assert vault.RECALL_DJEV_FLOOR["architecture"] == 2
+    assert vault.RECALL_COLLECTION_FLOOR["architecture"] == 5
+
+
 def test_vault_read_serves_a_checkout_doc_read_only():
     out = vault._vault_read({"path": "lloyd-architecture/index.md", "num_lines": 3})
     assert "error" not in out, out

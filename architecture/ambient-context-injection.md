@@ -28,7 +28,10 @@ passing ones, so the figure ages rather than reassures (only the
 `tests/test_session_queue.py` 20, `tests/test_active_session_resolution.py` 5,
 `tests/test_ambient_prefetch_retention.py` 16,
 `tests/test_session_doc_claims.py` 15 (56 across those four), and
-`tests/test_prefetch.py` 116 — nine arrived with #4393, which gave the task-ref `#`
+`tests/test_prefetch.py` 119 — three arrived with #4392, which pinned that the injected
+leg asks the daemon for both architecture corpora under the deployed `both`, that the
+names come from `agent_mcp.vault`'s one export, and that the ask stays scope-restricted
+on the wire; nine arrived with #4393, which gave the task-ref `#`
 arm a right boundary and a 6-digit budget; six arrived with #4032, which pinned which query the
 facts and skills legs receive on a short follow-up under the off-by-default
 `prefetch.followup.focus_legs` key; four had arrived with #3081, the subliminal `notes`
@@ -177,7 +180,7 @@ instant — no measurement, no stamp, rather than a 1969 date offered as evidenc
   is never the one that waits.
 - **`content` is truncated at 800 chars** when rendered, with an ellipsis. The
   summary line has its own, tighter cap the page did not used to state:
-  `AMBIENT_SUMMARY_MAX = 240` (`app/prefetch.py:222`), marked with
+  `AMBIENT_SUMMARY_MAX = 240` (`app/prefetch.py:221`), marked with
   ` [... truncated]`, applied to every ambient line — and the next-session
   channel caps its own fields at 720 / 2000 before a note is ever stored
   (`NEXT_SESSION_SUMMARY_MAX` / `NEXT_SESSION_CONTENT_MAX`,
