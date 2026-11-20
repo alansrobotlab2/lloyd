@@ -3559,10 +3559,22 @@ def test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling():
     `test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol` prices one
     doc; the other 35 stay graded by containment alone until #3580's scope call is
     made, and until this node nothing said that population may not grow. The bound is
-    the measured count itself — 192 rows as counted 2026-11-02 at 372d0aad — so the
-    suite accepts the corpus exactly as it stands and reddens on one more bare
-    `path:NNN` citation. That is the cheap half of a rule nobody will decide the
-    expensive half of: the docs are not re-typed, but the pile stops growing.
+    the measured count itself — `NAMED_SYMBOL_UNNAMED_CEILING`, whose comment carries
+    the dated per-doc census — so the suite accepts the corpus exactly as it stands and
+    reddens on one more bare `path:NNN` citation. That is the cheap half of a rule
+    nobody will decide the expensive half of: the docs are not re-typed, but the pile
+    stops growing.
+
+    #4266 deleted the live count this docstring used to quote — "192 rows as counted
+    2026-11-02 at 372d0aad", quoted as the bound itself, against a constant that three
+    later commits lowered. Two other sentences here carry 192 as well, and both are
+    dated narrative rather than a bound (#3580's "192 occurrences, 166 distinct
+    `path:NNN` spans, heaviest `threat-model.md` at 42", and #4061's "a 192nd row
+    against `NAMED_SYMBOL_UNNAMED_CEILING` (191)"), so they are history and stay. What
+    all three have in common is that no assert reads any of them: the constant's own
+    comment is the measurement of record, and a count copied out of it into prose is a
+    number nobody re-measures — which is how three of them drifted apart from each other
+    while the suite stayed green.
 
     The `> 0` arm is the #1699 vacuity shape #2582 was filed against: a ceiling over
     a population nothing measures is a comment. The rail's own copy of that arm is the
@@ -3586,47 +3598,93 @@ def test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling():
     assert len(rows) <= NAMED_SYMBOL_UNNAMED_CEILING, unnamed_anchor_ceiling_report(rows)
 
 
+#: The doc the ceiling's negative control seeds and the span it seeds there, named at
+#: module scope because #4266 gave `_CEILING_SEEDED_DOCS` a second user —
+#: `CEILING_SHRINK_SLUG` below — which calls this control while holding its own seed, so
+#: the two controls must never pick the same doc.
+CEILING_SEED_SLUG, CEILING_SEED_SPAN = "autonomy-jobs.md", "eval/run_eval.py:2716"
+
+
 def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():
     """#3652 clause 4: the bound is demonstrated, not asserted.
 
-    Same shape as `test_the_rot_bound_is_shown_able_to_bite`: the corpus is green, one
-    unnamed anchor is seeded into a real doc's text through the seam
-    `corpus_doc_texts` reads, the ceiling must refuse it by slug and span, the seed
+    Same shape as `test_the_rot_bound_is_shown_able_to_bite`: the corpus is green,
+    unnamed anchors are seeded into a real doc's text through the seam
+    `corpus_doc_texts` reads, the ceiling must refuse them by slug and span, the seed
     goes away in a `finally` so it cannot reach a second node, and the unseeded corpus
     is green again on the far side.
 
-    The tightness assert below is what makes the seed one anchor rather than a
-    computed surplus. The bound was set AT the measured count, so a corpus that
-    shrank without the constant being lowered would let a single seeded anchor
-    through, and a control that cannot reach its `pytest.raises` is a control that
-    asserts nothing — it would then read as a passing test for as long as the drift
-    went unfixed, which is the failure #2795's rot bound was written to end.
+    #4266 replaced the arm that used to pin the corpus to the constant (`len(rows) ==
+    NAMED_SYMBOL_UNNAMED_CEILING`) with a seed sized from the gap: `surplus` anchors,
+    where `surplus = NAMED_SYMBOL_UNNAMED_CEILING - len(rows) + 1`. The equality made
+    showing the bound bite cost MORE than leaving a stale citation in place — clearing
+    one anchor dropped the population below the constant and reddened this node, so the
+    only way a doc could get cheaper was to edit this test file in the same commit,
+    which no review of a document is allowed to do (#4266, and `architecture/memory.md`
+    §4 records the same incident from the writing side). Demonstrating a bound needs the
+    `pytest.raises` leg, not the corpus parked on the number: that is why
+    `test_the_rot_bound_is_shown_able_to_bite`, the node this one says it copies, injects
+    its one surplus entry and says nothing about its population.
+
+    What the equality arm was actually for is kept, and it is kept as an assert about the
+    SEED rather than about the corpus: a control whose seed buys nothing is a control that
+    reads as passing while pricing nothing, which is the #2795 failure. So the node now
+    requires that the seeded corpus gained exactly the surplus it seeded, that every row
+    it gained carries the seeded span with mode `unnamed`, and that the seeded total is
+    over the bound before it asks for the raise.
     """
-    slug, span = "autonomy-jobs.md", "eval/run_eval.py:2716"
-    seed = (f"\nThe ceiling's negative control cites `{span}` for the baseline "
-            "write.\n")
+    slug, span = CEILING_SEED_SLUG, CEILING_SEED_SPAN
     assert slug in PATH_DOC_SLUGS, f"{slug} is not a doc the ceiling reads"
     assert span not in _text(slug), (
         f"{slug} now cites {span} itself, so a seeded occurrence would take its mode "
         "from the real sentence and price nothing")
-    assert not _CEILING_SEEDED_DOCS, "a seed survived an earlier control"
+    # Per-slug, not `not _CEILING_SEEDED_DOCS`: the dict is one seam shared by every
+    # control that seeds a corpus, and the shrink node (#4266) deliberately calls THIS
+    # node while holding a seed in a different doc. A dict-empty guard made that call
+    # fail with "a seed survived an earlier control" for a seed that was not ours, which
+    # is how the bound came to have a second reason a doc could not be edited alone.
+    assert slug not in _CEILING_SEEDED_DOCS, (
+        f"{slug} already holds a seed, so this node's own seeded rows could not be "
+        "told apart from another control's")
     assert corpus_doc_texts()[slug] == _text(slug), (
         "the seam this control writes into is not the corpus the ceiling reads")
 
     rows = unnamed_anchor_rows()
-    assert len(rows) == NAMED_SYMBOL_UNNAMED_CEILING, (
-        f"the corpus holds {len(rows)} fallback-decided anchors against a ceiling of "
-        f"{NAMED_SYMBOL_UNNAMED_CEILING}: the population shrank and the constant did "
-        "not. Re-measure, then lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit "
-        "that cleared the anchor — that is what records the shrink.")
+    surplus = NAMED_SYMBOL_UNNAMED_CEILING - len(rows) + 1
+    assert surplus >= 1, (
+        f"the corpus already holds {len(rows)} fallback-decided anchors against a "
+        f"ceiling of {NAMED_SYMBOL_UNNAMED_CEILING}, so it is already over the ceiling "
+        "and the shipped node is red before any seed: this control cannot show a bound "
+        "biting on a corpus the bound already refuses. Re-measure the constant.")
+    # One sentence per seeded anchor, and one anchor per sentence: `fallback_decision`
+    # yields a row per graded citation, so k identical citations appended to a real doc's
+    # text are k rows (measured at k = 1, 2, 3 and 8 on this seed, each growing the
+    # corpus by exactly k). The span is one the corpus already cites elsewhere, so no
+    # invented path:NNN is needed to grow the population by any k the gap asks for.
+    seed = "".join(f"\nThe ceiling's negative control cites `{span}` for the baseline "
+                   "write.\n" for _ in range(surplus))
     seeded = corpus_doc_texts()
     seeded[slug] = _text(slug) + seed
     seeded_rows = unnamed_anchor_rows(seeded)
-    assert len(seeded_rows) == len(rows) + 1, (
-        f"the seed took the corpus from {len(rows)} rows to {len(seeded_rows)}: the "
-        "bound can only be shown biting on exactly one added fallback-decided anchor")
-    seeded_total = NAMED_SYMBOL_UNNAMED_CEILING + 1
-    seeded_doc = sum(1 for s, _r in rows if s == slug) + 1
+    gained = [(s, r) for s, r in seeded_rows if s == slug and r["span"] == span]
+    assert len(gained) == surplus, (
+        f"the {surplus} seeded citation(s) produced {len(gained)} fallback-decided "
+        f"rows for `{slug}` / `{span}`: a seed that buys no row cannot bite, and the "
+        "raise below would be reached by something other than this node's seed")
+    assert all(r["mode"] == "unnamed" for _s, r in gained), (
+        f"the seeded `{span}` citation was decided as "
+        f"{sorted({r['mode'] for _s, r in gained})}, not `unnamed`: this bound counts "
+        "fallback-decided anchors, so a seed that came back named priced nothing")
+    assert len(seeded_rows) == len(rows) + surplus, (
+        f"the seed took the corpus from {len(rows)} rows to {len(seeded_rows)}, not the "
+        f"{surplus} it seeded: some other doc's population moved inside the seed, and a "
+        "control whose corpus changes twice proves nothing about the seed")
+    assert len(seeded_rows) > NAMED_SYMBOL_UNNAMED_CEILING, (
+        f"the seeded corpus holds {len(seeded_rows)} rows against a ceiling of "
+        f"{NAMED_SYMBOL_UNNAMED_CEILING}, which is not over the bound — the raise below "
+        "would have nothing to raise for")
+    seeded_total = len(seeded_rows)
+    seeded_doc = sum(1 for s, _r in rows if s == slug) + surplus
     report = unnamed_anchor_ceiling_report(seeded_rows)
 
     test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
@@ -3660,6 +3718,90 @@ def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():
                            "that is what records the shrink."), report[-200:]
     assert "lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit" in msg, msg[-600:]
     test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
+
+
+#: #4266: the second user of `_CEILING_SEEDED_DOCS`, and the opposite kind of seed. The
+#: control above ADDS anchors to show the bound refusing a surplus; this one REMOVES the
+#: one bare citation named below from a real doc's text — the exact edit an accuracy pass
+#: on a document makes — to show that removing one now costs that doc nothing.
+#: `app/routers/sessions.py:1413` is the measured shape from #4266's triage: the doc's
+#: text with that span's number dropped (`app/routers/sessions.py:1413` ->
+#: `app/routers/sessions.py`) takes the corpus from 187 rows to 186.
+CEILING_SHRINK_SLUG = "ambient-context-injection.md"
+CEILING_SHRINK_CITATION = "app/routers/sessions.py:1413"
+
+
+def test_clearing_a_bare_citation_costs_the_doc_no_test_edit():
+    """#4266: dropping one stale line number must not owe anyone a commit here.
+
+    The tax this node prices is the one #4266 was filed for. The control above used to
+    require the corpus to sit EXACTLY on `NAMED_SYMBOL_UNNAMED_CEILING`, so a doc that
+    deleted a bare `path:NNN` citation — the cheapest possible accuracy fix, and the one
+    a reviewer of a document is allowed to make alone — dropped the population under the
+    constant and reddened that control with "the population shrank and the constant did
+    not". Every correction pass therefore had two options, and one of them was a paired
+    edit to this file: measured at `d601f230`, one such edit produced `1 failed, 1
+    passed`, and `architecture/memory.md` §4 records what a review that could not edit a
+    test file did instead — "Each wrong number is now the true one rather than gone",
+    because "clearing an anchor requires lowering the constant in the same commit".
+
+    So the seed below is the shrink, and the claim is that both ceiling nodes are green
+    on the far side of it with `NAMED_SYMBOL_UNNAMED_CEILING` not touched: the strict
+    `len(after) < NAMED_SYMBOL_UNNAMED_CEILING` assert is the evidence that the constant
+    did not move with the population, since a constant that had been lowered to meet the
+    shrink would leave the two equal instead. The shrink node calls the ceiling control
+    as well as the shipped bound, which is the case that used to be impossible: the
+    control's seed guard is per-doc, so holding a seed here no longer makes the control
+    report somebody else's seed.
+    """
+    assert CEILING_SHRINK_SLUG != CEILING_SEED_SLUG, (
+        "both controls seed through one dict; on the same doc this node's removal and "
+        "the ceiling control's addition would cancel and neither could price anything")
+    assert CEILING_SHRINK_SLUG in PATH_DOC_SLUGS, (
+        f"{CEILING_SHRINK_SLUG} is not a doc the ceiling reads, so seeding it would "
+        "prove nothing about the corpus the bound actually refuses")
+    text = _text(CEILING_SHRINK_SLUG)
+    assert text.count(CEILING_SHRINK_CITATION) == 1, (
+        f"{CEILING_SHRINK_CITATION} occurs {text.count(CEILING_SHRINK_CITATION)} times "
+        f"in {CEILING_SHRINK_SLUG}: the measured shrink drops exactly one citation, so "
+        "re-point this node's span rather than widening the edit")
+
+    rows = unnamed_anchor_rows()
+    cite_rows = [(s, r["mode"]) for s, r in rows
+                 if s == CEILING_SHRINK_SLUG and r["span"] == CEILING_SHRINK_CITATION]
+    assert len(cite_rows) == 1 and cite_rows[0][1] != "named", (
+        f"{CEILING_SHRINK_CITATION} contributes {cite_rows} to the bounded population "
+        "here, so this is no longer the citation the shrink clears — the node below "
+        "would be seeding an edit that changes nothing")
+
+    shrunk = text.replace(CEILING_SHRINK_CITATION,
+                          CEILING_SHRINK_CITATION.rsplit(":", 1)[0])
+    _CEILING_SEEDED_DOCS[CEILING_SHRINK_SLUG] = shrunk
+    try:
+        after = unnamed_anchor_rows()
+        assert not [1 for s, r in after
+                    if s == CEILING_SHRINK_SLUG
+                    and r["span"] == CEILING_SHRINK_CITATION], (
+            "the seeded text still contributes the citation it dropped")
+        assert len(after) == len(rows) - 1, (
+            f"dropping one bare citation moved the corpus from {len(rows)} rows to "
+            f"{len(after)}: this node measures one cleared anchor, and a shrink of any "
+            "other size is a different edit than the one #4266 prices")
+        assert len(after) < NAMED_SYMBOL_UNNAMED_CEILING, (
+            f"{len(after)} rows against a ceiling of {NAMED_SYMBOL_UNNAMED_CEILING}: not "
+            "strictly under it, so these two green calls would not show the constant "
+            "standing while the population fell")
+        # The two nodes a doc-only edit used to be unable to make. Called as the corpus
+        # reader sees them — through the seam, with this node's seed in place — because
+        # the bound reads `corpus_doc_texts()` and nothing else.
+        test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
+        test_the_fallback_anchor_ceiling_is_shown_able_to_bite()
+    finally:
+        del _CEILING_SEEDED_DOCS[CEILING_SHRINK_SLUG]
+
+    assert unnamed_anchor_rows() == rows, (
+        "the shrink seed outlived its `finally`, so every later reader of the corpus "
+        "sees a doc this repo never wrote")
 
 
 #: The anchor #4061 re-typed out of the unreadable `gate.py:2584` spelling, and the
