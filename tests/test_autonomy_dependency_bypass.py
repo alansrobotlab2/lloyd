@@ -655,3 +655,188 @@ def test_the_pass_hold_leaves_alone_everything_it_did_not_release(aut, tmp_path)
     write_task(aut, 49, depends_on=48, stale_bypass_hours=36,
                last_run=(PIN - dt.timedelta(days=2)).isoformat())
     assert len([int(t["id"]) for t in aut.get_due_tasks(now=PIN)]) <= 2
+
+
+# ── #4254: a fleet hold does not spend the fail-forward budget ────────────────
+#
+# The measured incident, instants and all. `pause_journal` id 69 took the pool at
+# 2026-11-18T02:30:06.420505Z (`holder_kind: person`, `actor: mission-control`)
+# and id 70 lifted it 21 h 49 m later at 2026-11-19T00:19:04.743834Z. #42's last
+# success sat at 2026-11-17T06:18:46.950660Z, so its dependent #39 reached its
+# 36 h bound at 18:18:46Z — and queue row 24044 was enqueued 62 s later, at
+# 18:19:48Z, with `not_before: NULL`. On unpause the scheduler claimed #39 at
+# 00:24:17Z and only enqueued #42 (row 24051) at 00:28:59Z, 27 s after #38
+# finished: the dependent ran 4 min before its upstream existed as work, found
+# only the already-consumed knowledge-handoff-2026-11-17.md, and burned a cycle.
+#
+# The arithmetic the assertions below quote:
+#   wall at 18:19:48Z        (ENQUEUED − UP_RAN)            = 36.0169 h
+#   held inside that window  (ENQUEUED − HOLD_ON)           = 15.8282 h
+#   unpaused                 = HOLD_ON − UP_RAN             = 20.1887 h  → "20.2"
+#   wall at 00:20:00Z next day                              = 42.0203 h
+#   unpaused there           42.0203 − 21.8162 (full hold)  = 20.2041 h  → "20.2"
+
+UP_RAN = dt.datetime(2026, 11, 17, 6, 18, 46, 950660, tzinfo=dt.timezone.utc)
+HOLD_ON = dt.datetime(2026, 11, 18, 2, 30, 6, 420505, tzinfo=dt.timezone.utc)
+HOLD_OFF = dt.datetime(2026, 11, 19, 0, 19, 4, 743834, tzinfo=dt.timezone.utc)
+ENQUEUED = dt.datetime(2026, 11, 18, 18, 19, 48, tzinfo=dt.timezone.utc)
+JUST_AFTER_RELEASE = dt.datetime(2026, 11, 19, 0, 20, 0, tzinfo=dt.timezone.utc)
+#: The instant the bound IS reached on unpaused time: every hour of the hold is
+#: stepped over, so 36 h of runnability start at HOLD_OFF.
+RELEASE_EXACT = UP_RAN + (HOLD_OFF - HOLD_ON) + dt.timedelta(hours=36)
+
+
+def _incident_chain(aut, tmp_path):
+    """The #42 → #39 edge as it stood on 2026-11-18, handoff and all.
+
+    #42's declared `output_artifact` IS on disk under its 2026-11-17 spelling —
+    the 42 h old, already-consumed file the run record found — so #1437's
+    artifact leg is satisfied and the ONLY thing that released #39 in production
+    was the elapsed bound. That leaves the clock as the single moving part of
+    these cases; the artifact rule itself is pinned by the tests above.
+    """
+    tmpl = str(tmp_path / "reflection" / "knowledge-handoff-{date}.md")
+    write_task(aut, 42, last_run=UP_RAN.isoformat(), output_artifact=tmpl)
+    write_task(aut, 39, depends_on=42, stale_bypass_hours=36,
+               last_run=(UP_RAN - dt.timedelta(days=1)).isoformat())
+    _write_handoff(tmpl, UP_RAN.astimezone().strftime("%Y-%m-%d"))
+    return tmpl
+
+
+def _hold_store(aut, tmp_path, monkeypatch, rows, name="holds.db"):
+    """A real hold history, written by the real writer, at the path the gate reads.
+
+    `rows` are `(value, holder_kind, at)` triples fed to
+    `WorkQueue.pause_journal_append` — the same call the API and the pool make to
+    record a take and its lift, which is what pairs them via `hold_id`. The gate
+    then reads them back through `WorkQueue.pause_journal_holds`. Writing through
+    one API and reading through the other is the point: the scheduler and the
+    worker pool are separate processes sharing `workers.db`, so the pairing (and
+    its `duration_s`) is the seam this fix actually crosses, not a detail a fake
+    can stand in for.
+    """
+    from workers.queue import WorkQueue
+    db = tmp_path / name
+    q = WorkQueue(db)
+    for value, kind, at in rows:
+        q.pause_journal_append(value=value, holder_kind=kind,
+                               actor="mission-control", at=at.isoformat())
+    monkeypatch.setattr("workers.queue.configured_db_path", lambda: db)
+    # An isolated warning ledger, so the dedup in `_fleet_hold_seconds` cannot be
+    # satisfied by an earlier test in the same xdist worker.
+    monkeypatch.setattr(autonomy, "_hold_clock_warned", {}, raising=False)
+    return q
+
+
+def test_a_fleet_pause_does_not_spend_the_dependents_stale_bypass_budget(
+        aut, tmp_path, monkeypatch):
+    """#4254 clauses 1 and 2: held time is not the upstream going quiet.
+
+    At 2026-11-18T18:19:48Z the wall clock said 36.0169 h since #42 last ran —
+    62 s past #39's declared 36 h bound — and that is what released it in
+    production. 15.8282 h of that span the pool was held by a person, so on
+    unpaused time #42 had been quiet 20.1887 h: inside the bound, and no
+    fail-forward at all. The verdict at the release instant is pinned too,
+    because a rule that only holds DURING a pause is the same bug one tick later
+    — 21 h 49 m of held time is still 21 h 49 m of upstream that could not run.
+
+    The holder is deliberately `person` here and `guardian-tripwire` in the node
+    below, which asserts the identical sentence; see that one for why no
+    `holder_kind` filter belongs in the deduction.
+    """
+    _incident_chain(aut, tmp_path)
+    _hold_store(aut, tmp_path, monkeypatch, [
+        ("1", "person", HOLD_ON), ("0", "person", HOLD_OFF)])
+    tasks = board(aut, 42, 39)
+
+    wall = (ENQUEUED - UP_RAN).total_seconds() / 3600.0
+    assert 36.01 < wall < 36.03, wall        # the measured 62 s past the bound
+    assert aut._is_dependency_met(tasks[1], tasks, now=ENQUEUED) is False, (
+        f"#39 was released {wall:.4f} h after #42 last ran, 15.8282 h of which "
+        "the worker pool was held: the pause spent a budget it never spent")
+    assert aut._is_dependency_met(tasks[1], tasks,
+                                  now=JUST_AFTER_RELEASE) is False, (
+        "42.0203 h of wall time with 21.8162 h of it held is 20.2041 unpaused "
+        "hours, which is inside a 36 h bound")
+
+
+def test_the_bound_still_spends_on_time_the_pool_was_free(aut, tmp_path,
+                                                          monkeypatch):
+    """The deduction delays the fail-forward; it does not cancel it.
+
+    The bound is 36 h of RUNNABLE silence, so it arrives at `UP_RAN` + the hold
+    + 36 h — 2026-11-19T16:07:45Z, 9 h 48 m after the fleet came back. Held at
+    that exact instant (`age <= bound` is the gate's own comparison), released a
+    minute later. Without this node the fix could be "a pause means never",
+    which would put #1551's fail-forever back through the other door.
+    """
+    _incident_chain(aut, tmp_path)
+    _hold_store(aut, tmp_path, monkeypatch, [
+        ("1", "person", HOLD_ON), ("0", "person", HOLD_OFF)])
+    tasks = board(aut, 42, 39)
+    assert aut._is_dependency_met(tasks[1], tasks, now=RELEASE_EXACT) is False
+    assert aut._is_dependency_met(
+        tasks[1], tasks, now=RELEASE_EXACT + dt.timedelta(minutes=1)) is True, (
+        "36 h of unpaused silence past the upstream's last run is exactly what "
+        "the owner declared fail-forward for")
+
+
+def test_a_machine_hold_shortens_the_budget_exactly_as_a_person_hold_does(
+        aut, tmp_path, monkeypatch):
+    """#4254 clause 2: the deduction has no `holder_kind` filter, and cannot have one.
+
+    A hold suppresses claims whatever took it. An eval window and a guardian
+    tripwire stop every upstream just as surely as `mission-control` does — and
+    #4135's own incident was a 46 h operator hold — so filtering on `person`
+    would leave this bug standing for every pause a human did not take. Same two
+    instants as the person fixture above, so the sentence the board prints is
+    compared against unpaused time computed here from the stamps: everything
+    before the hold is unpaused, so at ENQUEUED the answer is HOLD_ON − UP_RAN =
+    20.1887 h, and the 42.0 h wall figure must not appear anywhere.
+    """
+    _incident_chain(aut, tmp_path)
+    _hold_store(aut, tmp_path, monkeypatch, [
+        ("1", "guardian-tripwire", HOLD_ON),
+        ("0", "guardian-tripwire", HOLD_OFF)])
+    tasks = board(aut, 42, 39)
+    assert aut._is_dependency_met(tasks[1], tasks, now=ENQUEUED) is False, (
+        "a guardian tripwire hold was not deducted, so the deduction filters on "
+        "holder_kind after all")
+    # Expected from the stamps alone: everything before the hold is unpaused
+    # time, so the gate must print HOLD_ON − UP_RAN = 20.1887 h and not the
+    # 36.0169 h wall figure — which, being past the bound, would not even be an
+    # in-window sentence at all.
+    assert aut.hold_reason(tasks[1], tasks, now=ENQUEUED) == (
+        "waiting on #42 (inside its 36 h stale_bypass window: #42 ran "
+        f"{(HOLD_ON - UP_RAN).total_seconds() / 3600.0:.1f} h ago)")
+
+
+def test_an_unreadable_hold_history_restores_the_wall_clock_and_warns_once(
+        aut, tmp_path, monkeypatch, caplog):
+    """#4254 clause 5: the fail-open direction is always toward dispatching.
+
+    The hold history lives in `workers.db`, a store the scheduler does not own:
+    it can be locked, mid-migration, or simply absent. The answer must be the
+    measure this file's whole history is written against — wall-clock age — plus
+    ONE warning line, never a held chain and never a warning per 60 s tick.
+    `caplog` counts the line across four evaluations of the same held pair,
+    which is what a dedupe is for.
+    """
+    caplog.set_level("WARNING", logger="lloyd-autonomy")
+    _incident_chain(aut, tmp_path)
+    bogus = tmp_path / "unreadable.db"
+    bogus.write_text("this is not a sqlite database\n")
+    monkeypatch.setattr("workers.queue.configured_db_path", lambda: bogus)
+    monkeypatch.setattr(autonomy, "_hold_clock_warned", {}, raising=False)
+    tasks = board(aut, 42, 39)
+
+    assert aut._is_dependency_met(tasks[1], tasks, now=ENQUEUED) is True, (
+        "an unreadable hold history stopped the fail-forward: an unreadable "
+        "store is no reason to halt the nightly chain")
+    for _ in range(3):
+        aut._is_dependency_met(tasks[1], tasks, now=ENQUEUED)
+    lines = [r.getMessage() for r in caplog.records
+             if r.name == "lloyd-autonomy" and "fleet hold history"
+             in r.getMessage()]
+    assert len(lines) == 1, (
+        f"the store-read failure printed {len(lines)} times for four ticks")

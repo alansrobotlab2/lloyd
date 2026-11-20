@@ -254,7 +254,7 @@ Four behaviours are load-bearing:
   call sites rather than as a refusal, so a bad config pauses no schedule
   (#1684's ruling, kept).
 - **It passes the pool's cap into `run_task`** (`max_duration_seconds: 3600`;
-  `run_task` (`app/autonomy.py:4983`) keeps its own timeout 30 s under the value
+  `run_task` (`app/autonomy.py:5111`) keeps its own timeout 30 s under the value
   it is handed, the margin being `_POOL_TIMEOUT_MARGIN`) so the task's own timer
   always wins. When the two were equal the pool cancelled the handler before it could
   write anything, and 237 runs and 73.6 GPU-hours recorded with a NULL `task_id`

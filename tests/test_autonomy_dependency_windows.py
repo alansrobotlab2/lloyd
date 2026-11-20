@@ -1483,3 +1483,60 @@ def test_an_upstream_that_ran_before_its_dependent_still_cannot_re_drive_it(
     assert reason(aut, b[42], board, now) == aut.RUN_SUCCESS_HOLD
 
     assert [r.getMessage() for r in caplog.records if "RE-DRIVEN" in r.getMessage()] == []
+
+
+# ── #4254 clause 3: the board prints the hours the gate counted ───────────────
+
+def _hold_history(tmp_path, monkeypatch, rows):
+    """Hold rows written through the store's own writer, at the path the gate reads.
+
+    `pause_journal_append` is the only writer of this history and pairs a take
+    with its lift by `hold_id`; `WorkQueue.pause_journal_holds` is the reader the
+    scheduler's deduction uses. Writing through one and reading through the other
+    is the seam, because the pool and the scheduler are separate processes over
+    one `workers.db`.
+    """
+    from workers.queue import WorkQueue
+    db = tmp_path / "holds.db"
+    q = WorkQueue(db)
+    for value, kind, when in rows:
+        q.pause_journal_append(value=value, holder_kind=kind,
+                               actor="mission-control", at=when.isoformat())
+    monkeypatch.setattr("workers.queue.configured_db_path", lambda: db)
+    return q
+
+
+def test_the_stale_bypass_sentence_prints_the_hours_the_gate_counted(
+        aut, monkeypatch, tmp_path):
+    """One measure, two readers (#870's rule, this time in the reader's direction).
+
+    The release decision and the sentence about it are different functions, and
+    before #4254 only the decision learned that a held fleet stops every
+    upstream. Replaying the measured 2026-11-18 hold across the #42 → #39 edge —
+    #42 last ran 2026-11-17T06:18:46.950660Z, the pool was held from
+    2026-11-18T02:30:06.420505Z to 2026-11-19T00:19:04.743834Z — and probing at
+    2026-11-19T00:20:00Z, the wall clock says #42 has been quiet 42.0203 h while
+    the gate's own measure says 20.2041 h of runnability. Before the fix that
+    pair printed `stale_bypass 36 h passed` for a chain whose bound had NOT run
+    out, and released it; after it, the same instant reads the in-window sentence
+    with the deducted hours, which is the only figure a reader can act on.
+    """
+    up_last = dt.datetime(2026, 11, 17, 6, 18, 46, 950660, tzinfo=dt.timezone.utc)
+    hold_on = dt.datetime(2026, 11, 18, 2, 30, 6, 420505, tzinfo=dt.timezone.utc)
+    hold_off = dt.datetime(2026, 11, 19, 0, 19, 4, 743834, tzinfo=dt.timezone.utc)
+    probe = dt.datetime(2026, 11, 19, 0, 20, 0, tzinfo=dt.timezone.utc)
+    unpaused_h = ((probe - up_last) - (hold_off - hold_on)).total_seconds() / 3600.0
+    assert unpaused_h == pytest.approx(20.2, abs=0.05), (
+        "the stamps no longer replay the measured 20.2 unpaused hours")
+
+    _hold_history(tmp_path, monkeypatch, [("1", "person", hold_on),
+                                          ("0", "person", hold_off)])
+    board = [task(42, last=up_last),
+             task(39, dep=42, last=up_last - dt.timedelta(days=1),
+                  stale_bypass_hours=36)]
+    b = by_id(board)
+
+    assert aut._is_dependency_met(b[39], board, now=probe) is False
+    assert reason(aut, b[39], board, probe) == (
+        "waiting on #42 (inside its 36 h stale_bypass window: #42 ran "
+        f"{unpaused_h:.1f} h ago)")

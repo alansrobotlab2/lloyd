@@ -112,6 +112,56 @@ def _parse(aut, task_id):
     return aut._parse_task_file(path) if path else None
 
 
+# ── #4254 clause 4: no hold in the journal means no change of behaviour ───────
+
+def test_the_fail_forward_still_releases_when_nothing_held_the_pool(
+        aut, monkeypatch, tmp_path):
+    """The control the pause deduction is measured against.
+
+    The same chain the 2026-11-18 incident ran — #42 last succeeded
+    2026-11-17T06:18:46.950660Z with its `{date}` handoff on disk, #39 behind it
+    declaring `stale_bypass_hours: 36` — probed at 2026-11-18T18:19:48Z, which
+    is 36.0169 h later: 62 s past the bound. With the hold pair the incident had
+    in `pause_journal` deliberately NOT written, the dependent releases exactly
+    as it did before #4254, because with no hold anywhere wall time already IS
+    unpaused time.
+
+    This is the node that keeps the fix a delay and not a veto. The rest of this
+    file — the bypass past an unresolved upstream, and the past-bound + 24 h
+    no-input release in test_autonomy_dependency_bypass.py — is the same claim
+    one level down, and every in-window sentence in
+    test_autonomy_dependency_windows.py assumes it too: none of them writes a
+    hold row, so if the deduction did anything in an empty journal they would all
+    go red together.
+    """
+    up_last = dt.datetime(2026, 11, 17, 6, 18, 46, 950660, tzinfo=dt.timezone.utc)
+    probe = dt.datetime(2026, 11, 18, 18, 19, 48, tzinfo=dt.timezone.utc)
+    wall_h = (probe - up_last).total_seconds() / 3600.0
+    assert 36.01 < wall_h < 36.03, (
+        "the probe is no longer the measured 62 s past the bound")
+
+    tmpl = str(tmp_path / "reflection" / "knowledge-handoff-{date}.md")
+    write_task(aut, 42, last_run=up_last.isoformat(), output_artifact=tmpl)
+    write_task(aut, 39, depends_on=42, stale_bypass_hours=36,
+               last_run=(up_last - dt.timedelta(days=1)).isoformat())
+    handoff = Path(tmpl.replace("{date}",
+                                up_last.astimezone().strftime("%Y-%m-%d")))
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("x" * 5000)
+
+    from workers.queue import WorkQueue
+    empty = tmp_path / "no-holds.db"
+    assert WorkQueue(empty).pause_journal_holds() == [], (
+        "the control store has hold rows in it, so this is not the control")
+    monkeypatch.setattr("workers.queue.configured_db_path", lambda: empty)
+
+    board = [_parse(aut, 42), _parse(aut, 39)]
+    assert aut._is_dependency_met(board[1], board, now=probe) is True, (
+        f"#39 stayed held {wall_h:.4f} h past #42's last run with NOTHING held "
+        "the fleet: the deduction changed the release rule for a chain no pause "
+        "ever touched")
+
+
 # ── clauses 1-3: the three shapes that must hold ─────────────────────────────
 
 

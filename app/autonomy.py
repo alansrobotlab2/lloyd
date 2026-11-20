@@ -1764,6 +1764,104 @@ def _stale_bypass_hours(dependent: dict) -> Optional[float]:
     return hours if hours > 0 else None
 
 
+#: Episode ledger for the unreadable-hold-history warning, deduplicated exactly
+#: like `_missing_artifact_bypass_warned`: the scheduler re-answers this check
+#: every 60 s tick, so a store that stays unreadable must print ONE line and not
+#: one per tick. The first successful read clears it, so a history that recovers
+#: and then breaks again warns again.
+_hold_clock_warned: dict = {}
+
+
+def _fleet_hold_seconds(after: datetime.datetime,
+                        now: datetime.datetime) -> float:
+    """Seconds of the window `[after, now]` in which the worker pool was HELD.
+
+    #4254. `pause_journal` ids 69/70 held the fleet for 21 h 49 m from
+    2026-11-18T02:30:06Z to 2026-11-19T00:19:04Z while the nightly chain sat
+    due, and the raw wall-clock subtraction spent that time as though the
+    upstream had simply been late: #39's 36 h bound ran out at 18:18:46Z, so
+    queue row 24044 was enqueued at 18:19:48Z with `not_before: NULL` and on
+    unpause raced #42 — which could not have a row of its own until #38
+    finished, 27 s after it completed at 00:28:32Z — and won. A deliberate
+    pause is not an upstream that never comes back, which is the only thing the
+    fail-forward exists for.
+
+    The spans come from `WorkQueue.pause_journal_holds`, the store's own pairing
+    of a take row with the lift that closes it via `hold_id`. There is no second
+    reader of `pause_journal` here, because a second reader is a second answer.
+    EVERY hold counts whatever its `holder_kind`: a machine hold (an eval window,
+    a guardian tripwire) suppresses claims exactly as an operator's does, and
+    filtering on `person` would leave this bug standing for every pause a person
+    did not take — #4135's own incident was a 46 h operator hold.
+
+    Each interval is clipped to the window at both ends, so a hold that opened
+    before `after` contributes only the part inside it and a hold entirely
+    outside contributes nothing (which is why an unrelated pause in the journal
+    cannot perturb a chain measured against a pinned `now`). An OPEN hold — a
+    take with no lift, so `ended_at` is None — runs to `now`: the honest answer
+    for a fleet being held as the question is asked, and the case that must keep
+    a dependent waiting rather than release it. A row whose instants cannot be
+    parsed is skipped, and a history that cannot be read at all is answered as
+    "no holds" by `_unpaused_age_s`: every failure direction here is toward
+    dispatching, never toward stopping it.
+    """
+    from workers.queue import WorkQueue, configured_db_path
+    try:
+        holds = WorkQueue(configured_db_path()).pause_journal_holds()
+    except Exception as exc:
+        # Fail OPEN. An unreadable hold history must restore the wall-clock
+        # measure this function did not have before #4254, and say so once; a
+        # store being down is no reason for the nightly chain to stop dispatch.
+        if not _hold_clock_warned.get("unreadable"):
+            _hold_clock_warned["unreadable"] = True
+            logger.warning(
+                "Could not read the fleet hold history, so stale_bypass_hours "
+                "is aging on wall-clock time again and a fleet pause can spend a "
+                "dependent's fail-forward budget (#4254): %s", exc)
+        return 0.0
+    _hold_clock_warned.pop("unreadable", None)
+    total = 0.0
+    for hold in holds:
+        start = _parse_iso(hold.get("started_at"))
+        if start is None:
+            continue
+        if hold.get("ended_at") in (None, ""):
+            end = now                       # still held: the span runs to `now`
+        else:
+            end = _parse_iso(hold.get("ended_at"))
+            if end is None:
+                continue                    # unparseable end: never hold on it
+        lo, hi = max(start, after), min(end, now)
+        if hi > lo:
+            total += (hi - lo).total_seconds()
+    return total
+
+
+def _unpaused_age_s(dep_last_run: Optional[datetime.datetime],
+                    now: datetime.datetime) -> Optional[float]:
+    """Seconds the upstream has gone without a success, EXCLUDING held time.
+
+    `None` for an upstream that never ran, exactly as the bare subtraction this
+    replaced answered: the never-ran branch of `_dependency_bypassed` measures
+    nothing and therefore gains no pause term. Otherwise the wall-clock gap less
+    every fleet hold clipped into the window (`_fleet_hold_seconds`), floored at
+    zero — a hold covering the whole window means the upstream demonstrably could
+    not run in it, so it owes no unpaused time rather than a negative age.
+
+    ONE MEASURE, TWO READERS (#870). Both the release decision
+    (`_dependency_bypassed`) and the sentence printed about it
+    (`_bypass_hold_detail`) ask this one function. Deducting in the gate alone
+    would have the board print hours the gate never used — the
+    two-functions-one-fact failure #870 names in this module, and the difference
+    between a fixed clock and a `#42 ran 42.0 h ago` sitting beside a verdict of
+    NOT released.
+    """
+    if dep_last_run is None:
+        return None
+    return max(0.0, (now - dep_last_run).total_seconds()
+               - _fleet_hold_seconds(dep_last_run, now))
+
+
 def _dependency_bypassed(dependent: dict, dep_task: dict,
                          dep_last_run: Optional[datetime.datetime],
                          now: datetime.datetime) -> bool:
@@ -1778,14 +1876,32 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     report stalled the nightly chain ~10 h on 2026-09-10/11.
 
     WHICH CLOCK IT ANSWERS (#1538): "has the UPSTREAM gone N hours without a
-    success", measured from `dep_last_run` and from nothing else. It is NOT a
-    cap on how long the DEPENDENT has been waiting. #42's own `next_run` was
+    success", measured from `dep_last_run` and from nothing else about the
+    DEPENDENT — the one thing it does subtract is the fleet's own held time,
+    which is not staleness at all (#4254, below). It is NOT a cap on how long
+    the DEPENDENT has been waiting. #42's own `next_run` was
     75.5 h in the past when its 36 h bound was reached, and the stall alert
     quoted `hours_past_next_run` beside `stale_bypass_hours` as if they were one
     clock, which is how four days of correct alarms came to describe a fault in
     this elapsed check when the fault was in the ORDER of the gate that calls it
     (`_dependency_refusal`). A dependent that declares no bound has no
     fail-forward path at all, however many cycles it misses.
+
+    THE PAUSE IS NOT STALENESS (#4254): the elapsed measure is `_unpaused_age_s`
+    — the gap from `dep_last_run` less every interval the worker pool spent
+    HELD inside that window, read from the pool's own `pause_journal` history.
+    The field's rationale is fail-forward for an upstream that never comes back,
+    and while the fleet is held the upstream is not failing, it is knowingly
+    stopped: the pool claims nothing, so no upstream can run however long the
+    pause lasts. Measured on the wall clock a long enough hold therefore turns a
+    deliberately held chain into a spuriously eligible dependent, and because
+    the dependent's row is enqueued during the hold while the upstream's cannot
+    exist until ITS upstream completes, the dependent wins the race on every
+    release. Measured on 2026-11-18/19: 36.02 h wall against #39's 36 h bound,
+    20.2 h of it unpaused, enqueued 62 s past the boundary with
+    `not_before: NULL` and run 4 min before #42 even had a queue row. What this
+    does NOT change is the bound itself, and not the `in_progress` arm below
+    either — a merely LATE upstream is still waited for.
 
     TWO BRANCHES THAT ARE DELIBERATELY DIFFERENT. An upstream that HAS RUN is
     bypassed only once `now` sits further past its `last_run` than the
@@ -1836,8 +1952,9 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     if str(dep_task.get("status", "")).strip() == "in_progress":
         return False
     key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
-    age_s = (None if dep_last_run is None
-             else (now - dep_last_run).total_seconds())
+    # The DEPENDENT's bound against the UNPAUSED age of the upstream (#4254):
+    # held time is not the upstream going quiet. None still means never ran.
+    age_s = _unpaused_age_s(dep_last_run, now)
     if age_s is not None:
         _never_ran_bypass_warned.pop(key, None)
         if age_s <= bypass_hours * 3600:
@@ -1898,13 +2015,24 @@ def _bypass_hold_detail(dependent: dict, dep_task: dict,
     The never-ran branch gets no in-window suffix: `_upstream_due_in_window`
     measures elapsed time from a `last_run` that does not exist there, and
     guessing at it would print a prediction the elapsed gates cannot support.
+
+    WHICH HOURS IT PRINTS (#4254): the `#42 ran N h ago` figure is
+    `_unpaused_age_s` — the identical measure the release decision is reached
+    with, so a fleet pause is absent from the sentence exactly as it is absent
+    from the verdict. Across the measured 2026-11-18 hold that reads `inside its
+    36 h stale_bypass window: #42 ran 20.2 h ago` and never the 42.0 h the wall
+    clock says, which is the point: a held fleet stops every upstream, so the
+    wall figure describes a silence no upstream was actually in.
     """
     bound = _stale_bypass_hours(dependent)
     if bound is None:
         return ""
     uid = dep_task.get("id")
-    age = (None if dep_last_run is None
-           else (now - dep_last_run).total_seconds() / 3600.0)
+    # #4254: the SAME deducted measure the gate decides on. Recomputing the wall
+    # gap here would print a figure the release verdict was never reached with —
+    # the two-functions-one-fact failure #870 names in this module.
+    age_s = _unpaused_age_s(dep_last_run, now)
+    age = None if age_s is None else age_s / 3600.0
     inside = age is not None and age <= bound
     if inside:
         head = (f"inside its {_fmt_hours(bound)} h stale_bypass window: "
