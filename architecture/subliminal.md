@@ -2,7 +2,7 @@
 segment: architecture
 tags: [architecture,subliminal,memory,prefetch]
 type: architecture
-updated: 2026-10-20
+updated: 2026-11-20
 status: implemented
 ---
 
@@ -213,11 +213,13 @@ facts@6ms vault@140ms` shows when each one arrived.
 
 ### Worker 1: Skill search
 
-- **Source:** the roots in `agent_mcp/skills.py::SKILLS_DIRS` — the two builtin
-  roots (`~/obsidian/skills/` and `~/lloyd/skills/`) unioned with whatever
-  `config.yaml skills.directories` names, deduped (#1294). Only the vault root
-  exists today — 210 dirs, ~198 retrievable; the repo-local root is in the list
-  and absent on disk, which `_iter_skills` skips silently. One walker decides
+- **Source:** the roots in `agent_mcp/skills.py::SKILLS_DIRS` — the one builtin
+  root (`~/obsidian/skills/`) unioned with whatever `config.yaml
+  skills.directories` names, deduped (#1294). `~/lloyd/skills/` was a second
+  builtin root until 2026-11-09 (`e9e2d20e`): it never existed on this box, so
+  the entry has been deleted from `_BUILTIN_SKILL_DIRS` rather than skipped at
+  walk time, and `SKILLS_DIRS` is one path long on this host. Re-counted
+  2026-11-19: 218 dirs, 208 retrievable, 10 quarantined by `status:`. One walker decides
   what a live skill is: `prompt_builder` imports `iter_active_skills` and
   `is_quarantined_skill_file` from that module and takes its walk roots from
   `SKILLS_DIRS` rather than carrying its own copy, so the advertised index and
@@ -225,7 +227,8 @@ facts@6ms vault@140ms` shows when each one arrived.
 - **Method:** `_score_skill(skill, tokens, require_metadata_hit=True)` —
   `name×3.0 + desc×2.0 + tags×1.5 + min(body_hits, 4)×0.3`, plus
   `pseudo_query_hits × weight` when the #1490 Skill2Query arm is on
-  (`skills.pseudo_queries.enabled`; **off** in `config.yaml` today, and the cache
+  (`skills.pseudo_queries.enabled`; the key is **absent from `config.yaml`**, so
+  the code default — off — is what applies, and the cache
   that arm reads — `SKILL_PSEUDO_QUERIES_PATH` at `app/paths.py:227` — has never
   been generated, so the effective formula is the four terms above).
 - **Metadata-hit gate:** a skill with zero name/desc/tag overlap scores 0.0
@@ -236,11 +239,15 @@ facts@6ms vault@140ms` shows when each one arrived.
 - **Output:** first skill full body (≤6000 chars), second skill excerpt (≤500 chars)
 - **Thresholds:** ≥3.0 for the first, ≥4.0 for the second
 - **Cache:** in-memory skill list, rebuilt only when a `SKILL.md` mtime changes
-  (a `(dir, mtime)` signature over both roots is re-checked at most every 15 s,
-  ~1 ms). Name/description/tag/body token sets are memoized on each cached dict
+  (a `(dir, mtime)` signature over the walk roots is re-checked at most every 15 s,
+  ~1 ms). The cache itself moved out of this module on 2026-11-09 (`e9e2d20e`):
+  it is `agent_mcp/skills.py::load_skills_cached` with its own
+  `SKILL_CACHE_CHECK_S = 15.0` (`agent_mcp/skills.py:389`), shared with
+  `skills_search`, and `prefetch._get_skills_cached` is a thin wrapper kept
+  because the eval runners and tests patch that name. Name/description/tag/body token sets are memoized on each cached dict
   by `skills._skill_token_sets` under a private `_tok` key, so scoring the
   whole set is one set intersection per skill (~0.2–1 ms; 283 skills when
-  this was measured, ~198 today) instead of re-tokenizing 1.5 MB of bodies
+  this was measured, 208 today) instead of re-tokenizing 1.5 MB of bodies
   per turn.
 - **Quarantine:** a skill whose frontmatter `status:` is one of `inactive`,
   `archived`, `disabled`, `retired`, `quarantined` is excluded from retrieval
@@ -277,6 +284,20 @@ facts@6ms vault@140ms` shows when each one arrived.
   and are re-exported from `agent_mcp/facts.py` under their old underscore
   names, which is what prefetch still imports.
 - **Output:** top 2 entities × 3 facts each = ≤6 fact lines
+- **Query (#4032, shipped off):** this leg and the skills leg normally search the
+  raw message. With `prefetch.followup.focus_legs` on, a message carrying fewer
+  than `FOLLOWUP_MAX_CONTENT_WORDS` (8) noise-filtered content words is handed to
+  both legs as `focus.enrich_query(text)` instead — the arm exists because "and
+  what about the other one?" reduces the skills query to the token `other` while
+  the fuzzy entity matcher answers `one` with `Checkmate-in-One` and `Capital One`.
+  It is **off** in `config.yaml` (`followup.focus_legs: false`) and its A/B is
+  unrecorded as of 2026-11-20 — the decision sits with #4296, and the command
+  `config.yaml:1813` names for it (`--arms`) is not the flag the runner takes
+  (`--arm`, #4394): `eval/run_prefetch_followup_eval.py --arm raw,focus`
+  over `eval/prefetch_followup_queries.yaml` decides, and nothing has written the
+  promised `eval/measurements/prefetch-followup-<date>.md`. `_search_recent_sessions`
+  and `_search_backlog_refs` never take the enriched query — a temporal regex and a
+  `#NNN` extraction are not topic searches.
 - **No LLM:** pure regex + file reads
 
 ### Worker 3: Vault search (QMD)
@@ -301,6 +322,19 @@ facts@6ms vault@140ms` shows when each one arrived.
   the global fusion or per-collection-floor payload the recall path sends. That
   is the intended trade, not an oversight — prefetch is scoped deliberately and
   is on a latency budget.
+- **Which `architecture` corpus it means** (`vault_search.architecture`, #1662,
+  2026-11-10): the shipped value is `both`, and `apply_architecture_collection`
+  applies that to `agent_mcp.vault.VAULT_SEGMENTS` — the explicit tools' fan-out,
+  twelve names on this host including `lloyd-architecture` (this checkout's live
+  `architecture/*.md`). `prefetch.VAULT_COLLECTIONS` follows only the `repo` arm
+  (`app/prefetch.py:234-235`), so under `both` the ninth name above is still the
+  vault's `architecture` collection — `~/obsidian/architecture`, a 36-file clone of
+  these docs that is refreshed only in patches (its `subliminal.md` is a
+  9,791-byte file dated 2026-08-23 against this page's 1,080 lines) — and prefetch
+  never reaches the live ones. The `both` decision was priced on the recall path
+  (+0.061 mrr_doc over the 79 doc-gold queries,
+  `eval/measurements/architecture-collection-2026-11-10.md`); the path that injects
+  into every turn was not in the measurement.
 - **Two legs, sequenced:**
   - **3a `lex` only** — 6–50 ms per call once the terms are warm, 0.5–1.3 s
     on a term's first sight. Waited on for at most 150 ms after the other
@@ -402,15 +436,20 @@ precision-first parallel source that sidesteps that entirely.
 
 - **Method:** regex `(?:#(\d{2,4})|(?<!\d)(\d{3,4})(?!\d))` casts a wide net; the
   precision gate is **existence in the live backlog index**. Unknown numbers are
-  dropped silently. The negative lookarounds mean `20260421` yields no match.
-  Live IDs span 9–3080 (9–387 when this was written; the board has roughly
-  doubled several times since), which collides with HTTP status codes and millisecond
+  dropped silently. The negative lookarounds mean a **bare** `20260421` yields no
+  match — but they guard that arm only. `#(\d{2,4})` has no right boundary, so
+  `#20260421` captures `2026`, and because the id space is dense the existence gate
+  confirms the truncated number instead of rejecting it: measured, `#20260421` and
+  `#10000` each render a real but unrelated task (#4393).
+  Live IDs span 9–4391 (9–387 when this was written, 9–3080 on 2026-10-20 —
+  roughly 1,300 new ids a month), which collides with HTTP status codes and millisecond
   values, so a **bare** number is also rejected when followed by a unit
   (`300ms`, `512mb`, `3 sec`) or preceded by code/port context (`HTTP 302`,
   `returned a 404`, `port 8080`, `BUDGET_MS = 300`). `#NNN` is never filtered.
 - **Source:** `~/obsidian/backlog/*.md`, indexed by leading task ID. The
-  directory is re-stat'ed every 60 s (3,018 `.md` files on 2026-10-20; a full
-  scandir+stat pass measures 8.7 ms, so the minute boundary costs ~0.015 ms/s of
+  directory is re-stat'ed every 60 s (4,329 `.md` files on 2026-11-19, 3,018 on
+  2026-10-20; a full scandir+stat pass over that many measures 8.7 ms, so the
+  minute boundary costs ~0.015 ms/s of
   averaged GIL time) and only files whose
   mtime changed are re-read and parsed; the old rebuild re-parsed every file
   (~216 ms of GIL-held CPU landing inside the budget once a minute). A stale
@@ -713,9 +752,12 @@ Background tasks fired via `asyncio.ensure_future` after a turn completes
 1. Skips already-`captured` sessions — but **only for the summary half.** Since
    #1159 fact extraction has its own per-session `fact_watermark` and is *not*
    suppressed by `captured`; a summary is written once, extraction follows the
-   turns that arrive after it. `_MIN_TURNS_FOR_EXTRACTION = 3` still gates the
-   *first* pass, and since #1647 it counts human turns
-   (`count_human_user_turns`, which excludes `[System: Background task ...`
+   turns that arrive after it. The gate is `FACT_EXTRACT_MIN_NEW_USER_MSGS = 3`
+   (`app/post_capture.py:323`) — the same threshold the old
+   `_MIN_TURNS_FOR_EXTRACTION` carried, but applied to the human turns **past the
+   watermark** rather than to the session total, which is what makes it an event
+   gate instead of a per-turn one — and since #1647 it counts human turns
+   (`_human_user_messages` / `_machine_user_row`, which exclude `[System: Background task ...`
    rows), because a watchdog's injected turn used to arm extraction on a session
    nobody spoke in.
 2. Exports the session as searchable markdown — **on every pass**, not only the
@@ -802,7 +844,8 @@ Tier-2 topic extraction (above).
 | `VAULT_LEX_SOFT_WAIT_MS` | 150 | Max extra wait for the lex leg once other workers are in |
 | `VAULT_LEX_STRAGGLE_MAX_S` | 2.0 s | Ladder deadline once the lex leg is straggling |
 | `VAULT_CARRIED_MIN_SLOTS` | 2 | Vault slots reserved for carried-over hits |
-| `_SKILL_CACHE_CHECK_S` | 15 s | How often the skill-dir mtime signature is re-checked |
+| `SKILL_CACHE_CHECK_S` | 15 s | How often the skill-dir mtime signature is re-checked. Lives in `agent_mcp/skills.py:389` since 2026-11-09 — it was `_SKILL_CACHE_CHECK_S` in `app/prefetch.py` until the cache moved |
+| `FOLLOWUP_MAX_CONTENT_WORDS` | 8 | Content-word floor below which the facts and skills legs may get the focus-enriched query, when `prefetch.followup.focus_legs` is on (#4032; off today) |
 | `PROMPT_BUDGET_CHARS` | 80,000 | Shared system+injected budget `log_turn_prompt_budget` measures the turn against (`prompt_builder`). Nothing is truncated at it — an overrun is a loud `over_budget=True` in the `PROMPT_BUDGET` line, not a silently cut identity file |
 
 ## Files
@@ -833,7 +876,7 @@ Tier-2 topic extraction (above).
 | QMD daemon | 8181 | GPU 0 | Hybrid BM25 + vector search, embedding model (`Qwen3-Embedding-0.6B-Q8_0` since 2026-09-21, `embeddinggemma-300M-Q8_0` before; the fork in `~/lloyd/qmd`). Single node process — serializes requests. **Vec-leg timing was corpus-proportional under the exact per-collection scans: 2.5–3.0 s at the 2026-09-20 index (15,850 files / 38,907 chunks). The fork's in-memory `VecIndex` removed that: 52 ms p50 / 57 ms p90 for prefetch's hybrid call on 2026-09-24, so the leg lands in budget.** The one thing that does NOT scale with corpus is the *fixed startup tax*: `embed ≈ vec ≈ chunk+1` ms on every query, warm, any text, any leg (39 ms on a 6-char word). 3.0 s is the worst case for a straggler, so a 500 ms carry-over is safe; lex leg 10–80 ms and AND-only |
 | vLLM primary (Qwen3.8-Flash-Next-nvfp4, 262,144 ctx) | 8096 | GPU 1 (RTX PRO 6000, `--gpu-memory-utilization 0.9345`) | Main agent model, and since 2026-09-20 the *only* chat-completions engine: it serves capture/fact/focus/title extraction too, because the `secondary` alias rewrites to it |
 | djev (DiffusionGemma 26B-A4B) | 8010 vLLM / 8011 structured | GPU 2 (RTX 3090) | What replaced the llama.cpp secondary slot in that GPU's memory (`551e9044`, `secondary_enabled: false`). Structured decisions only — rank/classify/triage — **not** a chat alias, so no Tier-2 job routes here; the two engines are an either/or on a 24 GiB card. Not Inner Voice either: the observer is pinned to `primary` in config.yaml after a 4B briefly landed in this GPU's slot and intervened on 40% of judged events |
-| Qwen3-TTS (qwen3-tts) | 8093 | — | Voice output, vLLM-omni (`--omni`). `:8090` is the **vendored** Kokoro server (`/health` 200 today), which the TTS fallback chain still treats as the lowest-priority link; see [[voice]] |
+| Qwen3-TTS (qwen3-tts) | 8093 | GPU 3 | Voice output, vLLM-Omni (`--omni`), `livekit.tts.api_url`, `agent-tts-omni`. The **vendored** server at `:8090` was retired 2026-11-10: nothing listens there now, `livekit.tts.fallback_url` has been `""` since (so a clause the primary cannot speak is logged "not heard" rather than retried elsewhere), and the guardian's watch moved from `agent-tts` to `policy.TTS_PROGRAM = "agent-tts-omni"`; see [[voice]] |
 | lloyd-mcp aggregator | 8500 | — | All agent tools |
 
 ## Evaluation
@@ -841,10 +884,11 @@ Tier-2 topic extraction (above).
 `eval/run_eval.py` + `eval/vault_recall_queries.yaml` — hand-written queries over
 the live personal vault, scored for `entity_hit` / `doc_hit` / `topk_overlap`
 against expected entities and documents. Written to baseline retrieval before and
-after graph-vote re-ranking changes. The gold set is **81 queries**, not the 20
-this page counted on 2026-09-20 (single 19, multi-hop 19, hard 12, technical 11,
-fuzzy 11, recent 9), and `run_prefetch_eval.py` loads the same file, so its
-"dev set of 20" is 81 too. #1552 re-pointed every `expect_docs` path that had gone
+after graph-vote re-ranking changes. The gold set is **86 queries** on 2026-11-19
+(single 19, multi-hop 19, hard 12, technical 16, fuzzy 11, recent 9), not the 20
+this page counted on 2026-09-20 — it stood at 81 until `15bc6fc5` (2026-11-10)
+added the five extra `technical` ones — and `run_prefetch_eval.py` loads the same
+file, so its "dev set of 20" is 86 too. #1552 re-pointed every `expect_docs` path that had gone
 unreadable, so any comparison against an artifact older than that is void.
 
 **Baselines left the repo:** `app.paths.EVAL_BASELINES_DIR` is now
@@ -897,8 +941,8 @@ Two things to be honest about:
 ### Prefetch-path eval
 
 `eval/run_prefetch_eval.py` runs the `vault_recall_queries.yaml` set (81 queries
-on 2026-11-10; it was 20 when this section was first written, and the table below
-is from then) through the vault leg as
+on 2026-11-10, the day this section's first table ran; 86 today — it was 20 when
+this section was first written, and the second table is from then) through the vault leg as
 deployed, as a *first turn* (fresh `SessionFocus`, no prior context — the
 hardest case), and scores `doc_hit` / MRR against `expect_docs` for the lex
 leg, the hybrid straggler, and their merge (what the next turn injects). Run it
@@ -1078,3 +1122,27 @@ with the genuinely correct answer, never an easier target.
   extracts it, requires it to name both readers and the decider, refuses the two
   retired claims it has carried, and re-observes all three outcomes against the live
   function so the prose cannot drift from the code.
+- **2026-11-20 — stale.** Every mechanism claim held against the tree at
+  `3372e01b` (the 300 ms wall and the 6-slot non-context-manager pool, all 38 tuning
+  constants and their values, the nine prefetch collections, eleven badges over nine
+  section tags, the carry-over age and `VAULT_CARRIED_MIN_SLOTS` 2-of-5, both role
+  filters, the notes-drain `is_user_session` gate, the background-session IDE gate,
+  the 20-turn nudge on the stream path only). Corrected: the skills worker's second
+  builtin root `~/lloyd/skills/` is **gone** from `_BUILTIN_SKILL_DIRS` (`e9e2d20e`,
+  2026-11-09), so `SKILLS_DIRS` is one path here and the inventory is 218 dirs / 208
+  retrievable / 10 quarantined; the skill cache is `agent_mcp.skills.load_skills_cached`
+  with `SKILL_CACHE_CHECK_S` at `agent_mcp/skills.py:389`, not `_SKILL_CACHE_CHECK_S`
+  in this module; `skills.pseudo_queries.enabled` is absent from `config.yaml` rather
+  than set false; the fact-extraction gate is `FACT_EXTRACT_MIN_NEW_USER_MSGS` over
+  `_human_user_messages`, not `_MIN_TURNS_FOR_EXTRACTION` / `count_human_user_turns`;
+  the vendored TTS server on `:8090` is retired (2026-11-10) with
+  `livekit.tts.fallback_url: ""`, so the fallback chain names no lowest-priority
+  link; the gold set is 86 queries (`15bc6fc5`, 2026-11-10), which also reconciles
+  this page's own 81-vs-86 disagreement; backlog is 4,329 files with ids spanning
+  9–4391. Added: `prefetch.followup.focus_legs` (#4032 — off, A/B unrun) and what
+  `vault_search.architecture: both` does and does not reach. Filed **#4392**
+  (prefetch's vault leg names only the vault's stale `architecture` clone, never
+  `lloyd-architecture`, under the shipped `both`) and **#4393** (the `#`-arm of the
+  task-ref regex has no right boundary, so `#20260421` cites Task #2026 today and
+  every 5-digit id will cite a wrong task from ~2027-04); both confirmed by running
+  `_search_backlog_refs` and the two live collection lists, not by reading.
