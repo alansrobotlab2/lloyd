@@ -1807,9 +1807,9 @@ def _rescan_by_category(entity: str, facts_view: list[dict],
     whole-entity scan is n² comparisons, the partition is Σn_c² ≤
     `FACT_GODNODE_THRESHOLD` × n — linear in the entity, not quadratic. What that
     buys in coverage, not cost, is what `facts_excluded` and `facts_total` carry:
-    `QMD` measured on the derived tree 2026-10-18 is 1,028 facts over 8 category
-    files, `state` (579) and `event` (413) over the bound and skipped, so the
-    partition reads 36 of 1,028 facts — 3.5% of the entity. The pair counts that
+    `QMD` measured on the derived tree 2026-11-20 is 1,454 facts over 8 category
+    files, `state` (757) and `event` (644) over the bound and skipped, so the
+    partition reads 53 of 1,454 facts — 3.6% of the entity. The pair counts that
     same entity produced on earlier readings are deliberately not quoted here:
     a whole-entity pair count is C(n,2) in a number that moves with every
     re-extraction, which is exactly why coverage is stated as a fraction of facts

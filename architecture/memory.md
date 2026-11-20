@@ -95,9 +95,9 @@ Cost falls with the coverage: Σn_c² ≤ 50·n comparisons against n², which i
 took 113 seconds on `Lloyd`. Cost is not the figure a scan's reach is read from,
 though: a whole-entity pair count is quadratic in a fact count that moves with
 every re-extraction, so a hub's coverage is stated as a fraction of its facts.
-`QMD`, re-measured 2026-10-18 by counting `^- entity:` rows per category file, is
-1,028 facts over 8 files, of which `state` (579) and `event` (413) sit over the
-bound and are skipped — **36 of 1,028 facts scanned, 3.5% of the entity**. That
+`QMD`, re-measured 2026-11-20 by counting `^- entity:` rows per category file, is
+1,454 facts over 8 files, of which `state` (757) and `event` (644) sit over the
+bound and are skipped — **53 of 1,454 facts scanned, 3.6% of the entity**. That
 fraction is what the plan and the record now publish, as `facts_excluded` and
 `facts_total` on the row and as a `facts scanned=N of M` percentage on the CLI
 line, because until #3007 the record named the skipped categories and published

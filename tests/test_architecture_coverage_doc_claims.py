@@ -4274,6 +4274,54 @@ _HIDE_RE = re.compile(
     r"|\bskip(?:if)?\s*=\s*[\"']",
     re.M)
 
+#: The one node this file is allowed to hold off the gate's hard rung (#4260
+#: clause 3), and why it earns it: its assertion counts `^- entity:` rows in
+#: `$DATA_ROOT/_pipeline/vault-derived/facts/QMD/`, a store nightly re-extraction
+#: rewrites between rounds — `QMD-state.md` and `QMD-event.md` were both rewritten at
+#: 16:55 on 2026-11-18 — which is exactly the case `pytest.ini`'s `live_vault` rule
+#: exists for. The exemption is spelled as a node id, not as "any marked node": the
+#: selection asserts in #1763's node name it, and the scan below refuses any OTHER
+#: node that grows a mark or a runtime skip, so the ban #1763 wrote keeps its teeth.
+HUB_REMEASURE_NODE = "test_memory_doc_hub_fraction_matches_the_live_fact_store"
+
+
+def _hide_markers_outside_the_hub_node(src: str) -> list[str]:
+    """Every hide marker in this file that sits OUTSIDE `HUB_REMEASURE_NODE`.
+
+    #1763 clause 2 asked for `_HIDE_RE.findall(src) == []` — the whole file clean of
+    markers. #4260 clause 3 requires one marker, `@pytest.mark.live_vault`, on one
+    named node, so the ban moves from "none anywhere" to "none outside the one the
+    acceptance names", and it moves by name rather than by loosening the pattern: the
+    exempt span is located by parsing the file (decorators included, since the
+    decorator is the marker), so a mark on any other function, a `pytest.mark.skipif`
+    at module level, or a `skip=` keyword inside a parametrize all fall outside it and
+    still fail. Both nodes that enforce this (#1763's and #2625's) read this one
+    measurement, so the two cannot disagree about what is exempt.
+
+    (And the prose above is itself graded by this scan: `_HIDE_RE` reads source text,
+    not code, so writing the pattern out as a quoted literal in a docstring is matched
+    by it like any other occurrence — which is the right outcome for a ban that has to
+    survive a reader who only skims.)
+    """
+    fn = [n for n in ast.parse(src).body
+          if isinstance(n, ast.FunctionDef) and n.name == HUB_REMEASURE_NODE]
+    assert len(fn) == 1, (
+        f"{HUB_REMEASURE_NODE} is {len(fn)} top-level functions in this file, not 1, "
+        "so the file's one exemption has no single span to be checked against — the "
+        "exemption is a name, and a name that does not resolve is not an exemption")
+    lines = src.splitlines(keepends=True)
+    first = min([fn[0].lineno] + [d.lineno for d in fn[0].decorator_list])
+    last = max([fn[0].end_lineno] + [getattr(d, "end_lineno", d.lineno)
+                                     for d in fn[0].decorator_list])
+    lo = sum(len(line) for line in lines[:first - 1])
+    hi = sum(len(line) for line in lines[:last])
+    # `_HIDE_RE` begins with `\s*`, so a decorator's match starts on the blank lines
+    # above it and would otherwise fall outside a window that begins at the decorator.
+    # Back the edge up over whitespace only — never over another statement's text.
+    while lo > 0 and src[lo - 1] in " \t\r\n":
+        lo -= 1
+    return [m.group(0) for m in _HIDE_RE.finditer(src) if not lo <= m.start() < hi]
+
 
 def _pytest(extra: list[str]) -> subprocess.CompletedProcess:
     """Run pytest in a child interpreter, the way the gate's rung does."""
@@ -4289,8 +4337,9 @@ def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
     One `-v` run under the gate's mark expression answers every half:
 
     - `--collect-only` with and without `-m "not live_vault and not
-      fault_injection"` collect the same nodes, so nothing in this file was moved
-      out of the gate's reach;
+      fault_injection"` collect the same nodes **except the one node this file names
+      out of hand** (`HUB_REMEASURE_NODE`, #4260 clause 3), so nothing in this file
+      was moved out of the gate's reach by an author with a red check;
     - the run reports one **PASSED line** per node collected less this one, so a
       skipped or xfailed node cannot hide inside a passing exit code;
     - the node #1763 files — `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree`
@@ -4313,19 +4362,27 @@ def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
                                 .splitlines()) if "::" in ln]
     gated = [ln for ln in (_pytest(["--collect-only", "-q", "-m", TESTS_MARK_EXPR,
                                     THIS_FILE]).stdout.splitlines()) if "::" in ln]
-    assert gated == unfiltered, (
-        f"the gate's selection ({TESTS_MARK_EXPR!r}) deselected "
-        f"{len(unfiltered) - len(gated)} of this file's nodes: "
-        f"{sorted(set(unfiltered) - set(gated))}")
+    dropped = sorted(set(unfiltered) - set(gated))
+    assert dropped == [f"{THIS_FILE}::{HUB_REMEASURE_NODE}"], (
+        f"the gate's selection ({TESTS_MARK_EXPR!r}) deselected {dropped}. This file "
+        f"holds exactly one node off the hard rung — {HUB_REMEASURE_NODE}, which "
+        "#4260 clause 3 requires to be `live_vault` because it counts rows in a fact "
+        "store that nightly re-extraction rewrites. Anything else moved out of the "
+        "gate's reach is the #1763 failure this node was written for, and an empty "
+        "list here means the exempt node was deleted rather than marked")
     assert unfiltered, "collection found no nodes at all — the check is empty"
+    assert any(HUB_REMEASURE_NODE in node for node in unfiltered), (
+        f"{HUB_REMEASURE_NODE} is not collected even unfiltered, so the file's one "
+        "exemption is a mark on nothing — the deletion half of #1763's three ways")
     assert any(NAMED_NODE in node for node in gated), (
         f"{NAMED_NODE} is no longer collected: the red node was removed rather "
         "than fixed")
 
     src = (ROOT / THIS_FILE).read_text(encoding="utf-8")
-    hidden = _HIDE_RE.findall(src)
+    hidden = _hide_markers_outside_the_hub_node(src)
     assert hidden == [], (
-        f"this file carries a marker that takes a node off the hard rung: {hidden}")
+        "this file carries a marker that takes a node off the hard rung, outside the "
+        f"one node #4260 names: {hidden}")
 
     this_node = (f"{THIS_FILE}::"
                  "test_the_gate_selection_drops_nothing_and_the_named_node_passes")
@@ -4514,9 +4571,11 @@ def test_the_nodes_2625_files_are_green_with_nothing_hidden():
     ones #1763 lists above, and they are graded here over the ids #2625 files rather
     than over the file in general. A child pytest asked with
     `scripts.automod.gate.TESTS_MARK_EXPR` still collects all three of them, the
-    source carries no marker that could have taken one out, and the two that a node
-    here may run report **PASSED by name** with no `skipped` or `xfailed` line in
-    that run.
+    source carries no marker over them that could have taken one out, and the two
+    that a node here may run report **PASSED by name** with no `skipped` or
+    `xfailed` line in that run. None of the three is the file's single #4260
+    exemption, so the marker scan below reads the same exemption-aware measurement
+    #1763's node reads.
 
     The third is this file's own selection node, and the bargain it makes about
     itself applies unchanged to it: excluded by id, which is visible in the argv
@@ -4536,9 +4595,13 @@ def test_the_nodes_2625_files_are_green_with_nothing_hidden():
         f"the hard rung rather than fixed. {len(gated)} nodes are collected here")
 
     src = (ROOT / THIS_FILE).read_text(encoding="utf-8")
-    hidden = _HIDE_RE.findall(src)
+    # #4260 clause 3 put one `live_vault` mark in this file, on a node none of the
+    # three ids named here is; the scan is the same one #1763's node reads, so both
+    # enforce one exemption list and neither can be widened on its own.
+    hidden = _hide_markers_outside_the_hub_node(src)
     assert hidden == [], (
-        f"this file carries a marker that takes a node off the hard rung: {hidden}")
+        "this file carries a marker that takes a node off the hard rung, outside the "
+        f"one node #4260 names: {hidden}")
 
     ran = _pytest(["-v", "-m", TESTS_MARK_EXPR]
                   + [f"{THIS_FILE}::{n}" for n in RED_NODES_2625])
@@ -9781,12 +9844,136 @@ def test_the_persistence_page_keeps_the_two_denominators_apart():
 # row's other count is FOR: a witness of a different tree, never a second
 # denominator to reconcile the first against.
 
-#: The coverage figure §2 has to lead with, and the retired readings of the same
-#: entity: pair counts and the fact counts that produced them, from both the
-#: 2026-09-20 and the 2026-10-18 pass.
-_HUB_FRACTION = "36 of 1,028 facts"
+#: #4260: what these needles pin is the SHAPE of the coverage figure, never its
+#: value. The value is a measurement of a store that ingestion rewrites on a schedule
+#: no round under test controls, and it was pinned as the literal
+#: `"36 of 1,028 facts"` from the day #3007 wrote it: `git log -S'_HUB_FRACTION'`
+#: returned that one commit, while the same count moved to 53 of 1,454 — 41% more —
+#: with the node reading the page green throughout. A literal here is therefore
+#: unfixable by design: telling the truth cost an edit to another item's acceptance
+#: needle, which is the correction nobody makes. So the assertions below parse the
+#: figure the page prints and grade what follows from it, and the value is graded
+#: against the store itself by `HUB_REMEASURE_NODE`, which carries `live_vault` so
+#: corpus movement cannot redden a round that did not move it.
+_HUB_FRACTION_RE = re.compile(
+    r"(?P<num>\d[\d,]*)\s+of\s+(?P<den>\d[\d,]+)\s+facts?\b"
+    r".{0,80}?(?P<pct>\d{1,3}(?:\.\d+)?)\s*%\s+of\s+the\s+entity", re.S)
+
+#: The same sentence's own statement of the whole, which has to agree with the
+#: figure's denominator: "is 1,454 facts over 8 files" beside "53 of 1,454 facts".
+#: The file count beside it is a FILE count and is not graded — `QMD-overview.md`
+#: carries front matter and a definition and contributes 0 rows, so rows and files
+#: are different measures of the same directory (#4260's own caveat).
+_HUB_TOTAL_RE = re.compile(r"(?P<total>\d[\d,]*)\s+facts\s+over\s+(?P<files>\d+)\s+files")
+
+#: The date the figure was measured, in the page's own words. Looked for in the
+#: window before the figure: §2 says `re-measured` twice, and the other is 2,900
+#: characters later about a re-planned signal, so a window is what keeps that one
+#: from being read as this figure's stamp.
+_HUB_STAMP_RE = re.compile(r"re-measured\s+(?P<stamp>\d{4}-\d{2}-\d{2})\b")
+_HUB_STAMP_WINDOW = 400
+
+#: The date this clause shipped, as a FLOOR and not an age limit. #4260's ruling is
+#: that freshness comes from the live count and never from the clock: `QMD` grew
+#: 1,028 → 1,454 in the 31 days after its 2026-10-18 stamp, so a "stamp ≤ N days
+#: old" rule and the ±10% band are jointly unsatisfiable — a legal stamp can be 40%
+#: off. What this floor refuses is only the revert that restores the pre-fix stamp
+#: under a figure that stamp never measured; a page re-measured tomorrow clears it
+#: for free.
+_HUB_STAMP_FLOOR = "2026-11-20"
+
+#: The retired readings of the same entity: pair counts and the fact counts that
+#: produced them, from the 2026-09-20 pass. #3007 ruled a whole-entity pair count
+#: unreadable as a measure of a scan's reach, so these stay out whatever the store
+#: happens to count; the 2026-10-18 pair is NOT on this list, because it was a true
+#: measurement that aged, which is the whole thing #4260 is about.
 _RETIRED_HUB_READINGS = ("~195", "527,000", "5.5 million", "208 partitioned",
                          "3,321", "13 categories")
+
+
+def _hub_figures(text: str) -> list[dict]:
+    """Every `N of M facts … P% of the entity` figure in `text`, parsed to numbers.
+
+    Returns the raw span too, because a mutation test has to rewrite the text the
+    page actually printed, not a reconstruction of it — the page hand-wraps and
+    thousands-separates, and `_flat` is what makes a needle survive that.
+    """
+    return [{"num": int(m.group("num").replace(",", "")),
+             "den": int(m.group("den").replace(",", "")),
+             "pct": float(m.group("pct")),
+             "start": m.start(),
+             "span": m.group(0)}
+            for m in _HUB_FRACTION_RE.finditer(text)]
+
+
+def _hub_coverage(body: str) -> dict:
+    """§2's hub coverage figure: exactly one, with its stamp. Loud when not.
+
+    The trap this file's header names for every extractor here — a parse that matched
+    nothing looks exactly like a doc with nothing wrong — is answered by asserting the
+    COUNT before any value is compared, and by putting the parsed spans in the failure
+    message so a reader sees what did match.
+    """
+    from datetime import date
+
+    figs = _hub_figures(body)
+    assert len(figs) == 1, (
+        f"§2 of memory.md states {len(figs)} figures shaped `N of M facts … P% of the "
+        "entity`; #3007 clause 5, as re-graded by #4260, requires exactly one — a "
+        f"hub's coverage stated as a fraction of its own facts. Matched: "
+        f"{[f['span'] for f in figs]}")
+    fig = figs[0]
+    stamps = _HUB_STAMP_RE.findall(
+        body[max(0, fig["start"] - _HUB_STAMP_WINDOW):fig["start"]])
+    assert stamps, (
+        f"the coverage figure {fig['span']!r} has no `re-measured <ISO date>` stamp "
+        f"within {_HUB_STAMP_WINDOW} characters before it, so the page publishes a "
+        "corpus measurement with no date attached — which is how a 2026-10-18 stamp "
+        "sat over a 41%-wrong denominator without anyone being able to see the age")
+    fig["stamp"] = stamps[-1]
+    try:
+        fig["date"] = date.fromisoformat(fig["stamp"])
+    except ValueError:
+        raise AssertionError(
+            f"§2's coverage stamp {fig['stamp']!r} is not a real ISO date "
+            "(#4260 clause 4: the stamp is parsed, not needle-matched)") from None
+    totals = _HUB_TOTAL_RE.findall(body)
+    assert totals, (
+        f"§2 prints the figure {fig['span']!r} but no `… facts over N files` "
+        "statement beside it, so the denominator names no whole to be a fraction of")
+    assert int(totals[0][0].replace(",", "")) == fig["den"], (
+        f"§2 says {totals[0][0]} facts in the whole but its coverage figure reads "
+        f"{fig['span']!r} — the sentence contradicts its own denominator, which is "
+        "the denominator-less reading #3007 was filed for")
+    return fig
+
+
+def _percentage_rounds_from_the_pair(fig: dict) -> bool:
+    """#4260 clause 5: the printed percentage is the printed numerator over the
+    printed denominator, to one decimal place.
+
+    This is what makes a correction a two-number edit. Counts move with the corpus and
+    a percentage follows from them, so a future fix changes the two counts and the
+    arithmetic keeps the headline honest; a stale percentage beside fresh counts — the
+    shape the 2026-10-18 pass left behind, where 3.5% still read plausibly over a
+    wrong denominator — fails here instead. `round(…, 1)` is the one-decimal rule as
+    the page applies it: 53 over 1,454 is 3.6453%, printed 3.6%.
+    """
+    return fig["pct"] == round(100.0 * fig["num"] / fig["den"], 1)
+
+
+def _figures_agree(page: str, other: str) -> bool:
+    """One hub figure in each text and the same pair in both (#4260 clause 4).
+
+    Predicate form, on this file's pattern, so the node can show it refusing a
+    planner docstring this file rewrites here. The percentage is not compared: it is
+    derived from the pair by `_percentage_rounds_from_the_pair`, and comparing a
+    derived value would grade the same fact twice.
+    """
+    a, b = _hub_figures(page), _hub_figures(other)
+    return (len(a) == 1 and len(b) == 1
+            and (a[0]["num"], a[0]["den"]) == (b[0]["num"], b[0]["den"]))
+
 
 
 def _memory_section_2_raw() -> str:
@@ -9828,8 +10015,20 @@ def _memory_section_2_passages() -> list[str]:
 
 def _reads_as_a_fact_fraction(body: str) -> bool:
     """The rule as a predicate, so the node below can demonstrate it failing on
-    text this file writes rather than only on text the doc happens to carry."""
-    return (_HUB_FRACTION in body
+    text this file writes rather than only on text the doc happens to carry.
+
+    #4260 changed what it asks. It used to ask "does the page print the pair this
+    file also prints", which could only ever be true of the day it was written; it
+    now asks whether the page states coverage as `N of M facts … P% of the entity`,
+    whether that P follows from those two counts, and whether a retired pair count
+    has come back beside them. Any of the three failing reads False, and none of
+    them knows or cares what `QMD` counted today — that half is
+    `HUB_REMEASURE_NODE`'s, against the store.
+    """
+    figs = _hub_figures(body)
+    if len(figs) != 1:
+        return False
+    return (_percentage_rounds_from_the_pair(figs[0])
             and not any(stale in body for stale in _RETIRED_HUB_READINGS))
 
 
@@ -9867,24 +10066,49 @@ def _row_reads_as_denominator_plus_witness(passages: list[str]) -> bool:
 
 
 def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
-    """#3007 clause 5, both halves: the page leads with the fraction, and the
-    retired QMD measurement is gone from the code that repeated it.
+    """#3007 clause 5, both halves, graded as SHAPE since #4260: the page leads with
+    a fraction of its entity's facts, and the retired QMD measurement is gone from the
+    code that repeated it.
 
-    The 2026-09-20 reading of `QMD` (3,321 facts over 13 categories) and its
-    pair-count arithmetic survived in `fact_improvement.py`'s own docstring a month
-    after `architecture/memory.md` was corrected to 1,028 over 8 — the doc and the
-    code restating it drifted apart, which is the second half of this clause and
-    the reason the assertion below reads the module and not only the doc.
+    The 2026-09-20 reading of `QMD` and its pair-count arithmetic survived in
+    `fact_improvement.py`'s own docstring a month after `architecture/memory.md` was
+    corrected to a lower count — the doc and the code restating it drifted apart,
+    which is the second half of this clause and the reason the assertions below read
+    the module and not only the doc. #4260 is what happened to the FIRST half: the
+    replacement figure was itself a corpus measurement, pinned here as a literal from
+    the day it was written, so the page could not be corrected without editing a
+    #3007 acceptance needle, and it stayed 41% wrong while this node passed. Nothing
+    below quotes a value; each assertion parses what the page prints and asks what
+    follows from it. The value itself belongs to `HUB_REMEASURE_NODE`, which reads the
+    store and is `live_vault` for exactly that reason.
     """
     body = _memory_section_2()
+    fig = _hub_coverage(body)                      # shape: one figure, stamped, self-consistent
     assert _reads_as_a_fact_fraction(body), body[:900]
-    # A fraction has to name what it is a fraction of, or "3.5%" is the same
-    # denominator-less figure #3007 was filed for, one level up the page.
-    assert "1,028" in body and "3.5%" in body, body[:900]
+    assert _percentage_rounds_from_the_pair(fig), (
+        f"§2 prints {fig['pct']}% beside {fig['span']!r}, but that pair is "
+        f"{100.0 * fig['num'] / fig['den']:.4f}% — #4260 clause 5: the headline "
+        "percentage is derived from the two counts a reader can see, so a correction "
+        "edits the counts and nothing else")
+    assert fig["date"].isoformat() >= _HUB_STAMP_FLOOR, (
+        f"§2's coverage figure is stamped {fig['stamp']}, before #4260 retired the "
+        f"literal needle on {_HUB_STAMP_FLOOR}. This is a floor, not an age limit: "
+        "freshness is what the live re-count in HUB_REMEASURE_NODE grades, because a "
+        "legal stamp can be 40% off the truth (#4260's ruling against an age band)")
     # Every field the passage now cites has to be a field the code emits, or the
     # rewrite has replaced a figure that moved with one that does not exist.
     fi_src = (ROOT / "agent_mcp" / "fact_improvement.py").read_text(
         encoding="utf-8", errors="replace")
+    # The clause's second half, since #4260 clause 4: the planner's docstring repeats
+    # this one measurement, so it carries the same pair. A stale copy in the code was
+    # the state #3007 filed; the count drifting in BOTH copies is #4260's, and grading
+    # only that they agree is what lets either be corrected without touching a needle.
+    assert _figures_agree(body, fi_src), (
+        f"§2 of memory.md prints {_hub_figures(body)[0]['span']!r} while "
+        "agent_mcp/fact_improvement.py's planner docstring prints "
+        f"{[_f['span'] for _f in _hub_figures(fi_src)]} — the same hub measurement "
+        "restated in two files, which is the drift #3007 called 'the second half of "
+        "this clause' and #4260 clause 4 makes graded")
     for field in ("facts_excluded", "facts_total", "categories_skipped", "scan_scope",
                   _WITNESS_FIELD):
         assert field in fi_src, (
@@ -9896,12 +10120,33 @@ def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
     for stale in ("3,321", "13 categories"):
         assert stale not in fi_src, (
             f"the retired 2026-09-20 QMD figure {stale!r} is back in the planner")
-    # Can this node fail? Two mutations of the page's own text, both written here:
-    # put a retired pair count back, and take the fraction out. Each has to be
-    # rejected, or the assertions above are matching nothing.
+    # Can this node fail? Four mutations of the page's and the planner's own text,
+    # every one written here rather than read off the doc, and each has to be
+    # rejected — or the assertions above are matching nothing. #4260 clause 1 names
+    # the first two (drop the fraction, restore a pair count); clause 5 needs the
+    # third (a headline percentage that no longer follows from its own printed pair,
+    # which is exactly the shape a stale figure hides in); clause 4 needs the fourth
+    # (the code's copy of the pair moving away from the page's).
     assert not _reads_as_a_fact_fraction(
         body + " ~195 comparisons against ~527,000 whole")
-    assert not _reads_as_a_fact_fraction(body.replace(_HUB_FRACTION, "some facts"))
+    assert not _reads_as_a_fact_fraction(body.replace(fig["span"], "some of its facts"))
+    stale_pct = fig["span"].replace(f"{fig['pct']}%", "9.9%")
+    assert stale_pct != fig["span"], (
+        f"the mutation wrote nothing: {fig['span']!r} does not print its percentage "
+        "as a substring, so the check below could not have failed for the right reason")
+    assert not _reads_as_a_fact_fraction(body.replace(fig["span"], stale_pct)), (
+        "a headline percentage that contradicts its own printed pair still reads as a "
+        "fact fraction, so clause 5's arithmetic is not being graded")
+    planner_span = _hub_figures(fi_src)[0]["span"]
+    planner_den = f"{_hub_figures(fi_src)[0]['den']:,}"
+    mutated = fi_src.replace(planner_span, planner_span.replace(planner_den, "9,999"))
+    assert mutated != fi_src, (
+        f"the mutation wrote nothing: the planner docstring does not print its "
+        f"denominator as {planner_den!r}, so the assert below could not have failed "
+        "for the right reason")
+    assert not _figures_agree(body, mutated), (
+        "the planner docstring still 'agrees' with the page after this file rewrote "
+        "its denominator to 9,999, so the agreement assert above was matching prose")
 
     # ── #3267: the row's OTHER count has to be explained on the page too ──────
     # Publishing the fraction put two counts on every scanned row and §2 ruled on
@@ -9950,6 +10195,149 @@ def test_memory_doc_reads_a_hub_scan_as_a_fraction_of_its_facts():
         [p.replace(_DENOMINATOR_FIELD, "the fact total") for p in passages]), (
         "the ruling still 'holds' with `facts_total` removed from §2, so the "
         "assertion above was matching the other field name only")
+
+
+#: #4260 clause 2: the store the figure is counted from, and the bound that decides
+#: which of its category files a by-category rescan reads. Read-only in both
+#: directions — nothing in this file writes the data root, and the two large files
+#: here are rewritten by nightly re-extraction, which is why the node that reads them
+#: is `live_vault` and sits off the gate's hard rung.
+HUB_ENTITY = "QMD"
+FACTS_SUBDIR = Path("_pipeline") / "vault-derived" / "facts"
+_HUB_ROW_RE = re.compile(r"^- entity:", re.M)
+
+
+def _hub_measure_roots() -> tuple[Path, ...]:
+    """Every data root this file already resolves a `$LLOYD_DATA/…` citation
+    against, in the order it tries them: `ENV_DATA_ROOT` (the running process's, if
+    `LLOYD_DATA` names one), then `app.data_root`'s passwd-derived `DATA_ROOT`, then
+    the account home's `lloyd-data`.
+
+    Not `Path.home()/"lloyd-data"` on its own, which is the trap this file's header
+    and `app/paths.py` both name: inside a gate `HOME` is the round's symlink farm and
+    `LLOYD_DATA` is the round's own empty root, so the production store is not under
+    either of those and a check that asked only `$HOME` would report a real path
+    missing. Deduped, because outside a gate two of the three are the same directory.
+    """
+    out: list[Path] = []
+    for cand in (ENV_DATA_ROOT, DATA_ROOT, ACCOUNT_HOME / "lloyd-data"):
+        if cand is not None and cand not in out:
+            out.append(cand)
+    return tuple(out)
+
+
+def _hub_entity_dir() -> Path | None:
+    """The first root that actually holds `QMD`'s category files, else None.
+
+    None is a real answer and is reported as a skip, never as a pass: an absent store
+    measures nothing, and #1699's header rule is that an empty read must not read as
+    a clean result.
+    """
+    for root in _hub_measure_roots():
+        cand = root / FACTS_SUBDIR / HUB_ENTITY
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def _count_hub_rows(entity_dir: Path) -> dict:
+    """Count `^- entity:` rows per `*.md` and split them the way the planner does.
+
+    A file over `FACT_GODNODE_THRESHOLD` rows is a category the by-category rescan
+    skips, so it is excluded from the scanned count and everything else is what that
+    scan reads (`agent_mcp/fact_improvement.py`'s `_rescan_by_category`: the detector
+    refuses a piece *larger* than the bound, hence `>`, and the threshold is that
+    module's constant rather than a number repeated here). Rows, not files:
+    `QMD-overview.md` carries front matter and a definition and contributes 0 rows,
+    so the page's "8 files" is a file count while this pair is a row count — the
+    #4260 caveat, and the reason neither is compared to the other.
+    """
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD
+
+    per_file = {p.name: len(_HUB_ROW_RE.findall(
+        p.read_text(encoding="utf-8", errors="replace"))
+        ) for p in sorted(entity_dir.glob("*.md"))}
+    assert per_file, f"{entity_dir} holds no *.md, so the counted pair would be 0 of 0"
+    skipped = {k: v for k, v in per_file.items() if v > FACT_GODNODE_THRESHOLD}
+    total = sum(per_file.values())
+    return {"threshold": FACT_GODNODE_THRESHOLD, "per_file": per_file,
+            "skipped": skipped, "total": total,
+            "scanned": total - sum(skipped.values())}
+
+
+@pytest.mark.live_vault
+def test_memory_doc_hub_fraction_matches_the_live_fact_store():
+    """#4260 clause 2: the figure §2 prints is the store's, re-measured on the run.
+
+    The other half of the split this item asked for. The node above grades the page
+    against the page — hermetic, doc text plus two source files, which is what lets it
+    sit on the hard gate rung at all. This one grades it against
+    `$DATA_ROOT/_pipeline/vault-derived/facts/QMD/`, which no round under test
+    controls, so it carries `live_vault` and `TESTS_MARK_EXPR` leaves it to the
+    nightly full run (`pytest.ini`; enforced at `scripts/automod/gate.py`'s
+    `TESTS_MARK_EXPR`). That separation is the point: `QMD-state.md` and `QMD-event.md`
+    were both rewritten at 16:55 on 2026-11-18, so an unmarked assertion over them
+    would have reddened every round for ingestion its author did not cause — the exact
+    failure `pytest.ini` describes and the reason a gate rung may not read a moving
+    store.
+
+    Tolerances are #4260's: the denominator within ±10% of the counted total, the
+    numerator within ±10% of the counted scanned rows or 10 rows, whichever is wider.
+    The 10 is because a numerator in the tens has a 10% band of a few rows, and one
+    category crossing the bound between two runs moves it by far more than that; no
+    age clause sits beside either band, because a legal stamp can be 40% off —
+    freshness here is this comparison, not the clock.
+    """
+    fig = _hub_coverage(_memory_section_2())
+    entity_dir = _hub_entity_dir()
+    if entity_dir is None:
+        pytest.skip(
+            f"no {HUB_ENTITY} fact directory under {FACTS_SUBDIR} in any of "
+            f"{list(_hub_measure_roots())}, so the counted pair does not exist on "
+            "this box — reported as a skip and never as a pass (#4260 clause 3)")
+    counted = _count_hub_rows(entity_dir)
+    den_tol = 0.10 * counted["total"]
+    num_tol = max(0.10 * counted["scanned"], 10)
+    ok = (abs(fig["den"] - counted["total"]) <= den_tol
+          and abs(fig["num"] - counted["scanned"]) <= num_tol)
+    assert ok, (
+        f"architecture/memory.md §2 (stamped {fig['stamp']}) prints "
+        f"{fig['num']:,} of {fig['den']:,} facts"
+        f"\n  {entity_dir} counts        "
+        f"{counted['scanned']:,} of {counted['total']:,} facts"
+        f"\n  doc  vs counted: numerator {fig['num'] - counted['scanned']:+d} row(s) "
+        f"outside ±{num_tol:.1f}, denominator {fig['den'] - counted['total']:+d} "
+        f"row(s) outside ±{den_tol:.1f}"
+        f"\n  skipped over {counted['threshold']} rows: "
+        f"{counted['skipped'] or 'none'}"
+        "\n  Fix: edit the two counts and the re-measured stamp in §2, and the same "
+        "pair in agent_mcp/fact_improvement.py's planner docstring. No test needle "
+        "moves with them — that is #4260.")
+
+
+def test_the_hub_remeasure_node_skips_rather_than_passes_on_an_absent_store(tmp_path,
+                                                                           monkeypatch):
+    """#4260 clause 3: with no `QMD` directory at any root it tries, the re-measure
+    node reports SKIPPED — it does not pass.
+
+    The node is called directly, with this module's own root resolver replaced by one
+    that names a directory that does not exist. `pytest.skip` raises `Skipped`, which
+    is the verdict the nightly record will show; a node that returned quietly would
+    have recorded a PASS for a measurement it never took, which is the same false
+    green #4260 was filed against, one level down. Every root is replaced, not just
+    `ENV_DATA_ROOT`: patching one of the three would leave `DATA_ROOT` resolving to
+    the real store, and then the test would be asserting a skip against a tree that
+    has the rows.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_hub_measure_roots",
+                        lambda: (tmp_path / "absent-root",))
+    assert _hub_entity_dir() is None, (
+        "the patched resolver found a fact store, so this test is not exercising the "
+        "absent-store branch it exists for")
+    with pytest.raises(pytest.skip.Exception) as got:
+        test_memory_doc_hub_fraction_matches_the_live_fact_store()
+    assert HUB_ENTITY in str(got.value), (
+        f"the skip reason does not name the entity whose store was missing: {got.value}")
 
 
 # ── #3009: §4 states the arm's non-parity as a named field, not a false flag ──
