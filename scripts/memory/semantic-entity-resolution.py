@@ -178,6 +178,13 @@ MERGE_ROMAN_NUMERALS = {
 # (`Parakeet v3`). `name_tokens` already splits on `-`, `_` and `.`, so
 # `Mamba-1` leaves `1` and `v3` arrives whole.
 VERSION_TOKEN_PATTERN = re.compile(r"(?:\d+|v\d+)", re.IGNORECASE)
+# The two spellings of ONE release, for the comparison in `release_tokens`
+# (#4269): `v3` and `3` are the same release written by two authors, so a raw
+# set comparison would call `Depth Anything 3` / `Depth Anything V3` a version
+# disagreement. Only a `v` GLUED to digits reduces — the roman numerals `v` and
+# `vi` in `MERGE_ROMAN_NUMERALS` are release tokens too and are not the numbers
+# five and six, and folding them would be the very conflation this reads for.
+V_PREFIXED_NUMBER = re.compile(r"v(\d+)", re.IGNORECASE)
 # Codas `name_tokens` cannot see at all: `[a-z0-9]+` makes `BrowseComp+` and
 # `BrowseComp` tokenize identically, so the release marker in these two rows
 # lives only in the raw text and needs its own scan. `-` and `_` are NOT here —
@@ -945,10 +952,29 @@ def has_release_symbol(name: str) -> bool:
     return bool(RELEASE_SYMBOL_CHARS & set(name or ""))
 
 
+def release_tokens(name: str) -> set[str]:
+    """The name's release tokens, with `v3`-style spellings reduced to `3`.
+
+    The reduction is what lets two authors' spellings of ONE release compare
+    equal: read raw, `Depth Anything 3` and `Depth Anything V3` hold `3` and `v3`,
+    `is_release_token` accepts both, and the pair — a `merge` row in the committed
+    2026-09-30 witness — would be labelled a version disagreement. Only a `v`
+    glued to digits reduces; the roman numerals of `MERGE_ROMAN_NUMERALS` stay
+    themselves, or `Cosmos Reason V` would fold into `Cosmos Reason 5`.
+    """
+    reduced = set()
+    for tok in name_tokens(name):
+        if not is_release_token(tok):
+            continue
+        marked = V_PREFIXED_NUMBER.fullmatch(tok)
+        reduced.add(marked.group(1) if marked else tok)
+    return reduced
+
+
 def is_version_suffix_asymmetry(a: str, b: str) -> bool:
     """Is one name the other plus release tokens, and nothing else? (#1894)
 
-    Two shapes, because the marker is visible in two different places:
+    Three shapes, because the marker is visible in three different places:
 
     * Token containment with a version-only remainder — `Mythos` / `Mythos 5`,
       `ISO 13849` / `ISO 13849-1`. Every extra token must be a release token, so
@@ -961,6 +987,17 @@ def is_version_suffix_asymmetry(a: str, b: str) -> bool:
     * Equal tokens with a release symbol on one side — `BrowseComp+`,
       `RobotArena∞`. Both tokenise identically, so only the raw text can tell
       them apart, and the alphanumerics have to match for this to fire at all.
+    * A release token on BOTH sides and the two disagreeing (#4269) —
+      `DeepSeek-V4-Flash` ({4}) / `DeepSeek 4.1 Flash` ({4, 1}). Each of the two
+      shapes above reads whole token sets, so a pair that spells a version on
+      both names escapes them both: neither set contains the other, and the sets
+      are not equal. That is the case where "same base name" should raise a hand
+      rather than lower one — the row the item caught proposed a 0.95 `same`
+      between a 4 and a 4.1, its own reason reading "minor version naming
+      variations (4.1 vs 4)". Both sides are required: one number against one
+      ordinary word (`Mythos 5` / `Mythos Five`) is a naming difference, and the
+      comparison goes through `release_tokens` so `v3` against `3` is agreement,
+      not disagreement.
 
     Both orientations are tested, so the answer never depends on which name the
     proposal lists first, and equal tokens with no symbol on either side are not
@@ -976,6 +1013,9 @@ def is_version_suffix_asymmetry(a: str, b: str) -> bool:
                 return True
         elif small == big and has_release_symbol(raw_big) != has_release_symbol(raw_small):
             return True
+    rel_a, rel_b = release_tokens(a), release_tokens(b)
+    if rel_a and rel_b and rel_a != rel_b:
+        return True
     return False
 
 

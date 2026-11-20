@@ -1375,6 +1375,185 @@ def test_version_suffix_predicate_fires_only_on_release_codas():
     assert not ser.is_release_token("alpha") and not ser.is_release_token("library")
 
 
+# ---------------------------------------------------------------------------
+# #4269 — the third shape: BOTH names carry a release token and the two disagree
+#
+# The two original shapes both compare whole token SETS, so a pair whose names
+# each spell a version is invisible to them: neither set contains the other and
+# the sets are not equal. The live rows are in the 2026-11-19 proposals —
+# `DeepSeek-V4-Flash` <-> `DeepSeek 4.1 Flash` (`same`, c=0.95, `action: merge`,
+# `review_flag: null`) and `GR00T N1.7` <-> `GR00T 1.7` — and each row's own
+# reason concedes the difference it is being asked to erase ("minor version
+# naming variations (4.1 vs 4)").
+# ---------------------------------------------------------------------------
+
+VERSION_CONFLICT_PAIRS = [
+    ("DeepSeek-V4-Flash", "DeepSeek 4.1 Flash"),   # {v4} vs {4, 1}
+    ("GR00T N1.7", "GR00T 1.7"),                   # {7} vs {1, 7}
+    ("Cosmos Reason 1", "Cosmos Reason 2"),        # {1} vs {2}: two releases
+]
+
+# A version number on ONE side and an ordinary word on the other: nothing
+# disagrees, so this shape must stay shut. `GR00T 2` / `GR00T N2` is a real
+# 2026-11-19 row whose `nN` spelling is not a release token, and the other two
+# are the same shape in prose. Drop the both-sides precondition to a bare set
+# comparison and every row here fires — which is why they are here and
+# `NOT_VERSION_CODA` cannot stand in for them: on those seven pairs both release
+# sets are EMPTY, so an empty-vs-empty comparison agrees whether or not the
+# precondition is enforced.
+ONE_SIDED_VERSION = [
+    ("Mythos 5", "Mythos Five"),
+    ("Sonnet 4", "Claude Sonnet"),
+    ("GR00T 2", "GR00T N2"),
+]
+
+
+def test_a_version_disagreement_on_both_names_is_flagged():
+    """clause 1 (#4269) — both names carry a release token and they disagree.
+
+    Asserted in both orientations, as every other name-shape node does. The
+    row the item names came out of the 2026-11-19 run as a `merge` at c=0.95
+    with `review_flag: null`, and `name_shape_review_flag` is the only caller
+    of this predicate, so the flag's word is the assertion that matters.
+    """
+    for a, b in VERSION_CONFLICT_PAIRS:
+        for pair in ((a, b), (b, a)):
+            assert ser.is_version_suffix_asymmetry(*pair) is True, pair
+            assert ser.name_shape_review_flag(*pair) == ser.REVIEW_FLAG_VERSION_SUFFIX, pair
+    # The dot is a separator, not part of a token: the comparison is {4} against
+    # {4, 1}, never the string `4.1` against `v4`.
+    assert ser.name_tokens("DeepSeek 4.1 Flash") == {"deepseek", "4", "1", "flash"}
+    assert ser.release_tokens("DeepSeek-V4-Flash") == {"4"}
+    assert ser.release_tokens("DeepSeek 4.1 Flash") == {"4", "1"}
+
+
+def test_the_same_release_spelled_two_ways_is_not_a_version_disagreement():
+    """clause 2 (#4269) — `v3` and `3` are one release, so they cannot disagree.
+
+    `Depth Anything 3` / `Depth Anything V3` is a `merge` row in the committed
+    witness with `review_flag: null`, and it is the pair that settles how the
+    comparison is done: `is_release_token` accepts both spellings and `3` != `v3`,
+    so comparing the tokens RAW labels that row a version conflict and moves the
+    witness's eleven flagged merges to twelve. The reduction is therefore the
+    clause, not a refinement of it.
+    """
+    for pair in (("Depth Anything 3", "Depth Anything V3"),
+                 ("Depth Anything V3", "Depth Anything 3")):
+        assert ser.is_version_suffix_asymmetry(*pair) is False, pair
+        assert ser.name_shape_review_flag(*pair) is None, pair
+    # The two facts that make the raw comparison over-fire, pinned so the
+    # reduction inside `is_version_suffix_asymmetry` cannot be dropped as redundant.
+    assert ser.is_release_token("3") and ser.is_release_token("v3") and "3" != "v3"
+    assert ser.release_tokens("Depth Anything V3") == ser.release_tokens("Depth Anything 3") == {"3"}
+    # Only a `v` glued to digits reduces. The roman numeral `v` IS a release token
+    # and is not the number five: reducing it would fold `Cosmos Reason V` into
+    # `Cosmos Reason 5`, which is the same conflation this shape exists to name.
+    assert ser.release_tokens("Cosmos Reason V") == {"v"}
+    assert ser.release_tokens("Cosmos Reason II") == {"ii"}
+
+
+def test_the_version_disagreement_needs_a_release_token_on_both_names():
+    """clause 3 (#4269) — one number and one ordinary word is a naming difference.
+
+    `NOT_VERSION_CODA` is the seven pairs that must stay unlabelled, restated here
+    because this shape is the one that could newly reach them: `alpha`, `library`
+    and `version` are stage and role words, `vr` and `tool` are not version shapes,
+    and an identical pair has ONE set rather than two that disagree.
+    """
+    for a, b in NOT_VERSION_CODA:
+        for pair in ((a, b), (b, a)):
+            assert ser.is_version_suffix_asymmetry(*pair) is False, pair
+    for a, b in ONE_SIDED_VERSION:
+        for pair in ((a, b), (b, a)):
+            assert ser.is_version_suffix_asymmetry(*pair) is False, pair
+            assert ser.name_shape_review_flag(*pair) is None, pair
+    # The precondition is measured, not merely implied by the answers above.
+    assert ser.release_tokens("Voice Mode Alpha") == set()
+    assert ser.release_tokens("Browser Version") == set()
+    assert ser.release_tokens("Mythos 5") == {"5"} and ser.release_tokens("Mythos Five") == set()
+
+
+def test_a_version_disagreement_is_labelled_and_still_merged(monkeypatch):
+    """clause 4 (#4269) — the new shape labels; it does not decide.
+
+    #1894 clause 3, restated in `name_shape_review_flag`'s docstring, forbids any
+    caller treating a non-None answer as a reason to withhold a merge, so both
+    answers have to appear on the SAME pair in the same breath. Facts are stubbed
+    to TWO each, as in `test_review_flags_never_change_what_merge_allowed_returns`:
+    inside `MERGE_VARIANT_MAX_FACTS`, so `(True, "ok")` is a statement about the
+    flag and not about an empty store.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: 2)
+    for pair in (("DeepSeek-V4-Flash", "DeepSeek 4.1 Flash"),
+                 ("DeepSeek 4.1 Flash", "DeepSeek-V4-Flash")):
+        assert ser.name_shape_review_flag(*pair) == ser.REVIEW_FLAG_VERSION_SUFFIX, pair
+        assert ser.merge_allowed(*pair, {}) == (True, "ok"), pair
+    # No seventh guard was added, and the #1175 guard still answers only on its
+    # own containment class: these two names neither contain nor equal one another.
+    assert ser.is_suffix_asymmetric("DeepSeek-V4-Flash", "DeepSeek 4.1 Flash") is False
+    assert ser.merge_allowed("Browser", "Browser Tool", {}) == (False, "suffix_asymmetry")
+
+
+def test_the_version_disagreement_survives_the_emitter_onto_the_sweep_row(tmp_path, monkeypatch,
+                                                                          capsys):
+    """The seam #4269 is actually about: #67 proposes in one process, the sweep reads
+    the JSONL in another.
+
+    A predicate that fires only in-process changes nothing, so this drives the real
+    `main()` over the item's own pair with `--replay` — no engine, the same path a
+    reviewer re-checking a week's proposals takes — and reads the dated file back.
+    `GR00T 2` / `GR00T N2` rides along as the control: same base name, a version on
+    one side only, and it must still reach the sweep unlabelled.
+    """
+    judgments = tmp_path / "semantic-verdicts-pairs-2099-01-01.jsonl"
+    judgments.write_text("".join(json.dumps({
+        "a": a, "b": b, "verdict": "same", "confidence": 0.95, "reason": "replayed",
+    }) + "\n" for a, b in [("DeepSeek-V4-Flash", "DeepSeek 4.1 Flash"),
+                            ("GR00T 2", "GR00T N2")]))
+
+    _drive_main(tmp_path, monkeypatch,
+                ["--replay", str(judgments), "--min-score", "4.0"],
+                entities=["DeepSeek-V4-Flash", "DeepSeek 4.1 Flash", "GR00T 2", "GR00T N2"],
+                neighbors={})
+    out = capsys.readouterr().out
+
+    rows = {(frozenset((r["canonical"], r["variant"]))): r
+            for r in _row_lines(tmp_path / "semantic-proposals-2099-01-01.jsonl").values()}
+    conflict = frozenset({"DeepSeek-V4-Flash", "DeepSeek 4.1 Flash"})
+    assert rows[conflict]["review_flag"] == "version_suffix_mismatch", rows[conflict]
+    assert rows[conflict]["action"] == "merge", (
+        f"the flag must not have downgraded the row: {rows[conflict]}")
+    assert rows[frozenset({"GR00T 2", "GR00T N2"})]["review_flag"] is None, rows
+    assert _review_flag_counts(out) == {"version_suffix_mismatch": 1}, out
+
+
+def test_the_new_shape_adds_no_row_to_the_committed_witness():
+    """clause 5 (#4269) — the flag's audit baseline is still eleven rows, not twelve.
+
+    Re-derives over the same committed bytes as
+    `test_the_quoted_run_counts_re_derive_from_the_committed_witness`, which is where
+    the eleven come from, and pins the one row this shape could have added:
+    `Depth Anything 3` <-> `Depth Anything V3` is a `merge` row IN that file, so a
+    raw release-token comparison takes this count to twelve and the reduction is the
+    only thing keeping the baseline readable. The target pair is not in the file at
+    all, so nothing here is a restatement of a flag that already fired.
+    """
+    assert WITNESS_ARTIFACT.exists(), (
+        f"{WITNESS_ARTIFACT} is clause 6's witness and is not on disk")
+    rows = [json.loads(l) for l in WITNESS_ARTIFACT.read_text().splitlines() if l.strip()]
+    merge_rows = [r for r in rows if r.get("action") == "merge"]
+    assert len(merge_rows) == 48, f"48 merge-action rows expected, got {len(merge_rows)}"
+
+    pairs = {(r["canonical"], r["variant"]) for r in merge_rows}
+    flagged = {p for p in pairs
+               if ser.name_shape_review_flag(*p) == ser.REVIEW_FLAG_VERSION_SUFFIX}
+    assert len(flagged) == 11, sorted(flagged)
+    assert ("Depth Anything 3", "Depth Anything V3") in pairs
+    assert ("Depth Anything 3", "Depth Anything V3") not in flagged, sorted(flagged)
+    assert not ({("DeepSeek-V4-Flash", "DeepSeek 4.1 Flash"),
+                 ("GR00T N1.7", "GR00T 1.7")} & pairs)
+
+
 def test_bare_name_expansion_flags_a_one_token_name_and_not_two_full_names():
     """clause 2 — `Jason` vs `Jason Ma` is a name-identity question, this is not one."""
     for pair in (("Jason", "Jason Ma"), ("Jason Ma", "Jason")):
