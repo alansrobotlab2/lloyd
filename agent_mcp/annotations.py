@@ -90,6 +90,19 @@ READ_ONLY: frozenset[str] = frozenset({
     "calendar_list", "calendar_events", "calendar_categories",
     "tasks_list", "contacts_search", "contacts_get",
     "discord_list_channels", "discord_get_home_channel",
+    # The five reads among the nine Thunderbird bridge tools that shipped
+    # unclassified until 2026-11-20 (#4433). Two header reads and an attachment
+    # search are observation of state Thunderbird already holds; the saved-search
+    # listing reads the folder tree; and the compose preflight's own description
+    # says it "Counts effective recipients and inspects caller attachments
+    # without decoding or writing". Unclassified they took the fail-safe default,
+    # which made a re-read inside one worker scope answer from the effect ledger's
+    # stored text — a stale answer served as a fresh one — and refused a header
+    # read in plan mode. All five dial out through the bridge, and the `email_`
+    # prefix is what makes `is_open_world` say so; unclassified, all nine of the
+    # bridge's late arrivals served `openWorldHint=false` to every consumer.
+    "email_message_headers", "email_message_headers_batch",
+    "email_attachment_search", "email_virtual_folders", "email_compose_dry_run",
 })
 
 # ---------------------------------------------------------------------------
@@ -106,6 +119,11 @@ DESTRUCTIVE: frozenset[str] = frozenset({
     "autoresearch_rollback",
     "email_delete", "email_delete_filter", "email_delete_folder",
     "email_empty_trash", "email_empty_junk",
+    # Removes a saved-search view. The bridge refuses to delete messages with it,
+    # but the view is gone and Thunderbird does not keep a trash for it — the same
+    # blast radius as `email_delete_folder` beside it, which was badged and this
+    # one was not while it shipped as `tb_deleteVirtualFolder` (#4433).
+    "email_virtual_folder_delete",
     "calendar_delete_event",
     "contacts_delete",
 })
@@ -121,6 +139,11 @@ IDEMPOTENT: frozenset[str] = frozenset({
     "autonomy_delete_task", "autonomy_write_task",
     "email_delete", "email_delete_filter", "email_delete_folder",
     "email_empty_trash", "email_empty_junk",
+    # A second identical call removes nothing further: the view is either gone or
+    # the bridge says so. Its creator is absent on purpose — what a re-issued
+    # create with the same name does is not something this table has measured, and
+    # an unmeasured create does not get an idempotent badge.
+    "email_virtual_folder_delete",
     "calendar_delete_event", "calendar_update_event",
     "contacts_delete", "contacts_update",
     "tasks_update", "fact_invalidate",

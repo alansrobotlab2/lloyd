@@ -62,6 +62,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from agent_mcp import main as M  # noqa: E402
+from agent_mcp import thunderbird as TB  # noqa: E402
 
 ARCH_DOC = ROOT / "architecture" / "tools.md"
 
@@ -462,3 +463,150 @@ def test_the_regen_snippet_prints_the_tool_and_module_totals(page_text, tools, s
     assert out.count("\n") > tools_out, (
         "the snippet printed its totals but stopped printing the per-tool rows §6 is "
         "made of, which leaves the regeneration with nothing to write")
+
+
+# ── The Thunderbird bridge's own 49 rows (#4433) ─────────────────────────────
+#
+# Every node above drops the bridge on BOTH sides when it exports nothing here
+# (`_zero_export_modules`), which is the case in every automod worktree: the bridge
+# is gitignored, so `thunderbird` serves zero tools and the wire says nothing about
+# its names. That exemption is what let §6 carry nine rows under
+# `tb_getMessageHeaders` … `tb_dryRunCompose` while every parity node read green —
+# a regeneration that trusted §6 would have re-shipped the mismatch. These nodes
+# read the page against the map in git instead of against the wire, so they are
+# non-vacuous exactly where the wire nodes are blind.
+
+#: The five reads among the nine tools that arrived after the map's first 40, and
+#: the one delete. These are the classification facts §6 has to carry, not a second
+#: copy of the tables: `agent_mcp/annotations.py` holds the truth and
+#: `tests/test_mcp_layer.py` pins it — a §6 that disagrees with it misleads the next
+#: regeneration, which copies its marks out of this page.
+_BRIDGE_READS = {
+    "email_message_headers", "email_message_headers_batch",
+    "email_attachment_search", "email_virtual_folders", "email_compose_dry_run",
+}
+_BRIDGE_DELETE = "email_virtual_folder_delete"
+_BRIDGE_WRITERS = {
+    "email_virtual_folder_create", "email_folder_refresh", "calendar_refresh",
+    _BRIDGE_DELETE,
+}
+
+_TB_ROW = re.compile(r"^\| `([^`]+)` \| ([^|]+)\|", re.M)
+_SECTION11 = re.compile(r"^## 11\. Regenerating the inventory\n(.*?)^## Review log",
+                        re.S | re.M)
+#: Each §11 sentence that states how many bridge rows a dump prints, serves or
+#: holds — what a regeneration pass copies §6's counts from — plus the `bridge=`
+#: total it copies into the totals line.
+_BRIDGE_ROW_COUNT = re.compile(r"\b(?:prints|serves|holds)\s+all\s+(\d+)\b")
+_BRIDGE_TOTAL = re.compile(r"bridge=`?\s*(\d+)")
+
+
+def _bridge_marks(page_text: str) -> dict[str, str]:
+    """Every tool row on the page as name -> its marks cell."""
+    marks = {hit.group(1): hit.group(2).strip()
+             for hit in (_TB_ROW.match(line) for line in page_text.splitlines())
+             if hit}
+    if not marks:
+        raise LookupError("no `| `tool` | marks | …` row parsed out of the page, so "
+                          "every check below would be over nothing")
+    return marks
+
+
+def _section11(page_text: str) -> str:
+    hit = _SECTION11.search(page_text)
+    if not hit:
+        raise LookupError("architecture/tools.md has no `## 11. Regenerating the "
+                          "inventory` section running to the Review log")
+    return hit.group(1)
+
+
+def _bridge_inventory_defects(page_text: str) -> list[str]:
+    """Where §6's bridge rows and §11's counts have drifted from the map in git."""
+    declared = _tool_sections(_section6(page_text))["thunderbird"]["declared"]
+    marks = _bridge_marks(page_text)
+    mapped = set(TB.TOOL_NAME_MAP.values())
+    defects: list[str] = []
+    strays = sorted(n for n in marks if n.startswith("tb_"))
+    if strays:
+        defects.append(
+            f"§6 inventories {len(strays)} tool(s) under the bridge's own names instead "
+            f"of the mapped ones §11's regeneration block prints: {strays}")
+    missing = sorted(mapped - set(marks))
+    if missing:
+        defects.append(f"{len(missing)} mapped bridge tool(s) have no §6 row: {missing}")
+    if declared != len(mapped):
+        defects.append(
+            f"the `#### `thunderbird` ({declared})` heading declares {declared} while "
+            f"the map carries {len(mapped)} names — a regeneration copies its row count "
+            "from that heading")
+    for name in sorted(_BRIDGE_READS):
+        cell = marks.get(name, "")
+        if "RO" not in cell:
+            defects.append(f"{name} is a pure read and §6 marks it {cell!r}, no `RO`")
+    for name in sorted(_BRIDGE_WRITERS):
+        cell = marks.get(name, "")
+        if "RO" in cell:
+            defects.append(f"{name} changes state and §6 marks it {cell!r} as a read")
+    delete_cell = marks.get(_BRIDGE_DELETE, "")
+    if not {"DX", "ID"} <= set(delete_cell.split()):
+        defects.append(
+            f"{_BRIDGE_DELETE} destroys a saved-search view and §6 marks it "
+            f"{delete_cell!r} — `email_delete_folder` beside it carries `DX ID`")
+    no_ow = sorted(n for n in mapped if n in marks and "OW" not in marks[n])
+    if no_ow:
+        defects.append(
+            f"{len(no_ow)} bridge tool(s) §6 marks closed-world, which none of them is "
+            f"— every one dials out through the bridge: {no_ow}")
+    sec11 = _section11(page_text)
+    for pattern in (_BRIDGE_ROW_COUNT, _BRIDGE_TOTAL):
+        for stated in pattern.findall(sec11):
+            if int(stated) != len(mapped):
+                defects.append(
+                    f"§11 states {stated} as the bridge's row count while the map "
+                    "carries "
+                    f"{len(mapped)} names; a regeneration that trusts it silently "
+                    "freezes or drops the difference")
+    return defects
+
+
+def test_the_bridges_six_section_rows_are_the_mapped_names_with_their_marks(page_text):
+    """Clause 5: §6 carries all 49 bridge tools under their Lloyd names, each with
+    the marks the annotation tables give it."""
+    assert _bridge_inventory_defects(page_text) == []
+
+
+def test_a_row_left_on_the_bridges_own_name_is_reported(page_text):
+    """The node above can fail: the §6 state #4433 was filed against, planted back.
+
+    `tb_deleteVirtualFolder` in place of `email_virtual_folder_delete` is exactly
+    what shipped on 2026-11-20 — an unbadged delete, under a name the regeneration
+    block will never print.
+    """
+    planted = _planted(page_text,
+                       "| `email_virtual_folder_delete` | DX ID OW | `folderPath` |",
+                       "| `tb_deleteVirtualFolder` | FX | `folderPath` |")
+    defects = _bridge_inventory_defects(planted)
+    assert any("tb_deleteVirtualFolder" in d for d in defects), defects
+    assert any(_BRIDGE_DELETE in d and "DX ID" in d for d in defects), defects
+
+
+def test_section11_states_the_row_count_the_map_carries(page_text):
+    """§11's row-count sentences and its `bridge=` total are what a regeneration
+    copies §6's counts from, so each one must state the map's 49."""
+    stated = (_BRIDGE_ROW_COUNT.findall(_section11(page_text))
+              + _BRIDGE_TOTAL.findall(_section11(page_text)))
+    assert len(stated) >= 4, (
+        f"§11 names the bridge's row count {len(stated)} time(s); it documents two "
+        "dumps and a total, and a section that stopped stating the number would leave "
+        "this node with nothing to check")
+    assert sorted(set(stated)) == [str(len(set(TB.TOOL_NAME_MAP.values())))], stated
+
+
+def test_a_stale_row_count_in_section11_is_reported(page_text):
+    """The revival this guards: the page saying `all 40 rows` while the map and the
+    server both carry 49."""
+    planted = _planted(page_text, "The dump below prints all 49",
+                       "The dump below prints all 40")
+    assert any("40" in d for d in _bridge_inventory_defects(planted)), (
+        "§11 could go back to stating 40 while the map carries 49 and the "
+        "regeneration would freeze nine rows without a sound")

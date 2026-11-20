@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -35,6 +36,7 @@ from mcp.types import CallToolResult, Tool  # noqa: E402
 
 from agent_mcp import annotations as A  # noqa: E402
 from agent_mcp import main as M  # noqa: E402
+from agent_mcp import thunderbird as TB  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -1231,3 +1233,228 @@ async def test_the_memory_file_beside_the_denied_one_still_lands(vault_lane):
         "# Lloyd Long-Term Memory\n\nA note.\n")
     assert (vault / "lloyd" / "SOUL.md").read_text(encoding="utf-8") == (
         "ORIGINAL IDENTITY FILE")
+
+
+# ── The Thunderbird bridge namespace (#4433) ─────────────────────────────────
+#
+# Every name the Thunderbird bridge serves must be a key of
+# `thunderbird.TOOL_NAME_MAP`. An unmapped one reaches the model as
+# `tb_<rawName>`, and one omission buys four defects: it is outside
+# `_OPEN_WORLD_PREFIXES` so it advertises closed-world while dialling IMAP, it is
+# in no annotation table so `side_effecting()` fails safe and a re-read inside one
+# worker scope is answered from the effect ledger's stored text, it is outside
+# `_BRIDGE_NAME_RE` so any camelCase name the bridge's own prose cites stays
+# unserved, and §11's regeneration block cannot attribute it to a module.
+#
+# Why the pin is source-level rather than wire-level. The bridge itself
+# (`agent-services/services/thunderbird-mcp/mcp-bridge.cjs`) is gitignored, so
+# `thunderbird` exports ZERO tools in an automod worktree, and both guards that
+# could have caught this skip its names exactly then: `_unverifiable_names()` in
+# this file exempts every `email_`/`calendar_`/`tasks_`/`contacts_` name whenever
+# the module is degraded, and
+# `tests/test_tools_md_inventory_parity.py::_zero_export_modules` drops the module
+# from both sides. On top of that
+# `test_annotation_tables_have_no_stale_entries` walks table → served and never
+# served → table, so a served-but-unclassified name is invisible to it in every
+# rung. That is the whole mechanism by which nine tools shipped for four weeks
+# while `list_tools` logged the gap 5,693 times into
+# `~/lloyd-data/logs/mcp.err` (counted 2026-11-20, first line 2026-10-25): the
+# warning had no reader, so the enforcement had to become a node.
+#
+# The snapshot below is strict on purpose — a tenth tool added upstream turns
+# these nodes red instead of shipping as an unclassified `tb_*`. Whether that
+# strictness outlives the round is the owed-check ruling recorded on #4433; it is
+# not something this file softens in advance.
+
+#: Every bridge name the running aggregator served on 2026-11-20: `tools/list`
+#: against :8500 returned 158 tools, 49 of them the bridge's — the 40
+#: `TOOL_NAME_MAP` already renamed plus the 9 that arrived as `tb_*`.
+BRIDGE_SNAPSHOT_2026_11_20 = frozenset({
+    "applyFilters", "batchGetMessageHeaders", "createContact", "createEvent",
+    "createFilter", "createFolder", "createTask", "createVirtualFolder",
+    "deleteContact", "deleteEvent", "deleteFilter", "deleteFolder",
+    "deleteMessages", "deleteVirtualFolder", "displayMessage", "dryRunCompose",
+    "emptyJunk", "emptyTrash", "forwardMessage", "getAccountAccess",
+    "getContact", "getMessage", "getMessageHeaders", "getMessages",
+    "getRecentMessages", "listAccounts", "listCalendars", "listCategories",
+    "listEvents", "listFilters", "listFolders", "listTasks",
+    "listVirtualFolders", "moveFolder", "refreshCalendar", "refreshFolder",
+    "renameFolder", "reorderFilters", "replyToMessage", "saveDraft",
+    "searchAttachments", "searchContacts", "searchMessages", "sendMail",
+    "updateContact", "updateEvent", "updateFilter", "updateMessage",
+    "updateTask",
+})
+
+#: The nine that shipped as `tb_*`, with the Lloyd name each now takes. Every
+#: target carries an `email_`/`calendar_` prefix deliberately: `is_open_world` is
+#: a prefix test (`agent_mcp/annotations.py:197`), all nine do reach
+#: IMAP/Exchange/CalDAV through the bridge, and all nine served
+#: `openWorldHint=false` before the rename.
+TB_RENAMES = {
+    "getMessageHeaders": "email_message_headers",
+    "batchGetMessageHeaders": "email_message_headers_batch",
+    "searchAttachments": "email_attachment_search",
+    "listVirtualFolders": "email_virtual_folders",
+    "createVirtualFolder": "email_virtual_folder_create",
+    "deleteVirtualFolder": "email_virtual_folder_delete",
+    "refreshFolder": "email_folder_refresh",
+    "refreshCalendar": "calendar_refresh",
+    "dryRunCompose": "email_compose_dry_run",
+}
+
+#: Five of the nine observe and change nothing: two header reads, an attachment
+#: search over the local snapshot, a listing of saved searches, and a compose
+#: preflight whose own description says "Read-only add-on checks … without
+#: decoding or writing". They must not be effect-ledgered, and plan mode must
+#: not refuse them.
+TB_READ_ONLY = frozenset(TB_RENAMES[b] for b in (
+    "getMessageHeaders", "batchGetMessageHeaders", "searchAttachments",
+    "listVirtualFolders", "dryRunCompose"))
+
+#: The four that do write something on the account: two provider refreshes, a
+#: saved-search creation, and a saved-search deletion.
+TB_WRITERS = frozenset(TB_RENAMES[b] for b in (
+    "refreshFolder", "refreshCalendar", "createVirtualFolder",
+    "deleteVirtualFolder"))
+
+#: Verbatim from the wire on 2026-11-20, the description
+#: `tb_batchGetMessageHeaders` was served with. It cites `getMessageHeaders`,
+#: which no server has ever served under that name — the dangling citation
+#: #4433 clause 4 is about.
+BRIDGE_PROSE_CITING_A_BRIDGE_NAME = (
+    "Fetch headers for up to 200 messages that share one folder, in a single "
+    "round-trip, in the same shape as getMessageHeaders.")
+
+
+def _bridge_namespace_defects(mapping: dict[str, str]) -> list[str]:
+    """Every way one bridge-name → Lloyd-name map can leave a tool unbadged."""
+    defects = []
+    unmapped = sorted(BRIDGE_SNAPSHOT_2026_11_20 - set(mapping))
+    if unmapped:
+        defects.append(
+            f"{len(unmapped)} bridge name(s) the aggregator serves are not keys of "
+            f"TOOL_NAME_MAP and would ship as tb_*: {unmapped}")
+    dupes = sorted({n for n in mapping.values()
+                    if sum(1 for v in mapping.values() if v == n) > 1})
+    if dupes:
+        defects.append(f"Lloyd names two bridge tools share, so REVERSE_MAP loses one: "
+                       f"{dupes}")
+    for bridge in sorted(TB_RENAMES):
+        lloyd = mapping.get(bridge, "")
+        if not lloyd.startswith(("email_", "calendar_")):
+            defects.append(
+                f"{bridge} → {lloyd!r}: not an email_*/calendar_* name, so "
+                "is_open_world() still reports it closed-world")
+    return defects
+
+
+def test_every_bridge_tool_the_aggregator_serves_is_mapped():
+    """Clause 1: no bridge tool can reach the model as `tb_*`."""
+    assert _bridge_namespace_defects(TB.TOOL_NAME_MAP) == []
+    assert BRIDGE_SNAPSHOT_2026_11_20 <= set(TB.TOOL_NAME_MAP), (
+        "the served-name snapshot is not a subset of TOOL_NAME_MAP")
+    assert {TB.TOOL_NAME_MAP[b] for b in TB_RENAMES} == set(TB_RENAMES.values())
+    assert TB.REVERSE_MAP.get("email_message_headers") == "getMessageHeaders"
+
+
+def test_a_bridge_name_dropped_from_the_map_is_reported():
+    """The clause-1 node can fail: the state #4433 was filed about.
+
+    `deleteVirtualFolder` removed from the map is exactly the shipped condition —
+    it and eight siblings reached the model as `tb_*` for four weeks.
+    """
+    dropped = dict(TB.TOOL_NAME_MAP)
+    del dropped["deleteVirtualFolder"]
+    defects = _bridge_namespace_defects(dropped)
+    assert any("deleteVirtualFolder" in d for d in defects), defects
+
+
+def test_a_lloyd_name_without_a_mail_or_calendar_prefix_is_reported():
+    """The other half of clause 1: the prefix is what buys `openWorldHint`."""
+    prefixed = dict(TB.TOOL_NAME_MAP, deleteVirtualFolder="tb_deleteVirtualFolder")
+    defects = _bridge_namespace_defects(prefixed)
+    assert any("deleteVirtualFolder" in d and "closed-world" in d for d in defects), defects
+
+
+def test_the_five_bridge_reads_are_read_only_and_usable_in_plan_mode(names):
+    """Clause 2, both halves, with the four writers as the control beside them.
+
+    `email_send` is the second control: a table that classified everything mail
+    as read-only would pass a five-name assertion and fail this one.
+    """
+    for name in sorted(TB_READ_ONLY):
+        assert A.side_effecting(name) is False, (
+            f"{name} is a pure read but is still effect-ledgered: a repeat inside "
+            "one worker scope answers from the ledger's stored text")
+        assert name in A.READ_ONLY, f"{name} is not in READ_ONLY"
+    assert A.side_effecting("email_send") is True
+    blocked = set(A.plan_mode_blocked_tools(set(names) | set(TB_RENAMES.values())))
+    assert sorted(blocked & TB_READ_ONLY) == [], (
+        f"a pure read is refused in plan mode: {sorted(blocked & TB_READ_ONLY)}")
+    assert TB_WRITERS <= blocked, (
+        f"a bridge writer is no longer refused in plan mode: "
+        f"{sorted(TB_WRITERS - blocked)}")
+
+
+def test_the_bridge_saved_search_delete_is_destructive_and_idempotent():
+    """Clause 3: `email_virtual_folder_delete` is badged like `email_delete_folder`."""
+    delete, neighbour = TB_RENAMES["deleteVirtualFolder"], "email_delete_folder"
+    ann, ref = A.annotations_for(delete), A.annotations_for(neighbour)
+    assert ann.destructive_hint is True, f"{delete} serves destructiveHint=false"
+    assert ann.idempotent_hint is True, f"{delete} serves idempotentHint=false"
+    assert ann.read_only_hint is ref.read_only_hint is False
+    assert delete in A.DESTRUCTIVE and delete in A.IDEMPOTENT
+    # Non-vacuity: a name in no table stays unbadged, so the two Trues above are
+    # the classification and not the default.
+    unclassified = TB_RENAMES["refreshFolder"]
+    assert A.annotations_for(unclassified).destructive_hint is False
+    assert A.side_effecting(unclassified) is True
+
+
+def test_the_nine_renamed_bridge_tools_advertise_the_open_world():
+    """All nine reach IMAP/Exchange/CalDAV; none may claim a closed world."""
+    closed = sorted(n for n in TB_RENAMES.values()
+                    if not A.annotations_for(n).open_world_hint)
+    assert closed == [], f"advertising openWorldHint=false while dialling out: {closed}"
+
+
+def test_lloyd_prose_translates_every_bridge_name_it_now_ships():
+    """Clause 4's mechanism: `_BRIDGE_NAME_RE` is built from `TOOL_NAME_MAP`, so a
+    name missing from the map stays in prose untranslated and points at a tool
+    nothing serves. Every one of the 49 must now translate."""
+    for bridge in sorted(BRIDGE_SNAPSHOT_2026_11_20):
+        hit = TB._BRIDGE_NAME_RE.search(bridge)
+        assert hit is not None and hit.group(0) == bridge, (
+            f"{bridge}: the prose rewriter does not match the whole name, so a "
+            "description citing it keeps the unserved camelCase form")
+        shaped = TB._lloyd_prose(f"use {bridge} first")
+        assert shaped == f"use {TB.TOOL_NAME_MAP[bridge]} first", (
+            f"{bridge}: rewrote to {shaped!r}")
+        assert TB._lloyd_prose(shaped) == shaped, f"{bridge}: not idempotent"
+    shaped = TB._lloyd_prose(BRIDGE_PROSE_CITING_A_BRIDGE_NAME)
+    assert TB_RENAMES["getMessageHeaders"] in shaped, shaped
+    assert not TB._BRIDGE_NAME_RE.search(shaped), shaped
+
+
+def test_no_served_description_cites_an_unserved_bridge_name(tools):
+    """Clause 4's observable half, on the wire: the nine's served descriptions.
+
+    In an automod worktree the bridge exports nothing and this is vacuous — which
+    is precisely why the source-level nodes above carry the clause. Run against
+    the live checkout it reads the descriptions the model actually sees.
+    """
+    by_name = {t.name: t for t in tools}
+    served_names = set(by_name)
+    offenders = {}
+    for lloyd in TB_RENAMES.values():
+        tool = by_name.get(lloyd)
+        if tool is None:
+            continue                       # the module is degraded here
+        text = tool.description or ""
+        dangling = sorted(b for b in BRIDGE_SNAPSHOT_2026_11_20
+                          if re.search(rf"\b{re.escape(b)}\b", text)
+                          and TB.TOOL_NAME_MAP[b] not in served_names)
+        if dangling:
+            offenders[lloyd] = dangling
+    assert offenders == {}, (
+        f"served descriptions cite bridge names nothing serves: {offenders}")

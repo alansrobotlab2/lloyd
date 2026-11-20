@@ -36,8 +36,8 @@ own session to list them, and the backend reads the side routes in §2.
 
 **158 tools, 29 modules**, measured 2026-11-20 on `:8500/health` and a
 token-bearing `tools/list`, which agree exactly (109 in the tree plus the
-Thunderbird bridge's 49 — nine of those 49 are still served under the bridge's own
-`tb_*` names, unmapped and unclassified (§6, #4433)). The model is
+Thunderbird bridge's 49, every one of them under a Lloyd `email_`/`calendar_` name
+since #4433 renamed the nine that had been arriving as `tb_*`). The model is
 shown fewer: `_BackgroundTaskDrain` is never advertised, `recall_observation` is
 offered only to a turn whose relief writes observation stubs (#1481), and the four
 `discord_*` tools sit in `disabled_tools`, so a chat turn sees 152 on config.yaml
@@ -518,7 +518,7 @@ self-evidently a file with a fresh timestamp.
 | `automod` | 10 | a thin surface over `scripts/automod/`. There is no `automod_write_code`: a round is a worktree path plus ordinary Edit/Write/Bash. While `automod.enabled` is false every tool refuses except `automod_status` and `automod_abort` ([[automod]]) |
 | `skills` | 2 | the skill library ([[skills]]) |
 | `http_tools` | 3 | web search, fetch and raw requests (§9) |
-| `thunderbird` | 49 | mail (34), calendar (7), to-dos (3), contacts (5), through a Node bridge over stdio. Zero tools, and still `ok`, when Thunderbird is not running. The proxy rewrites the bridge's prose, never its schema structure: bridge function names become Lloyd's, and repeated or long parameter text is replaced (`PARAM_DESCRIPTION_OVERRIDES`) — **for the 40 names in `TOOL_NAME_MAP` only.** Nine have arrived since and are passed through under the bridge's own camelCase names (`tb_getMessageHeaders` … `tb_dryRunCompose`), so neither the rename nor the description rewrite reaches them, and none is in an annotations table: all nine read as FX, five of them are pure reads, and `tb_deleteVirtualFolder` destroys a view without a `DX` mark (#4433) |
+| `thunderbird` | 49 | mail (34), calendar (7), to-dos (3), contacts (5), through a Node bridge over stdio. Zero tools, and still `ok`, when Thunderbird is not running. The proxy rewrites the bridge's prose, never its schema structure: bridge function names become Lloyd's, and repeated or long parameter text is replaced (`PARAM_DESCRIPTION_OVERRIDES`). Both are keyed on `TOOL_NAME_MAP`, and all 49 names the bridge exports are keys of it as of #4433 — the nine that used to arrive outside the map came through as `tb_*`, un-renamed, un-annotated and un-rewritten, which is why the map is now snapshotted by a test rather than by a `list_tools` warning nobody read |
 
 ### Every tool
 
@@ -785,8 +785,12 @@ re-implements the caps.
 
 #### `thunderbird` (49)
 
-The first 40 are the names `TOOL_NAME_MAP` gives Lloyd. The last nine are the bridge's
-own names, passed through unmapped, and carry no classification at all (#4433).
+All 49 are names `TOOL_NAME_MAP` gives Lloyd. The last nine rows arrived later than the
+map's first 40 and shipped unmapped as `tb_getMessageHeaders` … `tb_dryRunCompose` until
+2026-11-20, which is what left them out of every annotation table and out of
+`_BRIDGE_NAME_RE`'s rewrite (#4433); the map now carries all 49 and
+`tests/test_mcp_layer.py` snapshots them, so a tenth bridge tool turns that test red
+instead of shipping as a `tb_*` name.
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
@@ -830,15 +834,15 @@ own names, passed through unmapped, and carry no classification at all (#4433).
 | `email_reorder_filters` | OW FX | `accountId`, `fromIndex`, `toIndex` | Move a filter in the run order |
 | `email_apply_filters` | OW FX | `accountId`, `folderPath` | Run filters over a folder |
 | `email_account_access` | RO OW | — | Which accounts the bridge may touch |
-| `tb_getMessageHeaders` | FX | `messageId`, `folderPath` | One message's header fields only — no body, no MIME parse. A read, unclassified, so it is effect-ledgered in a worker scope and a re-read inside that scope replays the first answer |
-| `tb_batchGetMessageHeaders` | FX | `messageIds`, `folderPath` | Headers for up to 200 messages in one folder, in one round trip; the point is to avoid N `email_read` calls. Same unclassified-read consequence |
-| `tb_searchAttachments` | FX | — | Find messages by attachment filename or Content-Type, from the local snapshot only; never decrypts |
-| `tb_refreshFolder` | FX | `folderPath` | Ask one IMAP/Exchange/Owl folder to sync now; reports before/after counts and `netMessageDelta` |
-| `tb_refreshCalendar` | FX | — | Refresh one calendar, or all enabled refreshable ones, through its provider |
-| `tb_createVirtualFolder` | FX | `name`, `parentFolderPath`, `searchFolderPaths`, `conditions` | Create a saved search (a live view over several folders; nothing is moved) |
-| `tb_listVirtualFolders` | FX | — | The saved searches with their scope and conditions. A read, unclassified |
-| `tb_deleteVirtualFolder` | FX | `folderPath` | Remove a saved-search view, keeping the messages. Destroys state and is not `DX`-marked, unlike `email_delete_folder` |
-| `tb_dryRunCompose` | FX | `to`, `subject`, `body` | Preflight an `email_send`: recipient counts and attachment checks, no delivery. A read, unclassified |
+| `email_message_headers` | RO OW | `messageId`, `folderPath` | One message's header fields only — no body, no MIME parse |
+| `email_message_headers_batch` | RO OW | `messageIds`, `folderPath` | Headers for up to 200 messages in one folder, in one round trip; the point is to avoid N `email_read` calls |
+| `email_attachment_search` | RO OW | — | Find messages by attachment filename or Content-Type, from the local snapshot only; never decrypts |
+| `email_folder_refresh` | OW FX | `folderPath` | Ask one IMAP/Exchange/Owl folder to sync now; reports before/after counts and `netMessageDelta` |
+| `calendar_refresh` | OW FX | — | Refresh one calendar, or all enabled refreshable ones, through its provider |
+| `email_virtual_folder_create` | OW FX | `name`, `parentFolderPath`, `searchFolderPaths`, `conditions` | Create a saved search (a live view over several folders; nothing is moved) |
+| `email_virtual_folders` | RO OW | — | The saved searches with their scope and conditions |
+| `email_virtual_folder_delete` | DX ID OW | `folderPath` | Remove a saved-search view, keeping the messages. Badged like `email_delete_folder`: the view is gone and there is no trash for it |
+| `email_compose_dry_run` | RO OW | `to`, `subject`, `body` | Preflight an `email_send`: recipient counts and attachment checks, no delivery |
 
 ---
 
@@ -1327,10 +1331,13 @@ the command that reads them. It prints the same four columns in the same order a
 dump above, so the two compare name for name: the module column carries `thunderbird`
 for the bridge's rows (the names `thunderbird.py:TOOL_NAME_MAP` maps are tracked even
 though the bridge itself is not) and `-` for every other row, because the wire
-attributes no module. **Read that last clause as a live defect, not a formatting note:**
-the set is built from `TOOL_NAME_MAP`, so the nine unmapped `tb_*` rows (§6) print `-`
-and this block's `bridge=` total reads 40 while the server serves 49 — a regeneration
-that trusts that column mis-attributes nine tools (#4433). `RO`/`DX`/`ID`/`OW` come off the wire and `RX`/`FX`/`PM` are
+attributes no module. Because the set is built from `TOOL_NAME_MAP`, that column is
+only as complete as the map: while nine bridge tools were unmapped it printed `-` for
+them and this block's `bridge=` total read 40 against a server serving 49, and a
+regeneration trusting the column mis-attributed nine rows. All 49 are mapped now
+(#4433), so `bridge=49` is what the block prints against a live aggregator — say the
+number out loud when you regenerate, because a map that has silently lost a name
+prints a smaller total and still exits 0. `RO`/`DX`/`ID`/`OW` come off the wire and `RX`/`FX`/`PM` are
 recomputed here from the same `agent_mcp/annotations.py` the dump above uses. The
 substitute-interpreter caveat applies: `.venvs/` is gitignored, so inside a worktree run
 it with the round's own interpreter. Compare the two dumps under **one** collation —
@@ -1469,3 +1476,30 @@ stops being executable is caught in the suite rather than at a reader's keyboard
   spelling #3292 refuses because no rail can read it, and a review log quoting a
   citation is that citation — so its own sweep node reported `tools.md` dirty until
   #4437 wrote them as pointers instead.
+- **2026-11-20 — #4433 implemented: the nine unmapped bridge tools are mapped.** The
+  entry above recorded the nine arriving under `tb_*` names; they are keys of
+  `TOOL_NAME_MAP` now — `email_message_headers`, `email_message_headers_batch`,
+  `email_attachment_search`, `email_virtual_folders`, `email_virtual_folder_create`,
+  `email_virtual_folder_delete`, `email_folder_refresh`, `calendar_refresh`,
+  `email_compose_dry_run` — so §6's nine rows, §11's module column and its `bridge=`
+  total, and `_BRIDGE_NAME_RE`'s description rewrite all reach them. The five pure
+  reads joined `READ_ONLY` and the saved-search delete joined `DESTRUCTIVE` and
+  `IDEMPOTENT`, which is what puts `RO` on those rows and `DX ID` on the delete the
+  way `email_delete_folder` beside it has always carried them; all nine carry `OW`
+  through the `email_`/`calendar_` prefix `is_open_world` tests, where unclassified
+  they each served `openWorldHint=false` while dialling IMAP/Exchange/CalDAV.
+  **One condition to read before regenerating from this page:** the running aggregator
+  holds the pre-change module until it restarts, so a §11 dump taken against `:8500`
+  before that restart still lists the nine under their `tb_*` names and disagrees with
+  the tree by exactly those nine rows. Enforcement moved off the `list_tools` warning —
+  5,693 unread lines of `~/lloyd-data/logs/mcp.err` between 2026-10-25 and 2026-11-20
+  — onto `tests/test_mcp_layer.py`, which snapshots all 49 served bridge names and
+  goes red for a tenth rather than letting it ship unclassified; whether a tenth
+  upstream tool should keep that strictness is the ruling #4433 leaves to its
+  owed-check. `app/harness/tool_roster.py`'s committed snapshot still lists the nine
+  `tb_*` names by design: regenerating it inside a worktree would drop all 49 bridge
+  names, since the bridge is gitignored there, and its own header already rules a
+  removed name stale-but-tolerated — it lingers until someone regenerates, where the
+  worst it can do is accept a declared name that then fails at dispatch, "visible, not
+  silent". Renames reach it on the next live refresh, which is a `:8500` restart the
+  owed-check for this item already waits on.

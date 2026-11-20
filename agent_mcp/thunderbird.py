@@ -106,6 +106,36 @@ TOOL_NAME_MAP = {
     "createContact": "contacts_create",
     "updateContact": "contacts_update",
     "deleteContact": "contacts_delete",
+    # ── the nine that arrived beside these (#4433) ─────────────────────────
+    # The bridge grew these after the collision above, and until 2026-11-20 not
+    # one was a key here, so all nine reached the model as `tb_getMessageHeaders`
+    # … `tb_dryRunCompose`. Missing a key costs four things from the same
+    # omission: the name is in no `agent_mcp/annotations.py` table, so
+    # `side_effecting()` fails safe and a pure header read gets effect-ledgered —
+    # a repeat inside one worker scope answered from the ledger's stored text, a
+    # stale answer served as a fresh one — and is refused in plan mode; it is
+    # outside `_OPEN_WORLD_PREFIXES`, so it advertises `openWorldHint=false` while
+    # dialling IMAP/Exchange/CalDAV; `tb_deleteVirtualFolder` destroyed a
+    # saved-search view with no `DX` mark while its neighbour
+    # `email_delete_folder` carried one; and `_BRIDGE_NAME_RE` below is built from
+    # this map, so the tool's own description keeps whatever camelCase name the
+    # bridge prose cites — `tb_batchGetMessageHeaders` shipped "in the same shape
+    # as getMessageHeaders", a tool nothing serves — and §11's regeneration block
+    # cannot attribute the row to a module. `list_tools` logged the gap 5,693
+    # times into ~/lloyd-data/logs/mcp.err between 2026-10-25 and 2026-11-20 and
+    # nobody read it, so the enforcement is a node now:
+    # `tests/test_mcp_layer.py::test_every_bridge_tool_the_aggregator_serves_is_mapped`
+    # snapshots all 49 served bridge names and goes red for a tenth. Every name
+    # here carries an `email_`/`calendar_` prefix for that prefix test's sake.
+    "getMessageHeaders": "email_message_headers",
+    "batchGetMessageHeaders": "email_message_headers_batch",
+    "searchAttachments": "email_attachment_search",
+    "listVirtualFolders": "email_virtual_folders",
+    "createVirtualFolder": "email_virtual_folder_create",
+    "deleteVirtualFolder": "email_virtual_folder_delete",
+    "refreshFolder": "email_folder_refresh",
+    "refreshCalendar": "calendar_refresh",
+    "dryRunCompose": "email_compose_dry_run",
 }
 
 REVERSE_MAP = {v: k for k, v in TOOL_NAME_MAP.items()}
