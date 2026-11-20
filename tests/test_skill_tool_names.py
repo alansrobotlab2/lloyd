@@ -152,13 +152,20 @@ ALLOWED_TO_MENTION = {
     "nightly-skills-management",
     "trajectory-skill-mining",
     "nightly-skill-consolidation",
-    # Defines a plugin hook literally named chat_send in Python.
-    "create-hermes-plugin",
     # Cites the names as the worked example of wrong-tool-name diagnosis.
     "autonomy-task-diagnosis",
     # Says in its own text that pipeline_dispatch is not a tool.
     "pipeline-dispatch",
 }
+
+# #4363: every entry must name a skill `_active_skill_files()` actually yields. An entry
+# for anything else is inert while that skill is unreachable and silently re-grants the
+# exemption the moment the name returns, so `AGENT_MENTION_EXEMPT`'s corpus bound is now
+# extended to this set and to `PHANTOM_EXEMPT` by
+# `test_neither_phantom_exemption_set_outlives_the_corpus`. That bound is what removed the
+# seventh entry — a plugin-authoring skill retired under `skills/.archived/`, which this
+# walk skips because the directory is dot-prefixed, so its `chat_send` hook line was
+# shielded by an entry no scan could ever have reached.
 
 
 def _active_skill_files() -> list[Path]:
@@ -382,6 +389,265 @@ def test_the_live_corpus_defects_are_all_the_named_ones(skill_files):
     assert retired_offenders == set(), (
         f"active skills name retired selfmod_* tools: {sorted(retired_offenders)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The two phantom exemption sets, bounded by the corpus (#4363)
+# ---------------------------------------------------------------------------
+
+
+def _lint_module(tag: str):
+    """`scripts/skill_lint.py` loaded by path, as `tests/test_skill_lint_gates.py` loads it.
+
+    Called from inside the nodes, never at import: the script is not an importable
+    module — its shipped invocation is `python …/scripts/skill_lint.py`, which puts
+    `scripts/` on `sys.path` and not the repo root — and its body imports
+    `app.data_root`, so a load at collection time would put an unrelated tripwire in
+    front of every node in this file.
+
+    That shipped invocation is also the process boundary this section straddles. The
+    sweep runs in a shell-out from a worker job and reports through a JSON file, while
+    pytest only ever reads this file's own literal, so the code graph sees no edge
+    between the two exemption sets and a one-sided edit reads as local when it is not.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        tag, ROOT / "scripts" / "skill_lint.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _lint_source() -> str:
+    """The sweep's own text, read as bytes-to-str so the seeded leg can edit it."""
+    return (ROOT / "scripts" / "skill_lint.py").read_text(errors="replace")
+
+
+def _lint_records():
+    """`iter_active_skills()`'s records — the loader's own corpus walk."""
+    from agent_mcp.skills import iter_active_skills
+
+    return list(iter_active_skills())
+
+
+def _lint_sweep_names() -> frozenset[str]:
+    """The skills the weekly sweep actually walks."""
+    return frozenset(record.name for record in _lint_records())
+
+
+def _archived_skill_names() -> frozenset[str]:
+    """Skills retired out of the walk into the dot-prefixed archive directory.
+
+    Read off disk rather than spelled out, twice over. The bound has to enumerate what
+    is unreachable instead of quoting a historical victim, and writing an archived name
+    into either file this round edits would re-add the string the shipped verification
+    greps both of them for (#4363).
+    """
+    archive = SKILLS_DIRS[0] / ".archived"
+    if not archive.is_dir():
+        return frozenset()
+    return frozenset(
+        entry.name for entry in archive.iterdir()
+        if entry.is_dir() and (entry / "SKILL.md").exists())
+
+
+def _corpus(skill_files: list[Path]) -> frozenset[str]:
+    """The skill names this file's scan walks, derived the way the scan derives them.
+
+    `path.parent.name` is what `_phantom_offenders` exempts against, so the bound is
+    measured over exactly the population the gate applies it to and cannot drift from
+    the scan it exists to bound.
+    """
+    return frozenset(path.parent.name for path in skill_files)
+
+
+def _set_literal(source: str, name: str) -> set[str]:
+    """The string members of a module-level `NAME = {...}` / `frozenset({...})`.
+
+    Parsed from text so the seeded leg hands this the same reader it hands edited bytes,
+    and so the two shapes the sets are written in — a bare `{...}` in this file, a
+    `frozenset({...})` in the sweep — read as one thing.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+        if getattr(target, "id", None) != name:
+            continue
+        return {constant.value
+                for constant in ast.walk(node.value)
+                if isinstance(constant, ast.Constant)
+                and isinstance(constant.value, str)}
+    raise AssertionError(f"{name} is no longer an assignment in the source given")
+
+
+def _dead_exemption_entries(label: str, exempt, walked) -> list[str]:
+    """One complaint per entry of `label` naming a skill the walk does not yield.
+
+    Shared by the live bound and its seeded leg on purpose: the thing under test is
+    that one rule fires, and a complaint hand-written into the perturbation node would
+    still pass if the bound itself stopped working.
+
+    An entry the scan cannot reach is not inert. While it sits there the ledger reads
+    as bounded, and its one live effect is to re-grant the exemption — with nobody
+    deciding it again — to whatever skill next carries that name, whether it comes back
+    from the archive, is renamed, or is newly written.
+    """
+    return [
+        f"{label} exempts {entry!r}, which is not among the {len(walked)} skills the "
+        f"scan walks: no live SKILL.md yields it (archived under a dot-prefixed "
+        f"directory, renamed, or never installed). The entry shields nothing today and "
+        f"re-grants the exemption the moment that name returns — delete it, or restore "
+        f"the skill and say why. #4363"
+        for entry in sorted(set(exempt) - set(walked))
+    ]
+
+
+def test_neither_phantom_exemption_set_outlives_the_corpus(skill_files):
+    """#4363 clause 1: the bound #410 gave one exemption ledger now covers the other two.
+
+    `AGENT_MENTION_EXEMPT` has been bounded by its corpus ever since —
+    `test_the_live_corpus_defects_are_all_the_named_ones` above runs that scan with the
+    exemption switched off and demands the offenders be exactly its keys. The two
+    phantom sets carried no such check, and the drift it catches is not hypothetical:
+    both named a plugin-authoring skill that has lived only under `skills/.archived/`
+    since it was retired. Both walks skip dot-prefixed entries (`_active_skill_files`
+    here, `agent_mcp/skills.py::iter_active_skills` in the sweep), so neither gate could
+    ever have flagged it, and nothing reported the entry as unreachable.
+
+    Each set is measured against the corpus of the gate that reads it: this file's
+    `_active_skill_files()` for `ALLOWED_TO_MENTION`, the sweep's
+    `iter_active_skills()` for `PHANTOM_EXEMPT`. They are deliberately NOT compared to
+    each other — exempting a skill in one linter and not the other is allowed by the
+    ruling recorded at `tests/test_autonomy_jobs_doc_claims.py:6880`, and a bound that
+    enforced equality would silently revoke it.
+    """
+    lint_corpus, ci_corpus = _lint_sweep_names(), _corpus(skill_files)
+    assert lint_corpus, (
+        "the sweep's own corpus walk yielded nothing, so a bound measured over it "
+        "would flag every entry for the wrong reason — a vault that is not where "
+        "`iter_active_skills` looks — rather than for a genuinely dead exemption")
+
+    complaints = (
+        _dead_exemption_entries("PHANTOM_EXEMPT",
+                                _set_literal(_lint_source(), "PHANTOM_EXEMPT"),
+                                lint_corpus)
+        + _dead_exemption_entries("ALLOWED_TO_MENTION", ALLOWED_TO_MENTION, ci_corpus))
+    assert complaints == [], "\n".join(complaints)
+
+
+def test_no_exemption_set_carries_an_archived_skill_and_losing_it_exposed_nothing(
+        skill_files):
+    """#4363 clause 2: the archived entry is gone, and its removal changed nothing.
+
+    Three claims, because dropping an exemption is the kind of edit that is either inert
+    or an outage and the diff alone cannot tell you which:
+
+      * neither set names a skill sitting in the archive directory at all, which is the
+        entry #4363 removed;
+      * and neither names one that is archived AND unreachable, asserted separately
+        because those are two questions. Measured 2026-11-19: of the 142 archived skills
+        with a SKILL.md on this machine, 141 are archived-only and exactly one
+        (`weekly-backlog-hygiene`) also has a live directory, so a rule that merely
+        forbade archived names would reject an exemption for a restored skill and stay
+        silent about a name that simply vanished. The bound keys on the walk; this node
+        keys on the archive because clause 2 is about that one entry;
+      * both scans still come back clean over the live corpus with six exemptions where
+        they had seven: the CI half through this file's `_phantom_offenders`, the sweep
+        half through the shipped `skill_lint.check_phantom_tools`, so the claim is made
+        with the matcher that runs nightly and not with a reimplementation of it.
+
+    What this node does NOT claim is that the removed entry was wrong when it was
+    written. The comment it carried said that skill defined a plugin hook literally named
+    `chat_send`, and an exemption for a live skill naming a real phantom name was correct;
+    it went inert at archival. Nothing on this tree re-derives that — 24 of those 142
+    archived SKILL.md files match the phantom pattern (measured 2026-11-19), so sweeping
+    the archive cannot single out the one entry this clause is about. That is the argument for bounding
+    the ledger by the corpus rather than by anyone's memory of why each line is there.
+    """
+    archived = _archived_skill_names()
+    assert archived, (
+        f"nothing lives under {SKILLS_DIRS[0] / '.archived'} on this machine, so this "
+        "node would pass with no archived name to check against anything")
+    lint_set = _set_literal(_lint_source(), "PHANTOM_EXEMPT")
+
+    assert not (lint_set & archived), sorted(lint_set & archived)
+    assert not (ALLOWED_TO_MENTION & archived), sorted(ALLOWED_TO_MENTION & archived)
+
+    unreachable = archived - _corpus(skill_files) - _lint_sweep_names()
+    assert unreachable, (
+        "every archived skill is also inside a scanned corpus, so the two assertions "
+        "above were vacuous and an archived-and-unreachable entry could not be told apart "
+        "from a restored one by this node")
+    assert not (lint_set | ALLOWED_TO_MENTION) & unreachable, sorted(
+        (lint_set | ALLOWED_TO_MENTION) & unreachable)
+
+    assert _phantom_offenders(
+        skill_files, agent_exempt=frozenset(AGENT_MENTION_EXEMPT)) == {}, (
+        "the CI scan gained an offender the moment the archived entry was dropped, "
+        "which means a live skill does name a phantom tool after all")
+
+    sweep = _lint_module("skill_lint_phantom_clause_two")
+    assert set(sweep.PHANTOM_EXEMPT) == lint_set, (
+        "the sweep's loaded value is not the literal parsed from its source, so "
+        "`_set_literal` is reading the wrong assignment and the bound above is over "
+        "bytes nobody runs")
+    sweep_offenders = {}
+    for record in _lint_records():
+        body = (record.directory / "SKILL.md").read_text(
+            encoding="utf-8", errors="replace")
+        if hits := sweep.check_phantom_tools(record.name, body):
+            sweep_offenders[record.name] = hits
+    assert sweep_offenders == {}, (
+        "the nightly sweep gained an offender the moment the archived entry was dropped "
+        "from PHANTOM_EXEMPT")
+
+
+
+def test_a_dead_entry_in_an_exemption_ledger_reddens_the_bound(skill_files):
+    """#4363 clause 3: the bound is not vacuous — seeded bytes make it fire, exactly once.
+
+    `test_growing_one_exemption_list_reddens_the_rail` demonstrates this discipline for
+    the doc-claim rail; this is the same shape pointed at the corpus bound. The real text
+    of both files is read, and in each one entry that IS in the corpus that gate walks is
+    renamed to a name the walk does not yield:
+
+      * the unedited bytes are judged clean by the same call first, so what fires the
+        bound is the seeded edit and not a bound that fires at anything;
+      * the edited bytes yield exactly ONE complaint, naming both the renamed entry and
+        the set carrying it — `PHANTOM_EXEMPT` for the sweep's file,
+        `ALLOWED_TO_MENTION` for this one. Which ledger drifted is the first thing an
+        author needs, because the fix is a one-line delete in exactly one of them.
+    """
+    lint_bytes, ci_bytes = _lint_source(), Path(__file__).resolve().read_text(
+        errors="replace")
+    lint_corpus, ci_corpus = _lint_sweep_names(), _corpus(skill_files)
+
+    for label, source, name, walked in (
+            ("PHANTOM_EXEMPT", lint_bytes, "PHANTOM_EXEMPT", lint_corpus),
+            ("ALLOWED_TO_MENTION", ci_bytes, "ALLOWED_TO_MENTION", ci_corpus)):
+        assert _dead_exemption_entries(label, _set_literal(source, name),
+                                       walked) == [], (
+            f"{label} already trips the bound as shipped, so the seeded edit below "
+            "cannot show what a single dead entry looks like")
+
+        live = _set_literal(source, name) & set(walked)
+        assert live, f"no entry of {label} is in its walked corpus to seed from"
+        entry = sorted(live)[0]
+        ghost = f"{entry}-archived"
+        assert ghost not in walked, f"{ghost} is unexpectedly a live skill"
+
+        seeded_text = source.replace(f'"{entry}"', f'"{ghost}"', 1)
+        seeded = _set_literal(seeded_text, name)
+        assert ghost in seeded and entry not in seeded, (
+            f"the seeded rename matched nothing inside the {label} literal; the "
+            "literal's shape moved and this node now proves nothing")
+
+        complaints = _dead_exemption_entries(label, seeded, walked)
+        assert len(complaints) == 1, f"expected one complaint, got: {complaints}"
+        assert ghost in complaints[0] and label in complaints[0], complaints[0]
 
 
 def test_web_lookup_skill_exists_and_names_the_real_tools():

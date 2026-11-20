@@ -522,17 +522,22 @@ matched only as `` `terminal` `` or `terminal(`, because it is also an ordinary
 English word. `read_text`/`write_text` were deliberately **not** rewritten:
 those are pathlib, not tools.
 
-Seven names are exempt in both gates, because their job is to say these names
+Six names are exempt in both gates, because their job is to say these names
 are not real: `web-search-and-fetch`, `nightly-skills-management`,
-`trajectory-skill-mining`, `nightly-skill-consolidation`, `create-hermes-plugin`,
-`autonomy-task-diagnosis`, `pipeline-dispatch`. The two sets are separate
+`trajectory-skill-mining`, `nightly-skill-consolidation`,
+`autonomy-task-diagnosis`, `pipeline-dispatch`. The two sets stay separate
 literals — `PHANTOM_EXEMPT` (`scripts/skill_lint.py:282`) and
-`ALLOWED_TO_MENTION` (`tests/test_skill_tool_names.py:150`) — equal today by
-hand-maintenance with nothing asserting it, and one entry
-(`create-hermes-plugin`) now sits only under `skills/.archived/`, where neither
-gate can reach it; unlike `AGENT_MENTION_EXEMPT`, which the corpus test at
-`:357-380` bounds, neither is checked against what the walk actually yields
-(#4363).
+`ALLOWED_TO_MENTION` (`tests/test_skill_tool_names.py:150`) — because two
+different checks may each decide to exempt a skill; what #4363 added is that each
+one is now bounded by the corpus of the gate that reads it, by
+`test_neither_phantom_exemption_set_outlives_the_corpus`, which extends to these
+two the same bound `AGENT_MENTION_EXEMPT` has had since `:357-380`. That bound is
+what removed the seventh name: a plugin-authoring skill retired under
+`skills/.archived/`, which both walks skip (`.`-prefixed directories), so its
+entry shielded nothing while staying ready to re-grant the exemption to whatever
+skill next bore that name, with nobody deciding it again. Being archived is not
+being unreachable — one archived name also has a live directory — so the bound
+keys on the walk, not on the archive.
 
 ## skill_lint
 

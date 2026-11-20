@@ -281,9 +281,19 @@ PHANTOM_TOOLS = frozenset({
 # Skills whose job is to say these names are not real.
 PHANTOM_EXEMPT = frozenset({
     "web-search-and-fetch", "nightly-skills-management", "trajectory-skill-mining",
-    "nightly-skill-consolidation", "create-hermes-plugin", "autonomy-task-diagnosis",
+    "nightly-skill-consolidation", "autonomy-task-diagnosis",
     "pipeline-dispatch",
 })
+
+# #4363: every entry must name a skill this sweep actually walks. `iter_active_skills`
+# skips dot-prefixed directories, so an entry for a skill retired under
+# `skills/.archived/` shielded nothing any scan could reach while staying ready to
+# re-grant the exemption to whatever skill next bore that name, with nobody deciding it
+# again. `tests/test_skill_tool_names.py::
+# test_neither_phantom_exemption_set_outlives_the_corpus` bounds this set and
+# `ALLOWED_TO_MENTION` against the corpus each gate walks and names the entry and the
+# set when one does not; that bound is what removed the seventh name. A seventh lands
+# here only with a live skill behind it.
 
 
 # `terminal` was the OpenClaw name for Bash. It is also an ordinary English

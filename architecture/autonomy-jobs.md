@@ -787,16 +787,19 @@ and re-enabled as #83 only once the skill could state the rules that prevent it:
    `{"error": ...}`. Patterns mined from older sessions describe a signalling bug
    that has since been fixed.
 
-**Two linters enforce rule 4, and each carries a seven-name exemption list of
+**Two linters enforce rule 4, and each carries a six-name exemption list of
 which three entries are this chain.**
 `tests/test_skill_tool_names.py:150` (`ALLOWED_TO_MENTION`) and
 `scripts/skill_lint.py:282` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
 `trajectory-skill-mining` and `nightly-skill-consolidation` write the phantom
 names down, because their job is to say those names are not real. The same two
-lists now also carry `web-search-and-fetch`, `create-hermes-plugin`,
-`autonomy-task-diagnosis` and `pipeline-dispatch`, each exempt for a reason
-unrelated to this chain — and they are hand-maintained in two different files,
-with nothing pinning them equal. The test's
+lists now also carry `web-search-and-fetch`, `autonomy-task-diagnosis` and
+`pipeline-dispatch`, each exempt for a reason unrelated to this chain — and they
+are hand-maintained in two different files, with nothing pinning them equal.
+Each is bounded by the corpus its own gate walks
+(`tests/test_skill_tool_names.py::test_neither_phantom_exemption_set_outlives_the_corpus`),
+which is what retired the seventh entry from both: a skill that now lives only
+under `skills/.archived/`, so neither walk could reach it. The test's
 `KNOWN_UNFIXED` debt ledger is **empty** — the 91 skills that carried a phantom
 name have been rewritten or archived — and a new entry there is a regression, not
 a grandfathering.
