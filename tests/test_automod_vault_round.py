@@ -659,6 +659,133 @@ def test_a_land_bound_to_no_item_is_not_recorded_as_a_grader_outage(vault):
     assert _events("vault_review") == [], "there is no item to file a review against"
 
 
+# ── #4417: a no-change refusal books the review that actually ran ────────────
+#
+# `land()` grades the contract BEFORE the `git diff --cached --quiet` guard, so on that
+# branch the verdict already exists as a function-local (`review` set at
+# `scripts/automod/vault_round.py:2022`, `clauses` at `:2019`) — and the refusal row
+# threw it away for a hard-coded `"review": "skipped"`. Live witness, item #4270 — its
+# triage reads the pair as one call, same `session_id=20261120_015016_autocode_f2c1` and
+# the same two paths: `2026-11-20T10:00:25Z vault_review kind=pass blocking=false` with
+# five `met` clauses, then `2026-11-20T10:05:28Z vault_land ok=false review='skipped'`
+# carrying no `review_clauses` key at all. 46 such pairs sit in `promotions.jsonl`
+# since 2026-11-01.
+# #4270's own implement round read the land row alone, concluded no verdict was
+# obtainable, reported all five clauses `deferred` — and `deferred` is not the exempt
+# kind in the #2691/#3186 rescue, so an item whose grader had marked every clause `met`
+# was parked in `owed`. #955's rule is the standard this fixes: a skip reason has to be
+# true, and a wrong one is worse than an absent one.
+
+#: The contract both halves of the comparison below are graded against. No clause is
+#: landing-shaped — `review.LANDING_CLAUSE_RX` matches none of the three — so the only
+#: rows either land row can carry are the grader's own.
+CLAUSES_4417 = ["the skill names the retry rule",
+                "the refusal row carries the grader's own verdict",
+                "the ledger row says what the reviewer said"]
+
+
+def _grader_says_every_clause_met(**kw):
+    """The fake reviewer: `pass`, and one `met` row per clause of CLAUSES_4417."""
+    return ("pass", "all three content clauses met",
+            [{"clause": i, "verdict": "met"} for i in range(1, len(CLAUSES_4417) + 1)])
+
+
+def test_a_no_change_refusal_after_a_passing_review_books_that_verdict(vault, items, monkeypatch):
+    """Clauses 1-3, in the shape the ledger actually shows: the reviewer passed THIS
+    call's round, and the refusal that follows it has to say so.
+
+    The bytes are taken the way they are taken live — a concurrent pre-flight snapshot
+    commits the job's in-flight skill, so the job's own land stages nothing. The review
+    block runs before the guard either way, which is the whole point: the verdict is in
+    hand at the moment the row is written.
+    """
+    write_item(items, 4417, CLAUSES_4417)
+    monkeypatch.setattr(V, "GRADER", _grader_says_every_clause_met)
+    rel = "skills/foo/SKILL.md"
+    swept = _sweep_commit(vault, rel, "---\nname: foo\n---\n# foo retry rule\n",
+                          "lloyd-autonomy-data-pipeline <adb@jobs.lloyd.local>")
+    with pytest.raises(V.VaultRoundError, match="nothing to commit"):
+        V.land([rel], "skill: foo names the retry rule (#4417)", item_id=4417)
+    rows = _events("vault_land")
+    assert len(rows) == 1, f"the guard writes exactly one row: {rows}"
+    row = rows[-1]
+    # Clause 1: the verdict the grader gave, not the word for a grader that was never
+    # consulted. This is the one field a later reader greps, and it was lying.
+    assert row["review"] == "pass", row
+    # Clause 2: one row per graded clause, each carrying the grader's verdict.
+    assert [c["clause"] for c in row["review_clauses"]] == [1, 2, 3], row
+    assert [c["verdict"] for c in row["review_clauses"]] == ["met", "met", "met"], row
+    # Clause 3: a pass arrives unexplained. `review_reason` means "why the second
+    # reader did not answer" everywhere else in this function, and the no-change
+    # sentence explains the LAND — which is `errors[0]'s` job, and stays there.
+    assert "review_reason" not in row, row
+    assert "nothing to commit on those paths" in row["errors"][0], row
+    # Clause 5's content, on the same row: the #2175 shape is untouched by this fix.
+    assert row["ok"] is False and row["paths"] == [rel], row
+    assert row["held_by"] == {
+        rel: git(vault, "log", "-1", "--format=%h", "--", rel).stdout.strip()}, row
+    assert "commit" not in row, "a land that made no commit must not appear to have made one"
+    # The pass this row contradicted is in the same ledger, from the same call: the
+    # pair #4270 shows, and the reason the hard-coded word was a false field.
+    review = _events("vault_review")[-1]
+    assert (review["item_id"], review["kind"], review["blocking"]) == (4417, "pass", False), review
+    assert [c["clause"] for c in review["clauses"]] == [1, 2, 3], review
+    assert git(vault, "cat-file", "-e", swept).returncode == 0, "the sweep's sha is real"
+
+
+def test_a_no_change_refusal_books_the_clause_rows_a_committing_land_would(vault, items,
+                                                                          monkeypatch):
+    """Clause 2's exact words: THE ROWS THE `ok=true` LAND ROW WOULD HAVE WRITTEN.
+
+    Two calls, one contract text, one fake grader. Item #4418 changes the skill and
+    commits it, so its `vault_land` is `ok: true`; item #4417's bytes are taken by a
+    sweep first, so it hits the guard. The gradings are identical, so the per-clause
+    rows have to agree entry for entry — a refusal is a land that made no commit, not
+    a land that was never graded. Neither row can be moved by the landing splice or
+    the #2263 shortfall here: no clause of this contract is landing-shaped, and each
+    item is graded on its first attempt.
+    """
+    write_item(items, 4417, CLAUSES_4417)
+    write_item(items, 4418, CLAUSES_4417)
+    monkeypatch.setattr(V, "GRADER", _grader_says_every_clause_met)
+    rel = "skills/foo/SKILL.md"
+    _sweep_commit(vault, rel, "---\nname: foo\n---\n# foo retry rule\n",
+                  "lloyd-autonomy-data-pipeline <adb@jobs.lloyd.local>")
+    with pytest.raises(V.VaultRoundError, match="nothing to commit"):
+        V.land([rel], "skill: foo names the retry rule (#4417)", item_id=4417)
+    refused = _events("vault_land")[-1]
+    (vault / rel).write_text("---\nname: foo\n---\n# foo retry rule, edited again\n")
+    V.land([rel], "skill: foo names the retry rule (#4418)", item_id=4418)
+    landed = _events("vault_land")[-1]
+    assert landed["ok"] is True and landed["review"] == "pass", landed
+    assert refused["review"] == landed["review"] == "pass", (refused, landed)
+    assert refused["review_clauses"] == landed["review_clauses"], (
+        "the refusal must carry the very rows a committing land carries for the same "
+        f"grading: {refused.get('review_clauses')} vs {landed.get('review_clauses')}")
+
+
+def test_an_unbound_no_change_refusal_still_books_the_true_abstention(vault):
+    """Clause 4: where `skipped` is the truth, it stays the truth — and its reason
+    names the abstention, as #955 ruled, not the land's misfortune.
+
+    An unbound land has no contract to grade, so the reviewer was never consulted;
+    that is the sentence this row owes. The no-change explanation is not lost, it just
+    moves to where it was always true: `errors[0]`, and the raised message.
+    """
+    rel = "skills/foo/SKILL.md"
+    (vault / rel).write_text("---\nname: foo\n---\n# foo v8\n")
+    V.land([rel], "autoresearch: promote v8")
+    with pytest.raises(V.VaultRoundError, match="nothing to commit"):
+        V.land([rel], "autoresearch: promote v8 again")
+    row = _events("vault_land")[-1]
+    assert row["ok"] is False and row["item_id"] is None, row
+    assert row["review"] == "skipped", row
+    assert "no item bound" in row["review_reason"], row
+    assert "not consulted" in row["review_reason"], row
+    assert "review_clauses" not in row, "nothing was graded, so nothing is claimed"
+    assert "nothing to commit on those paths" in row["errors"][0], row
+
+
 def test_front_matter_checker():
     import tempfile
     d = Path(tempfile.mkdtemp())

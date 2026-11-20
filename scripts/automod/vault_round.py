@@ -2286,6 +2286,30 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
             # half, and the #2175 text follows unchanged for the paths it does
             # explain.
             text = " | ".join([*refused_reasons, text])
+        # #4417: this row used to hard-code `review: "skipped"`. On an item-bound land
+        # that word asserts, in the one field a later reader greps, that the contract
+        # was never graded — while the `vault_review kind=pass` row for the SAME item
+        # and the SAME paths sits above it in the ledger. `land()` reviews before it
+        # commits, so by this guard the verdict is already a local of this frame
+        # (`review`, `clauses` above) and a `pass` has fallen straight through to here.
+        # Live witness: 46 refusal rows booked `skipped` under a passing review in
+        # `promotions.jsonl` since 2026-11-01. Item #4270 is the sharpest pair, and its
+        # triage reads it as one call — same `session_id`, same two paths:
+        # `2026-11-20T10:00:25Z vault_review kind=pass` with five `met` clauses, then
+        # `2026-11-20T10:05:28Z vault_land ok=false review='skipped'` with no
+        # `review_clauses` key. #4270's implement round read the land row alone,
+        # concluded no verdict was obtainable, reported all five clauses `deferred` —
+        # and only `not_met` is exempt in the #2691/#3186 rescue, so an item whose
+        # grader had marked every clause `met` was parked in `owed`. #955's rule is the
+        # standard: a skip reason has to be true, and a wrong one is worse than an
+        # absent one.
+        #
+        # Nothing downstream moves. `backlog.held_by_head_landing` takes its grading
+        # from the `vault_review` event and says so in its own docstring, and
+        # `vault_review_outcome` reads per-clause rows off an **ok** land row keyed by
+        # commit (`scripts/automod/backlog.py:5479-5481`), so a row with no commit
+        # never reaches it. This is instrument accuracy, not a rescue.
+        graded = clauses if review == "pass" else []
         S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
                         "paths": norm, "errors": [text],
                         # `commit` stays absent: this land made no commit. What HEAD
@@ -2297,11 +2321,21 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                         # bytes merely equal HEAD: the caller has to be told the path
                         # was refused, not that it was unchanged.
                         **({"sidecar_refusals": refused} if refused else {}),
-                        "review": "skipped",
-                        "review_reason": "nothing staged: HEAD already holds the "
-                                         "named paths, or they were never changed"
-                                         + (" (after refusing the SQLite sidecar(s) "
-                                            "listed in sidecar_refusals)" if refused else ""),
+                        "review": review,
+                        # The grader's own rows — the very ones the `ok=true` row below
+                        # writes for the same grading, minus the landing splice, which
+                        # needs the sha this land never made: a clause about the commit
+                        # keeps the reviewer's verdict rather than an invented one. An
+                        # empty list writes no key, so an absent key means "no clause
+                        # rows here" and never "graded as nothing".
+                        **({"review_clauses": graded} if graded else {}),
+                        # Only a genuine abstention is explained. The old sentence
+                        # explains why the LAND refused — nothing staged, or the
+                        # sidecars on `sidecar_refusals` — which is true of this row and
+                        # no property of a grader; beside `review: pass` it would be a
+                        # new false field of exactly the kind #955 forbids. It already
+                        # rides in `errors[0]`, and the caller is handed it as the raise.
+                        **({"review_reason": review_reason} if review_reason else {}),
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError(text)
     # #3589: a loaded memory line this landing removes with its ledger row still live.
