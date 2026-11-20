@@ -291,15 +291,42 @@ passes its `run_id` into `execute`, so the queue id is the link.
   deriving from `daily_max` — a derived cap moves intake on a `config.yaml` edit
   nobody can read as intent — and a capped night that executed keeps reporting
   `success`. The starved priority cohort that item named went with the registry
-  reset above; a 55-weighted one is filling in again (23 of 32 queued, measured
-  2026-10-20) and `next()` still drains the stored `priority ASC` — nothing ages
-  it, unlike `workers/queue.py`'s `AGING_PERIOD_HOURS` — so whether it is reached
-  depends only on the 50s ahead of it clearing, and at 2026-11-19 they are not
-  clearing: the same payload reads `queued: 36`, `queued_fraction: 0.9`,
-  `done_today: 2` and `head_age_days: 50.0` beside `stale_queued: 0`. A source
-  with twelve days of drain behind it is still not reaching a head fifty days
-  old, and the two freshness numbers in one payload disagree about the same queue
-  in the same read (#4274).
+  reset above; a 55-weighted one filled in again (23 of 32 queued, measured
+  2026-10-20) while `next()` drained the stored `priority ASC` with nothing
+  aging it, so whether it was reached depended only on the 50s ahead of it
+  clearing — and at 2026-11-19 they were not clearing: the same payload read
+  `queued: 36`, `queued_fraction: 0.9`, `done_today: 2` and `head_age_days: 50.0`
+  beside `stale_queued: 0`, with the row named by `oldest_queued_at` sitting 8th
+  in the order `next()` used, behind seven topics one generator run had proposed
+  that same morning. A source with twelve days of drain behind it was not
+  reaching a head fifty days old, and the two freshness numbers in one payload
+  disagreed about the same queue in the same read.
+- **The ordering half of that is shipped; the ruling on the weights is not.**
+  `next()` and `stats()` read one ordering now, `_claim_query()`, which ages a
+  queued topic: `priority` less `STARVED_PRIORITY_CREDIT` (1000) once the row has
+  waited `STARVED_AFTER_DAYS` (14 days), then `proposed_at ASC`, then `id ASC`.
+  Fourteen is one full pass over the cap — `MAX_QUEUED` 40 over the source's
+  `daily_max` 3 is 13.3 days — so a row still queued past it has waited longer
+  than this registry's own worst-case service time, which is the point at which
+  "it is next in band order" stops being an explanation. The credit is one
+  constant offset, deliberately not `workers/queue.py`'s per-period ramp
+  (`AGING_PERIOD_HOURS` 6 with `AGING_POINTS_PER_PERIOD` 15): this registry's
+  entire spread is 50 against 55, which that ramp flattens to nothing inside two
+  days, whereas an offset lifts the starved cohort ahead of the fresh one and
+  leaves every row under the gate in exactly the band order #1277 shipped. Two
+  fields carry the drain side the payload never had: `head_claim_position` is the
+  oldest queued topic's 1-based depth in that order — 1 means it is what a worker
+  is handed next, and it read 8 at filing — and `head_passed_over` counts topics
+  that reached a PRODUCTIVE status having been proposed after it, from registry
+  rows alone, so "the head has been passed over" is a number rather than an
+  inference. `stale_queued` keeps its own 60-day question, "is this topic too old
+  to research at all", which stays a human's; the new pair answers "has the
+  ordering stopped serving it", which the store can answer from its own rows. Read
+  them beside each other with `python -m app.research_store stats`. What is NOT
+  settled, and is not a round's call: whether the 55 and 60 weights should exist
+  at all now that nothing downstream reads them differently from 50 — collapsing
+  `research_propose` to one band changes proposal semantics for every autonomy
+  run (owed on #4274).
 - **The generator is still an autonomy task**, so it inherits that path's
   timeout semantics rather than the pool's — #65 at `timeout_seconds: 1500`,
   under `scheduled-task`'s 3600 s pool cap so the task's own timer is the one
@@ -314,6 +341,22 @@ passes its `run_id` into `execute`, so the queue id is the link.
 
 ## Review log
 
+- **2026-11-20 — `current`.** #4274 shipped, so the sentence in the 2026-11-19
+  bullet below — that the starved head stood against "`workers/queue.py`'s aging
+  rule that `next()` does not have" — is now history, and §5 says what replaced
+  it. The claim order ages: `_claim_query()` is the one `ORDER BY` that both
+  `next()` and `stats()` read, `priority` less the constant
+  `STARVED_PRIORITY_CREDIT` (1000) once a row is `STARVED_AFTER_DAYS` (14) old,
+  then `proposed_at`, then `id`. `stats()` gained `head_claim_position` and
+  `head_passed_over`; `stale_queued`, `head_age_days`, `queued_fraction` and
+  `at_cap` are unchanged, including the test that pins an 11-day head beside
+  `stale_queued: 0` as the ordinary saturated state — it now also pins position 1,
+  because at 11 days the row is under the new gate and the FIFO answer is correct.
+  Verified through the shipped route, `python -m app.research_store stats`, and by
+  `tests/test_research_store.py`, which re-derives the 14 from `MAX_QUEUED` over
+  the `daily_max` in `config.yaml` rather than trusting it. Unchanged by this and
+  still owed: whether the 55 and 60 weights mean anything, which is a ruling about
+  what proposers should send, not a store change.
 - **2026-11-19 — `current`.** Every mechanism in the unit still runs, and every
   symbol, path, constant and cadence verified against the tree: the seven
   `STATUSES`, `propose`'s `ON CONFLICT(key) DO NOTHING RETURNING id` and `claim`'s

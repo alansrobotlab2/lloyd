@@ -77,6 +77,50 @@ MAX_QUEUED = 40
 #: reported by `stats()`, so the decision stays a human's.
 STALE_QUEUED_DAYS = 60
 
+#: A `queued` topic that has waited this long is claimed ahead of every topic
+#: that has waited less, whatever its stored `priority` (#4274).
+#:
+#: The arithmetic is the cap over the drain. `MAX_QUEUED` is 40 topics and the
+#: source's `daily_max` is 3 (`config.yaml` `sources.deep_research`, read by
+#: `workers/sources/deep_research.py::enqueue_if_due`), so one full pass over a
+#: full registry is 40 / 3 = 13.3 days. Fourteen is the first whole day past
+#: that: a row still unclaimed at 14 days has waited longer than this queue's
+#: own worst-case service time, which is the point at which "it is next in
+#: band order" stops being an explanation. `tests/test_research_store.py` pins
+#: the number to that division, so moving the cap or the drain moves it too.
+#:
+#: This is NOT a stricter `STALE_QUEUED_DAYS` and the two must not be merged.
+#: That one is 60 days and asks whether a topic is too old to research at all,
+#: which is a human decision (`stats()` reports `stale_queued` and deletes
+#: nothing); this one is 14 days and asks whether the ORDERING has stopped
+#: serving this row, which the store can answer from its own rows. At filing
+#: the two disagreed about one queue in one read: `head_age_days: 50.0` beside
+#: `stale_queued: 0`, with the row `oldest_queued_at` named sitting 8th in the
+#: order `next()` used — behind seven topics proposed that same morning by one
+#: generator run, against a drain of 3 a day.
+STARVED_AFTER_DAYS = 14
+
+#: The priority credit the `STARVED_AFTER_DAYS` gate above buys, and deliberately
+#: a CONSTANT offset rather than a per-period ramp. Subtracting one number from every starved row
+#: moves the whole cohort ahead of the fresh one while leaving that cohort's
+#: internal `priority ASC` exactly as its author set it, and leaves every row
+#: under the gate untouched — so band ordering among fresh topics is bit-for-bit
+#: the ordering #1277 shipped, which clause 4 of #4274 requires.
+#:
+#: The rule cannot simply be copied from `workers/queue.py`
+#: (`AGING_PERIOD_HOURS` 6 / `AGING_POINTS_PER_PERIOD` 15 / `AGING_FLOOR_PRIORITY`
+#: 10, composed by `_effective_priority_sql`): that store's rows are re-enqueued
+#: hourly and 15 points per six hours clamps almost anything to its floor within
+#: two days, while this registry's entire spread is 50 against 55 — one period
+#: of that ramp would flatten every distinction the column makes. A FLOOR cannot
+#: carry the guarantee either: a caller may propose any number, so only an
+#: offset larger than the range callers use puts a starved row ahead of a fresh
+#: one "whatever the stored priority". 1000 is that offset —
+#: `agent_mcp/research.py::research_propose` documents 0-100 and `propose`'s own
+#: default is 50 — so a starved row sorts at `priority - 1000`, at most -900,
+#: and a fresh row would have to be proposed below -900 to stay ahead of it.
+STARVED_PRIORITY_CREDIT = 1000
+
 #: How substantial a file must be before `finish` accepts it as the note a
 #: `written` outcome points at (#1276). The retired markdown source left 90 of
 #: its 142 notes with no body at all (architecture/research-pipeline.md §1),
@@ -197,6 +241,63 @@ class StoreUnavailable(RuntimeError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _claim_query(now: str, *,
+                 limit: Optional[int] = None) -> "tuple[str, list]":
+    """The SELECT that answers "what should be researched next", with its binds.
+
+    One builder because two readers have to agree exactly (#4274). `next()`
+    claims in this order, and `stats()` reports how deep the oldest queued topic
+    sits IN it. Having two descriptions of the ordering is precisely how the
+    payload came to say `head_age_days: 50.0` and `stale_queued: 0` about one
+    queue in one read: `stats()` took `MIN(proposed_at)` over every queued row
+    while `next()` ordered by the stored `priority`, so the field named "head"
+    described a row the claim order was about to pass over for the eighth time
+    that week, and no field between them could express that.
+
+    Three ordering terms:
+
+    * `priority - CASE WHEN <age in seconds> >= ? THEN ? ELSE 0 END` — the
+      stored band, less `STARVED_PRIORITY_CREDIT` once the row has waited
+      `STARVED_AFTER_DAYS`. The age is computed by SQLite from `proposed_at`
+      against the SAME `now` the `not_before` comparison binds, so the wait that
+      decides a claim cannot disagree with the `head_age_days` reported for the
+      same row in the same call; a naive stamp would be read as UTC by both,
+      which is the one-clock rule this store already follows. Both sides are
+      `CAST(... AS INTEGER)`, so a stamp `strftime` cannot parse yields NULL,
+      `CASE WHEN NULL` falls to `ELSE 0`, and an unparseable age buys nothing —
+      the same rule `workers/queue.py` states for its own credit, and the reason
+      the credit is inside a CASE rather than subtracted directly (a subtracted
+      NULL would make the whole key NULL, and NULL sorts FIRST ascending, which
+      would hand an unreadable row the head of the queue).
+    * `proposed_at ASC` — FIFO inside a band. Untouched for a row under the gate,
+      which is what keeps #1277's band ordering intact.
+    * `id ASC` — the tie-break that makes "position N" a fact rather than a coin
+      flip. `proposed_at` is a microsecond stamp and one generator run proposes
+      seven topics inside four minutes, so a tie is rare but two rows written in
+      the same microsecond would otherwise order arbitrarily, and a reported
+      depth that changes between reads is not a health number. It costs nothing
+      in behaviour: `id` increases with `proposed_at` for every row this store
+      writes.
+
+    The `ORDER BY` is an expression now, so `idx_topics_ready`
+    (`status, priority, proposed_at`) no longer covers the sort. It still covers
+    the `status='queued'` lookup, and the sort is over the queued population the
+    cap bounds at `MAX_QUEUED` = 40 rows, which is why an expression evaluated
+    per read is affordable here where `workers/queue.py` can hold thousands.
+    """
+    sql = ("SELECT * FROM topics WHERE status='queued' "
+           "AND (not_before IS NULL OR not_before <= ?) "
+           "ORDER BY priority - CASE WHEN "
+           "CAST(strftime('%s', ?) AS INTEGER) "
+           "- CAST(strftime('%s', proposed_at) AS INTEGER) >= ? "
+           "THEN ? ELSE 0 END ASC, proposed_at ASC, id ASC")
+    params: list = [now, now, STARVED_AFTER_DAYS * 86400, STARVED_PRIORITY_CREDIT]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(max(1, int(limit)))
+    return sql, params
 
 
 # ── Key normalisation ────────────────────────────────────────────────────────
@@ -440,15 +541,23 @@ class ResearchStore:
     # -- claim / release / finish -------------------------------------------
 
     def next(self, n: int = 1) -> list[dict]:
-        """The topics a worker should take, soonest first. Peek only."""
+        """The topics a worker should take, soonest first. Peek only.
+
+        The stored `priority` band, then FIFO inside it — with one break, that a
+        topic which has waited `STARVED_AFTER_DAYS` is offered ahead of anything
+        younger whatever its band (#4274). Without that break the band was the
+        whole answer: `propose`'s default is 50, the nightly generator proposes
+        up to the cap, and at `daily_max: 3` one run's intake replaced the band
+        ahead of a 55-weighted row faster than a day drained it, so the row at
+        the head of the line by age waited 50 days and sat 8th in this order.
+        `_claim_query` is the ordering, in one place, because `stats()` reports
+        a row's depth in it and two copies of an `ORDER BY` is what let the two
+        numbers disagree about one queue.
+        """
+        sql, params = _claim_query(_now(), limit=n)
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM topics WHERE status='queued' "
-                "AND (not_before IS NULL OR not_before <= ?) "
-                "ORDER BY priority ASC, proposed_at ASC LIMIT ?",
-                (_now(), max(1, int(n))),
-            ).fetchall()
-            return [self._row(r) for r in rows]
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row(r) for r in rows]
 
     def claim(self, topic_id: int, *, by: str, queue_id: Optional[int] = None) -> Optional[dict]:
         """Take a topic for research. Returns the row, or None if someone won.
@@ -804,6 +913,27 @@ class ResearchStore:
             stale_n = conn.execute(
                 "SELECT COUNT(*) AS n FROM topics WHERE status='queued' "
                 "AND proposed_at < ?", (stale,)).fetchone()["n"]
+            # The drain side, which #1277 never had (#4274). `oldest` above is a
+            # `MIN` over every queued row, so `head_age_days` describes the most
+            # ANTIQUE topic while the order `next()` uses may be about to hand a
+            # worker one that is hours old — and nothing in the payload said so.
+            # These two are derived from the claim order itself, not from a
+            # second opinion about it: `_claim_query` is the same SQL `next()`
+            # runs, so a depth here is a depth in what actually gets claimed.
+            head_row = conn.execute(
+                "SELECT id FROM topics WHERE status='queued' "
+                "ORDER BY proposed_at ASC, id ASC LIMIT 1").fetchone()
+            claim_ids = [int(r["id"]) for r in conn.execute(
+                *_claim_query(now.isoformat())).fetchall()]
+            # How many topics that got researched were proposed AFTER the row now
+            # called the head. Registry rows only — no clock, no counter kept
+            # outside the table — because the claim being made is "this row has
+            # been passed over", and the only evidence for that is rows that were
+            # behind it and are now settled.
+            passed_over = (0 if head_row is None else conn.execute(
+                f"SELECT COUNT(*) AS n FROM topics "
+                f"WHERE status IN ({placeholders}) AND proposed_at > ?",
+                (*PRODUCTIVE, oldest)).fetchone()["n"])
             last_written = conn.execute(
                 "SELECT topic, artifact_path, finished_at FROM topics "
                 "WHERE status='written' ORDER BY finished_at DESC LIMIT 1").fetchone()
@@ -848,6 +978,18 @@ class ResearchStore:
             if head.tzinfo is None:
                 head = head.replace(tzinfo=timezone.utc)
             head_age_days = max(0.0, round((now - head).total_seconds() / 86400, 1))
+        # 1-based depth of the row `oldest_queued_at` names inside the order
+        # `next()` claims in — 1 when that row is what a worker would be handed
+        # next, 8 when seven fresher topics stand in front of it, which is the
+        # reading the live registry gave at filing. None has exactly two causes,
+        # both visible from the fields beside it: `queued: 0`, or the oldest row
+        # is held back by a `not_before` in the future (a `release` backoff, so
+        # seconds-to-minutes), in which case it is not in an order `next()` can
+        # use at all and "how deep is it" has no answer. It is never a third
+        # state: every other queued row is in `claim_ids` by construction.
+        head_claim_position = None
+        if head_row is not None and int(head_row["id"]) in claim_ids:
+            head_claim_position = claim_ids.index(int(head_row["id"])) + 1
         return {
             "by_status": by_status,
             "total": sum(by_status.values()),
@@ -859,6 +1001,20 @@ class ResearchStore:
             "done_today": done_today,
             "oldest_queued_at": oldest,
             "head_age_days": head_age_days,
+            # The drain side of the same queue (#4274). `head_age_days` says how
+            # long the most ANTIQUE queued topic has waited and `stale_queued`
+            # says whether anything has crossed 60 days; at filing those read
+            # `50.0` and `0` about one registry in one call, because neither of
+            # them looked at the order topics are actually claimed in. These two
+            # do, and they are what makes "not draining" a number in the payload
+            # rather than an inference a reader has to make about `next()`:
+            # a position above 1 says the head is standing behind something, and
+            # `head_passed_over` says how many topics that finished were proposed
+            # after it. Both stay meaningful beside `stale_queued`, whose 60-day
+            # question — is this topic too old to research at all — is a human's
+            # and keeps its own field unchanged.
+            "head_claim_position": head_claim_position,
+            "head_passed_over": passed_over,
             "stale_queued": stale_n,
             "last_written": dict(last_written) if last_written else None,
             # Always a mapping with both keys, so "nothing is missing" is `count: 0`

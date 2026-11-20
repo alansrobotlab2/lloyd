@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import re
 import sqlite3
 import subprocess
 import textwrap
@@ -351,9 +352,13 @@ def test_stats_names_the_cap_it_is_measured_against(s):
 
 
 def test_stats_reports_the_heads_wait_well_inside_the_stale_gate(s):
-    """An 11-day-old head is the ordinary saturated state at a 3-a-day drain,
-    and `stale_queued`'s 60-day gate reports 0 for it. The wait in days is a
-    separate field beside it, not a lower threshold."""
+    """An 11-day-old head is inside neither gate this store has. `stale_queued`'s
+    60-day bar reports 0 for it, and #4274's `STARVED_AFTER_DAYS` of 14 has not
+    been crossed either, so the claim order still owes it nothing and its depth
+    is 1 — the FIFO answer, not a promoted one. Both waits are reported beside
+    each other precisely so a reader is never left guessing which gate an age
+    has crossed: at filing the live head was 50 days old and read
+    `stale_queued: 0` all the same, which is the disagreement #4274 is about."""
     assert s.stats()["head_age_days"] is None, "an empty queue has no head"
     head = s.propose("the topic at the head of the queue")["id"]
     s.propose("a newer topic behind it")
@@ -364,6 +369,267 @@ def test_stats_reports_the_heads_wait_well_inside_the_stale_gate(s):
     assert 10.9 <= stats["head_age_days"] <= 11.1
     assert stats["stale_queued"] == 0
     assert stats["oldest_queued_at"] == eleven_days
+    assert stats["head_claim_position"] == 1, (
+        "both rows are in the default band, so the older one is genuinely first "
+        "and an 11-day wait buys nothing on its own")
+
+
+# ---------------------------------------------------------------------------
+# The drain side: how deep the head sits, and what got claimed ahead of it
+# (#4274)
+# ---------------------------------------------------------------------------
+
+#: `config.yaml` `sources.deep-research.daily_max`, measured 2026-11-19, and the
+#: divisor in the arithmetic behind `STARVED_AFTER_DAYS`. Pinned against the file
+#: by `test_the_drain_the_gate_divides_by_is_the_shipped_one` rather than trusted.
+DAILY_MAX = 3
+
+
+def _backdate(s: ResearchStore, topic_id: int, *, days: float) -> str:
+    """Stamp a queued topic as proposed `days` ago, and return the stamp.
+
+    `propose` always stamps `proposed_at` with `now`, and both gates read exactly
+    that column, so any test about a wait has to move it by hand — the same shape
+    `test_stale_queued_topics_are_reported_not_deleted` uses for the 60-day gate.
+    """
+    stamp = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with s._connect() as conn:
+        conn.execute("UPDATE topics SET proposed_at=? WHERE id=?", (stamp, topic_id))
+    return stamp
+
+
+def test_stats_reports_the_heads_depth_in_the_order_next_claims_in(s):
+    """#4274 clause 1: `head_claim_position` is the oldest queued topic's 1-based
+    place in the order `next()` uses, read out of the same SQL `next()` runs, so
+    it cannot describe an ordering the store does not have.
+
+    Eight is the shipped shape. One generator run (`proposed_by:
+    20261118_162833_autonomy_3e7a`) proposed seven prio-50 topics at 00:34-00:37
+    UTC on 2026-11-19 against a `daily_max` of 3, and the prio-55 row that had
+    been waiting since 2026-09-30 stood 8th in the claim order — behind seven
+    rows nearly fifty days younger. Ten days old here keeps the head inside
+    `STARVED_AFTER_DAYS`, so the node pins the depth the payload could not
+    express rather than the fix grading its own promotion.
+    """
+    head = s.propose("the topic that has waited longest", priority=55)["id"]
+    for i in range(7):
+        s.propose(f"a topic the generator proposed this morning number {i}",
+                  priority=50)
+    _backdate(s, head, days=10)
+
+    stats = s.stats()
+    assert stats["head_claim_position"] == 8, (
+        "seven fresher topics in the default band stand in front of the head")
+    assert [t["id"] for t in s.next(8)][-1] == head, (
+        "a reported depth must be a depth in the order next() hands out")
+    assert stats["head_passed_over"] == 0, (
+        "nothing has been researched at all here, so the head has been "
+        "outranked but not yet passed over")
+
+
+def test_the_head_is_first_when_nothing_stands_in_front_of_it(s):
+    """#4274 clause 1, the healthy edge: 1 when the oldest row is the one that
+    would be claimed next, and no position at all for an empty queue — never 0,
+    which would read as "zero rows ahead" and as "not measured" at once."""
+    assert s.stats()["head_claim_position"] is None, "an empty queue has no head"
+    assert s.stats()["head_passed_over"] == 0
+
+    head = s.propose("urgent and already first in line", priority=10)["id"]
+    s.propose("a newer topic in a slower band", priority=70)
+    assert s.stats()["head_claim_position"] == 1
+    assert s.next(1)[0]["id"] == head, "position 1 must be the row next() offers"
+    assert s.stats()["head_passed_over"] == 0, "nothing has been researched yet"
+
+
+def test_a_head_held_back_by_a_backoff_has_no_claim_position(s):
+    """The other and only other cause of a null position, pinned so `null` never
+    has to be guessed at: the oldest row is sitting on a `not_before` the claim
+    order will not read today (a `release` backoff — seconds to minutes), so it is
+    in no order `next()` can use and "how deep is it" has no answer."""
+    head = s.propose("a topic released with an hour of backoff")["id"]
+    s.claim(head, by="w")
+    s.release(head, backoff_seconds=3600)
+    s.propose("a newer topic in the same band", priority=50)
+
+    stats = s.stats()
+    assert stats["oldest_queued_at"] is not None and stats["queued"] == 2
+    assert stats["head_claim_position"] is None, (
+        "the row named by `oldest_queued_at` cannot be claimed today")
+
+
+def test_stats_counts_the_topics_researched_ahead_of_the_head(s):
+    """#4274 clause 2: `head_passed_over` is the number of topics that reached a
+    PRODUCTIVE status having been proposed AFTER the row `oldest_queued_at` names.
+    Derived from registry rows only — no clock arithmetic and no counter kept
+    beside the table — because the claim to be evidenced is "this head has been
+    passed over", and the only thing that evidence is, is rows that were behind
+    it and are now settled.
+
+    Two exclusions the number has to get right or it inflates into noise: a
+    `rejected` settle is not a topic that was researched (PRODUCTIVE is
+    `written` and `nothing_found`), and a productive topic OLDER than the head is
+    not something the head was passed over by.
+    """
+    before = s.propose("researched before the head was even proposed")["id"]
+    _backdate(s, before, days=40)
+    s.claim(before, by="w")
+    s.finish(before, "nothing_found", note="searched, nothing there")
+    head = s.propose("the head of the queue", priority=55)["id"]
+    twenty_days = _backdate(s, head, days=20)
+    for i in range(3):
+        later = s.propose(f"proposed after the head number {i}", priority=50)["id"]
+        s.claim(later, by="w")
+        s.finish(later, "nothing_found", note="searched, nothing there")
+    refused = s.propose("proposed after the head, refused as out of scope")["id"]
+    s.claim(refused, by="w")
+    s.finish(refused, "rejected", note="out of scope")
+
+    stats = s.stats()
+    assert stats["queued"] == 1 and stats["oldest_queued_at"] == twenty_days
+    assert stats["head_passed_over"] == 3, (
+        "three topics proposed after the head were researched; the `rejected` "
+        "settle is not productive and the 40-day row predates the head")
+    assert stats["head_age_days"] > 19.9 and stats["stale_queued"] == 0, (
+        "20 days is past the starvation gate and short of the stale gate: the "
+        "two numbers describe different questions")
+
+
+def test_a_starved_topic_is_claimed_ahead_of_every_fresher_one(s):
+    """#4274 clause 3: at `STARVED_AFTER_DAYS` a queued topic is offered ahead of
+    any topic that has waited less, whatever the stored `priority`. This is the
+    shipped registry in miniature — a prio-55 row 50 days old, and prio-10/40/50
+    rows proposed today that the old `ORDER BY priority ASC` put in front of it."""
+    aged = s.propose("the fifty-day head", priority=55)["id"]
+    _backdate(s, aged, days=50)
+    fresh = {prio: s.propose(f"a fresh topic in band {prio}", priority=prio)["id"]
+             for prio in (10, 40, 50)}
+
+    assert [t["id"] for t in s.next(4)] == [aged, fresh[10], fresh[40], fresh[50]], (
+        "the starved row goes first, and the fresh rows keep their band order")
+
+
+def test_the_starved_head_is_first_and_the_payload_says_so(s):
+    """#4274's acceptance in one registry: the same cohort that reported
+    `head_age_days: 50.9` beside `stale_queued: 0` while the head sat 5th-8th in
+    the claim order now reports the head first, and the field that used to be
+    absent carries the 1 that proves it.
+
+    `stale_queued` deliberately stays 0 here. It answers a different question —
+    is this topic too old to research at all, which is a human's call — and
+    `test_stale_queued_topics_are_reported_not_deleted` is its falsifier, so the
+    drain fix re-purposes nothing from it.
+    """
+    head = s.propose("the topic at the head of the line", priority=55)["id"]
+    for i in range(7):
+        s.propose(f"a topic proposed this morning number {i}", priority=50)
+    _backdate(s, head, days=50)
+
+    stats = s.stats()
+    assert stats["head_claim_position"] == 1, (
+        "the head is what next() offers, so its depth is 1")
+    assert s.next(1)[0]["id"] == head
+    assert stats["head_age_days"] > 49.9
+    assert stats["stale_queued"] == 0
+
+
+def test_a_topic_one_day_short_of_the_gate_still_waits_behind_its_band(s):
+    """The gate is a gate: a 13-day-old prio-55 row has not yet outlived one full
+    pass over the cap, so the fresh prio-50 row in front of it stays in front and
+    the payload says the head is 2nd rather than promoting it early."""
+    head = s.propose("thirteen days old", priority=55)["id"]
+    _backdate(s, head, days=13)
+    fresh = s.propose("proposed today", priority=50)["id"]
+
+    assert [t["id"] for t in s.next(2)] == [fresh, head]
+    assert s.stats()["head_claim_position"] == 2
+
+
+def test_the_gate_moves_only_the_starved_rows_and_leaves_band_order_intact(s):
+    """#4274 clause 4: promotion must not collapse the bands it is meant to
+    jump. Because the credit is one constant subtracted from every starved row
+    and nothing at all below the gate, three properties hold at once, and this
+    node is the one that would reddened by a ramp or by a FIFO-within-the-cohort
+    implementation:
+
+    * the two starved rows keep their band order even though the slower band is
+      the older of the two (a rule that served the cohort FIFO would put
+      `aged_dull` first);
+    * the fresh rows come back in band order, 30 before 50 before 70;
+    * the two fresh prio-50 rows come back in the order they were proposed.
+    """
+    aged_dull = s.propose("starved and in a slow band", priority=70)["id"]
+    aged_urgent = s.propose("starved and in an urgent band", priority=30)["id"]
+    _backdate(s, aged_dull, days=30)
+    _backdate(s, aged_urgent, days=20)
+    fresh_dull = s.propose("fresh and in a slow band", priority=70)["id"]
+    fresh_urgent = s.propose("fresh and in an urgent band", priority=30)["id"]
+    first_in_band = s.propose("the first fresh row in the default band",
+                              priority=50)["id"]
+    second_in_band = s.propose("the second fresh row in the default band",
+                               priority=50)["id"]
+
+    assert [t["id"] for t in s.next(6)] == [
+        aged_urgent, aged_dull, fresh_urgent, first_in_band, second_in_band,
+        fresh_dull]
+
+
+def test_the_starvation_gate_is_one_full_pass_over_the_cap(s):
+    """#4274 clause 5, the arithmetic half: the gate and the credit are
+    module-level constants, and the gate is `MAX_QUEUED` divided by the drain —
+    40 topics at 3 a day is 13.3 days, so 14 is the first whole day at which a
+    still-queued row has waited longer than a full pass over a full registry.
+    Move the cap or the drain and one of these three assertions says so."""
+    assert R.STARVED_AFTER_DAYS == 14
+    assert R.STARVED_AFTER_DAYS * DAILY_MAX >= R.MAX_QUEUED, (
+        "the gate must be at least one full pass over the cap")
+    assert (R.STARVED_AFTER_DAYS - 1) * DAILY_MAX < R.MAX_QUEUED, (
+        "and the first whole day at which it is one: 13 days x 3 is 39, short "
+        "of a 40-topic queue")
+
+
+def test_the_drain_the_gate_divides_by_is_the_shipped_one():
+    """`DAILY_MAX` above is a number this file asserts, so it is checked against
+    the config the source actually reads: `sources.deep-research.daily_max` in
+    `config.yaml`. If someone moves the drain, the gate's arithmetic is stale and
+    this says which of the two has to move."""
+    config = (Path(__file__).resolve().parents[1] / "config.yaml").read_text()
+    block = config.split("\n    deep-research:", 1)
+    assert len(block) == 2, "config.yaml no longer carries a deep-research source"
+    drain = re.search(r"^\s*daily_max:\s*(\d+)", block[1], re.M)
+    assert drain, "the deep-research source block names no daily_max"
+    assert int(drain.group(1)) == DAILY_MAX, (
+        f"config.yaml drains {drain.group(1)} a day; re-derive "
+        f"STARVED_AFTER_DAYS from {R.MAX_QUEUED}/{drain.group(1)}")
+
+
+def test_promotion_below_the_gate_is_a_step_not_a_gradient(s):
+    """#4274 clause 5, the bounded half. `workers/queue.py` ages per period; this
+    store does not, and the difference is what clause 4 depends on: a row under
+    the gate has no credit at all, so no amount of waiting below 14 days can
+    smear two distinct bands. A 13-day prio-70 row and a one-day prio-10 row
+    therefore come back in band order, oldest-credit notwithstanding."""
+    slow = s.propose("thirteen days in a slow band", priority=70)["id"]
+    urgent = s.propose("one day old and urgent", priority=10)["id"]
+    _backdate(s, slow, days=13)
+
+    assert [t["id"] for t in s.next(2)] == [urgent, slow], (
+        "age buys nothing below the gate, so bands cannot collapse among fresh "
+        "rows the way a per-period ramp would collapse this registry's 50-vs-55")
+
+
+def test_an_unreadable_proposed_at_stamp_buys_no_promotion(s):
+    """The NULL arm of the credit, written down because the other shape is the
+    one that hands the queue to a corrupt row. Inside a `CASE` an unparseable
+    stamp falls to `ELSE 0`, so a bad age buys nothing; subtracted directly it
+    makes the whole sort key NULL, and NULL sorts FIRST ascending, which would
+    put an unreadable row at the head of every claim."""
+    broken = s.propose("a row whose stamp cannot be parsed")["id"]
+    with s._connect() as conn:
+        conn.execute("UPDATE topics SET proposed_at='not-a-timestamp' WHERE id=?",
+                     (broken,))
+    fresh = s.propose("a fresh urgent topic", priority=10)["id"]
+
+    assert [t["id"] for t in s.next(2)] == [fresh, broken]
 
 
 # ---------------------------------------------------------------------------
