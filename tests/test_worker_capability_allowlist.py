@@ -1947,7 +1947,8 @@ def _bash_declared(src: str) -> bool:
 #: because the test author had not thought of its third turn shape. The two nodes
 #: below are what make that unreadable: the envelope set comes from the module, and
 #: every `extra_disallowed=` argument the module's own AST passes has to be one of
-#: them, or the row says so by line number.
+#: them, or the row says so by the site's position-stable name (`SITE_NAME_RE`, #4451
+#: — it used to say so by line number, which any diff that inserted a line could move).
 def _source_module(src: str):
     """The module that owns this roster name, found by its own `NAME`."""
     import importlib
@@ -2026,12 +2027,71 @@ def _site_measured(node: ast.AST, mod) -> bool:
     return True
 
 
+#: The grammar of one `unmeasured_sites` entry, #4451: `<qualname>:<envelope>#<ordinal>`.
+#:
+#: Position-stable ON PURPOSE, because the entry used to be `call.lineno` and a line
+#: number is not a fact about a capability, it is a fact about where the file happens
+#: to sit. Round `SM_20261121_042538` (#4284) added 11 lines above
+#: `workers/sources/autotriage.py`'s one `extra_disallowed=` call — one local
+#: `close_refused`, one `and`, one `**B.close_refusal_fields(...)` — which moved that
+#: call from 1520 to 1531 and reddened
+#: `test_the_co_presence_baseline_is_current_and_names_every_co_present_source` on a
+#: whole-dict equality with nothing else in the 33 KB fixture moving
+#: (`live-only=['1531']`, `committed-only=['1520']`). That round changed no tool use,
+#: no import and no durable write, so its `tests` rung was failed by a POINTER, not by
+#: a capability change, and the only fix available to it was to re-record the table.
+#:
+#: All three parts are read off the module's own syntax, never off the calendar:
+#: the dotted def/class path the call sits in (`<module>` at top level); the envelope
+#: the site narrows, which is the `TURN_ENVELOPES[...]` label it cites — joined with
+#: `+` when one argument unions several — or, when it cites none, the label `_co_envelopes`
+#: itself gives the module's single base compile (`turn`), and `unlabeled` for a site
+#: inside a module that DOES publish a registry and still names no envelope; and the
+#: ordinal of this call among the calls sharing that qualname-and-envelope pair, in
+#: source order. So the name says which site it is, a re-record can move it only when a
+#: real site appears or disappears, and inserting a line above a site moves nothing.
+SITE_NAME_RE = re.compile(r"^(?:<module>|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)"
+                          r":[\w.+-]+#[1-9]\d*$")
+
+#: What `_site_envelope_token` answers for a site that cites no `TURN_ENVELOPES` label:
+#: the module's own registry decides. `turn` is the label `_co_envelopes` compiles a
+#: registry-less module under, so the name agrees with the row beside it; `unlabeled`
+#: is the case where no compiled envelope can be meant, and says so rather than
+#: borrowing `turn` from a module that has one.
+SITE_TOKEN_NO_REGISTRY = "turn"
+SITE_TOKEN_NO_LABEL = "unlabeled"
+
+
+def _site_qualname(node: ast.AST, parents: dict) -> str:
+    """The dotted def/class path a node sits in, outermost first, `<module>` at top level.
+
+    Reads only the enclosing syntax — no line number — which is what makes it a legal
+    ingredient of a site name (#4451). A nested helper is named by its own chain, not
+    by `<locals>`, because Python's own `<locals>` marker carries the enclosing CALL's
+    identity, which no AST walk can resolve statically and which a rename would move.
+    """
+    chain = []
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            chain.append(current.name)
+        current = parents.get(current)
+    return ".".join(reversed(chain)) or "<module>"
+
+
 def _narrowing_report(mod) -> dict:
     """What this module narrows per call site, and whether the census measures each.
 
-    Reported, never suppressed: `unmeasured_sites` names line numbers, so a source that
-    narrows a turn outside its published registry is visible in the committed table the
-    same way a co-present source is.
+    Reported, never suppressed: `unmeasured_sites` names every unmeasured site by the
+    position-stable identifier documented on `SITE_NAME_RE`, so a source that narrows a
+    turn outside its published registry is visible in the committed table the same way
+    a co-present source is — and, unlike the line number this field held until #4451,
+    a diff that only inserts lines above the site cannot move the entry.
+
+    This is the ONE place the census reads a source's position, which is what
+    `test_no_census_field_but_the_site_names_is_derived_from_source_position` pins:
+    `dispatch_sites` is a count, `envelopes` and `unreferenced_envelopes` are label
+    sets, and every other field of a row comes from a compiled options object.
     """
     registry = getattr(mod, "TURN_ENVELOPES", None) or {}
     try:
@@ -2039,14 +2099,30 @@ def _narrowing_report(mod) -> dict:
     except OSError:
         return {"envelopes": sorted(registry), "dispatch_sites": 0,
                 "unmeasured_sites": [], "unreferenced_envelopes": sorted(registry)}
-    sites = [(call.lineno, kw.value)
-             for call in ast.walk(tree) if isinstance(call, ast.Call)
-             for kw in call.keywords if kw.arg == "extra_disallowed"]
-    used = {label for _, value in sites for label in _site_labels(value)}
+    parents: dict = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    # Ordered by position because the ORDINAL is a statement about source order: the
+    # k-th call in this function that narrows this envelope. The emitted name itself
+    # carries no position, so nothing here moves when lines are inserted above a site.
+    sites = sorted((call.lineno, call.col_offset, _site_qualname(call, parents), kw.value)
+                   for call in ast.walk(tree) if isinstance(call, ast.Call)
+                   for kw in call.keywords if kw.arg == "extra_disallowed")
+    used = {label for _, _, _, value in sites for label in _site_labels(value)}
+    named: list[str] = []
+    counted: dict[str, int] = {}
+    for _, _, qualname, value in sites:
+        labels = _site_labels(value)
+        envelope = ("+".join(sorted(labels)) if labels else
+                    SITE_TOKEN_NO_REGISTRY if not registry else SITE_TOKEN_NO_LABEL)
+        key = f"{qualname}:{envelope}"
+        counted[key] = counted.get(key, 0) + 1
+        if not _site_measured(value, mod):
+            named.append(f"{key}#{counted[key]}")
     return {"envelopes": sorted(registry),
             "dispatch_sites": len(sites),
-            "unmeasured_sites": sorted(line for line, value in sites
-                                        if not _site_measured(value, mod)),
+            "unmeasured_sites": sorted(named),
             "unreferenced_envelopes": sorted(set(registry) - used)}
 
 
@@ -2296,6 +2372,391 @@ def test_the_co_presence_baseline_is_current_and_names_every_co_present_source()
         "own round and owns this list")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# #4451 — an unmeasured narrowing site is named, never pointed at.
+#
+# The census's `sources.<src>.narrowing.unmeasured_sites` field used to hold
+# `call.lineno`. A line number is not a capability: it is where a call happens to sit,
+# so ANY diff that inserted a line above a narrowing site in a worker source reddened
+# `test_the_co_presence_baseline_is_current_and_names_every_co_present_source` — whose
+# whole-dict equality is the field's only reader — and left that round one remedy,
+# re-recording the table. #4284 paid it for 11 lines: `autotriage._execute_sweep`'s one
+# `extra_disallowed=` call moved 1520 → 1531 and the deep-diff of census against
+# fixture printed one line, `live-only=['1531'] committed-only=['1520']`, with no
+# `co_present`, `durable_writes` or `dispatch_sites` value anywhere in the 33 KB table
+# moving. Three commits (`43cc6ba7`, `b2750532`, `1ff323fb`) each carried the fixture in
+# the same commit as a `workers/sources/*.py` edit, which is that churn, precedent.
+#
+# What follows pins the replacement from both ends: the names are position-stable
+# (a shifted file cannot move one) and they are not merely inert, because a genuine new
+# narrowing still arrives as exactly one new name.
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: A worker source in miniature, with the two shapes the census has to tell apart: one
+#: site citing a published envelope (measured, so never named) and one narrowing with a
+#: bare list inside a module that DOES publish a registry (unmeasured, so named
+#: `writer_options:unlabeled#1`). #4451's two mutation nodes shift and grow THIS rather
+#: than a real source, because the property under test is the census's pointer, not
+#: anything `autotriage` does.
+SYNTH_WORKER_BASE = '''\
+TURN_ENVELOPES = {
+    "stage-a-reader": ["Bash"],
+    "stage-b-writer": ["Bash", "Write"],
+}
+
+
+def reader_options():
+    return run_prompt_in_session(
+        "prompt",
+        extra_disallowed=list(TURN_ENVELOPES["stage-a-reader"]),
+    )
+
+
+def writer_options():
+    # a judgment, not an action
+    return run_prompt_in_session(
+        "prompt",
+        extra_disallowed=["Task", "Edit"],
+    )
+'''
+
+#: The inserted lines. Real assignments, not comments: #4284's +11 were
+#: `close_refused = B.record_verdict(...) is None`, its `close = close and not
+#: close_refused`, and one `**B.close_refusal_fields(...)` spread — code, and the
+#: fixture moved anyway. The two arms insert at different heights so a shift is proven
+#: both above the enclosing `def` and inside it.
+SYNTH_FILLER_INSIDE = "".join(f"    note_{i} = {i}\n" for i in range(8))
+SYNTH_FILLER_ABOVE = "".join(f"TOP_{i} = {i}\n" for i in range(9))
+
+#: A second site citing an envelope that is NOT in the registry — a genuine new
+#: narrowing, which is exactly what the report exists to see — and a third in the same
+#: function under the same absent label, which only the ordinal can tell apart.
+SYNTH_GHOST = SYNTH_WORKER_BASE + '''
+
+def ghost_options():
+    return run_prompt_in_session(
+        "prompt",
+        extra_disallowed=list(TURN_ENVELOPES["stage-c-ghost"]),
+    )
+'''
+
+SYNTH_GHOST_TWICE = SYNTH_WORKER_BASE + '''
+
+def ghost_options(reuse):
+    if reuse:
+        return run_prompt_in_session(
+            "prompt",
+            extra_disallowed=list(TURN_ENVELOPES["stage-c-ghost"]),
+        )
+    return run_prompt_in_session(
+        "prompt",
+        extra_disallowed=list(TURN_ENVELOPES["stage-c-ghost"]),
+    )
+'''
+
+
+def _synth_shifted(inside_function: bool) -> str:
+    """`SYNTH_WORKER_BASE` with filler inserted above its unmeasured site."""
+    if inside_function:
+        return SYNTH_WORKER_BASE.replace(
+            "    # a judgment, not an action\n",
+            "    # a judgment, not an action\n" + SYNTH_FILLER_INSIDE)
+    return SYNTH_WORKER_BASE.replace(
+        "def writer_options():", SYNTH_FILLER_ABOVE + "\ndef writer_options():")
+
+
+def _synthetic_worker_module(text: str, name: str, tmp_path: Path):
+    """`text` compiled as a module whose `__file__` is a real file on disk.
+
+    `_narrowing_report` re-reads `mod.__file__`, so a synthetic source has to exist as
+    bytes and not only as an exec'd namespace. `run_prompt_in_session` is deliberately
+    undefined here: every call sits inside a body no test runs.
+    """
+    import importlib.util
+
+    path = tmp_path / f"{name}.py"
+    path.write_text(text, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _raw_site_lines(text: str) -> list[int]:
+    """The literal line numbers of the `extra_disallowed=` calls in `text`.
+
+    Only ever a non-vacuity control: it proves an insertion really moved a site, so the
+    equality of two reports is a verdict about the names and not a verdict that the two
+    texts turned out identical after all.
+    """
+    tree = ast.parse(text)
+    return sorted(call.lineno for call in ast.walk(tree) if isinstance(call, ast.Call)
+                  for kw in call.keywords if kw.arg == "extra_disallowed")
+
+
+def _split_site_name(site: str) -> tuple[str, str, str]:
+    """Split a published site name into (qualname, envelope, ordinal), by the grammar."""
+    head, _, ordinal = site.rpartition("#")
+    qualname, _, envelope = head.partition(":")
+    return qualname, envelope, ordinal
+
+
+def _module_grammar(src: str) -> tuple[set[str], list[str], set[str]]:
+    """What a source module can legitimately publish, read independently of the census.
+
+    Returns (every def/class path in the file, every `TURN_ENVELOPES` label the module's
+    call sites cite, every literal line number one of those calls sits on). The node
+    that reads it re-derives the grammar from the module rather than from
+    `_narrowing_report`, so a change of format there has to be a change here too.
+    """
+    mod = _source_module(src)
+    assert mod is not None, f"{src}: no module owns this roster name"
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    parents: dict = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    paths = {"<module>"}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            paths.add(_def_path(node, parents))
+    cited, lines = set(), []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        for kw in call.keywords:
+            if kw.arg == "extra_disallowed":
+                lines.append(str(call.lineno))
+                cited.update(_site_labels(kw.value))
+    return paths, sorted(cited), lines
+
+
+def _def_path(node: ast.AST, parents: dict) -> str:
+    """The dotted def/class path of one definition node, `<module>` for the top level."""
+    chain = []
+    current = node
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            chain.append(current.name)
+        current = parents.get(current)
+    return ".".join(reversed(chain)) or "<module>"
+
+
+def _census_helper_functions() -> dict[str, ast.AST]:
+    """Every function in THIS file that `_co_census` reaches, transitively.
+
+    Reached by name through `ast.Call` nodes with a bare `func`, which is how this file
+    calls its own helpers; a call through an attribute (`caps.expand`,
+    `gam.worker_source_names`, `C._worker_run_options`) leaves this file and is not
+    collected — `guard_arm_matrix.worker_source_names()` returns roster NAMES, so it is
+    not a route a position could travel, and the two other files it names are modules
+    that never see a source's AST at all.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    defs = {n.name: n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    reached: dict[str, ast.AST] = {}
+    stack = ["_co_census"]
+    while stack:
+        name = stack.pop()
+        fn = defs.get(name)
+        if fn is None or name in reached:
+            continue
+        reached[name] = fn
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                stack.append(node.func.id)
+    return reached
+
+
+def _publishes_an_integer(node, path: str = "$") -> list[str]:
+    """Every path in the committed table whose value is an integer (a count, or a leak)."""
+    if isinstance(node, dict):
+        return [p for k, v in node.items() for p in _publishes_an_integer(v, f"{path}.{k}")]
+    if isinstance(node, list):
+        return [p for i, v in enumerate(node)
+                for p in _publishes_an_integer(v, f"{path}[{i}]")]
+    return [path] if isinstance(node, int) and not isinstance(node, bool) else []
+
+
+def test_the_unmeasured_site_names_are_position_stable_identifiers_not_line_numbers():
+    """Clause 1: every named site is identified by an identifier derived from its module.
+
+    `enclosing function qualname + the envelope label + an ordinal`, and no bare line
+    number anywhere in the field. Both halves can fail: the old format (`1520`, an INT
+    in the JSON) fails the type check, the digit check, the grammar and the
+    "is it one of my call sites' line numbers" cross-check at once, and a format that
+    drifted away from the module's own syntax fails the qualname and label checks.
+    """
+    committed = json.loads(CO_FIXTURE.read_text())
+    named = [(src, site)
+             for src, row in sorted(committed["sources"].items())
+             for site in row["narrowing"]["unmeasured_sites"]]
+    assert named, (
+        "nothing is in the report, so this node would be grading an empty list: the "
+        "census names every source that narrows a turn it does not compile, and at this "
+        "item's base that is 3 sites — autotriage, board-steward and owed-check")
+
+    for src, site in named:
+        assert isinstance(site, str), (
+            f"{src}: {site!r} is a {type(site).__name__}, and the only integer this "
+            "field ever held was a line number")
+        assert not site.isdigit(), f"{src}: {site!r} is a bare line number"
+        assert SITE_NAME_RE.fullmatch(site), (
+            f"{src}: {site!r} is not `<qualname>:<envelope>#<ordinal>` (SITE_NAME_RE)")
+        qualname, envelope, ordinal = _split_site_name(site)
+        assert int(ordinal) >= 1, f"{src}: {site!r} has no ordinal at all"
+
+        paths, labels, site_lines = _module_grammar(src)
+        assert qualname in paths, (
+            f"{src}: {site!r} names {qualname!r}, which is no def or class path in "
+            f"the module (its paths are {sorted(paths)})")
+        assert site not in site_lines, (
+            f"{src}: {site!r} equals the line number of one of this module's "
+            f"extra_disallowed= calls {site_lines}")
+        assert int(ordinal) <= len(site_lines), (
+            f"{src}: {site!r} is ranked {ordinal} among a module with only "
+            f"{len(site_lines)} extra_disallowed= call(s) {site_lines}. The ordinal is a "
+            "rank, so an ordinal that outruns the module's own sites is a line number "
+            "wearing a `#` — which is how a line number would come back.")
+        registry = getattr(_source_module(src), "TURN_ENVELOPES", None) or {}
+        pieces = envelope.split("+")
+        assert pieces == sorted(pieces), (
+            f"{src}: {site!r} unions its labels out of order; the grammar joins them "
+            "sorted so one site has exactly one name")
+        if envelope in (SITE_TOKEN_NO_REGISTRY, SITE_TOKEN_NO_LABEL):
+            want = SITE_TOKEN_NO_LABEL if registry else SITE_TOKEN_NO_REGISTRY
+            assert envelope == want, (
+                f"{src}: {site!r} carries {envelope!r}, but the token for a site that "
+                f"cites no label depends on whether the module publishes a registry, and "
+                f"for this row it is {want!r}")
+        else:
+            assert all(part in registry or part in labels for part in pieces), (
+                f"{src}: {site!r} names envelope {envelope!r}, which the module neither "
+                f"publishes ({sorted(registry)}) nor cites from any extra_disallowed= "
+                f"call ({labels})")
+
+    for src, row in committed["sources"].items():
+        sites = row["narrowing"]["unmeasured_sites"]
+        assert len(set(sites)) == len(sites), f"{src}: a site name is published twice"
+        assert sites == sorted(sites), f"{src}: {sites} is not sorted"
+
+
+@pytest.mark.parametrize("inside_function", [True, False],
+                         ids=["inside-function", "above-the-def"])
+def test_inserting_lines_above_a_narrowing_site_moves_no_field_of_its_report(
+        tmp_path, inside_function):
+    """Clause 2: a module shifted above its own site produces an identical report.
+
+    Every field — `envelopes`, `dispatch_sites`, `unmeasured_sites`,
+    `unreferenced_envelopes` — must come back equal, because #4284's failure was a
+    whole-dict equality over exactly these fields and the only thing that changed was
+    where a call sat. The filler is real code, inserted once inside the enclosing
+    function and once above its `def`, and the node first PROVES the call moved.
+    """
+    shifted = _synth_shifted(inside_function)
+    base_lines, shifted_lines = _raw_site_lines(SYNTH_WORKER_BASE), _raw_site_lines(shifted)
+    assert len(base_lines) == len(shifted_lines) == 2, (
+        "the miniature source must keep exactly two narrowing sites for this to be a "
+        "shift and not a change of shape")
+    gaps = [s - b for b, s in zip(base_lines, shifted_lines)]
+    assert max(gaps) >= 8, (
+        f"the insertion moved no site (line gaps {gaps}); a node that compares two "
+        "identical texts proves nothing about position")
+
+    base = _narrowing_report(_synthetic_worker_module(SYNTH_WORKER_BASE, "s4451_base", tmp_path))
+    moved = _narrowing_report(_synthetic_worker_module(shifted, "s4451_shifted", tmp_path))
+    assert moved == base, (
+        f"a shift above the site changed the report: {base} -> {moved}")
+    assert base["unmeasured_sites"] == ["writer_options:unlabeled#1"], (
+        f"the miniature source no longer names its one unmeasured site as the grammar "
+        f"says ({base['unmeasured_sites']}); every assertion above is about a name that "
+        "has to exist for this to grade anything")
+
+
+def test_a_second_unmeasured_site_adds_exactly_one_name_and_keeps_the_others(tmp_path):
+    """Clause 3: the report still SEES a genuine new narrowing, not just moved pointers.
+
+    Position-stability is only a good instrument if a real new site still arrives. The
+    first added site cites `TURN_ENVELOPES["stage-c-ghost"]`, a label the module's
+    registry does not define, so it is unmeasured by construction; the second sits in
+    the same function under the same label, where nothing but the ordinal distinguishes
+    it. Each step gains exactly one name and loses none.
+    """
+    report = {
+        name: _narrowing_report(_synthetic_worker_module(text, f"s4451_{name}", tmp_path))
+        for name, text in (("base", SYNTH_WORKER_BASE), ("one", SYNTH_GHOST),
+                           ("two", SYNTH_GHOST_TWICE))}
+    base, one, two = report["base"], report["one"], report["two"]
+
+    assert base["unmeasured_sites"] == ["writer_options:unlabeled#1"]
+    assert one["unmeasured_sites"] == [
+        "ghost_options:stage-c-ghost#1", "writer_options:unlabeled#1"]
+    assert two["unmeasured_sites"] == [
+        "ghost_options:stage-c-ghost#1", "ghost_options:stage-c-ghost#2",
+        "writer_options:unlabeled#1"]
+    assert (set(one["unmeasured_sites"]) - set(base["unmeasured_sites"])
+            == {"ghost_options:stage-c-ghost#1"}), one["unmeasured_sites"]
+    assert not set(base["unmeasured_sites"]) - set(one["unmeasured_sites"]), (
+        "the pre-existing site's name was renumbered by a site added beside its module")
+    assert (set(two["unmeasured_sites"]) - set(one["unmeasured_sites"])
+            == {"ghost_options:stage-c-ghost#2"}), two["unmeasured_sites"]
+
+    # The new narrowing cannot hide: the row counts the site it names.
+    assert (base["dispatch_sites"], one["dispatch_sites"], two["dispatch_sites"]) == (2, 3, 4)
+    # And nothing the field is not about moved with it.
+    for arm in (one, two):
+        assert arm["envelopes"] == ["stage-a-reader", "stage-b-writer"]
+        assert arm["unreferenced_envelopes"] == ["stage-b-writer"], (
+            "an unregistered label must not become a published envelope just because a "
+            "call site cites it")
+
+
+def test_no_census_field_but_the_site_names_is_derived_from_source_position():
+    """Clause 4, permanent form: position can enter the table at exactly one point.
+
+    The item's clause is about this diff — after the re-record, the committed table
+    differs from the one at `e735dbd5` only inside `sources.*.narrowing.unmeasured_sites`,
+    with every `co_present`, `co_present_sources`, `dispatch_sites` and `durable_writes`
+    value unchanged. That transition is one-shot, and the command that measures it is
+        git diff e735dbd5..HEAD -- tests/fixtures/worker_co_presence_baseline.json
+    whose output is recorded on #4451. A node pinned to those two shas would be a red
+    tree for the next round that legitimately moved a capability, so what is pinned here
+    is the reason it could not move anything else, and it holds for every future
+    re-record too:
+
+    1. Of every function `_co_census` reaches in this file, exactly one reads a source
+       position (`lineno`, `end_lineno` or `col_offset`), and that one is
+       `_narrowing_report`, whose output is shift-invariant by the node above. The
+       co-presence half is separately pinned beside it: `co_present_sources` is still
+       the 13-name list `CO_PRESENT_AT_2026_10_23` pins, which predates `e735dbd5`.
+    2. So the only integers the committed table publishes are counts. Every other value
+       — every name in `durable_writes`, `egress_reads`, `envelopes`,
+       `unmeasured_sites` — is a string, which is the shape a position-stable table has.
+    """
+    position_readers = sorted(
+        name for name, fn in _census_helper_functions().items()
+        if any(isinstance(n, ast.Attribute)
+               and n.attr in {"lineno", "end_lineno", "col_offset"}
+               for n in ast.walk(fn)))
+    assert position_readers == ["_narrowing_report"], (
+        f"position now enters the census at {position_readers}, not only at "
+        "_narrowing_report — a second reader is a second way for a diff that only "
+        "inserts lines to redden the baseline node, which is #4451's whole subject")
+
+    committed = json.loads(CO_FIXTURE.read_text())
+    count_shapes = (re.compile(r"^\$\.pool$"),
+                    re.compile(r"^\$\.sources\.[^.]+\.envelopes\.[^.]+\.reachable$"),
+                    re.compile(r"^\$\.sources\.[^.]+\.narrowing\.dispatch_sites$"))
+    leaked = [p for p in _publishes_an_integer(committed)
+              if not any(rx.match(p) for rx in count_shapes)]
+    assert not leaked, (
+        f"the table publishes an integer at {leaked}, and every integer it ever "
+        "published by accident was a line number — `unmeasured_sites` held exactly that "
+        "(`sources.autotriage.narrowing.unmeasured_sites[0] == 1520`) until this item")
+
+
 def test_the_census_definition_is_not_the_tier_predicate_and_not_durable_external():
     """Clause 1, the definition itself: why the census is what it is.
 
@@ -2466,7 +2927,7 @@ def test_the_census_reads_its_envelopes_from_the_module_and_narrows_nothing_behi
         "stage) — a site that appeared or vanished changes what the row is a statement "
         "about, and the committed fixture has to be re-recorded, not edited")
     assert narrowing["unmeasured_sites"] == [], (
-        f"youtube-digest narrows a turn no row measures, at line(s) "
+        f"youtube-digest narrows a turn no row measures, at site(s) "
         f"{narrowing['unmeasured_sites']}: the row would read clean over a shape the "
         "census never compiled")
     assert narrowing["unreferenced_envelopes"] == [], (
