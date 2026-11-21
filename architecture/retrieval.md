@@ -428,7 +428,7 @@ cannot quietly move a trend line.
   score it); and §1 still claimed the prefetch block keeps the vault's architecture
   list, which #4392 refuted on 2026-11-20 (`fa5298e0`) — prefetch splices
   `architecture_collections()` now. Also corrected: two dead line citations
-  (`automod_regression.py:803`, `vault.py:70`), "all 14 collections" (the index names
+  (`workers/sources/automod_regression.py`, `agent_mcp/vault.py`), "all 14 collections" (the index names
   15), `architecture/recall-research-2026-09-24.md` cited as a live note when
   `4a6cdd54` deleted it, and §5's 81 carried without the 86 it grew to. Added: the
   episodic kill switch beside the other three, `observed_ranker` (#3675) and
