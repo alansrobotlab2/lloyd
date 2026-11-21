@@ -1269,6 +1269,13 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'v1/core/kv_cache_utils.py':
    ('other-tree: a module inside the upstream vLLM package the'
     'paragraph is describing, not a path in this repository'),
+  'v1/core/kv_cache_planning.py': (
+      "other-tree: the same upstream vLLM module layout as the entry above, in the "
+      "newer spelling — vLLM moved `_warn_if_unannotated_eagle_mamba` out of "
+      "`kv_cache_utils.py` into `kv_cache_planning.py` between the build the conf "
+      "pins and the `-main` revert target, and both files live under the primary "
+      "venv's site-packages, a checkout the extractor cannot see"
+  ),
   '~/.config/systemd/user/nvidia-power-limit.service':
    ('generated: the installed copy of `agent-'
     'services/systemd/nvidia-power-limit.service`, which the'
@@ -1417,6 +1424,20 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: exempted span still fails to resolve; #4182's own node now asks it, for that span.
 #: The list is 109 exemptions across 28 docs — other-tree 43, generated 33,
 #: historical 33 — and NONE of them is `stale:`.
+#: Re-measured 2026-11-21, the day the list gained an entry again for the reason the
+#: list exists to carry, not the reason it exists to refuse. `e735dbd5` corrected
+#: `vllm.md`'s unannotated-draft-group bullet against the venv the conf pins, and the
+#: correction was true in both of its halves: `_warn_if_unannotated_eagle_mamba` is
+#: defined in `kv_cache_planning.py` there and in `kv_cache_utils.py` in the `-main`
+#: revert target. But the sentence now names TWO upstream modules and the `vllm.md`
+#: key excused only the older one, so the sweep reported the newer spelling as an
+#: invented path and `…[vllm.md]` went red on a page that had just been made more
+#: accurate. That is the `other-tree:` kind working as designed — an upstream
+#: package's own module layout, under a venv the extractor cannot see and a round's
+#: worktree never carries — so the fix is the entry beside its sibling, not a
+#: re-spelling of a sentence `git grep` will find wrong the next time a rebuild moves
+#: the function again. The list is 110 exemptions across 28 docs — other-tree 44,
+#: generated 33, historical 33 — and NONE of them is `stale:`.
 #: The ruling, from that owed-check: `stale` STAYS an admitted kind, and this ceiling — not
 #: the kind list — is the rail. Deleting the kind was refused for a reason worth keeping
 #: beside the number, because it is the rail's own text: the failure message of
@@ -9383,6 +9404,80 @@ def test_the_ceiling_s_ruling_is_recorded_in_its_own_comment():
         "the block must name the ruling as settled, which is what replaces the pointer")
     for refused in ("leave the admitted kinds", "drop `stale`", "drop the kind"):
         assert refused not in block, f"the block proposes {refused!r}, which was refused"
+
+
+# ── #4450 — a correction that cites a second upstream module needs its own entry ──
+
+#: The span `e735dbd5` put into `vllm.md`'s unannotated-draft-group bullet, spelled
+#: once so the entry it joins, the node below, and every failure message quote the
+#: same bytes the page cites.
+PLANNING_MODULE_SPAN = "v1/core/kv_cache_planning.py"
+
+#: The spelling the same bullet carried before, and whose entry the new one joins.
+UTILS_MODULE_SPAN = "v1/core/kv_cache_utils.py"
+
+
+def test_the_moved_upstream_module_exemption_is_earned_and_load_bearing():
+    """#4450: `vllm.md` went red the day an arch-review pass made it more accurate.
+
+    `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree[vllm.md]`
+    failed at `e735dbd5` naming `['v1/core/kv_cache_planning.py']`, and took
+    `test_the_gate_selection_drops_nothing_and_the_named_node_passes` down with it —
+    that node re-runs this whole file under the gate's mark expression and demands
+    exit 0, so one red doc is two red nodes. Measured at this round's base: 2 failed,
+    303 passed, 1 deselected.
+
+    The page was right and the list was one entry short of it. vLLM moved
+    `_warn_if_unannotated_eagle_mamba` between builds: in the venv the conf pins
+    (`vllm-flash-next-main-1110`) it is defined in `v1/core/kv_cache_planning.py` at
+    line 1068 with its `logger.warning` at 1091, while in the `-main` revert target
+    the same function is defined in `v1/core/kv_cache_utils.py` at 2190. The bullet
+    names both, because its whole point is that the file moves; the `vllm.md` key
+    excused only the older spelling, so the sweep read the newer one as an invented
+    path. Neither resolves under any of the four roots, and neither can: both files
+    are inside `.venvs/`, which is gitignored, dated per rebuild, and absent from a
+    round's worktree — the tree the gate runs this check in.
+
+    So the fix is the entry, not the sentence. `other-tree:` is the kind the comment
+    above `STALE_EXEMPTION_CEILING` admits for "an upstream package's own module
+    layout", and re-spelling a true claim to dodge a check is how the #4182 clear
+    reads: the page cites the module, and the list's job is to say why that is not a
+    pointer into this repository. No node was hidden to get here — nothing is marked
+    or deselected, and the second node's own arithmetic is what proves it.
+
+    Graded three ways, the shape #2795 set for a rail that has to be shown to bite:
+    the page really cites the span, so the entry excuses a citation and not an
+    absence; the entry is `other-tree:`, so the rot population stays at the zero the
+    ceiling holds; and with the entry lifted out of the dict the filed node fails
+    again naming this exact span, so the green is the entry's doing and not the
+    corpus having stopped being checkable.
+    """
+    slug = "vllm.md"
+    cited = {span for span, _p, _l in cited_citations(_text(slug))}
+    assert PLANNING_MODULE_SPAN in cited, (
+        f"{slug} no longer cites `{PLANNING_MODULE_SPAN}`, so the exemption filed for "
+        "it excuses a citation nobody writes — delete the entry and the re-measurement "
+        "above STALE_EXEMPTION_CEILING in the same commit")
+    assert UTILS_MODULE_SPAN in cited, (
+        f"{slug} no longer cites `{UTILS_MODULE_SPAN}` beside the newer module, so the "
+        "bullet has stopped describing the move between builds that both entries rest on")
+
+    reason = PATH_CITATION_EXEMPTIONS[slug][PLANNING_MODULE_SPAN]
+    assert reason.split(":", 1)[0].strip() == "other-tree", (
+        f"the `{PLANNING_MODULE_SPAN}` exemption reasons {reason!r}; the kind that fits "
+        "an upstream vLLM module is `other-tree:` — `stale:` is the rot kind and the "
+        "ceiling holds it at zero")
+
+    test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree(slug)
+    saved = PATH_CITATION_EXEMPTIONS[slug].pop(PLANNING_MODULE_SPAN)
+    try:
+        with pytest.raises(AssertionError) as raised:
+            test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree(slug)
+    finally:
+        PATH_CITATION_EXEMPTIONS[slug][PLANNING_MODULE_SPAN] = saved
+    assert PLANNING_MODULE_SPAN in str(raised.value), str(raised.value)[:300]
+    assert "carry no exemption reason" in str(raised.value), str(raised.value)[:300]
+    test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree(slug)
 
 
 # ── #4182 — an exemption whose path has appeared has to be deleted ────────────
