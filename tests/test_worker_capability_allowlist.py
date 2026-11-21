@@ -2047,14 +2047,18 @@ def _site_measured(node: ast.AST, mod) -> bool:
 #: `+` when one argument unions several — or, when it cites none, the label `_co_envelopes`
 #: itself gives the module's single base compile (`turn`), and `unlabeled` for a site
 #: inside a module that DOES publish a registry and still names no envelope; and the
-#: ordinal of this call among the calls sharing that qualname-and-envelope pair, in
-#: source order. So the name says which site it is, a re-record can move it only when a
-#: real site appears or disappears, and inserting a line above a site moves nothing.
+#: ordinal of this call among the UNMEASURED calls sharing that qualname-and-envelope
+#: pair, in source order. Measured calls are not named, so they are not counted either:
+#: a measured site added beside a named one — the same function, the same envelope token
+#: — cannot renumber it, which is the one remaining way a name could move without a
+#: capability changing. So the name says which site it is, a re-record can move it only
+#: when a real unmeasured site appears or disappears, and inserting a line above a site
+#: moves nothing.
 SITE_NAME_RE = re.compile(r"^(?:<module>|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)"
                           r":[\w.+-]+#[1-9]\d*$")
 
-#: What `_site_envelope_token` answers for a site that cites no `TURN_ENVELOPES` label:
-#: the module's own registry decides. `turn` is the label `_co_envelopes` compiles a
+#: The envelope token `_narrowing_report` gives a site that cites no `TURN_ENVELOPES`
+#: label: the module's own registry decides. `turn` is the label `_co_envelopes` compiles a
 #: registry-less module under, so the name agrees with the row beside it; `unlabeled`
 #: is the case where no compiled envelope can be meant, and says so rather than
 #: borrowing `turn` from a module that has one.
@@ -2104,8 +2108,11 @@ def _narrowing_report(mod) -> dict:
         for child in ast.iter_child_nodes(node):
             parents[child] = node
     # Ordered by position because the ORDINAL is a statement about source order: the
-    # k-th call in this function that narrows this envelope. The emitted name itself
-    # carries no position, so nothing here moves when lines are inserted above a site.
+    # k-th call in this function that narrows this envelope WITHOUT the census being
+    # able to measure it. The emitted name itself carries no position, so nothing here
+    # moves when lines are inserted above a site, and a measured site sharing a
+    # function-and-envelope key with a named one moves nothing either, because it is
+    # skipped before it is ever counted.
     sites = sorted((call.lineno, call.col_offset, _site_qualname(call, parents), kw.value)
                    for call in ast.walk(tree) if isinstance(call, ast.Call)
                    for kw in call.keywords if kw.arg == "extra_disallowed")
@@ -2113,13 +2120,14 @@ def _narrowing_report(mod) -> dict:
     named: list[str] = []
     counted: dict[str, int] = {}
     for _, _, qualname, value in sites:
+        if _site_measured(value, mod):
+            continue
         labels = _site_labels(value)
         envelope = ("+".join(sorted(labels)) if labels else
                     SITE_TOKEN_NO_REGISTRY if not registry else SITE_TOKEN_NO_LABEL)
         key = f"{qualname}:{envelope}"
         counted[key] = counted.get(key, 0) + 1
-        if not _site_measured(value, mod):
-            named.append(f"{key}#{counted[key]}")
+        named.append(f"{key}#{counted[key]}")
     return {"envelopes": sorted(registry),
             "dispatch_sites": len(sites),
             "unmeasured_sites": sorted(named),
@@ -2454,6 +2462,50 @@ def ghost_options(reuse):
     )
 '''
 
+#: A module that publishes NO registry — the shape `autotriage`, `board_steward` and
+#: `owed_check` have, which is why their rows carry the `turn` token — holding BOTH kinds
+#: of site in ONE function: `list(DISALLOWED)` is the deny set `_co_envelopes` compiles
+#: as that row, so it is measured, and `list(SWEEP_DISALLOWED)` (the constant name
+#: `autotriage` really uses) narrows a turn the census cannot see. Neither cites a
+#: `TURN_ENVELOPES` label, so both fall under one qualname-and-envelope key
+#: (`sweep:turn`) and the ordinal is the only thing that could move when the measured one
+#: sits beside the named one. No source in the tree has that pair today; this is the
+#: costume a line number would wear next.
+SYNTH_MEASURED_BESIDE = '''\
+DISALLOWED = ["Bash", "Write"]
+
+SWEEP_DISALLOWED = ["Bash", "Task"]
+
+
+def sweep(both):
+    if both:
+        return run_prompt_in_session(
+            "prompt",
+            extra_disallowed=list(DISALLOWED),
+        )
+    return run_prompt_in_session(
+        "prompt",
+        extra_disallowed=list(SWEEP_DISALLOWED),
+    )
+'''
+
+#: The same module with that one measured call deleted, so the only difference between
+#: the two reports is how the shared key was counted.
+SYNTH_MEASURED_GONE = '''\
+DISALLOWED = ["Bash", "Write"]
+
+SWEEP_DISALLOWED = ["Bash", "Task"]
+
+
+def sweep(both):
+    if both:
+        pass
+    return run_prompt_in_session(
+        "prompt",
+        extra_disallowed=list(SWEEP_DISALLOWED),
+    )
+'''
+
 
 def _synth_shifted(inside_function: bool) -> str:
     """`SYNTH_WORKER_BASE` with filler inserted above its unmeasured site."""
@@ -2711,6 +2763,31 @@ def test_a_second_unmeasured_site_adds_exactly_one_name_and_keeps_the_others(tmp
         assert arm["unreferenced_envelopes"] == ["stage-b-writer"], (
             "an unregistered label must not become a published envelope just because a "
             "call site cites it")
+
+
+def test_a_measured_site_sharing_a_key_with_a_named_one_never_renumbers_it(tmp_path):
+    """The ordinal counts the sites the report NAMES, never every narrowing call.
+
+    A registry-less module gives every unlabelled site the same `turn` token, so a
+    measured `list(DISALLOWED)` call and an unmeasured `list(SWEEP_DISALLOWED)` call in
+    one function share a single qualname-and-envelope key. Counting the measured call
+    would name the second site `sweep:turn#2` while it stands and `sweep:turn#1` once the
+    first is deleted: a name moving because a deny set the census DOES compile appeared
+    beside it, which is #4451's subject in a different costume — the fixture churns
+    again and no capability changed. `SYNTH_MEASURED_BESIDE` and `SYNTH_MEASURED_GONE`
+    differ by that one measured call and nothing else, so any difference between their
+    reports is the counting, and the two `#1`s are the verdict.
+    """
+    beside = _narrowing_report(
+        _synthetic_worker_module(SYNTH_MEASURED_BESIDE, "s4451_beside", tmp_path))
+    gone = _narrowing_report(
+        _synthetic_worker_module(SYNTH_MEASURED_GONE, "s4451_gone", tmp_path))
+    assert beside["unmeasured_sites"] == ["sweep:turn#1"], beside["unmeasured_sites"]
+    assert gone["unmeasured_sites"] == ["sweep:turn#1"], gone["unmeasured_sites"]
+    assert (beside["dispatch_sites"], gone["dispatch_sites"]) == (2, 1), (
+        "the two miniature sources no longer differ by exactly one measured narrowing "
+        f"call (dispatch_sites {beside['dispatch_sites']} vs {gone['dispatch_sites']}), "
+        "so the equality above is not grading the counting")
 
 
 def test_no_census_field_but_the_site_names_is_derived_from_source_position():
