@@ -3484,7 +3484,10 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
     seeded = text.replace("eval/run_eval.py:2947", "eval/run_eval.py:2134")
-    seeded = seeded.replace("scripts/automod/gate.py:3541", "scripts/automod/gate.py:1590")
+    # #4347 grows `_reuse_inner`/`_reuse_rule` above `rung_prompt_surface`, so the
+    # live number is 3558 and this pre-shift seed must age with it: seeding a value
+    # the doc no longer carries replaces nothing and the node asserts on itself.
+    seeded = seeded.replace("scripts/automod/gate.py:3558", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2134", "scripts/automod/gate.py:1590"], (
@@ -3506,8 +3509,11 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 #: 3140 since #4074's `pre_replay` loader moved the whole file below line 330 down 76;
 #: 3170 since #4082's scratch rehearsal grew `rung_recovery` and moved `rung_pyright`
 #: down another 30 — the control has to be re-measured every time, which is the whole
-#: reason it is a constant with this lineage attached rather than a number inline.
-_PRE_3770_PROMPT_SURFACE_ANCHOR = 3170
+#: reason it is a constant with this lineage attached rather than a number inline;
+#: 3187 since #4347's canary-reuse guard and missing-canary refusal moved everything
+#: below `Gate.run` down 17, so line 3170 fell out of `rung_pyright` (3182-3274) into
+#: `rung_static`.
+_PRE_3770_PROMPT_SURFACE_ANCHOR = 3187
 
 
 def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
@@ -3518,8 +3524,9 @@ def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
     by any line inside `rung_prompt_surface`, and at 76 lines that rung has 75 other
     lines to land on. This node reads the bytes at the cited line and requires them
     to be the `label = f"item{…}" … f"gate-{…}"` assignment the doc is talking about,
-    which is the only property that makes `scripts/automod/gate.py:3435` the right
-    number rather than a defensible one.
+    which is the only property that makes the doc's `gate.py` number the right number
+    rather than a defensible one (3435 when #3770 filed this, 3541 before #4347, 3558
+    now).
 
     Then the failure this round would have shipped. #3770 inserts the chrome-bundle
     provenance node into `gate.py` above this rung, the assignment slides down by the
@@ -3837,7 +3844,7 @@ def test_clearing_a_bare_citation_costs_the_doc_no_test_edit():
 #: The anchor #4061 re-typed out of the unreadable `gate.py:2584` spelling, and the
 #: definition the rewritten sentence names beside it. 2584 until #4074 put the
 #: `pre_replay` field and its loader into `gate.py` above `run` and moved it down 34.
-GATE_LADDER_SPAN = "scripts/automod/gate.py:2618"
+GATE_LADDER_SPAN = "scripts/automod/gate.py:2635"
 GATE_LADDER_SYMBOL = "run"
 
 
@@ -3890,7 +3897,7 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
 THREAT_AUTOMOD_ANCHORS = (
     ("scripts/automod/spec.py:748", "check_scope"),     # what classifies the diff
     (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
-    ("scripts/automod/gate.py:4350", "rung_review"),    # the second reader
+    ("scripts/automod/gate.py:4367", "rung_review"),    # the second reader
 )
 
 #: The numbers those rows carried, which sit in definitions unrelated to them.

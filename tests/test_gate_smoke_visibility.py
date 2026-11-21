@@ -319,17 +319,42 @@ def test_a_moving_trace_leaves_no_verdict_anywhere_in_the_rung(monkeypatch, tmp_
 
 
 def test_the_rung_fails_only_where_its_assertions_fail(monkeypatch):
-    """The static half of the same ruling: one refusal path exists in the rung,
-    and it is the report's own `ok` — the four deterministic assertions. A
-    second `return False` here would be a floor on something, and the only
-    something left is the trace."""
+    """The static half of the same ruling: the rung refuses on two conditions,
+    and neither one reads the trace.
+
+    One is the report's own `ok` — the four deterministic assertions (#3725). The
+    other is #4347's missing-canary guard: it refuses because the canary object
+    the report would come from was never built in this process, so it returns
+    before the report exists and cannot read a trace either. A third refusal
+    would be a floor on something, and the only something left is the trace —
+    which the rung deliberately reports as data (`has_trace`) instead of failing
+    on. The skipped branch still returns True with no canary object at all."""
     src = (ROOT / "scripts" / "automod" / "gate.py").read_text(encoding="utf-8")
+    # The trace-diff helper sits BELOW the rung, so splitting on it yields exactly
+    # the rung body — where the trace is read for reporting, never as a refusal.
+    assert src.index("def rung_canary_smoke") < src.index("def _canary_trace_diff"), (
+        "the trace-diff helper moved above the smoke rung, so the slice below is no "
+        "longer one rung — re-derive the boundary before trusting these counts")
     rung = src.split("def rung_canary_smoke")[1].split("def _canary_trace_diff")[0]
-    assert rung.count("return False") == 1, (
-        f"the rung has another refusal path than the smoke's own assertions:\n{rung}")
-    guarded = rung.split("return False")[0].rstrip().splitlines()[-1]
-    assert guarded.strip() == 'if not rep["ok"]:', (
-        f"the one refusal path is not the assertions: {guarded!r}")
+    assert rung.count("return False") == 2, (
+        "the rung refuses on something beside its own assertions and the missing "
+        f"canary object:\n{rung}")
+    assert 'if not rep["ok"]:' in rung, (
+        "the assertions refusal went away — a turn whose transport failed tells you "
+        "nothing about the tool path (#3725)")
+    assert "if self._canary is None:" in rung, (
+        "the missing-canary refusal went away — a reused boot with no smoke entry "
+        "would deref an unset _canary and raise (#4347)")
+    guard = rung.split("if self._canary is None:")[1].split("return True")[0]
+    assert "rep[" not in guard.split("rep = ")[0], (
+        "the missing-canary guard reads the report or the trace; it exists to "
+        "refuse before either is available (#4347)")
+    assert 'if rep["error"]:' not in rung, (
+        "a non-empty stderr is back as a refusal; that would fail a turn that ran "
+        "Bash against a missing file, which is a passing turn (#3725)")
+    assert "has_trace" in rung, (
+        "the rung stopped recording trace absence, so the ledger can no longer "
+        "separate a real no-record turn from a skipped one")
 
 
 def test_a_build_that_cannot_dispatch_a_tool_still_fails_on_a_perfect_trace(monkeypatch,

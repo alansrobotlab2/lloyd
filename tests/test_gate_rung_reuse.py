@@ -176,17 +176,186 @@ def test_tests_is_never_reused_bare(tmp_path, stub_git):
 ])
 def test_a_canary_is_reused_only_for_tests_and_docs(tmp_path, stub_git,
                                                     delta, reused):
-    """A canary boots the candidate: any code change invalidates it."""
+    """A canary boots the candidate: any code change invalidates it.
+
+    Both canary entries are cached green here, which is the only state in which
+    a boot may be reused at all (#4347: a boot reused with no smoke entry leaves
+    `canary_smoke` dereferencing an unset `_canary`). With the pair present the
+    delta rule is what decides, identically for both names.
+    """
     stub_git["delta"] = delta
-    g = _Gate(tmp_path, cached={"canary_boot": _entry()})
+    g = _Gate(tmp_path, cached={"canary_boot": _entry(), "canary_smoke": _entry()})
     assert (g._reuse("canary_boot") is not None) is reused
+    assert (g._reuse("canary_smoke") is not None) is reused
 
 
 def test_an_empty_delta_reuses_everything(tmp_path, stub_git):
+    """An empty delta still re-runs one rung: `canary_boot` alone.
+
+    #4347: a boot reuse without a smoke reuse leaves this process with
+    `_canary` unset while `canary_smoke` runs, which is the
+    `'NoneType' object has no attribute 'smoke'` death in 5 gate rows over 4
+    rounds (newest SM_20261117_132548, 2026-11-17). So the empty delta re-runs
+    the boot, and everything on the reuse path beside it is unchanged.
+    """
     stub_git["delta"] = []
     g = _Gate(tmp_path, cached={"canary_smoke": _entry()})
     got = g._reuse("canary_smoke")
     assert got is not None and "nothing committed" in got[1]
+    boot = _Gate(tmp_path, cached={"canary_boot": _entry()})
+    assert boot._reuse("canary_boot") is None, (
+        "the boot was reused with no smoke beside it, so canary_smoke would run "
+        "against a process that never built a canary object")
+
+
+def test_a_reused_boot_without_a_cached_smoke_is_refused(tmp_path, stub_git):
+    """The invariant, on the two deltas that used to reuse the boot anyway.
+
+    A reused `canary_boot` implies a reused `canary_smoke`: only a PASSING rung
+    is cached (`if ok: self._reuse_save(...)`), so a smoke that genuinely
+    FAILED leaves no entry — and that is exactly the re-gate where the live turn
+    most needs to run again. SM_20261117_132548 is that state: boot green at
+    14:14:24Z, smoke FAIL at 14:14:29Z, then both re-gates show `canary_boot`
+    REUSED 0.0s followed by `canary_smoke` FAIL 0.0s.
+    """
+    for delta in ([], ["docs/x.md"]):
+        stub_git["delta"] = delta
+        g = _Gate(tmp_path, cached={"canary_boot": _entry()})
+        assert g._reuse("canary_boot") is None, (
+            f"boot-only reuse survived a {delta} delta")
+
+
+def test_a_boot_still_reuses_when_its_smoke_reuses_beside_it(tmp_path, stub_git):
+    """Bounded guard, not a capability removal: with both entries green the
+    boot still reuses, and its reason string is the unchanged one, so no rung
+    comes off the reuse path wholesale.
+    """
+    stub_git["delta"] = []
+    g = _Gate(tmp_path, cached={"canary_boot": _entry(), "canary_smoke": _entry()})
+    got = g._reuse("canary_boot")
+    assert got is not None, "the guard took the boot off the reuse path"
+    assert got[1] == "nothing committed since", f"the reason changed: {got[1]!r}"
+
+
+def test_a_skipped_smoke_keeps_its_boot_reusable(tmp_path, stub_git):
+    """The engine-unreachable case pays nothing.
+
+    A skipped smoke is a passing rung, so it is cached like any green and the
+    boot keeps reusing; `skip_smoke` never has to be read here, which is what
+    keeps `_reuse_rule` the staticmethod the harness binds.
+    """
+    stub_git["delta"] = ["docs/x.md"]
+    g = _Gate(tmp_path, cached={"canary_boot": _entry(),
+                                "canary_smoke": _entry(data={"skipped": True})})
+    got = g._reuse("canary_boot")
+    assert got is not None, (
+        "the guard refused a boot whose smoke is cached as SKIPPED, so an "
+        "engine-unreachable box would pay a boot it does not need")
+    assert got[1] == "only tests and docs in the delta", f"reason: {got[1]!r}"
+
+
+@pytest.mark.parametrize("name,delta,cached,expect", [
+    # Every delta `_reuse_rule` answers for a name, over the cache shapes that
+    # decide it: the boot guard must not touch any of these answers.
+    ("drill", ["docs/x.md"], {"drill": _entry()}, "only tests and docs in the delta"),
+    ("drill", [], {"drill": _entry()}, "nothing committed since"),
+    ("venv", ["SETUP.md"], {"venv": _entry()}, "no requirements path in the delta"),
+    ("venv", ["requirements.txt"], {"venv": _entry()}, None),
+    ("frontend", ["docs/x.md"], {"frontend": _entry()}, "no frontend path in the delta"),
+    ("frontend", ["web/src/api.ts"], {"frontend": _entry()}, None),
+    ("prompt_surface", ["docs/x.md"], {"prompt_surface": _entry()},
+     "no prompt-surface path in the delta"),
+    ("prompt_surface", ["app/prompt_builder.py"], {"prompt_surface": _entry()}, None),
+    ("tests", ["tests/test_a.py"], {"tests": _entry()}, None),
+])
+def test_the_boot_guard_moves_no_other_rung_s_answer(tmp_path, stub_git, name, delta,
+                                                    cached, expect):
+    stub_git["delta"] = delta
+    g = _Gate(tmp_path, cached=cached)
+    got = g._reuse(name)
+    assert (got[1] if got else None) == expect
+
+
+@pytest.mark.parametrize("name,delta,expect", [
+    ("drill", ["docs/x.md"], "only tests and docs in the delta"),
+    ("drill", [], "nothing committed since"),
+    ("venv", ["SETUP.md"], "no requirements path in the delta"),
+    ("frontend", ["docs/x.md"], "no frontend path in the delta"),
+    ("prompt_surface", ["docs/x.md"], "no prompt-surface path in the delta"),
+    ("tests", ["tests/test_a.py"], None),
+])
+def test_the_rule_still_answers_a_two_argument_call_with_no_cache(name, delta, expect):
+    """`_reuse_rule(name, delta)` is the call the harness and any other reader
+    makes: the cache arrives as an optional third argument, so a two-argument
+    call for a name the guard does not own answers exactly as it did before.
+    """
+    assert G.Gate._reuse_rule(name, delta) == expect
+
+
+def test_a_boot_rule_call_with_no_cache_refuses_the_boot():
+    """The one name the guard owns is refused on an UNKNOWN cache.
+
+    A caller that cannot show a green `canary_smoke` entry cannot show the
+    invariant, and the cost of refusing is one ~30 s boot against a gate that
+    dies at `canary_smoke` with no canary object at all.
+    """
+    assert G.Gate._reuse_rule("canary_boot", []) is None
+    assert G.Gate._reuse_rule("canary_boot", ["docs/x.md"]) is None
+    assert (G.Gate._reuse_rule("canary_boot", [], {"canary_smoke": _entry()})
+            == "nothing committed since")
+
+
+def test_a_smoke_without_its_canary_fails_by_name_rather_than_raising():
+    """The residual case, diagnosable instead of an engine failure.
+
+    Before #4347 this raised `AttributeError: 'NoneType' object has no attribute
+    'smoke'` at gate.py's bare `self._canary.smoke(...)`, and the rung wrapper
+    reported it as `AttributeError: ...` at 0.0s — what a reader saw in the
+    ledger was an engine fault, not "the boot was reused without the smoke".
+    """
+    class _Bare:
+        skip_smoke = False
+        _canary = None
+        rung_canary_smoke = G.Gate.rung_canary_smoke
+
+    ok, detail, data = _Bare().rung_canary_smoke()
+    assert ok is False, "a smoke with no canary object passed"
+    assert "canary_smoke" in detail, f"the detail does not name the rung: {detail!r}"
+    assert "boot" in detail.lower(), f"the detail does not name the missing boot: {detail!r}"
+    assert isinstance(data, dict)
+
+
+def test_the_ladder_still_boots_the_canary_immediately_before_the_smoke(monkeypatch):
+    """The pair is the invariant's other half: the boot builds the object the
+    next rung dereferences, so a reorder would put the smoke in front of the
+    only thing that ever sets `_canary`.
+    """
+    monkeypatch.setattr(G, "engine_reachable", lambda root, timeout=4.0: (False, "stub"))
+    names = []
+
+    class _StubGate(G.Gate):
+        def __init__(self):
+            super().__init__("SM_TEST_LADDER", G.Path(__file__).resolve().parents[1],
+                             "HEAD", skip_smoke=True)
+
+    def _record(name, fn):
+        """Stand in for the rung wrapper: record the rung reached, answer PASS.
+
+        The PASS is this stub's own return value and carries no claim — it is
+        there so the ladder, which short-circuits on a failing rung, walks to
+        the end and `names` becomes the ladder's order. The two asserts below
+        are the whole check, and a reorder fails them.
+        """
+        names.append(name)
+        return True
+
+    g = _StubGate()
+    monkeypatch.setattr(g, "_rung", _record)
+    g.run()
+    assert names.index("canary_boot") == names.index("canary_smoke") - 1, names
+    assert names == ["preflight", "vet", "code_rules", "recovery", "static", "pyright",
+                     "prose_consumers", "frontend", "tests", "prompt_surface", "review",
+                     "venv", "canary_boot", "canary_smoke", "drill"], names
 
 
 @pytest.mark.parametrize("delta,reused", [

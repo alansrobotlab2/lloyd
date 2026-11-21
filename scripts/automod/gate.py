@@ -2318,7 +2318,8 @@ class Gate:
             # milliseconds; `review` has its own patch-id reuse, which is a
             # stronger test than "no relevant file changed".
             return None
-        entry = self._reuse_load().get(name)
+        cache = self._reuse_load()
+        entry = cache.get(name)
         if not isinstance(entry, dict):
             return None
         head = W.head(self.worktree) or self.report.head or ""
@@ -2338,14 +2339,30 @@ class Gate:
         delta = [p for p in _run(
             ["git", "diff", "--name-only", "--no-renames", f"{old_head}..{head}"],
             cwd=self.worktree, timeout=60).stdout.splitlines() if p.strip()]
-        why = self._reuse_rule(name, delta)
+        why = self._reuse_rule(name, delta, cache)
         if why is None:
             return None
         return entry.get("data") or {}, why
 
     @staticmethod
-    def _reuse_rule(name: str, delta: list[str]) -> str | None:
-        """Why this rung's answer cannot have changed, or None."""
+    def _reuse_rule(name: str, delta: list[str],
+                    cache: dict | None = None) -> str | None:
+        """Why this rung's answer cannot have changed, or None.
+
+        `cache` is the rung cache `entry` came from, and only one name needs it:
+        a reused `canary_boot` must imply a reused `canary_smoke`, because the
+        boot is what builds the `_canary` object the smoke dereferences IN THIS
+        PROCESS. Reuse is per-name, so the cache can hold the green boot and no
+        smoke at all — only a passing rung is saved, and a smoke that genuinely
+        failed leaves nothing — which is exactly the re-gate that most needs the
+        live turn. Refusing there costs one ~30 s boot; skipping it cost 5 gate
+        rows reading as `AttributeError: 'NoneType' object has no attribute
+        'smoke'` at 0.0s across 4 rounds. A caller that passes no cache cannot
+        show the invariant, so it does not get the boot.
+        """
+        if name == "canary_boot" and not isinstance((cache or {}).get("canary_smoke"),
+                                                    dict):
+            return None
         if not delta:
             return "nothing committed since"
         if name == "frontend":
@@ -5248,6 +5265,19 @@ class Gate:
             return True, f"SKIPPED (engine unreachable: {self._smoke_skip_reason})", {
                 "skipped": True, "reason": self._smoke_skip_reason,
                 "has_trace": False, "no_trace_reason": "skipped"}
+        if self._canary is None:
+            # `_canary` is built by `rung_canary_boot` inside THIS process, so this
+            # rung can only run against a real canary when the boot ran here too.
+            # `_reuse_rule` now refuses a reused boot with no `canary_smoke` entry
+            # (#4347), and this is the residual: a named failed rung where the bare
+            # deref below raised `AttributeError: 'NoneType' object has no attribute
+            # 'smoke'` and the ledger showed an engine fault at 0.0s — 5 rows over 4
+            # rounds, newest SM_20261117_132548, where a real smoke failure left no
+            # entry while the green boot stayed reusable.
+            return False, ("canary_smoke cannot run: the canary object is unset, so "
+                           "canary_boot did not run in this process"), {
+                "has_trace": False,
+                "no_trace_reason": "canary object unset — canary_boot did not run"}
         rep = self._canary.smoke(timeout=240)
         # The turn's structural trace rides in the rung data whether or not
         # the four assertions held (#828). It is observation only: nothing
