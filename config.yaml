@@ -2067,6 +2067,15 @@ workers:
     # tool reads with no answer. A two-minute judgment every fifteen minutes
     # is a cost the primary can carry, and the round hold keeps it off the
     # engine while a round runs.
+    # ONE CAVEAT ABOUT A REVERT (#4443), true on both sides of it: because a
+    # `steward_move` row is written only for a move the steward actually APPLIES, the
+    # window it bounds opens the moment `apply` goes back to false and closes when it
+    # comes true, and inside that window neither an absent `steward_move` row nor a zero
+    # `up_next -> draft: never triaged` count is evidence that #4412's round-trip fix
+    # worked — the only reading is rows > 0 with the park-line count at 0, and rows = 0
+    # is UNMEASURED — while it claims nothing about any window before such a revert,
+    # since the rows have been live since the 2026-11-16T00:06Z flip: 47 of them as
+    # measured 2026-11-20, newest 2026-11-20T15:47:54Z.
     board-steward:
       enabled: true
       apply: true

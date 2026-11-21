@@ -2191,6 +2191,155 @@ def test_every_flip_block_pin_reddens_on_its_own_mutation():
     assert "[retired floor gone]" in labels(old_floor)
 
 
+#: The #4443 caveat's opening words, as committed to `config.yaml`'s board-steward
+#: block. That sentence is the ONE piece of prose #4443 allowed into a comment run
+#: #4409's round also rewrites, so its own words are the slice anchor: the run around it
+#: is 30-odd lines of other rounds' pinned prose, and a marker matched anywhere in there
+#: could stay satisfied while the sentence itself went missing.
+CAVEAT_4443_ANCHOR = "ONE CAVEAT ABOUT A REVERT (#4443)"
+
+#: The STOP CONDITION sentence, byte for byte as it sits in `config.yaml` at this
+#: round's base — comment wrap and hashes included. Writing its trip record is #4409's
+#: job, not this round's, so #4443 pinned the bytes rather than hoping two rounds editing
+#: one comment block would notice each other: a later round that legitimately rewrites
+#: the trip, or merely re-wraps it, has to pass over this node's corpse in its own diff.
+STOP_CONDITION_VERBATIM = (
+    "STOP CONDITION: if that alarm\n"
+    "    # fires within 7 days of this flip (2026-11-16T00:06Z), a round sets `apply`\n"
+    "    # back to false and records this reading as 'tried, didn't work out'. The\n"
+    "    # revert is the finding, and the round that reverses this one is a normal\n"
+    "    # outcome here, not a failure to hide.")
+
+
+def _caveat_4443_problems(block: str) -> list[str]:
+    """Which pins on the #4443 applied-move caveat FAIL, each labelled. Empty == all hold.
+
+    The same shape as `_flip_block_problems`, for the same reason: the deletion proof
+    below has to run THIS predicate over a mutated block, and a predicate re-implemented
+    there would prove nothing about the node it imitates. The slice is the caveat's own
+    comment run — its anchor line down to the first non-comment line, which is the
+    `board-steward:` key it sits directly above — so no marker can be satisfied by the
+    two paragraphs that neighbour it (one of which already names the flip date).
+    """
+    lines = block.splitlines()
+    hits = [i for i, ln in enumerate(lines) if CAVEAT_4443_ANCHOR in ln]
+    if len(hits) != 1:
+        return [f"[caveat present] the block holds {len(hits)} lines opening with the "
+                f"caveat's anchor, not exactly 1 — the sentence was deleted or typed "
+                f"twice, and a reader who cannot find it cannot be told what to do with "
+                f"a silent steward"]
+    start = hits[0]
+    end = start + 1
+    while end < len(lines) and lines[end].lstrip().startswith("#"):
+        end += 1
+    flat = " ".join(" ".join(ln.lstrip().lstrip("#").rstrip()
+                             for ln in lines[start:end]).split())
+    problems: list[str] = []
+    for label, want in (
+            ("[row is applied-only]",
+             "written only for a move the steward actually APPLIES"),
+            ("[window opens when apply goes false]",
+             "the window it bounds opens the moment `apply` goes back to false"),
+            ("[silence is not evidence]",
+             "neither an absent `steward_move` row nor a zero `up_next -> draft: never "
+             "triaged` count is evidence that #4412"),
+            ("[the one reading]", "rows > 0 with the park-line count at 0"),
+            ("[zero rows is unmeasured]", "rows = 0 is UNMEASURED"),
+            ("[no absence claim before a revert]",
+             "claims nothing about any window before such a revert"),
+            ("[flip date named beside the window]", "2026-11-16T00:06Z"),
+            ("[row count carries its own date]",
+             "47 of them as measured 2026-11-20, newest 2026-11-20T15:47:54Z")):
+        if want not in flat:
+            problems.append(f"{label} the caveat no longer states {want!r}")
+    return problems
+
+
+def test_the_config_states_that_only_an_applied_move_writes_a_steward_move_row():
+    """#4443: the block says a `steward_move` row exists only for an APPLIED move, so a
+    steward switched back to `apply: false` writes none and its silence proves nothing.
+
+    The confound is measured, not feared: #4412's volume clause is graded on
+    `up_next -> draft: never triaged` park lines, while `apply_moves` runs only under
+    `if apply:` and the row is appended only under `if moved_status:` inside it — so a
+    round that reverts the flag drives the park count to 0 by itself. Rows > 0 with the
+    park count at 0 is the fix; rows = 0 is UNMEASURED, and the sentence has to say that
+    or the next `apply: false` round is read as the repair. The same sentence stays honest
+    about the side it is not on: rows have been live since the 2026-11-16T00:06Z flip (47
+    as measured 2026-11-20, newest 2026-11-20T15:47:54Z), so it claims nothing about a
+    window before a revert. The YAML leg beside it is what stops the prose being pinned
+    while the flag quietly moved.
+    """
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    import yaml
+    assert yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"] is True, (
+        "the caveat holds on both sides of a revert, but this tree is the flipped side; "
+        "on an un-reverted file these pins are guarding the wrong half")
+    block = _board_steward_block(text)
+    problems = _caveat_4443_problems(block)
+    assert problems == [], problems
+    assert STOP_CONDITION_VERBATIM in block, (
+        "the STOP CONDITION sentence is no longer the bytes #4443 pinned: its trip "
+        "record is #4409's to write, so a round that re-wrapped or restated it here has "
+        "taken #4409's clause")
+
+
+def test_the_applied_move_caveat_pin_reddens_on_its_own_deletion():
+    """A pin that cannot fail is not a pin: removing the caveat, or any one of its
+    load-bearing halves, has to redden the label that guards it.
+
+    The first mutation is the one the item asked for — the whole sentence gone, which is
+    also what #4409's round does by accident if it rewrites this comment run without
+    seeing the caveat inside it. The rest are the quiet half-edits a later prose edit
+    makes while intending something else: the mechanism softened, the window's start
+    dropped, the flip date typed off, the UNMEASURED reading deleted across the comment
+    wrap, and the no-absence-before-a-revert half turned into a universal claim. The last
+    pair proves the byte pin bites on a re-wrap alone.
+    """
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    block = _board_steward_block(text)
+    assert _caveat_4443_problems(block) == [], (
+        "the committed caveat does not pass its own pins")
+    assert STOP_CONDITION_VERBATIM in block
+
+    lines = block.splitlines()
+    start = next(i for i, ln in enumerate(lines) if CAVEAT_4443_ANCHOR in ln)
+    end = start + 1
+    while end < len(lines) and lines[end].lstrip().startswith("#"):
+        end += 1
+    deleted = "\n".join(lines[:start] + lines[end:])
+    assert deleted != block
+    assert "[caveat present]" in " ".join(_caveat_4443_problems(deleted))
+
+    def labels(mutated: str) -> str:
+        return " ".join(_caveat_4443_problems(mutated))
+
+    # The mechanism, softened from applied to proposed: the whole point of the caveat.
+    assert "[row is applied-only]" in labels(
+        block.replace("actually APPLIES", "is proposed"))
+    # The window's start, generalised into prose about windows in general.
+    assert "[window opens when apply goes false]" in labels(
+        block.replace("opens the moment `apply` goes back to false", "opens at a revert"))
+    # The two silence-is-not-evidence claims, dropped as too much prose.
+    assert "[silence is not evidence]" in labels(
+        block.replace("neither an absent", "and not an absent"))
+    # The flip date, typed off everywhere — the caveat's own slice has to lose it.
+    assert "[flip date named beside the window]" in labels(
+        block.replace("2026-11-16T00:06Z", "the flip"))
+    # The UNMEASURED half, deleted across the comment wrap.
+    assert "[zero rows is unmeasured]" in labels(
+        re.sub(r"rows\s*=\s*0(?:\s+#\s*)?is\s+UNMEASURED", "and silence settles it", block))
+    # The honesty half, turned into a claim about every window.
+    assert "[no absence claim before a revert]" in labels(
+        block.replace("claims nothing about any window before such a revert",
+                      "claims the same for every window"))
+    # A re-wrap of the STOP CONDITION, with its words untouched: the byte pin bites.
+    rewrapped = block.replace(STOP_CONDITION_VERBATIM,
+                              STOP_CONDITION_VERBATIM.replace("\n    # ", " "))
+    assert rewrapped != block and STOP_CONDITION_VERBATIM not in rewrapped, (
+        "the byte pin cannot fail, so it pins nothing")
+
+
 #: The three ways the tree actually writes the retired floor. #3089's own absence
 #: grep was `>= 100`, which saw one of them: `config.yaml` and the architecture doc
 #: put the backtick AFTER `judged` (one of them with a Unicode `≥`), and
