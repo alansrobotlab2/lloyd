@@ -1,7 +1,7 @@
 ---
 title: qmd — the vault search engine, Lloyd's fork, and how it runs
 status: implemented
-date: 2026-10-22
+date: 2026-11-21
 ---
 
 # qmd — the vault search engine, Lloyd's fork, and how it runs
@@ -94,10 +94,19 @@ supervisord program agent-qmd-daemon
   The title is the first `#` or `##` heading anywhere in the file (a fork branch,
   `title-fix`, prefers front matter and the H1 and was measured neutral once the
   OR keyword leg landed, so it is not merged).
-- **Collections** (14): the 11 the recall searches (`memory`, `knowledge`,
+- **Collections** (15): the 11 the recall searches (`memory`, `knowledge`,
   `projects`, `personal`, `work`, `skills`, `architecture`, `lloyd`,
-  `autonomy`, `backlog`, `people`) plus `autonomy-runs`, `sessions` and
-  `subliminal`. The recall never names those three. `subliminal` is the vault
+  `autonomy`, `backlog`, `people`) plus `autonomy-runs`, `sessions`,
+  `subliminal` and `lloyd-architecture`. The recall never names the first
+  three of those, so they cost it nothing — but the eleventh name is not a fixed
+  count: `VAULT_SEGMENTS` is rewritten at import by `architecture_collections()`,
+  so the deployed `vault_search.architecture: both` expands the `architecture` slot
+  to `architecture` + `lloyd-architecture` and the fan-out is **12 names over 15
+  collections**, still one `/query` request (`vault.VAULT_SEGMENTS`, measured
+  2026-11-21). `lloyd-architecture` is the checkout's own `~/lloyd/architecture/*.md`,
+  added 2026-11-10 and named apart from the vault's `architecture` so a hit's path says
+  which tree it came from; which of the two recall answers from is the config setting,
+  not a property of the index. `subliminal` is the vault
   root at `pattern: "*.md"` — root-level only, the loose notes that sit in no
   segment directory and nothing else — because the 2026-10-07 ruling on #2180
   narrowed it to that rather than retiring the eleven: under the old vault-wide
@@ -110,9 +119,11 @@ supervisord program agent-qmd-daemon
   `subliminal` is folded back onto its segment path by
   `agent_mcp/vault.py::_qmd_normalize_global`. The three are still embedded, so
   they count toward every re-embed. The vault's
-  `architecture/` is an old OpenClaw-era set; the current docs in
-  `~/lloyd/architecture/` are not a collection (measured, not adopted:
-  `architecture/retrieval.md` §4).
+  `architecture/` is an old OpenClaw-era set, and the current docs in
+  `~/lloyd/architecture/` **are** a collection now (`lloyd-architecture`, 2026-11-10):
+  the "not a collection" reading that `architecture/retrieval.md` §4 measured is
+  retired, and a reader who wants the live docs must check the mode rather than assume
+  the vault copy is all there is.
 - **Paths come back percent-encoded** (`encodeQmdPath`, per segment). Lloyd
   decodes them at `agent_mcp/vault.py::qmd_query` (`qmd_file`), the one door.
 
@@ -247,11 +258,11 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   orphan ratio cannot give, and the footprint as main + `-wal` + `-shm` (#844).
   Neither cleanup nor VACUUM reclaims a dead vec0 slot, and the job rebuilds
   nothing itself — but "the verdict is report-only" stopped being true on
-  2026-09-30: since #1897 `_exit_code` (:1637-1649) returns 1 whenever
+  2026-09-30: since #1897 `_exit_code` returns 1 whenever
   `need_capacity` fires, so the nightly goes red every night from there until a
   person performs the hand side-copy-and-swap. What *is* notice-only is the
   lead-time signal #3072 put in front of it (2026-10-20): `capacity_approaching()`
-  (:1445-1463) is true for `CAPACITY_OCCUPANCY_TRIGGER` (0.25) ≤ occupancy <
+  is true for `CAPACITY_OCCUPANCY_TRIGGER` (0.25) ≤ occupancy <
   `CAPACITY_APPROACHING_OCCUPANCY` (**0.50**), same dead-MiB floor, disjoint from
   the red band by construction, and deliberately unread by `_exit_code`. It exists
   because the red trigger is the first notice a person otherwise gets of a
@@ -260,8 +271,16 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   `capacity_approaching: true` in the nightly of 2026-10-22** — read it back with
   `scripts/maintenance/qmd_index_maintenance.py --dry-run`, whose report carries
   `vec0.occupancy` and the `capacity_approaching` key — i.e. 0.0134–0.0189
-  occupancy/night and roughly twelve nights of warning inside the band. The band
-  is firing now and the rebuild is owed (#3119).
+  occupancy/night and roughly twelve nights of warning inside the band. **That
+  warning has since been spent, twice over, and the band is NOT firing**: read at
+  2026-11-21 the live index sits at occupancy 0.6691 with 174.7 MiB dead and
+  `capacity_approaching: false`, because the nightly of 2026-11-20 both built and
+  swapped a copy unattended (see §5's third swap). Read the decay rate as dated, not
+  as a law: the 0.0134–0.0189 figure is the 10-06 → 10-20 walk, and the cycle that
+  closed on 11-20 decayed 0.4669 → 0.3419 across eleven nights (~0.011/night) against a
+  1020 MiB allocation — the rate is a function of the allocation, which a swap halves,
+  so #3978's ceiling and this sentence are both calibrated against a shape the current
+  index no longer has (#4475). What the rebuild is owed now is calibration, not a run.
   That rebuild is a route of the same script that only a person
   invokes (#1992): `--rebuild-side-copy <name>` copies the live config to
   `~/.config/qmd/<name>.yml`, runs `update` and `embed` with `--index <name>`
@@ -285,7 +304,12 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   Exactly one unattended swap exists as of #3978 — Alan's ruling on #3119 — and it is not
   a command line: `scheduled_side_copy_swap` is called in-process by the nightly run, for
   the copy that same run built or topped up, only while its measured occupancy is below
-  `SWAP_OCCUPANCY_CEILING` (**0.35**) and at or above the red trigger, and a post-swap
+  `SWAP_OCCUPANCY_CEILING` (**0.35**) — the ceiling is the only occupancy bound the
+  gate applies: `scheduled_side_copy_swap` tests an interactive terminal, `occ is
+  None`, that ceiling, and whether this run built or reused a copy, and never tests a
+  lower bound, so a night already past the red 0.25 trigger still swaps if it holds a
+  verified copy, which is what a red night wants (#4475; the prose used to claim a
+  lower bound the code does not have) — and a post-swap
   check that fails puts the backup back by itself and exits 1 (see
   `scheduled_side_copy_swap`). The BUILD is scheduled as of #3460 — the
   nightly run whose report reads `capacity_approaching` and finds no copy on disk
@@ -293,14 +317,29 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   date so it can never be refused as somebody else's copy. One guard reads the clock:
   `scheduled_build_window` refuses to start a build whose `SCHEDULED_BUILD_BUDGET_S`
   (**2400 s**) budget would put its end inside the nightly hours **22:00–04:00**
-  (`SCHEDULED_BUILD_WINDOW_HOURS`), printing and recording the reason, and a run that
+  (`SCHEDULED_BUILD_WINDOW_HOURS`, which is the hour set `{22, 23, 0, 1, 2, 3, 4}` —
+  hour 4 is *inside*, so the window the guard tests runs to 05:00 and the shorthand
+  "04:00" names its last guarded hour, not its close; the test that pins this sentence
+  asks for the literal and re-reads the set from source, which is why both appear here
+  (#4476)), printing and recording the reason, and a run that
   finds a copy already waiting launches nothing and reuses that copy's name in seconds —
   the name is the decision the swap then acts on, so a cycle holds one full re-embed and
   the swap takes the earlier copy rather than a fresh one. The measured nightly start of 05:01 ends 05:41, which is
   41 minutes past the close of that window. It is the only branch on `.hour` in
   `scripts/maintenance/qmd_index_maintenance.py`: everywhere else the route is refused
   by a failed verification or a busy embed lock, never by the time of day. It has been
-  run for real since the route landed, twice. The
+  run for real since the route landed, three times, and the third one is the first
+  that was not a person: the nightly of **2026-11-20** reached `scheduled_side_copy_swap`
+  at occupancy 0.3419, in band under the 0.35 ceiling, and its own swap report reads
+  `attempted: true, swapped: true, retrieval_ok: true, retrieval_hits: 5`, with the
+  replaced database left in the `.bak` series as the entry this review's date reads back
+  as the series' newest. Its report names are deliberately not cited here: no witness of
+  those bytes is committed under `tests/fixtures/`, and this document's own rail refuses
+  a dated report with no committed copy (#4477 owes the fixture, and then the citation).
+  It halved the allocation (1020 MiB → 528 MiB) while raising occupancy to 0.7511 on the
+  copy and 0.6691 the next morning — reclaiming dead slots shrinks the denominator
+  faster than the live row count, which is the mechanism, not noise. The two hand runs
+  follow. The
   2026-10-04 invocation built a side copy and verified it but stopped short of
   swapping (`$LLOYD_DATA/_pipeline/reflection/qmd-side-copy-rebuild-20261004-2026-10-04T113501.json`);
   the 2026-10-05 one rebuilt and swapped
@@ -499,7 +538,7 @@ the build rather than the setting is what changed.
 - `agent-services/conf/qmd-index.yml` (template), `~/.config/qmd/index.yml`, `~/.config/qmd/evalpin.yml`
 - `scripts/maintenance/qmd_index_maintenance.py`, `scripts/qmd_fork_landing.py`, `scripts/automod/evalpin.py`
 - `app/qmd_health.py`, `agent_mcp/vault.py`
-- `eval/qmd_contention.py` — the join that prices GPU-0 contention by parsing the daemon's own `/query` lines (§2's log) against the regression runner's windows
+- `eval/qmd_contention.py` — the join that prices contention on qmd's own card by parsing the daemon's own `/query` lines (§2's log) against the regression runner's windows. The card is whatever `agent-qmd-daemon.conf` pins — GPU 4 since 2026-11-10, GPU 0 before that — and since `evalpin.production_daemon` takes that conf's environment the pin sits on the same card, so the join still measures a real contention; only the card's number moved, and the script's own docstring still names GPU 0 (#4474). Read §7's measurement trap before quoting its figure.
 - tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_qmd_maintenance_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`, `test_qmd_contention.py`
 
 ## Review log
@@ -586,3 +625,27 @@ the build rather than the setting is what changed.
   uninstalled on 09-19 (#1368); and §8 was missing `test_qmd_query_shape.py` and
   `test_service_health_check_qmd.py`. No vector or document count is pinned here
   any more — §3 says to read `GET /health → vecIndex.vectors`.
+- 2026-11-21 — **stale**. The mechanisms all still run (daemon, watcher, cleanup timer,
+  task #81, the side-copy route, the eval pins: `/health` answers `status: ok` with 95,723
+  vectors, the cleanup timer fired 04:47:57 with exit 0, and both `/api/*/health` routes
+  returned a genuine 7-day window — `window_clamped_to_hours` and `oldest_input` both
+  null). What had moved under the prose: **§2** counted 14 collections and said the
+  checkout's own docs were "not a collection" — `lloyd-architecture` was added 2026-11-10,
+  so it is 15, and with the deployed `vault_search.architecture: both` the recall fans out
+  over 12 names (`vault.VAULT_SEGMENTS`, re-measured). **§5** said the capacity band "is
+  firing now and the rebuild is owed": the nightly of 2026-11-20 built **and** swapped a
+  copy unattended — the first swap not performed by a person, and the reason the band is
+  now silent at 0.6691 — so the swap count went from two to three, the decay rate is
+  labelled as dated, and the paragraph's `22:00–04:00` shorthand is reconciled with its own
+  arithmetic by naming the hour set the guard actually tests (hour 4 is inside, so the
+  window closes at 05:00). Also corrected: the swap gate was given a lower occupancy bound
+  it does not have, two retired `path:N-M` line citations (#3292) that had drifted off their
+  functions, §8's contention join was still priced on GPU 0, and the first unattended swap's
+  report is **not** cited because its bytes have no committed witness — the doc's own rail
+  refused the citation mid-edit, which is the point of it. Filed: #4473 (the cleanup unit
+  still pins `CUDA_VISIBLE_DEVICES=0`), #4474 (`eval/qmd_contention.py` still says GPU 0),
+  #4475 (no lower swap bound, and the first threshold night refutes the 0.35 calibration),
+  #4476 (a test pins the literal `04:00` it parses as hour 4), #4478 (the missing fixtures).
+  Verified unchanged: 15 collections' worth of template/live agreement (`drift_count: 0`),
+  `qmd cleanup`'s three effects including `llm_cache` (`runCleanup` → `deleteLLMCache`),
+  the 04:45 timer, the GPU-4 pin on the daemon and watcher, and task #81's `preferred_hours: [5]`.
