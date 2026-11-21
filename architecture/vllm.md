@@ -5,7 +5,7 @@ relations:
 tags: [architecture, lloyd, vllm, primary, kv-cache, gpu, throughput, benchmarks]
 type: reference
 status: implemented
-date: 2026-10-21
+date: 2026-11-21
 ---
 
 # The primary engine: vLLM setup, tuning, throughput
@@ -46,6 +46,7 @@ supervisord as `agent-llm-primary`. The live command line, verbatim:
   --limit-mm-per-prompt {"image": 20, "video": 0, "audio": 0}
   --mm-processor-kwargs {"max_pixels": 2119936}
   --max-num-batched-tokens 4096
+  --long-prefill-token-threshold 2048
   --gdn-prefill-backend flashinfer --no-enable-flashinfer-autotune
   --kv-cache-dtype fp8
   --engram-config {"cpu_offload": true}
@@ -75,9 +76,11 @@ outer residual and QSA output gate fusions); on 2026-10-12 it was rebuilt again
 at `a98247ab4db6` for the Qwen4Exp fusions and bugfixes that followed (the
 setup script's header lists them; SETUP.md has the summary), with FlashInfer
 0.7.0.post1 and its prebuilt cubins. Each rebuild goes to a new dated venv
-path; the 09-17 build at `.venvs/vllm-flash-next-main` is now the **only**
-revert target on the box, and both the conf's comment and the launcher's own
-`VLLM_VENV` fallback name it. They did not until 2026-10-21. The comment told a
+path; the conf names its revert targets in date order — `vllm-flash-next-main-1012`
+**first** (with `KV_CACHE_MEMORY_BYTES` back to 14.0 GiB, since that build at
+14.5 leaves ~2,100 MiB) and the 09-17 build at `.venvs/vllm-flash-next-main`
+second, which is also the launcher's own `VLLM_VENV` fallback since #3136
+(`d2847a34`). Neither instruction reached a venv that existed until 2026-10-21. The comment told a
 human to switch to the 09-10 build, `.venvs/vllm-flash-next-main-0910`: deleted
 by the 10-12 rebuild. The launcher defaulted to the BF16 worker build,
 `.venvs/vllm-qwen38-flash-next`: not installed either, and never rebuilt.
@@ -127,10 +130,11 @@ carries the slot table and the identity probe in full.)
   (vLLM main, UVA offload — what `agent-llm-primary.conf` serves, a main build
   since 2026-09-10, this venv since 11-10), `vllm-flash-next-main-1012` (the
   10-12 `a98247ab` build, the first revert target) and `vllm-flash-next-main` (the
-  09-17 `dff1bde` build). The third one the script can speak
-  — the PLE-offload-worker build `vllm-qwen38-flash-next`, which is also its
-  fallback default — has been deleted, so the two-venv branch is currently
-  reachable only by rebuilding it (#3136).
+  09-17 `dff1bde` build). The third build the script can speak
+  — the PLE-offload-worker build `vllm-qwen38-flash-next`, which was also its
+  fallback default until #3136 — has been deleted, so the two-venv branch is
+  currently reachable only by rebuilding it; the fallback now names the 09-17
+  build above.
 - **The secondary (`:8091`, Qwen3.6-35B-A3B UD-Q3_K_XL, llama.cpp,
   `--parallel 1` because llama.cpp divides `--ctx-size` across slots and the
   full 256K window was the point) is off since 2026-09-20** —
@@ -470,7 +474,7 @@ Every knob is an environment variable the launcher reads, so an arm is one
 
 | Knob | Default | Production | Notes |
 |---|---|---|---|
-| `VLLM_VENV` | `vllm-qwen38-flash-next` | **`vllm-flash-next-main-1110`** | the BF16 worker build vs the FP8 main build (dated per rebuild; `-1012` is the first revert target, the undated path the 09-17 build). The default names a venv that no longer exists (§1, #3136) |
+| `VLLM_VENV` | `vllm-flash-next-main` (the 09-17 FP8 build) | **`vllm-flash-next-main-1110`** | which installed build to boot (dated per rebuild; `-1012` is the first revert target, the undated path the 09-17 build). The fallback used to name the BF16 worker build `vllm-qwen38-flash-next`, which is not installed — #3136 (`d2847a34`) moved it to a path that exists (§1) |
 | `KV_CACHE_DTYPE` | *(empty = BF16)* | **`fp8`** | §3 |
 | `MAX_NUM_BATCHED_TOKENS` | *(empty = vLLM's 8192)* | **`4096`** | §5.1 |
 | `LONG_PREFILL_TOKEN_THRESHOLD` | *(empty = off)* | **`2048`** | §5.2: a long prefill's share of each step while another request is eligible |
@@ -647,7 +651,8 @@ next iteration.
 ### 6.4 The observer runs at its watched turn's priority, or one step below
 
 `attach_observer_for_turn` passes `_observer_priority(options, platform)`
-(`app/routers/_messages_inner_voice.py:252`, since `97a86cc0` on 2026-09-12),
+(the call site is `app/routers/_messages_inner_voice.py:432`, the
+`_observer_priority` def 259; since `97a86cc0` on 2026-09-12),
 which is two-valued: **the turn's own `RunOptions.priority`** for a user
 platform, so a chat's second opinion runs at 0 beside the chat instead of
 queueing at 1 behind every worker iteration; **`priority + 1`** for a platform
@@ -667,8 +672,8 @@ context decoding continuously; B = ~200k. Every request at priority 1.
 
 **Do not run it casually**: it wants the engine to itself — the worker pool
 paused and drained or the backend down — and it waits for an idle engine and
-refuses to start otherwise (`wait_idle`, :128). Every request it issues goes at
-priority 1 (`PRIORITY`, :61), so a live chat still outranks it; the reason for
+refuses to start otherwise (`wait_idle`, :136). Every request it issues goes at
+priority 1 (`PRIORITY`, :69), so a live chat still outranks it; the reason for
 the idle gate is that the measurement is A's step gap, and any other tenant is
 noise in the number.
 
@@ -793,8 +798,8 @@ another 140 ms of neighbour latency for +27% prefill and no further KV benefit.
   bar by design (the definition's header says why), so it is not the production
   restart route even though it restarts the same program. Both pairs are
   machine- and day-specific; read that file and `/proc/meminfo`, not this page.
-- **A venv switch compiles, and the compile is its own memory event.** Both
-  primary venvs carry the same flashinfer, whose `build.ninja` embeds the venv's
+- **A venv switch compiles, and the compile is its own memory event.** The
+  primary venvs each carry a flashinfer whose `build.ninja` embeds that venv's
   absolute include paths — so every switch between `vllm-flash-next-main` and
   `-main-0910` rebuilt all ~64 `fused_moe_120` objects `nproc` (32) wide: on
   2026-09-18 09:39 that put 83 GiB of `cicc` on top of the PLE table, hit
@@ -1354,10 +1359,14 @@ has still not been run as of 2026-09-11.
   which stays the counted reading, as §6.1's budget keeps its home above and is
   quoted against it and no other.
 
-- **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` in
-  vLLM's `v1/core/kv_cache_utils.py` — name the function, not the line: in
-  the **production** venv at `dff1bde` the def is 2190 and its
-  `logger.warning` 2215; the 2133/2166 this page used to quote is the
+- **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` — name the
+  function, not the line, because the file it lives in moves between builds: in
+  the venv the conf pins now (`vllm-flash-next-main-1110`, vLLM main
+  `8f2ba935a`) it sits in `v1/core/kv_cache_planning.py`, def 1068 and its
+  `logger.warning` 1091, with the one-sentence text below. The def 2190 /
+  warning 2215 this page quotes is the older
+  `v1/core/kv_cache_utils.py`, in the `-main` (`dff1bde`) revert target; the
+  2133/2166 this page used to quote is the
   `-0910` revert target's copy, and the kv_cache_utils.py in older
   notes is the *worker* build's. It fires on every production boot, and in
   this build it says only "Speculative decoding (method=mtp) is enabled but no
@@ -1678,3 +1687,4 @@ has still not been run as of 2026-09-11.
 - 2026-10-05 — **§10 counts 2026-10-01 (#2248).** The day the standing daily job caught while its status lines were still in the rotation is committed as `tests/fixtures/vllm_prefix_miss_2026-10-01.json`, a sixth extract, re-derived from the rotation at the config gate and byte-identical to the daily job's copy at `~/lloyd-data/vllm-prefix-miss/` — which `test_the_sixth_day_round_trips_and_the_fixture_outlives_the_lines` compares the two files for, rather than leaving the identity as intent. `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it and attributes the day's one chat miss (iteration 20, 159,350 tokens cold, a 0.1 s gap, gap KV peak 0.453 against the 0.60 gate, 15,363 tokens computed against 462,198 free blocks), so the condition is met on a third counted day. What the third day settles is the gap shape, and the node now derives it across all three fixtures rather than asserting it: the six qualifying events then on the record are 4 + 1 + 1 at 0.1–0.7 s, every one of those six spanned by a single status line — the seventh, 2026-10-15's, added below by #2852, is not (126.5 s over 14 lines) — while a day's own gap p50 — 100.1 s on 2026-09-29 — is a median over all its miss events and is not the qualifying events' gap. The accepted-loss ruling and its consequence are unchanged: owed-check ruled on 2026-10-06 (#2248's owed entry 3, recorded here by #2268) that a third qualifying day adds evidence, not stance, so the ruling's published consequence did not move and its evidence set was then the three extracts 2026-09-27, 2026-09-29 and 2026-10-01; the comment body itself, a write to a third-party repository, then belonged to #2250 (Alan), which is the ask the 2026-10-20 note at the end of this entry records as dropped. **2026-10-16: superseded on the evidence set by #2852** — 2026-10-15 is the **fourth counted day on which the condition is met**, so the set is now **the four extracts 2026-09-27, 2026-09-29, 2026-10-01 and 2026-10-15**, and the stance moved no further than it moved for the third: the evidence set grew and no comment had been written. **2026-11-01: superseded on the evidence set by #3692** — 2026-10-25 is the **fifth counted day on which the condition is met**, so the set is now **the five extracts 2026-09-27, 2026-09-29, 2026-10-01, 2026-10-15 and 2026-10-25**, and the stance moved no further than it moved for the third and the fourth: the evidence set grew, the day that grew it had both triggers firing, and no comment had been written. **2026-10-20: superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250** — posting the vLLM#57032 comment is **DROPPED, not owed**, so the four-extract evidence set this entry grew carries no upstream ask and no counted day re-opens one.
 - 2026-10-16 — **§10 counts 2026-10-15 (#2852).** The fourth counted day on which the accepted-loss filing condition is met, committed as `tests/fixtures/vllm_prefix_miss_2026-10-15.json` byte-identical to the daily job's copy (`test_the_seventh_extract_is_committed_and_matches_the_daily_job_byte_for_byte` compares the two files, because the 10-15 status lines leave the rotation with the same turn the 10-01 ones did). `test_the_seventh_day_figures_are_the_derivation` recomputes every figure in the new §10 paragraph from the fixture at the config gate, and `test_the_seventh_day_chat_miss_qualifies_on_the_measured_pool` attributes its one chat miss (`2026-10-15T15:54:11`, iteration 17, 112,821 tokens cold, 126.5 s over 14 status lines, gap KV peak 0.511 against the 0.60 gate, 408,165 tokens computed against 413,190 free blocks). Two things this day cost the page, both paid here rather than carried. **One:** it is the first counted day whose window contains no engine boot, so #2665's windowing leaves `pool_tokens` empty and the churn join unmeasured; the free-block figure is computed on 844,969 tokens read from the rotation's last boot before the window (`INFO 10-12 16:21:06`), the paragraph says so, and `_with_pool` pins it so `_gap_events` can walk a day `derive` cannot — at that pool the day's churn split is 44 of 109. The margin is thin and the entry says so: not-churned holds only above an 834,693-token pool (98.8% of the walk's need), so this is the weakest of the four qualifying days. **Two:** the gap-shape generalisation the 2026-10-05 entry above records as settled — every qualifying gap sub-second and spanned by a single status line — is true of the six events then on the record and false of this seventh, and no rail would have caught it, because the two asserts that held it walked only the three older fixtures. They now scan all four, the sub-second claim is scoped to the six it covers, and the derived negative half fails any future re-widening. Stance unchanged: a fourth qualifying day adds evidence, not stance, and no comment had been written. **2026-10-20: superseded on the escalation by Alan's hand ruling of 2026-10-12 on #2250** — posting the vLLM#57032 comment is **DROPPED, not owed**; this day's event stands in the four-extract evidence set as the weakest of the four and answers to no upstream ask.
 - 2026-10-21 — **stale, corrected.** §1's verbatim command line still carried `--language-model-only` and no `--limit-mm-per-prompt`, a month after `7c7d6d69` (2026-09-23) loaded the vision tower: the live argv now runs `--limit-mm-per-prompt {"image": 20, "video": 0, "audio": 0} --mm-processor-kwargs {"max_pixels": 2119936}`, because `agent-llm-primary.conf` sets `LANGUAGE_MODEL_ONLY=0` over the launcher's `1` — a knob §5's table did not list, and the only conf-set value that fails *silently* (a text-only engine that still passes the model-identity check), which is what §3.1's #1420 assert exists for. The §1 paragraph telling a human which `VLLM_VENV` to switch for a rollback named `.venvs/vllm-flash-next-main-0910`, and the launcher's fallback default names `.venvs/vllm-qwen38-flash-next`; both directories are gone (`ls -d ~/lloyd/.venvs/*vllm*` → `-djev`, `-flash-next-main`, `-flash-next-main-1012`, `-omni`), so the fallback this page relied on to turn a lost conf line into a quietly-wrong boot is now a dead venv check — #3136. §2.4's index map was still a three-card table from before `2e08e6d3`: index 2 given as `61:00.0` (it is `42:00.0`, and djev runs on it) serving "the llama.cpp secondary", off since 2026-09-20, no rows for indices 3 and 4, and both `/dev/nvidiaN` minors wrong — the one §2 table `tests/test_infrastructure_gpu_inventory.py` deliberately excludes from its harvester, hence #3137. Two §10 line citations are stale — `scripts/vllm_prefix_miss_window.py` for `derive`'s `by_kind` loop (really 287-291) and `:61-66` for `session_kind` (really 84-89) — and are **left as they stand**: both sit inside the 2026-09-25 counted reading, which `test_the_ninth_extract_moves_no_graded_reading` pins by sha256 pending a round that re-derives every figure in it, and `test_criterion_a_names_the_population_it_counted` requires the classifier be cited **by line**, so the symbol-for-number substitution this page's §8 lesson would otherwise recommend fails both rails. #3139 carries the corrected numbers and the two rails a fix has to satisfy; the test file's copy of the same range is in the same item, and the `nvidia-power-limit.service` `Documentation=` path that has never resolved is #3138. What held, re-measured rather than assumed: the five clamp values and their ranges against the unit's environment, the 844,969-token fp8 pool and 4096 batched tokens, `DEFAULT_MM_MAX_POS: 262144`, YaRN off with `context_length` absent, the `:8096` boot-probe route (`/v1/tokenize` 404 on the live engine), `PREFIX_CACHE_TOK_S = 6000.0`, the ram-gate floors and their clone in `round restart --only`, `app/prefix_miss.py`'s six trigger constants, `app/engine_pressure.py`'s 300 s ring, the `app/routers/sessions.py` / `app/routers/messages.py` / `app/sessions_io.py` cites, `app/engine_pressure.py` in §6.2's writer list, and the argv's `--scheduling-policy priority --async-scheduling --enable-prefix-caching`. Filed #3136 #3137 #3138 #3139.
+- 2026-11-21 — **stale, corrected; the KV account held.** Re-measured against the live `-1110` engine and the tree. §1's verbatim command line was missing `--long-prefill-token-threshold 2048` — the third review in a row to find a flag absent from a hand-copied block (#4448 files the rail: the launcher's `DRY_RUN` argv is already captured by `tests/test_flash_next_launcher.py` and nothing compares it to §1). §1 also told a rollback reader the 09-17 build is the **only** revert target; the conf names `-main-1012` **first** (needs `KV_CACHE_MEMORY_BYTES` back to 15032385536) with `-main` second, and since #3136 (`d2847a34`) the launcher's own `VLLM_VENV` fallback is `-main`, not the deleted BF16 worker build — §1.1 and §5's `VLLM_VENV` row both still said the fallback names a deleted venv. The conf's second arm is priced for nothing, which #4449 files: reverting to `-main` at today's 14.5 GiB has never been measured, and the fallback lands there. Line cites re-pointed: bench `wait_idle` :128→:136, `PRIORITY` :61→:69, `_observer_priority` :252→call 432 / def 259. §10's draft-group note moved with the build — in `-1110` `_warn_if_unannotated_eagle_mamba` is in `v1/core/kv_cache_planning.py` (def 1068, warning 1091), not `kv_cache_utils.py`. What held, re-measured not assumed: `cache_config_info` fp8, `block_size`/`mamba_block_size` 3200, `num_gpu_blocks` 343, `kv_cache_max_concurrency` 3.2056, `kv_cache_memory_bytes` 15,569,256,448 = 14.5 GiB and `kv_cache_size_tokens` **840,330** — already carried in §3's table and §10's three-sizes paragraph, so every 844,969 on the page is dated to a build that measured it and none reads as current; `workers.slots` 6, `workers.kv_gate.max_kv_usage` 0.60, `expect_kv_pool_tokens_min` 600000, `expect_kv_cache_dtype` fp8, `context_length` 262144 with YaRN off, the 275 W / 450 W clamps, the five `LONG_LIVED = True` sources §6.3 lists (arch_review, autocode, autotriage, deep_research, owed_check), `engine_pressure`'s 300 s ring, the `LONG_PREFILL_TOKEN_THRESHOLD`/`MAX_NUM_BATCHED_TOKENS` conf pair against the live argv, and §11's worker-kwargs finding — `workers/sources/_common.py:784` still cites this page's "Found on the way" for the reason it passes only the compaction fractions. Filed #4448 #4449.
