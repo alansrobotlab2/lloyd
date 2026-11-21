@@ -7,11 +7,22 @@ Both quoted the 2026-09-30 baseline — an effect rate printed as `30%` and a ra
 count — as the number a reader should re-run and compare against. That baseline
 cannot be reproduced: its targets were mined from the refusal's own prose, so every
 `tool_sandbox` and `grant` refusal came back with an empty target set and its `0.0`
-was an unmeasured pass, and the September corpus it counted is no longer in
-readable storage. Nothing pinned any of it — `git grep` for the figures found them
+was an unmeasured pass, and the instrument that measures it now resolves operands the
+prose miner could not, so a re-run answers a different question. Nothing pinned any of
+it — `git grep` for the figures found them
 in the two docs and nowhere else — so doc and instrument disagreed with no node
 reddening (#3565's fix commit booked that debt at `eval/refusal_detour_baseline.py:38-40`
 and it went unpaid).
+
+That last clause of the reason was itself a false claim, and #4277 is the file that keeps
+it from coming back. The two docs said the September corpus "has aged out of readable
+storage"; it had not — 4,013 of its sessions are in the store as `.json.gz`, which the
+retention sweep never deletes, and what hid them was the scanner's own `*.json` glob, now
+crossed by `--include-gz`. A retirement whose second reason is a myth is a retirement a
+future round will 'correct' back into a re-run, so `FALSE_CORPUS_CLAIMS` below names the
+myth's wording and the nodes below demand the true cause in its place — and demand that
+the method-matched before/after pair the corrected cause makes possible is published with
+its own labels, because the reason the archive matters is exactly that pair.
 
 What this file holds, therefore, is the **shape** of a refusal figure, never its
 values. Every rate printed in a refusal passage must have a measurable count on the
@@ -33,6 +44,14 @@ came from — a table with a command and a scan date but no committed witness is
 The live-store block beside it stays unpinned on values, and must: no rows file was ever
 written for it, so there is nothing to recompute it from, and the citation that covers the
 first block must not be allowed to reach it.
+
+A third block, added by #4277, splits the two cases: it is a reading of the store, but of
+the *archived* store over a closed window, and an archived session is never rewritten or
+deleted, so the September figures cannot age. Its rates are therefore pinned like the
+2026-11-04 block's — by value, not just by shape — and the post-#3774 row printed under it
+is pinned like the live block, because that store is still growing. Which of the two a row
+belongs to is decided by the label the row itself carries (`method-matched` against `NOT
+method-matched`), so a row cannot escape its own doctrine by moving.
 
 Run just this file:
 
@@ -70,6 +89,47 @@ RERUN_AS_JUDGEMENT = (
     "Re-run it to see whether the paragraph moved that",
     "judged by that number moving on a re-run",
 )
+
+#: The false retirement cause, in the exact wording each file carried until #4277. The
+#: corpus had not aged out: 4,013 sessions from 2026-09 sit in the store as `.json.gz`
+#: (oldest `20260909_153801_autonomy_2cf3`), `scripts/groundskeeper/retention-sweep.py`
+#: gzips an aged transcript and never deletes it, and the thing that hid them was the
+#: scanner's `*.json` glob — since #4277, `--include-gz`. Both files now say that; these
+#: strings are kept out of the docs so a 'helpful' rewrite cannot restore the myth in
+#: the present perfect. The corrected sentences say the corpus `had not aged out`, which
+#: is why the check is on this wording and not on the words 'aged out'.
+FALSE_CORPUS_CLAIMS = (
+    "has aged out of readable storage",
+    "the corpus it counted has aged out",
+    "no longer in readable storage",
+)
+
+#: The two anchors of the block #4277 added to harness.md: the method-matched pair across
+#: the paragraph's ship commit, and the live-store row printed under it. A node that
+#: checks a label has to know which block the label is supposed to be inside, and the
+#: section is long enough that searching the whole page would let a row labelled one way
+#: answer a check written for the other.
+PAIR_BLOCK_START = "**The pair the paragraph was owed"
+POST_ROW_BLOCK_START = "**The same instrument on the post-#3774 store"
+
+#: Framings that would turn a pair whose after-side is *worse* into evidence of success.
+#: The rate is a detour rate: higher is worse, so the block's own arithmetic is pinned by
+#: `test_the_pair_block_says_the_rate_did_not_improve_and_never_calls_it_a_win` and these
+#: phrases are the prose that would contradict it.
+WIN_FRAMINGS = (
+    "the paragraph worked",
+    "compliance improved",
+    "moved in the right direction",
+    "the pair is a win",
+    "detours fell",
+    "a clear improvement",
+)
+
+#: Rate-bearing refusal lines the shape rule inspected before #4277 (measured over the
+#: two files at `26814c9b`: 8 rows of the published block plus one prose line). The floor
+#: in `test_the_shape_rule_holds_over_both_refusal_passages` is green by count alone, so
+#: without this baseline a page could satisfy it by saying less, not more.
+SHAPE_CHECKED_BEFORE_4277 = 9
 
 # ---------------------------------------------------------------------------
 # the rate shape, and the refusal passages it is checked inside
@@ -183,23 +243,56 @@ def table_rows(lines: list[str]) -> list[list[str]]:
     return rows
 
 
+def labelled_rows(lines: list[str], label: str, guard: str) -> list[list[str]]:
+    """Table rows whose first cell carries both `label` and the quoted `guard`.
+
+    A label belongs to one block: the method-matched pair and the NOT-method-matched row
+    sit in the same section, and a check that reads the whole page cannot tell a missing
+    label from a label on the wrong row — so callers pass a block, not the section.
+    """
+    return [cells for cells in table_rows(lines)
+            if label in cells[0] and f"`{guard}`" in cells[0]]
+
+
+def rates_over(row: list[str]) -> list[tuple[int, int]]:
+    """Each `(numerator/denominator, 0.rate)` pair a row prints, left to right.
+
+    The same-cell regex keeps the pairing honest: `83/136 (0.61)` yields (83, 136) with
+    0.61 beside it, so a node can check the printed rate against its own denominator
+    instead of trusting either half.
+    """
+    out: list[tuple[int, int]] = []
+    for cell in row:
+        m = re.search(r"\b(\d[\d,]*)\s*/\s*(\d[\d,]*)\b", cell)
+        if m:
+            out.append((int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # clause 1 — CLAUDE.md retires the baseline and says why
 # ---------------------------------------------------------------------------
 
 def test_claudes_refusal_passage_retires_the_baseline_and_names_its_cause() -> None:
     """CLAUDE.md prints neither retired figure, marks the 2026-09-30 baseline RETIRED
-    with both causes, and names the instrument a reader would actually run.
+    with the true causes, and names the instrument a reader would actually run.
 
-    The corpus cause is a number this node checks because it is checkable and will
-    not drift: 38 of the 2026-09 `.json` sessions survive in the session store and
-    the oldest is `20260922_201704`. Both are stated in the passage, and the scanner
-    globs `*.json` only — 8,324 `.json.gz` sessions are invisible to it — which is
-    what makes "re-run it and compare" impossible rather than merely stale.
+    Three of these tokens used to certify the *false* corpus cause — `38`,
+    `20260922_201704`, `gz` — and all three survive the correction, now as the dated
+    plain-store count that was mistaken for a loss rather than as proof that September
+    was gone: 38 plain `.json` sessions from 2026-09 were left when the claim was written
+    on 2026-11-04 and 64 by 2026-11-21, oldest plain `20260922_201704`, while 4,013 of
+    that month's sessions are `.json.gz` (oldest `20260909_153801_autonomy_2cf3`). The
+    month count is a closed window, so it cannot drift; the plain count can, which is why
+    the passage dates it. What the node newly demands is the mechanism — the sweep never
+    deletes a `.gz`, and `--include-gz` reads it — because a reader who is told only that
+    a corpus is thin will go looking for a backup.
     """
     passage = "\n".join(claude_refusal_lines())
     for retired in RETIRED_STRINGS:
         assert retired not in passage, f"{retired!r} is still printed in CLAUDE.md:\n{passage}"
+    for claim in FALSE_CORPUS_CLAIMS:
+        assert claim not in passage, f"the false corpus cause is back in CLAUDE.md: {claim!r}"
     assert "RETIRED" in passage, "the 2026-09-30 baseline is not marked retired"
     assert "prose" in passage, "the retired-with-cause line must name the prose-mined targets"
     assert "eval/refusal_detour_baseline.py" in passage
@@ -207,7 +300,18 @@ def test_claudes_refusal_passage_retires_the_baseline_and_names_its_cause() -> N
         "the corpus cause has to be stated as a count and an oldest session id, or a "
         "reader cannot tell aged-out from never-measured"
     )
-    assert "gz" in passage, "the passage must say the gzipped sessions are not scanned"
+    assert "gz" in passage, "the passage must say how the gzipped sessions are read"
+    assert "4,013" in passage and "20260909_153801_autonomy_2cf3" in passage, (
+        "the correction has to be as countable as the claim it replaces"
+    )
+    assert "--include-gz" in passage, "the passage must name the flag that reads the archive"
+    assert "never deletes" in passage, (
+        "without the sweep's non-deletion the archive is a backup, not readable storage"
+    )
+    assert "287 measurable" in passage and "306" in passage, (
+        "the surviving reason has to be the one that is checkable: the same 306 "
+        "tool_sandbox refusals now yield 287 measurable rows"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +901,227 @@ def test_the_witness_citation_reddens_when_the_path_or_its_size_is_dropped() -> 
         "the shipped section does not pass the rules the two splices above fail, so the "
         "control is proving nothing"
     )
+
+
+# ---------------------------------------------------------------------------
+# clause 2 (#4277) — the retirement names the archive as the cause, not the calendar
+# ---------------------------------------------------------------------------
+
+def test_harness_names_the_archive_as_the_era_that_survived_and_the_glob_that_hid_it() -> None:
+    """harness.md's retirement says the September era survives gzipped, and says it in
+    numbers a reader can re-count.
+
+    The node exists because the page asserted the opposite for six weeks: 'the corpus it
+    counted has aged out of readable storage — the session store holds about 30 days
+    uncompressed'. Measured over the whole store on 2026-11-21, 4,013 sessions from
+    2026-09 are `.json.gz` (oldest `20260909_153801_autonomy_2cf3`) against 64 plain
+    `.json`, and `scripts/groundskeeper/retention-sweep.py` gzips an aged transcript and
+    never deletes it. So the checks here are the count, the oldest archived id, the sweep's
+    non-deletion, the flag that reads it, and the thing that actually hid the era — this
+    scanner's `*.json` glob — plus the surviving reason stated as a count: those same 306
+    `tool_sandbox` refusals now yield 287 measurable rows.
+
+    The plain-store count is checked only as a *dated* pair of readings (38 on 2026-11-04,
+    64 on 2026-11-21). It is the one figure in this passage that moves — the sweep runs
+    daily and a restore can add files back — and a node that pinned it would go red on an
+    unrelated day and teach a reader to ignore the node.
+    """
+    joined = "\n".join(harness_refusal_lines())
+    for claim in FALSE_CORPUS_CLAIMS:
+        assert claim not in joined, f"the false corpus cause is back in harness.md: {claim!r}"
+    retired_at = joined.find("RETIRED")
+    current_at = joined.find("What the fixed instrument prints")
+    assert 0 <= retired_at < current_at, "the retirement passage moved"
+    retirement = joined[retired_at:current_at]
+    for token in ("4,013", "20260909_153801_autonomy_2cf3", "never deletes",
+                  "--include-gz", "*.json", "retention-sweep.py", "false"):
+        assert token in retirement, f"the corrected cause lost {token!r}: {retirement}"
+    assert "287 measurable" in retirement and "306" in retirement, (
+        "reason #1 has to stand as a count: the same 306 tool_sandbox refusals now yield "
+        "287 measurable rows, which is what makes the old reading unreproducible"
+    )
+    assert "2026-11-04" in retirement and "2026-11-21" in retirement, (
+        "the plain-store count is only honest dated, because it moves"
+    )
+    assert "38" in retirement and "64" in retirement, \
+        "both dated plain-store readings belong to the correction"
+
+
+# ---------------------------------------------------------------------------
+# clause 4 (#4277) — the method-matched pair, published with its labels
+# ---------------------------------------------------------------------------
+
+def _blocks_around_the_pair() -> tuple[list[str], list[str]]:
+    """(the pair block, the block printed under it) from harness.md's refusal section."""
+    section = harness_refusal_lines()
+    pair_at = next((i for i, line in enumerate(section) if PAIR_BLOCK_START in line), None)
+    post_at = next((i for i, line in enumerate(section) if POST_ROW_BLOCK_START in line), None)
+    assert pair_at is not None and post_at is not None and post_at > pair_at, (
+        "the pair block and the post-#3774 block must both stand, in that order"
+    )
+    return section[pair_at:post_at], section[post_at:]
+
+
+def test_the_method_matched_pair_is_published_across_the_ship_commit() -> None:
+    """harness.md prints `safety` on each side of the paragraph's ship commit, both sides
+    gz-decoded, each rate beside its measurable count, window and scan date.
+
+    Values are pinned here, against this file's own default, because this block is a
+    reading of the *archived* store over a closed window: an archived session is named by
+    its date and never rewritten or deleted, so `30/50 (0.6)` is what re-running the named
+    command over 2026-09-22..29 will print for as long as the store exists. That is the
+    same property the 2026-11-04 block is pinned for; the block under it, a live store
+    still growing, stays pinned on shape alone.
+
+    The labels are the load-bearing half. A pair is only evidence if both sides were
+    measured the same way, and the only thing saying whether they were is the word
+    `method-matched` inside the row — so the node demands the word, the flag that makes it
+    true (`--include-gz`), the windows it makes readable, and the ship commit the pair is
+    cut at (`3baf94ed`, 2026-09-30). A future round that re-published one side off the
+    plain store would have to either keep the label false or redden this node.
+    """
+    pair, _post = _blocks_around_the_pair()
+    head = "\n".join(pair)
+    for token in ("3baf94ed", "--include-gz", "window 3", "2026-11-21", "method-matched"):
+        assert token in head, f"the pair block lost {token!r}"
+    assert "NOT method-matched" not in head, \
+        "the NOT label belongs to the block below, not to the pair"
+
+    rows = labelled_rows(pair, "**method-matched**", "safety")
+    assert len(rows) == 2, f"expected a before row and an after row, got {len(rows)}: {rows}"
+    before, after = (rows[0], rows[1]) if "before" in rows[0][0] else (rows[1], rows[0])
+    assert "before" in before[0] and "after" in after[0], [before[0], after[0]]
+    assert "2026-09-22..29" in before[0] and "3,513" in before[0], before[0]
+    assert "2026-09-30..10-06" in after[0] and "4,346" in after[0], after[0]
+    published = {
+        "before": ("65", "50 measurable", (30, 50, "0.6"), (16, 50, "0.32")),
+        "after": ("66", "54 measurable", (35, 54, "0.648"), (19, 54, "0.352")),
+    }
+    for name, row in (("before", before), ("after", after)):
+        refusals, measurable, *rates = published[name]
+        assert row[1] == refusals, f"{name}: refusals printed {row[1]!r}, expected {refusals}"
+        assert row[2] == measurable, f"{name}: measurable printed {row[2]!r}"
+        assert len(row) == 5, f"{name}: a rate row missing an arm: {row}"
+        for (num, den, rate), cell in zip(rates, row[3:]):
+            assert cell == f"{num}/{den} ({rate})", f"{name}: printed {cell!r}, expected {num}/{den} ({rate})"
+            assert num / den == pytest.approx(float(rate), abs=5e-4), \
+                f"{name}: {num}/{den} is not {rate} — a rate disagreeing with its own denominator"
+    sandbox = labelled_rows(pair, "same two scans", "tool_sandbox")
+    assert len(sandbox) == 2, f"the archived era's measurable rows are not both printed: {sandbox}"
+    for row in sandbox:
+        joined = " | ".join(row)
+        assert MEASURABLE.search(joined) and OVER.search(joined) and RATE.search(joined), row
+
+
+def test_the_post_3774_row_is_published_and_labelled_not_method_matched() -> None:
+    """The block under the pair adds the post-#3774 reading and says plainly that it is
+    not a third side of the comparison.
+
+    It cannot be: it reads plain `.json` (all traffic from 2026-11-05 on is plain) over a
+    window three times longer than either side of the pair. So the row's label, its
+    `--since 2026-11-05`, its scan date and its storage form are all pinned — while its
+    values are not, because that store is still being written and its counts move (the
+    2026-11-04 triage measured +1 refusal in three hours on the same command). The shape
+    rule that holds every other rate to its denominator applies to it in full, and this
+    node re-asserts it so the row cannot escape that check by being labelled something else.
+    """
+    _pair, post = _blocks_around_the_pair()
+    head = "\n".join(post)
+    assert "NOT method-matched" in head, "the post-#3774 row lost its label"
+    assert "--since 2026-11-05" in head, "the row lost the window it was measured over"
+    assert "2026-11-18" in head, "the row lost its scan date, and its counts move"
+    assert "plain `*.json`" in head, "the row lost the storage form that makes it not-matched"
+    rows = labelled_rows(post, "NOT method-matched", "safety")
+    assert len(rows) == 1, f"expected exactly one NOT-method-matched safety row: {rows}"
+    joined = " | ".join(rows[0])
+    assert "**method-matched**" not in joined, "the row carries both labels at once"
+    assert MEASURABLE.search(joined), f"row prints no measurable count: {joined}"
+    assert OVER.search(joined) and RATE.search(joined), \
+        f"row prints no rate over its denominator: {joined}"
+    assert "3,639" in rows[0][0], f"the row must name how many sessions it scanned: {rows[0][0]}"
+
+
+# ---------------------------------------------------------------------------
+# clause 5 (#4277) — the pair is not sold as a win, and the owed-rerun sentence is gone
+# ---------------------------------------------------------------------------
+
+def test_the_pair_block_says_the_rate_did_not_improve_and_never_calls_it_a_win() -> None:
+    """The block states that the detour rate did not improve after the paragraph, and the
+    two printed rates have to agree with that sentence.
+
+    This is the arithmetic behind the item's clause, not its prose: same-target went
+    30/50 (0.6) before to 35/54 (0.648) after, same-effect 16/50 (0.32) to 19/54 (0.352),
+    and a *higher* detour rate is a refused call followed by a look-alike retry more often.
+    So the node demands the after-side ratio is not lower on either arm — if someone
+    re-publishes this pair off a window where the rate genuinely fell, the sentence 'did
+    not improve' becomes false and this node reddens with it, instead of the page quietly
+    turning into a claim that the paragraph worked. The block must also say out loud that
+    it is not a win, and must not pick any of the framings that would make it one.
+
+    It also holds the deleted instruction down: 'none is full yet: the owed re-run over a
+    week of post-paragraph traffic publishes the first figure worth comparing' sent a reader
+    off waiting for a number the archive already held. With the pair published, waiting for
+    it is a fiction, so the sentence must not return.
+    """
+    pair, post = _blocks_around_the_pair()
+    head = "\n".join(pair)
+    assert "did not improve" in head, "the block no longer says the rate did not improve"
+    assert "not a win" in head, "the block must say the pair is not a win"
+    section = "\n".join(harness_refusal_lines())
+    for framing in WIN_FRAMINGS:
+        assert framing not in section, f"the section frames the pair as a win: {framing!r}"
+    rows = labelled_rows(pair, "**method-matched**", "safety")
+    before, after = (rows[0], rows[1]) if "before" in rows[0][0] else (rows[1], rows[0])
+    before_rates, after_rates = rates_over(before), rates_over(after)
+    assert len(before_rates) == len(after_rates) == 2, (before_rates, after_rates)
+    for arm, (bn, bd), (an, ad) in zip(("same-target", "same-effect"), before_rates, after_rates):
+        assert an / ad >= bn / bd, (
+            f"{arm} improved ({bn}/{bd} -> {an}/{ad}): 'did not improve' is now false, so "
+            "the sentence and the block's own framing have to be rewritten together"
+        )
+    for dead in ("none is full yet", "first figure worth comparing"):
+        assert dead not in section, f"the owed-rerun instruction is back: {dead!r}"
+    assert post, "the post-#3774 block is part of this argument and has to stand with it"
+
+
+# ---------------------------------------------------------------------------
+# clause 6 (#4277) — the shape rule is shown to inspect the lines this change added
+# ---------------------------------------------------------------------------
+
+def test_the_shape_rule_actually_inspects_the_lines_4277_added() -> None:
+    """The `checked >= 8` floor is green by count, so it has to be shown to be growing.
+
+    SM_20261105_010319's own advisory measured 0 rate-bearing lines inside the extracted
+    CLAUDE.md passage, which means that floor was satisfied in the round that added it
+    entirely by harness.md's table rows — a page could satisfy `>= 8` by printing *less*,
+    and the node would not notice. So the baseline is recorded at 9 (the figure over the
+    two files at `26814c9b`: 8 table rows plus one prose line, counted with the same
+    regexes this file ships), and this node demands the count is now above it AND that the
+    surplus sits inside the block #4277 added, which did not exist when the floor was
+    written. Five is the floor there because the four pair rows and the post-#3774 row
+    alone supply five rate-bearing lines; the prose lines in that block are surplus this
+    node does not need.
+    """
+    harness = harness_refusal_lines()
+    claude = claude_refusal_lines()
+    checked = [line for line in harness + claude if RATE.search(line)]
+    assert len(checked) > SHAPE_CHECKED_BEFORE_4277, (
+        f"the rule inspected {len(checked)} rate-bearing refusal line(s); the pre-#4277 "
+        f"count was {SHAPE_CHECKED_BEFORE_4277}. The new rows are outside what this file "
+        "extracts, so the floor is green by absence again"
+    )
+    pair, post = _blocks_around_the_pair()
+    tail_checked = [line for line in pair + post if RATE.search(line)]
+    assert len(tail_checked) >= 5, (
+        f"only {len(tail_checked)} rate-bearing lines inside the published pair and the row "
+        "under it: the shape rule is not reaching the lines it was extended for"
+    )
+    assert any("method-matched" in line for line in tail_checked), (
+        "none of the inspected lines is a labelled row, so the count could be met by "
+        "unrelated prose"
+    )
+    assert bare_rate_lines(harness) == [] and bare_rate_lines(claude) == []
+    assert len(checked) >= 8, "the floor this node supersedes as evidence still holds"
 
 
 if __name__ == "__main__":

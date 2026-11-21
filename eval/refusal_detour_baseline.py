@@ -52,12 +52,21 @@ rendering of them. The 2026-10+ window is therefore quoted from
 `eval/measurements/refusal-detours/2026-11-04.rows.jsonl` (450 rows).
 
     python eval/refusal_detour_baseline.py [--sessions-dir DIR] [--window 3]
-        [--since 2026-09-01] [--out eval/measurements/refusal-detours/<date>.json]
+        [--since 2026-09-01] [--include-gz] [--out eval/measurements/refusal-detours/<date>.json]
         [--no-devset]
+
+**What a scan covers is a property of the flag, not of the calendar.** The store keeps a
+session as `<id>.json` until the retention sweep ages it out of that form, then renames it
+`<id>.json.gz` and never deletes it, so `--include-gz` is the difference between scanning
+2026-09 and being told 2026-09 is empty: 3,513 of its September 22-29 sessions sit in the
+archive and 0 in the plain glob (measured 2026-11-21). The default stays the plain glob so
+a figure already quoted against the 2026-10+ corpus still names the same scan, and every
+summary records `include_gz` so a published rate says which storage it came from.
 """
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import re
@@ -73,6 +82,52 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 DENIED = "Tool call denied: "
 DEVSET_NAME = "refusal_detour_devset_2026-10.jsonl"
 DEVSET_PATH = Path(__file__).resolve().parent / DEVSET_NAME
+
+#: The suffix the retention sweep renames an aged transcript to. It never deletes one:
+#: `scripts/groundskeeper/retention-sweep.py` gzips a session past its age window and
+#: keeps the `.gz` ("never delete … the `.json.gz` keeps them recoverable"), so the
+#: archived era is readable storage, not a backup that may or may not exist.
+GZ_SUFFIX = ".json.gz"
+
+
+def session_id_of(name: str) -> str:
+    """The session id a stored transcript file is named for, either suffix stripped.
+
+    `Path("20260925_x.json.gz").stem` is `20260925_x.json`, so a `.stem` read off an
+    archived file carries a trailing `.json`: both the `--since` comparison and the
+    session-id fallback go through here, or an archived row is dated against a name no
+    plain file has and its `session` field ends in `.json`.
+    """
+    for suffix in (GZ_SUFFIX, ".json"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def read_session_bytes(path: Path) -> bytes:
+    """A stored transcript's own bytes, with a `.json.gz` decoded in memory.
+
+    In memory on purpose: the store held 15,710 `.json.gz` sessions on 2026-11-21, and a
+    scan that unpacked them to disk would turn the instrument that only reads the store
+    into a writer into it.
+    """
+    if path.name.endswith(GZ_SUFFIX):
+        with gzip.open(path, "rb") as fh:
+            return fh.read()
+    return path.read_bytes()
+
+
+def merge_session_files(plain: list[Path], archived: list[Path]) -> list[Path]:
+    """Plain sessions plus the archived ones, minus an archived copy of a plain session.
+
+    One session can only be counted once per scan, and `summarize()` has no way to tell
+    a doubled row from a real second refusal. No session is in both forms on this box
+    today — 0 of 25,764 stored names share a stem across the two suffixes (measured
+    2026-11-21) — because the sweep renames rather than copies. The merge is what keeps
+    `--include-gz` from silently doubling that day changes.
+    """
+    seen = {session_id_of(p.name) for p in plain}
+    return sorted(list(plain) + [p for p in archived if session_id_of(p.name) not in seen])
 
 #: Guard classes, keyed by the prefix the emitting rail actually writes. A class
 #: must be a stable slug: the pre-#3565 fallback returned the first 40 characters of
@@ -647,14 +702,20 @@ _ROW_KEYS = ("session", "session_class", "at", "guard", "label", "refused_tool",
 
 
 def scan_session(path: Path, *, window: int) -> list[dict]:
+    """Every refusal row in one stored transcript, plain or `.json.gz`.
+
+    The gz branch is what makes a September session scannable at all (#4277); a scan
+    that unpacked the archive to a temp file first would be a write into the store it is
+    only ever supposed to read.
+    """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_session_bytes(path).decode("utf-8"))
     except Exception:  # noqa: BLE001
         return []
     msgs = data.get("messages") if isinstance(data, dict) else None
     if not isinstance(msgs, list):
         return []
-    sid = str(data.get("session_id") or path.stem)
+    sid = str(data.get("session_id") or session_id_of(path.name))
     cls = str(data.get("platform") or "")
     cls = "background" if cls in ("worker", "autonomy") else _session_class(sid)
     index = _call_index(msgs)
@@ -787,6 +848,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--rows", action="store_true", help="also write the per-refusal rows beside the summary")
     ap.add_argument("--no-devset", action="store_true", help="skip scoring the hand-labelled dev set")
+    ap.add_argument("--include-gz", action="store_true",
+                    help="also scan *.json.gz sessions, decoded in memory. Without it the "
+                         "archived era is invisible: the glob is *.json, so a September with "
+                         "3,513 gzipped sessions scans as a September with none (#4277).")
     args = ap.parse_args(argv)
     if args.sessions_dir:
         sessions = Path(args.sessions_dir)
@@ -794,14 +859,21 @@ def main(argv: list[str] | None = None) -> int:
         from app.paths import SESSIONS_DIR
         sessions = SESSIONS_DIR
     rows: list[dict] = []
-    files = sorted(sessions.glob("*.json"))
+    plain = sorted(sessions.glob("*.json"))
+    # The default glob stays `*.json` alone: `--include-gz` is opt-in so that a run
+    # quoted against the 2026-10+ corpus keeps meaning the same thing, and a reader can
+    # tell from the flag which storage a figure was computed over.
+    files = (merge_session_files(plain, sorted(sessions.glob(f"*{GZ_SUFFIX}")))
+             if args.include_gz else plain)
     if args.since:
         stamp = args.since.replace("-", "")
-        files = [f for f in files if not (f.stem[:8].isdigit() and f.stem[:8] < stamp)]
+        files = [f for f in files if not (session_id_of(f.name)[:8].isdigit()
+                                          and session_id_of(f.name)[:8] < stamp)]
     for f in files:
         rows.extend(scan_session(f, window=args.window))
     summary = {"measured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                "sessions_dir": str(sessions), "sessions_scanned": len(files),
+               "include_gz": bool(args.include_gz),
                "window": args.window, **summarize(rows)}
     if not args.no_devset:
         cases = load_devset()

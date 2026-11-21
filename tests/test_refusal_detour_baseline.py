@@ -30,7 +30,20 @@ artefact are re-read from disk rather than taken from an in-memory dict — the 
 is what every published per-guard figure was computed from. And the session store's
 bytes themselves are crossed by a node that needs no store, reading the committed
 envelopes instead.
+
+A fourth boundary is the store's *archival* form, added by #4277. The retention sweep
+gizes a session past its age window and never deletes the `.gz`
+(`scripts/groundskeeper/retention-sweep.py`), so 15,710 stored sessions — measured
+2026-11-21 — were readable bytes the scanner's `*.json` glob never opened, and that is
+how a September holding 3,513 archived sessions got published as a September that had
+aged out of existence. `--include-gz` crosses that boundary in memory, and its nodes
+demand that the same refusals measure identically out of either container, that a
+`.json.gz` is not even handed to the scanner without the flag, and that naming
+`--sessions-dir` still bypasses the `app.paths` data-root anchor instead of re-pointing
+it — the 2026-09-22 rule that a worktree must not read the live data root lives in
+`app.paths`, and the scanner must not grow its own copy of it.
 """
+import gzip
 import importlib.util
 import json
 import re
@@ -1057,6 +1070,180 @@ def test_the_synthesis_note_reproduces_from_the_committed_rows_file():
     assert path.is_file(), f"the reproducing block cites {path.name}, which is not committed"
     assert f"{len(_rows_of(path))} rows" in block, \
         f"the reproducing block does not state the {len(_rows_of(path))} rows it reproduces"
+
+
+# ---------------- clause 1 (#4277): the archived era is scannable, in memory --------- #
+
+def write_store(store: Path, *, gzipped: bool = False) -> Path:
+    """Write every fixture session into `store`, gzipped when asked, and return it.
+
+    The payload is byte-for-byte what `rows_for` writes; only the container and the
+    suffix differ. That is what turns 'these two scans agree' into a test of the decode
+    rather than a test of the corpus.
+    """
+    store.mkdir(parents=True, exist_ok=True)
+    for sid, sess in FIXTURE_SESSIONS.items():
+        payload = json.dumps({"session_id": sid, "messages": sess["messages"]})
+        if gzipped:
+            (store / f"{sid}{rdb.GZ_SUFFIX}").write_bytes(gzip.compress(payload.encode()))
+        else:
+            (store / f"{sid}.json").write_text(payload)
+    return store
+
+
+def run_cli(args: list[str], out: Path, *flags: str) -> dict:
+    """One CLI run through the shipped `main`; the summary is re-read off disk."""
+    assert rdb.main([*args, "--out", str(out), "--no-devset", *flags]) == 0
+    return json.loads(out.read_text())
+
+
+def test_a_gzipped_session_scans_to_exactly_the_plain_sessions_figures(tmp_path):
+    """`--include-gz` decodes the archive; it does not change what a refusal means.
+
+    The corpus is the 8 fixture sessions — 8 refusals, 5 of them measurable, 2
+    same-target and 2 same-effect across 5 guard keys — written twice, once as `.json`
+    and once as `.json.gz`. Every per-guard count must come back identical: a scan that
+    quietly dropped the archived rows, or read a session twice, still prints a plausible
+    rate, and it is exactly that reading which made the September corpus look lost. The
+    published before/after pair in `architecture/harness.md` is now computed over
+    `.json.gz` files, so this equality is what its figures rest on.
+    """
+    plain = run_cli(["--sessions-dir", str(write_store(tmp_path / "plain"))],
+                    tmp_path / "plain.json")
+    assert plain["include_gz"] is False
+    assert plain["sessions_scanned"] == len(FIXTURE_SESSIONS)
+    assert plain["all"]["refusals"] == 8 and plain["all"]["measurable"] == 5, plain["all"]
+    assert len(plain["by_guard"]) >= 5, "a one-guard corpus cannot show a per-guard count moving"
+
+    archived = run_cli(["--sessions-dir", str(write_store(tmp_path / "archived", gzipped=True))],
+                       tmp_path / "archived.json", "--include-gz")
+    assert archived["include_gz"] is True
+    assert archived["sessions_scanned"] == len(FIXTURE_SESSIONS)
+    assert archived["by_guard"] == plain["by_guard"], (
+        "the same 8 refusals measured differently out of the archive: "
+        f"{archived['by_guard']} vs {plain['by_guard']}"
+    )
+    assert archived["all"] == plain["all"]
+    assert archived["retry_tools"] == plain["retry_tools"]
+
+    both = write_store(write_store(tmp_path / "both", gzipped=True))
+    merged = run_cli(["--sessions-dir", str(both)], tmp_path / "both.json", "--include-gz")
+    assert merged["sessions_scanned"] == len(FIXTURE_SESSIONS), (
+        "a session present in both containers was scanned twice, doubling every count"
+    )
+    assert merged["by_guard"] == plain["by_guard"]
+
+
+def test_a_json_gz_file_is_not_even_handed_to_the_scanner_without_the_flag(tmp_path, monkeypatch):
+    """Default behaviour is unchanged, and it is unchanged by the glob, not by a decode.
+
+    3,513 of the 2026-09-22..29 sessions exist only as `.json.gz`; before #4277 a scan of
+    that window reported 0 sessions scanned and 0 refusals, which is the reading that
+    produced the false 'aged out of readable storage' cause. `scan_session` is the only
+    reader in the file, so a scan that never names a `.json.gz` path is the strongest
+    form of 'never opened': the archived bytes are not read, not read-and-discarded.
+    """
+    store = write_store(tmp_path / "archived", gzipped=True)
+    seen: list[str] = []
+    monkeypatch.setattr(rdb, "scan_session",
+                        lambda p, *, window: (seen.append(p.name), [])[1])
+
+    off = run_cli(["--sessions-dir", str(store)], tmp_path / "off.json")
+    assert seen == [], f"without --include-gz the scanner opened: {seen}"
+    assert off["sessions_scanned"] == 0 and off["all"]["refusals"] == 0, off["all"]
+
+    seen.clear()
+    on = run_cli(["--sessions-dir", str(store)], tmp_path / "on.json", "--include-gz")
+    assert sorted(seen) == sorted(f"{sid}{rdb.GZ_SUFFIX}" for sid in FIXTURE_SESSIONS), seen
+    assert on["sessions_scanned"] == len(FIXTURE_SESSIONS)
+
+
+def test_an_archived_session_row_names_a_session_id_and_never_a_file_name(tmp_path):
+    """A gz row's `session` is the id the harness wrote, not `…_cd19.json`.
+
+    `Path("20260922_120000_autocode_cd19.json.gz").stem` is
+    `20260922_120000_autocode_cd19.json`, so an id fallback that stops at `.stem`
+    publishes a session id no plain file has, and a reader who asks the store for
+    `$SESSIONS/<id>.json` is told it does not exist. The payloads in `rows_for` all carry
+    a `session_id`, so the fallback is driven here by writing a session WITHOUT one. The
+    `--since` assertions behind it are belt-and-braces: `.stem[:8]` happens to be the
+    same eight digits either way, and pinning it is what stops a later simplification
+    back to `.stem` changing what an archived window silently means.
+    """
+    assert rdb.session_id_of("20260909_153801_autonomy_2cf3.json.gz") == "20260909_153801_autonomy_2cf3"
+    assert rdb.session_id_of("20261121_114246_bench_81c8.json") == "20261121_114246_bench_81c8"
+    assert rdb.session_id_of("20260909_153801_autonomy_2cf3.json.gz") != \
+        Path("20260909_153801_autonomy_2cf3.json.gz").stem, "the trap this helper exists for"
+
+    store = tmp_path / "sessions"
+    store.mkdir()
+    msgs = FIXTURE_SESSIONS["fx1_tool_sandbox_join"]["messages"]
+    archived = store / f"20260922_120000_autocode_cd19{rdb.GZ_SUFFIX}"
+    archived.write_bytes(gzip.compress(json.dumps({"messages": msgs}).encode()))
+    plain = store / "20261022_120000_autocode_cd19.json"
+    plain.write_text(json.dumps({"messages": msgs}))
+
+    rows_archived = rdb.scan_session(archived, window=3)
+    rows_plain = rdb.scan_session(plain, window=3)
+    assert len(rows_archived) == len(rows_plain) == 1, (len(rows_archived), len(rows_plain))
+    assert rows_archived[0]["session"] == "20260922_120000_autocode_cd19", rows_archived[0]["session"]
+    assert rows_plain[0]["session"] == "20261022_120000_autocode_cd19", rows_plain[0]["session"]
+    for field in ("guard", "measurable", "same_target", "same_effect", "targets"):
+        assert rows_archived[0][field] == rows_plain[0][field], field
+
+    later = run_cli(["--sessions-dir", str(store), "--rows", "--since", "2026-10-01"],
+                    tmp_path / "later.json", "--include-gz")
+    assert later["sessions_scanned"] == 1, "--since cut the window on the wrong name"
+    rows = [json.loads(l) for l in
+            (tmp_path / "later.rows.jsonl").read_text().splitlines() if l.strip()]
+    assert [r["session"] for r in rows] == ["20261022_120000_autocode_cd19"], rows
+    whole = run_cli(["--sessions-dir", str(store), "--since", "2026-09-01"],
+                    tmp_path / "whole.json", "--include-gz")
+    assert whole["sessions_scanned"] == 2, "an archived session was outside its own window"
+
+
+def test_a_session_present_in_both_containers_is_merged_onto_its_plain_copy():
+    """The one way `--include-gz` could double a count, closed at the merge.
+
+    The sweep renames rather than copies, so today no stored name shares a stem across
+    the two suffixes — 0 of 25,764 entries, measured over the whole store on
+    2026-11-21 — and this node is what stays true on the day that changes: the plain
+    copy wins and the archived twin is not scanned at all.
+    """
+    plain = [Path("20261002_b.json"), Path("20261001_a.json")]
+    archived = [Path("20261001_a.json.gz"), Path("20260901_c.json.gz")]
+    merged = rdb.merge_session_files(plain, archived)
+    assert merged == sorted([Path("20261002_b.json"),
+                             Path("20260901_c.json.gz"), Path("20261001_a.json")]), merged
+    assert Path("20261001_a.json.gz") not in merged, "the archived twin survived the merge"
+
+
+def test_the_default_store_still_arrives_from_app_paths_and_a_named_dir_skips_the_anchor(
+        tmp_path, monkeypatch):
+    """The `--sessions-dir` seam keeps the 2026-09-22 data-home rule exactly as it was.
+
+    `--sessions-dir` defaults to `app.paths.SESSIONS_DIR`, and `app.paths` is the only
+    place allowed to know where a tree's data root is: it resolves off `LLOYD_HOME` and
+    `IS_WORKTREE`, sends a round's worktree to its own sibling root, and raises
+    `DataRootMissing` for a production checkout whose root lost its marker — which is why
+    the scanner imports it lazily and does not grow a second resolver. So: no flag means
+    the value comes from `app.paths`, and naming a directory means that resolution is
+    never reached.
+    """
+    import app.paths as AP
+
+    anchored = AP.SESSIONS_DIR
+    assert anchored == AP.DATA_ROOT / "sessions", "SESSIONS_DIR no longer hangs off DATA_ROOT"
+    named = write_store(tmp_path / "named")
+    monkeypatch.setattr(AP, "SESSIONS_DIR", tmp_path / "from-app-paths")
+
+    default = run_cli([], tmp_path / "default.json")
+    assert default["sessions_dir"] == str(tmp_path / "from-app-paths"), default["sessions_dir"]
+    assert default["sessions_scanned"] == 0, "the default read a directory nobody named"
+
+    named_summary = run_cli(["--sessions-dir", str(named)], tmp_path / "named.json")
+    assert named_summary["sessions_dir"] == str(named)
+    assert named_summary["sessions_scanned"] == len(FIXTURE_SESSIONS)
 
 
 if __name__ == "__main__":

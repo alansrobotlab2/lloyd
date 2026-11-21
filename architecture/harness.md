@@ -2071,11 +2071,19 @@ labels `sudo` 24 and `rm -rf on root/home/system path` 13, retries Bash 16, Read
 Write 2. It is retired for two reasons, not one. Its targets were mined from the refusal's
 own *prose*, so 306/306 `tool_sandbox` refusals and every `grant` refusal came back with an
 empty target set and 0 measurable rows: both arms were structurally dead for them and the
-`0.0` printed against a zero denominator was an unmeasured pass, not compliance. And the
-corpus it counted has aged out of readable storage — the session store holds about 30 days
-uncompressed, only 38 `.json` sessions from 2026-09 survive (oldest `20260922_201704`), and
-the scanner globs `*.json`, never the gzipped majority. So those numbers are a record of what
-was once claimed, and **the paragraph is no longer judged by that number moving**.
+`0.0` printed against a zero denominator was an unmeasured pass, not compliance. The second
+reason this section used to give was **false, and is corrected here (#4277)**: the corpus had
+not aged out of readable storage. 4,013 sessions from 2026-09 are still in the store as
+`.json.gz` (oldest `20260909_153801_autonomy_2cf3`), the retention sweep gzips an aged
+transcript and never deletes it — `scripts/groundskeeper/retention-sweep.py` says so in its own
+docstring — and what hid the era was this scanner's `*.json` glob, which `--include-gz` now
+decodes. The plain store is thin, which is what was mistaken for a loss: 38 plain `.json`
+sessions from 2026-09 were left when that claim was written on 2026-11-04 (64 by 2026-11-21,
+oldest `20260922_201704`); a thin count is not an absent one. What the retirement really rests
+on, besides the dead arms, is that a re-run no longer answers the 2026-09-30 question: the
+same 306 `tool_sandbox` refusals now yield 287 measurable rows, because #3565 resolves
+operands the prose miner could not. So those numbers are a record of what was once claimed, and
+**the paragraph is no longer judged by that number moving**.
 
 **What the fixed instrument prints.** `measurable` sits beside `refusals` in every line, both
 rates are over the measurable denominator, and a slice with no measurable row prints
@@ -2114,9 +2122,47 @@ measurable, the same rates), and the scan above prints 397 / 247 — which is wh
 `tests/test_refusal_hint_doc_claims.py` pins the
 *shape* of this block (every rate with its measurable count on the same line, the window and
 the scan date named with it) and asserts none of its values. A row is a reading of its window,
-not a threshold. What would actually judge the paragraph is a window of traffic beginning
-after the paragraph shipped, and none is full yet: the owed re-run over a week of
-post-paragraph traffic publishes the first figure worth comparing. Pins:
+not a threshold.
+
+**The pair the paragraph was owed, and it is method-matched (#4277).** What would judge a
+paragraph shipped on 2026-09-30 is traffic from either side of that day read by one instrument
+the same way, and the era before it was never lost — see the corrected cause above. Both sides
+below are one command each: `eval/refusal_detour_baseline.py --include-gz` over the window of
+the store named in the row, window 3, both scans taken 2026-11-21, cut at the paragraph's own
+ship commit `3baf94ed`. Each side reads `.json.gz` only, so neither is a scan of a storage form
+the other is not:
+
+| guard | side | refusals | measurable | same-target | same-effect |
+| --- | --- | --- | --- | --- | --- |
+| `safety` — **method-matched**, before, window 2026-09-22..29, 3,513 gz sessions scanned | 65 | 50 measurable | 30/50 (0.6) | 16/50 (0.32) |
+| `safety` — **method-matched**, after, window 2026-09-30..10-06, 4,346 gz sessions scanned | 66 | 54 measurable | 35/54 (0.648) | 19/54 (0.352) |
+| `tool_sandbox` — same two scans, before, same window | 306 | 287 measurable | 31/287 (0.108) | 25/287 (0.087) |
+| `tool_sandbox` — same two scans, after, same window | 28 | 28 measurable | 0/28 (0.0) | 0/28 (0.0) |
+
+**The detour rate did not improve after the paragraph, so this pair is not a win and is not
+called one.** `safety` same-target moved from 30/50 (0.6) before to 35/54 (0.648) after, and
+same-effect from 16/50 (0.32) to 19/54 (0.352) — a *higher* detour rate is a refused call
+followed by a look-alike retry more often, not less. The paragraph therefore stands or falls on
+grounds other than this number, and the honest statement of those grounds is twofold: the
+instrument cannot separate a detour from a compliant re-plan (a same-target hit means only that
+the refused operand reappeared within three calls), and these two windows are not the same
+traffic — the before window holds 306 `tool_sandbox` refusals against 28 in the after window,
+because the bench corpus stopped filling the store between them. A pair that moves with the
+traffic mix cannot judge a paragraph either way. No rows file is committed for these two scans,
+so the figures exist as printed; unlike the live-store block above they stay re-runnable for as
+long as the archive holds, because the sweep never deletes a `.gz`.
+
+**The same instrument on the post-#3774 store, which is NOT method-matched to that pair:**
+
+| guard | side | refusals | measurable | same-target | same-effect |
+| --- | --- | --- | --- | --- | --- |
+| `safety` — **NOT method-matched** to the gz pair; plain `*.json` only, `--since 2026-11-05`, 3,639 sessions scanned 2026-11-18 | 356 | 136 measurable | 83/136 (0.61) | 44/136 (0.324) |
+
+That row is a reading of a store that is still growing — its counts are dated because they move,
+and the node pins its shape and not its values — and it is labelled `NOT method-matched` because
+it reads the other storage form (traffic from 2026-11-05 on is all plain `.json`) over a window
+three times longer than either side of the pair. It is quoted as the current era's detour rate,
+never as a third side of a comparison. Pins:
 `tests/test_refusal_hint.py` for the paragraph's wording, `tests/test_refusal_hint_doc_claims.py`
 for the shape of the figures above.
 

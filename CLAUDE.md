@@ -128,12 +128,17 @@ same rule; a refusal naming a remedy is the way forward. The 2026-09-30 baseline
 paragraph was measured against is **RETIRED, and a fresh run is not comparable to it**:
 its targets were mined from the refusal's own prose, so a refusal that quoted no operand
 left the instrument nothing measurable and its printed `0.0` was an unmeasured pass, not
-compliance; and the corpus it counted has aged out — 38 `.json` sessions from 2026-09
-survive in the store (oldest `20260922_201704`) and the scanner globs `*.json`, never the
-gzipped majority. `eval/refusal_detour_baseline.py` now resolves the refused call's own
-operand through its `tool_call_id` and prints every guard's rate beside its measurable
-count; the current stratified reading, and why no number yet judges that paragraph, is in
-`architecture/harness.md`, "The refusal paragraph".
+compliance. The second cause this bullet used to give was **false and is corrected here
+(#4277)**: the corpus had not aged out. 4,013 sessions from 2026-09 are still in the store as
+`.json.gz` (oldest `20260909_153801_autonomy_2cf3`), the retention sweep gzips an aged
+transcript and never deletes it, and what hid the era was the scanner's `*.json` glob, which
+`--include-gz` now decodes; the plain count that read as a loss was 38 (64 by 2026-11-21,
+oldest plain session `20260922_201704`), and a thin count is not an absent one. What does make
+those figures unreproducible is the first cause: the same 306 `tool_sandbox` refusals now yield
+287 measurable rows. `eval/refusal_detour_baseline.py` resolves the refused call's own operand
+through its `tool_call_id`, reads the archive under `--include-gz`, and prints every guard's
+rate beside its measurable count; the method-matched before/after pair, and why it is not a
+win, is in `architecture/harness.md`, "The refusal paragraph".
 
 **The injection canary bench** (`eval/run_injection_canary.py`, scenarios and corpus in
 `eval/injection_canary/`) is the positive class the P10 seams never had: twelve worker-style
