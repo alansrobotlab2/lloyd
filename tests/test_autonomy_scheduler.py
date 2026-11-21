@@ -6095,8 +6095,24 @@ def test_the_catch_up_is_spent_by_the_run_it_caught_up(aut, monkeypatch, tmp_pat
     assert [t["id"] for t in aut.get_due_tasks(now=_SPEND_NOW)] == [], (
         "the out-of-window grant is standing, not spent: the same lost occurrence "
         "would be run again on the next 60 s tick")
-    assert q.wm_keys(aut.WINDOW_LOSS_WM_SOURCE) == [
-        "window_lost:42:2026-10-09T22:00"], "the record must outlive the catch-up"
+    # The exact-list form is kept rather than relaxed to a membership test, and it now
+    # names BOTH rows the source holds: #4304 writes a once-per-occurrence marker
+    # BESIDE the loss row (never a field inside its payload, which is the row
+    # `window_catch_up_row` returns and this test's own assertions read), so this is
+    # still the proof that the record outlives the catch-up and also the pin on the
+    # marker's key shape.
+    assert sorted(q.wm_keys(aut.WINDOW_LOSS_WM_SOURCE)) == [
+        "window_caught_up_logged:42:2026-10-09T22:00",
+        "window_lost:42:2026-10-09T22:00"], (
+        "the record must outlive the catch-up, and the marker that keeps its sentence "
+        "to one line must be beside it under the same source (#4304)")
+    # The key list above used to be the whole proof that the dispatch source holds
+    # ONLY loss rows; with the marker beside them it cannot say that any more, so the
+    # claim moves to the reader that has to make the distinction: exactly one task is
+    # still a lost occurrence on this source, and the marker row is not a second grant.
+    assert list(aut.window_loss_rows(queue=q)) == [42], (
+        "the marker row is being read as a lost occurrence, which is a second "
+        "out-of-window grant no block ever starved (#4304)")
 
 
 def test_a_windowed_task_with_no_dependency_catches_up_on_the_loss_row(
@@ -6348,6 +6364,287 @@ def test_a_windowless_task_is_not_what_this_grant_is_for(aut, monkeypatch,
     assert aut.window_catch_up_row(_chain_task(aut, 42), now=_LOSS_NOW) is not None
     assert reached, (
         "no ledger read was ever attempted, so the assertion above is vacuous")
+
+
+# ── #4304: the catch-up is explained once per starved occurrence, not per tick ──
+#
+# The datum, from `~/lloyd-data/logs/server.err{,.1,.2,.3,.4}`: the operator pool was
+# held from 2026-11-18T02:30:06.418642+00:00 to 2026-11-19T00:19Z, and ONE sentence
+# fired 48,404 times across those four rotations (1,256 + 21,947 + 18,127 + 7,074), all
+# of them naming the same `pause_since`. Task #56's single 2026-11-18T09:00Z→11:00Z
+# occurrence appeared 3,077 times inside one rotation, in groups of six stamps spaced
+# ~65 s. The multiplier is structural, not incidental: the line sits inside the
+# per-tick due-ness predicate, and `_upstream_starting_now` re-enters that predicate for
+# the upstream with the caller's loss row still threaded through — so one starved
+# occurrence is six lines a tick, ~8,600 a day, and three 10 MB rotations of it.
+#
+# What is missing is a marker, not a mechanism: the occurrence is ALREADY durably
+# identified, by the `window_lost:<task_id>:<local HH:MM>` row the log site is holding
+# (`row["_key"]`). What the marker must not be is process memory — `_no_frequency_warned`
+# (`app/autonomy.py:1392`) is the in-file precedent, and a restart inside a 47 h hold
+# reloads that set empty and resumes the flood exactly where it left off.
+#
+# The five acceptance clauses and the node that pins each, in clause order:
+#   1  test_the_catch_up_line_fires_once_per_occurrence_not_per_due_check
+#   2  test_a_standing_marker_silences_the_line_and_still_dispatches
+#   3  test_the_catch_up_marker_is_a_watermark_row_not_process_memory
+#   4  test_three_scans_over_two_starved_occurrences_emit_two_lines
+#   5  test_the_catch_up_line_still_names_the_task_the_window_and_the_hold
+# One node per clause; every one of them also asserts the predicate or the due list
+# still says True/dispatched, so none can go green by quieting the log through a
+# refused run.
+
+#: The phrase that identifies the line. Matched as a substring, so that rewording the
+#: sentence (a separate ruling, deliberately not this item's) cannot silently turn the
+#: five nodes below into a count of zero lines that reads as deduplication.
+_CATCH_UP_PHRASE = "catch-up for it has not run yet"
+
+#: One SELECT, run by a CHILD INTERPRETER against the fixture's `workers.db`, counting
+#: the once-per-occurrence marker by (source, key). stdlib only on purpose: the witness
+#: must not import `workers.queue`, or it would be re-testing the same reader that
+#: wrote the row and would prove nothing about a process that never wrote it.
+_READ_WATERMARK_SQL = (
+    "import sqlite3, sys\n"
+    "c = sqlite3.connect(sys.argv[1])\n"
+    "print(c.execute('SELECT COUNT(*) FROM watermarks WHERE source=? AND key=?', "
+    "(sys.argv[2], sys.argv[3])).fetchone()[0])\n")
+
+
+def _catch_up_lines(caplog) -> list[str]:
+    """Every catch-up sentence captured so far, in the order they fired."""
+    return [r.getMessage() for r in caplog.records
+            if _CATCH_UP_PHRASE in r.getMessage()]
+
+
+def _due_check_42(aut, *, now=_LOSS_NOW) -> bool:
+    """One due-check of #42 under the 2026-10-10 hold, asked exactly the way
+    `get_due_tasks` asks it: the ledger resolved for that task and injected into the
+    hours gate. Injected rather than left to the bare call because that injection is
+    what production does (one scan-level ledger read, #2552) and because the injected
+    row is the object carrying `_key`, which is what the marker is keyed on.
+    """
+    res = aut.dependency_resolution_set()
+    t42 = [t for t in res if t.get("id") == 42][0]
+    return aut._is_task_due(t42, res, now=now,
+                            window_catch_up=aut.window_catch_up_row(t42, now=now))
+
+
+def test_the_catch_up_line_fires_once_per_occurrence_not_per_due_check(
+        aut, monkeypatch, tmp_path, caplog):
+    """Clause 1: two due-checks at one frozen `now`, one sentence.
+
+    Twice-at-one-instant is the smallest real shape of "the same tick asked again", and
+    it is not hypothetical: the dependent recursion re-enters the predicate for the
+    upstream at the caller's own instant, which is four of the six stamps per tick. A
+    marker written on the first emission is what the second call has to find.
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    assert [row["task_id"] for row in fw._window_losses(q)] == [42]
+    caplog.set_level(logging.INFO, logger="lloyd-autonomy")
+
+    assert _due_check_42(aut) is True, (
+        "the fixture lost an occurrence under the hold, so the catch-up has to answer "
+        "due or there is nothing here to deduplicate")
+    assert _due_check_42(aut) is True, (
+        "the dedup changed the dispatch decision: a guard that stops the line by "
+        "refusing the run keeps the 2026-10-10 loss and a quieter log")
+
+    lines = _catch_up_lines(caplog)
+    assert len(lines) == 1, (
+        f"one starved occurrence explained {len(lines)} times at one instant, where "
+        f"the 2026-11-18 hold measured 6 per tick: {lines}")
+
+
+def test_a_standing_marker_silences_the_line_and_still_dispatches(
+        aut, monkeypatch, tmp_path, caplog):
+    """Clause 2: marker already present → no sentence, and the task is still due.
+
+    The marker is planted through the queue's own watermark API before the first
+    due-check, which is precisely the state a process finds when it starts inside a
+    hold that has been running for hours: the loss row standing, its occurrence already
+    explained, the next tick due to speak again. The key is derived from the ledger's
+    own `_key` rather than re-formatted, because the KEY truncates local time
+    (`window_lost:42:2026-10-09T22:00`) while the PAYLOAD's `window_open` is
+    ISO-with-offset (`2026-10-10T05:00:00+00:00`) — a marker built from the payload
+    would never line up with the row it is supposed to speak for.
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    fw._window_losses(q)
+    loss_key = aut.window_loss_rows(queue=q)[42]["_key"]
+    q.wm_set(aut.WINDOW_LOSS_WM_SOURCE,
+             aut.window_catch_up_log_key(loss_key), _LOSS_NOW.isoformat())
+    caplog.set_level(logging.INFO, logger="lloyd-autonomy")
+
+    assert _due_check_42(aut) is True, (
+        "with the occurrence already explained the authorisation is untouched: the "
+        "loss is still unrun, and the marker speaks only for the sentence")
+    assert _catch_up_lines(caplog) == [], (
+        f"the standing marker did not silence the line: {_catch_up_lines(caplog)}")
+
+
+def test_the_catch_up_marker_is_a_watermark_row_not_process_memory(
+        aut, monkeypatch, tmp_path, caplog):
+    """Clause 3: the "already explained" fact lives in the store and is re-read.
+
+    Four readings make this falsifiable rather than merely green:
+
+    * a FRESH `WorkQueue` handle on the same file — what a process restarted mid-hold
+      opens — finds the marker under the loss rows' own source, so the silence does not
+      depend on anything the emitting process remembers;
+    * a SEPARATE INTERPRETER, given nothing but the file path and the SQL that counts
+      the row, finds exactly one — a fresh handle is still this process, so this is the
+      arm that crosses the process boundary a restart actually happens across;
+    * the ledger reader still IGNORES the marker: `window_loss_from_key` answers None
+      for it and `window_loss_rows` still lists exactly one task. The marker is a second
+      row shape under `scheduled-task`, and one the loss ledger mistook for a loss would
+      authorise a catch-up no block ever starved;
+    * deleting the row makes the line fire again. A set in process memory would keep it
+      suppressed after the store was emptied — which is the `_no_frequency_warned`
+      shape this item rules out, and the only arm that tells the two apart from inside
+      one process.
+    """
+    import subprocess
+
+    import workers.fleet_watchdog as fw
+    from workers.queue import WorkQueue
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    fw._window_losses(q)
+    caplog.set_level(logging.INFO, logger="lloyd-autonomy")
+
+    assert _due_check_42(aut) is True
+    assert len(_catch_up_lines(caplog)) == 1, "the first emission is the fixture, not the claim"
+
+    loss_key = aut.window_loss_rows(queue=q)[42]["_key"]
+    assert loss_key == "window_lost:42:2026-10-09T22:00", (
+        f"the marker is keyed on this string; it is no longer the loss row's key: {loss_key}")
+    marker_key = aut.window_catch_up_log_key(loss_key)
+    fresh = WorkQueue(str(tmp_path / "workers.db"))
+    assert fresh.wm_get(aut.WINDOW_LOSS_WM_SOURCE, marker_key) is not None, (
+        "a fresh handle on the same store does not see the marker, so a restarted "
+        "process re-logs the occurrence it was built to stay quiet about")
+    assert aut.WINDOW_LOSS_WM_SOURCE == "scheduled-task", (
+        "the marker was written under a different source than the loss rows")
+
+    # The restart, witnessed by a process that has never imported this module: the
+    # child gets the file path and the key, opens it with the stdlib driver, and counts
+    # the row by the (source, key) the guard reads. A `WorkQueue` handle re-opens the
+    # file but is still this interpreter, with this module's caches in hand; a row a
+    # foreign process can find by SQL is the durable fact clause 3 asks for.
+    child = subprocess.run(
+        [sys.executable, "-c", _READ_WATERMARK_SQL, str(tmp_path / "workers.db"),
+         aut.WINDOW_LOSS_WM_SOURCE, marker_key],
+        capture_output=True, text=True, timeout=60)
+    assert child.returncode == 0, f"the witness process died: {child.stderr}"
+    assert child.stdout.strip() == "1", (
+        f"a separate process reading the file by SQL finds "
+        f"{child.stdout.strip()!r} marker rows, not one, so a scheduler restarted into "
+        "this hold does not find the occurrence already explained and the flood "
+        "resumes")
+
+    assert aut.window_loss_from_key(marker_key) is None, (
+        "the marker reads as a lost occurrence, which is a grant nothing starved")
+    assert list(aut.window_loss_rows(queue=fresh)) == [42], (
+        "the ledger gained a phantom loss: the marker row is being read as one")
+
+    assert _due_check_42(aut) is True
+    assert len(_catch_up_lines(caplog)) == 1, (
+        "the marker is on the board and the predicate spoke again, so the guard is "
+        f"not reading the store: {_catch_up_lines(caplog)}")
+
+    fresh.wm_delete(aut.WINDOW_LOSS_WM_SOURCE, marker_key)
+    assert _due_check_42(aut) is True
+    assert len(_catch_up_lines(caplog)) == 2, (
+        "emptying the marker did not resume the line, so the decision was being made "
+        "somewhere other than the store")
+
+
+def test_three_scans_over_two_starved_occurrences_emit_two_lines(
+        aut, monkeypatch, tmp_path, caplog):
+    """Clause 4: N scans over M occurrences are M lines, not N×M.
+
+    Two windowed tasks, two distinct loss rows, three successive scans — the 60 s
+    enqueue loop at `workers/sources/scheduled_task.py` replayed three times. #99
+    declares the same window and the same stale stamp as #42 and NO `depends_on`, so one
+    of the two reaches the line through the hours gate alone and the other through the
+    gate plus the upstream recursion, which is where the ×6 came from. The due list is
+    asserted on every scan: a count of two lines is worthless if the scans stopped
+    dispatching.
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    write_task(aut, 99, preferred_hours=_WINDOW,
+               last_run="2026-10-08T09:18:03+00:00",
+               next_run="2026-10-09T09:18:03+00:00")
+    losses = fw._window_losses(q)
+    assert sorted(r["task_id"] for r in losses) == [42, 99], (
+        f"the fixture holds {sorted(r['task_id'] for r in losses)}, and two distinct "
+        "starved occurrences is the whole measurement")
+    caplog.set_level(logging.INFO, logger="lloyd-autonomy")
+
+    for scan in range(3):
+        assert sorted(t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)) == [42, 99], (
+            f"scan {scan + 1} stopped dispatching one of the two catch-ups")
+
+    lines = _catch_up_lines(caplog)
+    assert len(lines) == 2, (
+        f"three scans over two starved occurrences emitted {len(lines)} lines; the "
+        f"per-tick repeat is the 47,148-line flood: {lines}")
+    assert sorted(l.split("occurrence ")[1] for l in lines) == sorted(
+        f"{r['window_open']} -> {r['window_close']} closed unrun with the operator "
+        f"pool held since {r['pause_since']}, and the catch-up for it has not run yet"
+        for r in (aut.window_loss_rows(queue=q)[42],
+                  aut.window_loss_rows(queue=q)[99])), (
+        "the two lines are not one per distinct occurrence: " + repr(lines))
+
+
+def test_the_catch_up_line_still_names_the_task_the_window_and_the_hold(
+        aut, monkeypatch, tmp_path, caplog):
+    """Clause 5: the sentence is unchanged, and the grant is still spent by one run.
+
+    The whole point of deduplicating is that the surviving line stays informative, so
+    the assertion is against the exact text a reader has been parsing since #2552 — the
+    task id and name, then `window_open -> window_close`, then `pause_since`, every one
+    of those values read out of the loss row rather than restated here. And the marker
+    must not become a second spend: the authorisation is still `last_run`, so the run
+    the catch-up causes is the last one it authorises, which is what the last three
+    lines re-measure on the same row (`test_the_catch_up_is_spent_by_the_run_it_caught_up`
+    pins the same rule at the grant).
+    """
+    import workers.fleet_watchdog as fw
+
+    q = _held_window_chain(aut, monkeypatch, tmp_path)
+    fw._window_losses(q)
+    caplog.set_level(logging.INFO, logger="lloyd-autonomy")
+
+    assert [t["id"] for t in aut.get_due_tasks(now=_LOSS_NOW)] == [42]
+    lines = _catch_up_lines(caplog)
+    assert len(lines) == 1, f"expected the one sentence: {lines}"
+    loss = aut.window_loss_rows(queue=q)[42]
+    assert lines[0] == (
+        f"Task #42 (task42): dispatching outside its window — occurrence "
+        f"{loss['window_open']} -> {loss['window_close']} closed unrun with the "
+        f"operator pool held since {loss['pause_since']}, and the catch-up for it has "
+        "not run yet"), f"the surviving line changed: {lines[0]!r}"
+    assert loss["window_open"] == "2026-10-10T05:00:00+00:00" and loss["name"] == "task42"
+
+    # The marker dedups the SENTENCE, never the authorisation: a run stamp newer than
+    # the lost occurrence is still the only thing that spends it.
+    write_task(aut, 42, depends_on=38, preferred_hours=_WINDOW,
+               last_run="2026-10-10T12:05:00+00:00",
+               next_run="2026-10-11T05:00:00+00:00")
+    monkeypatch.setattr(aut, "_local_hour", lambda: 21)   # 04:30Z at UTC-7
+    assert aut.window_catch_up_row(_chain_task(aut, 42), now=_SPEND_NOW) is None, (
+        "the marker was read as a spent grant: the catch-up outlived the run it "
+        "authorises, which is the second dispatch this row was built to refuse")
+    assert [t["id"] for t in aut.get_due_tasks(now=_SPEND_NOW)] == []
+    assert len(_catch_up_lines(caplog)) == 1, (
+        "the spent grant still talks: the scan above should have emitted nothing at all")
 
 
 # ── #3596: reaching the turn cap without the declared deliverable is not a success ──

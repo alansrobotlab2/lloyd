@@ -2551,6 +2551,81 @@ def window_loss_from_key(key: str) -> Optional[int]:
         return None
 
 
+#: Prefix for the "this occurrence has already been explained in the log" marker.
+#: Deliberately NOT the loss prefix: `window_loss_from_key` parses a task id out of
+#: every `window_lost:` key and `window_loss_rows` turns each one into a grant, so a
+#: row shape the ledger reader could mistake for a loss would authorise an out-of-window
+#: run that no block ever starved. Same SOURCE as the loss rows, different prefix — the
+#: marker is about the same occurrence and must be findable beside it (#4304).
+WINDOW_CAUGHT_UP_LOG_WM_PREFIX = "window_caught_up_logged:"
+
+
+def window_catch_up_log_key(loss_key: str) -> str:
+    """The watermark key for "the catch-up line for this loss has already been emitted".
+
+    Derived by re-prefixing the loss key rather than re-formatting the row's payload.
+    The two carry the opening instant in different shapes — the KEY truncates to local
+    `%Y-%m-%dT%H:%M` (`window_loss_key`) while the PAYLOAD's `window_open` is
+    ISO-with-offset — so a marker built from `row["window_open"]` would not line up with
+    the row it explains, and the identity of "one occurrence" is exactly what the key
+    already encodes: task id plus opening instant, the two facts the sentence reports.
+    """
+    rest = loss_key
+    if rest.startswith(WINDOW_LOSS_WM_PREFIX):
+        rest = rest[len(WINDOW_LOSS_WM_PREFIX):]
+    return f"{WINDOW_CAUGHT_UP_LOG_WM_PREFIX}{rest}"
+
+
+def _log_window_catch_up(task: dict, row: dict,
+                         now: datetime.datetime) -> None:
+    """Say once that a starved occurrence is being caught up (#4304).
+
+    The sentence is #2552's, unchanged in every field; only its FREQUENCY is this
+    item's. It sits inside the per-tick due-ness predicate, so during a hold it fired
+    48,404 times over the 2026-11-18T02:30Z→2026-11-19T00:19Z hold — task #56's single
+    09:00Z→11:00Z occurrence alone 3,077 times in one 10 MB rotation, six stamps per
+    ~65 s tick, because a dependent's own due-check re-enters the predicate for its
+    upstream with the caller's loss row still threaded through (`_upstream_starting_now`)
+    and every one of those re-entries reached this line. Three rotations of one sentence
+    buried every other signal in `server.err`.
+
+    The guard is a dedup key, not new machinery: the occurrence is already durably
+    identified by `row["_key"]`, the loss row's own watermark key, so one marker row per
+    occurrence is the whole change. It is durable and NOT a process-memory set —
+    `_no_frequency_warned` is the in-file precedent this rejects, because a 47 h hold
+    outlives every restart and an in-process set reloads empty and resumes the flood
+    where it stopped.
+
+    The marker keys on the OCCURRENCE, not on the task being evaluated, because that is
+    what the line reports and what the count is measured in: one starved window is one
+    sentence, whoever is holding the row when it is spoken.
+
+    A store that cannot answer is not a reason to lose the line — the authorisation came
+    out of that same store, and silent recovery is the failure mode #1682 is about — so
+    both watermark calls are guarded and the fallback is today's behaviour, one line per
+    tick. It is guarded rather than propagated because the dispatch is already authorised
+    at this point and a broken marker must never become a refused run.
+    """
+    loss_key = str(row.get("_key") or "")
+    if loss_key:
+        key = window_catch_up_log_key(loss_key)
+        try:
+            from workers.queue import WorkQueue, configured_db_path
+            q = WorkQueue(configured_db_path())
+            if q.wm_get(WINDOW_LOSS_WM_SOURCE, key) is not None:
+                return
+            q.wm_set(WINDOW_LOSS_WM_SOURCE, key, now.isoformat())
+        except Exception as e:
+            logger.debug("could not mark the catch-up for %r as logged: %s",
+                         loss_key, e)
+    logger.info(
+        "Task #%s (%s): dispatching outside its window — occurrence %s -> %s "
+        "closed unrun with the operator pool held since %s, and the catch-up "
+        "for it has not run yet", task.get("id"), task.get("name"),
+        row.get("window_open"), row.get("window_close"),
+        row.get("pause_since"))
+
+
 def window_catch_up_row(task: dict, *, now: Optional[datetime.datetime] = None,
                         rows: Optional[dict] = None):
     """The lost occurrence that entitles `task` to one out-of-window catch-up.
@@ -3089,12 +3164,11 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
         row = _resolve_catch_up(task, now, window_catch_up)
         if not row:
             return False
-        logger.info(
-            "Task #%s (%s): dispatching outside its window — occurrence %s -> %s "
-            "closed unrun with the operator pool held since %s, and the catch-up "
-            "for it has not run yet", task.get("id"), task.get("name"),
-            row.get("window_open"), row.get("window_close"),
-            row.get("pause_since"))
+        # One sentence per starved occurrence, not one per tick (#4304). The marker
+        # that makes that true is a durable watermark, so a restart inside a
+        # multi-day hold does not resume the flood; the dispatch decision either side
+        # of this call is untouched by it.
+        _log_window_catch_up(task, row, now)
     # ── The work already ran this period ─────────────────────────────────
     # Last, on purpose: every gate above reads only the task file, so this is
     # the one place that asks a second, independent account — the run record on
