@@ -28,6 +28,13 @@ import pytest
 import app.data_root as dr
 import app.paths as paths
 from app.autonomy import _parse_task_file
+# #4463: the credential this sweep now recognises belongs to the aggregator, so the
+# matcher's two facts — the header name and where the secret lives — are imported from
+# that module here too, and `test_the_credential_is_resolved_by_the_aggregators_own_
+# resolver` holds the sweep's copy against these same objects.
+from agent_mcp.aggregator_auth import AUTH_HEADER as AGG_AUTH_HEADER
+from agent_mcp.aggregator_auth import TOKEN_FILE_ENV as AGG_TOKEN_FILE_ENV
+from agent_mcp.aggregator_auth import token_path as agg_token_path
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "groundskeeper" / "retention-sweep.py"
 
@@ -4036,6 +4043,321 @@ def test_the_registration_outcome_is_its_own_count_and_one_state_prints_one_line
     assert not due.exists(), (
         "the entry the dry run reported as due was not reclaimed by `--apply`")
     assert "FAILED" not in applied, applied
+
+
+# ---------------------------------------------------------------------------
+# The credential rail on `~/lloyd-work`'s LOOSE files (#4463).
+#
+# `~/lloyd-work/dwproof-agg-info.json`: 317 B, mode 644, carrying a value byte-equal
+# to the live aggregator request credential. `GET http://127.0.0.1:56223/state`
+# answers 401 with no header and 200 with that file's value in
+# `X-Lloyd-Aggregator-Token`, so the copy is live, not expired — and
+# `agent_mcp/aggregator_auth.py:17-21` is what makes it worth having: the grant gate
+# is a PreToolUse hook upstream of that process, plan mode only removes tools from the
+# advertised list, and the bench/eval sandbox keys on a session id a caller simply
+# omits. An out-of-band request carrying the secret therefore skips every gate the
+# harness owns.
+#
+# Nothing reaped it, because this rung never saw it: a non-directory returns
+# `not_a_dir += 1; continue` ABOVE both age cutoffs, so a loose file under the work
+# root is untouched at any age. The rail below therefore TIGHTENS AND NEVER DELETES.
+# This store is where other sessions leave in-flight patches, probe scripts and logs;
+# a sweep that began deleting loose files in order to fix one leaked credential would
+# be the worse bug. Every node here points `LLOYD_MCP_TOKEN_FILE` at a fixture file,
+# so none of them reads or touches the live credential — the item's clause 5 rules
+# that file out of scope, mode 600 and unchanged hash prefix.
+# ---------------------------------------------------------------------------
+
+def _mode(path: Path) -> int:
+    """`path`'s permission bits, the way the assertions below read them."""
+    return path.stat().st_mode & 0o777
+
+
+def _agg_credential(tmp_path, monkeypatch, token: str) -> Path:
+    """A credential file the aggregator's own resolver will find, and nothing else.
+
+    `LLOYD_MCP_TOKEN_FILE` is the knob `agent_mcp.aggregator_auth.token_path` reads, so
+    setting it is both the isolation and the thing clause 4 asks for: a fixture that
+    invented its own environment name would leave the sweep free to keep restating the
+    production location.
+    """
+    path = tmp_path / "agg-state" / "credential"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token + "\n", encoding="utf-8")   # the file's own shape: value + \n
+    path.chmod(0o600)
+    monkeypatch.setenv(AGG_TOKEN_FILE_ENV, str(path))
+    return path
+
+
+def _leaky_scratch(rs, *, token: str, header: bool = True,
+                   name: str = "dwproof-agg-info.json") -> Path:
+    """A loose work-root file in the shape of the measured leak, left at mode 0644.
+
+    Both spellings the real emitter wrote — the credential inside a `headers` map under
+    the header's own name, and again flat under `token_env` — because
+    `~/lloyd-work/dwproof-agg-driver.py:19` used `write_text(json.dumps(info))` with no
+    `chmod`, which is where the 644 came from. `header=False` drops the literal, which
+    leaves the credential value as the only possible match.
+    """
+    body = {"url": "http://127.0.0.1:56223", "token_env": token}
+    if header:
+        body["headers"] = {AGG_AUTH_HEADER: token}
+    path = rs.AUTOMOD_WORK_ROOT / name
+    path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    path.chmod(0o644)
+    return path
+
+
+def test_a_loose_file_carrying_the_credential_is_tightened_and_counted(rs, automod,
+                                                                      tmp_path,
+                                                                      monkeypatch):
+    """Clause 1: a top-level non-directory entry whose bytes carry the credential is
+    set to mode 0600 under `--apply` and reported as its own bucket.
+
+    The fixture carries BOTH needles (the header literal and the credential), like the
+    file this item filed, so a matcher that implemented only one half still fails
+    nothing here — the two halves are pinned apart in
+    `test_the_credential_is_resolved_by_the_aggregators_own_resolver` (value only) and
+    `test_an_unreadable_credential_file_falls_back_to_the_header_literal` (literal
+    only). `not_a_dir` still counts the entry: the rung did not make it a directory, and
+    shrinking that bucket would move the existing `2 not a directory` census node.
+    """
+    token = "dwproof-" + "a" * 35
+    _agg_credential(tmp_path, monkeypatch, token)
+    leak = _leaky_scratch(rs, token=token)
+
+    out = rs.sweep_automod_worktrees(apply=True, now=time.time(), repo=automod)
+
+    assert out["credential_tightened"] == 1, out
+    assert _mode(leak) == 0o600, (
+        f"the copy that authenticates against the live aggregator is still group- or "
+        f"other-readable: mode {oct(_mode(leak))}")
+    assert out["not_a_dir"] == 1, out
+
+
+def test_the_tighten_is_gated_on_apply_and_never_deletes(rs, automod, tmp_path,
+                                                        monkeypatch):
+    """Clause 2: the mode change waits for `--apply`, the count does not, and the file
+    survives.
+
+    The gating is not an invention of this rail: `_worktree_line`'s own docstring and
+    `main()`'s header say an operator approves `--apply` against the dry run's numbers,
+    so a chmod that fired in the dry run would mutate the very store the dry run exists
+    to describe. The COUNT is therefore in both modes — the same number the operator
+    approves is the number that gets done — while the mutation is apply-only. And the
+    file still exists afterwards with `reclaimed == 0`: this rail tightens, and a rail
+    that also deleted would be reading one bucket as two decisions.
+    """
+    token = "dwproof-" + "b" * 35
+    _agg_credential(tmp_path, monkeypatch, token)
+    leak = _leaky_scratch(rs, token=token)
+    now = time.time()
+
+    dry = rs.sweep_automod_worktrees(apply=False, now=now, repo=automod)
+
+    assert dry["credential_tightened"] == 1, dry
+    assert _mode(leak) == 0o644, (
+        f"a dry run changed a store byte: mode is now {oct(_mode(leak))}, so the "
+        f"numbers the operator approved and the state they approved them about are "
+        f"not the same state")
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+
+    assert out["credential_tightened"] == 1, out
+    assert leak.is_file(), "the credential rail deleted the file it was told to tighten"
+    assert out["reclaimed"] == 0 and out["bytes"] == 0, out
+    assert _mode(leak) == 0o600, out
+
+
+def test_the_tighten_strips_group_and_other_and_keeps_the_owner_bits(rs, automod,
+                                                                    tmp_path,
+                                                                    monkeypatch):
+    """The tightening is `chmod go-rwx`, not `chmod 600`.
+
+    The clause names 0600, and for the 0644 JSON dump that started this the two
+    spellings are the same answer — which is exactly why the difference needs its own
+    node rather than riding on the one above. A dry run against the live store today
+    flags a second entry, a 64,178-byte scratch script that carries the header literal
+    and not the credential; the owner bits on a file like that are the difference between
+    a script its author can still run and one the rail quietly disarmed while nobody was
+    looking. Group and other are the audience this rail exists to exclude.
+    """
+    token = "dwproof-" + "f" * 35
+    _agg_credential(tmp_path, monkeypatch, token)
+    script = rs.AUTOMOD_WORK_ROOT / "pristine-script.py"
+    script.write_text(f"# {AGG_AUTH_HEADER}: {token}\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    out = rs.sweep_automod_worktrees(apply=True, now=time.time(), repo=automod)
+
+    assert out["credential_tightened"] == 1, out
+    assert _mode(script) == 0o700, (
+        f"the tighten reset the owner bits instead of narrowing the audience: mode "
+        f"{oct(_mode(script))}, expected 0700 from 0755")
+    assert not script.stat().st_mode & 0o077, out
+
+
+def test_the_rail_leaves_every_other_loose_entry_alone(rs, automod, tmp_path,
+                                                      monkeypatch):
+    """Clause 3: nothing else under the work root is chmodded, and nothing inside a
+    directory is reached at all.
+
+    Four states, each one the reason the rail must not be a scan-and-chmod:
+
+      * a loose file that carries neither needle keeps its 0644 and is not counted —
+        the other sessions' patches and probe scripts this store is full of;
+      * a loose file that DOES carry the credential but is already 0600 is not counted,
+        because the bucket is work this run has outstanding, not a headcount of tight
+        files: a store that is already correct prints nothing rather than naming the
+        same file every night forever;
+      * a directory holding a credential copy keeps its own mode and is not counted —
+        this walk is `root.iterdir()` and never descends, so a nested copy is outside
+        this rail's reach at any age, which is the scope the clause names;
+      * a symlink is never chmodded. This one is the load-bearing case: `chmod` follows
+        a symlink to its TARGET, so a rail keyed on the link's own bytes would take a
+        0644 file outside the work root down to 0600 without being asked to — an edit to
+        another session's file through a name in this one.
+    """
+    token = "dwproof-" + "c" * 35
+    _agg_credential(tmp_path, monkeypatch, token)
+    quiet = rs.AUTOMOD_WORK_ROOT / "4135-msg.txt"
+    quiet.write_text("notes about an unrelated item\n", encoding="utf-8")
+    quiet.chmod(0o644)
+    already = rs.AUTOMOD_WORK_ROOT / "tight-leak.log"
+    already.write_text(f"{AGG_AUTH_HEADER}: {token}\n", encoding="utf-8")
+    already.chmod(0o600)
+    holder = rs.AUTOMOD_WORK_ROOT / "4171-witness"
+    holder.mkdir()
+    (holder / "info.json").write_text(f"{AGG_AUTH_HEADER}: {token}\n", encoding="utf-8")
+    holder.chmod(0o755)
+    elsewhere = tmp_path / "other-session-in-flight.patch"
+    elsewhere.write_text(f"{AGG_AUTH_HEADER}: {token}\n", encoding="utf-8")
+    elsewhere.chmod(0o644)
+    (rs.AUTOMOD_WORK_ROOT / "link-to-it").symlink_to(elsewhere)
+
+    out = rs.sweep_automod_worktrees(apply=True, now=time.time(), repo=automod)
+
+    assert out["credential_tightened"] == 0, out
+    assert out["failed"] == 0, out
+    assert _mode(quiet) == 0o644, "a file carrying neither needle was chmodded"
+    assert _mode(already) == 0o600, "an already-tight file was recounted as work"
+    assert _mode(holder) == 0o755, (
+        "the rail descended into a directory it was only asked to look at")
+    assert (holder / "info.json").is_file(), "the rail reached inside a directory"
+    assert _mode(elsewhere) == 0o644, (
+        "a chmod reached through a symlink changed a file outside the work root")
+    assert out["not_a_dir"] == 3, out   # quiet, already, the link — `holder` is a dir
+
+
+def test_the_credential_is_resolved_by_the_aggregators_own_resolver(rs, automod,
+                                                                   tmp_path,
+                                                                   monkeypatch):
+    """Clause 4, first half: the secret's location is the aggregator's to say.
+
+    `#1415`'s shape, restated for a new file: the failure was never a wrong constant,
+    it was a second implementation of where things live. `aggregator_auth.py:46` says
+    the credential is "written once by the first process", and the same module documents
+    `LLOYD_MCP_TOKEN_FILE` as the way to move it — a literal here would keep tightening
+    against wherever the sweep guessed the file was while the real one moved, and report
+    success. So the sweep holds the resolver OBJECT, pinned against this module's own
+    import the way `test_the_sweep_imports_the_resolver_instead_of_restating_it` pins
+    the data-root trio, and the file's own name appears nowhere in its source.
+
+    The behavioural half is a fixture credential and a scratch file that carries ONLY
+    that value — no header literal — so a tightening here is proof the resolver was
+    consulted and the fixture's value was the needle.
+    """
+    assert rs._aggregator_token_path is agg_token_path, (
+        "the sweep holds a copy of the resolver instead of the aggregator's own")
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert '"aggregator-token"' not in src and "'aggregator-token'" not in src, (
+        "the credential's location is restated in the script that chmods, so a "
+        "LLOYD_MCP_TOKEN_FILE redirect leaves the rail matching a file nobody uses")
+
+    token = "dwproof-" + "d" * 35
+    _agg_credential(tmp_path, monkeypatch, token)
+    leak = _leaky_scratch(rs, token=token, header=False)
+
+    out = rs.sweep_automod_worktrees(apply=True, now=time.time(), repo=automod)
+
+    assert out["credential_tightened"] == 1, out
+    assert _mode(leak) == 0o600, out
+    assert out["why"] == "", (
+        f"the credential WAS readable, so the run has no reason to report: {out['why']}")
+
+
+def test_an_unreadable_credential_file_falls_back_to_the_header_literal(rs, automod,
+                                                                       tmp_path,
+                                                                       monkeypatch):
+    """Clause 4, second half: no credential must not mean no rail and must not mean a
+    traceback.
+
+    A weekly sweep that dies on a missing file reports nothing at all, which reads as
+    "the store is fine" — the standing failure mode of this whole file. So the run
+    carries on matching the header literal alone: a file that prints the header it is
+    about to send is carrying the credential beside it whatever the secret is now. And
+    the fallback is a NARROWER matcher, not a wider one — a foreign token with no
+    header literal stays at 0644, because with no credential there is nothing to match
+    it against and tightening every loose file in the store would be clause 3's
+    violation in the name of safety. The reason rides in `why`, the key this rung
+    already documents as "the first reason verbatim".
+    """
+    monkeypatch.setenv(AGG_TOKEN_FILE_ENV, str(tmp_path / "no-such-dir" / "credential"))
+    leaked = _leaky_scratch(rs, token="a value this box never issued",
+                            name="agg-driver-info.json")
+    stranger = _leaky_scratch(rs, token="a value this box never issued", header=False,
+                              name="some-other-run-info.json")
+
+    out = rs.sweep_automod_worktrees(apply=True, now=time.time(), repo=automod)
+
+    assert out["credential_tightened"] == 1, out
+    assert _mode(leaked) == 0o600, "the header literal alone stopped deciding the match"
+    assert _mode(stranger) == 0o644, (
+        "with no credential to compare, the rail widened instead of narrowing")
+    assert "unreadable" in out["why"] and "header literal" in out["why"], out
+
+
+def test_the_credential_count_rides_the_work_root_line_in_both_modes(rs, automod,
+                                                                    capsys,
+                                                                    monkeypatch,
+                                                                    tmp_path):
+    """Clause 5: the bucket is on the `~/lloyd-work` store line, and one state prints
+    one line — the pair every other count on this line is held to.
+
+    `main()` is the boundary here, not the rung: a count the rung returns and `main()`
+    does not print is a verdict only the process that computed it ever reads. The item's
+    own clause 4 said "row 17", which belongs to the scorecard's install-provenance row
+    (`scripts/automod/scorecard.py`, `_render_provenance`); this store's line is
+    unnumbered, and `_worktree_line` is what prints it. The dry run's line is also the
+    approval prompt, so it must carry the tightening BEFORE the mode changes and equal
+    the applied line after — which is only meaningful because the directory list is
+    provably unchanged across the dry run.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    token = "dwproof-" + "e" * 35
+    _agg_credential(tmp_path, monkeypatch, token)
+    leak = _leaky_scratch(rs, token=token)
+    before = sorted(p.name for p in rs.AUTOMOD_WORK_ROOT.iterdir())
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0, "a dry run must exit 0"
+    dry_line = _store_line(capsys.readouterr().out, "lloyd-work round dirs")
+    assert "1 credential tightened" in dry_line, dry_line
+    assert sorted(p.name for p in rs.AUTOMOD_WORK_ROOT.iterdir()) == before, (
+        "a dry run deleted something")
+    assert _mode(leak) == 0o644, (
+        f"the dry run printed a tightening it was only due to do: mode "
+        f"{oct(_mode(leak))}")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = _store_line(capsys.readouterr().out, "lloyd-work round dirs")
+    assert applied == dry_line, (
+        f"one state, one line — the number the operator approved and the number that "
+        f"was done must be the same line:\n  dry:     {dry_line}\n  applied: {applied}")
+    assert _mode(leak) == 0o600, (
+        "the line reported a tightening the applied run did not perform")
+    assert leak.is_file(), "the applied run deleted the file the line said it tightened"
 
 
 def test_a_branch_goes_only_at_thirty_days_and_only_when_its_tip_is_in_main(rs,

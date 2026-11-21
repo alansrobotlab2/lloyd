@@ -1928,6 +1928,94 @@ def _registered_worktrees(repo: Path) -> list[str]:
         raise AutomodStoreUnavailable(str(exc)) from exc
 
 
+# --------------------------------------------------------------------------
+# The credential rail on the work root's LOOSE files (#4463)
+# --------------------------------------------------------------------------
+
+#: Where the aggregator's request credential lives is that module's fact, not this
+#: script's: `agent_mcp/aggregator_auth.py` owns the path, publishes the value once, and
+#: documents `LLOYD_MCP_TOKEN_FILE` as the way to move it. Held as the resolver OBJECT —
+#: the same shape `test_the_sweep_imports_the_resolver_instead_of_restating_it` holds
+#: the data-root trio — so a redirect there redirects this rail too and the file's own
+#: name appears nowhere in this one. `#1415`'s lesson restated for a new file: the
+#: failure was never a wrong constant, it was a second implementation of where things
+#: live, and a literal here would keep matching a file nobody uses while the real
+#: credential moved, then report a tightened store.
+#:
+#: `None` is not a crash. This script runs under a bare `python3` from cron and from
+#: autonomy task #79, and the credential is a nice-to-have needle there: the header
+#: literal below still decides the match, and the run says which half it had (#4463).
+try:
+    from agent_mcp.aggregator_auth import AUTH_HEADER as _AGG_AUTH_HEADER
+    from agent_mcp.aggregator_auth import token_path as _aggregator_token_path
+except Exception:  # noqa: BLE001 - no-venv invocation is the expected path
+    _AGG_AUTH_HEADER = "X-Lloyd-Aggregator-Token"
+    _aggregator_token_path = None
+
+
+def _credential_needles() -> tuple[list[bytes], str]:
+    """The byte strings that mark a scratch file as carrying the aggregator credential.
+
+    Two needles, and the difference between them is the reason for both. The header
+    literal is the durable one: a file that prints the header the aggregator requires is
+    carrying the secret beside it, and it stays a marker after that secret moves. The
+    credential value is the wider one — it catches a file that names the secret without
+    naming the header — and it exists only while the token file can be read.
+
+    The value is READ, never published. `read_token(publish=True)` mints a credential
+    when the file is absent, so a retention sweep that called it would create a secret
+    the aggregator never agreed to and refuse every tool call in the product over it.
+
+    Returns `(needles, why)`, where `why` is the reason the credential half is missing
+    and is empty when it is not.
+    """
+    needles = [_AGG_AUTH_HEADER.encode("utf-8")]
+    if _aggregator_token_path is None:
+        return needles, ("agent_mcp.aggregator_auth was not importable from this tree, "
+                         "so the header literal alone decided the match")
+    path = _aggregator_token_path()
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return needles, (f"the credential file {path} is unreadable "
+                         f"({exc.strerror or type(exc).__name__}), so the header literal "
+                         "alone decided the match")
+    if not value:
+        return needles, (f"the credential file {path} is empty, so the header literal "
+                         "alone decided the match")
+    needles.append(value.encode("utf-8"))
+    return needles, ""
+
+
+def _bytes_contain(path: Path, needles: list[bytes], chunk: int = 1 << 20) -> bool:
+    """Whether any needle appears anywhere in `path`'s bytes.
+
+    Chunked rather than `read_bytes()` because this runs over every loose file at the top
+    of the work root on a machine that is also hosting the model: the largest thing the
+    walk finds must not be what a retention sweep allocates. The carried tail is the
+    longest needle, so a credential straddling a chunk boundary is a hit rather than a
+    miss — and a miss there is exactly the leaked copy left group-readable.
+
+    A file that cannot be read is not a match. `unreadable by us` and `carrying a secret`
+    are different facts, and the one that would justify reaching for a chmod here is not
+    established by an error.
+    """
+    tail_len = max((len(n) for n in needles), default=1) - 1
+    tail = b""
+    try:
+        with path.open("rb") as fh:
+            while True:
+                buf = fh.read(chunk)
+                if not buf:
+                    return False
+                window = tail + buf
+                if any(n in window for n in needles):
+                    return True
+                tail = window[-tail_len:] if tail_len else b""
+    except OSError:
+        return False
+
+
 def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None = None,
                             ledger: Path | None = None, current: Path | None = None,
                             repo: Path | None = None,
@@ -1970,7 +2058,14 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
                      `reclaimed_scratch` above it, and never counted in `registered`
                      because it is not being kept
       live           the round `current.json` names — never deleted, any age
-      not_a_dir      a symlink or a plain file — never touched by this rung
+      not_a_dir      a symlink or a plain file — never REMOVED by this rung, at any age;
+                     a plain file's MODE may still be tightened below (#4463)
+      credential_tightened   a loose top-level file whose bytes carry the aggregator
+                     credential, set to mode 0600 under `--apply` or due for it in a dry
+                     run — counted in BOTH modes, like `deregistered` above it, because
+                     an operator approves `--apply` against these numbers. Never a
+                     deletion: these same loose files are other sessions' in-flight
+                     patches and logs (#4463)
       failed         `git worktree remove` refused, `rmtree` or the age read refused
                      (permissions, a busy mount); `why` carries the first reason verbatim
     """
@@ -1980,7 +2075,7 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
     out = {"reclaimed": 0, "reclaimed_rounds": 0, "reclaimed_scratch": 0, "bytes": 0,
            "young": 0, "untracked": 0, "scratch_kept": 0, "registered": 0, "live": 0,
            "deregistered": 0,
-           "not_a_dir": 0, "failed": 0, "skip": "", "why": ""}
+           "not_a_dir": 0, "failed": 0, "credential_tightened": 0, "skip": "", "why": ""}
     if not root.is_dir():
         return out
     if registered is None:
@@ -1997,9 +2092,43 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
     except OSError as exc:
         out["skip"] = f"SKIPPED ({root} unreadable: {exc})"
         return out
+    # Resolved once, above the walk: this is one fact about the box (what a credential
+    # copy looks like), not one fact per entry, and a store with 100 loose files must not
+    # read the token 100 times. Computed AFTER the two skip returns above, so a store
+    # this rung could not read also does not get its credential file opened.
+    needles, needles_why = _credential_needles()
     for dir in entries:
         try:
             if dir.is_symlink() or not dir.is_dir():
+                # A non-directory used to be the end of this entry's story at ANY age,
+                # and that is how a 317-byte copy of the live aggregator credential sat in
+                # this store at mode 644 for six weeks while the sweep printed `1 not a
+                # directory` over it (#4463). Tighten the mode; never remove the file —
+                # the loose files here are other sessions' in-flight patches, probe
+                # scripts and logs, and a rail that deleted them to fix one leak would be
+                # the worse bug. A symlink is skipped outright because `chmod` FOLLOWS
+                # one: tightening through it would edit another session's file outside the
+                # work root by way of a name inside it. And a file already at 0600 is not
+                # counted, so the bucket is work outstanding rather than a headcount of
+                # correct files that would name the same one every night forever.
+                if not dir.is_symlink():
+                    try:
+                        mode = dir.stat().st_mode
+                        if mode & 0o077 and _bytes_contain(dir, needles):
+                            if apply:
+                                # Owner bits are carried over, not reset to 6: this is
+                                # `chmod -R go-rwx`, not `chmod 600`. The measured
+                                # resident here is a 0644 JSON dump, for which the two
+                                # spellings are the same 0600 — but a 0755 probe script
+                                # that prints the header must come out 0700, because
+                                # taking its execute bit away would be a second mutation
+                                # this rail was never asked to make to another session's
+                                # file, and the one that WAS asked for is reversible.
+                                dir.chmod(mode & ~0o077)
+                            out["credential_tightened"] += 1
+                    except OSError as exc:
+                        print(f"  ! skip {dir.name}: {exc}", file=sys.stderr)
+                        out["failed"] += 1
                 out["not_a_dir"] += 1
                 continue
             if live is not None and dir.name == live:
@@ -2078,6 +2207,13 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
         except OSError as exc:
             print(f"  ! skip {dir.name}: {exc}", file=sys.stderr)
             out["failed"] += 1
+    # The credential reason is folded in LAST and with the rung's own `or` idiom, so it
+    # can never shadow a real failure's verbatim reason above it: `why` is documented as
+    # "the first reason", and a report that read `1 FAILED to remove (the credential file
+    # is unreadable)` would send an operator to the wrong store. When nothing failed, it
+    # is the only reason there is, and this is the one place a reader learns the rail ran
+    # with half its needles.
+    out["why"] = out["why"] or needles_why
     return out
 
 
@@ -2398,6 +2534,13 @@ def _worktree_line(w: dict) -> str:
             f"{w['registered']} registered", f"{w['live']} live round"]
     if w["not_a_dir"]:
         kept.append(f"{w['not_a_dir']} not a directory")
+    if w["credential_tightened"]:
+        # #4463: the one thing this rung DOES to a non-directory, so it gets its own
+        # words rather than hiding inside `not a directory` two lines above — a mode
+        # change no operator read is a mode change nobody approved. It rides among the
+        # kept counts because the file IS kept: tightening a mode is the whole of what
+        # this rail may do to it, and printing it under `reclaimed` would say otherwise.
+        kept.append(f"{w['credential_tightened']} credential tightened")
     if w["failed"]:
         # The reason rides along, the way the branch store reports its two
         # FAILED cases: a count of registrations this store could not take down
