@@ -68,7 +68,7 @@ from app.backlog_tags import BLOCKER_TAG, NEEDS_HUMAN_TAG, is_spawn_tag, new_tas
 # `app.backlog_write` and `app.atomic_io` hold to the same rule (#3036).
 from app import backlog_write as BW, frontmatter as FM
 from app.atomic_io import commit_lock
-from app.data_root import PRODUCTION_DATA_ROOT, vault_root
+from app.data_root import PRODUCTION_DATA_ROOT, PRODUCTION_VAULT, vault_root
 
 BACKLOG_DIR = vault_root() / "backlog"
 
@@ -9644,16 +9644,16 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
         # default here the number would silently mean "what one owed-check run
         # could take" while the row above it still says `owed`, and 454 stranded
         # items would read as 5.
-        owing = O.owing_items(boards, due_only=False, stranded_cap=None)
+        owing = O.owing_items(boards, due_only=False, backlog_dir=backlog_dir, stranded_cap=None)
         owed = {"items": len(owing), "entries": sum(len(o.entries) for o in owing),
-                "due": sum(len(o.due) for o in owing), "outside": O.outside_list(boards),
+                "due": sum(len(o.due) for o in owing), "outside": O.outside_list(boards, backlog_dir=backlog_dir),
                 # #3017: a ruled-but-unexecuted hand-run, beside `outside` and on
                 # the same readout. `outside` is a ruling anyone may answer; this
                 # is a command whose own receipt says it has not been run, so an
                 # attended session sees the pending write without the owed-check
                 # job deciding it — which is how eight carriers closed with the
                 # apply still unrun.
-                "hand_runs": O.hand_runs(boards)}
+                "hand_runs": O.hand_runs(boards, backlog_dir=backlog_dir)}
     except Exception as exc:  # noqa: BLE001 — a count is never the board's shape
         logger.warning("owed counts failed: %s", exc)
         owed = None
@@ -9981,7 +9981,7 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
     allocate the same id do not overwrite each other: the loser takes the next.
     """
     root = backlog_dir or BACKLOG_DIR
-    root.mkdir(parents=True, exist_ok=True)
+    ensure_board_dir(root, "new_item")   # creates it, or refuses: see the section below
     if status not in PIPELINE_STATUSES:
         raise ValueError(f"unknown status {status!r}")
     board = check_board(board)  # app/backlog_boards.py: raises on a board off the list
@@ -10454,3 +10454,80 @@ def _runtime_root_assertion_holds(acceptance) -> bool:
     if not any(t and _under_runtime_data_root(t.lower()) for t in toks):
         return False
     return _asserts_no_round_can_perform(acceptance)
+
+
+# ---------------------------------------------------------------------------
+# Writing the board safely: the live board is the human's, not the suite's.
+#
+# `BACKLOG_DIR` binds `vault_root() / "backlog"` at import, and `vault_root()` is
+# `Path.home() / "obsidian"` unless overridden. Inside an automod round `$HOME` is
+# the round home and its `obsidian` is a symlink into the house vault —
+# `worktree.py::HOME_LINK_SKIP` skips `lloyd` and `lloyd-data`, not `obsidian` — so
+# a test that reaches `new_item` with no `backlog_dir=` files a real item on Alan's
+# board. Item #4487 is one: 6 KB, `status: done`, its title and both of its owed
+# rows verbatim fixture strings from `tests/test_owed_check.py`, written with no
+# ledger row for the loop that wrote it, and it cost a sweep pass and a triage turn
+# to learn it was never a request. `tests/conftest.py::_isolate_automod_backlog`
+# moves the default to scratch for every test; this is the backstop for a test that
+# points it back. The two helpers live here, at the end of the module, because prose
+# elsewhere cites lines above by absolute number — the rule
+# `tests/test_backlog_unattended.py::test_the_runtime_root_exception_is_documented_and_sits_below_the_cited_lines`
+# enforces for anything this module gains. (#4488)
+# ---------------------------------------------------------------------------
+
+#: The board as the account's human sees it. `PRODUCTION_VAULT` is
+#: `ACCOUNT_HOME / "obsidian"` — the passwd entry, not `$HOME`, which a round
+#: rebinds — which is exactly why a round's `$HOME/obsidian` resolves ONTO this
+#: directory rather than beside it.
+PRODUCTION_BOARD_DIR = PRODUCTION_VAULT / "backlog"
+
+
+class LiveBoardWriteRefused(RuntimeError):
+    """A board writer was handed the house vault's board from inside a pytest run.
+
+    Not a condition to catch. It is the sound of a test about to do what #4487 did:
+    file an item whose title is a fixture string, which nothing downstream can tell
+    apart from a request.
+    """
+
+
+def refuse_live_board_write(root: Path | str, writer: str) -> None:
+    """Refuse a board write aimed at the house vault, but only inside a test (#4488).
+
+    The conftest rebind already points every test at a scratch directory, so this
+    line is reached only by a test that undid it — an explicit `backlog_dir=` at the
+    house, or its own `monkeypatch` of `BACKLOG_DIR`. That is the one write which
+    must never create a file, because a sweep reads a fixture-titled file as a real
+    proposal: #4487 was swept, parked as `worth=low`, triaged, and closed `stale`.
+
+    Gated on `PYTEST_CURRENT_TEST` and on nothing else, because four production
+    callers write the live board on purpose and must keep doing so unchanged:
+    red-tree filing in this module, `scripts/automod/owed.py`'s follow-ups,
+    `scripts/maintenance/code_rules_census.py`, `scripts/step_conformance.py`. The
+    flag is set by pytest per test and by nothing else, and
+    `scripts/automod/vault_guards.py` strips `PYTEST_*` from a gate's children, so a
+    gate's own run is not the guarded case either. The idiom is `app/qmd_health.py`'s
+    and `scripts/service_health_check.py`'s.
+    """
+    import os
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        here, house = Path(root).resolve(), PRODUCTION_BOARD_DIR.resolve()
+    except OSError:      # an unreadable root is not recognisably the house board
+        return
+    if here != house and house not in here.parents:
+        return
+    raise LiveBoardWriteRefused(
+        f"{writer}: refusing to write into the live vault board {root} while pytest is "
+        f"running ({os.environ['PYTEST_CURRENT_TEST']}) — that is the human's board, and "
+        f"an item filed there by a test is indistinguishable from a request (#4487, whose "
+        f"debris is still on it). Pass `backlog_dir=` under `tmp_path`: the suite already "
+        f"rebinds `scripts.automod.backlog.BACKLOG_DIR` to a scratch directory.")
+
+
+def ensure_board_dir(root: Path, writer: str) -> Path:
+    """Create `root`, or refuse: `refuse_live_board_write`, then `mkdir`."""
+    refuse_live_board_write(root, writer)
+    root.mkdir(parents=True, exist_ok=True)
+    return root

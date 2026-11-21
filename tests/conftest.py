@@ -815,6 +815,56 @@ def _entity_seeding_off_in_tests(monkeypatch):
     monkeypatch.setenv("LLOYD_RECALL_EPISODIC", "0")
 
 
+# Placed here rather than beside `_isolate_backlog_dedupe` forty lines above
+# because prose elsewhere in the repo names `tests/conftest.py:815` — the line
+# above — as an ABSOLUTE number, and the citation-liveness nodes grade the file as
+# it stands. `tests/test_backlog_unattended.py::
+# test_the_runtime_root_exception_is_documented_and_sits_below_the_cited_lines`
+# records what happens otherwise: `SM_20261117_193757` was gate-refused for
+# reddening five such nodes with a diff that inserted a helper a thousand lines
+# above the constants it cited. Anything this file gains goes below those cites.
+@pytest.fixture(autouse=True)
+def _isolate_automod_backlog(tmp_path_factory, monkeypatch):
+    """No test files a real backlog item into the human's board (#4488).
+
+    `scripts.automod.backlog` binds `BACKLOG_DIR = vault_root() / "backlog"` at
+    import, and `vault_root()` is `Path.home() / "obsidian"` unless overridden.
+    Inside an automod round `$HOME` is the round home, whose `obsidian` is a
+    symlink into the house vault — `scripts/automod/worktree.py::HOME_LINK_SKIP`
+    skips `lloyd` and `lloyd-data`, not `obsidian` — so any test that reaches the
+    module's writer with no `backlog_dir=` creates a real item on Alan's board.
+    Item #4487 is one: 6 KB, `status: done`, its title and both of its owed rows
+    verbatim fixture strings from `tests/test_owed_check.py`, filed with no ledger
+    row for the loop that filed it, and it cost a sweep pass plus a triage turn to
+    discover it was never a request.
+
+    Per-file patches cannot close that hole. `tests/test_owed_check.py` and
+    `tests/test_backlog_unattended.py` do patch the global, and
+    `tests/test_backlog_red_tree.py` borrows the latter's fixture — but 25 test
+    files import `scripts.automod.backlog` and never name `BACKLOG_DIR`, clean only
+    because they happen not to call a writer, and none of them covers an in-process
+    probe. So the default moves here, where the suite's other `_isolate_*` fixtures
+    put it: `_isolate_backlog_dedupe` above is the same failure class on the dedupe
+    log, whose docstring counts 656 of 1004 rows as fixtures.
+
+    A test that wants its own board still wins — its `monkeypatch` runs after this
+    one's, and an explicit `backlog_dir=` never passed through this global. What a
+    test-local patch can no longer do is point the board back at the house and
+    write: `scripts.automod.backlog.refuse_live_board_write` refuses that before a
+    file is born, and the loop's own production writers, which have no
+    `PYTEST_CURRENT_TEST`, file the live board exactly as they did.
+
+    `tests/test_automod_backlog_isolation.py` is the check, including the child
+    pytest run with `HOME` at a fake home whose `obsidian` is a symlink.
+    """
+    try:
+        from scripts.automod import backlog as AUTOMOD_BACKLOG
+    except Exception:          # module not importable in this test's env
+        return
+    monkeypatch.setattr(AUTOMOD_BACKLOG, "BACKLOG_DIR",
+                        tmp_path_factory.mktemp("automod-backlog"))
+
+
 @pytest.fixture(autouse=True)
 def _fact_write_gate_off_in_tests(monkeypatch):
     """Fact writes in tests never ask the live djev (#1487).

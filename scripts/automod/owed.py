@@ -544,7 +544,7 @@ def _holds_a_slot(owing: Owing) -> bool:
 
 
 def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None = None,
-                due_only: bool = True,
+                due_only: bool = True, backlog_dir: Path | None = None,
                 stranded_cap: int | None = MAX_STRANDED_PER_RUN) -> list[Owing]:
     """Items (open or closed) with owed entries: an open item waiting on a
     decision first, then oldest owed first.
@@ -574,7 +574,7 @@ def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None =
     from scripts.automod import backlog as B
     now = now or _now()
     out: list[Owing] = []
-    for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS):
+    for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS, backlog_dir=backlog_dir):
         # Front matter only, through the shared parse memo. This loop used to
         # `read_text` every item on the board — all 83 MB of it — and parse it
         # again, a second full walk after `all_items`/`load_item` had already
@@ -1849,11 +1849,11 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             "carrier_guard": close_refusal.get("carrier_guard") or []}
 
 
-def outside_list(boards: tuple[str, ...] | None = None) -> list[dict]:
+def outside_list(boards: tuple[str, ...] | None = None, *, backlog_dir: Path | None = None) -> list[dict]:
     """Everything on the board that only Alan's hands can do, for Mission Control."""
     from scripts.automod import backlog as B
     out: list[dict] = []
-    for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS):
+    for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS, backlog_dir=backlog_dir):
         # Third full board walk per cycle before #3860 — see `owing_items`.
         fm = B.front_matter_of(item.path)
         for o in (fm.get(OUTSIDE_KEY) or []):
@@ -1864,7 +1864,7 @@ def outside_list(boards: tuple[str, ...] | None = None) -> list[dict]:
     return out
 
 
-def hand_runs(boards: tuple[str, ...] | None = None) -> list[dict]:
+def hand_runs(boards: tuple[str, ...] | None = None, *, backlog_dir: Path | None = None) -> list[dict]:
     """Every OPEN item whose `hand_run:` receipt still fails, for Mission
     Control — the pending one-command run, visible without the owed-check job
     ruling on it (#3017).
@@ -1885,7 +1885,7 @@ def hand_runs(boards: tuple[str, ...] | None = None) -> list[dict]:
     from app.backlog_status import CLOSED_STATUSES
     from scripts.automod import backlog as B
     out: list[dict] = []
-    for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS):
+    for item in B.all_items(boards if boards is not None else B.DEFAULT_BOARDS, backlog_dir=backlog_dir):
         if str(item.status or "").strip().lower() in CLOSED_STATUSES:
             continue
         try:
