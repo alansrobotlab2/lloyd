@@ -149,11 +149,23 @@ APPLY_INSTANT = "2026-10-19T16:44:20Z"
 # the instant of a backup it is not stored in.
 PS_4_APPLY_INSTANT = "2026-10-20T09:15:39Z"
 
+# The third ruled apply: carrier #3704's four pairs (`PS-9`) went in by hand on 2026-11-19,
+# and the write is on disk to be checked against — `store-backups/
+# kg-stranded-20261119T010306Z.sqlite` exists and its `stat -c %Y` is 1795050187. The instant
+# is taken from that artefact, never from the marker this file checks it against, for the
+# reason on `APPLY_INSTANT` above: a date scraped off the claim cannot falsify the claim.
+# `PS-10`'s one edge (2026-11-19T15:46:35Z, carrier #4257's pair
+# `agent-supervisord.service -> supervisord`) is applied but NOT a `RULED` key, so it has no
+# entry here — a key the skill does not carry cannot be weighed against its marker, and
+# inventing the key here would authorise a set nobody ruled. Recorded as a finding on #4480.
+PS_9_APPLY_INSTANT = "2026-11-19T01:03:06Z"
+
 #: Every ruled key except `PS-1` (excused: its status rides on `PS-2`'s receipt sentence) and
 #: the apply instant its marker must declare. A key missing from this map fails the node that
-#: reads it and names itself, rather than being skipped or borrowing a date.
+#: reads it and names itself, rather than being skipped or borrowing a date. A NEW `RULED` key
+#: in the skill therefore reds that node until its own apply's artefact is named here.
 APPLY_INSTANTS = {"PS-2": APPLY_INSTANT, "PS-3": APPLY_INSTANT,
-                  "PS-4": PS_4_APPLY_INSTANT}
+                  "PS-4": PS_4_APPLY_INSTANT, "PS-9": PS_9_APPLY_INSTANT}
 
 
 def _missing(path: Path) -> str:
@@ -1333,46 +1345,147 @@ def test_a_ruled_marker_is_weighed_against_its_own_key_instant_not_one_constant(
         "the bare-constant comparison survived inside the node that reads the table")
 
 
-def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_stay():
-    """#3065 clause 3: the store's present tense reads 21; every past reading keeps its date.
+# ── the two figures the record states about itself (#4480) ───────────────────
+#
+# Both of these numbers have a source outside the prose: the store decides one, the `RULED`
+# literal decides the other. Writing either down in this file is what filed #4480 — vault
+# commit `86b1eeeca` (#4352) corrected the skill's present-tense count from 21 to 26 on
+# 2026-11-19, a vault-surface landing cannot edit a file under `~/lloyd`, and the pinned 21
+# here stayed: every `tests` rung since reproduced two red nodes with no code bug behind them.
+# A pinned present-tense figure is the SAME claim held by two owners and only one of them gets
+# corrected, so the expected values below are measured and any figure but the measured one is
+# the failure. That is also what keeps the nodes able to fail: a checker that cannot see a
+# stale number is a photograph of today, not a guard, which is why the falsifier node feeds
+# both checkers readings this record has actually carried.
 
-    The two sentences were about today: "the store at 19 active `name-embedding:` edges with
-    all seven pairs live" (the `pairs=0` label branch) and "the store reads 19 active
-    `name-embedding:` edges" (the scope paragraph's settle). Both went false at
-    2026-10-20T09:15:39Z. The arithmetic is attributed per set, and it is NINE pairs — PS-3's
-    seven and PS-4's two — because `PS-1` ⊂ `PS-2` ⊂ `PS-3` contributes no pair of its own, so
-    "ten" would be a fresh false figure of exactly the kind this item is about.
+#: The two present-tense store readings the record carries: `the store at N active
+#: name-embedding: edges` (Step 2.5's `pairs=0` label branch) and `the store reads N active
+#: name-embedding: edges` (SD-stranded-1's scope settle). `at|reads` is the whole
+#: discriminator from the readings that must KEEP their numbers: the dated ones are past
+#: (`the store read 12 active`) or carry a qualifier this pattern will not span
+#: (`Measured 2026-10-20T10:05Z: the live store reads 21 active …`).
+PRESENT_STORE_FIGURE_RE = re.compile(
+    r"the store (at|reads) (\d+) active `name-embedding:` edges")
+
+#: Any count the record states as "N ruled pairs", spelled or in digits, so a miscount written
+#: as a word is as catchable as one written as a number.
+RULED_PAIR_FIGURE_RE = re.compile(r"(?i)\b([a-z]+|\d+) ruled pairs\b")
+
+_WORD_ONES = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+              "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+              "seventeen", "eighteen", "nineteen")
+_WORD_TENS = ("twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+
+
+def _number_word(n: int) -> str:
+    """Spell `n` (0-99) the way the record spells its counts: 13 → "thirteen".
+
+    The section states its arithmetic in words, so a derived figure has to be spelled before
+    it can be compared with the prose. Outside 0-99 this raises rather than compare against a
+    string the record would never use.
+    """
+    assert 0 <= n < 100, f"{n} is outside the range _number_word spells"
+    if n < 20:
+        return _WORD_ONES[n]
+    ten, one = divmod(n, 10)
+    return _WORD_TENS[ten - 2] + (f"-{_WORD_ONES[one]}" if one else "")
+
+
+def _stale_store_readings(text: str, count: int) -> list[str]:
+    """Every present-tense store count in `text` that is not `count`, quoted back."""
+    flat = " ".join(text.split())
+    return [f"the store {branch} {fig} active `name-embedding:` edges"
+            for branch, fig in PRESENT_STORE_FIGURE_RE.findall(flat)
+            if fig != str(count)]
+
+
+def _present_store_branches(text: str) -> set[str]:
+    """Which of the two present-tense readings `text` carries: a subset of {"at", "reads"}."""
+    return {branch for branch, _ in
+            PRESENT_STORE_FIGURE_RE.findall(" ".join(text.split()))}
+
+
+def _wrong_ruled_pair_figures(text: str, want: int) -> list[str]:
+    """Every "N ruled pairs" in `text` whose value is not `want`, quoted back."""
+    spelled, digits = _number_word(want), str(want)
+    return [f"{fig} ruled pairs" for fig in
+            RULED_PAIR_FIGURE_RE.findall(" ".join(text.split()))
+            if fig.lower() != spelled and fig != digits]
+
+
+def _ruled_pair_total(script_section: str) -> int:
+    """How many distinct pairs `RULED` enumerates, counted from the literal itself.
+
+    `PS-1` ⊂ `PS-2` ⊂ `PS-3` and contributes no pair of its own, so the union — not a sum over
+    keys — is the figure the record's arithmetic sentence has to carry.
+    """
+    ruled = _ruled_dict(_setcheck_script(_step_2_5_section(script_section)))
+    return len(set().union(*ruled.values())) if ruled else 0
+
+
+def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_stay():
+    """#3065 clause 3, re-anchored by #4480: the present tense must equal the store's own
+    count, and every past reading keeps its number.
+
+    Two sentences state today's count — "the store at N active `name-embedding:` edges" (Step
+    2.5's `pairs=0` label branch) and "the store reads N active `name-embedding:` edges"
+    (SD-stranded-1's scope settle). N was 19 until the apply of 2026-10-20T09:15:39Z and 21
+    until the two applies of 2026-11-19 — `PS-9`'s four pairs at 01:03:06Z and `PS-10`'s one at
+    15:46:35Z — after which the store measures 26. This node asserted 21 as a literal, #4352
+    moved the vault to 26, and no vault landing can reach this file: that is #4480, and it is
+    why the expected figure is now read through `_live_name_embedding_pairs()` instead of
+    written down. A present-tense count in prose and a present-tense count pinned here are one
+    claim with two owners.
+
+    The arithmetic is attributed per set, and the enumerated ruled pairs are THIRTEEN — `PS-3`'s
+    seven, `PS-4`'s two and `PS-9`'s four — because `PS-1` ⊂ `PS-2` ⊂ `PS-3` contributes no pair
+    of its own while `PS-10`'s single edge is applied but not ruled, so counting it as a ruled
+    pair (fourteen) would credit a set nobody put in `RULED`. That figure is derived from the
+    `RULED` literal for the same reason the store figure is derived from the store. This
+    replaces three literal bans (`ten pairs`, `10 pairs`, `ten ruled pairs`), each naming one
+    wrong figure; `_wrong_ruled_pair_figures` refuses every figure but the derived one, in
+    digits or in words, so it is not a narrower check.
 
     What must NOT move is the history and the receipt: `ACTIVE_NAME_EMBEDDING=19
     PAIRS_LIVE=7/7 MISSING=0` is #3011's probe's measured output on 2026-10-19, the pass
-    condition "exits 0 only at 19 active `name-embedding:` edges" is that probe's own floor, and
+    condition "exits 0 only at 19 active `name-embedding:` edges" is that probe's own floor;
+    rewriting either
     `len(rows)>=19` is the live receipt's floor — a floor is not a statement about today's
     count, and rewriting it would rewrite the command owed.py runs.
     """
     text = _skill_text()
-    for stale in ("store reads 19 active", "store at 19 active"):
-        assert stale not in text, (
-            f"{SKILL_PATH} still says {stale!r}: the store has read 21 active "
-            "`name-embedding:` edges since 2026-10-20T09:15:39Z, and a present-tense store "
-            "count is read as today")
+    count, _live = _live_name_embedding_pairs()
+    n_ruled_pairs = _ruled_pair_total(text)
+
+    stale = _stale_store_readings(text, count)
+    assert not stale, (
+        f"{SKILL_PATH} states today's store count as {stale}, but the store measures {count} "
+        "active `name-embedding:` edges through `app.kg_store` right now "
+        f"(measured at {LIVE_STORE}): a present-tense store count is read as today, and a "
+        "false one is worse than none because it closes the report that would have caught it")
+    branches = _present_store_branches(text)
+    assert branches == {"at", "reads"}, (
+        f"the record's present-tense readings are {sorted(branches) or ['none']}; both have to "
+        "carry the figure — the `pairs=0` label branch and the scope settle — and a "
+        "half-corrected record is still stale prose")
+
+    assert _wrong_ruled_pair_figures(text, n_ruled_pairs) == [], (
+        f"{SKILL_PATH} states the enumerated ruled-pair count as "
+        f"{_wrong_ruled_pair_figures(text, n_ruled_pairs)}, but `RULED` enumerates "
+        f"{n_ruled_pairs} distinct pairs")
+    flat_all = " ".join(text.split())
+    assert (f"{_number_word(n_ruled_pairs)} ruled pairs" in flat_all
+            or f"{n_ruled_pairs} ruled pairs" in flat_all), (
+        f"neither \"{_number_word(n_ruled_pairs)} ruled pairs\" nor "
+        f"\"{n_ruled_pairs} ruled pairs\" is in the record: the arithmetic has to be stated, "
+        "not merely free of a wrong figure")
 
     section = _sd_stranded_1_section(text)
     flat = " ".join(section.split())
-    for sentence in ("the store at 21 active `name-embedding:` edges",
-                     "the store reads 21 active `name-embedding:` edges"):
-        assert sentence in flat, (
-            f"one of the two replaced readings is missing its number — expected {sentence!r} "
-            "in the section; those are the `pairs=0` label branch and the scope settle, and a "
-            "half-corrected record is still stale prose")
-    assert "`PS-3`'s seven" in flat and "`PS-4`'s two" in flat, (
-        "the 21 has to be attributed to the two applies that wrote it — PS-3's seven pairs at "
-        "2026-10-19T16:44:20Z and PS-4's two at 2026-10-20T09:15:39Z — or a reader cannot tell "
-        "which backup holds which edges")
-    assert "nine ruled pairs" in flat, (
-        "the enumerated ruled pairs are nine, not a rounder number: PS-1 and PS-2 are inside "
-        "PS-3 and add nothing of their own")
-    for wrong in ("ten pairs", "10 pairs", "ten ruled pairs"):
-        assert wrong not in flat, f"the section claims {wrong!r}; the enumerated count is nine"
+    assert "`PS-3`'s seven" in flat and "`PS-4`'s two" in flat and "`PS-9`'s four" in flat, (
+        "the count has to be attributed to the applies that wrote it — PS-3's seven pairs at "
+        "2026-10-19T16:44:20Z, PS-4's two at 2026-10-20T09:15:39Z and PS-9's four at "
+        "2026-11-19T01:03:06Z — or a reader cannot tell which backup holds which edges")
 
     assert "ACTIVE_NAME_EMBEDDING=19 PAIRS_LIVE=7/7 MISSING=0" in section, (
         "the 2026-10-19 measured form of #3011's probe is gone: it is the past-tense record of "
@@ -1381,8 +1494,74 @@ def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_sta
         "the receipt's own pass condition stopped saying 19: that number is the probe's floor "
         "(12 pilot + PS-3's 7), not a claim about today, and the probe is run by owed.py")
     assert "len(rows)>=19" in section.replace(" ", ""), (
-        "the live receipt's floor was edited: it is a floor, still true at 21, and it is the "
+        "the live receipt's floor was edited: it is a floor, still true at 26, and it is the "
         "reading that decides whether a carrier may close")
+
+
+def test_the_figure_checkers_refuse_a_stale_count_and_a_miscounted_set():
+    """Both derived figures above can fail, on readings this record has actually held.
+
+    The positive control first: the live skill agrees with the live store and with its own
+    `RULED`, or the refusals below would be proving that the checkers always raise. Then four
+    wrong readings, each wrong in one named way — the 21 the vault carried until #4352 (the
+    figure that red-coded #4480), that same 21 left in ONE sentence of a two-sentence record
+    (the half-corrected case the message has to name), a ruled-pair count that counts
+    `PS-10`'s unruled edge, and the same count written in digits when the prose spells it.
+    """
+    text = _skill_text()
+    count, _live = _live_name_embedding_pairs()
+    n_ruled_pairs = _ruled_pair_total(text)
+    assert _stale_store_readings(text, count) == [], (
+        "the live skill already disagrees with the live store, so this node cannot use the "
+        "live skill as its positive control — fix the clause node's subject first")
+    assert _wrong_ruled_pair_figures(text, n_ruled_pairs) == [], (
+        "the live skill already misstates its own RULED count — same reason")
+    assert {"at", "reads"} == _present_store_branches(text), "positive control, branches"
+
+    drifted = " ".join(text.split()).replace(
+        f"the store at {count} active", f"the store at {count - 5} active")
+    assert drifted != " ".join(text.split()), (
+        f"the record does not carry `the store at {count} active` — the mutation this node "
+        "needs cannot be built, so the checker's ability to refuse is unproven")
+    refused = _stale_store_readings(drifted, count)
+    assert refused == [f"the store at {count - 5} active `name-embedding:` edges"], (
+        f"a present-tense count five edges behind the store came back as {refused!r}: the "
+        "stale-record direction is unguarded, which is exactly how #4480 happened")
+
+    half = " ".join(text.split()).replace(
+        f"the store reads {count} active", f"the store reads {count - 7} active")
+    assert half != " ".join(text.split()), "the second reading is not in the record"
+    assert _stale_store_readings(half, count) == [
+        f"the store reads {count - 7} active `name-embedding:` edges"], (
+        "a record with one sentence corrected and one left behind passed: the "
+        "half-corrected direction is unguarded")
+
+    # The record states the ruled-pair figure twice — Step 2.5's post-apply watermark block and
+    # SD-stranded-1's verification bullet — so the mutation lands on both and both must be
+    # refused. A checker that flagged only the first would leave the second site unguarded.
+    spelled = _number_word(n_ruled_pairs)
+    over = " ".join(text.split()).replace(f"{spelled} ruled pairs",
+                                          f"{_number_word(n_ruled_pairs + 1)} ruled pairs")
+    assert over != " ".join(text.split()), "the ruled-pair figure is not spelled as expected"
+    over_refused = _wrong_ruled_pair_figures(over, n_ruled_pairs)
+    assert over_refused and set(over_refused) == {
+        f"{_number_word(n_ruled_pairs + 1)} ruled pairs"}, (
+        f"counting PS-10's applied-but-unruled edge as a ruled pair came back as "
+        f"{over_refused!r}: a spelled miscount is invisible, and that figure is what a reader "
+        "takes as the authorised scope")
+    n_sites = " ".join(text.split()).count(f"{spelled} ruled pairs")
+    assert len(over_refused) == n_sites, (
+        f"the record states the figure at {n_sites} sites but {len(over_refused)} refusals came "
+        "back: a checker that stops at the first leaves the rest unguarded")
+    assert n_sites == 2, (
+        f"the figure is stated at {n_sites} sites, not the two this node documents — Step 2.5's "
+        "watermark block and SD-stranded-1's verification bullet")
+
+    digits = " ".join(text.split()).replace(f"{spelled} ruled pairs",
+                                           f"{n_ruled_pairs} ruled pairs")
+    assert _wrong_ruled_pair_figures(digits, n_ruled_pairs) == [], (
+        "the same count written in digits was refused: the check is on the value, not on the "
+        "style the prose happens to write it in")
 
 
 def test_the_copy_reading_names_the_backup_method_and_says_what_a_lone_main_file_reads():
@@ -1391,9 +1570,11 @@ def test_the_copy_reading_names_the_backup_method_and_says_what_a_lone_main_file
     The instruction used to be "a fresh read-only copy through `app.kg_store`", which an
     executor follows as `shutil.copy2` of the one file named. That reads the PRE-WRITE count and
     looks like a refutation of a write that succeeded: reproduced 2026-10-20T10:05Z on this box,
-    where the live store reads 21 active `name-embedding:` edges through `app.kg_store` and a
+    where the live store read 21 active `name-embedding:` edges through `app.kg_store` and a
     copy of `kg.sqlite` alone — 159,481,856 bytes, with 8,157,632 bytes of uncheckpointed
-    `kg.sqlite-wal` beside it — reads 19. The same trap was what #3060's triage hit three minutes
+    `kg.sqlite-wal` beside it — read 19. Both figures are that instant's, not today's, and the
+    store measures more than either now: #4480 is about what a present-tense figure costs. The
+    same trap was what #3060's triage hit three minutes
     after its own apply printed `applied 2 edges`.
 
     A stale snapshot that reads like a refutation is worse than no snapshot, because the action
