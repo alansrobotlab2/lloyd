@@ -657,6 +657,115 @@ def test_the_pass_hold_leaves_alone_everything_it_did_not_release(aut, tmp_path)
     assert len([int(t["id"]) for t in aut.get_due_tasks(now=PIN)]) <= 2
 
 
+# ── #4299: the pass hold has to cover a HELD upstream, not only a starting one ──
+#
+# The recurrence, from `~/lloyd-data/workers.db` `runs`. On 2026-11-19 #38 ran
+# 00:19:05.641Z→00:28:32.956Z and #42 correctly waited on it, but #39 — released by
+# its own 36 h bound against #42 — dispatched at 00:24:17.781Z and finished at
+# 00:34:52.876Z, while #42 did not start until 01:41:33.046Z and finished at
+# 01:52:21.310Z. Execution order that night: 38, 39, 42, 40 against declared
+# 38 → 42 → 39 → 40, so #39 finished 00:34:52.876Z, 77 min before the handoff
+# #42 produced it. On 2026-11-16 and 2026-11-17 the same chain ran in declared order
+# (38 06:00 / 42 06:06 / 39 09:00), which is the proof that #4135's rule was working:
+# the leak is one hop up the edge it guards.
+
+def _nightly_trio(aut, status38="up_next"):
+    """The 38 → 42 → 39 chain 25 h past both bounds: #38 and #42 last ran 61 h ago
+    against #39's `stale_bypass_hours: 36`, and #39 itself 2 days ago. No
+    `output_artifact` is declared, so the release is the elapsed bound alone — the
+    shape the 11-19 night was in, and the one #4135's own tests stop at.
+    """
+    h61 = (PIN - dt.timedelta(hours=61)).isoformat()
+    write_task(aut, 38, status=status38, last_run=h61)
+    write_task(aut, 42, depends_on=38, stale_bypass_hours=36, last_run=h61)
+    write_task(aut, 39, depends_on=42, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    return board(aut, 38, 42, 39)
+
+
+def test_the_pass_hold_reaches_the_dependent_whose_upstream_is_held_too(aut):
+    """Clauses 1 and 2: a two-hop chain no longer overtakes itself in one pass.
+
+    (a) is the 11-19 shape — #38 `in_progress`, so #42 is refused by the gate itself
+    (`_dependency_bypassed`'s in-flight guard) and #4135's rule never fires for it.
+    Before #4299 `get_due_tasks()` returned [#39] at that instant: the dependent two
+    hops behind an in-flight run dispatched past the held link, which is the pair
+    00:24:17.781Z-inside-00:19:05.641Z on the board.
+    (b) is the same instant one tick earlier with #38 still `up_next`: the shipped rule
+    held #42 correctly, yet `get_due_tasks()` returned [38, 39] — the pass started the
+    chain head AND its grandchild while skipping the middle link, which is what let the
+    grandchild finish first.
+    Both arms keep #42's own hold string exactly as #4135 shipped it, asserted here in
+    both states because clause 3's other half is that this rule never overwrites a
+    description the gate or the direct pass-hold owns.
+    """
+    tasks = _nightly_trio(aut, "in_progress")
+    t38, t42, t39 = tasks
+    assert [int(t["id"]) for t in aut.get_due_tasks(now=PIN)] == [], (
+        "a dependent two hops behind an in-flight run is dispatched anyway, which is "
+        "the 2026-11-19T00:24:17Z pair: "
+        f"{[int(t['id']) for t in aut.get_due_tasks(now=PIN)]}")
+    assert aut.hold_reason(t42, tasks, now=PIN) == (
+        "waiting on #38 (stale_bypass 36 h passed; #38 is in_progress)"), (
+        "#42's gate-owned hold string moved")
+    held = aut.hold_reason(t39, tasks, now=PIN)
+    assert held is not None and "#42" in held, held
+    assert "in_progress" not in held, (
+        f"the dependent describes the in-flight run as its own upstream's state: {held}")
+
+    tasks = _nightly_trio(aut, "up_next")
+    t38, t42, t39 = tasks
+    assert [int(t["id"]) for t in aut.get_due_tasks(now=PIN)] == [38], (
+        "the pass starts the chain head and its grandchild while skipping the middle "
+        f"link: {[int(t['id']) for t in aut.get_due_tasks(now=PIN)]}")
+    assert aut.hold_reason(t42, tasks, now=PIN) == (
+        "waiting on #38 (this dispatch pass is starting #38, which will write its "
+        "output; this dependent dispatches next pass)"), (
+        "#42's #4135 hold string moved")
+    assert aut.hold_reason(t39, tasks, now=PIN) == (
+        "waiting on #42 (#42 is itself held this pass by its upstream #38; this "
+        "dependent dispatches once the chain catches up)")
+
+    # A `depends_on` cycle still terminates now that the recursion descends two links
+    # instead of one: #50 → #51 → #52 → #50, all bounds past, must answer.
+    h61 = (PIN - dt.timedelta(hours=61)).isoformat()
+    write_task(aut, 50, depends_on=52, stale_bypass_hours=36, last_run=h61)
+    write_task(aut, 51, depends_on=50, stale_bypass_hours=36, last_run=h61)
+    write_task(aut, 52, depends_on=51, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    assert len([int(t["id"]) for t in aut.get_due_tasks(now=PIN)]) <= 3
+
+
+def test_a_chain_hold_expires_the_pass_the_chain_catches_up(aut):
+    """Clause 5: the hold is one pass, not a new fail-forever (#1551's question).
+
+    (a) is the held instant from clause 1 — #38 `in_progress`, #39 declined. (b) is the
+    next pass with the chain caught up: #42 finished minutes ago, #38 before it, every
+    status back to `up_next`. #39 is then released on real input by the freshness rule
+    (its upstream's run is 3 min old against a 12 h half-interval), so it dispatches and
+    `hold_reason` gives None: the hold expired with the pass, exactly as #4135's direct
+    arm already does one hop lower. Nothing here waits on a bound or a grace horizon —
+    `recover_stuck_tasks` resetting a stale `in_progress` file and max-retries landing a
+    failing task at `failed` (not in `RUNNABLE_STATUSES`, so not due) are what make the
+    arms it holds on finite even when a run never completes.
+    """
+    tasks = _nightly_trio(aut, "in_progress")
+    assert aut.hold_reason(tasks[2], tasks, now=PIN) is not None
+    assert [int(t["id"]) for t in aut.get_due_tasks(now=PIN)] == []
+
+    write_task(aut, 38, status="up_next",
+               last_run=(PIN - dt.timedelta(minutes=10)).isoformat())
+    write_task(aut, 42, depends_on=38, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(minutes=3)).isoformat())
+    write_task(aut, 39, depends_on=42, stale_bypass_hours=36,
+               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+    tasks = board(aut, 38, 42, 39)
+    assert [int(t["id"]) for t in aut.get_due_tasks(now=PIN)] == [39], (
+        "the chain caught up and the dependent is still not dispatched: "
+        f"{[int(t['id']) for t in aut.get_due_tasks(now=PIN)]}")
+    assert aut.hold_reason(tasks[2], tasks, now=PIN) is None
+
+
 # ── #4254: a fleet hold does not spend the fail-forward budget ────────────────
 #
 # The measured incident, instants and all. `pause_journal` id 69 took the pool at

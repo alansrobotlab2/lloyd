@@ -2937,6 +2937,20 @@ SAME_PASS_UPSTREAM_HOLD = ("waiting on #{uid} (this dispatch pass is starting #{
                            "next pass)")
 
 
+#: #4299's hold: the pass declined this dependent because the upstream it was about
+#: to forward past is ITSELF held this pass — not by its own schedule, which is what
+#: `SAME_PASS_UPSTREAM_HOLD` says, but by a run higher in the same chain. That
+#: sentence cannot carry the case honestly: it claims "this dispatch pass is starting
+#: #N", and at 2026-11-19T00:24:17Z #42 was not starting, it was sitting on
+#: `waiting on #38 (stale_bypass 36 h passed; #38 is in_progress)`. The held upstream
+#: is named first because that is the id the acceptance clause and the board need, and
+#: the run above it second because that is what the wait is for (#1739's ruling: a
+#: hold pointing at nothing is worth nothing).
+CHAIN_HELD_UPSTREAM_HOLD = ("waiting on #{uid} (#{uid} is itself held this pass by "
+                            "its upstream #{bid}; this dependent dispatches once the "
+                            "chain catches up)")
+
+
 def _same_pass_hold(task: dict) -> str:
     """`SAME_PASS_UPSTREAM_HOLD` with the upstream's id filled into both blanks.
 
@@ -2947,6 +2961,19 @@ def _same_pass_hold(task: dict) -> str:
     """
     return SAME_PASS_UPSTREAM_HOLD.replace("{uid}",
                                            str(task.get("depends_on")).strip())
+
+
+def _chain_held_hold(task: dict, blocker: dict) -> str:
+    """`CHAIN_HELD_UPSTREAM_HOLD` with the held upstream and the run above it filled in.
+
+    Same `.replace` reason as `_same_pass_hold`: `{uid}` appears twice. `blocker` is
+    the link `_chain_block_above` actually inspected, so the second id names a link the
+    predicate walked rather than a re-lookup that could answer differently for an
+    upstream the resolution set cannot resolve (#1739 clause 3).
+    """
+    return (CHAIN_HELD_UPSTREAM_HOLD
+            .replace("{uid}", str(task.get("depends_on")).strip())
+            .replace("{bid}", str(blocker.get("id"))))
 
 
 def _upstream_task(task: dict, all_tasks: list[dict]) -> Optional[dict]:
@@ -2969,13 +2996,98 @@ def _upstream_task(task: dict, all_tasks: list[dict]) -> Optional[dict]:
     return None
 
 
+def _chain_block_above(task: dict, all_tasks: list[dict], *,
+                       now: datetime.datetime,
+                       _seen: frozenset = frozenset(),
+                       pass_catch_up=_CATCH_UP_UNSET) -> Optional[dict]:
+    """The link directly above `task` that is in the way THIS pass, or None. (#4299)
+
+    WHY A PREDICATE AND NOT `not _is_task_due(upstream)`. That one-liner is the
+    tempting shape and it is #1551/#814's fail-forever in a new dress: it would also
+    hold a dependent whose upstream sits outside its `preferred_hours` window, is
+    serving a retry cooldown, already recorded a success this period, or is `paused`
+    — states in which nothing above anyone is running and the chain has every reason
+    to forward. So the question is narrowed to the one block that IS the chain being
+    mid-flight: `task` is due on its own gates, and the link directly above it is
+    either running (`status: in_progress`, the same fact
+    `_dependency_bypassed`'s non-forwarding guard rests on), or is being started by
+    this very pass (due by the same predicate dispatch is about to apply to it), or is
+    itself chain-held — which is the third arm, and the recursion it costs nothing to
+    pay for: the live nightly chain is four links deep (`38 → 42 → 39 → 40`), and
+    `test_the_pass_hold_leaves_alone_everything_it_did_not_release` already refuses to
+    assume `depends_on` chains are two links long.
+
+    WHY `task`'s OWN GATES ARE ASKED WITH `_chain_probe`. `task` reaches here only
+    because the pass declined something, and the pass declines for exactly two
+    reasons: the dependency gate refused it, or the chain above it is in the way.
+    Those are different facts, and only the second one should hold anyone downstream
+    — the first is #1538's `waiting on #N`, which releases on its own clock and which
+    downstream already reads through its own gate. `_chain_probe=True` therefore skips
+    the dependency gate and the pass-level veto, and every other veto (the run-record
+    backstop, `paused`/`draft`, `in_progress`, the cooldown, the window, no-frequency,
+    the catch-up ledger, the retry cooldown, the preferred hours) keeps its veto: an
+    upstream that would not run this pass whatever the chain did is not a chain in
+    flight, and holding a dependent for it would be a hold with no run to wait for.
+
+    WHY THE HOLD IS FINITE (#1551's question, asked of the new arm). None of the three
+    arms can persist on its own. `in_progress` cannot: `recover_stuck_tasks` resets a
+    file left `in_progress` past its `timeout_seconds`, and a task that lands at
+    `failed` is neither `in_progress` nor dispatch-due (`RUNNABLE_STATUSES` excludes
+    it), so the recursion bottoms out. Being started this pass cannot: `last_run` is
+    stamped at completion, the run record lands the same instant, and the next pass
+    sees a completed upstream whose output is fresh — which is clause 5, and is the
+    2026-11-19 shape releasing once #42 finished at 01:52:21.310Z. And the recursion
+    cannot: a link already on the way stops the walk, both at the top of the body and at
+    the link above it — the second guard is the one that matters, because
+    `_upstream_starting_now` bails out of a cycle by answering False, which makes the cut
+    link look dispatch-due to everything above it, and taking that answer as "this pass is
+    starting it" would describe a run nobody is starting. A cycle therefore keeps the one
+    sentence it already had, which is what
+    `tests/test_autonomy_dependency_windows.py::test_a_dependency_cycle_cannot_recurse`
+    pins.
+
+    Returns the blocking LINK (not a bool) because the board sentence has to name it:
+    #1739's ruling is that a stall description pointing at nothing is worth nothing,
+    and here the actionable id is the run two hops up while the held one is only one
+    hop up.
+    """
+    tid = str(task.get("id", "")).strip()
+    if not tid or tid in _seen:
+        return None
+    if not _is_task_due(task, all_tasks, now=now, _seen=_seen | {tid},
+                        window_catch_up=pass_catch_up, _chain_probe=True):
+        return None
+    gdep = _upstream_task(task, all_tasks)
+    if gdep is None:
+        return None
+    gid = str(gdep.get("id", "")).strip()
+    if gid and gid in _seen | {tid}:
+        # A `depends_on` cycle: the link above is one this walk already consulted, so
+        # the `_is_task_due` answer below would be the cycle cut's, not a dispatch. See
+        # the docstring's recursion paragraph for why taking that answer as "this pass
+        # is starting it" would describe a run nobody is starting.
+        return None
+    if str(gdep.get("status", "")).strip() == "in_progress":
+        return gdep
+    if _is_task_due(gdep, all_tasks, now=now, _seen=_seen | {tid},
+                    window_catch_up=pass_catch_up):
+        return gdep
+    if _chain_block_above(gdep, all_tasks, now=now, _seen=_seen | {tid},
+                          pass_catch_up=pass_catch_up) is not None:
+        return gdep
+    return None
+
+
 def _upstream_starting_now(task: dict, all_tasks: list[dict], *,
                            now: datetime.datetime,
                            _seen: frozenset = frozenset(),
                            pass_catch_up=_CATCH_UP_UNSET) -> bool:
-    """Is the upstream this dependent would forward past being dispatched right now?
+    """Is the upstream this dependent would forward past being dispatched right now,
+    or held this pass by a run higher in the same chain?
 
-    #4135. Both nightly reflection jobs came off a 46 h 43 m operator hold and
+    #4135 asked the first half; #4299 adds the second, at this function's LAST line
+    and nowhere else, because the incident it fixes is the first half working exactly
+    as written. Both nightly reflection jobs came off a 46 h 43 m operator hold and
     were dispatched in ONE scheduler tick on 2026-11-15: #38 at
     03:58:40.328609Z and #42 at 03:58:40.510792Z — 182 ms apart, #42's entire
     683 s run inside #38's 852 s. #42 declares `depends_on: 38` and
@@ -3021,6 +3133,21 @@ def _upstream_starting_now(task: dict, all_tasks: list[dict], *,
     #1296/#3544: a dependent holding a `success` for this period must keep reading
     `already ran this period`, not this sentence, and a dependent the gate refused must
     keep reading `waiting on #N` with #1538's detail.
+
+    #4299: THE ARM THAT MADE IT TRANSITIVE. The final line no longer stops at
+    "is the upstream due"; when it is not, it asks `_chain_block_above` whether the
+    upstream is due-but-held because ITS upstream is running or starting. That is the
+    whole of the widening, and its boundary is the item's scope line: the arm keys ONLY
+    to an upstream whose own block is a link above it, never to plain
+    `not _is_task_due(upstream)` — which would also hold a dependent whose upstream is
+    outside its `preferred_hours` window, serving a retry cooldown, sitting on a
+    recorded success for this period, or `paused`, and none of those has a run coming.
+    Those four are clause 4's exclusions, pinned dispatching in
+    `tests/test_autonomy_scheduler.py`, and they are the same list #1551 and #814 wrote
+    about: a bound, or a hold, that nothing can ever clear is not a fail-forward. The
+    arms it DOES fire from are all finite: `recover_stuck_tasks` (`app/autonomy.py`)
+    resets a file left `in_progress` past its `timeout_seconds`, and max-retries lands a
+    failing task at `failed`, which is not runnable and not due, so the recursion stops.
 
     Answers False, leaving today's behaviour, for everything it is not sure about:
     no `depends_on`, no upstream file (#558's verdict, not a hold), an upstream that
@@ -3071,18 +3198,45 @@ def _upstream_starting_now(task: dict, all_tasks: list[dict], *,
         return False
     if not _dependency_bypassed(task, dep_task, dep_last_run, now):
         return False
-    return _is_task_due(dep_task, all_tasks, now=now, _seen=_seen | {tid},
-                        window_catch_up=pass_catch_up)
+    if _is_task_due(dep_task, all_tasks, now=now, _seen=_seen | {tid},
+                    window_catch_up=pass_catch_up):
+        return True
+    # #4299: the upstream is not starting, but it is DUE-BUT-HELD because a link
+    # higher in this same chain is in flight or starting. Serialising only the direct
+    # edge is what let 2026-11-19 overtake itself: #38 ran 00:19:05.641Z→00:28:32.956Z
+    # and #42 correctly held on it, yet #39 — released by its own 36 h bound past #42
+    # — dispatched at 00:24:17.781Z and wrote this cycle's knowledge 66 minutes before
+    # the handoff #42 finally produced at 01:52:21.310Z. Execution order that night was
+    # 38, 39, 42, 40 against declared 38 → 42 → 39 → 40; on 11-16 and 11-17 the same
+    # chain ran 38 06:00 / 42 06:06 / 39 09:00, so the direct-edge rule was working and
+    # the leak is one hop up it. `git log -S'_upstream_starting_now'` answered exactly
+    # one commit (06ce51cf) before this one.
+    return _chain_block_above(dep_task, all_tasks, now=now, _seen=_seen | {tid},
+                              pass_catch_up=pass_catch_up) is not None
 
 
 def _is_task_due(task: dict, all_tasks: list[dict], *,
                  now: Optional[datetime.datetime] = None,
                  window_catch_up=_CATCH_UP_UNSET,
-                 _seen: frozenset = frozenset()) -> bool:
+                 _seen: frozenset = frozenset(),
+                 _chain_probe: bool = False) -> bool:
     # `all_tasks` is the dependency resolution set, not the dispatch candidates
     # — pass `dependency_resolution_set()`. `now` is one instant for this whole
     # evaluation, so `hold_reason` can be asked the same question at the same
     # instant and get the same answer (#870).
+    #
+    # `_chain_probe` is True for ONE caller, `_chain_block_above` (#4299), and skips
+    # exactly the two chain-level vetoes at the end of this body — the dependency gate
+    # and the pass-level hold. What it asks is "would this link dispatch were nothing
+    # above it in the way?", and a link refused by its upstream is refused by the chain:
+    # answering that question with the gate in place would report every held link as
+    # not-due and let the new arm decide a verdict `_dependency_refusal` already owns
+    # (#1538: `waiting on #N` releases on its own clock and must stay the gate's
+    # sentence). Every other veto keeps its answer, including the window, the preferred
+    # hours, the run-record backstop, the cooldown and the status gate — those are the
+    # blocks that are NOT the chain, and clause 4 pins a dependent forwarding past each
+    # of them. A probe never logs: the two warn-once ledgers below are once per process
+    # for the board's benefit, and a probe runs several times per tick.
     if now is None:
         now = _utcnow()
     # A task is runnable if it has a skill_name (slug) or a full skill_path.
@@ -3093,7 +3247,7 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
         # Loud skip: an empty skill_name otherwise dead-letters the task
         # forever with no signal (bit task 79 in June 2026).
         task_id = str(task.get("id", "?"))
-        if task_id not in _no_skill_warned:
+        if not _chain_probe and task_id not in _no_skill_warned:
             _no_skill_warned.add(task_id)
             logger.warning(
                 "Task #%s (%s) has no skill_name/skill_path — it will NEVER "
@@ -3107,7 +3261,7 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
     interval = _frequency_interval_seconds(task)
     if interval is None:
         task_id = str(task.get("id", "?"))
-        if task_id not in _no_frequency_warned:
+        if not _chain_probe and task_id not in _no_frequency_warned:
             _no_frequency_warned.add(task_id)
             logger.warning(
                 "Task #%s (%s) has frequency %r and no runs_per_day — not in "
@@ -3151,7 +3305,7 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
     # due again on the next tick — the retry storm.
     if _in_failure_cooldown(task, now):
         return False
-    if not _is_dependency_met(task, all_tasks, now=now):
+    if not _chain_probe and not _is_dependency_met(task, all_tasks, now=now):
         return False
     if not _is_preferred_hour(task):
         # The window is the ONLY thing that can refuse a task here and have that
@@ -3204,8 +3358,9 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
     # this dependent. It is the pass declining to start it in the tick in which it
     # also starts the upstream whose input the bypass would have it consume nothing
     # of. `_seen` is threaded so a `depends_on` cycle terminates.
-    if _upstream_starting_now(task, all_tasks, now=now, _seen=_seen,
-                              pass_catch_up=window_catch_up):
+    if not _chain_probe and _upstream_starting_now(task, all_tasks, now=now,
+                                                   _seen=_seen,
+                                                   pass_catch_up=window_catch_up):
         return False
     return True
 
@@ -3367,6 +3522,22 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
     # stale, which is exactly the state that reaches this line.
     if _upstream_starting_now(task, all_tasks, now=now,
                               pass_catch_up=window_catch_up):
+        # Two sentences answer one True, and which is true is decided in the SAME order
+        # `_upstream_starting_now` asks its arms: the direct one first. Asked in any
+        # other order this function would print #4299's chain sentence about the
+        # 2026-11-15 shape, where #42 WAS starting this pass and nothing was above it —
+        # a hold describing a link that is not being held, which is the failure mode
+        # #1739 was filed for. `held` is resolved with `_upstream_task`, the same
+        # lookup the predicate used, so the id the sentence names is one the board can
+        # click rather than one re-derived from `depends_on` (#1739 clause 3).
+        held = _upstream_task(task, all_tasks)
+        if (held is not None
+                and not _is_task_due(held, all_tasks, now=now,
+                                     window_catch_up=window_catch_up)):
+            blocker = _chain_block_above(held, all_tasks, now=now,
+                                         pass_catch_up=window_catch_up)
+            if blocker is not None:
+                return _chain_held_hold(task, blocker)
         return _same_pass_hold(task)
     return None
 

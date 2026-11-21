@@ -238,7 +238,7 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:3494` in that module, pinned by
+  frozenset({24, 38, 39, 40, 42, 53, 56})` at `app/autonomy.py:3665` in that module, pinned by
   `tests/test_worker_evidence.py`) — 7 of the 23 jobs that write durable state
   unattended. #53 Documentation Digester joined on 2026-10-09 (#2482), the first
   widening since #902 scoped the pilot to the reflection chain: that job's run of
@@ -624,7 +624,7 @@ sessions it wrote into one dated JSONL per day. #81 QMD Index Maintenance is hel
 out by that same ruling: what it would claim is the qmd embedding index's own
 state, which none of the four check kinds can read —
 `EVIDENCE_PILOT_TASK_IDS = frozenset({24, 38, 39, 40, 42, 53, 56})`
-(`app/autonomy.py:3494`, not inside the verifier's own file, and pinned there by
+(`app/autonomy.py:3665`, not inside the verifier's own file, and pinned there by
 `tests/test_worker_evidence.py:686`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
@@ -2225,12 +2225,13 @@ decide what gets worked on next.
 ## One dispatch pass, one link of a chain (#4135, 2026-11-15)
 
 `_is_task_due` ends with a veto no other gate owns, and `_upstream_starting_now` is its
-only owner. It fires for exactly one shape: a dependent its own `stale_bypass_hours`
-RELEASED (so `_dependency_bypassed` answered True and `_window_dependency_fresh` did
-not), whose upstream is `up_next`, has a `last_run`, and is itself dispatch-due in the
-same pass. Then the dependent is not due for THIS pass, and `hold_reason` says
+only owner. It fires for two shapes, both keyed to a dependent its own
+`stale_bypass_hours` RELEASED (so `_dependency_bypassed` answered True and
+`_window_dependency_fresh` did not). The first: its upstream is `up_next`, has a
+`last_run`, and is itself dispatch-due in the same pass — then `hold_reason` says
 `waiting on #N (this dispatch pass is starting #N, which will write its output; this
-dependent dispatches next pass)`. It is asked at the same position in both, so the
+dependent dispatches next pass)`. The second is #4299's, below. It is asked at the same
+position in both, so the
 board, `/api/autonomy/health`, and `fleet_watchdog._next_run_stalled` describe one hold
 (#870); being non-None, it also clears the dependent out of `_grossly_overdue`, which
 shouts about a task that is due, stale, and unqueued.
@@ -2256,6 +2257,35 @@ tick, changes no answer of `_is_dependency_met`, and costs one 60 s scan — pin
 `tests/test_autonomy_dependency_bypass.py` (release, one-pass expiry, the watchdog
 sentence) and `tests/test_autonomy_scheduler.py` (the #870 matrix and a declared bound
 still reachable).
+
+**#4299 (2026-11-21) — the veto had to reach one link higher.** The shape above
+serialises the edge it looks at, and a four-link chain overtakes itself one hop up it.
+The `runs` table has the recurrence: on 2026-11-19 #38 ran 00:19:05.641Z→00:28:32.956Z
+and #42 correctly waited for it, but #39 — released by its own 36 h bound against #42 —
+started at 00:24:17.781Z and finished at 00:34:52.876Z, while #42 did not start until
+01:41:33.046Z and finished at 01:52:21.310Z. Executed order 38, 39, 42, 40 against
+declared 38 → 42 → 39 → 40: #39 finished 00:34:52.876Z, 77 min before the handoff
+#42 produced it. The same chain ran in declared order on 2026-11-16 (06:00:30 /
+06:06:46 / 09:00:44) and 2026-11-17 (06:00:05 / 06:07:55 / 09:00:08), which is the proof
+that the rule above was working. So the last line of `_upstream_starting_now` no longer
+stops at "is the upstream due": when it is not, `_chain_block_above` asks whether the
+upstream is due-but-held because ITS upstream is `in_progress`, being started this pass,
+or itself chain-held, and the dependent is then held with
+`waiting on #N (#N is itself held this pass by its upstream #M; this dependent
+dispatches once the chain catches up)`. The scope line is that the new arm keys to
+*which block* the upstream is under, never to `not _is_task_due(upstream)`: an upstream
+outside its `preferred_hours` window, serving a retry cooldown, sitting on a recorded
+success for this period, or `paused` has no run coming, and holding a dependent for one
+is #1551's and #814's fail-forever again. It is asked as `_is_task_due(...,
+_chain_probe=True)`, which skips only the dependency gate and this same veto — a link
+refused by its upstream is refused by the chain, and #1538 owns that sentence. Finite
+because every arm it holds on is finite: `recover_stuck_tasks` resets a file left
+`in_progress` past its `timeout_seconds`, `failed` is not in `RUNNABLE_STATUSES` so the
+recursion bottoms out there, and `_seen` closes a `depends_on` cycle. Pinned by
+`test_the_pass_hold_reaches_the_dependent_whose_upstream_is_held_too`,
+`test_a_chain_hold_expires_the_pass_the_chain_catches_up`,
+`test_a_chain_held_dependent_holds_on_the_board_and_quiets_the_stall_alarm` and
+`test_the_chain_hold_never_fires_on_an_upstream_blocked_by_not_the_chain`.
 
 - **2026-11-16 — `stale`, corrected in place: the wiring drew ten edges and the
   fleet declared twelve.** §The wiring read "29 of the 39 tasks (2026-10-12)" over a

@@ -7325,3 +7325,173 @@ async def test_the_pass_rule_leaves_the_pinned_bypass_matrix_and_its_reach_alone
     assert {6, 7} <= set(due), (
         f"with nothing starting in this pass, a released dependent is still not "
         f"dispatched — #4135 cost the fail-forward, not a pass: {due}")
+
+
+# ── #4299: the pass hold must also cover an upstream the chain is holding ──────
+#
+# The witness this section pins is in `~/lloyd-data/workers.db`: on 2026-11-19 #38
+# ran 00:19:05.641Z→00:28:32.956Z, #39 ran 00:24:17.781Z→00:34:52.876Z, #42 ran
+# 01:41:33.046Z→01:52:21.310Z and #40 ran 01:43:51.501Z→01:58:39.594Z. Declared
+# order is 38 → 42 → 39 → 40; executed order was 38, 39, 42, 40. #42 waited for #38
+# correctly, and #39 — released by its own 36 h bound past #42 — went anyway and
+# wrote this cycle's knowledge 77 min before the handoff #42 produced it.
+
+def _chain_trio(aut, *, status38="in_progress", **dep_fm):
+    """38 → 42 → 39, both bounds 25 h past, in the 2026-11-19 state.
+
+    #38 and #42 last ran 61 h ago (past #42's and #39's `stale_bypass_hours: 36`),
+    #39 5 days ago — five days clears `_STALL_INTERVAL_MULT` (2.5 × the daily
+    interval = 60 h) so a #39 the pass does NOT decline is one the stall alarm must
+    report, which is what makes the omission assertion below worth anything. No
+    `output_artifact` is declared anywhere, so each release here is the elapsed bound
+    alone and the #4088 re-drive stays out of the shape. `status38` picks the arm:
+    `in_progress` is the gate holding #42 (the 00:24Z instant), `up_next` is this pass
+    starting #38 (the instant one tick before it). `dep_fm` overrides #39.
+    """
+    h61 = (PIN - dt.timedelta(hours=61)).isoformat()
+    d5 = (PIN - dt.timedelta(days=5)).isoformat()
+    write_task(aut, 38, status=status38, last_run=h61)
+    write_task(aut, 42, depends_on=38, stale_bypass_hours=36, last_run=h61)
+    write_task(aut, 39, depends_on=42, stale_bypass_hours=36, last_run=d5, **dep_fm)
+    return [read_task(aut, 38), read_task(aut, 42), read_task(aut, 39)]
+
+
+def test_a_chain_held_dependent_holds_on_the_board_and_quiets_the_stall_alarm(
+        aut, monkeypatch, tmp_path):
+    """Clause 3: the new hold is one gate seen from dispatch, the board and the alarm.
+
+    `hold_reason` names #42 — the upstream it is actually waiting on — and names #38 as
+    the run that is holding #42, because #1739's ruling is that a hold pointing at
+    nothing is worth nothing and the actionable thing two hops up is the in-flight run.
+    It does NOT reuse #4135's sentence: that claims "this dispatch pass is starting
+    #42", and #42 was not starting on 2026-11-19, it was sitting on
+    `waiting on #38 (stale_bypass 36 h passed; #38 is in_progress)`. #42's own string is
+    asserted unchanged in the same instant, since this rule is the last answer
+    `hold_reason` gives and must not overwrite a description the gate owns.
+
+    `_grossly_overdue` then says nothing about #39 while still reporting #913, the
+    dependency-free control at the same 5-day age: the arm lives inside `_is_task_due`,
+    which the alarm consults first, so a pass-declined dependent cannot read as a
+    silently skipped cycle — the same free property #4135's clause pinned one hop lower.
+    """
+    from workers.queue import WorkQueue
+
+    _pin(aut, monkeypatch)
+    board = _chain_trio(aut, status38="in_progress")
+    write_task(aut, 913, last_run=(PIN - dt.timedelta(days=5)).isoformat())
+    board.append(read_task(aut, 913))
+    t38, t42, t39, t913 = board
+
+    due = [int(t["id"]) for t in aut.get_due_tasks(now=PIN)]
+    assert aut._is_task_due(t39, board, now=PIN) is False
+    assert (39 in due) is (aut.hold_reason(t39, board, now=PIN) is None), (
+        "one gate, two answers: dispatch and the board disagree about #39")
+    assert aut.hold_reason(t39, board, now=PIN) == (
+        "waiting on #42 (#42 is itself held this pass by its upstream #38; this "
+        "dependent dispatches once the chain catches up)")
+    assert aut.hold_reason(t42, board, now=PIN) == (
+        "waiting on #38 (stale_bypass 36 h passed; #38 is in_progress)"), (
+        "#42's gate-owned hold string moved")
+    assert aut.hold_reason(t38, board, now=PIN) == "in_progress", (
+        "the chain head's own description changed too, so the new sentence is being "
+        f"printed for tasks the rule never considered: {aut.hold_reason(t38, board, now=PIN)!r}")
+    assert aut.hold_reason(t913, board, now=PIN) is None
+
+    stalled = [int(i) for i in fw._grossly_overdue(WorkQueue(tmp_path / "stall.db"))]
+    assert 39 not in stalled, (
+        f"the stall alarm reported a chain-held pass as a silently skipped cycle; it "
+        f"reports {stalled}")
+    assert 42 not in stalled, stalled
+    assert 913 in stalled, (
+        f"the control at the same age is not reported either, so the assertion above "
+        f"is vacuous: {stalled}")
+
+
+def test_the_chain_hold_never_fires_on_an_upstream_blocked_by_not_the_chain(
+        aut, monkeypatch):
+    """Clause 4: the arm keys to WHICH block the upstream is under, not to `not due`.
+
+    The tempting one-liner at that position is `not _is_task_due(upstream)`, and it is
+    #1551/#814's fail-forever wearing this item's clothes: it would also hold a
+    dependent whose upstream is outside its `preferred_hours` window, serving a retry
+    cooldown, sitting on a recorded success for this period, or `paused` — four states
+    in which no run is coming and the chain's own declared bound is the whole point of
+    dispatching. Each arm below therefore puts #38 `in_progress` (so a chain really is
+    in flight) and blocks #42 by one of those four causes, then requires #39 to
+    dispatch anyway. `42 not in due` in every arm is what keeps the assertion honest:
+    the upstream genuinely is not due, so a widened rule would have held #39 here.
+    """
+    _pin(aut, monkeypatch)
+
+    def held_or_not(label, **dep_fm):
+        board = _chain_trio(aut, status38="in_progress")
+        if "window" in label:
+            monkeypatch.setattr(aut, "_local_hour", lambda: 13)
+            write_task(aut, 42, depends_on=38, stale_bypass_hours=36,
+                       preferred_hours=[4],
+                       last_run=(PIN - dt.timedelta(hours=61)).isoformat())
+        elif "cooldown" in label:
+            write_task(aut, 42, depends_on=38, stale_bypass_hours=36,
+                       failure_count=2,
+                       last_attempt=(PIN - dt.timedelta(minutes=1)).isoformat(),
+                       last_run=(PIN - dt.timedelta(hours=61)).isoformat())
+        elif "record" in label:
+            _record(aut, 42, "run_42_chainarm", status="success",
+                    completed_at=(PIN - dt.timedelta(hours=1)).isoformat())
+        elif "paused" in label:
+            write_task(aut, 42, depends_on=38, stale_bypass_hours=36, status="paused",
+                       last_run=(PIN - dt.timedelta(hours=61)).isoformat())
+        board = [read_task(aut, i) for i in (38, 42, 39)]
+        due = [int(t["id"]) for t in aut.get_due_tasks(now=PIN)]
+        hold = aut.hold_reason(board[2], board, now=PIN)
+        assert 39 in due, f"{label}: #39 was held although #42's block is not the chain"
+        assert hold is None, f"{label}: {hold!r}"
+        assert 42 not in due, (
+            f"{label}: #42 is due too, so this arm proves nothing about the block's "
+            f"cause: {due}")
+
+    held_or_not("window")
+    held_or_not("cooldown")
+    held_or_not("record")
+    held_or_not("paused")
+
+
+def test_the_never_ran_and_freshness_releases_keep_their_own_two_shapes(
+        aut, monkeypatch):
+    """Clause 4's other half: the two exclusions #814 and the freshness rule already
+    owned are untouched by the new arm, in the two shapes where they decide the pass.
+
+    (a) #38 has NEVER run, so #42 forwards on the immediate branch and #39 is held —
+    but by #4135's direct rule, because #42 is being started this pass, and the string
+    says so. `upstream_starting_now`'s never-ran preamble answers False for the 38 → 42
+    edge (#870's `assert met[6] is True` is the fail-forward this protects), and the new
+    arm sits AFTER that answer rather than around it, so a renamed or brand-new chain
+    still gets its first cycle.
+    (b) #42 ran 2 h ago, so #39 is released on REAL input by the freshness rule, the
+    bypass is never consulted, and nothing holds it: `get_due_tasks` returns #39 with
+    `hold_reason` None. This is the healthy chain one cycle behind, and holding it is
+    what #1538 was filed about.
+    """
+    _pin(aut, monkeypatch)
+    _chain_trio(aut, status38="up_next")
+    write_task(aut, 38, status="up_next", last_run="")
+    board = [read_task(aut, i) for i in (38, 42, 39)]
+    due = sorted(int(t["id"]) for t in aut.get_due_tasks(now=PIN))
+    assert 42 in due, (
+        "a never-run upstream now holds its bypassing dependent, which is the "
+        f"fail-forward #870 pins by name: {due}")
+    assert 39 not in due, due
+    assert aut.hold_reason(board[2], board, now=PIN) == (
+        "waiting on #42 (this dispatch pass is starting #42, which will write its "
+        "output; this dependent dispatches next pass)"), (
+        "the never-ran release grew #4299's sentence instead of keeping #4135's")
+
+    _chain_trio(aut, status38="up_next")
+    fresh = (PIN - dt.timedelta(hours=2)).isoformat()
+    write_task(aut, 42, depends_on=38, stale_bypass_hours=36, last_run=fresh)
+    board = [read_task(aut, i) for i in (38, 42, 39)]
+    due = sorted(int(t["id"]) for t in aut.get_due_tasks(now=PIN))
+    assert 39 in due, (
+        f"the healthy chain one cycle behind was held: {due}")
+    assert 42 not in due, due
+    assert aut.hold_reason(board[2], board, now=PIN) is None
