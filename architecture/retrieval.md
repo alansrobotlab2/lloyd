@@ -1,15 +1,16 @@
 ---
 title: Vault recall — the retrieval pipeline and what was measured
 status: implemented
-date: 2026-09-22
+date: 2026-11-21
 ---
 
 # Vault recall — the retrieval pipeline and what was measured
 
 `vault_recall` (`agent_mcp/vault.py::_vault_recall`) is how Lloyd finds notes. It
-runs four legs in parallel — documents from the qmd daemon, a grep over Lloyd's
-code, an entity-graph lookup, and entity facts — and hands back the top documents
-plus facts. This doc is about the **document leg**: how its candidate pool is
+runs a document leg (the qmd daemon), a grep over Lloyd's code and an entity-facts
+leg in parallel, with a fourth entity-graph expansion leg available to the caller —
+`RECALL_EXPAND_GRAPH` is false at the defaults, so a production recall does not
+spend it — and hands back the top documents plus facts. This doc is about the **document leg**: how its candidate pool is
 built, who orders it, and every change to it that was measured on 2026-09-21,
 kept or rejected. CLAUDE.md carries a line per decision; this is the long version.
 
@@ -17,25 +18,41 @@ kept or rejected. CLAUDE.md carries a line per decision; this is the long versio
 
 ```
 query ──► qmd /query (daemon :8181, fork ~/lloyd/qmd)
-            lex leg:  BM25 over the 11 vault collections + lloyd-architecture, terms ORed
+            lex leg:  BM25 over the 11 vault collections + lloyd-architecture
+                      (+ `sessions` as the episodic floor, #1485), terms ORed
             vec leg:  Qwen3-Embedding-0.6B (embeddinggemma-300M until 2026-09-21)
-            fusion:   global — one ranking across collections by score
-            pool:     fused head 20 + floors of 2 for autonomy/architecture/skills
-                      (≤32 rows; cross-encoder OFF)
+            fusion:   global — one ranking across collections by score, each leg
+                      fused 100 deep (`QMD_FUSION_DEPTH`, §3.6)
+            pool:     fused head 18 + floors of 2 for autonomy/architecture/skills
+                      and 1 for `sessions`: 18 + (2+2+2+1) x 2 = the ≤32 rows one
+                      canvas holds (cross-encoder OFF). Head 20 with the floor off.
        ──► djev (GPU 2, :8011) orders the ≤32 rows          (RECALL_RERANKER "djev")
-            160-char candidates, one read, max_n 32, 4 s timeout
+            160-char candidates, one read, max_n = `recall_djev_pool()` — derived
+            from the served canvas (128/4 = 32), not a constant, 4 s timeout
        ──► top `limit` documents
 fallback: djev does not answer ──► the whole recall re-runs on the cross-encoder
-          path (global 40 + floors 5, qmd rerank on), counted and announced by
+          path (global 40 + floors 5, plus the `sessions` floor while the episodic
+          one is on, qmd rerank on), counted and announced by
           app/qmd_health.py::note_ranker
 ```
 
 - **One definition of the request.** `recall_doc_leg_shape()` is read by the doc
-  leg and by `scripts/automod/evalpin.production_payload`, so the regression pin
-  warms exactly what production sends.
+  leg, by `vault_search`'s recall rows (`_vault_search_recall_rows`) and by
+  `recall_doc_pool()` (the `djev.rank` `request_shape` report), and by
+  `scripts/automod/evalpin.production_payload`, so the regression pin warms exactly
+  what production sends and a change to the request lands once. The pool is the
+  served djev canvas read at call time through `recall_djev_pool()` →
+  `djev.canvas_rows()` (128 rows ÷ 4 candidates per question = 32), never a copied
+  constant; the head and the floors are measured numbers and must not become
+  derived — `tests/test_episodic_recall.py` checks their arithmetic against the
+  function.
 - **Kill switches.** `RECALL_RERANKER = "qmd"` restores the cross-encoder path;
   `RECALL_LEX_MODE = "and"` restores the AND keyword leg (and sends no key);
-  `RECALL_QMD_FUSION = "collection"` restores #504's 240-row per-collection request.
+  `RECALL_QMD_FUSION = "collection"` restores #504's 240-row per-collection request;
+  `retrieval.recall.episodic_floors: false` in config.yaml — or the
+  `LLOYD_RECALL_EPISODIC=0` that `tests/conftest.py` pins, so a development box
+  cannot score a floor it never asked for — drops the `sessions` collection and
+  returns the head to 20.
 - **Paths arrive decoded.** qmd percent-encodes every path segment; `qmd_file()`
   decodes at `_qmd_post` (and again in the Mission Control memory search), so
   `people/Ali Behrouz.md` is citable. 18 indexed notes carry a space, `+`, `#`
@@ -51,9 +68,14 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
   with the floor staying on the vault copy. A `lloyd-architecture/<doc>.md` hit
   opens through `vault_read`, which serves it from the checkout read-only;
   `vault_write` refuses it. The counters (`vault_overview`, MC stats) walk
-  `VAULT_DIR_SEGMENTS`, the vault's own directories. The prefetch block keeps
-  the vault list in `both` mode — its 300 ms budget was not where this was
-  measured. `eval/measurements/architecture-collection-2026-11-10.md`.
+  `VAULT_DIR_SEGMENTS`, the vault's own directories. The prefetch leg honours the
+  same switch now: `app/prefetch.py` keeps its own narrower list (a
+  scope-restricted subset, fused with no fold and no global-fusion payload) with an
+  `architecture` **slot** that `_derive_vault_collections()` replaces with
+  `architecture_collections()` at import — so under `both` prefetch names both
+  names too. It used to carry a second `== "repo"` ternary here, which honoured one
+  mode only and left the leg searching the vault's stale clone of these docs
+  (#4392, fixed `fa5298e0` 2026-11-20). `eval/measurements/architecture-collection-2026-11-10.md`.
 - **Session hits are ids, not paths.** A `sessions` hit (the episodic floor, or
   prefetch's recent-sessions leg) carries `session_id` and `open_with:
   session_read`; `session_read` (`agent_mcp/session.py`) returns that chat's
@@ -61,10 +83,11 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
   whenever the chat grows (`app/post_capture.py`), not only at turn 1.
 - **`vault_search` has its own pipeline key.** `vault_search.pipeline: legacy`
   (AND keywords, cross-encoder, the tool's long-standing shape) or `recall`
-  (this doc-leg's request and djev order). `vault_search.consolidate_default`
-  is whether the tool spends a primary-model call summarising its hits when the
-  caller does not say. Both are measured by `eval/run_vault_search_eval.py
-  --compare`; the defaults are what that measurement chose.
+  (this doc-leg's request and djev order) — deployed `recall`, with
+  `vault_search.consolidate_default: true`, which is whether the tool spends a
+  primary-model call summarising its hits when the caller does not say. Both are
+  measured by `eval/run_vault_search_eval.py --compare` (it runs both arms,
+  alternating per query); the defaults are what that measurement chose.
 - **Tests never reach the live djev.** `tests/conftest.py` pins the recall to
   `"qmd"`; `tests/test_recall_djev_ranker.py` opts in with djev stubbed.
 - **The prefetch hybrid leg lands on the same turn** (2026-09-24, #1482
@@ -72,7 +95,10 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
   `_prefetch_run` waits for it and fuses it with the lex hits; carry-over to the
   next turn is only the busy-daemon fallback. The whole recall stack was
   reviewed that day against the frontier — `architecture/recall-research-2026-09-24.md`,
-  items #1480–#1495.
+  items #1480–#1495 — a note `4a6cdd54` deleted on 2026-09-27 when research stopped
+  being an architecture doc; read it back with
+  `git show 4a6cdd54^:architecture/recall-research-2026-09-24.md`, and
+  `architecture/index.md` names it under Retired.
 
 ## 2. How it is measured
 
@@ -81,13 +107,27 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
 index name and port, so it never collides with the regression runner's pin), and
 a per-arm wrapper that changes one thing at `_qmd_post` or a module constant.
 **The pin is the arms that ask for it, not `run_eval` itself:** `PinnedCorpus` is
-constructed in `workers/sources/automod_regression.py:803` and nowhere in
-`eval/run_eval.py`, which reaches the daemon through
-`agent_mcp/vault.py:70 QMD_DAEMON_URL` — so the nightly baseline scores the live
-index, and the `corpus` block its artifact records (`eval/run_eval.py:128`, whose `label_agreement_ceiling` import the block pins) is the
-KG half only: no document or vector count, so `corpus_ok` cannot go false however
-the document corpus re-embeds, and `eval_trend_stats.corpus_diff` prints
-"corpus identical" across a drift that moves every doc-side number (#1374).
+constructed twice in `workers/sources/automod_regression.py` (the noise arm and the
+dev/holdout arm) and nowhere in `eval/run_eval.py`, which reaches the daemon through
+`agent_mcp/vault.py`'s `QMD_DAEMON_URL` — so the nightly baseline scores the live
+index, and what it scored with is recorded beside it. The `corpus` block its
+artifact records (`eval/run_eval.py:128`, whose `label_agreement_ceiling` import the
+block pins) is **no longer the KG half only**: #1374 gave it a `doc` half, owned by
+`app/doc_corpus.py` — `vectors` read off the serving daemon's `/health`, `corpus_mode`
+(`pinned` when a `LLOYD_CONFIG_OVERLAY` is serving the run, `live` otherwise, derived
+never asserted), and the five identity keys `index_path` / `index_mtime` /
+`index_size_bytes` / `content_vectors` / `index_reason`, written under
+`doc_corpus.DOC_KEY` at `eval/run_eval.py:172` and answered by `doc_corpus.doc_ok` —
+and `eval_trend_stats.fmt_drift` refuses to read a missing vector count as zero drift:
+a baseline from before the `doc` half prints `doc_vectors unknown`, and a run whose
+fact half matches prints "corpus identical on the fact half, doc side unknown", never
+the bare "corpus identical" that used to print through a re-embed. A probe that cannot
+answer writes `corpus["doc"] = null` rather than `vectors: 0`, which is what forces
+every later reader to say *unknown*. Two more fields of the same artifact carry the rest of the
+provenance a trend line needs: `observed_ranker`, the ranker the daemon reported for
+that run rather than the knob that was requested (#3675), and the report-only
+`episodic_floor_leg` that scores the generated past-chat proxy set against the floor
+state the run actually served (#4404).
 Every comparison is **paired per query** with a 10,000-draw bootstrap 95%
 interval; two arms on different snapshots are only compared through a control arm
 that matches the earlier pin query for query.
@@ -181,10 +221,12 @@ zero), NDCG +0.065 to +0.076 (each above zero), doc_hit +0.049 to +0.062. The
 model is set in one place, `models.embed` in `~/.config/qmd/index.yml`, which
 beats `QMD_EMBED_MODEL` in `resolveEmbedModel`; `evalpin.yml` must name the same
 model, since the regression pin serves a copy of production's vectors. Changing
-it is a full re-embed — every chunk vector in `content_vectors`, all 14
-collections — so read the size before costing it rather than quoting this line:
-`GET :8181/health` → `vecIndex.vectors` read 38,796 on 2026-09-22, and
-`architecture/qmd.md` deliberately pins no count at all. Cost the re-embed from
+it is a full re-embed — every chunk vector in `content_vectors`, for every
+collection `~/.config/qmd/index.yml` names (15 on 2026-11-21, `sessions` and
+`lloyd-architecture` among them) — so read the size before costing it rather than
+quoting this line: `GET :8181/health` → `vecIndex.vectors` read 38,796 on
+2026-09-22 and 97,398 on 2026-11-21, and `architecture/qmd.md` deliberately pins no
+count at all (it too carries dated readings only). Cost the re-embed from
 that number and from the measured chunks/s.
 
 ### 3.4 Floors, not depth (#1335, `77a30cbb`)
@@ -252,9 +294,19 @@ on 2026-11-09 to rebuild it weekly (`skills/entity-vectors-rebuild/SKILL.md`,
 2026-11-09T21:59Z, before that job's first run, the same check still exits 1 — 11,990 rows
 against 16,964 live entities, **44.90 days** old, 70.4% coverage (5,020 entities unseedable,
 46 index names no longer live), `build.json` **ABSENT**
-(#3907 read it at 42.9 days with `build.json` absent; nothing has rebuilt it since) —
+(#3907 read it at 42.9 days with `build.json` absent) —
 and `_load_index` now logs the same line once per cold load instead of
-serving an unbounded-age index in silence. `recall_seeds` is the one list `vault_recall` and the eval
+serving an unbounded-age index in silence. **#111 has run since.** Read again at
+2026-11-21T20:47Z the same check exits 0: 17,485 x 1024 rows, built 2026-11-17,
+4.32 days old against the 10-day bound, 98.4% live coverage (276 entities unseedable,
+13 index names no longer live), `build.json` present naming its store — so the stale
+reading above is the state before the cadence existed, not the state now, and job #111
+sits `up_next` with `last_run` 2026-11-17 and `next_run` 2026-11-24. Note what the
+bound is: `index_status()` says outright that nothing consults `MAX_INDEX_AGE_DAYS` to
+change behaviour and no caller may use `stale` to drop a seed, so the age is a reported
+comparison and the only thing that actually bounds it is #111's weekly cadence plus
+`--status`'s exit codes. Miss two weekly runs and the semantic leg keeps serving an
+index the bound has already called stale, quietly and by design. `recall_seeds` is the one list `vault_recall` and the eval
 both use; the doc leg starts before the seeds when the semantic half is on.
 Paired on one pin, 86 queries: entity_hit 0.337 → 0.500 (+0.163 [0.093, 0.244]),
 fact_entity_recall +0.172 [0.088, 0.265], anchorless 25 → 16 (strict 38 → 27),
@@ -307,7 +359,12 @@ The same production configuration scores doc_hit ~0.52 on the old 87-query set
 and ~0.69 on the repaired 81: most of the "misses" were labels that named the
 wrong file. Absolute numbers re-base at the repair (`scripts/eval_trend_stats.py`
 says so); paired comparisons made before it are still valid, just less powerful,
-because a broken label misses in every arm.
+because a broken label misses in every arm. The set is **86** queries since
+2026-11-10 restored five `lloyd-architecture` queries (81 → 86, another re-base
+point, §4), and `tests/test_eval_corpus_guard.py` re-counts the file against its own
+`GOLD SET SIZE:` header and against that number together — a growth is allowed, but
+it has to move the header and the pin in the same change, so a silently larger set
+cannot quietly move a trend line.
 
 ## 6. Files
 
@@ -321,9 +378,16 @@ because a broken label misses in every arm.
   `PinnedCorpus` refuses a snapshot holding no document of a collection that
   request names (`snapshot_collections`, `missing_collections`)
 - `qmd/src/store.ts` (fork) — `buildFTS5Query(query, mode)`, `searchFTSAcross`, `structuredSearch` options
+- `app/doc_corpus.py` — the document half of an eval run's corpus identity (#1374):
+  `collect()` for the daemon-side vector count and `corpus_mode`, `index_identity()`
+  for the five identity keys, `doc_ok()` for the artifact's verdict, and `None` (never
+  a zero) when the probe cannot answer
 - `app/entity_linker.py`, `app/qwen3_embed.py`, `agent_mcp/retrieval.py::recall_seeds` — entity seeding (#1486)
 - `eval/vault_recall_queries.yaml` — the gold set; `tests/test_eval_corpus_guard.py` guards it
-- tests: `test_recall_first_stage.py`, `test_recall_djev_ranker.py`, `test_recall_global_fusion.py`, `test_doc_candidate_pool.py`
+- tests: `test_recall_first_stage.py`, `test_recall_djev_ranker.py`, `test_recall_global_fusion.py`, `test_doc_candidate_pool.py`,
+  and `test_episodic_recall.py` for #1485's floor — the only file that checks the
+  head-plus-floors arithmetic against `recall_djev_pool()` and that
+  `production_payload` is the doc leg's request
 
 ## Review log
 
@@ -350,3 +414,33 @@ because a broken label misses in every arm.
   `vault_search` pipeline and consolidate keys documented. Corrected: the MC memory
   search and backlog dedupe no longer open their own sockets — both call
   `qmd_query` since #1498.
+- **2026-11-21** — `stale`. Four claims had described what ran rather than what runs,
+  all of them sentences rather than mechanisms: §2 still said the nightly artifact's
+  `corpus` block is the KG half only and that `corpus_diff` prints "corpus identical"
+  through a re-embed, but #1374's fix landed in `a0b1b6b9` and `app/doc_corpus.py` now
+  ships the `doc` half (`vectors`, `corpus_mode`, five identity keys, `doc_ok`) with
+  `fmt_drift` printing `doc_vectors unknown` / "…doc side unknown" instead; §3.7's
+  "nothing has rebuilt it since" is falsified by job #111, which has run — re-read
+  2026-11-21T20:47Z, `--status` exits 0 at 17,485 rows, 4.32 days, 98.4% coverage,
+  `build.json` present — and the 10-day figure is a reported comparison `entity_linker`
+  forbids any caller to act on; §1's pool omitted the deployed episodic floor (head 18
+  + a `sessions` floor of 1, which `tests/conftest.py` pins off so a dev box cannot
+  score it); and §1 still claimed the prefetch block keeps the vault's architecture
+  list, which #4392 refuted on 2026-11-20 (`fa5298e0`) — prefetch splices
+  `architecture_collections()` now. Also corrected: two dead line citations
+  (`automod_regression.py:803`, `vault.py:70`), "all 14 collections" (the index names
+  15), `architecture/recall-research-2026-09-24.md` cited as a live note when
+  `4a6cdd54` deleted it, and §5's 81 carried without the 86 it grew to. Added: the
+  episodic kill switch beside the other three, `observed_ranker` (#3675) and
+  `episodic_floor_leg` (#4404) as artifact fields, `app/doc_corpus.py` and
+  `tests/test_episodic_recall.py` in §6. Re-measured true and left alone: the
+  pool-derived-from-canvas derivation (`canvas_rows()` 128/4 = 32), `note_ranker`'s two
+  call sites and `qmd_query` as the one door that folds every reply's `meta`
+  (`backlog_similar` and `memory.py` build their own payloads — the doc never claimed
+  otherwise), `PREFETCH_BUDGET_MS = 300`, `topics_merge: off` in both code and config,
+  `N_RESAMPLES = 10000`, the fork's `buildFTS5Query`/`searchFTSAcross`/`lexMode`,
+  `QMD_FUSION_DEPTH`, `djev.enabled: true`, and `vecIndex.vectors` 97,398. Filed
+  nothing: every mechanism the doc names resolves in the tree, and each of the
+  mechanism-level doubts raised on the way (a shape that follows the engine's liveness,
+  an index served past its bound) is already instrumented (`observed_ranker`) or is a
+  shipped ruling rather than drift.
