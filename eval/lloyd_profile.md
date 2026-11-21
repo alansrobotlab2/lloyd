@@ -19,8 +19,26 @@ projects. It also modifies its own code through a gated loop.
 
 ## Hardware and models
 
-- Two 24 GB RTX 3090-class GPUs. Anything that needs more than ~22 GB per GPU,
-  or a cloud API, is not adoptable as-is.
+- Five cards, `nvidia-smi` index order; the card-by-card map's owner is
+  `architecture/infrastructure.md` § GPUs. GPU 0 RTX 3090 24 GB (the desktop and
+  the LiveKit voice worker), GPU 1 RTX PRO 6000 Blackwell 96 GB (the primary),
+  GPU 2 RTX 3090 24 GB (djev), GPU 3 RTX 3090 24 GB (the voice TTS), GPU 4
+  RTX 3090 24 GB (qmd).
+- Adoptability is therefore one 24 GB card, not two cards with nothing free: an
+  idea that fits inside a 3090 has a card to be tried on and needs no cloud API.
+  How much room each card actually has is whatever
+  `nvidia-smi --query-gpu=index,memory.used --format=csv` says now — GPU 2's djev
+  tenant keeps that card near-full and GPU 0 carries the desktop. GPU 1, the
+  Blackwell, is not a spare card: the primary occupies 95106 of its 97887 MiB
+  (measured 2026-11-21 with `nvidia-smi
+  --query-gpu=index,name,memory.total,memory.used --format=csv` — re-run it rather
+  than re-member it), so an allocation bigger than a 3090 has nowhere to go without
+  displacing the model Lloyd thinks with.
+- FP4: GPU 1 is the box's only card with native FP4 (CUTLASS / FlashInfer MoE,
+  sm_120) and it is committed to the primary, so a native-FP4 idea has no spare
+  card to be measured on. The 3090s are not FP4-blind: vLLM serves weight-only
+  NVFP4 through Marlin W4A16, which is how GPU 2 runs DiffusionGemma NVFP4 today
+  (`architecture/djev.md`, "Why an SM86 card can serve NVFP4 at all").
 - Primary: Qwen3.8-Flash-Next (NVFP4) on vLLM, 262k context, OpenAI-compatible
   API, `qwen3_xml` tool parser, reasoning parser, prefix caching on.
 - Secondary: Qwen3.6-35B-A3B (GGUF Q3, llama.cpp, `--parallel 1`, full 256k
