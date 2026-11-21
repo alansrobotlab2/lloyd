@@ -2736,3 +2736,154 @@ def test_a_refused_carrier_close_is_cleared_by_filing_the_carrier_item_it_names(
     child_path = B._item_path(child.id)
     assert child_path is not None and fm_of(child_path)["status"] == "draft", \
         "the step is now carried by an open item, which is the point"
+
+
+# ── #4343: a ruling that names a re-arm measurement schedules it, and a
+#            stand-in name in brackets is not a follow-up ────────────────────
+
+_REARM_RULING = (
+    "The 1070 run-record duty is the right one and the instrument is correct. "
+    "RE-ARM only on a measured fire: >=1 `BENCH ASSERTION DROP` on a job's stderr "
+    "whose run record does NOT carry the copied line, or one key dropped across "
+    "consecutive runs and still unlanded after 7 days — only then reopen refusal."
+)
+_PLAIN_RULING = ("The bench drop line already has its duty holder in vault-commit.sh, "
+                 "and no measurement is owed by this ruling.")
+
+
+def _ruled(isolated, whats, ruling, *, follow=None, now=None):
+    """Settle every owed row on #4185-style item as a `ruling`, optionally filing a child."""
+    p, entries = _owing(isolated, 4185, whats, status="done")
+    answer = {"n": 1, "outcome": "ruling", "ruling": ruling}
+    if follow is not None:
+        answer["follow_up"] = follow
+    out = O.apply_verdict(p, entries, [answer], item_id=4185, now=now)
+    return p, out
+
+
+def _child_of(p, parent_rec=0):
+    """The item a settle filed, read back from the parent's front matter."""
+    child_id = fm_of(p)["owed_settled"][parent_rec]["follow_up"]
+    path = B._item_path(int(child_id))
+    assert path is not None, f"child #{child_id} has no file on disk"
+    return child_id, path
+
+
+def test_a_standin_name_in_parentheses_is_not_a_follow_up():
+    """`(none) no escalation work filed` is the name #4337 was filed from on
+    2026-11-19, and the sixth junk item of this shape after #1754, #1998, #2002,
+    #2020 and #2826 — all five closed as junk afterwards.
+
+    The lead arm reads only up to a colon or a dash set off by spaces, so a
+    stand-in followed by a PLAIN SPACE is one unbroken phrase to it and the name
+    files. The bracket is not the hole: `none no escalation work filed` passed
+    before this fix too, which is why the bare form is asserted here as well.
+    """
+    body = ("Nothing to change: the ruling already closes the entry and the "
+            "instrument prints what it always printed.")
+    for name in ("(none) no escalation work filed",     # the #4337 instance
+                 "[none] no escalation work filed",     # bracketed variant
+                 "{none} no escalation work filed",
+                 "none no escalation work filed",       # the same hole unbracketed
+                 "(nothing) no further work needed",
+                 "(n/a) no engineering work remains"):
+        assert not O.is_real_follow_up({"name": name, "body": body}), name
+
+
+def test_a_real_instruction_behind_a_standin_word_still_files():
+    """Tightening the lead arm must not file less real work: a substantive name
+    plus a body of at least `MIN_INSTRUCTION_CHARS` characters carrying a sentence
+    terminator still files, including names that merely BEGIN with a stand-in word.
+    """
+    body = ("Change the settle block in scripts/automod/owed.py to write the "
+            "re-arm condition as an owed row, and pin it with a node here.")
+    assert len(body) >= O.MIN_INSTRUCTION_CHARS
+    for name in ("Schedule the re-arm measurement on the filed child",
+                 "None of the three callers pass session_id",
+                 "Nothing-examined rows: count them in the scorecard",
+                 "No-op guard for the settle path: remove it"):
+        assert O.is_real_follow_up({"name": name, "body": body}), name
+
+
+def test_a_ruling_that_names_a_rearm_condition_schedules_it_on_the_child(isolated):
+    """Clause 3 of #4343: the condition a ruling names must become a scheduled owed
+    row on the child that ruling files, read back from the child's front matter.
+
+    Before this, #4185's ruling — the text below, verbatim in shape — was written
+    into `owed_settled` and its child was created with NO owed row at all: the
+    parent is `done`, owed-check never revisits a `done` item, and
+    `derived_entries` counts `owed_settled` as recorded, so the words "RE-ARM only
+    on a measured fire" were read by nobody ever again.
+    """
+    now = O._now()
+    p, out = _ruled(isolated, [_REARM_RULING.split(":")[0] + " — settle it"],
+                    _REARM_RULING,
+                    follow={"name": "Give the bench drop line its run-record duty",
+                            "body": "Add the copied line to the run record and assert "
+                                    "it in the canary test."},
+                    now=now)
+    assert out["filed"], "the ruling's follow-up should still be filed"
+    child_id, child_path = _child_of(p)
+    rows = O.entries_of(fm_of(child_path))
+    assert len(rows) == 1, f"the child carries {len(rows)} owed rows, expected the one measurement"
+    row = rows[0]
+    assert O.REARM_MARKER in row["what"], row["what"]
+    assert "BENCH ASSERTION DROP" in row["what"], \
+        "the scheduled row must carry the parent's own condition, not a paraphrase of it"
+    assert row["kind"] == "check"
+    scheduled = row.get("recheck_after")
+    assert scheduled, f"the child's row has no schedule at all: {row}"
+    at = datetime.fromisoformat(str(scheduled).replace("Z", "+00:00"))
+    assert at > now, f"recheck_after {scheduled} is not in the future"
+    assert at <= now + timedelta(days=O.MAX_RECHECK_DAYS), \
+        f"recheck_after {scheduled} sits past MAX_RECHECK_DAYS = {O.MAX_RECHECK_DAYS}"
+    assert any("re-arm condition scheduled" in note for note in out["notes"]), out["notes"]
+
+
+def test_a_ruling_naming_no_rearm_condition_files_an_unscheduled_child(isolated):
+    """Clause 4 of #4343: the mechanism fires ONLY on a named re-arm. A ruling with
+    no `RE-ARM` in it files its child with no owed row, and the settled parent
+    record keeps exactly the fields it wrote before this change — `what`,
+    `outcome`, `at`, plus `ruling` and `follow_up` — with no `recheck_after`, so a
+    `done` parent is still not revisited and no new scheduling leaks onto a ruling
+    that asked for none.
+    """
+    assert O.rearm_condition(_PLAIN_RULING) == "", "the control ruling must name no condition"
+    assert O.rearm_condition("") == ""
+    p, out = _ruled(isolated, ["rule on the bench drop duty"], _PLAIN_RULING,
+                    follow={"name": "Record the drop line in the run record",
+                            "body": "Copy the line into the run record and pin the "
+                                    "assertion in the canary test."})
+    child_id, child_path = _child_of(p)
+    assert O.entries_of(fm_of(child_path)) == [], \
+        "a ruling that names no re-arm must not put a scheduled row on its child"
+    assert not any("re-arm condition scheduled" in note for note in out["notes"]), out["notes"]
+
+    rec = fm_of(p)["owed_settled"][0]
+    assert rec["outcome"] == "ruling"
+    assert rec["what"] and rec["at"] and rec["ruling"] == _PLAIN_RULING
+    assert int(rec["follow_up"]) == int(child_id)
+    assert "recheck_after" not in rec, \
+        f"the settled parent record gained a schedule it never had: {rec}"
+    assert fm_of(p)["status"] == "done", "the parent must still close"
+
+    # `add_owed`'s new parameter must not change a row written without one: every
+    # `owed` row already on the board was written by a call that passed nothing, so
+    # an empty value has to drop the key rather than store an empty string.
+    plain = B.new_item("A row written without a schedule", status="draft")
+    plain_path = B._item_path(plain.id)
+    assert O.add_owed(plain_path, ["Rule on which of the two dates to use"])
+    stored = fm_of(plain_path)[O.OWED_KEY]
+    assert len(stored) == 1 and "recheck_after" not in stored[0], \
+        f"an unscheduled row gained a key: {stored}"
+    later = (O._now() + timedelta(days=O.REARM_RECHECK_DAYS)).isoformat()
+    assert O.add_owed(plain_path, ["Check whether the nightly shows the drop"],
+                      recheck_after=O.recheck_date(later))
+    stored = fm_of(plain_path)[O.OWED_KEY]
+    assert len(stored) == 2, f"the scheduled row was not appended: {stored}"
+    dated = [r for r in stored if r["what"].startswith("Check whether")]
+    assert len(dated) == 1, f"the scheduled row is not the row asked for: {stored}"
+    at = datetime.fromisoformat(str(dated[0]["recheck_after"]).replace("Z", "+00:00"))
+    assert at > O._now(), f"the scheduled row is not in the future: {dated[0]}"
+    assert at <= O._now() + timedelta(days=O.MAX_RECHECK_DAYS), \
+        f"the scheduled row sits past MAX_RECHECK_DAYS = {O.MAX_RECHECK_DAYS}: {dated[0]}"

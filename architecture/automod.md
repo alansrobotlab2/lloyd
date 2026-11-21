@@ -1924,6 +1924,21 @@ against the live system, then answers with one of these:
 The apply step is the only writer; the session cannot edit files or write the
 board.
 
+**A ruling that names a re-arm condition schedules it (#4343).** A ruling whose
+text carries the literal `RE-ARM` (any case — `owed.rearm_condition` takes
+everything after it, and paraphrases none of it) and which files a child writes
+that condition onto the child as an owed row with a `recheck_after` seven days
+out, because the child is the item created to carry the ruling forward. Left as
+prose inside the `ruling:` field it schedules nothing at all: the parent goes
+`done`, owed-check never revisits a `done` item, and `derived_entries` counts
+`owed_settled` as recorded — so a ruling reading "RE-ARM only on a measured
+fire …" is a permanent close. That is what happened to #4185 at
+2026-11-19T09:26:30Z: its child #4337 was created with no owed row, both items
+are now `done` with `owed: None`, and `grep -l 'RE-ARM' ~/obsidian/backlog/*.md`
+finds the condition in no open item. A ruling with no marker files its child
+exactly as before and its settled record keeps `what`/`outcome`/`at` plus
+`ruling`/`follow_up`, with no `recheck_after`.
+
 **A settled record's text is bounded visibly (#1955).** `evidence` and `ruling`
 are stored up to `owed.SETTLED_TEXT_LIMIT` (1200) characters. Past it the field
 is cut at the last sentence end, else the last whitespace, and ends with the

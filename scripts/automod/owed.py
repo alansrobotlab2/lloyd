@@ -55,6 +55,39 @@ MAX_RECHECK_DAYS = 30
 # rescheduled again: the session is told so, and `recheck` is refused.
 MAX_RECHECKS = 4
 
+# The marker a ruling uses to name the measurement it must be re-opened on (#4343).
+# A ruling that reads "RE-ARM only on a measured fire: …" is a CONDITIONAL close, and
+# a conditional close with nothing watching the condition is a permanent one: #4185's
+# ruling carried exactly that sentence at 2026-11-19T09:26:30Z, the child it filed
+# (#4337) was created with no owed row of any kind, and `grep -l 'RE-ARM'
+# ~/obsidian/backlog/*.md` today finds the words in no open item. One literal, matched
+# case-insensitively, and nothing else fires this.
+REARM_MARKER = "RE-ARM"
+# How far out the scheduled re-check sits. The condition is a measurement over run
+# records, which accrue on the nightly cadence: an hour is too soon to have seen a
+# fire, and a month is too late to be a check. `recheck_date` clamps whatever this
+# resolves to into (now + 1h, now + MAX_RECHECK_DAYS] either way.
+REARM_RECHECK_DAYS = 7
+_REARM_AT = re.compile(REARM_MARKER, re.IGNORECASE)
+
+
+def rearm_condition(ruling: str) -> str:
+    """The clause a ruling names as its re-arm condition, or "" when it names none.
+
+    Everything after the marker, with the punctuation and the connective off the front:
+    #4185's ruling reads "… RE-ARM only on a measured fire: ≥1 `BENCH ASSERTION DROP`
+    …", and the measurement is the part from "a measured fire" onward. The condition is
+    never paraphrased — the marker is the whole contract, and a condition the tool had
+    to rewrite would be a second claim to check instead of the ruling's own words.
+    """
+    text = str(ruling or "")
+    found = _REARM_AT.search(text)
+    if not found:
+        return ""
+    tail = re.sub(r"^[\s:;,.\u2013\u2014-]+", "", text[found.end():])
+    tail = re.sub(r"^(?:only\s+)?(?:on|when|if|once)\s+", "", tail, flags=re.IGNORECASE)
+    return " ".join(tail.split())
+
 # The origin an entry carries when it was never written into `owed`: derived at
 # read time from the item's `human_clauses`. It is what lets a ruling tell a
 # stranded clause from one the landing route recorded (#2055).
@@ -442,7 +475,8 @@ def entries_of(fm: dict, *, derived: bool = True) -> list[dict]:
     return out
 
 
-def add_owed(path: Path, whats: list[str], *, kind: str = "check", activity: str = "") -> bool:
+def add_owed(path: Path, whats: list[str], *, kind: str = "check", activity: str = "",
+             recheck_after: str = "") -> bool:
     """Append entries (deduped by text) to the item's `owed` list.
 
     #3897: an entry is debt somebody has to settle, so a `what` that is not a
@@ -450,6 +484,12 @@ def add_owed(path: Path, whats: list[str], *, kind: str = "check", activity: str
     #3504's `human_clauses` fragments `1.` and `1]}],` be booked, and each cost
     an owed-check turn to re-discharge. `B.names_a_demand` is the ONE shape
     measurement; `clean_clauses` and `derived_entries` read the same one.
+
+    `recheck_after` (#4343) puts the new row on a schedule instead of leaving it
+    due now: a measurement that must not be looked at until its window has
+    filled is otherwise re-read on the next tick and reported as "no fires".
+    An empty value is the old behaviour exactly — `_compact` drops the key, so
+    every row written before this parameter existed is byte-identical.
     """
     from scripts.automod import backlog as B
     fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
@@ -463,10 +503,12 @@ def add_owed(path: Path, whats: list[str], *, kind: str = "check", activity: str
         what = _text(w)
         if what and B.names_a_demand(what) and what not in seen:
             seen.add(what)
-            new.append({"what": what, "kind": kind if kind in KINDS else "check", "since": stamp})
+            new.append({"what": what, "kind": kind if kind in KINDS else "check",
+                        "since": stamp, "recheck_after": recheck_after})
     if not new:
         return False
-    return B.update_frontmatter(path, {OWED_KEY: [_compact(e) for e in have] + new},
+    return B.update_frontmatter(path, {OWED_KEY: [_compact(e) for e in have]
+                                       + [_compact(e) for e in new]},
                                 activity=activity or ("owed: " + "; ".join(e["what"] for e in new))[:600])
 
 
@@ -1117,6 +1159,23 @@ _PLACEHOLDER_NAMES = frozenset({"placeholder", "todo", "tbd", "follow-up", "foll
 # purpose: "Follow-up: fix the cursor" leads with a word from that set and is work.
 _NO_FOLLOW_UP_LEADS = frozenset({"none", "n/a", "nothing"})
 _LEAD_SEPARATOR = re.compile(r"\s*:\s+|\s+[-–—]\s+")
+# What a stand-in lead looks like when the model skips the separator (#4343).
+# `_LEAD_SEPARATOR` demands whitespace on BOTH sides of a dash, so
+# "(none) no escalation work filed" — the name owed-check filed #4337 from on
+# 2026-11-19, and the sixth item of this exact shape after #1754, #1998, #2002,
+# #2020 and #2826, all five of which were later closed as junk — has neither a
+# colon nor a set-off dash, and the parenthesis survives `_bare`'s edge strip
+# only for a WHOLE name, so the lead arm saw "(none) no escalation work filed"
+# as one unbroken phrase and filed it. The hole is the missing separator, not
+# the bracket: the bare `none no escalation work filed` passed too. Refusing any
+# name whose first word is a stand-in would file nothing whenever a real
+# instruction happens to begin with "None of the three callers pass session_id"
+# — a name the suite already demands file — so the second half must also declare
+# that nothing is left: a continuation that opens with a negation, or carrying
+# the continuation itself declares that nothing is left — it opens with a
+# negation. Shape, not vocabulary, and one direction only: it can refuse a junk
+# name, never re-file one.
+_NO_NOTHING_LEFT = re.compile(r"^(?:no|none|nothing|n/?a)\b")
 
 # A body shorter than this with no sentence terminator in it is a token standing
 # in for an instruction, not one. The margin is measured, not guessed. The job's
@@ -1176,6 +1235,12 @@ def is_real_follow_up(follow: dict) -> bool:
     # ruling closes the entry" (#1998, #2002, #2020, all 2026-10-01) — is the
     # model saying there is no follow-up, in the blank where one goes.
     if _bare(_LEAD_SEPARATOR.split(name, maxsplit=1)[0]) in _NO_FOLLOW_UP_LEADS:
+        return False
+    # …and the same shape with the separator omitted, which the arm above cannot
+    # see (#4343). Only when the continuation also says nothing is left, so a real
+    # instruction that merely starts with the word still files.
+    lead, _, rest = name.strip().partition(" ")
+    if _bare(lead) in _NO_FOLLOW_UP_LEADS and _NO_NOTHING_LEFT.match(rest.strip()):
         return False
     if not body or body.startswith("placeholder") or body in _PLACEHOLDER_NAMES:
         return False
@@ -1653,6 +1718,34 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                              status="draft")
             filed.append(new.id)
             record["follow_up"] = new.id
+            # A ruling that names the measurement it must be re-opened on is a
+            # conditional close, and the child exists precisely to carry it
+            # forward — so the condition goes onto the child as a SCHEDULED owed
+            # row (#4343). Left as prose inside a `ruling:` string it schedules
+            # nothing: the parent goes `done`, owed-check never revisits a `done`
+            # item, and `derived_entries` counts `owed_settled` as recorded, so no
+            # reader was ever going to look at those words again. That is how
+            # #4185's "RE-ARM only on a measured fire: …" at 2026-11-19T09:26:30Z
+            # became permanent: its child #4337 was created with no owed row, and
+            # `grep -l 'RE-ARM' ~/obsidian/backlog/*.md` now finds the condition in
+            # no open item.
+            condition = rearm_condition(record.get("ruling") or "")
+            if condition:
+                from datetime import timedelta
+                scheduled = add_owed(
+                    new.path,
+                    [_text(f"Record whether the {REARM_MARKER} condition the parent's "
+                           f"ruling named has fired, and reopen this when it has: "
+                           f"{condition}", 500)],
+                    kind="check",
+                    recheck_after=recheck_date(
+                        (now + timedelta(days=REARM_RECHECK_DAYS)).isoformat(), now),
+                    activity=f"owed-check: the ruling on #{item_id} named a re-arm "
+                             f"condition; scheduled as a re-check on #{new.id}")
+                notes.append(
+                    f"#{n} re-arm condition scheduled on #{new.id}" if scheduled
+                    else f"#{n} named a re-arm condition that is not a demand: refused, "
+                         f"the ruling stands unre-armed")
         elif out == "work":
             # No follow-up could be filed (cap reached, none named, or a
             # placeholder): still owed. Dated and counted like every other hold:
