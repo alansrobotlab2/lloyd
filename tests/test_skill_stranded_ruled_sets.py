@@ -59,6 +59,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,20 @@ PS_4_APPLY_INSTANT = "2026-10-20T09:15:39Z"
 # inventing the key here would authorise a set nobody ruled. Recorded as a finding on #4480.
 PS_9_APPLY_INSTANT = "2026-11-19T01:03:06Z"
 
+#: The four pairs that apply wrote, from carrier #3704. A closed historical fact about one write,
+#: unlike a store count that moves with the next apply, so it is legitimate to write down: the
+#: node that reads it holds `RULED` to the set the apply is recorded as having made.
+PS_9_WRITTEN_PAIRS = frozenset({
+    ("Browser UI Test Flakiness", "Test Flakiness"),
+    ("Capture-recapture population estimation", "Capture-recapture"),
+    ("LiteLLM Router", "LiteLLM"),
+    ("write tool", "Write"),
+})
+
+#: The pre-apply backup, named by deriving its name from the apply instant rather than spelling
+#: it out — the same instant the marker declares, so the two cannot drift apart unnoticed.
+PS_9_BACKUP = f"kg-stranded-{PS_9_APPLY_INSTANT.replace('-', '').replace(':', '')}.sqlite"
+
 #: Every ruled key except `PS-1` (excused: its status rides on `PS-2`'s receipt sentence) and
 #: the apply instant its marker must declare. A key missing from this map fails the node that
 #: reads it and names itself, rather than being skipped or borrowing a date. A NEW `RULED` key
@@ -195,6 +210,22 @@ def _step_2_5_section(text: str) -> str:
 def _paragraphs(section: str) -> list[str]:
     """Prose units split on blank lines — keeps fenced blocks inside their own unit."""
     return [p for p in section.split("\n\n") if p.strip()]
+
+
+def _step_2_5_purpose(text: str) -> str:
+    """The Step 2.5 `**Purpose:**` paragraph, which is the site that states today's count.
+
+    Isolated rather than graded over the whole section, because clause 3 names THIS paragraph: a
+    `now returns **N**` stated anywhere else in Step 2.5 must not satisfy it, and the paragraph
+    is also where the applies that wrote the count have to be named.
+    """
+    units = [p for p in _paragraphs(_step_2_5_section(text))
+             if p.lstrip().startswith("**Purpose:**")]
+    assert len(units) == 1, (
+        f"expected exactly one `**Purpose:**` paragraph in the Step 2.5 section of {SKILL_PATH}, "
+        f"found {len(units)} — the paragraph clause 3 grades has moved or merged, and an empty "
+        "extraction would satisfy that clause by saying nothing")
+    return units[0]
 
 
 def _bullets(section: str) -> list[str]:
@@ -1358,14 +1389,32 @@ def test_a_ruled_marker_is_weighed_against_its_own_key_instant_not_one_constant(
 # stale number is a photograph of today, not a guard, which is why the falsifier node feeds
 # both checkers readings this record has actually carried.
 
-#: The two present-tense store readings the record carries: `the store at N active
-#: name-embedding: edges` (Step 2.5's `pairs=0` label branch) and `the store reads N active
-#: name-embedding: edges` (SD-stranded-1's scope settle). `at|reads` is the whole
-#: discriminator from the readings that must KEEP their numbers: the dated ones are past
-#: (`the store read 12 active`) or carry a qualifier this pattern will not span
-#: (`Measured 2026-10-20T10:05Z: the live store reads 21 active …`).
-PRESENT_STORE_FIGURE_RE = re.compile(
-    r"the store (at|reads) (\d+) active `name-embedding:` edges")
+#: Every shape in which the record states today's `name-embedding:` count as a bare number, with
+#: the site that carries it: the `pairs=0` label branch and SD-stranded-1's scope settle are the
+#: two present-tense sentences, the Step 2.5 purpose paragraph states it as `now returns **N**`,
+#: and the pilot bullet states it as `today's N live …`. There are four sites because a store
+#: count stated in prose and the same count pinned in this file are ONE claim with TWO owners,
+#: and #4480 is what that costs: the two applies of 2026-11-19 moved the store from 21 to 26 and
+#: only the prose had an owner, so the pinned half went red while the false half stayed green.
+#: Every site here is therefore graded against `_live_name_embedding_pairs()`, never a literal.
+#:
+#: The patterns deliberately span only these shapes. The readings that must KEEP their numbers are
+#: past tense (`the store read 12 active`) or carry a qualifier no pattern here reaches
+#: (`Measured 2026-10-20T10:05Z: the live store reads 21 active …`), so a dated reading can never
+#: be swept up by a check on today's.
+STORE_COUNT_SITES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("the `pairs=0` label branch",
+     re.compile(r"the store at (\d+) active `name-embedding:` edges")),
+    ("SD-stranded-1's scope settle",
+     re.compile(r"the store reads (\d+) active `name-embedding:` edges")),
+    ("the Step 2.5 purpose paragraph",
+     re.compile(r"now returns \*\*(\d+)\*\*")),
+    ("the pilot bullet",
+     re.compile(r"today's (\d+) live `name-embedding:` edges")),
+)
+
+#: The sites' names, for a message that has to list what is missing.
+SITE_NAMES: tuple[str, ...] = tuple(label for label, _ in STORE_COUNT_SITES)
 
 #: Any count the record states as "N ruled pairs", spelled or in digits, so a miscount written
 #: as a word is as catchable as one written as a number.
@@ -1392,17 +1441,20 @@ def _number_word(n: int) -> str:
 
 
 def _stale_store_readings(text: str, count: int) -> list[str]:
-    """Every present-tense store count in `text` that is not `count`, quoted back."""
+    """Every site in `text` whose stated count is not `count`, named and quoted."""
     flat = " ".join(text.split())
-    return [f"the store {branch} {fig} active `name-embedding:` edges"
-            for branch, fig in PRESENT_STORE_FIGURE_RE.findall(flat)
-            if fig != str(count)]
+    return [f"{label} states {found.group(0)!r}"
+            for label, pattern in STORE_COUNT_SITES
+            for found in pattern.finditer(flat)
+            if found.group(1) != str(count)]
 
 
-def _present_store_branches(text: str) -> set[str]:
-    """Which of the two present-tense readings `text` carries: a subset of {"at", "reads"}."""
-    return {branch for branch, _ in
-            PRESENT_STORE_FIGURE_RE.findall(" ".join(text.split()))}
+def _sites_carrying(text: str, count: int) -> set[str]:
+    """Which of the four sites state exactly `count`, so a reworded site is caught as missing."""
+    flat = " ".join(text.split())
+    want = str(count)
+    return {label for label, pattern in STORE_COUNT_SITES
+            if want in {found.group(1) for found in pattern.finditer(flat)}}
 
 
 def _wrong_ruled_pair_figures(text: str, want: int) -> list[str]:
@@ -1424,12 +1476,15 @@ def _ruled_pair_total(script_section: str) -> int:
 
 
 def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_stay():
-    """#3065 clause 3, re-anchored by #4480: the present tense must equal the store's own
-    count, and every past reading keeps its number.
+    """#3065 clause 3, re-anchored by #4480 and extended by #4352 clauses 1-3: every place the
+    record states today's count must equal the store's own count, and every past reading keeps
+    its number.
 
-    Two sentences state today's count — "the store at N active `name-embedding:` edges" (Step
-    2.5's `pairs=0` label branch) and "the store reads N active `name-embedding:` edges"
-    (SD-stranded-1's scope settle). N was 19 until the apply of 2026-10-20T09:15:39Z and 21
+    Four sites state today's count, and `STORE_COUNT_SITES` holds them: "the store at N active
+    `name-embedding:` edges" (Step 2.5's `pairs=0` label branch), "the store reads N active
+    `name-embedding:` edges" (SD-stranded-1's scope settle), "now returns **N**" (the Step 2.5
+    purpose paragraph) and "today's N live `name-embedding:` edges" (the pilot bullet). N was 19
+    until the apply of 2026-10-20T09:15:39Z and 21
     until the two applies of 2026-11-19 — `PS-9`'s four pairs at 01:03:06Z and `PS-10`'s one at
     15:46:35Z — after which the store measures 26. This node asserted 21 as a literal, #4352
     moved the vault to 26, and no vault landing can reach this file: that is #4480, and it is
@@ -1446,12 +1501,21 @@ def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_sta
     wrong figure; `_wrong_ruled_pair_figures` refuses every figure but the derived one, in
     digits or in words, so it is not a narrower check.
 
-    What must NOT move is the history and the receipt: `ACTIVE_NAME_EMBEDDING=19
-    PAIRS_LIVE=7/7 MISSING=0` is #3011's probe's measured output on 2026-10-19, the pass
-    condition "exits 0 only at 19 active `name-embedding:` edges" is that probe's own floor;
-    rewriting either
-    `len(rows)>=19` is the live receipt's floor — a floor is not a statement about today's
-    count, and rewriting it would rewrite the command owed.py runs.
+    Clause 3 of #4352 is graded in the same node because it is the same claim in a different
+    shape: the Step 2.5 purpose paragraph states today's count as `now returns **N**`, and it has
+    to name the applies that wrote it — including `PS-9`'s of 2026-11-19T01:03:06Z, the one the
+    record did not carry when the item was filed. The node does not pin HOW MANY applies there
+    have been: that count moves with the next apply exactly as the store count moved, and `RULED`
+    cannot yield it (the pilot's write and `PS-10`'s edge are applies without a key of their own),
+    so a pinned apply-count would be the next figure of this class rather than the last.
+
+    What must NOT move is the history and the receipt. `ACTIVE_NAME_EMBEDDING=19 PAIRS_LIVE=7/7
+    MISSING=0` is #3011's probe's measured output on 2026-10-19, "exits 0 only at 19 active
+    `name-embedding:` edges" is that probe's own pass condition, and `len(rows)>=19` is the live
+    receipt's floor: a floor is not a statement about today's count, and rewriting it would
+    rewrite the command owed.py runs to decide whether a carrier may close. The four dated
+    readings keep their numbers too — 12 at 2026-10-19T00:35Z, 19 at 2026-10-20T10:05Z, 21 at
+    2026-10-24T04:26Z and the `PS-4` transition "19 → 21".
     """
     text = _skill_text()
     count, _live = _live_name_embedding_pairs()
@@ -1463,11 +1527,28 @@ def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_sta
         "active `name-embedding:` edges through `app.kg_store` right now "
         f"(measured at {LIVE_STORE}): a present-tense store count is read as today, and a "
         "false one is worse than none because it closes the report that would have caught it")
-    branches = _present_store_branches(text)
-    assert branches == {"at", "reads"}, (
-        f"the record's present-tense readings are {sorted(branches) or ['none']}; both have to "
-        "carry the figure — the `pairs=0` label branch and the scope settle — and a "
-        "half-corrected record is still stale prose")
+    quiet = _sites_carrying(text, count)
+    assert quiet == set(SITE_NAMES), (
+        f"the sites carrying the measured {count} are {sorted(quiet)}, not all four: "
+        f"{[n for n in SITE_NAMES if n not in quiet]} is missing it — a figure the node cannot "
+        "see is a figure the node cannot keep honest, and a half-corrected record is stale prose")
+
+    # Clause 3, amended: the Step 2.5 purpose paragraph carries today's count as `now returns
+    # **N**` and names the applies that wrote it. `PS-9`'s apply must be named there with its
+    # instant, because it is the one the record did not carry when this item was filed. What the
+    # node does NOT pin is how many applies there have been: that count moves with the next
+    # apply exactly as the store count did, and `RULED` cannot yield it — the pilot's write and
+    # `PS-10`'s edge are applies without a key of their own — so no measurement here could tell
+    # a true 'five' from a false 'six'. Recorded as a finding on #4352.
+    purpose = _step_2_5_purpose(text)
+    assert f"now returns **{count}**" in " ".join(purpose.split()), (
+        "the Step 2.5 purpose paragraph does not state the measured count: clause 3 asks it to "
+        f"say `now returns **{count}**`, the figure `_live_name_embedding_pairs()` returns")
+    purpose_flat = " ".join(purpose.split())
+    assert "`PS-9`" in purpose_flat and PS_9_APPLY_INSTANT in purpose_flat, (
+        f"the Step 2.5 purpose paragraph must name `PS-9`'s apply at {PS_9_APPLY_INSTANT} among "
+        "the applies that wrote the count; a reader who cannot see which applies are being "
+        "totalled cannot check the total")
 
     assert _wrong_ruled_pair_figures(text, n_ruled_pairs) == [], (
         f"{SKILL_PATH} states the enumerated ruled-pair count as "
@@ -1516,7 +1597,10 @@ def test_the_figure_checkers_refuse_a_stale_count_and_a_miscounted_set():
         "live skill as its positive control — fix the clause node's subject first")
     assert _wrong_ruled_pair_figures(text, n_ruled_pairs) == [], (
         "the live skill already misstates its own RULED count — same reason")
-    assert {"at", "reads"} == _present_store_branches(text), "positive control, branches"
+    assert _sites_carrying(text, count) == set(SITE_NAMES), (
+        f"the live record's sites carrying {count} are {sorted(_sites_carrying(text, count))}, "
+        f"not all four — positive control, so the mutations below cannot be blamed on a site "
+        "the record stopped carrying")
 
     drifted = " ".join(text.split()).replace(
         f"the store at {count} active", f"the store at {count - 5} active")
@@ -1524,7 +1608,8 @@ def test_the_figure_checkers_refuse_a_stale_count_and_a_miscounted_set():
         f"the record does not carry `the store at {count} active` — the mutation this node "
         "needs cannot be built, so the checker's ability to refuse is unproven")
     refused = _stale_store_readings(drifted, count)
-    assert refused == [f"the store at {count - 5} active `name-embedding:` edges"], (
+    assert refused == ["the `pairs=0` label branch states "
+                       + repr(f"the store at {count - 5} active `name-embedding:` edges")], (
         f"a present-tense count five edges behind the store came back as {refused!r}: the "
         "stale-record direction is unguarded, which is exactly how #4480 happened")
 
@@ -1532,9 +1617,35 @@ def test_the_figure_checkers_refuse_a_stale_count_and_a_miscounted_set():
         f"the store reads {count} active", f"the store reads {count - 7} active")
     assert half != " ".join(text.split()), "the second reading is not in the record"
     assert _stale_store_readings(half, count) == [
-        f"the store reads {count - 7} active `name-embedding:` edges"], (
+        "SD-stranded-1's scope settle states "
+        + repr(f"the store reads {count - 7} active `name-embedding:` edges")], (
         "a record with one sentence corrected and one left behind passed: the "
         "half-corrected direction is unguarded")
+
+    # Clause 3's site, mutated on its own: the two prose sentences corrected while the Step 2.5
+    # purpose paragraph keeps the figure from before the applies. A checker over the whole file
+    # would see four figures, three of them right, and pass.
+    purpose_stale = " ".join(text.split()).replace(
+        f"now returns **{count}**", f"now returns **{count - 5}**")
+    assert purpose_stale != " ".join(text.split()), "`now returns **N**` is not in the record"
+    assert _stale_store_readings(purpose_stale, count) == [
+        "the Step 2.5 purpose paragraph states "
+        + repr(f"now returns **{count - 5}**")], (
+        "the Step 2.5 purpose paragraph kept a stale count unnoticed: that is the site clause 3 "
+        "names, and the only figure in it that a store measurement can check")
+
+    # The reworded-site direction: a site that stops stating the figure at all has to be caught
+    # as MISSING, not waved through because no stale number was found.
+    reworded = " ".join(text.split()).replace(
+        f"today's {count} live `name-embedding:` edges",
+        "today's live `name-embedding:` edges")
+    assert reworded != " ".join(text.split()), "the pilot bullet does not state the count"
+    assert _stale_store_readings(reworded, count) == [], (
+        "dropping the number left a stale-looking fragment behind; the site pattern is matching "
+        "something it should not")
+    assert "the pilot bullet" not in _sites_carrying(reworded, count), (
+        "a site that states no figure still counted as carrying it: every wrong figure would "
+        "then pass, because only the measured one is ever compared")
 
     # The record states the ruled-pair figure twice — Step 2.5's post-apply watermark block and
     # SD-stranded-1's verification bullet — so the mutation lands on both and both must be
@@ -1562,6 +1673,122 @@ def test_the_figure_checkers_refuse_a_stale_count_and_a_miscounted_set():
     assert _wrong_ruled_pair_figures(digits, n_ruled_pairs) == [], (
         "the same count written in digits was refused: the check is on the value, not on the "
         "style the prose happens to write it in")
+
+
+def _text_beside(text: str, needle: str, radius: int = 200) -> list[str]:
+    """Flat windows of `text` around each occurrence of `needle`, for claims stated in the
+    same breath as a named artefact."""
+    flat = " ".join(text.split())
+    return [flat[max(0, hit.start() - radius):hit.end() + radius]
+            for hit in re.finditer(re.escape(needle), flat)]
+
+
+def _epoch_claims(window: str) -> set[str]:
+    """Every bare 9-11 digit number in `window` — the shape a `stat -c %Y` epoch takes."""
+    return set(re.findall(r"(?<![\d.])(\d{9,11})(?![\d.])", window))
+
+
+def test_the_ps_9_rule_names_the_four_pairs_it_wrote_and_its_backup_proves_the_instant():
+    """#4352 clause 5's provenance half: `PS-9`'s entry has to be checkable, not merely dated.
+
+    The previous round made this clause true in the prose and the review still graded it PARTIAL,
+    because nothing but the prose was checking it: the marker's instant was weighed against the
+    store (every pair present, so it must be), but no test opened the artefact the instant is
+    supposed to come from. An instant copied from a comment can only ever agree with the comment
+    that copied it — that is the rule on `APPLY_INSTANTS`, and this is the node that applies it.
+
+    So three things are checked against each other rather than quoted. `RULED`'s `PS-9` must
+    enumerate exactly the four pairs carrier #3704 wrote — one key, the whole set, no more. The
+    backup the comment names must exist under the store-backups directory, its name derived here
+    from the marker's own instant so the two cannot drift apart. And the epoch the comment claims
+    for it must be the epoch the filesystem reports for that file, read by `stat` and compared as
+    a number: the comment says "matched by its `stat -c %Y` epoch", so an `ls`-shaped string that
+    no later run could re-check is exactly what may not stand.
+
+    The file itself is never opened, let alone ordered: at 200,245,248 bytes it sits over the
+    WITNESS_MAX_BYTES ceiling, and #4352's own owed note says a whole copy must not be taken.
+    `stat` reads the directory entry, which is the only thing this claim is about.
+    """
+    text = _skill_text()
+    section = _step_2_5_section(text)
+    ruled = _ruled_dict(_setcheck_script(section))
+    assert "PS-9" in ruled, (
+        f"`RULED` has lost the key for the 2026-11-19T01:03:06Z apply ({sorted(ruled)}); the four "
+        "edges it wrote would start printing as fresh proposals again")
+    assert set(ruled["PS-9"]) == set(PS_9_WRITTEN_PAIRS), (
+        f"`PS-9` enumerates {sorted(ruled['PS-9'])} but the apply it names wrote "
+        f"{sorted(PS_9_WRITTEN_PAIRS)}: a key holding a subset of its own write re-proposes the "
+        "rest, and one holding more authorises pairs nobody ruled")
+
+    _count, live = _live_name_embedding_pairs()
+    state, instant = _execution_claim(section, "PS-9", {(s, t) for s, t in live})
+    assert (state, instant) == ("executed", PS_9_APPLY_INSTANT), (
+        f"`PS-9`'s marker declares {state} at {instant}, not executed at {PS_9_APPLY_INSTANT}, "
+        "and `APPLY_INSTANTS` holds "
+        f"{APPLY_INSTANTS.get('PS-9')!r}: the comment, the constant and the store have to agree")
+    assert APPLY_INSTANTS["PS-9"] == PS_9_APPLY_INSTANT
+
+    backup = LIVE_STORE.parent / "store-backups" / PS_9_BACKUP
+    assert backup.is_file(), (
+        f"{backup} is absent, so the instant `PS-9` declares has no artefact to be checked "
+        "against — the pre-apply backup is the only witness that is not the claim itself")
+    actual_epoch = int(backup.stat().st_mtime)
+    windows = _text_beside(text, PS_9_BACKUP)
+    assert windows, (
+        f"nothing in {SKILL_PATH} names the backup {PS_9_BACKUP} by which its own apply instant "
+        "is matched: a date with no artefact attached is a date nobody can re-check")
+    for window in windows:
+        assert "stat -c %Y" in window, (
+            f"the entry names {PS_9_BACKUP} but does not say the instant is matched by "
+            f"`stat -c %Y` — an `ls` string is how this record would come to state an instant "
+            "no later run can reproduce")
+        assert _epoch_claims(window) == {str(actual_epoch)}, (
+            f"{PS_9_BACKUP} is quoted with epoch claim(s) {sorted(_epoch_claims(window))} while "
+            f"the file reports {actual_epoch} "
+            f"({datetime.fromtimestamp(actual_epoch, timezone.utc).isoformat()}): the comment's "
+            "epoch and the filesystem's disagree, so one of them is a copy of a claim rather "
+            "than a measurement")
+
+    # The comparison has to bite. An epoch one second off is the smallest error this record could
+    # carry and still look exactly as correct as it does now, so it is the one worth proving
+    # against: if rewriting it were invisible, the node would be a photograph of the comment.
+    tampered = windows[0].replace(str(actual_epoch), str(actual_epoch + 1))
+    assert _epoch_claims(tampered) != {str(actual_epoch)}, (
+        "moving the quoted epoch by one second left it agreeing with the artefact, which means "
+        "the claim was never compared with it")
+
+
+def test_the_pairs_zero_paragraph_records_the_measured_current_reading():
+    """#4352 clause 5's other half: `proposed edges 0` is a branch a run can be in, never
+    today's expected one.
+
+    The paragraph under the `pairs=0` heading used to call an empty run "the expected one" over a
+    store it stated as 21 active `name-embedding:` edges "so the residue is gone". The store
+    disagrees with that reading, and so does this decision's own ledger: the three runs of
+    2026-11-19 that fell between `PS-9`'s apply and `PS-10`'s — `011109Z`, `053554Z`, `100236Z` —
+    each printed `proposed edges 1` over `agent-supervisord.service -> supervisord`, the pair
+    carrier #4257 held as a pending `hand_run:`, and took `no-filing pending-hand-run-4257`. The
+    candidate set is re-derived from Step 1's fresh mints every run, so `proposed edges` reports
+    that run's extraction; the paragraph must say so and record the measured reading, while the
+    `pairs=0` branch itself stays valid.
+    """
+    section = _sd_stranded_1_section(_skill_text())
+    flat = " ".join(section.split())
+    assert "and it is the expected one" not in flat, (
+        "the `pairs=0` paragraph calls an empty run today's expected reading again; the set is "
+        "re-derived every run, so no reading is standing")
+    assert "residue is gone" not in flat, (
+        "the paragraph claims the residue is gone as a present fact; the store's shape is a "
+        "measurement, and `PS-10`'s pair was novel after the apply that sentence called final")
+    for required in ("NOT today's expected reading", "`proposed edges 1`",
+                     "`agent-supervisord.service -> supervisord`", "#4257",
+                     "`no-filing pending-hand-run-4257`"):
+        assert required in flat, (
+            f"the paragraph must record the measured current reading ({required!r} is missing): "
+            "three runs of 2026-11-19 printed `proposed edges 1` on this very ledger")
+    assert "no-filing post-apply-empty" in flat and "printf" in flat, (
+        "the `pairs=0` branch itself must survive: an empty set on a store whose `receipt:` probe "
+        "exits 0 still records `no-filing post-apply-empty`")
 
 
 def test_the_copy_reading_names_the_backup_method_and_says_what_a_lone_main_file_reads():
