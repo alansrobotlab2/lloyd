@@ -470,3 +470,84 @@ def test_rank_key_puts_a_proposal_after_a_defect_of_the_same_rank():
     # Rank still beats the proposal tie-break: a high proposal before a medium defect.
     hi_prop = it(3, ("backlog", "youtube-eval")); mid_bug = it(4, ("backlog",)); mid_bug.worth = "medium"
     assert sorted([mid_bug, hi_prop], key=B.rank_key)[0].id == 3
+
+
+# ── #4284: a refused retiring close is ledgered as a refusal, not a retirement ──
+
+def _carrier_item(d: Path, item_id: int, receipt: str = "exit 1") -> Path:
+    """A swept carrier: an open item whose whole contract is one command, with a
+    receipt that exits `receipt` — `exit 1` pending, `exit 0` discharged."""
+    path = d / f"{item_id}-hand-run-carrier.md"
+    fm = {"status": "draft", "priority": "low", "board": "lloyd", "tags": ["backlog"],
+          "created": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+          "hand_run": {"set": "stranded-pipeline PS-4 -> ~/lloyd-data/_pipeline/ps-tasks",
+                       "cmd": "test -e ~/lloyd-data/_pipeline/ps-tasks/PS-5.md",
+                       "receipt": receipt, "since": "2026-11-19T01:14:58Z"}}
+    path.write_text("---\n" + yaml.dump(fm, default_flow_style=False) + "---\n\n"
+                    f"# Hand-run carrier {item_id}\n\n"
+                    "Blocks #4284. Contract: run the command above over the runtime.\n",
+                    encoding="utf-8")
+    return path
+
+
+def test_a_refused_retiring_close_is_ledgered_as_not_closed_and_not_retired(isolated):
+    """The sweep's `retired` count and its `closed` flag must be the item's state.
+
+    `record_sweep_verdicts` appended `closed: True` and bumped `retired`
+    unconditionally after calling `record_verdict`, so a guard that only refused the
+    close would leave the ledger claiming a retirement that never happened — the
+    #1020 asymmetry `record_verdict`'s own docstring names, in the one place a
+    human's outflow scorecard reads. The ordinary `stale` item in the same batch is
+    the control: the counter still counts the closes that did happen.
+    """
+    held = _carrier_item(isolated, 7001)
+    write_item(isolated, 7002)
+    res = B.record_sweep_verdicts("sw-hold", [_item(7001), _item(7002)], {
+        7001: {"verdict": "stale", "worth": "low", "size": "small",
+               "evidence": "the premise predates the rename"},
+        7002: {"verdict": "stale", "worth": "low", "size": "small",
+               "evidence": "genuinely gone"},
+    }, session_id="sess")
+
+    assert res["retired"] == 1, f"the counter counted the refusal: {res}"
+    assert _fm(held)["status"] == "draft", "the carrier closed anyway"
+    assert _fm(_path(isolated, 7002))["status"] == "done", \
+        "the control item did not close, so the counter proves nothing"
+
+    rows = {r["item_id"]: r for r in S.read_events(path=S.LEDGER_PATH)
+            if r["event"] == "backlog_triage" and r.get("sweep_batch") == "sw-hold"}
+    assert rows[7001]["closed"] is False, rows[7001]
+    assert "hand-run" in rows[7001]["close_refused"] and "exit 1" in rows[7001]["close_refused"], \
+        rows[7001]
+    assert rows[7002]["closed"] is True and "close_refused" not in rows[7002], rows[7002]
+
+
+def test_a_refused_retiring_close_in_a_group_cluster_is_ledgered_as_not_closed(isolated):
+    """The group route — `record_group_verdict`, the item's `apply_group_verdicts` —
+    must not count or claim a retirement it refused (#4284).
+
+    A cluster verdict reaches the same `record_verdict(..., close=True)` the sweep
+    calls, and `select_cluster` excludes no carrier, so a clustered carrier is the
+    other way a `stale` group answer took a live `hand_run` out of the readout. The
+    ordinary `stale` member is the control: `retired` still counts the close that did
+    happen, and counts nothing else.
+    """
+    held = _carrier_item(isolated, 7011)
+    write_item(isolated, 7012)
+    res = B.record_group_verdict(
+        {"id": "grp-hold"}, [_item(7011), _item(7012)],
+        {7011: {"verdict": "stale", "evidence": "the premise predates the rename"},
+         7012: {"verdict": "stale", "evidence": "genuinely gone"}},
+        None, {}, session_id="sess")
+
+    assert res["retired"] == 1, f"the group counter counted the refusal: {res}"
+    assert _fm(held)["status"] == "draft", "the cluster's carrier closed anyway"
+    assert _fm(_path(isolated, 7012))["status"] == "done", \
+        "the control member did not close, so the counter proves nothing"
+
+    rows = {r["item_id"]: r for r in S.read_events(path=S.LEDGER_PATH)
+            if r["event"] == "backlog_triage" and r.get("group_cluster") == "grp-hold"}
+    assert rows[7011]["closed"] is False, rows[7011]
+    assert "hand-run" in rows[7011]["close_refused"] and "exit 1" in rows[7011]["close_refused"], \
+        rows[7011]
+    assert rows[7012]["closed"] is True and "close_refused" not in rows[7012], rows[7012]

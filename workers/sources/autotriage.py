@@ -1330,13 +1330,20 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
     # through. The label moves; the clauses never do.
     surface, surface_note = B.demote_mixed_surface(
         parsed["verdict"], parsed["surface"], parsed.get("acceptance_clauses") or ())
-    B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
-                     check=parsed["check"], close=close, spawned=spawned, merged=merged,
-                     acceptance=parsed["acceptance"],
-                     acceptance_clauses=parsed.get("acceptance_clauses") or (),
-                     human_clauses=parsed.get("human_clauses") or (),
-                     dropped_clauses=parsed.get("clauses_dropped_text") or (),
-                     hold=hold, surface_note=surface_note)
+    # None is `record_verdict`'s "the item did not move", and since #4284 one of its
+    # causes is the single-item route's own: a `stale`/`already_done` verdict on an item
+    # whose `hand_run.receipt` still fails is refused, because closing a carrier
+    # un-publishes the run (`owed.hand_runs` reads open items only). `close` here is what
+    # the turn ASKED for; `closed` below is what the item is, and the row says which.
+    close_refused = B.record_verdict(candidate, parsed["verdict"], parsed["evidence"],
+                                     check=parsed["check"], close=close, spawned=spawned,
+                                     merged=merged,
+                                     acceptance=parsed["acceptance"],
+                                     acceptance_clauses=parsed.get("acceptance_clauses") or (),
+                                     human_clauses=parsed.get("human_clauses") or (),
+                                     dropped_clauses=parsed.get("clauses_dropped_text") or (),
+                                     hold=hold, surface_note=surface_note) is None
+    close = close and not close_refused
 
     # The cap is a prompt instruction, and the items exist on disk by the time
     # we read SPAWNED — unfiling them would destroy real findings. So it is
@@ -1371,6 +1378,10 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
                     "clauses_dropped_text": parsed.get("clauses_dropped_text") or [],
                     "human_clauses": parsed.get("human_clauses") or [],
                     "closed": close,
+                    # Present only when the close was asked for and refused: the ledger
+                    # is where a reader learns that a `stale` verdict left a carrier open,
+                    # and with what the receipt said (#4284).
+                    **B.close_refusal_fields(candidate, close_refused),
                     "spawned": spawned, "merged": merged, "id_floor": id_floor,
                     "spawned_unverified": unverified,
                     # Which parser produced this verdict, and why the

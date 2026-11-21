@@ -1053,3 +1053,41 @@ def test_the_unverifiable_branch_names_the_same_item(backlog_dir, ledger, monkey
 
     assert out["status"] == "success" and out["verdict"] == "unverifiable"
     assert out["artifact_path"] == "backlog#72"
+
+
+def test_a_retiring_verdict_on_a_red_carrier_is_recorded_as_not_closed(
+        backlog_dir, ledger, monkeypatch):
+    """The worker seam: a `stale` verdict on a carrier writes `closed: false` and the
+    receipt's reading into the `backlog_triage` row, and the item stays open.
+
+    `close` in the row was the turn's INTENTION, so the one route that reaches the
+    board from a live worker said a carrier was retired while its `hand_run.receipt`
+    still exited non-zero and the item sat in `draft` — the owed-check job and the
+    outflow scorecard read that row, not the item. `workers.sources.autotriage` is a
+    process boundary (`scripts.automod` runs in the round's python, the route in the
+    worker), so the guard is tested across it here rather than only at the function.
+    """
+    path = backlog_dir / "4257-hand-run-carrier.md"
+    path.write_text(
+        "---\n" + yaml.dump({
+            "status": "draft", "priority": "low", "board": "lloyd", "tags": ["backlog"],
+            "created": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+            "hand_run": {"set": "agent-supervisord.service -> supervisord",
+                         "cmd": "systemctl --user show -p ExecMainStartTimestamp agent-supervisord",
+                         "receipt": "exit 1", "since": "2026-11-19T01:14:58Z"}})
+        + "---\n\n# Hand-run carrier\n\nContract: run the command above.\n",
+        encoding="utf-8")
+    _stub_turn(monkeypatch, verdict="stale")
+
+    out = asyncio.run(M.execute(_QItem({"group_triage": False,
+                                        "implement_pool_floor": 40})))
+
+    assert out["status"] == "success" and out["verdict"] == "stale"
+    assert out["closed"] is False, "the run result still claimed the close"
+
+    row = [r for r in S.read_events(path=ledger) if r.get("item_id") == 4257][-1]
+    assert row["event"] == "backlog_triage" and row["closed"] is False, row
+    assert "exit 1" in row["close_refused"] and "hand-run" in row["close_refused"], \
+        row["close_refused"]
+    assert B._split_frontmatter(path.read_text())[0]["status"] == "draft", \
+        "the carrier closed anyway"

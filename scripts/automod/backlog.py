@@ -6703,8 +6703,9 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
         disagreeing with the machine. Eight of the window's 19 disagreement rows
         were these four items over two scored ticks.
 
-        So the pool status asks the one question the four closers,
-        `apply_verdict` and the dispatcher already ask (#3461: the enumeration is
+        So the pool status asks the one question the five closers (the fifth is
+        `record_verdict`'s retiring branch, #4284), `apply_verdict` and the
+        dispatcher already ask (#3461: the enumeration is
         `owed.hand_run_pending`'s own docstring, and "a reader absent from it is
         the bug #3461 is about"). The met-landing branch above has parked a held
         carrier on this predicate since #3461; this is the same park for the
@@ -8480,6 +8481,32 @@ def demote_mixed_surface(verdict: str, surface: str, acceptance_clauses) -> tupl
     return "vault", MIXED_NO_CODE_NOTE
 
 
+def close_refusal_fields(item: Item, refused: bool) -> dict:
+    """The extra `backlog_triage` fields when `record_verdict` refused the close it
+    was asked for (#4284), for every route that appends a row of its own.
+
+    A row's `closed` has to be the item's state and not the caller's intention: a
+    `closed: true` beside an item still sitting in `draft` is the #1020 asymmetry
+    `record_verdict`'s own docstring names, and it is worse here than anywhere, because
+    the ledger is where the owed-check job and the scorecard read that a carrier was
+    retired. The CAUSE of None is re-asked rather than guessed, because the row is the
+    only place a later reader learns why nothing moved: a held receipt is quoted with
+    its reading, and the other None (`_unparsed_guard`) says which it was instead of
+    leaving the two indistinguishable.
+    """
+    if not refused:
+        return {}
+    from scripts.automod import owed as _O
+    try:
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+    except OSError:
+        return {"close_refused": "its front matter could not be read"}
+    held, why = _O.retiring_close_held(fm)
+    if held:
+        return {"close_refused": _O.hold_note(held, why)}
+    return {"close_refused": "its front matter refused the write (see record_verdict)"}
+
+
 def record_verdict(item: Item, verdict: str, evidence: str, *,
                    check: str = "", close: bool = False,
                    spawned: list[int] | tuple[int, ...] = (),
@@ -8509,6 +8536,14 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     409); this module was the loud-refuse/silent-destroy asymmetry (#1020). A
     triage row on the ledger with no matching change on the item is the
     consequence — see the note on the item.
+
+    Returns None a SECOND way since #4284: a retiring (`stale`/`already_done`) close
+    of an item whose `hand_run.receipt` still exits non-zero is refused — the item
+    keeps its status, `completed` and `autotriage_retired` untouched, and its activity
+    log gains the refusal with the receipt's reading. The file is written in that case
+    (the verdict and the refusal both land on the item), so a caller must not infer
+    "nothing happened" from None, only "the close did not happen", and must not write
+    a `closed: true` row for it. `owed.hand_run_waived` is the exemption.
 
     `surface_note` states why the recorded surface differs from the one the triage
     turn gave — only `demote_mixed_surface`'s demotion of a `mixed` verdict with no
@@ -8541,6 +8576,38 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     log.append(entry)
     fm["activity_log"] = log
     fm["updated"] = stamp
+
+    # #4284: THE RETIRING CLOSE ASKS THE SAME MEASUREMENT. `stale`/`already_done` reach
+    # `done` through this branch and it was the one closer in the module that never
+    # asked — `git grep -n hand_run_pending scripts/automod/` enumerated
+    # `_close_settled_items`, `desired_statuses`, `ready_confirmed` and `owed.close_item`
+    # and stopped there. It matters more here than on a met landing, because
+    # `owed.hand_runs` (`owed.py`) `continue`s on `CLOSED_STATUSES`: its own docstring is
+    # "a CLOSED item holding an unexecuted run is the exact state this exists to make
+    # impossible". So a `stale` triage of a carrier does not just close an item, it
+    # UN-PUBLISHES the run — the `hand_run:` block stays in a `done` file that nothing
+    # reads, and there is no route back that does not go through a person.
+    #
+    # One measurement, the same two calls `owed.retiring_close_held` composes: the
+    # predicate every other closer reads, plus the written waiver #4066's front matter
+    # invented. A red receipt holds; a receipt that exits 0 does not, so a carrier whose
+    # run has been executed still retires like anything else. The verdict itself is still
+    # written — triage said what triage said — and the refusal is recorded beside it, on
+    # the item here and in the caller's ledger row (`closed: false`, never a `closed:
+    # true` for a close that did not happen: #1020's asymmetry).
+    refused = ""
+    if close and verdict in RETIRING:
+        from scripts.automod import owed as _O
+        _held_by, _receipt_why = _O.hand_run_pending(fm)
+        if _held_by and not _O.hand_run_waived(fm):
+            close = False
+            refused = _O.hold_note(_held_by, _receipt_why)
+            log.append(f"**{stamp}** — retiring `{verdict}` close REFUSED: {refused}. The "
+                       "item stays open as the standing carrier: `owed.hand_runs` reads open "
+                       "items only, so closing it here would remove the run from the readout "
+                       "an attended session launches from. To retire it anyway, write a "
+                       "`hand_run_waived:` block with a `waived_why`.")
+            fm["activity_log"] = log
 
     if close and verdict in RETIRING:
         fm["status"] = "done"
@@ -8691,7 +8758,12 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
                 if verdict == "confirmed" else f"triage said `{verdict}`: {evidence.strip()}")
         O.add_owed(item.path, [what[:500] + " — decide: close it, rework it, or route the edit"],
                    kind="decide")
-    return item.path
+    # None is how every closer in this module says "the item did not move", and a
+    # caller that reads it writes no `closed: true` row (#4284). The file WAS written —
+    # the verdict and the refusal line are both on the item — so this is not the
+    # `_unparsed_guard` case; a caller that has to tell them apart re-asks
+    # `owed.retiring_close_held`, which answers held here and not there.
+    return None if refused else item.path
 
 
 # Triage verdicts that leave an open item with no unattended route (`draft`,
@@ -8811,20 +8883,30 @@ def record_group_verdict(cluster: dict, members: list[Item], verdicts: dict[int,
         judged[str(i)] = verdict
         if verdict == "duplicate_of":
             t = int(v["duplicate_of"])
-            record_verdict(item, "stale", f"duplicate of #{t}: {evidence}", close=True)
+            refused = record_verdict(item, "stale", f"duplicate of #{t}: {evidence}",
+                                     close=True) is None
             update_frontmatter(item.path, {"duplicate_of": t})
             S.append_event({"event": "backlog_triage", "item_id": i, "verdict": "stale",
-                            "closed": True, "duplicate_of": t, "group_cluster": cid,
+                            "closed": not refused, "duplicate_of": t, "group_cluster": cid,
                             "group_verdict": verdict, "evidence": evidence[:1000],
-                            "session_id": session_id, "spawned": [], "auto": True}, path=_ledger_or(extra))
+                            "session_id": session_id, "spawned": [], "auto": True,
+                            **close_refusal_fields(item, refused)}, path=_ledger_or(extra))
+            # Still counted: the pair was recorded and `duplicate_of` is on the item,
+            # which is what this counter counts. `closed` on the row is the item's
+            # state, and a held carrier keeps its run published either way (#4284).
             counts["duplicates"] += 1
         elif verdict in RETIRING:
-            record_verdict(item, verdict, evidence, close=True)
+            refused = record_verdict(item, verdict, evidence, close=True) is None
             S.append_event({"event": "backlog_triage", "item_id": i, "verdict": verdict,
-                            "closed": True, "group_cluster": cid, "group_verdict": verdict,
+                            "closed": not refused, "group_cluster": cid,
+                            "group_verdict": verdict,
                             "evidence": evidence[:1000], "session_id": session_id,
-                            "spawned": [], "auto": True}, path=_ledger_or(extra))
-            counts["retired"] += 1
+                            "spawned": [], "auto": True,
+                            **close_refusal_fields(item, refused)}, path=_ledger_or(extra))
+            # A refused retirement is not a retirement: the scorecard's outflow and the
+            # `retired` count would otherwise credit a close that never happened (#4284).
+            if not refused:
+                counts["retired"] += 1
         elif verdict == "fold":
             update_frontmatter(item.path, {"group": umbrella.id},
                                activity=f"folded into umbrella #{umbrella.id} by automod group "
@@ -9508,20 +9590,29 @@ def record_sweep_verdicts(batch_id: str, members: list[Item], verdicts: dict[int
         judged[str(i)] = verdict
         if verdict == "duplicate_of":
             t = int(v["duplicate_of"])
-            record_verdict(item, "stale", f"duplicate of #{t}: {evidence}", close=True)
+            refused = record_verdict(item, "stale", f"duplicate of #{t}: {evidence}",
+                                     close=True) is None
             update_frontmatter(item.path, {"duplicate_of": t})
             S.append_event({"event": "backlog_triage", "item_id": i, "verdict": "stale",
-                            "closed": True, "duplicate_of": t, "sweep_batch": batch_id,
+                            "closed": not refused, "duplicate_of": t, "sweep_batch": batch_id,
                             "evidence": evidence[:1000], "session_id": session_id,
-                            "spawned": [], "auto": True}, path=ledger)
+                            "spawned": [], "auto": True,
+                            **close_refusal_fields(item, refused)}, path=ledger)
+            # The pair is recorded and `duplicate_of` is on the item whatever the close
+            # did, which is what this counter counts; `closed` on the row is the item
+            # (#4284, and the same reading as `apply_group_verdicts` above).
             counts["duplicates"] += 1
         elif verdict in RETIRING:
-            record_verdict(item, verdict, evidence, close=True)
+            refused = record_verdict(item, verdict, evidence, close=True) is None
             S.append_event({"event": "backlog_triage", "item_id": i, "verdict": verdict,
-                            "closed": True, "sweep_batch": batch_id,
+                            "closed": not refused, "sweep_batch": batch_id,
                             "evidence": evidence[:1000], "session_id": session_id,
-                            "spawned": [], "auto": True}, path=ledger)
-            counts["retired"] += 1
+                            "spawned": [], "auto": True,
+                            **close_refusal_fields(item, refused)}, path=ledger)
+            # Not a retirement until the close happened: the sweep docstring promises
+            # these rows are "an ordinary close", and a held carrier is not one (#4284).
+            if not refused:
+                counts["retired"] += 1
         else:
             park = worth == "low" and item.status == TRIAGE_POOL_STATUS
             tags = (SWEPT_TAG,) + ((PARKED_TAG,) if park else ())

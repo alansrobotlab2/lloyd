@@ -7010,3 +7010,149 @@ def test_no_item_the_pool_refuses_is_one_the_table_wants_at_the_pool_status(isol
         assert got[0] != B.IMPLEMENT_POOL_STATUS, (
             f"#{iid}: the pool refuses it and the table wants {got[0]!r} — that is "
             f"the pair #3791 was filed over: {got}")
+
+
+# ── #4284: a retiring close refuses to un-publish an unexecuted hand_run ───────
+#
+# Every other closer in the module asks whether a carrier's receipt passes —
+# `_close_settled_items`, `desired_statuses`, `ready_confirmed`, `owed.close_item` —
+# and `record_verdict`'s RETIRING branch, the one that takes an item to `done` on a
+# `stale`/`already_done` triage, asked nothing. `owed.hand_runs` skips
+# `CLOSED_STATUSES` by design ("a CLOSED item holding an unexecuted run is the exact
+# state this exists to make impossible"), so that one branch was a route from a live
+# carrier to a run nobody can launch, with the `hand_run:` block left in a closed file
+# nothing reads. The nodes below pin the four things that must now be true.
+
+#: #4066's block, the shape Alan wrote by hand on 2026-11-18 with no reader in the
+#: repo: `hand_run_waived: {set, cmd, since, waived, waived_why}`. The `waived_why` is
+#: the whole of it — `waived:` alone is a timestamp anyone could type.
+_WAIVED_WHY = ("the runtime never started, so its supervisor entry is moot; the pair "
+               "set in `hand_run` above cannot come live by any route")
+
+
+def _patch(path, **keys):
+    """Rewrite an item's front matter with these keys, body untouched.
+
+    `update_frontmatter` serialises a value to a scalar, so a nested block like
+    #4066's `hand_run_waived` has to go in as a mapping or the reader sees a string
+    and answers "" for it.
+    """
+    _, fm_text, body = path.read_text(encoding="utf-8").split("---\n", 2)
+    fm = yaml.safe_load(fm_text)
+    fm.update(keys)
+    path.write_text("---\n" + yaml.dump(fm, default_flow_style=False) + "---\n"
+                    + body, encoding="utf-8")
+
+
+def _waived(path, why: str | None = _WAIVED_WHY):
+    """Give the carrier a written waiver, in #4066's shape.
+
+    `why=None` leaves `waived_why` off the block entirely and `why=""` writes it empty;
+    both are the case that must NOT open the gate, and they are why this takes the
+    reason as an argument rather than a flag.
+    """
+    block = {"set": _PS5_SET, "cmd": _PS5_CMD, "since": "2026-10-25T00:00:00Z",
+             "waived": "2026-11-18T17:11:42.975876"}
+    if why is not None:
+        block["waived_why"] = why
+    _patch(path, hand_run_waived=block)
+
+
+def _retire(path, verdict: str = "stale"):
+    """The unguarded call, exactly as the three live routes make it."""
+    return B.record_verdict(B.load_item(path), verdict,
+                            "the premise predates the rename", close=True)
+
+
+def test_a_retiring_close_refuses_a_carrier_whose_receipt_still_fails(isolated):
+    """Clause 1: `stale` + close=True on a red receipt moves nothing.
+
+    Before this the branch wrote `status: done`, `completed` and
+    `autotriage_retired` and the carrier vanished from `owed.hand_runs` — the loss
+    #3966 and #4043 were retired with their runs unrun, which triage showed was
+    rail-authoring in their case and is only structural here. What must survive is
+    the verdict itself: triage said `stale`, and the item is not reopened by this.
+    """
+    p = _carrier(isolated, 4284)
+    _patch(p, tags=["backlog", "spawned-by-pipeline-steward", "needs-human"])
+
+    assert _retire(p) is None, "the closer still returned a path for a close it did not do"
+
+    fm = _fm(p)
+    assert fm["status"] == "up_next", f"the carrier moved to {fm['status']!r}"
+    assert "completed" not in fm, fm.get("completed")
+    assert "autotriage_retired" not in fm, fm.get("autotriage_retired")
+    assert "needs-human" in fm.get("tags", []), "the carrier keeps its human tag"
+    assert any("**stale**" in str(e) for e in fm["activity_log"]), \
+        "a refused CLOSE must not swallow the verdict that was actually recorded"
+
+    line = str(fm["activity_log"][-1])
+    assert "REFUSED" in line and "hand-run" in line, line
+    assert "exit 1" in line and "exited 1" in line, \
+        f"the refusal must carry the receipt and its reading: {line}"
+
+
+def test_a_written_waiver_opens_the_retiring_close_and_an_empty_one_does_not(isolated):
+    """Clause 2: the exemption is a stated reason, and nothing narrower than one.
+
+    #4066's block is Alan's own shape, unread by code until now. A block that carries
+    only `waived:` — the timestamp half — would make the exemption a bare boolean
+    whoever held the file could type, so both the missing key and the empty string
+    have to keep the hold.
+    """
+    good = _carrier(isolated, 4281)
+    empty = _carrier(isolated, 4282)
+    missing = _carrier(isolated, 4283)
+    _waived(good)
+    _waived(empty, why="")
+    _waived(missing, why=None)
+
+    assert _retire(good) == good
+    fm = _fm(good)
+    assert fm["status"] == "done" and fm.get("completed") and \
+        fm.get("autotriage_retired") == "stale", fm["status"]
+
+    for path, label in ((empty, "empty `waived_why`"), (missing, "no `waived_why` key")):
+        assert _retire(path) is None, f"a {label} waived the close"
+        assert _fm(path)["status"] == "up_next", f"a {label} moved the carrier"
+
+
+def test_a_retiring_close_still_closes_a_carrier_whose_receipt_passes(isolated):
+    """Clause 3: the hold fires on a red receipt, never on the presence of a block.
+
+    #3060's verdict close was legitimate — its receipt printed `PAIRS_LIVE=2/2` and
+    exited 0 — and a guard that held every carrier would strand a discharged run's
+    item open forever, which is a worse bug than the one being fixed.
+    """
+    p = _carrier(isolated, 4285, receipt="exit 0")
+
+    assert _retire(p, "already_done") == p
+
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm.get("completed"), fm["status"]
+    assert fm.get("autotriage_retired") == "already_done"
+    assert not any("REFUSED" in str(e) for e in fm["activity_log"]), \
+        "a discharged carrier must not be told it was held"
+
+
+def test_a_refused_retiring_close_leaves_the_launch_readout_untouched(isolated):
+    """Clause 4: `owed.hand_runs()` is identical across the refusal.
+
+    This is the whole point of the guard rather than a status check: the readout an
+    attended session launches from reads OPEN items only, so the close and the loss of
+    the run are the same event. Asserting the list is unchanged is asserting the run
+    is still launchable, which no front-matter assertion says.
+    """
+    carrier = _carrier(isolated, 4286)
+    discharged = _carrier(isolated, 4287, receipt="exit 0")
+    before = O.hand_runs()
+    # The readout lists a carrier only while its receipt fails, so the discharged
+    # #4287 is absent BEFORE the calls too: its absence must not be mistaken for this
+    # guard working, which is why the node also asserts the held one is present.
+    assert [h["item_id"] for h in before] == [4286], before
+
+    assert _retire(carrier) is None
+    assert _retire(discharged) == discharged
+
+    assert O.hand_runs() == before, (
+        f"a refused close changed the launch readout: {before} -> {O.hand_runs()}")

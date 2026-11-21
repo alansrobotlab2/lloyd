@@ -773,6 +773,15 @@ def hand_run_pending(fm: dict) -> tuple[dict, str]:
         `status_moved … done` row straight onto the board — the route that
         false-closed #3320 three seconds after the sweep refused it (#3461).
 
+    A FIFTH reaches `done` by another road and asked here only since #4284:
+    `backlog.record_verdict`'s RETIRING branch, which takes an item to `done` on a
+    `stale`/`already_done` triage with no landing and no sha behind it. It was the
+    closest possible miss — one branch in one function, the only closer that never
+    asked — and its cost is the highest of the five, because `hand_runs` reads open
+    items only: retiring a carrier there un-publishes its run with nothing left to
+    relaunch it, which is why `retiring_close_held` below is the one place a waiver
+    counts.
+
     Three more readers hold or report something that is not a close:
     `ready_confirmed` refuses the OFFER of a round (#3289), `apply_verdict`
     refuses a settle-shaped answer, and `hand_runs` is the readout all of them
@@ -783,6 +792,50 @@ def hand_run_pending(fm: dict) -> tuple[dict, str]:
         return {}, ""
     ok, reading = _receipt_passes(block["receipt"])
     return ({}, "") if ok else (block, reading)
+
+
+#: The front-matter key that exempts a RETIRING close from the pending-hand-run hold.
+#: Alan wrote this shape by hand on #4066 (`~/obsidian/backlog/4066-*.md`, the block
+#: beside its `hand_run:`) on 2026-11-18, twelve days before any code read it:
+#: `git grep -n hand_run_waived` over the repo was empty until #4284. So the shape is
+#: his, and the reader only has to keep the one part of it that carries a reason.
+HAND_RUN_WAIVED = "hand_run_waived"
+
+
+def hand_run_waived(fm: dict) -> str:
+    """The item's waived-why, or "" when it carries no usable waiver (#4284).
+
+    Only a NON-EMPTY `waived_why` waives anything. #4066's block pairs a `waived:`
+    timestamp with a `waived_why` that states the ruling; a block that carried only
+    `waived:` would make the exemption a bare boolean anyone can type, and a close
+    that deletes the only readout of an unexecuted run is exactly the thing that
+    needs a stated reason. So a missing, empty, or whitespace-only `waived_why`
+    answers "" and the hold stands.
+    """
+    raw = fm.get(HAND_RUN_WAIVED)
+    if not isinstance(raw, dict):
+        return ""
+    return _text(raw.get("waived_why"), 600)
+
+
+def retiring_close_held(fm: dict) -> tuple[dict, str]:
+    """(block, why) when a RETIRING (`stale`/`already_done`) close must be refused.
+
+    The composition the retiring closer makes, spelled out once: the same measurement
+    every other closer asks, minus the case a person has waived in writing. A red
+    receipt is what holds it — a discharged one answers `({}, "")` here exactly as it
+    does everywhere else, so a carrier whose run has been executed is never stuck
+    open by this.
+
+    `backlog.record_verdict` inlines the two calls rather than calling this, so that
+    `git grep -n hand_run_pending scripts/automod/` lists the retiring closer's own
+    body and a reader can enumerate the closers from the grep. The pair here and the
+    pair there are the same two functions for that reason: a third condition belongs
+    in `hand_run_pending` or `hand_run_waived`, where both get it, never in one of
+    the two compositions.
+    """
+    block, why = hand_run_pending(fm)
+    return ({}, "") if not block or hand_run_waived(fm) else (block, why)
 
 
 def _hold_note(block: dict, why: str) -> str:
@@ -803,6 +856,13 @@ def _hold_note(block: dict, why: str) -> str:
     return _text(
         f"pending hand-run unexecuted — receipt "
         f"'{_text(block['receipt'], 400)}' {why}", 650)
+
+
+#: The same line under a public name (#4284): the retiring closers in `backlog.py`
+#: write it into an item's activity log and into their `backlog_triage` row, and a
+#: reader comparing a held close across the two surfaces has to be reading one
+#: builder's output on both.
+hold_note = _hold_note
 
 
 # ── The carrier guard (#4242) ───────────────────────────────────────────────
