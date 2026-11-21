@@ -5609,6 +5609,93 @@ def test_the_historical_0910_records_are_left_alone():
         "is gone — which is the reading a human reverting would take"
 
 
+# ── #4449: the fallback revert target carries its own KV byte price ─────────────────
+#
+# §1's revert prose is aimed at a human at the keyboard during an incident, and the
+# launcher header is the other thing they read when the conf itself is the suspect.
+# Since 2026-11-10 both named the undated 09-17 build — the launcher's own
+# `VLLM_VENV` fallback — without the `KV_CACHE_MEMORY_BYTES` to set with it, while
+# the conf's serving line carried 15569256448 (14.5 GiB). The pairing that produces
+# (old build, new byte budget) has never been booted; it is priced here from that
+# build's own recorded reading of 92,002 of 97,887 MiB at the launcher's 11.5 GiB
+# default, which puts 14.5 GiB at ~2,800 MiB free against the ~3,300 MiB of safe
+# headroom the conf states. So 14.0 GiB is the revert value, and nothing may cite a
+# bigger one without quoting a dated `A/B config` boot behind it.
+
+LAUNCHER_SH = ROOT / "agent-services" / "bin" / "start-qwen38-flash-next.sh"
+CONF_SH = ROOT / "agent-services" / "supervisor" / "conf.d" / "agent-llm-primary.conf"
+FALLBACK_KV_MAX = 15032385536            # 14.0 GiB, derived above
+_KV_PRICED = re.compile(r"KV_CACHE_MEMORY_BYTES[^0-9]{0,30}(\d{10,})")
+
+
+def _md_paragraphs(lines):
+    """The non-empty blocks of a markdown section, each joined across its line
+    wraps. A revert instruction is one sentence and the file wraps at ~88 columns,
+    so a per-line check would ask the wrong question of every line."""
+    paras, cur = [], []
+    for ln in list(lines) + [""]:
+        if ln.strip():
+            cur.append(ln)
+        elif cur:
+            paras.append(" ".join(cur))
+            cur = []
+    return paras
+
+
+def _launcher_revert_entry() -> str:
+    """The launcher header's `revert` entry: the `#   revert` line and its
+    continuation lines, joined. That block is what names the fallback build."""
+    lines = LAUNCHER_SH.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("#   revert ")), None)
+    assert start is not None, "the launcher header lost its `revert` entry"
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r"^#   \S", lines[i])), len(lines))
+    return " ".join(ln.lstrip("#").strip() for ln in lines[start:end])
+
+
+def test_section_1_prices_the_fallback_revert_target_s_kv_bytes():
+    """#4449 clause 4. The §1 paragraph that names the launcher's `VLLM_VENV`
+    fallback has to price the byte pin that goes with it, name the build the
+    fallback lands on, and cite a figure the conf itself carries — the doc may not
+    invent a number, and a conf re-price that leaves the prose behind is the drift
+    this item was filed on. The launcher's own revert entry is held to the same
+    figure, because it is the other copy a reader meets."""
+    paras = _md_paragraphs(_section_lines(1))
+    revert = [p for p in paras
+              if re.search(r"launcher.{0,3}s own .{0,2}VLLM_VENV.{0,2} fallback", p)]
+    assert len(revert) == 1, (
+        f"expected exactly one §1 paragraph to name the launcher's own VLLM_VENV "
+        f"fallback and found {len(revert)}; the revert prose moved, so re-read it "
+        "before trusting the price below")
+    para = revert[0]
+    priced = [int(x) for x in _KV_PRICED.findall(para)]
+    assert priced, (
+        "§1's revert paragraph names the fallback venv but no KV_CACHE_MEMORY_BYTES "
+        "to set with it — the conf's serving 14.5 GiB survives a lost VLLM_VENV line "
+        "and boots the 09-17 build unpriced")
+    assert max(priced) <= FALLBACK_KV_MAX, (
+        f"§1 prices the fallback at {max(priced)}, above the {FALLBACK_KV_MAX} the "
+        "build's own 92,002/97,887 reading supports — raise it only beside a dated "
+        "A/B config boot line")
+    assert "fallback lands on this build" in para, \
+        "§1 no longer says the launcher's fallback lands on the build it is pricing"
+
+    conf = CONF_SH.read_text(encoding="utf-8")
+    for value in priced:
+        assert str(value) in conf, \
+            f"§1 prices the fallback at {value} but agent-llm-primary.conf never "\
+            "names that figure — the doc has drifted from the conf it documents"
+
+    entry = _launcher_revert_entry()
+    assert "This is what VLLM_VENV falls back to" in entry, \
+        "the launcher's revert entry is no longer the block that calls itself the "\
+        f"fallback, so this node is reading the wrong block: {entry[:120]}"
+    header_figures = [int(x) for x in _KV_PRICED.findall(entry)]
+    assert header_figures == priced, \
+        f"the launcher header prices the fallback at {header_figures} where §1 says "\
+        f"{priced} — one build, one price, in both places a reader looks"
+
+
 # ── #3191: the 844,969 denominator stops citing a store that deletes itself ──────────────
 #
 # `NO_BOOT_POOL` is one hand-typed integer, and the provenance above it named a pair of

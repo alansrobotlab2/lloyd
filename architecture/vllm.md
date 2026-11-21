@@ -80,7 +80,15 @@ path; the conf names its revert targets in date order — `vllm-flash-next-main-
 **first** (with `KV_CACHE_MEMORY_BYTES` back to 14.0 GiB, since that build at
 14.5 leaves ~2,100 MiB) and the 09-17 build at `.venvs/vllm-flash-next-main`
 second, which is also the launcher's own `VLLM_VENV` fallback since #3136
-(`d2847a34`). Neither instruction reached a venv that existed until 2026-10-21. The comment told a
+(`d2847a34`). **The second target needs the byte pin lowered too**:
+`KV_CACHE_MEMORY_BYTES` back to 15032385536 (14.0 GiB), not the 15569256448 the
+conf serves on — that build's own reading of 92,002 of 97,887 MiB at 11.5 GiB
+prices 14.5 GiB at ~2,800 MiB free against the ~3,300 MiB of safe headroom stated
+there, and the pairing appears in no retained log, so the figure is arithmetic and
+not an observed death. It matters most exactly where it was missing: the fallback
+lands on this build, so a conf that loses its `VLLM_VENV=` line and keeps the byte
+pin boots a 09-17 engine at the 11-10 budget. #4449 put the value beside the venv
+name in the conf comment and in the launcher's own revert entry. Neither instruction reached a venv that existed until 2026-10-21. The comment told a
 human to switch to the 09-10 build, `.venvs/vllm-flash-next-main-0910`: deleted
 by the 10-12 rebuild. The launcher defaulted to the BF16 worker build,
 `.venvs/vllm-qwen38-flash-next`: not installed either, and never rebuilt.

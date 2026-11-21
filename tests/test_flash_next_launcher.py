@@ -1405,6 +1405,129 @@ def test_the_conf_offers_only_a_revert_target_that_is_on_the_box():
     assert _conf_env()["VLLM_VENV"].endswith("/.venvs/vllm-flash-next-main-1110")
 
 
+# ── #4449: a revert instruction may not name a venv without its KV byte pin ────────
+#
+# The conf is the one artefact that survives an automod round overwriting the
+# launcher, so its comment *is* the rollback instruction. Since 2026-11-10 it has
+# priced one of its two arms: reverting to `-1012` says "set KV_CACHE_MEMORY_BYTES
+# back to 15032385536", while reverting to the 09-17 build at
+# `.venvs/vllm-flash-next-main` said only "set VLLM_VENV back to it" — and the
+# serving line kept `KV_CACHE_MEMORY_BYTES="15569256448"` (14.5 GiB). That unpriced
+# pairing is exactly what the launcher walks into on its own: `start-qwen38-flash-next.sh`
+# defaults `VLLM_VENV` to the undated build, so a conf that loses its `VLLM_VENV=`
+# entry and keeps the byte pin boots a four-month-old engine at today's budget
+# instead of refusing.
+#
+# No retained log has ever booted that pairing (the scan the item ran covers
+# `.log` back to `.log.10`, whose mtime 2026-11-04 predates 14.5 GiB entirely, and
+# shows only -1012@15032385536, -1110@15569256448 and -1110@15032385536). So the
+# price below is arithmetic off the conf's own recorded readings, and stops short
+# of claiming a boot died: this build read 92,002 of 97,887 MiB at 11.5 GiB, so
+# 14.5 GiB puts it at ~95,074 used — ~2,800 MiB free, under the ~3,300 MiB the same
+# paragraph prices as safe headroom. 14.0 GiB is therefore the revert value, and
+# the ceiling this check holds an older build to.
+
+REVERT_KV_MAX = 15032385536                       # 14.0 GiB, the priced revert value
+REVERT_KV_READING = ("92,002", "97,887")          # the card reading that derives it
+# The one arm whose price is derived rather than measured, and so the one whose
+# instruction has to carry the reading it was derived from. `-1012` is priced from
+# the KV paragraph's own pair of readings and its arm predates this item; the
+# undated build's arm carried no number at all until #4449.
+UNDATED_BUILD = "vllm-flash-next-main"
+_MAIN_BUILD = re.compile(r"\.venvs/(vllm-flash-next-main(?:-\d{4})?)(?![\w-])")
+_KV_FIGURE = re.compile(r"KV_CACHE_MEMORY_BYTES\b[^0-9]{0,60}?(\d{6,})")
+_BOOT_CITATION = re.compile(r"(A/B config.*20\d\d-\d\d-\d\d|20\d\d-\d\d-\d\d.*A/B config)", re.S)
+
+
+def _conf_revert_instructions(text: str):
+    """`(venv, sentence)` for every conf COMMENT sentence that names a
+    flash-next-main build and tells the reader what to do with `VLLM_VENV` — the
+    unit a human at the keyboard follows, and the unit that can lose a number
+    across a line break. Comment lines are joined before splitting for that
+    reason: one instruction wrapped over four `; ` lines is still one instruction.
+
+    The `environment=` line is deliberately not in here. It is the serving pin,
+    not an instruction, and it prices itself."""
+    comment = " ".join(ln.lstrip(";").strip() for ln in text.splitlines()
+                       if ln.lstrip().startswith(";"))
+    out = []
+    for sent in re.split(r"(?<=\.)\s+", comment):
+        sent = " ".join(sent.split())
+        m = _MAIN_BUILD.search(sent)
+        if m and "VLLM_VENV" in sent:
+            out.append((m.group(1), sent))
+    return out
+
+
+def _unpriced_revert_instructions(instructions):
+    """The instructions in `instructions` that a reader could follow into an
+    unpriced boot: no byte figure at all; or one above `REVERT_KV_MAX` on a build
+    that is not the serving pin with no dated `A/B config` line behind it; or, for
+    the undated build the launcher falls back to, a figure with neither that boot
+    line nor the card reading it was derived from — a number nobody can re-derive
+    is a number nobody can trust at 2 a.m."""
+    serving = Path(_conf_env()["VLLM_VENV"]).name
+    bad = []
+    for venv, sent in instructions:
+        figure = _KV_FIGURE.search(sent)
+        if figure is None:
+            bad.append((venv, "names no KV_CACHE_MEMORY_BYTES value", sent))
+        elif venv == serving:
+            continue
+        elif int(figure.group(1)) > REVERT_KV_MAX and not _BOOT_CITATION.search(sent):
+            bad.append((venv, f"priced at {figure.group(1)}, above the {REVERT_KV_MAX} "
+                              f"revert ceiling with no cited boot measurement", sent))
+        elif venv == UNDATED_BUILD and not _BOOT_CITATION.search(sent) \
+                and not all(d in sent for d in REVERT_KV_READING):
+            bad.append((venv, "prices the undated build without the card reading "
+                              "the price came from", sent))
+    return bad
+
+
+def test_every_revert_instruction_prices_its_kv_byte_pin():
+    """#4449 clauses 1-3. Every instruction that points `VLLM_VENV` at a
+    flash-next-main build has to carry the `KV_CACHE_MEMORY_BYTES` to set with it,
+    at or below the value that build's own card reading supports, or a human
+    reverting a conf that lost its `VLLM_VENV=` line lands on the launcher's
+    fallback at the serving build's byte budget."""
+    ins = _conf_revert_instructions(CONF.read_text(encoding="utf-8"))
+    assert len(ins) >= 2, (
+        f"the check reads {len(ins)} revert instruction(s) out of the conf; it is "
+        "meant to see at least one per revert target, so a reworded comment has "
+        "narrowed its scope and a future unpriced arm would pass it unseen")
+    assert len({v for v, _ in ins}) >= 2, (
+        f"the instructions all name one build ({sorted({v for v, _ in ins})}); the "
+        "conf has two revert targets and both are read by this rule")
+    bad = _unpriced_revert_instructions(ins)
+    assert bad == [], (
+        f"these revert instructions would send a reader to a venv at an unpriced "
+        f"KV budget: {bad}")
+
+
+def test_the_price_check_fires_on_an_instruction_that_moved_its_number():
+    """The witness the node above cannot be while the conf is correct: the same
+    parse, run over the shipped comment text with one instruction's byte figure
+    deleted, then raised to the serving 14.5 GiB, names that instruction each time
+    and nothing else."""
+    conf = CONF.read_text(encoding="utf-8")
+    ins = _conf_revert_instructions(conf)
+    assert _unpriced_revert_instructions(ins) == [], \
+        "the witness assumes a clean conf; fix the arms before testing the rail"
+    victim = ins[0][0]
+
+    unpriced = re.sub(_KV_FIGURE, "KV_CACHE_MEMORY_BYTES back to the value above",
+                      conf, count=1)
+    hits = _unpriced_revert_instructions(_conf_revert_instructions(unpriced))
+    assert [h[0] for h in hits] == [victim], \
+        f"deleting the first instruction's byte figure flagged {hits}"
+
+    overpriced = re.sub(_KV_FIGURE, lambda m: m.group(0).replace(
+        m.group(1), "15569256448"), conf, count=1)
+    hits = _unpriced_revert_instructions(_conf_revert_instructions(overpriced))
+    assert [h[0] for h in hits] == [victim], \
+        f"raising the first instruction to the serving 14.5 GiB flagged {hits}"
+
+
 def test_the_launcher_fallback_default_names_a_venv_that_exists():
     """clause 2. The fallback is the older surviving FP8 build, deliberately NOT
     the dated serving path: a default naming `-1012` would go stale at the next

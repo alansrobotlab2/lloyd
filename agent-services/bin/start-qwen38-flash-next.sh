@@ -91,6 +91,13 @@ set -euo pipefail
 #           and the date in the serving path is exactly why the fallback is this
 #           undated build: a fallback naming -1012 goes stale at the next
 #           rebuild, which is how the instruction deleted by #3136 rotted.
+#           Reverting to it also means KV_CACHE_MEMORY_BYTES=15032385536 (14.0
+#           GiB), never the 15569256448 (14.5 GiB) the conf pins for -1110: this
+#           build read 92,002 of 97,887 MiB at the 11.5 GiB default, which prices
+#           14.5 GiB at ~2,800 MiB free against the ~3,300 the conf calls safe,
+#           and no retained log has booted the pairing — arithmetic off those
+#           readings, not an observed death. The conf carries the same price in
+#           both of its -main revert instructions.
 #   worker   ~/lloyd/.venvs/vllm-qwen38-flash-next      NOT INSTALLED
 #           The 08-31 base + PR #53899's offload worker described above. Its
 #           last copy was deleted; re-run setup-vllm-qwen38-flash-next.sh (8-17
