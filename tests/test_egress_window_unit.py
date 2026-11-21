@@ -2029,3 +2029,271 @@ def test_the_committer_is_authorized_for_this_unit_and_labels_its_own_rows(tmp_p
     assert step.invocation_refusal({"INVOCATION_ID": "8f14e45fceea167a5a36dedd4bea2543"},
                                    cgroup_file=str(witness)) is None, \
         "the step still refuses the unit whose ExecStartPost runs it"
+
+
+# ── #4396: this unit renders the vaulted-credential escape table, before it commits ─────
+#
+# The credential arm rides THIS window and nowhere else: the rows that carry
+# `credential_states` are written by the two arms `ExecStart` forks, and the sibling's
+# scenario list has no credential arm. The 2026-11-16 pair therefore measured 34 such rows
+# against the live aggregator and published nothing — `credential-report --write` existed in
+# `eval/run_injection_canary.py` and no unit ever invoked it, so no
+# `run-<date>-credential-escape.md` has ever been committed (the triage's
+# `git log --all --diff-filter=A | grep credential-escape` returns nothing). #4396 wires the
+# render into this unit, one line ahead of the committer, because a measured arm with no
+# artifact reads to the next reader as an arm that never ran.
+#
+# Two process boundaries make the line worth pinning beyond its own tokens, and each gets a
+# node: the argv systemd will exec has to be the argv the CLI's own parser accepts and routes
+# to `credential_report_path()` (a step whose arguments the parser no longer recognises exits
+# 2 and marks the fire `Failed`), and the artifact's directory has to be inside the pathspec
+# the very next line stages (an artifact rendered outside the staged directory is residue
+# again, however correctly ordered).
+
+# The arguments as ONE string, spelled exactly as the unit spells them. Not a tuple: a
+# module-level string tuple/list is banned in this file by
+# `test_the_ban_s_header_records_the_tracked_scope_and_both_settled_rulings`, because #3233
+# removed a constant that enumerated root directories and handed a narrowing to whatever
+# walked them, and the guard reads syntax rather than intent. The single-string form is also
+# the form the acceptance check greps for, so the node and the human are reading one thing.
+CRED_SCRIPT = "eval/run_injection_canary.py"
+CRED_ARGV = "credential-report --write --force"
+CRED_SUBCMD = "credential-report"
+CRED_REPORT = "run-2026-11-16-credential-escape.md"
+LIVE_CHECKOUT = "/home/alansrobotlab/lloyd"
+
+
+def _canary_module():
+    """`eval/run_injection_canary.py` loaded from THIS tree, by path for the reason
+    `_commit_step_module` gives: pytest's rootdir-only conftest turns a cross-file import
+    into `tests.foo`, which this repo's module-import guard refuses. Loading it is what lets
+    a node hand the unit's OWN argument vector to the CLI's OWN parser instead of trusting
+    that the two spellings still agree a year from now."""
+    import importlib.util
+    assert CANARY.is_file(), f"{CANARY} is missing, so this unit's render step exits 2"
+    spec = importlib.util.spec_from_file_location("run_injection_canary_egress_unit", CANARY)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _cred_lines() -> list[str]:
+    """The `ExecStartPost` values that render the credential table, in file order.
+
+    Selected on the subcommand token, not on the whole line, so a future edit that reworded
+    the flags would still be selected and then judged by the nodes' exact-argv assertions
+    rather than silently dropping out of the selection and reading as "this unit has no
+    credential step", which is the wrong diagnosis in the wrong direction.
+    """
+    import shlex
+    hits = [l for l in _post_lines() if CRED_SUBCMD in shlex.split(l)]
+    assert len(hits) == 1, (
+        f"#4396 expects exactly one ExecStartPost running `credential-report`, got {hits!r} "
+        f"out of {len(_post_lines())} post-start step(s)")
+    return hits
+
+
+def test_execstartpost_renders_the_credential_escape_artifact():
+    """#4396 clause 1: the unit carries a post-start step that direct-execs the repo's venv
+    python on `eval/run_injection_canary.py credential-report --write --force`, and exactly
+    one such step.
+
+    The shape is the sibling's `report --write --force` line token for token, and the reason
+    is the same one this file already gives twice for `ExecStart` and for the committer: a
+    leading `-` is systemd's ignore-a-failed-exec marker, which here would swallow the one
+    case the step does not already guarantee (a `python` that cannot start at all) and let it
+    read as a clean fire; a shell is needed only to interpolate something, and everything on
+    this line is absolute because the unit sets no `WorkingDirectory=`.
+
+    The argv is pinned as a whole list rather than by substring, because this line has
+    exactly one correct spelling — an extra token is either a `--out` (clause 3) or a
+    pathspec the unit invented, and either one changes what the fire publishes.
+    """
+    import shlex
+    step = _cred_lines()[0]
+    assert not step.startswith("-"), \
+        f"ExecStartPost={step!r} carries systemd's exec-failure-ignore prefix"
+    argv = shlex.split(step)
+    assert len(argv) == 5, \
+        f"this line is `python script credential-report --write --force` and nothing else: " \
+        f"{argv!r}"
+    py, script = argv[:2]
+    assert argv[2:] == shlex.split(CRED_ARGV), \
+        f"the step passes {argv[2:]!r}, not the {CRED_ARGV!r} the CLI needs to overwrite a " \
+        f"same-day artifact instead of refusing it"
+    assert py.endswith(VENV_PY_SUFFIX) and os.path.isabs(py) \
+        and Path(py).is_file() and os.access(py, os.X_OK), \
+        f"the render step must run the repo's venv python, got {py!r}"
+
+    exec_target = _execstart(_parse(SERVICE.read_text(encoding="utf-8"))).split()[0]
+    checkout = str(Path(exec_target).parents[1])            # ExecStart's own checkout
+    assert script == f"{LIVE_CHECKOUT}/{CRED_SCRIPT}", \
+        f"the line renders {script!r}, not {CRED_SCRIPT} in the live checkout"
+    for token in argv[:2]:                                 # the two path tokens, not the flags
+        assert token.startswith(checkout + os.sep), \
+            f"{token!r} is outside the checkout ExecStart runs ({checkout})"
+    assert (REPO / CRED_SCRIPT).is_file(), \
+        f"{CRED_SCRIPT} is untracked, so the step this line execs would not exist after a " \
+        f"fresh checkout"
+
+    for shell_ism in ("$(", "${", "`", "sh -c", "bash -c", "python -c", "date "):
+        assert shell_ism not in step, \
+            f"{shell_ism!r} needs a shell, and this unit execs directly"
+    # Counted as MATCHING LINES, which is what `grep -c` on the acceptance check reports, and
+    # not as occurrences: a comment that spelled the two tokens out on its own line would
+    # report 2 to the check while an occurrence count still said 1, and the check is the
+    # thing a human runs.
+    raw = SERVICE.read_text(encoding="utf-8")
+    hits = [l for l in raw.splitlines() if "credential-report --write" in l]
+    assert len(hits) == 1 and hits[0].startswith("ExecStartPost="), \
+        f"`grep -c 'credential-report --write'` on this unit would report {len(hits)}: " \
+        f"{hits!r}"
+
+
+def test_the_credential_render_is_ordered_before_the_step_that_commits_it():
+    """#4396 clause 2: the render runs first, so the artifact is in the tree when the
+    committer stages the directory.
+
+    systemd executes every `ExecStartPost` of a `Type=oneshot` in file order, so the order of
+    these two lines IS the publish route and nothing else enforces it. Rendered after the
+    committer, the artifact would sit in `git status --porcelain
+    eval/measurements/injection-canary/` until some later fire happened to stage the
+    directory — the residue state #4396 exists to end, and the one the sibling unit's
+    committer comment records as the reason its own report line comes first.
+
+    The order is only meaningful across the second boundary: the file the render writes has
+    to fall inside `COMMIT_PATHSPEC`, which is what the committer stages and nothing else. A
+    correctly ordered render writing outside that pathspec would be green here and publish
+    nothing, so `credential_report_path()`'s own directory is asserted against the committer's
+    own pathspec rather than against a literal this file shares with it.
+    """
+    lines = _post_lines()
+    cred = _cred_lines()[0]
+    commits = [l for l in lines if l.rstrip().endswith("/" + COMMIT_SCRIPT)]
+    assert len(commits) == 1, lines
+    assert lines.index(cred) < lines.index(commits[0]), (
+        "systemd runs ExecStartPost in file order: a credential render placed after "
+        f"{COMMIT_SCRIPT} writes run-<UTC date>-credential-escape.md after the directory was "
+        "staged, so the artifact is next fire's uncommitted residue and never published")
+
+    step = _commit_step_module()
+    canary = _canary_module()
+    target = canary.credential_report_path("2026-11-16")
+    assert target.name == CRED_REPORT, target.name
+    assert target.parent == REPO / "eval" / "measurements" / "injection-canary", \
+        f"the artifact would land in {target.parent}, which the committer does not stage"
+    assert f"{(target.parent.relative_to(REPO))}/" == COMMIT_PATHSPEC == step.CORPUS_PATHSPEC, \
+        (f"the render writes {(target.parent.relative_to(REPO))}/ but the commit step "
+         f"stages {step.CORPUS_PATHSPEC!r}: ordered correctly, published never")
+
+
+def test_the_credential_render_names_no_date_and_forces_its_own_overwrite(tmp_path):
+    """#4396 clause 3: no `--out`, no `%`-specifier, no date literal — and each of the three
+    arguments the line DOES carry is load-bearing, proven by running the CLI's own parser and
+    its own command function.
+
+    The dated filename has to come from `credential_report_path()`'s UTC day and nowhere
+    else. systemd cannot interpolate a date into a static line, so a literal would freeze one
+    day's name onto a weekly fire and then, with `--force`, overwrite that frozen file with
+    every later week's table — an artifact whose name lies about the rows beneath it. So the
+    node feeds the unit's argv verbatim to `build_parser()` and asserts `out is None`: the
+    route to the dated name is the function, not the line.
+
+    `--force` is proven the same way instead of asserted from prose. The first fire of a UTC
+    day commits the artifact, so the file EXISTS for the rest of that day, and
+    `_credential_report_cmd` returns 1 on an existing target — which on a `Type=oneshot` ends
+    the fire `Failed with result 'exit-code'` over re-rendering rows it just measured. The
+    same-day re-run is how a window gets refilled after a gap, so this is the ordinary case,
+    not a corner.
+    """
+    import json
+    import shlex
+    from datetime import datetime, timezone
+    step = _cred_lines()[0]
+    assert "%" not in step, \
+        "a `%` on this line is a systemd specifier; the UTC day belongs to the script"
+    assert "--out" not in step, \
+        f"--out on a weekly fire freezes one day's artifact name: {step!r}"
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", step), \
+        f"a date literal cannot be interpolated by systemd: {step!r}"
+
+    mod = _canary_module()
+    ns = mod.build_parser().parse_args(shlex.split(step)[2:])   # past python and the script
+    assert ns.cmd == "credential-report", \
+        "the unit's arguments do not route to the credential command: the step would exit 2"
+    assert ns.write is True and ns.force is True, \
+        f"the step is {vars(ns)}; without --write it prints and publishes nothing"
+    assert ns.out is None and ns.rows is None, \
+        f"the unit must not pin an output or a rows file: {vars(ns)}"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert mod.credential_report_path().name == f"run-{today}-credential-escape.md", \
+        "the artifact's day comes from credential_report_path(), so this line needs no date"
+
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps({"ts": "2026-11-16T15:00:00+00:00", "day": "2026-11-16",
+                               "arm": "enforce-off", "key": "credential-escape", "rep": 1,
+                               "credential_measured": True, "credential_escape": False,
+                               "credential_secrets_resolved": True,
+                               "credential_states": {"ANTHROPIC_API_KEY": "never-sent"}})
+                    + "\n", encoding="utf-8")
+    out = tmp_path / CRED_REPORT
+    base = ["credential-report", "--rows", str(rows), "--out", str(out)]
+    assert mod._credential_report_cmd(
+        mod.build_parser().parse_args(base + ["--write"])) == 0, \
+        "the first write must succeed, or the unit's step can never publish"
+    assert out.is_file() and "ANTHROPIC_API_KEY" in out.read_text(encoding="utf-8"), \
+        "the artifact names the vaulted credentials it measured"
+    again = mod.build_parser().parse_args(base + ["--write"])
+    assert mod._credential_report_cmd(again) == 1, \
+        "the command no longer refuses an existing target, so --force in the unit line is " \
+        "no longer what keeps a same-day re-fire from marking the window Failed"
+    assert mod._credential_report_cmd(
+        mod.build_parser().parse_args(base + shlex.split(CRED_ARGV)[1:])) == 0, \
+        "--force does not overwrite, so the unit's step would exit 1 on every re-fire"
+
+
+def test_the_credential_step_brought_no_arm_override_and_left_the_pair_intact():
+    """#4396 clause 4: adding a step moved no arm-isolation property.
+
+    This window's whole measurement is what its environment does NOT set:
+    `LLOYD_EGRESS_ENFORCE` belongs only in the ON arm's forked child (the driver scopes it
+    there), `LLOYD_CANARY_ROWS` stays unset so the rows land on the tracked corpus,
+    `LLOYD_DATA` stays unset so the parent reads the live store, and no
+    `WorkingDirectory=` may exist while every token is absolute. A step added for a
+    *reporting* reason is the most likely place for somebody to "helpfully" pin one of those,
+    and each of the four would turn the published pair into a false negative rather than an
+    error — the fire would come back green and measuring something else. `ExecStart` is
+    asserted byte for byte because this step is additive: the arms themselves did not change.
+
+    The manager parse is included here rather than trusted to
+    `test_systemd_itself_still_parses_every_window_unit_after_the_comment_edits`: that node
+    reads the shipped set, this node is the one that says a THIRD ExecStartPost line and its
+    comment block are what the real loader accepted.
+    """
+    raw = SERVICE.read_text(encoding="utf-8")
+    parsed = _parse(raw)
+    step = _cred_lines()[0]
+    for forbidden in ("LLOYD_EGRESS_ENFORCE", "LLOYD_CANARY_ROWS", "LLOYD_DATA",
+                      "Environment=", "WorkingDirectory"):
+        assert forbidden not in step, \
+            f"the render step smuggs {forbidden!r} onto the unit that measures the arms"
+
+    env = _env_keys(parsed)
+    assert sorted(env) == ["LLOYD_EGRESS_ARMS_ROOT", "LLOYD_PYTHON"], \
+        f"the unit gained an Environment key: {sorted(env)}"
+    for forbidden in ("LLOYD_EGRESS_ENFORCE", "LLOYD_CANARY_ROWS", "LLOYD_DATA"):
+        assert not re.search(rf"^\s*{forbidden}\s*=", raw, re.M), \
+            f"{forbidden} must not be assigned at unit level"
+    assert not any(k == "WorkingDirectory" for k, _ in parsed["Service"]), \
+        "a WorkingDirectory= would re-anchor every absolute-token assumption in this file"
+    assert _execstart(parsed) == (
+        "/home/alansrobotlab/lloyd/eval/run_egress_arms.sh 1 --on-port 8599 "
+        "--drain-wait 3600"), \
+        f"the credential step was supposed to be additive; ExecStart reads " \
+        f"{_execstart(parsed)!r}, which is not the arm pair this unit exists to run"
+
+    proc = subprocess.run(["systemd-analyze", "verify", str(SERVICE)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, \
+        f"the manager cannot load this unit with its third ExecStartPost: {proc.stderr.strip()}"

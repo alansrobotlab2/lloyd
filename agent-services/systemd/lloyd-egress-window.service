@@ -160,6 +160,51 @@ Environment=LLOYD_PYTHON=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
 # fire of this unit is recorded as an egress-arm window and not as its sibling's.
 # tests/test_commit_injection_canary_corpus.py pins both halves; the journal line of a real
 # fire is what closes the arm no test can reach.
+#
+# #4396: publish the vaulted-credential escape table, and publish it BEFORE the line below.
+#
+# WHY THIS UNIT OWNS THE RENDER. The credential arm rides the egress window and nowhere
+# else: the rows that carry `credential_states` are written by the two arms this fire
+# launches, and the persistence window's scenario list has no credential arm. So the
+# 2026-11-16 pair measured 34 credential rows against the live aggregator and published
+# nothing — the `credential-report` command and its `--write` mode existed in
+# `eval/run_injection_canary.py` and were invoked by nothing, so
+# `run-<UTC date>-credential-escape.md` has consequently never
+# been in the repository (`git log --diff-filter=A` over the tracked names finds no such
+# file). A measured arm with no artifact is an unrun arm to the next reader.
+#
+# WHY IT GOES FIRST. The committer stages `eval/measurements/injection-canary/` and nothing
+# else, and systemd runs every `ExecStartPost` of a `Type=oneshot` in FILE ORDER, so the
+# order of the two lines IS the publish route: rendered first, the artifact is in the tree
+# when the directory is staged; rendered after, it is `git status` residue until some later
+# fire stages the directory — which is exactly the state this item exists because of. The
+# sibling unit already puts its `report --write --force` step before its own committer for
+# that reason, and this line mirrors that shape token for token: repo venv python, direct
+# exec, both paths absolute, no shell, no `-` prefix (systemd's ignore-a-failed-exec marker,
+# which here would also swallow a `python` that could not start), no `%`-specifier, and no
+# `--out` or date literal — `credential_report_path()` names `run-<UTC date>-credential-escape.md`
+# off `datetime.now(timezone.utc)` itself, so a date in this line could only contradict the
+# rows the table summarises, and a shell would be needed only to compute one.
+# `tests/test_egress_window_unit.py` pins the line, its arguments, its one-occurrence count
+# and its order ahead of the committer; the journal of a real fire closes what no test can.
+#
+# `--force` is load-bearing, not tidy: the command returns 1 on an existing target, and the
+# first fire of a UTC day commits the artifact, so any second completed fire that same day
+# (the manual `systemctl start --user` a window gets when a gap is being filled) would end
+# `Failed with result 'exit-code'` over re-rendering the rows it just measured — the same
+# reason the sibling's line states for its own report. The command's other 1 — no rows file
+# at all — cannot fire from this unit: `LLOYD_CANARY_ROWS` is deliberately unset above, so
+# the render reads the tracked corpus, which is tracked and therefore present.
+#
+# WHAT THIS DOES NOT FIX, STATED LOUDLY. The committer exits 0 on its ordinary refusals so a
+# refused commit never marks a window `Failed`, but the cross-fire collision is the one
+# refusal that returns 1, and both window units have read `Active: failed` since the
+# 2026-11-16 fire for exactly that. The collision is structural — both window timers are
+# Monday-only and this window's scenario list includes three `persistence-*` keys the
+# earlier fire already owns at the same `(day, arm, key, rep)` — so until that ruling lands,
+# this step writes the artifact and the next line still declines to commit it. Ruling on it
+# is owed on #4396, not settled here.
+ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/eval/run_injection_canary.py credential-report --write --force
 ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/scripts/maintenance/commit_injection_canary_corpus.py
 # The whole reason the unit must state a timeout: systemd's user-manager default SIGTERMs
 # a starting unit at 90 s, and this window spends that 90 s in its very first drain poll.
