@@ -32,7 +32,7 @@ into the system prompt (`maxSkillsInPrompt=0`). None of that is true of Lloyd.
 Neither path exists on this box, no marketplace or installer code exists in the
 tree, and the skills index **is** in the system prompt on every turn. The doc
 also named `skills_get` and `file_read` as the way to read a skill; both are on
-the phantom-tool ban list (`scripts/skill_lint.py:262`,
+the phantom-tool ban list (`scripts/skill_lint.py:372`,
 `tests/test_skill_tool_names.py::PHANTOM_TOOLS`) — this file was itself an instance of the
 defect described under "Phantom tool names" below. Its skill inventory listed
 34 skills, of which 8 have since been archived and 3 no longer exist at all.
@@ -526,7 +526,7 @@ Six names are exempt in both gates, because their job is to say these names
 are not real: `web-search-and-fetch`, `nightly-skills-management`,
 `trajectory-skill-mining`, `nightly-skill-consolidation`,
 `autonomy-task-diagnosis`, `pipeline-dispatch`. The two sets stay separate
-literals — `PHANTOM_EXEMPT` (`scripts/skill_lint.py:282`) and
+literals — `PHANTOM_EXEMPT` (`scripts/skill_lint.py:392`) and
 `ALLOWED_TO_MENTION` (`tests/test_skill_tool_names.py:150`) — because two
 different checks may each decide to exempt a skill; what #4363 added is that each
 one is now bounded by the corpus of the gate that reads it, by
@@ -549,7 +549,8 @@ no quarantine rule, so its weekly total counted retired skills the model can no
 longer reach and never saw a second configured root. Narrowing the set is only
 admissible because every finding is computed from the same walked records: a live
 skill with a DEAD frontmatter or a PHANTOM_TOOL reference is still reported, and the
-report now names the roots it scanned. Nine categories: DEAD (unparseable
+report now names the roots it scanned. Eleven rows: nine over the skill file —
+DEAD (unparseable
 frontmatter, or description *and* tags both empty — the live scorer would
 return 0 for any query), MISSING_DESC, DRIFT (description is output-framed
 rather than trigger-framed), DUPLICATE (difflib name ratio ≥ 0.85 **and** description ratio ≥ 0.60), STALE (mtime
@@ -564,6 +565,23 @@ DEAD_SYSTEMD_UNIT (a `systemctl` command names a unit living in neither the
 repo's `agent-services/systemd/` nor the user tree, #1580). "Advisory"
 describes this script, not the class: MISSING_SCRIPT, INJECTION_PATTERN and
 DEAD_SYSTEMD_UNIT each also have a hard gate in the suite.
+
+Two more rows measure the **prompt's skill index** instead of the skill file.
+`DESCRIPTION` (P5) counts what the index cannot say: no description, or one longer
+than the renderer clips. `BURIED_TRIGGER` (#4374) asks the question the first one
+cannot — among the skills the index *does* render with a description, which of
+their clipped lines show no `TRIGGER_WORDS` marker at all — over only those skills,
+because a description cut to a name-only line was never read and its ordering is not
+yet a routing defect. Both read their limits through
+`app.prompt_builder._skills_index_settings()`, and the second takes its membership
+from `_skills_index_lines()` rather than a length proxy, so the nightly cannot
+disagree with the prompt about who is cut the moment `skills.index.budget_chars` or
+`max_description_chars` is tuned; a lint with its own copy of either number is the
+drift those two functions exist to prevent. Neither row gates the verdict.
+`BURIED_TRIGGER`'s trust cell is `mostly`, and it publishes the denominators the
+count cannot carry in `buried_trigger_context` (`index_described`,
+`rendered_clipped`, `clause_free`, `descriptions_on`) because a bare 0 there is
+ambiguous in four different ways.
 
 Every count row carries a fourth column, "is this count trustworthy?", from
 `CATEGORY_TRUST` in the script (#903): DRIFT and STALE are marked `no` — DRIFT
@@ -739,6 +757,35 @@ no tool set `isError`.
 
 ## Review log
 
+- 2026-11-20 — **#4374: the sweep gained the one arm that reads inside the clip.** This
+  page enumerated nine categories and stopped; `DESCRIPTION` (P5) had been a tenth row
+  all along and still only asked *how long* a description is. A description whose
+  when-to-use clause sits past the clip therefore had no instrument: `check_description_drift`
+  passes any ≤10-character opener, so it flagged 0 of the rendered-clipped set, and moving a
+  trigger from character 1780 to character 20 changed no count anywhere. The new
+  `BURIED_TRIGGER` row fires on the conjunction of three arms — the renderer granted the
+  skill a description line, the folded description exceeds `max_description_chars`, and no
+  `TRIGGER_WORDS` word appears inside the first `max_description_chars` characters. Measured
+  2026-11-20 from the main checkout: **20 firing of 69 rendered-clipped, and 19 of those 20
+  carry no `TRIGGER_WORDS` word anywhere** — exactly one is a pure reorder away and the rest
+  need a clause authored, which is #4373's blocked case, so the row is never read as "should be
+  0". The denominator is granted by `_skill_rank_counts()`'s daily rank table, so membership
+  moves day to day and a round's worktree, which has no rank file of its own, reads a different
+  cut (the same code answered 22 of 62 there the same afternoon); the instrument is
+  `buried_trigger_context`'s denominators, not any count quoted here. Two properties the row
+  depends on are pinned by `tests/test_skill_lint_clip_ordering.py`: membership comes from
+  `_skills_index_lines()` and not from a length proxy, because `DESCRIPTION` counted **191**
+  clipped rows that day against **69** rendered lines — a length-only arm convicts about three
+  times the population the model half-sees, and every extra row is name-only, its text never
+  shown; and the cap is never
+  re-declared locally, because a second copy of the number is how the nightly and the prompt
+  start disagreeing about who is cut. The count publishes its own denominators in
+  `buried_trigger_context` — `index_described`, `rendered_clipped`, `clause_free`,
+  `descriptions_on` — because a bare 0 here is ambiguous four ways at once, and the same node
+  pair proves non-vacuity (the same description, trigger moved from 172 to 0, count 1 then 0).
+  Corrected: "Nine categories" → eleven rows, and the two index rows are now described where
+  the trust column is, since one of them is `mostly` and the page's trust paragraph had never
+  mentioned it.
 - 2026-11-19 — **stale.** Four claims the 2026-11-09 work invalidated under its own nose, plus 18 drifted `file:line` refs. *The index's cost:* this page said the quarantine alias "pays the walker's real front-matter parse for every skill on every prompt build" while a line above it said front matter is parsed once per file version — `_frontmatter_of` (`agent_mcp/skills.py:201`, mtime+size) settles it in the cache's favour. *Where skills live:* it still called `SKILLS_DIRS` "the pair the code ships" and the index walk "both canonical roots" two sections after recording that 2026-11-09 deleted the second built-in root; the walker answers **one** root here. *The MCP tool:* `skills_search` was described as "ranked over name, description, tags and body", the exact promise #4028 deleted from the tool description because `require_metadata_hit` makes a body-only match unreachable — and `skills.search_embed_rerank: true` has re-ordered its results by the same cosine since 2026-11-10 (hit@1 0.481 → 0.722, `eval/measurements/skills-search-embed-2026-11-10.md`), which this page did not mention at all. *The front matter table* credited the scorer with reading `category`; `_skill_token_sets` builds four sets and category is not one of them. Pseudo-queries re-worded: the generator, the path and the eval exist and only `skills.pseudo_queries.enabled` is absent. Filed #4362 (the hard phantom-tool gate walks a hardcoded root pair that is empty under a round's isolated `$HOME`, so it `pytest.skip`s instead of checking — the fence the page calls "the hard one" and "in every round's `tests` rung" is vacuous on a gate run), #4363 (the two exemption sets are unreconciled literals, bounded by nothing, one member already archived; prior art #1522 closed on measuring them equal rather than wiring the check), #4364 (`prompt_builder.SKILLS_DIRS` is a dead alias bound to `None`, shadowing the walker's real name).
 
 - 2026-11-09 — **architecture and code review of discovery and retrieval.** Findings and what landed: (1) the index's usage rank scanned every event log inline in the synchronous prompt build — 13.2 s on the event loop once per UTC day per process — now a background refresh with a persisted rank, and the scan skips stale files and unrelated lines (~2 s); (2) the rank counted worker traffic (97% of offers), so descriptions went to task-bound skills — it now counts chat sessions; (3) `skills.index.chat_scope: discoverable` drops the 53 task-bound skills from chat prompts behind one `skills_search` line — measured and kept off (`scoped` changed nothing, `no_index` lost the right skill on 3 of 51 turns; `eval/measurements/skills-index-scope-2026-11-09.md`); (4) chat turns re-order lexical offers by an embedding cosine (hit@1 0.510 → 0.686, `eval/measurements/skill-embed-fusion-2026-11-09.md`); (5) vault landings enforce a growth-only authoring contract (description present and within the index clip, body under 12,000 chars); (6) `find_active_skill` closes a `../` traversal in `skills_read`, `/api/skill-content` and the autonomy loader and brings quarantine to autonomy, one loaded-skill cache serves prefetch and `skills_search`, front matter is parsed once per file version, the never-existing `~/lloyd/skills` root is gone, and plan mode pins its playbook instead of steering the scorer with synthetic tokens.

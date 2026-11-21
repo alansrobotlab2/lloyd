@@ -6410,7 +6410,7 @@ NOT_A_SYMBOL = frozenset({"py", "tsx", "ts", "md", "sh", "json", "true", "false"
 
 #: How far either side of a citation to look for the symbol the doc quotes beside it.
 #: 320 characters is one or two sentences of this doc's prose: wide enough that
-#: "`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:282` (`PHANTOM_EXEMPT`)" resolves
+#: "`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:392` (`PHANTOM_EXEMPT`)" resolves
 #: whichever side the name falls on, narrow enough that a citation is not credited to a
 #: symbol named two sections away.
 CITATION_WINDOW = 320
@@ -6447,7 +6447,7 @@ REQUIRED_CITATIONS = frozenset({
     "app/autonomy.py:3420",                        # EVIDENCE_PILOT_TASK_IDS. 2912→3112 when #4088's consumer re-drive block landed above it; 3112→3292 when #4135's pass-level hold did the same (181 lines); 3292→3420 when #4254's fleet-hold deduction landed above it (128 lines).
     "tests/test_worker_evidence.py:686",           # the assert pinning that frozenset
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
-    "scripts/skill_lint.py:282",                   # PHANTOM_EXEMPT
+    "scripts/skill_lint.py:392",                   # PHANTOM_EXEMPT. 282→392 when #4374's BURIED_TRIGGER check landed above it (110 lines).
     "agent_mcp/skills.py:88",                      # _QUARANTINE_STATUSES
     "app/routers/backlog.py:895",                  # backlog_task_delete, re-pointed 850→870 by #3701 (its resolver gained a collision check above it), then 870→895 by #3410 (the module docstring gained a dated re-measurement line above it)
     "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
@@ -6605,7 +6605,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     Ten citation instances over nine distinct `path:line` pairs in today's live prose
     (`app/autonomy.py:3292` twice — §The functions and §Evidence pilot — then
     `tests/test_worker_evidence.py:686`, `tests/test_skill_tool_names.py:150`,
-    `scripts/skill_lint.py:282`, `agent_mcp/skills.py:88`,
+    `scripts/skill_lint.py:392`, `agent_mcp/skills.py:88`,
     `app/routers/backlog.py:849`,
     `web/src/components/pages/BacklogPage.tsx:572`, `app/paths.py:278` from #2795, and
     `eval/djev_name_prior_probe.py:647` from cffd22e6), the nine of them named in
@@ -6668,9 +6668,21 @@ def test_a_drifted_citation_names_the_line_and_where_the_symbol_actually_is():
     definition sat at `tests/test_skill_tool_names.py:137` and moved to :150 when that
     file's docstring grew. Seeding :137 and reading the message must be enough to fix
     the sentence — no hunt, because the hunt is the thing that was never done.
+
+    The sentence's OTHER citation is derived rather than written down. It used to name
+    `scripts/skill_lint.py:282` literally, which held until #4374 landed a check above
+    `PHANTOM_EXEMPT` and moved it to :392 — at which point the seed drifted on its own
+    and this node reported two drifts where it asserts one. Asking `_symbol_definition`
+    where the frozenset is bound today means exactly one citation in this seed drifts,
+    the seeded one, whatever line `PHANTOM_EXEMPT` happens to sit on.
     """
+    phantom_line = _symbol_definition(
+        "scripts/skill_lint.py",
+        (ROOT / "scripts/skill_lint.py").read_text(errors="replace"),
+        "PHANTOM_EXEMPT")
+    assert phantom_line, "PHANTOM_EXEMPT has no findable definition to cite"
     seeded = ("Two linters enforce rule 4. `tests/test_skill_tool_names.py:137` "
-              "(`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:282` "
+              f"(`ALLOWED_TO_MENTION`) and `scripts/skill_lint.py:{phantom_line}` "
               "(`PHANTOM_EXEMPT`) let `nightly-skills-management` write the phantom "
               "names down.")
 
@@ -6898,7 +6910,7 @@ def test_growing_one_exemption_list_reddens_the_rail():
     """Clause 4's failure leg, seeded: the drift a line-number pin cannot see.
 
     `PHANTOM_EXEMPT` gains one entry and the sentence still says seven. Appending to a
-    set literal moves no definition line, so every `scripts/skill_lint.py:282`-style
+    set literal moves no definition line, so every `scripts/skill_lint.py:392`-style
     check — including the citation resolver above in this same file — stays green while
     the sentence goes stale. That is the drift #2633 was filed for, so its failure is
     exercised rather than assumed:

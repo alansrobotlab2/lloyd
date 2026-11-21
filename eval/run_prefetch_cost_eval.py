@@ -310,7 +310,8 @@ def split_by_advertisement(arm: str,
     return kept, tail
 
 
-#: The trigger vocabulary `scripts/skill_lint.py:92` uses for its DRIFT rule, spelled
+#: The trigger vocabulary `scripts/skill_lint.py:112` (moved 92→112 when #4374's category
+#: list grew the module header above it) uses for its DRIFT rule, spelled
 #: out rather than imported: importing skill_lint drags that module's skill walker into
 #: an eval module the suite loads for every arm, and
 #: `tests/test_prefetch_cost_eval.py` pins the two lists against each other so a change

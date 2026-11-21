@@ -790,7 +790,7 @@ and re-enabled as #83 only once the skill could state the rules that prevent it:
 **Two linters enforce rule 4, and each carries a six-name exemption list of
 which three entries are this chain.**
 `tests/test_skill_tool_names.py:150` (`ALLOWED_TO_MENTION`) and
-`scripts/skill_lint.py:282` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
+`scripts/skill_lint.py:392` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
 `trajectory-skill-mining` and `nightly-skill-consolidation` write the phantom
 names down, because their job is to say those names are not real. The same two
 lists now also carry `web-search-and-fetch`, `autonomy-task-diagnosis` and

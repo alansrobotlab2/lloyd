@@ -2,7 +2,7 @@
 """
 Skill-lint — advisory quality sweep over ~/obsidian/skills/*/SKILL.md.
 
-Writes `~/obsidian/autonomy/skill-lint-report.md` with nine categories:
+Writes `~/obsidian/autonomy/skill-lint-report.md` with these categories:
   1. DEAD              — unparseable frontmatter or desc+tags both empty (never fires)
   2. MISSING_DESC      — has tags but no description (fires via tag/name only)
   3. DRIFT             — description present but output-framed not trigger-framed
@@ -16,6 +16,16 @@ Writes `~/obsidian/autonomy/skill-lint-report.md` with nine categories:
                         neither agent-services/systemd/ nor ~/.config/systemd/user
                         (#1580). Commands only: a skill that names a retired unit in
                         prose is describing a retirement, not prescribing a step.
+ 10. DESCRIPTION       — the prompt's skill index shows the skill by name alone,
+                        because its description is empty or longer than the renderer
+                        clips to (P5). The clip is read through `app.prompt_builder`,
+                        never restated here.
+ 11. BURIED_TRIGGER    — rendered WITH a description, longer than the clip, and no
+                        TRIGGER_WORDS marker inside what the clip leaves visible
+                        (#4374). Where DESCRIPTION asks how long a description is,
+                        this asks what survives the cut, over only those skills the
+                        renderer granted a line: a strict subset of DESCRIPTION's
+                        clipped rows, and advisory like them.
 
 It also counts authorship (#774): how many live skills carry a `written_by:`
 front-matter key naming an unattended job, how many say `interactive`, and how
@@ -71,13 +81,23 @@ from agent_mcp.skills import iter_active_skills, skill_roots  # noqa: E402
 # P5: the DESCRIPTION bucket measures what the system prompt's skill index can
 # say about each skill, so it reads the index's own description rule and clip
 # rather than restating them (a second rule is how the index and the Skills page
-# drifted before #1294).
+# drifted before #1294). #4374 adds `_skills_index_lines` to that import for the
+# same reason one directory over: which skills the index renders WITH a
+# description is the renderer's budget arithmetic, and a lint that re-derived it
+# would disagree with the prompt about who is cut the moment anyone tunes
+# `skills.index.budget_chars` or `max_description_chars`.
 from app.prompt_builder import (  # noqa: E402
-    _skills_index_settings, clip_skill_description, skill_index_description)
+    _skills_index_lines, _skills_index_settings, clip_skill_description,
+    skill_index_description)
 from app.data_root import vault_root
 
 #: Category name of the P5 bucket, used as the table row and the payload key.
 DESCRIPTION_CATEGORY = "DESCRIPTION"
+
+#: Category name of the #4374 bucket: rendered with a description, longer than the
+#: clip, and with no trigger marker inside what the clip shows. Payload key
+#: `buried_trigger`, context `buried_trigger_context`.
+BURIED_TRIGGER_CATEGORY = "BURIED_TRIGGER"
 
 REPORT_PATH = vault_root() / "autonomy" / "skill-lint-report.md"
 
@@ -215,6 +235,96 @@ def check_description_drift(description: str) -> tuple[bool, str]:
         return False, ""
 
     return True, f"first sentence opens with {opener!r}, no trigger words present"
+
+
+# ── Clip position: is the trigger inside what the index actually shows? ──────
+#
+# DESCRIPTION measures one property, `len(index_desc) > clip`, and length is
+# exactly the property the renderer's clip preserves or destroys. So a rewrite
+# that moves a when-to-use clause from character 172 to character 0 — which is
+# what backlog #4373 does by hand to 13 skills — changes no count in this report
+# anywhere, and DRIFT cannot catch the reverse edit either: `check_description_drift`
+# Path 2 passes any ≤10-character opener without testing it, which is why
+# `CATEGORY_TRUST["DRIFT"]` is a `no`. This bucket asks the question length
+# cannot, over the population the model half-sees rather than the 191-odd
+# descriptions that merely exceed the cap (#4374's triage: 191 over-cap, only 68
+# of them rendered as a clipped line, the rest names-only at budget).
+#
+# Three arms, deliberately not equally solid:
+#   (a) the rendered index line carries a description — MEASURED, through the
+#       renderer's own grant arithmetic (`_skills_index_lines`);
+#   (b) the folded description exceeds the renderer's clip — MEASURED, same
+#       `_skills_index_settings()` read DESCRIPTION already uses;
+#   (c) no TRIGGER_WORDS token in the first `clip` characters — ADVISORY: a word
+#       list over prose, not a parse. `CATEGORY_TRUST[BURIED_TRIGGER_CATEGORY]`
+#       repeats this, because the reading of a 0 is the load-bearing part.
+
+def trigger_marker_in_window(description: str, window_chars: int) -> bool:
+    """Whether any TRIGGER_WORDS token occurs in `description`'s first `window_chars`.
+
+    Whole-word and case-folded, the same match `check_description_drift` uses —
+    but with no Path 2: an imperative opener ("Rebuild …", "Publish …") is
+    precisely what a buried trigger hides behind, so passing it through is this
+    category's whole reason to exist beside DRIFT.
+    """
+    window = (description or "")[:max(0, int(window_chars))]
+    return bool(set(re.findall(r"\b\w+\b", window.lower())) & TRIGGER_WORDS)
+
+
+def first_trigger_offset(description: str) -> tuple[int, str] | None:
+    """`(offset, word)` of the first TRIGGER_WORDS token, or None if there is none.
+
+    Printed beside a firing row because the two firing reasons have different
+    fixes: an offset past the window is a reorder (#4373's edit), `None` is a
+    skill with no when-to-use clause anywhere, which no reorder can fix and which
+    `scripts/automod/vault_round.py`'s contract check will not let a worker
+    lengthen a description to author. That second population is
+    `buried_trigger_context["clause_free"]`.
+    """
+    for m in re.finditer(r"\b\w+\b", description or ""):
+        if m.group(0).lower() in TRIGGER_WORDS:
+            return m.start(), m.group(0).lower()
+    return None
+
+
+def rendered_index_descriptions(active, *, counts: Optional[dict] = None,
+                                settings: Optional[dict] = None) -> dict:
+    """`{skill: the description the rendered index line shows}`, `""` = names-only.
+
+    Membership is read out of the renderer's own lines, never recomputed: an
+    over-cap description reaches the model only if the description budget granted
+    that skill a line, and the two numbers differ by ~3× on the live library.
+    Both the cap and the budget come from `_skills_index_settings()`, the same
+    read `_load_skills_index` makes — a local `100` here is how the nightly and
+    the prompt start disagreeing about who is cut.
+
+    `descriptions: false` renders a names-only index at all (`_load_skills_index`
+    does not call `_skills_index_lines` on that path), so every value is `""` and
+    the category is 0 for a reason that is not health; `lint` publishes the flag
+    in its context block rather than a clean-looking zero.
+
+    `counts` ranks who is granted a description — `None` reads the same 30-day
+    telemetry the prompt does. `advertise_top_n` and `chat_scope` are not applied:
+    they remove whole lines rather than descriptions, production runs them at
+    `null`/`all`, and a worker or autonomy prompt lists every live skill, which is
+    the set this sweep walks.
+    """
+    settings = _skills_index_settings() if settings is None else settings
+    active = list(active)
+    if not active or not settings["descriptions"]:
+        return {}
+    if counts is None:
+        from app import prompt_builder as _pb  # late, so a test's patch lands
+
+        counts = _pb._skill_rank_counts()
+    lines = _skills_index_lines(active, counts,
+                                budget=settings["budget_chars"],
+                                max_desc=settings["max_description_chars"])
+    shown: dict[str, str] = {}
+    for line in lines[1:]:                    # lines[0] is the header
+        name, sep, desc = line[2:].partition(" — ")
+        shown[name] = desc if sep else ""
+    return shown
 
 
 REQUIRED_FIELDS = ("description", "tags")
@@ -1371,8 +1481,18 @@ def spill_delta(vault: Path, names: Sequence[str] = SPILL_SAMPLE,
             "total_delta_chars": sum(measured) if measured else None}
 
 
-def lint(skill_records: Optional[Sequence] = None) -> dict:
+def lint(skill_records: Optional[Sequence] = None,
+         index_counts: Optional[dict] = None) -> dict:
     """Lint every *live* skill — the set `agent_mcp.skills.iter_active_skills` owns.
+
+    `index_counts` is the rank table handed to `rendered_index_descriptions`, the
+    one thing that decides which over-cap descriptions the renderer shows at all.
+    It is a parameter and not only an internal call because a reader recomputing
+    the population outside this process — the way #4373's acceptance command does,
+    and the way `tests/test_skill_lint_clip_ordering.py` proves the two agree —
+    cannot otherwise make them match: the real 30-day telemetry counts are
+    dominated by two skills, so a different table moves membership. `None` reads
+    production telemetry, which is what the prompt itself uses.
 
     This used to be a sixth walk, over a `SKILLS_DIR` it hardcoded and with no
     quarantine rule at all: it linted retired-in-place skills as if they were live,
@@ -1425,6 +1545,13 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
     stale_ages: list[int] = []
     marked_active = 0
     scanned_names: list[str] = []
+    # #4374. Which skills the rendered index shows WITH a description, read through
+    # the renderer once for the whole sweep: an empty value is names-only at budget,
+    # which a length-only arm cannot tell from a visible clip. `rendered_clipped` is
+    # the denominator the new count is a subset of; `buried` is the firing set.
+    shown_descriptions = rendered_index_descriptions(active, counts=index_counts)
+    buried: list[dict] = []
+    rendered_clipped = 0
 
     for record in active:
         entry = record.directory
@@ -1470,6 +1597,33 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
                 "chars": len(index_desc),
                 "index_text": clip_skill_description(index_desc, index_clip),
             })
+
+        # #4374, immediately beside the arm it extends rather than folded into it:
+        # the row above asks how long the description is, this one asks what the
+        # clip leaves visible. Arms (a) and (b) are measurements; (c) is a word-list
+        # scan over prose and `CATEGORY_TRUST[BURIED_TRIGGER_CATEGORY]` says so.
+        # A falsy value here is over the cap but rendered name-only — 123 of the 191
+        # on 2026-11-19 — and must not fire: the model never sees that cut text, so
+        # its ordering is not yet a routing defect. `.get(...) and`, not `in`: every
+        # scanned skill is a KEY of this dict, names-only ones with an empty value,
+        # and testing membership alone would silently make arm (a) the length arm
+        # again. The fixture `test_a_names_only_index_line_does_not_fire` is what
+        # catches that regression, because its names-only description satisfies
+        # arms (b) and (c) exactly as the firing one does.
+        if shown_descriptions.get(entry.name) and len(index_desc) > index_clip:
+            rendered_clipped += 1
+            if not trigger_marker_in_window(index_desc, index_clip):
+                marker = first_trigger_offset(index_desc)
+                buried.append({
+                    "name": entry.name,
+                    "path": str(skill_file),
+                    "chars": len(index_desc),
+                    "window": index_desc[:index_clip],
+                    # None means no marker anywhere, which no reorder can fix; an
+                    # offset past the clip is the one #4373 can fix by moving text.
+                    "first_marker_at": marker[0] if marker else None,
+                    "first_marker": marker[1] if marker else None,
+                })
 
         is_dead, dead_reasons = check_dead(fm, yaml_err)
         if is_dead:
@@ -1613,6 +1767,28 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         # first sentence can be front-loaded, and does not enter the verdict.
         "description": description,
         "description_clip": index_clip,
+        # #4374. Which rendered-clipped descriptions show no trigger marker inside
+        # the clip. Not in the verdict, exactly like the `clipped` rows above it: it
+        # names work, it does not mean a skill is broken.
+        "buried_trigger": buried,
+        "buried_trigger_context": {
+            "clip": index_clip,
+            # The renderer renders no description at all when this is false, so the
+            # count above is 0 for a reason that is not health.
+            "descriptions_on": bool(_skills_index_settings()["descriptions"]),
+            # Every skill the renderer granted a description line, whether or not it
+            # is over the cap: the difference between this and `rendered_clipped` is
+            # "nothing was described", and the difference between that and
+            # `descriptions_on` is "the budget ran out first". Both are needed to
+            # read a 0, and neither is inferable from the count.
+            "index_described": sum(1 for v in shown_descriptions.values() if v),
+            # The population the model half-sees; `buried` is a subset of it.
+            "rendered_clipped": rendered_clipped,
+            # Firing rows with no marker anywhere: a reorder is not the fix for
+            # those, and `scripts/automod/vault_round.py`'s contract check refuses to
+            # let a worker lengthen an over-cap description to author one (#4373).
+            "clause_free": sum(1 for b in buried if b["first_marker_at"] is None),
+        },
         "authorship": {
             "by_job": dict(sorted(authors.items())),
             "machine_written": sum(n for j, n in authors.items()
@@ -1695,6 +1871,23 @@ CATEGORY_TRUST: dict[str, tuple[str, str]] = {
                               "absent path has already turned the tests red"),
     DESCRIPTION_CATEGORY: ("yes", "measured over every live skill's parsed description "
                            "with the index's own rule and clip (prompt_builder)"),
+    # The two solid arms and the advisory one are named separately because the
+    # count is only as honest as its weakest arm, and #4374's own triage is what
+    # settled which is which.
+    BURIED_TRIGGER_CATEGORY: (
+        "mostly",
+        "membership and length are measured — the skills the renderer itself "
+        "grants a description line (through `_skills_index_lines`, not a length "
+        "proxy: 191 over-cap descriptions on 2026-11-19 were only 68 rendered "
+        "lines) at the renderer's own clip. The trigger arm is advisory: "
+        "TRIGGER_WORDS is a word list matched over prose, never a parse of where "
+        "the when-to-use clause sits, so a firing row means 'no marker inside the "
+        "clip' and a 0 means 'no row lacked a marker in its window', never 'every "
+        "description leads with its trigger'. `buried_trigger_context` carries the "
+        "two numbers that separate a check that worked from one that never could: "
+        "`rendered_clipped`, the population this count is a subset of, and "
+        "`clause_free`, the firing rows with no marker anywhere — those need an "
+        "authored clause, not a reorder, and #4373's clause for that is blocked."),
     INJECTION_CATEGORY: ("yes", "every line of every skill is matched, but a match is a "
                                 "shape, not a risk — a regex misses paraphrase, so 0 "
                                 "means 'no match', never 'no risk'"),
@@ -2148,6 +2341,17 @@ def render_report(result: dict) -> str:
         (DESCRIPTION_CATEGORY, f"skill index shows it name-only ({len(desc_missing)}) "
          f"or cut at {desc_clip} chars ({len(desc_clipped)})", len(desc_rows),
          f"write a description; front-load its trigger in the first {desc_clip} chars"),
+        # #4374. Deliberately a row of its own and not a third clause of the
+        # DESCRIPTION gloss: DESCRIPTION's denominator is every parsed description,
+        # this one's is the rendered-clipped population in `buried_trigger_context`,
+        # and putting the smaller number beside the bigger gloss is how a count gets
+        # read as a subset of the wrong set.
+        (BURIED_TRIGGER_CATEGORY,
+         f"rendered with a description, cut at {desc_clip} chars, and no trigger "
+         f"marker inside what the cut shows",
+         len(result.get("buried_trigger") or []),
+         f"move the when-to-use clause into the first {desc_clip} chars — a reorder, "
+         f"not a rewrite; a row with `first_marker: null` needs a clause authored"),
         (INJECTION_CATEGORY, "instructs acting on remote instructions/config, or pipes remote content into a shell",
          n_inj, "rewrite to name a local/pinned step, or list in INJECTION_ALLOWLIST with a reason"),
         (DEAD_UNIT_CATEGORY, "runs systemctl against a unit in neither unit root",
@@ -2407,6 +2611,73 @@ def render_report(result: dict) -> str:
             lines.append(f"| `{d['name']}` | {d['reason']} | {d.get('chars', 0)} | {shown} |")
         if len(ordered) > 40:
             lines.append(f"| … | {len(ordered) - 40} more | | |")
+        lines.append("")
+
+    # BURIED_TRIGGER — #4374. Prints on its context block, not on its count, which
+    # is the module's own precedent (STALE renders on the usage half alone): the
+    # section is the only place that can say WHY the count is what it is, and a
+    # gate on `if n_buried:` would hide the two cases where a 0 is not health —
+    # descriptions switched off, and a run that measured nothing at all.
+    bt_rows = result.get("buried_trigger")
+    bt_ctx = result.get("buried_trigger_context")
+    if bt_rows or bt_ctx:
+        n_bt = len(bt_rows or [])
+        lines.append(f"## {BURIED_TRIGGER_CATEGORY} — {n_bt} rendered description(s) "
+                     f"cut before their trigger (window {desc_clip} chars)")
+        lines.append("")
+        if bt_ctx:
+            lines.append(f"Measured over {bt_ctx['rendered_clipped']} of the "
+                         f"{bt_ctx['index_described']} skills the index renders with any "
+                         f"description at all — those {bt_ctx['rendered_clipped']} are the "
+                         f"ones whose line carries a description longer than the "
+                         f"{bt_ctx['clip']}-char clip, and they are the population the "
+                         "model half-sees. Skills cut at the clip but rendered name-only "
+                         "(the description budget ran out first) are NOT counted: their "
+                         "text is never shown, so their ordering is not yet a routing "
+                         "defect. The membership and length arms are measurements; the "
+                         "marker arm is TRIGGER_WORDS matched over prose, so this count "
+                         "is advisory.")
+            if not bt_ctx["descriptions_on"]:
+                lines.append("")
+                lines.append("`skills.index.descriptions` is off, so the index renders no "
+                             "description at all and the count above is 0 for that reason, "
+                             "not because every trigger is front-loaded.")
+            if bt_ctx["clause_free"]:
+                lines.append("")
+                lines.append(f"{bt_ctx['clause_free']} of the {n_bt} rows below have no "
+                             "TRIGGER_WORDS marker anywhere in the description, not just "
+                             "outside the window: those need a when-to-use clause authored, "
+                             "and #4373 records that adding one to an already over-cap "
+                             "description is refused by the automod contract check, so that "
+                             "half is a human ruling, not a worker task.")
+        # A payload with NEITHER key — one stored before this category existed —
+        # gets the table row and no section, the way every other category's missing
+        # key does: the renderer does not describe a measurement it does not have,
+        # and a section asserting a population it never counted would be the one way
+        # for this row to print an unqualified zero.
+        lines.append("")
+        if n_bt:
+            lines.append("`first marker` is where the first TRIGGER_WORDS word actually sits "
+                         "— past the clip means a reorder fixes it, `none` means there is no "
+                         "clause to move. The window is what the index line shows, cut the "
+                         "way the renderer cuts it.")
+            lines.append("")
+            lines.append("| skill | chars | first marker | what the index shows |")
+            lines.append("|---|---|---|---|")
+            for item in sorted(bt_rows, key=lambda b: -int(b.get("chars", 0)))[:40]:
+                marker = ("none" if item.get("first_marker_at") is None
+                          else f"`{item['first_marker']}` at {item['first_marker_at']}")
+                window = (item.get("window") or "").replace("|", "\\|")
+                lines.append(f"| `{item['name']}` | {item.get('chars', 0)} | {marker} "
+                             f"| {window} |")
+            if n_bt > 40:
+                lines.append(f"| … | {n_bt - 40} more | | |")
+        else:
+            lines.append("Nothing fired: no rendered-clipped description has a marker-free "
+                         "window. Read that as 'every skill the model half-sees shows a "
+                         "marker inside its clip', which is narrower than 'no buried trigger' "
+                         "— the marker scan is a word list, and a 0 here says nothing at all "
+                         "about the skills cut to a name-only line.")
         lines.append("")
 
     # DEAD_SYSTEMD_UNIT — #1580. A command block that names a unit neither unit

@@ -370,7 +370,8 @@ def test_a_rung_the_vault_commit_hook_starts_by_path_can_import_the_app_package(
     `scripts/util/vault-commit.sh` is covered on the day it lands, and one renamed out of
     my list cannot hide. A rung whose module imports a checkout-root package at top level
     must insert the checkout onto `sys.path` ABOVE that import — the idiom is
-    `scripts/skill_lint.py:66-68`, which exists for exactly this reason, and the bug that
+    `scripts/skill_lint.py:76-78` (moved 66→76 when #4374's category list grew the module
+    header above it), which exists for exactly this reason, and the bug that
     earned it is the same one: 194 skills linted, five of them retired, because the import
     that would have said so had died.
     """
