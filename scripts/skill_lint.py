@@ -522,9 +522,236 @@ KNOWN_ABSENT_SCRIPTS: dict[str, str] = {
 }
 
 
+# ── an absolute path a command tells the reader to open (#4367) ─────────────
+#
+# Everything above resolves a `~/lloyd/…` *citation* against the checkout. This
+# resolves the other thing a skill tells you to do: a command that names a file by
+# absolute path. At `88867ed8` the file had no `os.path.exists` or `shutil.which`
+# anywhere near a command operand (`git -C ~/lloyd grep -n
+# 'shutil\.which|os\.path\.exists' -- scripts/skill_lint.py` → zero hits), so
+# nothing in the shipped lint ever put an absolute operand on disk and asked
+# whether it was there.
+#
+# Two instructions paid for that before vault `07379a6ac` (2026-11-20 09:42:55)
+# repointed them, and both were the instruction rather than a model improvising:
+#
+#   * `service-health-check/SKILL.md:463` ran `ls -la
+#     /home/alansrobotlab/lloyd/autonomy.db` — #1381 moved that store to
+#     `~/lloyd-data` long before, so the step answered `No such file or
+#     directory` on every following, inside the health check whose whole job is
+#     to report whether anything completed.
+#   * `subtitle-processing/SKILL.md:70` fell back to
+#     `/home/alansrobotlab/.local/bin/yt-dlp`, a path that has never held the
+#     binary here (`which yt-dlp` answers `/usr/bin/yt-dlp`).
+#
+# That is the failure mode #4367's paper names: a skill stores "a program from
+# past experience", the environment moves, the skill's stored state goes partly
+# stale, the agent compensates at run time — and the stored state is never
+# updated, so the compensation is charged on every future invocation. The runtime
+# join that would price that compensation measured a null over 57 days of traces
+# (15 attributed failures, 0 surviving inspection), so what is buildable today is
+# the static half: name the operand, the line and the command that authored it.
+#
+# Why it rides the existing `MISSING_SCRIPT` row rather than a new category: the
+# claim is the same one that row already makes — this skill names a file the tree
+# does not have — and a new category would need its own trust row, its own corpus
+# assertion and its own section while `lint()` already charges every empty
+# `known_stale` hit and `tests/test_fact_identity_one_action_one_fact.py` already
+# turns the suite red on one. So an operand comes back with `known_stale: ""`
+# hard-wired: `KNOWN_ABSENT_SCRIPTS` is the dated-debt ledger for the citation
+# class and must never excuse an operand, which is why nothing here looks a path
+# up in it (#4367 clause 1).
+#
+# The precision rule, and the only reason this can be ON. Re-measured over the 208
+# active skills on 2026-11-20 through the walker this rule itself uses —
+# `command_contexts(body, shell_fences_only=True)` over
+# `skill_folder_text()` of each — 18 DISTINCT absolute paths under this box's home
+# root sit in a command context and are not on disk, and this rule reports 0 of the
+# 18 while reporting the shape above. Every one of the 18 is a class of text that is
+# not an instruction to open a file:
+#
+#   * `export PATH="/home/…/.local/bin:$PATH"`, repeated across the yt-dlp skills: a
+#     field carrying `=` and `$`, not a path operand.
+#   * a dated example the skill says to substitute (`kg-health-2026-09-20T061402Z.json`,
+#     `autonomy-data-pipeline`), a `…/x` elision, or a field carrying a glob/`$STAMP`
+#     (`nightly-reflection-*`) — none of them a literal this box can stat.
+#   * 2 tool-argument transcripts, `Read file_path: '/home/…/Kz4QJmNrVXU.en.vtt'`
+#     (`subtitle-processing`), and an error transcript's own `Cause:` prefix
+#     (`browser-audio-pipeline`) — `Read` and `Cause:` are not shell verbs.
+#   * a `--flag=/home/…` the command creates rather than reads
+#     (`browser-audio-pipeline`).
+#   * 3 in a non-shell fence — `bash-background-tasks` json, `qmd-collection-management`
+#     yaml, `task-notification-handling` xml — out before the verb is read.
+#
+# The same filters also silence a retirement note quoting a moved tree (`voice-mode`,
+# `groundskeeper-survey`) and a `>` target, which is written rather than read. Every
+# class is pinned by name in `tests/test_skill_script_existence.py`, alongside the
+# control that keeps a blind scan from reading as a clean corpus.
+#
+# Two boundaries this deliberately does not cross, both recorded on #4367 as owed
+# rulings rather than quietly widened. Absolute paths OUTSIDE the home root: the same
+# walk found 241 distinct dead ones (399 occurrences) on 2026-11-20, and reading that
+# list is the argument for leaving them out — almost every row is `/tmp` scratch named
+# by the run that makes it, an HTTP route (`/api/…`, `/repos/{o}/{r}/…`), or a
+# `<placeholder>`, none of which is a broken instruction, and a `/usr/**` rule would
+# need its own trust ledger. And the bare-binary question — #4367's triage measured
+# 3,026 unresolvable first tokens across these 208 skills, which needs a
+# PATH-and-builtins ledger, not a dead-operand rule. Nothing here stats a verb.
+
+#: Shell utilities whose operand they OPEN. The claim is "this instruction reads a
+#: file that is not there", so the verb has to be one that reads AND has to be the
+#: command being run: the first token of a segment, past any `VAR=value` prefix and
+#: any `sudo`/`command`/`env`/`time`/`nohup` wrapper. Closed and named on purpose.
+#: `[ -f X ]` and `test -e X` are excluded because a guard whose file is absent is
+#: doing its job, and `cp`/`mkdir`/`rm`/`echo >` are excluded because writing to an
+#: absent path is not the same claim as reading one.
+_READ_COMMANDS = frozenset({
+    "awk", "bash", "cat", "cmp", "comm", "cut", "dash", "diff", "dir", "egrep",
+    "fgrep", "file", "find", "grep", "head", "hexdump", "jq", "less", "ls",
+    "md5sum", "more", "nm", "node", "od", "open", "perl", "pg", "python",
+    "python2", "python3", "rg", "ruby", "sed", "sha1sum", "sha256sum", "sh",
+    "sort", "source", "stat", "strings", "tail", "tac", "tree", "uniq", "vdir",
+    "wc", "xdg-open", "xxd", "yq", "zcat", "zgrep", "zsh",
+})
+
+#: Fence info strings that mean "type this into a shell". An empty info string is
+#: in the set — most of the corpus's command blocks say nothing — which is why the
+#: verb rule, not the fence label, carries the precision. Anything else (`sql`,
+#: `python`, `json`) is a sample in another language, not a step to run.
+_SHELL_FENCE_LANGS = frozenset({
+    "", "bash", "con", "console", "session", "sh", "shell", "shell-session",
+    "shellscript", "text", "zsh",
+})
+
+#: A field that is not one literal path this box can stat: an expansion, a glob, a
+#: brace set, a placeholder, an elision, or a `name=value` pair (a flag like
+#: `--user-data-dir=/home/…`, which the command creates rather than reads).
+_FIELD_NOISE = re.compile(r"[$*?\[\]{}<>~`=]|\.\.|…")
+
+#: A command substitution or quoted span: the path inside it is a value some other
+#: command produced, so the skill never claims this box has that file. Checked as a
+#: REGION rather than per field, because `$(echo /home/…/x.json)` puts the `$` in
+#: the field before the path — a per-field test sees a clean operand and reports a
+#: file the skill never named.
+_EXPANSION_RE = re.compile(r"\$\([^)]*\)?|\$\{[^}]*\}?|`[^`]*`|\$\w+")
+
+#: A name carrying a date, a timestamp or a date PLACEHOLDER is an example of a
+#: per-run artefact: the skill says in as many words that the reader substitutes
+#: the path its own launch echoed, so an example whose day has passed is not a
+#: broken instruction. `YYYY`/`MM`/`DD` catch the spelled-out form.
+_DATED_ARTEFACT = re.compile(r"\d{4}-\d{2}-\d{2}|\d{4}_\d{2}_\d{2}|\d{8}|YYYY|MM|DD")
+
+#: A literal absolute path: path-safe characters only, so a `$`, `*`, `<`, `~` or
+#: space ends the candidate rather than joining it. The lookbehind keeps a URL's
+#: `//host` and a relative `dir/file` from reading as one.
+_ABS_OPERAND_RE = re.compile(
+    r"(?<![\w/.~$@-])(/[A-Za-z0-9][A-Za-z0-9._@+-]*(?:/[A-Za-z0-9._@+-]+)*)")
+
+#: Shell segment boundaries. `2>&1`'s `&` is protected because it is not preceded
+#: by whitespace; a bare trailing `&` (background) is a boundary too.
+_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||[|;])\s*|\s&+\s*")
+
+#: Prefixes that are not the command: `sudo ls`, `env FOO=1 cat`, `(export …)`.
+_WRAPPER_TOKENS = frozenset({"command", "do", "else", "env", "nohup", "sudo",
+                             "then", "time"})
+_ASSIGN_RE = re.compile(r"^[\w.]+=")
+_PROMPT_RE = re.compile(r"^\s*(?:\$|>)\s+")
+_TRAILING_COMMENT_RE = re.compile(r"\s+#\D.*$")
+
+
+def _fence_lang(line: str) -> str:
+    """The info string of a fence marker line, lowercased; "" when it names none.
+
+    A marker carrying anything the pattern cannot read is treated as naming
+    nothing, which puts it on the scanned side of the fence-language filter: the
+    rule's precision comes from the verb, so defaulting to "look" cannot invent a
+    finding on its own.
+    """
+    m = re.match(r"^\s*(?:```|~~~)[ \t]*([A-Za-z0-9_+.,#-]*)[ \t]*$", line)
+    return m.group(1).lower() if m else ""
+
+
+def dead_command_operands(content: str,
+                          box_root: Path | None = None) -> list[dict]:
+    """Absolute operands a command in this skill reads and that are not on disk.
+
+    One dict per (line, path): `{kind, path, line_no, command, known_stale}` —
+    `line_no` and `command` are the point, because the repair is a one-line edit
+    to the instruction and a rate tells nobody which one. `known_stale` is always
+    "": this class has no ledger. `box_root` defaults to this box's home root, the
+    tree this box owns; paths outside it (including `/tmp` scratch and a
+    `/home/user/…` example home) are out of scope for the reason in the section
+    comment above. Read-only: nothing here opens a file for writing, and the scan
+    never touches the skills tree it reports on.
+    """
+    root = str(Path(box_root) if box_root else Path.home())
+    stats: dict[str, bool] = {}
+    out: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+    for line_no, ctx in command_contexts(content, shell_fences_only=True):
+        text = _PROMPT_RE.sub("", ctx)
+        text = _TRAILING_COMMENT_RE.sub(" ", text)
+        for segment in _SEGMENT_RE.split(text):
+            tokens = list(re.finditer(r"\S+", segment))
+            i = 0
+            while i < len(tokens) and (
+                    _ASSIGN_RE.match(tokens[i].group(0))
+                    or tokens[i].group(0).lstrip("({!") in _WRAPPER_TOKENS):
+                i += 1
+            if i >= len(tokens):
+                continue
+            if tokens[i].group(0).rsplit("/", 1)[-1] not in _READ_COMMANDS:
+                continue
+            tail = segment[tokens[i].end():]
+            fields = [(m.start(), m.end()) for m in re.finditer(r"\S+", tail)]
+            expansions = [(m.start(), m.end())
+                          for m in _EXPANSION_RE.finditer(tail)]
+            for m in _ABS_OPERAND_RE.finditer(tail):
+                path = m.group(1)
+                if any(a <= m.start(1) < b for a, b in expansions):
+                    continue
+                holder = [(a, b) for a, b in fields if a <= m.start(1) < b]
+                if not holder:
+                    continue
+                field = tail[holder[0][0]:holder[0][1]]
+                if _FIELD_NOISE.search(field) or _TEMPLATE_PATHS.search(path):
+                    continue
+                # The dated class is read off the path BELOW the box root, never off
+                # the root itself. `~` resolves wherever the caller's HOME points, and
+                # a home whose own name carries a digit run — the gate's round home
+                # `…/lloyd-work/SM_20261121_015006/home`, a `pytest-123456` temp dir —
+                # would otherwise excuse every operand the run inspects, which is
+                # exactly how all five clause nodes went red in the gate on
+                # 2026-11-20 while passing at a real HOME. What the skill told the
+                # reader to open is the tail; the tail is what gets judged.
+                rel = path[len(root) + 1:] if len(path) > len(root) else path
+                if _DATED_ARTEFACT.search(rel):
+                    continue
+                if tail[:m.start(1)].rstrip().endswith((">", ">&", ">|", ">>")):
+                    continue
+                if path != root and not path.startswith(root + "/"):
+                    continue
+                if stats.setdefault(path, Path(path).exists()):
+                    continue
+                if (line_no, path) in seen:
+                    continue
+                seen.add((line_no, path))
+                out.append({"kind": "command-operand", "path": path,
+                            "line_no": line_no, "command": ctx.strip(),
+                            "known_stale": ""})
+    return sorted(out, key=lambda d: (d["line_no"], d["path"]))
+
+
 def check_script_paths(content: str, skill_dir: Path | None = None,
-                       repo_root: Path | None = None) -> list[dict]:
-    """Repo script paths the skill cites that are not in the tree."""
+                       repo_root: Path | None = None,
+                       box_root: Path | None = None) -> list[dict]:
+    """Files this skill tells someone to open that are not in the tree.
+
+    Two shapes, one row: a `~/lloyd/…` repo citation resolved against
+    `repo_root` (the class `KNOWN_ABSENT_SCRIPTS` carries dated debt for), and an
+    absolute operand a command in the skill reads — see
+    `dead_command_operands`, which never consults that ledger.
+    """
     repo_root = repo_root or Path(__file__).resolve().parents[1]
     out: list[dict] = []
     for match in set(_SCRIPT_PATH_RE.findall(content)):
@@ -538,7 +765,8 @@ def check_script_paths(content: str, skill_dir: Path | None = None,
         if not found:
             out.append({"path": match,
                         "known_stale": KNOWN_ABSENT_SCRIPTS.get(match, "")})
-    return sorted(out, key=lambda d: d["path"])
+    out.extend(dead_command_operands(content, box_root=box_root))
+    return sorted(out, key=lambda d: (d["path"], d.get("line_no", 0)))
 
 
 # ── injection-shaped instructions in the body (#677) ─────────────────────────
@@ -742,22 +970,34 @@ _UNIT_GLOB_PATTERNS = ("*.service", "*.timer", "*.socket", "*.target",
                        "*.path", "*.mount", "*.slice")
 
 
-def command_contexts(content: str) -> list[tuple[int, str]]:
+def command_contexts(content: str,
+                     shell_fences_only: bool = False) -> list[tuple[int, str]]:
     """Every (line_no, text) in this skill that reads as a command to run.
 
     Two surfaces: a line inside a fenced block, and an inline backtick span.
     Deliberately NOT every line — the distinction is the whole precision story of
     `DEAD_SYSTEMD_UNIT`, since a retirement note has to be able to name a deleted
     unit without prescribing a command for it.
+
+    `shell_fences_only` narrows the fenced half to blocks whose info string names a
+    shell (`_SHELL_FENCE_LANGS`), which is what `dead_command_operands` needs: a
+    `cat` inside a ```sql block is sample text in someone else's language, while a
+    retirement note in prose is still the same span the unit rule reads. One
+    walker either way, per #1294 — a second fence parser is a second answer to what
+    a command is.
     """
     out: list[tuple[int, str]] = []
     in_fence = False
+    skip_fence = False
     for line_no, line in enumerate(content.splitlines(), 1):
         if _FENCE_MARK.match(line):
             in_fence = not in_fence
+            skip_fence = (in_fence and shell_fences_only
+                          and _fence_lang(line) not in _SHELL_FENCE_LANGS)
             continue
         if in_fence:
-            out.append((line_no, line))
+            if not skip_fence:
+                out.append((line_no, line))
         else:
             out.extend((line_no, span) for span in _INLINE_CODE_SPAN.findall(line))
     return out
@@ -1904,7 +2144,7 @@ def render_report(result: dict) -> str:
         ("DUPLICATE", "near-duplicate names", n_dup, "resolve ownership, merge, or rename"),
         ("STALE", f">{STALE_DAYS}d mtime, status ≠ active", n_stale, "review for removal"),
         ("PHANTOM_TOOL", "names a tool that does not exist", n_phantom, "replace with the real tool name"),
-        ("MISSING_SCRIPT", "names a repo script absent from the tree", n_scripts, "land the script or drop the citation"),
+        ("MISSING_SCRIPT", "names a file absent from the tree", n_scripts, "land the file or repoint the citation"),
         (DESCRIPTION_CATEGORY, f"skill index shows it name-only ({len(desc_missing)}) "
          f"or cut at {desc_clip} chars ({len(desc_clipped)})", len(desc_rows),
          f"write a description; front-load its trigger in the first {desc_clip} chars"),
@@ -2103,16 +2343,28 @@ def render_report(result: dict) -> str:
     # section is where a reader sees WHICH skill and WHICH path, which a non-empty
     # dict in an assert message says only once.
     if n_scripts:
-        lines.append(f"## MISSING_SCRIPT — {n_scripts} skill(s) naming a repo script absent from the tree")
+        lines.append(f"## MISSING_SCRIPT — {n_scripts} skill(s) naming a file absent from the tree")
         lines.append("")
         lines.append("This is the gap that let a skill ship a day pointing at a script its")
-        lines.append("round never committed. Land the script, or drop the citation.")
+        lines.append("round never committed, and since #4367 the gap that let one tell the")
+        lines.append("reader to `ls` a store the box moved out from under it. Land the file,")
+        lines.append("or repoint the citation — and when the row names a line, the repair is")
+        lines.append("that line, not the skill.")
         lines.append("")
         lines.append("| skill | absent path(s) |")
         lines.append("|---|---|")
         for item in result["missing_script"]:
-            paths = ", ".join(f"`{s['path']}`" for s in item["scripts"])
-            lines.append(f"| `{item['name']}` | {paths} |")
+            cells = []
+            for s in item["scripts"]:
+                if s.get("kind") == "command-operand":
+                    # The repair is a one-line edit, so the row names the line and
+                    # the command that authored it (#4367) — a bare path would make
+                    # the reader grep the skill for it.
+                    cells.append(f"`{s['path']}` at :{s['line_no']} — "
+                                 f"`{s['command']}`")
+                else:
+                    cells.append(f"`{s['path']}`")
+            lines.append(f"| `{item['name']}` | {', '.join(cells)} |")
         lines.append("")
 
     # INJECTION_PATTERN — #677. The corpus-wide assertion lives in

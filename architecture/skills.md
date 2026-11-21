@@ -553,8 +553,12 @@ report now names the roots it scanned. Nine categories: DEAD (unparseable
 frontmatter, or description *and* tags both empty — the live scorer would
 return 0 for any query), MISSING_DESC, DRIFT (description is output-framed
 rather than trigger-framed), DUPLICATE (difflib name ratio ≥ 0.85 **and** description ratio ≥ 0.60), STALE (mtime
-> 90 days and `status != active`), PHANTOM_TOOL, MISSING_SCRIPT (cites a repo
-script that is not in the tree), INJECTION_PATTERN (body instructs acting on
+> 90 days and `status != active`), PHANTOM_TOOL, MISSING_SCRIPT (cites a file that
+is not in the tree: a `~/lloyd/…` repo script, **or** — #4367 — an absolute path
+under this box's home root that a read command in a shell fence of the skill puts in
+command position, reported with its `line_no` and the `command` that authored it and
+never excusable through `KNOWN_ABSENT_SCRIPTS`, which is dated debt for the citation
+class only), INJECTION_PATTERN (body instructs acting on
 remotely hosted instructions or pipes remote content into a shell, #677), and
 DEAD_SYSTEMD_UNIT (a `systemctl` command names a unit living in neither the
 repo's `agent-services/systemd/` nor the user tree, #1580). "Advisory"
