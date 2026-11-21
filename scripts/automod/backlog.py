@@ -1595,6 +1595,184 @@ def _witness_within_size_bound(path) -> bool:
     return size is not None and size <= WITNESS_MAX_BYTES
 
 
+#: A SHA-256 the way an item writes one: 64 LOWERCASE hex, as `sha256sum` prints it,
+#: bounded so a hex run of a different length (a git object id, a truncated paste) is not
+#: read as one. #4342 measured that this module was hash-blind before this rail — the only
+#: digest spelling in the file was a sha1 swarm id — so a copy demand was published for a
+#: digest-quote no `wc -l -c` can ever reproduce. An UPPERCASE paste is not recognised and
+#: keeps today's demand, which is the conservative direction: a missed skip costs one
+#: redundant demand, a false skip costs the archive of a witness.
+_WITNESS_DIGEST_RX = re.compile(r"(?<![0-9a-f])([0-9a-f]{64})(?![0-9a-f])")
+
+#: The words that make a hex string a CLAIM ABOUT a file's bytes. Adjacency alone is not
+#: attribution: a commit sha, a colour, a fixture id and a file path all sit beside each
+#: other in a triage note. A digest with none of these words anywhere in the text states
+#: nothing about any file, so the line/byte demand is untouched.
+_WITNESS_HASH_WORD_RX = re.compile(
+    r"\b(?:sha[-_ ]?(?:1|256|384|512)\w*|digests?|hash(?:es|ed|ing)?|checksums?|"
+    r"baselines?|fingerprints?)\b", re.IGNORECASE)
+
+#: One citation — the stretch of text a reader takes as one claim. Both sentence and line
+#: are cut, because `~/obsidian/backlog/4256-*.md:270` puts `agent-llm-primary.log` in one
+#: sentence and the daily copy's digest in the NEXT: pairing a digest by whole line there
+#: attributes a hash of one file to a demand for another and swallows a legitimate demand
+#: (#4342 clause 4, and the false pairing its triage measured on the live board).
+_WITNESS_CITATION_SPLIT_RX = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _witness_sha256(path) -> "str | None":
+    """The witness bytes as a lowercase digest, or None when they cannot be had.
+
+    Refuses an over-bound file rather than reading it: the answer this feeds is a skip, and
+    slurping a multi-megabyte log to fail a digest comparison is exactly the cost the size
+    bound above exists to stop (#4342's implementation caveat). A file that vanishes
+    between the on-disk probe and here answers None too — unknown is never "stale".
+    """
+    import hashlib
+    if not _witness_within_size_bound(path):
+        return None
+    try:
+        return hashlib.sha256(_witness_target(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _digest_owner_candidates(token: str):
+    """The files a cited path token could name, for digest ownership.
+
+    Resolved through `_pinned_candidates`, the same spellings the #2267 basename skip
+    probes, and NOT through `WITNESS_PATH_RX`: the narrow pattern refuses a repo-relative
+    tail ON PURPOSE (#1886 — a relative fragment must never become a witness we order
+    copied), but ownership is the opposite question and needs the wide reading. A digest's
+    owner is routinely spelled relative on this board — `tests/fixtures/
+    vllm_prefix_miss_2026-11-18.json` on #4256, `backlog/data/denials.jsonl` on #3484,
+    `backlog/data/flash-next-canary.jsonl` on #3234 — and an owner the narrow pattern
+    cannot see is an owner that silently belongs to nobody, which hands its digest to the
+    NEXT path in the citation. That is the one way this skip can do harm: a store the text
+    never hashed loses its demand because a repo-relative path is invisible as an owner.
+
+    A URL's tail does slip through `_PINNED_PATH_RX`, and here that direction is survivable
+    for the same reason it is for the basename skip: a mis-seen owner can only ABSTAIN, and
+    abstaining publishes the demand as it is worded today.
+    """
+    yield from _pinned_candidates(token)
+
+
+def _stale_digest_note(path) -> str:
+    """The owed note for a witness whose quoted digest has moved on (#4342).
+
+    Emitted to the OWED list and never to the graded clause list: the correct record of a
+    stale digest is the two figures side by side in the round that closes the item, not an
+    archive task for bytes that no longer exist. It exists because a witness that quietly
+    stops being asked for is indistinguishable from a guard that never fired — #2382's
+    failure mode in a new guise — and because #4342's own triage had to re-derive from a
+    live `sha256sum` exactly the fact this sentence hands over for free. Like the over-bound
+    note it is gated by `MAX_CLAUSES` at the call site: a contract already at its cap
+    receives no generated prose at all, and #2289 clause 4 / #2382 clause 5 are the rulings
+    that put every destination under that gate.
+    """
+    return (f"No copy demand for `{path}`: the digest this item quotes for it no longer "
+            f"matches the bytes on disk, so the instant it cited is gone and a copy taken "
+            f"now would be a different file carrying this item's figure. Record the quoted "
+            f"digest and what the file hashes to now in the round that closes this item "
+            f"(#4342).")
+
+
+def _digest_owner(paths, dig) -> "str | None":
+    """The one path token inside one citation that `dig` describes, or None for nobody.
+
+    Prose puts the file either BEFORE the number ("`path` is 41 bytes, sha256 X") or AFTER it
+    ("sha256 X of `path`"), so the side that holds a path decides the direction and the
+    closest path on that side owns it. When BOTH sides hold a path the citation does not say
+    which of the two the number describes, and nothing is attributed.
+
+    The both-sides rule is the review's measurement on SM_20261121_133517, whose owner rule
+    took the nearest path ending before the digest unconditionally: in
+
+        the live copy is `{svc}` at 40 bytes; baseline sha256 {stale} of
+        tests/fixtures/vllm_prefix_miss_2026-11-18.json
+
+    the demanded store sits before the number and the digest's true owner after it, so
+    nearest-before handed `svc` a hash about a fixture, dropped its copy demand and emitted a
+    "No copy demand for `{svc}`" note — the clause's own property, falsified in the one order
+    no node covered. Ambiguity costs at most one redundant demand; a false pairing costs the
+    archive of a witness and a demand nobody gets (#4342 clause 4).
+    """
+    before = [p for p in paths if p.end() <= dig.start()]
+    after = [p for p in paths if p.start() >= dig.end()]
+    own = before or after
+    if not own or (before and after):
+        return None       # no candidate at all, or the citation offers two owners
+    near = (min(own, key=lambda p: dig.start() - p.end()) if before
+            else min(own, key=lambda p: p.start() - dig.end()))
+    return near.group(0)
+
+
+def _witness_digest_state(path, text) -> str:
+    """Whether `text` quotes a digest for THIS witness, and whether it still holds.
+
+    Returns `"absent"` (no digest is stated for this file — the ordinary case, and the one
+    every clause of #2267/#2382/#2513/#3872 was written for), `"match"` (the digest equals
+    the bytes on disk, so a committed copy really would reproduce the claim) or `"stale"`
+    (a digest IS stated for this file and the file has since moved under it).
+
+    Pairing is per citation, never per item — that is the whole of #4342 clause 4, and the
+    board proves the need: `backlog/4256-*.md` quotes
+    `6335d1e09c566430aa1a2a1f662c9a56382cb73c64f9e867a4f4ab5d8960126d` as the digest of
+    `tests/fixtures/vllm_prefix_miss_2026-11-18.json` while the copy demand on the same
+    item names `~/lloyd-data/logs/services/agent-llm-primary.log`. A digest matched to a
+    path by nearness across a whole item would silence that demand forever on a hash of a
+    different file. So the text is split the way the clause list already splits
+    `## Acceptance clauses` — a blank line or a new list item — and inside one citation the
+    digest belongs to the single path closest to it, recognised under ANY spelling
+    (`_digest_owner_candidates`). A digest with no path in its own citation belongs to
+    nobody, and a citation whose nearest path is some other file abstains for this one —
+    which is both half of clause 4 at once: the owner rule IS the abstain rule, so a text
+    cannot both attribute a digest and ignore a second path sitting in the same citation.
+
+    A hash word is required as well as a 64-hex. Commit shas are 40-hex and do not match
+    the pattern, but a round's 64-hex content sha or an artifact digest printed beside an
+    unrelated path would: `sha256`, `sha-256`, `checksum`, `digest` or `hash` is what makes
+    the token a stated digest rather than a number that happens to be long.
+
+    The digest is computed from the real bytes on every call: nothing here is injectable,
+    because an answer that could be handed in is an answer no gate could trust. The cost is
+    one read of a file already proven to be under `WITNESS_MAX_BYTES`, once per citation
+    that quotes a digest, at triage time. An unreadable or over-bound file answers None from
+    `_witness_sha256` and is not treated as stale: an unreadable witness is not evidence
+    that a claim about its contents was wrong.
+    """
+    if not _WITNESS_HASH_WORD_RX.search(text):
+        return "absent"
+    want = _witness_target(path)
+    # ONE read per call, not one per citation: the caller has already proven a 64-hex is in
+    # the text and that this token is under `WITNESS_MAX_BYTES` (`_witness_sha256` refuses
+    # anything over the bound itself), and the match test below needs the bytes whatever the
+    # word order turns out to be.
+    live = _witness_sha256(path)
+    state = "absent"
+    for citation in _WITNESS_CITATION_SPLIT_RX.split(text):
+        digests = list(_WITNESS_DIGEST_RX.finditer(citation))
+        if not digests or not _WITNESS_HASH_WORD_RX.search(citation):
+            continue
+        paths = list(_PINNED_PATH_RX.finditer(citation))
+        for dig in digests:
+            if live is not None and dig.group(1) == live:
+                # The bytes pair the digest with this file themselves — no word order can
+                # misattribute a sha256 that actually equals these bytes, so this is "match"
+                # even when the citation names a second path nearer to the number.
+                return "match"
+            owner = _digest_owner(paths, dig)
+            if owner is None:
+                continue              # the citation will not say whose hash this is
+            if not any(c == want for c in _digest_owner_candidates(owner)):
+                continue              # a claim about a different file
+            if live is None:
+                continue              # unreadable is not "stale"
+            state = "stale"           # a digest IS stated for this file, and it moved
+    return state
+
+
 # ── a contract that numbers itself (#3002) ────────────────────────────────────
 #
 # Why this sits here and not beside `clean_clauses`, which is the only caller: the
@@ -2713,6 +2891,51 @@ def _pinned_candidates(tok: str):
         yield Path(__file__).resolve().parents[2] / raw.lstrip("./")
 
 
+def _copy_demand(witness: str, artifact: str, ext: str, *,
+                 hash_quoted: bool = False) -> str:
+    """The whole-file copy demand, in the shape that can pin the figure quoted.
+
+    Two wordings, one per kind of figure, because the re-derive command has to be able to
+    reproduce what the item actually claimed. With no digest quoted the text is the one
+    #2289/#2382/#2513 left, byte for byte — clause 3 of #4342 is that it does not change.
+    With a matching digest quoted, an extract "reproducing the same numbers" is a
+    non-sequitur (a digest has no numbers to reproduce except itself) and `wc -l -c` cannot
+    answer a hash claim, so the demand asks for the file whole and for `sha256sum` of the
+    bytes in the vault (#4342 clause 2). Neither wording issues a `git` command or names a
+    repository: the demand orders bytes into the vault, and the vault route an item takes
+    to land them is the item's own to choose, so a wording that read "commit this" would
+    ask a code round for a commit its diff can never contain (#2289).
+    """
+    if hash_quoted:
+        return (f"The witness bytes have no history: copy `{witness}` to `{artifact}` in "
+                f"the vault, whole — an extract cannot carry a digest — and re-derive the "
+                f"quoted digest from the bytes there with `sha256sum {artifact}`; the "
+                f"digest the item quotes is that output.")
+    return (f"The witness bytes have no history: copy `{witness}` to `{artifact}` in "
+            f"the vault (an extract reproducing the same numbers is fine) and "
+            f"re-derive the quoted report from the committed bytes with "
+            f"`{_rederive_command(artifact, ext)}` — that output is the figure the "
+            f"item quotes.")
+
+
+def _sibling_copy_demand(first: str, ext: str, artifact_dir: str, *,
+                         hash_quoted: bool = False) -> str:
+    """The re-aimed demand, for a witness the vault already holds an extract of (#3872).
+
+    Same two wordings for the same reason: the cheap check is "re-derive from the copy that
+    is already committed", and what re-deriving means depends on the figure the item quoted.
+    """
+    if hash_quoted:
+        return (f"The witness bytes have no history: `{artifact_dir}` already commits a "
+                f"copy of them — re-derive the quoted digest from `{first}`, and publish "
+                f"your own extract only if that output does not reproduce the digest the "
+                f"item quotes: `sha256sum {first}`")
+    return (f"The witness bytes have no history: `{artifact_dir}` already commits a copy "
+            f"of them — re-derive the quoted report from `{first}`, and publish "
+            f"your own extract only if that output does not reproduce the figure the "
+            f"item quotes: `{_rederive_command(first, ext)}`")
+
+
 def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
                                 artifact_dir: str = WITNESS_ARTIFACT_DIR,
                                 route_to_owed: bool = False, item_id=None):
@@ -2745,16 +2968,25 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         re-triage stamp that did it had cleared the front matter, so no cap was in
         the way. Compared across paths by basename, never by substring, and never
         against the candidate itself;
+      * the 64-hex digest it states as that file's hash still matches the bytes on
+        disk (#4342, `_witness_digest_state`). An item that quotes a witness BY digest
+        and whose digest has since moved on cannot be served by any copy: the bytes a
+        copy can carry now are a later instant's, so the demand would order a witness
+        that contradicts the claim it is meant to pin. The token is dropped and the
+        owed list is told why — a witness that quietly stops being asked for is
+        indistinguishable from a guard that never fired;
       * the contract has room: at `MAX_CLAUSES` the list comes back UNCHANGED,
         because a generated clause must never evict, truncate or reorder one
         that was authored.
 
-    The two new skips are per-token and neither may become a blanket skip: each
+    Every one of these skips is per-token and none may become a blanket skip: each
     leaves every other token in the text eligible. The opposite direction — a
     witness that must still get its clause — is pinned by
     `test_a_witness_whose_basename_no_tree_path_names_still_gains_one_clause` for
-    the basename, and by the under-bound control inside
-    `test_a_witness_beyond_the_size_bound_is_skipped_like_an_absent_one` for size.
+    the basename, by the under-bound control inside
+    `test_a_witness_beyond_the_size_bound_is_skipped_like_an_absent_one` for size, and
+    by `test_one_stale_digest_witness_does_not_skip_the_live_one_beside_it` for the
+    digest.
 
     Exactly one clause goes on, for the first out-of-tree path in reading order,
     worded over committed bytes with no time shape — the owed route publishes it as
@@ -2764,7 +2996,10 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     quoted from, plus the byte count, because every canonical extract in this
     convention is ONE line and `wc -l` alone printed `1` for all six
     `tests/fixtures/vllm_prefix_miss_*.json` whose bytes ranged 169,348 to 263,748,
-    pinning nothing (#2267 clause 4) — and a sqlite count for a store.
+    pinning nothing (#2267 clause 4) — and a sqlite count for a store. A witness the
+    text quotes by a digest that still matches its bytes is the exception no count can
+    serve: its command is `sha256sum` of the artifact in the vault, and its demand asks
+    for the file whole, because the figure to reproduce IS a digest (#4342 clause 2).
 
     At most ONE over-bound note goes out per call, for the first such token in
     reading order, and independently of whether a clause also went out: a body
@@ -2827,6 +3062,12 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         return _answer()
     seen: set[str] = set()
     witness = ""
+    # True when the chosen witness is the file whose digest this text quotes and that
+    # digest still matches its bytes. It decides which re-derive command the demand names:
+    # a digest claim is reproduced by `sha256sum`, and a `wc -l -c` demand attached to a
+    # hash quote claims to pin a hash with a line count (#4342 clause 2, and the note the
+    # triage left for whoever implemented this).
+    hash_quoted = False
     # The first token, in reading order, that is on disk, over the size bound and in
     # no tree — the one the owed extract note is about (#2382). Kept apart from
     # `witness` because the two demands are not alternatives: a body can cite a big
@@ -2841,6 +3082,17 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     # tree. Resolved lazily, only once a candidate needs the question, because the
     # probe walks the filesystem and the common case is no candidate at all.
     tree_basenames: "set[str] | None" = None
+    # #4342: whether this text quotes ANY witness by digest at all. Computed once and
+    # consulted per token, because the question below ("does the quoted digest still
+    # match?") can only be answered by reading the file, and a text with no 64-hex in it
+    # must not cost a read of anything. One text, one answer: the digest set does not
+    # change between tokens of the same call.
+    digests_in_text = bool(_WITNESS_DIGEST_RX.search(str(text or "")))
+    # The first token skipped for a stale quoted digest, kept so the skip is reportable
+    # rather than silent — a witness that quietly stops being asked for is
+    # indistinguishable from a guard that never fired, which is #2382's failure mode in a
+    # new guise.
+    stale_quoted = ""
     for tok in WITNESS_PATH_RX.findall(str(text or "")):
         if tok in seen:
             continue
@@ -2863,11 +3115,26 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
                 if not over_bound and _witness_size(tok) is not None:
                     over_bound = tok
                 continue
+            state = (_witness_digest_state(tok, str(text or ""))
+                     if digests_in_text else "absent")
+            if state == "stale":
+                # The instant this item quoted is gone: bytes copied now are a different
+                # file, so the copy would carry this item's figure and prove nothing. The
+                # token is dropped exactly as an absent file is, and every OTHER token in
+                # the text stays eligible — this is the per-token skip #4342 asks for, not
+                # a blanket one (clause 5 pins one stale plus one live = one demand).
+                # Only the token is RECORDED here; the owed note is emitted below the
+                # clause cap, where every other destination is gated.
+                stale_quoted = stale_quoted or tok
+                continue
             if not witness:
                 # No `break`: the loop keeps going so an over-bound token LATER in
                 # reading order is still seen, and stops on its own once both
                 # destinations have a candidate.
                 witness = tok
+                # "match": the quoted digest still equals these bytes, so the demand has
+                # to be re-derivable as a digest and not as a line count (#4342 clause 2).
+                hash_quoted = state == "match"
         if witness and over_bound:
             break
     # The cap gates BOTH destinations, and now literally so: a note accumulated
@@ -2879,6 +3146,8 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     if over_bound and route_to_owed:
         owed.append(_over_bound_extract_demand(over_bound, artifact_dir,
                                               item_id=item_id))
+    if stale_quoted and route_to_owed:
+        owed.append(_stale_digest_note(stale_quoted))
     if not witness:
         return _answer()
     # #2513: never a name the vault already holds. The basename used to be lifted
@@ -2932,20 +3201,13 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     if sibs:
         first = f"{artifact_dir}/{sibs[0]}"
         (owed if route_to_owed else every).append(
-            f"The witness bytes have no history: `{artifact_dir}` already commits a copy "
-            f"of them — re-derive the quoted report from `{first}`, and publish your own "
-            f"extract only if that output does not reproduce the figure the item quotes: "
-            f"`{_rederive_command(first, ext)}`")
+            _sibling_copy_demand(first, ext, artifact_dir, hash_quoted=hash_quoted))
         return _answer()
     # Past the `MAX_CLAUSES` check above, which is where both destinations are
     # gated. #2289 clause 4 pinned that gate for the copy demand; #2382 clause 5
     # pins it for the note.
     (owed if route_to_owed else every).append(
-        f"The witness bytes have no history: copy `{witness}` to `{artifact}` in "
-        f"the vault (an extract reproducing the same numbers is fine) and "
-        f"re-derive the quoted report from the committed bytes with "
-        f"`{_rederive_command(artifact, ext)}` — that output is the figure the "
-        f"item quotes.")
+        _copy_demand(witness, artifact, ext, hash_quoted=hash_quoted))
     return _answer()
 
 

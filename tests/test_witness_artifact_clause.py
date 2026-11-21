@@ -4302,3 +4302,475 @@ def test_the_re_aim_is_untaken_rather_than_cost_the_fallback_its_own_sentence(tm
     assert note.endswith("say so rather than ordering the store."), note
     assert set(_demanded_paths(note)) == {art}, (
         f"the affordable note did not fall back to the fresh name {art}: {note}")
+
+
+
+# ── a digest-quoted witness is only copyable while the digest holds (#4342) ──────
+#
+# `~/.local/share/ai-engineer/seen.json` has collected this demand on five items — #2336
+# twice (`owed_settled` 2026-10-08T19:46:04 and 2026-10-22T05:29:42, both ruling that a
+# copy pins nothing), #4201, #4339 and #4340 — and reproduces none of them. The monitor
+# rewrites it (`scripts/youtube_channel_monitor.py`'s `save_state()`), while an item quotes
+# one morning's digest: #4201 cites
+# `6a4865ae44251deb402dd0d6484d6eefd7e14bd6cc1a25f282932d803a0b9ef1` and `sha256sum` of the
+# store on 2026-11-19 answered
+# `2153c21acb63852ea1b4a116c01a1704fea0806853f02c634359767d7415c588`. A copy taken now
+# matches neither, so the demand was an order to produce a witness that contradicts the
+# item it pins — and the item it produced, #4340, asked to commit 866 KB of a mode-600 state
+# file and was closed `stale` 27 minutes after creation.
+#
+# What the skip must not become is a blanket skip. The board scan in the triage found 71
+# published demands with a 64-hex inside ±1.5 KB of them, 40 quoting a digest that STILL
+# equals the file — a closed round's `gate.json`, immovable now — and those demands are
+# right, so they must keep firing. Each node below pins one side of that line; the last two
+# pin the boundaries the triage named: pairing per citation rather than per item, and no
+# read of a store the size bound has already refused.
+HASH_QUOTED_THEN_MOVED = "6a4865ae44251deb402dd0d6484d6eefd7e14bd6cc1a25f282932d803a0b9ef1"
+
+
+def _digest_of(path: Path) -> str:
+    """What `sha256sum` answers for these bytes — the figure an item would quote."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _live_state(tmp_path: Path, name: str = "seen.json") -> Path:
+    """A mutable state file where no git tree reaches it, as `seen.json` is."""
+    d = tmp_path / "share" / "ai-engineer"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text('{"urls": ["https://a", "https://b"]}\n')
+    return p
+
+
+def _owed(text: str, item_id: int = 4342) -> "list[str]":
+    """The text through the owed route, returning the OWED half of the pair.
+
+    Every demand this item is about was published there. Each node asks the graded half the
+    same question too, because a skip that spares only one destination is not a skip. The
+    owed route answers `(clauses, owed)` and the graded route one list (#2289), so both
+    helpers read the shape rather than assume it.
+    """
+    out = B.add_witness_artifact_clause([], text, route_to_owed=True, item_id=item_id)
+    return out[1] if isinstance(out, tuple) else []
+
+
+def _demands(out: "list[str]") -> "list[str]":
+    """The copy demands in an owed list, with the skip notes filtered out.
+
+    A stale digest now speaks — one owed note naming the witness it declined (#4342) — so a
+    node that counts demands must not count that sentence as one. Clause 1 and clause 5 pin
+    the note's presence from the other side.
+    """
+    return [o for o in out if "witness bytes have no history" in o]
+
+
+def _graded(text: str, item_id: int = 4342) -> "list[str]":
+    out = B.add_witness_artifact_clause([], text, item_id=item_id)
+    return out[0] if isinstance(out, tuple) else out
+
+
+def test_a_stale_quoted_digest_publishes_no_copy_demand_on_either_destination(tmp_path):
+    """#4342 clause 1: once the quoted instant is gone, no copy is demanded for it.
+
+    The text is #4339's shape: a live state file, the figures it held at the reading
+    (18,687 lines / 866,062 bytes as at 2026-11-19 — which is what makes a copy demand look
+    executable to a reader), and a digest that no longer describes the bytes. Neither
+    destination carries a copy demand. The control is the same text with the file's real
+    digest substituted, so exactly one figure in the text differs and nothing else can
+    explain the silence.
+    """
+    store = _live_state(tmp_path)
+    text = (f"Adoptable? The monitor's state at `{store}` is 3 lines of seen URLs, "
+            f"866,062 bytes at the reading, sha256 {HASH_QUOTED_THEN_MOVED}.")
+    assert _graded(text) == [], "a stale digest still bought a graded copy demand"
+    owed = _owed(text)
+    assert not [d for d in owed if "witness bytes have no history" in d], \
+        f"the owed route kept the copy demand the graded route dropped: {owed}"
+    assert len(owed) == 1 and "No copy demand for" in owed[0] and str(store) in owed[0], \
+        f"the skip must report itself to owed rather than go silent: {owed}"
+    assert len(_demands(_owed(text.replace(HASH_QUOTED_THEN_MOVED,
+                                           _digest_of(store))))) == 1, \
+        "the digest is the only difference, so a live one must buy the demand back"
+
+
+def test_a_matching_digest_keeps_the_demand_and_asks_for_sha256sum(tmp_path):
+    """#4342 clause 2: a digest that still holds is worth archiving, and reproducibly.
+
+    `wc -l -c` cannot answer a hash claim — its own docstring says the byte count is what
+    makes the figure unfakeable — so a demand that pinned a quoted digest with a line count
+    would assert an unfakeable figure it never checks. The command named in the demand has to
+    be the one whose output IS the quoted figure, and an extract cannot carry a digest of the
+    whole, so the demand asks for the bytes whole.
+    """
+    store = _live_state(tmp_path)
+    live = _digest_of(store)
+    text = f"The state at `{store}` is 3 lines, 41 bytes, sha256 {live} at the read."
+    out = _owed(text)
+    assert len(out) == 1, f"a digest that matches must still be asked for: {out}"
+    d, = out
+    assert "`sha256sum backlog/data/seen.json`" in d, d
+    assert "wc -l -c" not in d, f"a line count cannot reproduce a digest: {d}"
+    assert "an extract reproducing the same numbers" not in d, \
+        f"an extract has no digest of the file: {d}"
+    assert "whole" in d, f"a digest needs the bytes whole, and the demand says so: {d}"
+    assert "git" not in d, f"the demand orders vault bytes, not a repo commit: {d}"
+    assert len(_graded(text)) == 1, "the graded route must keep the demand too"
+
+
+def test_a_citation_with_no_digest_is_untouched_and_worded_exactly_as_today(tmp_path):
+    """#4342 clause 3: a figure-only citation gets its demand, byte for byte as now.
+
+    Compared against `_demand_sentence`, the spelling this file already keeps for exactly
+    that purpose, rather than against fragments: the older skips "may not become a blanket
+    skip", and re-wording the demand while adding a third skip would be that in a costume.
+    """
+    store = _live_state(tmp_path, "state.json")
+    art = "backlog/data/state.json"
+    text = f"`{store}` is 1 line of state, 41 bytes"
+    out = _owed(text)
+    assert out == [_demand_sentence(art).replace("`X`", f"`{store}`", 1)], out
+    assert "sha256sum" not in out[0], \
+        f"a text with no digest must not be handed a digest demand: {out[0]}"
+
+
+def test_a_digest_stated_for_one_file_does_not_silence_the_demand_for_another(tmp_path):
+    """#4342 clause 4: pairing is per citation, never per item — #4256's shape.
+
+    #4256 quotes `6335d1e09c566430aa1a2a1f662c9a56382cb73c64f9e867a4f4ab5d8960126d` as the
+    baseline digest of `tests/fixtures/vllm_prefix_miss_2026-11-18.json` while the copy
+    demand on the same item names a service log. A digest matched to a demand by nearness
+    across the whole item would silence that demand permanently on a hash of some other file,
+    so the pairing happens inside one citation and the log keeps its `wc -l -c`.
+    """
+    logs = tmp_path / "lloyd-data" / "logs" / "services"
+    logs.mkdir(parents=True)
+    svc = logs / "agent-llm-primary.log"
+    svc.write_bytes(b"x" * 40)
+    fx = tmp_path / "lg" / "tests" / "fixtures"
+    fx.mkdir(parents=True)
+    baseline = fx / "vllm_prefix_miss_2026-11-18.json"
+    baseline.write_text("{}\n")
+    text = (f"Baseline sha256 of `{baseline}` = {HASH_QUOTED_THEN_MOVED} for "
+            "comparison, 2 bytes.\n"
+            f"The live copy that shows the recurrence is `{svc}`, 40 bytes.")
+    out = _owed(text)
+    assert len(_demands(out)) == 1, f"a hash of one file silenced a demand: {out}"
+    d, = _demands(out)
+    assert f"`{svc}`" in d, d
+    assert "wc -l -c" in d, \
+        "this citation quotes no digest for THIS file, so its command is unchanged: " + d
+    notes = [o for o in out if "No copy demand for" in o]
+    assert len(notes) == 1 and str(baseline) in notes[0], \
+        f"the declined witness is named in a note, never demanded: {out}"
+    joined = (f"sha256 {HASH_QUOTED_THEN_MOVED} of `{baseline}`, 2 bytes, and "
+              f"`{svc}` 40 bytes in the same sentence")
+    out = _owed(joined)
+    assert len(_demands(out)) == 1 and f"`{svc}`" in _demands(out)[0], \
+        "the nearest path in the citation owns the digest, so the farther one is free: " \
+        + str(out)
+
+
+def test_one_stale_digest_witness_does_not_skip_the_live_one_beside_it(tmp_path):
+    """#4342 clause 5: the skip is per token — one stale digest, one live, one demand.
+
+    Two witnesses in two citations of one item, which is what a triaged body looks like when
+    it cites a state file and an artifact. An item-wide answer takes the wrong half of the
+    pair whichever way it goes, so the surviving demand is asserted to be the
+    digest-matching one and the stale path is asserted absent from the sentence.
+    """
+    moved = _live_state(tmp_path, "state-a.json")
+    holds = _live_state(tmp_path, "state-b.json")
+    # Different bytes: `_live_state` writes the same body twice, and two stores with identical
+    # content make "which one is the stale witness?" unanswerable — a digest quoted for either
+    # reproduces both, so the demand that comes back for `state-a.json` would be correct. The
+    # clause is about two files that differ, so the fixture has to.
+    moved.write_text('{"urls": ["https://gone"]}\n', encoding="utf-8")
+    assert _digest_of(moved) != _digest_of(holds)
+    text = (f"`{moved}` is 1 line of state, 30 bytes, sha256 {HASH_QUOTED_THEN_MOVED}.\n"
+            f"`{holds}` is 1 line of state, 41 bytes, sha256 {_digest_of(holds)}.")
+    out = _owed(text)
+    assert len(_demands(out)) == 1, f"expected exactly one demand, got {out}"
+    d, = _demands(out)
+    assert f"`{holds}`" in d, d
+    assert f"`{moved}`" not in d, f"the stale witness was demanded anyway: {d}"
+    assert "sha256sum" in d, f"the survivor is the digest-quoted witness: {d}"
+
+
+def test_an_over_bound_store_is_never_hashed_and_keeps_its_extract_demand(tmp_path):
+    """Guard: the caveat's other half — the digest read never touches an over-bound store.
+
+    Reading a store above `WITNESS_MAX_BYTES` just to fail a digest comparison is the cost
+    the size bound exists to refuse, so `_witness_sha256` answers None there and the token
+    never reaches the comparison. What must survive is #2382's extract note, a different
+    demand on different bytes: the graded list stays empty for it, as it was before this item
+    existed, and the owed list still carries the extract demand itself.
+    """
+    d = tmp_path / "share"
+    d.mkdir()
+    store = d / "big.jsonl"
+    store.write_bytes(b"y" * (B.WITNESS_MAX_BYTES + 8))
+    assert B._witness_sha256(store) is None, \
+        "an over-bound store was read whole to fail a digest comparison"
+    text = (f"The ledger at `{store}` is {B.WITNESS_MAX_BYTES + 8} bytes whose sha256 "
+            f"{HASH_QUOTED_THEN_MOVED} is why nothing reproduces it.")
+    assert _graded(text) == [], "an over-bound store never earns a graded copy demand"
+    out = _owed(text)
+    assert len(out) == 1 and "WITNESS_MAX_BYTES" in out[0], \
+        f"the digest skip swallowed the extract note: {out}"
+    assert "sha256sum" not in out[0], out[0]
+
+
+def test_the_sibling_demand_for_a_hash_quoted_witness_names_sha256sum(tmp_path):
+    """Guard: the re-aimed sibling wording (#3872) follows the same command rule.
+
+    A witness the vault already holds an extract of is re-aimed at that extract, and the same
+    reasoning applies there: if the item quoted a digest, re-deriving a line count from the
+    extract reproduces nothing. Both wordings are pinned on the builder so the untouched
+    branch is shown unchanged rather than asserted similar.
+    """
+    art = "backlog/data/2026-11-01.2267-seen.json"
+    plain = B._sibling_copy_demand(art, "json", "backlog/data")
+    assert "re-derive the quoted report from" in plain, plain
+    assert f"wc -l -c < {art}" in plain, plain
+    hashed = B._sibling_copy_demand(art, "json", "backlog/data", hash_quoted=True)
+    assert "re-derive the quoted digest from" in hashed, hashed
+    assert f"sha256sum {art}" in hashed, hashed
+    assert "wc -l -c" not in hashed, hashed
+    for both in (plain, hashed):
+        assert "`backlog/data` already commits a copy" in both, both
+        assert "your own extract only if" in both, both
+
+
+def _witness_target_reads(token: str) -> Path:
+    """Where a `~`- or `$HOME`-spelled token actually points on this run."""
+    return B._witness_target(token)
+
+
+def test_the_item_s_real_store_at_a_stale_digest_asks_for_no_copy(tmp_path, monkeypatch):
+    """The #4342 premise end to end at the path shape the item cites — HOME-spelled.
+
+    `~/.local/share/ai-engineer/seen.json` is how every one of the five demands on this store
+    names it, and `~` is a spelling none of the `tmp_path` nodes above exercise: the token
+    `WITNESS_PATH_RX` returns is the tilde form, so the comparison that decides the skip runs
+    on `expanduser` output, and a skip that only worked on absolute paths would leave the real
+    items firing. `HOME` is pointed at a temporary directory holding a real store rather than
+    read from the machine and skipped when absent: on a tree without the store the node would
+    otherwise vanish, and a premise node that silently does not run is a premise that is not
+    pinned. The digest is fabricated (`#4342 fabricated digest` hashed), so it can never
+    equal any instant of any file.
+    """
+    home = tmp_path / "home"
+    (home / ".local" / "share" / "ai-engineer").mkdir(parents=True)
+    real = home / ".local" / "share" / "ai-engineer" / "seen.json"
+    real.write_text('{"urls": ["https://a"]}\n', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    stale = hashlib.sha256(b"#4342 fabricated digest").hexdigest()
+    cited = "~/.local/share/ai-engineer/seen.json"
+    assert _witness_target_reads(cited) == real, "the fixture is not where the token resolves"
+    assert stale != _digest_of(real), "the fabricated digest matched the store"
+    text = (f"Adoptable idea? The monitor's state at `{cited}` is 18,687 lines / "
+            f"866,062 bytes, sha256 {stale} at the reading.")
+    assert _graded(text) == [], "the live store still takes a graded copy demand"
+    out = _owed(text)
+    assert len(out) == 1, f"expected one owed note, got {out}"
+    assert "No copy demand for" in out[0], \
+        "the skip went silent — owed must say why nothing was asked for: " + out[0]
+    assert cited in out[0] and "wc -l -c" not in out[0], out[0]
+
+
+def test_a_digest_stated_for_a_repo_relative_path_leaves_the_demanded_store_alone(tmp_path):
+    """#4342 clause 4, as the board actually writes it: the owner is spelled relative.
+
+    #4256's citation is `tests/fixtures/vllm_prefix_miss_2026-11-18.json` — no home, no
+    leading slash — and #3484, #3541, #3585 and #3234 state their digests the same way
+    (`backlog/data/denials.jsonl`, `…/kg.sqlite`, `backlog/data/flash-next-canary.jsonl`).
+    `WITNESS_PATH_RX` refuses a relative tail ON PURPOSE (#1886), so an owner-matcher built on
+    it sees no owner at all and hands the digest to the next path in the sentence: the store
+    the text never hashed loses its demand and gains a "No copy demand for" note blaming it
+    for another file's bytes. Ownership therefore goes through `_PINNED_PATH_RX` and
+    `_pinned_candidates`, the same resolution the #2267 basename skip uses. Both spellings of
+    the same false pairing are asserted, because the absolute one already worked and pinning
+    only it is what let this through the last review.
+    """
+    logs = tmp_path / "lloyd-data" / "logs" / "services"
+    logs.mkdir(parents=True)
+    svc = logs / "agent-llm-primary.log"
+    svc.write_bytes(b"x" * 40)
+    fixture_rel = "tests/fixtures/vllm_prefix_miss_2026-11-18.json"
+    # One sentence: the digest, its relative owner, and the demanded store. No `. ` or
+    # newline before the end, so no citation split can be what saves the demand here.
+    same_sentence = (f"Baseline sha256 of {fixture_rel} = {HASH_QUOTED_THEN_MOVED} for the "
+                     f"recurrence, and the live copy that shows it is `{svc}` at 40 bytes.")
+    out = _owed(same_sentence)
+    demands = _demands(out)
+    assert len(demands) == 1, \
+        f"a repo-relative owner went unseen and its digest silenced this store: {out}"
+    assert f"`{svc}`" in demands[0] and "wc -l -c" in demands[0], demands[0]
+    assert [o for o in out if "No copy demand for" in o] == [], \
+        f"the store was blamed for a digest about another file: {out}"
+    # The order where the relative owner is load-bearing rather than belt-and-braces: the
+    # digest leads, so the only other path on its side is the demanded store itself. An owner
+    # matcher built on `WITNESS_PATH_RX` sees no relative path at all and picks `{svc}` —
+    # suppression from a hash of a file the demand never named.
+    digest_leads = (f"sha256 {HASH_QUOTED_THEN_MOVED} of {fixture_rel}, 2 bytes, "
+                    f"and `{svc}` 40 bytes, both from the same run.")
+    out_leads = _owed(digest_leads)
+    assert len(_demands(out_leads)) == 1 and f"`{svc}`" in _demands(out_leads)[0], \
+        f"a relative owner named after the number was not seen as an owner: {out_leads}"
+    absolute = same_sentence.replace(
+        fixture_rel, f"{Path(__file__).resolve().parents[0] / 'fixtures' / 'vllm_prefix_miss_2026-11-18.json'}")
+    out_abs = _owed(absolute)
+    assert len(_demands(out_abs)) == 1 and f"`{svc}`" in _demands(out_abs)[0], \
+        f"the same pairing written absolutely changed the answer: {out_abs}"
+    # And the well-formed version of the same pairing: the digest in one citation, the store
+    # in the next. #4256's real body reads this way, which is why `_WITNESS_CITATION_SPLIT_RX`
+    # cuts on a sentence end as well as a blank line.
+    separate = (f"Baseline sha256 of {fixture_rel} = {HASH_QUOTED_THEN_MOVED} for the "
+                f"recurrence.\nThe live copy that shows it is `{svc}` at 40 bytes.")
+    out_sep = _owed(separate)
+    assert len(_demands(out_sep)) == 1 and f"`{svc}`" in _demands(out_sep)[0], out_sep
+    assert [o for o in out_sep if "No copy demand for" in o] == [], out_sep
+
+
+def test_a_citation_naming_a_path_on_both_sides_of_a_digest_attributes_it_to_nobody(tmp_path):
+    """The order that made SM_20261121_133517 fail review, pinned as a falsifying test.
+
+    The review put the demanded store FIRST and the digest's true owner SECOND —
+
+        the live copy is `{svc}` at 40 bytes; baseline sha256 … of tests/fixtures/….json
+
+    — and measured that the demand vanished, replaced by a "No copy demand for `{svc}`" note:
+    nearest-path-ending-before owned the number because nothing asked whether a path also
+    FOLLOWED it. Same false pairing as the node above, arriving from the other direction, and
+    it is the direction this item's clause 4 names. Both orders are pinned because one node
+    per direction is what finding it took — the relative-owner node above puts its store
+    second and passed on the buggy code.
+    """
+    logs = tmp_path / "lloyd-data" / "logs" / "services"
+    logs.mkdir(parents=True)
+    svc = logs / "agent-llm-primary.log"
+    svc.write_bytes(b"x" * 40)
+    both_sides = (f"The live copy is `{svc}` at 40 bytes; baseline sha256 "
+                  f"{HASH_QUOTED_THEN_MOVED} of tests/fixtures/vllm_prefix_miss_2026-11-18.json")
+    out = _owed(both_sides)
+    demands = _demands(out)
+    assert len(demands) == 1, \
+        f"the demanded store was named before the number and lost its demand to a fixture: {out}"
+    assert f"`{svc}`" in demands[0] and "wc -l -c" in demands[0] and "sha256sum" not in demands[0], \
+        f"an unattributed digest changed the demand's wording: {demands[0]}"
+    assert [o for o in out if "No copy demand for" in o] == [], \
+        f"the store was blamed for a digest about another file: {out}"
+    # The abstention is about the digest only: on the graded route, where the demand lands in
+    # the clause list instead of owed, the store still gets its clause — an unattributed
+    # number must not change either destination.
+    graded = _graded(both_sides)
+    assert len(graded) == 1 and "witness bytes have no history" in graded[0] \
+        and f"`{svc}`" in graded[0], graded
+
+
+def test_the_nearest_path_on_the_digest_s_side_is_its_owner(tmp_path):
+    """The abstention is for a citation with two CANDIDATE SIDES, not for two paths.
+
+    "`{a}` is 2 bytes and `{b}` is 5 bytes, sha256 X" puts both paths on the same side of the
+    number, which is ordinary prose and exactly the shape of the 40 board citations whose
+    digest still matches and whose demand must keep firing. Absteining there would lose the
+    demand a second time. The closest path on the occupied side owns the number and every
+    path further away does not — the same rule, checked in both directions.
+    """
+    fx = tmp_path / "lg" / "tests" / "fixtures"
+    fx.mkdir(parents=True)
+    a, b = fx / "a.json", fx / "b.json"
+    a.write_bytes(b"hi")
+    b.write_bytes(b"there")
+    # One demand per item, taken by the first eligible token, so `a` is what comes back — and
+    # what the node pins is that a digest belonging to `b` neither silences it nor renames its
+    # command, and books no note against either file.
+    text = f"`{a}` is 2 bytes and `{b}` is 5 bytes, sha256 {_digest_of(b)} at the reading."
+    out = _owed(text)
+    assert [o for o in out if "No copy demand for" in o] == [], \
+        f"the digest belongs to the nearer path, not to `{a}`: {out}"
+    demands = _demands(out)
+    assert len(demands) == 1 and f"`{a}`" in demands[0], out
+    assert "wc -l -c" in demands[0] and "sha256sum" not in demands[0], demands[0]
+    # And the nearer path is the one that answers for the number: `_digest_of(a)` is quoted
+    # after `{b}`, so `b` is attributed and skipped — while `a`'s own demand survives and
+    # changes wording by itself, because a digest equal to its bytes needs no word order to
+    # pair with it. That is the byte-proven branch of `_witness_digest_state`, and it is what
+    # keeps a mis-seen owner from ever costing the true owner its witness.
+    moved = (f"`{a}` is 2 bytes and `{b}` is 5 bytes, sha256 {_digest_of(a)} at the reading.")
+    moved_out = _owed(moved)
+    notes = [o for o in moved_out if "No copy demand for" in o]
+    assert len(notes) == 1 and f"`{b}`" in notes[0] and f"`{a}`" not in notes[0], \
+        f"the nearer path on the occupied side is the one that answers for the number: {notes}"
+    moved_a = next(d for d in _demands(moved_out) if f"`{a}`" in d)
+    assert "sha256sum" in moved_a and "wc -l -c" not in moved_a, moved_a
+
+
+def test_the_stale_digest_note_is_gated_by_the_clause_cap(tmp_path):
+    """The skip's owed note sits under `MAX_CLAUSES` like every other destination.
+
+    `add_witness_artifact_clause` says the cap "gates BOTH destinations, and now literally
+    so", and #2289 clause 4 / #2382 clause 5 are the rulings that put the owed note behind it.
+    The note is decided inside the token loop, so it is the one destination that can quietly
+    reach an item already at its cap — the quiet growth past the item's own prose that the
+    budget exists to stop. Both sides are pinned: one clause below the cap the note is
+    published, at the cap nothing is.
+    """
+    cited = _live_state(tmp_path)
+    text = f"The state at `{cited}` is 1 line, 41 bytes, sha256 {HASH_QUOTED_THEN_MOVED}."
+    _, owed = B.add_witness_artifact_clause(
+        [f"- clause {i}" for i in range(B.MAX_CLAUSES - 1)], text,
+        route_to_owed=True, item_id=4342)
+    assert len(owed) == 1 and "No copy demand for" in owed[0], owed
+    _, capped = B.add_witness_artifact_clause(
+        [f"- clause {i}" for i in range(B.MAX_CLAUSES)], text,
+        route_to_owed=True, item_id=4342)
+    assert capped == [], \
+        f"a contract at its cap of {B.MAX_CLAUSES} clauses received generated prose: {capped}"
+
+
+def test_an_uppercase_digest_paste_keeps_today_s_demand(tmp_path):
+    """The known limit of the lowercase-only digest pattern, pinned rather than assumed.
+
+    `_WITNESS_DIGEST_RX` matches lowercase hex, so a pasted UPPERCASE digest is not read as a
+    digest claim at all and the witness keeps the line/byte demand: clause 2's `sha256sum`
+    wording is unmet for that one spelling, and the cost is a redundant ask rather than a
+    silent skip. `sha256sum` and `shasum -a 256` print lowercase, and every digest citation
+    #4342's triage measured on the board is lowercase, which is why the class stops there. If
+    uppercase pastes show up, widening the pattern is the fix and this node is the record of
+    what changes.
+    """
+    cited = _live_state(tmp_path)
+    text = (f"The state at `{cited}` is 1 line, 41 bytes, "
+            f"sha256 {HASH_QUOTED_THEN_MOVED.upper()} at the reading.")
+    out = _owed(text)
+    assert [o for o in out if "No copy demand for" in o] == [], \
+        f"an uppercase digest was read as a digest claim: {out}"
+    assert len(_demands(out)) == 1 and "wc -l -c" in _demands(out)[0], out
+
+
+def test_the_re_aimed_sibling_demand_names_sha256sum_for_a_hash_quoted_witness(tmp_path):
+    """#4342 clause 2 on the #3872 branch: the re-aim inherits the command, not just the sentence.
+
+    `add_witness_artifact_clause` builds the demand in two places — the fresh-name copy
+    demand and the re-aim at an extract the vault already commits — and each has to carry the
+    digest answer across its own hand-off. The vault holds
+    `2026-11-01.4342-ai-engineer-seen.json`, an extract of the cited store under the family
+    tail `_witness_family_tail` defines, so the demand is the re-aim and not a fresh slot. With
+    a digest that still matches it must say `sha256sum` of those committed bytes; with the same
+    store quoted by line count only it must say `wc -l -c`, which is #4342 clause 3's
+    untouched wording arriving at the other destination.
+    """
+    store = _live_state(tmp_path)
+    art = "backlog/data/2026-11-01.4342-ai-engineer-seen.json"
+    _vault_witness(tmp_path, "2026-11-01.4342-ai-engineer-seen.json",
+                   body=store.read_text(encoding="utf-8"))
+    hashed = _owed(f"`{store}` is 1 line, 41 bytes, sha256 {_digest_of(store)} at the read.")
+    assert len(_demands(hashed)) == 1, hashed
+    assert f"`sha256sum {art}`" in _demands(hashed)[0], _demands(hashed)[0]
+    assert "wc -l -c" not in _demands(hashed)[0], _demands(hashed)[0]
+    plain = _owed(f"`{store}` is 1 line, 41 bytes of seen URLs")
+    assert len(_demands(plain)) == 1, plain
+    assert f"wc -l -c < {art}" in _demands(plain)[0], _demands(plain)[0]
+    assert "sha256sum" not in _demands(plain)[0], _demands(plain)[0]
