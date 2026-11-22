@@ -35,7 +35,11 @@ Three rules, each the reason for a line below:
 
 An unreachable supervisord skips the tick without touching any streak: it says
 nothing about the programs, and a canary pointing `LLOYD_SUPERVISOR_SOCK` at a
-dead path must stay silent.
+dead path must stay silent. Silent is not the same as unexplained, though: the
+skip is recorded as that service's no-streak cause (`no_streak_cause`), because
+the dispatch gate's alert has to say WHICH of the four reasons it is reporting
+rather than offer a pair of them as a guess — #4468 is the receipt for printing a
+cause that was never measured, twice.
 
 One more rule, added by #1683: the primary engine has a SECOND watcher, the
 dispatch gate in `workers/sources/scheduled_task.py`, which pauses autonomy
@@ -103,6 +107,46 @@ GRACE_S = {PRIMARY_ENGINE: 30 * 60}
 # respawn, FATAL once it gives up) keeps it going.
 _STOPPED = "STOPPED"
 
+# ── Why the probe holds no streak (#4468) ─────────────────────────────────────
+# `tick` ends a streak in three distinguishable ways, and the dispatch gate's
+# no-streak outage alert used to explain its silence with a two-cause disjunction
+# — "supervisord unreachable, or the port never closed". #4468 is filed on two
+# deliberate stops of the primary (Nov 11 and Nov 12, per the item; owed-check has
+# not yet confirmed the field half) in which the socket had answered, `tick` had
+# answered STOPPED, and the port had closed — so both printed causes were false and
+# the true one went unmentioned. The cause is a fact this file already knows at the
+# moment it pops the streak, and nothing else can recover it afterwards:
+# `streaks.pop` discards the observation with the streak, and the gate has no
+# supervisor read of its own (its only window in here is `outage()`, until
+# `no_streak_cause`). So each pop records which of the three it was, and `run_probe`
+# records the fourth case, in which a tick never happens at all — a supervisord
+# that cannot be reached, which says nothing about any program.
+#
+#: The program is STOPPED in supervisord: someone stopped it on purpose. Silence
+#: here is intended — `test_a_deliberate_stop_is_not_an_outage` pins that a
+#: deliberate stop announces nothing — so the stop is news the GATE has to carry.
+NO_STREAK_PROGRAM_STOPPED = "program_stopped"
+#: The supervisor socket answered on this service's port. A /health that stops
+#: answering while the socket stays open is the one outage a closed-port streak
+#: can never see (#1683's non-dead-code clause).
+NO_STREAK_PORT_ANSWERING = "port_answering"
+#: The supervisor read itself failed, so no program was judged and no clock
+#: started (#1359: "an unreachable supervisord skips the tick").
+NO_STREAK_SUPERVISOR_UNREACHABLE = "supervisord_unreachable"
+#: Not a cause: the probe holds NO measurement of this service at all — no tick
+#: has run, the registry declares no port for it, or supervisord answered with no
+#: such program in its table. The gate says so instead of naming a cause it never
+#: observed, which is the exact move #4468 was filed against.
+NO_STREAK_UNOBSERVED = "no_observation"
+#: The causes a measurement can produce, in the order
+#: `tests/test_autonomy_scheduler.py` requires a distinct sentence for each.
+NO_STREAK_CAUSES = (NO_STREAK_PROGRAM_STOPPED, NO_STREAK_PORT_ANSWERING,
+                    NO_STREAK_SUPERVISOR_UNREACHABLE)
+#: Everything `no_streak_cause` can answer, causes plus the absence of one: the
+#: gate's sentence table has to cover all of it, and that coverage is what the
+#: same test pins, so a new state here without a sentence there fails there.
+NO_STREAK_STATES = NO_STREAK_CAUSES + (NO_STREAK_UNOBSERVED,)
+
 Announce = Callable[[str, str, str], object]
 
 
@@ -143,6 +187,10 @@ class ServiceProbe:
     announce: Optional[Announce] = None
     clock: Callable[[], float] = time.monotonic
     streaks: dict[str, _Streak] = field(default_factory=dict)
+    #: Why each watched service currently has NO streak, keyed by name, holding
+    #: one of the `NO_STREAK_*` causes above (#4468). Written on the same line
+    #: that pops the streak, because the pop is the last moment the reason exists.
+    no_streak: dict[str, str] = field(default_factory=dict)
 
     def tick(self, services: dict, procs: dict,
              port_open: Callable[[int], bool]) -> list[dict]:
@@ -157,7 +205,21 @@ class ServiceProbe:
             seen.add(name)
             proc = procs.get(name)
             state = (proc or {}).get("statename", "")
-            if proc is None or state == _STOPPED or port_open(port):
+            # Three ways this service has no streak, named separately because the
+            # gate has to say which one it is (#4468). `proc is None` is none of
+            # them: the socket ANSWERED and the program is simply not in its
+            # table, so borrowing either name would repeat this item's own defect
+            # — a cause printed that was never measured. Dropping the record is
+            # what makes `no_streak_cause` answer "no observation of it".
+            stopped = proc is not None and state == _STOPPED
+            answering = (not stopped) and proc is not None and port_open(port)
+            if proc is None or stopped or answering:
+                if stopped:
+                    self.no_streak[name] = NO_STREAK_PROGRAM_STOPPED
+                elif answering:
+                    self.no_streak[name] = NO_STREAK_PORT_ANSWERING
+                else:
+                    self.no_streak.pop(name, None)
                 streak = self.streaks.pop(name, None)
                 if streak and streak.announced and proc is not None \
                         and state != _STOPPED:
@@ -167,6 +229,12 @@ class ServiceProbe:
                         f"{name} was not serving for "
                         f"{int(now - streak.since) // 60} min.", "info"))
                 continue
+            # Reaching here means a closed port under supervisord's hand, which
+            # retires whatever no-streak record an earlier tick left: both dicts
+            # answer one question — "why is there no streak?" — and a streak is the
+            # answer "there is one". Neither is a live reading of NOW, only of the
+            # tick that wrote it, which is why the streak is checked first.
+            self.no_streak.pop(name, None)
             streak = self.streaks.get(name)
             if streak is None:
                 self.streaks[name] = _Streak(since=now, state=state,
@@ -186,19 +254,68 @@ class ServiceProbe:
                         f"Its log: supervisorctl tail {name} stderr.")
                 streak.announcement = title
                 events.append(self._say("down", name, title, body, "critical"))
-        # A slot switched off since the last tick is no longer ours to judge.
+        # A slot switched off since the last tick is no longer ours to judge, and
+        # a reason recorded for it would outlive the judgement it explains.
         for gone in set(self.streaks) - seen:
             self.streaks.pop(gone, None)
+        for gone in set(self.no_streak) - seen:
+            self.no_streak.pop(gone, None)
         return events
+
+    def no_streak_cause(self, name: str) -> str:
+        """Why `outage(name)` returns None, as the last measurement put it (#4468).
+
+        One of `NO_STREAK_PROGRAM_STOPPED`, `NO_STREAK_PORT_ANSWERING` or
+        `NO_STREAK_SUPERVISOR_UNREACHABLE` when a tick or a skipped tick actually
+        observed that state, and `NO_STREAK_UNOBSERVED` when it never got the
+        chance to look at all: no tick has run, the registry gives the service no
+        port to watch, or supervisord answered with no such program in its table.
+        The last is deliberately not one of the three causes — it says the probe
+        holds no measurement, which is the one thing a reader must not have to
+        infer for themselves (#4468 exists because a caller printed causes it had
+        not measured).
+        """
+        return self.no_streak.get(name, NO_STREAK_UNOBSERVED)
+
+    def note_supervisord_unreachable(self, services: dict) -> None:
+        """Record why no tick happened, for every service the tick would have
+        judged (#4468).
+
+        `run_probe` returns before `tick` on a dead socket, and `tick` is the only
+        writer of these records, so without this call a no-streak outage alert has
+        nothing to say except a guess. It records a cause only: the streaks are
+        untouched, and a skipped tick still says nothing about the programs
+        (#1359) — `test_an_unreachable_supervisord_skips_the_tick` pins that. A
+        service already holding a streak is skipped too, because the question was
+        never asked about it. That keeps the two dicts agreeing whenever the probe
+        has looked at the service at all; they are records of the tick that wrote
+        them, not readings of now, and `no_streak_cause` reads the streak first for
+        exactly that reason.
+        """
+        for name, (_display, port) in services.items():
+            if port and name not in self.streaks:
+                self.no_streak[name] = NO_STREAK_SUPERVISOR_UNREACHABLE
 
     def outage(self, name: str) -> Optional[Outage]:
         """This service's closed-port streak, or None when there is none.
 
         The reader the dispatch gate uses (#1683), so that one outage has one
-        length. Returns None — not a zero — when the probe holds no streak:
-        either supervisord was unreachable (a skipped tick says nothing about the
-        programs and starts no clock) or the port is genuinely answering, and in
-        both cases the caller has to say WHICH measurement it is reporting.
+        length. Returns None — not a zero — when the probe holds no streak, and
+        there are FOUR reasons for that, not the two this docstring used to name
+        (#4468: the gate's alert quoted the pair and both were false over a
+        deliberate stop of the primary):
+
+          * the program is STOPPED in supervisord — a stop someone asked for,
+            which `tick` ends a streak with and announces NOTHING about, by design;
+          * the port is answering, so no closed-port clock ever starts — the
+            wedged-socket case that keeps the gate's own timer alive;
+          * supervisord was unreachable, so the tick was skipped and no program
+            was judged at all;
+          * no observation of this service exists: no tick has run, the registry
+            declares no port for it, or supervisord's table has no such program.
+
+        `no_streak_cause(name)` returns which of them it is, measured rather than
+        assumed, and the caller has to say WHICH measurement it is reporting.
         """
         streak = self.streaks.get(name)
         if streak is None:
@@ -270,5 +387,14 @@ def run_probe(probe: ServiceProbe) -> list[dict]:
     try:
         procs = sc._supervisor_all()
     except sc.SupervisordUnreachable:
+        # The skipped tick is itself the fact the gate has to print (#4468), so it
+        # is recorded on the way out. A failing config read inside that record must
+        # not turn a skipped tick into a crash: an empty table records nothing, and
+        # the gate then says it holds no observation, which is true.
+        try:
+            services = sc.infra_services()
+        except Exception:  # noqa: BLE001 — a skip stays a skip
+            services = {}
+        probe.note_supervisord_unreachable(services)
         return []
     return probe.tick(sc.infra_services(), procs, sc._port_open)

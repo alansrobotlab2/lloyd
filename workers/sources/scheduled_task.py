@@ -20,6 +20,7 @@ import logging
 import urllib.request
 from typing import Any
 
+from workers import service_probe
 from workers.queue import WorkQueue, QueueItem
 
 logger = logging.getLogger("lloyd-workers.scheduled_task")
@@ -306,9 +307,47 @@ async def _alert(message: str) -> None:
     except Exception as e:
         logger.error("alert dispatch failed: %s", e)
 
+#: The clause each no-streak state contributes to the outage sentence (#4468).
+#:
+#: One state, one clause, and the state is the one the instrument measured. The
+#: branch this table replaces offered two candidate causes joined by "or" and
+#: named neither of them as a measurement; #4468 is filed on two field outages
+#: (Nov 11 and Nov 12, per its own report, the half owed-check still has to
+#: confirm) in which the primary was STOPPED in supervisord — the socket had
+#: answered, so the first cause was false, the port had closed, so the second was
+#: false, and the one thing that was true (a deliberate stop, which
+#: `ServiceProbe.tick` ends a streak with and announces NOTHING about, by design)
+#: went unprinted. The probe now records which state it observed at the instant it
+#: drops the streak, because after `streaks.pop` nothing survives to be re-derived
+#: and this gate has no supervisor read of its own.
+#:
+#: Keys are `service_probe.NO_STREAK_STATES`; the paired test fails if a state
+#: arrives without a clause, if two states share one, or if a clause reaches for a
+#: second cause with "or"/"nor" — a disjunction is what made each false half
+#: unfalsifiable from the line alone.
+_NO_STREAK_CLAUSES = {
+    service_probe.NO_STREAK_PROGRAM_STOPPED:
+        "the program is STOPPED in supervisord — a deliberate stop, not a crash: "
+        "the fleet is paused by a stop someone asked supervisord for, and a "
+        "program sitting STOPPED is one the probe is silent about by design "
+        "(#1359)",
+    service_probe.NO_STREAK_PORT_ANSWERING:
+        "the primary's port is answering, so this is /health failing on an open "
+        "socket rather than a port that closed",
+    service_probe.NO_STREAK_SUPERVISOR_UNREACHABLE:
+        "supervisord was unreachable on the probe's last tick, a skipped tick "
+        "that judges no program and starts no clock (#1359)",
+    service_probe.NO_STREAK_UNOBSERVED:
+        "the probe holds no observation of the primary at all — no tick has "
+        "recorded a state for it — so this scheduler's own timer is the only "
+        "measurement there is",
+}
+
+
 def _vllm_outage_sentence(outage, own_seconds: float, now,
                           url: str | None = None,
-                          url_source: str | None = None) -> str:
+                          url_source: str | None = None,
+                          no_streak_cause: str | None = None) -> str:
     """The one sentence a sustained primary outage produces (#1683).
 
     Which instrument measured it is stated in the sentence, because the two
@@ -325,6 +364,12 @@ def _vllm_outage_sentence(outage, own_seconds: float, now,
     had never served while this same gate held the fleet paused; naming the key
     is what makes the outage self-diagnosing. Both default to a fresh
     derivation, so no caller can print an endpoint it did not resolve.
+
+    `no_streak_cause` is what the probe recorded as its reason for holding NO
+    streak (#4468) and is read off the same instance `outage` came from, so the
+    sentence can only name a cause that was measured. It is consulted in the
+    no-streak branch alone: one of `service_probe.NO_STREAK_STATES`, and an
+    unrecorded or unknown one falls to "no observation" rather than to a guess.
     """
     import datetime as _dt
 
@@ -334,10 +379,16 @@ def _vllm_outage_sentence(outage, own_seconds: float, now,
 
     if outage is None:
         measured = own_seconds
+        # Hoisted rather than inlined into the lookup: an unset cause is the
+        # no-observation case, and naming it once keeps the dict's key type `str`
+        # for the type checker instead of handing it a `str | None`.
+        state = no_streak_cause or service_probe.NO_STREAK_UNOBSERVED
+        cause = (_NO_STREAK_CLAUSES.get(state)
+                 or _NO_STREAK_CLAUSES[service_probe.NO_STREAK_UNOBSERVED])
         where = ("measured on this scheduler's own run of unhealthy /health "
                  "ticks; the service probe (workers/service_probe.py) holds no "
                  "streak for the primary, so it has announced nothing to quote "
-                 "— supervisord unreachable, or the port never closed")
+                 f"— {cause}")
     else:
         measured = outage.down_seconds
         quoted = (f", which already announced \"{outage.announcement}\""
@@ -365,9 +416,14 @@ async def _note_vllm_outage() -> None:
     reading the probe's number and the alert can quote the sentence they already
     saw instead of arriving as a second, unrelated incident. This module's own
     uninterrupted run of unhealthy ticks is the fallback, and it is load-bearing
-    rather than legacy — the probe holds no streak when supervisord is
-    unreachable (a skipped tick says nothing about the programs) or when vLLM
-    keeps :8096 open while /health stops answering. A healthy tick clears
+    rather than legacy — the probe holds no streak for FOUR distinguishable
+    reasons, and the alert names whichever one it recorded: the program is STOPPED
+    in supervisord (a deliberate stop, announced as nothing at all, and the shape
+    #4468 was filed on), the primary's port is answering so a
+    closed-port clock never starts, supervisord was unreachable so the tick was
+    skipped, or no observation of it exists yet (#4468). Naming the one that was
+    measured is what the probe's `no_streak_cause` is for; this gate keeps no
+    supervisor read of its own. A healthy tick clears
     `_vllm_down_since`, which is what makes a later outage alert again instead of
     inheriting this one's `vllm_down_alerted`.
 
@@ -387,7 +443,6 @@ async def _note_vllm_outage() -> None:
     (last-writer-wins) and can file a backlog task, so an engine outage would
     clobber a live rollback's record to buy a telemetry line."""
     import datetime as _dt
-    from workers import service_probe
 
     now = _dt.datetime.now(_dt.timezone.utc)
     if not _state["vllm_down_logged"]:
@@ -399,7 +454,11 @@ async def _note_vllm_outage() -> None:
         return
     own_since = _state.get("vllm_down_since") or now
     own_seconds = (now - own_since).total_seconds()
-    outage = service_probe.shared().outage(service_probe.PRIMARY_ENGINE)
+    # ONE read of the shared probe, so the elapsed minutes and the no-streak cause
+    # are the same instrument's answer: reading it twice could pair a streak with a
+    # reason another tick of another probe recorded (#4468).
+    probe = service_probe.shared()
+    outage = probe.outage(service_probe.PRIMARY_ENGINE)
     measured = own_seconds if outage is None else outage.down_seconds
     if measured >= _VLLM_DOWN_ALERT_SECONDS:
         _state["vllm_down_alerted"] = True
@@ -407,7 +466,12 @@ async def _note_vllm_outage() -> None:
         # alert names the very endpoint this gate has been failing to reach, and
         # the key it is configured by (#1684).
         url, url_source = _primary_health_target()
-        msg = _vllm_outage_sentence(outage, own_seconds, now, url, url_source)
+        # Only a probe that holds no streak owes a reason; a probe that holds one
+        # has already said the thing out loud, and this quotes it instead.
+        no_streak_cause = (None if outage is not None else
+                           probe.no_streak_cause(service_probe.PRIMARY_ENGINE))
+        msg = _vllm_outage_sentence(outage, own_seconds, now, url, url_source,
+                                    no_streak_cause=no_streak_cause)
         logger.error("%s", msg)
         await _alert(msg)
 

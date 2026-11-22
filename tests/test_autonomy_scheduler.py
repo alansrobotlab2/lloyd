@@ -3721,6 +3721,277 @@ def test_the_unwatched_model_server_claim_names_the_probe_and_the_ledger_gap():
                 "ALERT.md last-writer-wins and can file a backlog task")
 
 
+# ── #4468: a probe holding no streak has to say WHY it holds none ──────────────
+#
+# The `outage is None` branch of `_vllm_outage_sentence` explained the probe's
+# silence with two causes joined by "or", and a service sitting STOPPED in
+# supervisord matches neither: the supervisor answers while a program is stopped,
+# and a stopped engine's port is closed. What it did match — a deliberate stop,
+# which `ServiceProbe.tick` ends a streak over and announces nothing about ON
+# PURPOSE (tests/test_service_probe.py::test_a_deliberate_stop_is_not_an_outage
+# pins that silence as intended) — was the one cause never printed, so #4468 is
+# filed on two deliberate stops of the primary that paused the whole fleet on a
+# sentence naming two things that were false. `workers/service_probe.py` now
+# records WHICH state it measured at the instant it drops the streak, because
+# `streaks.pop` discards the observation with the streak and this gate keeps no
+# supervisor read of its own. Each node below seeds one state through the probe's
+# own `tick`/`run_probe` and drives the real gate to its alert, so a cause no
+# measurement produced cannot reach the line.
+
+def _shared_probe_left_without_streak(monkeypatch, state, port_open: bool):
+    """A real `ServiceProbe` ticked into a NO-streak state and installed as the
+    process-wide instance the dispatch gate reads.
+
+    Nothing writes a cause into the probe or the gate by hand: the record the
+    alert later quotes is the one `ServiceProbe.tick` made while judging the
+    program, with `state=None` meaning supervisord answered with no such program
+    in its table. Returns the probe and its (title, body, level) announce calls.
+    """
+    from workers import service_probe as sp
+
+    t = [1000.0]
+    calls: list[tuple[str, str, str]] = []
+    probe = sp.ServiceProbe(
+        announce=lambda *a: calls.append(a) or {"desktop": True},
+        clock=lambda: t[0])
+    monkeypatch.setattr(sp, "_shared", probe)
+    services = {sp.PRIMARY_ENGINE: ("LLM Primary", 8096)}
+    procs = ({} if state is None else
+             {sp.PRIMARY_ENGINE: {"name": sp.PRIMARY_ENGINE, "statename": state}})
+    open_it = lambda port: port_open  # noqa: E731
+    for _ in range(3):
+        probe.tick(services, procs, open_it)
+        t[0] += 60
+    return probe, calls
+
+
+def _shared_probe_with_supervisord_down(monkeypatch):
+    """The other way a probe ends up with no streak: `run_probe` never reaches
+    `tick` at all, because the supervisor socket cannot be read.
+
+    The real `app.supervisor_client.infra_services()` supplies the table this
+    records against — the same one the tick would have judged — so the cause is
+    booked by the same route production takes, not by a fixture's assumption.
+    """
+    from app import supervisor_client as sc
+    from workers import service_probe as sp
+
+    def _down():
+        raise sc.SupervisordUnreachable("no socket")
+
+    monkeypatch.setattr(sc, "_supervisor_all", _down)
+    calls: list[tuple[str, str, str]] = []
+    probe = sp.ServiceProbe(
+        announce=lambda *a: calls.append(a) or {"desktop": True},
+        clock=lambda: 1000.0)
+    monkeypatch.setattr(sp, "_shared", probe)
+    assert sp.run_probe(probe) == [], (
+        "a dead supervisor socket stopped being a skipped tick, so whatever the "
+        "alert now says about it is a claim about a tick that did not happen")
+    return probe, calls
+
+
+async def _alert_after_47_min_of_no_health(monkeypatch, tmp_path, tag: str):
+    """Drive the real gate to its outage alert with the probe holding no streak.
+
+    The gate's own timer is aged exactly as the fallback node above ages it — 45-
+    minute threshold plus 120 s, so the line reports 47 min — which leaves the
+    probe's recorded state as the ONLY difference between the four cases these
+    tests run. Returns the captured alerts and the queue, so a caller can keep
+    ticking and count how many alerts one uninterrupted outage produces.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
+    _clean_outage_state(monkeypatch, st)
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    q = WorkQueue(tmp_path / f"no-streak-{tag}.db")
+
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert alerts == [], (
+        "the first unhealthy tick raised an outage alert before any downtime had "
+        "elapsed, so the counts below are measuring nothing")
+    st._state["vllm_down_since"] = (
+        dt.datetime.now(dt.timezone.utc)
+        - dt.timedelta(seconds=st._VLLM_DOWN_ALERT_SECONDS + 120))
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    return alerts, q
+
+
+def _other_no_streak_clauses(cause: str) -> list[str]:
+    """The clause every OTHER no-streak state contributes. Absent from the alert,
+    those absences are the clause that neither unmeasured cause is claimed — read
+    off the table rather than from a hand-copied phrase, so a rewording cannot
+    make the assertion vacuous.
+    """
+    import workers.sources.scheduled_task as st
+
+    return [text for key, text in st._NO_STREAK_CLAUSES.items() if key != cause]
+
+
+async def test_a_stopped_primary_makes_the_no_streak_alert_say_so(
+        aut, monkeypatch, tmp_path):
+    """Clauses 2 and 4 on the shape that actually fired: STOPPED, no streak.
+
+    The probe is driven there by its own `tick`, and its silence is asserted first
+    — the probe still announces nothing about a deliberate stop, so everything the
+    alert says about the stop has to come from this gate. Pre-fix this fails on the
+    first `assert`: the line printed two causes and neither was the stop.
+    """
+    from workers import service_probe as sp
+
+    probe, calls = _shared_probe_left_without_streak(monkeypatch, "STOPPED",
+                                                     port_open=False)
+    assert calls == [], (
+        "the fixture's probe announced the deliberate stop, which #1359's rule it "
+        "must not: then the alert would have something to quote and this node "
+        "would be testing the wrong instrument")
+    assert probe.streaks == {}
+    assert probe.no_streak_cause(sp.PRIMARY_ENGINE) == sp.NO_STREAK_PROGRAM_STOPPED
+
+    alerts, q = await _alert_after_47_min_of_no_health(monkeypatch, tmp_path,
+                                                        "stopped")
+    assert len(alerts) == 1, (
+        f"a 47-minute outage with the primary STOPPED raised {alerts}: the gate "
+        "went silent on the case that fired twice in the field")
+    msg = alerts[0]
+    assert "STOPPED in supervisord" in msg, (
+        f"the alert does not name the state supervisord reported: {msg}")
+    assert "deliberate" in msg and "not a crash" in msg, (
+        f"the alert does not say the stop was deliberate rather than a crash, so "
+        f"a reader still goes looking for a fault: {msg}")
+    assert "47 min" in msg, (
+        f"the alert no longer reports the gate's own 47-minute measurement: {msg}")
+    for other in _other_no_streak_clauses(sp.NO_STREAK_PROGRAM_STOPPED):
+        assert other not in msg, (
+            f"the alert also claims {other!r}, which is a second cause and one "
+            f"this probe did not measure: {msg}")
+    # The retired line itself, assembled so this file does not contain the string
+    # whose absence it pins — the same trap the #1683/#1744 scan above dodges.
+    assert ("or the port " + "never closed") not in msg, (
+        f"the retired two-cause sentence is back: {msg}")
+
+    # Clause 4 on the same outage: further unhealthy ticks add nothing.
+    import workers.sources.scheduled_task as st
+
+    for _ in range(3):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        f"one uninterrupted STOPPED outage raised {len(alerts)} alerts across 4 "
+        "ticks — one per outage is still the contract (#938)")
+
+
+async def test_an_unreachable_supervisord_is_named_as_the_cause_it_measured(
+        aut, monkeypatch, tmp_path):
+    """Clause 3, first edge: the tick that never happened is its own sentence.
+
+    This is the case the gate's fallback was BUILT for, so its wording was already
+    half right and still had to stop offering the other half as an alternative.
+    """
+    from workers import service_probe as sp
+
+    probe, calls = _shared_probe_with_supervisord_down(monkeypatch)
+    assert calls == [] and probe.streaks == {}, (
+        "a skipped tick produced announcements or a streak, so the probe is no "
+        "longer the instrument these nodes assume it is")
+    assert probe.no_streak_cause(sp.PRIMARY_ENGINE) == (
+        sp.NO_STREAK_SUPERVISOR_UNREACHABLE), (
+        "the skipped tick recorded no reason, which is the hole #4468 is about: "
+        "the gate would have to guess again")
+
+    alerts, _q = await _alert_after_47_min_of_no_health(monkeypatch, tmp_path,
+                                                        "unreachable")
+    assert len(alerts) == 1, f"no alert on a 47-minute outage: {alerts}"
+    msg = alerts[0]
+    assert "supervisord was unreachable" in msg, (
+        f"the alert does not name the unreachable supervisor as its cause: {msg}")
+    assert "47 min" in msg, (
+        f"the alert no longer reports the gate's own 47-minute measurement: {msg}")
+    for other in _other_no_streak_clauses(sp.NO_STREAK_SUPERVISOR_UNREACHABLE):
+        assert other not in msg, (
+            f"the alert also claims {other!r} beside the cause it measured: {msg}")
+
+
+async def test_an_answering_port_is_named_as_the_cause_it_measured(
+        aut, monkeypatch, tmp_path):
+    """Clause 3, second edge: /health dead on an OPEN socket.
+
+    The wedged-vLLM shape is the reason this gate's own timer is not dead code
+    (#1683), and it is the one no-streak case where the port is emphatically not
+    closed — so naming a closed port here would be the false half again.
+    """
+    from workers import service_probe as sp
+
+    probe, calls = _shared_probe_left_without_streak(monkeypatch, "RUNNING",
+                                                     port_open=True)
+    assert calls == [] and probe.streaks == {}
+    assert probe.no_streak_cause(sp.PRIMARY_ENGINE) == sp.NO_STREAK_PORT_ANSWERING
+
+    alerts, _q = await _alert_after_47_min_of_no_health(monkeypatch, tmp_path,
+                                                        "answering")
+    assert len(alerts) == 1, f"no alert on a 47-minute outage: {alerts}"
+    msg = alerts[0]
+    assert "port is answering" in msg, (
+        f"the alert does not name the answering port as its cause: {msg}")
+    assert "47 min" in msg, (
+        f"the alert no longer reports the gate's own 47-minute measurement: {msg}")
+    assert "closed-port streak" not in msg, (
+        f"the alert quotes a closed-port streak for a service whose port is "
+        f"answering: {msg}")
+    for other in _other_no_streak_clauses(sp.NO_STREAK_PORT_ANSWERING):
+        assert other not in msg, (
+            f"the alert also claims {other!r} beside the cause it measured: {msg}")
+
+
+def test_every_no_streak_state_has_exactly_one_clause_and_no_disjunction():
+    """Clause 1, on the table itself rather than one rendered case at a time.
+
+    The gate owes a sentence of its own to each of the four answers
+    `ServiceProbe.no_streak_cause` can give — `program_stopped`,
+    `port_answering`, `supervisord_unreachable` and `no_observation`, the last
+    one meaning nothing looked at the service at all. The three checks below are
+    what makes the branch a
+    measurement rather than a wording: every state has a clause, no two states
+    share one (a shared clause is a disjunction wearing a different hat), and no
+    clause reaches for a second cause with "or"/"nor" — a disjunction is exactly
+    what made each false half unfalsifiable from the line alone.
+    """
+    import inspect
+    import re
+
+    from workers import service_probe as sp
+    import workers.sources.scheduled_task as st
+
+    clauses = st._NO_STREAK_CLAUSES
+    assert set(clauses) == set(sp.NO_STREAK_STATES), (
+        f"the gate's clause table covers {sorted(clauses)} but the probe can "
+        f"answer {sorted(sp.NO_STREAK_STATES)} — a state without a clause is a "
+        "back to a guess, and #4468 is about guessing")
+    texts = list(clauses.values())
+    assert all(t.strip() for t in texts), f"an empty clause: {clauses}"
+    assert len(set(texts)) == len(texts), (
+        f"two states share one clause, so the alert cannot say which was "
+        f"measured: {clauses}")
+    for state, text in clauses.items():
+        assert not re.search(r"\b(or|nor)\b", text), (
+            f"the clause for {state!r} offers a disjunction — {text!r} — which is "
+            "the defect #4468 was filed against, in prose that now looks measured")
+
+    # And the branch reads the table instead of carrying its own wording: the
+    # retired sentence must be gone from the module, not merely unused. Its own
+    # literal is assembled rather than written out, because a file that contains
+    # the string it forbids can never pass the check.
+    retired = ("or the port " + "never closed")
+    assert retired not in inspect.getsource(st), (
+        "the retired two-cause disjunction is still in scheduled_task.py")
+
+
 # ── The run record vetoes a second dispatch of a period that already ran ──────
 # #1296. An arch-review stray sweep reverted task #82's completion stamp 48 s
 # after the run finished, so `last_run` stayed on 2026-09-19, elapsed read a full

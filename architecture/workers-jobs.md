@@ -264,7 +264,7 @@ Four behaviours are load-bearing:
   2026-09-22 wipe §2 records.
 - **It recovers claims the pool never finished**, ahead of both the gate and
   `get_due_tasks`: `enqueue_if_due` calls `autonomy.recover_stuck_tasks` on every
-  tick (`workers/sources/scheduled_task.py:291`), because a worker that dies
+  tick (`workers/sources/scheduled_task.py:488`), because a worker that dies
   mid-run leaves the task file `in_progress` and the task stops coming due. It
   sits *before* the vLLM gate, so a dead claim is recovered even while dispatch is
   paused.

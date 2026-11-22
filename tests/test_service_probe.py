@@ -364,3 +364,128 @@ def test_a_non_primary_down_body_claims_no_dispatch_cost_and_still_reads_cleanly
     assert "dispatch is paused" not in body.lower(), body
     assert "(#1359). Its log:" in body, body
     assert "  " not in body, f"a double space survives somewhere: {body!r}"
+
+
+# ── #4468: which state left a service with no streak ───────────────────────────
+#
+# The dispatch gate's no-streak outage alert used to explain its silence with a
+# pair of causes it had not measured, and both printed false over a deliberate
+# stop of the primary (#4468). `tick` can only answer that question at the instant
+# it drops the streak: `streaks.pop` discards the observation with the streak, and
+# the gate keeps no supervisor read of its own. So every shape below goes through
+# the real `tick`/`run_probe` — the record is written by the measurement, and a
+# cause no shape here produces cannot be printed by anything.
+
+NO_STREAK_NAME = "agent-djev"
+
+
+def test_the_no_streak_record_names_the_state_the_tick_measured():
+    """Each way `tick` ends a streak records its own cause, and only its own.
+
+    Pre-fix this file had no record to read at all: `test_a_deliberate_stop_is_not_an_outage`
+    pinned the probe's SILENCE on a stop (correctly, and it stays green), and the
+    gate then filled the gap with a guess. Four shapes, because the fourth is what
+    keeps the other three honest — a program supervisord's table does not contain
+    is neither a stop nor an answering port, and buying a cause for it would be
+    this item's own defect repeated in the instrument that is supposed to end it.
+    """
+    probe, _clock, calls = _probe()
+
+    probe.tick(DJEV, _procs("STOPPED"), CLOSED)
+    assert calls == [], ("the probe announced a deliberate stop, which #1359 "
+                         "forbids — everything said about a stop is the gate's")
+    assert probe.streaks == {}
+    assert probe.no_streak_cause(NO_STREAK_NAME) == sp.NO_STREAK_PROGRAM_STOPPED, (
+        "a deliberate stop recorded no cause, which is the hole #4468 is about")
+
+    # /health failing on an OPEN socket is the wedge #1683 built the gate's own
+    # timer for, and it is the one shape where the port is emphatically not closed.
+    probe.tick(DJEV, _procs("RUNNING"), OPEN)
+    assert probe.streaks == {}
+    assert probe.no_streak_cause(NO_STREAK_NAME) == sp.NO_STREAK_PORT_ANSWERING
+
+    # Supervisord answered and the program is not in its table: no cause is
+    # available, and "no observation" must stay distinguishable from a cause.
+    probe.tick(DJEV, {}, CLOSED)
+    assert probe.no_streak_cause(NO_STREAK_NAME) == sp.NO_STREAK_UNOBSERVED
+
+    # A closed port under a live program starts a streak again, and a reason
+    # recorded for the silence before it must not survive to be quoted beside a
+    # streak that contradicts it.
+    probe.tick(DJEV, _procs("RUNNING"), CLOSED)
+    assert probe.streaks, ("a closed port under a RUNNING program stopped starting "
+                           "a streak, so the gate has nothing to measure")
+    assert probe.no_streak_cause(NO_STREAK_NAME) == sp.NO_STREAK_UNOBSERVED, (
+        "a no-streak reason outlived the silence it explained, so the gate could "
+        "quote a cause its own streak rules out")
+
+
+def test_a_skipped_tick_records_the_reason_without_touching_any_streak(monkeypatch):
+    """`run_probe` returns before `tick` on a dead socket, and that skip is itself
+    the cause the gate has to print — recorded on the way out.
+
+    Recording it must not buy a second judgement: #1359's rule is that an
+    unreachable supervisord says nothing about the programs and starts no clock, so
+    a streak already running survives the skip, and a service with a live streak
+    gets no no-streak record — `no_streak_cause` answers only the question
+    `outage()` answered with None.
+    """
+    import app.supervisor_client as sc
+
+    def _down():
+        raise sc.SupervisordUnreachable("no socket")
+
+    probe, clock, calls = _probe()
+    monkeypatch.setattr(sc, "_supervisor_all", _down)
+    monkeypatch.setattr(sc, "infra_services", lambda: DJEV)
+
+    assert sp.run_probe(probe) == []
+    assert calls == []
+    assert probe.streaks == {}, "a skipped tick started a clock, which #1359 forbids"
+    assert probe.no_streak_cause(NO_STREAK_NAME) == (
+        sp.NO_STREAK_SUPERVISOR_UNREACHABLE), (
+        "the skipped tick recorded no reason, leaving the gate to name one it had "
+        "not measured — which is #4468")
+
+    # Now a streak is running, and the same skip must leave it standing.
+    monkeypatch.setattr(sp, "guardian_announce", None)
+    monkeypatch.setattr(sc, "_supervisor_all", lambda: _procs("RUNNING"))
+    probe.tick(DJEV, _procs("RUNNING"), CLOSED)
+    clock.t += 180           # past the djev grace of 120 s, so the streak is live
+    probe.tick(DJEV, _procs("RUNNING"), CLOSED)
+    running = dict(probe.streaks)
+    assert running, "the streak did not become live, so the assertion below is vacuous"
+
+    monkeypatch.setattr(sc, "_supervisor_all", _down)
+    assert sp.run_probe(probe) == []
+    assert probe.streaks == running, (
+        "an unreachable supervisord touched a running streak, so the probe is no "
+        "longer the instrument #1359 specifies")
+    assert probe.no_streak_cause(NO_STREAK_NAME) == sp.NO_STREAK_UNOBSERVED, (
+        "a service with a live streak was filed as having no streak, so the two "
+        f"records disagree: {dict(probe.no_streak)}")
+
+
+def test_outages_docstring_carries_every_no_streak_cause():
+    """The reader's own contract names all four reasons, not the two it named.
+
+    #4468's blind spot was duplicated here before it was printed anywhere: this
+    docstring said None meant EITHER an unreachable supervisord OR an answering
+    port, so a fresh session reading it re-derived the same false pair that the
+    gate then printed over two deliberate stops. `either` is banned for the same
+    reason the gate's clause table bans a disjunction — two causes offered as a
+    set is what makes each false half unfalsifiable from the line alone.
+    """
+    doc = sp.ServiceProbe.outage.__doc__ or ""
+    low = doc.lower()
+
+    for wanted in ("stopped in supervisord", "port is answering", "unreachable",
+                   "no observation"):
+        assert wanted in low, (
+            f"`ServiceProbe.outage`'s docstring never says a missing streak can "
+            f"mean {wanted!r}, so a reader of it re-derives a shorter list than "
+            "the probe can actually produce")
+    assert "no_streak_cause" in doc, (
+        "the docstring does not point at the accessor that says WHICH reason it is")
+    assert "either" not in low, (
+        f"the docstring is back to offering two causes as the whole set: {doc!r}")
