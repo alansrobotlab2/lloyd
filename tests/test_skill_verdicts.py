@@ -6505,10 +6505,14 @@ def test_the_record_cli_refuses_an_absent_snapshot_and_writes_nothing(tmp_path):
 # file, so no current count, and `reopen_reason` requires a baseline above 0 — the date leg
 # is the ONLY reopen available, and it was being pushed past reach every night they recurred.
 
-def _days_ago(days: int) -> str:
-    """A `decided_at` stamp `days` in the past, in the ledger's own format."""
-    return (datetime.now(tz=timezone.utc) - timedelta(days=days)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
+def _days_ago(days: int, minutes: int = 0) -> str:
+    """A `decided_at` stamp `days` days and `minutes` minutes in the past, ledger format.
+
+    `minutes` exists because #4318 bounds lifts per MINUTE window: a node that has to put three
+    accepted lifts inside one ten-minute window and two more a window apart cannot wait on a clock
+    it does not control. Default 0 leaves every pre-existing call exactly as it read."""
+    return (datetime.now(tz=timezone.utc)
+            - timedelta(days=days, minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_the_date_leg_ages_on_first_decided_at_not_on_the_latest_append(store):
@@ -8151,3 +8155,493 @@ def test_a_reanchored_tombstone_stays_out_of_the_input_lost_tally(tmp_path, mirr
     assert sv.candidate_input_lost(corrected) is not None, (
         "the command is named input-lost even with the exemption matcher removed, so "
         "the None asserted above was blindness, not the exemption")
+# ── Bounding a re-anchor burst by a ledger-tail count (#4318) ────────────────
+#
+# One `--re-anchor-leg` append RESTARTS a key's 60-day date leg: `first_decided_at` stops being
+# the earliest decision the ledger holds for the key and becomes the lift's own stamp, so a
+# released pattern goes back under suppression (#3940). On 2026-11-12 `autonomy-57 2026-11-12`
+# did that to 23 distinct keys between 21:08:40Z and 21:08:42Z — two seconds, one process per
+# key, every key named on its own command line, no per-key falsifier re-read. A counter held
+# inside a process could not have stopped that; a count read off the ledger's own tail can, which
+# is what `sv.reanchor_lift_burst` is and what `record_verdict` refuses on.
+#
+# What makes the count hard is that a lift row's shape — `first_decided_at == decided_at` — is
+# ALSO a key's first-ever verdict row, because `record_verdict` stamps the field with its own
+# stamp when there is nothing to carry forward (#2746, and the module docstring says the two
+# readings coincide exactly there). Measured over the live ledger on 2026-11-18: 101 non-`run:`
+# rows carry the shape, 71 of them a key's first-ever row, 30 genuine lifts — 3.4x. A
+# shape-only counter would therefore refuse an ordinary nightly for writing fresh verdicts, which
+# clause 4 forbids, so the EARLIER-ROW test comes first and the nodes below prove both halves.
+#
+# Deliberately NOT marked `live_vault`: this file carries no marker at all (its 153 existing
+# nodes all run under the gate's `-m "not live_vault and not fault_injection"`), and a marked
+# node here would be a clause with no enforcement.
+
+# Three lifts, a refusal at the fourth: the ceiling as shipped. Whether 3 is the right number is
+# owed-check's to settle after a fortnight of nightly traffic (#4318 owed). These nodes express
+# themselves through the constants, so widening the default reddens them instead of quietly
+# letting the incident become acceptable.
+_BURST_KEYS = ("Bash/bulk-1", "Bash/bulk-2", "Bash/bulk-3")
+
+
+def _raw_row(store: Path, key: str, first: str, decided: str, *,
+             verdict: str = "reviewed_no_skill",
+             decided_by: str = "autonomy-57 2026-11-12") -> dict:
+    """Append one ledger row with `first_decided_at` and `decided_at` set independently.
+
+    Deliberately NOT a `record_verdict` call, for the same reason `stored_row` above bypasses the
+    mint: the rows this writes are shapes the mint refuses or could never produce — a `run:`
+    bookkeeping row, a `superseded` re-decision, a lift that is a key's only row. The mint stops at
+    #736's printing-falsifier rule and #2052's denominator rail before the burst counter is ever
+    consulted, so a reader-side rule can only be graded against rows written past it. Every field
+    set here is one `record_verdict` writes too; only the mint-time rails are stepped over, and the
+    counter under test reads the file, never the mint.
+    """
+    row = {"pattern_key": key, "verdict": verdict, "reason": "burst fixture row",
+           "evidence_cmd": PRINTING_CMD, "evidence_observed": "1",
+           "occurrences_at_decision": 14, "decided_at": decided,
+           "first_decided_at": first, "decided_by": decided_by,
+           "source_candidate": "", "evidence_cmd_status": "ok"}
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    return row
+
+
+def _seed_rows(store: Path, rows: list[dict]) -> None:
+    """Lay rows down as the ledger's own bytes, so the counter reads a tail rather than an API."""
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def _lift(store: Path, key: str, at: str, *, occurrences: int = 14,
+          decided_by: str = "autonomy-57 2026-11-12",
+          verdict: str = "reviewed_no_skill") -> dict:
+    """Append a true lift the way a live run does: `record_verdict` with `reanchor_date_leg`.
+
+    Minted rather than hand-written, because the accepted-lift nodes are the half of clause 5 that
+    only means something on the real path — they prove the guard does NOT refuse a legal lift, and
+    the row being counted has to be the one the mint produces: `first_decided_at == decided_at ==
+    at`, with an earlier row for the key already on disk from `_crossed_key`. `decided_at=at` is
+    what lets a node place three lifts inside one window and two a window apart, so the shipped
+    default is graded against stamps the test can move instead of a clock it cannot wait on.
+    """
+    return sv.record_verdict(
+        store=store, pattern_key=key, verdict=verdict,
+        reason="burst fixture: hand re-decision of a released key",
+        evidence_cmd=PRINTING_CMD, occurrences=occurrences, decided_at=at,
+        decided_by=decided_by, reanchor_date_leg=True)
+
+
+def _lift_cli(store: Path, key: str) -> int:
+    """A lift the way a runbook loop makes it: a fresh `reanchor --re-anchor-leg` PROCESS per key.
+
+    The incident's process boundary exactly — a new interpreter each iteration, so nothing but the
+    ledger is shared between lifts. `cwd=_ROOT` and the store in the child's own environment, the
+    same idiom every other CLI node in this file uses.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.skill_verdicts", "reanchor",
+         "--pattern", key, "--evidence-cmd", PRINTING_CMD,
+         "--decided-by", "alan", "--re-anchor-leg", "--store", str(store)],
+        cwd=_ROOT, env=_cli_env(store),
+        capture_output=True, text=True, timeout=120).returncode
+
+
+def _lift_cli_run(store: Path, key: str):
+    """The same lift, handing back the CompletedProcess so a node can read its stderr."""
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.skill_verdicts", "reanchor",
+         "--pattern", key, "--evidence-cmd", PRINTING_CMD,
+         "--decided-by", "alan", "--re-anchor-leg", "--store", str(store)],
+        cwd=_ROOT, env=_cli_env(store),
+        capture_output=True, text=True, timeout=120)
+
+
+def _cli_env(store: Path) -> dict:
+    # The child inherits SKILL_VERDICTS_MIRROR from the `mirror` fixture's monkeypatch, so the
+    # clause "nothing appended to EITHER tree" has a second tree to be measured against.
+    return {**os.environ, "SKILL_VERDICTS_STORE": str(store),
+            "SKILL_VERDICTS_CANDIDATES": str(store.parent)}
+
+
+def test_the_burst_constants_sit_beside_the_leg_they_bound():
+    """Clause 1: both constants exist, beside `REOPEN_AFTER_DAYS`, with the shipped defaults.
+
+    Position is part of the clause and is asserted on the source rather than remembered: the leg
+    these numbers govern is declared a few lines above them, and a constant that drifted somewhere
+    else is the one a later move or fold loses sight of. The values are asserted on the module,
+    never on line numbers — a line cite rots inside days.
+
+    A reader may notice 3 is BELOW the largest legitimate window measured in the live ledger, four
+    (`task-58-nightly-consolidation 2026-11-11`). That tension is real, it is the item's own
+    finding, and it is owed-check's to settle after a fortnight of nightly traffic (#4318 owed);
+    changing the number in a round is that ruling, not this change's.
+    """
+    src = Path(sv.__file__).read_text(encoding="utf-8", errors="replace")
+    anchor = src.index("REOPEN_AFTER_DAYS = ")
+    for name, value in (("REANCHOR_BURST_MAX", 3),
+                        ("REANCHOR_BURST_WINDOW_MINUTES", 10)):
+        assert hasattr(sv, name), f"{name} is not a module constant"
+        assert getattr(sv, name) == value, (
+            f"{name} is {getattr(sv, name)!r}, not the {value} this item ships — the default is "
+            "owed-check's to raise after a fortnight of nightly traffic, not a round's to drift")
+        head = src.index(f"{name} = ")
+        assert anchor < head < anchor + 2000, (
+            f"{name} is no longer beside REOPEN_AFTER_DAYS, which is where a reader looks for the "
+            "number that bounds the leg")
+        start = src.rindex("\n\n", 0, head)
+        assert "#4318" in src[start:head], f"{name} lost its incident cite"
+
+
+def test_a_row_that_lifted_the_leg_is_told_from_a_rows_very_first_verdict(store):
+    """The discriminator triage corrected (#4318): the equal-stamp SHAPE is not a lift.
+
+    All three shapes are written through real writers, and the predicate is checked against each:
+    a lift (earlier row, clock restarted), a key's first-ever row (equal stamps, nothing earlier),
+    and a carried-forward re-confirmation (later row, anchor unmoved).
+    """
+    now, earlier = _days_ago(0), _days_ago(0, minutes=1)
+
+    # A key's first-ever row: the shape is right, and the key has no earlier row.
+    sv.record_verdict(store=store, pattern_key="Edit/first", verdict="reviewed_no_skill",
+                      reason="the key's very first decision", evidence_cmd=PRINTING_CMD,
+                      occurrences=4, decided_at=earlier)
+    # A genuine lift: an earlier row, and the clock restarted on the lift's own stamp.
+    _crossed_key(store, "Bash/lifted")
+    _lift(store, "Bash/lifted", now)
+    # A carried-forward re-confirmation, LATER than the lift and not one: the anchor moved
+    # nowhere, which is the behaviour #2746 clause 1 exists to keep.
+    sv.record_verdict(store=store, pattern_key="Edit/first", verdict="reviewed_no_skill",
+                      reason="re-confirmed, anchor carried", evidence_cmd=PRINTING_CMD,
+                      occurrences=4, decided_at=_days_ago(0, minutes=2))
+
+    rows = [json.loads(l) for l in _lines(store)]
+    by_key: dict[str, list[dict]] = {}
+    for row in rows:
+        by_key.setdefault(row["pattern_key"], []).append(row)
+    fresh_row = by_key["Edit/first"][0]
+    assert fresh_row["first_decided_at"] == fresh_row["decided_at"], (
+        "a key's first-ever row stopped carrying the equal-stamp shape, so the discriminator this "
+        "node pins has become the whole predicate and clause 4 is vacuous")
+    # `seen_before` is what the streaming counter passes per row — whether that key has any row
+    # EARLIER in the file, the line its docstring spells out — and it is computed positionally
+    # here rather than by calling the counter's own internals, because the argument this node
+    # grades is exactly that fact stated about a row, not the mechanism that derives it.
+    def seen_before(row: dict) -> bool:
+        # FILE ORDER, not timestamp order: `reanchor_lift_burst` marks a key seen once a line of
+        # its own has been read, so "this key has an earlier LINE" is what the argument states.
+        return by_key[row["pattern_key"]].index(row) > 0
+
+    lift_row = next(r for r in by_key["Bash/lifted"] if r["decided_at"] == now)
+    assert sv.is_date_leg_lift_row(lift_row, seen_before=seen_before(lift_row)), (
+        "the real lift was not recognised")
+    assert not sv.is_date_leg_lift_row(fresh_row, seen_before=seen_before(fresh_row)), (
+        "the key's first-ever row counted as a lift — the shape-only reading the 2026-11-18 "
+        "triage finding was about, which refuses an ordinary nightly")
+    carried = by_key["Edit/first"][-1]
+    assert not sv.is_date_leg_lift_row(carried, seen_before=seen_before(carried)), (
+        "a carried-forward re-confirmation counted as a lift; its anchor moved nowhere")
+    assert sv.reanchor_lift_burst(store)[0] == 1, (
+        "the counter disagrees with the predicate beside the row it just measured")
+
+
+def test_a_whole_nightly_of_first_ever_verdicts_never_counts_as_a_burst(store):
+    """Clause 4's counting half: six fresh keys in one window are ZERO lifts.
+
+    Six first-ever verdicts, six equal stamps, all inside one window — the shape every one of them
+    carries is what the item's original clause-2 discriminator counted. On the live ledger
+    `task-83-nightly-skills-management 2026-10-29` alone contributed 13 rows of this shape, so a
+    nightly would have met the ceiling without lifting anything.
+    """
+    for i in range(6):
+        sv.record_verdict(
+            store=store, pattern_key=f"Tool/t-{i}", verdict="reviewed_no_skill",
+            reason="first decision for this key", evidence_cmd=PRINTING_CMD,
+            occurrences=3, decided_at=_days_ago(0, minutes=i))
+    assert len(_lines(store)) == 6, "this node lost control of its own rows"
+    shape_rows = [json.loads(l) for l in _lines(store)
+                  if json.loads(l)["first_decided_at"] == json.loads(l)["decided_at"]]
+    assert len(shape_rows) == 6, (
+        "these rows no longer carry the equal-stamp shape, so the node measures nothing")
+
+    count, keys = sv.reanchor_lift_burst(store)
+    assert (count, keys) == (0, []), (
+        f"{count} first-ever verdict rows counted as re-anchor lifts ({keys}) — the 3.4x "
+        "over-count measured on the live ledger 2026-11-18: 101 rows carry the shape, 71 of them "
+        "a key's first-ever row")
+
+
+def test_the_counter_never_classifies_a_row_whose_key_is_skipped(store, monkeypatch):
+    """Clause 2's `streams the store`: rows whose key cannot be a lift never reach the classifier.
+
+    Asserted by RECORDING which rows the classifier was handed, because a whole-store read would
+    print the same count and look identical. The live ledger passed its 1 MiB witness ceiling
+    (2026-11-18), so reading all of it once per append is the cost this clause rules out — and a
+    `run:` key is skipped before its rows are ever opened.
+    """
+    old, mid, now = _days_ago(30), _days_ago(20), _days_ago(0)
+    run_key = sv.RUN_ROW_PREFIX + "2026-11-21-nightly-mining"
+    _seed_rows(store, [
+        _raw_row(store, "Edit/old", old, old),                       # earlier row, outside window
+        _raw_row(store, "Bash/named", mid, mid),                     # earlier row for the key below
+        _raw_row(store, "Bash/named", now, now),                     # a lift: in window
+        _raw_row(store, run_key, now, now, verdict="below_threshold"),
+    ])
+    seen: list[str] = []
+    real = sv.is_date_leg_lift_row
+
+    def spy(row, *, seen_before):
+        seen.append(str(row.get("pattern_key") or ""))
+        return real(row, seen_before=seen_before)
+
+    monkeypatch.setattr(sv, "is_date_leg_lift_row", spy)
+    assert sv.reanchor_lift_burst(store, at=now)[0] == 1
+    assert "Edit/old" in seen, (
+        "the counter stopped classifying the rows before the window, so `seen_before` is no longer "
+        "derived by streaming the file in order — the stamp check, not the classifier, is what "
+        "excludes a 30-day-old row from the count")
+    assert run_key not in seen, (
+        "a run bookkeeping row was classified at all: its key is meant to be skipped first")
+
+
+def test_a_run_bookkeeping_row_never_counts_as_a_lift(store):
+    """A `run:<date>-nightly-mining` row accrues one a night and can never be a lift (#3591).
+
+    The shape is why this needs a node of its own: a run row's first decision IS its own stamp, so
+    a shape-only counter reads the miner's nightly bookkeeping as lifts and spends the burst budget
+    on rows that re-arm nothing. The counter reuses `is_run_bookkeeping_key`, the one predicate
+    this module already uses to say 'not a pattern decision', rather than inventing a second rule
+    for the same population.
+    """
+    now = _days_ago(0)
+    run_rows = [
+        _raw_row(store, sv.RUN_ROW_PREFIX + "2026-11-21-nightly-mining", now, now,
+                  verdict="below_threshold"),
+        _raw_row(store, sv.RUN_ROW_PREFIX + "2026-11-20-nightly-mining",
+                  _days_ago(1), _days_ago(1), verdict="below_threshold"),
+    ]
+    _seed_rows(store, run_rows)
+    assert all(r["first_decided_at"] == r["decided_at"] for r in run_rows), (
+        "these rows stopped carrying the lift shape, so the node measures nothing")
+    assert sv.reanchor_lift_burst(store, at=now) == (0, []), (
+        "per-run ledger rows counted toward the burst budget")
+
+
+def test_the_fourth_lift_in_a_window_is_refused_before_the_row_is_minted(store):
+    """Clauses 2 and 3: the append past the ceiling raises, writes nothing, and says why.
+
+    Three lifts already sit in the window when the fourth arrives. The refusal has to name
+    everything a reader needs without opening the source: the count found, the window in minutes,
+    the keys that made the burst, #4084, and the alternative — one run report naming them —
+    instead of a loop.
+    """
+    for i, key in enumerate(_BURST_KEYS):
+        _crossed_key(store, key)
+        _lift(store, key, _days_ago(0, minutes=i + 1))
+    before = len(_lines(store))
+
+    with pytest.raises(ValueError) as excinfo:
+        _lift(store, "Bash/fourth", _days_ago(0))
+
+    text = str(excinfo.value)
+    assert f"{len(_BURST_KEYS)} date-leg lifts" in text, (
+        f"the refusal does not name the count it found: {text}")
+    assert f"{sv.REANCHOR_BURST_WINDOW_MINUTES} minutes" in text, (
+        f"the refusal does not name the window in minutes: {text}")
+    assert f"REANCHOR_BURST_MAX={sv.REANCHOR_BURST_MAX}" in text, text
+    for key in _BURST_KEYS:
+        assert key in text, f"the refusal omits a key from the burst it quotes: {text}"
+    assert "#4084" in text, f"the refusal does not cite the incident it refuses for: {text}"
+    for phrase in ("BY NAME", "one run report", "not looped"):
+        assert phrase in text, f"the refusal is missing {phrase!r}: {text}"
+    assert len(_lines(store)) == before, "the refused lift appended a row"
+    assert "Bash/fourth" not in " ".join(_lines(store)), (
+        "the refused key reached the ledger even though its append was refused")
+
+
+def test_the_fourth_cli_reanchor_lift_exits_2_writing_neither_tree(store, mirror):
+    """Clause 2 across the boundary the incident crossed: a separate subcommand, exit 2, both trees inert.
+
+    `reanchor --re-anchor-leg` is NOT `record --re-anchor-leg`: it is its own subcommand whose
+    handler maps any `ValueError` from `reanchor_verdict` to exit 2, and it is the lane a runbook
+    loops. A bound held only on the in-process call would be beaten by the command a real bulk
+    uses, so one process is spawned per lift and the assertions are return codes plus the line
+    count of BOTH files — runtime store and durable mirror.
+    """
+    keys = [f"Bash/loop-{i}" for i in range(4)]
+    # All four keys crossed-leg, and only three lifts made: the fourth has to reach the burst
+    # guard, and a key with no earlier row would be refused by `reanchor`'s own rule instead.
+    for key in keys:
+        _crossed_key(store, key)
+    seeded_mirror = len(_lines(mirror))
+    for key in keys[:3]:
+        assert _lift_cli(store, key) == 0, f"the loop's lift of {key} was refused early"
+    before_store, before_mirror = len(_lines(store)), len(_lines(mirror))
+    assert before_mirror == seeded_mirror + 3, (
+        f"control: the mirror went from {seeded_mirror} to {before_mirror} lines over three "
+        "accepted CLI lifts, so 'nothing appended to the mirror' has to mean something")
+
+    refused = _lift_cli_run(store, keys[3])
+    assert refused.returncode == 2, f"the 4th lift of a loop must exit 2, got {refused.returncode}"
+    assert len(_lines(store)) == before_store and len(_lines(mirror)) == before_mirror, (
+        "the loop's 4th iteration appended to a tree")
+    # `keys[3]` is in the store already — its crossed-leg first row, which is itself
+    # `first_decided_at == decided_at` — so the signature of a lift cannot identify the refused
+    # one here. What is checkable is that the key gained NO row: it must still hold exactly the
+    # one line `_crossed_key` minted for it.
+    assert [r["pattern_key"] for r in (json.loads(l) for l in _lines(store))
+            if r["pattern_key"] == keys[3]] == [keys[3]], (
+        "the refused lift landed a second row for the key it refused")
+    # The refusal has to be LOUD on the child's stderr: an exit code alone tells a looping run
+    # nothing about why, which is how a bulk loop becomes a mystery rather than a message.
+    err = refused.stderr
+    assert "refused" in err and "#4084" in err, (
+        f"a refused lift that prints nothing is indistinguishable from one that succeeded: {err}")
+
+
+def test_three_lifts_inside_one_window_each_take_their_own_append(store):
+    """Clause 5: the ceiling sits AT the constant, not below it — three lifts, three rows.
+
+    Stamps 1, 2 and 3 minutes back, so each lift is inside the window of the next and none reaches
+    the ceiling; the fourth is what the node above refuses. This is also the first node to go red
+    if the counter starts counting the append in flight instead of the rows already on disk.
+    """
+    keys = ["Bash/ok-1", "Bash/ok-2", "Bash/ok-3"]
+    assert len(keys) == sv.REANCHOR_BURST_MAX, (
+        "this node is no longer the largest accepted burst, so it stopped pinning clause 5")
+    for key in keys:
+        _crossed_key(store, key)
+    for i, key in enumerate(keys):
+        stamp = _days_ago(0, minutes=i + 1)
+        assert _lift(store, key, stamp)["first_decided_at"] == stamp, (
+            f"{key}: the accepted lift did not restart its own leg")
+    assert len(_lines(store)) == 6, (
+        "three crossed keys plus three lifts is six rows; anything else means a lift was dropped "
+        "or duplicated")
+    assert sv.reanchor_lift_burst(store)[0] == sv.REANCHOR_BURST_MAX, (
+        "the counter stopped agreeing with the three appends it just allowed: all three are "
+        "inside the window of the next reading, which is exactly why the fourth is refused")
+
+
+def test_two_lifts_a_window_apart_are_two_decisions_not_a_burst(store):
+    """Clause 5: the window bounds TIME, so a slow deliberate lift is not a loop.
+
+    One lift 30 minutes back and one now: both land. The gap is three windows, so a guard that
+    counted the file instead of a window would refuse the second — which is the failure that pushes
+    a run to edit the ledger by hand, the thing this module exists to keep auditable.
+    """
+    _crossed_key(store, "Edit/slow-1")
+    _crossed_key(store, "Edit/slow-2")
+    _lift(store, "Edit/slow-1", _days_ago(0, minutes=30))
+    assert _lift(store, "Edit/slow-2", _days_ago(0))["first_decided_at"] == _days_ago(0)
+    assert len(_lines(store)) == 4, "both lifts were meant to append"
+
+
+def test_a_key_with_no_earlier_row_is_never_refused_as_a_burst(store):
+    """Clause 4's refusing half, four times over: fresh keys stay writable and keep their anchor.
+
+    Four first-ever verdicts inside one window — the count that refuses a LIFT — each landing with
+    its own stamp as its anchor (#2746 clause 2: a first row's anchor is its own decision, there
+    being nothing earlier to carry). This is the node that fails loudest if the guard is ever
+    widened from the re-anchor path to `record` in general.
+    """
+    for i in range(4):
+        sv.record_verdict(
+            store=store, pattern_key=f"Tool/fresh-{i}", verdict="reviewed_no_skill",
+            reason="first-ever decision", evidence_cmd=PRINTING_CMD, occurrences=2,
+            decided_at=_days_ago(0, minutes=i))
+    assert len(_lines(store)) == 4, "a first-ever verdict was refused by the burst guard"
+    latest = sv.load_verdicts(store)
+    for i in range(4):
+        assert latest[f"Tool/fresh-{i}"]["first_decided_at"] == _days_ago(0, minutes=i), (
+            f"Tool/fresh-{i} lost its own-stamp anchor, which is what #2746 clause 2 promises the "
+            "first row for a key")
+
+
+def test_a_falsified_re_verdict_never_counts_toward_the_burst(store):
+    """Clause 5: an ordinary append that CHANGES ITS MIND is still not a lift (#2746 clause 1).
+
+    A first-ever row 30 minutes back, a `rejected_false_positive` re-confirmation 5 minutes back
+    with the anchor carried forward. Both ordinary writes; neither may touch the burst budget, and
+    the row keeps the earliest anchor the ledger holds. This is the exact pair the shape-only
+    discriminator conflated, and the reason clause 4 exists: a nightly that re-decides a key after
+    its falsifier ran is normal traffic, not a bulk.
+    """
+    old, reconfirmed = _days_ago(0, minutes=30), _days_ago(0, minutes=5)
+    sv.record_verdict(store=store, pattern_key="Bash/falsified", verdict="reviewed_no_skill",
+                      reason="first decision", evidence_cmd=PRINTING_CMD, occurrences=2,
+                      decided_at=old)
+    sv.record_verdict(store=store, pattern_key="Bash/falsified",
+                      verdict="rejected_false_positive",
+                      reason="falsifier re-ran, the skill owns the signature",
+                      evidence_cmd=PRINTING_CMD, occurrences=2, decided_at=reconfirmed)
+    assert sv.reanchor_lift_burst(store)[0] == 0, (
+        "a re-confirmation that changed its mind counted as a date-leg lift")
+    row = sv.load_verdicts(store)["Bash/falsified"]
+    assert row["verdict"] == "rejected_false_positive", "the re-confirmation did not land"
+    assert row["first_decided_at"] == old, (
+        "the re-confirmation lost the earliest anchor the ledger holds for the key (#2746)")
+
+
+def test_the_shipped_default_refuses_the_measured_bulk_at_the_fourth_lift(store, tmp_path):
+    """"Would this have stopped it", asked of the shipped defaults: 23 lifts, 2 through, the rest refused.
+
+    The 2026-11-12 bulk was 23 true lifts over 23 distinct keys inside two seconds. Rebuilt from
+    those stamps — an earlier row per key, three lifts at the bulk's own stamps, then the fourth —
+    the ledger holds the three stamps it can see and refuses the next lift at the ceiling,
+    appending nothing.
+
+    A copy of the LIVE store is deliberately not used: the incident rows are already in it, so a
+    replay there would read the bulk as pre-existing traffic and refuse from lift one. The
+    reconstruction copies the row shape measured from the live file on 2026-11-18, which is also
+    why the store is over its 1 MiB witness ceiling and must not be ordered whole (#4318 owed).
+    """
+    bulk = "autonomy-57 2026-11-12"
+    stamps = [f"2026-11-12T21:08:{s:02d}Z" for s in (40, 41, 42)]
+    keys = [f"Tool/bulk-{i:02d}" for i in range(23)]
+    rows = [_raw_row(store, k, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z", decided_by="triage")
+            for k in keys]
+    for i, stamp in enumerate(stamps):
+        rows.append(_raw_row(store, keys[i], stamp, stamp, decided_by=bulk))
+    _seed_rows(store, rows)
+
+    count, burst = sv.reanchor_lift_burst(store, at=stamps[-1])
+    assert count == len(stamps) == sv.REANCHOR_BURST_MAX, (
+        f"the counter saw {count} lifts beside the {len(stamps)} the bulk put down at "
+        f"{stamps[0]}..{stamps[-1]}")
+    assert burst == keys[:len(stamps)], f"the burst keys are wrong: {burst}"
+
+    # The bulk's own next iteration: refused, and nothing appended.
+    with pytest.raises(ValueError, match="re-anchor burst"):
+        _lift(store, keys[len(stamps)], stamps[-1])
+    assert len(_lines(store)) == len(rows), "the bulk's 4th lift appended to the ledger"
+    assert not [r for r in (json.loads(l) for l in _lines(store))
+                if r["pattern_key"] == keys[len(stamps)]
+                and r.get("first_decided_at") == r["decided_at"] == stamps[-1]], (
+        "the bulk's next iteration landed a lift row")
+
+
+def test_nothing_in_the_burst_section_skips():
+    """Every node above runs; a skip in this section is a clause with no enforcement.
+
+    Read as source text, because that is the only form a `pytest.mark.skip` decoration keeps. A
+    later round that finds one of these nodes inconvenient can delete it and this node will not
+    notice; it cannot be silenced into a pass.
+    """
+    text = Path(__file__).read_text(encoding="utf-8", errors="replace")
+    # Built in two pieces: a literal copy of the header inside this node would make the count
+    # it takes be 2 for the reason that the guard was written, not for the reason it names.
+    marker = ("# ── Bounding a re-anchor burst"
+              " by a ledger-tail count (#4318) ")
+    assert text.count(marker) == 1, (
+        "the burst section header does not appear exactly once, so this guard's slice is wrong")
+    section = text[text.index(marker):]
+    assert section.count("def test_") >= 12, (
+        f"{section.count('def test_')} nodes in the burst section; the five clauses plus the "
+        "discriminator, the streaming check and this rule are all meant to be here")
+    # Built in pieces, for the same reason as the marker above: this node's own assert text
+    # contains the strings, and a literal here would make the guard fire on itself.
+    for needle in ("pytest." + "skip", "skip" + "if"):
+        assert needle not in section, (
+            f"a {needle} in the burst section is a clause with no enforcement")

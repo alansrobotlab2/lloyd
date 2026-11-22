@@ -211,6 +211,24 @@ TERMINAL_VERDICTS = frozenset({
 # rather than trusted. 60 days is roughly two full re-emergence cycles on this board.
 REOPEN_AFTER_DAYS = 60
 REOPEN_OCCURRENCE_GROWTH = 10.0
+# How many date-leg lifts one window may carry before the ledger refuses the next one (#4318).
+# A lift restarts a key's suppression clock, so a run that lifts N keys re-arms N suppressions
+# with no per-key falsifier re-read: `autonomy-57 2026-11-12` wrote 23 true-lift rows over 23
+# distinct keys between 21:08:40Z and 21:08:42Z (measured 2026-11-22 over the 854-row live
+# ledger by the predicate below; the item quoted 24 from a 827-row reading on 2026-11-18) — two
+# seconds, one process per key, which is why
+# a counter held inside a process could never have stopped it and a count read off the ledger's
+# own tail can. Three is the number that makes a bulk loop impossible while a run naming a
+# handful of keys by hand still goes through; whether 3 is the right ceiling is owed-check's to
+# rule on after a fortnight of nightly traffic, and the value can be raised here, or split per
+# `decided_by`, without touching the mechanism below.
+REANCHOR_BURST_MAX = 3
+# The window that count runs over, in minutes, ending at the stamp of the lift being appended.
+# Ten because the bulk measured above took two seconds, and the largest legitimate window in the
+# live ledger measured 2026-11-18 was four true lifts inside ten minutes
+# (`task-58-nightly-consolidation 2026-11-11`) — a window this wide separates a loop from a
+# hand-worked list while still counting every lift a loop can make.
+REANCHOR_BURST_WINDOW_MINUTES = 10
 
 #: The `decided_by` an un-named caller leaves: `record_verdict`'s own default and `record`'s
 #: argparse default, so it is the value that states nothing about who decided. One name for
@@ -835,6 +853,102 @@ def carried_forward_first_decided_at(store: Path | str | None, pattern_key: str)
     return best[1] if best else ""
 
 
+def is_date_leg_lift_row(row: dict, *, seen_before: bool) -> bool:
+    """Is this ledger line a date-leg LIFT rather than an ordinary verdict?
+
+    Two conditions, and the second is the one the item's first wording got wrong:
+
+    * `first_decided_at` equals its own `decided_at` — the clock restarted, which is what
+      `record_verdict(reanchor_date_leg=True)` writes. That shape is ALSO what a key's very
+      first line is, because with nothing earlier to carry the two readings coincide
+      (`carried_forward_first_decided_at` says so in its own docstring). Measured over the live
+      ledger 2026-11-18: 101 non-`run:` rows have the shape, 71 of them a key's first-ever row
+      and only 30 true lifts, so counting the shape alone over-counts 3.4x and a nightly's
+      fresh verdicts would trip a guard meant for bulk lifts.
+    * `seen_before` — the key already had a line in the store when this one was written. Same
+      restart test the carry-forward runs at the `start` floor above, applied per row.
+
+    `run:` bookkeeping rows are never lifts: one accrues per mining night (#3363) and the
+    audit denominator already has to exclude them (#3591).
+    """
+    key = (row.get("pattern_key") or "").strip()
+    if not key or is_run_bookkeeping_key(key):
+        return False
+    first = (row.get("first_decided_at") or "").strip()
+    decided = (row.get("decided_at") or "").strip()
+    return bool(seen_before) and bool(first) and first == decided
+
+
+def reanchor_lift_burst(store: Path | str | None,
+                        *, at: str | None = None,
+                        window_minutes: int = REANCHOR_BURST_WINDOW_MINUTES,
+                        ) -> tuple[int, list[str]]:
+    """How many date-leg lifts the ledger's tail carries in the window ending at `at` (#4318).
+
+    Returns `(count, keys)` — the keys in the order their rows appear, so a refusal can name the
+    burst rather than assert a number.
+
+    The window is `[at - window_minutes, at]`, inclusive both ends, anchored on the stamp of the
+    lift being appended rather than on the wall clock: a run that lifts a dozen keys stamps them
+    seconds apart, and anchoring on `now` would let a loop that sleeps 11 minutes between keys
+    walk through the guard one lift at a time. Anchored on the append's own stamp, every lift
+    that loop has already written is inside the next one's window.
+
+    Streamed line by line, never `load_verdicts` and never sorted: the live store is 854 lines
+    and over the 1 MiB witness ceiling, and the whole point is a tail count, so an ordering pass
+    would read a store this size into memory to answer a question about its last minutes. A
+    malformed line is skipped silently, the same policy `carried_forward_first_decided_at`
+    keeps for its per-append pass — `load_verdicts` already warns about malformed lines on the
+    surfaces where a count is published, and this one runs on every append.
+
+    Unparseable stamps cannot count toward a burst: a row whose date cannot be read has no
+    position in any window, and refusing a lift because of a stranger's malformed line would
+    hand a corrupt row a veto over the ledger.
+    """
+    path = Path(resolve_verdict_source(store)[0])
+    if not path.is_file():
+        return 0, []
+    anchor = _parse_ts(at) if at else _parse_ts(now_iso())
+    if anchor is None:
+        # `at` came in unparseable. Refuse to guess a window rather than silently counting the
+        # whole file: the caller passed a stamp it believed in, and the honest answer is that no
+        # row can be placed relative to a stamp that does not parse.
+        return 0, []
+    low = anchor - timedelta(minutes=window_minutes)
+    seen: set[str] = set()
+    count = 0
+    keys: list[str] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            key = (row.get("pattern_key") or "").strip()
+            if is_run_bookkeeping_key(key):
+                # Clause 2's "non-run:" half, before the predicate: the step-3.5 mining row is
+                # minted every night with `first_decided_at == decided_at`, and once two nights
+                # exist its key HAS an earlier row — so a bookkeeping row satisfies the lift
+                # shape on both counts without being a decision about anything (#3591 is why
+                # these rows are excluded from every other denominator this module publishes).
+                continue
+            lift = is_date_leg_lift_row(row, seen_before=key in seen)
+            if lift:
+                stamp = _parse_ts((row.get("decided_at") or "").strip())
+                if stamp is not None and low <= stamp <= anchor:
+                    count += 1
+                    if key not in keys:
+                        keys.append(key)
+            if key:
+                seen.add(key)
+    return count, keys
+
+
 def carried_forward_occurrences(store: Path | str | None, pattern_key: str) -> int:
     """The count the row about to be appended would otherwise lose (#736 clause 1).
 
@@ -1278,6 +1392,33 @@ def record_verdict(
     first_decided = ("" if reanchor_date_leg
                      else carried_forward_first_decided_at(store, pattern_key))
     stamp = decided_at or now_iso()
+
+    if reanchor_date_leg:
+        # The burst guard, before the row is minted (#4318) — the falsifier above only
+        # executes the run's own read-only check, so refusing here still appends to neither
+        # tree. A lift re-arms one key's
+        # suppression, and the 2026-11-12 bulk did it to 23 keys in two seconds — `autonomy-57
+        # 2026-11-12`, one process per key, which is why the count cannot live in a process and
+        # has to be read off the ledger's own tail. Raised here rather than in `cmd_record`
+        # because both CLI lanes and the library route all reach this one function: a run that
+        # imports this module and loops `record_verdict` is exactly as bulk-capable as the shell
+        # loop that made the incident, and a guard on only one write surface is not a guard.
+        count, burst_keys = reanchor_lift_burst(store, at=stamp)
+        if count >= REANCHOR_BURST_MAX:
+            raise ValueError(
+                f"refused: re-anchor burst. {count} date-leg lifts already sit inside the last "
+                f"{REANCHOR_BURST_WINDOW_MINUTES} minutes, at or over "
+                f"REANCHOR_BURST_MAX={REANCHOR_BURST_MAX}, so this lift of {pattern_key!r} is "
+                f"not appended to either tree. Window: "
+                f"{REANCHOR_BURST_WINDOW_MINUTES} minutes ending {stamp}. Keys in the burst: "
+                f"{', '.join(burst_keys)}. Each lift re-arms a released key's "
+                f"{REOPEN_AFTER_DAYS}-day suppression with no per-key falsifier re-read, which "
+                "is what the 2026-11-12 bulk of 23 lifts in 2 seconds did (#4084). A larger "
+                "deliberate lift is listed BY NAME in one run report, not looped: name the keys "
+                f"you are lifting in the report and lift at most {REANCHOR_BURST_MAX - 1} per "
+                "window, or lift them far enough apart that the ledger sees them as separate "
+                "decisions."
+            )
     row = {
         "pattern_key": pattern_key,
         "verdict": verdict,
