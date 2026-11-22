@@ -31,11 +31,12 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import workers.fleet_watchdog as fw                     # noqa: E402
+import workers.queue as queue_mod                       # noqa: E402
 import workers.sources as sources                       # noqa: E402
 import workers.sources.scheduled_task as st             # noqa: E402
 from app import autonomy                                # noqa: E402
 from workers.pool import WorkerPool                     # noqa: E402
-from workers.queue import WorkQueue                     # noqa: E402
+from workers.queue import MAX_LEGITIMATE_QUEUE_WAIT_SECONDS, WorkQueue  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -460,20 +461,25 @@ async def test_the_moved_alarms_keep_their_streak_and_cooldown_pacing(
 
 async def test_the_watchdog_reads_max_duration_seconds_and_never_the_enabled_flag(
         board, monkeypatch, tmp_path):
-    """Clause 5 across the config seam: the threshold that fires the alarm is config's.
+    """Clause 5 across the config seam: one field read, and never the disarmament key.
 
-    `max_duration_seconds` reaches the starving clause and nowhere else, so it is
-    checked three ways — the read, the threshold it sets, the alert that threshold
-    decides — because the value appears in NO alert text: the moved alarm quotes the age
-    of the oldest row, never its own threshold (clause 4 requires that message
-    unchanged). The proof is therefore that the config value decides WHETHER it fires.
+    `max_duration_seconds` is still the single config field this watchdog reads, and it
+    is checked the same three ways as before — the read, what the read decides, the
+    alert that decision reaches — because the value appears in NO alert text: the alarm
+    quotes the age of the oldest row and the bound it weighed it against, never the
+    source's run cap.
 
-    The board is empty, so the starving clause is the only alarm this can produce, and
-    the queue row is 20 min old. At the 300 s this hands the source block, 3x is 15 min,
-    so the row starves, the streak confirms and one alert goes out; at the 1800 s
-    fallback the same 3x bound is 90 min, so the same row is inside the cap, the streak
-    never confirms, and there is nothing to find. A watchdog that ignored the source
-    block would report the same result for both, and fail the second half.
+    What #4506 changed is WHICH decision the field feeds. It used to set the starving
+    threshold itself (3x it, so 15 min at 300 s and 90 min at 1800 s, which is what this
+    node proved by moving it), and the node asserted opposite outcomes for the same row
+    at the two values. It no longer does: the threshold is
+    `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS`, the claim path's 6 h opinion, and so the two
+    assertions below are that a 20 min row is quiet at BOTH config values and a 7 h row
+    starves at BOTH. A watchdog that went back to weighing the wait against this field
+    reddens one half or the other. Reading the field at all is still clause 5's point —
+    the field is what the dispatch tick paces on, and the guard this node exists for is
+    that the watchdog never reads `enabled`, which would let a dispatch-side switch
+    disarm the fleet's own alarm.
     """
     def config_at(max_duration):
         block = _NoEnabledKeyConfig({"max_duration_seconds": max_duration})
@@ -491,27 +497,37 @@ async def test_the_watchdog_reads_max_duration_seconds_and_never_the_enabled_fla
     assert fw._max_duration_seconds() == 300, (
         "the watchdog is not reading the field out of the `scheduled-task` block "
         "through `get_sources_config`, which is the read the clause names")
-    # The threshold the read produces, at both values of the field: the alarm's own
-    # detector, so the number above is shown to be the one that decides.
-    assert fw._queue_starving(q, 300) > 0, "3x 300 s is 15 min, so a 20 min row starves"
-    assert fw._queue_starving(q, 1800) == 0.0, "3x 1800 s is 90 min, so it does not"
+    # The threshold the field used to set is the shared bound now, so it is the same at
+    # both config values: 20 min is inside it, and a 7 h row is outside it.
+    assert fw._queue_starving(q, 300) == 0.0, (
+        "a 20 min row crossed the bound, which is what 3 x 300 s used to do — the "
+        "threshold is no longer this field's to set")
+    assert fw._queue_starving(q, 1800) == 0.0, "same row, same answer at the other value"
 
     alerts = _watch_alerts(monkeypatch)
-    _streak_at_alerting_threshold(monkeypatch)
-    await fw.tick(q)
-    assert len(alerts) == 1, f"expected the one starving-queue alert: {alerts}"
-    assert "oldest claimable queue item is 20 min old" in alerts[0], alerts[0]
-
-    # Same row, same state, only the read-out number different: inside the cap now, so
-    # no streak confirmation and no alert across a full alarm window.
-    alerts.clear()
-    config_at(1800)
     _streak_at_alerting_threshold(monkeypatch)
     for _ in range(fw._STALL_ALARM_TICKS):
         await fw.tick(q)
     assert alerts == [], (
-        "the alarm fired for a row well inside the 3x cap, so the config value is not "
-        f"what sets the threshold: {alerts}")
+        "the alarm fired for a 20 min row well inside the 6 h bound, so the config "
+        f"value is setting the threshold again: {alerts}")
+
+    # The other side of the same wiring: a row past the bound pages at BOTH config
+    # values, so the bound provably does not come from the field either.
+    alerts.clear()
+    aged = WorkQueue(_aged_queued_row(tmp_path / "past-bound.db",
+                                      minutes=_STARVING_HEAD_MINUTES))
+    assert fw._queue_starving(aged, 300) > MAX_LEGITIMATE_QUEUE_WAIT_SECONDS, (
+        "a 7 h row is not starvation at the 300 s config value")
+    assert fw._queue_starving(aged, 1800) > MAX_LEGITIMATE_QUEUE_WAIT_SECONDS, (
+        "the same row is not starvation at the 1800 s value either, so the bound is not "
+        "the config's after all")
+    config_at(1800)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(aged)
+    assert len(alerts) == 1, f"expected the one starving-queue alert: {alerts}"
+    assert (f"oldest claimable queue item is {_STARVING_HEAD_MINUTES} min old"
+            in alerts[0]), alerts[0]
 
 
 def test_a_starved_backlog_of_another_source_is_detected(tmp_path):
@@ -1095,11 +1111,15 @@ async def test_an_absent_or_unreadable_watermark_alerts_as_it_does_today(
 # instant either (#1661), which is the half that has to survive persistence.
 
 
-#: The age of the starving head in this section. 6 h is over 3x the widest
-#: `max_duration_seconds` this source has carried (3600 s since 2026-09-03), so the
-#: queue starves under the live config and under the 1800 s fallback alike — and
-#: `_starving_queue` asserts the figure it measured instead of assuming one.
-_STARVING_HEAD_MINUTES = 360
+#: The age of the starving head in this section: 7 h, one hour clear of the bound on
+#: either side. Since #4506 the threshold is `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` = 360
+#: min, so the age this fixture used to carry — 360 min, chosen as "over 3x the widest
+#: `max_duration_seconds`" — would have sat exactly on the strict `>` and made every
+#: alert counted below a coin toss against clock jitter. 420 starves under the bound and
+#: under every multiple of a run cap this source has ever carried (the 1800 s fallback
+#: made the old threshold 90 min, the live 3600 s made it 180) — and `_starving_queue`
+#: still asserts the figure it measured instead of assuming one.
+_STARVING_HEAD_MINUTES = 420
 
 
 def _starving_queue(tmp_path, name: str) -> WorkQueue:
@@ -2056,14 +2076,16 @@ def test_the_stall_alarm_reads_the_kind_from_the_row_not_from_a_second_counter(t
 # threw the key away one line before printing it.
 
 
-#: The one config number the starving clause weighs, pinned rather than inherited. The
-#: live value read through the loader on 2026-10-14:
+#: The config number pinned here rather than inherited, unchanged from the live value
+#: read through the loader on 2026-10-14:
 #: `workers.sources.get_sources_config()["scheduled-task"]["max_duration_seconds"]` is
-#: 3600, and `fw._max_duration_seconds()` — which weighs that source and no other —
-#: returns 3600. So the threshold AND the claim window below are 3 x 3600 = 10800 s =
-#: 180 min, and every age in this section clears that threshold.
+#: 3600, and `fw._max_duration_seconds()` still returns 3600. It is no longer what the
+#: starving clause weighs: since #4506 the threshold AND the claim window below are
+#: `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` — 21 600 s = 360 min, the same 6 h the claim
+#: path's aging dead band is defined from — so the value stays pinned here only to keep
+#: the config read itself deterministic, and every age in this section clears the bound.
 _STARVE_MAX_DURATION_S = 3600
-_STARVE_WINDOW_MIN = 3 * _STARVE_MAX_DURATION_S // 60
+_STARVE_WINDOW_MIN = MAX_LEGITIMATE_QUEUE_WAIT_SECONDS // 60
 
 #: Both ages below are real posts, not round numbers: 915 min is the 2026-10-12 23:58:32
 #: line (`server.err.4`), 456 min the 2026-10-13 10:14:02 one. The older is the head the
@@ -2074,8 +2096,12 @@ _STARVE_YOUNGER_MIN = 456
 
 
 def _starve_config(monkeypatch):
-    """Pin `max_duration_seconds` to the live 3600 s, so the window is 180 min here
-    whatever the box's `sources.yaml` says on the day the test runs."""
+    """Pin `max_duration_seconds` to the live 3600 s, whatever the box's
+    `sources.yaml` says on the day the test runs.
+
+    Since #4506 this no longer sets the starvation window — that is
+    `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS`, 360 min — but the field is still read, still by
+    name, and a node that let it drift would be grading some other box's config."""
     monkeypatch.setattr(
         sources, "get_sources_config",
         lambda: {"scheduled-task":
@@ -2164,9 +2190,11 @@ def _starved_board_queue(tmp_path, name: str, *, head: bool = True) -> WorkQueue
 
 def _assert_starving(q: WorkQueue) -> None:
     """The fixture's two standing premises, checked wherever the board is finished."""
-    assert fw._queue_starving(q, _STARVE_MAX_DURATION_S) > 3 * _STARVE_MAX_DURATION_S, (
-        f"a {_STARVE_HEAD_MIN} min head is not starvation at 3 x "
-        f"{_STARVE_MAX_DURATION_S} s, so no alert below could fire")
+    assert (fw._queue_starving(q, _STARVE_MAX_DURATION_S)
+            > MAX_LEGITIMATE_QUEUE_WAIT_SECONDS), (
+        f"a {_STARVE_HEAD_MIN} min head is not starvation at the "
+        f"{MAX_LEGITIMATE_QUEUE_WAIT_SECONDS // 3600} h bound, so no alert below could "
+        "fire — the bound is no longer 3 x `max_duration_seconds` (#4506)")
     assert fw._grossly_overdue(q) == [] and fw._next_run_stalled(q) == [], (
         "the board is not empty of task-side findings, so an alert counted below "
         "would not be attributable to the due-ness starve clause")
@@ -2177,7 +2205,8 @@ async def test_an_outranked_wait_names_its_source_and_says_priority_starvation(
     """Clauses 1 + 2: the line names the waiting source, and blames the priority order.
 
     The state is the live one: an `owed-check` head 915 min old, three `autotriage`
-    rows claimed inside the 180 min window, and nothing else wrong with the fleet. At
+    rows claimed inside the window the clause weighs with (360 min since #4506, 180 min
+    before it), and nothing else wrong with the fleet. At
     base this posts `autonomy scheduler may be stalled: oldest claimable queue item is
     915 min old` — which names no source and accuses the one process the evidence
     clears, because three rows went out of that queue inside the window.
@@ -2206,7 +2235,7 @@ async def test_an_outranked_wait_names_its_source_and_says_priority_starvation(
         f"the clause does not name the work being claimed ahead of the wait: {msg}")
     assert f"inside {_STARVE_WINDOW_MIN} min" in msg, (
         f"the clause does not bound the claim it counts with the window it weighed them "
-        f"in, and without the {3 * _STARVE_MAX_DURATION_S // 60} min a reader cannot "
+        f"in, and without the {_STARVE_WINDOW_MIN} min a reader cannot "
         f"tell an outranked queue from a stalled one: {msg}")
 
 
@@ -2215,7 +2244,8 @@ async def test_a_wait_with_nothing_claimed_in_the_window_keeps_today_s_sentence(
     """Clause 3's half that lives here: no claims in the window, today's bytes.
 
     Same board, same ages, the only difference being that the three `autotriage`
-    claims sit at 400 min — outside the 180 min window, so nothing proves the pool is
+    claims sit at 400 min — 40 min outside the 360 min window the clause has weighed
+    with since #4506, so nothing proves the pool is
     taking work, and the alarm has to keep the sentence
     `agent-services/guardian/detect.py:336` watches. Character for character,
     including the absence of the source name: an attribution this file cannot
@@ -4827,3 +4857,141 @@ async def test_a_held_parked_board_logs_the_nextrun_scan_with_the_pause_too(
     assert len(logged) == 1, (
         f"one parked-only scan must be exactly one log record: {logged}")
     assert "the worker pool is PAUSED by operator (machine hold)" in logged[0], logged[0]
+
+
+# ── #4506 — one bound: the page threshold IS the first aging credit ─────────
+#
+# Three instruments answered "how long may a queued row wait before this is news" and
+# none read what the others read: this file's starving clause paged at 3x the
+# `scheduled-task` block's `max_duration_seconds` (3 x 3600 = 180 min on the live
+# config), `workers/queue.py` started compensating a wait at 6 h, and a pre-registered
+# reflection criterion invented 240 min mid-week. Every pass read one of them and
+# reported as though it held the system's opinion — an 11 h 10 min wait called
+# starvation from the page side, a 4 h wait called a defect from the invented one, both
+# arithmetically correct against the number in hand. #4506 rules the wiring, not the
+# value: `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` (6 h = 21 600 s) is the opinion, the aging
+# dead band IS its definition, and the alarm that pages a human reads it.
+#
+# The measurement that decided which of the two moved, read off `~/lloyd-data/workers.db`
+# on 2026-11-22 with `select substr(claimed_at,1,10) d, count(*), round(avg(...),1),
+# round(max(...),1) from queue where source='owed-check' and claimed_at is not null
+# group by d`: 2026-11-20 = 68 rows, 64.7 avg, 290.1 max min; 2026-11-21 = 60 rows,
+# 89.4 avg, 327.7 max min. Two consecutive days, no `pause_journal` span over either
+# (the journal's newest row is id 74 at 2026-11-19T15:44:12Z, `value` 0), both over the
+# 180-min page bound and both under the 6 h first credit — the bound crossed by design
+# while the fleet was healthy, which is #2692's standing ruling re-measured. Nothing was
+# measured against 6 h, so the page bound moved and the dead band did not.
+
+
+def test_the_page_bound_is_the_first_aging_credit_not_a_config_multiple():
+    """#4506 clause 1: one number, and the alarm reads it, not a multiple of a run cap.
+
+    The arithmetic half is the relationship itself, stated once: the aging dead band and
+    the page bound are the same 21 600 s, and `AGING_PERIOD_HOURS` still evaluates to 6 —
+    #4506 moved which name holds the value, not the value, and
+    `tests/test_workers_queue.py::test_the_aging_rule_is_three_named_numbers` is the node
+    that pins the shipped triple (6, 15, 10) independently.
+
+    This lives in this file rather than beside the aging constants on purpose:
+    `tests/test_workers_queue.py`'s `q` fixture monkeypatches `AGING_PERIOD_HOURS` to
+    100_000 on the module singleton in
+    `test_the_aging_rule_is_three_named_numbers`, and reading the constant from a file
+    that never installs that fixture is what keeps this node measuring 6 hours.
+    """
+    assert MAX_LEGITIMATE_QUEUE_WAIT_SECONDS == 21_600, (
+        "the one number stopped being 6 h; the alarm text, the aging doc-comment and the "
+        "measurement quoted at the head of this section all quote it in words")
+    assert queue_mod.AGING_PERIOD_HOURS == 6, (
+        "the dead band's value moved, which #4506 explicitly forbids — this round wires "
+        "the two surfaces, it does not re-rule the 6 h")
+    assert queue_mod.AGING_PERIOD_HOURS * 3600 == MAX_LEGITIMATE_QUEUE_WAIT_SECONDS, (
+        "the aging dead band and the page bound are two magnitudes again, which is the "
+        "divergence #4506 was filed for: a 4 h wait was an alarm here and normal there")
+    assert fw.MAX_LEGITIMATE_QUEUE_WAIT_SECONDS == MAX_LEGITIMATE_QUEUE_WAIT_SECONDS, (
+        "the watchdog no longer weighs the wait against the shared bound")
+
+
+def test_the_page_bound_and_the_first_credit_fall_on_the_same_row(tmp_path):
+    """#4506 clause 4, measured by both mechanisms on rows one minute apart.
+
+    A relationship read off two constants can be satisfied by two constants that no
+    behaviour uses, so the boundary is measured twice instead: once by the alarm that
+    pages a person, once by the claim path that credits the age. Two rows one minute
+    each side of 6 h are the whole fixture, and the config value handed to the detector
+    is 300 s — under the shipped pre-#4506 code that made the bound 3 x 300 = 15 min, so
+    BOTH rows would have paged and the quiet half of this node would be red. That is the
+    divergence, pinned: the alarm now says the same thing about a wait that the credit
+    says, at the same minute.
+
+    The claim side is measured the way a worker measures an effective priority — by who
+    gets the row, never by reading the formula. An `owed-check` row at 72 earns one
+    credit of 15 points at 6 h (72 - 15 = 57), which beats a fresh `board-steward` row
+    at 65 and loses to it untouched; one credit is the FIRST credit, so the crossover
+    this node lands on is the same instant the alarm above crosses.
+    """
+    bound_minutes = MAX_LEGITIMATE_QUEUE_WAIT_SECONDS // 60
+
+    quiet = WorkQueue(_aged_queued_row(
+        tmp_path / "one-minute-inside.db", minutes=bound_minutes - 1))
+    pages = WorkQueue(_aged_queued_row(
+        tmp_path / "one-minute-past.db", minutes=bound_minutes + 1))
+    assert fw._queue_starving(quiet, 300) == 0.0, (
+        f"a {bound_minutes - 1} min wait paged the human, which is the shape two "
+        "hold-free healthy days (290.1 and 327.7 min) had and #4506 ruled legitimate")
+    assert fw._queue_starving(pages, 300) > MAX_LEGITIMATE_QUEUE_WAIT_SECONDS, (
+        f"a {bound_minutes + 1} min wait did not page, so the bound is above the aging "
+        "dead band and a starving row is now quieter than it was, not louder")
+
+    def first_claimed_source(*, aged_minutes: int) -> str:
+        probe = WorkQueue(tmp_path / f"credit-{aged_minutes}.db")
+        aged = probe.enqueue(source="owed-check", kind="owed-check:clause",
+                             payload={"item_id": 4506}, priority=72)
+        probe.enqueue(source="board-steward", kind="board-steward:clause",
+                      payload={"item_id": 4506}, priority=65)
+        _age_queued_row(probe, row_id=aged, minutes=aged_minutes)
+        claimed = probe.claim_next("w-4506")
+        assert claimed is not None, "the queue claimed nothing, so nothing is pinned"
+        return claimed.source
+
+    assert first_claimed_source(aged_minutes=bound_minutes + 1) == "owed-check", (
+        "the row the alarm pages for is still not credited by the claim path: the alarm "
+        "and the rescue are about different waits again")
+    assert first_claimed_source(aged_minutes=bound_minutes - 1) == "board-steward", (
+        "the credit landed before the page bound, so a wait the system calls legitimate "
+        "is already being compensated and the two numbers are not one number")
+
+
+async def test_the_starvation_alert_names_the_shared_bound_in_its_own_words(
+        board, monkeypatch, tmp_path):
+    """#4506 clause 3: the alert still states the bound it weighed, in its own sentence.
+
+    #2692 shipped this alarm quoting its own window (`claimed inside 180 min`) instead of
+    leaving a reader to multiply a config field, and the item says keep that. Keeping it
+    means keeping it TRUE: the minutes printed now come from
+    `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS`, so the sentence and the threshold cannot be
+    about different intervals — the three other sites that carried a raw `3 *
+    max_duration` were the attribution branch, its lookback and this text.
+
+    The positive control that gives the absence check its teeth is `_STARVE_MAX_DURATION_S`
+    = 3600: 3 x it is 180, the figure this alarm used to print. A clause that drifted back
+    to the config multiple prints 180 and reddens both asserts below; a clause that printed
+    no bound at all reddens the first.
+    """
+    _starve_config(monkeypatch)
+    q = _starved_board_queue(tmp_path, "bound-in-words.db")
+    _claim_rows(q, source="autotriage", n=3)
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, f"expected the one due-ness alert: {alerts}"
+    msg = alerts[0]
+    assert f"claimed inside {_STARVE_WINDOW_MIN} min" in msg, (
+        f"the clause stopped naming the window it weighed "
+        f"({_STARVE_WINDOW_MIN} min): {msg}")
+    assert _STARVE_WINDOW_MIN == MAX_LEGITIMATE_QUEUE_WAIT_SECONDS // 60 == 360, (
+        "the window named in the alert is not the shared bound")
+    assert "claimed inside 180 min" not in msg, (
+        "the sentence is quoting 3 x `max_duration_seconds` again — the magnitude a "
+        f"reader used to have to derive from config: {msg}")

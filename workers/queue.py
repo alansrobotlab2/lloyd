@@ -212,6 +212,44 @@ _CLAIM_RACE_RETRIES = 5
 # their next claim, they are not exempt.
 _CLAIM_CAP_SCAN_LIMIT = 64
 
+# ── The one number: how long a row may wait before it is news ─────────────
+#: The maximum legitimate queue wait (6 h = 21 600 s) — the system's single opinion of
+#: how long a claimable row may sit before the wait itself is the finding. Declared
+#: here, by the surface that has to act on a long wait, and read by the surface that
+#: pages a person, so the two cannot disagree about the same measured row (#4506).
+#:
+#: Before this line the two bounds were unrelated magnitudes. The claim path started
+#: crediting age at 6 h, while `workers/fleet_watchdog.py` paged at three times the
+#: `scheduled-task` block's `max_duration_seconds` — 3 × 3600 s = **180 min** on the
+#: live config, and a reflection criterion invented a third figure, 240 min. Three
+#: instruments, three answers to "is this wait news", and every analysis pass read one
+#: of them and reported as though it held the whole: one named an 11 h 10 min wait
+#: starvation from the page side, another called a 4 h wait a defect from a bound it had
+#: just invented. Both were arithmetically correct against the number in hand, and the
+#: divergence — not either value — was the defect.
+#:
+#: Why 6 h is the opinion and 180 min was not: 180 is the side with a measurement
+#: against it. Two consecutive hold-free healthy days crossed it on ordinary traffic
+#: (`owed-check` max daily waits 290.1 min on 2026-11-20 and 327.7 min on 2026-11-21,
+#: no `pause_journal` span covering either — the newest row is id 74, value 0,
+#: 2026-11-19T15:44:12Z). Nothing has been measured against 6 h, so the dead band's
+#: value is untouched and only its definition moved: the page bound is what moved to
+#: meet it. The page bound is therefore *equal to* the first aging credit, not below
+#: it — a row is alarming and being compensated from the same instant, which is the
+#: pair of facts this item ruled belong together.
+#:
+#: Both surfaces read this name. `workers/fleet_watchdog.py` imports it as the age its
+#: starving clause pages at, and `AGING_PERIOD_HOURS` below is this number divided to
+#: the unit the aging curve is written in. Re-point either file by the name, never by a
+#: line number:
+#:     grep -rn 'MAX_LEGITIMATE_QUEUE_WAIT_SECONDS' ~/lloyd/workers/
+#:
+#: Deliberately NOT folded in: `PENDING_WAIT_BOUND_SECONDS` below, the 60-min
+#: row-counting bound of `/api/workers/health`. It counts rows for a panel rather than
+#: paging a human, and whether it should read this number too is a scope ruling
+#: owed-check holds, not one this round may make.
+MAX_LEGITIMATE_QUEUE_WAIT_SECONDS = 6 * 3600
+
 # ── Aging: how a long wait buys urgency ───────────────────────────────────
 # The three numbers below are the whole rule, and setting `AGING_PERIOD_HOURS`
 # above any wait a row can reach is the switch that turns aging off: the
@@ -221,6 +259,13 @@ _CLAIM_CAP_SCAN_LIMIT = 64
 
 #: Hours a row must wait before its age starts counting, and the unit of every
 #: credit after that — a credit is earned per FULL period, never pro rata.
+#:
+#: Derived from `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS`, not written as a literal: the
+#: other surface's number, in the other file, is **the same 6 h** — the watchdog pages
+#: a person at exactly the instant this dead band ends — and the relationship is pinned
+#: by `tests/test_fleet_watchdog.py::test_the_watchdog_pages_at_the_first_aging_credit`.
+#: The value is 6, unchanged by #4506, and `tests/test_workers_queue.py` pins it
+#: alongside the curve below, which quotes 6 h throughout.
 #:
 #: Six hours is longer than any legitimate wait for a slot on this box and shorter
 #: than the starvation #2496 measured. The queue on 2026-10-10 held 31 rows at
@@ -234,7 +279,7 @@ _CLAIM_CAP_SCAN_LIMIT = 64
 #: that settle owed clauses and distill transcripts were displaced indefinitely, not
 #: merely late. `pending_wait_by_source` had been reporting that exact 11 h 10 min
 #: shape since #1526 and nothing in the claim path read it.
-AGING_PERIOD_HOURS = 6
+AGING_PERIOD_HOURS = MAX_LEGITIMATE_QUEUE_WAIT_SECONDS // 3600
 
 #: Priority points (a LOWER number) one full period buys: 15 per 6 h period, so a
 #: priority-72 `owed-check` row is at effective 57 at 6 h, 42 at 12 h, 27 at 18 h, 12

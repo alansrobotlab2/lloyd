@@ -71,7 +71,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from workers.queue import WorkQueue
+from workers.queue import MAX_LEGITIMATE_QUEUE_WAIT_SECONDS, WorkQueue
 # #3713: the stall alarm and the Mission Control figure attribute a wait the same
 # way or not at all, so they share the one function that answers which lanes a claim
 # gate is holding back. `workers.pool` imports this module only inside
@@ -97,6 +97,16 @@ NAME = "scheduled-task"
 #: weighs the oldest claimable item against a ceiling to decide whether dispatch is
 #: starving, so inheriting 900, or 0 from a missing block, would call ordinary queued
 #: work starving. `tests/test_fleet_watchdog.py` pins the behaviour that depends on it.
+#:
+#: #4506 moved WHAT that ceiling is: the starving clause now pages at
+#: `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` (imported above from `workers/queue.py`, 6 h =
+#: 21 600 s), which is the claim path's own opinion of a legitimate wait, and not at
+#: three times this field. On the live config (`max_duration_seconds: 3600`) that bound
+#: was 3 x 3600 = 180 min, and two consecutive hold-free healthy days crossed it — so
+#: the field is read here for the run-cap question it answers, and the page bound is no
+#: longer one of its uses. The read stays, and stays a single field: #1682's clause is
+#: that the watchdog reads this one field and never the source's `enabled` key, and a
+#: round that deleted the read to tidy it would delete that guard with it.
 DEFAULT_MAX_DURATION_SECONDS = 1800
 
 # Stall alarm: a task overdue by more than this multiple of its interval (with its
@@ -1128,8 +1138,21 @@ def _blocked_note(entry: dict) -> str:
 
 def _queue_starving(queue: WorkQueue, max_duration: int,
                     held_sources=None) -> float:
-    """Age in seconds of the oldest claimable queued item, if it is older than
-    3x max_duration. Catches the opposite failure: dispatch fine, workers dead.
+    """Age in seconds of the oldest claimable queued item, if it is older than the
+    system's one bound on a legitimate wait. Catches the opposite failure: dispatch
+    fine, workers dead.
+
+    That bound is `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` — 6 h = 21 600 s, imported from
+    `workers/queue.py`, where the aging dead band IS its definition (#4506). It used to
+    be three times `max_duration`, which made this alarm's threshold a consequence of one
+    source's run cap: 180 min on the live `max_duration_seconds: 3600`, against a claim
+    path that did not start compensating a wait until 6 h. The same measured row was
+    therefore an alarm and a non-event depending on which of the two files a reader had
+    open, and two consecutive hold-free healthy days crossed the 180 min figure on
+    ordinary traffic. `max_duration` is still the parameter it was — `tick` calls this
+    positionally through `run_in_executor` and a spy in
+    `tests/test_autonomy_scheduler.py` asserts that stays a number — it simply no longer
+    sets the threshold.
 
     `held_sources` names the lanes a claim gate is holding back. `None` — the
     argument `tick()` leaves it at — asks the running pool, so the answer comes from
@@ -1157,8 +1180,8 @@ def _queue_starving(queue: WorkQueue, max_duration: int,
     figures is all this detector needs, and the alarm and the Mission Control panel
     cannot disagree about how long the fleet has been waiting.
 
-    What has not moved is the threshold and the shape of the answer: 3x
-    `max_duration`, and 0.0 when nothing qualifies, which the alert's wording and the
+    What has not moved is the shape of the answer: the age above the bound, and 0.0
+    when nothing qualifies, which the alert's wording and the
     streak logic in `tick()` both depend on. A read that raises still returns 0.0 —
     an unreadable queue is not evidence of a stall, and a watchdog that alarmed on its
     own exception would spend a person's cooldown on a lock.
@@ -1189,7 +1212,7 @@ def _queue_starving(queue: WorkQueue, max_duration: int,
         return 0.0
     oldest = max((entry["max_wait_seconds"] for entry in waits.values()),
                  default=0.0)
-    return oldest if oldest > 3 * max_duration else 0.0
+    return (oldest if oldest > MAX_LEGITIMATE_QUEUE_WAIT_SECONDS else 0.0)
 
 
 def _oldest_wait(queue: WorkQueue, held_sources=None) -> tuple[float, str | None]:
@@ -1230,13 +1253,18 @@ def _oldest_wait(queue: WorkQueue, held_sources=None) -> tuple[float, str | None
 
 def _outranked_clause(
     queue: WorkQueue, starving: float, starving_source: str | None,
-    max_duration: int,
 ) -> str:
     """A clause naming the work being claimed ahead of the waiting row, or "".
 
     Empty string UNLESS the fleet is demonstrably claiming: some source other than the
     waiting one has rows in `claimed` or `running` stamped inside the same
-    3 x `max_duration` window the wait is weighed against. That is what "the pool is
+    `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` window the wait is weighed against — the one
+    bound `_queue_starving` pages at, so the count and the accusation can never be
+    about two different intervals (#4506: this branch, its lookback and the printed
+    minutes below all carried a raw three-times-`max_duration` expression, and binding
+    only the threshold
+    would have left the alert's own sentence quoting a window the alarm no longer used).
+    That is what "the pool is
     taking work" means, read off `queue.claimed_at` — the column `claim_next` stamps on
     every claim — rather than inferred from run rows, which only appear when a job
     finishes. The waiting source is excluded from the count on purpose: an `owed-check`
@@ -1283,11 +1311,12 @@ def _outranked_clause(
     9,520 rows on this box 2026-10-14, which at alert-path frequency is nothing, and which
     is why the read is not hoisted into the tick's ordinary path.
     """
-    if starving < 3 * max_duration or starving_source is None:
+    if starving < MAX_LEGITIMATE_QUEUE_WAIT_SECONDS or starving_source is None:
         return ""
     import datetime as _dt
     now = _dt.datetime.now(_dt.timezone.utc)
-    since = (now - _dt.timedelta(seconds=3 * max_duration)).isoformat()
+    since = (now - _dt.timedelta(
+        seconds=MAX_LEGITIMATE_QUEUE_WAIT_SECONDS)).isoformat()
     try:
         claims = queue.claims_by_source(since, exclude_source=starving_source)
     except Exception:
@@ -1304,7 +1333,7 @@ def _outranked_clause(
         ahead += f", plus work from {others} other source" + ("s" if others != 1 else "")
     return (
         f" — priority starvation: it is outranked by higher-priority work,"
-        f" {ahead} claimed inside {3 * max_duration // 60} min"
+        f" {ahead} claimed inside {MAX_LEGITIMATE_QUEUE_WAIT_SECONDS // 60} min"
     )
 
 
@@ -2304,7 +2333,7 @@ async def tick(queue: WorkQueue) -> None:
                 # `agent-services/guardian/detect.py:336` cites it, and
                 # `test_a_starving_queue_with_no_pause_alerts_byte_identically` pins its
                 # bytes — so a source name never leaks into the genuine-stall case.
-                outranked = _outranked_clause(queue, starving, starving_source, max_dur)
+                outranked = _outranked_clause(queue, starving, starving_source)
                 if outranked:
                     parts.append(f"the {starving_source} stream has a claimable row "
                                  f"{starving/60:.0f} min old{outranked}")
