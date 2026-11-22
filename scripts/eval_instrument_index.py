@@ -75,7 +75,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -177,6 +177,14 @@ class Instrument:
     #: The artifact's own statement of what its denominator is, when it carries
     #: one. Read into the row so a share is never quoted over an unknown N.
     unit_path: str | None = None
+    #: The artifact's own statement of WHICH WINDOW it was swept on, when it carries
+    #: one and the default window is what the row otherwise reads as. Declared like
+    #: every other pointer, dug with the same `_dig`, and named in the arm's published
+    #: line whenever it is not the default (`_window_note`). Only `behaviour_exhibit`
+    #: declares it today: a day swept with `--since`/`--until`/`--split-on` (#3885)
+    #: lands in that store under the same dated name as a 7-day run, and an index that
+    #: read only the store published the two as one row (#4334).
+    window_mode_path: str | None = None
     #: False = reported, never averaged into a total.
     averageable: bool = True
 
@@ -439,12 +447,24 @@ INSTRUMENTS: tuple[Instrument, ...] = (
     # `_behaviour_exhibit_dir` — the same constant `app.behaviour_exhibit.out_dir()`
     # returns since #3886, so the index and the sweep cannot end up pointing at two
     # directories, which is what this test's citation rule is for.
+    #
+    # `window_mode_path` is #4334's half. Since `199d319b` (#3885) the sweep can be
+    # handed an absolute window (`--since`/`--until`/`--split-on`) and publishes which of
+    # the two clocks admitted its files as `window_mode`, but `out_dir()` still routes any
+    # mode into THIS dated store under the same `behaviour-exhibit-YYYY-MM-DD.jsonl` name,
+    # and the only bar on the scheduled job doing that is a sentence in its own prompt
+    # (`autonomy/109-behaviour-exhibit-daily.md`). So the store cannot tell a 7-day row
+    # from a ten-day one; the artifact can, and now the arm reads it. RULING (#4334): this
+    # is a read-side fix only — a write-time refusal in `out_dir()` was ruled out on zero
+    # measured instances (0 `content` artifacts among the dated ones on this box), so the
+    # index names the mode rather than rejecting the row.
     Instrument(
         key="behaviour_exhibit",
         title="Behaviour exhibit rates, pooled over the scored behaviours (worker)",
         artifact=_behaviour_exhibit_dir,
         pattern="behaviour-exhibit-*.jsonl",
         value_path="worker_pooled",
+        window_mode_path="window_mode",
         unit="share",
         polarity="up",
         weight=0.0,
@@ -498,6 +518,13 @@ class Reading:
     ci95: list[float] | None
     declared_unit: str | None
     detail: str
+    #: Non-empty only for an arm that declares `window_mode_path`, and only when the
+    #: artifact it read was not swept on the window the row otherwise reads as. A short
+    #: human-readable clause, carried into `detail` and onto the printed table line: a
+    #: row scored over a window that is not the series' window has to SAY so, or the
+    #: table is a comparison between two different things (#4334). Empty on a `missing`
+    #: reading — there is no artifact to name a window of.
+    window_note: str = ""
 
     @property
     def contributes(self) -> bool:
@@ -657,6 +684,48 @@ def _as_day(raw: Any) -> date | None:
         return None
 
 
+#: The window a row reads as when its artifact says nothing otherwise: for
+#: `behaviour_exhibit` this is `app.behaviour_exhibit.resolve_window`'s `--days` cutoff,
+#: which returns exactly `"mtime"` or `"content"` and nothing else. An arm that declares
+#: a `window_mode_path` is an arm whose default window is implicit in the row, so the
+#: default is the one mode allowed to publish with no note.
+DEFAULT_WINDOW_MODE = "mtime"
+
+
+def _window_note(mode: Any) -> str:
+    """What the artifact's own window field says, in words, when it is not the default.
+
+    Empty for the default mode, which is the whole of #4334's byte-identical clause: an
+    mtime store publishes exactly what it published before the key was read. The two
+    non-default cases mean different things and are worded differently, because naming
+    them alike would be a fresh misreading of its own:
+
+    * a NAMED non-default mode is a content-windowed run — `--since`/`--until`/
+      `--split-on`, `199d319b` — sitting in the dated store beside the 7-day ones, and
+      the number is not comparable with theirs;
+    * NOTHING RECORDED — the key absent (the shape of every artifact written before
+      #3885), or present but null/empty, which records no mode either — is not corrupt.
+      `window_mode` shipped with #3885, so an artifact predating it could only have been
+      swept on the mtime cutoff: legacy, and worth saying so for exactly the reason the
+      item gives — a reader comparing it against a content-windowed row needs to know
+      which clock admitted its files. A non-string value is named by its repr rather than
+      called absent, because saying "absent" about a value that is there would be the
+      same misreading in the other direction.
+    """
+    if mode is None:
+        text = ""
+    else:
+        text = mode.strip() if isinstance(mode, str) else repr(mode)
+    if not text:                      # absent, null, or an empty string: nothing recorded
+        return (" (window_mode absent: legacy pre-#3885 artifact, swept before 199d319b "
+                "published the key, when every run of this sweep was an mtime window)")
+    if text == DEFAULT_WINDOW_MODE:
+        return ""
+    return (f" (window_mode={text}: not the mtime window, so this row is not comparable "
+            f"with the 7-day series -- a --since/--until/--split-on run, or a field the "
+            f"writer did not publish, put it into the dated store)")
+
+
 def read_instrument(instr: Instrument, *, today: date,
                     root_override: Path | None = None) -> Reading:
     """One component's row of evidence, read from disk as at `today`."""
@@ -721,24 +790,39 @@ def read_instrument(instr: Instrument, *, today: date,
                 value=value, denominator=denominator, ci95=ci95,
                 declared_unit=declared_unit if isinstance(declared_unit, str) else None)
 
+    # What the artifact's own window field says, when it says anything the row does not
+    # already read as. Empty for every arm that declares no `window_mode_path` and for an
+    # artifact on its default window, so a run over an mtime store is byte-identical to
+    # the same run before the field was read at all (#4334 clause 3).
+    window_note = (_window_note(_dig(doc, instr.window_mode_path))
+                   if instr.window_mode_path else "")
+
+    def noted(reading: Reading) -> Reading:
+        """The reading, with the window named in the sentence AND as its own field: the
+        first is what a person reading the headline's `why` sees, the second is what the
+        printed table line is built from."""
+        return reading if not window_note else replace(
+            reading, detail=reading.detail + window_note, window_note=window_note)
+
     if value is None:
-        return Reading(key=instr.key, status="no-value",
-                       detail=f"{path.name} carries no value at `{instr.value_path}` "
-                              f"(a named refusal, not a zero)", **base)
+        return noted(Reading(key=instr.key, status="no-value",
+                             detail=f"{path.name} carries no value at `{instr.value_path}` "
+                                    f"(a named refusal, not a zero)", **base))
     if not 0.0 <= value <= 1.0:
-        return Reading(key=instr.key, status="not-a-rate",
-                       detail=f"{value} is outside 0..1, so `{instr.value_path}` is "
-                              f"not a share and may not enter the total", **base)
+        return noted(Reading(key=instr.key, status="not-a-rate",
+                             detail=f"{value} is outside 0..1, so `{instr.value_path}` is "
+                                    f"not a share and may not enter the total", **base))
     if (instr.cadence_days is not None and not instr.hand_run_by_ruling
             and age is not None and age > instr.cadence_days):
-        return Reading(key=instr.key, status="stale",
-                       detail=f"newest artifact is {age} d old against a declared "
-                              f"cadence of {instr.cadence_days} d "
-                              f"(scheduled_by={instr.scheduled_by or 'no task file'})",
-                       **base)
-    return Reading(key=instr.key, status="measured",
-                   detail=f"newest artifact {path.name}"
-                          + (f", {age} d old" if age is not None else ""), **base)
+        return noted(Reading(
+            key=instr.key, status="stale",
+            detail=f"newest artifact is {age} d old against a declared "
+                   f"cadence of {instr.cadence_days} d "
+                   f"(scheduled_by={instr.scheduled_by or 'no task file'})",
+            **base))
+    return noted(Reading(key=instr.key, status="measured",
+                         detail=f"newest artifact {path.name}"
+                                + (f", {age} d old" if age is not None else ""), **base))
 
 
 # ── tier, quality, movement ───────────────────────────────────────────────────
@@ -991,6 +1075,7 @@ def build_row(instruments: Sequence[Instrument] = INSTRUMENTS, *,
                 "script": instr.consumer.script, "how": instr.consumer.how,
                 "compares_rows": instr.consumer.compares_rows}),
             "detail": reading.detail,
+            "window_note": reading.window_note,
         })
 
     dead_or_stale = [{"key": c["key"], "instrument_path": c["artifact_path"],
@@ -1089,11 +1174,14 @@ def render(row: dict) -> str:
              "-" * 108]
     for c in row["components"]:
         ci = (f" [{c['ci95'][0]:.3f},{c['ci95'][1]:.3f}]" if c["ci95"] else "")
+        # `.get`, not `[...]`: a row read back out of the series was written before
+        # #4334 added the field, and rendering history must not need a migration.
+        note = c.get("window_note") or ""
         lines.append(
             f"{c['key']:20s} {c['status']:10s} {c['tier']:<4d} {c['weight']:<5.2f} "
             f"{c['unit']:6s} {_num(c['value']):>7s} {_num(c['quality']):>6s} "
             f"{('' if c['denominator'] is None else str(c['denominator'])):>5s}  "
-            f"{str(c['newest_artifact']):11s}  {c['scheduled_by'] or 'none'}{ci}")
+            f"{str(c['newest_artifact']):11s}  {c['scheduled_by'] or 'none'}{note}{ci}")
     t = row["totals"]
     lines += ["",
               f"totals: {t['status']}  scored {t['scored']}/{t['of']}  "

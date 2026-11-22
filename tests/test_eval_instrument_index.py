@@ -1826,3 +1826,262 @@ def test_no_test_before_the_retirement_block_selects_the_retired_arm_by_key():
     assert after == {"automod_scorecard"}, (
         "positive control: the key IS still a constant in the file, below the banner, "
         "so the check above reads a file that mentions it rather than one that lost it")
+
+
+# ── #4334: the exhibit arm names the window its artifact was actually swept on ───
+#
+# #3885 (`199d319b`) gave the sweep `--since`/`--until`/`--split-on` AND published which
+# mode ran, as `window_mode`, beside the rates in the artifact. #3886 registered the arm
+# in this index but wired it to the STORE only — `app.paths.BEHAVIOUR_EXHIBIT_DIR`, the
+# date in the filename, `worker_pooled` — so an artifact swept on an absolute content
+# window lands in the same dated store under the same `behaviour-exhibit-YYYY-MM-DD.jsonl`
+# name and gets published as an ordinary 7-day mtime row. The scheduled job is barred
+# from those flags by its own prompt (`autonomy/109-behaviour-exhibit-daily.md`) and
+# nothing in code enforces the bar, while `out_dir()` routes a hand run's artifact into
+# that same store whatever the mode: the read side is therefore where the reading is
+# fixed, and read-side only — a write-time refusal is ruled out by the item on zero
+# measured instances (0 `content` artifacts out of the 8 dated ones on this box).
+#
+# `resolve_window` returns exactly two modes, `"mtime"` (`app/behaviour_exhibit.py:426`)
+# and `"content"` (`:430`), and `199d319b` is the commit that introduced the key. So an
+# artifact with NO `window_mode` is not an anomaly: it predates the key, and the only
+# window that could produce it is the mtime one. It is named as legacy for that reason —
+# a reader comparing it against a content-windowed row needs to know which of the two
+# clocks admitted its files, and "silently a 7-day row" hides the key's own birthday.
+#
+# Every fixture below is a `tmp_path` store handed in through `root_overrides`, exactly
+# as the four #3886 tests above are: no test here writes to the live dated store.
+
+def _exhibit_swept_on(mode: "str | None", *, day: str = FRESH) -> dict:
+    """One dated exhibit artifact in the shape `sweep` publishes for one window MODE.
+
+    Built on `_exhibit_artifact`, so the pooled scalar is still the writer's own. What
+    varies is the window block the writer publishes beside it: `window_mode` is
+    `Window.as_dict()["mode"]`; `window_days` is the caller's knob ONLY in mtime mode,
+    because `--days 7` printed beside a ten-day `--since 2026-10-26 --until 2026-11-05`
+    run is a lie the writer stopped telling in `199d319b`; and the endpoints are the
+    record that made a run re-derivable after the day it ran on. `mode=None` is the
+    pre-#3885 shape — `window_days: 7` and no mode key at all, which is exactly what
+    `/home/alansrobotlab/lloyd-data/eval/behaviour-exhibit/behaviour-exhibit-2026-11-04.jsonl`
+    still carries.
+    """
+    doc = _exhibit_artifact(
+        [_exhibit_row("tool-call-caption-present", _EXH_K, _EXH_N)],
+        measured_at=f"{day}T02:24:50+00:00")
+    if mode is None:
+        return doc
+    doc["window_mode"] = mode
+    if mode == "mtime":
+        doc["window_days"] = 7
+        doc["window_start"], doc["window_end"] = f"{day}T00:00:00+00:00", None
+    else:
+        doc["window_days"] = None
+        doc["window_start"], doc["window_end"] = ("2026-10-26T00:00:00+00:00",
+                                                 "2026-11-05T00:00:00+00:00")
+    return doc
+
+
+def _table_line(row: dict, key: str) -> str:
+    """One arm's printed line of the rendered table — the surface a person reads."""
+    line = next((ln for ln in EII.render(row).splitlines()
+                 if ln.startswith(key + " ")), None)
+    assert line is not None, f"{key} is not a row of the printed table:\n{EII.render(row)}"
+    return line
+
+
+def test_the_window_rule_names_a_mode_only_when_it_is_not_the_default_one():
+    """`_window_note` is the whole rule, so the rule itself is pinned — every branch.
+
+    `resolve_window` (`app/behaviour_exhibit.py:426` and `:430`) returns `"mtime"` or
+    `"content"` and nothing else, so the mtime arm is the one that must stay silent: it is
+    7 of the 8 dated artifacts on this box and every one the daily job writes, and an
+    appended note there is clause 3 failing. The empty-string arm is in the same class as
+    an absent key — a field that records no mode — while a value that is PRESENT but is
+    not a mode string is named by its repr, never called absent: "absent" about a value
+    that is on disk would be the same misreading in the other direction.
+    """
+    assert EII._window_note("mtime") == "", EII._window_note("mtime")
+    assert EII.DEFAULT_WINDOW_MODE == "mtime", (
+        "the default is pinned to the mode the sweep's own `Window` class uses")
+    note = EII._window_note("content")
+    assert "window_mode=content" in note and "--since" in note, note
+    assert "not comparable" in note, note
+    for nothing in (None, "", "   "):
+        absent = EII._window_note(nothing)
+        assert "window_mode absent" in absent and "legacy" in absent, (repr(nothing), absent)
+        assert "#3885" in absent and "199d319b" in absent, (repr(nothing), absent)
+    weird = EII._window_note(7)
+    assert "window_mode=7" in weird and "absent" not in weird, weird
+
+
+def test_a_content_window_exhibit_artifact_names_its_mode_in_the_published_row(tmp_path):
+    """Clause 1 (#4334): a `window_mode: "content"` artifact is published as one.
+
+    The reading's NUMBER is untouched — the arm still reports the writer's pooled rate
+    over its own denominator — because this is a naming fix, not a rescoring: what the
+    clause forbids is the row reading as a plain 7-day window, and what makes it a
+    different row is the mode, stated. Both published surfaces are checked: the serialised
+    component's own field and the printed table line, because the item's word is
+    "published line" and a field nobody renders is the failure #460 already named here.
+    """
+    store = tmp_path / "content-store"
+    doc = _exhibit_swept_on("content")
+    assert doc["window_mode"] == "content" and doc["window_days"] is None, (
+        "the fixture is the content shape: no `window_days`, because that key is only "
+        "true of the mtime window")
+    path = _plant_exhibit(store, doc, day=FRESH)
+
+    reading = EII.read_instrument(_instr("behaviour_exhibit"), today=NOW.date(),
+                                  root_override=store)
+    assert reading.status == "measured", vars(reading)
+    assert reading.value == pytest.approx(_EXH_K / _EXH_N, abs=1e-6), vars(reading)
+    assert reading.denominator == _EXH_N
+    assert "window_mode=content" in reading.detail, reading.detail
+    assert "window_mode=content" in reading.window_note, reading.window_note
+    assert reading.detail != (f"newest artifact {path.name}, 1 d old"), (
+        "the plain-window string this arm used to publish is gone, byte for byte, over a "
+        "content artifact — that string is what clause 1 says may not be the reading")
+
+    row = EII.build_row([_instr("behaviour_exhibit")], now=NOW,
+                        root_overrides={"behaviour_exhibit": store},
+                        out_dir=None, code_root=tmp_path / "code")
+    assert _component(row, "behaviour_exhibit")["window_note"] == reading.window_note, (
+        "the published row carries what the reader saw")
+    line = _table_line(row, "behaviour_exhibit")
+    assert "window_mode=content" in line, line
+    assert "--since" in line, (
+        "the line has to say how such an artifact gets into a dated store, or a reader "
+        "who never ran the flags cannot tell a hand sweep from a broken scheduler")
+
+    # The `-m` seam a person actually runs, across the process boundary: the mode has to
+    # reach the printed stdout and not merely the in-process dict. `--no-record` so the
+    # run appends nothing to any series, and `--roots` so it reads these fixtures and
+    # never the live dated store.
+    roots = _seed_all(tmp_path / "cli", GOOD_VALUES)
+    roots["behaviour_exhibit"] = store
+    snap = tmp_path / "cli-roots.json"
+    snap.write_text(json.dumps({k: str(v) for k, v in roots.items()}), encoding="utf-8")
+    proc = _run_publisher("--now", "2026-10-13T03:40:00+00:00", "--roots", str(snap),
+                          "--no-record", "--print")
+    assert proc.returncode == 0, proc.stderr[-500:]
+    cli_line = next((ln for ln in proc.stdout.splitlines()
+                     if ln.startswith("behaviour_exhibit ")), None)
+    assert cli_line is not None, proc.stdout
+    assert "window_mode=content" in cli_line, cli_line
+    assert "window_mode" not in proc.stdout.split("HEADLINE:")[1].splitlines()[0], (
+        "the mode belongs to the arm's own line: the headline is the composite, and the "
+        "arm carries no weight in it")
+
+
+def test_a_pre_3885_exhibit_artifact_with_no_window_mode_is_named_legacy(tmp_path):
+    """Clause 2 (#4334): no `window_mode` key is named as legacy, never as an ordinary row.
+
+    The distinction the clause is built on: the key arrived with `199d319b`, so an
+    artifact that predates it was definitionally an mtime run. Reporting it as an
+    ordinary 7-day row hides that it was written before the window was recorded at all;
+    reporting it as a NON-mtime anomaly would call a normal historical artifact broken.
+    So the note says both halves — the key is absent, and the window it lacks is the
+    mtime one.
+    """
+    store = tmp_path / "legacy-store"
+    doc = _exhibit_swept_on(None)
+    assert "window_mode" not in doc and doc["window_days"] == 7, (
+        "the 2026-11-04 artifact's real shape, re-read from disk: `window_days: 7`, no "
+        "`window_mode`, no endpoints")
+    path = _plant_exhibit(store, doc, day=FRESH)
+
+    reading = EII.read_instrument(_instr("behaviour_exhibit"), today=NOW.date(),
+                                  root_override=store)
+    assert reading.status == "measured", vars(reading)
+    assert reading.value == pytest.approx(_EXH_K / _EXH_N, abs=1e-6), vars(reading)
+    note = reading.window_note
+    assert "window_mode absent" in note, note
+    assert "legacy" in note and "#3885" in note, note
+    assert "199d319b" in note, "the note names the commit that introduced the key"
+    assert "mtime" in note, (
+        "and it names the window a pre-#3885 artifact did in fact run on, so the reader "
+        "is told what the absent key means rather than left to guess")
+    assert reading.detail != f"newest artifact {path.name}, 1 d old", (
+        "not silently an ordinary window=7d row")
+
+    row = EII.build_row([_instr("behaviour_exhibit")], now=NOW,
+                        root_overrides={"behaviour_exhibit": store},
+                        out_dir=None, code_root=tmp_path / "code")
+    assert "legacy" in _table_line(row, "behaviour_exhibit")
+
+
+def test_an_mtime_exhibit_store_publishes_byte_identically_to_the_row_before(tmp_path):
+    """Clause 3 (#4334): over the live shape — newest artifact `window_mode: mtime` — nothing changes.
+
+    This is the clause that keeps the fix from being a re-labelling of every day of the
+    series, so it is pinned at the byte level in three places: the arm's `detail` is
+    required to EQUAL the exact string this arm published before the key was read (an
+    appended note of any kind fails it), the whole rendered table must not contain the
+    word `window_mode` or `legacy` anywhere, and the headline's stale list must not gain
+    the arm. The same check was run against the real store before and after the change
+    and printed identical output; this test is the hermetic half of that, and it uses no
+    file outside `tmp_path`.
+    """
+    store = tmp_path / "mtime-store"
+    doc = _exhibit_swept_on("mtime")
+    assert doc["window_mode"] == "mtime" and doc["window_days"] == 7, (
+        "7 of the 8 dated artifacts on this box, and every one the daily job writes, "
+        "have exactly this shape")
+    path = _plant_exhibit(store, doc, day=FRESH)
+
+    reading = EII.read_instrument(_instr("behaviour_exhibit"), today=NOW.date(),
+                                  root_override=store)
+    assert reading.status == "measured", vars(reading)
+    assert reading.window_note == "", vars(reading)
+    assert reading.detail == f"newest artifact {path.name}, 1 d old", (
+        "byte-for-byte the pre-#4334 string; age 1 day because the fixture is dated "
+        "FRESH against the pinned NOW")
+
+    roots = _seed_all(tmp_path, GOOD_VALUES)
+    roots["behaviour_exhibit"] = store
+    out = tmp_path / "index"
+    out.mkdir(parents=True, exist_ok=True)
+    row = EII.build_row(EII.INSTRUMENTS, now=NOW, root_overrides=roots, out_dir=out,
+                        code_root=tmp_path / "code")
+    rendered = EII.render(row)
+    assert "window_mode" not in rendered, rendered
+    assert "legacy" not in rendered.lower(), rendered
+    assert row["headline"].count("behaviour_exhibit") == 0, row["headline"]
+    assert row["dead_or_stale"] == [], (
+        "a fresh mtime store is not missing and not stale: clause 2 of the item is that "
+        "the arm stays out of the headline's dead list exactly as it is today")
+    comp = _component(row, "behaviour_exhibit")
+    assert comp["status"] == "measured" and comp["window_note"] == "", comp
+
+
+def test_naming_the_window_leaves_the_arm_named_by_app_paths_at_zero_weight(tmp_path):
+    """Clause 4 (#4334): the arm's identity is untouched — one store, no weight, no share.
+
+    #3886 clause 1 is that the store has one name, resolved through the writer's own
+    `app.paths.BEHAVIOUR_EXHIBIT_DIR` rather than a path re-spelled here, and #3886's
+    ruling is that this arm is carried in the table and excluded from both composites
+    (its pooled denominator is caption-arm-dominated). Reading one more field out of the
+    artifact may not disturb either: the path pin, `weight == 0.0` and
+    `averageable == False` are re-asserted here, and the three pre-existing pins —
+    `test_the_exhibit_store_has_one_name_shared_by_its_writer_and_its_readers`,
+    `test_the_exhibit_arm_is_carried_in_the_table_and_excluded_from_both_totals` and
+    `test_the_eight_declared_weights_sum_to_one_with_the_retired_share_redistributed` —
+    pass unchanged. The third half of the clause, that no hunk touches
+    `app/behaviour_exhibit.py`, is a property of the diff: `git show --stat` over this
+    round's commit names two files, and neither is the writer.
+    """
+    import app.paths as p
+
+    instr = _instr("behaviour_exhibit")
+    assert instr.artifact() == p.BEHAVIOUR_EXHIBIT_DIR, (
+        "#3886 clause 1 still holds after the mode read is wired in")
+    assert instr.weight == 0.0 and instr.averageable is False
+    assert instr.window_mode_path == "window_mode", (
+        "the arm declares the pointer the way it declares `value_path`; the reader is "
+        "generic over any arm that carries a window, not hard-coded to one key")
+
+    row, _, _ = _row(tmp_path, GOOD_VALUES)
+    comp = _component(row, "behaviour_exhibit")
+    assert comp["weight"] == 0.0 and comp["averageable"] is False
+    assert comp["contributes"] is False and comp["in_total_denominator"] is False
+    assert any(x["key"] == "behaviour_exhibit" for x in row["totals"]["excluded"])
