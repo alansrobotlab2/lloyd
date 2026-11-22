@@ -2139,8 +2139,10 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--only", nargs="*", default=None,
                         help="case KEYS to grade — a subset of the same names "
                              "`run --only` takes. The corpus file stays whole, the "
-                             "retry baseline must match THIS subset's N, and the "
-                             "report states how many cases were excluded")
+                             "retry baseline must match the landed A-retry count (the "
+                             "M of 'graded N declared / M landed A-retry'), not how "
+                             "many keys are named here, and the report states how many "
+                             "cases were excluded")
     report.set_defaults(fn=cmd_report)
 
     witness = sub.add_parser("witness",

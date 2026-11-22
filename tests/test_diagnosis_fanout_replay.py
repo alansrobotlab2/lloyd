@@ -3916,3 +3916,98 @@ def test_the_guard_still_refuses_a_missing_retry_arm_and_a_mismatched_baseline(t
     assert proc.returncode == 3, proc.stdout
     assert "baseline ceiling 600000 != 200000" in proc.stdout, proc.stdout
     assert "HEADLINE: cannot evaluate" in proc.stdout, proc.stdout
+
+
+# ── #4333: `report --only`'s help states the landed-count rule #4166 shipped ───
+#
+# These nodes read the CLI's own `--help` output rather than a constant, because that sentence
+# has no other readable form: the parser is built inline inside `main()` and never handed back
+# (eval/diagnosis_fanout_replay.py:2152 `args = ap.parse_args(argv)`), so there is no formatter
+# object to query in process — and no node in this file asserted on help text before this block
+# (`git grep -n '"--help"\|help_text\|format_help' -- tests/` returns nothing at this round's
+# base). The subprocess is the boundary the operator actually crosses: the rule they obey when
+# they build a retry baseline is the one argparse prints, so the pin has to sit on stdout.
+#
+# The rule itself moved under #4166 (0cefd88c): the graded set became declared ∩ landed A-retry
+# (eval/diagnosis_fanout_replay.py:1702-1703), printed at :1715, and the block above pins that
+# line as `graded 21 declared / 11 landed A-retry` for a `--only` carrying all 21 declared keys.
+# So the N to match is the 11. The help still said to match `THIS subset's N` — the 21 — which
+# is the pre-#4166 ritual `~/lloyd-data/eval/2258/launch-pass.sh` documents and whose EXIT=3
+# that block measures: help stating the retired rule sends a person to a refusal they were told
+# to expect.
+
+def _run_help(*prefix: str) -> str:
+    """`--help` off the shipped script, with argparse's line wrapping collapsed away.
+
+    Whitespace is flattened because argparse rewraps help to the terminal width: a sentence
+    pinned against this checkout's column count would break on a wider one, and what #4333
+    fixes is a sentence, not where it happens to break. argparse exits 0 after printing help,
+    so a non-zero return here means the subcommand stopped before the help — which is not a
+    wording finding and must not read as one.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "eval" / "diagnosis_fanout_replay.py"),
+         *prefix, "--help"],
+        capture_output=True, text=True, timeout=180, cwd=str(REPO))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return " ".join(proc.stdout.split())
+
+
+def test_report_only_help_says_the_baseline_matches_the_landed_count():
+    """Clause 2: the help names the landed A-retry count as the N the baseline matches.
+
+    The new sentence quotes the report line it points at — `graded N declared / M landed
+    A-retry` — because that count is printed, not derivable from the keys `--only` was handed:
+    over the fixture above, 21 keys are named and 11 are graded. And the retired `THIS subset's
+    N` has to be absent from the same stdout, or the help offers both rules at once.
+    """
+    help_text = _run_help("report")
+    assert "retry baseline must match the landed A-retry count" in help_text, help_text
+    assert "graded N declared / M landed A-retry" in help_text, help_text
+    assert "THIS subset's N" not in help_text, help_text
+
+
+def test_the_retired_subset_n_rule_is_gone_from_the_replay_source():
+    """Clause 1: the phrase the acceptance greps for appears nowhere in the file.
+
+    Asserted over the source text rather than the rendered help so a reintroduction fails
+    wherever it is written, not only where argparse happens to print it. `subset's N` is the
+    whole of the retired rule's shape, so its absence is the diff-visible half of the fix.
+    """
+    src = (REPO / "eval" / "diagnosis_fanout_replay.py").read_text(encoding="utf-8")
+    assert "subset's N" not in src, "the pre-#4166 baseline rule is back in the help string"
+
+
+def test_the_excluded_note_wording_and_the_spend_lines_are_byte_unchanged(tmp_path):
+    """Clause 3: the two surfaces this item bars are exactly as they were shipped.
+
+    `excluded_note` (eval/diagnosis_fanout_replay.py:531, wording at :546 and :552) and the
+    token-spend lines (:1734, :1764) are deliberate per the SM_20261116_221938 findings and are
+    what the #4166 block above is pinned to, so a help-string fix must leave both word-for-word.
+    Asserted as behaviour off the shipped callables and one real `format_report`, so the guard
+    catches a reword of either surface — the change #4333 forbids — instead of only the file
+    list a commit touched.
+    """
+    cases = _study_corpus()
+    only = _non_leaky_keys(cases)
+    picked, bad = select_cases(cases, only)
+    assert bad == [] and len(picked) == 21, bad
+    assert excluded_note(cases, picked) == (
+        "excluded from the graded set: 77 of 98 corpus cases, in 1 family: "
+        "tests-blamed-then-refuted=77. The headline below is over the 21 graded cases only.")
+    assert excluded_note(cases, cases) == (
+        "excluded from the graded set: none — all 98 corpus cases are graded, so the headline "
+        "covers the whole corpus")
+
+    # A-retry's spend is only printed when a baseline matched this subset, so the fixture carries
+    # one: with `baseline=None` the arm prints `not recorded` and the line this node is about
+    # never reaches stdout. 21 cases × 41,000 is the 861,000 the fixture rows recorded.
+    baseline = {"corpus": "fp", "n": NON_LEAKY, "model": "primary", "token_ceiling": 120_000,
+                "token_spend": 861_000, "top1_hits": 21}
+    lines, evaluated = format_report(_study_rows(cases, only), picked, baseline=baseline,
+                                     corpus="fp", model="primary", token_ceiling=120_000,
+                                     citation_root=tmp_path, all_cases=cases)
+    text = "\n".join(lines)
+    assert evaluated is True, text
+    assert "  token spend       A: 840000   B: 1890000" in text, text
+    assert "  token spend  A-retry: 861000" in text, text
