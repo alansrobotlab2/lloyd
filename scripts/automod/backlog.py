@@ -10660,3 +10660,40 @@ def status_pass_store_mismatch(ledger: Path | str,
             f"it (that store is {PRODUCTION_STORE_DIR}): a status pass reading this store "
             f"would park items on the human's board and book its `status_moved` rows where "
             f"nothing else reads them (#4471)")
+
+
+# ── Owed-check's follow-ups, and the items that only witness another ─────
+#
+# At the end of the module on purpose: tests and item bodies cite lines of this
+# file by number, and a block inserted above them moves every one.
+
+# The owed-check job (`scripts/automod/owed.py::apply_verdict`) files follow-ups
+# through `new_item`, which stamped no tag at all — so they read as a human's
+# items: no expiry, absent from the scorecard's spawn gauge. Measured on the
+# live board on 2026-11-22, 112 of 160 open items carried "Filed by owed-check
+# from #N" in their body and 232 of the 523 items numbered 4000 and up did: the
+# largest inflow the loop had was the one nothing counted. The tag carries the
+# `spawned-by-` prefix, so expiry and the gauge pick it up by the prefix rule
+# below. It is NOT in `QUARANTINE_TAGS`, for the reason a review finding is not:
+# a follow-up describes the tree after a landing, and single triage is the pass
+# that should decide whether it still holds.
+OWED_SPAWN_TAG = "spawned-by-owed"
+
+# A "derived" follow-up exists to witness, record or pin a claim an EARLIER item
+# already made, rather than to change what Lloyd does. On the same reading, 35 of
+# the 112 open owed-filed items matched this pattern, and the share of new items
+# worded this way rose from ~4 % (ids 500-750) to ~27 % (ids 4250-4500). Two
+# readers: `owed.apply_verdict` does not file one (the debt stays on the parent's
+# `owed` list, where `MAX_RECHECKS` bounds it), and scorecard row 19 counts them.
+# Precision over recall on purpose: a miss files an item as before; a false hit
+# would withhold real engineering work, so the pattern needs the word `witness`,
+# or a bookkeeping verb leading a name that cites an item id.
+_DERIVED_NAME = re.compile(
+    r"\bwitness\b|^(?:record|pin|bind|rule|settle|re-?point|re-?anchor)\b.*#\d{2,5}",
+    re.IGNORECASE)
+
+
+def is_derived_name(name: str) -> bool:
+    """True when an item's name says it only witnesses, records or pins an
+    earlier item's claim. See `_DERIVED_NAME`."""
+    return bool(_DERIVED_NAME.search(str(name or "").strip()))

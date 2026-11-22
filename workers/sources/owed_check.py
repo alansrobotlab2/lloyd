@@ -56,7 +56,7 @@ DEDUP_KEY = "owed-check:item"
 DEFAULT_BATCH = 3
 DEFAULT_MODEL = "primary"
 DEFAULT_MAX_TURNS = 40
-DEFAULT_SPAWN_CAP = 3
+DEFAULT_SPAWN_CAP = 1
 BODY_CHARS = 14_000
 #: parse_answer's ceiling on evidence/ruling, far above
 #: `owed.SETTLED_TEXT_LIMIT` so the writer's marked cut is the only cut.

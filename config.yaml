@@ -2190,7 +2190,9 @@ workers:
       max_duration_seconds: 1500
       model: primary
       max_turns: 40
-      spawn_cap: 3
+      # 3 -> 1 on 2026-11-22: 112 of 160 open items were owed-check follow-ups,
+      # the largest inflow on the board and the one no gauge counted.
+      spawn_cap: 1
       priority: 72
       inner_voice: false
     # OFF since 2026-09-08. This source promoted generated prompt variants
@@ -2640,7 +2642,8 @@ workers:
       max_attempts: 3               # then the unit is parked for that spacing
       daily_max: 4                  # a first pass over the picklist in ~a week
       max_open_items: 25            # open arch-review items before a tick skips
-      spawn_cap: 5
+      # 5 -> 1 on 2026-11-22, the bound triage and autocode already run under.
+      spawn_cap: 1
       # One review's diff, added + deleted, counted over the whole file
       # (check_doc_bound). Sized for a whole-doc refresh, not a group section;
       # a group's own bound is max_shrink_pct measured against its section.

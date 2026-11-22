@@ -402,6 +402,11 @@ def _handle_write(args: dict) -> str:
         similar, merged, overrode = _dedupe(args)
         if merged is not None:
             return merged
+        # After the dedupe on purpose: a write folded into an open item, or
+        # refused for a closed match, filed nothing and spends nothing.
+        over_cap = _spawn_cap_refusal(args)
+        if over_cap is not None:
+            return over_cap
         max_id = 0
         pattern = re.compile(r"^(\d+)[-_].*\.md$")
         if BACKLOG_DIR.exists():
@@ -521,6 +526,7 @@ def _handle_write(args: dict) -> str:
     if promotion is not None:
         _apply_promotion(task_id, promotion, activity or "")
     if creating:
+        _spawn_cap_count(args)
         out = {"success": True, "task_id": task_id, "created": True,
                "similar": similar, "message": "Task created"}
         if promotion is not None:
@@ -618,6 +624,99 @@ def _loop_write_tags() -> frozenset[str]:
         return _LOOP_WRITE_TAGS if bool(cfg.get("loop_spawned", True)) else frozenset()
     except Exception:  # noqa: BLE001 — fail open to the ruling
         return _LOOP_WRITE_TAGS
+
+
+# ── The spawn cap, enforced at the write ─────────────────────────────────
+#
+# Every worker prompt states a cap on the items one run may file ("at most
+# {spawn_cap}"), and until 2026-11-22 that sentence was the whole mechanism: the
+# sources counted what a run filed AFTER it ended and wrote `spawned_over_cap`
+# to the ledger, a field nothing read. Here the cap is a refusal the model is
+# told about while it can still act on it — append the finding to the item it
+# came from — and one row in the denial journal, so the overflow is countable.
+#
+# Scope, each part deliberate:
+#   * unattended sessions only. A chat session is a person's, and a person
+#     decides what goes on their own board;
+#   * creates carrying a `spawned-by-*` tag only. An untagged create from a
+#     scheduled task (the weekly census, a nightly skill) is that task's own
+#     product, bounded by its dedupe, and has no per-run cap to enforce;
+#   * `umbrella` and `blocker` are exempt, as they are from the merge: an
+#     umbrella consolidates items rather than adding one, and a live blocker is
+#     the one item a round is always allowed to file.
+#
+# The count is per (session, tag), in this process. A restart of the aggregator
+# forgets it, which can only ever allow one extra item to a session that was
+# mid-turn across the restart.
+_SPAWN_CAP_SOURCE = {"spawned-by-triage": "autotriage", "spawned-by-autocode": "autocode",
+                     "spawned-by-review": "arch-review"}
+_SPAWN_CAP_DEFAULT = 1
+_SPAWN_CAP_SESSIONS = 512
+_spawn_counts: "dict[tuple[str, str], int]" = {}
+
+
+def _spawn_cap_for(tag: str) -> int:
+    try:
+        from app.config import CONFIG
+        src = _SPAWN_CAP_SOURCE.get(tag)
+        cfg = ((((CONFIG or {}).get("workers") or {}).get("sources") or {}).get(src) or {}
+               if src else {})
+        return max(0, int(cfg.get("spawn_cap", _SPAWN_CAP_DEFAULT)))
+    except Exception:  # noqa: BLE001 — a config that cannot be read is the default cap
+        return _SPAWN_CAP_DEFAULT
+
+
+def _spawn_tag(args: dict) -> str | None:
+    """The `spawned-by-*` tag a capped create carries, else None."""
+    tags = normalize_tags(args.get("tags")) if args.get("tags") is not None else []
+    if _NEVER_MERGE_TAGS & set(tags):
+        return None
+    return next((str(t) for t in tags if str(t).startswith(_SPAWN_TAG_PREFIX)), None)
+
+
+def _spawn_cap_refusal(args: dict) -> str | None:
+    """The JSON refusal for a create past its session's cap, else None.
+    Fail-open: a failure in here is the old, uncapped write."""
+    try:
+        tag = _spawn_tag(args)
+        if tag is None:
+            return None
+        cls, sid = _session_class()
+        if cls not in ("background", "subagent") or not sid:
+            return None
+        cap, filed = _spawn_cap_for(tag), _spawn_counts.get((sid, tag), 0)
+        if filed < cap:
+            return None
+        reason = (f"this run has already filed {filed} `{tag}` item(s) and its cap is "
+                  f"{cap}. Do not file another and do not retry under a different tag: "
+                  f"append the finding to the item it came from (`backlog_write_task` "
+                  f"with that `task_id`), or name it in your final answer.")
+        try:
+            from app.harness import denial_journal
+            denial_journal.record(guard="spawn_cap", where="dispatch", session_id=sid,
+                                  tool="backlog_write_task", reason=reason, label=tag,
+                                  excerpt=str(args.get("name") or ""))
+        except Exception:  # noqa: BLE001 — bookkeeping about a decision already made
+            pass
+        logger.warning("backlog_write_task refused over the spawn cap: %s %s", sid, tag)
+        return json.dumps({"success": False, "error": f"Tool call denied: {reason}"})
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _spawn_cap_count(args: dict) -> None:
+    """One capped create was written. Never raises."""
+    try:
+        tag = _spawn_tag(args)
+        cls, sid = _session_class()
+        if tag is None or not sid or cls not in ("background", "subagent"):
+            return
+        if len(_spawn_counts) >= _SPAWN_CAP_SESSIONS * 2:
+            for key in list(_spawn_counts)[:_SPAWN_CAP_SESSIONS]:
+                _spawn_counts.pop(key, None)       # oldest first: dicts keep order
+        _spawn_counts[(sid, tag)] = _spawn_counts.get((sid, tag), 0) + 1
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # Writes that must never be folded into an existing item however similar they

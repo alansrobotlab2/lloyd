@@ -39,6 +39,10 @@ The metrics, each defined where it is computed:
                              session class (app/harness/denial_journal.py)
  17  install provenance      unattended install decisions by outcome, from
                              the provenance journal (app/harness/supply_chain.py)
+ 18  tree growth             lines added and deleted on main, tests / prose / other
+ 19  derived work            share of new items that only witness, record or pin
+                             an earlier item's claim; how many owed-check filed
+ 20  tests rung              median wall seconds of the gate's `tests` rung
 """
 
 from __future__ import annotations
@@ -791,6 +795,78 @@ def _provenance(path: Path, since: float) -> dict[str, Any]:
     return out
 
 
+# ── 18-20: is the loop improving the product, or only growing the tree ──
+
+_TEST_PATH = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|\.test\.[tj]sx?$")
+
+
+def _tree_growth(repo: Path, since_ts: float) -> dict[str, Any]:
+    """Lines added and deleted on `repo`'s history since `since_ts`, split into
+    tests, prose (`*.md`) and everything else.
+
+    The loop's other rows count landings; none of them said the tree grew by
+    ~68k lines a week against ~3.6k deleted (measured 2026-11-22), 70 % of it
+    tests. `measured` is False when git could not be read, which is not zero."""
+    out: dict[str, Any] = {"measured": False, "commits": 0, "added": 0, "deleted": 0,
+                           "added_tests": 0, "added_prose": 0, "added_other": 0}
+    since = datetime.fromtimestamp(since_ts, tz=timezone.utc).isoformat()
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo), "log", f"--since={since}", "--no-merges",
+             "--format=%x1e", "--numstat"],
+            capture_output=True, text=True, timeout=120, check=False)
+    except Exception:
+        return out
+    if r.returncode != 0:
+        return out
+    out["measured"] = True
+    out["commits"] = r.stdout.count("\x1e")
+    for line in r.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[0].isdigit():
+            continue                      # a binary file prints `-\t-\tpath`
+        added, path = int(parts[0]), parts[2]
+        deleted = int(parts[1]) if parts[1].isdigit() else 0
+        out["added"] += added
+        out["deleted"] += deleted
+        key = ("added_tests" if _TEST_PATH.search(path)
+               else "added_prose" if path.endswith(".md") else "added_other")
+        out[key] += added
+    out["net"] = out["added"] - out["deleted"]
+    out["test_share"] = _rate(out["added_tests"], out["added"])
+    return out
+
+
+def _derived_share(backlog_dir: Path, since_ts: float) -> dict[str, Any]:
+    """Of the items created since `since_ts`: how many owed-check filed, and how
+    many only witness, record or pin an earlier item's claim
+    (`backlog.is_derived_name`). Read off the board files, like `board_flow`."""
+    from scripts.automod.backlog import (OWED_SPAWN_TAG, _iso_ts, all_items,
+                                         is_derived_name)
+    out: dict[str, Any] = {"created": 0, "derived": 0, "owed_filed": 0}
+    for item in all_items(None, backlog_dir=backlog_dir):
+        ts = _iso_ts(item.created, legacy_local=True)
+        if ts is None or ts < since_ts:
+            continue
+        out["created"] += 1
+        if is_derived_name(item.name):
+            out["derived"] += 1
+        if OWED_SPAWN_TAG in (item.tags or []):
+            out["owed_filed"] += 1
+    out["derived_share"] = _rate(out["derived"], out["created"])
+    return out
+
+
+def _tests_rung(gate_rows: list[dict]) -> dict[str, Any]:
+    """Wall seconds of the `tests` rung over the window. The ledger's `seconds`
+    includes the wait on the suite lock, which is the number a round pays."""
+    secs = [float(e.get("seconds") or 0) for e in gate_rows
+            if e.get("rung") == "tests" and isinstance(e.get("seconds"), (int, float))]
+    return {"runs": len(secs), "median_s": _median(secs),
+            "over_1800": sum(1 for x in secs if x > 1800)}
+
+
+
 def compute(*, since_days: float = 7.0, ledger: Path | None = None,
             backlog_dir: Path | None = None, repo: Path | None = None,
             now: float | None = None, denials: Path | None = None,
@@ -1113,7 +1189,16 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     # ── 17 install provenance ───────────────────────────────────────────
     install_provenance = _provenance(provenance or _provenance_journal_default(), since)
 
-    return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
+    # ── 18 tree growth · 19 derived work · 20 tests rung ────────────────
+    growth = _tree_growth(repo, since)
+    try:
+        derived = _derived_share(backlog_dir, since) if backlog_dir.exists() else {}
+    except Exception:
+        derived = {}
+    tests_rung = _tests_rung(by("gate"))
+
+    return {"tree_growth": growth, "derived_work": derived, "tests_rung": tests_rung,
+            "computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
@@ -1185,7 +1270,35 @@ def render(row: dict) -> str:
     lines.append(_render_overrides(row))
     lines.append(_render_denials(row))
     lines.append(_render_provenance(row))
+    lines.extend(_render_growth_rows(row))
     return "\n".join(lines)
+
+
+def _render_growth_rows(row: dict) -> list[str]:
+    """Rows 18-20. A row recorded before they existed renders as not recorded."""
+    out: list[str] = []
+    g = row.get("tree_growth")
+    if not isinstance(g, dict) or not g.get("measured"):
+        out.append("| 18 | tree growth | — | not measured for this row |")
+    else:
+        out.append(f"| 18 | tree growth | {g.get('net', 0):+d} lines | {g['added']} added, "
+                   f"{g['deleted']} deleted over {g['commits']} commits; added: tests "
+                   f"{g['added_tests']} ({_pct(g.get('test_share'))}), prose {g['added_prose']}, "
+                   f"other {g['added_other']} |")
+    d = row.get("derived_work")
+    if not isinstance(d, dict) or "created" not in d:
+        out.append("| 19 | derived work | — | not measured for this row |")
+    else:
+        out.append(f"| 19 | derived work | {_pct(d.get('derived_share'))} | {d['derived']} of "
+                   f"{d['created']} items created only witness, record or pin an earlier "
+                   f"item's claim; {d['owed_filed']} filed by owed-check |")
+    t = row.get("tests_rung")
+    if not isinstance(t, dict) or not t.get("runs"):
+        out.append("| 20 | tests rung | — | no tests rung in the window |")
+    else:
+        out.append(f"| 20 | tests rung | {t['median_s']} s | median over {t['runs']} runs, "
+                   f"lock wait included; {t['over_1800']} over 1800 s |")
+    return out
 
 
 def _override_ref(event_row: dict) -> str:
@@ -1290,6 +1403,48 @@ def record(row: dict, path: Path | None = None) -> Path:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
     return path
+
+
+#: How long after the newest recorded row another is due. Under a day on
+#: purpose: the caller is a pass that runs every few minutes, so the row lands
+#: at roughly the same hour each day instead of drifting later by one poll.
+RECORD_EVERY_S = 23 * 3600
+
+
+def last_recorded_at(path: Path | None = None) -> float | None:
+    """`computed_at` of the newest row in `scorecard.jsonl`, as epoch seconds.
+    Reads the tail only; None when there is no file or no readable row."""
+    path = path or scorecard_path()
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 262144))
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            stamp = json.loads(line).get("computed_at")
+            return datetime.fromisoformat(stamp).timestamp()
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return None
+
+
+def record_if_due(*, now: float | None = None, path: Path | None = None,
+                  every_s: float = RECORD_EVERY_S, **compute_kwargs) -> Path | None:
+    """Append one row when the newest is older than `every_s`; else None.
+
+    Until 2026-11-22 the only writer of `scorecard.jsonl` was the `--record`
+    flag and nothing called it: the file held two rows, the newer from
+    2026-09-12, so no row of this report had a trend. Housekeeping calls this
+    once per pass; it costs a 256 KiB tail read on every pass but one a day."""
+    now = time.time() if now is None else now
+    last = last_recorded_at(path)
+    if last is not None and now - last < every_s:
+        return None
+    return record(compute(now=now, **compute_kwargs), path)
 
 
 def parse_since(text: str) -> float:

@@ -1821,6 +1821,14 @@ def _housekeeping_passes(src_cfg: dict) -> None:
             logger.info("backlog #%s expired after %s d untouched", r["item_id"], r["age_days"])
     except Exception as exc:
         logger.warning("expire_stale_spawns failed: %s", exc)
+    try:
+        # One scorecard row a day, so the report has a trend. Nothing else
+        # writes the file (see `scorecard.record_if_due`).
+        from scripts.automod import scorecard as SC
+        if SC.record_if_due() is not None:
+            logger.info("scorecard row recorded")
+    except Exception as exc:
+        logger.warning("scorecard record failed: %s", exc)
 
 
 def _escalate_review_disagreement(candidate, round_id: str | None) -> bool:

@@ -320,7 +320,9 @@ bookkeeping (journal, toast, voice). Re-announcing a recorded state through
   item is a proposal, deployed only on a measured gain (§3.2b).
 - **The loop must close more than it opens**: self-filed items are
   quarantined and expire; findings are appended to the item they came from;
-  one new item per run (`SPAWN_CAP` 1), a live `blocker` exempt;
+  one new item per run (`SPAWN_CAP` 1, refused at the write since 2026-11-22),
+  a live `blocker` exempt; an owed-check follow-up that only witnesses its
+  parent's claim is not filed;
   `backlog_write_task` dedupes before writing; confirmations are held while
   the implement pool is full; `backlog.board_health` is the one board shape
   (§3.2c, `architecture/backlog.md`).

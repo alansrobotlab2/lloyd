@@ -1710,12 +1710,23 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             if artifact:
                 record["artifact"] = artifact
         follow = a.get("follow_up") or {}
-        if out in ("work", "ruling") and is_real_follow_up(follow) and len(filed) < spawn_cap:
+        # A follow-up that only witnesses, records or pins the parent's own claim
+        # is not filed (2026-11-22): it is a debt of THIS item and stays on its
+        # `owed` list, where `MAX_RECHECKS` turns a stubborn one into a ruling.
+        # Filed, each became a board item with its own triage, round, review and
+        # — usually — its own witness follow-up. See `backlog._DERIVED_NAME`.
+        derived = (is_real_follow_up(follow)
+                   and B.is_derived_name(_text(follow.get("name"), 140)))
+        if derived:
+            notes.append(f"#{n} follow-up not filed: it only witnesses or records "
+                         f"this item's own claim, so the debt stays here")
+        if (out in ("work", "ruling") and is_real_follow_up(follow) and not derived
+                and len(filed) < spawn_cap):
             new = B.new_item(_text(follow.get("name"), 140),
                              f"{str(follow.get('body') or '').strip()}\n\n"
                              f"Filed by owed-check from #{item_id}'s owed entry: "
                              f"{cite_for_child(e['what'], revision)}",
-                             status="draft")
+                             status="draft", tags=[B.OWED_SPAWN_TAG])
             filed.append(new.id)
             record["follow_up"] = new.id
             # A ruling that names the measurement it must be re-opened on is a

@@ -321,9 +321,10 @@ Inflow is bounded at three points, but only two of them bind. `max_open_items`
 (25) open `arch-review` drafts across both kinds stops the whole tick, and
 expiry (`spawn_expiry_days()` — `expire_spawns_after_days: 30`, raised from 7 on
 2026-09-15, because expiry was then the only exit a quarantined draft had and it
-was closing items nothing had read) closes anything untouched; `spawn_cap` (5) per run is a prompt
-instruction plus the `spawned_over_cap` field on the ledger event — nothing
-truncates a turn that files a sixth finding. The middle one is the R > 1 lesson
+was closing items nothing had read) closes anything untouched; `spawn_cap` (1 since 2026-11-22, was 5) per run is refused at the write by
+`agent_mcp/backlog.py::_spawn_cap_refusal`, which reads this source's
+`spawn_cap` for a `spawned-by-review` create — until that date it was a prompt
+instruction plus the `spawned_over_cap` field on the ledger event. The middle one is the R > 1 lesson
 applied before it can happen — a pass that files faster than the board closes
 does not need better verdicts, it needs an edge cut, and the only edge cut here
 is the one that stops the tick.
@@ -381,8 +382,8 @@ Kill switch: `workers.sources.arch-review.enabled`.
   and they were restored the same evening, so it holds 17 again; tool policy is
   a deny-list over the
   chat toolbox rather than the grant list §2 described, so the memory and fact
-  writers are live and outside the sweep (#709); `spawn_cap` is a prompt plus a
-  gauge, not a bound; and two rails are looser than their own sentences — the
+  writers are live and outside the sweep (#709); `spawn_cap` was a prompt plus a
+  gauge, not a bound, until 2026-11-22 made it a refusal at the write; and two rails are looser than their own sentences — the
   shrink percentage is whole-file for groups (#913) and the filing check matches
   provenance as a substring (#914). Filed #709, #913, #914, #915, #916.
 - 2026-10-12 — **stale**. The mechanism is unchanged and every rail in §2 still

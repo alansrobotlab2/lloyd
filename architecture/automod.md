@@ -319,9 +319,19 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   that may become an item is a **blocker**; for triage it is one survivor of
   a closing verdict; every other finding goes onto an item as `## Findings`
   (§3.2c), never nowhere (#229's lesson still holds). Triage's cap was 3 plus
-  a "Further findings from…" overflow item until then. It is **recorded, not enforced**: the items are on disk before
-  `SPAWNED:` is parsed, so unfiling them would destroy real work. Both event
-  types carry `spawn_cap` and `spawned_over_cap`.
+  a "Further findings from…" overflow item until then. Until 2026-11-22 it was **recorded, not enforced**: the items are on disk before
+  `SPAWNED:` is parsed, so unfiling them would destroy real work, and
+  `spawned_over_cap` on both event types was a field nothing read. It is now
+  **refused at the write**: `agent_mcp/backlog.py::_spawn_cap_refusal` counts
+  `spawned-by-*` creates per (session, tag) and answers a create past
+  `workers.sources.<source>.spawn_cap` (default 1) with `Tool call denied`,
+  journaled under guard `spawn_cap`. Unattended sessions only; `blocker` and
+  `umbrella` are exempt; a write the dedupe merged spends nothing; the check
+  fails open. The count lives in the aggregator process, so a restart can
+  allow a mid-turn session one extra item. Owed-check's follow-ups go through
+  `new_item`, not this tool: their bound is `spawn_cap` in `apply_verdict`
+  (3 → 1 the same day) plus the derived-name rule (`architecture/backlog.md`,
+  "The tags the loop writes on itself").
   `tests/test_backlog_spawn_loop.py` pins it, including the counterfactual —
   with the spawn tags unrecognised the same run grows the queue.
   The proving run on #278 (`confirmed`, 16 iterations) filed #402 and #403
@@ -4409,6 +4419,25 @@ from `denied.json` first).
 `round status` shows a last-known-good that matches the running commit.
 
 ---
+
+### 12.1 The scorecard has a trend, and three rows about growth (2026-11-22)
+
+`scorecard.record_if_due` appends one row to `scorecard.jsonl` when the newest
+is older than 23 h; autocode's housekeeping pass calls it (off the event loop,
+guarded like every other pass). Until then the only writer was the `--record`
+flag and nothing called it: the file held two rows, the newer from 2026-09-12.
+
+Rows 1–17 count what the loop did. Three more say what that did to the tree:
+
+| # | Row | Why |
+|---|---|---|
+| 18 | tree growth — lines added and deleted on `main`, split tests / prose / other | The first reading was +63,858 net lines in 7 days, 71 % of the additions tests, against 3,598 deleted. |
+| 19 | derived work — share of new items that only witness, record or pin an earlier item's claim; how many owed-check filed | 14 % of the week's 364 new items; the wording rule is `backlog.is_derived_name`. |
+| 20 | tests rung — median wall seconds, lock wait included | 1,129 s over 288 runs, 65 over 1,800 s; the suite's size is the loop's own output. |
+
+None of the three is a gate. They exist so that a week in which the loop
+landed 149 changes and deleted almost nothing does not read as healthy.
+`tests/test_loop_inflow_brakes.py`.
 
 ## 13. Known limits
 
