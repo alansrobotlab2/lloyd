@@ -159,11 +159,41 @@ PS_4_APPLY_INSTANT = "2026-10-20T09:15:39Z"
 # kg-stranded-20261119T010306Z.sqlite` exists and its `stat -c %Y` is 1795050187. The instant
 # is taken from that artefact, never from the marker this file checks it against, for the
 # reason on `APPLY_INSTANT` above: a date scraped off the claim cannot falsify the claim.
-# `PS-10`'s one edge (2026-11-19T15:46:35Z, carrier #4257's pair
-# `agent-supervisord.service -> supervisord`) is applied but NOT a `RULED` key, so it has no
-# entry here — a key the skill does not carry cannot be weighed against its marker, and
-# inventing the key here would authorise a set nobody ruled. Recorded as a finding on #4480.
 PS_9_APPLY_INSTANT = "2026-11-19T01:03:06Z"
+
+# The fourth ruled apply, and the fourth KEY that had to be added rather than excused: carrier
+# #4257's pair `agent-supervisord.service -> supervisord` went in by hand on 2026-11-19T15:46:35Z
+# and its write is on disk to be checked against — `store-backups/kg-stranded-20261119T154635Z.sqlite`,
+# whose `stat -c %Y` is 1795103195, the marker's instant to the second. This pair used to be this
+# file's own counter-example, and the wrong one: the paragraph that sat directly above
+# `PS_9_APPLY_INSTANT` — deleted by #4519, and pinned absent by
+# `test_ps_10_is_a_ruled_key_whose_pair_the_set_check_covers_by_name` — declared that a key the
+# skill did not carry could not be weighed, that adding one here would authorise a decision no
+# human had made, and that the finding lived on #4480. All three readings were wrong in the
+# direction that costs something. `RULED` is what `covered_by=` is computed against, so while the
+# skill's literal stopped at `PS-9` a dry run answered
+# `novel=['agent-supervisord.service -> supervisord'] covered_by=none` for a pair whose edge was
+# LIVE: the filing branch was one edge-expiry away from opening another carrier for a decision that
+# had been ruled, applied and written. The ruling that covers it is SD-stranded-1 (2026-10-16) plus
+# #2986's owed-check ruling of 2026-10-18T23:41:30Z, whose operative scope is "EVERY pair a fresh
+# dry run prints", and #4257 held this pair as its pending `hand_run:`; `PS-9` is the same shape — a
+# carrier whose apply ran, with no separate ruling. #4519 is the round that put the key in the skill,
+# this instant in this map, and the pair in both. The finding's home is #4519, not #4480: #4480 is
+# `status: done`, as is #4257, and a closed item is not an owner.
+#
+# Which makes it the rule rather than a one-off: a by-hand apply that ran and whose edges are live
+# takes a `RULED` key in the skill AND an entry in `APPLY_INSTANTS` in the same pass — PS-11 (#4503)
+# is the next one due. A settled set the record cannot see stays invisible until one of its edges
+# expires, and edges expire rather than delete.
+PS_10_APPLY_INSTANT = "2026-11-19T15:46:35Z"
+
+#: PS-10's whole set, from carrier #4257 — the pair the three runs of 2026-11-19 between `PS-9`'s
+#: apply and this one printed as `proposed edges 1`. Like `PS_9_WRITTEN_PAIRS`, a closed historical
+#: fact about one write, which is why it may be written down where a store count may not.
+PS_10_RULING_PAIR = frozenset({("agent-supervisord.service", "supervisord")})
+
+#: Derived from the instant, never spelled out — the same rule as `PS_9_BACKUP`.
+PS_10_BACKUP = f"kg-stranded-{PS_10_APPLY_INSTANT.replace('-', '').replace(':', '')}.sqlite"
 
 #: The four pairs that apply wrote, from carrier #3704. A closed historical fact about one write,
 #: unlike a store count that moves with the next apply, so it is legitimate to write down: the
@@ -184,7 +214,8 @@ PS_9_BACKUP = f"kg-stranded-{PS_9_APPLY_INSTANT.replace('-', '').replace(':', ''
 #: reads it and names itself, rather than being skipped or borrowing a date. A NEW `RULED` key
 #: in the skill therefore reds that node until its own apply's artefact is named here.
 APPLY_INSTANTS = {"PS-2": APPLY_INSTANT, "PS-3": APPLY_INSTANT,
-                  "PS-4": PS_4_APPLY_INSTANT, "PS-9": PS_9_APPLY_INSTANT}
+                  "PS-4": PS_4_APPLY_INSTANT, "PS-9": PS_9_APPLY_INSTANT,
+                  "PS-10": PS_10_APPLY_INSTANT}
 
 
 def _missing(path: Path) -> str:
@@ -1274,6 +1305,168 @@ PS_4_PROPOSALS = (Path.home() / "lloyd-data/_pipeline"
                   / "stranded-proposals-2026-10-20T084644Z.jsonl")
 
 
+def _ps10_pair_payload() -> str:
+    """PS-10's one proposal row in the shape `link_stranded_entities.py` writes it.
+
+    Built off the committed PS-2 witness's row shape for the reason spelled out on
+    `_ps4_pair_payload`, and it is ONE row: the pair the key had to cover is one pair, and a
+    payload with a second row would test a set the record does not claim.
+    """
+    rows = [json.loads(l) for l in
+            _committed_ps2_bytes().decode().splitlines() if l.strip()]
+    source, target = sorted(PS_10_RULING_PAIR)[0]
+    r = dict(rows[0])
+    r.update({"source": source, "target": target,
+              "evidence": f"name-embedding: '{target}' is a registered entity name "
+                          f"inside '{source}'"})
+    return json.dumps(r) + "\n"
+
+
+def _without_key(script: str, key: str) -> str:
+    """`script` with `key`'s entry and its comment lines taken out — the record before it had one.
+
+    The mutated text must still parse and still hold every OTHER key, or a "refusal" printed by a
+    snippet that crashed on the mutation would be scored as the key having been load-bearing.
+    """
+    tail = '"write tool", "Write")},'
+    close = tail[:-1] + "}"
+    out, n = re.subn(re.escape(tail) + r"(?:\n[ ]*#[^\n]*)*\n[ ]*\"" + re.escape(key)
+                     + r"\": \{[^}]*\}\}", close, script, count=1)
+    assert n == 1, (f"the mutation removed no `{key}` entry: the RULED literal no longer ends "
+                    f"the shape this expects, so the mutant proves nothing")
+    return out
+
+
+def test_ps_10_is_a_ruled_key_whose_pair_the_set_check_covers_by_name(tmp_path):
+    """#4519 clauses 1-4: the applied pair is a ruled key, and the snippet now says so by name.
+
+    The bite was latent and the mechanism was not. `covered_by=` is computed against `RULED`
+    alone, so while the literal stopped at `PS-9` the set-check answered
+    `novel=['agent-supervisord.service -> supervisord'] covered_by=none` for a pair whose edge was
+    LIVE — which reads as a new decision to the branch that opens a carrier. Today's silence is
+    the linker's `edge already live` branch keeping the pair out of the proposals JSONL, and an
+    expiry is the one thing the record elsewhere says an edge does rather than delete: one
+    `expired_at` and the missing key fired on its own. So the pair belongs in `RULED` for the same
+    reason `PS-4` does, and this node is the same shape as `test_ps_4_is_ruled_and_a_reprint_of_
+    its_pairs_is_covered_not_novel` on purpose — one ruled set, its exact pairs, and a reprint of
+    those pairs that must come back covered.
+
+    The exactness is the safety half, not decoration: a key holding a second pair would answer
+    `covered_by=['PS-10']` for a proposal nobody ruled on, which is a fabricated authorization
+    (#2829's over-inclusion list is the precedent). The epoch is the honesty half: PS-9's node
+    established that an instant copied from a comment can only ever agree with the comment that
+    copied it, so the number here is read off `stat` and compared, and the mutant that moves it by
+    one second has to be caught.
+    """
+    text = _skill_text()
+    section = _step_2_5_section(text)
+    script = _setcheck_script(section)
+    ruled = _ruled_dict(script)
+
+    # Clause 1: the key, its place, and the pair set it is allowed to cover.
+    assert "PS-10" in ruled, (
+        f"`RULED` carries {sorted(ruled)}: carrier #4257's apply of 2026-11-19T15:46:35Z is "
+        "still not a key, so the set-check calls a live edge novel")
+    assert ruled["PS-10"] == PS_10_RULING_PAIR, (
+        f"`RULED['PS-10']` holds {sorted(ruled['PS-10'])}, not carrier #4257's one pair "
+        f"{sorted(PS_10_RULING_PAIR)} — a subset re-proposes the rest, a superset authorises "
+        "proposals nobody ruled")
+    keys = list(ruled)
+    assert keys.index("PS-10") == keys.index("PS-9") + 1, (
+        f"`RULED` is in dict order and `PS-10` sits at {keys.index('PS-10')} with "
+        f"`PS-9` at {keys.index('PS-9')}: {keys}")
+
+    # Its marker, weighed the way every other applied key's is.
+    count, live = _live_name_embedding_pairs()
+    state, instant = _execution_claim(section, "PS-10", {(s, t) for s, t in live})
+    assert (state, instant) == ("executed", PS_10_APPLY_INSTANT), (
+        f"`PS-10` declares {state}" + (f" at {instant}" if instant else "")
+        + f" while the store holds its pair; it has to carry `EXECUTED` with "
+        f"{PS_10_APPLY_INSTANT} on the same line, the shape PS-4 and PS-9 carry")
+    assert APPLY_INSTANTS["PS-10"] == PS_10_APPLY_INSTANT
+
+    # Clause 1's provenance: the named artefact, matched by epoch, in the entry itself.
+    comment = _ruled_comment(section, "PS-10")
+    assert PS_10_BACKUP in comment and "stat -c %Y" in comment, (
+        f"`PS-10`'s entry does not name both the artefact and the command that reads it: "
+        f"{comment!r}")
+    backup = LIVE_STORE.parent / "store-backups" / PS_10_BACKUP
+    assert backup.is_file(), (
+        f"{backup} is absent, so the instant `PS-10` declares has no witness that is not the "
+        "claim itself — the pre-apply backup is the only one")
+    actual_epoch = int(backup.stat().st_mtime)
+    assert actual_epoch == 1795103195, (
+        f"{PS_10_BACKUP} reports {actual_epoch} "
+        f"({datetime.fromtimestamp(actual_epoch, timezone.utc).isoformat()}), not the epoch "
+        "clause 1 quotes: the artefact moved, or the pair was written by a different run")
+    assert _epoch_claims(comment) == {str(actual_epoch)}, (
+        f"`PS-10`'s entry claims epoch(s) {sorted(_epoch_claims(comment))} where the file says "
+        f"{actual_epoch} — one of the two is a copy of a claim rather than a measurement")
+    assert not re.search(r"Nov 19 0[78]", comment), (
+        f"`PS-10`'s entry carries an `ls`-shaped date, which no later run can re-check: {comment!r}")
+    moved = comment.replace(str(actual_epoch), str(actual_epoch + 1))
+    assert _epoch_claims(moved) != {str(actual_epoch)}, (
+        "moving the quoted epoch by one second left it agreeing with the artefact, so the "
+        "comparison above never compared anything")
+
+    # Clause 4: the set-check, run as Step 2.5 runs it — HOME and PATH and nothing else.
+    payload = _ps10_pair_payload()
+    out = _run_setcheck(script, "ps10-covered", payload, tmp_path)
+    assert out.endswith("pairs=1 novel=none covered_by=['PS-10']"), (
+        f"the set-check answered {out!r} for a reprint of the pair PS-10 rules; the novel-set "
+        "branch reads `novel=['...'] covered_by=none` as a new decision and files a carrier")
+
+    removed = _without_key(script, "PS-10")
+    assert "PS-10" not in _ruled_dict(removed) and len(_ruled_dict(removed)) == len(ruled) - 1, (
+        "the mutant still carries PS-10, so the refusal below is not the key's doing")
+    out2 = _run_setcheck(removed, "ps10-key-removed", payload, tmp_path)
+    assert out2.endswith("pairs=1 novel=['agent-supervisord.service -> supervisord'] "
+                         "covered_by=none"), (
+        f"with the key removed the snippet answered {out2!r}; it must go back to calling the "
+        "pair novel, which is the behaviour #4519 exists to end — and the only reason it is not "
+        "firing today is the live edge")
+
+    # Clause 2: the figure, derived, attributed per apply, and unchanged where it counts the store.
+    n_pairs = _ruled_pair_total(text)
+    assert n_pairs == 14 == len(set().union(*ruled.values())), (
+        f"the distinct pairs `RULED` enumerates is {len(set().union(*ruled.values()))} while the "
+        f"figure checkers derive {n_pairs}: PS-1..PS-3 are nested and contribute nothing new, so "
+        "the sum is the size of the union")
+    assert _wrong_ruled_pair_figures(text, n_pairs) == [], (
+        f"a site still states a ruled-pair figure other than {n_pairs}")
+    assert len(re.findall(RULED_PAIR_FIGURE_RE, " ".join(text.split()))) == 2, (
+        "the enumerated figure must be stated at exactly two sites — the ledger and the rule — "
+        "and a third copy is the one that will not be updated")
+    flat = " ".join(text.split())
+    for key in ("PS-3", "PS-4", "PS-9", "PS-10"):
+        want = _number_word(len(ruled[key]))
+        assert f"`{key}`'s {want} " in flat, (
+            f"the per-apply attribution does not name `{key}`'s {want} pair(s): a total with no "
+            "denominator is how this record reached nineteen")
+    assert _stale_store_readings(flat, len(live)) == [], (
+        "the store-count sites moved with the ruled-pair figure: 26 is what `name-embedding:` "
+        "edges are live, and PS-10's is one of them, not a fifteenth")
+
+    # Clause 3: the module's own half — nothing in here may still call this set unruled. Each
+    # phrase is JOINED AT RUNTIME for the reason this module's own bans are spelled
+    # `(?:PS|SD)[-_]stranded`: a forbidden literal written whole into the loop that searches for
+    # it is present by construction, and the node can only ever fail.
+    here = Path(__file__).read_text(encoding="utf-8")
+    for head, tail in (("applied but NOT a ", "`RULED` key"),
+                       ("applied but not ", "ruled"),
+                       ("applied-but-", "unruled"),
+                       ("inventing the key ", "here"),
+                       ("nobody ruled ", "PS-10")):
+        stale = head + tail
+        assert stale not in here, (
+            f"{THIS_FILE} still says {stale!r}: PS-10 is a ruled key with an apply instant in "
+            "APPLY_INSTANTS, and a comment that says otherwise is read by the next run as a "
+            "reason not to add the next one")
+    assert "#4519" in here, (
+        "the new comment cites no open carrier: #4480 and #4257 are both `status: done`, and a "
+        "closed item is not an owner")
+
+
 def _ps4_pair_payload() -> str:
     """PS-4's two proposal rows in the shape `link_stranded_entities.py` writes them.
 
@@ -1508,10 +1701,12 @@ def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_sta
     written down. A present-tense count in prose and a present-tense count pinned here are one
     claim with two owners.
 
-    The arithmetic is attributed per set, and the enumerated ruled pairs are THIRTEEN — `PS-3`'s
-    seven, `PS-4`'s two and `PS-9`'s four — because `PS-1` ⊂ `PS-2` ⊂ `PS-3` contributes no pair
-    of its own while `PS-10`'s single edge is applied but not ruled, so counting it as a ruled
-    pair (fourteen) would credit a set nobody put in `RULED`. That figure is derived from the
+    The arithmetic is attributed per set, and the enumerated ruled pairs are FOURTEEN — `PS-3`'s
+    seven, `PS-4`'s two, `PS-9`'s four and `PS-10`'s one — because `PS-1` ⊂ `PS-2` ⊂ `PS-3`
+    contributes no pair of its own. `PS-10`'s one is in that sum only because the key is in
+    `RULED`: #4519 added it, and until then the record enumerated thirteen while its own prose
+    named a fourteenth pair that had been ruled and applied — the figure and the dict moved
+    together in one landing, which is why neither could be corrected on its own. That figure is derived from the
     `RULED` literal for the same reason the store figure is derived from the store. This
     replaces three literal bans (`ten pairs`, `10 pairs`, `ten ruled pairs`), each naming one
     wrong figure; `_wrong_ruled_pair_figures` refuses every figure but the derived one, in
@@ -1522,7 +1717,8 @@ def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_sta
     to name the applies that wrote it — including `PS-9`'s of 2026-11-19T01:03:06Z, the one the
     record did not carry when the item was filed. The node does not pin HOW MANY applies there
     have been: that count moves with the next apply exactly as the store count moved, and `RULED`
-    cannot yield it (the pilot's write and `PS-10`'s edge are applies without a key of their own),
+    cannot yield it (its keys count settled SETS, not writes — `PS-2` and `PS-3` name the one apply
+    of 2026-10-19T16:44:20Z and `PS-1` names none),
     so a pinned apply-count would be the next figure of this class rather than the last.
 
     What must NOT move is the history and the receipt. `ACTIVE_NAME_EMBEDDING=19 PAIRS_LIVE=7/7
@@ -1553,9 +1749,9 @@ def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_sta
     # **N**` and names the applies that wrote it. `PS-9`'s apply must be named there with its
     # instant, because it is the one the record did not carry when this item was filed. What the
     # node does NOT pin is how many applies there have been: that count moves with the next
-    # apply exactly as the store count did, and `RULED` cannot yield it — the pilot's write and
-    # `PS-10`'s edge are applies without a key of their own — so no measurement here could tell
-    # a true 'five' from a false 'six'. Recorded as a finding on #4352.
+    # apply exactly as the store count did, and `RULED` cannot yield it — its keys count settled
+    # SETS, not writes, since `PS-2` and `PS-3` name one apply and `PS-1` names none — so no
+    # measurement here could tell a true 'five' from a false 'six'. Recorded as a finding on #4352.
     purpose = _step_2_5_purpose(text)
     assert f"now returns **{count}**" in " ".join(purpose.split()), (
         "the Step 2.5 purpose paragraph does not state the measured count: clause 3 asks it to "
@@ -1603,7 +1799,8 @@ def test_the_figure_checkers_refuse_a_stale_count_and_a_miscounted_set():
     wrong readings, each wrong in one named way — the 21 the vault carried until #4352 (the
     figure that red-coded #4480), that same 21 left in ONE sentence of a two-sentence record
     (the half-corrected case the message has to name), a ruled-pair count that counts
-    `PS-10`'s unruled edge, and the same count written in digits when the prose spells it.
+    `RULED` read one pair higher than its own keys, and the same count written in digits when
+    the prose spells it.
     """
     text = _skill_text()
     count, _live = _live_name_embedding_pairs()
@@ -1673,7 +1870,7 @@ def test_the_figure_checkers_refuse_a_stale_count_and_a_miscounted_set():
     over_refused = _wrong_ruled_pair_figures(over, n_ruled_pairs)
     assert over_refused and set(over_refused) == {
         f"{_number_word(n_ruled_pairs + 1)} ruled pairs"}, (
-        f"counting PS-10's applied-but-unruled edge as a ruled pair came back as "
+        f"counting one pair more than `RULED` enumerates as a ruled pair came back as "
         f"{over_refused!r}: a spelled miscount is invisible, and that figure is what a reader "
         "takes as the authorised scope")
     n_sites = " ".join(text.split()).count(f"{spelled} ruled pairs")
