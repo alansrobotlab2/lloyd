@@ -290,6 +290,129 @@ def test_run_arms_scores_both_legs_and_reports_a_rate_per_arm_per_leg():
     assert "facts" in fu.render_table(summary)
 
 
+# ── #4296: the skills target scorer must read the shape production returns ───
+
+
+def _production_shape(*names, score: float = 0.91):
+    """A skills leg handing back what production's leg actually returns.
+
+    `app/prefetch._search_skills_for_turn` is annotated
+    `-> list[tuple[float, dict]]` and returns `(score, skill_dict)` pairs. Every stub
+    in this file before #4296 returned plain strings instead, which is why the
+    scorer's `s in names` test never failed here while scoring 0.0 in production.
+    """
+    return [(score, {"name": n, "description": f"{n} body"}) for n in names]
+
+
+def _perfect_skills_leg(names):
+    """A leg that always offers exactly `names`, in production's pair shape.
+
+    The one gold case that expects no skill gets an empty list from this leg, which is
+    what its must-be-empty clause asks for — so a perfect leg satisfies that case too.
+    """
+    pairs = _production_shape(*names)
+    return lambda query, session_id: list(pairs)
+
+
+def test_a_skills_hit_is_counted_against_the_name_inside_the_production_pair_shape():
+    """A pair naming the expected skill is a hit; a pair naming another is not.
+
+    The bug this pins: the scorer tested `s in names` where `names` was the list of
+    `(score, dict)` pairs, so a slug was compared against tuples and every skills
+    TARGET case scored False in both arms, whatever the leg returned — the tied
+    skills arm that made #4296's adoption rule unsatisfiable by any run.
+    """
+    case = fu.Case(
+        id="shape", prefix=["the qmd collection daemon keeps timing out"],
+        follow_up="and what about the other one?",
+        expect_skills=["qmd-index-maintenance"])
+
+    hit = fu.run_case(case, "raw",
+                      skills_fn=lambda q, s: _production_shape("qmd-index-maintenance"))
+    assert hit["skills_hit"] is True, (
+        "a (score, dict) pair naming the expected skill is a hit; the scorer is still "
+        f"comparing the slug against the pair itself: {hit['skills_returned']}")
+
+    miss = fu.run_case(case, "raw",
+                       skills_fn=lambda q, s: _production_shape("some-other-skill"))
+    assert miss["skills_hit"] is False, (
+        "a pair naming a DIFFERENT skill must not count as the expected one")
+
+    # The plain-string shape every pre-#4296 stub returns — and what
+    # default_skills_fn's own annotation still claims — has to keep scoring too,
+    # or fixing the production shape strands the harness's own stubs.
+    assert fu.run_case(case, "raw", skills_fn=lambda q, s: [
+        "qmd-index-maintenance"])["skills_hit"] is True, (
+        "the string shape the existing stubs return stopped scoring")
+
+
+def test_the_skills_must_be_empty_measure_reads_the_raw_return_not_the_names():
+    """[] is a hit and one (score, dict) pair is a miss, exactly as before #4296.
+
+    Kept on the RAW list the leg returned, deliberately: once the target scorer starts
+    digging inside pairs, a measure that followed it would call an unnameable pair
+    empty and quietly start awarding hits for garbage. The two branches must not
+    converge, so the pair with no usable name is asserted here as a miss.
+    """
+    case = fu.Case(
+        id="empty", prefix=["Scott. Thank you. Yeah."],
+        follow_up="Hey there. Leave it alone please.",
+        skills_must_be_empty=True)
+
+    assert fu.run_case(case, "raw", skills_fn=lambda q, s: [])["skills_hit"] is True, (
+        "a leg that offers nothing is what a must-be-empty case asks for")
+    assert fu.run_case(case, "raw", skills_fn=lambda q, s: _production_shape(
+        "qmd-index-maintenance"))["skills_hit"] is False, (
+        "one offered skill is a miss for a must-be-empty case")
+    assert fu.run_case(case, "raw", skills_fn=lambda q, s: [
+        (0.5, {"score": 1.0})])["skills_hit"] is False, (
+        "a pair with no name still fills the slot; it is not an empty answer")
+
+
+def test_a_perfect_skills_leg_scores_the_shipped_gold_set_at_1_00_on_both_arms():
+    """The number #4296 was blocked on: the arms can now differ on skills at all.
+
+    Over the shipped 12 gold cases — 3 facts targets, 9 skills targets, 2 facts
+    must-be-empty, 1 skills must-be-empty — a leg offering each case's own expected
+    skill in production's pair shape scored skills target_rate 0.00 for BOTH arms
+    before the fix, so "focus > raw on the corrected skills rate" could not be
+    satisfied by any run. The facts leg is deliberately run empty here, which pins its
+    two rates independently of the skills shape: 3 targets missed, 2 must-be-empty
+    cases satisfied. The skills must-be-empty measure is n=1 and is asserted as that
+    one case's outcome, not presented as a rate.
+    """
+    cases = fu.load_cases(GOLD)
+    assert len(cases) == 12
+    assert sum(1 for c in cases if c.expect_skills) == 9
+    assert sum(1 for c in cases if c.expect_entities) == 3
+    assert sum(1 for c in cases if c.skills_must_be_empty) == 1
+
+    rows = []
+    for case in cases:
+        rows += fu.run_arms([case], ("raw", "focus"),
+                            facts_fn=lambda q: [],
+                            skills_fn=_perfect_skills_leg(case.expect_skills))
+    assert len(rows) == 24, "12 cases x 2 arms"
+    summary = fu.summarise(cases, rows)
+
+    for arm in ("raw", "focus"):
+        skills = summary[arm]["skills"]
+        assert skills["target_n"] == 9
+        assert skills["target_rate"] == 1.0, (
+            f"the {arm} arm scores a perfect skills leg at "
+            f"{skills['target_rate']}, not 1.0 — the pair shape is still unscored")
+        # n=1: the case that expects no skill is offered nothing by a perfect leg,
+        # so its must-be-empty clause is satisfied. Recorded as an outcome.
+        assert skills["empty_n"] == 1
+        assert skills["empty_ok"] == 1, (
+            "the one skills must-be-empty case expects no skill, so a perfect leg "
+            "offers it none and satisfies it")
+        # Facts scoring is untouched by the skills fix.
+        facts = summary[arm]["facts"]
+        assert facts["target_n"] == 3 and facts["target_rate"] == 0.0
+        assert facts["empty_n"] == 2 and facts["empty_rate"] == 1.0
+
+
 def test_dry_run_never_touches_a_store(monkeypatch):
     """`--dry-run` is the mode a reviewer can run anywhere; it must not read KG."""
     def _boom(*a, **k):

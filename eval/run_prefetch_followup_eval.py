@@ -245,10 +245,36 @@ def default_skills_fn():
     """The skills leg as production calls it: (query tokens, query, session id)."""
     from app.prefetch import _query_tokens, _search_skills_for_turn
 
-    def _skills(query: str, session_id: str) -> list[str]:
+    def _skills(query: str, session_id: str) -> list[tuple[float, dict]]:
         return _search_skills_for_turn(_query_tokens(query), query, session_id)
 
     return _skills
+
+
+def skill_names(returned) -> list[str]:
+    """The skill slugs in whatever a skills leg handed back.
+
+    #4296. Production's leg is annotated `-> list[tuple[float, dict]]` and hands back
+    `(score, skill_dict)` pairs, so a slug is never an element of that list and
+    `slug in returned` is False for every target case no matter what was offered —
+    the structural 0.00-vs-0.00 that made the A/B's skills arm untellable. The pair's
+    name lives at `item[1]["name"]`, which is what this reads.
+
+    Plain strings are read as slugs too, because this harness's own stubs return them
+    and `default_skills_fn` was annotated `-> list[str]` until the fix; a pair whose
+    dict carries no `name` contributes nothing, since inventing a slug there would
+    hand a hit to whatever the case happened to expect.
+    """
+    names: list[str] = []
+    for item in returned:
+        if isinstance(item, str):
+            names.append(item)
+        elif (isinstance(item, (tuple, list)) and len(item) >= 2
+              and isinstance(item[1], dict)):
+            name = item[1].get("name")
+            if isinstance(name, str):
+                names.append(name)
+    return names
 
 
 def run_case(case: Case, arm: str, *, facts_fn=None, skills_fn=None,
@@ -266,11 +292,17 @@ def run_case(case: Case, arm: str, *, facts_fn=None, skills_fn=None,
         else:
             out["facts_hit"] = any(e.lower() in joined for e in case.expect_entities)
     if case.scores_skills:
-        names = (skills_fn or default_skills_fn())(query, session_id) or []
-        out["skills_returned"] = list(names)
+        returned = (skills_fn or default_skills_fn())(query, session_id) or []
+        out["skills_returned"] = list(returned)
         if case.skills_must_be_empty:
-            out["skills_hit"] = not names
+            # Deliberately the RAW return, not skill_names(): a leg that offered an
+            # unnameable pair still filled the slot, and must-be-empty asks whether
+            # anything was offered. Converging the two branches would award this case
+            # a hit for garbage. Pinned by
+            # test_the_skills_must_be_empty_measure_reads_the_raw_return_not_the_names.
+            out["skills_hit"] = not returned
         else:
+            names = skill_names(returned)
             out["skills_hit"] = any(s in names for s in case.expect_skills)
     return out
 
