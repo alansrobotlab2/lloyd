@@ -41,6 +41,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "autonomy" / "data_pipeline_watermark.py"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tests.skill_folder import disk_skill_folder  # noqa: E402
+
 VAULT = Path.home() / "obsidian"
 SKILL = VAULT / "skills" / "autonomy-data-pipeline" / "SKILL.md"
 
@@ -326,7 +331,14 @@ def test_the_skill_branches_call_the_writer_and_read_the_four_keys_back():
     one module, and the post-flight read-back is no longer optional prose.
     """
     assert SKILL.is_file(), f"{SKILL} is the surface clause 4 is about"
-    text = SKILL.read_text()
+    # The skill as a FOLDER, not one file: #4307 moved the noop branch and the
+    # Post-Flight section into `step1-fact-extraction.md` and `post-flight.md` under their
+    # same headings, so reading `SKILL.md` alone reported a moved instruction as a deleted
+    # one — this node went red on item #4496 for exactly that. `disk_skill_folder` splices
+    # each sibling's body under the heading it shares with `SKILL.md`, so `_section` below
+    # still cuts one branch's span and a `json.dump` parked under some other heading still
+    # fails it; what changes is that the branch's text is found where it now lives.
+    text = disk_skill_folder(SKILL.parent, encoding="utf-8")[1]
     noop = _section(text, "### GATE — if `status=noop` (files_processed=0)")
     post = _section(text, "## Post-Flight: Watermark Update")
 

@@ -75,6 +75,8 @@ THIS_FILE = "tests/test_skill_step25_label_pin.py"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests.skill_folder import disk_skill_folder  # noqa: E402
+
 # Never `app.paths.VAULT_ROOT`: that re-anchors to a round's worktree, and the
 # skills tree lives in the account's vault, which no round has.
 SKILLS_DIR = Path.home() / "obsidian" / "skills"
@@ -84,8 +86,10 @@ STEP_HEADING = "## Step 2.5:"
 FIELD_RE = re.compile(r'field\("([^"]+)"\)')
 HEADING_RE = re.compile(r"^## ", re.M)
 
-# Four denominators the block reads, measured at `SKILL.md:489-492` on
-# 2026-09-29. Not a list of labels — the labels themselves must come from the
+# Four denominators the block reads, measured at the four `field("…")` lines of
+# `skills/autonomy-data-pipeline/step2-5-denominators.md` (116-119 as folded on
+# 2026-11-22; the same four the block carried at `SKILL.md:489-492` on 2026-09-29,
+# which #4307 moved). Not a list of labels — the labels themselves must come from the
 # linker and the vault file; this is only a floor on the block still recording
 # anything, so an extraction that silently returns nothing cannot pass.
 RECORDED_FIELDS = 4
@@ -105,8 +109,24 @@ def _missing_tree(path: Path) -> str:
 
 
 def _skill_text(path: Path) -> str:
+    """The skill's text as a FOLDER: `SKILL.md` spliced with every sibling beside it.
+
+    #4307 folded this skill down to 9,968 chars by moving each step's full text into a
+    named sibling under its heading, so `SKILL.md` keeps the `## Step 2.5:` heading plus a
+    pointer line and the recording block these nodes parse went to
+    `step2-5-denominators.md`. Reading one file reported that move as a deletion — five
+    red nodes here, and the same shape in `test_skill_stranded_ruled_sets.py`,
+    `test_data_pipeline_watermark.py` and `test_frontmatter_check_route.py` (item #4496).
+    That is the #4190 misreading `tests/skill_folder.py` was landed to prevent; this
+    module had simply never been routed through it.
+
+    `disk_skill_folder` splices by heading title, so the span under `## Step 2.5:` in the
+    text returned here is main's own prose plus the sibling's under that same heading and
+    nothing else — the section scoping that keeps these extractions from widening across a
+    958-line skill is unchanged, and a heading that is truly gone still extracts nothing.
+    """
     assert path.is_file(), _missing_tree(path)
-    return path.read_text(encoding="utf-8", errors="replace")
+    return disk_skill_folder(path.parent, encoding="utf-8")[1]
 
 
 def _read_skill() -> str:
@@ -137,7 +157,8 @@ def _skill_labels(text: str) -> list[str]:
     labels = FIELD_RE.findall(_step_2_5_block(text))
     assert len(labels) == RECORDED_FIELDS, (
         f"the Step 2.5 block reads {len(labels)} field(\"…\") labels, expected "
-        f"{RECORDED_FIELDS} as measured at {SKILL_PATH}:489-492 — a block that "
+        f"{RECORDED_FIELDS} as measured at "
+        f"{SKILL_PATH.parent}/step2-5-denominators.md:116-119 — a block that "
         "records a different number of denominators needs this pin re-measured, "
         "not a subset check over a list that may be empty")
     return labels

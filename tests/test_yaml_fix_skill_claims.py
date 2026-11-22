@@ -190,15 +190,29 @@ def test_exactly_two_scripts_still_carry_the_fallback_class():
 
 def test_only_the_historical_mention_of_the_deleted_script_survives():
     """`semantic_relationships` survives only as prose in autonomy-data-pipeline
-    saying the old Step 2 ran it and it is gone."""
+    saying the old Step 2 ran it and it is gone.
+
+    Pinned to the FOLDER, not to one file inside it, because #4307 moved that prose out of
+    `SKILL.md` into `step2-index-rebuild.md` under its heading — the same fold that reddened other
+    nodes on item #4496. Still exactly one file in the whole skills tree may carry
+    the name, so a second mention anywhere, in any skill, on any page, still fails here.
+    """
     hits = sorted(
         f.relative_to(SKILLS_DIR).as_posix()
         for f in _skill_files()
         if "semantic_relationships" in _text(f)
     )
-    assert hits == ["autonomy-data-pipeline/SKILL.md"], hits
+    assert len(hits) == 1, (
+        f"{len(hits)} skills files name the deleted script, expected exactly the one "
+        f"historical mention: {hits}")
+    folder = PIPELINE_SKILL.parent.name
+    assert hits[0].startswith(f"{folder}/"), (
+        f"the surviving mention of the deleted script is in `{hits[0]}`, not in the skill "
+        f"that retired it (`{folder}/…`) — a mention in another skill is a second claim "
+        "naming a file no checkout carries")
+    carrier = SKILLS_DIR / hits[0]
     line = next(
-        ln for ln in _text(PIPELINE_SKILL).splitlines() if "semantic_relationships" in ln
+        ln for ln in _text(carrier).splitlines() if "semantic_relationships" in ln
     )
     assert line.lstrip().startswith(">") and "old Step 2" in line, line
 

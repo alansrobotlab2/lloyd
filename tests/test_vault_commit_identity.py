@@ -622,12 +622,24 @@ def corpus_dir() -> Path:
 
 
 def declared_job_names(skills_dir: Path) -> set[str]:
-    """The `LLOYD_JOB=<name>` literals across `<skills_dir>/*/SKILL.md`, the shape a
-    skill's own command line spells."""
+    """The `LLOYD_JOB=<name>` literals across `<skills_dir>/*/*.md`, the shape a skill's
+    own command line spells — in `SKILL.md` OR in any sibling beside it.
+
+    The folder, not the index file, because a folded skill states its job identity in
+    whichever file carries the command it tells you to run: #4307 moved
+    `autonomy-data-pipeline`'s Post-Flight and Step 1 commands into `post-flight.md` and
+    `step1-fact-extraction.md`, and reading only `SKILL.md` started reporting that the
+    job the wrapper's own comment shows was declared by nobody. That is the same #4190
+    misreading `tests/skill_folder.py` exists to prevent, one reader over: a fold moves
+    a section's text, and a reader of one file calls it a deletion. `*/SKILL.md` alone
+    stays a legitimate shape for a skill that never folded, so widening the glob can
+    only ever ADD declared names, never drop one — the direction that makes this fix
+    safe rather than merely quieting the floor below.
+    """
     return {name
-            for skill in sorted(skills_dir.glob("*/SKILL.md"))
+            for page in sorted(skills_dir.glob("*/*.md"))
             for name in LLOYD_JOB_LITERAL.findall(
-                skill.read_text(encoding="utf-8", errors="replace"))}
+                page.read_text(encoding="utf-8", errors="replace"))}
 
 
 def wrapper_comment_literals(wrapper: Path) -> list[tuple[int, str]]:

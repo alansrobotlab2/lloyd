@@ -44,16 +44,36 @@ VAULT = Path.home() / "obsidian"
 SKILLS = VAULT / "skills"
 SKILLS_MGMT = SKILLS / "nightly-skills-management/SKILL.md"
 DATA_PIPELINE = SKILLS / "autonomy-data-pipeline/SKILL.md"
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.skill_folder import disk_skill_folder  # noqa: E402
 
 #: The sentence #1745 left behind and #1804 made false. Its presence means a run is
 #: being told to skip the tags half of a check that exists.
 STALE_CLAIM = "no tags test"
 
 
+def _skill_text(skill: Path) -> str:
+    """A skill's text as its whole FOLDER: `SKILL.md` spliced with the siblings beside it.
+
+    A fold moves a section's text and leaves its heading plus a pointer behind, so a reader
+    of one file reports the moved instruction as a deleted one — which is what happened on
+    item #4496 to both data-pipeline nodes in this file (`segment_scan.py --list` and the
+    `/tmp` preamble both live in `autonomy-data-pipeline`'s siblings since #4307 folded it),
+    and is the #4190 misreading `tests/skill_folder.py` was landed to prevent. Splicing is
+    by heading title, so `text.index(anchor)` below still finds the anchor inside the
+    section it belongs to and the ±window keeps its meaning; `nightly-skills-management`
+    folds too (`step-1-and-commit-detail.md`), so the same read serves both files here.
+    """
+    assert skill.is_file(), f"no skill at {skill}: this file polices it, so it reports"
+    return disk_skill_folder(skill.parent, encoding="utf-8")[1]
+
+
 def _section(skill: Path, anchor: str, before: int = 300, after: int = 3000) -> str:
-    """The region of a SKILL.md around `anchor`, for an assertion that must not be
+    """The region of a skill around `anchor`, for an assertion that must not be
     satisfied by a passing mention somewhere else in a 900-line file."""
-    text = skill.read_text(encoding="utf-8")
+    text = _skill_text(skill)
     at = text.index(anchor)
     return text[max(0, at - before):at + after]
 
@@ -158,7 +178,7 @@ def test_the_data_pipeline_routes_the_check_to_the_committed_scanner():
     the lines that still name the /tmp path, or the next run reads "reuse it" as licence to
     take the count from a file the same run wrote with.
     """
-    text = DATA_PIPELINE.read_text(encoding="utf-8")
+    text = _skill_text(DATA_PIPELINE)
     assert "segment_scan.py --list" in text, "the scanner is not routed in at all"
     assert "--root" in text, "bytes-before-they-land are still a /tmp-only job"
     step = _section(DATA_PIPELINE, "written once to `/tmp/vault_fm_check.py`")

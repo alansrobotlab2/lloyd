@@ -69,6 +69,10 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tests.skill_folder import git_skill_folder  # noqa: E402
 _SCRIPTS = _REPO_ROOT / "scripts" / "util"
 _WRAPPER = _SCRIPTS / "vault-commit.sh"
 _SHIM = _SCRIPTS / "bench_assertion_findings.py"
@@ -760,18 +764,23 @@ def test_both_pre_flight_skills_carry_the_copy_duty_the_report_asks_for():
     starts saying "benchmark drop" pins nothing. `verbatim` is the duty itself — a job that
     SUMMARISES the line into one more sentence still loses the card, which is the failure the
     clause exists to stop.
+
+    The unit read is a skill FOLDER, not `SKILL.md` alone, for the same reason the paragraph
+    above reads HEAD rather than the working tree: #4307 folded `autonomy-data-pipeline`'s
+    Post-Flight text into `post-flight.md`, so the copy duty this clause demands moved to a
+    sibling and the node reported a MOVED duty as an abandoned one (item #4496). Reading the
+    folder keeps the assertion's teeth — the duty has to be in the text a run of this skill
+    reads, wherever its author put it, and a skill that drops it from every page still goes
+    red here.
     """
-    for rel in ("skills/nightly-reflection-signals/SKILL.md",
-                "skills/autonomy-data-pipeline/SKILL.md"):
-        proc = subprocess.run(["git", "-C", str(Path.home() / "obsidian"), "show", f"HEAD:{rel}"],
-                              capture_output=True, text=True, timeout=120)
-        assert proc.returncode == 0, (
-            f"#4185 clause unreadable: `git -C ~/obsidian show HEAD:{rel}` failed "
-            f"({proc.stderr.strip()[:200]}) — a clause cannot be graded from an artifact that "
-            f"cannot be read")
-        assert "BENCH ASSERTION" in proc.stdout, (
+    for rel in ("skills/nightly-reflection-signals", "skills/autonomy-data-pipeline"):
+        _main, text, err = git_skill_folder(Path.home() / "obsidian", rel)
+        assert err is None, (
+            f"#4185 clause unreadable: skill folder {rel} could not be read from the vault's "
+            f"HEAD ({err}) — a clause cannot be graded from an artifact that cannot be read")
+        assert "BENCH ASSERTION" in text, (
             f"{rel} no longer carries the copy duty, so a job running this pre-flight may "
             f"again leave a drop line in a terminal and record nothing")
-        assert "verbatim" in proc.stdout.lower(), (
+        assert "verbatim" in text.lower(), (
             f"{rel} names a BENCH ASSERTION line but never says to copy it verbatim into the "
             f"run record — summarising it is the failure the clause exists to stop")

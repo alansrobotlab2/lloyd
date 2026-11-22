@@ -69,6 +69,10 @@ from app.data_root import PRODUCTION_DATA_ROOT
 ROOT = Path(__file__).resolve().parent.parent
 BACKLOG_PY = ROOT / "scripts" / "automod" / "backlog.py"
 THIS_FILE = "tests/test_skill_stranded_ruled_sets.py"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tests.skill_folder import disk_skill_folder  # noqa: E402
 
 # Never app.paths.VAULT_ROOT: a round's worktree has no vault.
 VAULT = Path.home() / "obsidian"
@@ -190,8 +194,20 @@ def _missing(path: Path) -> str:
 
 
 def _skill_text() -> str:
+    """The skill's text as a FOLDER: `SKILL.md` spliced with every sibling beside it.
+
+    #4307 folded this skill to 9,968 chars, moving each step's text into a named sibling
+    under its heading, so the Step 2.5 section these 34 nodes grade — its Purpose
+    paragraph, its `SD-STRANDED SETCHECK` heredoc, its ruled-set bullets — is in
+    `step2-5-denominators.md` while `SKILL.md` keeps the heading and a pointer. Reading
+    one file reported that as prose this skill no longer carries (the 26 nodes here, item #4496), which is the #4190 misreading `tests/skill_folder.py` exists to prevent and
+    this module had not been routed through. Splicing is by heading title, so the span
+    under `## Step 2.5:` holds main's own text plus the sibling's under that heading and
+    nothing else — the scoping that stops a node here pinning somebody else's paragraph
+    still bites, and a heading that is genuinely gone still extracts nothing.
+    """
     assert SKILL_PATH.is_file(), _missing(SKILL_PATH)
-    return SKILL_PATH.read_text(encoding="utf-8", errors="replace")
+    return disk_skill_folder(SKILL_PATH.parent, encoding="utf-8")[1]
 
 
 def _step_2_5_section(text: str) -> str:
