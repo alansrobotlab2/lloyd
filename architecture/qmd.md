@@ -320,8 +320,9 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   (`SCHEDULED_BUILD_WINDOW_HOURS`, which is the hour set `{22, 23, 0, 1, 2, 3, 4}` —
   hour 4 is *inside*, so the window the guard tests runs to 05:00 and the shorthand
   "04:00" names its last guarded hour, not its close; the test that pins this sentence
-  asks for the literal and re-reads the set from source, which is why both appear here
-  (#4476)), printing and recording the reason, and a run that
+  walks both endpoints out of that set rather than asking for this shorthand, which
+  survives here as prose only and is no longer a pin (#4476)), printing and recording
+  the reason, and a run that
   finds a copy already waiting launches nothing and reuses that copy's name in seconds —
   the name is the decision the swap then acts on, so a cycle holds one full re-embed and
   the swap takes the earlier copy rather than a fresh one. The measured nightly start of 05:01 ends 05:41, which is

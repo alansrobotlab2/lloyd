@@ -305,6 +305,39 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _build_window_bounds(hours: frozenset[int]) -> tuple[str, str]:
+    """The guarded run's start and close as `HH:00`, walked out of the hour set itself.
+
+    #4476. The close of a window whose guarded hours WRAP midnight is not
+    `max(hours) + 1`: on the script's own set `max({22, 23, 0, 1, 2, 3, 4}) + 1` is 24,
+    which renders `24:00` — neither the real close (hour 4 IS guarded, so the run ends
+    when hour 5 begins: `05:00`) nor a clock time at all. A formula that cannot produce
+    the endpoint the doc names would turn a correct doc red, which is the bug the
+    original wording of #4476 carried.
+
+    So the run is walked rather than maxed: the start is the unique hour whose
+    predecessor is unguarded, the last guarded hour is reached by stepping forward while
+    members remain, and the close is that hour plus one modulo 24. A set that is not one
+    contiguous run has no single close, and one covering all 24 hours has no start; both
+    raise instead of handing back an endpoint nobody asked for.
+    """
+    if not hours:
+        raise ValueError("an empty guarded set has no window to close")
+    starts = [h for h in sorted(hours) if (h - 1) % 24 not in hours]
+    if len(starts) != 1:
+        raise ValueError(
+            f"{sorted(hours)} is not one contiguous run of guarded hours: "
+            f"{len(starts)} candidate starts, so it has no single close")
+    start = starts[0]
+    last = start
+    for _ in range(len(hours)):          # bounded: a member must be consumed each step
+        nxt = (last + 1) % 24
+        if nxt not in hours:
+            break
+        last = nxt
+    return f"{start:02d}:00", f"{(last + 1) % 24:02d}:00"
+
+
 def _task81_bullet() -> str:
     """§5's `Task #81` bullet — the list item that carries the #1992 account.
 
@@ -461,11 +494,20 @@ def test_the_paragraph_keeps_both_caveats_and_names_the_build_window_guard():
     `".hour" not in src`. #3460 clause 5 makes that reading false on purpose — the
     acceptance says the same change that schedules the nightly BUILD has to "retire
     the contradiction rather than tripping it", because a scheduled 36-minute re-embed
-    must not straddle the 22:00-04:00 nightly hours. So the node now pins the guard
-    that paragraph describes against the code that implements it, in both
-    directions: the paragraph names the window and the caller, the script carries the
-    two constants and the `.hour` branch, and the budget the paragraph quotes is the
-    number the constant holds — re-read from source here, never quoted from prose.
+    must not straddle the nightly hours — which run 22:00 to 05:00, because hour 4 is
+    inside the guarded set and `04:00` is its last guarded hour, not its close. So the
+    node now pins the guard that paragraph describes against the code that implements
+    it, in both directions: the paragraph names the window and the caller, the script
+    carries the two constants and the `.hour` branch, and the budget the paragraph
+    quotes is the number the constant holds — re-read from source here, never quoted
+    from prose.
+
+    #4476 removed the one leg that broke that last clause for itself: a check pinned
+    the two hour literals as prose strings four lines above the `re.search` that parses
+    the hour set, so the paragraph could pass only by printing the misleading shorthand
+    beside a correction. Both endpoints are now walked out of the parsed set by
+    `_build_window_bounds`, whose own node pins the wrap this set has and the
+    non-wrapping case the walk must also get right.
     """
     flat = _flat(_task81_bullet())
     assert "embed lock is per directory" in flat and "exclude each other" in flat
@@ -481,11 +523,12 @@ def test_the_paragraph_keeps_both_caveats_and_names_the_build_window_guard():
     series = _report(MAINTENANCE_AFTER)["stray_retention"]["bak_series"]
     assert series[0] == _swapped_backup(), (
         f"the swap's backup is not the series' newest: {series}")
-    # The window, as the paragraph states it and as the script holds it. The two
-    # directions are checked against each other, not against a literal repeated here.
-    assert "22:00" in flat and "04:00" in flat, (
-        "the paragraph stopped naming the nightly hours the scheduled build must not "
-        "straddle")
+    # The nightly window is pinned at the bottom of this node, where the hour set that
+    # defines it is parsed out of the script. #4476 removed the leg that used to sit
+    # here: it demanded the two hour literals as prose strings, two lines before
+    # re-parsing the set, and one of them named an endpoint an hour early — hour 4 is
+    # inside SCHEDULED_BUILD_WINDOW_HOURS, so the guarded run closes at 05:00 and the
+    # doc could satisfy that leg only by printing the misleading shorthand.
     assert "rebuild-YYYYMMDD" in flat, (
         "the paragraph no longer names the scheduled caller or the name it derives")
     budget = re.search(r"^SCHEDULED_BUILD_BUDGET_S = (\d+)$", src, re.M)
@@ -497,11 +540,51 @@ def test_the_paragraph_keeps_both_caveats_and_names_the_build_window_guard():
     hours = re.search(r"^SCHEDULED_BUILD_WINDOW_HOURS = frozenset\(\{([^}]*)\}\)$",
                       src, re.M)
     assert hours, "the guarded hours are no longer a constant in the script"
-    assert sorted(int(h) for h in hours.group(1).split(",")) == [0, 1, 2, 3, 4, 22, 23], (
+    guarded = frozenset(int(h) for h in hours.group(1).split(","))
+    assert sorted(guarded) == [0, 1, 2, 3, 4, 22, 23], (
         "the script's window is no longer the nightly hours the paragraph names")
+    start, close = _build_window_bounds(guarded)
+    assert start in flat and close in flat, (
+        f"the paragraph stopped naming the nightly window the scheduled build must not "
+        f"straddle: it has to carry both the run's first guarded hour ({start}) and the "
+        f"hour it ends at ({close}), both walked out of SCHEDULED_BUILD_WINDOW_HOURS")
     assert ".hour" in src, (
         "qmd_index_maintenance.py no longer branches on the hour, so the guard the "
         "paragraph describes — and #3460 clause 2 requires — is gone")
+
+
+def test_the_build_window_bounds_are_walked_out_of_the_hour_set():
+    """#4476: the window's close is WALKED out of the hour set, never `max(hours) + 1`.
+
+    The node above derives the endpoint it demands from `SCHEDULED_BUILD_WINDOW_HOURS`,
+    so the derivation is now load-bearing: whatever it computes is what the doc has to
+    say. Three cases pin it, each a set this file can write out exactly:
+
+    * the script's own nightly set `{22, 23, 0, 1, 2, 3, 4}` WRAPS midnight, so its run
+      closes at `05:00`. The positive control below shows what the naive formula renders
+      on this same set — `24:00` — which is neither that close nor a clock time, so a
+      `max + 1` clause would have failed a doc that correctly said `05:00`. That is the
+      bug the formula on the item carried, and it is why this is a walk;
+    * a set that does NOT wrap, `{1, 2, 3}`, closes at `04:00`, where `max + 1` happens
+      to be right. Pinning it is what proves the walker is a general rule and not a wrap
+      special-case that breaks the first time a window stops crossing midnight — and it
+      is the case where `04:00` legitimately IS a close, which the doc's shorthand is not;
+    * a set that is not one contiguous run (`{1, 2, 22, 23}`, two starts) and one that
+      guards all 24 hours (no start at all) have no single close, and raise rather than
+      returning an endpoint nobody asked for. An empty set raises too, so a parse that
+      quietly produced one can never certify a doc.
+    """
+    nightly = frozenset({22, 23, 0, 1, 2, 3, 4})
+    assert _build_window_bounds(nightly) == ("22:00", "05:00"), (
+        "hour 4 is guarded, so the nightly run ends when hour 5 begins")
+    assert f"{max(nightly) + 1:02d}:00" == "24:00" != _build_window_bounds(nightly)[1], (
+        "the trap this walk exists to avoid has moved: max+1 no longer renders 24:00 on "
+        "the nightly set, so restate which formula is being rejected")
+    assert _build_window_bounds(frozenset({1, 2, 3})) == ("01:00", "04:00"), (
+        "a non-wrapping window closed at the wrong hour")
+    for no_single_close in (frozenset({1, 2, 22, 23}), frozenset(range(24)), frozenset()):
+        with pytest.raises(ValueError):
+            _build_window_bounds(no_single_close)
 
 
 def test_the_swap_fixture_is_admissible_and_tracked():
