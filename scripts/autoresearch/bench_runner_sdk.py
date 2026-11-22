@@ -1691,7 +1691,19 @@ async def run_bench_sdk(
             # run while it was set would read the CHILD's `/state` (green) and write
             # through the supervised route — the half-repoint #4163 clause 2 exists to
             # refuse. Passing it per call makes that state unrepresentable.
+            # One card, one arm. The trial used to be matched on task id ALONE, so every
+            # variant in the matrix dispatched it against the single child the round booted
+            # (#4320 clause 4): four rows whose writes landed in the fixture root the first
+            # arm had already dirtied, and a real spend of 4 x 140.9 s against a bound sized
+            # for one trial. `variant_id` names the arm the child was booted FOR; any other
+            # arm gives the card up entirely rather than running it without a child, because
+            # an unrooted writes trial writes into the live tree — the outcome #4163 clause 2
+            # exists to refuse. A caller that names no arm (the on-demand path is a single
+            # variant) keeps the pre-#4320 behaviour of running it wherever it is asked.
             admitted = bool(writes_trial) and task.get("id") == writes_trial.get("task_id")
+            if admitted and writes_trial.get("variant_id") is not None:
+                if str(writes_trial["variant_id"]) != str(variant_id):
+                    return
             trace = await run_trial(
                 task, variant_id, overlay_dir, model,
                 per_task_timeout=timeout,

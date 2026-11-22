@@ -669,3 +669,466 @@ def test_a_production_rooted_round_boots_a_real_child_it_can_actually_write_to(t
     assert boot["handle"].proc.poll() is not None, "stop() left the child running"
     assert not Path(boot["fixture"].root).exists(), (
         "cleanup() must remove the copy: it is the user's memory in a second location")
+
+
+# ── #4320: the pick reads the pool BEFORE the shrink, and the slot survives it ──────
+#
+# #4163 shipped the boot with the pick called on the post-shrink matrix at
+# `run_round.py:2006` (`tasks`, rebound by `fit_matrix` one statement earlier), while
+# `pick_writes_card`'s own docstring promised a card "even when the shrink dropped it".
+# The consequence was total: the three writes cards free 3 x 4 x 140.9 = 1690.8 s against a
+# 1430 s window in `R_20261119_032746` — the widest saving on the bench — so `_drop_
+# preference`, which orders by saving with validity LAST, cut all three first, in every
+# round, and the pick then answered None on the pool that had contained them. Every round
+# report since the boot landed printed "no writes-scoped card in this round's matrix" over a
+# matrix line naming bench_029, bench_030 and bench_031 as its own drops, and 0 of the 255
+# `durable_write` ledger rows is a `per_trial` row.
+#
+# These nodes pin the three things that make the boot reachable in code: the pool the pick
+# is handed, the price the slot is reserved at, and the one arm it is dispatched on. The
+# boot firing in the wild, and the scored rows it produces over ~15 rounds, stay owed.
+
+WRITES_ROTATION_CARDS = (
+    "bench_029_durable_write_vault_note",
+    "bench_030_durable_write_kg_row",
+    "bench_031_durable_write_backlog_card",
+)
+#: What `R_20261119_032746` measured for the agent-loop arm, the figure the item's
+#: arithmetic and the bound are both stated against.
+SDK_P90 = 140.9
+#: The window that round shrank to.
+WINDOW = 1430.0
+
+
+def _sdk_task(task_id: str, **extra) -> dict:
+    # `requires_runtime: true` is what puts a task on the serial agent-loop arm
+    # (`split_tasks_by_harness`), and it is what the three real cards declare — without it
+    # these tasks would be costed on the parallel direct arm and the `arms x p90` figure
+    # this file reasons about would not be the figure the projection computed.
+    return {"id": task_id, "category": "capability", "prompt": "do the thing",
+            "requires_runtime": True, **extra}
+
+
+def _writes_pool() -> list[dict]:
+    """The pool `R_20261119_032746` had: three writes cards and six ordinary ones."""
+    return ([_sdk_task(c, writes=["memory"]) for c in WRITES_ROTATION_CARDS]
+            + [_sdk_task(f"bench_c{i}") for i in range(6)])
+
+
+class _Priors:
+    """A MEASURED agent-loop p90 at tonight's figure, so nothing falls back to a constant."""
+
+    def __new__(cls):
+        return run_round.TrialPriors(
+            direct=run_round.ArmPrior(seconds=4.0, n=20, measured=True),
+            sdk=run_round.ArmPrior(seconds=SDK_P90, n=20, measured=True))
+
+
+def test_the_admitted_card_is_priced_before_the_first_drop_is_considered():
+    """Clauses 2 and 3, and the gain the item states, in one costing of one pool.
+
+    Same pool, same arms, same window and the same measured p90 as
+    `R_20261119_032746`, whose report recorded `4 arm(s) x 31 task(s) … 36 agent-loop
+    trial(s) ≈ 5072 s` against a `1430 s` window, `1 requires_runtime task(s) started of 9
+    planned`, and 4508.9 s freed. Here the pool is 9 tasks, so the arms x p90 leg the old
+    costing put on it is 4 x 9 x 140.9 = 5072.4 s and the writes cards alone were
+    3 x 4 x 140.9 = 1690.8 s of it.
+    """
+    pool = _writes_pool()
+    priors = _Priors()
+    before = run_round.project_matrix(4, pool, priors=priors)
+    assert before["sdk_seconds"] == pytest.approx(4 * 9 * SDK_P90), before
+
+    reserve = run_round.writes_reserve_for(pool, SDK_P90, round_index=0)
+    assert reserve.admitted in WRITES_ROTATION_CARDS, reserve
+    assert (set(reserve.unadmitted)
+            == set(WRITES_ROTATION_CARDS) - {reserve.admitted}), reserve
+
+    kept, proj, dropped = run_round.fit_matrix(4, pool, window_seconds=WINDOW,
+                                               priors=priors, writes=reserve)
+    ids = [str(t.get("id")) for t in kept]
+
+    # Clause 2: the slot is in the plan at the boot's own spend, before any drop.
+    assert proj["writes_admitted"] == reserve.admitted, proj
+    assert proj["writes_seconds"] == pytest.approx(
+        run_round.FIXTURE_BUILD_SECONDS + run_round.CHILD_BOOT_SECONDS + SDK_P90), proj
+    # Clause 1 + 2 together: the card the round admitted is IN the shrunk matrix. This is
+    # the whole of what was unreachable before, in one line.
+    assert reserve.admitted in ids, (ids, dropped)
+    # Clause 3: the two cards the round cannot admit never enter the matrix and are never
+    # the shrink's victims, so the drop list cannot name them and the report line that
+    # printed the shrink's victims cannot call them window casualties.
+    assert set(dropped) & set(WRITES_ROTATION_CARDS) == set(), dropped
+    assert set(reserve.unadmitted) & set(ids) == set(), ids
+    # Clause 3's price: 0.0, not arms x p90. Whatever survived the shrink, the agent-loop
+    # leg is exactly the ordinary tasks times arms times p90 — no writes card is in it.
+    ordinary = [t for t in kept if str(t.get("id")) not in WRITES_ROTATION_CARDS]
+    assert len(ordinary) < 6, (
+        "the shrink did not fire at all on this window, so this node would pass on a "
+        f"round that never had to reserve anything: {len(ordinary)} ordinary tasks kept")
+    assert proj["sdk_seconds"] == pytest.approx(4 * len(ordinary) * SDK_P90), proj
+    assert proj["projected_seconds"] == pytest.approx(
+        proj["sdk_seconds"] + proj["writes_seconds"]), proj
+    # The gain, as a multiple of the round's own arm count, measured on the PLAN rather
+    # than after a shrink so it holds for any window. Before, all three writes cards were on
+    # the arms x p90 leg (3 x 4 x 140.9 = 1690.8 s of `R_20261119_032746`'s 5072 s). After,
+    # the two unadmitted cost nothing, which is 2 x arms x 140.9 = 1127.2 s at 4 arms, and
+    # the admitted one costs the boot's real spend, 6 + 3 + 140.9 = 149.9 s. The formula,
+    # not a fixed threshold, is what is pinned here: the ">=1500 s" figure the item first
+    # stated is satisfiable only by a 4-arm round and would be FAILED by a correct 3-arm one
+    # (2 x 3 x 140.7 = 844.2 s on R_20261122_033510, the newest round, which runs 3 arms at
+    # its own measured 140.7 s p90). The live measurement of the saving is owed after landing.
+    planned = run_round.project_matrix(4, pool, priors=priors, writes=reserve)
+    trial = run_round.writes_trial_seconds(SDK_P90)
+    assert planned["projected_seconds"] == pytest.approx(4 * 6 * SDK_P90 + trial), planned
+    assert before["projected_seconds"] - planned["projected_seconds"] == pytest.approx(
+        3 * 4 * SDK_P90 - trial), (before, planned)
+    assert before["projected_seconds"] - planned["projected_seconds"] == pytest.approx(
+        1540.9), (before["projected_seconds"], planned["projected_seconds"])
+
+
+def test_the_boot_window_bound_is_the_admitted_cards_real_spend():
+    """Clause 4: no round admits a trial it cannot finish, and cannot over-price one either.
+
+    `boot_precondition`'s bound and `fit_matrix`'s reserved slot are the same number, from
+    the same function, for the same p90. They used to be different things: the bound was
+    `6 + 3 + p90 ≈ 149.9 s` while the dispatch cost 4 x 140.9 s, because every arm ran the
+    admitted card against the one child — an under-price of ~423 s that the one-arm
+    restriction (the other half of this file) is what actually closes.
+
+    `free_bytes` is an argument, not a reading of the disk, so the disk check is its own node
+    above and this one needs no filesystem and no patch.
+    """
+    need = run_round.writes_trial_seconds(SDK_P90)
+    assert need == pytest.approx(
+        run_round.FIXTURE_BUILD_SECONDS + run_round.CHILD_BOOT_SECONDS + SDK_P90)
+
+    # Exactly the real spend: affordable.
+    assert run_round.boot_precondition(
+        seconds_left=need, agent_p90=SDK_P90, estimate_bytes=10 ** 6,
+        free_bytes=10 ** 12) is None
+    # One second short of it: refused, and the refusal names the trial's own need.
+    refused = run_round.boot_precondition(
+        seconds_left=need - 1.0, agent_p90=SDK_P90, estimate_bytes=10 ** 6,
+        free_bytes=10 ** 12)
+    assert refused and "a writes trial needs" in refused, refused
+
+    # The shrink reserves exactly that much, so a window that admits the trial is a window
+    # the matrix kept room for — not a window the trial was dropped into afterwards.
+    reserve = run_round.writes_reserve_for([_sdk_task(CARD, writes=["vault"])],
+                                           SDK_P90, round_index=0)
+    assert reserve.admitted == CARD and reserve.seconds == pytest.approx(need), reserve
+
+
+def test_the_admitted_card_is_dispatched_on_the_baseline_arm_only(tmp_path, monkeypatch):
+    """Clause 4: one card, one arm, one per-trial row.
+
+    The restriction is pinned at the seam a round actually crosses: `run_bench_sdk` fans
+    `(variant x task)` out and used to match the admitted card on task id ALONE, so all four
+    arms dispatched it against the single child the round booted. That made the real spend 4
+    x 140.9 s against a bound sized for one trial, and it made arms 2-4 write into a fixture
+    root arm 1 had already dirtied — three rows that were not independent measurements of
+    anything. The baseline is `variant_pairs[0]`, the first pair the round builds.
+    """
+    seen: list[tuple[str, str]] = []
+
+    async def fake_run_trial(task, variant_id, overlay_dir, model, **kw):
+        seen.append((str(variant_id), str(task["id"])))
+        if str(task["id"]) == CARD:
+            assert kw.get("writes_child") is not None, (
+                "the arm that runs the admitted card must have the child")
+        else:
+            assert "writes_child" not in kw or kw.get("writes_child") is None, (
+                "no other task may see the child")
+        return {"variant_id": str(variant_id), "task_id": str(task["id"]),
+                "status": "success", "duration_seconds": 1.0, "turns": 1}
+
+    monkeypatch.setattr(sdk, "run_trial", fake_run_trial)
+    variants = [("BASELINE", tmp_path / "baseline"), ("v1", tmp_path / "v1"),
+                ("v2", tmp_path / "v2")]
+    traces = asyncio.run(sdk.run_bench_sdk(
+        None, variants, [_sdk_task(CARD, writes=["vault"]), _sdk_task("bench_c1")],
+        "test-model", 2, 30,
+        writes_trial={"task_id": CARD, "variant_id": "BASELINE",
+                      "state_url": CHILD_STATE,
+                      "fixture_dir": str(tmp_path / "fixtures" / "round_R_T_4"),
+                      "mcp_servers": [{"name": "lloyd-mcp", "url": CHILD_ORIGIN}]}))
+
+    card_arms = sorted(v for v, t in seen if t == CARD)
+    assert card_arms == ["BASELINE"], (
+        f"the admitted card ran on {card_arms}; the round booted one child for one arm")
+    # The control, on ARM ids rather than the task id: an ordinary task is dispatched on every
+    # arm of the round, so if the gate ever keys on something looser than the admitted card
+    # this is the line that goes red. Counting dispatches by task id would read
+    # `["bench_c1", "bench_c1", "bench_c1", "bench_c1"]` either way and assert nothing.
+    other_arms = sorted(v for v, t in seen if t == "bench_c1")
+    assert other_arms == ["BASELINE", "v1", "v2"], (
+        f"bench_c1 ran on {other_arms}; the restriction is about the one admitted card, not "
+        "about the matrix")
+    card_traces = [t for t in traces if t["task_id"] == CARD]
+    assert len(card_traces) == 1, card_traces
+
+    # The published per-trial key set is unchanged: the row a writes trial writes has
+    # exactly the keys an ordinary one does — no new field, and none dropped. Pinned on BOTH
+    # writers, because the ledger the owed-check greps is written by the round
+    # (`run_round.trial_ledger_row`) and the on-demand path writes through this one; the two
+    # share their key helpers precisely so that neither can drift.
+    scores = {"objective_score": 1.0, "rubric_overall": None, "composite_score": 1.0}
+    other = next(t for t in traces if t["task_id"] == "bench_c1")
+    card_row = sdk.ledger_row_for(card_traces[0], scores, "R_T_4")
+    plain_row = sdk.ledger_row_for(other, scores, "R_T_4")
+    assert set(card_row) == set(plain_row), (sorted(card_row), sorted(plain_row))
+    assert card_row["task_id"] == CARD and card_row["variant_id"] == "BASELINE", card_row
+
+    card_round_row = run_round.trial_ledger_row("R_T_4", card_traces[0], scores)
+    plain_round_row = run_round.trial_ledger_row("R_T_4", other, scores)
+    assert set(card_round_row) == set(plain_round_row), (
+        sorted(card_round_row), sorted(plain_round_row))
+    assert card_round_row["task_id"] == CARD, card_round_row
+    assert card_round_row["variant_id"] == "BASELINE", card_round_row
+
+
+def test_the_rotation_pick_is_handed_the_pool_the_shrink_was_given(round_env, tmp_path,
+                                                                   monkeypatch):
+    """Clause 1, at the call site: the round's writes pool is `pre_fit_tasks`, not `tasks`.
+
+    The unit-level fix is one argument, and a unit test on `writes_reserve_for` alone could
+    pass while the call kept handing the pick the shrunk list — which is exactly what #4163
+    shipped. So this runs a real round, with a window the matrix cannot fit (a 60 s budget
+    against an arm prior that makes one task cost a minute per arm), and asserts three
+    things about the round's own readings: the pool the pick was handed still holds all three
+    rotation cards, the card it chose is in the matrix that was dispatched, and the two cards
+    it did not choose are not — the shrink having cut deep is the point, because that is the
+    only state where the old code and the new one differ.
+    """
+    cfg = round_env
+    for cid in WRITES_ROTATION_CARDS:
+        (cfg.paths.bench_dir / f"{cid}.md").write_text(
+            "---\n"
+            f"id: {cid}\n"
+            "category: capability\n"
+            "safety_critical: false\n"
+            "requires_runtime: true\n"
+            "writes:\n  - memory\n"
+            "prompt: write one thing down\n"
+            "objective_checks:\n  - type: contains\n    value: done\n"
+            "---\n\nProse body.\n",
+            encoding="utf-8")
+
+    pools: list[list[str]] = []
+    reserves: list[run_round.WritesReserve] = []
+    real_reserve = run_round.writes_reserve_for
+
+    def spy_reserve(tasks, agent_p90, *, round_index):
+        pools.append([str(t.get("id")) for t in tasks])
+        out = real_reserve(tasks, agent_p90, round_index=round_index)
+        reserves.append(out)
+        return out
+
+    kept_ids: list[list[str]] = []
+    real_fit = run_round.fit_matrix
+
+    def spy_fit(*a, **kw):
+        kept, proj, dropped = real_fit(*a, **kw)
+        kept_ids.append([str(t.get("id")) for t in kept])
+        return kept, proj, dropped
+
+    monkeypatch.setattr(run_round, "writes_reserve_for", spy_reserve)
+    monkeypatch.setattr(run_round, "fit_matrix", spy_fit)
+    # An agent-loop arm at tonight's measured p90 and a direct arm at a minute a trial, so a
+    # 60 s budget guarantees the shrink fires. The round's own priors would otherwise be the
+    # fallback constants, which fit any window and prove nothing.
+    monkeypatch.setattr(
+        run_round, "derive_trial_priors",
+        lambda *_a, **_kw: run_round.TrialPriors(
+            direct=run_round.ArmPrior(seconds=60.0, n=20, measured=True),
+            sdk=run_round.ArmPrior(seconds=SDK_P90, n=20, measured=True)))
+    # The precondition refuses, so no child, no fixture and no filesystem probe: this node
+    # is about WHICH LIST the pick reads, and the boot's affordance is pinned by
+    # `test_the_boot_window_bound_is_the_admitted_cards_real_spend`.
+    monkeypatch.setattr(run_round, "boot_precondition",
+                        lambda **_kw: "the round's own refusal")
+
+    res = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=1))
+    assert "error" not in res, res
+
+    assert len(pools) == 1, pools
+    pool, kept = pools[0], kept_ids[0]
+    assert set(WRITES_ROTATION_CARDS) <= set(pool), (
+        f"the pick was handed {pool}; the rotation cards were not in it")
+    assert reserves[0].admitted in WRITES_ROTATION_CARDS, reserves[0]
+    assert len(kept) < len(pool), (
+        "the shrink never fired, so this round could not tell the two readings apart: "
+        f"pool {len(pool)}, dispatched {kept}")
+    # The pre-shrink pool and the dispatched matrix are different lists, and the admitted
+    # card is in the second while the rotation's other two cards are in neither matrix.
+    assert reserves[0].admitted in kept, (
+        f"the admitted card did not survive the shrink: {kept}")
+    assert set(reserves[0].unadmitted) & set(kept) == set(), kept
+
+    report = (cfg.paths.rounds_dir / f"{res['round_id']}.md").read_text(encoding="utf-8")
+    # The sentence every post-#4163 round printed, over a pool that held all three cards.
+    assert "no writes-scoped card in this round's matrix" not in report, report
+
+
+# ── clause 4, the deadline side: a cut of ANY other task must not unscore the card ────
+#
+# The one-arm restriction is what makes the card's trace set a STRICT SUBSET of the round's
+# arms, and `complete_matrix` decided both questions — which tasks are scored, and which are
+# reported as never reached — from one all-arms set. So on the first round that ever booted a
+# child, a deadline that cut an unrelated task took the card's lone baseline trace with it:
+# no judged trial, no `per_trial` row, and the id was excused from `tasks_not_reached`, so
+# the report named it nowhere and the round was silent about the ~150 s the boot spent. The
+# two nodes below are the same defect read at the two levels that can each be reached without
+# the other: the function, and a round that has two arms (with one arm the subset is the whole
+# set and the defect cannot appear, which is why no deadline test caught it).
+
+def test_a_single_arm_card_survives_the_cut_that_took_an_all_arms_task():
+    """The function: `single_arm_tasks` narrows the denominator, it is not a keep-list.
+
+    A task the deadline reached for some arms and not others must go, for every arm at once
+    (#1546) — that rule is what keeps the arms comparable, and `bench_c1` is its case. The
+    admitted card is reached on the arm it was dispatched on, so it stays. A cut single-arm
+    trace still goes, and is reported: one denominator, read once, decides both questions.
+    """
+    traces = [{"variant_id": "BASELINE_t", "task_id": CARD},
+              {"variant_id": "BASELINE_t", "task_id": "bench_c1"},
+              {"variant_id": "V_1", "task_id": "bench_c1"},
+              {"variant_id": "BASELINE_t", "task_id": "bench_c2"}]   # V_1 cut before bench_c2
+    kept, missing = run_round.complete_matrix(
+        traces, ["BASELINE_t", "V_1"],
+        [{"id": CARD}, {"id": "bench_c1"}, {"id": "bench_c2"}],
+        single_arm_tasks={CARD})
+    assert missing == ["bench_c2"], missing
+    assert {(t["variant_id"], t["task_id"]) for t in kept} == {
+        ("BASELINE_t", CARD), ("BASELINE_t", "bench_c1"),
+        ("V_1", "bench_c1")}, kept
+
+    # And the honest reading of the card's OWN bad day: its lone trial cut short is a timeout
+    # the arm did not earn, so it is not scored AND is named — not silently excused.
+    cut_card = [{"variant_id": "BASELINE_t", "task_id": CARD, "deadline_cut": True},
+                {"variant_id": "BASELINE_t", "task_id": "bench_c1"},
+                {"variant_id": "V_1", "task_id": "bench_c1"}]
+    kept2, missing2 = run_round.complete_matrix(
+        cut_card, ["BASELINE_t", "V_1"],
+        [{"id": CARD}, {"id": "bench_c1"}], single_arm_tasks={CARD})
+    assert missing2 == [CARD], missing2
+    assert [t["task_id"] for t in kept2] == ["bench_c1", "bench_c1"], kept2
+
+
+def test_a_deadline_cut_keeps_the_admitted_writes_card_scored(round_env, tmp_path,
+                                                             monkeypatch):
+    """Clause 4, at the round level: the boot's ~150 s ends in a per-trial row or in a name.
+
+    A real round (`run_round.run`), two arms, a child it booted, and a runner double that
+    stops the SECOND arm one task short — the shape both real runners have, since each walks
+    the task list and starts nothing past the deadline. Three readings of the same round, all
+    from disk: the ledger holds exactly one per-trial row for the card and it names the
+    baseline arm; the card is not in the round's not-reached list; and the report's deadline
+    line names the task the cut took, not the card. Under the shipped filter all three read
+    differently, because the card's lone baseline trace was dropped with the cut task's.
+    """
+    cfg = round_env
+    for cid in WRITES_ROTATION_CARDS:
+        (cfg.paths.bench_dir / f"{cid}.md").write_text(
+            "---\n"
+            f"id: {cid}\n"
+            "category: capability\n"
+            "safety_critical: false\n"
+            "requires_runtime: true\n"
+            "writes:\n  - memory\n"
+            "prompt: write one thing down\n"
+            "objective_checks:\n  - type: contains\n    value: done\n"
+            "---\n\nProse body.\n",
+            encoding="utf-8")
+
+    # Two arms. One arm cannot express the defect: with `want == {BASELINE_t}` the card's
+    # single trace already covers the round, so the old filter and the new one agree.
+    monkeypatch.setattr(run_round, "propose_variants",
+                        lambda cfg_, **kw: [{"variant_id": "V_1", "hypothesis": "h",
+                                             "surface": "SOUL.md", "edits": []}])
+    monkeypatch.setattr(run_round, "materialize_variants",
+                        lambda cfg_, _v, base: ([base, ("V_1", cfg_.paths.variants_dir)], {}))
+    # Cheap direct arm, tonight's measured agent-loop p90, and a 10-minute budget: the matrix
+    # FITS (so the shrink is not what removes anything here) while `deadline` is set, which is
+    # the only state in which `complete_matrix` runs at all.
+    monkeypatch.setattr(
+        run_round, "derive_trial_priors",
+        lambda *_a, **_kw: run_round.TrialPriors(
+            direct=run_round.ArmPrior(seconds=60.0, n=20, measured=True),
+            sdk=run_round.ArmPrior(seconds=SDK_P90, n=20, measured=True)))
+    from scripts.autoresearch import bench_fixture as bench_fixture_mod
+    monkeypatch.setattr(bench_fixture_mod, "estimate_fixture_bytes", lambda **_kw: 10 ** 6)
+    # The boot itself is pinned by the nodes above against the real builder and spawner; this
+    # node needs a round that HAS a child, so the handle is a double with the real keys. The
+    # card is the round's own pick (`record_split` above already put this round in the ledger,
+    # so the rotation is at position 1 of 029→030→031), never a card this node assumed.
+    seen: dict[str, object] = {}
+
+    def fake_boot(cfg_, **kw):
+        seen["booted_for"] = str(kw["card"])
+        return {"handle": _FakeHandle(),
+                "fixture": _FakeFixture(tmp_path / "fixtures" / "trial_1"),
+                "card": str(kw["card"]), "scopes": list(kw["scopes"]),
+                "url": CHILD_URL, "state_url": CHILD_STATE,
+                "mcp_servers": [{"name": "lloyd-mcp", "url": CHILD_ORIGIN}],
+                "fixtures_area": tmp_path / "fixtures"}
+
+    monkeypatch.setattr(run_round, "boot_precondition", lambda **_kw: None)
+    monkeypatch.setattr(run_round, "boot_writes_trial_child", fake_boot)
+    monkeypatch.setattr(run_round, "teardown_writes_trial_child", lambda _b: {"stops": 1})
+
+    async def cut_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel, **kw):
+        trial = kw.get("writes_trial") or {}
+        seen["writes_trial"] = trial
+        card = str(trial.get("task_id") or "")
+        ids = [str(t.get("id")) for t in tasks]
+        # The cut tail is an ORDINARY task: that is the case the card used to die for.
+        cut = next(t for t in reversed(ids) if t != card)
+        seen["cut"] = cut
+        base = {"status": "success", "turns": 1, "duration_seconds": 1.0,
+                "tool_calls": [], "denied_calls": [],
+                "final_text": "I called vault_recall and the answer is done."}
+        traces = []
+        for vid, _ in variant_pairs:
+            for t in tasks:
+                tid = str(t.get("id"))
+                if tid == card and str(vid) != str(variant_pairs[0][0]):
+                    continue          # clause 4: only the baseline dispatches the card
+                if str(vid) != str(variant_pairs[0][0]) and ids.index(tid) >= ids.index(cut):
+                    continue          # the second arm was cut from `cut` onward
+                traces.append({**base, "variant_id": str(vid), "task_id": tid,
+                               "task_category": t.get("category"),
+                               "harness": "sdk" if t.get("requires_runtime") else "direct"})
+        return traces, [], {}
+
+    monkeypatch.setattr(run_round, "_run_trials", cut_trials)
+    res = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=10))
+    assert "error" not in res, res
+
+    card = str(seen["booted_for"])
+    assert card in WRITES_ROTATION_CARDS, seen
+    handed = seen["writes_trial"]
+    assert handed and handed["variant_id"] == "BASELINE_t", (
+        f"the round handed the runner {handed}; the child is for the baseline arm")
+
+    # The cut happened, and it is the ordinary task that pays for it.
+    assert res["deadline_stopped"] is True, res
+    assert res["tasks_not_reached"] == [seen["cut"]], res
+    assert card not in res["tasks_not_reached"], res
+
+    rows = [json.loads(line) for line in
+            cfg.paths.ledger_path.read_text(encoding="utf-8").splitlines()]
+    card_rows = [r for r in rows if r.get("round_id") == res["round_id"]
+                 and r.get("task_id") == card and not r.get("event")]
+    assert len(card_rows) == 1, (
+        f"the round booted a child and reached the card; it owes exactly one per-trial row: "
+        f"{card_rows}")
+    assert card_rows[0]["variant_id"] == "BASELINE_t", card_rows[0]
+    assert card_rows[0]["objective_score"] == 1.0, (
+        "a recorded row is not a scored one: the trace has to reach the judge")
+
+    report = (cfg.paths.rounds_dir / f"{res['round_id']}.md").read_text(encoding="utf-8")
+    line = next(ln for ln in report.splitlines()
+                if "not reached by every variant" in ln)
+    assert seen["cut"] in line and card not in line, line

@@ -1422,3 +1422,193 @@ def test_a_boot_already_attempted_never_falls_back_to_the_box_level_cause():
     assert never_attempted == run_round.UNSCORABLE_CAUSE + " and the shrink dropped it", (
         f"with no boot attempted at all the sentence must stay byte-identical, since that "
         f"is the only case whose claim it still supports; got {never_attempted!r}")
+
+
+# ── #4320: the two report artifacts agree on WHY a writes card went unscored ─────────
+#
+# `R_20261116_111918.md` line 15 records the shrink dropping bench_029, bench_030 and
+# bench_031, and line 16, two lines later, prints `writes-scoped trial: no writes-scoped card
+# in this round's matrix`. A round cannot both drop a card it had and report that the card
+# was never in the matrix; the shrink's victim list and the pick's matrix were simply two
+# different lists. The same split ran through the two artifacts: the ledger row builder read
+# each row's `second_cause`, while the report line printed the bare `UNSCORABLE_CAUSE`
+# constant — so a round that HAD booted a fixture-rooted child still reported that no
+# fixture-rooted aggregator is booted, in the one document a human reads.
+#
+# The nodes below pin the report side of #4320 clauses 3 and 5. The boot-file nodes pin the
+# pick, the reserved slot and the single arm.
+
+ROTATION_CARDS = (
+    "bench_029_durable_write_vault_note",
+    "bench_030_durable_write_kg_row",
+    "bench_031_durable_write_backlog_card",
+)
+
+
+def _writes_card_file(cfg, task_id: str) -> None:
+    """A `writes:`-declaring card on the serial arm, written where the round reads cards."""
+    (cfg.paths.bench_dir / f"{task_id}.md").write_text(
+        "---\n"
+        f"id: {task_id}\n"
+        "category: capability\n"
+        "safety_critical: false\n"
+        "requires_runtime: true\n"
+        "writes:\n  - memory\n"
+        "prompt: write one thing down\n"
+        "objective_checks:\n  - type: contains\n    value: done\n"
+        "---\n\nProse body.\n",
+        encoding="utf-8")
+
+
+def test_the_unadmitted_rotation_cards_get_rows_naming_the_bound(round_env, monkeypatch):
+    """Clause 3: two cards out of the matrix, two rows, and the bound is the reason.
+
+    These two cards are NOT the shrink's victims — the reserve priced them out before the
+    matrix was costed, so no drop list can name them and the line that reports drop-list
+    victims cannot be the thing that mentions them. Without their own rows the ledger would
+    just stop mentioning two of the three durable-write cards, which reads as coverage nobody
+    considered rather than as the one-per-round ruling of 2026-11-16 that excuses them.
+    """
+    cfg = round_env
+    for cid in ROTATION_CARDS:
+        _writes_card_file(cfg, cid)
+    for i in range(6):
+        (cfg.paths.bench_dir / f"bench_c{i}.md").write_text(
+            "---\n"
+            f"id: bench_c{i}\n"
+            "category: capability\n"
+            "safety_critical: false\n"
+            "requires_runtime: true\n"
+            "prompt: answer\n"
+            "objective_checks:\n  - type: contains\n    value: done\n"
+            "---\n\nProse body.\n",
+            encoding="utf-8")
+    reserves: list[run_round.WritesReserve] = []
+    real_reserve = run_round.writes_reserve_for
+
+    def spy_reserve(tasks, agent_p90, *, round_index):
+        out = real_reserve(tasks, agent_p90, round_index=round_index)
+        reserves.append(out)
+        return out
+
+    monkeypatch.setattr(run_round, "writes_reserve_for", spy_reserve)
+    # A measured p90 at tonight's figure and a 1-minute budget: the shrink must fire, which
+    # is the state where the old code dropped all three cards and reported none of them.
+    monkeypatch.setattr(
+        run_round, "derive_trial_priors",
+        lambda *_a, **_kw: run_round.TrialPriors(
+            direct=run_round.ArmPrior(seconds=60.0, n=20, measured=True),
+            sdk=run_round.ArmPrior(seconds=140.9, n=20, measured=True)))
+    monkeypatch.setattr(run_round, "boot_precondition",
+                        lambda **_kw: "the window the round was given")
+
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=1))
+    assert "error" not in result, result
+    reserve = reserves[0]
+    assert reserve.admitted in ROTATION_CARDS and len(reserve.unadmitted) == 2, reserve
+    report = (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
+
+    rows = [r for r in _rows_all(cfg, result["round_id"])
+            if r.get("event") == run_round.UNSCORABLE_EVENT]
+    assert len(rows) == 3, (
+        "one row for each of the three rotation cards: the two this round could not admit, "
+        f"plus the admitted one whose boot the window refused: {rows}")
+    bound_rows = [r for r in rows if run_round.ONE_PER_ROUND_BOUND in r["reason"]]
+    assert {r["task_id"] for r in bound_rows} == set(ROTATION_CARDS) - {reserve.admitted}, (
+        [r["task_id"] for r in bound_rows], reserve)
+    for row in bound_rows:
+        # The bound is named, and the box-level sentence is not: this round did address the
+        # aggregator (it refused a boot for a stated reason), and "no fixture-rooted
+        # aggregator is booted" is a different claim from the one that excuses these cards.
+        assert run_round.UNSCORABLE_CAUSE not in row["reason"], row
+        assert row["declared_writes"] == ["memory"], row
+        assert "the window the round was given" in row["reason"], row
+    # The admitted card's own row says what happened to IT, and never borrows the bound:
+    # the round did try to give this card its one trial.
+    admitted_row = next(r for r in rows if r not in bound_rows)
+    assert admitted_row["task_id"] == reserve.admitted, admitted_row
+    assert run_round.ONE_PER_ROUND_BOUND not in admitted_row["reason"], admitted_row
+    assert "the window the round was given" in admitted_row["reason"], admitted_row
+
+    line = [ln for ln in report.splitlines()
+            if ln.startswith(f"- {run_round.UNSCORABLE_HEAD} this round")]
+    assert len(line) == 1, report
+    # The header distinguishes the two ways a writes card leaves a round, and a card that
+    # was never a shrink victim must not be described as one.
+    assert "not admitted: one writes trial per round" in line[0], line[0]
+    assert "dropped by the matrix shrink" not in line[0], line[0]
+    assert run_round.ONE_PER_ROUND_BOUND in line[0], line[0]
+    assert run_round.UNSCORABLE_CAUSE not in line[0], line[0]
+    # The projection says the same thing in numbers, on its own terms rather than folded into
+    # an arm's `x p90 each`, and the report prints TWO of them — the matrix it started and the
+    # matrix it planned — over different pools, so each writes term is pinned on the line that
+    # can carry it. Every phrase is quoted whole: `"0 s" in report` is satisfied by any
+    # `…140 s` figure, and "not admitted" is already in the unscorable line above, so the old
+    # loose pair passed on a `_projection_text` that never mentioned the writes cards at all.
+    started = next(ln for ln in report.splitlines() if ln.startswith("- trial matrix: "))
+    planned = next(ln for ln in report.splitlines()
+                   if ln.startswith("- matrix reduced before trials: "))
+    # Started: the admitted card alone, at the boot's real spend — the 6 s fixture copy + 3 s
+    # child boot + one agent-loop p90 of 140.9 s = 149.9 s, printed rounded. That is the SAME
+    # sum `boot_precondition` refuses a short window at, so the report's arithmetic and the
+    # admission bound cannot disagree (#4320 clause 2 pins the equality at the function).
+    assert "+ 1 writes trial ≈ 150 s" in started, started
+    # Planned: the two cards the bound kept out, priced at nothing and named. They are absent
+    # from the STARTED pool — `fit_matrix` takes them out rather than letting a later drop
+    # "save" their cost — so this line is the only place their 0 s can be said.
+    assert "[2 writes card(s) not admitted this round: " in planned, planned
+    assert "— 0 s]" in planned, planned
+    for cid in sorted(set(ROTATION_CARDS) - {reserve.admitted}):
+        assert cid in planned, planned
+
+
+def test_the_report_line_prints_the_rows_own_cause_and_the_ledger_wording_is_unchanged():
+    """Clause 5, at the formatter: the row's cause, the constant only when a row has none.
+
+    `unscorable_writes_ledger_row` has always honoured `second_cause` (`f"and {second or
+    UNSCORABLE_CAUSE}"`), while `_unscorable_writes_text` printed the bare constant, so the
+    ledger row and the report line described the same card differently by construction. The
+    bug was unobservable while `pick_writes_card` was fed the shrunk matrix, because then no
+    round ever had a boot to describe — which is why this node seeds the boot rather than
+    running a round and hoping one happens.
+
+    Pinned together with it: the sentence for a row that carries NO second cause, byte for
+    byte as it read before, and the unchanged shape of the line (`UNSCORABLE_HEAD` prefix,
+    `event=… in <ledger>` suffix) that promotion and grep both key off.
+    """
+    ledger = Path("/tmp/ledger.jsonl")
+    victim = {"task_id": "bench_029_durable_write_vault_note", "writes": ["vault"],
+              "second_cause": "writes trial child booted for "
+                              "bench_029_durable_write_vault_note (fixtures under /tmp/f)"}
+    plain = {"task_id": "bench_031_durable_write_backlog_card", "writes": ["backlog"]}
+
+    attempted = run_round._unscorable_writes_text([victim], ledger)
+    assert len(attempted) == 1, attempted
+    assert attempted[0].startswith(f"- {run_round.UNSCORABLE_HEAD} this round "), attempted[0]
+    assert victim["second_cause"] in attempted[0], attempted[0]
+    assert run_round.UNSCORABLE_CAUSE not in attempted[0], (
+        "a round that attempted a boot cannot report that no fixture-rooted aggregator "
+        f"is booted: {attempted[0]}")
+
+    untouched = run_round._unscorable_writes_text([plain], ledger)
+    assert run_round.UNSCORABLE_CAUSE in untouched[0], untouched[0]
+    assert untouched[0].endswith(
+        f"; recorded per card as event={run_round.UNSCORABLE_EVENT} in {ledger}"), untouched[0]
+
+    # The ledger row's own wording is untouched by any of this: same sentence with a
+    # second cause, same sentence without one.
+    with_cause = run_round.unscorable_writes_ledger_row("R_T_5", dict(victim, not_dropped=True),
+                                                        None)
+    assert with_cause["reason"] == f"unscorable this round: {victim['second_cause']}", with_cause
+    without = run_round.unscorable_writes_ledger_row("R_T_5", dict(plain), 1430.0)
+    assert without["reason"] == (
+        "unscorable this round: dropped by the pre-trial matrix shrink (1430 s window), "
+        f"and {run_round.UNSCORABLE_CAUSE}"), without
+
+
+def _rows_all(cfg, round_id: str) -> list[dict]:
+    """Every ledger line for the round, EVENTS INCLUDED — `_rows` filters them out, and the
+    rows this node reads are all events."""
+    return [r for r in (json.loads(line) for line in
+                        cfg.paths.ledger_path.read_text(encoding="utf-8").splitlines())
+            if r.get("round_id") == round_id]

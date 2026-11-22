@@ -426,13 +426,30 @@ def trial_deadline(started: float, budget_minutes: int | None) -> float | None:
 
 
 def complete_matrix(traces: list[dict[str, Any]], variant_ids: list[str],
-                    tasks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+                    tasks: list[dict[str, Any]], *,
+                    single_arm_tasks: set[str] = frozenset()
+                    ) -> tuple[list[dict[str, Any]], list[str]]:
     """Keep only the tasks every variant has an uncut trial of.
 
-    `(kept_traces, not_reached_task_ids)`. A task the deadline reached for some
-    variants and not others would rank them on different tasks, and a trial the
-    deadline cut short is a timeout the variant did not earn, so both go, for
-    every variant at once. The runners walk the matrix task by task, so what is
+    `(kept_traces, not_reached_task_ids)`. `single_arm_tasks` narrows the DENOMINATOR per task
+    and nothing else (#4320 clause 4): the admitted writes card is dispatched on the baseline
+    arm ALONE by the one-per-round ruling, so a three-arm round holds exactly one trace of it
+    by design. Demanding all of `variant_ids` of it would file a card that SCORED as
+    `started_not_scored` on the very round that scored it.
+
+    It is not a keep-list, and that is the other half of what #4320 broke. Both questions used
+    to be answered from one all-arms set: which tasks are scored, and which are named as never
+    reached. So on the first round that ever booted a child, a deadline that cut an unrelated
+    task took the card's lone baseline trace with it — no judged trial, no `per_trial` row —
+    while the same id was excused from the report, and the round was silent about the ~150 s
+    the boot spent. Now one measurement answers both: a task is REACHED when the arms that
+    were asked to run it have an uncut trial of it, which for a single-arm task is the one arm
+    it was dispatched on. A cut card is therefore both unscored AND named, because a trial the
+    deadline cut short is a timeout no arm earned — on one arm or on four.
+
+    A task the deadline reached for some variants and not others would rank the arms on
+    different tasks, and a trial the deadline cut short is a timeout the variant did not earn,
+    so both go, for every variant at once. The runners walk the matrix task by task, so what is
     dropped is the tail of the task list, not a variant.
     """
     have: dict[str, set[str]] = {}
@@ -440,9 +457,70 @@ def complete_matrix(traces: list[dict[str, Any]], variant_ids: list[str],
         if not t.get("deadline_cut"):
             have.setdefault(t["task_id"], set()).add(t["variant_id"])
     want = set(variant_ids)
-    reached = {tid for tid, vids in have.items() if want <= vids}
+    # `tid in single_arm_tasks` short-circuits the subset test rather than widening `want`
+    # per task: such a task is reached as soon as it has an UNCUT trace anywhere, since
+    # `have` admits no cut one and the round dispatched it on one arm only.
+    reached = {tid for tid, vids in have.items()
+               if tid in single_arm_tasks or want <= vids}
     not_reached = [t["id"] for t in tasks if t.get("id") not in reached]
     return [t for t in traces if t["task_id"] in reached], not_reached
+
+
+def writes_trial_seconds(agent_p90: float) -> float:
+    """What admitting ONE writes card actually costs the window: build + boot + one trial.
+
+    ONE function because two numbers for the same spend is how #4320 happened. The bound
+    that decides whether a boot may be attempted (`boot_precondition`) and the cost that
+    decides whether the shrink gives the card up (`project_matrix`) are the same
+    expenditure, measured by two pieces of code that never spoke. Costed like an ordinary
+    agent-loop task at `arms x agent-p90`, a writes card is the widest saving on the bench
+    — 3 cards x 4 arms x 140.9 s = 1690.8 s in `R_20261119_032746` — so it was always the
+    first drop, and the boot the round could otherwise afford was never reached.
+    `agent_p90` is passed in rather than read here: it is the leg's own derived prior, and
+    a constant inside would reintroduce the hardcoded fallback #1715 removed.
+    """
+    return round(FIXTURE_BUILD_SECONDS + CHILD_BOOT_SECONDS + float(agent_p90), 1)
+
+
+@dataclass(frozen=True)
+class WritesReserve:
+    """What this round decided about the writes rotation, in the form the costing can use.
+
+    Three facts, not one, because the matrix has to treat the rotation cards differently
+    and only this object knows which is which:
+
+    * `admitted` — the ONE card the rotation picked. Charged `seconds` (the boot's real
+      spend, `writes_trial_seconds`) instead of `arms x agent-p90`, and never a shrink
+      victim: the point of pricing it before the shrink is that a round forced to shrink
+      still dispatches it.
+    * `unadmitted` — the rotation cards this round cannot admit, because the bound is one
+      writes trial per round. Charged NOTHING: an agent-loop task costs `arms x agent-p90`
+      and three cards at that price are what made every writes card the first thing the
+      window gave up — 4508.9 s freed in `R_20261119_032746` in exchange for no evidence
+      at all. They leave the matrix before any trial is dispatched, and each publishes an
+      `unscorable_writes_trial` row naming the bound in its place.
+    * `seconds` — the admitted card's cost, from `writes_trial_seconds`, so the price the
+      shrink pays and the bound the boot checks are one number.
+
+    Unlike `TrialPriors`, whose defaults #1715 rejected because a default there was a
+    *cost*, the default below carries none: it states that this round admits no writes
+    card, which is the truth for every caller that has not made the decision —
+    `scripts/autoresearch/plan_matrix.py`, and every projection test costing a bench with
+    no writes cards in it.
+    """
+
+    admitted: str | None
+    unadmitted: tuple[str, ...]
+    seconds: float
+
+    @property
+    def excused(self) -> frozenset[str]:
+        """Ids that leave the matrix unscored and must not be costed as trials."""
+        return frozenset(self.unadmitted)
+
+
+#: The reserve of a round that made no writes decision: nothing reserved, nothing excused.
+NO_WRITES_RESERVE = WritesReserve(admitted=None, unadmitted=(), seconds=0.0)
 
 
 # ── the trial matrix: what the window can actually hold (#1605) ───────────────
@@ -617,7 +695,8 @@ def _waves(trials: int, max_parallel: int) -> int:
 
 def project_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
                    max_parallel: int = 4, *, window_seconds: float | None = None,
-                   priors: TrialPriors) -> dict[str, Any]:
+                   priors: TrialPriors,
+                   writes: WritesReserve = NO_WRITES_RESERVE) -> dict[str, Any]:
     """Project the wall cost of the (variant × task) matrix, arm by arm.
 
     `arms` is the number of things benched — the baseline plus every surviving
@@ -640,20 +719,42 @@ def project_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto"
     is a deliberate act — `TrialPriors.fallback()` — and it carries the word
     "fallback" into the report line this projection prints.
     """
-    direct_tasks, sdk_tasks, _skipped = split_tasks_by_harness(tasks, harness)
+    excused_ids = writes.excused
+    admitted = writes.admitted
+    excused = [t for t in tasks if str(t.get("id")) in excused_ids]
+    # The rotation cards this round cannot admit are not in the matrix at all, so they are
+    # not in its cost either. `arms x agent-p90` for three cards that can never be
+    # dispatched is what made a writes card the widest saving on the bench and therefore
+    # the FIRST drop — every round of the fourteen after #4163 landed.
+    pool = [t for t in tasks if str(t.get("id")) not in excused_ids]
+    direct_tasks, sdk_tasks, _skipped = split_tasks_by_harness(pool, harness)
     arms = max(int(arms), 0)
-    direct_seconds = _waves(arms * len(direct_tasks), max_parallel) * priors.direct.seconds
-    sdk_seconds = arms * len(sdk_tasks) * priors.sdk.seconds
+    direct_admitted = [t for t in direct_tasks if str(t.get("id")) == admitted]
+    sdk_admitted = [t for t in sdk_tasks if str(t.get("id")) == admitted]
+    # The admitted card is dispatched on ONE arm, so `arms x` does not describe it: its
+    # cost is the copy, the child and one agent-loop trial, which is `writes.seconds` —
+    # the same sum `boot_precondition` checks the window against. It is reported on its
+    # own line rather than folded into an arm's `x p90 each`, so neither arm's arithmetic
+    # is a fiction. A card the shrink dropped after all is charged nothing (clause 3).
+    admits_any = bool(direct_admitted or sdk_admitted)
+    n_direct = len(direct_tasks) - (len(direct_admitted) if admits_any else 0)
+    n_sdk = len(sdk_tasks) - (len(sdk_admitted) if admits_any else 0)
+    direct_seconds = _waves(arms * n_direct, max_parallel) * priors.direct.seconds
+    sdk_seconds = arms * n_sdk * priors.sdk.seconds
+    writes_seconds = writes.seconds if admits_any else 0.0
     out: dict[str, Any] = {
         "arms": arms,
-        "tasks": len(tasks),
+        "tasks": len(pool),
         "direct_tasks": len(direct_tasks),
         "sdk_tasks": len(sdk_tasks),
-        "direct_trials": arms * len(direct_tasks),
-        "sdk_trials": arms * len(sdk_tasks),
+        "direct_trials": arms * n_direct,
+        "sdk_trials": arms * n_sdk,
         "direct_seconds": round(direct_seconds, 1),
         "sdk_seconds": round(sdk_seconds, 1),
-        "projected_seconds": round(direct_seconds + sdk_seconds, 1),
+        "writes_admitted": admitted if admits_any else None,
+        "writes_unadmitted": [str(t.get("id")) for t in excused],
+        "writes_seconds": round(writes_seconds, 1),
+        "projected_seconds": round(direct_seconds + sdk_seconds + writes_seconds, 1),
         # The object the cost was made from, not just the two numbers, so the
         # report can name where each came from next to the line it priced.
         "priors": priors,
@@ -724,9 +825,9 @@ def _drop_preference(task: dict[str, Any], valid_ids: set[str] | None,
 
 def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
                max_parallel: int = 4, window_seconds: float | None = None,
-               valid_ids: set[str] | None = None,
-               *, priors: TrialPriors) -> tuple[list[dict[str, Any]],
-                                                dict[str, Any], list[str]]:
+               valid_ids: set[str] | None = None, *, priors: TrialPriors,
+               writes: WritesReserve = NO_WRITES_RESERVE
+               ) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     """The largest matrix that fits the window, the projection that says so, and
     the task ids dropped to get there.
 
@@ -740,18 +841,37 @@ def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
     `window_seconds` None (no budget) means no shrink: the tasks still come back in
     coverage order, because that ordering is what keeps an unexpected cut off the
     valid pool.
+
+    `writes` is the round's one-writes-trial decision, and it is honoured HERE, before the
+    first drop is even considered — that is #4320 clause 2. Two rules, both structural
+    rather than a tiebreak, because the old costing made a writes card the single widest
+    saving on the bench (3 cards x 4 arms x 140.9 s in `R_20261119_032746`) and
+    `_drop_preference` orders by saving with validity LAST, so the writes cards were the
+    first thing every round gave up and the boot was never reached:
+
+    * `writes.unadmitted` never enter the matrix. The round cannot dispatch them, so
+      keeping them in the pool only let them be dropped, and dropping them was what the
+      shrink reported as its saving.
+    * `writes.admitted` is never a victim. It is priced at the boot's real spend, the same
+      sum `boot_precondition` checks the window against, so a round forced to shrink works
+      around that slot instead of cutting through it. A window too small for it is refused
+      by `boot_precondition`, which says so in the report — silently dropping it here would
+      spend the shrink on cheaper tasks and still deliver nothing.
     """
-    kept = order_tasks_for_coverage(list(tasks), valid_ids)
+    reserved = {writes.admitted} - {None}
+    kept = order_tasks_for_coverage([t for t in tasks
+                                     if str(t.get("id")) not in writes.excused],
+                                    valid_ids)
     if window_seconds is None or not kept:
         return kept, project_matrix(arms, kept, harness, max_parallel,
-                                    priors=priors), []
+                                    priors=priors, writes=writes), []
 
     def cost(pool: list[dict[str, Any]]) -> float:
         return project_matrix(arms, pool, harness, max_parallel,
-                             priors=priors)["projected_seconds"]
+                             priors=priors, writes=writes)["projected_seconds"]
 
     proj = project_matrix(arms, kept, harness, max_parallel,
-                          window_seconds=window_seconds, priors=priors)
+                          window_seconds=window_seconds, priors=priors, writes=writes)
     dropped: list[str] = []
     # The smallest step worth taking: the slack `PROJECTION_MARGIN` already holds
     # back of the window — 10% of it, 143.1 s on the live 1431 s window. A step
@@ -772,13 +892,18 @@ def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
         # on cheap tasks cannot fit a round the serial arm has outgrown); then
         # lint-invalid before lint-valid; then the bench tail, the same end a deadline
         # cut takes from, so shrinking and being cut choose alike.
-        savings = {id(t): here - cost([x for x in kept if x is not t]) for t in kept}
+        # The reserved writes slot is not a candidate: `savings` feeds `best_outside`,
+        # which decides when a held-out safety task may go, so leaving a card the shrink
+        # may never take in here would let its 150 s of reserved window license the drop
+        # of a task it is not allowed to trade.
+        candidates = [t for t in kept if str(t.get("id")) not in reserved]
+        savings = {id(t): here - cost([x for x in kept if x is not t]) for t in candidates}
         outside = [sav for t, sav in savings.items()
                    if str(next(x for x in kept if id(x) == t).get("category") or "")
                    not in bench_split.HELDOUT_CATEGORIES]
         best_outside = max(outside, default=0.0)
         victims = sorted(
-            enumerate(reversed(kept)),
+            enumerate(reversed(candidates)),
             key=lambda pair: (_drop_preference(pair[1], valid_ids, savings[id(pair[1])],
                                                best_outside),
                               pair[0]))
@@ -803,7 +928,7 @@ def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
         kept = [t for t in kept if t is not victim]
         dropped.append(str(victim.get("id")))
         proj = project_matrix(arms, kept, harness, max_parallel,
-                              window_seconds=window_seconds, priors=priors)
+                              window_seconds=window_seconds, priors=priors, writes=writes)
     if stopped_early is not None:
         # Carried on the projection so the report can say the matrix is still
         # over-window, that shrinking stopped, and what stopped it. Silently
@@ -843,14 +968,28 @@ def _projection_text(proj: dict[str, Any]) -> str:
 
     Everything the line said before still reads the same way: the provenance is
     appended after `= 1180 s projected`.
+
+    A writes trial gets its own term (#4320), and it is NOT folded into the agent-loop
+    leg. The two numbers are different in kind: that leg is `arms x tasks x p90` of model
+    calls, while the admitted card is one trial on one arm plus a fixture copy and a child
+    process, and the cards the round could not admit contribute nothing at all. Costing all
+    three the same way is what made a writes card the widest saving on the bench and the
+    first thing every shrink gave up.
     """
+    writes_term = ""
+    if proj.get("writes_admitted"):
+        writes_term = (f"+ 1 writes trial ≈ {proj['writes_seconds']:.0f} s "
+                       f"(fixture copy + child boot + 1 agent-loop trial on one arm) ")
+    if proj.get("writes_unadmitted"):
+        writes_term += (f"[{len(proj['writes_unadmitted'])} writes card(s) not admitted "
+                        f"this round: {', '.join(proj['writes_unadmitted'])} — 0 s] ")
     return (f"{proj['arms']} arm(s) × {proj['tasks']} task(s): "
             f"{proj['direct_trials']} direct trial(s) ≈ {proj['direct_seconds']:.0f} s "
             f"(×{proj['direct_trial_seconds']:.0f} s each, "
             f"{proj['direct_tasks']} task(s) in parallel) + "
             f"{proj['sdk_trials']} agent-loop trial(s) ≈ {proj['sdk_seconds']:.0f} s "
             f"(×{proj['sdk_trial_seconds']:.0f} s each, serial) "
-            f"= {proj['projected_seconds']:.0f} s projected; "
+            f"{writes_term}= {proj['projected_seconds']:.0f} s projected; "
             f"{proj['priors'].provenance()}")
 
 
@@ -1004,6 +1143,7 @@ def matrix_coverage(
     pre_fit_tasks: list[dict[str, Any]], dropped_ids: list[str],
     valid_ids: set[str] | None, planned: dict[str, Any], started: dict[str, Any],
     *, harness: str, ledger_path: Path,
+    writes: WritesReserve = NO_WRITES_RESERVE,
 ) -> dict[str, Any]:
     """What a matrix shrink gave up, in the two currencies #1605's ruling is written
     against, so the ruling can be re-opened on a number instead of a recollection.
@@ -1048,7 +1188,10 @@ def matrix_coverage(
     called with the config, the two summaries and the split and nothing else.
     """
     dropped = set(dropped_ids)
-    started_ids = {str(t.get("id")) for t in pre_fit_tasks} - dropped
+    # Excused by the one-writes-trial bound is a third state, not "started": the card is in
+    # the pre-fit pool, is not in the shrink's drop list, and was never handed to a runner.
+    started_ids = ({str(t.get("id")) for t in pre_fit_tasks} - dropped
+                   - set(writes.excused))
     # `None` is not zero: `_lint_valid_ids` returns None when the lint could not be
     # read, and rendering that as `0 of 0` would tell the next reader that the lint
     # refused every task on the bench — the strongest possible argument for a budget
@@ -1269,6 +1412,7 @@ CHILD_BOOT_SECONDS = 3.0
 #: half-written second copy of the user's memory left under the fixtures area.
 FIXTURE_DISK_FACTOR = 2.0
 
+
 #: The rotation. An id-ordered rotation rather than "first card in the matrix" because
 #: the matrix order is the shrink's choice and shifts with the window: a card would
 #: then be admitted or not by which neighbour got cut, and #031 would never run at all
@@ -1342,7 +1486,7 @@ def boot_precondition(*, seconds_left: float, agent_p90: float,
     moving p90 of their own cost would let a slow night boot less and a fast night boot
     more, the self-reference #1635 removed from the priors.
     """
-    need = FIXTURE_BUILD_SECONDS + CHILD_BOOT_SECONDS + agent_p90
+    need = writes_trial_seconds(agent_p90)
     if seconds_left < need:
         return (f"window {seconds_left:.0f} s left is below the {need:.0f} s a writes "
                 f"trial needs ({FIXTURE_BUILD_SECONDS:.0f} s copy + "
@@ -1573,6 +1717,71 @@ def leftover_fixtures(data_root: Path | str, *, before: set[str]) -> list[str]:
     return sorted(fixture_dirs(data_root) - set(before))
 
 
+#: The bound that excuses the rotation cards a round did not admit (#4320 clause 3).
+#: Named once because it is what the ledger row, the report line and the projection all
+#: have to say, and "the shrink dropped it" is a different and wrong claim: the shrink
+#: never touched these cards, the one-writes-trial-per-round ruling of 2026-11-16 did.
+ONE_PER_ROUND_BOUND = ("the round admits ONE writes-scoped trial, so this card was "
+                       "not admitted")
+
+
+def writes_not_admitted_cause(*, boot: dict[str, Any] | None,
+                              boot_skipped: str | None) -> str:
+    """The cause a rotation card the round did not admit gets, naming the bound.
+
+    Carries the boot's own outcome in front of the bound because the two facts travel
+    together: a card is excused by the bound only because some OTHER card got the round's
+    single trial, and a reader who is told only "not admitted" cannot tell that from the
+    box-level claim `UNSCORABLE_CAUSE` — which is false here, since a child either was
+    booted or was refused for a stated reason.
+    """
+    if boot is not None:
+        return f"a fixture-rooted aggregator was booted for {boot['card']}; {ONE_PER_ROUND_BOUND}"
+    if boot_skipped:
+        return (f"no fixture-rooted aggregator was booted for this round: {boot_skipped}; "
+                f"{ONE_PER_ROUND_BOUND}")
+    return ONE_PER_ROUND_BOUND
+
+
+def rotation_writes_drops(tasks: list[dict[str, Any]], admitted: str | None,
+                          *, second_cause: str) -> list[dict[str, Any]]:
+    """The rotation cards this round could not admit, as rows saying why (#4320 clause 3).
+
+    Not `unscorable_writes_drops`: that one reads the SHRINK'S victim list, and these cards
+    were never on it — the shrink cannot drop a card the round already priced out of the
+    matrix, which is the whole of what #4320 changed. They are the rotation members present
+    in the round's pool other than the one the pick chose. Each carries `not_dropped`, so
+    the ledger sentence says "unscorable this round" and the bound, and never claims a
+    window gave them up.
+    """
+    rows = [{"task_id": str(t.get("id")), "writes": writes_declared(t),
+             "second_cause": second_cause, "not_dropped": True}
+            for t in tasks
+            if str(t.get("id")) in WRITES_ROTATION and str(t.get("id")) != admitted
+            and writes_declared(t)]
+    return sorted(rows, key=lambda r: r["task_id"])
+
+
+def writes_reserve_for(tasks: list[dict[str, Any]], agent_p90: float,
+                       *, round_index: int) -> WritesReserve:
+    """The round's writes decision, taken over the pool it had BEFORE the shrink.
+
+    `tasks` here is `pre_fit_tasks`, and that is the defect this function exists to keep
+    out: `pick_writes_card`'s own docstring promises a card "even when the shrink dropped
+    it", and #4163 called it with the post-shrink list anyway — so a round whose shrink
+    gave up all three rotation cards was told it had none, and every one of the fourteen
+    rounds after the boot landed printed "no writes-scoped card in this round's matrix"
+    over a pool that had contained all three. The pick and the reserve are one call, over
+    one list, before any costing, so the card cannot be chosen from a pool the shrink has
+    already emptied.
+    """
+    admitted = pick_writes_card((t.get("id") for t in tasks), round_index=round_index)
+    have = {str(t.get("id")) for t in tasks}
+    unadmitted = tuple(c for c in WRITES_ROTATION if c in have and c != admitted)
+    return WritesReserve(admitted=admitted, unadmitted=unadmitted,
+                         seconds=(writes_trial_seconds(agent_p90) if admitted else 0.0))
+
+
 def _writes_unscorable_cause(*, boot: dict[str, Any] | None,
                              boot_skipped: str | None, dropped: bool) -> str:
     """The second cause, phrased for what the round actually did about the aggregator.
@@ -1610,10 +1819,28 @@ def _unscorable_writes_text(rows: list[dict[str, Any]], ledger_path: Path) -> li
     # The word is `promote.UNSCORABLE_HEAD`, the same token the coverage line and the
     # refusal print: the report, the ledger row and the promotion text describe one class
     # with one spelling, so a reader who greps the word finds all three.
+    # Which of the two ways a writes card can leave a round decides this phrase. A shrink
+    # victim was given up by the window; a rotation card the round did not admit was never a
+    # candidate at all, and calling that "dropped by the matrix shrink" would blame the
+    # window for the one-per-round ruling (#4320 clause 3).
+    how = []
+    if any(not r.get("not_dropped") for r in rows):
+        how.append("dropped by the matrix shrink")
+    if any(r.get("not_dropped") for r in rows):
+        how.append("not admitted: one writes trial per round")
     return [
-        f"- {UNSCORABLE_HEAD} this round (writes-scoped, dropped by the matrix shrink): "
+        f"- {UNSCORABLE_HEAD} this round "
+        f"(writes-scoped, {'; '.join(how)}): "
         + ", ".join(f"{r['task_id']} (writes: {', '.join(r['writes'])})" for r in rows)
-        + f" — not merely not-run: the window is one cause, and {UNSCORABLE_CAUSE}"
+        # The cause is the ROW's, not a constant (#4320 clause 5). `UNSCORABLE_CAUSE` is a
+        # claim about the box — no fixture-rooted aggregator is booted — and a round that
+        # booted one, or tried and was refused by a bound, has disproved it. The ledger row
+        # beside this line already prints each row's `second_cause`
+        # (`unscorable_writes_ledger_row` reads it above); this line printed the constant,
+        # so the two artifacts disagreed about the same card by construction. A row with no
+        # second cause still prints the box-level sentence, byte-identical to before.
+        + " — not merely not-run: the window is one cause, and "
+        + "; and ".join(sorted({str(r.get("second_cause") or UNSCORABLE_CAUSE) for r in rows}))
         + f"; recorded per card as event={UNSCORABLE_EVENT} in {ledger_path}"
     ]
 
@@ -1947,22 +2174,37 @@ async def run(
     # to check the report's "p90 of n=67" runs the same function over the same
     # rows — `derive_trial_priors(cfg.paths.ledger_path)` is importable.
     priors = derive_trial_priors(cfg.paths.ledger_path)
-    planned = project_matrix(len(variant_pairs), tasks, harness, max_parallel,
-                             window_seconds=window, priors=priors)
     # #1716: the list the shrink was given, kept because it IS one of the two
     # denominators — `lint_valid_started` is the valid pool intersected with the tasks
-    # handed to the runners, and `tasks` is rebound to the shrunk matrix on the next
-    # line, so after it there is no way back to what was asked for.
+    # handed to the runners, and `tasks` is rebound to the shrunk matrix below, so after it
+    # there is no way back to what was asked for.
+    # #4320 moves it one line earlier for a second reason: the writes rotation is a
+    # decision about what the round COULD run, and by the time the shrink has been and
+    # gone there is no such list left to read.
     pre_fit_tasks = list(tasks)
+    # The round's one writes decision, taken over that pool and priced before any drop is
+    # considered. Every costing below — the plan, the shrink, the coverage — reads the SAME
+    # reserve object, so no path can fall back to charging a writes card `arms x p90`,
+    # which is the price that made it the first drop of every round (#4320 clauses 1, 2, 3).
+    writes_reserve = writes_reserve_for(
+        pre_fit_tasks, priors.sdk.seconds,
+        round_index=writes_rotation_index(cfg.paths.ledger_path))
+    planned = project_matrix(len(variant_pairs), tasks, harness, max_parallel,
+                             window_seconds=window, priors=priors,
+                             writes=writes_reserve)
     tasks, projection, matrix_dropped = fit_matrix(
         len(variant_pairs), tasks, harness, max_parallel, window, valid_ids,
-        priors=priors)
+        priors=priors, writes=writes_reserve)
     # Cost of the shrink in the ruling's currencies, computed here at the one place
     # that knows both the planned and the started matrix. Deliberately before the
     # deadline cut below: "handed to the runners" is the shrink's decision, and a
     # task the deadline later failed to reach is a second, separately reported loss.
     matrix_coverage_report = matrix_coverage(
         pre_fit_tasks, matrix_dropped, valid_ids, planned, projection, harness=harness,
+        # The rotation cards that left the matrix by the bound, not by the window, are not
+        # "coverage the shrink started": counting them as started would put a task in the
+        # numerator that no runner ever saw (#4320 clause 3).
+        writes=writes_reserve,
         # The round's one ledger read for this, taken where the other one is
         # (`derive_trial_priors`, 20 lines up): before this round's own trial rows are
         # appended, so a task's entry is its history and not this round's id.
@@ -2003,9 +2245,13 @@ async def run(
     # the data root would measure a filesystem the copy never touches.
     _boot_src, _boot_fixtures_parent = writes_fixture_source()
     fixtures_before = fixture_dirs(_boot_src)
-    writes_card = pick_writes_card((t.get("id") for t in tasks),
-                                   round_index=writes_rotation_index(
-                                       cfg.paths.ledger_path))
+    # The pick already happened, over `pre_fit_tasks`, and was priced into the matrix
+    # before the shrink ran (#4320 clause 1). Re-picking here off `tasks` is what #4163 did
+    # and what made the boot unreachable: `tasks` is the shrunk matrix, the rotation cards
+    # are never in it after a shrink — because the shrink always dropped them, which is the
+    # thing this round changed — and `pick_writes_card` answered None on a pool that had
+    # held all three. Fourteen rounds of "no writes-scoped card in this round's matrix".
+    writes_card = writes_reserve.admitted
     # Read through `all_tasks`, not `tasks`: the shrink may have dropped this card and the
     # scopes are what decides whether a boot is even attempted. Reading `tasks` would answer
     # [] on precisely the round where the row matters most, and the round would then publish
@@ -2015,8 +2261,17 @@ async def run(
     if writes_card and card_scopes:
         from app.paths import VAULT_ROOT
         from .bench_fixture import estimate_fixture_bytes
+        # A round with no deadline has no window to be short of, so its remaining time is
+        # unbounded rather than zero — and `float(budget_minutes * 60)` could never have
+        # produced a number here anyway, because `trial_deadline` returns None exactly when
+        # `budget_minutes` is falsy. #4320 is what reaches this line at all (a shrinking
+        # round used to never admit a writes card), so the expression had never been
+        # evaluated: a hand-run round with no budget that now reserves a slot died with
+        # `TypeError: unsupported operand type(s) for *: 'NoneType' and 'int'` and lost the
+        # whole round. `boot_precondition` itself is untouched, and still refuses any round
+        # that DOES have a window and cannot fit the trial in it.
         seconds_left = (deadline - time.monotonic() if deadline is not None
-                        else float(budget_minutes * 60))
+                        else float("inf"))
         why = boot_precondition(
             seconds_left=seconds_left, agent_p90=priors.sdk.seconds,
             estimate_bytes=estimate_fixture_bytes(vault=VAULT_ROOT,
@@ -2057,9 +2312,17 @@ async def run(
                                 "not_dropped": True, "second_cause": boot_cause})
         tasks = [t for t in tasks if t.get("id") != writes_card]
 
+    # #4320 clause 3: the rotation cards this round did not admit. They left the matrix
+    # before it was costed, so they are in no drop list and the shrink says nothing about
+    # them — without these rows the ledger would simply stop mentioning two of the three
+    # durable-write cards, which reads as coverage nobody ever considered rather than as the
+    # one-per-round ruling it is.
+    unadmitted_writes = rotation_writes_drops(
+        pre_fit_tasks, writes_card,
+        second_cause=writes_not_admitted_cause(boot=boot, boot_skipped=boot_skipped))
     unscorable_writes = unscorable_writes_drops(pre_fit_tasks, matrix_dropped,
                                                second_cause=boot_cause)
-    for _drop in unscorable_writes + boot_unscorable:
+    for _drop in unscorable_writes + boot_unscorable + unadmitted_writes:
         ledger_append(cfg.paths.ledger_path,
                       unscorable_writes_ledger_row(rid, _drop, window))
     if unscorable_writes:
@@ -2068,6 +2331,12 @@ async def run(
             "(%s) — %s", len(unscorable_writes),
             ", ".join(d["task_id"] for d in unscorable_writes),
             boot_cause or UNSCORABLE_CAUSE)
+    if unadmitted_writes:
+        # A line of its own, because these cards were not dropped: the round chose one of
+        # the three rotation cards and the bound is what the other two are waiting on.
+        logger.info("writes card(s) not admitted this round (%s) — %s",
+                    ", ".join(d["task_id"] for d in unadmitted_writes),
+                    writes_not_admitted_cause(boot=boot, boot_skipped=boot_skipped))
     if boot_unscorable:
         logger.warning("writes trial not admitted this round: %s — %s",
                        boot_unscorable[0]["task_id"], boot_skipped)
@@ -2099,11 +2368,20 @@ async def run(
     # its trial returns, so nothing else in the round can inherit a pointer to a process
     # that is about to be stopped. The kwarg is passed ONLY when a child exists: a round
     # with no child calls `_run_trials` exactly as it did before #4163.
+    # `variant_id` names the ONE arm this child is for (#4320 clause 4). The runner used to
+    # match the admitted card on task id alone, so every variant dispatched it against the
+    # single child the round booted: the real spend was 4 x 140.9 s against a bound sized
+    # for one trial, and arms 2-4 wrote into a fixture root arms 1-3 had already dirtied, so
+    # their per-trial rows were not independent measurements of anything. `variant_pairs[0]`
+    # is the baseline — `#{"variant"}: BASELINE`, the first entry of the pair list — and it
+    # is now the only arm that gets the trial, at the ~148 s the 2026-11-16 ruling sized the
+    # bound with.
     _writes_kw: dict[str, Any] = {} if boot is None else {"writes_trial": {
         "task_id": boot["card"],
         "state_url": boot["state_url"],
         "fixture_dir": str(boot["fixture"].root),
         "mcp_servers": boot["mcp_servers"],
+        "variant_id": str(variant_pairs[0][0]),
     }}
     try:
         direct_traces, sdk_traces, arm_seconds = await _run_trials(
@@ -2124,8 +2402,16 @@ async def run(
     # tasks for all — and says what it left out.
     tasks_not_reached: list[str] = []
     if deadline is not None:
+        # ONLY the admitted card, and only when it has a child to run against: it is the one
+        # task the round dispatches on a single arm (#4320 clause 4). The rotation cards the
+        # round did not admit need no excuse here — `fit_matrix` priced them out of the matrix,
+        # so they are not in `tasks` and no runner saw them, and naming them would ask this to
+        # judge a dispatch that never happened. A card whose boot was refused is likewise out
+        # of `tasks` (taken out above, with its unscorable row), so the condition is the same
+        # test the dispatch below uses: one arm only when there is one child.
         kept, tasks_not_reached = complete_matrix(
-            direct_traces + sdk_traces, [vid for vid, _ in variant_pairs], tasks)
+            direct_traces + sdk_traces, [vid for vid, _ in variant_pairs], tasks,
+            single_arm_tasks=({writes_card} if boot is not None else set()))
         if tasks_not_reached:
             logger.warning("deadline: %d task(s) not reached by every variant, not scored: %s",
                            len(tasks_not_reached), ", ".join(tasks_not_reached))
@@ -2354,7 +2640,12 @@ async def run(
         # because the misreading this item was filed on is exactly "the shrink cost us
         # that card" — and for a writes-scoped card the shrink removed something that
         # could not have been scored here at all.
-        *(_unscorable_writes_text(unscorable_writes, cfg.paths.ledger_path)),
+        # The rotation cards the round could not admit ride the SAME line as the shrink
+        # victims (#4320 clause 3), and that line prints each row's own cause (#4320 clause
+        # 5) — so a round that booted a child says so here instead of repeating the
+        # box-level "no fixture-rooted aggregator is booted" over its own boot.
+        *(_unscorable_writes_text(unscorable_writes + unadmitted_writes,
+                                  cfg.paths.ledger_path)),
         # #4163 clause 5: a fixture copy that outlived the round. In the REPORT, not only
         # in the returned payload and `main`'s exit status — the report is what a reader
         # who was not the caller reads, and a verdict that is only printed or only in a
