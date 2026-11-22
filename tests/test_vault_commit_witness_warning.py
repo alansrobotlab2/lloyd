@@ -514,18 +514,30 @@ def test_the_guardrail_types_no_witness_size_and_names_the_fixture_as_the_only_r
     had to re-measure twice over, because the fixture had outgrown it — and then ordered the
     nightly to "move the byte/newline literals" in the pinning node. #3904 (`0bf6a859`)
     deleted that instruction from the rung's `ADVICE` and every literal it pointed at from
-    the pinning node, and the node above pins both facts FOR THE CODE. Nothing swept the
-    vault: `tests/_typed_size_scan.py::typed_size_statements` is called over two test-source
-    sites and the rung's module text, and never over a skill page. That asymmetry is how the
-    sentence survived a retirement whose own guard was green — and the prose is the half the
-    nightly job follows, where an instruction to move literals the pinning node does not
-    have sends a writer to edit a test file that a re-freeze must not touch.
+    the pinning node, and the node above pins both facts FOR THE CODE. The vault was not
+    swept: `tests/_typed_size_scan.py::typed_size_statements` ran at four sites, every one of
+    them over Python source — two in `tests/test_memory_ledger_bound.py` over the pinning
+    node's own text, two in this file over the rung's module text — and never over a skill
+    page. That asymmetry is how the sentence survived a retirement whose own guard was green
+    — and the prose is the half the nightly job follows, where an instruction to move literals
+    the pinning node does not have sends a writer to edit a test file that a re-freeze must
+    not touch.
 
     So the two retired shapes are pinned as banned, with the positive half beside them: the
     recipe names the fixture as the single file a re-freeze re-copies and says out loud that
-    no test file moves with it. `live_vault` for this file's standing reason — the skill body
-    belongs to the nightly skills pass, so an unmarked node here would redden the next
-    author's gate for the previous writer's edit. Run it with `-m live_vault`.
+    no test file moves with it.
+
+    Naming those two figures, though, bans exactly two figures (#4248). The fixture is
+    29,233 B / 82 newlines as this round measures it — `wc -c` and `tr -cd '\\n' | wc -c`, the
+    recipe's own two instruments — and every one of those digits passes a ban written as two
+    strings, so the true size typed into the paragraph would have aged into the next stale
+    receipt by the same route #3904 closed. The ban is therefore the general one this file
+    already runs on the rung: the same scanner over `section`, so no size of any shape belongs
+    here and the only figure a writer can get is the one it measures. The node below is the
+    negative control that proves the ban can fail, and it seeds that true figure. `live_vault`
+    for this file's standing reason — the skill body belongs to the nightly skills pass, so an
+    unmarked node here would redden the next author's gate for the previous writer's edit. Run
+    it with `-m live_vault`.
     """
     section = _witness_guardrail()
     assert "15,555" not in section and "74 newlines" not in section, (
@@ -540,6 +552,73 @@ def test_the_guardrail_types_no_witness_size_and_names_the_fixture_as_the_only_r
     assert "moves nothing in a test file" in section, (
         "the guardrail no longer says a re-freeze touches only the fixture — the sentence "
         "that keeps a nightly out of the pinning node")
+    # The four conditions above ban the two figures that were there. This one bans any
+    # figure at all, which is the whole of #3904's rule and the half #4013 left unguarded
+    # on this surface (#4248).
+    typed = typed_size_statements(section)
+    assert not typed, (
+        "the guardrail types a witness size (" + named_typed_sizes(typed) + ") — #3904 "
+        "retired every hand-typed figure about the fixture and #4013 banned only the two "
+        "that happened to be on the page, so a size that is TRUE today (the fixture "
+        "measures 29,233 B / 82 newlines as this file measures it) could be typed back "
+        "into the paragraph the nightly job follows and go stale exactly as the retired "
+        "pair did")
+
+
+#: The fixture's own size as one sentence, for the control below: `wc -c` says 29233 and
+#: `tr -cd '\\n' | wc -c` says 82 on `tests/fixtures/step_2a_ter_curation_witness_2212.md`
+#: as this round measures. Deliberately the TRUE figure — a seed that was already wrong would
+#: prove the ban rejects a wrong number, which is not the claim. Neither of the two retired
+#: literals appears in it, which is what makes the control pin one assert and not four.
+SEEDED_GUARDRAIL_SIZE = "\nFrozen at 29,233 B / 82 newlines.\n"
+
+
+@pytest.mark.live_vault
+def test_seeding_the_fixtures_real_size_into_the_guardrail_reddens_only_the_typed_size_ban(
+        monkeypatch):
+    """#4248: the new ban can fail, and it is the only thing on the page that fails for a seed.
+
+    An assert that cannot fail is the failure mode
+    `tests/test_memory_ledger_bound.py::test_the_witness_receipt_never_lies_about_the_corpus`
+    was written against, and a ban added to a node that reads a live vault page is exactly
+    where it hides:
+    the section is clean today, so `assert not typed_size_statements(section)` is green whether
+    or not the scanner can see the page at all. So the seed is the fixture's REAL size — the
+    figure that passes the two-literal ban and would be a perfectly plausible sentence for a
+    writer to add, which is the sentence #3904 exists to forbid.
+
+    Two things are required, and the first is why the seed is spelled out rather than
+    generated: the four conditions the node checks BEFORE this one all still hold on the seeded
+    bytes, so the raise below cannot have come from any of them, and the message that does come
+    back names both #3904 and #4013 and quotes the seeded figure. The second half is the same
+    call on the unseeded section raising nothing — otherwise "red on a seed" would be worth
+    nothing, since a broken ban is red on everything.
+    """
+    live = _witness_guardrail()
+    seeded = live + SEEDED_GUARDRAIL_SIZE
+    for absent in ("15,555", "74 newlines", "byte/newline literals"):
+        assert absent not in seeded, f"the seed reintroduces a retired literal: {absent}"
+    for kept in ("tests/fixtures/step_2a_ter_curation_witness_2212.md",
+                 "moves nothing in a test file"):
+        assert kept in seeded, f"the seed drops a fragment the earlier asserts require: {kept}"
+    assert [(shape, found.group()) for shape, found in typed_size_statements(seeded)] == [
+        ("a size figure written into prose", "29,233 B")], "the seed does not reach the scanner"
+
+    # The node itself, not a copy of its body: the control is worth nothing if it re-implements
+    # the guard it is supposed to be testing.
+    target = test_the_guardrail_types_no_witness_size_and_names_the_fixture_as_the_only_re_freeze_target
+    monkeypatch.setattr(sys.modules[__name__], "_witness_guardrail", lambda: seeded)
+    with pytest.raises(AssertionError) as seeded_failure:
+        target()
+    message = str(seeded_failure.value)
+    assert "#3904" in message and "#4013" in message, (
+        f"the ban fired for some other reason, or not at all: {message}")
+    assert "29,233 B" in message, (
+        f"the red message does not quote the seeded figure, so a writer cannot see which "
+        f"sentence to delete: {message}")
+
+    monkeypatch.setattr(sys.modules[__name__], "_witness_guardrail", lambda: live)
+    target()
 
 
 # ---------------------------------------------------------------------------
