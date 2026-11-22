@@ -6818,9 +6818,9 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     ledger = Path(ledger)
     from scripts.automod import state as _S
     archives = _S.ledger_archives(ledger)
-    if archives and not _S.ledger_rows(ledger) \
-            and not any(_S.ledger_rows(a) for a in archives):
-        return {}
+    if status_pass_store_mismatch(ledger) or (archives and not _S.ledger_rows(ledger)
+            and not any(_S.ledger_rows(a) for a in archives)):
+        return {}          # the store is not this board's, or a fold left it unread (#4412)
     # Archive-aware, like `held`, `verdicts` and `outcomes` beside it. Read from
     # the live file alone, a confirmation whose row the 14-day fold had rotated
     # was missing here while `triaged_ids` still said "confirmed": the item fell
@@ -7291,9 +7291,14 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
                        retriage_enabled: bool = True) -> list[dict]:
     """Write the desired statuses that differ. Idempotent; returns what moved.
     `retriage_enabled` is `desired_statuses`' — pass the `retriage_spent`
-    switch, or a spend waits for a re-triage that is never coming."""
-    if not enabled:
-        return []
+    switch, or a spend waits for a re-triage that is never coming.
+
+    Abstains WHOLE, before its pre-pass writers, on `status_pass_store_mismatch`: the
+    #4471 shape moves items through `rescue_off_vocabulary` and `clear_expired_on_reopen`
+    as well as through the table, and every one of those writes a backlog file whose
+    `status_moved` row lands in a store nothing else reads."""
+    if not enabled or status_pass_store_mismatch(ledger):
+        return []          # switched off, or the store is not the board's own (#4471)
     from scripts.automod import state as S
     # First, anything the pass below is structurally unable to see. `current`
     # is read after it so the rescued items are judged in this same pass.
@@ -10531,3 +10536,90 @@ def ensure_board_dir(root: Path, writer: str) -> Path:
     refuse_live_board_write(root, writer)
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+# ---------------------------------------------------------------------------
+# A status pass may answer only from the store that belongs to the board it writes (#4471)
+#
+# Sits here, below the #4488 helpers, for the reason they give: prose in this repo cites
+# lines of this file by ABSOLUTE number (`backlog.py:1426`/`:1450`, and down to `:8345`/
+# `:8382` in `scripts/groundskeeper/retention-sweep.py`), and an insertion above them
+# reddens citation-liveness nodes over a diff that never touched what they name. Both call
+# sites below are therefore folded into an existing condition instead of adding a line.
+# ---------------------------------------------------------------------------
+
+#: The promotion store that belongs to the house vault: `state.STATE_DIR`'s own default
+#: expression with the vault's home in place of `Path.home()`. The two halves of a status
+#: pass are normally derived from ONE root — `vault_root()` from `$HOME`, and the store from
+#: `$HOME` when nothing redirects it — and that derivation is what a pass can actually check,
+#: because `$HOME` itself cannot: under a gate or a canary `$HOME` is the round's symlink
+#: farm whose `obsidian` is a LINK ONTO `PRODUCTION_VAULT` (`worktree.py:65 HOME_LINK_SKIP`
+#: links `obsidian` and skips only `lloyd`/`lloyd-data`), while `LLOYD_AUTOMOD_STATE` names a
+#: scratch dir beside it (`gate.py::_child_env`, `canary_config.py::canary_env`,
+#: `gate.py::_pickup_env`). So the pass's board half is the human's board and its store half
+#: has never seen a verdict — which is #4471, and not a hypothesis: re-measured at this
+#: round's start over the live board, the gate shape (an empty `promotions.jsonl`, no
+#: `promotions-archive-*.jsonl.gz` beside it) parks ALL 162 items the table answers, against
+#: 1 of 171 over the live store.
+PRODUCTION_STORE_DIR = PRODUCTION_VAULT.parent / ".local" / "state" / "lloyd-automod"
+
+
+def status_pass_store_mismatch(ledger: Path | str,
+                               board_dir: Path | str | None = None) -> str:
+    """`''` when this status pass may form opinions, or the reason it must not (#4471).
+
+    The one condition refused: the board the pass would write IS the account's board, and the
+    store it is reading is not the store belonging to that board. Both halves matter, and
+    neither alone is the guard.
+
+    * The board half is what keeps this from being a blanket abstention. A scratch board —
+      every node in `tests/test_board_steward_status_abstention.py`,
+      `tests/test_backlog_unattended.py` and the rest, whose `BACKLOG_DIR` the conftest
+      rebind moves to a scratch directory — answers on any store the caller names, so a
+      redirected `LLOYD_AUTOMOD_STATE` (which conftest and every gate child sets) is not by
+      itself a refusal. Nor is a row count: this refuses a store holding thousands of rows
+      exactly as fast as an empty one, and pins that arm in
+      `tests/test_board_steward_status_abstention.py::test_the_refusal_keys_on_the_store_and_not_on_its_rows`.
+      Keying it on emptiness instead would break the two nodes that exist to pin a fresh
+      install answering at all (`test_a_store_with_no_ledger_at_all_still_answers`,
+      `test_an_empty_decode_parks_nothing`), which is what #4471 clause 2 rules out.
+    * The store half is what keeps the guard off a healthy pass. Comparison is by resolved
+      path, so the round's linked vault counts as the house board — the same reason
+      `app/data_root.py::is_production_vault` realpaths both sides, and the reason an
+      unredirected pass reading `$HOME/.local/state/lloyd-automod/promotions.jsonl` answers
+      even though a round's `$HOME` is nowhere in that comparison. The store must be that
+      store's DIRECTORY, not merely some file under it: a pass that parks the board has to
+      book its `status_moved` rows where the next healthy reader will look for them, and a
+      sibling or nested file is not that place.
+
+    What this is NOT. It is not #4412's half-fold guard, which stays where it is inside
+    `desired_statuses` and answers a different question (a store with a rotation that decodes
+    NOTHING has failed to read); neither arm subsumes the other, because a `gate-state` store
+    has no rotation beside it and so walks past the #4412 guard by construction. And it is not
+    gate isolation: the deeper ask — redirect the VAULT root into the round's scratch too, so
+    a gate subprocess cannot write the live board at all — is owed on #4471 as a ruling, not
+    taken here.
+
+    The abstention writes nothing, so it leaves no row behind by design, and the audit surface
+    is the house store rather than a log line: #4471's owed 7-day check is exactly "no vault
+    park activity line whose timestamp has no matching `up_next → draft` `status_moved` row in
+    the live ledger", which held 600-to-1 wrong over the window `2026-11-21T04:25:07Z`→`14:45Z`
+    — 600 park lines over 158 items, all 158 of them carrying a `confirmed` triage row in the
+    merged corpus, against exactly 1 `up_next → draft` row in the live ledger.
+    """
+    board = Path(board_dir) if board_dir is not None else BACKLOG_DIR
+    try:
+        house = PRODUCTION_BOARD_DIR.resolve()
+        board_r = Path(board).resolve()
+        if board_r != house and house not in board_r.parents:
+            return ""                      # a scratch board: the caller owns both halves
+        store = Path(ledger).resolve().parent
+        paired = PRODUCTION_STORE_DIR.resolve()
+    except OSError:                        # unresolvable paths are nobody's house
+        return ""
+    if store == paired:
+        return ""
+    return (f"{board} is the account's board, but {ledger} is not the store that belongs to "
+            f"it (that store is {PRODUCTION_STORE_DIR}): a status pass reading this store "
+            f"would park items on the human's board and book its `status_moved` rows where "
+            f"nothing else reads them (#4471)")

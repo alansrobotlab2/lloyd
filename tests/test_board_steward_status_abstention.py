@@ -274,3 +274,151 @@ def test_a_store_with_no_ledger_at_all_still_answers(isolated):
     assert not S.LEDGER_PATH.exists()
     want = B.desired_statuses(S.LEDGER_PATH, None)
     assert want[9150] == ("draft", PARK)
+
+
+# ===========================================================================
+# A status pass may answer only from the store that belongs to the board it writes (#4471)
+#
+# #4412 stopped the ONE shape of empty decode it could see: a store whose rotation sits
+# beside it and decodes nothing. This is the other shape, and #4412's guard cannot reach it.
+# A gate or canary subprocess runs with `LLOYD_AUTOMOD_STATE` pointed at
+# `<round>/gate-state/automod` (`gate.py::_child_env`, `gate.py::_pickup_env`,
+# `canary_config.py::canary_env`) — a store with NO rotation beside it by construction, so
+# the `if archives and …` test is false and the pass answers — while its board half is the
+# account's own board: `worktree.py:65 HOME_LINK_SKIP` names only `lloyd` and `lloyd-data`,
+# so a round's `~/obsidian` is a LINK ONTO the house vault, and `backlog.py:73`
+# `BACKLOG_DIR = vault_root() / "backlog"` never looks at the redirected state root.
+# `round.py::board_pass` is the reachable caller, and it is reachable on every gate.
+#
+# Measured over the live board at this round's start, both against the shipped code: with the
+# live store the table answers 171 items and park-pairs 1; with a round-shaped scratch store
+# (an empty `promotions.jsonl`, no `.gz` beside it) it answers 162 and park-pairs ALL 162 —
+# #4409 among them, four times over on 2026-11-21, each park answered minutes later by a
+# `draft → up_next` whose reason was `triage confirmed it with an acceptance check`. The
+# window's 600 vault park lines over 158 items, every one of them carrying a `confirmed` row
+# in the merged corpus, left exactly 1 `up_next → draft` row in the live ledger, because the
+# park rows went into the round's store and died with its directory.
+# ===========================================================================
+
+def _house(tmp_path, monkeypatch):
+    """Declare `tmp_path / "house"` to be the account's home, and hand back its board plus the
+    store that belongs to that board.
+
+    Those two paths are the whole of what `status_pass_store_mismatch` compares. Conftest's
+    `_point_automod_at_scratch` already aims the pair at scratch for every test; this says so
+    per-test over a home the node owns, so the guard's board arm is what is being exercised
+    rather than an accident of isolation."""
+    home = tmp_path / "house"
+    board = home / "obsidian" / "backlog"
+    board.mkdir(parents=True)
+    store_dir = home / ".local" / "state" / "lloyd-automod"
+    store_dir.mkdir(parents=True)
+    monkeypatch.setattr(B, "BACKLOG_DIR", board)
+    monkeypatch.setattr(B, "PRODUCTION_BOARD_DIR", board)
+    monkeypatch.setattr(B, "PRODUCTION_STORE_DIR", store_dir)
+    return board, store_dir / "promotions.jsonl"
+
+
+def _confirm_in(store, item_id: int, status: str) -> None:
+    """`_confirm` against an explicit store: these nodes reason about a named store, and the
+    fixture-rebound `S.LEDGER_PATH` is a different file."""
+    S.append_event({"event": "backlog_triage", "item_id": item_id, "verdict": "confirmed",
+                    "verdict_source": "structured"}, path=store)
+    B.set_status(item_id, status, "triage put it there")
+
+
+def test_a_round_scratch_store_never_parks_the_board(tmp_path, monkeypatch):
+    """#4471 clause 1: the gate/canary shape writes nothing, where the shipped code parks.
+
+    The live figures are in the block comment above; reproduced here at a fraction of that
+    volume — twelve open, untriaged, in-pool items where the live burst parked 154 in one pass —
+    because the SHAPE is what breaks, not the count: a board that is the account's board, and
+    the store a round hands its subprocesses.
+    """
+    board, paired = _house(tmp_path, monkeypatch)
+    ids = list(range(9280, 9292))
+    for iid in ids:
+        write_item(board, iid, status="up_next")
+    scratch = (tmp_path / "SM_20261121_145251" / "gate-state" / "automod"
+               / "promotions.jsonl")
+    scratch.parent.mkdir(parents=True)
+    scratch.write_text("", encoding="utf-8")            # empty, and no .gz beside it
+    before = {p.name: p.read_bytes() for p in board.glob("*.md")}
+    assert len(before) == 12, "the board has to be standing for the abstention to mean anything"
+
+    why = B.status_pass_store_mismatch(scratch)
+    assert why and "4471" in why, f"the refusal must name the store it wanted: {why!r}"
+    assert B.desired_statuses(scratch, None) == {}, (
+        "a pass reading a store that is not this board's forms no opinion, and above all "
+        "none of the `never triaged` park that shipped here")
+    assert B.reconcile_statuses(scratch, None) == [], (
+        "and writes nothing: the shipped pass moved all twelve of these items")
+    assert {p.name: p.read_bytes() for p in board.glob("*.md")} == before, (
+        "no status, no body line, no activity entry — an abstention leaves no trace on the "
+        "board it abstained from")
+    assert scratch.read_text(encoding="utf-8") == "", "nor does it book rows in its own store"
+
+    # The same twelve items, the same board, read from the store that belongs to it: still all
+    # twelve parked. That is the control — the guard above refused on identity, and this holds
+    # with the guard deleted, which is what makes it a control and not the falsifier.
+    assert B.desired_statuses(paired, None) == {iid: ("draft", PARK) for iid in ids}, (
+        "a fresh install's own store answers even while empty")
+
+
+def test_the_refusal_keys_on_the_store_and_not_on_its_rows(tmp_path, monkeypatch):
+    """#4471 clause 2: the key is the store's identity, never its row count.
+
+    Emptiness is #4412's key and cannot be this one's, because an empty store is also a fresh
+    install — `test_a_store_with_no_ledger_at_all_still_answers` and
+    `test_an_empty_decode_parks_nothing` exist to keep that difference alive. The two arms
+    below fail in opposite directions: the paired-but-empty arm parks, so it stays green with
+    the guard removed; the unpaired-but-populated arm abstains, and it is the falsifier."""
+    board, paired = _house(tmp_path, monkeypatch)
+    write_item(board, 9293, status="up_next")
+    assert not paired.exists()
+    assert B.desired_statuses(paired, None)[9293] == ("draft", PARK), (
+        "no redirect, no ledger file at all: the board's own store still answers, so the "
+        "refusal cannot be reading how many rows it holds")
+
+    fat = tmp_path / "SM_20261122_000000" / "gate-state" / "automod" / "promotions.jsonl"
+    fat.parent.mkdir(parents=True)
+    fat.write_text("".join(
+        json.dumps({"event": "backlog_triage", "item_id": 8000 + n,
+                    "verdict": "confirmed", "verdict_source": "structured"}) + "\n"
+        for n in range(2000)), encoding="utf-8")
+    assert not B.status_pass_store_mismatch(paired), "the board's own store is never refused"
+    assert B.status_pass_store_mismatch(fat), (
+        "2,000 rows do not make a round's scratch store into the board's own")
+    assert B.desired_statuses(fat, None) == {}, (
+        "and a pass holding other items' whole triage history still will not park this "
+        "board's items from it")
+
+
+def test_a_pool_park_is_always_booked_in_the_store_the_pass_read(tmp_path, monkeypatch):
+    """#4471 clause 4: 600 park lines to 1 ledger row was possible because a write and its
+    `status_moved` row could be aimed at different stores, so the board's park count stopped
+    being checkable against the ledger that grades it. Every in-pool move has to be paired
+    with its row, in the file the pass read."""
+    board, paired = _house(tmp_path, monkeypatch)
+    for iid in (9296, 9297, 9298):                  # the store's healthy history
+        write_item(board, iid)
+        _confirm_in(paired, iid, "up_next")
+    write_item(board, 9294, status="up_next")       # never triaged: the park
+    write_item(board, 9295)
+    _confirm_in(paired, 9295, "draft")              # confirmed, parked: the lift
+
+    moved = B.reconcile_statuses(paired, None)
+    assert sorted((m["item_id"], m["from"], m["to"]) for m in moved) == [
+        (9294, "up_next", "draft"), (9295, "draft", "up_next")]
+
+    rows = [e for e in S.ledger_rows(paired) if e.get("event") == "status_moved"]
+    park_rows = sorted((e["item_id"], e["from"], e["to"]) for e in rows
+                       if e["from"] == "up_next" and e["to"] == "draft")
+    park_writes = sorted((m["item_id"], m["from"], m["to"]) for m in moved
+                         if m["from"] == "up_next" and m["to"] == "draft")
+    assert park_writes == park_rows == [(9294, "up_next", "draft")], (
+        "one park written, exactly one park booked, in the store this pass read: a board "
+        "whose parks outnumber its rows is the #4471 blind spot")
+    assert {(e["item_id"], e["from"], e["to"]) for e in rows} == {
+        (9294, "up_next", "draft"), (9295, "draft", "up_next")}, (
+        "no move this pass makes goes unbooked, in either direction")

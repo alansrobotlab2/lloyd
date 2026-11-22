@@ -7156,3 +7156,37 @@ def test_a_refused_retiring_close_leaves_the_launch_readout_untouched(isolated):
 
     assert O.hand_runs() == before, (
         f"a refused close changed the launch readout: {before} -> {O.hand_runs()}")
+
+
+# ===========================================================================
+# The arm that fires on an ABSENT row survives #4471's abstention (clause 3)
+#
+# `status_pass_store_mismatch` is a new abstention in front of every arm of
+# `desired_statuses`. The arm that parks an untriaged item is the only one that fires on a row
+# being MISSING rather than on one being FOUND, so it is the arm an over-broad abstention would
+# kill silently — in the direction that stops the board being tidied, not the direction that
+# stops it being parked. #4471's own measurement is why the narrowing is safe the other way: of
+# the 158 items a redirected pass parked on 2026-11-21, 158 carried a `backlog_triage` row with
+# `verdict: confirmed` in the merged corpus and ZERO had no triage row at all. Every park that
+# window produced was this arm firing on the wrong store, and the case it exists for had not
+# happened even once.
+# ===========================================================================
+
+def test_the_never_triaged_arm_still_parks_on_the_board_s_own_store(isolated, monkeypatch):
+    """#4471 clause 3: a healthy store holding other items' `backlog_triage` rows, an open
+    `up_next` item with no triage row of its own — the park still answers, and is written."""
+    monkeypatch.setattr(B, "PRODUCTION_BOARD_DIR", isolated)
+    monkeypatch.setattr(B, "PRODUCTION_STORE_DIR", S.LEDGER_PATH.parent)
+    write_item(isolated, 9310); _confirm(9310)         # the store's own history
+    write_item(isolated, 9311); _confirm(9311)
+    write_item(isolated, 9312, status="up_next")       # nobody ever triaged this one
+
+    assert not B.status_pass_store_mismatch(S.LEDGER_PATH), (
+        "the store belonging to the board a pass is writing is never the refused one")
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[9312][:2] == ("draft", "never triaged; autotriage reads draft"), (
+        "the arm #4471 narrows still catches the case it exists for")
+    moved = [(m["item_id"], m["from"], m["to"])
+             for m in B.reconcile_statuses(S.LEDGER_PATH, None)]
+    assert moved == [(9312, "up_next", "draft")], (
+        "and the pass writes that move, booking its row in the store it read")
