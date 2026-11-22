@@ -236,20 +236,34 @@ _CLAIM_CAP_SCAN_LIMIT = 64
 #: shape since #1526 and nothing in the claim path read it.
 AGING_PERIOD_HOURS = 6
 
-#: Priority points (a LOWER number) one full period buys. 15 per 6 h moves a
-#: priority-72 `owed-check` row to 57 after a day of waiting, and past a fresh
-#: priority-30 `scheduled-task` row after 18 h (72 - 45 = 27 < 30) — the crossover
-#: the live queue needed on 2026-10-10 and never got. The curve is owed-check's to
-#: re-rule once a day of real traffic has been measured against it; the number is
-#: fixed here so a round can land, not so it is final.
+#: Priority points (a LOWER number) one full period buys: 15 per 6 h period, so a
+#: priority-72 `owed-check` row is at effective 57 at 6 h, 42 at 12 h, 27 at 18 h, 12
+#: at 24 h and 10 at 30 h, where the floor below stops the fall. 27 is what carries that
+#: row past a fresh priority-30 `scheduled-task` row after 18 h (72 - 45 = 27 < 30) — the
+#: crossover the live queue needed on 2026-10-10 and never got. The day is not a second
+#: figure to remember: at 24 h this row is at 12, not the 57 one period buys, which is
+#: the error #4504 corrects: the sentence here used to attach 57 to a day of waiting
+#: rather than to one period, which understated a day's gain four times over, and
+#: `backlog/2692` quoted that reading as "one point per 6 h, ~10 days" for a curve that
+#: floors a starved row in 30 h. Each number above is evaluated by
+#: `tests/test_workers_queue.py::test_the_aging_prose_quotes_the_numbers_the_shipped_expression_produces`
+#: against this expression, so a constant move reddens a node rather than leaving this
+#: sentence behind. The curve is owed-check's to re-rule once a day of
+#: real traffic has been measured against it; the number is fixed here so a round can
+#: land, not so it is final.
 AGING_POINTS_PER_PERIOD = 15
 
 #: The lowest effective priority aging may produce, so waiting cannot make an old
 #: row outrank everything at once. It is also a ceiling on the boost: a row already
 #: inside this band (`priority` <= 10) is untouched by its own age, because the
 #: effective value is `MIN(priority, ...)`, never above the number the caller asked
-#: for. Nothing on this fleet enqueues below 30 today, so the clamp is not a
-#: present-tense case — it is the reason a future 5 cannot be silently demoted
+#: for. The floor is present-tense, not hypothetical: `scheduled-task` maps a task's
+#: `priority: high` to 20 (`workers/sources/scheduled_task.py::_PRIORITY_MAP`) and the
+#: live `workers.db` held 115 priority-20 rows when #4504 read it on 2026-11-22, so a
+#: whole band reaches this number after ONE period. What the `MIN` clamp itself guards is
+#: a stored number strictly BELOW it, and the lowest band any source publishes is
+#: `critical` = 10 — exactly the floor, never under it — so the clamp stays the
+#: forward-looking guard it was: it is the reason a future 5 cannot be silently demoted
 #: behind a fresh 8 by a rule that was only ever meant to help the old ones.
 AGING_FLOOR_PRIORITY = 10
 

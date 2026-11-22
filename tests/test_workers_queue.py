@@ -229,6 +229,108 @@ def test_the_credit_a_wait_earns_is_the_ladder_the_constants_describe(
         f"{stored}")
 
 
+def _aging_doc_comment(name: str) -> str:
+    """The `#:` doc-comment block that documents one `AGING_*` constant, as one line.
+
+    Read out of the shipped module source rather than transcribed into an assertion, so a
+    node using this grades the sentence a reader of `workers/queue.py` actually gets: the
+    defect #4504 fixes is exactly a sentence no assertion was reading. The block is the run
+    of `#:` lines immediately above the module-level assignment, joined into one line so a
+    mid-sentence wrap cannot split a number from its unit.
+    """
+    from workers import queue as queue_mod
+
+    lines = inspect.getsource(queue_mod).splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if line.startswith(f"{name} =")), None)
+    assert start is not None, f"{name} is no longer a module-level assignment"
+    end = start
+    while end > 0 and lines[end - 1].lstrip().startswith("#:"):
+        end -= 1
+    return " ".join(line.lstrip()[2:].strip() for line in lines[end:start])
+
+
+def test_the_aging_prose_quotes_the_numbers_the_shipped_expression_produces(tmp_path):
+    """#4504: the worked example beside the constant has to be the expression's own.
+
+    `AGING_POINTS_PER_PERIOD`'s comment published "to 57 after a day of waiting" while the
+    shipped expression puts a priority-72 row at 57 after ONE period and at 12 after a day
+    — the sentence understated a day's gain by 45 points, four periods' worth. The ladder
+    above already pinned (72, 24, 12) and could not see the sentence beside it, so this node
+    takes the ages AND the values out of the comment and asks SQLite's own
+    `_effective_priority_sql()` what each age is worth. No number is transcribed here, which
+    is what makes a future constant edit redden a node instead of leaving the prose lying —
+    and, because the grammar is parsed rather than grepped, prose rewritten away from
+    `"<effective> at <hours> h"` reddens it too instead of silently escaping the pin.
+    """
+    import re
+
+    from workers import queue as queue_mod
+    from workers.sources import owed_check, scheduled_task
+
+    prose = _aging_doc_comment("AGING_POINTS_PER_PERIOD")
+    gain = (f"{queue_mod.AGING_POINTS_PER_PERIOD} per "
+            f"{queue_mod.AGING_PERIOD_HOURS} h period")
+    assert gain in prose, (
+        f"the comment no longer states the gain as {gain!r}, so a reader cannot tell from "
+        f"the sentence meant to say it what one period buys: {prose!r}")
+
+    named = re.search(r"priority-(\d+) `owed-check`", prose)
+    assert named, (
+        "the comment no longer works the credit out on a named priority-NN `owed-check` "
+        f"row, which is the row the example is about: {prose!r}")
+    assert int(named.group(1)) == owed_check.DEFAULT_PRIORITY, (
+        f"the example is about a priority-{named.group(1)} row but `owed-check`'s "
+        f"DEFAULT_PRIORITY is {owed_check.DEFAULT_PRIORITY}, so the sentence describes a row "
+        "no source enqueues")
+
+
+    quoted = re.findall(r"\b(\d+) at (\d+) h\b", prose)
+    assert quoted, (
+        "the comment no longer states its example as `\"<effective> at <hours> h\"`, so "
+        "nothing ties the prose to the expression any more: " + prose)
+
+    expr, params = queue_mod._effective_priority_sql()
+    probe = WorkQueue(tmp_path / "aging-prose.db")
+    measured: dict[int, int] = {}
+    for value, hours in ((int(v), int(h)) for v, h in quoted):
+        if hours in measured:
+            assert measured[hours] == value, (
+                f"the comment quotes {measured[hours]} and {value} for the same {hours} h "
+                "age — two readings of one credit in one sentence")
+        aged = probe.enqueue(owed_check.NAME, f"aged-{hours}",
+                             priority=owed_check.DEFAULT_PRIORITY)
+        _backdate_enqueued_at(probe, aged, hours=hours)
+        with probe._connect() as conn:
+            got = conn.execute(f"SELECT {expr} FROM queue WHERE id = ?",
+                               [*params, aged]).fetchone()[0]
+        assert got == value, (
+            f"the comment says a priority-{owed_check.DEFAULT_PRIORITY} `owed-check` row is "
+            f"at {value} after {hours} h; the shipped expression says {got}. "
+            "test_the_credit_a_wait_earns_is_the_ladder_the_constants_describe is the "
+            "measure of record — move the prose to it, and do not move a constant to suit a "
+            "sentence: the curve is owed-check's to re-rule (#4504 changes no number)")
+        measured[hours] = got
+
+    crossed = re.search(r"after (\d+) h", prose)
+    assert crossed, (
+        "the comment no longer names the age at which the aged row gets past a fresh "
+        f"priority-{scheduled_task.DEFAULT_PRIORITY} `scheduled-task` row: " + prose)
+    crossover = int(crossed.group(1))
+    assert measured.get(crossover) is not None, (
+        f"the comment puts the crossover at {crossover} h but its worked example quotes no "
+        f"value for that age, so the crossover is an unmeasured claim: {sorted(measured)}")
+    assert measured[crossover] < scheduled_task.DEFAULT_PRIORITY, (
+        f"effective {measured[crossover]} at {crossover} h is not below a fresh priority-"
+        f"{scheduled_task.DEFAULT_PRIORITY} row, so {crossover} h is not the crossover the "
+        "sentence states")
+    earlier = measured.get(crossover - queue_mod.AGING_PERIOD_HOURS)
+    assert earlier is not None and earlier >= scheduled_task.DEFAULT_PRIORITY, (
+        f"the comment says the crossover is at {crossover} h, but one period earlier the row "
+        f"is already at {earlier}: the age is only the crossover if the row is still behind a "
+        "fresh priority-30 row then — the ladder's (72, 18, 27) is the measure here too")
+
+
 def test_a_wait_short_of_one_period_earns_nothing(tmp_path):
     """`/ period` is INTEGER division, and that is the whole difference between a
     credit per full period and a credit per second.
@@ -250,9 +352,12 @@ def test_a_row_below_the_floor_is_never_demoted_by_its_own_age(tmp_path):
     BOOST and must not become a ceiling on the row.
 
     A priority-8 row aged 60 hours has earned 150 points, which arithmetic alone puts at
-    -142 and the floor alone lifts to 10 — behind a fresh priority-9 row. Nothing on
-    this fleet enqueues below 30 today, so this is not today's bug; it is the reason a
-    future urgent band cannot be silently reordered by a rule written to help old rows.
+    -142 and the floor alone lifts to 10 — behind a fresh priority-9 row. No source
+    publishes a band under the floor today (`scheduled-task`'s lowest is `critical` = 10,
+    exactly on it), so this is not today's bug — the fleet does enqueue below 30, its
+    `high` band is 20, which is the claim #4504 corrected beside the constant — and it
+    stays the reason a future urgent band cannot be silently reordered by a rule written
+    to help old rows.
     The challenger at 9 is what separates the shipped expression (aged row stays 8 and
     wins) from `MAX(priority - credit, FLOOR)` (aged row becomes 10 and loses).
     """
