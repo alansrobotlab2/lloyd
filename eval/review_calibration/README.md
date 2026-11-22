@@ -46,6 +46,41 @@ case that catches the wrong read — its range is the round's two cherry-picks
 alone prints one. `tests/test_automod_review_tools.py` pins every shipped case's
 `changed_paths` against that range for exactly this reason.
 
+## The independently labelled set (`independent/`) — 2026-11-22
+
+The four cases above were confirmed, where they were confirmed at all, by the
+same loop that runs the grader, and after the 2026-10 runs disagreed two of them
+were re-marked toward what the grader had answered. A set like that cannot say
+how often the grader is wrong. `independent/` is the start of one that can: each
+case is a real landed round whose label comes from a reader that is **not** the
+grader (a different model, given the item's clauses and `git diff parent..commit`
+and no prior review), and each `note` says who read it, when, and how sure.
+
+```bash
+.venvs/lloyd/bin/python -m scripts.automod.review_tools calibrate --set independent
+```
+
+`calibrate` prints the two errors apart — **false met** (a `pass` on a case
+labelled `retry`: a bad change lands) and **false refusal** (a `retry` on a case
+labelled `pass`: good work is sent back) — because one agreement figure hides
+which of the two a grader makes.
+
+What it holds, and what it cannot yet measure:
+
+- 12 cases, all labelled `pass`: six rounds whose first review was a refusal and
+  six that passed first time, drawn at random (seed 20261122) from the 95 landed
+  rounds of the previous 14 days with 40–450 inserted lines and at least one
+  code file. Three are `provisional` (a clause a reader could not settle
+  without running something).
+- **It measures false refusal only.** There is no `retry` case, so false met —
+  the costly error — is reported `unmeasured`, not zero. The ledger cannot
+  supply one: of 41 owed-check reopens, one follows a landing, and every
+  rollback on record was a false positive. `retry` cases have to be made, by
+  the route `544-stripped-tests` already uses (`strip_tests`) and by labelling
+  the refused heads kept at `refs/automod/rounds/<round>`.
+- **A label here is never re-marked to match a grader.** It changes only on a
+  named re-read, recorded in the case's `note`.
+
 ## The cause corpus (`cause_corpus.jsonl`) — #4026
 
 Alongside the four graded cases sits a **cause-labelled disagreement corpus**: every

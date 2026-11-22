@@ -282,6 +282,39 @@ def calibrate(*, repo: Path | None = None, fixture_dir: Path | None = None, grad
     return rows
 
 
+def error_rates(rows: list[dict], cases: list[dict]) -> dict:
+    """The grader's two errors, counted apart, over cases whose label is not its own.
+
+    `false_met` is a `pass` on a case labelled `retry` — a bad change landing —
+    and `false_refusal` is a `retry` on a case labelled `pass` — good work sent
+    back. One agreement figure hides which of the two a grader makes, and they
+    cost different things. A row whose grading did not complete (no `kind`) is
+    `ungraded` and enters neither denominator."""
+    want = {c["name"]: c["expect"]["kind"] for c in cases}
+    out = {"labelled_pass": 0, "false_refusal": 0, "labelled_retry": 0, "false_met": 0,
+           "ungraded": 0}
+    for r in rows:
+        expect, got = want.get(r["name"]), r.get("kind")
+        if got not in ("pass", "retry") or expect not in ("pass", "retry"):
+            out["ungraded"] += 1
+        elif expect == "pass":
+            out["labelled_pass"] += 1
+            out["false_refusal"] += got == "retry"
+        else:
+            out["labelled_retry"] += 1
+            out["false_met"] += got == "pass"
+    return out
+
+
+def error_rates_line(rows: list[dict], cases: list[dict]) -> str:
+    e = error_rates(rows, cases)
+    def part(k: int, n: int, what: str) -> str:
+        return f"{what} {k}/{n}" if n else f"{what} unmeasured (no such case)"
+    return (part(e["false_met"], e["labelled_retry"], "false met") + "; "
+            + part(e["false_refusal"], e["labelled_pass"], "false refusal")
+            + (f"; {e['ungraded']} ungraded" if e["ungraded"] else ""))
+
+
 def backfill_path() -> Path:
     from scripts.automod import state as S
     return S.STATE_DIR / "review_backfill.jsonl"
@@ -639,6 +672,8 @@ def main(argv=None) -> int:
     f.add_argument("--provisional", action="store_true", help="expectation not yet confirmed by a human")
     f.add_argument("--note", default="")
     c = sub.add_parser("calibrate", help="run every case and compare")
+    c.add_argument("--set", dest="case_set", default=None,
+                   help="grade the cases in eval/review_calibration/<set>/ instead of the four shipped ones")
     c.add_argument("--only", default=None)
     c.add_argument("--seams-policy", default=None, choices=["first", "always", "never"],
                    help="decide under this seams_block instead of automod.review.seams_block")
@@ -694,7 +729,8 @@ def main(argv=None) -> int:
         print(p)
         return 0
     if args.cmd == "calibrate":
-        rows = calibrate(only=args.only, seams_policy=args.seams_policy)
+        rows = calibrate(only=args.only, seams_policy=args.seams_policy,
+                         fixture_dir=(FIXTURE_DIR / args.case_set) if args.case_set else None)
         for r in rows:
             mark = "PASS" if r["ok"] else "FAIL"
             print(f"[{mark}] {r['name']}{' (provisional)' if r['provisional'] else ''}: {r['why']}"
@@ -706,6 +742,8 @@ def main(argv=None) -> int:
         # the one it has always returned — 0 only when there are cases and all of them
         # agree. This instrument may describe the grader; it may not soften it.
         print("\n" + RC.render_agreement(RC.agreement_by_cause(rows, rows)))
+        print(error_rates_line(rows, load_fixtures((FIXTURE_DIR / args.case_set)
+                                                   if args.case_set else None)))
         print(f"{sum(r['ok'] for r in rows)}/{len(rows)} agree")
         return 0 if rows and all(r["ok"] for r in rows) else 1
     if args.cmd == "backfill":

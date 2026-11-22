@@ -1184,3 +1184,35 @@ def test_clause_5_no_cases_at_all_is_still_not_agreement(tmp_path, monkeypatch, 
     monkeypatch.setattr(RT, "FIXTURE_DIR", tmp_path / "no-cases-here")
     assert RT.main(["calibrate"]) == 1
     assert capsys.readouterr().out.rstrip("\n").splitlines()[-1] == "0/0 agree"
+
+
+# ── the independently labelled set, and the two error rates ──────────────
+
+def test_the_independent_set_is_separate_and_every_case_matches_its_range():
+    """`eval/review_calibration/independent/` holds cases labelled by a reader
+    that is not the grader (2026-11-22). They sit in their own directory so the
+    four shipped cases, and every node above that pins them, are untouched."""
+    shipped = {c["name"] for c in RT.load_fixtures()}
+    cases = RT.load_fixtures(RT.FIXTURE_DIR / "independent")
+    assert len(cases) >= 12 and not shipped & {c["name"] for c in cases}
+    for case in cases:
+        assert "independent diff read" in case["note"], case["name"]
+        assert sorted(case["changed_paths"]) == _range_paths(
+            RT.LIVE_ROOT, case["parent"], case["commit"]), case["name"]
+
+
+def test_the_two_grader_errors_are_counted_apart():
+    cases = [{"name": n, "expect": {"kind": k}} for n, k in
+             (("a", "pass"), ("b", "pass"), ("c", "retry"), ("d", "retry"), ("e", "pass"))]
+    rows = [{"name": "a", "kind": "pass"}, {"name": "b", "kind": "retry"},
+            {"name": "c", "kind": "pass"}, {"name": "d", "kind": "retry"},
+            {"name": "e", "kind": None}]
+    assert RT.error_rates(rows, cases) == {"labelled_pass": 2, "false_refusal": 1,
+                                           "labelled_retry": 2, "false_met": 1, "ungraded": 1}
+    assert RT.error_rates_line(rows, cases) == "false met 1/2; false refusal 1/2; 1 ungraded"
+
+
+def test_an_error_with_no_case_of_its_kind_is_unmeasured_not_zero():
+    cases = [{"name": "a", "expect": {"kind": "pass"}}]
+    line = RT.error_rates_line([{"name": "a", "kind": "pass"}], cases)
+    assert line == "false met unmeasured (no such case); false refusal 0/1"
