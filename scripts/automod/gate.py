@@ -2147,6 +2147,49 @@ def _pytest_floor_note(figure: int, floor: int, base: int | None, field: str) ->
             f"fraction {PYTEST_FLOOR_FRACTION}, floor {floor})")
 
 
+
+def contract_void_mark(item_id: int | None, *, ledger: Path | None = None) -> dict:
+    """The latest `backlog_retriage` row for `item_id`, IF that mark voided it.
+
+    A mark voids an item's confirmation exactly once, by `_after_mark`'s
+    precedence (`backlog.py:4332` — a verdict row at or BEFORE the mark counts
+    as no verdict at all), and it takes the item's front-matter clauses with
+    it: after one, `item_contract` returns `clauses: []` for the contract a
+    round was already graded on. That row is the event this path classifies,
+    and its `previous_clauses` the text to grade instead.
+
+    Returns `{}` — "nothing external emptied this" — when the item's
+    confirmation still stands, when no mark exists, and when the ledger cannot
+    be read. Those three read the same from here and are collapsed
+    deliberately: the safe direction is to book the refusal the way an
+    unconfirmed item's is booked — the pre-#4483 behaviour — rather than to
+    call a contract failure an infra one.
+
+    A `staticmethod` that takes the ledger because `_regate_after_move` asks
+    this same question with no `Gate` in hand, and clauses 2 and 4 of #4483
+    need ONE answer from both callers: two readers disagreeing about which
+    mark voided an item would be this bug again in a new place.
+    """
+    if not item_id:
+        return {}
+    try:
+        from scripts.automod import backlog as _B
+        key = int(item_id)
+        latest = _B.retriage_mark_rows(ledger=ledger or S.LEDGER_PATH).get(key)
+        # `confirmed_verdicts` keeps only rows whose verdict is `confirmed` AND
+        # which post-date the item's latest mark (`_after_mark`,
+        # `backlog.py:4332`), so the item's ABSENCE from it is precisely "this
+        # item has no standing confirmation" — there is no verdict vocabulary to
+        # compare against, and an item whose confirmation is absent for a reason
+        # other than a mark still has `latest` None and returns {} here.
+        if latest and key not in _B.confirmed_verdicts(
+                ledger=ledger or S.LEDGER_PATH):
+            return latest
+    except Exception as exc:  # noqa: BLE001 — classification, not verdict
+        print(f"[gate] could not read retriage marks for item "
+              f"{item_id}: {exc}")
+    return {}
+
 class Gate:
     def __init__(self, round_id: str, worktree: Path, base: str, *,
                  live_root: Path | None = None, skip_smoke: bool = False,
@@ -2458,8 +2501,15 @@ class Gate:
         # rung never judged is byte-identical to the row of a diff failure, which is
         # how three rounds came to spend an item's attempt on a timeout this rung
         # cannot have been blaming them for.
+        # WHICH contract an emptied-contract refusal graded, and WHICH mark emptied it
+        # (#4483). `external_blocker` alone says "not the diff's fault" but not which
+        # mark row to go and read, and the mark's ts is the join key the owed
+        # post-landing check needs. The reason word survives inside `detail[:500]`;
+        # these two survive nowhere else once `gate.json` goes with the worktree, so
+        # they ride the event for exactly the reason `external_blocker` does.
         for key in ("whole_suite_rerun_refused", "parallel_failing_files_total",
-                    "parallel_failing_nodes_total", "serial_rerun"):
+                    "parallel_failing_nodes_total", "serial_rerun",
+                    "retriage_mark_ts", "contract_source"):
             val = (res.data or {}).get(key)
             if val:
                 event[key] = val
@@ -2917,12 +2967,19 @@ class Gate:
             # Python change with no test in the diff cannot have pinned any
             # clause (the implement prompt demands a pinning test). Both are
             # the round's own, and both are cheaper to learn here than after
-            # a 77 s test run.
-            from scripts.automod import review as RV
-            contract = RV.item_contract(self.item_id)
+            # a 77 s test run. The contract is read through `_gate_contract`, not
+            # `item_contract` directly: this is that first read, and the object returned
+            # here is the one the review rung grades eight rungs later even if a
+            # `backlog_retriage` mark voids the item in between (#4483).
+            contract = self._gate_contract()
             if not contract["clauses"]:
+                voided = self._voiding_mark_data()
                 return False, (f"item #{self.item_id} has no acceptance clauses to judge "
-                               f"against — the review rung cannot grade it"), data
+                               f"against — the review rung cannot grade it"
+                               + (f"; its confirmation was voided by the backlog_retriage "
+                                  f"mark at ts={voided['ts']}, and that mark carried no "
+                                  f"previous_clauses to grade instead" if voided else "")), {
+                    **data, **self._contract_void_data()}
             py_changed = any(p.endswith(".py") and not TP.is_test_file(p, self.worktree)
                              for p in changed)
             if py_changed and not any(TP.is_test_path(p, self.worktree) for p in changed):
@@ -4686,16 +4743,23 @@ class Gate:
         if overturned:
             overturn_note = (f" — every blocking entry was retired by the second reader"
                              f" ({confirm['reason'][:200]}); no review attempt spent")
+        # `self._record` writes the rung's data dict onto the round's `gate` row, and
+        # `_contract_provenance` adds WHICH contract that row graded: a round that
+        # graded carried-over or mark-recovered clauses has to read differently in
+        # the ledger from one that graded the item's live text, because the
+        # post-landing check #4483 owes is exactly that difference.
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
-                      f"clause(s); {parsed['summary'][:160]}{honesty_suffix}{overturn_note}"), {
+                      f"clause(s); {parsed['summary'][:160]}{honesty_suffix}{overturn_note}"), \
+            self._contract_provenance({
                           "review_session": res.get("session_id"),
                           "clauses": parsed["clauses"], "review_attempt": attempt,
+                          "n_clauses": len(contract["clauses"]),
                           "post_landing_clauses": marked,
                           "advisory_seams": advisory_seams,
                           "advisory_findings": advisory_findings,
                           "honesty_note": honesty_note,
                           "amendments_ratified": [a.get("clause") for a in amendments],
-                          **confirm_fields, **validated}
+                          **confirm_fields, **validated}, contract)
 
     def _review_confirm(self, contract: dict, decision: dict, *,
                         run_grader_fn=None) -> dict:
@@ -4737,6 +4801,120 @@ class Gate:
         return {"policy_on": on, "mode": mode, **verdict,
                 "seconds": time.monotonic() - started}
 
+    #: The acceptance contract THIS gate run is graded on, filled by its first
+    #: `_gate_contract` read and returned by every later one. None until that read.
+    _pinned_contract: dict | None = None
+
+    #: The item's latest `backlog_retriage` row when that mark voided its
+    #: confirmation; `{}` when nothing voided it, which is the case that must stay
+    #: a plain contract failure. Read once by `_voiding_mark_data`.
+    _voiding_mark: dict | None = None
+
+    def _gate_contract(self) -> dict:
+        """This run's acceptance contract: read once, then pinned for the whole run.
+
+        `item_contract` reads the ledger and the item file LIVE, and one gate run
+        asked it twice: preflight, then the review rung eight rungs and up to ~40
+        minutes later. SM_20261121_105002 is what that costs — preflight recorded
+        `clauses: 4`, a `backlog_retriage` mark landed at 11:54:36 between the two
+        reads, and the review rung refused a round that had already spent an
+        attempt on an item whose contract a window it did not open had just
+        emptied. So the first read fixes the text and every later read returns
+        it; carrying forward is safe in the other direction too, because a
+        RE-confirmed item with new clauses wins and this run gets graded on the
+        newer text.
+
+        When a later live read comes back empty the pinned clauses are returned
+        with `contract_source: "carried_over"`, so the review ledger row records
+        what the round was graded on instead of one rung's reading of an item
+        file that moved mid-run. When the FIRST read is the empty one — the shape
+        `_regate_after_move` inherits, since a re-gate is a new process and can
+        pin nothing — the clauses come from the voiding mark's
+        `previous_clauses`: the text the steward itself stored as what the item's
+        last `confirmed` verdict published. A mark that stored none leaves the
+        contract empty, which is the refusal both call sites then book.
+        """
+        from scripts.automod import review as RV
+        live = RV.item_contract(self.item_id)
+        if live["clauses"]:
+            self._pinned_contract = live
+            live["contract_source"] = "live"
+            return live
+        if self._pinned_contract and self._pinned_contract["clauses"]:
+            # Only a contract that ORIGINATED as a live read becomes
+            # `carried_over` here. In a re-gate the pinned one was itself
+            # recovered from the mark, and relabelling it would say "the item
+            # still had these clauses when preflight looked" about text that came
+            # from the voiding row — the distinction the ledger check needs.
+            if str(self._pinned_contract.get("contract_source") or "live") == "live":
+                self._pinned_contract["contract_source"] = "carried_over"
+            return self._pinned_contract
+        mark = self._voiding_mark_data()
+        recovered = [str(c) for c in (mark.get("previous_clauses") or []) if str(c).strip()]
+        if recovered:
+            contract = {"clauses": recovered, "amendments": [],
+                        "contract_source": "retriage_mark",
+                        "retriage_mark": {"ts": str(mark.get("ts") or ""),
+                                          "unit": str(mark.get("unit") or ""),
+                                          "verdict": str(mark.get("verdict") or "")}}
+            self._pinned_contract = contract
+            return contract
+        self._pinned_contract = live
+        return live
+
+    #: The module-level `contract_void_mark`, reachable from a `Gate` for the tests
+    #: and callers that hold one. ONE implementation, not two.
+    contract_void_mark = staticmethod(contract_void_mark)
+
+    def _voiding_mark_data(self) -> dict:
+        """This round's voiding mark, read once and cached. See `contract_void_mark`."""
+        if self._voiding_mark is None:
+            # `S.LEDGER_PATH` read here, not a per-`Gate` field: `Gate` takes no
+            # ledger in its signature, and the re-gate caller in `promote.py` has
+            # no `Gate` at all — both must ask the same file or the two callers of
+            # `contract_void_mark` can disagree about which mark voided an item.
+            self._voiding_mark = self.contract_void_mark(self.item_id,
+                                                         ledger=S.LEDGER_PATH)
+        return self._voiding_mark
+
+    def _contract_void_data(self) -> dict:
+        """Ledger keys booking an empty-contract refusal as an infra one (#4483).
+
+        A mark this round never opened is an outside event, so the refusal carries
+        `external_blocker: True` plus `retriage_mark_ts` — the key `land_failed`
+        already uses for an external block (#3504) — which is what lets
+        `_regate_after_move` charge no review attempt and a reader see WHAT
+        emptied the contract instead of inferring it from the wall clock. An item
+        never confirmed gets NEITHER key and keeps its attempt: #4458's own `gate`
+        row is the counter-example that had to stay, `verdict: confirmed` with
+        zero `backlog_retriage` rows in the ledger, so an empty contract there is
+        that item's own contract failure and must still cost it.
+        """
+        voided = self._voiding_mark_data()
+        if not voided:
+            return {}
+        return {"external_blocker": True, "retriage_mark_ts": str(voided.get("ts") or ""),
+                "contract_source": "retriage_mark"}
+
+    def _contract_provenance(self, data: dict, contract: dict) -> dict:
+        """Say on a grading row WHICH contract was graded, and why.
+
+        `clauses` alone cannot tell "graded the item's live clauses" from "graded
+        the 4 the voiding mark preserved" or "graded the 4 preflight read"; the
+        post-landing ledger check #4483 owes has to tell them apart from the row.
+        Silence means the ordinary case — a live contract read this very rung —
+        so nothing about a normal round's row changes.
+        """
+        source = str(contract.get("contract_source") or "")
+        if not source or source == "live":
+            return data
+        data["contract_source"] = source
+        mark = contract.get("retriage_mark") or self._voiding_mark_data()
+        ts = str((mark or {}).get("ts") or "")
+        if ts:
+            data["retriage_mark_ts"] = ts
+        return data
+
     def _review_prepare(self):
         """Everything the review rung decides before it asks a grader.
 
@@ -4762,9 +4940,14 @@ class Gate:
             _B.orphan_stale_amendments(self.item_id, self.round_id)
         except Exception as exc:  # noqa: BLE001 — bookkeeping, not the verdict
             print(f"[warn] could not orphan stale amendments: {exc}")
-        contract = RV.item_contract(self.item_id)
+        contract = self._gate_contract()
         if not contract["clauses"]:
-            return False, f"item #{self.item_id} has no acceptance clauses", {}
+            voided = self._voiding_mark_data()
+            return False, (f"item #{self.item_id} has no acceptance clauses"
+                           + (f"; its confirmation was voided by the backlog_retriage mark "
+                              f"at ts={voided['ts']}, and that mark carried no "
+                              f"previous_clauses to grade instead" if voided else "")), {
+                "item_id": self.item_id, **self._contract_void_data()}
         contract = {**contract, "amendments": [
             a for a in (contract.get("amendments") or [])
             if str(a.get("round_id") or "") == str(self.round_id)]}

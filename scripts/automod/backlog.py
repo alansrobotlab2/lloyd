@@ -4296,6 +4296,39 @@ def retriage_marks(ledger: Path, *, with_archives: bool = False) -> dict[int, fl
     return marks
 
 
+#: The contract text a re-triage deleted from the item, stored on its mark row by
+#: `retriage_spent_items` (`backlog.py:9437`, written at `backlog.py:9508`). The ONLY
+#: clause text that survives a void: `gate.json` keeps a clause COUNT, and a `review`
+#: row keeps per-clause verdicts
+#: keyed by index with no clause text — so `Gate.contract_void_mark` reading this key
+#: is what lets a round still be graded after the item stopped carrying a contract.
+RETRIAGE_PREVIOUS_CLAUSES_KEY = "previous_clauses"
+
+
+def retriage_mark_rows(ledger: Path, *,
+                       with_archives: bool = False) -> dict[int, dict]:
+    """`{item_id: the latest backlog_retriage ROW}` — `retriage_marks` with its payload.
+
+    `retriage_marks` answers "when" and drops the row, which is fine for the
+    precedence readers but leaves the one thing a voided contract can still be
+    graded on unread: `previous_clauses`, written by `retriage_spent_items` at the moment
+    the clauses were deleted, when the item's own front matter and its `verdict:
+    confirmed` row were both still there to be read. `gate.json` stores only a
+    clause COUNT and a `review` row only index-keyed verdicts, so a row read here
+    is the sole surviving TEXT of the contract a round was graded on.
+
+    Latest by `ts`, like `retriage_marks`, so a duplicate row and a file order
+    cannot change the answer.
+    """
+    rows: dict[int, dict] = {}
+    for d in _ledger_events(ledger, "backlog_retriage", merged=with_archives):
+        i = int(d["item_id"])
+        if i in rows and float(rows[i].get("ts") or 0) >= float(d.get("ts") or 0):
+            continue
+        rows[i] = d
+    return rows
+
+
 def _after_mark(d: dict, marks: dict[int, float]) -> bool:
     """Whether a row counts: no mark for its item, or written after it."""
     m = marks.get(int(d["item_id"]))
@@ -9467,9 +9500,13 @@ def retriage_spent_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_
         if item.status != TRIAGE_POOL_STATUS:
             set_status(item.id, TRIAGE_POOL_STATUS, why)
         note_item(item.id, why)
+        # The key by NAME, not a literal: `Gate.contract_void_mark` is the reader, and
+        # a writer that spells the string while the reader spells a constant is the
+        # shape that let this key sit written-and-unread for a whole round (#4483).
         S.append_event({"event": "backlog_retriage", "item_id": item.id, "round_id": rid,
                         "outcome_detail": detail[:600],
-                        "previous_clauses": list(fm.get("acceptance_clauses") or []),
+                        RETRIAGE_PREVIOUS_CLAUSES_KEY:
+                            list(fm.get("acceptance_clauses") or []),
                         **refusal}, path=ledger)
         out.append({"item_id": item.id, "round_id": rid, "reason": why})
     return out

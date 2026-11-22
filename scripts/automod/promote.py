@@ -1322,6 +1322,23 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
         item_id = (spec.get("item") or {}).get("id")
     except Exception as exc:  # noqa: BLE001 — a missing spec is not fatal here
         print(f"[warn] could not read the run spec for {round_id}: {exc}")
+    # Said out loud BEFORE the chase runs, because this is the one moment the loop
+    # knows an outside event emptied the contract it is about to re-grade: a
+    # `backlog_retriage` mark that voided the item's confirmation. The clauses the
+    # chase's review rung will grade are that mark's `previous_clauses`
+    # (`Gate.contract_void_mark` → `Gate._gate_contract`), so a passing round is not
+    # refused on a window this landing did not open (#4483, which cost SM_20261121_
+    # 105002 a clause-met round's review attempt). No attempt is charged by a
+    # mark-caused refusal: `_contract_void_data` books it `external_blocker` and
+    # `land_failed(external=True)` below spends the failed RUN, never an attempt.
+    voided = G.contract_void_mark(item_id, ledger=S.LEDGER_PATH)
+    if voided:
+        print(f"[promote] {round_id}: item {item_id}'s confirmation was voided by the "
+              f"backlog_retriage mark at {voided.get('created_at') or voided.get('ts')}"
+              f"; the re-gate's review rung will grade that mark's "
+              f"{len(voided.get('previous_clauses') or [])} previous clause(s), and a "
+              f"zero-clause refusal here charges no review attempt "
+              f"(external_blocker, #4483)")
     with _pool_pause_heartbeat():
         report = G.Gate(round_id, Path(worktree), base, live_root=live,
                         item_id=item_id).run()
@@ -1344,13 +1361,33 @@ def _regate_after_move(round_id: str, worktree: Path, live: Path, base: str,
     # Shape mirrors `land_wait_settle` above (round_id / ok / detail). Written on a
     # dry run as well: this function runs before `promote`'s dry-run return, which
     # is what its tests exercise.
+    # Which contract the chase's review rung actually graded, read out of the report
+    # it just wrote rather than re-derived here: a re-gate starts a fresh `Gate` with
+    # nothing pinned, so if a `backlog_retriage` mark voided the item between the two
+    # gates, the clauses came from that mark's `previous_clauses` and this row is the
+    # only place that says so (#4483 — SM_20261121_105002's chase refused on the empty
+    # contract instead, spending a passing round's review attempt). A reused-patch-id
+    # skip carries no count, and says `contract: not graded` rather than 0.
+    graded = next((r for r in rep.get("rungs", []) if r.get("name") == "review"), {}) or {}
+    graded_data = graded.get("data") or {}
+    n_clauses = graded_data.get("n_clauses")
+    contract_note = (
+        f"graded {int(n_clauses)} acceptance clause(s) from the "
+        f"{graded_data.get('contract_source') or 'live'} contract"
+        + (f" voided by the backlog_retriage mark at "
+           f"{graded_data.get('retriage_mark_ts')}"
+           if graded_data.get("retriage_mark_ts") else "")
+        if n_clauses is not None else "contract: not graded (review skipped)")
     S.append_event({
         "event": "land_rebased", "round_id": round_id, "ok": True,
         "from_base": base, "to_base": report.base, "head": report.head,
         "moved_to": live_head,
+        "n_clauses": n_clauses,
+        "contract_source": graded_data.get("contract_source"),
+        "retriage_mark_ts": graded_data.get("retriage_mark_ts"),
         "detail": (f"main moved to {live_head[:8]} after the gate passed; rebased "
                    f"{base[:8]}->{str(report.base)[:8]} and every rung passed on top "
-                   f"of it, head {str(report.head)[:8]}")})
+                   f"of it, head {str(report.head)[:8]}; {contract_note}")})
     return report.base, report.head, rep
 
 

@@ -1830,3 +1830,109 @@ def test_the_promoters_own_lease_sites_are_attributed_by_function(monkeypatch):
     restart_leg()
     assert _edge_rows("pause_set")[0]["by"].startswith("restart_leg pid ")
     assert _edge_rows("pause_clear")[0]["by"].startswith("restart_leg pid ")
+
+
+# ─── #4483: a re-gate after a voiding re-triage mark grades the recovered contract ─────
+
+def test_a_re_gate_after_a_voiding_mark_names_the_recovered_clause_count(
+        shared_tree, monkeypatch):
+    """#4483 clause 2: the chase recovers the mark's clauses and says how many.
+
+    The incident, in ledger form: `gate` / `rung: review` / `ok: false` / detail
+    `item #4458 has no acceptance clauses` at 2026-11-21T11:57:00Z — twelve minutes
+    after that round's preflight recorded `clauses: 4`, because the `backlog_retriage`
+    mark landed at 11:54:36 BETWEEN the two live contract reads and the chase that
+    followed main's move had nothing pinned to fall back on. It refused, so a round
+    that had passed every rung spent its review attempt on a window it did not open.
+
+    Three halves, all measured through the promoter rather than beside it: the
+    module-level `contract_void_mark` reader promote calls with no `Gate` in hand, the
+    chase's report carrying the recovered count, and the `land_rebased` row naming it.
+    """
+    import scripts.automod.gate as G
+    from scripts.automod import state as S_
+    t = shared_tree
+    mark_ts = 1_795_000_000.0
+    S_.append_event({"event": "backlog_retriage", "item_id": 7, "ts": mark_ts,
+                     "created_at": "2026-11-21T11:54:36Z", "findings": "",
+                     "outcome_detail": "", "round_id": "", "unmet_twice": [],
+                     "clauses": [],
+                     "previous_clauses": ["The committer scopes the collision to one unit",
+                                          "A cross-unit duplicate commits with a note",
+                                          "An unconfirmed item still cannot land",
+                                          "A mark-caused refusal is booked as infra"]})
+
+    # The reader the promoter uses. `confirmed_verdicts` keeps only rows that post-date
+    # the item's latest mark, so an item whose only confirmation predates it is ABSENT
+    # from it — which is precisely the condition making this row the voiding one.
+    voided = G.contract_void_mark(7, ledger=S_.LEDGER_PATH)
+    assert voided.get("ts") == mark_ts, sorted(voided)
+    assert len(voided.get("previous_clauses") or []) == 4, sorted(voided)
+    assert G.contract_void_mark(9998, ledger=S_.LEDGER_PATH) == {}, (
+        "an item with no mark at all must not be classified as externally blocked")
+
+    class _RecoveredGate(_StubGate):
+        """The chase's report: its review rung graded four recovered clauses."""
+
+        def run(self):
+            from scripts.automod import worktree as W
+            onto = _git(self.live, "rev-parse", "HEAD").stdout.strip()
+            ok, why, conflicts = W.rebase_onto(self.worktree, onto)
+            assert ok, (why, conflicts)
+            head = W.head(self.worktree)
+            rungs = ([{"name": "preflight", "ok": True, "detail": "rebased"}]
+                     + [{"name": n, "ok": True, "detail": "passed"} for n in
+                        ("static", "tests", "canary_boot", "canary_smoke", "frontend",
+                         "drill")]
+                     + [{"name": "review", "ok": True,
+                         "detail": "review: 4 met of 4 clause(s); recovered contract",
+                         "data": {"n_clauses": 4, "contract_source": "retriage_mark",
+                                  "retriage_mark_ts": str(mark_ts)}}])
+            return type("Rep", (), {
+                "ok": True, "base": onto, "head": head,
+                "changed_paths": ["app/m.py"],
+                "to_dict": lambda self_: {"ok": True, "base": onto, "head": head,
+                                          "rungs": rungs}})()
+
+    _RecoveredGate.verdict, _RecoveredGate.seen = True, []
+    monkeypatch.setattr(G, "Gate", _RecoveredGate)
+    P.promote("SM_4483_REGATE", t["wt"], t["base"], gate_report={"head": t["gated"]},
+              dry_run=True)
+
+    rows = _events("land_rebased")
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["n_clauses"] == 4, row
+    assert row["contract_source"] == "retriage_mark", row
+    assert row["retriage_mark_ts"] == str(mark_ts), row
+    assert "4 acceptance clause(s) from the retriage_mark contract" in row["detail"], row
+    assert str(mark_ts) in row["detail"], row
+    assert _events("land_failed") == [], (
+        "a chase that graded the recovered contract must not also book a failure")
+
+
+def test_a_review_skip_leaves_the_recovery_row_saying_so_rather_than_zero(tmp_path):
+    """The skip's note shape: `not graded`, never a clause count of zero.
+
+    This node does NOT run the chase — it pins the two-branch note rule (`n_clauses`
+    null versus an integer) that `_regate_after_move` applies to its report, so a
+    future edit that turned a null into a `0` is caught here. What the chase really
+    books is asserted by the node above, which drives `_regate_after_move` end to end
+    and reads the `land_rebased` row it appended
+    (`tests/test_automod_promote.py:1902-1911`: `n_clauses == 4`, `contract_source`,
+    `retriage_mark_ts`, and the clause count inside `detail`).
+
+    Why the distinction: `n_clauses: 0` would read as "graded nothing" to the
+    post-landing check #4483 owes — an empty contract mistaken for a graded one, the
+    failure mode this whole item is about. A skip leaves `n_clauses` null.
+    """
+    graded = next((r for r in [{"name": "preflight", "ok": True},
+                               {"name": "review", "ok": True,
+                                "detail": "review: skipped", "data": {"skipped": True}}]
+                  if r.get("name") == "review"), {}) or {}
+    data = graded.get("data") or {}
+    n = data.get("n_clauses")
+    assert n is None
+    note = (f"graded {int(n)} acceptance clause(s)" if n is not None
+            else "contract: not graded (review skipped)")
+    assert note == "contract: not graded (review skipped)", note

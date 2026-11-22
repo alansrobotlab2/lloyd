@@ -5455,3 +5455,221 @@ def test_the_block_is_recorded_even_when_a_rung_stopped_the_ladder(live_repo, mo
                                                  "recovery", "static"]
     assert isinstance(rep["pre_replay"], dict)
     assert rep["pre_replay"]["units_scanned"] == 214512
+
+
+# ─── #4483: one gate run is graded on one contract, fixed at its first read ────────────
+# Every node below uses its OWN item id: a `backlog_retriage` row seeded by one node
+# stays in that run's ledger for the nodes that follow, so a shared id would let the
+# mark one node planted decide another node's answer.
+
+_C4483_TEXT = ["The re-gate recovers the contract the round was graded on",
+               "The recovery row names the recovered clause count",
+               "An item with no confirmed verdict and no clauses still cannot land",
+               "A mark-caused refusal is booked as an infra refusal naming the mark"]
+
+
+def _item_on_disk(tmp_path, item_id: int, clauses=()):
+    """A real backlog item on disk carrying `clauses`, never confirmed.
+
+    Written as a file because `review.item_contract` reads the item's front matter
+    whenever the ledger holds no confirmation, and this round's defect is one of
+    those two live reads changing underneath a run — a stubbed contract could not
+    show it. Ids are high and unconfirmed so the answer comes from the front matter.
+    """
+    from scripts.automod import backlog as _B
+    body = "".join(f"  - {c}\n" for c in clauses)
+    text = ("---\ntype: note\nstatus: up_next\npriority: low\n"
+            + (f"acceptance_clauses:\n{body}" if clauses else "")
+            + f"---\n\n# A #4483 fixture item {item_id}\n")
+    path = _B.BACKLOG_DIR / f"{item_id}-a-4483-fixture-item.md"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _strip_clauses(path):
+    """The outside event: the item's front matter loses its clauses mid-run."""
+    import re
+    path.write_text(re.sub(r"acceptance_clauses:\n(  - .*\n)+", "",
+                           path.read_text(encoding="utf-8")), encoding="utf-8")
+
+
+def _seed_retriage_mark(item_id, *, ts=1_795_000_000.0, previous=_C4483_TEXT):
+    """A `backlog_retriage` row for `item_id`, shaped like `retriage_spent_items`
+    writes it (`backlog.py:9437`).
+
+    `previous=None` is the shape the recovery cannot serve: the steward's own
+    re-triage row (`unmet_twice`, no `previous_clauses`) is the only writer of that
+    event that carries no contract text. The real #4458 mark at 2026-11-21T11:54:36Z
+    carried all four of its clauses.
+    """
+    from scripts.automod import state as _S
+    row = {"event": "backlog_retriage", "item_id": item_id, "ts": ts,
+           "created_at": "2026-11-21T11:54:36Z", "findings": "",
+           "outcome_detail": "", "round_id": "", "unmet_twice": [], "clauses": []}
+    if previous is not None:
+        row["previous_clauses"] = list(previous)
+    _S.append_event(row)
+    return row
+
+
+def test_a_contract_emptied_between_the_two_reads_reaches_the_grader_carried_over(
+        tmp_path, monkeypatch):
+    """#4483 clause 1: preflight's clauses are what the review rung grades and books.
+
+    SM_20261121_105002: preflight recorded `clauses: 4` at 11:44, a re-triage mark
+    landed at 11:54:36, and the review rung — reading the same live store eight rungs
+    later — refused with `item #4458 has no acceptance clauses`, spending a passing
+    round's review attempt. The item file here really loses its `acceptance_clauses`
+    between the two reads, so the seam under test is the shipped one and the reader
+    under test is the real `review.item_contract`, not a stub.
+    """
+    from scripts.automod import review as RV
+    path = _item_on_disk(tmp_path, 9991, _C4483_TEXT)
+    g = _ReviewGate(tmp_path)
+    g.item_id = 9991
+    first = g._gate_contract()                       # preflight's read fixes the text
+    assert first["clauses"] == _C4483_TEXT, first
+    assert first["contract_source"] == "live", first
+    _strip_clauses(path)                             # the mark lands, mid-run
+    assert RV.item_contract(9991)["clauses"] == [], (
+        "the fixture stopped resembling the incident: the live read must go empty")
+    ctx = g._review_prepare()                        # the review rung's own read
+    assert "contract" in ctx, (
+        f"a mid-run void must not answer the rung with a refusal: {ctx}")
+    assert ctx["contract"]["clauses"] == _C4483_TEXT, ctx["contract"]
+    graded = ctx["contract"]["contract_source"]
+    assert graded == "carried_over", ctx["contract"]
+    booked = g._contract_provenance({"n_clauses": len(ctx["contract"]["clauses"])},
+                                    ctx["contract"])
+    assert booked == {"n_clauses": 4, "contract_source": "carried_over"}, booked
+    assert "no acceptance clauses" not in str(ctx), ctx
+def test_the_pinned_contract_survives_a_re_read_after_the_item_loses_its_clauses(tmp_path):
+    """`_gate_contract` returns the first read's clauses once the store goes empty.
+
+    The unit the node above reaches through the rung: preflight reads 4 clauses, the
+    item file is then emptied, and the review rung's read still answers 4 — because
+    in the shipped code nothing pins the contract between two live reads, which is
+    what this round changes.
+    """
+    path = _item_on_disk(tmp_path, 9992, _C4483_TEXT)
+    g = G.Gate("SM_4483_PIN", tmp_path, "a" * 40, item_id=9992)
+    first = g._gate_contract()
+    assert len(first["clauses"]) == 4 and first["contract_source"] == "live", first
+    _strip_clauses(path)
+    from scripts.automod import review as RV
+    assert RV.item_contract(9992)["clauses"] == [], (
+        "the fixture stopped resembling the incident: the live read must go empty")
+    second = g._gate_contract()
+    assert second["clauses"] == _C4483_TEXT, second
+    assert second["contract_source"] == "carried_over", second
+
+
+def test_a_re_gate_after_a_voiding_mark_grades_the_mark_s_previous_clauses(tmp_path):
+    """#4483 clause 2's read side: the mark's text is a clause source; nothing else is.
+
+    A re-gate is a fresh `Gate` in a fresh process with nothing pinned, so the only
+    contract left is the one `retriage_spent_items` copied onto the mark row when it
+    deleted the item's own. `gate.json` keeps a clause COUNT and a `review` row keeps
+    index-keyed verdicts with no clause text, so exactly two sources exist and this
+    round reads only those two.
+    """
+    _seed_retriage_mark(9993)
+    _item_on_disk(tmp_path, 9993)                    # voided: front matter lost them
+    g = G.Gate("SM_4483_REGATE", tmp_path, "a" * 40, item_id=9993)
+    got = g._gate_contract()
+    assert got["clauses"] == _C4483_TEXT, (
+        f"a re-gate must recover the mark\'s four previous clauses: {got}")
+    assert got["contract_source"] == "retriage_mark", got
+    assert got["retriage_mark"]["ts"] == "1795000000.0", got
+
+
+def test_a_mark_with_no_previous_clauses_still_refuses_and_cannot_land(tmp_path):
+    """#4483 clause 3: no confirmed verdict and no `previous_clauses` → still refused.
+
+    The steward\'s `unmet_twice` mark row carries no contract text, so there is nothing
+    to grade and the round must not land ungarded. This node is what makes the fix a
+    recovery rather than a bypass: it removes a false refusal without widening what
+    lands ungraded.
+    """
+    _seed_retriage_mark(9994, previous=None)
+    _item_on_disk(tmp_path, 9994)
+    g = G.Gate("SM_4483_EMPTY", tmp_path, "a" * 40, item_id=9994)
+    assert g._gate_contract()["clauses"] == []
+    answer = g._review_prepare()
+    ok, detail = answer[0], answer[1]
+    assert ok is False, answer
+    assert "has no acceptance clauses" in detail, detail
+
+
+def test_a_voided_item_s_refusal_is_booked_infra_and_an_unconfirmed_item_s_is_not(
+        tmp_path, monkeypatch):
+    """#4483 clause 4: `external_blocker` + the mark\'s ts on the ROW, or neither.
+
+    #4458\'s own `gate` row is the counter-example that had to stay: its item was
+    `confirmed` with zero marks, so an empty contract there is the item\'s own contract
+    failure and charges the round. A mark this round never opened is an outside event,
+    and the refusal has to name WHICH mark — the pre-#4483 data dict was empty, which
+    is why the chase could only be classified after the fact.
+    """
+    _seed_retriage_mark(9995, previous=None)
+    _item_on_disk(tmp_path, 9995)
+    marked = G.Gate("SM_4483_MARKED", tmp_path, "a" * 40, item_id=9995)
+    answer = marked._review_prepare()
+    ok, detail, data = answer[0], answer[1], answer[2]
+    assert ok is False, answer
+    assert data.get("external_blocker") is True, data
+    assert data.get("retriage_mark_ts") == "1795000000.0", data
+    assert "1795000000.0" in detail, detail
+    assert data.get("contract_source") == "retriage_mark", data
+
+    plain = G.Gate("SM_4483_PLAIN", tmp_path, "a" * 40, item_id=9996)
+    _item_on_disk(tmp_path, 9996)
+    answer2 = plain._review_prepare()
+    ok2, detail2, data2 = answer2[0], answer2[1], answer2[2]
+    assert ok2 is False, answer2
+    assert "external_blocker" not in data2 and "retriage_mark_ts" not in data2, data2
+    assert "backlog_retriage mark" not in detail2, detail2
+
+    # The DURABLE row, not only the returned dict. `_rung` is what books a rung, and
+    # these keys reach the ledger only if its event allowlist carries them: below
+    # `detail[:500]` the reason word still survives inside the detail, but the mark's
+    # ts and the contract's source survive nowhere once `gate.json` goes with the
+    # worktree — which is the whole reason #4458's refusal had to be classified
+    # after the fact by the chase that happened to wrap it.
+    booked: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", lambda e, **k: booked.append(e))
+    assert marked._rung("review", marked._review_prepare) is False
+    rows = [r for r in booked if r.get("rung") == "review"]
+    assert len(rows) == 1, booked
+    assert rows[0]["external_blocker"] is True, rows[0]
+    assert rows[0]["retriage_mark_ts"] == "1795000000.0", rows[0]
+    assert rows[0]["contract_source"] == "retriage_mark", rows[0]
+
+    booked.clear()
+    assert plain._rung("review", plain._review_prepare) is False
+    rows = [r for r in booked if r.get("rung") == "review"]
+    assert len(rows) == 1, booked
+    assert "external_blocker" not in rows[0], rows[0]
+    assert "retriage_mark_ts" not in rows[0] and "contract_source" not in rows[0], rows[0]
+
+
+def test_only_the_two_refusals_and_the_vault_skip_quote_the_empty_contract():
+    """#4483 clause 5\'s grep, pinned: three sites, two refusals, one untouched skip.
+
+    `review.py`\'s line is the vault-review SKIP (`\"skipped\"`, not a refusal), and a fix
+    that turned it into one would silently stop grading vault rounds. The message
+    exists at exactly two refusing sites — preflight and the review rung — because a
+    fix that only touched the second relocates the refusal to the first, which the
+    triage measured.
+    """
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run(["git", "grep", "-n", "has no acceptance clauses", "--", "scripts/"],
+                         capture_output=True, text=True, cwd=str(root))
+    lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 3, lines
+    gate_sites = [ln for ln in lines if "automod/gate.py" in ln]
+    assert len(gate_sites) == 2, gate_sites
+    vault_skip = [ln for ln in lines if "automod/review.py" in ln]
+    assert len(vault_skip) == 1, vault_skip
+    n, body = int(vault_skip[0].split(":")[1]), vault_skip[0].split(":", 2)[2]
+    assert "skipped" in body, (n, body)

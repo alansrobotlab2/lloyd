@@ -3485,9 +3485,9 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 
     seeded = text.replace("eval/run_eval.py:2947", "eval/run_eval.py:2134")
     # #4347 grows `_reuse_inner`/`_reuse_rule` above `rung_prompt_surface`, so the
-    # live number is 3558 and this pre-shift seed must age with it: seeding a value
+    # live number is 3608 and this pre-shift seed must age with it: seeding a value
     # the doc no longer carries replaces nothing and the node asserts on itself.
-    seeded = seeded.replace("scripts/automod/gate.py:3558", "scripts/automod/gate.py:1590")
+    seeded = seeded.replace("scripts/automod/gate.py:3615", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2134", "scripts/automod/gate.py:1590"], (
@@ -3512,8 +3512,12 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 #: reason it is a constant with this lineage attached rather than a number inline;
 #: 3187 since #4347's canary-reuse guard and missing-canary refusal moved everything
 #: below `Gate.run` down 17, so line 3170 fell out of `rung_pyright` (3182-3274) into
-#: `rung_static`.
-_PRE_3770_PROMPT_SURFACE_ANCHOR = 3187
+#: `rung_static`; 3244 since #4483, whose pinned-contract readers AND the two keys'
+#: event allowlist sit ABOVE `Gate.run` and moved `rung_recovery` 3073→3130 and
+#: `rung_pyright` 3182→3239 — so 3187 fell out of `rung_pyright` and now sits inside
+#: `rung_recovery`, the same drift one rung earlier, and all +57 of it is this round's
+#: own insertion above the rung, not main's.
+_PRE_3770_PROMPT_SURFACE_ANCHOR = 3244
 
 
 def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
@@ -3525,7 +3529,7 @@ def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
     lines to land on. This node reads the bytes at the cited line and requires them
     to be the `label = f"item{…}" … f"gate-{…}"` assignment the doc is talking about,
     which is the only property that makes the doc's `gate.py` number the right number
-    rather than a defensible one (3435 when #3770 filed this, 3541 before #4347, 3558
+    rather than a defensible one (3435 when #3770 filed this, 3541 before #4347, 3558, and 3608
     now).
 
     Then the failure this round would have shipped. #3770 inserts the chrome-bundle
@@ -3844,7 +3848,7 @@ def test_clearing_a_bare_citation_costs_the_doc_no_test_edit():
 #: The anchor #4061 re-typed out of the unreadable `gate.py:2584` spelling, and the
 #: definition the rewritten sentence names beside it. 2584 until #4074 put the
 #: `pre_replay` field and its loader into `gate.py` above `run` and moved it down 34.
-GATE_LADDER_SPAN = "scripts/automod/gate.py:2635"
+GATE_LADDER_SPAN = "scripts/automod/gate.py:2685"
 GATE_LADDER_SYMBOL = "run"
 
 
@@ -3897,7 +3901,7 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
 THREAT_AUTOMOD_ANCHORS = (
     ("scripts/automod/spec.py:748", "check_scope"),     # what classifies the diff
     (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
-    ("scripts/automod/gate.py:4367", "rung_review"),    # the second reader
+    ("scripts/automod/gate.py:4424", "rung_review"),    # the second reader
 )
 
 #: The numbers those rows carried, which sit in definitions unrelated to them.
