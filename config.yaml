@@ -827,15 +827,22 @@ harness:
     # `bash_record` (#4044) is the third switch and it is a RECORDER, not a gate: with
     # it on, a Bash child's environment carries a loopback proxy whose only job is to
     # write the destinations that child reaches into this same table under their own
-    # `via`, so the inventory above stops being structurally incomplete. It ships false
-    # and stays false until a week of real traffic has been read plus the injection
-    # canary and fleet watchdog are green — the injection puts a process this box owns
-    # onto the path of every unattended `curl`, and some clients error on a proxy
+    # `via`, so the inventory above stops being structurally incomplete. It is ARMED
+    # (#4293, 2026-11-22) for one observation week of ordinary fleet Bash: the arm
+    # shipped in #4044 and the week it was waiting for never started, because the flag
+    # stayed false — 5,388 `egress_events` rows read on 2026-11-19, every one of them
+    # `via='tool'`. The week's break-detector is the injection canary and the fleet
+    # watchdog reading green within 24h, since the injection puts a process this box
+    # owns onto the path of every unattended `curl` and some clients error on a proxy
     # variable they cannot reach (#2269: a Bash narrowing that broke `curl` health
-    # checks, reverted). It refuses nothing whatever `enforce` says; arming that remains
-    # a separate decision (#2702/#2787). The port is never a key here — the recorder
-    # binds an ephemeral loopback port in code (`agent_mcp/_bash_egress_proxy.py`).
-    bash_record: false
+    # checks, reverted). Arming the recorder arms no gate: `enforce` above is the switch
+    # that refuses a host, it stays **false by decision**, and #4294 carries that
+    # separate call (#2702/#2787). Whether the recorder stays armed once the week is
+    # read is a ruling the week's inventory has to support — filed as #4293's owed check
+    # on 2026-11-22, and not a default to infer or silently restore. The port is never a
+    # key here — the recorder binds an ephemeral loopback port in code
+    # (`agent_mcp/_bash_egress_proxy.py`).
+    bash_record: true
     allow:
       - {host: duckduckgo.com, reason: "web search (http_search)"}
       - {host: arxiv.org, reason: "papers: abs/pdf, export. and info. subdomains"}

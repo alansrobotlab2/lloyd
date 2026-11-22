@@ -7819,6 +7819,146 @@ def test_guard_coverage_cites_the_live_owner_of_the_egress_posture():
     assert '"enforce": enforce_on()' in inspect.getsource(egress.network_report)
 
 
+# ── #4293: the Bash recorder's posture is a config value, and the docs must read it ──
+
+#: Wording no arm of `bash_record` makes true once the recorder is armed. The first two
+#: are exactly what the three graded cells said before #4293 armed the key; the second
+#: two are the same claim without the backticks, which is how a reword keeps the lie.
+BASH_RECORD_NEVER = ("ships `false`", "shipped `false`", "ships false", "shipped false")
+
+#: What each graded cell has to contain while the recorder is armed. Marked by parsed
+#: config value rather than spelled at the call site, so a landing that flips the flag
+#: back is told by this file which arm it is now grading (#2581's lesson, applied to the
+#: third egress switch: the `enforce` node above reads `config.yaml`, and before it did
+#: not, a row explained an unarmed branch as a key "no `config.yaml` sets").
+BASH_RECORD_ARMED_MARKS: dict[str, tuple[str, ...]] = {
+    "config.yaml comment": ("It is ARMED", "#4293"),
+    "harness.md switch list": ("ARMED for the #4293 observation week",),
+    "guard-coverage egress row": ("armed for the #4293 observation week",),
+}
+
+
+def _bash_record_armed() -> bool:
+    """`harness.egress_policy.bash_record` as parsed out of THIS tree's `config.yaml`.
+
+    The operand is the file, not a literal in this file: `agent_mcp/egress.py` arms the
+    recorder with `_env_flag("LLOYD_EGRESS_BASH_RECORD", _config_flag("bash_record"))`,
+    so the shipped posture the three cells state IS this key's parsed value (the env half
+    is a per-process override and is deliberately not read here, exactly as the `enforce`
+    node above leaves `LLOYD_EGRESS_ENFORCE` alone).
+    """
+    import yaml
+
+    policy = ((yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+               or {}).get("harness") or {}).get("egress_policy") or {}
+    armed = policy.get("bash_record")
+    assert isinstance(armed, bool), (
+        f"harness.egress_policy.bash_record is {armed!r} in config.yaml, not a boolean: "
+        "the graded cells state one of exactly two postures, and `_config_flag` refuses "
+        "to arm on a quoted string (#1965)")
+    return armed
+
+
+def _bash_record_cells() -> dict[str, str]:
+    """The three cells that state the posture, each located by its own text.
+
+    None is found by line number, so a reflow or a renumbering cannot quietly narrow what
+    this node grades — the same reason the `enforce` node looks its row up by its
+    leading pipe-and-module-name rather than by a line number.
+    """
+    cfg = (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+    key = [i for i, ln in enumerate(cfg) if ln.strip().startswith("bash_record:")]
+    assert len(key) == 1, f"bash_record is set {len(key)} times in config.yaml: {key}"
+    start = key[0]
+    while start and cfg[start - 1].lstrip().startswith("#"):
+        start -= 1
+    comment = " ".join(ln.strip().lstrip("#").strip() for ln in cfg[start:key[0]])
+    assert comment, "the key has no comment block above it to state its posture"
+
+    harness = (ARCH / "harness.md").read_text(encoding="utf-8").split("\n\n")
+    named = [p for p in harness if "`egress_policy.bash_record`" in p]
+    assert len(named) == 1, (
+        f"`egress_policy.bash_record` is stated by {len(named)} paragraphs of "
+        f"harness.md, want exactly 1: {[p[:60] for p in named]}")
+
+    row = [ln for ln in _guard_coverage_lines()
+           if ln.startswith("| `agent_mcp/egress.py` |")]
+    assert len(row) == 1, row
+    return {"config.yaml comment": comment,
+            "harness.md switch list": named[0],
+            "guard-coverage egress row": row[0]}
+
+
+def _bash_record_problems(cells: dict[str, str],
+                          armed: bool | None = None) -> list[str]:
+    """Every way `cells` mis-states the recorder's posture. Empty means each cell reads
+    for the arm under test and none still says the arm ships disarmed.
+
+    `armed` is the controls' only handle; otherwise it is the live parsed value. Passing
+    it is how a control shows the verdict moves with the operand while the doc bytes do
+    not move at all.
+    """
+    arm = _bash_record_armed() if armed is None else armed
+    problems: list[str] = []
+    for label, cell in cells.items():
+        flat = " ".join(cell.split())
+        if arm:
+            for never in BASH_RECORD_NEVER:
+                if never in flat:
+                    problems.append(f"{label}: states {never!r} while "
+                                    "bash_record is true in config.yaml")
+            for mark in BASH_RECORD_ARMED_MARKS[label]:
+                if mark not in flat:
+                    problems.append(f"{label}: bash_record=True requires {mark!r}")
+        else:
+            for mark in BASH_RECORD_ARMED_MARKS[label]:
+                if mark in flat:
+                    problems.append(f"{label}: carries {mark!r}, the wording of an "
+                                    "armed recorder, while bash_record is false")
+    return problems
+
+
+def test_the_bash_record_docs_state_the_posture_config_yaml_actually_sets():
+    """#4293 armed the Bash recorder; these three cells said it ships `false`.
+
+    None of them was pinned before this node: the drift was silent, which is the failure
+    shape this file exists to close. The posture now travels with the parsed value of
+    `harness.egress_policy.bash_record` — the operand `bash_record_on()` reads — and a
+    tree that keeps the armed key beside "ships false" prose, or the disarmed key beside
+    "ARMED for the #4293 observation week" prose, fails here.
+
+    The three sites: `config.yaml`'s own comment block above the key,
+    `architecture/harness.md`'s four-off-switches paragraph, and
+    `architecture/guard-coverage.md`'s `agent_mcp/egress.py` row. The clause's other half —
+    that `enforce` remains off by decision — is graded by the `enforce` node above against
+    its own operand, so this node does not duplicate it; what it does require is that
+    arming the recorder did not quietly reword the gate's posture.
+    """
+    cells = _bash_record_cells()
+    armed = _bash_record_armed()
+    problems = _bash_record_problems(cells)
+    assert problems == [], (
+        f"harness.egress_policy.bash_record parses to {armed} in config.yaml, and the "
+        f"graded cells do not state that posture: {problems}")
+
+    # The clause's own demand, in the armed direction: a cell that reverts to the
+    # pre-#4293 sentence has to be refused while the key is true. Written into the cell
+    # by this node, byte for byte as the corpus said it, not paraphrased.
+    if armed:
+        stale = {label: cell + " It ships `false` and stays false until a week of real "
+                               "traffic has been read." for label, cell in cells.items()}
+        assert _bash_record_problems(stale) != [], (
+            "a cell that still says the recorder ships false passes while the key is "
+            "true, which is the drift this node was added to refuse")
+
+    # Edge onto the operand: the same bytes, unchanged, must fail for the other arm. An
+    # assertion that only compared doc text to doc text would pass for either value.
+    flipped = _bash_record_problems(cells, not armed)
+    assert flipped != [], (
+        f"these cells pass for bash_record={not armed} as well, so the assertion above "
+        "grades wording and not the config value")
+
+
 # ── #2024: the file-gated safety-state table names real edges and real events ─
 
 def test_guard_coverage_tabulates_every_file_gated_flag_with_both_edges():

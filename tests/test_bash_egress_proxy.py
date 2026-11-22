@@ -17,10 +17,13 @@ have shipped with:
   process spawned by `builtin_bash._bash` — the same coroutine the Bash tool calls — not
   out of `proxy_env_for_turn()`. A node that called the builder directly would pass while
   the spawn site stopped calling it, the residual #3846's own test file names.
-* **The flag-off half is measured, not read out of the YAML.** `bash_record: false` in
-  config.yaml is a claim about a file; the claim that matters is that the child's
-  environment is the one it got yesterday, so the default-state node inspects a real
-  child's keys.
+* **Both arms of the flag are measured on a real child, never inferred from the YAML.**
+  `bash_record: true` in config.yaml since #4293's observation week is a claim about a
+  file; the claims that matter are that the OFF arm leaves the child's environment exactly
+  the one it got yesterday (#2269), and that the ARMED file really does reach a
+  non-sandboxed spawn. So the off node sets its arm through `_flags` instead of trusting
+  the word "shipped" — before #4293 armed the key, that inference is what made it fail —
+  and the armed node patches nothing and reads the file.
 * **Nothing here is evidence about clients.** These nodes drive the recorder through
   loopback destinations, from a child that is told to speak to it. Whether curl, pip,
   yt-dlp, Node's native `fetch` or a raw TCP connect hand their traffic to an env-var
@@ -210,22 +213,62 @@ _RAW_ABSOLUTE_PROBE = (
 
 # ── clause 2: the environment the arm hands a child ─────────────────────────
 
-def test_the_shipped_default_hands_the_child_exactly_todays_environment(tmp_path, db):
-    """Flag off — the shipped state — and no proxy variable reaches a real child.
+def test_the_off_arm_hands_the_child_exactly_todays_environment(tmp_path, db,
+                                                                monkeypatch):
+    """Flag off — and no proxy variable reaches a real child.
 
     Asserted on a spawned process rather than read out of config.yaml because the flag
     governs every unattended `curl` on the box: #2269 records a Bash narrowing that broke
     the `curl` health checks and was reverted, so "off means off" has to be a measured
     property of the spawn. The filter is on the variable NAME, so a value inherited from
     a developer shell would not hide an injected one — and no node here sets one by hand.
+
+    The off arm is SET here (`_flags`) rather than inferred from the shipped posture,
+    because as of #4293 the shipped key is true: this box's Bash children now do carry the
+    recorder, and a node that read "off" off the word "shipped" had been asserting the
+    opposite of the live posture since the flip — it failed on exactly that. The node that
+    grades the shipped value itself is `test_the_armed_shipped_posture_reaches_a_real_child`.
     """
+    _flags(monkeypatch, bash_record=False)
     out = tmp_path / "off.json"
     _child(f'{sys.executable} -c "{_ENV_DUMP}" {out}')
 
     seen = json.loads(out.read_text(encoding="utf-8"))
     assert seen == {}, (
-        f"the shipped default handed the child proxy variables: {seen} — every "
-        "unattended curl on the box would now depend on the recorder being up")
+        f"the off arm handed the child proxy variables: {seen} — every unattended curl "
+        "on the box would now depend on the recorder being up")
+
+
+def test_the_armed_shipped_posture_reaches_a_real_child(tmp_path, db, monkeypatch):
+    """#4293: the recorder is armed by the shipped file, with no flag set by this node.
+
+    The acceptance claim measured where it is observable: the spawn site
+    (`agent_mcp/builtin_bash.py:697` -> `_egress_proxy_for_child`) handing a real child the
+    loopback proxy because `config.yaml` says `bash_record: true`. Nothing patches
+    `egress.config` here, so a landing that flipped the key back without reading this node
+    goes red, and so does one that armed the key while the injection stayed dead — the
+    first is a config change, the second is a config change that does nothing.
+
+    Only the per-process override is cleared, so what is read is the file rather than this
+    box's environment. The autouse `_turn` fixture is what makes the spawn eligible: a
+    sandboxed bench or eval arm is deliberately handed nothing
+    (`agent_mcp/_bash_egress_proxy.py:171-183`).
+    """
+    from app.config import CONFIG
+
+    policy_cfg = (CONFIG.get("harness") or {}).get("egress_policy") or {}
+    assert policy_cfg.get("bash_record") is True, policy_cfg
+    monkeypatch.delenv("LLOYD_EGRESS_BASH_RECORD", raising=False)
+
+    out = tmp_path / "armed.json"
+    _child(f'{sys.executable} -c "{_ENV_DUMP}" {out}')
+
+    seen = json.loads(out.read_text(encoding="utf-8"))
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy",
+                 "https_proxy", "all_proxy"):
+        assert name in seen, f"{name} missing from {sorted(seen)}"
+        assert seen[name].startswith("http://127.0.0.1:"), (
+            f"{name}={seen[name]!r} is not the loopback recorder the armed posture names")
 
 
 def test_the_flag_on_child_gets_the_recorder_in_every_spelling_a_client_reads(

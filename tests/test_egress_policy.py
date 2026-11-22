@@ -1394,23 +1394,43 @@ def test_status_publishes_exactly_the_three_flags_it_shipped_with(db, monkeypatc
     assert report["policy"]["bash_record"] is False, report["policy"]
 
 
-def test_the_bash_record_flag_ships_off_and_parses_like_the_two_flags_beside_it(
+def test_the_bash_record_flag_is_armed_for_the_4293_week_and_parses_like_the_two_beside_it(
         db, monkeypatch):
-    """The shipped posture: no Bash child is pointed at a recorder, and a string value
-    cannot come up as armed.
+    """The posture since #4293: the recorder is ARMED for its one observation week, and
+    a string value still cannot come up as armed.
 
-    The parse half is not decoration — `enforce` had to be fixed for exactly this
-    (#1965): a quoted `"off"` coerced with `bool()` came up as enforcement. The arm is a
-    behaviour change on every Bash child in the fleet, so it inherits the same rule
-    rather than a fresh one, and the shipped file is asserted rather than the default in
-    case a later commit flips it without reading this node.
+    Two halves, and the flip moved exactly one of them.
+
+    The live-file half now asserts the ARMED value: `harness.egress_policy.bash_record`
+    is `true` in this tree's `config.yaml`, `enforce` beside it is still `false`, and
+    `bash_record_on()` answers from the booted `CONFIG` rather than a patched one. This
+    node used to read `is False` both ways with the message "the shipped posture proxies
+    every Bash child's traffic"; #4044 shipped the arm and the observation week it was
+    waiting for never started, because the 5,388 `egress_events` rows read on
+    2026-11-19 all read `via='tool'`.
+    What this half keeps guarding is a flip nobody read — so it fails loudly if the week
+    ends and someone restores `false` without ruling on it (#4293's owed decision).
+
+    The parse half is not decoration and the arming did not touch it — `enforce` had to
+    be fixed for exactly this (#1965): a quoted `"off"` coerced with `bool()` came up as
+    enforcement. The arm is a behaviour change on every Bash child in the fleet, so it
+    inherits the same rule rather than a fresh one, and the shipped file is asserted
+    rather than the default in case a later commit flips it without reading this node.
     """
     from app.config import CONFIG
 
     policy_cfg = (CONFIG.get("harness") or {}).get("egress_policy") or {}
-    assert policy_cfg.get("bash_record") is False, policy_cfg
-    assert egress.bash_record_on() is False, (
-        "the shipped posture proxies every Bash child's traffic")
+    assert policy_cfg.get("bash_record") is True, (
+        "#4293 armed the Bash recorder for one observation week; config.yaml reads "
+        f"{policy_cfg.get('bash_record')!r}. If the week is over, flipping it back is "
+        "#4293's ruling to make, not a default to restore silently")
+    assert policy_cfg.get("enforce") is False, (
+        "arming the recorder must not arm the gate — enforce is "
+        f"{policy_cfg.get('enforce')!r}, and #4294 owns that separate decision "
+        "(#2702/#2787)")
+    assert egress.bash_record_on() is True, (
+        "the armed posture proxies every non-sandboxed Bash child's traffic; a booted "
+        "process answering False here is reading a config.yaml that no longer arms it")
 
     for text in ("off", "false", "no", "0"):
         monkeypatch.setattr(egress, "config", lambda t=text: {
@@ -1421,3 +1441,42 @@ def test_the_bash_record_flag_ships_off_and_parses_like_the_two_flags_beside_it(
         "telemetry": True, "enforce": False, "bash_record": True, "allow": [],
         "retention_days": 90})
     assert egress.bash_record_on() is True
+
+
+def test_arming_the_recorder_arms_no_gate_and_publishes_the_flag_once(db, monkeypatch):
+    """#4293 armed `bash_record`; this node is what arming does NOT do.
+
+    The policy is pointed at the armed posture at the seam `egress` itself reads (the
+    same seam `policy_on` patches — used directly here because `policy_on` deliberately
+    carries no `bash_record` key, and the node above needs it to stay absent to prove the
+    payload shape did not change). Read against that state:
+
+    - `enforce_on()` is still False. It is the only switch with a refusal behind it, and
+      #4294 owns the decision to arm it (#2702/#2787's separation).
+    - `status()` publishes exactly the three flags it shipped with —
+      `credential_substitution`, `enforce`, `telemetry` — with no `bash_record` key in
+      it. That payload is the *guard's* posture and the injection canary stamps its A/B
+      arm from it; a fourth key there would read as a fourth thing the guard does.
+    - `network_report()`'s `policy` block carries all five keys — `telemetry`,
+      `enforce`, `bash_record`, `allow_entries`, `permanent_allow_entries` — with
+      `bash_record` True and `enforce` False, beside the `per_via` split the flag is the
+      denominator of. That is the only place the arm's state is published, and it is
+      where the week's evidence will be read from.
+    """
+    monkeypatch.setattr(egress, "config", lambda: {
+        "telemetry": True, "enforce": False, "bash_record": True, "allow": [],
+        "retention_days": 90})
+    assert egress.enforce_on() is False, (
+        "arming the recorder armed the gate: enforce_on() is True")
+    assert sorted(egress.status()) == ["credential_substitution", "enforce",
+                                       "telemetry"], egress.status()
+    assert "bash_record" not in egress.status(), egress.status()
+
+    report = egress.network_report()
+    assert sorted(report["policy"]) == ["allow_entries", "bash_record", "enforce",
+                                        "permanent_allow_entries",
+                                        "telemetry"], report["policy"]
+    assert report["policy"]["bash_record"] is True, report["policy"]
+    assert report["policy"]["enforce"] is False, report["policy"]
+    assert "per_via" in report, (
+        "the recorder's denominator went missing from the payload that publishes it")

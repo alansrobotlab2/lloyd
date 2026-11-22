@@ -215,7 +215,11 @@ reaches a model — `route: native | aux | auto | drop`, gated on
 manifest, `app/component_manifest.py`), `worker_prompt.drop_memory_files`
 (which memory files an unattended turn's prompt does *not* carry — `USER.md`
 today) and `egress_policy.bash_record` (#4044, the third egress switch: a
-recorder of a Bash child's destinations, not a gate, and it ships `false`).
+recorder of a Bash child's destinations, not a gate. It is **ARMED for the #4293
+observation week** as of 2026-11-22 — #4044 shipped the arm and the week of real
+traffic it was waiting for never started while the flag stayed false — and `enforce`
+remains off by decision (#4294 owns that call), so the arm writes rows and refuses
+nothing).
 
 ## Tests that pin the above
 
