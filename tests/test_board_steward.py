@@ -215,22 +215,30 @@ def test_a_stale_pick_is_ignored(monkeypatch, tmp_path):
     assert B.steward_pick(p) is None
 
 
-def test_the_shipped_state_applies():
-    """What the shipped source is configured to do, read off the real config.
+def test_the_shipped_state_does_not_apply_after_the_stop_condition_fired():
+    """What the shipped source is configured to do, read off the real config: NOT apply.
 
-    `apply` was false from Cut 3 (#3088) until #4147 flipped it at 2026-11-16T00:06Z, on
+    This node was `test_the_shipped_state_applies` and its body said
+    `assert cfg["apply"] is True`. #4409 re-pinned it to False, and moved the name with
+    the value, because the name was a claim too: a passing node called
+    `..._ships_the_flag_on_...` over `apply: false` tells the next reader the steward
+    writes, which is the exact false reading this item was filed to close.
+
+    `apply` was false from Cut 3 (#3088) until #4147 flipped it at 2026-11-16T00:06Z on
     the gate the block beside it states (summed judged 140 and rate 0.9714, both over the
-    rolling 7-day window). This node is the YAML-leg counterpart of the comment pins: a
-    block that recites the cleared figures beside `apply: false` would satisfy the prose
-    and ship the dry run, and the only thing that catches that is the parsed value. The
-    stop condition in that block puts this back to False if the disagreement alarm fires
-    within 7 days of the flip — and this node is what makes that round a real edit rather
-    than a stray keystroke.
+    rolling 7-day window), and the STOP CONDITION in that block fired 18h48m53s later, on
+    2026-11-16T18:54:53Z — the trip record beside the flag now says so, and closes the
+    flip as 'tried, didn't work out'. What this node is for has not changed across
+    either direction: it is the YAML-leg counterpart of the comment pins, the thing that
+    catches a block which recites figures beside a value they no longer justify, and the
+    reason a revert of this flag is a real edit rather than a stray keystroke. Whether
+    the flag may go back to true, and on what bar, is owed-check's ruling (#4409's owed
+    entry), not this node's.
     """
     from app.config import CONFIG
     cfg = CONFIG["workers"]["sources"]["board-steward"]
     assert cfg["enabled"] is True
-    assert cfg["apply"] is True
+    assert cfg["apply"] is False
     assert cfg["model"] == "primary"      # since the first live tick; see the source
     assert int(cfg["max_turns"]) >= 16
 
@@ -1964,11 +1972,14 @@ def _flip_block_problems(block: str, *, apply_value) -> list[str]:
     if not re.search(r"^\s+apply:\s*(?:true|false)\s*$", block, re.MULTILINE):
         problems.append("[flag key captured] the slice did not capture the flag the "
                         "comment gates: " + block[-200:])
-    if apply_value is not True:
+    if apply_value is not False:
         problems.append(
-            f"[apply ships on] `workers.sources.board-steward.apply` reads "
-            f"{apply_value!r}, not True — the gate's own reading cleared, so a flag "
-            f"still false is the flip that never happened")
+            f"[apply ships off] `workers.sources.board-steward.apply` reads "
+            f"{apply_value!r}, not False — the STOP CONDITION below FIRED on "
+            f"2026-11-16T18:54:53Z, and the round that closes the flip (#4409) set the "
+            f"flag back to false, so a value of True here is the flip re-opened by a "
+            f"round with no business re-opening it: whether it may be flipped again, "
+            f"and on what bar, is owed-check's to rule")
 
     # The ruled floor is the stated floor, and the superseded one is gone. A reader
     # obeys the number written beside the flag, so a retired 100 left in the prose is
@@ -1999,6 +2010,18 @@ def _flip_block_problems(block: str, *, apply_value) -> list[str]:
             "[window is the code window] `JUDGEMENT_WINDOW_DAYS` is no longer 7, so the "
             "window this comment states and the one `judgement_aggregate` measures have "
             "come apart")
+
+    # The figures below describe a DRY RUN, and say so. #4147 ruled them kept — they are
+    # what the flip was decided on — and #4409 relabelled them, because with `apply` back
+    # to false the steward writes nothing again and a paragraph headed as today's reading
+    # is the false absence #3089 set out to remove, one flip later: a reader who takes
+    # `rate` 0.9714 as the steward's CURRENT standing believes an agreement figure
+    # measured while the flag was off.
+    if "pre-flip-only reading" not in low:
+        problems.append(
+            "[reading labelled pre-flip-only] the cleared figures are no longer labelled "
+            "as the reading the flip RAN ON, so they read as the steward's current "
+            "standing — which `apply: false` says it does not have")
 
     # The reading: every figure, in one expression, with the minute it was measured. A
     # bare `2026-\d\d-\d\d` is not enough — the block also carries the ruling's date and
@@ -2098,26 +2121,85 @@ def _flip_block_problems(block: str, *, apply_value) -> list[str]:
                         "same comment: if the alarm fires within 7 days, `apply` goes "
                         "back to false and this reading is recorded as tried, didn't "
                         "work out")
-    if "`apply` back to false" not in flat:
-        problems.append("[stop condition moves the flag] the stop condition has to name "
+    # Not a substring of the instruction: its bytes. #4409's trip record re-uses the
+    # condition's own phrase "`apply` back to false" to report the value the round wrote,
+    # so a substring pin could be satisfied by the RECORD while the INSTRUCTION was
+    # softened — which is the drift #4443 pinned these bytes against. The constant is
+    # defined below this function and read at call time.
+    if STOP_CONDITION_VERBATIM not in block:
+        problems.append("[stop condition moves the flag] the STOP CONDITION sentence is no "
+                        "longer the bytes it was written as, so the instruction the trip "
+                        "record now quotes may itself have been edited — and it has to name "
                         "the value it writes, not just the alarm it watches")
+    # ── the TRIP RECORD the stop condition asked for, written by #4409 ──────────
+    # The sentence above is an instruction to a future round; #4409 is that round, and a
+    # round that only flips the value leaves the NEXT reader to re-derive why from a
+    # 15,633-row ledger. So the record is pinned in the same predicate as the flag it
+    # explains: the condition's own words, the count, the two stamps that bound it, and
+    # the two reverts that were real — separated from the pairs the broken pairing
+    # manufactured, which is the difference between closing a flip and closing an
+    # instrument error.
+    if "stop condition fired" not in low:
+        problems.append("[trip recorded] the block must open its record with the "
+                        "condition's own words — that it FIRED — or a later reader finds "
+                        "a reverted flag with no stated trigger")
+    if "fired 6 times" not in low:
+        problems.append("[trip counts its firings] the record has to carry the number of "
+                        "revert-leg firings, which is the trigger the condition was "
+                        "written to count")
+    if "2026-11-16T18:54:53Z" not in block or "2026-11-20T07:27:31Z" not in block:
+        problems.append("[trip bounds its window] the record has to name the first and "
+                        "the last firing, which is what makes 'inside 7 days' checkable "
+                        "instead of a claim")
+    if "2 of the 6 firings' pairs were genuine" not in flat:
+        problems.append("[trip separates genuine from mis-paired] 2 of the 6 firings rode "
+                        "a real revert and the rest rode the pairing bug; a record that "
+                        "says only 'it fired' leaves the mis-paired rows looking like "
+                        "steward errors")
+    for stamp, who in (("2026-11-16T07:17:31Z", "#4172"),
+                       ("2026-11-17T03:47:29Z", "#4151")):
+        if who not in block or stamp not in block:
+            problems.append(f"[trip names {who}] the genuine reverts are the reason for "
+                            f"the flag, so {who} and its stamp {stamp} have to be in the "
+                            "record beside it")
+    if "were mis-paired rows" not in flat:
+        problems.append("[trip names the mis-paired items] #4240 and #4244 are the shape "
+                        "the old pairing mistook for a revert; the record says which items "
+                        "were never reverted, and why the leg now pairs on the latest row")
+    # BY ID, in the block's own bytes — not paraphrased as "the others". An item the record
+    # does not name is an item nobody can look up in the store, and #4409's whole claim is
+    # that 2 of the 6 firings were false, which is only checkable if the false ones are
+    # findable. `#`-prefixed like the genuine pair above, so both directions read alike.
+    separating = flat[flat.find("mis-paired"):] if "mis-paired" in flat.lower() else ""
+    for mispaired in ("#4240", "#4244"):
+        if mispaired not in separating:
+            problems.append(f"[trip names {mispaired}] the record does not carry "
+                            f"{mispaired} itself, so the pair the shipped pairing "
+                            f"manufactured for it cannot be audited against the store")
     return problems
 
 
-def test_the_config_ships_the_flag_on_and_states_the_cleared_reading():
-    """#4147: the gate cleared, so the flag is on, and the block says so.
+def test_the_config_ships_the_flag_off_and_states_the_pre_flip_reading():
+    """#4409: the stop condition fired, so the flag is off again, and the block says so
+    in the trip record's own words.
 
     Every pin in `_flip_block_problems`, asserted on the real file. #3329 shipped this
     node pinning the UNMET half (`not cleared`, the agree-rate named as the failing leg,
-    the flag read as False); #3386 and #3651 re-pinned it to their own readings. From
-    2026-11-16T00:06Z the same node pins the cleared side: the flag parses True, the
-    block states the figures that clear both legs with the minute they were measured, and
-    the two strings that said otherwise are gone — while the history the bar was
-    deliberately NOT fitted to (0.7317, 0.80) stays exactly where it was.
+    the flag read as False); #3386 and #3651 re-pinned it to their own readings; #4147
+    pinned it to the cleared side with the flag True; #4409 brings it back to the reverted
+    side — the flag parses False, the figures that decided the flip stay in the block with
+    their historical values but are labelled the PRE-FLIP reading they are, and the trip
+    record beside them carries the 6 revert-leg firings, the two genuine reverts (#4172
+    and #4151, each with the stamp the machine wrote) and the two pairs the broken pairing
+    manufactured (#4240, #4244). The name moved with the value because the name was a
+    claim: a node reading 'ships the flag on' over `apply: false` is the false absence
+    this item was filed to close.
 
     The bar itself is unchanged and this node is the witness that it is: `judged` >= 50,
     `>= 0.90` and 'both over the rolling 7-day window' are still in the block, because
-    the flip consumed the gate, it did not move it.
+    the flip consumed the gate, it did not move it — and a future flip has to clear the
+    same two numbers owed-check ruled, on a ruling that is owed-check's to make (#4409's
+    owed entry), not a round's.
     """
     text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
     import yaml
@@ -2131,30 +2213,60 @@ def test_every_flip_block_pin_reddens_on_its_own_mutation():
     """A pin that cannot fail is not a pin: each mutation below breaks exactly one
     claim about the flip and has to be caught by the label that guards it.
 
-    Two of these are the clause's own words — restore `not cleared` into the block, or
-    restore `apply: false` — and the rest are the pins a careless later round is most
-    likely to break while editing the comment for another reason: the measured minute,
-    the window attached to the two numbers, a figure, the stop condition, the retired
-    half-sentence typed back in.
+    Two of these are #4409's own words — restore `not cleared` into the block, or flip
+    `apply` back to `true` on a value the trip record says is false — and the rest are the
+    pins a careless later round is most likely to break while editing the comment for
+    another reason: the measured minute, the window attached to the two numbers, a figure,
+    the stop condition, the retired half-sentence typed back in, and the trip record's
+    count, stamps and named reverts.
     """
     text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
     import yaml
-    assert yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"] is True, (
-        "the mutations below are written against the flipped block; on an unflipped "
-        "file this node would be proving the wrong thing")
+    assert yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"] is False, (
+        "the mutations below are written against the reverted block; on a file still "
+        "reading True this node would be proving the wrong thing")
     block = _board_steward_block(text)
-    assert _flip_block_problems(block, apply_value=True) == [], (
+    assert _flip_block_problems(block, apply_value=False) == [], (
         "the committed block does not pass its own pins")
 
-    def labels(mutated: str, *, apply_value=True) -> str:
+    def labels(mutated: str, *, apply_value=False) -> str:
         return " ".join(_flip_block_problems(mutated, apply_value=apply_value))
 
     # `not cleared` typed back in, wherever the comment wrap happens to fall.
     restored = re.sub(r"reads\s+(?:#\s*)?CLEARED", "reads NOT cleared", block, count=1)
     assert restored != block and "[unmet wording gone]" in labels(restored), restored
     assert "[gate reads cleared]" in labels(restored)
-    # The flag value, restored. Prose untouched: this is the YAML leg failing alone.
-    assert "[apply ships on]" in labels(block, apply_value=False)
+    # The flag value, flipped back on. Prose untouched: this is the YAML leg failing
+    # alone, and it is the leg that makes a re-flip a decision rather than an accident.
+    assert "[apply ships off]" in labels(block, apply_value=True)
+    # The reading's own label, generalised back into today's standing.
+    relabelled = block.replace("PRE-FLIP-ONLY READING", "TODAY'S READING")
+    assert relabelled != block and "[reading labelled pre-flip-only]" in labels(relabelled), \
+        labels(relabelled)
+    # The trip record, thinned to 'it fired': the count, then the two stamps, then the
+    # two items that were never reverted. Each is a separate claim, so each reddens
+    # separately.
+    uncounted = block.replace("fired 6 times", "fired")
+    assert uncounted != block and "[trip counts its firings]" in labels(uncounted), \
+        labels(uncounted)
+    unbounded = block.replace("2026-11-16T18:54:53Z", "the first one")
+    assert "[trip bounds its window]" in labels(unbounded), labels(unbounded)
+    unnamed = block.replace("#4172 applied `up_next`", "one item applied `up_next`")
+    assert "[trip names #4172]" in labels(unnamed), labels(unnamed)
+    unpaired = block.replace("were mis-paired rows", "were also reported")
+    assert unpaired != block and "[trip names the mis-paired items]" in labels(unpaired), \
+        labels(unpaired)
+    # The ids paraphrased away: the sentence survives, the auditability does not.
+    unnamed = re.sub(r"#42(?:40|44)", "another item", block)
+    assert unnamed != block and "[trip names #4240]" in labels(unnamed), labels(unnamed)
+    assert "[trip names #4244]" in labels(unnamed), labels(unnamed)
+    # (`2 of` and `the 6 firings` land on opposite sides of the comment wrap, so a plain
+    # string replace would match nothing and the mutation would prove nothing).
+    merged = re.sub(r"2\s+of\s+(?:#\s*)?the\s+(?:#\s*)?6", "several", block, count=1)
+    assert merged != block and "[trip separates genuine from mis-paired]" in labels(merged), \
+        labels(merged)
+    unrecorded = block.replace("STOP CONDITION FIRED", "STOP CONDITION")
+    assert unrecorded != block and "[trip recorded]" in labels(unrecorded), labels(unrecorded)
     # The retired half-sentence, typed back in at the end of the comment run.
     half = block + "\n    # the agree-rate is the half that does not\n"
     assert "[retired half-sentence gone]" in labels(half)
@@ -2264,17 +2376,21 @@ def test_the_config_states_that_only_an_applied_move_writes_a_steward_move_row()
     `if apply:` and the row is appended only under `if moved_status:` inside it — so a
     round that reverts the flag drives the park count to 0 by itself. Rows > 0 with the
     park count at 0 is the fix; rows = 0 is UNMEASURED, and the sentence has to say that
-    or the next `apply: false` round is read as the repair. The same sentence stays honest
-    about the side it is not on: rows have been live since the 2026-11-16T00:06Z flip (47
+    or the next `apply: false` round is read as the repair. #4409 landed the revert this
+    caveat was written for, so the tree is now on the window's OTHER side: `apply` is
+    false again from 2026-11-21, the park count is 0 by construction, and the warning is
+    the live reading rather than a hypothetical. The sentence stays honest about the side
+    it is not on: rows were live from the 2026-11-16T00:06Z flip (47
     as measured 2026-11-20, newest 2026-11-20T15:47:54Z), so it claims nothing about a
     window before a revert. The YAML leg beside it is what stops the prose being pinned
     while the flag quietly moved.
     """
     text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
     import yaml
-    assert yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"] is True, (
-        "the caveat holds on both sides of a revert, but this tree is the flipped side; "
-        "on an un-reverted file these pins are guarding the wrong half")
+    assert yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"] is False, (
+        "the caveat holds on both sides of a revert, but #4409 landed the revert, so this "
+        "tree is the `apply: false` side — a file reading True here is the flip re-opened "
+        "past its own stop condition, and these pins would be guarding the wrong half")
     block = _board_steward_block(text)
     problems = _caveat_4443_problems(block)
     assert problems == [], problems
@@ -3104,8 +3220,306 @@ def test_the_pair_is_found_only_in_the_field_names_the_writers_actually_stamp(tm
     assert D.reverted_moves(_post_flip_window(), invented) == []
 
 
+#: The machine's own abstention echo, copied from `scripts/automod/backlog.py:7026-7028`
+#: (`desired_statuses`, the #3467 handover) and from the live row the store carries for
+#: #4240 at 2026-11-18T02:27:28Z. It is stamped `status_moved` — the very kind the revert
+#: leg reads — while saying the opposite of a put-back, which is #4409's second false pair.
+#: `test_the_abstention_echo_filter_is_read_from_the_writer_that_stamps_it` re-reads both
+#: fragments out of the writer's own source, so this constant cannot drift.
+ECHO_REASON = ("the board steward moved it to in_progress (`steward_move`: Board line "
+               "carries round_flag=round_in_flight with round_sta); the machine abstains "
+               "until this item lands, is promoted or is re-triaged")
+
+#: A park reason that QUOTES the steward's claim without being the machine's abstention:
+#: `status_pipeline`'s spent-attempt line, copied from the live #4151 row at
+#: 2026-11-16T21:13:45Z. It must stay a revert, which is why the filter needs BOTH
+#: fragments and not just the phrase "the board steward moved it".
+MACHINE_PARK_REASON = ("its unattended attempts are spent; owed-check decides whether to "
+                       "grant another (reopen) or close it as tried")
+
+
+def _pair_ledger(tmp_path, rows):
+    """A `promotions.jsonl` of caller-supplied rows, written through the real writer.
+
+    Same rule `_flip_ledger` states, and for the same reason: every row goes through
+    `S.append_event(entry, path=…)`, which is what supplies `created_at` while the entry's
+    own keys win, so the stamps below are the live ones and the fixture cannot drift from
+    the store a third time (#4147's first round hand-rolled rows; #3150 is that failure).
+    """
+    from scripts.automod import state as S
+    led = tmp_path / "ledger.jsonl"
+    led.parent.mkdir(parents=True, exist_ok=True)
+    for r in rows:
+        S.append_event(dict(r), path=led)
+    return led
+
+
+def _applied(item, at, frm, to, note):
+    """A `steward_move` row with the payload `board_steward.py:1606` writes."""
+    return {"event": "steward_move", "item_id": item, "from": frm, "to": to,
+            "note": note, "tick": "run-4409", "created_at": at}
+
+
+def _machine_moved(item, at, frm, to, reason):
+    """A `status_moved` row with the payload `scripts/automod/backlog.py:7007` writes."""
+    return {"event": "status_moved", "item_id": item, "from": frm, "to": to,
+            "reason": reason, "needs_human": False, "owed": False, "created_at": at}
+
+
+def test_a_superseded_applied_move_is_not_a_revert_the_latest_one_is(tmp_path, monkeypatch):
+    """#4409 clause 4: the pairing is against the item's LATEST applied move, not its first.
+
+    The shape is #4240's live rows, at their live stamps. The steward moved it
+    `draft -> up_next` at 2026-11-17T23:27:39Z and then `up_next -> in_progress` at
+    2026-11-18T00:50:10Z, and at 02:27:28Z the machine moved it to `in_progress` — the
+    status the steward's NEWEST row had just asked for. The shipped pairing took the FIRST
+    apply (`up_next`) and scored that agreement as a put-back, so the disagreement alarm
+    fired on 2026-11-18T00:50:16Z over a steward that had been right. Three applied rows
+    for the window and two machine rows, one file, both directions:
+
+    * the superseded pair must be absent, and `below_floor` on a window whose rate CLEARS
+      must stay silent on it (that is the false alarm's own window, cleared leg and all);
+    * a genuine pair in the same store (#4172's live rows) must still come back, so the
+      silence above is the supersession rule and not a reader that found nothing;
+    * pairing on the FIRST `steward_move` — `D._supersedes` replaced by the rule that
+      shipped until this round — must manufacture the #4240 pair, which is what makes this
+      node a witness and not a tautology.
+
+    The reason carries no abstention marker here on purpose: clause 5's echo filter cannot
+    be what silences this ledger, so the two filters stay separately proved.
+    """
+    win = _post_flip_window()
+    led = _pair_ledger(tmp_path / "supersede", [
+        _applied(4240, "2026-11-17T23:27:39Z", "draft", "up_next",
+                 "draft with triage=confirmed and round_flag=none; last event is the "
+                 "confirmation, so the verdict moves it (#898)."),
+        _applied(4240, "2026-11-18T00:50:10Z", "up_next", "in_progress",
+                 "Board line carries round_flag=round_in_flight with round_state=worktree"
+                 "+gate on round SM_20261117_233457; only in_progress is proposable here."),
+        _machine_moved(4240, "2026-11-18T02:27:28Z", "up_next", "in_progress",
+                       "the round's worktree and gate are alive; the item is being worked"),
+        # A genuine revert for a different item, in the same store: applied `up_next` while
+        # a round of its own was in flight, machine back to `in_progress` 10 minutes later.
+        _applied(4172, "2026-11-16T07:07:00Z", "in_progress", "up_next",
+                 "Fresh red-tree item, confirmed 06:59, no round live."),
+        _machine_moved(4172, "2026-11-16T07:17:31Z", "up_next", "in_progress",
+                       "an automod round is in flight for it"),
+    ])
+
+    pairs = D.reverted_moves(win, led)
+    assert [p["item_id"] for p in pairs] == [4172], (
+        "the revert leg keyed on something other than the genuine pair: "
+        f"{pairs} — #4240's machine row moved it to the status its NEWEST `steward_move` "
+        "asked for, so pairing it is the false alarm the 2026-11-18T00:50:16Z firing was")
+    assert pairs[0]["applied"] == "up_next" and pairs[0]["reverted_to"] == "in_progress"
+    assert pairs[0]["at"] == "2026-11-16T07:17:31Z", pairs[0]
+
+    miss, why = D.below_floor(win, led)
+    assert miss is True and "#4172" in why and "#4240" not in why, why
+
+    # The mutation: pair on the FIRST applied move, which is what shipped until #4409.
+    # Replacing the shipped rule with the old one has to bring the false pair back, or the
+    # assertion above was satisfied by something other than latest-pairing.
+    monkeypatch.setattr(D, "_supersedes", lambda cur, ev: False)
+    first = D.reverted_moves(win, led)
+    assert [p["item_id"] for p in first] == [4240, 4172], (
+        "pairing on the FIRST `steward_move` did not manufacture the #4240 pair, so this "
+        f"node proves nothing about which row it pairs: {first}")
+    assert first[0]["applied"] == "up_next" and first[0]["reverted_to"] == "in_progress"
+
+
+def test_the_machines_abstention_echo_is_not_a_revert_even_when_its_to_differs(
+        tmp_path, monkeypatch):
+    """#4409 clause 5: the machine's `the machine abstains` row is agreement, not a put-back.
+
+    `desired_statuses` stamps its #3467 abstention into a `status_moved` row, so the kind
+    the leg reads for a reversal is also the kind the machine writes when the steward WON.
+    Latest-pairing alone does not save the leg here: this ledger's echo carries
+    `to: up_next` while the item's latest applied move is `in_progress`, exactly the case a
+    steward that moved an item twice inside one 900-second poll produces. Three directions,
+    one file:
+
+    * the echo is not a pair, and the alarm stays silent on a window whose rate clears;
+    * deleting the filter (`ABSTENTION_ECHO_MARKS` emptied) manufactures the pair, so the
+      silence is the filter and not the fixture's shape;
+    * a reason that QUOTES the steward without being the machine's own abstention — the
+      spent-attempt park line, which contains "the board steward moved it" in ordinary
+      prose about a claim — is still a revert. Only the abstention half is the machine's
+      first-person sentence, and this is the direction that keeps the filter from eating
+      real findings.
+    """
+    win = _post_flip_window()
+    rows = [
+        _applied(4240, "2026-11-17T23:27:39Z", "draft", "up_next",
+                 "draft with triage=confirmed and round_flag=none."),
+        _applied(4240, "2026-11-18T00:50:10Z", "up_next", "in_progress",
+                 "round_flag=round_in_flight with round_state=worktree+gate; only "
+                 "in_progress is proposable here."),
+        _machine_moved(4240, "2026-11-18T03:00:00Z", "in_progress", "up_next", ECHO_REASON),
+    ]
+    led = _pair_ledger(tmp_path / "echo", rows)
+    assert D.reverted_moves(win, led) == []
+    miss, why = D.below_floor(win, led)
+    assert miss is False and "at or above" in why, (
+        "the abstention echo fired the disagreement alarm: " + why)
+
+    # Deleting the filter reddens the whole direction, on the same file. An EMPTY tuple
+    # would invert `all()` and filter every row, so the mutation is a mark no row can
+    # carry: the filter stays in place and matches nothing, which is what removing it does.
+    monkeypatch.setattr(D, "ABSTENTION_ECHO_MARKS", ("no writer stamps this phrase",))
+    pairs = D.reverted_moves(win, led)
+    assert [p["item_id"] for p in pairs] == [4240], (
+        f"with the abstention filter removed the echo still is not a pair: {pairs} — the "
+        "node's silence would then be coming from somewhere else")
+    assert pairs[0]["applied"] == "in_progress" and pairs[0]["reverted_to"] == "up_next"
+
+    # A park reason that mentions the steward in prose is a real revert. `to` differs from
+    # the latest applied status and the machine spoke for itself, so the filter must not
+    # touch it — the false-negative direction, which is the one that would hide #4172.
+    quoted = _pair_ledger(tmp_path / "quoted", rows[:2] + [
+        _machine_moved(4240, "2026-11-18T03:00:00Z", "in_progress", "up_next",
+                       "the board steward moved it once, and " + MACHINE_PARK_REASON)])
+    hits = D.reverted_moves(win, quoted)
+    assert [p["item_id"] for p in hits] == [4240], (
+        "a machine park reason that merely mentions the steward was swallowed as an "
+        f"abstention echo: {hits}")
+    assert D.below_floor(win, quoted)[0] is True
+
+
+def test_the_abstention_echo_filter_is_read_from_the_writer_that_stamps_it():
+    """The filter's fragments live in the writer's source, not only in this module's.
+
+    #4147's first round lost this leg because its reader used field names no writer emits,
+    and its node passed anyway: the failure was invisible because both sides of the seam
+    were invented together. This node closes the same seam for the new filter — it reads
+    `desired_statuses`' own source and requires BOTH fragments `ABSTENTION_ECHO_MARKS`
+    matches on to appear there, so a writer that re-words its abstention sentence reddens
+    here rather than re-arming the false pair silently. It also requires the filter to be
+    more than one fragment: a filter that matched the phrase "the board steward moved it"
+    alone would match a park reason quoting the steward's claim, and that is how a fix for
+    a false positive becomes a false negative.
+    """
+    import inspect
+
+    marks = D.ABSTENTION_ECHO_MARKS
+    assert len(marks) >= 2, (
+        f"{marks}: one fragment is not a filter — the phrase 'the board steward moved it' "
+        "appears in ordinary prose about a claim, and matching on it alone eats genuine "
+        "reverts")
+    src = inspect.getsource(B.desired_statuses)
+    for mark in marks:
+        assert mark in src, (
+            f"`ABSTENTION_ECHO_MARKS` matches on {mark!r}, which no longer appears in "
+            "`desired_statuses` — the writer re-worded its abstention sentence and the "
+            "filter is now silently matching rows that are not abstentions")
+    assert "status_moved" in src, (
+        "`desired_statuses` no longer stamps its abstention as a `status_moved` row, so "
+        "`EVENT_KIND_REVERT` is the wrong kind for this filter and both sides need re-read")
+
+
+
+#: The shipped config, read as text so the YAML leg and the comment leg come from one file.
+CFG_YAML = Path(__file__).resolve().parents[1] / "config.yaml"
+
+
+def test_the_stop_condition_trip_is_recorded_beside_the_flag_that_reverted():
+    """#4409 clause 1's own witness: the flag parses False, and the stop condition's block
+    records the trip in the condition's own words.
+
+    One node per clause, so a reader (or a gate) can answer "did the record land?" without
+    reading the shared predicate. Everything asserted here is also a label inside
+    `_flip_block_problems`; what this node adds is that the labels are read against the
+    parsed YAML value beside the prose, so the record and the flag cannot disagree.
+    """
+    text = CFG_YAML.read_text(encoding="utf-8")
+    import yaml
+    apply_value = yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"]
+    labels = " ".join(_flip_block_problems(_board_steward_block(text),
+                                           apply_value=apply_value))
+    assert "[trip recorded]" not in labels, labels
+    assert "[trip counts the firings]" not in labels, labels
+    assert "[trip bounds its window]" not in labels, labels
+    assert "[stop condition moves the flag]" not in labels, labels
+    assert apply_value is False, (
+        "the record says the condition fired and a round set the flag back; the parsed "
+        "value beside it has to agree, which is the YAML leg #4443 pinned")
+
+
+def test_the_trip_record_names_both_genuine_reverts_and_both_mis_paired_items():
+    """#4409 clause 2's own witness: the record names the reason for the flag.
+
+    Both directions of the count, each with the row that settles it: #4172 and its
+    `in_progress` stamp of 2026-11-16T07:17:31Z, #4151 and its `draft` stamp of
+    2026-11-17T03:47:29Z, the phrase that says only 2 of the 6 firings rode a real revert,
+    and the two items the shipped pairing mis-paired, #4240 and #4244, named by id. An item
+    the record does not name cannot be looked up in the store, and a count without them
+    reads as six reverts.
+    """
+    block = _board_steward_block(CFG_YAML.read_text(encoding="utf-8"))
+    flat = " ".join(block.split())
+    for stamp, who in (("2026-11-16T07:17:31Z", "#4172"),
+                       ("2026-11-17T03:47:29Z", "#4151")):
+        assert who in block and stamp in block, (who, stamp)
+    assert re.search(r"(?:2|two)\s+(?:#\s*)?of\s+(?:#\s*)?(?:the\s+)?6\s+"
+                     r"(?:firings|fires)", flat), flat
+    assert "pairs were genuine" in flat, flat
+    assert "mis-paired" in flat.lower(), flat
+    for mispaired in ("#4240", "#4244"):
+        assert mispaired in block, mispaired
+
+
+def test_no_shipped_test_still_asserts_the_board_steward_flag_is_on():
+    """#4409 clause 3's other half: a NAME is a claim, and two of them said the flag ships
+    on while the body underneath them was being changed to False.
+
+    Scans every test file for a node that pins THIS source's parsed `apply` key to True
+    (the subscript-then-`is True` form, built below by concatenation so this node cannot
+    match its own prose) or whose NAME asserts the flag ships on. `tests/test_autocode_off_loop.py` asserts
+    `cfg["apply"] is True` for the autocode source and must keep doing so, which is why the
+    scan is scoped to nodes naming this source rather than to the whole repo. The two nodes
+    this round renamed are the ones the scan exists to keep out.
+    """
+    here_dir = Path(__file__).resolve().parent
+    tracked = subprocess.run(["git", "-C", str(here_dir.parent), "ls-files", "tests"],
+                             capture_output=True, text=True).stdout.split()
+    names = sorted(Path(n).name for n in tracked) or sorted(
+        q.name for q in here_dir.glob("test_*.py"))
+    offenders = []
+    for fname in names:
+        path = here_dir / fname
+        if not path.exists():
+            continue
+        src = path.read_text(encoding="utf-8")
+        for whole, name in re.findall(r"(def (test_[a-z0-9_]+)\([\s\S]*?)(?=\ndef |\Z)", src):
+            if name == "test_no_shipped_test_still_asserts_the_board_steward_flag_is_on":
+                continue              # this node: it quotes the form it hunts for
+            if "board-steward" not in whole and "board_steward" not in name:
+                continue
+            # Only ASSERT lines: a node's docstring may QUOTE the retired claim to explain
+            # why it is gone, and prose is not an assertion.
+            asserts = " ".join(l.strip() for l in whole.splitlines()
+                               if l.strip().startswith("assert"))
+            if ('apply"] is True' in asserts or "apply'] is True" in asserts) \
+                    or "ships_the_flag_on" in name or name.endswith("_state_applies"):
+                offenders.append(f"{path.name}::{name}")
+    assert offenders == [], (
+        "a node still asserts board-steward's apply is True; the stop condition fired on "
+        f"2026-11-16T18:54:53Z and #4409 reverted the flag: {offenders}")
+    here = Path(__file__).read_text(encoding="utf-8")
+    for renamed in ("def test_the_shipped_state_does_not_apply_after_the_stop_condition",
+                    "def test_the_config_ships_the_flag_off_and_states_the_pre_flip"):
+        assert renamed in here, renamed
+    # Only DEF statements: this file's own docstrings name the retired nodes to explain
+    # why they are gone, and a substring test over the whole file would read that as the
+    # nodes still being there.
+    defs = set(re.findall(r"^def (test_[a-z0-9_]+)\(", here, re.M))
+    assert "test_the_shipped_state_applies" not in defs
+    assert "test_the_config_ships_the_flag_on_and_states_the_cleared_reading" not in defs
+
+
 def test_a_reverted_applied_move_fires_the_alarm_on_a_window_the_rate_clears(tmp_path):
-    """Clause 3: apply:true, rate at or above 0.90, and a reverted applied move fires.
+    """Clause 3 of #4147 (and the purpose witness #4409 clause 5 requires to stay green):
+    rate at or above 0.90, and a reverted applied move fires.
 
     This is the whole point of the leg. Post-flip the rate can only drift DOWN and never
     scores a fresh `disagree`, so without this second leg a steward that is being

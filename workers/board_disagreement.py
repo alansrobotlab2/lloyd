@@ -115,6 +115,54 @@ EVENT = "board_steward_disagreement"
 EVENT_KIND_APPLIED = "steward_move"
 EVENT_KIND_REVERT = "status_moved"
 
+#: The two halves of the reason the state machine stamps on its OWN abstention, and why
+#: neither one of them is a revert. `scripts/automod/backlog.py:7026-7028`
+#: (`desired_statuses`, the #3467 handover) writes, for an item whose latest
+#: `steward_move` still stands: `the board steward moved it to {claim[1]}
+#: (`steward_move`: {claim[2]}); the machine abstains until this item lands, is promoted or
+#: is re-triaged`. That row is the machine SAYING THE STEWARD WON, stamped into the same
+#: `status_moved` kind the leg reads for a put-back — so a reader that keys on the kind
+#: alone scores the machine's loudest agreement as its own reversal.
+#:
+#: Both halves are required, not just the first: an item's own triage or park reason can
+#: legitimately contain the phrase "the board steward moved it" (a park line quoting the
+#: steward's claim does), and only the abstention half is the machine's first-person
+#: sentence. The pair is checked case-insensitively because the reason crosses a process
+#: boundary, and `test_the_abstention_echo_filter_is_read_from_the_writer_that_stamps_it`
+#: re-reads both fragments out of `desired_statuses`' own source, so a writer that ever
+#: re-words its sentence reddens here instead of silently re-arming the false pair.
+ABSTENTION_ECHO_MARKS = ("the board steward moved it", "the machine abstains")
+
+
+def _is_abstention_echo(ev: dict) -> bool:
+    """Is this `status_moved` the machine echoing the steward's claim instead of moving?
+
+    `bool(ABSTENTION_ECHO_MARKS) and` is not decoration: `all()` over an EMPTY iterable is
+    True, so an emptied tuple would classify EVERY row as an abstention echo and silence
+    the whole revert leg — the false negative, which is the direction that hides a real
+    disagreement. An empty mark list has to read as "no filter", which is also what the
+    mutation in `test_the_machines_abstention_echo_is_not_a_revert_even_when_its_to_differs`
+    does to delete the filter.
+    """
+    reason = str(ev.get("reason") or "").lower()
+    return bool(ABSTENTION_ECHO_MARKS) and all(mark in reason for mark in ABSTENTION_ECHO_MARKS)
+
+
+def _supersedes(cur: dict, ev: dict) -> bool:
+    """Does `ev` replace `cur` as the applied move the item currently stands on?
+
+    The store is append-only, so the row stamped later is the one still in force, and a tie
+    goes to the row read second for the same reason. Extracted from `reverted_moves`'
+    selection loop so the pairing rule has one name and one mutation:
+    `test_a_superseded_applied_move_is_not_a_revert_the_latest_one_is` replaces this with
+    an always-False rule — which is the pairing that shipped until #4409, first row per item
+    — and requires that node to redden. An earlier row that a later one overwrote is not
+    evidence of anything the steward still believes, which is what the whole leg claims to
+    measure.
+    """
+    return _iso_norm(str(ev.get("created_at") or "")) >= _iso_norm(
+        str(cur.get("created_at") or ""))
+
 _ROW_RE = re.compile(r"^- #(\d+)[:\s]", re.MULTILINE)
 
 
@@ -142,7 +190,31 @@ def reverted_moves(window: dict, ledger: Path) -> list[dict]:
     machine put it back.
 
     Returns `[{"item_id", "applied", "reverted_to", "at", "reason"}]`, one per item: the
-    FIRST revert found for it, keyed by `item_id`.
+    FIRST revert found AFTER that item's LATEST applied move. Two filters, both of which the
+    live post-flip ledger proved necessary (#4409, measured 2026-11-21 over the rows the
+    flip wrote):
+
+    * **LATEST applied, not first.** An item the steward moves twice in one window has two
+      `steward_move` rows, and the second supersedes the first — the machine putting the
+      item at the status the steward's NEWEST row says is agreement, not a put-back. The
+      shipped pairing took the item's FIRST row and stopped at the first revert, so #4240
+      (`draft→up_next` at 2026-11-17T23:27:39Z, then `up_next→in_progress` at
+      2026-11-18T00:50:10Z) paired the stale first row against a `to: in_progress` move and
+      fired a disagreement that never happened; #4244 did the same with `up_next→draft` at
+      2026-11-18T00:50:11Z. Pairing on the latest row leaves only the two genuine pairs in
+      the window (#4172, #4151) — see
+      `test_a_superseded_applied_move_is_not_a_revert_the_latest_one_is`.
+    * **An abstention echo is not a revert.** `ABSTENTION_ECHO_MARKS` above; the machine's
+      own `the machine abstains` row is stamped `status_moved`, and its `to` can differ from
+      an applied status whenever the steward moved the item again before the machine echoed,
+      which is a second way the same tick manufactures a pair out of an agreement.
+
+    An applied row stamped BEFORE `window_since` is out too, which is what "inside the same
+    window" has always claimed above: the shipped reader windowed only the revert, so one
+    stale apply could keep pairing with every machine move for the rest of the store. On the
+    rows the flip actually wrote this changes nothing — the six revert-leg firings' windows
+    each still return exactly the pairs the un-windowed read returns — so the narrowing
+    costs no real finding and removes a source of re-firing.
 
     THE FIELD NAMES ARE MEASURED, NOT ASSUMED (#4147's first round died here). The stamp
     is `created_at` on EVERY row because `scripts/automod/state.py:187` prepends
@@ -183,9 +255,9 @@ def reverted_moves(window: dict, ledger: Path) -> list[dict]:
         return []
     reverts = [e for e in events
                if e.get("event") == EVENT_KIND_REVERT
-               and _iso_norm(str(e.get("created_at") or "")) >= since]
+               and _iso_norm(str(e.get("created_at") or "")) >= since
+               and not _is_abstention_echo(e)]   # the machine agreeing, stamped as a move
     out: list[dict] = []
-    seen: set[int] = set()
 
     def _item_of(ev: dict):
         # `item_id` is a plain int on both kinds, and a hand-edited or half-written row
@@ -196,23 +268,33 @@ def reverted_moves(window: dict, ledger: Path) -> list[dict]:
         except (TypeError, ValueError):
             return None
 
+    #: The item's LATEST in-window applied move, keyed by item, kept in the store's own
+    #: order of first appearance so `below_floor`'s reason stays deterministic.
+    latest: dict[int, dict] = {}
     for ev in events:
         if ev.get("event") != EVENT_KIND_APPLIED:
             continue
         item = _item_of(ev)
         applied = str(ev.get("to") or "")
-        if item is None or not applied or item in seen:
-            continue
+        stamp = _iso_norm(str(ev.get("created_at") or ""))
+        if item is None or not applied or stamp < since:
+            continue                     # nothing this window can pair: no item, no status,
+            # or an apply stamped before the window opened
+        cur = latest.get(item)
+        if cur is None or _supersedes(cur, ev):
+            latest[item] = ev
+
+    for item, ev in latest.items():
+        applied = str(ev.get("to") or "")    # `to` on BOTH kinds; there is no `to_status`
+        at = _iso_norm(str(ev.get("created_at") or ""))
         for ev2 in reverts:
             if _item_of(ev2) != item:
                 continue
-            if _iso_lt(_iso_norm(ev2.get("created_at")),
-                       _iso_norm(ev.get("created_at"))):
+            if _iso_lt(_iso_norm(ev2.get("created_at")), at):
                 continue                     # the machine moved BEFORE the steward applied
             to2 = str(ev2.get("to") or "")   # `to` on BOTH kinds; there is no `to_status`
             if not to2 or to2 == applied:
                 continue                     # the machine agreed; nothing was put back
-            seen.add(item)
             out.append({"item_id": item, "applied": applied, "reverted_to": to2,
                         "at": str(ev2.get("created_at") or ""),
                         "reason": str(ev2.get("reason") or "")})

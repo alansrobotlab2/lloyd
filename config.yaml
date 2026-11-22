@@ -1975,12 +1975,15 @@ workers:
     # `implement_outcomes` and its caps, quarantine, expiry, the three-tier
     # `select_confirmed`). Every 15 minutes it reads the ledger since its
     # last pass and the open board and answers with the moves and the next
-    # pick. `apply: true` since 2026-11-16T00:06Z (#4147): it applies its moves
-    # through the one status writer and records how far its answer agrees with
-    # the machine's (`agreement()`, on its `board_steward` ledger rows) on the
-    # way. For the ten weeks before that minute it ran with `apply: false` and
-    # wrote nothing, which is the state the two numbers below were ruled to
-    # measure. Flip to
+    # pick. `apply` is FALSE again (#4409, 2026-11-21): the flip that set it true at
+    # 2026-11-16T00:06Z (#4147) applied its moves through the one status writer and
+    # recorded how far its answer agrees with the machine's (`agreement()`, on its
+    # `board_steward` ledger rows) on the way, and the STOP CONDITION written beside
+    # that flip fired inside its own 7 days — its trip record is below, under
+    # `STOP CONDITION FIRED`, and the flag value is the record's, not the other way
+    # round. For the ten weeks before the flip it ran with `apply: false` and wrote
+    # nothing, which is the state the two numbers below were ruled to measure, and it
+    # is the state it is back in. Flip to
     # `apply: true` only after a run of live ticks at `apply: false` whose
     # summed `judged` count clears a minimum and whose rate holds over it —
     # a tick that judged nothing has no rate (#1688) — and with the
@@ -1999,8 +2002,13 @@ workers:
     # cleared it. The rate bar was deliberately not lowered: it read 0.7317 over
     # the trailing 7 days and 0.80 post-#3089-landing, and fitting a bar to its
     # own measurement is exactly what this comment forbids.
-    # TODAY'S READING off the field the flip actually reads, and the gate reads
-    # CLEARED. Measured 2026-11-16T00:06Z through the shipped reader
+    # THE PRE-FLIP-ONLY READING the flip ran on, off the field the flip actually
+    # reads, and the gate reads CLEARED — pre-flip-only in the plain sense: these
+    # figures were measured in the minute BEFORE the flag went true, off a steward
+    # that was writing nothing, and `apply` is false again (#4409), so they are the
+    # dry run's standing and no longer anybody's current one. The numbers are kept
+    # exactly as measured because they are what the flip was decided on. Measured
+    # 2026-11-16T00:06Z through the shipped reader
     # (`workers.dispatch_watch.judgement_aggregate` over `~/lloyd-data/workers.db`,
     # the same call `GET /api/workers/health` publishes as `judgement` on this
     # source's row): summed judged 140, agree 136, disagree 3, rate 0.9714, 93
@@ -2038,8 +2046,31 @@ workers:
     # fires within 7 days of this flip (2026-11-16T00:06Z), a round sets `apply`
     # back to false and records this reading as 'tried, didn't work out'. The
     # revert is the finding, and the round that reverses this one is a normal
-    # outcome here, not a failure to hide. With `apply: true`
-    # it writes through the one status writer and `select_confirmed` takes
+    # outcome here, not a failure to hide. STOP CONDITION FIRED — the record the
+    # sentence above asked for, in its own words: this round (#4409, 2026-11-21) sets
+    # `apply` back to false, and this block now reads 'tried, didn't work out'. The
+    # alarm fired 6 times on the revert leg, every one of them inside the 7 days the
+    # condition names, counted off its own `board_steward_disagreement` rows in the
+    # automod ledger: first 2026-11-16T18:54:53Z (18h48m53s after the flip at
+    # 2026-11-16T00:06Z), then 2026-11-18T00:50:16Z, 2026-11-19T01:36:56Z,
+    # 2026-11-19T19:32:52Z, 2026-11-20T04:33:53Z, last 2026-11-20T07:27:31Z. 2 of
+    # the 6 firings' pairs were genuine, and those two reverts are the reason for the
+    # flag: #4172 applied `up_next` at 2026-11-16T07:07:00Z while a round of its own
+    # was in flight, and the machine had it back to `in_progress` 10 minutes later at
+    # 2026-11-16T07:17:31Z — its steward note read "no round live" ten minutes before
+    # the machine's "an automod round is in flight for it" row, so a stale view
+    # mis-bound that move rather than a wrong judgment; #4151 applied `up_next` at
+    # 2026-11-17T00:59:08Z AFTER its unattended attempts were spent, and the machine
+    # parked it `draft` at 2026-11-17T03:47:29Z, which is the judgment error — the
+    # steward un-parked an item the loop had finished trying. The other pairs the leg
+    # reported were mis-paired rows, not reverts: #4240 and #4244, each of which the
+    # steward had moved AGAIN before the machine's row (#4240 to `in_progress`, #4244 to
+    # `draft`), and the pairing judged the superseded row against it, so the leg now pairs
+    # an item's LATEST applied move and ignores the
+    # machine's own abstention echo (`reverted_moves`). Whether `apply` may be flipped
+    # again, and on what bar, is owed-check's to rule on 2 genuine mis-moves in 4
+    # days; no round decides it here. With `apply: false` the one status writer is
+    # never reached, and `select_confirmed` is left as the only mover that takes
     # its pick. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.
     # HOW A MOVE REACHES THE BOARD, decided 2026-11-02 (#3467): every status the
@@ -2078,7 +2109,7 @@ workers:
     # measured 2026-11-20, newest 2026-11-20T15:47:54Z.
     board-steward:
       enabled: true
-      apply: true
+      apply: false
       interval_seconds: 900
       max_inflight: 1
       max_duration_seconds: 600
