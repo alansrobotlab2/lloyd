@@ -70,19 +70,39 @@ refusal that is not a failure of the window may not change the window's result. 
 non-zero exit here would also make the weekly `git status` alarm about this directory
 indistinguishable from the window having broken.
 
-THE ONE EXCEPTION: A CROSS-FIRE COLLISION EXITS 1 (#3748 clause 4). When a staged row
-shares its (day, arm, key, rep) with a row ALREADY COMMITTED by a DIFFERENT fire, the
-commit about to be made would present as this fire's measurement rows that it did not
-measure — the exact pooling that made the 2026-11-02 egress fire's two controls read
-inside the persistence window (34/60 → 35/72, `36c3607f`) and `f3eb9ac3` do the same
-to 2026-10-26 (27/60 → 30/66). That is not an ordinary refusal of a step that cannot
-commit; it is this fire's data integrity failing while it commits, so it gets the exit
-code systemd can see, unit `Failed` included — whether that state should page or be
-absorbed is a ruling #3748 carries, not this module's. The DAY is part of the compared
-tuple deliberately: the scenario set re-runs BY DESIGN every week, so one (arm, key,
-rep) legitimately recurs across different days' fires, and a day-blind check would
-refuse every future fire against every past one. Pooling can only happen inside one
-UTC date, so that is the scope the check bounds to. Every other path still exits 0.
+THE ONE EXCEPTION: A SAME-UNIT COLLISION EXITS 1 (#3748 clause 4, scoped to ONE WINDOW
+UNIT by #4472). When a staged row shares its (day, arm, key, rep) with a row ALREADY
+COMMITTED BY ANOTHER FIRE OF THE SAME UNIT, the commit about to be made would present as
+this fire's measurement rows that it did not measure — the pooling that made the 2026-11-02
+egress fire's two controls read inside the persistence window (34/60 → 35/72, `36c3607f`)
+and `f3eb9ac3` do the same to 2026-10-26 (27/60 → 30/66). That is not an ordinary refusal of
+a step that cannot commit; it is one window's published denominator moving while it commits,
+so it gets the exit code systemd can see, unit `Failed` included — whether that state should
+page or be absorbed is a ruling #3748 carries, not this module's. The DAY is part of the
+compared tuple deliberately: the scenario set re-runs BY DESIGN every week, so one (arm, key,
+rep) legitimately recurs across different days' fires, and a day-blind check would refuse
+every future fire against every past one. Pooling can only happen inside one UTC date, so
+that is the scope the check bounds to. Every other path still exits 0.
+
+WHY A CROSS-UNIT DUPLICATE COMMITS INSTEAD (#4472, settling what #4396 owed). The narrowing
+above to one `fire_unit` is what the two units' own scenario lists always demanded. Both
+timers are Monday-only, and the egress list includes the three `persistence-*` keys at rep 1
+(`eval/injection_canary/scenarios.yaml`), so every Monday the later egress fire stages rows
+whose tuple that morning's persistence fire has already committed. The old day-blind version
+refused exactly that, so from 2026-11-09 nothing committed at all: the journal carries the
+identical 3-row refusal twice on 2026-11-16 — 03:13 on the persistence unit, 07:05 on the
+egress unit — and both units have read `Active: failed` ever since. A gate whose only
+satisfiable state is one the units cannot reach is not a data-integrity check. Two window
+units measuring the same scenario on the same UTC date are two independent real
+measurements, and hand-deleting a copy fabricates an absence, so both are committed and
+`cross_unit_note` writes the ONE journalled line that names both units and the duplicate
+count. The accepted cost: the day-groupers pool the two copies, so the per-key n for a shared
+key is window-dependent for that date, and this note is the only record of it — whether that
+n should be labelled by window is a separate ruling, not this module's. SIDE EFFECT, STATED
+SO THE COMMIT LOG IS NOT MISREAD: the first fire after this ruling lands commits the whole
+accumulated residue — both units' uncommitted rows plus the dated report — under a subject
+that names only the committing unit, because the subject records who committed and is not a
+list of what is inside.
 
 WHO MAY DRIVE IT: THE UNIT, BY ITS CGROUP IDENTITY. An agent Bash turn typing `git
 commit` in `/home/alansrobotlab/lloyd` is refused by `check_live_git_writes`
@@ -265,16 +285,20 @@ def _row_fire(row: dict) -> tuple[str, str] | None:
     return (unit, inv) if unit and inv else None
 
 
-def collision_refusal(committed: list[dict], staged: list[dict]) -> str | None:
-    """Why the staged corpus rows must not be committed beside the committed ones.
+def _fire_mismatches(committed: list[dict], staged: list[dict]
+                     ) -> list[tuple[tuple, tuple[str, str], tuple[str, str]]]:
+    """Every staged row whose (day, arm, key, rep) a DIFFERENT fire already committed.
 
-    A staged row collides when its (day, arm, key, rep) — the tuple the day-groupers
-    pooled, day first because the same scenario legitimately re-runs across weeks'
-    fires — matches a COMMITTED row stamped by a DIFFERENT fire. Both sides must carry
-    the full stamp: unstamped rows on either side keep this check exactly as quiet on
-    history as it is silent today, which is what lets every existing exit-0 path stay
-    one. Returns the human-readable refusal naming each colliding fire plus
-    day/arm/key/rep, or None.
+    One walk, two readings: `collision_refusal` takes the SAME-`fire_unit` entries and
+    `cross_unit_note` takes the differing-unit ones. Sharing the walk is what keeps those
+    readings from drifting apart — a pair that one call calls "commit" and the other calls
+    "refuse" would either double-print in the journal or vanish from it, and the note is the
+    ruling's only record.
+
+    Both sides must carry the full stamp (`_row_fire`): a row with no identity is not
+    evidence about identity, which is what keeps every pre-existing exit-0 path exit 0
+    against stamp-less history. The DAY is in the tuple because the scenario set re-runs by
+    design every week, so pooling can only ever happen inside one UTC date.
     """
     known: dict[tuple, tuple[str, str]] = {}
     for row in committed:
@@ -282,7 +306,7 @@ def collision_refusal(committed: list[dict], staged: list[dict]) -> str | None:
         if fire:
             known[((row.get("ts") or "?")[:10], row.get("arm"),
                    row.get("key"), row.get("rep"))] = fire
-    bad: list[str] = []
+    out: list[tuple[tuple, tuple[str, str], tuple[str, str]]] = []
     for row in staged:
         fire = _row_fire(row)
         if not fire:
@@ -291,16 +315,63 @@ def collision_refusal(committed: list[dict], staged: list[dict]) -> str | None:
                    row.get("key"), row.get("rep"))
         prior = known.get(episode)
         if prior and prior != fire:
-            bad.append(f"day={episode[0]} arm={episode[1]} key={episode[2]} "
-                       f"rep={episode[3]}: staged rows were written by fire "
-                       f"{fire[0]}/{fire[1][:8]}, but that same (day, arm, key, rep) "
-                       f"is already committed by fire {prior[0]}/{prior[1][:8]}")
+            out.append((episode, prior, fire))
+    return out
+
+
+def collision_refusal(committed: list[dict], staged: list[dict]) -> str | None:
+    """Why the staged corpus rows must not be committed beside the committed ones.
+
+    A staged row collides when its (day, arm, key, rep) — the tuple the day-groupers
+    pooled, day first because the same scenario legitimately re-runs across weeks' fires —
+    matches a COMMITTED row written by another FIRE OF THE SAME WINDOW UNIT. #4472 narrowed
+    that from "a different fire": the pair that refused both window units every Monday from
+    2026-11-09 was CROSS-unit, and two units measuring the same scenario on the same date
+    are two independent real measurements, which `cross_unit_note` records and the commit
+    takes. What stays here is the hazard the non-zero exit was built for — one window's own
+    rows landing twice under one date from two invocations of THAT unit, which silently
+    moves that window's published denominator. Returns the refusal naming both fires plus
+    day/arm/key/rep, or None.
+    """
+    bad: list[str] = []
+    for episode, prior, fire in _fire_mismatches(committed, staged):
+        if prior[0] != fire[0]:
+            continue
+        bad.append(f"day={episode[0]} arm={episode[1]} key={episode[2]} "
+                   f"rep={episode[3]}: staged rows were written by fire "
+                   f"{fire[0]}/{fire[1][:8]}, but that same (day, arm, key, rep) "
+                   f"is already committed by fire {prior[0]}/{prior[1][:8]}")
     if not bad:
         return None
     shown = "; ".join(bad[:5]) + (f" (+{len(bad) - 5} more)" if len(bad) > 5 else "")
     return (f"{len(bad)} staged row(s) share a (day, arm, key, rep) with rows "
-            f"committed by a different fire — committing would pool one window's rows "
-            f"into the other's denominator ({shown})")
+            f"committed by another fire of the SAME window unit — committing would pool "
+            f"one window's rows into its own denominator ({shown})")
+
+
+def cross_unit_note(committed: list[dict], staged: list[dict]) -> str | None:
+    """The journal line for cross-unit duplicates this ruling commits anyway (#4472).
+
+    Returns the note, or None when no staged row duplicates a committed tuple owned by a
+    DIFFERENT window unit. Deliberately ONE line for the whole fire, naming both units and
+    the number of duplicated rows: after #4472 the day-groupers pool both copies, so the
+    per-key n for a shared key — the three `persistence-*` scenarios the egress list also
+    carries at rep 1 — is window-dependent for that date. This line is the ONLY record of
+    that, which is why it is journalled instead of merely returned, and why it states the
+    consequence rather than just announcing a duplicate.
+    """
+    pairs = [m for m in _fire_mismatches(committed, staged) if m[1][0] != m[2][0]]
+    if not pairs:
+        return None
+    units = sorted({m[1][0] for m in pairs} | {m[2][0] for m in pairs})
+    shown = "; ".join(f"day={e[0]} arm={e[1]} key={e[2]} rep={e[3]}"
+                      for e, _, _ in pairs[:5])
+    if len(pairs) > 5:
+        shown += f" (+{len(pairs) - 5} more)"
+    return (f"note: {len(pairs)} staged row(s) duplicate a committed (day, arm, key, rep) "
+            f"owned by another window unit ({' and '.join(units)}) — committing both as "
+            f"two independent real measurements, so the day-groupers pool them and the "
+            f"per-key n for those keys is window-dependent for this date ({shown})")
 
 
 def is_systemd_invocation(env: dict[str, str] | None = None) -> bool:
@@ -387,9 +458,11 @@ def commit_corpus(repo: str = LIVE_REPO,
 
     Returns 0 on every ordinary path, by contract (see the module docstring): the
     caller is `ExecStartPost`, and a step that refuses must not fail the window that
-    earned it. The ONE exception is the cross-fire collision, which returns 1: rows
-    that are not this fire's are not an ordinary refusal (docstring "THE ONE
-    EXCEPTION", #3748 clause 4).
+    earned it. The ONE exception is a collision with another fire of the SAME window unit,
+    which returns 1: rows a unit already committed under its own stamp are not an ordinary
+    refusal (docstring "THE ONE EXCEPTION", #3748 clause 4 as scoped to one `fire_unit` by
+    #4472). A duplicate whose two copies belong to DIFFERENT units is not that exception —
+    it commits, with one `note:` line naming both units and the count.
     """
     refused = invocation_refusal(env, cgroup_file)
     if refused:
@@ -425,14 +498,22 @@ def commit_corpus(repo: str = LIVE_REPO,
     # `:path` is the INDEX — the bytes this commit would take, not whatever the
     # worktree drifted to after staging. Rows unstamped on either side cannot collide
     # (`collision_refusal`), so a fire whose corpus predates the stamp commits exactly
-    # as it did before this check existed.
-    refusal = collision_refusal(_corpus_rows(repo, f"HEAD:{ROWS_REL}"),
-                                _corpus_rows(repo, f":{ROWS_REL}"))
+    # as it did before this check existed. One read of each side feeds both the refusal and
+    # the note, so the two readings cannot disagree about which rows were examined.
+    committed_rows = _corpus_rows(repo, f"HEAD:{ROWS_REL}")
+    staged_rows = _corpus_rows(repo, f":{ROWS_REL}")
+    refusal = collision_refusal(committed_rows, staged_rows)
     if refusal:
         _log(f"COLLISION refused: {refusal}; committed nothing in {repo} and left the "
              f"{len(staged)} staged path(s) in the index for a human to read — this "
-             f"exit is the #3748 cross-fire exception, not an ordinary refusal")
+             f"exit is the #3748 same-unit collision exception, scoped to one "
+             f"`fire_unit` by #4472, not an ordinary refusal")
         return 1
+
+    # Computed here, logged only once the commit is a fact: the note's wording says both
+    # copies are now in the corpus, and beside a failed `git commit` that would be a claim
+    # about rows that are not in HEAD.
+    note = cross_unit_note(committed_rows, staged_rows)
 
     # Non-None by construction: `invocation_refusal` returned None, and its second arm is
     # exactly this lookup. Both halves of the subject come from that one component, which is
@@ -450,6 +531,8 @@ def commit_corpus(repo: str = LIVE_REPO,
              f"{len(staged)} staged path(s) in {repo} for the next fire")
         return 0
 
+    if note:
+        _log(note)
     sha = _git(repo, "rev-parse", "--short", "HEAD").stdout.strip() or "unknown"
     _log(f"committed {sha} in {repo}: {len(staged)} path(s) under {CORPUS_PATHSPEC}, "
          f"as {message}")

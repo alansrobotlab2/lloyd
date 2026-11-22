@@ -823,7 +823,13 @@ def test_a_turn_without_an_invocation_id_still_exits_zero_at_the_boundary(repo):
         "a turn with no INVOCATION_ID changed the checkout"
 
 
-# --- #3748 clause 4: a cross-fire collision exits 1, naming both fires -----------------
+# --- #3748 clause 4 as narrowed by #4472: a collision exits 1 only WITHIN one unit -----
+# #3748 reserved exit 1 for "a cross-fire collision"; #4472 rules that a collision is a
+# same-`fire_unit` repeat, because the two window units measuring the same scenario on the
+# same UTC day are two real measurements and refusing them kept BOTH units `failed` from
+# 2026-11-09. The nodes below therefore pin three shapes: same-unit/different-invocation
+# refuses (the hazard exit 1 exists for), cross-unit commits with one `note:` line, and
+# unstamped rows on either side stay on every ordinary exit-0 path.
 
 def _frow(ts, key, rep, unit, inv, arm="enforce-off"):
     import json
@@ -835,21 +841,64 @@ def _corpus_text(repo, text):
     (repo / CORPUS / "rows.jsonl").write_text(text, encoding="utf-8")
 
 
+def _row(ts, unit, inv, key="control-benign", rep=1, arm="enforce-off") -> dict:
+    """One stamped corpus row as the DICT `collision_refusal` is handed.
+
+    The dict twin of `_frow`, for the nodes that ask that function directly instead of
+    round-tripping through a commit: same field names, same defaults, so the two spellings
+    of a row cannot disagree about what a stamp is.
+    """
+    return {"ts": ts, "arm": arm, "key": key, "rep": rep,
+            "fire_unit": unit, "fire_invocation": inv}
+
+
+def _rowline(*args, **kw) -> str:
+    """`_row` as one JSONL line, for seeding a corpus file."""
+    import json
+    return json.dumps(_row(*args, **kw), sort_keys=True) + "\n"
+
+
+def _as_egress_unit(tmp_path) -> dict:
+    """`commit_corpus` kwargs for the OTHER window unit's fire.
+
+    `as_unit`'s witness leaf is the persistence unit, which is the right shape for every
+    pre-existing node and the wrong one for #4472: the ruling only shows up when the fire
+    doing the committing is not the fire whose rows are already in HEAD, so the cross-unit
+    node needs a witness naming `lloyd-egress-window.service`. Same shape as `as_unit` for
+    the same reason — a file, never an argv flag.
+    """
+    witness = tmp_path / f"cgroup-{STEP.EGRESS_UNIT}.witness"
+    witness.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+                       f"{STEP.EGRESS_UNIT}\n", encoding="utf-8")
+    return {"env": {"INVOCATION_ID": IV}, "cgroup_file": str(witness)}
+
+
 def test_a_stamped_row_colliding_with_another_fire_commits_nothing_and_exits_1(
         repo, as_unit, capsys):
-    """The first non-zero path this script has ever had — reserved for data integrity.
+    """The one non-zero path this script has — now scoped to ONE window unit (#4472).
 
-    Fire B stages a row whose (day, arm, key, rep) is already committed by fire A: the
-    2026-11-02 pooling (`36c3607f` landing two egress controls inside the persistence
-    fire's date, 34/60 read as 35/72) in synthetic form. Exit 1 is deliberate and
-    singular — the module contract is exit-0-on-refusal because `ExecStartPost` must
-    not fail a window for a housekeeping miss, but rows that are not the fire's own are
-    not a housekeeping miss: they silently move another window's published denominator.
+    Two fires of the SAME unit: fire B (invocation `b`*32) stages a row whose (day, arm,
+    key, rep) fire A (`a`*32) already committed the same UTC date. That is the hazard exit
+    1 exists for — one window's own rows landing twice under one date, which silently moves
+    THAT window's published denominator — and it must still refuse after #4472 narrowed the
+    match to an equal `fire_unit`.
+
+    RE-PINNED, NOT DELETED, AND WHY THAT MATTERS. Until this round the node built its pair
+    from two DIFFERENT units (`STEP.PERSISTENCE_UNIT`/`a`*32 against
+    `STEP.EGRESS_UNIT`/`b`*32), which is exactly the shape #4472 rules must commit: the
+    2026-11-02 precedent it originally cited (`36c3607f`, two egress controls landing inside
+    the persistence fire's date, 34/60 read as 35/72) was itself a CROSS-UNIT pair, so the
+    settled ruling accepts that precedent's shape as two independent real measurements and
+    commits both with a `note:` line. Handing the node a same-unit pair keeps the only pin
+    on the remaining hazard; deleting it would have left the exit-1 path untested and a
+    later reader to re-derive the pre-#4472 rule from the docstring's history. The
+    cross-unit twin of this node is
+    `test_a_cross_unit_duplicate_of_a_committed_tuple_commits_and_notes_instead`.
     """
     a = _frow("2026-11-09T02:21:00+00:00", "control-benign", 1,
               STEP.PERSISTENCE_UNIT, "a" * 32)
-    b = _frow("2026-11-09T06:34:00+00:00", "control-benign", 1,
-              STEP.EGRESS_UNIT, "b" * 32)
+    b = _frow("2026-11-09T02:41:00+00:00", "control-benign", 1,
+              STEP.PERSISTENCE_UNIT, "b" * 32)
     _corpus_text(repo, a)
     assert STEP.commit_corpus(str(repo), **as_unit) == 0, "fire A's own row must commit"
     before = _head(repo)
@@ -858,11 +907,140 @@ def test_a_stamped_row_colliding_with_another_fire_commits_nothing_and_exits_1(
     assert _head(repo) == before, "the collision path still committed"
     out = capsys.readouterr().out
     assert "COLLISION refused" in out, out[-400:]
-    assert f"{STEP.EGRESS_UNIT}/bbbbbbbb" in out and \
+    assert f"{STEP.PERSISTENCE_UNIT}/bbbbbbbb" in out and \
         f"{STEP.PERSISTENCE_UNIT}/aaaaaaaa" in out, (
         f"the refusal must name BOTH fires by unit and short invocation: {out!r}")
     assert "day=2026-11-09 arm=enforce-off key=control-benign rep=1" in out, out[-400:]
     assert _staged(repo), "the index was reset; the module leaves staged paths to a human"
+
+
+def test_collision_refusal_returns_none_across_units_and_refuses_within_one(tmp_path):
+    """#4472 clauses 1 and 3 at the function's own boundary: the unit is the discriminator.
+
+    Two rows share (day, arm, key, rep). Differing `fire_unit` is NOT a refusal — two
+    window fires measuring the same scenario on the same date are two real measurements,
+    and the #4472 ruling commits both; equal `fire_unit` with a different
+    `fire_invocation` IS one, because that is the same window's denominator being moved by
+    its own second fire. A node on `commit_corpus` alone cannot tell those two arms apart
+    from an unstamped-row pass, so this one asks the function directly, which is also the
+    surface the acceptance check names.
+    """
+    cross = [
+        _row("2026-11-09T02:21:00+00:00", STEP.PERSISTENCE_UNIT, "a" * 32),
+        _row("2026-11-09T06:34:00+00:00", STEP.EGRESS_UNIT, "b" * 32),
+    ]
+    assert STEP.collision_refusal([cross[0]], [cross[1]]) is None, (
+        "a cross-unit duplicate still refused, which is the Monday-2026-11-16 behaviour "
+        "#4472 settles: both units read `failed` and nothing commits")
+    same_unit = [
+        _row("2026-11-09T02:21:00+00:00", STEP.PERSISTENCE_UNIT, "a" * 32),
+        _row("2026-11-09T02:41:00+00:00", STEP.PERSISTENCE_UNIT, "b" * 32),
+    ]
+    refused = STEP.collision_refusal([same_unit[0]], [same_unit[1]])
+    assert refused is not None, (
+        "a same-unit, different-invocation duplicate stopped refusing — that is one "
+        "window's rows landing twice under one date, the pooling exit 1 exists for")
+    assert f"{STEP.PERSISTENCE_UNIT}/aaaaaaaa" in refused and \
+        f"{STEP.PERSISTENCE_UNIT}/bbbbbbbb" in refused, refused
+    assert "day=2026-11-09 arm=enforce-off key=control-benign rep=1" in refused, refused
+
+
+def test_a_cross_unit_duplicate_of_a_committed_tuple_commits_and_notes_instead(
+        repo, tmp_path, as_unit, capsys):
+    """#4472 clauses 1 and 2 end to end: the 2026-11-16 refusal becomes a commit plus one note.
+
+    The shape both Monday fires actually hit: the morning persistence commit holds the three
+    `persistence-*` rep-1 rows, and the egress fire's own staged rows carry the same
+    (day, arm, key, rep) — the journal's `3 staged row(s) … written by fire
+    lloyd-egress-window.service/5fa7459a … already committed by fire
+    lloyd-persistence-window.service/6867ac96`, at 03:13 and again at 07:05, with both units
+    `Failed with result 'exit-code'` ever since. After this round the egress fire commits and
+    returns 0, and the ONE record that day's per-key `persistence-*` denominator is
+    window-dependent is a single journalled `note:` line naming both units and the count.
+    """
+    committed = "".join(
+        _rowline("2026-11-09T02:21:00+00:00", STEP.PERSISTENCE_UNIT, "a" * 32, key=k)
+        for k in ("persistence-web-digest", "persistence-relay-email",
+                  "persistence-control-handover"))
+    _corpus_text(repo, committed)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0, \
+        "the persistence fire's own commit must still succeed"
+    before = _head(repo)
+    staged_rows = "".join(
+        _rowline("2026-11-09T06:34:00+00:00", STEP.EGRESS_UNIT, "b" * 32, key=k)
+        for k in ("persistence-web-digest", "persistence-relay-email",
+                  "persistence-control-handover"))
+    _corpus_text(repo, committed + staged_rows)
+    assert STEP.commit_corpus(str(repo), **_as_egress_unit(tmp_path)) == 0, (
+        "the cross-unit duplicate still failed the egress window: the collision is between "
+        "two units, so it is two measurements, not one window's pooling")
+    assert _head(repo) != before, "the ruling commits, so HEAD must move"
+
+    rows = _git(repo, "show", f"HEAD:{CORPUS}/rows.jsonl").stdout.splitlines()
+    assert len(rows) == 6, f"both copies must be in HEAD, nothing deleted: {rows!r}"
+    assert sum(1 for r in rows if f'"{STEP.EGRESS_UNIT}"' in r) == 3, rows
+
+    out = capsys.readouterr().out
+    notes = [l for l in out.splitlines() if l.startswith(f"{STEP.PREFIX} note:")]
+    assert len(notes) == 1, f"exactly one note line, got {notes!r} in {out!r}"
+    note = notes[0]
+    assert STEP.PERSISTENCE_UNIT in note and STEP.EGRESS_UNIT in note, (
+        f"the note names the units involved or a reader cannot tell which pair pooled: "
+        f"{note!r}")
+    assert "3 staged row(s)" in note, (
+        f"the note must carry the duplicate row count as a count, not as a digit a "
+        f"count of 13 or 30 would also match: {note!r}")
+    assert "COLLISION" not in out, (
+        f"a cross-unit duplicate must not also read as a refusal: {out!r}")
+    assert f"committed {_git(repo, 'rev-parse', '--short', 'HEAD').stdout.strip()}" in out
+
+
+def test_a_stamped_row_over_an_unstamped_committed_tuple_stays_exit_0(repo, as_unit,
+                                                                     capsys):
+    """#4472 clause 4: the narrowing must not invent collisions on stamp-less history.
+
+    The committed side carries no `fire_unit` at all — every historical row, all 286 lines
+    of HEAD's corpus as of this round — so nothing can tell whose they were, and the check
+    stays as quiet on history as it was before the stamp. That has to hold on BOTH edges of
+    this change: an unstamped committed row under a stamped staged row of the same tuple,
+    and (next node) an unstamped staged row over a stamped committed one. A re-narrowed
+    comparison that read a missing unit as "a different unit" would turn every future fire
+    against pre-stamp history into an exit 1.
+    """
+    plain = ('{"ts": "2026-11-09T02:21:00+00:00", "arm": "enforce-off",'
+             ' "key": "control-benign", "rep": 1}\n')
+    _corpus_text(repo, plain)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0
+    _corpus_text(repo, plain + _rowline("2026-11-09T02:31:00+00:00",
+                                        STEP.PERSISTENCE_UNIT, "a" * 32))
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0, (
+        "a stamped staged row colliding with an UNSTAMPED committed row exited non-zero")
+    out = capsys.readouterr().out
+    assert "COLLISION" not in out and "note:" not in out, (
+        f"an unstamped row is not evidence about identity either way, so it may produce "
+        f"neither a refusal nor a note: {out!r}")
+
+
+def test_an_unstamped_staged_row_over_a_stamped_committed_tuple_stays_exit_0(
+        repo, as_unit, capsys):
+    """Clause 4's other edge: the STAGED side is the unstamped one.
+
+    Same reasoning, opposite direction — a fire whose new writer has not stamped its rows
+    cannot be accused of pooling by a stamped row beside it. Together with the node above
+    this is the "unstamped rows on either side keep every ordinary exit-0 path exit-0"
+    clause; the re-append case for fully unstamped history is
+    `test_unstamped_history_never_trips_the_collision_path`.
+    """
+    stamped = _rowline("2026-11-09T02:21:00+00:00", STEP.PERSISTENCE_UNIT, "a" * 32)
+    _corpus_text(repo, stamped)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0
+    unstamped = ('{"ts": "2026-11-09T02:31:00+00:00", "arm": "enforce-off",'
+                 ' "key": "control-benign", "rep": 1}\n')
+    _corpus_text(repo, stamped + unstamped)
+    assert STEP.commit_corpus(str(repo), **as_unit) == 0, (
+        "an unstamped staged row collided with a stamped committed row of the same tuple")
+    out = capsys.readouterr().out
+    assert "COLLISION" not in out and "note:" not in out, out[-400:]
 
 
 def test_the_same_key_and_rep_on_a_different_utc_date_is_not_a_collision(repo, as_unit):

@@ -197,13 +197,25 @@ Environment=LLOYD_PYTHON=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python
 # the render reads the tracked corpus, which is tracked and therefore present.
 #
 # WHAT THIS DOES NOT FIX, STATED LOUDLY. The committer exits 0 on its ordinary refusals so a
-# refused commit never marks a window `Failed`, but the cross-fire collision is the one
-# refusal that returns 1, and both window units have read `Active: failed` since the
-# 2026-11-16 fire for exactly that. The collision is structural — both window timers are
-# Monday-only and this window's scenario list includes three `persistence-*` keys the
-# earlier fire already owns at the same `(day, arm, key, rep)` — so until that ruling lands,
-# this step writes the artifact and the next line still declines to commit it. Ruling on it
-# is owed on #4396, not settled here.
+# refused commit never marks a window `Failed`, and exactly ONE refusal returns 1: a staged
+# row whose `(day, arm, key, rep)` ANOTHER FIRE OF THIS SAME WINDOW UNIT already committed.
+# That is the settled rule — #4472 scoped the collision to one `fire_unit`, which closes the
+# question this paragraph used to leave open (#4396 owed the ruling; it is made). The
+# cross-unit collision this unit creates is structural, not an accident: both window timers
+# are Monday-only and this window's scenario list includes three `persistence-*` keys the
+# 02:10 persistence fire owns
+# at the same tuple, so since 2026-11-09 every egress fire was refused for rows the morning's
+# own commit already held, and both units read `Active: failed` (the journal has the identical
+# 3-row refusal twice on 2026-11-16 — 03:13 persistence, 07:05 egress). Now a cross-unit
+# duplicate is treated as what it is — two independent real measurements — so it COMMITS, and
+# `cross_unit_note` logs one `note:` line naming both units and the duplicate count. The
+# artifact this line renders is therefore committed by the very next line instead of stranded
+# behind a refusal this unit could never satisfy. ACCEPTED COST, so nobody rediscovers it as a
+# bug: the day-groupers pool both copies, so for those three keys the per-key n on a Monday is
+# window-dependent, and that `note:` line is its only record. Pinned in
+# `tests/test_commit_injection_canary_corpus.py`
+# (`test_a_cross_unit_duplicate_of_a_committed_tuple_commits_and_notes_instead`) and by
+# `test_the_unit_s_ruling_on_the_cross_fire_collision_is_settled` in this file.
 ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/eval/run_injection_canary.py credential-report --write --force
 ExecStartPost=/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python /home/alansrobotlab/lloyd/scripts/maintenance/commit_injection_canary_corpus.py
 # The whole reason the unit must state a timeout: systemd's user-manager default SIGTERMs

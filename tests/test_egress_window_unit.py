@@ -2297,3 +2297,70 @@ def test_the_credential_step_brought_no_arm_override_and_left_the_pair_intact():
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, \
         f"the manager cannot load this unit with its third ExecStartPost: {proc.stderr.strip()}"
+
+
+# ── #4472: the cross-fire ruling this unit used to record as owed ───────────────────────
+#
+# The `WHAT THIS DOES NOT FIX` paragraph above the two `ExecStartPost` lines is this unit's
+# own account of when its committer declines to commit. Until #4472 it asserted both window
+# units had read `Active: failed` since the 2026-11-16 fire and then closed with `Ruling on it
+# is owed on #4396, not settled here` — which had become an instruction to fix a question that
+# had been decided, the shape an alarm keeps after the ruling lands somewhere else. The node
+# below is the first that grades that prose at all: the code change in #4472 reddens nothing
+# here, so a quiet restore of the old sentence — or a stub that mentions the ruling without
+# stating the rule — is the failure mode to guard.
+
+def test_the_unit_s_ruling_on_the_cross_fire_collision_is_settled():
+    """#4472 clause 5: the paragraph states the rule IN FORCE, and no longer owes a ruling.
+
+    Read out of the raw file, as one contiguous comment block starting at its own heading,
+    because `_comments` drops the `ExecStartPost=` lines the block sits above and would fuse
+    this paragraph with the timeout arithmetic that follows it.
+
+    Three things are pinned:
+      * the settled rule, in the paragraph's own words — a collision exists only WITHIN ONE
+        `fire_unit`, and a cross-unit duplicate is committed and journalled as a `note:` line
+        naming both units and the count;
+      * the accepted cost is named too (a pooled per-key n that is window-dependent), since a
+        ruling that hides its own cost is rediscovered as a bug;
+      * the three phrasings that meant "not yet decided" are gone. An owed line outlives its
+        ruling and re-opens a closed question for the next reader, which is exactly what the
+        2026-11-21 triage had to do here.
+    """
+    lines = SERVICE.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, l in enumerate(lines)
+                  if l.startswith("# WHAT THIS DOES NOT FIX")), None)
+    assert start is not None, \
+        "the paragraph that states the committer's refusal rule has been deleted, so the " \
+        "unit no longer documents when its own next line declines to commit"
+    block: list[str] = []
+    for line in lines[start:]:
+        if not line.lstrip().startswith("#"):
+            break
+        block.append(line.lstrip("#").strip())
+    para = " ".join(block)
+    lowered = para.lower()
+
+    assert "`fire_unit`" in para and ("same window unit" in lowered
+                                     or "same `fire_unit`" in lowered), (
+        "the paragraph does not state the rule in force — that a collision exists only "
+        f"within one window unit: {para!r}")
+    assert "it COMMITS" in para, (
+        "the paragraph must say a cross-unit duplicate COMMITS rather than being refused; "
+        "the disjunctive `commits or commit` wording this replaces was satisfied by almost "
+        f"any rewrite, including one that keeps refusing: {para!r}")
+    assert "`note:`" in para, \
+        f"the journalled note is the ruling's only record; the unit has to name it: {para!r}"
+    assert "window-dependent" in lowered, \
+        f"the accepted cost of the ruling must stay in the unit that pays it: {para!r}"
+    assert "`persistence-*`" in para, (
+        "the three shared scenario keys are WHY the cross-unit case was structural, and "
+        f"without them the rule reads as hypothetical: {para!r}")
+
+    for stale in ("owed on #4396", "not settled here", "until that ruling lands",
+                  "is owed on"):
+        assert stale not in para, \
+            f"the paragraph still records the #4472 ruling as outstanding ({stale!r})"
+    assert len(para.split()) > 120, \
+        f"the paragraph ran to {len(para.split())} words; the mechanism and its cost are " \
+        "a paragraph of prose, and a stub cannot carry either"
