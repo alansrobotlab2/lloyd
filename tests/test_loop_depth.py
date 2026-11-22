@@ -322,6 +322,24 @@ def test_a_scratch_checkout_under_the_loop_root_is_not_an_open_round(monkeypatch
     assert stray == scratch + ["/tmp/wt484"]
 
 
+def test_a_round_in_review_is_one_open_round_not_two(monkeypatch):
+    """The review rung's snapshot is a worktree registered inside the round's own
+    directory. Counted per registration, one round in review filled both slots of
+    a depth-2 loop for as long as the grader ran (2026-11-22)."""
+    root = I._LOOP_WORKTREE_ROOT
+    one_round = [str(root / "SM_A" / "home" / "lloyd"),
+                 str(root / "SM_A" / "gate-state" / "review-c4da82ec0b90-prefetch"),
+                 str(root / "SM_A" / "gate-state" / "review-c4da82ec0b90")]
+    owned, stray = I._loop_worktrees(one_round)
+    assert owned == [one_round[0]] and stray == []
+    _free_loop(monkeypatch, one_round)
+    assert I._loop_is_free(2) == (True, "free")
+    assert I._loop_is_free(1)[0] is False
+    two_rounds = one_round + [str(root / "SM_B" / "home" / "lloyd")]
+    _free_loop(monkeypatch, two_rounds)
+    assert I._loop_is_free(2)[0] is False
+
+
 def test_a_standing_decline_is_said_again_after_the_relog_interval(monkeypatch, caplog):
     import logging
     clock = {"t": 1000.0}

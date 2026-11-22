@@ -1515,6 +1515,7 @@ def _loop_worktrees(paths: list[str]) -> tuple[list[str], list[str]]:
     root = str(_LOOP_WORKTREE_ROOT.resolve())
     live = str(Path(LIVE_ROOT).resolve())
     owned, stray = [], []
+    seen: set[str] = set()
     for raw in paths:
         try:
             resolved = str(Path(raw).resolve())
@@ -1523,7 +1524,17 @@ def _loop_worktrees(paths: list[str]) -> tuple[list[str], list[str]]:
         if resolved == live:
             continue
         top = resolved[len(root) + 1:].split("/", 1)[0] if resolved.startswith(root + "/") else ""
-        (owned if top.startswith(_LOOP_WORKTREE_PREFIXES) else stray).append(raw)
+        if not top.startswith(_LOOP_WORKTREE_PREFIXES):
+            stray.append(raw)
+        elif top not in seen:
+            # One round, one entry. The review rung registers its snapshot as a
+            # second worktree INSIDE the round's own directory
+            # (`<round>/gate-state/review-<head>`), and counted per registration
+            # a single round in review read as two open rounds: at depth 2 the
+            # other slot could not start for as long as any review ran — 16.2 h
+            # of review time in the week to 2026-11-22.
+            seen.add(top)
+            owned.append(raw)
     return owned, stray
 
 
