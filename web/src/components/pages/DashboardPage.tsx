@@ -1126,11 +1126,31 @@ function DecisionsLine({ d }: { d: BoardDecisions }) {
 
 /** #628: the destination inventory. Telemetry runs with enforcement off, so the
  *  counts are where the fleet actually went — the list an allow-list is seeded
- *  from. A missing database is said as such, never shown as an idle zero. */
-function NetworkPanel({ network }: { network: NetworkState }) {
+ *  from. A missing database is said as such, never shown as an idle zero.
+ *
+ *  #4292: and which of the two instruments went there. Since #4044 the table has a
+ *  second instrument, and every figure this panel shows except the Bash arm's own
+ *  count comes from egress.py queries that bind `VIA_TOOL` — `total`, `distinct_hosts`,
+ *  `by_decision`, `per_destination` and `per_scope` are all tool-via only, per that
+ *  module's own docstring. So the arm is said here, in the headline, beside the policy
+ *  word: a reader arming `harness.egress_policy.enforce` was otherwise picking a
+ *  denominator they could not see the edge of. Exported so what is *displayed* is
+ *  assertable by rendering — see DashboardNetworkPanel.test.tsx. */
+export function NetworkPanel({ network }: { network: NetworkState }) {
   const d = network.by_decision
   const top = (network.per_destination ?? []).slice(0, 6)
   const scopes = (network.per_scope ?? []).slice(0, 4)
+  // `?? []` and `?? 0` are the whole degradation path: a backend older than the
+  // per-via split sends no such key, and an arm that has recorded nothing sends no
+  // row for it. Both read as zero, never as a missing panel.
+  const bash = (network.per_via ?? []).find(r => r.via === 'bash_proxy')
+  const bashCount = bash?.count ?? 0
+  // Two separate claims, deliberately not merged into one word: the count is
+  // history the store holds, the word is the live `bash_record` switch. An arm that
+  // recorded and was then disarmed still has destinations on record, and blanking
+  // its count because the switch is off now would read as "Bash never reached
+  // anything" — the same wrong-zero this panel already refuses for a missing table.
+  const bashWord = network.policy.bash_record ? 'bash recording' : 'bash off'
   return (
     <Panel>
       <div className="mb-2 flex items-baseline justify-between gap-2">
@@ -1139,6 +1159,7 @@ function NetworkPanel({ network }: { network: NetworkState }) {
         </span>
         <span className="text-[10px] text-muted-foreground">
           {network.policy.enforce ? 'enforcing' : 'recording only'}
+          {' · '}{bashWord} · {bashCount} bash calls
           {' · '}{network.policy.allow_entries} allow entries
         </span>
       </div>
@@ -1147,7 +1168,7 @@ function NetworkPanel({ network }: { network: NetworkState }) {
       ) : (
         <>
           <div className="font-mono text-[11px] tabular-nums text-muted-foreground">
-            {network.total} calls · {network.distinct_hosts} hosts · {d.allow} allow · {d.deny} deny · {d['grant-required']} grant-required
+            {network.total} tool calls · {network.distinct_hosts} hosts · {d.allow} allow · {d.deny} deny · {d['grant-required']} grant-required
           </div>
           {top.length > 0 && (
             <div className="mt-2 space-y-0.5 border-t border-border pt-2">

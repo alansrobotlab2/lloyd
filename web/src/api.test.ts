@@ -208,3 +208,136 @@ describe("revokeClient", () => {
     await expect(api.revokeClient("studio-mini")).rejects.toThrow(/confirm/);
   });
 });
+
+// ── #4292 clauses 1 and 2: NetworkState carries what #628's accessor already sends ──
+//
+// `app/routers/dashboard.py`'s `_network()` returns `agent_mcp.egress.network_report()`
+// verbatim, and that report has carried two more keys than the typed reader declared:
+// `policy.bash_record` (egress.py:1358, `bash_record_on()`) and the per-via split
+// `per_via` (egress.py:1354). Probed live on 2026-11-22, `/api/dashboard` returned
+// `policy` = {telemetry: true, enforce: false, bash_record: false, allow_entries: 7,
+// permanent_allow_entries: 7} and one `per_via` row {via: 'tool', count: 494,
+// distinct_hosts: 89, denies: 0, last_at: '2026-11-22T14:33:46+00:00', scopes: […]},
+// which the browser threw away at the type boundary.
+//
+// Two runners, two halves of this pin, and both are needed:
+//   * `tsc --noEmit` — the gate's `frontend` rung runs it as a delta, so a NEW type
+//     error reddens the round. The `SAMPLE` literal and the `Exact<>` assertions
+//     below are that half: they stop compiling if `bash_record` leaves the policy
+//     block, if `per_via` gains or loses a key, or if a key's type drifts from what
+//     egress.py:1327-1337 writes. "Exactly these six keys, and no others" is a
+//     claim about a type, and a type is only checkable by the compiler.
+//   * vitest — where types are erased and an interface has no runtime existence, so
+//     the text pins on `api.ts?raw` are what a test run can actually fail on. `?raw`
+//     is the device DashboardResponsive.test.ts uses for the same stated reason: this
+//     project's tsconfig ships no node types, so `node:fs` does not type-check here.
+import apiSource from "./api.ts?raw";
+import type { NetworkState } from "./api";
+
+/** The six keys the emit site's row dict writes — agent_mcp/egress.py:1327-1337:
+ *  `via`/`count` at :1328, `distinct_hosts`/`denies` at :1329, `last_at` at :1330,
+ *  `scopes` at :1337, over the grouped query that closes at :1349. */
+const VIA_KEYS = ["via", "count", "distinct_hosts", "denies", "last_at", "scopes"];
+
+/** What the same six keys must be typed as. `scopes` is the per-via list of
+ *  `{scope, count}` built at egress.py:1326; `last_at` is `MAX(at)` over a
+ *  `at TEXT NOT NULL` column (egress.py:134, :1345), so a row that exists has a
+ *  string — never the null an outer join would produce. */
+type ExpectedViaRow = {
+  via: string;
+  count: number;
+  distinct_hosts: number;
+  denies: number;
+  last_at: string;
+  scopes: { scope: string; count: number }[];
+};
+
+type ViaRow = NonNullable<NetworkState["per_via"]>[number];
+
+/** True only when the two types are identical in both directions — the strict
+ *  conditional-identity form, so a key ADDED to the reader fails it exactly as a
+ *  key removed does. `extends`-shaped checks pass on a supertype and would let a
+ *  seventh key in silently. */
+type Exact<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+
+/** The payload shape, as the live probe above returned it. Its annotation is the
+ *  assertion: an omitted required key or a wrong row key is a compile error here. */
+const SAMPLE: NetworkState = {
+  window_days: 7,
+  total: 494,
+  distinct_hosts: 89,
+  by_decision: { allow: 494, deny: 0, "grant-required": 0 },
+  per_destination: [],
+  per_scope: [],
+  per_via: [{
+    via: "tool", count: 494, distinct_hosts: 89, denies: 0,
+    last_at: "2026-11-22T14:33:46+00:00",
+    scopes: [{ scope: "worker:deep-research", count: 435 }],
+  }],
+  database_present: true,
+  policy: { telemetry: true, enforce: false, bash_record: false,
+            allow_entries: 7, permanent_allow_entries: 7 },
+};
+
+/** The interface's own block — the same range the item's check extracts with
+ *  `awk '/export interface NetworkState/,/^}/'`. A `}` at column 0 ends it, so the
+ *  nested object literals inside cannot close the match. */
+const STATE_BLOCK =
+  (apiSource.match(/export interface NetworkState \{[\s\S]*?^\}/m) ?? [""])[0];
+
+/** One `key: type` list body, keys in source order, from inside `decl`. */
+function keysOf(decl: string, name: string): string[] {
+  const body = decl.match(new RegExp(`${name}:\\s*\\{([\\s\\S]*?)\\}`))?.[1] ?? "";
+  return [...body.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:/g)].map((m) => m[1]);
+}
+
+describe("NetworkState per-via split", () => {
+  it("extracts the interface block the item's awk check extracts", () => {
+    // Without this the greps below could be reading an empty string and every
+    // `not.toContain` would pass on nothing.
+    expect(STATE_BLOCK.length).toBeGreaterThan(100);
+    expect(STATE_BLOCK).toContain("database_present");
+  });
+
+  it("declares policy.bash_record beside the four keys the payload already carried", () => {
+    // Clause 1. Order is the payload's, but the claim being pinned is the key
+    // set, so this compares sorted — "the five keys the payload actually
+    // carries", not "in this spelling order".
+    expect(keysOf(STATE_BLOCK, "policy").sort())
+      .toEqual(["allow_entries", "bash_record", "enforce",
+                "permanent_allow_entries", "telemetry"].sort());
+    expect(STATE_BLOCK).toContain("bash_record: boolean");
+  });
+
+  it("declares per_via as optional, so an older backend stays readable", () => {
+    // Clause 2's optionality half: a tab open across a backend restart polls the
+    // new build with the old snapshot shape (the `sectionOk` rule above), and a
+    // required `per_via` would make that a type error the panel cannot catch.
+    expect(STATE_BLOCK).toMatch(/per_via\?:/);
+    const sample: NetworkState = { ...SAMPLE, per_via: undefined };
+    delete (sample as { per_via?: unknown }).per_via;
+    expect(sectionOk(sample)).toBe(true);
+  });
+
+  it("types a per_via row as exactly the six keys egress.py writes, and no others", () => {
+    // Clause 2's exactness half. `Exact` is compile-time — the gate's tsc delta
+    // is what makes it fail — and the runtime line beneath it is what makes the
+    // fixture itself honest rather than a node that cannot fail.
+    const rowIsExactlyTheSixKeys: Exact<ViaRow, ExpectedViaRow> = true;
+    expect(rowIsExactlyTheSixKeys).toBe(true);
+    const scopesAreScopeCountPairs:
+      Exact<NonNullable<ViaRow["scopes"]>[number], { scope: string; count: number }> = true;
+    expect(scopesAreScopeCountPairs).toBe(true);
+    expect(Object.keys(SAMPLE.per_via![0]).sort()).toEqual([...VIA_KEYS].sort());
+  });
+
+  it("keeps all six key names inside the interface block itself", () => {
+    // The row type is written inline, the way its two sibling lists already are,
+    // so the awk block a reviewer extracts is the whole contract rather than a
+    // pointer to a named type elsewhere in a 3000-line file.
+    for (const key of VIA_KEYS) {
+      expect(STATE_BLOCK).toMatch(new RegExp(`\\b${key}:`));
+    }
+  });
+});

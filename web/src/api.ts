@@ -2756,7 +2756,16 @@ export interface AutomodState {
   rollbacks: { count: number; triggers: string[]; true_positives: number | null }
 }
 
-/** #628: where the four egress tools went, from `agent_mcp.egress.network_report`. */
+/** #628: where the four egress tools went, from `agent_mcp.egress.network_report`.
+ *
+ *  #4044 added the second instrument and #4292 gives the reader its two keys. Every
+ *  figure above except `per_via` counts `via='tool'` rows only — egress.py's own
+ *  docstring says so, and its `total`/`hosts`/`by_decision` queries all bind
+ *  `VIA_TOOL` — so `total` is the tool arm's count and the Bash recorder's rows never
+ *  join it. `per_via` is where the other arm lives, and `policy.bash_record` is
+ *  whether that arm is switched on at all: without the two of them the headline is a
+ *  tool-only denominator wearing no label, which is exactly the number an operator
+ *  must not arm `harness.egress_policy.enforce` on. */
 export interface NetworkState {
   window_days: number
   total: number
@@ -2766,9 +2775,17 @@ export interface NetworkState {
                      grant_required: number; scopes: number; last_at: string }[]
   per_scope: { scope: string; total: number; denied: number; grant_required: number;
                distinct_hosts: number }[]
+  // One row per instrument that has recorded anything in the window, newest-heavy
+  // order. Inline like the two lists above, so the block IS the contract: the six
+  // keys are what egress.py:1327-1337 writes over the query closing at :1349, and
+  // `scopes` is that arm's own attribution (egress.py:1326), not the tool-only
+  // `per_scope` above. Optional because a backend older than the split sends no such
+  // key — read it `?? []`, never `.length` on the bare field.
+  per_via?: { via: string; count: number; distinct_hosts: number; denies: number;
+              last_at: string; scopes: { scope: string; count: number }[] }[]
   database_present: boolean
-  policy: { telemetry: boolean; enforce: boolean; allow_entries: number;
-            permanent_allow_entries: number }
+  policy: { telemetry: boolean; enforce: boolean; bash_record: boolean;
+            allow_entries: number; permanent_allow_entries: number }
 }
 
 export interface DashboardSnapshot {
