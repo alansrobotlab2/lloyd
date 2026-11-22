@@ -88,14 +88,22 @@ def _iter_governed():
 def _active_skill_folders() -> dict[str, str]:
     """Every active skill → its FOLDER's spliced text, through `tests/skill_folder.py`.
 
-    Same loader mirror as `_active_skills` (dot-prefixed directories are the archive,
-    quarantined skills are out of circulation), but the value is what a run is actually
-    dispatched rather than the map file alone: the autonomy route splices a folded skill
-    together, so a `git commit -m "$(date -u +%Y-%m-%d)"` literal that a fold moved into a
-    named sibling is still a subject the job executes, and a rail that reads only
-    `SKILL.md` stops judging it the day a fold moves it. `autonomy-data-pipeline`'s
-    pre-flight and post-flight subjects live in `step1-fact-extraction.md` and
-    `post-flight.md` for exactly that reason (#4307).
+    Both live-corpus scans in this file read their corpus here. The loader mirror is the
+    prompt's own: dot-prefixed directories are the archive and quarantined skills are out of
+    circulation. What the value holds is what a run is actually dispatched rather than the
+    map file alone, because the autonomy route splices a folded skill together — a
+    `git commit -m "$(date -u +%Y-%m-%d)"` literal that a fold moved into a named sibling is
+    still a subject the job executes, and a rail reading only `SKILL.md` stops judging it the
+    day the fold moves it. `autonomy-data-pipeline`'s pre-flight and post-flight subjects
+    live in its named siblings for exactly that reason (#4307).
+
+    A second, map-file-only reader used to sit beside this one and is deleted with the round
+    that widened the last two scans. That deletion is the point rather than tidiness: an
+    unreferenced corpus-shaped function is the old blind spot left compilable, and the next
+    reader reaching for the shorter name re-narrows the rail with no test to notice.
+    `_iter_governed` still names map files, and that one is different in kind — it pairs a
+    known fix string with the file that carries it, which is a per-file claim about the fix,
+    not a corpus to scan.
     """
     from app.prompt_builder import _is_quarantined_skill
     from tests.skill_folder import disk_skill_folder
@@ -109,30 +117,6 @@ def _active_skill_folders() -> dict[str, str]:
                 continue
             if (entry / "SKILL.md").exists() and not _is_quarantined_skill(entry / "SKILL.md"):
                 out[entry.name] = disk_skill_folder(entry)[1]
-    return out
-
-
-def _active_skills() -> dict[str, str]:
-    """Every SKILL.md the prompt actually advertises → its body.
-
-    The loader mirrors ``prompt_builder._load_skills_index`` exactly as
-    ``tests/test_skill_reflection_archive.py`` does: dot-prefixed directories
-    are the archive, quarantined skills are out of circulation. The rule judges
-    the corpus that actually gets loaded.
-    """
-    from app.prompt_builder import _is_quarantined_skill
-
-    out: dict[str, str] = {}
-    for root in SKILLS_DIRS:
-        if not root.exists():
-            continue
-        for entry in sorted(root.iterdir()):
-            if not entry.is_dir() or entry.name.startswith(".") or entry.name in out:
-                continue
-            skill_file = entry / "SKILL.md"
-            if skill_file.exists() and not _is_quarantined_skill(skill_file):
-                out[entry.name] = skill_file.read_text(
-                    encoding="utf-8", errors="replace")
     return out
 
 
@@ -295,8 +279,21 @@ def test_the_live_skill_tree_is_clean_beyond_the_governed_seven():
     class in (a check that existed and never ran), and the corpus size is
     recorded in the failure text so a future pass can see what was covered
     rather than re-deriving it.
+
+    The corpus is each active skill's FOLDER spliced together, not its `SKILL.md` alone.
+    #4307 is why: a fold moves a command into a named sibling and the dispatched run still
+    executes it, so a reader that walks only the map file does not merely under-count — it
+    reports a defect-free corpus while the defect it governs is sitting in the file it never
+    opened. That is not hypothetical here. This node was green over a live local-day commit
+    subject carried by `nightly-reflection-knowledge-write`'s commit-detail sibling, which
+    its own `SKILL.md` copy of the same command did not share, and the only reason the sweep
+    had half-fixed that line is that the half it could read happened to be the map file. The
+    subject now interpolates `$(date -u +%Y-%m-%d)` in both copies (the vault sweep recorded
+    on #4516), which is what let this scan widen without widening into someone else's defect.
+    Splicing does not change the denominator's unit — a skill folder is still one skill — so
+    the floor below stays where the map-file scan put it.
     """
-    bodies = _active_skills()
+    bodies = _active_skill_folders()
     assert len(bodies) >= 150, (
         f"only {len(bodies)} active skills discovered under {SKILLS_DIRS}; the "
         "live corpus measured 194 on 2026-09-17, so this scan is reading far "
@@ -863,20 +860,102 @@ def test_the_live_corpus_actually_writes_utc_commit_subjects():
         "counting `SKILL.md` alone reads a moved subject as a deleted one, which is what "
         "made this node red for two days after #4307 folded autonomy-data-pipeline."
     )
-    # The dirty scan stays on the map file, deliberately narrower than the count above, and
-    # this is the gap stated rather than buried: widening it is red TODAY on a live defect the
-    # rail has never been able to see — `nightly-reflection-knowledge-write`'s sibling carries
-    # `"nightly: knowledge write $(date +%Y-%m-%d)"`, a local-day subject the #2227 sweep
-    # exists to refuse, invisible because the rail reads `SKILL.md`. Widening the scan and
-    # leaving that line un-swept would make this node red for a defect this round did not
-    # introduce; sweeping it is a vault edit to another job's runbook. Both facts are on #4307.
-    map_bodies = _active_skills()
+    # The dirty scan reads the SAME folder-spliced corpus as the count above, so the count and
+    # the zero are one measurement instead of two corpora free to disagree about what a skill
+    # is. The narrower scan was deliberate and its reason was written down: widening it was red
+    # on a live defect the map-file rail had never been able to see — `nightly-reflection-knowledge-write`'s
+    # commit sibling carried a local-day subject that its own `SKILL.md` copy of the same
+    # command did not, so #2227's sweep had cleaned only the half it could read. That reason
+    # expired the moment the sibling was swept to `$(date -u +%Y-%m-%d)` in both copies (the
+    # vault sweep on #4516, pinned by
+    # `test_the_knowledge_write_commit_subject_is_utc_in_every_copy_it_lives_in` below), and a
+    # stated gap whose cause is gone is just a blind spot with a comment on it.
     dirty = {n: v for n, v in
-             ((n, template_clock_violations(n, map_bodies[n])) for n, _ in population)
+             ((n, template_clock_violations(n, bodies[n])) for n, _ in population)
              if v}
     assert not dirty, (
         "the sweep regressed in a live skill: "
         + "\n".join(f"{n}: {v}" for n, v in sorted(dirty.items()))
+    )
+
+
+#: The two shapes of the one subject widening this rail newly reached. Quoted text rather
+#: than an address, because a runbook grows from the top and a line number decays while the
+#: command is the thing the job actually runs. The local string is not a substring of the
+#: swept one — `$(date ` is followed by `-u` in one and `+` in the other — so a file can be
+#: tested for both and neither form can mask the other.
+_KNOWLEDGE_WRITE_SKILL = "nightly-reflection-knowledge-write"
+_LOCAL_DAY_SUBJECT = '"nightly: knowledge write $(date +%Y-%m-%d)"'
+_UTC_DAY_SUBJECT = '"nightly: knowledge write $(date -u +%Y-%m-%d)"'
+
+
+@pytest.mark.live_vault
+def test_the_knowledge_write_commit_subject_is_utc_in_every_copy_it_lives_in():
+    """The defect this round's widening reached is swept, and failing back is loud.
+
+    Widening a reader to a skill FOLDER is only worth doing if the text it newly reaches is
+    judged. A scan that starts reading a file and then reports nothing has bought a fresh
+    blind spot at the price of the old one, which is the exact trade #4516 was filed to
+    refuse. This node is the difference, and it is the sanctioned place for a claim about a
+    named runbook: it reads `~/obsidian` and carries the `live_vault` mark, so the claim is
+    checked on every pass instead of remembered across one.
+
+    Three things, in the order a regression would arrive:
+
+    (1) the subject lives in more than one file of the skill. It does on purpose — the
+    sibling instructs its reader to keep the two copies of the command identical, and one
+    command written in two places is precisely how the local form outlived a sweep that had
+    already fixed the other copy. If the duplication is ever dissolved, this pairing goes
+    with it, and the assert says so rather than letting the node quietly assert nothing.
+    (2) no file of the skill carries the local form, and every carrier is clean under the
+    rule. This is the assertion that fires the first time a nightly re-types the two deleted
+    letters, in whichever copy it re-types them.
+    (3) putting the local form back into a carrier, in its own place, makes exactly one
+    violation naming that skill. So the zero in (2) is the rule seeing real text and not a
+    pattern that cannot match the shape it ships to catch — the same against-the-real-file
+    pairing `_GOVERNED` uses for the map-file skills.
+    """
+    folder = next(
+        (root / _KNOWLEDGE_WRITE_SKILL for root in SKILLS_DIRS
+         if (root / _KNOWLEDGE_WRITE_SKILL / "SKILL.md").exists()),
+        None,
+    )
+    assert folder is not None, (
+        f"{_KNOWLEDGE_WRITE_SKILL} is in neither skill tree {SKILLS_DIRS}, so this node is "
+        "judging a skill that no longer exists"
+    )
+
+    texts = {d: d.read_text(encoding="utf-8", errors="replace")
+             for d in sorted(folder.glob("*.md"))}
+    carriers = [d for d, t in texts.items() if _UTC_DAY_SUBJECT in t]
+    local_carriers = [d.name for d, t in texts.items() if _LOCAL_DAY_SUBJECT in t]
+
+    assert len(carriers) >= 2, (
+        f"the subject sits in {len(carriers)} file(s) of {folder.name}, not the two the "
+        "sibling says must agree. Either the duplication has been dissolved — then delete "
+        "this pairing with it, because a single copy drifts less than a declared pair — or "
+        "the swept form has been lost from one of them and the count below is no longer "
+        "judging what it was written to judge."
+    )
+    assert not local_carriers, (
+        f"{local_carriers} interpolates the box's local day into the commit subject again "
+        f"while {len(carriers)} other file(s) of the same skill send the UTC one. The "
+        "wrapper stamps the commit's own date in UTC, so subject and commit disagree, and "
+        "they disagree differently in two files that are told to be identical"
+    )
+    for doc in carriers:
+        assert not template_clock_violations(f"{folder.name}/{doc.name}", texts[doc]), (
+            f"{doc.name} is clean to this file's own rule and dirty to the corpus scan "
+            "above — two readers of one corpus disagreeing is the failure this round set "
+            "out to end, so check which of the two just moved"
+        )
+
+    mutated = texts[carriers[0]].replace(_UTC_DAY_SUBJECT, _LOCAL_DAY_SUBJECT, 1)
+    violations = template_clock_violations(f"{folder.name}/{carriers[0].name}", mutated)
+    assert len(violations) == 1, (
+        f"restoring the local form produced {len(violations)} violations, not 1: the rule no "
+        "longer sees the exact string the sweep changed, so the zero above proves nothing "
+        f"about this file — {violations}"
     )
 
 

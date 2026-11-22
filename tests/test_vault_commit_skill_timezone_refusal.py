@@ -3,10 +3,13 @@
 `scripts/skill_timezone.py` defines the class once. Until this round its only caller was
 `scripts/automod/vault_round.py::skill_timezone_errors`, whose selector is
 `p.startswith("skills/") and p.endswith("/SKILL.md")` — so the one violation the vault
-actually carries was invisible at land time, because it is not in a SKILL.md. It is
-`skills/nightly-reflection-knowledge-write/step-1-and-commit-detail.md` line 110, which
-interpolates `$(date +%Y-%m-%d)` into a `vault-commit.sh` subject, and the writer that
-follows that instruction commits through the wrapper this suite drives. Measured over
+then carried was invisible at land time, because it is not in a SKILL.md. It was a
+local-day `$(date +%Y-%m-%d)` interpolation into a `vault-commit.sh` subject, carried by a
+detail file of `nightly-reflection-knowledge-write`, and the writer that follows that
+instruction commits through the wrapper this suite drives. #4516 swept that line to
+`date -u` (measured 2026-11-22: 0 violations outside `skills/.archived/`), so what these
+nodes refuse from here is a recurrence of the shape — which is the more durable thing for a
+fixture to guard, and why the string outlives the line it was copied from. Measured over
 `~/obsidian/skills/**/*.md` on 2026-11-07: 1 violation outside `skills/.archived/` (that
 line) and 14 across 8 archived SKILL.md files, in 567 `.md` files under `skills/`.
 

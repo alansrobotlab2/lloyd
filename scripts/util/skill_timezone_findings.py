@@ -7,25 +7,39 @@ them predate this file and neither of them stands at this door:
   * ``scripts/automod/vault_round.py::skill_timezone_errors`` (the land rail), whose
     selector is ``p.startswith("skills/") and p.endswith("/SKILL.md")`` — a DETAIL file
     inside a skill directory never reaches it;
-  * ``tests/test_skill_timezone_literals.py``, the reporting copy, whose live-vault
-    ``_active_skills()`` reads ``*/SKILL.md`` for the same reason.
+  * ``tests/test_skill_timezone_literals.py``, the reporting copy. Both of its live-vault
+    corpus scans read ``*/SKILL.md``; #4516 widened them to each active skill's spliced
+    FOLDER (``_active_skill_folders``), so a subject a fold moved into a detail file is
+    judged there too, and the map-file-only reader was deleted rather than left beside it —
+    a corpus function nothing calls is the old blind spot kept compilable.
 
-So the one live violation in the vault today is invisible to both. It is not in a
-SKILL.md at all: it is ``skills/nightly-reflection-knowledge-write/step-1-and-commit-detail.md``
-line 110, which interpolates ``$(date +%Y-%m-%d)`` into a ``vault-commit.sh`` subject —
-the exact shape #2454 exists to refuse, written in the instructions of the job that
-writes skills. Measured over ``~/obsidian/skills/**/*.md`` on 2026-11-07: 1 violation
-outside ``skills/.archived/`` (that one line) and 14 violations across 8 archived
-SKILL.md files, out of 567 ``.md`` files under ``skills/``. Re-measure with
+Neither of those is this door, which is what this module exists for. The land rail speaks
+on a round's diff and the reporting copy speaks in pytest, whose automod invocation
+deselects ``live_vault`` outright — so on the night a job commits, nothing stands between a
+runbook and its own commit. The violation that founded this file was a ``vault-commit.sh``
+subject interpolating the LOCAL day, carried by a detail file of the job that writes
+skills, invisible to both readers above; #4516 swept it to ``date -u`` through the vault
+route, and made that invisibility the reason for the widening. Measured over
+``~/obsidian/skills/**/*.md`` on 2026-11-22: 0 violations outside ``skills/.archived/``,
+against the 1 that one line plus the 14 across 8 archived SKILL.md files, out of 567
+``.md`` files under ``skills/``, that #2454 counted on 2026-11-07. Re-measure with
 ``template_clock_violations`` over those paths.
+
+A swept instance retires no rail. The class is a hand-typed clock in a template, the
+reporting copy only ever speaks on a nightly, and the next local-day subject arrives with
+the next runbook anyone writes. A check kept only while its last defect is visible is a
+check that gets pruned for irrelevance and reintroduced at the next incident.
 
 Why a call site here, when the land rail already refuses this class: the nightly writer
 goes out through ``scripts/util/vault-commit.sh``, which has its own ``git add`` and its
 own ``git commit`` and is never validated by ``vault_round.validate()``. The class
-therefore entered that door unrefused, and clause 5 of the filing keeps it that way for
-now: widening the LAND rail to detail files would refuse every round touching the file
-above, because that check is whole-body and line 110 is in its body. Diff-relativity is
-the only shape that can exist on this door first, and this module is that shape.
+therefore entered that door unrefused, and clause 5 of the filing kept it that way on a
+reason of fact rather than of shape: widening the LAND rail to detail files is a
+whole-body scan, so while that violation sat inside a file the nightly commits every cycle,
+the widening would have refused every round touching it. The fact has now gone and the
+shape argument stands alone, which makes the widening #3881's owed-check ruling to make and
+not this file's to assume in either direction. Diff-relativity remains the only shape this
+door can take regardless of that ruling, and this module is that shape.
 
 Why diff-relative rather than a scan of every touched file: the tree already carries
 violations this wrapper commits every cycle. A whole-body check on touched files would

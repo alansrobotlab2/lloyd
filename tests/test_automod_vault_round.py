@@ -10647,24 +10647,33 @@ def test_the_mislabel_note_never_becomes_a_verdict_shortfall(vault, items, monke
 # directory never reaches it. Measured at the base of this round: `skill_timezone_errors`
 # given the path of a detail file that carries a live violation returns `[]`, and
 # `git log -S'skill_timezone_findings' -- scripts/automod/vault_round.py` returns 0
-# commits, so no round had ever put the diff-relative matcher behind this door. The live
-# vault carries 1 violation in 294 `.md` files under `skills/` (dot-dirs excluded,
-# measured 2026-11-11): `skills/nightly-reflection-knowledge-write/`
-# `step-1-and-commit-detail.md` line 110, which is a detail file and therefore invisible
-# to this door, to `tests/test_skill_timezone_literals.py`'s `_active_skills()`, and to
-# the vault git hook (whose one `pre-commit` filters `knowledge/*.md` and reads only the
-# front-matter `type`). A guard on one of two write surfaces is not a guard (#2468).
+# commits, so no round had ever put the diff-relative matcher behind this door. What made
+# the gap worth a module was one violation, in 294 `.md` files under `skills/` (dot-dirs
+# excluded, measured 2026-11-11): a local-day subject in a detail file of
+# `nightly-reflection-knowledge-write`. A detail file was then invisible three times over —
+# to this door, to the reporting copy of the rule in `tests/test_skill_timezone_literals.py`
+# as it stood before #4516 widened that file's corpus scans to each active skill's whole
+# folder, and to the vault git hook (whose one `pre-commit` filters `knowledge/*.md` and
+# reads only the front-matter `type`). A guard on one of two write surfaces is not a guard
+# (#2468). #4516 swept the violation and closed the reporting copy's half; this door is the
+# half that speaks at commit time rather than on a nightly, and it is still the one that
+# needs the matcher below.
 #
 # Widening `skill_timezone_errors` to detail files is what the #3881 owed-check ruling
-# forbids while line 110 is live — it is a whole-body scan, so it would refuse every
-# round touching that file. Diff-relativity is the only shape this door can take first,
-# and `scripts/util/skill_timezone_findings.py` is already that shape and already runs at
+# forbade while that violation sat inside a file the nightly commits every cycle — it is a
+# whole-body scan, so it would have refused every round touching it. That fact is now swept,
+# which leaves the prohibition resting on shape alone; the ruling is where it gets revisited,
+# not this comment. Diff-relativity is the shape this door can take either way, and
+# `scripts/util/skill_timezone_findings.py` is already that shape and already runs at
 # the other door: one rule, both doors, exactly as `SCF` (#3236), `LSF` (#3589) and `OTF`
 # (#3545) are read here.
 
-#: The violating line, in the shape the vault really carries it at
-#: `skills/nightly-reflection-knowledge-write/step-1-and-commit-detail.md`:110 — a
-#: `vault-commit.sh` subject interpolated with a LOCAL `date`. Its UTC twin is the fix.
+#: The violating line as the vault really carried it, in
+#: `skills/nightly-reflection-knowledge-write/step-1-and-commit-detail.md` — a
+#: `vault-commit.sh` subject interpolated with a LOCAL `date`. #4516 swept that copy to the
+#: UTC twin below, so what this fixture is now guards is a recurrence: the mutation the rail
+#: must refuse if any future commit writes those two letters back, which is why the string
+#: outlives the line it was copied from.
 CLOCK_BAD = ('LLOYD_JOB=nightly-reflection-knowledge-write '
              '~/lloyd/scripts/util/vault-commit.sh '
              '"nightly: knowledge write $(date +%Y-%m-%d)" -- memory/ lloyd/')
