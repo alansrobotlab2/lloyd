@@ -348,6 +348,31 @@ def _reading_date(text: str) -> dt.date:
     return dt.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%MZ").date()
 
 
+#: The word both prose surfaces use for #111's schedule; `frequency: weekly` in the task
+#: file is the setting it has to agree with.
+CADENCE_WORD = "weekly"
+
+
+def _cadence_sentences(flat: str) -> list[str]:
+    """The sentences of flattened `flat` that state a cadence.
+
+    #4495 is why the runner-id check is scoped to these rather than to the whole surface.
+    #4021 wrote it as `RUNNER_ID not in text` over the graded passage, which was sound the
+    day it was written: `architecture/retrieval.md` then carried `#111` exactly ONCE, inside
+    the arming sentence, so window membership and cadence-binding were the same test. Commit
+    `4227fb4e` (2026-11-21, "arch-review: doc:retrieval — stale") then did the honest thing
+    #111's first runs deserved — it recorded a post-run reading — and took the file to five
+    `#111` mentions, three of them inside the graded passage (`**#111 has run since.**`,
+    `job #111 sits up_next`). That silently amputated the control: seeding `armed autonomy
+    job **#111**` as `**#999**` left the id standing in the window, so the predicate could no
+    longer raise, and the node failed `DID NOT RAISE` over a doc that had done nothing wrong.
+    Scoping to the sentence that states the cadence is what the clause always said — "a
+    passage that names a cadence names the JOB ID" — and unlike window membership it cannot
+    be desensitised by a later revision mentioning the job somewhere else.
+    """
+    return [s for s in re.split(r"(?<=[.!?])\s+", flat) if CADENCE_WORD in s.lower()]
+
+
 def _assert_narration_is_armed(text: str, *, where: str) -> None:
     """Every predicate clause 5 puts on an arming narrative, in one callable place.
 
@@ -368,14 +393,20 @@ def _assert_narration_is_armed(text: str, *, where: str) -> None:
         if claim in low:
             raise AssertionError(
                 f"{where} still claims {claim!r}, which the arm made false")
-    if RUNNER_ID not in text:
+    # #4495: an empty `cadence` is exactly the old `if CADENCE_WORD not in low`, and the
+    # id is then asked of those sentences and not of the surface, for the reason the helper
+    # gives. It is checked before the kind, envelope and date predicates because the seeded
+    # controls each trip exactly ONE predicate and name it: an order that let a later check
+    # fire first would report the wrong one, which this file treats as a red.
+    cadence = _cadence_sentences(flat)
+    if not cadence:
+        raise AssertionError(f"{where} must state the cadence the job runs on")
+    if not any(RUNNER_ID in s for s in cadence):
         raise AssertionError(
             f"{where} names a cadence without naming {RUNNER_ID}: \"there is a weekly job\" "
             "is a promise, an id is something a reader can go and read")
     if "autonomy job" not in low:
         raise AssertionError(f"{where} must say what kind of thing runs the builder")
-    if "weekly" not in low:
-        raise AssertionError(f"{where} must state the cadence the job runs on")
     if "timeout_seconds: 7200" not in flat:
         raise AssertionError(
             f"{where} must state `timeout_seconds: 7200` — the 2 h envelope around a "
@@ -432,7 +463,20 @@ def test_the_armed_runner_is_the_one_the_prose_names_and_no_doc_still_says_unarm
         f"{RUNNER_ID} is named as the runner by the prose but has no functions-table row in "
         "architecture/autonomy-jobs.md — the doc-to-doc drift DOC_MEMBERSHIP warns on")
 
-    # The four predicates above have to be shown to bite. Each copy seeds ONE regression.
+    # The four predicates above have to be shown to bite. Each copy seeds ONE regression,
+    # and #4495 fixed WHICH TEXT it is seeded into: the graded surface is `passage`, the same
+    # window the positive assertions were just run on, and seeding `RETRIEVAL_DOC` instead was
+    # a second, invisible mismatch. It is harmless only while the seeded string is unique and
+    # the rest of the file cannot satisfy the predicate by itself — `4227fb4e` broke exactly
+    # that, by adding "the only thing that actually bounds it is #111's weekly cadence" three
+    # screens below the seeding section. A whole-file copy whose id has been moved to `#999`
+    # therefore still names #111 beside a cadence, somewhere, and a control whose blast radius
+    # is the whole file cannot demonstrate anything about a claim made about one section. Each
+    # of the four targets occurs once in the file and once inside the window, so seeding the
+    # window changes nothing about what is replaced and everything about what is asserted.
+    #
+    # Seeding ONE regression into the graded passage and naming the predicate it must trip is
+    # what makes each control a check rather than a coverage claim.
     controls = {
         "the sentence the arm deleted, seeded back": (
             "#4021 armed autonomy job",
@@ -446,8 +490,8 @@ def test_the_armed_runner_is_the_one_the_prose_names_and_no_doc_still_says_unarm
             "2026-11-09T21:59Z", "2026-11-07T22:19Z", "predates"),
     }
     for label, (old, new, expect) in controls.items():
-        seeded = RETRIEVAL_DOC.replace(old, new, 1)
-        assert seeded != RETRIEVAL_DOC, (
+        seeded = passage.replace(old, new, 1)
+        assert seeded != passage, (
             f"the control {label!r} did not take, so it proved nothing")
         with pytest.raises(AssertionError) as excinfo:
             _assert_narration_is_armed(seeded, where="architecture/retrieval.md's seeding passage")
@@ -455,6 +499,44 @@ def test_the_armed_runner_is_the_one_the_prose_names_and_no_doc_still_says_unarm
             f"the control {label!r} tripped {str(excinfo.value)!r} instead of the predicate "
             f"it was seeded to trip ({expect!r}), which means the predicate is not the one "
             "this node claims")
+
+
+def test_the_runner_id_must_be_named_by_the_cadence_sentence_and_not_merely_present():
+    """#4495: the runner-id predicate is sentence-scoped, so prose growth cannot mute it.
+
+    The node above is green because this predicate bites; this is the node that would fail
+    without the change, and it pins the exact shape that killed the old one. Both copies are
+    synthetic rather than seeded from `architecture/retrieval.md` because what is under test
+    here is the predicate and not the doc.
+
+    Copy A is a well-formed arming narrative that also mentions `#111` in a later,
+    cadence-free sentence — the shape `4227fb4e` put the real doc into. Copy B moves the id
+    out of the cadence sentence and leaves that neighbour's mention standing, so the surface
+    still contains `#111` and the old window-membership test waves it through. Presence cannot
+    tell A from B; only the id being named BY the sentence that states the cadence can, and
+    that difference is exactly "a doc whose weekly job is #111" versus "a doc that says there
+    is a weekly job and names a different one beside it".
+    """
+    neighbour = "Job #111 also writes build.json when it finishes."
+    armed = ("The builder is run by autonomy job **#111** weekly, with "
+             "`timeout_seconds: 7200`. Read at 2026-11-09T21:59Z the check exits 1. "
+             + neighbour)
+    # A: the id is inside the cadence sentence, so the narrative reads as armed no matter
+    # what the neighbour adds.
+    _assert_narration_is_armed(armed, where="a synthetic armed narrative")
+
+    # B: same surface, same id present, id unbound from the cadence. The pre-#4495 predicate
+    # accepted this, and that acceptance is the bug #4495 is.
+    unbound = armed.replace("autonomy job **#111** weekly", "autonomy job **#999** weekly")
+    assert RUNNER_ID in unbound, (
+        "the id-movement copy dropped #111 from the surface altogether, so it is testing the "
+        "old control rather than the scoping this node pins")
+    with pytest.raises(AssertionError) as excinfo:
+        _assert_narration_is_armed(
+            unbound, where="a synthetic narrative whose id sits outside the cadence sentence")
+    assert "without naming" in str(excinfo.value).lower(), (
+        f"the id-movement copy tripped {str(excinfo.value)!r} instead of the runner-id "
+        "predicate, so the predicate is not the sentence-scoped one this node claims")
 
 
 def test_the_rail_that_let_this_job_arm_refuses_the_same_commit_moving_a_schedule_key(
