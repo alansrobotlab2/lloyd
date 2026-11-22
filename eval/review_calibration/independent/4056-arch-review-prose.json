@@ -1,0 +1,53 @@
+{
+  "name": "4056-arch-review-prose",
+  "item_id": 4056,
+  "round_id": "SM_20261112_032524",
+  "parent": "07d78f108120824094c4f305300dd79412b9c7e8",
+  "commit": "4504216eac63d247072fe542d9e328325f39f2ac",
+  "changed_paths": [
+    "tests/test_arch_review_source.py",
+    "workers/sources/arch_review.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence high: prose item; string pins fail on the parent. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [
+      {
+        "clause": 1,
+        "outcome": "met",
+        "evidence": "workers/sources/arch_review.py:1383 (check_doc_bound docstring: 'the groups of one jobs doc share a file and must not re-open each other's text' + names tests/test_autonomy_jobs_doc_claims.py, zero 'seven groups' in the module); tests/test_arch_review_source.py::test_check_doc_bound_s_own_prose_name",
+        "deferred_to": []
+      },
+      {
+        "clause": 2,
+        "outcome": "met",
+        "evidence": "workers/sources/arch_review.py:1372 (summary paragraph: a non-empty reason refuses the commit, keep_rejected writes it to the state dir); tests/test_arch_review_source.py::test_check_doc_bound_s_own_prose_names_the_keeper_and_not_a_count; 'throw the edit away' absent from the module by grep",
+        "deferred_to": []
+      },
+      {
+        "clause": 3,
+        "outcome": "met",
+        "evidence": "workers/sources/arch_review.py:1104-1106 and _FM_RULE_GROUP at :1193-1199, both saying the commit is refused and the doc kept in the state dir with {max_delta_lines}/{shrink_bound}/{section_bound_hint} and 'Stay well inside it.' intact; tests/test_arch_review_source.py::test_every_prompt_shape_says_",
+        "deferred_to": []
+      },
+      {
+        "clause": 4,
+        "outcome": "met",
+        "evidence": "tests/test_arch_review_source.py:2375 ::test_the_module_never_claims_a_bound_throws_the_work_away_or_counts_the_groups \u2014 one node over _module_prose(), which now unwraps backslash continuations, banning all four phrases plus any typed group count, with two wrap controls, and its docstring naming f80",
+        "deferred_to": []
+      }
+    ],
+    "deferred_to": [],
+    "summary": "Landed (round SM_20261112_032524, head 54f6daee) on a gate whose review rung reported 'review: 4 met of 4 clause(s)'. The module prose now says what a bound does: check_doc_bound's summary states that a non-empty reason refuses the commit while keep_rejected keeps the edited doc in the state dir, and the section rail is argued from the shared jobs doc naming tests/test_autonomy_jobs_doc_claims.py ",
+    "spawned": [],
+    "human_paths": []
+  }
+}

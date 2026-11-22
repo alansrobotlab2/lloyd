@@ -1,0 +1,60 @@
+{
+  "name": "3991-steward-prose-fit",
+  "item_id": 3991,
+  "round_id": "SM_20261109_104010",
+  "parent": "452c1490bea8ccea6480a0fa06d8fd8bd21545dd",
+  "commit": "75aea27784cf28e3882099668d7b25a69f35daf8",
+  "changed_paths": [
+    "tests/fixtures/worker_co_presence_baseline.json",
+    "tests/test_board_steward.py",
+    "workers/sources/board_steward.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence medium: a whitespace-free overflow still ends mid-token, pinned by an older test. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [
+      {
+        "clause": 1,
+        "outcome": "met",
+        "evidence": "tests/test_board_steward.py::test_a_note_over_the_cap_is_cut_on_a_word_boundary_with_the_marker",
+        "deferred_to": []
+      },
+      {
+        "clause": 2,
+        "outcome": "met",
+        "evidence": "tests/test_board_steward.py::test_a_cut_note_never_ends_on_a_non_ascii_fragment",
+        "deferred_to": []
+      },
+      {
+        "clause": 3,
+        "outcome": "met",
+        "evidence": "tests/test_board_steward.py::test_the_reason_and_the_summary_get_the_same_cut_as_the_note",
+        "deferred_to": []
+      },
+      {
+        "clause": 4,
+        "outcome": "met",
+        "evidence": "tests/test_board_steward.py::test_a_field_at_or_under_its_cap_is_stored_byte_identical (the real exact-cap assertion the clause cites, tests/test_board_steward.py:758 in test_the_caps_sit_above_the_largest_reply_a_real_tick_ever_sent, ran green \u2014 the named node test_a_reply_at_the_caps_survives_the_",
+        "deferred_to": []
+      },
+      {
+        "clause": 5,
+        "outcome": "met",
+        "evidence": "tests/test_board_steward.py::test_a_dry_run_row_and_an_apply_row_book_the_identical_prose (plus tests/test_board_steward.py::test_the_activity_line_an_apply_tick_writes_is_the_sanitised_note on the item-file seam)",
+        "deferred_to": []
+      }
+    ],
+    "deferred_to": [],
+    "summary": "One 9-line guard, _fit_prose at workers/sources/board_steward.py:1174, reached only from parse_steward's three prose fields: text at or under its cap returns byte-identical (trigger len(text) <= limit, never >=, so a legitimate exact-cap reply and its own non-ASCII survive); an overflow delegates to workers/queue.py shorten_summary for the word-boundary cut with the ASCII '...' counted inside the ",
+    "spawned": [],
+    "human_paths": []
+  }
+}

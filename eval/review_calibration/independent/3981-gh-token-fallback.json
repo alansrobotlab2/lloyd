@@ -1,0 +1,53 @@
+{
+  "name": "3981-gh-token-fallback",
+  "item_id": 3981,
+  "round_id": "SM_20261109_044839",
+  "parent": "98f85afdf7368df7540200900304732bf20bdac0",
+  "commit": "67594ded0888ff347e514661f9eaa3cdb2af4ca6",
+  "changed_paths": [
+    "scripts/intel-pipeline/intel_pipeline/scanners/github_scanner.py",
+    "tests/test_intel_pipeline_scorer.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence medium: clause 1 'non-empty on this box' needs the real gh; lean met. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [
+      {
+        "clause": 1,
+        "outcome": "met",
+        "evidence": "tests/test_intel_pipeline_scorer.py::test_the_gh_credential_is_found_when_env_and_config_are_empty (plus ::test_the_gh_fallback_is_reached_through_the_mise_shim_when_path_has_no_gh); the item's own red check re-run live returned a 40-char token (sha256 prefix 68dc94fa, value not printed) from /home/",
+        "deferred_to": []
+      },
+      {
+        "clause": 2,
+        "outcome": "met",
+        "evidence": "tests/test_intel_pipeline_scorer.py::test_an_env_token_beats_both_the_config_and_the_gh_credential, with ::test_a_configured_token_beats_the_gh_credential and the unchanged ::test_token_prefers_the_environment_over_the_config",
+        "deferred_to": []
+      },
+      {
+        "clause": 3,
+        "outcome": "met",
+        "evidence": "tests/test_intel_pipeline_scorer.py::test_github_scanner_sends_no_authorization_header_without_a_token \u2014 assertion byte-identical, gh arm stubbed empty via _gh_credential_absent in its own body and in redirect_paths",
+        "deferred_to": []
+      },
+      {
+        "clause": 4,
+        "outcome": "met",
+        "evidence": "tests/test_intel_pipeline_scorer.py::test_the_quota_is_named_whatever_casing_the_wire_used now pins exc.value.reset == '1789139000' beside remaining/limit; the GITHUB_RATE_LIMIT banner nodes ::test_a_rate_limited_scan_says_so_in_the_run_output and ::test_a_rate_limited_repo_does_not_advance_its_stat",
+        "deferred_to": []
+      }
+    ],
+    "deferred_to": [],
+    "summary": "Round SM_20261109_044839, commit c6df4fcc on base 98f85afd, two files: scripts/intel-pipeline/intel_pipeline/scanners/github_scanner.py and tests/test_intel_pipeline_scorer.py. load_github_token() now resolves env GITHUB_TOKEN -> config token: -> `gh auth token` (gh_cli(): shutil.which plus the home-relative mise shim GH_CLI_HOME_PATH, so the PATH-stripped nightly worker still finds it; _gh_token(",
+    "spawned": [],
+    "human_paths": []
+  }
+}

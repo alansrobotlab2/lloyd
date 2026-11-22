@@ -1,0 +1,41 @@
+{
+  "name": "4200-link-footer-residue",
+  "item_id": 4200,
+  "round_id": "SM_20261117_044048",
+  "parent": "3ead517a278f93af103a1a86b2148ead800e6bd1",
+  "commit": "7ce37247cebb28be1bd483cd3ae8b48fa2702373",
+  "changed_paths": [
+    "scripts/intel-pipeline/intel_pipeline/body.py",
+    "tests/test_intel_pipeline_body.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence medium: clause 1's four named nodes go green through a vault commit outside the range; lean met. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [
+      {
+        "clause": 1,
+        "outcome": "met",
+        "evidence": "pytest -m 'not live_vault and not fault_injection' tests/test_intel_pipeline_body.py exits 0 at 905ae043 (202 passed, 1 deselected); gate tests rung failed: 0, 25382 passed. Nodes: test_no_shipped_digest_body_carries_a_tag_run_line, test_the_backfill_left_every_entry_populated_and_link_free, test_th",
+        "deferred_to": []
+      },
+      {
+        "clause": 2,
+        "outcome": "met",
+        "evidence": "diff adds only three nodes; no skip/xfail/delete/live_vault marker; skips equal base (42 vs 42, ceiling 56); reviewer forced _residue_welded_above False and all three new nodes fail (tests/test_intel_pipeline_body.py:5419, :5456, :5473).",
+        "deferred_to": []
+      }
+    ],
+    "deferred_to": [],
+    "summary": "Round SM_20261117_044048 fixed the red tree #4200 at its cause and landed. The four nodes read the live knowledge/ai-llms/youtube-digest.md, and one published entry (Gemini 4 Swarm is out of control... in its ## 2026-11-17 section) carried RELATED VIDEOS:, a 46-underscore rule and My Links (the source row is lloyd-data/_pipeline/vault-derived/memory/feeds/raw/2026-11-17.jsonl, video Sc6TriRAGnI). ",
+    "spawned": [],
+    "human_paths": []
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "name": "4215-ab-report-void",
+  "item_id": 4215,
+  "round_id": "SM_20261117_162952",
+  "parent": "281e96748e71f1e226b5b46806442fd5e9a6b6a4",
+  "commit": "d4991b185e4e18d562d262a99b4609f900dc5a67",
+  "changed_paths": [
+    "scripts/iv_ab_report.py",
+    "tests/test_iv_measurement.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence high: every node drives main() and fails on the parent. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [
+      {
+        "clause": 1,
+        "outcome": "met",
+        "evidence": "tests/test_iv_measurement.py::test_a_missing_sessions_dir_exits_non_zero_in_the_plain_run",
+        "deferred_to": []
+      },
+      {
+        "clause": 2,
+        "outcome": "met",
+        "evidence": "tests/test_iv_measurement.py::test_json_of_a_missing_sessions_dir_exits_non_zero_instead_of_reporting",
+        "deferred_to": []
+      },
+      {
+        "clause": 3,
+        "outcome": "met",
+        "evidence": "tests/test_iv_measurement.py::test_a_store_with_no_parseable_session_record_is_void_in_both_modes",
+        "deferred_to": []
+      },
+      {
+        "clause": 4,
+        "outcome": "met",
+        "evidence": "tests/test_iv_measurement.py::test_a_void_run_names_the_resolved_store_and_the_tree_it_resolved_in",
+        "deferred_to": []
+      },
+      {
+        "clause": 5,
+        "outcome": "met",
+        "evidence": "tests/test_iv_measurement.py::test_a_void_run_never_emits_the_clean_shape",
+        "deferred_to": []
+      }
+    ],
+    "deferred_to": [],
+    "summary": "Round SM_20261117_162952 landed at head 8b0b2b2e (base 281e9674) on a gate whose verdict was 'PASSED \u2014 every rung is green (review: 5 met of 5 clause(s))', review_attempt 1, all clauses how_verified: ran; tests rung '25497 passed, 1 xfailed, 43 skipped (8 workers); skip ceiling 57'. scripts/iv_ab_report.py now decides void from the sessions store alone (void_reason at :408 \u2014 dir absent, or nothing",
+    "spawned": [],
+    "human_paths": []
+  }
+}

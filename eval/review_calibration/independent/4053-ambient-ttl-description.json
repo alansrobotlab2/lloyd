@@ -1,0 +1,48 @@
+{
+  "name": "4053-ambient-ttl-description",
+  "item_id": 4053,
+  "round_id": "SM_20261111_222837",
+  "parent": "9416733925168b3034030b1f1d3d740c768cbac4",
+  "commit": "55aaa03460201dbe16025bdf2a18e9efb7d68d47",
+  "changed_paths": [
+    "agent_mcp/ambient.py",
+    "architecture/ambient-context-injection.md",
+    "tests/test_next_session_notes.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence high: clause 3 (catalog size) lean met by reading. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [
+      {
+        "clause": 1,
+        "outcome": "met",
+        "evidence": "tests/test_next_session_notes.py::test_the_ttl_field_description_prices_both_doors_it_buys (asserts on the live Tool object that 'Only applies to priority=ambient' and any 'never expires' promise are absent and that 'Both doors honour it', '3600', '24 h', 'next-session' and '0 selects that door's de",
+        "deferred_to": []
+      },
+      {
+        "clause": 2,
+        "outcome": "met",
+        "evidence": "tests/test_next_session_notes.py::test_the_note_door_honours_the_ttl_the_producer_sent[{",
+        "deferred_to": []
+      },
+      {
+        "clause": 3,
+        "outcome": "met",
+        "evidence": "tests/test_mcp_layer.py::test_advertised_catalog_stays_under_its_token_ceiling and tests/test_mcp_layer.py::test_no_module_tool_is_left_off_the_wire both pass on the graded head bfd328fd; advertised catalog measured 22,469 estimated tokens over 106 tools against the unchanged 22,500 ceiling (was 22,",
+        "deferred_to": []
+      }
+    ],
+    "deferred_to": [],
+    "summary": "Landed: the ttl_seconds field description in session_inject_context no longer claims ambient-tier-only scope or a flat 3600 default; it now states both doors honour the field (3600 s prefetch, 24 h next-session) and that a 0 selects that door's default, without promising permanence \u2014 the item's own proposed sentence was deliberately not copied because a producer-supplied 0 is rewritten by the hand",
+    "spawned": [],
+    "human_paths": []
+  }
+}

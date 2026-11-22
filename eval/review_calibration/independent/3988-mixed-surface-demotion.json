@@ -1,0 +1,32 @@
+{
+  "name": "3988-mixed-surface-demotion",
+  "item_id": 3988,
+  "round_id": "SM_20261109_080116",
+  "parent": "d0b2011cfd21112ecf9530b87edf2cb3b6764db1",
+  "commit": "e7bb13add52067269c5acec99cf5866ae35c5a35",
+  "changed_paths": [
+    "scripts/automod/backlog.py",
+    "scripts/automod/vault_round.py",
+    "tests/fixtures/worker_co_presence_baseline.json",
+    "tests/test_automod_vault_round.py",
+    "tests/test_autotriage.py",
+    "workers/sources/autotriage.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence medium: clause 2's clauses-unchanged assertion is missing from the demoted arm; a strict reader could say retry. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [],
+    "deferred_to": [],
+    "summary": "Round SM_20261109_080116 landed via automod_land on a passed gate (verdict line: `PASSED \u2014 every rung is green (review: 5 met of 5 clause(s))`; head 7ef3227c, rebased e30ce708\u2192d0b2011c; tests rung `24315 passed, 1 xfailed, 40 skipped (8 workers)`). A confirmed triage verdict stating `mixed` is now demoted to `vault` at the record \u2014 on both `confirmed_verdicts` writers \u2014 unless some acceptance clau",
+    "spawned": [],
+    "human_paths": []
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "4117-llm-call-cap",
+  "item_id": 4117,
+  "round_id": "SM_20261115_040026",
+  "parent": "724464aa1a22e23c60d31c3d7d85c55be457272c",
+  "commit": "a53032b80f2e369c12c61c3647be338a8019ff8f",
+  "changed_paths": [
+    "scripts/intel-pipeline/README.md",
+    "scripts/intel-pipeline/intel_pipeline/scoring.py",
+    "tests/test_intel_pipeline_readme.py",
+    "tests/test_intel_pipeline_scorer.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence medium: clause 5 lives in the vault; two CLI tests needed a new seed helper. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": null
+}

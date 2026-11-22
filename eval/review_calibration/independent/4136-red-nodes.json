@@ -1,0 +1,62 @@
+{
+  "name": "4136-red-nodes",
+  "item_id": 4136,
+  "round_id": "SM_20261115_095854",
+  "parent": "c180665fcfa141110ccdf1ef5d6ca9cc940e5779",
+  "commit": "58cc23b4ebbbb33160ccdc4822ae52ef87a28cbd",
+  "changed_paths": [
+    "app/tool_quality.py",
+    "architecture/backlog.md",
+    "architecture/index.md",
+    "tests/test_architecture_coverage_doc_claims.py",
+    "tests/test_tool_quality_sweep.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "note": "Label by an independent diff read on 2026-11-22 (Claude, a different model from the grader; the reader was given the item's clauses and `git diff parent..commit` and no prior review). Verdict pass, confidence low: turns on whole-file exit codes a reader cannot check; clause 2 was satisfied by the parent commit. Nothing was run for the label. Never re-mark this case to match a grader's answer; change it only on a named re-read.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "clause_outcomes": [
+      {
+        "clause": 1,
+        "outcome": "met",
+        "evidence": "pytest -m 'not live_vault and not fault_injection' tests/test_architecture_coverage_doc_claims.py -> 290 passed, exit 0; all five named nodes re-ran individually green, incl. tests/test_architecture_coverage_doc_claims.py::test_the_gate_selection_drops_nothing_and_the_named_node_passes",
+        "deferred_to": []
+      },
+      {
+        "clause": 2,
+        "outcome": "met",
+        "evidence": "tests/test_dashboard_cold_render.py::test_the_ledger_is_still_the_size_the_budget_was_calibrated_on passes at HEAD; mechanism is #4140's fold witness, already in this round's base c180665f; gate tests rung listed no failing node (25033 passed)",
+        "deferred_to": []
+      },
+      {
+        "clause": 3,
+        "outcome": "met",
+        "evidence": "pytest -m 'not live_vault and not fault_injection' tests/test_intel_pipeline_body.py -> 12 passed, exit 0; both named nodes green",
+        "deferred_to": []
+      },
+      {
+        "clause": 4,
+        "outcome": "met",
+        "evidence": "tests/test_session_sidecar_denominators.py::test_the_tool_quality_window_walk_reports_n_heads_not_n_plus_m, pinned by tests/test_tool_quality_sweep.py::test_a_day_is_read_in_either_spelling_of_the_same_day",
+        "deferred_to": []
+      },
+      {
+        "clause": 5,
+        "outcome": "met",
+        "evidence": "diff adds no skip/xfail/delete/live_vault; gate reports 42 skipped against base 42",
+        "deferred_to": []
+      }
+    ],
+    "deferred_to": [],
+    "summary": "Round SM_20261115_095854 (head ed9572c2, base c180665f) landed with gate `ok: true` \u2014 `tests` rung `25033 passed, 1 xfailed, 42 skipped (8 workers); skip ceiling 56 (base 42 ...)`, no failing node listed; `review: 4 met, 1 post_landing of 5 clause(s)`. Reused both commits of branch automod/SM_20261115_075651 verbatim (the _as_day compact-date fix in app/tool_quality.py, the re-pointed doc-claim no",
+    "spawned": [],
+    "human_paths": []
+  }
+}
