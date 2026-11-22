@@ -669,6 +669,70 @@ def test_the_reporting_contract_records_the_accepted_pillow_brotli_floor():
         assert re.search(rf"`{name}`", bullet), (
             f"{name} is in merged_scan.distinct_missed_package_names today and is not on the "
             "floor, so the bullet would be void the day it landed")
+    # ── clause 2b (#4354): and THAT COUNT IS ONE REPORT'S READING, NOT A PROPERTY ──
+    # The bullet used to open this sentence with "Today", and this file stayed green across
+    # the one excursion the field actually made — 8 names in `inventory-2026-11-12.json`
+    # (`dnspython`), back to 7 in `inventory-2026-11-19-post4098.json` — because the
+    # assertions above pin the word "seven" and the seven names, which a stale sentence
+    # keeps saying whether or not the store agrees. (Not the 2026-10-22→10-29 window: those
+    # are the readings whose 150→358 ROW delta the bullet disambiguates above.) So the count
+    # has to name the report it was read off, IN THE SAME SENTENCE. Distances in the
+    # flattened bullet this file grades today: the anchor `inventory-2026-11-19-post4098.json`
+    # closes 54 characters before the count, the nearest OTHER report before it —
+    # `inventory-2026-10-31.json`, in the accepted-versions parenthetical — starts 1,256
+    # characters before the count, and the nearest one after it — `inventory-2026-11-12.json`
+    # in the dnspython sub-bullet — starts 517 characters after. A 200-character window
+    # therefore admits the anchor and nothing else, and scanning backwards only is what keeps
+    # the 517-character later mention (a DIFFERENT report, with 8 names) from passing.
+    #: How far back from the count a named report still counts as beside it.
+    COUNT_REPORT_WINDOW = 200
+    seven_at = re.search(r"(?i)exactly seven names", bullet)
+    assert seven_at is not None, (
+        "the floor is no longer stated as 'carries exactly seven names', so there is no "
+        "count for a weekly run to compare its own report against")
+    before = bullet[max(0, seven_at.start() - COUNT_REPORT_WINDOW):seven_at.start()]
+    #: Suffix tolerated on purpose: the 2026-11-19 store holds both
+    #: `inventory-2026-11-19.json` and `inventory-2026-11-19-post4098.json`, and a bare
+    #: `inventory-\d{4}-\d{2}-\d{2}\.json` would not match the second, which is the file
+    #: the count was actually read off.
+    named = re.search(r"`inventory-\d{4}-\d{2}-\d{2}[^`]*\.json`", before)
+    assert named is not None, (
+        f"the seven-name count names no dated report within {COUNT_REPORT_WINDOW} characters "
+        "before it, so a bare 'Today' is a claim about every future run: when the next weekly "
+        "report carries an eighth name the sentence is quietly false and this file still "
+        "passes (measured: 8 names in inventory-2026-11-12.json, 7 in the reports either "
+        "side of it)")
+    # ── clause 2c (#4354): the WORKED ENTRANT/EXIT is part of the floor, not decoration ──
+    # The seven-name list tells a run what to compare against; this says what to do when the
+    # count moves. Deleting the sub-bullet wholesale left every assertion in this file green
+    # (measured by the review's mutation) — which is exactly how a worked example rots into
+    # prose nobody is obliged to keep. So the three facts a reader needs from it are pinned:
+    # the name, the report that first carried it as the eighth, and the version the fix landed
+    # at. `[^.]` in the pattern is not a typo: it stops the scan inside the sentence, so an
+    # `inventory-…json` from the NEXT sub-bullet cannot stand in for the one that shows the
+    # entry, and the same guard is why the exit report is required in the same window.
+    entered = re.search(r"(?is)`dnspython`.{0,300}?inventory-\d{4}-\d{2}-\d{2}[^`]*\.json",
+                        bullet)
+    assert entered is not None, (
+        "the floor bullet no longer works an entrant/exit through `dnspython`, so the seven "
+        "names read as a permanent property of the store rather than one report's reading — "
+        "and the day an eighth name arrives, a run has no precedent that void condition 2 "
+        "firing is survivable")
+    assert "2026-11-12" in entered.group(0), (
+        f"the entrant/exit names a report ({entered.group(0)[-40:]!r}) that is not "
+        "inventory-2026-11-12.json, the one reading that measured 8 names")
+    assert re.search(r"2\.9\.0", bullet[entered.start():entered.start() + 400]), (
+        "the entrant/exit lost the fixed version, which is the half that lets a future run "
+        "check it against `components` instead of taking the story on faith")
+    assert re.search(r"(?is)dnspython.{0,400}?2026-11-19", bullet), (
+        "the entrant/exit no longer says the name was GONE by the 2026-11-19 report, so the "
+        "example reads as an entry with no exit — an eighth accepted name, which is void "
+        "condition 2's forbidden conclusion")
+    void2_for_entrant = _section(bullet, "- **Void condition 2")
+    assert "dnspython" not in void2_for_entrant, (
+        "dnspython is in void condition 2's list: it came and went in a week and was never "
+        "accepted, so listing it there teaches a run to file nothing for a name that is "
+        "already gone — the opposite of the precedent this sub-bullet exists to set")
     assert re.search(r"(?i)compare\b.{0,80}(package )?names?", bullet), (
         "the bullet does not tell a run to compare package NAMES, which is the only thing a "
         "dated report can carry — the rows are popped before the file exists")
