@@ -2887,3 +2887,23 @@ def test_a_ruling_naming_no_rearm_condition_files_an_unscheduled_child(isolated)
     assert at > O._now(), f"the scheduled row is not in the future: {dated[0]}"
     assert at <= O._now() + timedelta(days=O.MAX_RECHECK_DAYS), \
         f"the scheduled row sits past MAX_RECHECK_DAYS = {O.MAX_RECHECK_DAYS}: {dated[0]}"
+
+
+def test_an_entry_recorded_during_the_session_survives_the_answer(isolated):
+    """The pass reads the item, runs a session for up to 25 minutes, then writes.
+    A producer that recorded a new debt in between must not have it deleted by a
+    write built from the earlier read (2026-11-22)."""
+    p, entries = _owing(isolated, 77, ["confirm the nightly shows it"])
+    O.add_owed(p, ["verify the landing's metric on tomorrow's run"])     # mid-session
+    out = O.apply_verdict(p, entries, [{"n": 1, "outcome": "settled",
+                                        "evidence": "run_82 at 13:00 shows it"}], item_id=77)
+    still = [e["what"] for e in O.entries_of(fm_of(p), derived=False)]
+    assert still == ["verify the landing's metric on tomorrow's run"]
+    assert out["remaining"] == 1
+    assert "recorded during this pass" in fm_of(p)["activity_log"][-1]
+
+
+def test_an_answered_entry_is_not_resurrected_as_a_late_one(isolated):
+    p, entries = _owing(isolated, 78, ["one", "two"])
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "settled", "evidence": "seen"}], item_id=78)
+    assert [e["what"] for e in O.entries_of(fm_of(p), derived=False)] == ["two"]

@@ -1790,6 +1790,19 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         settled.append(record)
         notes.append(f"#{n} {out}: " + (record.get("ruling") or evidence)[:200]
                      + (f" -> #{record['follow_up']}" if record.get("follow_up") else ""))
+    # `entries` was read before the session that answered it — up to
+    # `max_duration_seconds` ago — and `keep` is built from it alone. Anything a
+    # producer recorded on the item in between (a landing's post-landing check,
+    # a promotion ruling's `decide`) is in `fm`, read above, and in neither
+    # list; writing `keep` as the whole of `owed` deleted it with no trace
+    # (2026-11-22). Text is the identity `add_owed` dedupes on, so it is the
+    # one used here.
+    asked = {e.get("what") for e in entries}
+    late = [e for e in _recorded(fm) if e.get("what") not in asked]
+    if late:
+        keep.extend(late)
+        notes.append(f"{len(late)} entr{'y' if len(late) == 1 else 'ies'} recorded during "
+                     f"this pass kept as owed")
     updates = {OWED_KEY: keep or None, SETTLED_KEY: settled or None, OUTSIDE_KEY: outside or None}
     from app.backlog_tags import normalize_tags
     legacy = B.NEEDS_HUMAN_TAG in normalize_tags(fm.get("tags"))
