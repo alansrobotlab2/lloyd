@@ -782,13 +782,47 @@ def test_a_declared_entry_that_is_not_a_scoped_path_is_refused_as_an_invocation_
 # ---------------------------------------------------------------------------
 
 def _invocations() -> list[tuple[Path, int, str]]:
-    """Every non-comment line in a live skill that reaches the wrapper."""
+    """Every non-comment line in a live skill that reaches the wrapper.
+
+    Walked over every `.md` in each skill folder, not `SKILL.md` alone: #4307 folded
+    `autonomy-data-pipeline` and two of its calls now live in the named siblings
+    `step1-fact-extraction.md` and `post-flight.md`, where the spliced body a run is
+    dispatched still carries their headings. Twelve sites in eight skills on the live tree
+    2026-11-22; a `SKILL.md`-only walk finds 9 in 7 and reads a moved call site as a deleted
+    one, the misreading #4496 collected nodes for. A skill is a folder — `tests/skill_folder.py`
+    is that fact as a function, and the two nodes below that grade a named step read it through
+    `disk_skill_folder`.
+    """
     found = []
-    for skill in sorted(VAULT_SKILLS.glob("*/SKILL.md")):
-        for n, line in enumerate(skill.read_text(encoding="utf-8").splitlines(), 1):
+    for doc in sorted(VAULT_SKILLS.glob("*/*.md")):
+        for n, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             if "scripts/util/vault-commit.sh" in line and not line.strip().startswith("#"):
-                found.append((skill, n, line.strip()))
+                found.append((doc, n, line.strip()))
     return found
+
+
+def _pipeline_commit_literal() -> str:
+    """The `autonomy-data-pipeline` post-flight invocation, read as a FOLDER.
+
+    Through `tests/skill_folder.disk_skill_folder` rather than `(folder / "SKILL.md")`,
+    because #4307 folded this skill and the commit step now lives in the named sibling
+    `post-flight.md` under the `## Post-Flight: Git Snapshot` heading `SKILL.md` still
+    carries. The union is what a run is dispatched — the autonomy route splices the folder
+    together, so the literal this node takes verbatim and then executes is the same one the
+    job executes. A `SKILL.md`-only read returns None here and the node reports "post-flight
+    step no longer passes a pathspec" about a step that is intact two files over, which is
+    the misreading #4496 names: a folded skill read as one file reports its moved text as
+    deleted.
+    """
+    from tests.skill_folder import disk_skill_folder
+
+    _main, union = disk_skill_folder(VAULT_SKILLS / "autonomy-data-pipeline")
+    line = next((ln.strip() for ln in union.splitlines()
+                 if "scripts/util/vault-commit.sh" in ln and " -- " in ln), None)
+    assert line is not None, (
+        "no post-flight call to scripts/util/vault-commit.sh with a pathspec anywhere in the "
+        "autonomy-data-pipeline folder — SKILL.md or a named sibling")
+    return line
 
 
 @pytest.mark.live_vault
@@ -804,12 +838,12 @@ def test_every_wrapper_call_site_in_a_skill_scopes_its_commit_or_labels_it():
     seen = _invocations()
     assert len(seen) >= 11, f"expected the documented call sites, found {len(seen)}"
     unlabelled = []
-    for skill, n, line in seen:
+    for doc, n, line in seen:
         if " -- " in line or " --\n" in line:
             continue
         if "unattributed" in line.lower():
             continue
-        unlabelled.append(f"{skill.parent.name}/SKILL.md:{n}: {line}")
+        unlabelled.append(f"{doc.parent.name}/{doc.name}:{n}: {line}")
     assert not unlabelled, "call sites committing under a bare job name:\n" + "\n".join(unlabelled)
 
 
@@ -825,10 +859,7 @@ def test_the_pipeline_post_flight_step_declares_the_writes_it_is_committing():
     run-log note is the one path every run writes, so it is the entry that has to be
     in the literal for the literal to be a declaration rather than a placeholder.
     """
-    skill = VAULT_SKILLS / "autonomy-data-pipeline" / "SKILL.md"
-    line = next((ln.strip() for ln in skill.read_text(encoding="utf-8").splitlines()
-                 if "scripts/util/vault-commit.sh" in ln and " -- " in ln), None)
-    assert line is not None, "post-flight step no longer passes a pathspec"
+    line = _pipeline_commit_literal()
     assert "LLOYD_JOB_WRITES=" in line, line
     assert "memory/vault-maintenance/" in line, (
         f"the declared list does not name the run-log note, the write every run "
@@ -857,10 +888,7 @@ def test_the_scoped_call_sites_execute_and_leave_the_rest_of_the_tree_alone(tmp_
     though it sits in a named segment: the commit still ships it, and now has to say
     so. That is the 01:17Z run reproduced with the skill's own line.
     """
-    skill = VAULT_SKILLS / "autonomy-data-pipeline" / "SKILL.md"
-    line = next((ln.strip() for ln in skill.read_text(encoding="utf-8").splitlines()
-                 if "scripts/util/vault-commit.sh" in ln and " -- " in ln), None)
-    assert line is not None, "post-flight step no longer passes a pathspec"
+    line = _pipeline_commit_literal()
     repo = tmp_path / "vault"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main", ".")

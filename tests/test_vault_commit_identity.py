@@ -568,21 +568,34 @@ def test_the_live_vault_answers_the_query_and_the_partition_is_total():
 def test_every_wrapper_caller_that_names_a_job_names_a_parseable_one():
     """The blast radius of the convention, measured rather than asserted.
 
-    Ten call sites in seven skills reach the wrapper. Each either declares its job
-    or stays under the ambient identity, which clause 2 guarantees is not a
-    regression. What must not exist is a caller whose `LLOYD_JOB` cannot parse:
-    that turns a nightly commit into exit 3 and strands a whole job's output, which
-    is the #341 failure this wrapper was written to prevent.
+    Twelve distinct call sites in eight skills reach the wrapper (measured 2026-11-22 over
+    `skills/*/*.md`). Each either declares its job or stays under the ambient identity, which
+    clause 2 guarantees is not a regression. What must not exist is a caller whose `LLOYD_JOB`
+    cannot parse: that turns a nightly commit into exit 3 and strands a whole job's output,
+    which is the #341 failure this wrapper was written to prevent.
+
+    The walk is over every `.md` in a skill folder, not `SKILL.md` alone, because #4307 folded
+    `autonomy-data-pipeline` and that skill's two wrapper calls now live in the named siblings
+    `step1-fact-extraction.md` and `post-flight.md`, under headings `SKILL.md` still carries.
+    Reading `SKILL.md` alone reported a MOVED call site as a deleted one — 9 where this node
+    expected 10, red on the folded vault while the suite that deselects `live_vault` stayed
+    green — which is the misreading #4496 collected 35 nodes of and `tests/skill_folder.py`
+    exists to stop. A skill is a folder; the file is not the unit. The same walk one file wide
+    was also how a `LLOYD_JOB=` line spilled into a sibling could go un-counted by the very
+    node that polices the convention.
     """
-    seen = []
-    for skill in sorted(VAULT_SKILLS.glob("*/SKILL.md")):
-        for line in skill.read_text(encoding="utf-8").splitlines():
-            if "scripts/util/vault-commit.sh" in line and not line.strip().startswith("#"):
-                seen.append(line)
-                if "LLOYD_JOB=" in line:
-                    job = line.split("LLOYD_JOB=", 1)[1].split()[0].strip("\"'")
-                    assert VCI.JOB_NAME_RE.fullmatch(job), f"{skill.name}: {line}"
-    assert len(seen) >= 10, f"expected the ten documented call sites, found {len(seen)}"
+    seen = set()
+    for doc in sorted(VAULT_SKILLS.glob("*/*.md")):
+        for line in doc.read_text(encoding="utf-8").splitlines():
+            if "scripts/util/vault-commit.sh" not in line or line.strip().startswith("#"):
+                continue
+            if "LLOYD_JOB=" in line:
+                job = line.split("LLOYD_JOB=", 1)[1].split()[0].strip("\"'")
+                assert VCI.JOB_NAME_RE.fullmatch(job), f"{doc.parent.name}/{doc.name}: {line}"
+            seen.add((doc.parent.name, line.strip()))
+    assert len(seen) >= 10, (
+        f"expected at least the ten documented call sites, found {len(seen)} distinct in "
+        f"{len({slug for slug, _ in seen})} skills")
 
 
 # --------------------------------------------------------------------------

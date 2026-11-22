@@ -85,6 +85,33 @@ def _iter_governed():
                     yield rel, f.read_text(encoding="utf-8", errors="replace")
 
 
+def _active_skill_folders() -> dict[str, str]:
+    """Every active skill → its FOLDER's spliced text, through `tests/skill_folder.py`.
+
+    Same loader mirror as `_active_skills` (dot-prefixed directories are the archive,
+    quarantined skills are out of circulation), but the value is what a run is actually
+    dispatched rather than the map file alone: the autonomy route splices a folded skill
+    together, so a `git commit -m "$(date -u +%Y-%m-%d)"` literal that a fold moved into a
+    named sibling is still a subject the job executes, and a rail that reads only
+    `SKILL.md` stops judging it the day a fold moves it. `autonomy-data-pipeline`'s
+    pre-flight and post-flight subjects live in `step1-fact-extraction.md` and
+    `post-flight.md` for exactly that reason (#4307).
+    """
+    from app.prompt_builder import _is_quarantined_skill
+    from tests.skill_folder import disk_skill_folder
+
+    out: dict[str, str] = {}
+    for root in SKILLS_DIRS:
+        if not root.exists():
+            continue
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith(".") or entry.name in out:
+                continue
+            if (entry / "SKILL.md").exists() and not _is_quarantined_skill(entry / "SKILL.md"):
+                out[entry.name] = disk_skill_folder(entry)[1]
+    return out
+
+
 def _active_skills() -> dict[str, str]:
     """Every SKILL.md the prompt actually advertises → its body.
 
@@ -810,8 +837,16 @@ def test_the_live_corpus_actually_writes_utc_commit_subjects():
     assert below is the only number this file states about the corpus, and
     `test_no_citation_in_this_file_points_at_a_vault_line_number` keeps the addresses out of
     the sentence for good.
+
+    The corpus is each active skill's FOLDER spliced together (`_active_skill_folders`), not
+    its `SKILL.md` alone: #4307 folded `autonomy-data-pipeline` and both of its commit subjects
+    moved into named siblings the run still executes, so a `SKILL.md`-only count dropped this
+    population from 6 to 4 and read moved text as deleted — the misreading #4496 collected 35
+    nodes of (measured: the count is 4 with `SKILL.md` alone, 7 with the folder). Splicing is
+    also what the rail needs for its own sake: a subject is a subject wherever the runbook
+    keeps it.
     """
-    bodies = _active_skills()
+    bodies = _active_skill_folders()
     population = [
         (name, lineno)
         for name, body in bodies.items()
@@ -822,10 +857,22 @@ def test_the_live_corpus_actually_writes_utc_commit_subjects():
         f"only {len(population)} active-skill lines interpolate a date into a "
         f"commit subject, under the floor of 6 that #2227's sweep set: "
         f"{population[:6]} — the rule "
-        "below has almost nothing to judge, so its zero needs re-measuring by hand"
+        "below has almost nothing to judge, so its zero needs re-measuring by hand. The "
+        "corpus is each active skill's FOLDER (`_active_skill_folders`), because a folded "
+        "skill's commit step lives in a named sibling and the run executes it from there: "
+        "counting `SKILL.md` alone reads a moved subject as a deleted one, which is what "
+        "made this node red for two days after #4307 folded autonomy-data-pipeline."
     )
+    # The dirty scan stays on the map file, deliberately narrower than the count above, and
+    # this is the gap stated rather than buried: widening it is red TODAY on a live defect the
+    # rail has never been able to see — `nightly-reflection-knowledge-write`'s sibling carries
+    # `"nightly: knowledge write $(date +%Y-%m-%d)"`, a local-day subject the #2227 sweep
+    # exists to refuse, invisible because the rail reads `SKILL.md`. Widening the scan and
+    # leaving that line un-swept would make this node red for a defect this round did not
+    # introduce; sweeping it is a vault edit to another job's runbook. Both facts are on #4307.
+    map_bodies = _active_skills()
     dirty = {n: v for n, v in
-             ((n, template_clock_violations(n, bodies[n])) for n, _ in population)
+             ((n, template_clock_violations(n, map_bodies[n])) for n, _ in population)
              if v}
     assert not dirty, (
         "the sweep regressed in a live skill: "
