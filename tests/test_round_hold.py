@@ -1426,3 +1426,122 @@ def test_no_trip_means_no_hold_and_no_task_is_held_by_default(pool, monkeypatch,
     _take_trip(tmp_path / "nonexistent")
     assert pool._data_trip_hold_held() == ["1234"], (
         "the config's own list is the class; the code default is the floor, not the cage")
+
+
+# ---------------------------------------------------------------------------
+# The class the SHIPPED config pins — #4383, settling owed entry 2 of #4359.
+#
+# The gate above was built for one deleter and its default set is `("79",)`. The
+# ruling on which other jobs belong to the class named two: #79 the retention
+# sweep, and #98 `retag-untagged-facts`, whose bulk delete is
+# `skills/retag-untagged-facts/SKILL.md:95` —
+# `ls -1d facts-snapshot-*/ | sort | head -n -7 | xargs -r rm -rf --` under
+# `$LLOYD_DATA/_pipeline/vault-derived/facts/` — and NOT in its python script
+# (`scripts/memory/retag_untagged_facts.py` deletes only one temp file). So a
+# task-id hold is the only thing that can ever cover it. A ruling that lives
+# only in an item is a ruling nothing enforces: these nodes read the shipped
+# file, so an edit that drops an id or deletes the block goes red here.
+# ---------------------------------------------------------------------------
+
+import yaml  # noqa: E402
+
+#: Repo root, to read the SHIPPED `config.yaml`. `tests/conftest.py` patches
+#: `app.config.CONFIG`, so a node that imported CONFIG and asserted on its
+#: `workers` mapping would be asserting on the fixture's dict and would pass on
+#: a file that says nothing at all. Parsing the file is the house pattern for a
+#: claim about what ships (`tests/test_automod_frontend_probe_canary_schedule.py:125`).
+ROOT = Path(__file__).resolve().parents[1]
+
+#: `autonomy/98-retag-untagged-facts.md`, the second member of the class. Parked
+#: (`status: draft`, Alan's 2026-10-17 spent ruling as owed entry 3 of #2897),
+#: so naming it here has no dispatch effect today — it is cover for a re-arm,
+#: and holding a task id is not arming a job.
+RETAG_TASK_ID = 98
+
+
+def _shipped_data_trip_hold() -> dict:
+    """The `workers.data_trip_hold` block exactly as the shipped file spells it."""
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+    return (cfg.get("workers") or {}).get("data_trip_hold") or {}
+
+
+def test_the_shipped_config_pins_the_deleter_class_to_79_and_98():
+    """Clause 1: the key ships, and it drives the class the ruling named.
+
+    Measured before this change: `data_trip_hold` is not a child of `workers:` in
+    config.yaml, `data_trip_hold_config()` is `{}` and the class in force is the
+    code default `['79']` — so with a trip standing, #98's snapshot prune was not
+    in `held_tasks` and a re-armed #98 would dispatch into an unrestorable root
+    exactly as #79 did on 2026-11-19.
+    """
+    block = _shipped_data_trip_hold()
+    assert block, (
+        "workers.data_trip_hold is absent from the shipped config.yaml, so the class "
+        "is DEFAULT_DATA_TRIP_DELETER_TASKS = ('79',) and the #4359 ruling that "
+        "named #98 as a second member is unenforced")
+    assert P.data_trip_deleter_tasks(block) == ["79", "98"], (
+        f"the shipped block yields {P.data_trip_deleter_tasks(block)}; the ruling is "
+        f"{{#79 retention-sweep, #98 retag-untagged-facts}}")
+
+
+def test_the_shipped_set_retains_79_because_the_key_replaces_the_default():
+    """Clause 2: 79 has to be spelled out, because this key does not extend.
+
+    `workers/pool.py:377-384` returns the config's list when the key is present —
+    it REPLACES `DEFAULT_DATA_TRIP_DELETER_TASKS` rather than unioning with it. So
+    a later edit that lists only the new id silently disarms the gate for the one
+    sweep the gate was built for: the #1101 failure mode the comment above that
+    default names, where a mechanism that shipped armed read as inert because a
+    key was missing. This node is what catches that edit at commit time.
+    """
+    shipped = _shipped_data_trip_hold().get("deleter_tasks")
+    assert isinstance(shipped, (list, tuple)) and str(SWEEP_TASK_ID) in [
+        str(t).strip() for t in shipped
+    ], (
+        f"the shipped deleter_tasks is {shipped!r}; '79' has to be spelled out IN the "
+        f"list, because once the key exists the code default no longer applies — an "
+        f"id dropped from here leaves the 2026-11-19 retention sweep (898 "
+        f"session-spill dirs and 1,126 `runs` rows, 331.8 ms after a pause release) "
+        f"ungated. Asserting membership in the RESULT alone would pass on an absent "
+        f"block, where the default happens to supply '79'.")
+    assert str(SWEEP_TASK_ID) in P.data_trip_deleter_tasks(_shipped_data_trip_hold())
+
+
+def test_the_shipped_class_holds_both_deleters_under_a_standing_marker(
+        pool, gstate, monkeypatch, tmp_path):
+    """Clause 3: the file's own value is what the pool reports and what the claim obeys.
+
+    The seam is config → gate → queue: the shipped bytes are parsed (not a dict
+    typed into the test), handed to the gate as `data_trip_hold_config()` hands it
+    to the claim, and the claim is the boundary where a row's `attempts` would
+    rise. `workers/pool.py:1904` publishes the WHOLE class into `held_tasks`, not
+    its intersection with the queue, which is why 98 belongs in the assertion
+    even though #98 is parked and has no row in `workers.db`.
+    """
+    monkeypatch.setattr(P, "data_trip_hold_config", _shipped_data_trip_hold)
+    q = WorkQueue(tmp_path / "workers.db")
+    pool.queue = q
+    sweep, sibling = _seed_two_scheduled_tasks(q)
+    _take_trip(gstate)
+
+    held = pool._data_trip_hold_held()
+    assert held == [str(SWEEP_TASK_ID), str(RETAG_TASK_ID)], (
+        f"a standing marker held {held}; the shipped block must put both deleters "
+        f"under the hold")
+
+    status = pool.data_trip_hold_status()
+    assert status["held_tasks"] == ["79", "98"], (
+        f"/api/workers/status would publish {status['held_tasks']} for a trip that "
+        f"covers {held}")
+    assert status["deleter_tasks"] == ["79", "98"]
+    assert status["enabled"] is True, (
+        "no `enabled` key ships, so the gate is on by default — the operator's "
+        "kill switch stays an edit a person makes, as primary_hold's does")
+
+    claimed = q.claim_next("worker-0", {}, [], held)
+    assert claimed is not None and int(claimed.payload["task_id"]) == SIBLING_TASK_ID, (
+        "the non-deleter `scheduled-task` sibling must still claim while both "
+        "deleters are held — the hold is task-level by design")
+    row = q.get(sweep)
+    assert row.state == "queued" and int(row.attempts or 0) == 0, (
+        "the held sweep was consumed rather than delayed")

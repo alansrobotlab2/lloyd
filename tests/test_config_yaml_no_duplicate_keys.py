@@ -63,3 +63,32 @@ def test_detector_catches_a_repeated_key():
 def test_config_yaml_has_no_duplicate_keys():
     text = (ROOT / "config.yaml").read_text()
     assert _duplicates(text) == []
+
+
+def test_data_trip_hold_ships_only_the_deleter_tasks_key():
+    """The #4383 pin added ONE key under `workers:`, and only one inside its block.
+
+    `workers/pool.py` defaults the data-trip gate to ON — `data_trip_hold_status`
+    reads `cfg.get("enabled", True)` — so the operator's kill switch is
+    deliberately absent from tracked config, the same shape `primary_hold` has
+    (also absent, also defaulted on). Shipping `enabled: true` would put a
+    one-word edit that disarms a data-loss gate inside the blast radius of any
+    future config commit, which is the class of mistake #4359 exists for.
+
+    The value is pinned beside it because the key REPLACES
+    `workers.pool.DEFAULT_DATA_TRIP_DELETER_TASKS = (\"79\",)` rather than
+    extending it: the shipped pair must be `['79', '98']`, 79 the retention sweep
+    that deleted into the 2026-11-19 trip and 98 the `facts-snapshot-*` prune
+    ruled a second member of the class.
+    """
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+    block = (cfg.get("workers") or {}).get("data_trip_hold")
+    assert isinstance(block, dict), (
+        "workers.data_trip_hold is missing, so the class in force is the code "
+        "default and the #4359 ruling that named task 98 is unenforced")
+    assert sorted(block) == ["deleter_tasks"], (
+        f"workers.data_trip_hold ships {sorted(block)}; only deleter_tasks belongs "
+        f"there — an `enabled` key would be a kill switch no test re-arms")
+    assert block["deleter_tasks"] == ["79", "98"], (
+        f"the shipped class is {block['deleter_tasks']!r}; both ids are strings and "
+        f"79 stays, because the key replaces the default outright")

@@ -1907,6 +1907,37 @@ workers:
     # easier one: its job is now a few milliseconds — it only starts the
     # detached runner — and the comparison it starts has no LLM in it.
     exempt: [scheduled-task, autotriage, autoresearch, automod-regression]
+  # Data-trip hold (workers/pool.py `_data_trip_hold_held`). While the guardian's
+  # `data-tripped.json` marker stands, the task ids below are not CLAIMED; every
+  # other job still dispatches, and the trip's own `pause_journal` row is still
+  # resumed by a person (a trip hold carries no `holder_kind` on purpose, so it
+  # defaults to `person` — the kind nothing auto-releases). #4359: on 2026-11-19 a
+  # pause release at 01:34:58.141759Z started the retention sweep 331.8 ms later
+  # and it deleted 898 session-spill dirs (71,784 KiB), 68 task logs, 1,126 `runs`
+  # rows and 1,120 `queue` rows from the same root the guardian had refused to
+  # snapshot since 01:01:22Z, while that incident's 77 vanished files were still
+  # unexplained. The restore path consulted the marker; the delete path did not.
+  #
+  # The class owed-check #4359 ruled on, pinned here by #4383: `79`
+  # (`autonomy/79-retention-sweep.md`, the sweep above) and `98`
+  # (`autonomy/98-retag-untagged-facts.md`, whose bulk delete lives in
+  # skills/retag-untagged-facts/SKILL.md's `head -n -7 | xargs -r rm -rf` over
+  # `facts-snapshot-*` and NOT in its python script — so a task-id hold is the
+  # only thing that can ever cover it). #98 is `status: draft` under Alan's
+  # 2026-10-17 ruling that the job is spent (#2897 owed 3), so naming it changes
+  # no dispatch today: it is cover for a re-arm, and holding an id is not arming
+  # a job. Pinned by tests/test_round_hold.py's three shipped-class nodes.
+  #
+  # THIS KEY REPLACES workers/pool.py's DEFAULT_DATA_TRIP_DELETER_TASKS = ("79",)
+  # outright rather than extending it, so `79` has to be spelled out here: drop it
+  # and the gate silently disarms for the one sweep it was built for (the #1101
+  # lesson that absence must not read as "off"). `deleter_tasks: []` is how a
+  # person empties the class; a non-list value falls back to the default rather
+  # than to holding nothing. No `enabled` key ships: the gate reads
+  # `cfg.get("enabled", True)`, so it is on by default and the operator's kill
+  # switch stays an edit a person makes, as `primary_hold`'s does.
+  data_trip_hold:
+    deleter_tasks: ["79", "98"]
   # Poison sweep — periodic triage of the dead-letter pile. Runs from the
   # pool's scheduler loop (not a work source: a source that repairs the queue
   # would be starved by a backed-up queue) and is deterministic (no model:
