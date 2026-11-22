@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import inspect
 import json
 import math
 import re
@@ -949,3 +950,404 @@ def test_the_documented_corpus_output_path_is_committable():
         assert not ignored, (
             f"the documented corpus path {path} matches a .gitignore rule, so the "
             "frontier run's corpus could never be committed")
+
+
+# ---------------------------------------------------------------------------
+# #4499 — the teacher-forced readout asks for the OBSERVED TOKEN, not for a top-k
+# ---------------------------------------------------------------------------
+#
+# The premise these nodes pin: vLLM's `prompt_logprobs` map is the top-K candidates
+# PLUS the observed token appended at its true rank when that rank exceeds K, so at
+# K >= 1 the entry that says `rank: 1` is the argmax of the returned candidates and
+# the token the caller actually sent is somewhere in that map at a rank nothing in
+# the entries discloses. `prompt_logprobs: 0` is the shape that fixes it: one entry
+# per scored position, and that entry is the prompt's own token, so identity is
+# settled by cardinality. The committed capture below is the proof, from this engine,
+# on a prompt the caller typed — no node here asks the engine anything.
+
+#: Both arms of one row, teacher-forced at `prompt_logprobs: 0` and captured off the
+#: live engine. `tests/fixtures/.gitignore` carries the negation that lets it into
+#: the tree, and the last node here re-checks that rule every run, because a hidden
+#: fixture is a silently un-run module rather than a red suite (#2282).
+K0_CAPTURE = ROOT / "tests" / "fixtures" / "vllm_prompt_logprobs_k0_2026-11-22.json"
+
+
+def _k0_capture() -> tuple[dict, "R.CorpusRow"]:
+    """The committed capture, plus the corpus row its two prompts were built from."""
+    fx = json.loads(K0_CAPTURE.read_text(encoding="utf-8"))
+    row_json = fx["row"]
+    row = R.CorpusRow(
+        row_id=row_json["row_id"], session_id=row_json["session_id"],
+        tool_call_id=row_json["tool_call_id"], tool_name=row_json["tool_name"],
+        observation=row_json["observation"],
+        observation_bytes=row_json["observation_bytes"],
+        prefix=tuple(row_json["prefix"]), next_action=row_json["next_action"])
+    return fx, row
+
+
+def _sole(pos: dict) -> dict:
+    """The one entry of a one-entry position. Test-side twin of `R._sole_entry`."""
+    assert len(pos) == 1, f"{len(pos)} entries: not the shape this capture claims"
+    return next(iter(pos.values()))
+
+
+class K0CaptureClient(R.LogprobClient):
+    """A `LogprobClient` whose transport is the committed capture, so no socket opens.
+
+    The request half is NOT replaced: `_body` is the real one and the client is built
+    with the model name the capture records, so every teacher-forced body `score_row`
+    produces has to equal the `request_body` stored beside that arm's readouts — every
+    field, byte for byte. That is what makes the capture a witness of THIS module's
+    route rather than of some K=0 request someone typed: the fixture's readouts are
+    the engine's answer to exactly these bodies (see its `provenance`), so a change to
+    the body — a width, a `temperature`, a `chat_template_kwargs` — fails here against
+    the stored bytes instead of quietly scoring a request nobody sends. `_post` is the
+    only thing stubbed. An unknown prompt fails loudly too, because arms that no longer
+    match the captured ones would make every number below meaningless.
+
+    `swap_arms` answers the two captured prompts with each other's readouts. It exists
+    for one purpose: to produce a second VALID record for the same row whose ΔCE is the
+    exact negation of the real one, so an aggregate over the pair has a mean the test
+    can predict from arithmetic rather than from the record it is checking.
+    """
+
+    route_label = "stub:k0_capture"
+
+    def __init__(self, fx: dict, step_text: str, *, swap_arms: bool = False) -> None:
+        bodies = [arm["request_body"] for arm in fx["arms"]]
+        prompts = [arm["prompt_sent"] for arm in fx["arms"]]
+        assert [b["prompt"] for b in bodies] == prompts, (
+            "each arm's stored body must carry the prompt that arm was scored on")
+        super().__init__(base_url="http://stub.invalid/v1", model=bodies[0]["model"])
+        self.bodies: list[dict] = []
+        self.step_text = step_text
+        readouts = [arm["readout"] for arm in fx["arms"]]
+        if swap_arms:
+            readouts = readouts[::-1]
+        self.expected = {b["prompt"]: b for b in bodies}
+        self.readouts = dict(zip(prompts, readouts))
+
+    def _post(self, body: dict) -> dict:
+        self.bodies.append(dict(body))
+        if "prompt_logprobs" not in body:
+            return {"choices": [{"text": self.step_text}]}
+        if body["prompt"] not in self.expected:
+            raise AssertionError(
+                "score_row built a prompt that is not in the committed K=0 capture, so "
+                "the arms it is scoring are not the arms that were captured")
+        assert body == self.expected[body["prompt"]], (
+            f"posted body is not the one the capture was taken with: "
+            f"{ {k: v for k, v in body.items() if k != 'prompt'} } against "
+            f"{ {k: v for k, v in self.expected[body['prompt']].items() if k != 'prompt'} }")
+        # `prompt_token_ids` rides along as None because that is what this route
+        # serves on `choices[0]`: the id list is not available to shortcut identity,
+        # which is why the K=0 shape is the fix rather than a lookup.
+        return {"choices": [{"text": "", "prompt_logprobs": self.readouts[body["prompt"]],
+                             "prompt_token_ids": None}]}
+
+
+def _score_captured_row(*, swap_arms: bool = False) -> tuple[
+        dict, "R.CorpusRow", K0CaptureClient, dict]:
+    """Score the captured row through the capture. One call per node, no engine.
+
+    `swap_arms` keeps the row, the prompts and the request bodies exactly as they are
+    and hands each arm the OTHER arm's readout, so the returned record is a second
+    VALID row for the same (compressor, budget) whose ΔCE is the negation of the real
+    one — which is what lets the aggregate node predict its mean without quoting a
+    record back at itself.
+    """
+    fx, row = _k0_capture()
+    eng = K0CaptureClient(fx, R.render_action(row.next_action), swap_arms=swap_arms)
+    rec = R.score_row(row, eng, compressor=fx["row"]["compressor"],
+                      budget=fx["row"]["budget"])
+    return fx, row, eng, rec
+
+
+def test_the_teacher_forced_request_asks_for_the_observed_token_only():
+    """Both arms POST `prompt_logprobs: 0`, not a candidate width.
+
+    #4499's clause 1. The defect was named in the code itself: `teacher_forced`
+    defaulted `top_k: int = TOP_K` at 8, so every arm asked for a top-k map, and a
+    top-k map is where rank 1 stops being the served token. This node drives
+    `score_row` through the real `_body` and reads the JSON back off the transport,
+    so what it pins is the bytes on the wire for BOTH arms rather than a constant in
+    a signature. `max_tokens: 1` and the step requests are asserted beside it: the
+    fix is that the readout asks for less, not that it asks differently everywhere.
+    """
+    fx, _row, eng, rec = _score_captured_row()
+    assert rec["valid"] is True, rec["invalid_reason"]
+    teacher_forced = [b for b in eng.bodies if "prompt_logprobs" in b]
+    assert len(teacher_forced) == 2, (
+        f"one teacher-forced readout per arm; bodies were {len(eng.bodies)}")
+    assert [b["prompt_logprobs"] for b in teacher_forced] == [0, 0]
+    assert [b["logprobs"] for b in teacher_forced] == [0, 0], (
+        "the sampled-arm width must not ride along on a teacher-forced request")
+    assert [b["max_tokens"] for b in teacher_forced] == [1, 1]
+    assert teacher_forced[0]["prompt"] != teacher_forced[1]["prompt"], (
+        "the two bodies must be the two different arms, not one prompt twice")
+    steps = [b for b in eng.bodies if "prompt_logprobs" not in b]
+    assert len(steps) == 2 and all("logprobs" not in b for b in steps), (
+        "the step requests are untouched by this change and must not start asking "
+        "for logprobs it has no reader for")
+    assert R.OBSERVED_TOKENS_ONLY == 0
+    for fn in (R.LogprobClient.teacher_forced, R.score_row):
+        default = inspect.signature(fn).parameters["top_k"].default
+        assert default == R.OBSERVED_TOKENS_ONLY, (
+            f"{fn.__qualname__} still defaults to a K >= 1 readout")
+    # The capture's own provenance: the bodies the stub matched above are the ones the
+    # fixture says were POSTed to get these readouts, so this node's claim about the
+    # wire is a claim about the bytes that produced the numbers every other node here
+    # checks — not about a request shape the test author assumed.
+    assert fx["provenance"]["request_bodies"] == [
+        arm["request_body"] for arm in fx["arms"]], (
+        "the capture's provenance must carry the same bodies its arms were scored with")
+    assert [b["prompt_logprobs"] for b in fx["provenance"]["request_bodies"]] == [0, 0]
+
+
+def test_a_one_entry_map_scores_and_a_wider_map_is_refused():
+    """The observed token is identified by cardinality, never by rank (#4499, cl. 2).
+
+    The item's own counterexample is the canonical shape here: the observed token
+    `' capital'` arrives as the only entry of its position at rank 1434, and it is
+    nevertheless the token that was sent — so its negated logprob is the position's
+    NLL. A position with more than one entry is a `prompt_logprobs: K >= 1` readout,
+    where the observed token is one candidate among several at a rank nothing
+    discloses; `_position_nll` returns None for it, because reading rank 1 there
+    reports the argmax candidate's loss as though it were the recorded action's. The
+    wide position below is a clone of a real one from the capture with a rank-1
+    candidate added beside the observed entry, which is exactly the bytes such a
+    readout would carry.
+    """
+    assert R._position_nll({"6511": {"logprob": -9.32, "rank": 1434,
+                                     "decoded_token": " capital"}}) == pytest.approx(9.32)
+    assert R._position_nll(None) is None
+    assert R._position_nll({}) is None
+    assert R._position_nll({"token": " capital"}) is None
+    # The OpenAI/chat shapes keep scoring exactly as before, raw `nll` included.
+    assert R._position_nll({"token_logprob": -1.25}) == pytest.approx(1.25)
+    assert R._position_nll({"logprob": -0.5}) == pytest.approx(0.5)
+    assert R._position_nll({"nll": 3.5}) == pytest.approx(3.5)
+
+    fx, _row = _k0_capture()
+    for arm in fx["arms"]:
+        assert R._position_nll(arm["readout"][0]) is None, (
+            "position 0 is the masked ChatML opener: null means unscored")
+        for pos in arm["readout"]:
+            if pos is not None:
+                assert R._position_nll(pos) == pytest.approx(-_sole(pos)["logprob"])
+
+    scored = [p for p in fx["arms"][0]["readout"] if p]
+    widest = max(scored, key=lambda p: _sole(p)["rank"])
+    observed = _sole(widest)
+    assert observed["rank"] > 5, "the capture must carry a deep-rank position"
+    wide = dict(widest)
+    wide["1"] = {"logprob": -0.01, "rank": 1, "decoded_token": " "}
+    assert R._position_nll(wide) is None, (
+        "a multi-entry map must be refused; rank 1 of it is a candidate, not the "
+        "token the caller sent")
+    assert R._token_surface(wide) is None
+    assert R._position_topk(wide) == {}, (
+        "a token-id map is not a top-k distribution either way: no branch here reads it")
+
+
+def test_the_captured_surfaces_concatenate_to_the_prompt_they_scored():
+    """`token_text` alignment becomes honest, because the surfaces ARE the prompt (#cl. 3).
+
+    The capture stores both the bytes that were POSTED (`prompt_sent`) and the region
+    the readout labels (`prompt_labelled`). They differ by exactly the leading ChatML
+    opener: the engine masks position 0 and never decodes that token, so no readout
+    can name it, and this is the only gap. Walking `_token_surface` over the scored
+    positions in position order reproduces the labelled prompt character for character
+    — 4,172 and 1,346 characters on the two arms. Under the rank-1 semantics this
+    change removes, the same walk would have inserted `' '`-shaped argmax
+    candidates at positions whose observed token sat at rank 235,315 and 72,159.
+    """
+    fx, _row = _k0_capture()
+    for arm in fx["arms"]:
+        join = "".join(R._token_surface(p) for p in arm["readout"] if p)
+        assert join == arm["prompt_labelled"], (
+            f"{arm['label']}: surfaces differ from the labelled prompt by "
+            f"{len(join) - len(arm['prompt_labelled'])} chars")
+        assert arm["prompt_sent"] == arm["unlabelled_prefix"] + arm["prompt_labelled"]
+        assert arm["unlabelled_prefix"] == "<|" + "im_start" + "|>"
+        assert fx["action"] in arm["prompt_labelled"], (
+            "the action has to be inside the labelled region for token_text to mean "
+            "anything on this arm")
+    deepest = max((p for p in fx["arms"][0]["readout"] if p),
+                  key=lambda p: _sole(p)["rank"])
+    assert _sole(deepest)["rank"] > 1, (
+        "at this position the observed token is not anybody's first choice, so the "
+        "sole entry is the only reading that can be the prompt's")
+    assert R._token_surface(deepest) == _sole(deepest)["decoded_token"]
+
+
+def test_score_row_over_the_capture_scores_the_action_from_its_own_logprobs():
+    """ΔCE comes out non-null, `token_text`-aligned, and equals the capture's arithmetic.
+
+    #4499's clause 4. The expected value is computed HERE from the capture's own
+    sole-entry logprobs over the action span — no scripted shift constant, which is
+    the hole #4395's clause 4 left open ("it validates the arithmetic, not the token
+    identity"). The span is located in this node from the surfaces and the action
+    string, independently of `_align_action_span`, so an agreement between the two is
+    evidence rather than a tautology — and the two definitions are asserted to COINCIDE,
+    position by position: this node's window opens at the action's first token and runs
+    to the end of the readout, while `_align_action_span` walks backward from the end
+    until the action's character count is covered, so `start == first + 1` (the `+1` is
+    the single masked position 0, which is dropped from this node's surface list) plus
+    the per-arm mean equality plus `action_positions_scored == len(window)` is what
+    proves those two definitions are the same window and not two that happen to agree
+    here.
+
+    No direction is asserted for the delta, and none may be. #4499's owed check records
+    that per-request logprob magnitudes on this engine drift — one of six single
+    requests at the same K differed by 0.6 nats on one position — so a fixture that
+    asserted a sign would be asserting a measurement, and a frontier number is only
+    ever allowed to come from `>=3` same-arm repeats, never from bytes frozen here.
+    What is asserted is that the two arms scored DIFFERENT readouts whose means are
+    therefore different, so a delta of zero would be a bug rather than a result.
+    """
+    fx, _row, _eng, rec = _score_captured_row()
+    action = fx["action"]
+    assert rec["valid"] is True, rec["invalid_reason"]
+    assert rec["span_alignment"] == R.SPAN_TOKEN_TEXT
+    assert rec["action_kind"] == "tool_call"
+
+    expected_mean: dict[str, float] = {}
+    for arm in fx["arms"]:
+        start, route, reason = R._align_action_span(arm["readout"], action)
+        assert reason is None and route == R.SPAN_TOKEN_TEXT, (
+            f"{arm['label']}: the capture's own surfaces must locate the action")
+        masked = [i for i, p in enumerate(arm["readout"]) if p is None]
+        assert masked == [0], (
+            f"{arm['label']}: this node's index offset below holds only for a readout "
+            f"whose sole masked position is the leading one; got {masked}")
+        surfaces, nlls = [], []
+        for pos in arm["readout"]:
+            if pos is None:
+                continue
+            surfaces.append(_sole(pos)["decoded_token"])
+            nlls.append(-_sole(pos)["logprob"])
+        start_char = arm["prompt_labelled"].index(action)
+        offset, first = 0, None
+        for i, surface in enumerate(surfaces):
+            if offset + len(surface) > start_char:
+                first = i
+                break
+            offset += len(surface)
+        assert first is not None and surfaces[first] == action[0], (
+            "the action is meant to begin exactly on a token boundary in this capture")
+        assert start == first + 1, (
+            f"{arm['label']}: `_align_action_span` opened the window at readout index "
+            f"{start}, this node's forward walk opened it at {first} of the scored "
+            f"positions (readout index {first + 1}) — two different spans")
+        window = nlls[first:]
+        expected_mean[arm["label"]] = sum(window) / len(window)
+        assert rec["action_positions_scored"] == len(window)
+
+    assert expected_mean["full"] != expected_mean["candidate"], (
+        "the two arms must have scored different bytes, or a zero delta would be the "
+        "stub answering both prompts with one readout")
+    assert rec["full_arm_nll"] is not None
+    assert rec["candidate_arm_nll"] is not None
+    assert rec["full_arm_nll"] == pytest.approx(expected_mean["full"])
+    assert rec["candidate_arm_nll"] == pytest.approx(expected_mean["candidate"])
+    assert rec["delta_ce_nats"] is not None
+    assert rec["delta_ce_nats"] == pytest.approx(
+        expected_mean["candidate"] - expected_mean["full"])
+    assert rec["delta_ce_nats"] != 0.0, (
+        "same bytes on both arms: the delta would be measuring nothing")
+
+
+def test_the_k0_route_reports_no_kl_and_records_its_readout_shape():
+    """No candidate distribution is borrowed: KL is None and `top_k` says why (cl. 5).
+
+    A `prompt_logprobs: 0` readout carries the observed token and nothing else, so
+    `first_topk` is empty on both arms and `kl_first_position` has no distribution to
+    diverge. Reporting None is the honest outcome; the alternative this refuses is a
+    KL lifted from a second, K >= 1 request, which is a different quantity from a
+    different readout sitting in a column about this one. Whether to buy that KL back
+    at twice the requests is ruled on in #4499's owed checks. The record's existing
+    `top_k` field carries the shape — 0 — so every published ΔCE names the readout
+    that produced it, and a K=0 mean is never folded into a K>=1 mean.
+    """
+    fx, _row, _eng, rec = _score_captured_row()
+    assert rec["valid"] is True, rec["invalid_reason"]
+    assert rec["kl_first_position"] is None
+    assert rec["top_k"] == 0
+    for arm in fx["arms"]:
+        for pos in arm["readout"]:
+            if pos is not None:
+                assert R._position_topk(pos) == {}, (
+                    "a one-entry observed map is not a candidate distribution; if it "
+                    "ever read as one, this None would become a fabricated KL")
+    assert R.kl_first_position({}, {}) is None
+
+    # The aggregate half, over THREE valid rows for one (compressor, budget) cell: the
+    # real record, the same row again, and the arm-swapped one whose ΔCE is the real
+    # one's negation (each arm scored the other arm's readout, so its candidate mean is
+    # this record's full mean and the reverse — arithmetic, not a number quoted back
+    # from a record). `aggregate` rounds to 6 decimals, so a cell's mean is compared
+    # against a value predicted that way, never against a record's own field.
+    swapped = _score_captured_row(swap_arms=True)[3]
+    assert swapped["valid"] is True, swapped["invalid_reason"]
+    assert swapped["kl_first_position"] is None
+    assert swapped["delta_ce_nats"] == pytest.approx(-rec["delta_ce_nats"])
+
+    pair = R.aggregate([rec, swapped])
+    assert len(pair) == 1
+    cell = next(iter(pair.values()))
+    assert (cell["rows"], cell["valid_rows"], cell["invalid_rows"]) == (2, 2, 0)
+    assert cell["mean_delta_ce_nats"] == pytest.approx(0.0, abs=1e-6), (
+        "one row and its arm-swapped twin average to zero by arithmetic; anything else "
+        "means the cell is not summing the rows it was given")
+    assert cell["mean_kl_first_position"] is None, (
+        "an aggregate must not invent a KL for a route that cannot measure one, and two "
+        "valid rows is not a reason to")
+    assert cell["span_alignments"] == {R.SPAN_TOKEN_TEXT: 2}, cell["span_alignments"]
+
+    # And the mean is not hard-wired to zero: with the real row counted twice the cell
+    # must move off zero, which is what proves the pair above was 0.0 because of the
+    # rows fed to it rather than because nothing was summed.
+    triple = next(iter(R.aggregate([rec, rec, swapped]).values()))
+    assert (triple["rows"], triple["valid_rows"]) == (3, 3)
+    assert triple["mean_delta_ce_nats"] != 0.0
+    assert triple["mean_kl_first_position"] is None
+    assert rec["top_k"] == swapped["top_k"] == 0, (
+        "every row folded into that cell names the K=0 shape")
+
+
+def test_the_k0_capture_fixture_is_tracked_not_ignored():
+    """The root `*.json` rule must not hide the capture this module scores against.
+
+    #2282's trap, in its loud form: `tests/fixtures/.gitignore` carries the negation,
+    so the bytes are committable — and `git check-ignore --no-index` answers exit 0
+    for a NEGATION too, which is why this node reads the RULE it was printed rather
+    than the exit status. Three things are checked: the last matching pattern for the
+    capture is a negation from `tests/fixtures/.gitignore`; a sibling name outside the
+    family is still excluded by the root `*.json`, so the negation is a family and not
+    a blanket lift; and the file is actually tracked, so a fresh checkout has it. That
+    last one is what makes the guard real — without the bytes, the nodes above fail
+    here, and a fixture that was never committed would otherwise leave this module's
+    reader coverage silently unrun while the suite stayed green.
+    """
+    rel = str(K0_CAPTURE.relative_to(ROOT))
+    probe = subprocess.run(["git", "check-ignore", "--no-index", "-v", rel],
+                           cwd=ROOT, capture_output=True, text=True)
+    assert probe.returncode == 0, f"no ignore rule matched {rel}: {probe.stderr.strip()}"
+    rule = probe.stdout.split("\t")[0]
+    source, pattern = rule.rsplit(":", 1)
+    assert pattern.startswith("!"), f"{rel} is excluded by {rule}, not negated"
+    assert "tests/fixtures/.gitignore" in source, rule
+
+    control = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-v",
+         "tests/fixtures/engine_answer_not_a_capture.json"],
+        cwd=ROOT, capture_output=True, text=True)
+    assert control.returncode == 0, "an unnamed engine answer must still be ignored"
+    assert control.stdout.split("\t")[0].rsplit(":", 1)[1] == "*.json", control.stdout
+
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", rel],
+                             cwd=ROOT, capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{rel} is not in the tree ({tracked.stderr.strip()}), so the nodes that read "
+        "it would be skipped-or-broken on a fresh checkout instead of pinning anything")

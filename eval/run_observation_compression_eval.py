@@ -56,7 +56,11 @@ Two independent reads per (row, compressor, budget), never merged into one score
   first ACTION token position: that position is each arm's first generated token,
   so its top-k is that arm's next-action distribution. ΔCE is the mean-nll
   difference over the action span in nats (positive = the action is harder to
-  produce given the compression).
+  produce given the compression), taken from a `prompt_logprobs: 0` readout in
+  which the observed token is the single entry its position carries (#4499), so the
+  nll is the RECORDED ACTION's own and not its position's argmax candidate's. That
+  shape carries no candidates, which is why `kl_first_position` reports None on
+  every row of it rather than borrowing a distribution from another request.
 * `tier` — `eval/action_equivalence.py`'s tiers over the two ARMS' generated
   calls (one step at temperature 0 under each arm), which is the version a human
   can audit. `agrees` is true only at `canonically_equal`.
@@ -860,14 +864,34 @@ def compress(
 # The logprob readout — one client, and a refusal where there is no readout
 # ---------------------------------------------------------------------------
 
-#: Top-k at the first generated position. The paper's KL is over the full
-#: vocabulary; a served top-k is what this engine gives, so the number reported
-#: is a top-k truncation of it, computed over the UNION of the two arms' top-k
-#: with every token outside an arm's own list floored at that list's lowest
-#: logprob. That floor is an upper bound on the true KL, and the report says so —
-#: the alternative, renormalising the two truncated distributions against each
-#: other, silently changes the quantity and reads as the paper's objective.
-TOP_K = 8
+#: The teacher-forced readout asks for the OBSERVED TOKEN ONLY: `prompt_logprobs: 0`
+#: makes this engine return exactly one entry per scored position, and that entry IS
+#: the prompt's own token at that position. The observed token is therefore
+#: identified by CARDINALITY — one entry, whatever its `rank` says — and never by a
+#: rank. This is #4499, and it replaced a `TOP_K = 8` request.
+#:
+#: Why a top-k map (`prompt_logprobs: K`, K >= 1) cannot be read here. vLLM's map is
+#: the top-K candidates PLUS the observed token appended at its true rank when that
+#: rank exceeds K, so with K >= 1 the observed token is always PRESENT but is
+#: identifiable only in the K+1-entry case: when its rank is <= K it is one candidate
+#: among K and nothing in the entry says which. Reading rank 1 there scores the argmax
+#: CANDIDATE, not the recorded action's token — measured on this engine, the observed
+#: token's rank passed 100,000 on two positions of the capture committed under
+#: `tests/fixtures/`, and #4499's own typed-prompt probe found the observed
+#: `' Berlin'` at rank 14 under `' Paris'` at rank 1. So `_sole_entry` refuses a
+#: multi-entry map and no reader here guesses.
+#:
+#: What the K=0 shape cannot carry is `kl_first_position`: it has no candidates, so
+#: that column reports None on every row of this route and the report prints an empty
+#: cell. Buying it back costs a second, K>=1 readout per arm — twice the requests —
+#: and that KL must never enter a ΔCE mean, because the two shapes are different
+#: quantities taken from different requests. Whether to pay for it is ruled on in
+#: #4499's owed checks, not here.
+#:
+#: `-1` is not a route to "all of them": this engine refuses it (`Requested prompt
+#: logprobs of 248320, which is greater than max allowed: 20`). `0` is inside that
+#: bound and means the observed token only, not none.
+OBSERVED_TOKENS_ONLY = 0
 
 #: One generated step, budgeted. Long enough to hold a tool call's arguments,
 #: short enough that the arm is graded on the decision and not on an essay.
@@ -939,8 +963,39 @@ def _prompt_positions(choice: Any) -> list | None:
     return None
 
 
+def _sole_entry(pos: Any) -> dict | None:
+    """The one entry of a `prompt_logprobs: 0` position, or None if it is not one.
+
+    vLLM's `/v1/completions` labels a `prompt_logprobs` position with a map keyed by
+    token id (the OpenAI chat-shaped form puts the logprob at the top level instead).
+    At `prompt_logprobs: 0` that map holds EXACTLY ONE entry, and it is the prompt's
+    own token at that position — the only shape this engine serves whose observed
+    token is identifiable without inference, because cardinality settles it (#4499).
+
+    A map with more than one entry is a top-k readout, and this returns None for it:
+    the observed token is somewhere in that map at a rank nothing in the entries
+    discloses, so the choice is to refuse the position or to score rank 1, which is
+    the argmax candidate and a different quantity. The token-id key test is what
+    keeps a chat-shaped position's `top_logprobs` list from reading as a one-entry
+    map.
+    """
+    if not isinstance(pos, dict) or len(pos) != 1:
+        return None
+    (token_id, entry), = pos.items()
+    try:
+        int(token_id)
+    except (TypeError, ValueError):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
 def _position_nll(pos: Any) -> float | None:
-    """The teacher-forced -log P of one position, or None when unscored."""
+    """The teacher-forced -log P of one position, or None when unscored.
+
+    None is also the answer for a MULTI-entry map: an unidentified observed token is
+    an unscorable position, and a rank-1 logprob would be reported in its place as
+    though it were the recorded action's own (#4499).
+    """
     if not isinstance(pos, dict):
         return None        # vLLM sends null at position 0, and for masked tokens
     for key in ("token_logprob", "logprob"):
@@ -948,7 +1003,11 @@ def _position_nll(pos: Any) -> float | None:
         if v is not None:
             return -v      # served as a logprob (<= 0); CE is its negation
     v = _num(pos.get("nll"))
-    return v
+    if v is not None:
+        return v
+    entry = _sole_entry(pos)   # token-id-keyed map: only the one-entry shape scores
+    lp = None if entry is None else _num(entry.get("logprob"))
+    return None if lp is None else -lp
 
 
 def _position_topk(pos: Any) -> dict:
@@ -985,11 +1044,13 @@ def _position_topk(pos: Any) -> dict:
 def _token_surface(pos: Any) -> str | None:
     """The text one readout position stands for, or None when it does not say.
 
-    A served readout labels a position one of three ways: a decoded string (`token`
+    A served readout labels a position one of four ways: a decoded string (`token`
     or `text`, the shape #540's route returns), a raw byte list (`bytes`, what
-    vLLM's OpenAI-compat `prompt_logprobs` carries), or nothing but an id. The last
-    case is the only reason an estimated span needs to exist — and the reason that
-    span has to be labelled as an estimate wherever it is quoted.
+    vLLM's OpenAI-compat `prompt_logprobs` carries), a token-id-keyed map holding the
+    observed entry alone (`prompt_logprobs: 0`, whose `decoded_token` is the prompt's
+    own text at that position), or nothing but an id. The last case is the only reason
+    an estimated span needs to exist — and the reason that span has to be labelled as
+    an estimate wherever it is quoted.
     """
     if not isinstance(pos, dict):
         return None
@@ -1005,6 +1066,15 @@ def _token_surface(pos: Any) -> str | None:
             return None
     if isinstance(raw, str):
         return raw
+    # A token-id-keyed map: the surface is the SOLE entry's `decoded_token`. A
+    # multi-entry map gets None rather than rank 1's text, because rank 1 is some
+    # other token's surface and walking those against the prompt is exactly how a
+    # rank-1 reader labels a span `token_text` — the exact-alignment label — on text
+    # that is not the prompt's (#4499).
+    entry = _sole_entry(pos)
+    if entry is not None:
+        value = entry.get("decoded_token")
+        return value if isinstance(value, str) else None
     return None
 
 
@@ -1126,6 +1196,13 @@ def kl_first_position(full_topk: dict, cand_topk: dict) -> float | None:
     alternative, and it is worse: it changes the quantity and keeps the name. None
     when either side has no top-k at all: no distribution, no divergence, and a
     0.0 here would read as "the compression changed nothing".
+
+    On the route this module ships (`OBSERVED_TOKENS_ONLY`) it is always None: a
+    `prompt_logprobs: 0` readout carries the observed token and no candidates, so
+    `first_topk` is empty on both arms and there is no distribution to diverge. That
+    is the price of a ΔCE whose token identity is not a guess, and the empty cell is
+    the honest report — a KL borrowed from a second, K>=1 readout would be a
+    different request's distribution in a column about this one.
     """
     if not full_topk or not cand_topk:
         return None
@@ -1199,7 +1276,7 @@ def score_row(
     *,
     compressor: str = RUNG4,
     budget: float = 0.25,
-    top_k: int = TOP_K,
+    top_k: int = OBSERVED_TOKENS_ONLY,
     summariser: Callable[[str, int], str] | None = None,
     session_id: str = "",
 ) -> dict:
@@ -1265,6 +1342,11 @@ def score_row(
         # Present on invalid rows too, so the JSONL schema does not depend on which
         # rows happened to score.
         "span_alignment": "",
+        # The readout SHAPE that produced every number on this row, not a width to
+        # interpret: 0 is the observed-token-only request, so the row's ΔCE is a mean
+        # of sole-entry logprobs and its KL has no candidates to be computed from.
+        # A published ΔCE names this field, because a K>=1 mean is a different
+        # quantity and mixing the two would import their disagreement into the delta.
         "top_k": top_k,
         "tier": None,
         "decline": None,
@@ -1383,11 +1465,19 @@ class LogprobClient:
             body["prompt_logprobs"] = logprobs
         return body
 
-    def teacher_forced(self, prompt: str, *, top_k: int = TOP_K) -> dict:
+    def teacher_forced(self, prompt: str, *,
+                       top_k: int = OBSERVED_TOKENS_ONLY) -> dict:
         """`choices[0]` for a prompt that already CONTAINS the action to score.
 
         `max_tokens: 1` because the answer is in `prompt_logprobs`; the generated
         token is discarded, and asking for 0 is not a thing this API serves.
+
+        `top_k` defaults to `OBSERVED_TOKENS_ONLY`, so the request asks for
+        `prompt_logprobs: 0` and every scored position comes back as a one-entry map
+        holding the prompt's own token. Passing a K >= 1 is allowed and gets you a
+        candidate distribution the readers refuse to score, which is the correct
+        outcome: rank 1 of that map is the argmax candidate, not the served token
+        (#4499).
         """
         return self._post(self._body(prompt, max_tokens=1, logprobs=top_k))["choices"][0]
 

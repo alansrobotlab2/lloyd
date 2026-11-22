@@ -234,3 +234,18 @@
 # belongs to a trial's scratch directory and is what a re-run overwrites, never here, so
 # the negation only ever reaches a witness somebody deliberately placed here.
 !eval_3076_upper.json
+
+# The fifth family is a served-readout capture, not a counted day: the two
+# `prompt_logprobs: 0` teacher-forced answers (#4499) that
+# `tests/test_observation_compression_eval.py` scores its logprob readers against.
+# The reason it must be negated rather than force-added is #2282's trap, and it is
+# the loud kind: the root `*.json` rule hides the bytes, the module's nodes then fail
+# on a fresh checkout where the fixture is absent, and if somebody "fixes" that by
+# skipping when the file is missing the module's reader nodes are silently unrun
+# while the suite stays green. `test_the_k0_capture_fixture_is_tracked_not_ignored`
+# re-checks the rule with `git check-ignore --no-index` on every run.
+#
+# Scoped to the capture family and not to `*.json`: an engine answer that happens to
+# be sitting in this directory is runtime data, and only a deliberately named
+# `_2026-` capture is a witness.
+!vllm_prompt_logprobs_k0_*.json
