@@ -30,6 +30,7 @@ on it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -192,7 +193,8 @@ async def get_status(limit: int = 25):
     except Exception as exc:
         return JSONResponse({"available": False, "error": str(exc)[:200]}, status_code=200)
 
-    events = S.read_events(limit=limit)
+    # Off the loop: a cold read decodes the whole ledger (`S.ledger_rows`).
+    events = await asyncio.to_thread(S.read_events, limit=limit)
     acked = {e.get("commit") for e in events if e.get("event") == "ack"}
     unacked = [
         e for e in events
@@ -231,5 +233,5 @@ async def post_ack(request: Request):
     data = await request.json()
     commit = str(data.get("commit") or "")
     from scripts.automod import state as S
-    S.append_event({"event": "ack", "commit": commit, "by": "user"})
+    await asyncio.to_thread(S.append_event, {"event": "ack", "commit": commit, "by": "user"})
     return JSONResponse({"acked": commit})

@@ -436,22 +436,21 @@ def ledger_rows_reset() -> None:
 
 
 def read_events(path: Path | None = None, limit: int = 100) -> list[dict]:
-    target = path or LEDGER_PATH
-    if not target.exists():
-        return []
-    out: list[dict] = []
-    try:
-        for line in target.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except ValueError:
-                continue
-    except OSError:
-        return []
-    return out[-limit:]
+    """The newest `limit` events of one ledger file, oldest first.
+
+    Reads through `ledger_rows`, so the file is decoded once per change to it
+    and not once per call. Until 2026-11-22 this function read and decoded the
+    whole file every time, whatever `limit` was: 0.44 s for the 21.5 MB live
+    ledger, paid by ~230 call sites, among them `/api/automod/status` on the
+    backend's event loop.
+
+    The rows are shallow copies. `ledger_rows` hands out shared objects on the
+    condition that nobody writes into them, and this function's callers were
+    written against private dicts; a copy per row keeps a top-level write
+    private. A nested value is still shared — copy it before changing it.
+    """
+    rows = ledger_rows(path or LEDGER_PATH)
+    return [dict(row) for row in rows[-limit:]]
 
 
 # ---------------------------------------------------------------------------
