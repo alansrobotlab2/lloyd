@@ -6449,7 +6449,7 @@ REQUIRED_CITATIONS = frozenset({
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
     "scripts/skill_lint.py:392",                   # PHANTOM_EXEMPT. 282→392 when #4374's BURIED_TRIGGER check landed above it (110 lines).
     "agent_mcp/skills.py:88",                      # _QUARANTINE_STATUSES
-    "app/routers/backlog.py:895",                  # backlog_task_delete, re-pointed 850→870 by #3701 (its resolver gained a collision check above it), then 870→895 by #3410 (the module docstring gained a dated re-measurement line above it)
+    "app/routers/backlog.py:904",                  # backlog_task_delete, re-pointed 850→870 by #3701 (its resolver gained a collision check above it), then 870→895 by #3410 (the module docstring gained a dated re-measurement line above it), then 895→904 on 2026-11-22 (task-create allocates its id under the shared lock, above it)
     "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
     "app/paths.py:310",                            # VAULT_FACTS_ROOT, added by #2795
 })

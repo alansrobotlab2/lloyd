@@ -33,6 +33,7 @@ the list (`DESC_SNIPPET_CHARS`) with the full text behind
 `GET /api/backlog/task/{id}`.
 """
 
+import asyncio
 import logging
 import re
 import threading
@@ -887,7 +888,15 @@ async def backlog_task_create(request: Request):
     if data.get("description"):
         body += f"\n\n{data['description']}"
     _BACKLOG_DIR.mkdir(parents=True, exist_ok=True)
-    _write_task_file(_BACKLOG_DIR / filename, fm, body)
+    # The id above came from an unlocked scan. Allocate for real here, scan and
+    # create in one critical section shared with the other two creators.
+    def _create() -> int:
+        with BW.id_allocation_lock(_BACKLOG_DIR):
+            new_id = BW.next_backlog_id(_BACKLOG_DIR)
+            fm["position"] = new_id * 1000
+            _write_task_file(_BACKLOG_DIR / f"{new_id}-{slug}.md", fm, body)
+            return new_id
+    task_id = await asyncio.to_thread(_create)
     return JSONResponse({"success": True, "id": task_id})
 
 

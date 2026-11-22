@@ -10019,8 +10019,8 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
     Front matter mirrors `app/routers/backlog.py::backlog_task_create` (the OKF
     `type`, `segment`, `position = id * 1000`, and `created` on the store's one
     clock — `app/backlog_move.now_stamp()`, naive UTC, since #1517), and the id is
-    `max + 1` on disk. The file is created with `O_EXCL`, so two writers that
-    allocate the same id do not overwrite each other: the loser takes the next.
+    `max + 1` on disk, allocated and created under `id_allocation_lock`, so no
+    other creator can take the same id between the scan and the create.
     """
     root = backlog_dir or BACKLOG_DIR
     ensure_board_dir(root, "new_item")   # creates it, or refuses: see the section below
@@ -10028,13 +10028,13 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
         raise ValueError(f"unknown status {status!r}")
     board = check_board(board)  # app/backlog_boards.py: raises on a board off the list
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50] or "item"
-    for _ in range(20):
-        top = 0
-        for p in root.glob("*.md"):
-            m = re.match(r"^(\d+)[-_]", p.name)
-            if m:
-                top = max(top, int(m.group(1)))
-        item_id = top + 1
+    from app.backlog_write import id_allocation_lock, next_backlog_id
+    # The scan and the create are one critical section shared with the other two
+    # creators (`app/backlog_write.id_allocation_lock`). `O_EXCL` below never was
+    # that: it excludes `<id>-<slug>.md`, so two different names at one id both
+    # got through. It stays as the guard against a writer that takes no lock.
+    with id_allocation_lock(root):
+        item_id = next_backlog_id(root)
         # The same clock the closers in this module have always written
         # (#1517): an item filed here used to be born in the machine's local
         # zone and closed in UTC, so the pair disagreed by seven hours.
@@ -10054,16 +10054,12 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
         text = (f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
                 f"---\n# {name}" + (f"\n\n{body.strip()}\n" if body.strip() else "\n"))
         path = root / f"{item_id}-{slug}.md"
-        try:
-            with open(path, "x", encoding="utf-8") as f:
-                f.write(text)
-        except FileExistsError:
-            continue
-        item = load_item(path)
-        if item is None:  # pragma: no cover — we just wrote it
-            raise RuntimeError(f"new_item could not read back {path}")
-        return item
-    raise RuntimeError("new_item: could not allocate an id after 20 tries")
+        with open(path, "x", encoding="utf-8") as f:
+            f.write(text)
+    item = load_item(path)
+    if item is None:  # pragma: no cover — we just wrote it
+        raise RuntimeError(f"new_item could not read back {path}")
+    return item
 
 
 def _red_tree_file(node: str) -> str:

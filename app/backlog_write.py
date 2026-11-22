@@ -227,6 +227,40 @@ def write_item(path: Path | str, fm: Mapping[str, Any],
 BACKLOG_ID_PATTERN = re.compile(r"^(\d+)[-_].*\.md$")
 
 
+# ---------------------------------------------------------------------------
+# Allocating an id — the one place that answers "what is the next #N?"
+# ---------------------------------------------------------------------------
+#
+# Three lanes create item files (`agent_mcp.backlog._handle_write`,
+# `scripts.automod.backlog.new_item`, `app.routers.backlog.backlog_task_create`),
+# as three processes, and each allocated `max(id on disk) + 1` with nothing held
+# between the scan and the create. Two creates that scan together take the same
+# id. `new_item`'s `O_EXCL` did not help: the exclusive name is `<id>-<slug>.md`,
+# so two DIFFERENT names at one id both succeed — and triage runs two at a time.
+# The result is the state the resolver above refuses to read: two files, one id.
+#
+# So: one lock for the directory, held from the scan to the moment the new file
+# exists. It is `commit_lock` on a name that is never created, which puts the
+# flock in `atomic_io.LOCK_DIR` — off the vault, like every other lock here.
+
+def id_allocation_lock(backlog_dir: Path | str, *, timeout: float | None = None):
+    """Hold this from `next_backlog_id` until the new item's file exists."""
+    return atomic_io.commit_lock(Path(backlog_dir) / ".next-id", timeout=timeout)
+
+
+def next_backlog_id(backlog_dir: Path | str) -> int:
+    """`max(id) + 1` over the item files in `backlog_dir`; 1 on an empty or
+    missing directory. Only meaningful inside `id_allocation_lock`."""
+    top = 0
+    root = Path(backlog_dir)
+    if root.is_dir():
+        for f in root.glob("*.md"):
+            m = BACKLOG_ID_PATTERN.match(f.name)
+            if m:
+                top = max(top, int(m.group(1)))
+    return top + 1
+
+
 class AmbiguousBacklogId(Exception):
     """More than one `backlog/<id>-*.md` file carries the id being resolved (#3701).
 

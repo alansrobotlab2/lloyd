@@ -521,7 +521,21 @@ def _handle_write(args: dict) -> str:
             "frontmatter and was only read by fallback parse; fix the file by "
             "hand before writing to it (a rewrite would drop the fields the "
             "fallback could not read)."})
-    if not save_task(task):
+    if creating:
+        # The id above came from an unlocked scan, taken before the dedupe ran.
+        # Allocate for real here, scan and create in one critical section shared
+        # with the other two creators (`app/backlog_write.id_allocation_lock`).
+        try:
+            with BW.id_allocation_lock(BACKLOG_DIR):
+                task_id = BW.next_backlog_id(BACKLOG_DIR)
+                task.update({"id": task_id, "position": task_id * 1000,
+                             "filename": f"{task_id}-{task['filename'].split('-', 1)[1]}"})
+                saved = save_task(task)
+        except TimeoutError:
+            saved = False
+        if not saved:
+            return json.dumps({"success": False, "error": SAVE_FAILED})
+    elif not save_task(task):
         return json.dumps({"success": False, "error": SAVE_FAILED})
     if promotion is not None:
         _apply_promotion(task_id, promotion, activity or "")
