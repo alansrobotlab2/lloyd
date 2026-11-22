@@ -30,10 +30,23 @@ globs), URLs, commands with spaces and truncated ids are never extracted.
 A cite is `exempt` when its line says the target is gone on purpose ("no longer
 exists", "retired", and the two spellings #3944 found missing: an attributive
 `deleted` before the path, and the shell's own `No such file or directory`), when
-it carries `<!-- ri:known-absent -->`, or when its target is in `KNOWN_ABSENT` —
+it carries `<!-- ri:known-absent -->`, when its target is in `KNOWN_ABSENT` —
 the same shape as skill_lint's
-`KNOWN_ABSENT_SCRIPTS`: absent path -> why that is fine. Exempt cites do not
-count toward the exit code.
+`KNOWN_ABSENT_SCRIPTS`: absent path -> why that is fine — or when its target is an
+existence-gated daemon state path: an immediate child of a directory under the state
+root the scan was given (`<home>/.local/state/<daemon>/<name>`, #4462). That last arm
+is the one no line-level rule can ever cover.
+`memory/mental-models.md:2540` cites
+`~/.local/state/lloyd-guardian/data-tripped.json` as the MECHANISM that arms the
+guardian's data-trip hold, so the sentence is not saying the file is gone and the
+absence-prose arm cannot fire for it — while the file itself exists only for the
+minutes that hold is armed (`pause_journal` ids 71 and 73, both 2026-11-19, lasted
+33 m 36 s and 64 s). Such a cite is true roughly as often as it is false, and which
+way the sweep books it depends on what the daemon happened to be doing at 13:00Z, so
+#94's ledger re-reported a state transition as a broken cite and knowledge health
+report #60 spent its one reportable figure on it. Exempt cites do not count toward the
+exit code, and — like `swept` — they leave the newly-dangling delta, which is that
+figure.
 
 A cite is `swept` when it names an autonomy run record (`autonomy-runs/<id>/
 run_*.md`) that the groundskeeper's retention sweep has already deleted: the file
@@ -225,6 +238,63 @@ def _swept_run_record(target: str, missing: list[Path], *, now: datetime | None 
             f"nothing here to re-point")
 
 
+#: ── the existence-gated state-path arm (#4462) ────────────────────────────────
+#: Where a daemon keeps the files it writes while some condition holds and deletes
+#: when it stops: `<home>/.local/state/<daemon>/<name>` — the guardian's
+#: `data-tripped.json` (present only while the data-trip hold is armed),
+#: `backlog-skipped.json`, `tripwire-excused.jsonl`. Cites to those files are not
+#: documents that went missing; they are a mechanism's current state, and they flap.
+
+
+def _state_root(home: Path) -> Path:
+    """The daemon runtime-state root for a home the scan was given.
+
+    Derived from `home`, never listed: the exemption is keyed on the root the caller
+    handed the sweep, so a fixture home is measured against a fixture root and a new
+    daemon directory needs no edit here. `--state` overrides it the way `--data`
+    overrides the data root.
+    """
+    return home / ".local" / "state"
+
+
+def _existence_gated_state_path(target: str, citing: Path, *, vault: Path, repo: Path,
+                                home: Path, data: Path | None = None,
+                                state: Path | None = None) -> str | None:
+    """Why this missing cite is a daemon's transient state file; `None` if it is not.
+
+    Three conditions, and the third is what keeps the guard its teeth. The candidate
+    path is genuinely absent (a `path.json:9999` cite against a file that IS there is
+    line drift a reader can still repair, and stays dangling); it is an immediate
+    child of a directory that is itself an immediate child of the state root, exactly
+    one level, so `<state>/lloyd-guardian/bin/helper.py` and an ordinary source path
+    are not in the class; and that daemon directory is present on disk. A daemon
+    directory that has itself vanished is not one of its files flapping — the whole
+    state tree for that daemon is gone, which is a loss to chase, for the same reason
+    the swept arm refuses a cite whose parent directory is past.
+    """
+    state = state or _state_root(home)
+    data = data or home / "lloyd-data"
+    for _, path in _candidates(target, citing, vault=vault, repo=repo, home=home,
+                               data=data):
+        if path.exists():
+            continue
+        try:
+            rel = path.relative_to(state)
+        except ValueError:
+            continue
+        if len(rel.parts) != 2:
+            continue
+        daemon = path.parent
+        if not daemon.is_dir():
+            continue
+        return (f"existence-gated state path: {daemon} is a daemon's runtime state "
+                f"directory, present on disk, and {rel.parts[1]} is a file it writes "
+                f"while a condition holds and deletes when the condition stops — the "
+                f"cite resolves on some runs and not on others, which is a state "
+                f"transition and not a moved file for someone to re-point")
+    return None
+
+
 def extract_target(span: str) -> tuple[str, int | None] | None:
     """The (path, line) a backticked span cites, or None when it is not a path."""
     s = span.strip().rstrip(".,;")
@@ -330,7 +400,7 @@ def resolve(target: str, line: int | None, citing: Path, *, vault: Path,
 
 
 def scan_file(rel: str, *, vault: Path, repo: Path, home: Path,
-              data: Path | None = None) -> list[dict]:
+              data: Path | None = None, state: Path | None = None) -> list[dict]:
     citing = vault / rel
     try:
         text = citing.read_text(encoding="utf-8", errors="replace")
@@ -362,18 +432,31 @@ def scan_file(rel: str, *, vault: Path, repo: Path, home: Path,
                     verdict, how = "exempt", f"marker {EXEMPT_MARKER}"
                 elif (m := _ABSENCE_PROSE.search(raw)):
                     verdict, how = "exempt", f"absence prose: {m.group(0)!r}"
+                else:
+                    # Last arm, so the two hand-authored exemptions above keep their
+                    # own reason: a `KNOWN_ABSENT` entry or a per-line marker says
+                    # something more specific about a target than a class rule does
+                    # (#4462).
+                    gated = _existence_gated_state_path(
+                        target, citing, vault=vault, repo=repo, home=home, data=data,
+                        state=state)
+                    if gated:
+                        verdict, how = "exempt", gated
             rec.update(verdict=verdict, how_checked=how)
             out.append(rec)
     return out
 
 
 def scan(*, vault: Path, repo: Path = REPO_ROOT, home: Path | None = None,
-         data: Path | None = None, corpus: tuple[str, ...] = CORPUS) -> list[dict]:
+         data: Path | None = None, state: Path | None = None,
+         corpus: tuple[str, ...] = CORPUS) -> list[dict]:
     home = home or Path.home()
     data = data or home / "lloyd-data"
+    state = state or _state_root(home)
     records: list[dict] = []
     for rel in corpus:
-        records.extend(scan_file(rel, vault=vault, repo=repo, home=home, data=data))
+        records.extend(scan_file(rel, vault=vault, repo=repo, home=home, data=data,
+                                 state=state))
     return records
 
 
@@ -494,13 +577,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--home", type=Path, default=Path.home())
     ap.add_argument("--data", type=Path, default=None,
                     help="runtime data root (default <home>/lloyd-data)")
+    ap.add_argument("--state", type=Path, default=None,
+                    help="daemon runtime-state root, the one tree whose transient "
+                         "state files are exempt (default <home>/.local/state)")
     ap.add_argument("--report", type=Path, help="write the markdown report here")
     ap.add_argument("--json", action="store_true", help="print every record as JSON")
     ap.add_argument("--expect-dangling", action="append", default=[],
                     metavar="TARGET", help="a known-dead cite that must be reported")
     args = ap.parse_args(argv)
 
-    records = scan(vault=args.vault, repo=args.repo, home=args.home, data=args.data)
+    records = scan(vault=args.vault, repo=args.repo, home=args.home, data=args.data,
+                   state=args.state)
     if args.report:
         text = render_report(records, previous_dangling(args.report))
         args.report.parent.mkdir(parents=True, exist_ok=True)

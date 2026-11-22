@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -668,3 +669,267 @@ def test_the_memory_rule_no_longer_cites_the_swept_run_record():
         "the ledger no longer holds the record the rule's evidence came from"
     for field in SWEPT_RUN_FIELDS:
         assert field in ledger_text, f"the ledger does not carry {field!r}"
+
+
+# ─────────────── the existence-gated state-path arm (#4462) ───────────────
+# `memory/mental-models.md:2540` cites `~/.local/state/lloyd-guardian/data-tripped.json`
+# as the MECHANISM that arms the guardian's data-trip hold. That file exists only while
+# the hold is armed — `pause_journal` ids 71 and 73, both 2026-11-19, lasted 33 m 36 s
+# and 64 s — so a sweep that runs while the tripwire is down books the row `dangling`,
+# and no line-level arm of the exempt cascade can ever fire for it, because the citing
+# sentence is not saying the file is gone. #94's ledger therefore re-reported a state
+# transition as a broken cite, and knowledge health report #60 printed
+# `NEWLY DANGLING: 1` for exactly this row on 2026-11-21.
+
+#: The tripwire cite as `memory/mental-models.md:2540` spells it.
+TRIPWIRE = "~/.local/state/lloyd-guardian/data-tripped.json"
+#: A daemon the resolver has never heard of. The class is keyed on the state root the
+#: scan was given, so an unlisted daemon name has to behave exactly like the guardian's.
+UNLISTED = "~/.local/state/lloyd-widget-watchdog/last-scan.json"
+#: One level too deep: a helper inside the daemon's own subdirectory, not an immediate
+#: child of the daemon directory.
+DEEP = "~/.local/state/lloyd-guardian/bin/helper.py"
+#: An ordinary source path outside the state root — the moved module the sweep exists to
+#: catch, which is why this class has to stay exactly one level wide.
+MOVED = "scripts/maintenance/gone_module.py"
+
+
+def _state_memory(abs_cite: str) -> str:
+    """The corpus, five cites, no line containing a token `_ABSENCE_PROSE` matches.
+
+    That last part is the fixture's whole point: the row under test is exempt because of
+    the class rule, and a sentence that let the prose arm fire would turn the node green
+    for the wrong reason. `test_the_citing_line_still_defies_the_absence_prose_arm`
+    re-checks it, so widening that vocabulary cannot silently vacuate these nodes.
+    """
+    return "\n".join([
+        "# Memory",
+        "",
+        f"- the data-trip hold is armed by a marker the handler writes and clears: "
+        f"`{TRIPWIRE}`.",
+        f"- another daemon records its last pass the same way: `{UNLISTED}`.",
+        f"- the same tree spelled as an absolute path: `{abs_cite}`.",
+        f"- a helper the daemon's own installer drops under bin: `{DEEP}`.",
+        f"- the resolver used to be `{MOVED}`.",
+        "",
+    ])
+
+
+@pytest.fixture
+def state_world(tmp_path):
+    """Every daemon IDLE: each state directory present with its standing files, each
+    cited transient marker absent — the state `ls -la ~/.local/state/lloyd-guardian/`
+    shows when the data-trip hold is not armed, which is the condition the acceptance
+    check is measured under.
+    """
+    vault, repo, home = tmp_path / "vault", tmp_path / "repo", tmp_path / "home"
+    state = home / ".local" / "state"
+    for daemon in ("lloyd-guardian", "lloyd-widget-watchdog", "lloyd-sec-eval"):
+        (state / daemon).mkdir(parents=True)
+        (state / daemon / "heartbeat.json").write_text("{}\n", encoding="utf-8")
+    (state / "lloyd-guardian" / "bin").mkdir(parents=True)
+    abs_cite = str(state / "lloyd-sec-eval" / "scan-state.json")
+    files = {
+        "lloyd/MEMORY.md": _state_memory(abs_cite),
+        "lloyd/USER.md": "# User\n\n- nothing cited here.\n",
+        "memory/mental-models.md": "\n- nothing cited here either.\n",
+    }
+    for rel, text in files.items():
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(text, encoding="utf-8")
+    # Keys starting with `_` are the node's handles, not `scan` parameters.
+    return {"vault": vault, "repo": repo, "home": home,
+            "_state": state, "_abs_cite": abs_cite}
+
+
+def _state_scan(world, **kw):
+    args = {k: v for k, v in world.items() if not k.startswith("_")}
+    return ri.scan(**args, **kw)
+
+
+def _state_by_target(world, **kw):
+    return {r["target"]: r for r in _state_scan(world, **kw)}
+
+
+def _state_args(world, *, state: Path | None = None) -> list[str]:
+    """The CLI arguments for one run, so a node can cross the argparse seam with the
+    same roots its `scan` call used. `--state` is how a caller hands the sweep a state
+    root, exactly as `--data` hands it a data root.
+    """
+    out = ["--vault", str(world["vault"]), "--repo", str(world["repo"]),
+           "--home", str(world["home"])]
+    if state is not None:
+        out += ["--state", str(state)]
+    return out
+
+
+def _report_sections(report: str) -> dict[str, str]:
+    """Split a rendered report into its `## ` sections. A row's bytes are identical in
+    the Dangling and the Exempt list, so "which list" is the only thing worth asserting
+    and grepping the whole file cannot answer it.
+    """
+    out: dict[str, str] = {}
+    name = None
+    for line in report.splitlines():
+        if line.startswith("## "):
+            name = line.strip()
+            out.setdefault(name, "")
+        elif name is not None:
+            out[name] += line + "\n"
+    return out
+
+
+def test_the_citing_line_still_defies_the_absence_prose_arm(state_world):
+    """The premise of the whole item, pinned: no line-level rule can exempt this row.
+
+    #4462 is filed because the cite is structurally unexemptable, and the fixture is
+    meant to reproduce that. If the fixture's sentence ever starts matching
+    `_ABSENCE_PROSE`, every node below passes for the wrong reason, so this is the
+    vacuity guard for the section, not a fifth opinion about the verdict.
+    """
+    memory = (state_world["vault"] / "lloyd" / "MEMORY.md").read_text(encoding="utf-8")
+    lines = [ln for ln in memory.splitlines() if f"`{TRIPWIRE}`" in ln]
+    assert len(lines) == 1, lines
+    assert ri._ABSENCE_PROSE.search(lines[0]) is None, \
+        f"the fixture line now matches the prose arm, so the class rule is ungraded: {lines[0]}"
+    assert ri.EXEMPT_MARKER not in lines[0]
+
+
+def test_an_absent_daemon_state_file_is_exempt_as_an_existence_gated_state_path(state_world):
+    """Clause 1 of #4462: the tripwire is down, the cite is a mechanism, and the row is
+    exempt for a reason that names the class.
+
+    The reason has to carry the surviving daemon directory, because that directory is
+    the evidence: a daemon that is running and not holding one marker is a different
+    fact from a file that moved, and a reader who cannot re-check which of the two the
+    sweep saw has been handed a new claim with no way to test it.
+    """
+    got = _state_by_target(state_world)
+    for target in (TRIPWIRE, UNLISTED, state_world["_abs_cite"]):
+        assert got[target]["verdict"] == "exempt", got[target]
+        assert "existence-gated state path" in got[target]["how_checked"], got[target]
+        assert "absence prose" not in got[target]["how_checked"], got[target]
+        daemon = (state_world["home"] / target[2:] if target.startswith("~/")
+                  else Path(target)).parent
+        assert str(daemon) in got[target]["how_checked"], got[target]
+
+
+def test_the_exempt_state_path_row_renders_under_exempt_and_leaves_the_dangling_blob(state_world):
+    """Clause 1's other half: the row moves lists, and leaves the machine block.
+
+    The `ri:dangling` blob is what `previous_dangling` diffs night against night, so
+    staying out of it is what stops a state transition spending the newly-dangling
+    figure that knowledge health report #60 treats as reportable. The moved module is
+    asserted INSIDE the same blob beside the assertion, because an empty blob would
+    make "not in it" green while nothing worked.
+    """
+    report = ri.render_report(_state_scan(state_world), previous=None)
+    sections = _report_sections(report)
+    assert f"`{TRIPWIRE}`" in sections["## Exempt"], sections["## Exempt"]
+    assert "existence-gated state path" in sections["## Exempt"], sections["## Exempt"]
+    assert f"`{TRIPWIRE}`" not in sections["## Dangling"], sections["## Dangling"]
+
+    written = state_world["vault"] / "report.md"
+    written.write_text(report, encoding="utf-8")
+    keys = ri.previous_dangling(written)
+    assert keys is not None, "the rendered report lost the block the delta is diffed on"
+    assert f"lloyd/MEMORY.md -> {TRIPWIRE}" not in keys, keys
+    assert f"lloyd/MEMORY.md -> {MOVED}" in keys, keys
+
+
+def test_the_same_cite_with_the_state_file_present_resolves_and_appears_in_neither_section(state_world):
+    """Clause 2: arming the tripwire changes nothing a reader has to interpret.
+
+    Not Dangling, not Exempt — the cite resolves, which is the only outcome that is the
+    same story whether or not the daemon happened to be tripped at 13:00Z. The other
+    daemon's row is asserted still in the Exempt list so that "absent from Exempt"
+    cannot be satisfied by an empty section.
+    """
+    armed = state_world["home"] / TRIPWIRE[2:]
+    armed.write_text('{"armed_by": "guardian-data-trip", "at": "2026-11-19T01:01:22Z"}\n',
+                     encoding="utf-8")
+    got = _state_by_target(state_world)
+    assert got[TRIPWIRE]["verdict"] == "resolves", got[TRIPWIRE]
+    assert got[TRIPWIRE]["how_checked"].startswith("stat:"), got[TRIPWIRE]
+
+    sections = _report_sections(ri.render_report(_state_scan(state_world), previous=None))
+    for name in ("## Dangling", "## Exempt"):
+        assert f"`{TRIPWIRE}`" not in sections[name], (name, sections[name])
+    assert f"`{UNLISTED}`" in sections["## Exempt"], sections["## Exempt"]
+
+
+def test_a_state_path_one_level_deeper_and_an_ordinary_source_path_stay_dangling(state_world):
+    """Clause 3, the teeth. Two rows the class must not reach, in a run where the class
+    rule demonstrably IS firing: the same scan exempts three cites, so a node that
+    found nothing exempted at all would not be measuring scope.
+    """
+    got = _state_by_target(state_world)
+    exempt = sorted(t for t, r in got.items() if r["verdict"] == "exempt")
+    assert exempt == sorted([TRIPWIRE, UNLISTED, state_world["_abs_cite"]]), exempt
+    for target in (DEEP, MOVED):
+        assert got[target]["verdict"] == "dangling", got[target]
+        assert "existence-gated" not in got[target]["how_checked"], got[target]
+
+
+def test_a_run_whose_only_dangling_cites_are_out_of_class_still_exits_1(state_world, capsys):
+    """Clause 3's exit code. Three cites leave `dangling` for a reason a reader cannot
+    act on; the two that stay are the moved module and a path inside a daemon's own
+    subtree, and the run is red on exactly those. No exit-code behaviour changed here:
+    `main` still returns 1 on any dangling cite (`:526` at filing).
+    """
+    rc = ri.main(_state_args(state_world))
+    out = capsys.readouterr().out
+    assert rc == 1, (rc, out)
+    assert "5 cites, 2 dangling, 3 exempt, 0 swept run records" in out, out
+    dangling = [r["target"] for r in _state_scan(state_world) if r["verdict"] == "dangling"]
+    assert dangling == [DEEP, MOVED], dangling
+
+
+def test_the_class_is_keyed_on_the_state_root_the_scan_was_given(tmp_path, state_world,
+                                                                capsys):
+    """The exemption follows the root, not the spelling and not a list of names.
+
+    Two scans of the SAME corpus bytes. Given a home whose own state tree holds the
+    daemon directory, the cite is exempt — so the rule cannot be a list of paths, and
+    cannot be a pattern on `~/.local/state`, either. Given the first home with its state
+    root pointed somewhere else, the identical cite is dangling again — so the verdict is
+    computed against the root the caller named. The CLI route is asserted with the same
+    two roots because `--state` is how the nightly job would move it.
+    """
+    default = _state_by_target(state_world)
+    assert default[TRIPWIRE]["verdict"] == "exempt", default[TRIPWIRE]
+
+    elsewhere = tmp_path / "other-state"
+    moved = _state_by_target(state_world, state=elsewhere)
+    assert moved[TRIPWIRE]["verdict"] == "dangling", moved[TRIPWIRE]
+    assert moved[state_world["_abs_cite"]]["verdict"] == "dangling", moved
+
+    # The positive direction: a second home, the same cite bytes, a root under it.
+    home_b = tmp_path / "home-b"
+    (home_b / ".local" / "state" / "lloyd-guardian").mkdir(parents=True)
+    world_b = {"vault": state_world["vault"], "repo": state_world["repo"], "home": home_b}
+    assert _state_by_target(world_b)[TRIPWIRE]["verdict"] == "exempt", \
+        "the exemption did not follow a state root that moved with --home"
+
+    # The same two roots across the argparse seam, where the nightly job reaches them.
+    assert ri.main(_state_args(state_world)) == 1
+    assert "5 cites, 2 dangling, 3 exempt, 0 swept run records" in \
+        capsys.readouterr().out
+    assert ri.main(_state_args(state_world, state=elsewhere)) == 1
+    assert "5 cites, 5 dangling, 0 exempt, 0 swept run records" in \
+        capsys.readouterr().out
+
+
+def test_a_daemon_whole_state_directory_is_gone_stays_dangling(state_world):
+    """The precision guard that keeps the class honest, and the reason the arm reads
+    like the swept one: `<state>/lloyd-widget-watchdog/` is itself gone, so there is no
+    daemon here merely not holding a marker — the state tree for that daemon vanished,
+    which is a loss a reader can and should chase.
+    """
+    shutil.rmtree(state_world["_state"] / "lloyd-widget-watchdog")
+    got = _state_by_target(state_world)
+    assert got[UNLISTED]["verdict"] == "dangling", got[UNLISTED]
+    assert "existence-gated" not in got[UNLISTED]["how_checked"], got[UNLISTED]
+    # The guardian's own marker is unaffected: one daemon's wiped root does not
+    # excuse, or condemn, another daemon's flapping file.
+    assert got[TRIPWIRE]["verdict"] == "exempt", got[TRIPWIRE]
