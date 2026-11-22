@@ -65,18 +65,31 @@ def _iso(days_ago: int) -> str:
 _LOSER_FILE = "Idcol/Idcol-usage.md"
 _WINNER_FILE = "Idcol/Idcol-usage.md"
 _TWIN_FILE = "Idcol/Idcol-state.md"        # the id twins that must stay untouched
-_LOSER_TEXT, _WINNER_TEXT = ("The daemon is inactive.", "The daemon is active.")
+# The texts carry a co-named, differently-valued predicate token
+# (`lloyd.daemon false` against `lloyd.daemon true`, `lloyd.indexer disabled`
+# against `lloyd.indexer enabled`) because #4490 put #2078's basis test on the
+# confidence branch: a pair whose only link is the keyword opposition is now
+# withheld and never reaches a write at all. These rows are the same fixture
+# `tests/test_fact_identity_one_action_one_fact.py` writes, and they must stay
+# byte-equal to it — this file drives `apply_action` over a record that points at
+# them.
+_LOSER_TEXT, _WINNER_TEXT = ("The daemon is inactive (lloyd.daemon false).",
+                             "The daemon is active (lloyd.daemon true).")
 _LOSER_ID, _WINNER_ID = "fact-002", "fact-001"
 
 _RECORDS = [
     {"file": "Idcol/Idcol-state.md", "id": "fact-001",
-     "fact": "The indexer is disabled.", "confidence": 0.3, "age_days": 40},
+     "fact": "The indexer is disabled (lloyd.indexer disabled).",
+     "confidence": 0.3, "age_days": 40},
     {"file": "Idcol/Idcol-state.md", "id": "fact-002",
-     "fact": "The indexer is enabled.", "confidence": 0.9, "age_days": 3},
+     "fact": "The indexer is enabled (lloyd.indexer enabled).",
+     "confidence": 0.9, "age_days": 3},
     {"file": "Idcol/Idcol-usage.md", "id": "fact-001",
-     "fact": "The daemon is active.", "confidence": 0.9, "age_days": 40},
+     "fact": "The daemon is active (lloyd.daemon true).",
+     "confidence": 0.9, "age_days": 40},
     {"file": "Idcol/Idcol-usage.md", "id": "fact-002",
-     "fact": "The daemon is inactive.", "confidence": 0.3, "age_days": 3},
+     "fact": "The daemon is inactive (lloyd.daemon false).",
+     "confidence": 0.3, "age_days": 3},
 ]
 
 

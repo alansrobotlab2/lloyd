@@ -1170,21 +1170,60 @@ def test_equal_confidence_contradiction_needs_a_time_order_reason(world):
     assert plan["before_active"] == 2
 
 
+# ── #4490: which node pins which acceptance clause ──────────────────────────
+# 1  test_the_confidence_branch_withholds_a_basis_less_pair_at_a_full_gap
+# 2  test_a_withheld_confidence_pair_is_reported_with_its_trigger_and_basis, and
+#    test_the_equal_confidence_report_is_unchanged_by_the_confidence_arm for the
+#    clause's "the existing equal-confidence entries are unchanged" half
+# 3  the node below, plus test_the_confidence_basis_is_a_shared_identifier_valued_differently
+# 4  test_the_write_seam_refuses_a_confidence_record_with_no_basis, and
+#    test_the_write_seam_writes_a_confidence_record_that_has_a_basis for the arm
+#    that must still write
+# 5  test_a_floor_lineage_or_attribution_decline_is_not_a_withheld_basis
+# All six live in this file; the three withhold/seam nodes fail at the item's
+# base commit and pass on the change.
+
 def test_unequal_confidence_is_planned_as_the_confidence_class(world):
-    """A low-confidence claim contradicted by a high-confidence one is a
+    """#4490 clause 3: the confidence class STILL fires where the basis exists —
+    two facts in different source documents, 0.9 against 0.4, co-naming
+    `lloyd.voices` and valuing it `enabled` against `disabled`, plan exactly one
+    action with `kind: "confidence"`.
+
+    A low-confidence claim contradicted by a high-confidence one is a
     separate evidence class: the loser is the weak one regardless of which was
-    written first."""
+    written first — PROVIDED the gap has a basis under it.
+
+    Refactored for that clause. This fixture used to be "ASR wake word detection
+    is working end to end." (0.95) against "ASR wake word detection is broken."
+    (0.4): `_predicate_tokens` returns the empty set for BOTH texts, so #2078's
+    basis question has nothing to answer and the pair is now a withheld keyword
+    opposition — which is exactly what #4490 intends, so the class had to be
+    pinned with a pair that has a basis rather than with one that does not. The
+    survivor below is the known-good shape already used elsewhere in this file:
+    two rows in different source documents co-naming `lloyd.voices` and valuing
+    it `enabled` against `disabled`, the 0.9 against 0.4 pair #4490 names as the
+    clause-3 witness. The detector classifies it (`opposing_terms:enabled/disabled`),
+    so it arrives here through the same gate the bare pair used to.
+    """
     facts_root, st, _ = world
     _write_facts(facts_root, "ASR", "state", [
-        {"fact": "ASR wake word detection is working end to end.",
-         "created_at": _days_ago(2), "confidence": 0.95},
-        {"fact": "ASR wake word detection is broken.",
-         "created_at": _days_ago(4), "confidence": 0.4},
+        {"fact": "ASR wake word detection is working end to end (lloyd.voices enabled).",
+         "created_at": _days_ago(2), "confidence": 0.9, "source_doc": "asr.md"},
+        {"fact": "ASR wake word detection is broken (lloyd.voices disabled).",
+         "created_at": _days_ago(4), "confidence": 0.4, "source_doc": "wake.md"},
     ])
     _reindex(st, facts_root)
-    action = fi.plan_entity("ASR")["actions"][0]
+    plan = fi.plan_entity("ASR")
+    # EXACTLY one action, which is what the clause claims — not merely a
+    # non-empty list. These two rows are the entity's only pair, so a second
+    # entry could only be a duplicate of this one.
+    assert len(plan["actions"]) == 1, plan["actions"]
+    assert plan["keyword_only_flags"] == [], \
+        "a pair that co-names a differently-valued predicate was withheld"
+    action = plan["actions"][0]
     assert action["kind"] == "confidence"
     assert action["loser_fact"].startswith("ASR wake word detection is broken")
+    assert action["reason"].startswith("opposing_terms:enabled/disabled;"), action["reason"]
 
 
 def test_one_action_cannot_touch_a_fact_it_did_not_condemn(world):
@@ -3415,13 +3454,326 @@ def test_the_run_record_reports_the_flagged_pairs_beside_the_pair_count(world):
     assert len(on_disk["keyword_only_flags"]) == 1, on_disk["keyword_only_flags"]
 
 
+# ── 2f. #4490: the confidence branch asks the SAME basis question ────────────
+#
+# #2078 put the identifier-shaped-predicate basis on the equal-confidence branch
+# and left the confidence branch gating on the gap, `shared_lineage` and
+# `_unattributed_winner` alone — all three of them properties of the two NUMBERS
+# and of where the rows came from, none of them asking whether the two rows are
+# about one named thing. The witness is the 2026-11-21 dry run
+# (`_pipeline/improvement/20261121-220045-dryrun.json`, git_head 91ce4b04): entity
+# `Anomaly Detection`, 22 facts scanned, 17 contradiction pairs, 3 lineage pairs,
+# and the ONLY planned action of the whole 40-entity run —
+#
+#   stat-017  conf 0.85  created 2026-11-01  projects/lloyd/channel-eval/ai-engineer.md
+#     "Anomaly detection flags structural deviations like skipped or late steps in
+#      runs reporting success."
+#   stat-001  conf 0.95  created 2026-09-23  knowledge/ai/streaming-mcp-real-time-
+#      agent-monitoring.md
+#     "Anomaly detection in Streaming MCP uses a 30% failure threshold in a
+#      100-event sliding window."
+#
+# A gap of exactly `MIN_CONFIDENCE_GAP`, two different subsystems, two different
+# documents, and both sentences true at once — the only link is the words
+# success/failure, which is the same false-witness class #2078 was filed from.
+# `_shared_predicate` of those two texts is None. `shared_lineage` could not veto
+# it precisely BECAUSE the rows came from different documents, so the veto admitted
+# the cross-subsystem coincidence and spent itself on the same-document
+# re-extractions (830 of 873 pairs that run). And `stat-017` was the newest of ten
+# corroborated copies of one claim, so the expiry removed a corroborated claim's
+# latest copy in favour of another system's threshold.
+#
+# A guard on only one of two surfaces is not a guard, and this class had TWO open
+# surfaces: the planner's confidence branch, and the write seam, which ended its
+# basis call with `if not is_confidence else None`. The five nodes below pin the
+# item's five acceptance clauses — the withhold (clause 1), the report (2), the
+# class still firing on a real basis (3), the seam (4), and one decline counted
+# under one cause only (5).
+
+_ANOM_WINNER = ("Anomaly detection in Streaming MCP uses a 30% failure threshold "
+                "in a 100-event sliding window.")
+_ANOM_LOSER = ("Anomaly detection flags structural deviations like skipped or late "
+               "steps in runs reporting success.")
+_ANOM_WINNER_SOURCE = ("knowledge/ai/streaming-mcp-real-time-agent-monitoring.md")
+_ANOM_LOSER_SOURCE = "projects/lloyd/channel-eval/ai-engineer.md"
+
+
+def _anomaly_detection(facts_root):
+    """The item's witness pair, verbatim, at the confidences and ages it names."""
+    _write_facts(facts_root, "Anomaly Detection", "state", [
+        {"fact": _ANOM_WINNER, "created_at": _days_ago(59), "confidence": 0.95,
+         "source_doc": _ANOM_WINNER_SOURCE},
+        {"fact": _ANOM_LOSER, "created_at": _days_ago(20), "confidence": 0.85,
+         "source_doc": _ANOM_LOSER_SOURCE},
+    ])
+
+
+def test_the_confidence_branch_withholds_a_basis_less_pair_at_a_full_gap(world):
+    """Clause 1: `plan_entity` yields no action of ANY kind for the item's
+    opposing-terms pair — 0.85 against 0.95, a gap of exactly
+    `MIN_CONFIDENCE_GAP`, no identifier-shaped predicate token that both facts
+    value differently.
+
+    Every guard the branch had before this change still passes: the gap clears the
+    floor, the two `source_doc`s differ so `shared_lineage` (#1941) cannot veto,
+    and the winner carries a `source_doc` so `_unattributed_winner` (#1348) cannot
+    veto. Before #4490 those three passes WERE the whole decision, and the plan
+    contained one action; the dry run's `actions_planned` for this entity was 1,
+    and it was the only planned action of that run.
+
+    Asserted through `apply=True` as well as in plan mode: a withheld pair that
+    plans nothing but still gets written by the caller is the same defect one seam
+    over, and `_active` is the read that cannot be argued with."""
+    from agent_mcp import facts as facts_mod
+    from agent_mcp.fact_improvement import MIN_CONFIDENCE_GAP, REQUIRE_OPPOSING_TERMS
+    assert REQUIRE_OPPOSING_TERMS is True, \
+        "with the screen off the detector's own pairing no longer implies any opposition"
+    assert facts_mod._opposing_reason(_ANOM_LOSER.lower(), _ANOM_WINNER.lower()) == \
+        "opposing_terms:success/failure"
+    assert fi._shared_predicate(_ANOM_LOSER, _ANOM_WINNER, "Anomaly Detection") is None
+    assert round(0.95 - 0.85, 10) == pytest.approx(MIN_CONFIDENCE_GAP), \
+        "the witness is a gap of exactly the floor, not above it"
+    facts_root, st, _ = world
+    _anomaly_detection(facts_root)
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Anomaly Detection")
+    assert plan["contradictions"] >= 1, plan
+    assert plan["actions"] == [], plan
+    plan_rec = fi.run_improvement(entities=["Anomaly Detection"])
+    assert plan_rec["actions_planned"] == 0, plan_rec["per_entity"]
+    assert plan_rec["actions_taken"] == 0, plan_rec
+    applied = fi.run_improvement(apply=True, entities=["Anomaly Detection"])
+    assert applied["actions_planned"] == 0 and applied["actions_taken"] == 0, applied
+    assert applied["before_active"] == applied["after_active"] == 2, applied
+    assert _active(st, "Anomaly Detection") == 2, "an unplanned expiry reached the facts"
+
+
+def test_a_withheld_confidence_pair_is_reported_with_its_trigger_and_basis(world):
+    """Clause 2: the withheld pair is in the entity's withhold report and in the
+    run record's aggregate, carrying its `opposing_terms:success/failure` trigger
+    and a basis sentence naming why nothing stood under the confidence gap.
+
+    `_keyword_only_age_flags` used to open with `if conf1 != conf2: continue`, so
+    this class could never be named by the one report whose job is to name
+    withheld expiries — the record showed `actions_planned: 1` and
+    `keyword_only_flags: []` for the same entity, which reads as a night with
+    nothing questionable in it.
+
+    The entry names the low-confidence and high-confidence rows, NOT
+    `older_fact`/`newer_fact`: `stat-017` is the NEWER row of this pair and the
+    LOWER of its confidences, so writing it into `older_fact` would publish a
+    falsehood about its clock — the defect #2310 clause 4 exists to prevent. And
+    the reporter is called directly on the pair it ships, so the flag cannot be
+    assembled by the plan that counts it."""
+    from agent_mcp.fact_improvement import _keyword_only_age_flags
+    facts_root, st, _ = world
+    _anomaly_detection(facts_root)
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Anomaly Detection")
+    assert plan["actions"] == [], plan
+    assert len(plan["keyword_only_flags"]) == 1, plan["keyword_only_flags"]
+    flag = plan["keyword_only_flags"][0]
+    assert flag["entity"] == "Anomaly Detection", flag
+    assert flag["trigger"] == "opposing_terms:success/failure", flag
+    assert "opposing_terms keyword plus a confidence gap only" in flag["basis"], flag
+    assert ("neither fact names an identifier-shaped predicate token the other "
+            "also names") in flag["basis"], flag
+    assert flag["lower_confidence_fact"] == _ANOM_LOSER, flag
+    assert flag["lower_confidence"] == 0.85, flag
+    assert flag["higher_confidence_fact"] == _ANOM_WINNER, flag
+    assert flag["higher_confidence"] == 0.95, flag
+    assert "older_fact" not in flag and "newer_fact" not in flag, flag
+
+    # Same function, shipped form, the pair assembled the way the detector ships
+    # it: the reporter's output IS the plan's entry, not a parallel account.
+    pair = {"fact1": {"fact": _ANOM_LOSER, "confidence": 0.85,
+                      "created_at": _days_ago(20), "source_doc": _ANOM_LOSER_SOURCE},
+            "fact2": {"fact": _ANOM_WINNER, "confidence": 0.95,
+                      "created_at": _days_ago(59), "source_doc": _ANOM_WINNER_SOURCE},
+            "reason": "opposing_terms:success/failure"}
+    assert _keyword_only_age_flags("Anomaly Detection", [pair]) == [flag]
+
+    rec = fi.run_improvement(entities=["Anomaly Detection"])
+    assert rec["actions_planned"] == 0, rec
+    assert [f["entity"] for f in rec["keyword_only_flags"]] == ["Anomaly Detection"], \
+        rec["keyword_only_flags"]
+    assert [f["trigger"] for f in rec["keyword_only_flags"]] == \
+        ["opposing_terms:success/failure"], rec["keyword_only_flags"]
+    assert rec["per_entity"][0]["keyword_only_flags"] == [flag], rec["per_entity"][0]
+    assert _persisted_record(rec)["keyword_only_flags"] == [flag]
+
+
+def test_the_equal_confidence_report_is_unchanged_by_the_confidence_arm(world):
+    """Clause 2's other half: the equal-confidence entries in that report are
+    unchanged — same keys, same `older_fact`/`newer_fact` naming, same byte-for-
+    byte `basis` sentence.
+
+    The withhold reporter's first filter used to be `confidence1 != confidence2 →
+    skip`, so every entry it ever shipped came from the age branch; relaxing that
+    filter may only ADD entries, never re-word or re-key an existing one. This
+    runs the shipped age fixture through both the plan and the reporter."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "TTS", "event", [
+        {"fact": _LIVE_TTS_OLDER, "created_at": _days_ago(3.4), "confidence": 0.95},
+        {"fact": _LIVE_TTS_NEWER, "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("TTS")
+    assert plan["actions"] == [], plan
+    assert len(plan["keyword_only_flags"]) == 1, plan["keyword_only_flags"]
+    flag = plan["keyword_only_flags"][0]
+    assert flag["trigger"] == "opposing_terms:success/failure", flag
+    assert flag["older_fact"] == _LIVE_TTS_OLDER, flag
+    assert flag["newer_fact"] == _LIVE_TTS_NEWER, flag
+    assert flag["basis"] == ("opposing_terms keyword plus created_at order only; "
+                             "neither fact names an identifier-shaped predicate "
+                             "token the other also names"), flag
+    assert "lower_confidence_fact" not in flag and "higher_confidence_fact" not in flag, flag
+    assert flag["older_created_at"] and flag["newer_created_at"], flag
+
+
+def test_the_write_seam_refuses_a_confidence_record_with_no_basis(world):
+    """Clause 4, the surface: a `kind: "confidence"` record whose only basis is the
+    gap is refused by the write seam, exactly as a `superseded` record is.
+
+    Until #4490 the seam's basis call ended `if not is_confidence else None`, so
+    this record wrote — the planner's guard could be bypassed by whoever assembled
+    the dict, which is the shape of a record written by an older revision and
+    hand-applied later. The pair here is the item's own `Anomaly Detection`
+    witness, both rows on disk, at the confidences the dry run recorded: the
+    planner declines it (the clause-1 node above), so the ONLY route from those
+    two rows to an `invalid_at` mark is this seam. The same shape was open for
+    #2078, #2310, #2366 and #1941 — every one of them a superseded-basis round
+    that left the confidence kind passing straight through.
+
+    A `skipped` refusal, not an error — the caller's loop reads a skip as "took
+    none of these", and the #1255 invariant (a reported count equals the marks it
+    wrote) is what that reading rests on."""
+    facts_root, st, _ = world
+    _anomaly_detection(facts_root)
+    _reindex(st, facts_root)
+    assert fi.plan_entity("Anomaly Detection")["actions"] == [], \
+        "the pair must still be unactionable, or the seam below is not the only guard"
+    hand_built = {
+        "entity": "Anomaly Detection", "category": "state", "kind": "confidence",
+        "loser_fact": _ANOM_LOSER, "loser_id": "stat-002",
+        "loser_confidence": 0.85, "winner_confidence": 0.95,
+        "winner_fact": _ANOM_WINNER, "winner_id": "stat-001",
+        "loser_source_file": "Anomaly Detection/Anomaly Detection-state.md",
+        "winner_source_file": "Anomaly Detection/Anomaly Detection-state.md",
+        "reason": "opposing_terms:success/failure; confidence 0.85 < 0.95",
+    }
+    state_file = facts_root / "Anomaly Detection" / "Anomaly Detection-state.md"
+    before = state_file.read_text(encoding="utf-8")
+    assert "invalid_at: null" in before, before
+    result = fi.apply_action(hand_built, _days_ago(0))
+    assert result["expired_count"] == 0, result
+    assert "confidence basis" in result["skipped"], result
+    assert "keyword opposition" in result["skipped"], result
+    assert "no predicate token named by both facts" in result["skipped"], result
+    assert result["traces_written"] == 0, result
+    assert state_file.read_text(encoding="utf-8") == before, \
+        "the seam wrote a gap-only confidence record"
+    assert _active(st, "Anomaly Detection") == 2, result
+
+
+def test_the_write_seam_writes_a_confidence_record_that_has_a_basis(world):
+    """Clause 4's other arm, so the seam above is not a second refusal that reads
+    as a guard: on the same tree, with the same `kind`, the same files and the
+    same two confidences, an action whose facts DO co-name one identifier-shaped
+    predicate token and value it differently is written.
+
+    The ONLY difference between this node and the refusal above is the wording
+    inside the parentheses, and the test below reaches the writer through this
+    planner rather than by hand — so the seam and the planner agree in both
+    directions, which is what "all three surfaces ask exactly that one question"
+    has to mean before it can be said again."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Indexer", "state", [
+        {"fact": "The indexer is disabled (lloyd.indexer disabled).",
+         "created_at": _days_ago(30), "confidence": 0.4, "source_doc": "a.md"},
+        {"fact": "The indexer is enabled (lloyd.indexer enabled).",
+         "created_at": _days_ago(3), "confidence": 0.9, "source_doc": "b.md"},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Indexer")
+    assert len(plan["actions"]) == 1, plan
+    assert plan["actions"][0]["kind"] == "confidence", plan
+    assert plan["keyword_only_flags"] == [], plan
+    assert _active(st, "Indexer") == 2
+    result = fi.apply_action(plan["actions"][0], _days_ago(0))
+    assert result["expired_count"] == 1, result
+    assert _active(st, "Indexer") == 1, "a confidence action with a basis did not write"
+
+
+def test_a_floor_lineage_or_attribution_decline_is_not_a_withheld_basis(world):
+    """Clause 5: one decline, one cause. A pair declined for a sub-floor gap, a
+    `shared_lineage` pair, and an `_unattributed_winner` pair each produce no
+    action AND are not added to the withhold report.
+
+    Each fixture below is deliberately basis-less — no token, or a token with no
+    value on either side — so were the withhold reporter to sweep up every
+    unequal-confidence pair it sees, it would report all three and the same
+    decline would be counted twice, once under its real cause and once under the
+    basis. The withhold arm is LAST in the planner's order and mirrored in the
+    reporter's, and these are the three refusals that come before it.
+
+    The three entities go in one run so the aggregate is tested too: a per-entity
+    empty list that reappears as a populated run-level list would be the same bug
+    at the other end."""
+    facts_root, st, _ = world
+    # (a) the floor. 0.9 against 0.85 is a 0.05 gap, under MIN_CONFIDENCE_GAP.
+    _write_facts(facts_root, "Subfloor", "state", [
+        {"fact": "The gate is enabled.", "created_at": _days_ago(20), "confidence": 0.9},
+        {"fact": "The gate is disabled.", "created_at": _days_ago(10), "confidence": 0.85},
+    ])
+    # (b) shared lineage, at exactly the floor, from one document and one moment —
+    # the item's point that the veto's ABSENCE admits the cross-subsystem pair, so
+    # where it is present it stays the cause of the decline.
+    _write_facts(facts_root, "Lineageonly", "state", [
+        {"fact": "QMD reranking is working.", "source_doc": "one.md",
+         "created_at": _days_ago(40), "confidence": 0.85},
+        {"fact": "QMD reranking is broken.", "source_doc": "one.md",
+         "created_at": _days_ago(40), "confidence": 0.95},
+    ])
+    # (c) the unattributed winner — the #1348 shape, `OMIT` on both evidence
+    # fields of the 1.0 row, which is the only way this fixture can write the
+    # keyless row the live corpus is mostly made of.
+    _write_facts(facts_root, "Attributed", "state", [
+        {"fact": "QMD reranking is working.", "confidence": 1.0,
+         "created_at": OMIT, "source_doc": OMIT},
+        {"fact": "QMD reranking is broken.", "created_at": _days_ago(2),
+         "confidence": 0.7},
+    ])
+    _reindex(st, facts_root)
+    for entity in ("Subfloor", "Lineageonly", "Attributed"):
+        plan = fi.plan_entity(entity)
+        assert plan["contradictions"] >= 1, plan
+        assert plan["actions"] == [], (entity, plan["actions"])
+        assert plan["keyword_only_flags"] == [], (
+            entity, "one decline counted under two causes", plan["keyword_only_flags"])
+    rec = fi.run_improvement()
+    assert rec["actions_planned"] == 0 and rec["actions_taken"] == 0, rec
+    assert rec["keyword_only_flags"] == [], rec["keyword_only_flags"]
+    assert _active(st, "Subfloor") == 2 and _active(st, "Lineageonly") == 2 \
+        and _active(st, "Attributed") == 2
+
+
 def test_the_opposing_terms_screen_still_classifies_and_still_admits_confidence(world):
     """Clause 4: the narrowing is in the branch, not in the screen. The whole-word
     classifier still fires on `enabled` against `disabled`, and the pair it
     classifies still reaches the confidence basis at a gap of 0.3 — and the flag
-    list stays empty for it, because a pair with a confidence basis was never
-    asking the age question. `MIN_CONFIDENCE_GAP` is #701's, and the confidence
-    nodes above and beside this one are that floor's own guards."""
+    list stays empty for it because this pair ANSWERS the basis question: the two
+    rows co-name `lloyd.gate.autoupdate` and value it `enabled` against `disabled`.
+
+    That token is not decoration. This node used to run on the bare pair and call
+    the empty flag list "a pair with a confidence basis was never asking the age
+    question", which #4490 showed was a rationalisation — the age branch was not
+    the only branch with a basis, and a bare keyword pair at a 0.3 gap is now
+    withheld and REPORTED. The classifier assertions below stay on the bare
+    strings, because they are about the screen; the fixture carries the value
+    words, because it is about the basis. `MIN_CONFIDENCE_GAP` is #701's, and the
+    confidence nodes above and beside this one are that floor's own guards."""
     from agent_mcp import facts as facts_mod
     from agent_mcp.fact_improvement import REQUIRE_OPPOSING_TERMS
     assert REQUIRE_OPPOSING_TERMS is True
@@ -3431,14 +3783,17 @@ def test_the_opposing_terms_screen_still_classifies_and_still_admits_confidence(
         "A redeployed container.", "He re-enabled the sync.") is None
     facts_root, st, _ = world
     _write_facts(facts_root, "Gate", "state", [
-        {"fact": "The gate is enabled.", "created_at": _days_ago(30), "confidence": 0.9},
-        {"fact": "The gate is disabled.", "created_at": _days_ago(2), "confidence": 0.6},
+        {"fact": "The gate is enabled (lloyd.gate.autoupdate enabled).",
+         "created_at": _days_ago(30), "confidence": 0.9},
+        {"fact": "The gate is disabled (lloyd.gate.autoupdate disabled).",
+         "created_at": _days_ago(2), "confidence": 0.6},
     ])
     _reindex(st, facts_root)
     plan = fi.plan_entity("Gate")
     assert len(plan["actions"]) == 1, plan
     assert plan["actions"][0]["kind"] == "confidence", plan
-    assert plan["actions"][0]["loser_fact"] == "The gate is disabled.", plan
+    assert plan["actions"][0]["loser_fact"] == \
+        "The gate is disabled (lloyd.gate.autoupdate disabled).", plan
     assert plan["keyword_only_flags"] == [], plan
 
 
@@ -3498,9 +3853,16 @@ def test_every_admitted_action_names_the_opposing_pair_that_admitted_it(world):
     became the classification the reason names. Two actions, two different
     classifications, which is what this node is about."""
     facts_root, st, _ = world
+    # `lloyd.gate.autoupdate` valued `enabled` against `disabled`: the confidence
+    # pair needs a basis to be planned at all since #4490, and these value words
+    # are the same words the prose already carries, so the classification this
+    # node is about stays `enabled/disabled` — the pair's own trigger, not a
+    # second keyword the fixture had to invent.
     _write_facts(facts_root, "Trig", "state", [
-        {"fact": "The gate is enabled.", "confidence": 0.9, "created_at": _days_ago(2)},
-        {"fact": "The gate is disabled.", "confidence": 0.3, "created_at": _days_ago(30)},
+        {"fact": "The gate is enabled (lloyd.gate.autoupdate enabled).",
+         "confidence": 0.9, "created_at": _days_ago(2)},
+        {"fact": "The gate is disabled (lloyd.gate.autoupdate disabled).",
+         "confidence": 0.3, "created_at": _days_ago(30)},
     ])
     _write_facts(facts_root, "Trig", "usage", [
         {"fact": "The build is working (build.lloyd.ci true).", "confidence": 0.9, "created_at": _days_ago(30)},
@@ -3513,7 +3875,8 @@ def test_every_admitted_action_names_the_opposing_pair_that_admitted_it(world):
     assert sorted(by_kind) == ["confidence", "superseded"], by_kind
     assert by_kind["confidence"]["reason"].startswith(
         "opposing_terms:enabled/disabled;"), by_kind["confidence"]["reason"]
-    assert by_kind["confidence"]["loser_fact"] == "The gate is disabled."
+    assert by_kind["confidence"]["loser_fact"] == \
+        "The gate is disabled (lloyd.gate.autoupdate disabled)."
     assert by_kind["superseded"]["reason"].startswith(
         "opposing_terms:true/false;"), by_kind["superseded"]["reason"]
 
@@ -3546,13 +3909,30 @@ def test_the_confidence_floor_admits_a_gap_of_exactly_its_value(world):
     """The floor is `gap >= MIN_CONFIDENCE_GAP`, not `>`. The 2026-09-15
     working/broken hit had 0.9 against 1.0 — exactly the floor — so it stays
     admissible, and that is deliberate: whether it should be is the scope
-    ruling on the item, which no threshold answers."""
+    ruling on the item, which no threshold answers.
+
+    `lloyd.alfworld.success_reporting` valued `enabled` against `disabled` is what
+    lets this pair reach the floor at all: since #4490 a pair with no co-named,
+    differently-valued predicate is withheld before the gap is the question, and
+    this node is about the gap's boundary, so its fixture has to be a pair the
+    planner is allowed to consider. The two facts still carry no shared token in
+    their prose — the value words are the whole basis, which is the shape the
+    shipped `_extract_value` recognises.
+
+    Because `_OPPOSING_PAIRS` is matched in list order, those value words are also
+    what the classifier now reports: `enabled/disabled` sits above
+    `success/failure`, so the trigger reads `opposing_terms:enabled/disabled`
+    where this node once asserted `success/failure`. Same pair, same firing, one
+    more pair of opposing words in the text — the precedent is the `Trig` node's
+    note on #2366 doing exactly this to `working/broken`."""
     facts_root, st, _ = world
     _write_facts(facts_root, "Floor", "state", [
-        {"fact": "ALFWorld reached a 43% success rate on the tasks.",
+        {"fact": "ALFWorld reached a 43% success rate on the tasks "
+                 "(lloyd.alfworld.success_reporting enabled).",
          "confidence": 1.0, "created_at": _days_ago(20)},
         {"fact": "ALFWorld task failure is a rate the harness moves, not a "
-                 "property of the model.", "confidence": 0.9, "created_at": _days_ago(10)},
+                 "property of the model (lloyd.alfworld.success_reporting disabled).",
+         "confidence": 0.9, "created_at": _days_ago(10)},
     ])
     _reindex(st, facts_root)
     plan = fi.plan_entity("Floor")
@@ -3560,7 +3940,7 @@ def test_the_confidence_floor_admits_a_gap_of_exactly_its_value(world):
     action = plan["actions"][0]
     assert action["kind"] == "confidence"
     assert action["loser_fact"].startswith("ALFWorld task failure"), action
-    assert action["reason"].startswith("opposing_terms:success/failure;"), action["reason"]
+    assert action["reason"].startswith("opposing_terms:enabled/disabled;"), action["reason"]
 
 
 def test_the_equal_confidence_age_basis_is_unmoved_by_the_floor(world):
@@ -3621,10 +4001,20 @@ def test_the_equal_confidence_age_basis_is_unmoved_by_the_floor(world):
 # only come from attribution, never from the pair failing to pair or from
 # `MIN_CONFIDENCE_GAP` declining the 0.1 gap.
 
+# Both texts carry `lloyd.passk.equivalence` valued `enabled` against `disabled`.
+# The control node below — same texts, both rows attributed, action FIRES — needs
+# a pair the planner is allowed to act on, and since #4490 a pair whose only link
+# is the keyword opposition is withheld on the confidence branch too. The two
+# withhold nodes are declined by attribution, which the planner asks BEFORE the
+# basis, so adding the token moves none of them: the control's whole value is that
+# a 0-action result in the first two can only come from attribution. The value
+# words are `enabled`/`disabled`, which appear nowhere in the prose, so the
+# classification the `reason` names stays the pair's own `success/failure`.
 _PASSK_UNATTRIBUTED = ("The pass@k metric on a deterministic environment is "
-                       "mathematically equivalent to the success rate of a replay agent.")
+                       "mathematically equivalent to the success rate of a replay "
+                       "agent (lloyd.passk.equivalence enabled).")
 _PASSK_LOSER = ("A system can appear strong on pass@k but weak on pass^k, "
-                "revealing variance as a failure mode.")
+                "revealing variance as a failure mode (lloyd.passk.equivalence disabled).")
 _PASSK_LOSER_SOURCE = ("knowledge/youtube/AI_Engineer/20260820-your-agent-evolved-"
                        "your-evals-didnt-ameya-bhatawdekar-braintrust.md")
 
@@ -3674,7 +4064,12 @@ def test_two_unattributed_rows_still_demote_on_confidence_alone(world):
     action = plan["actions"][0]
     assert action["kind"] == "confidence", action
     assert action["loser_fact"] == _PASSK_LOSER, action
-    assert action["reason"].startswith("opposing_terms:success/failure;"), action["reason"]
+    # `enabled/disabled`, not `success/failure`: the value words #4490's basis
+    # requires of the `_PASSK_*` texts sit higher in `_OPPOSING_PAIRS`, so they
+    # are what the whole-word classifier reports. The pair and the basis are the
+    # node's subject; the trigger label is the detector's own, and #701 only asks
+    # that an admitted action NAME its trigger.
+    assert action["reason"].startswith("opposing_terms:enabled/disabled;"), action["reason"]
 
 
 def test_two_attributed_rows_still_demote_on_confidence_alone(world):

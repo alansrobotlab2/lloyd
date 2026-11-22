@@ -115,17 +115,32 @@ def _marked(root: Path) -> list[tuple[str, str, str]]:
 # while usage/fact-001 must survive.
 
 def _colliding_entity(root: Path) -> Path:
+    """The id-colliding pair set, in a shape the improve loop is allowed to act on.
+
+    Each pair co-names ONE identifier-shaped predicate token and VALUES it
+    differently — `lloyd.indexer disabled` against `lloyd.indexer enabled`,
+    `lloyd.daemon false` against `lloyd.daemon true` — which is what #2078's basis
+    requires of a pair, and since #4490 the confidence branch asks that question
+    too. Written without the value words this fixture is a bare keyword opposition,
+    and the loop would plan nothing, leaving the writer below with nothing to aim:
+    this file is about WHICH fact a write marks, and that needs an actionable pair.
+    The value words also become the classification the `reason` names, because
+    `_OPPOSING_PAIRS` is scanned in list order and `true/false` sits above
+    `enabled/disabled` and `active/inactive` — so the daemon pair now reads
+    `opposing_terms:true/false` where it read `active/inactive`. The ids,
+    confidences and ages this file pins are untouched.
+    """
     d = _write(root, "Idcol", "state", [
-        {"fact": "The indexer is disabled.", "confidence": 0.3, "id": "fact-001",
-         "created_at": _iso(40)},
-        {"fact": "The indexer is enabled.", "confidence": 0.9, "id": "fact-002",
-         "created_at": _iso(3)},
+        {"fact": "The indexer is disabled (lloyd.indexer disabled).",
+         "confidence": 0.3, "id": "fact-001", "created_at": _iso(40)},
+        {"fact": "The indexer is enabled (lloyd.indexer enabled).",
+         "confidence": 0.9, "id": "fact-002", "created_at": _iso(3)},
     ]).parent
     _write(root, "Idcol", "usage", [
-        {"fact": "The daemon is active.", "confidence": 0.9, "id": "fact-001",
-         "created_at": _iso(40)},
-        {"fact": "The daemon is inactive.", "confidence": 0.3, "id": "fact-002",
-         "created_at": _iso(3)},
+        {"fact": "The daemon is active (lloyd.daemon true).",
+         "confidence": 0.9, "id": "fact-001", "created_at": _iso(40)},
+        {"fact": "The daemon is inactive (lloyd.daemon false).",
+         "confidence": 0.3, "id": "fact-002", "created_at": _iso(3)},
     ])
     return d
 
@@ -637,11 +652,15 @@ def test_a_near_duplicate_is_counted_once_and_stays_a_subset_of_the_pairs(tree):
     """
     facts_root, st, _vault = tree
     _write(facts_root, "Pairct", "state", [
-        # An opposing-terms pair: the loop acts on this one.
-        {"fact": "The indexer is disabled.", "confidence": 0.3, "id": "stat-001",
-         "created_at": _iso(40)},
-        {"fact": "The indexer is enabled.", "confidence": 0.9, "id": "stat-002",
-         "created_at": _iso(3)},
+        # An opposing-terms pair the loop is allowed to act on: the two rows
+        # co-name `lloyd.indexer` and value it differently, which #4490 now
+        # requires of a confidence pair as well as of an age pair. Without the
+        # value words this is a bare keyword opposition, plans nothing, and the
+        # counts below would pin a withheld pair instead of an acted-on one.
+        {"fact": "The indexer is disabled (lloyd.indexer disabled).",
+         "confidence": 0.3, "id": "stat-001", "created_at": _iso(40)},
+        {"fact": "The indexer is enabled (lloyd.indexer enabled).",
+         "confidence": 0.9, "id": "stat-002", "created_at": _iso(3)},
     ])
     _write(facts_root, "Pairct", "usage", [
         # A 6-of-8-token Jaccard pair, 0.75 > 0.6, with no opposing term in

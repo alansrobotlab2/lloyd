@@ -28,7 +28,19 @@ detector's pairing:
                 (#701), so the 0.9 < 0.95 pair condemns nothing; and a row
                 carrying neither field beating one that carries either is the
                 extractor's default `1.0` beating a sourced claim (#1348), so
-                that pair is reported too, never acted on.
+                that pair is reported too, never acted on. *And the gap is not
+                the whole basis either* (#4490): this branch asks the SAME
+                predicate question the one below asks, because for its first two
+                months it asked only whether the two numbers differed, so a pair
+                whose sole semantic link was an `opposing_terms:<a>/<b>` keyword
+                hit expired a row as soon as its confidences differed by exactly
+                the floor — the 2026-11-21 run's only planned action, a
+                Streaming MCP failure-rate threshold expiring a structural-
+                deviation claim from another document, both can be true, linked
+                only by the words success/failure. Such a pair is now reported in
+                the plan's and the record's `keyword_only_flags` too, never acted
+                on; the field name, and `_keyword_only_age_flags`, both predate
+                the confidence half of what they now report.
                 *Attributable is not the same as independent*, and only one of
                 the two was ever checked: a pair whose sides carry the SAME
                 non-empty `source_doc`, or the same non-empty `source_hash`, is
@@ -1620,7 +1632,12 @@ def _shared_predicate(t1: str, t2: str, entity: str | None = None,
     co-naming with no assertion behind it both fail to count. See
     `_compare_predicates`, which is where all three exclusions live; this is the
     thin read of its result, kept as the module's basis question because the
-    planner, the flag counter and the write seam all ask exactly that one.
+    planner, the flag counter and the write seam all ask exactly that one — which
+    was a sentence about the `created_at` basis alone until #4490 put it on the
+    confidence branch and the confidence arm of the seam as well. Read as a claim
+    about both bases, it is now true; read as it was written, it was the reason the
+    gap-only class survived: a reader who believes the guard is universal does not
+    go looking for the branch that skips it.
 
     ALL surviving tokens are named, sorted and comma-joined. `sorted(shared)[0]`
     reported `anthropic.claude` for a pair that also shared the real field
@@ -1633,21 +1650,43 @@ def _shared_predicate(t1: str, t2: str, entity: str | None = None,
 
 
 def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
-    """Pairs whose ONLY basis for an expiry is keyword opposition plus write order.
+    """Pairs whose ONLY basis for an expiry is a keyword opposition plus one number.
 
-    Reported, never acted on (#2078). A pair is flagged when three things hold:
-    the two rows carry equal confidence (so the confidence branch, with its own
-    floor and vetoes, was never the question), `_loser_by_age` finds an age
-    basis (so this is a pair that WAS about to be expired), and
-    `_compare_predicates` finds nothing left standing as a basis (so the age
-    basis had nothing under it but the trigger string). That third condition has
-    three shapes now, and the flag's `basis` says which, in the words that are
-    true of it: no token named by both facts at all; tokens both facts VALUE the
-    same way (#2310); tokens both facts name but neither, or only one, VALUES
-    (#2366). A pair
-    with no age basis is not flagged: nothing was ever going to happen to it, and
-    calling it a withheld expiry would report a veto that was never exercised —
-    the #1348 lesson about a zero that reads as a clean night.
+    Reported, never acted on (#2078). A pair is flagged when it reached one of the
+    two expiry bases and nothing under that basis was the pair's own wording
+    except the trigger string. Both bases are asked now; until #4490 only one was,
+    and the name of this function and of the record's `keyword_only_flags` field
+    both date from that narrower version:
+
+    * equal confidences → the `created_at` basis. `_loser_by_age` must find an age
+      basis, or nothing was ever going to happen to this pair and calling it a
+      withheld expiry would report a veto that was never exercised — the #1348
+      lesson about a zero that reads as a clean night;
+    * unequal confidences (#4490) → the confidence basis. The pair must have
+      cleared `MIN_CONFIDENCE_GAP`, must not be `shared_lineage`, and must not be
+      an `_unattributed_winner` contest. Those three refusals are replayed HERE, in
+      the planner's OWN order and by the same functions, because each belongs to a
+      different cause: a pair the floor declined is `MIN_CONFIDENCE_GAP`'s answer,
+      one the lineage veto declined is #1941's, one attribution declined is
+      #1348's, and reporting any of them here as a withheld basis would count one
+      decline under two causes. This is also why the `!=` first filter that used to
+      open this loop is gone: it skipped the entire second class, so the class
+      #4490 is about could never be named by the very report whose job is to name
+      withheld expiries.
+
+    Then `_compare_predicates` must find nothing left standing as a basis. That
+    condition has three shapes, and the flag's `basis` says which, in the words
+    that are true of it: no token named by both facts at all; tokens both facts
+    VALUE the same way (#2310); tokens both facts name but neither, or only one,
+    VALUES (#2366).
+
+    The two shapes of entry differ by exactly the fields that name the pair, and
+    that is deliberate: the age basis decides which row is OLDER, so its entry says
+    `older_fact`/`newer_fact`, while the confidence basis decides which row holds
+    the lower number — writing the loser of a confidence pair into `older_fact`
+    would publish a falsehood about its clock, which is the exact defect #2310
+    clause 4 exists to prevent. `Anomaly Detection` `stat-017`, the #4490 witness,
+    is the NEWER of its pair and the LOWER of its confidences.
 
     Computed over every actable pair, not over the action loop, so the figure
     does not depend on `max_actions`: an entity whose first five pairs filled
@@ -1659,13 +1698,26 @@ def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
         f2 = item.get("fact2") or {}
         if not f1.get("fact") or not f2.get("fact"):
             continue
-        # `!=` mirrors the branch below: same test, opposite side of it.
-        if float(f1.get("confidence") or 0.5) != float(f2.get("confidence") or 0.5):
-            continue
-        ordered = _loser_by_age(f1, f2)
-        if ordered is None:
-            continue
-        loser, winner, _ = ordered
+        c1 = float(f1.get("confidence") or 0.5)
+        c2 = float(f2.get("confidence") or 0.5)
+        by_age = c1 == c2                 # the planner's own branch test
+        if by_age:
+            ordered = _loser_by_age(f1, f2)
+            if ordered is None:
+                continue
+            loser, winner, _ = ordered
+            prefix = "opposing_terms keyword plus created_at order only; "
+        else:
+            # Same three refusals, same order, same functions as the planner's
+            # confidence branch — see the list in the docstring.
+            if abs(c1 - c2) + _GAP_TOLERANCE < MIN_CONFIDENCE_GAP:
+                continue
+            if item.get("shared_lineage"):
+                continue
+            loser, winner = (f2, f1) if c1 > c2 else (f1, f2)
+            if _unattributed_winner(winner, loser):
+                continue
+            prefix = "opposing_terms keyword plus a confidence gap only; "
         # `entity` so a token that is the subject itself cannot count as the
         # predicate (#2199). Same argument, same entity, as the planning site
         # below — the two must decline the SAME pairs or the flag list reports a
@@ -1685,19 +1737,26 @@ def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
         withheld = ("; ".join(clauses) if clauses
                     else "neither fact names an identifier-shaped predicate token "
                          "the other also names")
-        flags.append({
-            "entity": entity,
-            "trigger": str(item.get("reason") or "").strip(),
-            "older_fact": loser.get("fact", ""),
-            "older_created_at": loser.get("created_at"),
-            "newer_fact": winner.get("fact", ""),
-            "newer_created_at": winner.get("created_at"),
-            # Byte-identical to the shipped sentence for a pair that shares no
-            # token; names the token and the shared value for a pair declined on
-            # agreement (#2310 clause 4); names the token and WHICH SIDE said
-            # nothing for a pair declined on a valueless co-naming (#2366).
-            "basis": f"opposing_terms keyword plus created_at order only; {withheld}",
-        })
+        flag: dict = {"entity": entity,
+                      "trigger": str(item.get("reason") or "").strip()}
+        if by_age:
+            flag["older_fact"] = loser.get("fact", "")
+            flag["older_created_at"] = loser.get("created_at")
+            flag["newer_fact"] = winner.get("fact", "")
+            flag["newer_created_at"] = winner.get("created_at")
+        else:
+            flag["lower_confidence_fact"] = loser.get("fact", "")
+            flag["lower_confidence"] = loser.get("confidence")
+            flag["higher_confidence_fact"] = winner.get("fact", "")
+            flag["higher_confidence"] = winner.get("confidence")
+        # Byte-identical to the shipped sentence for an age pair that shares no
+        # token; names the token and the shared value for a pair declined on
+        # agreement (#2310 clause 4); names the token and WHICH SIDE said
+        # nothing for a pair declined on a valueless co-naming (#2366). The
+        # prefix says which number was the basis, so an age withhold and a
+        # confidence withhold are told apart without re-reading the two facts.
+        flag["basis"] = prefix + withheld
+        flags.append(flag)
     return flags
 
 
@@ -2350,6 +2409,51 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY,
                 # `contradictions`, exactly as a sub-floor gap does (#701): "no
                 # basis to act" is not a verdict that the pair is agreeable.
                 continue
+            if _shared_predicate(str(loser.get("fact") or ""),
+                                 str(winner.get("fact") or ""), entity) is None:
+                # #4490. The SAME basis question the age branch below asks, on the
+                # branch that never asked it. Everything between here and
+                # `kind = "confidence"` is a property of the two NUMBERS and of
+                # where they came from: the floor, `shared_lineage`,
+                # `_unattributed_winner`. None of it asks whether the two rows are
+                # about ONE NAMED THING, so a pair whose only semantic link is an
+                # `opposing_terms:<a>/<b>` keyword hit reached a planned expiry the
+                # moment its confidences differed by `MIN_CONFIDENCE_GAP`. On the
+                # 2026-11-21 dry run the only planned action of 40 entities was
+                # `Anomaly Detection` `stat-017` ("Anomaly detection flags
+                # structural deviations like skipped or late steps in runs
+                # reporting success.", 0.85, `projects/lloyd/channel-eval/
+                # ai-engineer.md`) expired in favour of `stat-001` ("Anomaly
+                # detection in Streaming MCP uses a 30% failure threshold in a
+                # 100-event sliding window.", 0.95, `knowledge/ai/streaming-mcp-
+                # real-time-agent-monitoring.md`) — a gap of exactly the floor,
+                # between a failure-rate threshold inside Streaming MCP and
+                # structural-deviation flagging on runs that report success. Both
+                # can be true; the only link is the words success/failure.
+                #
+                # `shared_lineage` cannot save this class, and its ABSENCE is what
+                # admits it: the veto fires when the two rows come from one
+                # document, and these two come from different ones — so the veto
+                # structure let the cross-subsystem coincidence through and spent
+                # itself on the same-document re-extractions (830 of 873 pairs that
+                # run). Worse direction: `stat-017` is the newest of ten
+                # corroborated copies of one claim, so the expiry removed a
+                # corroborated claim's latest copy in favour of another system's
+                # threshold.
+                #
+                # A guard on only one of two surfaces is not a guard, and here the
+                # class rule fires twice — planner and flag counter, planner and
+                # write seam — while this module's own sentence at
+                # `_shared_predicate` ("the planner, the flag counter and the write
+                # seam all ask exactly that one") was true only of the `created_at`
+                # basis until this line.
+                #
+                # Last of the four refusals, in the same order as
+                # `_keyword_only_age_flags`' confidence arm, so a pair declined by
+                # the floor, by lineage or by attribution is counted under THAT
+                # cause and never also as a withheld basis (#2078's flag list stays
+                # one cause per pair).
+                continue
             kind = "confidence"
             reason = (f"{trigger}; contradiction detector paired it with "
                       f"{winner.get('fact', '')[:70]!r}; confidence "
@@ -2606,26 +2710,38 @@ def apply_action(action: dict, now_iso: str) -> dict:
     # rule (#2310's same-value exclusion, widened by #2366 to every co-named token
     # without a differing value on both sides), so the seam cannot write a pair the
     # plan would not have planned — whichever of the three refusals it is.
+    # `if not is_confidence else None`, which is how this read until #4490, was the
+    # second open surface of the same class: the planner, the flag counter and this
+    # seam were said to "all ask exactly that one" question, and a `kind:
+    # "confidence"` record skipped the seam's copy of it entirely — so a
+    # hand-assembled or older-revision confidence record wrote unguarded even after
+    # the planner learned to ask. One cause, three surfaces (planner, flag counter,
+    # write seam), and a guard on one of them is not a guard.
     basis = _compare_predicates(
         str(action.get("loser_fact") or ""),
         str(action.get("winner_fact") or ""),
-        str(action.get("entity") or "") or None) if not is_confidence else None
-    if basis is not None and basis.witness is None:
-        # #2078 at the write seam, not only the plan seam. `plan_entity` cannot
-        # produce such an action any more, so this refuses the shapes that reach
-        # a writer without one: a record written by an older revision and
-        # hand-applied later, an action dict assembled by hand, or a plan built
-        # against a tree whose guard was not yet deployed. It reads the two
-        # FACT TEXTS the action itself carries rather than re-planning, so it
-        # asks the same question the planner asked and cannot be talked out of it
-        # by the plan that brought the action here. Fails closed on a missing
-        # `winner_fact`: no second text, no co-naming, no write — and that
-        # sentence, not one naming a co-named token, because with no second text
-        # nothing was ever compared.
+        str(action.get("entity") or "") or None)
+    if basis.witness is None:
+        # #2078 at the write seam, not only the plan seam, and for BOTH kinds since
+        # #4490. `plan_entity` cannot produce such an action any more, so this
+        # refuses the shapes that reach a writer without one: a record written by an
+        # older revision and hand-applied later, an action dict assembled by hand, or
+        # a plan built against a tree whose guard was not yet deployed. It reads the
+        # two FACT TEXTS the action itself carries rather than re-planning, so it
+        # asks the same question the planner asked and cannot be talked out of it by
+        # the plan that brought the action here. Fails closed on a missing
+        # `winner_fact`: no second text, no co-naming, no write — and that sentence,
+        # not one naming a co-named token, because with no second text nothing was
+        # ever compared. For a confidence action that is a tightening beyond the
+        # basis itself: an unattributed view emits no `winner_*` key at all
+        # (#1817), so such a record is now refused here rather than written on the
+        # bare gap. That is the point of the seam — the number is not the basis.
         clauses = _withheld_clauses(basis)
         return {"expired_count": 0,
-                "skipped": ("supersession basis is keyword opposition plus write "
-                            "order only — "
+                "skipped": (("confidence basis is keyword opposition plus a "
+                             "confidence gap only — " if is_confidence else
+                             "supersession basis is keyword opposition plus write "
+                             "order only — ")
                             + ("; ".join(clauses) if clauses
                                else "no predicate token named by both facts")),
                 "field": field, "traces_written": 0, "traces": [], "untraceable": 0}
