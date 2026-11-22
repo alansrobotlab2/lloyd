@@ -176,6 +176,19 @@ REASON_WITNESSED = "disk_witnessed_write_not_in_trace"
 # with a record, and the deviation stays reported all the same, because the trace still shows no
 # write where the task's other runs show one.
 REASON_DECLARED_SKIP = "declared_skip_in_run_report"
+# A missing artifact step the run discharged by writing a DIFFERENT slug in the directory that
+# artifact is learned at, with that file's mtime inside the run's own window. Printed and counted
+# like every other deviation and never filed — the same rule `disk_witnessed_write_not_in_trace`
+# and `declared_skip_in_run_report` follow: the draft is the accusation, the row is the
+# observation. Task 53 is the shape that motivated it. Its task file prescribes
+# `knowledge/stack-updates/YYYY-MM-DD-{source}.md` "for each source with actual changes", so WHICH
+# slug appears on a given night is content the task itself declares, while `normalized_basename`
+# elides only the date stamp and a baseline learned over nights that all moved claude-code cannot
+# know the fourth. A dry run therefore answered `novel`-style "the mandated write is gone" on a
+# night that demonstrably wrote its note, and the drafts that reading produced — #2117, #2288,
+# #2617, #4224, #4517 — were each adjudicated stale by hand. The directory and the window are what
+# keep this from becoming a credit for any write at all: see `sibling_slug_write`.
+REASON_OTHER_SLUG = "artifact_written_under_other_slug"
 ESCALABLE_REASONS = (REASON_MISSING, REASON_OTHER_PATH)
 
 #: The margin on the disk witness's window. `started_at` is when the queue claimed the run and
@@ -535,6 +548,71 @@ def artifact_disk_witness(path, window_start, window_end, *, grace_seconds: int)
     }
 
 
+def corroborated_dirs_of(baseline: "TaskBaseline", step: str) -> tuple[str, ...]:
+    """Where the runs that taught `step` actually wrote it, as normalized directories.
+
+    `same_name_elsewhere` derives the learned directory the same way — from
+    `baseline.artifact_paths`, the paths captured behind a corroborated step — rather than from
+    the step id, which carries only a basename: #2502 left the directory out of the id on purpose
+    so a root move would not rename the corpus, and checked the directory at match time instead.
+    This is that same read, exposed for the one question the id cannot answer: given a file this
+    run wrote somewhere, was `somewhere` where the task's artifact lives?
+
+    Empty for a step with no corroborated paths — a baseline built before paths were captured, or
+    a fixture written without them — which is what makes an unlearned directory discharge nothing:
+    with nothing to compare against, the only honest answer is the deviation on the table.
+    """
+    out: list[str] = []
+    for path in baseline.artifact_paths.get(step, ()):
+        directory = normalized_dir(str(_expand(path)))
+        if directory and directory not in out:
+            out.append(directory)
+    return tuple(out)
+
+
+def sibling_slug_write(baseline: "TaskBaseline", trace: "Trace", step: str,
+                       window: tuple[datetime | None, datetime | None], *,
+                       grace_seconds: int = DEFAULT_GRACE_SECONDS) -> dict | None:
+    """A file THIS run wrote under a different name in the directory the artifact lives in.
+
+    Three conditions, each killing one way the credit could be wrong:
+
+    * the run captured a write whose basename differs from the missing step's — the thing that
+      varied is the name, so a second copy of the same name is not this case and stays #2502's
+      business;
+    * that write's directory matches a directory the runs which taught the step wrote it to,
+      through `dir_matches` so a root rename is as lenient here as it is for the artifact itself.
+      A basename landing in a directory no corroborated run used does NOT discharge: that is the
+      wrong-directory shape the flagged 2026-10-09 run had, and it stays filed;
+    * the file's own mtime falls inside the run's window widened by `grace_seconds`, by way of
+      `artifact_disk_witness`. The step is absent from the trace, so this is the only evidence that
+      the file belongs to THIS run: a `2026-11-15-vllm.md` still sitting in the directory from the
+      night before would otherwise excuse a run that wrote nothing at all, and a detector that
+      cannot catch a genuinely dropped mandated write is not an instrument.
+
+    Returns the discharge record — the step it stands for, the directory, and the witness the file
+    produced — so the row names which file answered for the missing one. Callers ask only for
+    `write:` steps: a missing `read:` or `tool:` step has no directory for an artifact to live in.
+    """
+    basename = step.split(":", 1)[1]
+    learned_dirs = corroborated_dirs_of(baseline, f"write:{basename}")
+    if not learned_dirs:
+        return None
+    for other_base, paths in (trace.write_paths or {}).items():
+        if other_base == basename:
+            continue
+        for path in sorted(paths):
+            directory = normalized_dir(str(_expand(path)))
+            if not directory or not any(dir_matches(learned, directory)
+                                        for learned in learned_dirs):
+                continue
+            witness = artifact_disk_witness(_expand(path), *window,
+                                            grace_seconds=grace_seconds)
+            if witness is not None:
+                return {"step": f"write:{other_base}", "directory": directory, **witness}
+    return None
+
+
 def steps_from_tools(tools, write_paths: dict | None = None) -> list[str]:
     """Ordered, de-duplicated step ids for one run's tool calls, in `sequence` order.
 
@@ -714,6 +792,10 @@ class Deviation:
     #: `declared_skip_in_run_report` (#2708); `""` on every other reason. A path and not a
     #: quotation: the reader has the file, and a quotation is one more thing a draft can truncate.
     declared_in: str = ""
+    #: The discharge #4518 added: this run wrote another slug in the directory the missing artifact
+    #: is learned at, and that file's mtime sits inside the run's window. The record
+    #: `sibling_slug_write` returns, so the row names the file that answered for the step.
+    sibling_slug: dict | None = None
 
     def to_json(self) -> dict:
         return {
@@ -737,6 +819,7 @@ class Deviation:
             "disk_witness": dict(self.disk_witness) if self.disk_witness else None,
             "written_elsewhere": list(self.written_elsewhere),
             "declared_in": self.declared_in,
+            "sibling_slug": self.sibling_slug,
         }
 
 
@@ -1233,13 +1316,27 @@ def score_run(
         # removes the draft, never the observation). Asked only for write steps, because a missing
         # `read:` or `tool:` step has no licence to be declared away.
         declared = ""
-        if witness is None and step.startswith(ESCALATE_PREFIX):
-            declared = skip_declared_in_run_report(
-                baseline, trace, step, (started, ended), grace_seconds=grace_seconds)
+        sibling: dict | None = None
+        if step.startswith(ESCALATE_PREFIX):
+            if witness is None:
+                declared = skip_declared_in_run_report(
+                    baseline, trace, step, (started, ended), grace_seconds=grace_seconds)
+            if witness is None and not declared:
+                # Third, and last of the readings that discharge a missing artifact, because it is
+                # the weakest of them: the first two quote the artifact itself or this run's own
+                # sentence naming THAT basename, while this one answers for the basename with a
+                # different file. Consulted only for `write:` steps, since what discharges is a
+                # directory and a window, and only when neither stronger reading answered — a run
+                # that declared the skip, or whose artifact file is stamped inside its window,
+                # needs no stand-in and must not have its own account overwritten by one.
+                sibling = sibling_slug_write(baseline, trace, step, (started, ended),
+                                             grace_seconds=grace_seconds)
         if witness is not None:
             reason = REASON_WITNESSED
         elif declared:
             reason = REASON_DECLARED_SKIP
+        elif sibling is not None:
+            reason = REASON_OTHER_SLUG
         elif elsewhere:
             reason = REASON_OTHER_PATH
         else:
@@ -1265,6 +1362,7 @@ def score_run(
             disk_witness=witness,
             written_elsewhere=elsewhere,
             declared_in=declared,
+            sibling_slug=sibling,
         )
         (report.pending if state == "pending" else report.deviations).append(deviation)
     for step in baseline.ordered(present & expected):
@@ -1980,6 +2078,13 @@ def print_replay(result: dict) -> None:
                 print(
                     f"    declared not written in {dev['declared_in']} — not escalated: the run"
                     " named this exact artifact in its own report's not-written block"
+                )
+            if dev.get("sibling_slug"):
+                sib = dev["sibling_slug"]
+                print(
+                    f"    artifact written under other slug {sib['step']!r} at {sib['path']}"
+                    f" mtime {sib['mtime']} — not escalated: this run wrote its artifact into"
+                    f" {sib['directory']} under a name the baseline had not learned"
                 )
             print(f"    expected_steps={dev['expected_steps']}")
 

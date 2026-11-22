@@ -26,11 +26,12 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1179,3 +1180,94 @@ def test_the_guard_costs_the_detector_no_real_capture_its_published_basename():
     # that can drift: every entry point goes through `normalized_basename`.
     assert sc._names_no_file("0") and sc._names_no_file("=")
     assert not sc._names_no_file("qhc_health.json")
+
+
+# --------------------------------------------------------------------------- #
+# #4518 — the discharge that stands in for a missing artifact step must not
+# rename a step, and must not fire without the directory.
+# --------------------------------------------------------------------------- #
+
+#: The two names task 53's `YYYY-MM-DD-{source}.md` convention produces on the two nights that
+#: matter: claude-code had a release, or something else did. `normalized_basename` elides the
+#: date and nothing else, so these are two step ids and #4518 keeps them that way — the fix is a
+#: reading of what a run wrote, never a widening of the id, because the ids are already published
+#: in the learned baselines this module keeps.
+SLUG_DIR = "knowledge/stack-updates"
+SLUG_A = f"/lloyd/{SLUG_DIR}/notes-2026-10-11-claude-code.md"
+SLUG_B = f"/lloyd/{SLUG_DIR}/notes-2026-10-11-vllm.md"
+SLUG_STEP_A = "write:notes-<date>-claude-code.md"
+SLUG_STEP_B = "write:notes-<date>-vllm.md"
+
+
+def test_the_source_slug_stays_in_the_artifact_step_id_and_the_step_set():
+    """#4518 clause 5: the fix reads the slug, it does not merge it away.
+
+    The alternative the item weighed — elide the slug the way the date is elided — would have
+    renamed every artifact step in the published corpus, which the module header and the #2502
+    comment both rule out. So both names stay distinct steps here, and the corpus that holds both
+    learns both, unchanged by the discharge: what #4518 added is a reading at score time that
+    asks WHERE the learned artifact's own corroborated paths live (`corroborated_dirs_of`, over the
+    `artifact_paths` #2502 already publishes), not a new key on the step id and not a new field on
+    the baseline. If the slug were elided, or if the discharge quietly folded one name into the
+    other, the first assert is what goes red.
+    """
+    assert sc.normalized_basename(SLUG_A) != sc.normalized_basename(SLUG_B)
+    assert sc.normalized_basename(SLUG_A) == "notes-<date>-claude-code.md"
+    assert sc.normalized_basename(SLUG_B) == "notes-<date>-vllm.md"
+    write_steps: dict = {}
+    steps = sc.steps_from_tools(
+        [_tool("Write", path=SLUG_A, seq=1), _tool("Write", path=SLUG_B, seq=2)],
+        write_paths=write_steps)
+    assert [s for s in steps if s.startswith("write:")] == [SLUG_STEP_A, SLUG_STEP_B]
+    assert set(write_steps) == {"notes-<date>-claude-code.md", "notes-<date>-vllm.md"}
+
+
+def test_a_sibling_slug_at_an_unlearned_directory_still_files(tmp_path):
+    """#4518 clause 3, at the corpus level: the discharge needs the directory match.
+
+    Five runs write their dated note into `knowledge/stack-updates`; the sixth writes a different
+    source's note into `_pipeline/eval`. `dir_matches` is the whole difference between this shape
+    and the one that is forgiven, and it is #2502's own rule — the root may move, the directory may
+    not. The 2026-10-09 run that published a pointer into a swapped directory is the flag this
+    refuses to forgive, so the reason stays `missing_structural_step` and the row carries no
+    `sibling_slug` at all. The notes' mtimes are set inside their own run's window on purpose: the
+    only thing that has to disqualify this write is WHERE it is, so a node that failed for a stale
+    mtime would be pinning nothing.
+    """
+    learned = tmp_path / "knowledge" / "stack-updates"
+    other = tmp_path / "_pipeline" / "eval"
+    specs = []
+    for i in range(6):
+        swapped = i == 5
+        directory = other if swapped else learned
+        directory.mkdir(parents=True, exist_ok=True)
+        note = directory / f"notes-2026-10-0{i}-{'vllm' if swapped else 'claude-code'}.md"
+        note.write_text("# notes\n", encoding="utf-8")
+        # One day per run, and each note stamped inside its OWN run's ledger window: the disk
+        # witness for the missing step reads the paths the baseline learned, so notes left a few
+        # minutes apart would let an earlier night's file witness this run (which is what the
+        # witness is for on a real nightly task, a day between runs). Here, the only thing that
+        # may disqualify the swapped note is its directory.
+        day = datetime(2026, 9, 4 + i, tzinfo=timezone.utc)
+        stamp = (day + timedelta(hours=5, minutes=8)).timestamp()
+        os.utime(note, (stamp, stamp))
+        specs.append({
+            "run_id": f"run_slug_{i}", "session_key": f"sk_slug_{i}", "status": "success",
+            "source": TASK, "task_id": 7,
+            "started": (day + timedelta(hours=5)).isoformat(timespec="seconds"),
+            "completed": (day + timedelta(hours=5, minutes=12)).isoformat(timespec="seconds"),
+            "calls": [_tool("Read", path=SOURCE_FILE, seq=1),
+                      _tool("Write", path=REPORT, seq=2),
+                      _tool("Write", path=str(note), seq=3)],
+        })
+    corpus, joined, _unjoined = _corpus(tmp_path / "corpus", specs, min_runs=5, support=1.0)
+    baseline = corpus.baselines[TASK]
+    assert SLUG_STEP_A in baseline.expected_steps, baseline.expected_steps
+    assert SLUG_STEP_B not in baseline.expected_steps, baseline.expected_steps
+    pair = next((t, r) for t, r in joined if t.session_key == "sk_slug_5")
+    report = sc.score_run(pair[0], pair[1], corpus,
+                          now=datetime(2026, 9, 16, tzinfo=timezone.utc))
+    deviation = {d.step: d for d in report.deviations}[SLUG_STEP_A]
+    assert deviation.reason == sc.REASON_MISSING, deviation.reason
+    assert deviation.sibling_slug is None, deviation.sibling_slug
+    assert sc.REASON_OTHER_SLUG not in sc.ESCALABLE_REASONS

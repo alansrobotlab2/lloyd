@@ -1327,3 +1327,145 @@ def test_the_declaration_is_read_only_inside_the_not_written_block():
     assert sc.declared_skip_in_report(dated, "patterns-<date>.md")
     assert not sc.declared_skip_in_report(
         "# Midnight summary\n\n## Files written\n\n- `p-latest.md`\n", "p-latest.md")
+
+
+# --------------------------------------------------------------------------- #
+# #4518 — an artifact written under a different slug, in the directory the
+# baseline learned that artifact in, is a discharged stage and not a dropped one.
+# --------------------------------------------------------------------------- #
+
+#: Task 53 writes `knowledge/stack-updates/YYYY-MM-DD-{source}.md`, one note per source that
+#: actually moved. `normalized_basename` elides the date and ONLY the date, so which source
+#: moved is inside the step id, and a baseline learned over nights that all moved claude-code
+#: cannot know the fourth name. Five drafts (#2117, #2288, #2617, #4224, #4517) were each
+#: adjudicated stale by hand over exactly that reading, on runs that had written their note.
+#: The notes here are REAL files with real mtimes, not a patched clock: the discharge's whole
+#: evidential content is a directory match and a window, and a subprocess the shipped CLI runs
+#: could not be monkeypatched anyway.
+SLUG_RUNS = 6
+SLUG_FAULTY = 4                      # the run whose night moved a different source
+SLUG_LEARNED_STEP = "write:notes-<date>-claude-code.md"
+SLUG_OTHER_STEP = "write:notes-<date>-vllm.md"
+
+
+def _slug_corpus(root: Path, *, other_slug_at: int = SLUG_FAULTY,
+                 other_slug_dir: Path | None = None,
+                 mtime_offset: timedelta = timedelta(0)) -> Path:
+    """`SLUG_RUNS` nightly runs one day apart, each writing its dated note; the run at
+    `other_slug_at` writes a DIFFERENT source's note instead, into `other_slug_dir` (the learned
+    directory unless a node says otherwise). Returns the corpus root.
+
+    Six days back to one day back is inside the `--days 14` window the drafts tell a human to
+    re-run, and a day apart is wider than `DEFAULT_GRACE_SECONDS` (6 h), so one run's note can
+    never witness another's.
+    """
+    learned = root / "knowledge" / "stack-updates"
+    specs = []
+    for i in range(SLUG_RUNS):
+        when = datetime.now(timezone.utc) - timedelta(days=SLUG_RUNS - i)
+        other = other_slug_at == i
+        directory = (other_slug_dir or learned) if other else learned
+        directory.mkdir(parents=True, exist_ok=True)
+        note = directory / f"notes-2026-10-0{i}-{'vllm' if other else 'claude-code'}.md"
+        note.write_text("# Stack updates\n", encoding="utf-8")
+        stamp = when - timedelta(minutes=4) + mtime_offset
+        os.utime(note, (stamp.timestamp(), stamp.timestamp()))
+        specs.append({
+            "run_id": f"run_slug_{i}",
+            "session_key": f"2026100{i}_0500{i}0_autonomy_slug{i}",
+            "status": "success",
+            "source": base.TASK,
+            "task_id": 7,
+            "started": (when - timedelta(minutes=25)).isoformat(timespec="seconds"),
+            "completed": (when + timedelta(minutes=6)).isoformat(timespec="seconds"),
+            "timestamp": (when - timedelta(minutes=25)).astimezone().strftime(
+                "%Y-%m-%dT%H:%M:%S"),
+            "calls": [
+                base._tool("Bash", command="check the feeds", seq=1),
+                base._tool("Read", path=base.SOURCE_FILE, seq=2),
+                base._tool("Write", path=base.REPORT, seq=3),
+                base._tool("Write", path=str(note), seq=4),
+                base._tool("fact_add", seq=5),
+            ],
+        })
+    traj, _db = base._write_corpus(root, specs)
+    return root
+
+
+def _slug_filer(tmp_path, *flags) -> subprocess.CompletedProcess:
+    corpus = tmp_path / "corpus"
+    _slug_corpus(corpus)
+    return _run_cli(corpus, tmp_path / "backlog", "--days", "14", "--support", "1.0", *flags)
+
+
+def test_a_sibling_slug_note_in_the_learned_directory_files_no_draft(tmp_path):
+    """#4518 clauses 1 and 2, across the same process boundary the nightly filer crosses.
+
+    Task 53's run of 2026-11-16 wrote `2026-11-16-vllm.md` into `knowledge/stack-updates/` — the
+    directory its learned `-claude-code.md` artifact lives in — because vLLM was the source with a
+    release that night, and that run's own record opens "**Claude Code: no release**". The
+    instrument asked only whether a NAME was present, so it filed, and it files again on every
+    such night because dedupe is per run id. On this corpus the shipped CLI still prints the
+    missing step and still counts the run, while filing nothing: the draft is the accusation and
+    the row is the observation, which is the principle #2708 clause 2 already rules by.
+    """
+    proc = _slug_filer(tmp_path, "--escalate-writes", "--dry-run")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    # Behaviour first, so the falsifier is behavioural: with the discharge absent from the module
+    # this run files exactly one draft, and this is the line that says so — a node that failed on
+    # a missing constant instead would be reporting that the fix has a new name, not that the
+    # draft came back.
+    assert "escalations_filed=0" in proc.stdout, proc.stdout[-400:]
+    assert _drafts(tmp_path / "backlog") == []
+    # …and the observation survives the draft it no longer files.
+    assert f"missing {SLUG_LEARNED_STEP!r}" in proc.stdout, proc.stdout[-2000:]
+    assert "runs_flagged=1" in proc.stdout, proc.stdout[-400:]
+    assert f"reason={sc.REASON_OTHER_SLUG}" in proc.stdout, proc.stdout[-2000:]
+    assert f"artifact written under other slug {SLUG_OTHER_STEP!r}" in proc.stdout
+    assert "not escalated" in proc.stdout, proc.stdout[-2000:]
+    assert sc.REASON_OTHER_SLUG not in sc.ESCALABLE_REASONS
+
+
+def test_a_sibling_slug_note_left_by_an_earlier_night_still_files(tmp_path):
+    """#4518 clause 4: the credit needs the file to be THIS run's, or nothing catches a drop.
+
+    The write step is absent from the trace, so an mtime inside the run's own window widened by
+    `grace_seconds` is the only evidence that the sibling note belongs to the run being scored. A
+    dated note in a shared directory is exactly the file an earlier night left behind, so moving
+    every mtime nine days back has to bring the draft back — the same falsifier
+    `test_a_stale_or_absent_artifact_at_the_learned_path_still_escalates` runs on the disk
+    witness, and for the same reason: a detector that cannot catch a genuinely dropped mandated
+    write is not an instrument.
+    """
+    corpus = tmp_path / "corpus"
+    _slug_corpus(corpus, mtime_offset=timedelta(days=-9))
+    proc = _run_cli(corpus, tmp_path / "backlog", "--days", "14", "--support", "1.0",
+                    "--escalate-writes")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert f"missing {SLUG_LEARNED_STEP!r}" in proc.stdout, proc.stdout[-2000:]
+    assert sc.REASON_OTHER_SLUG not in proc.stdout, proc.stdout[-2000:]
+    assert "escalations_filed=1/1" in proc.stdout, proc.stdout[-400:]
+    drafts = _drafts(tmp_path / "backlog")
+    assert len(drafts) == 1, [d.name for d in drafts]
+    assert SLUG_LEARNED_STEP in drafts[0].read_text(encoding="utf-8")
+
+
+def test_a_sibling_slug_note_in_another_directory_still_files(tmp_path):
+    """#4518 clause 3: the discharge needs the DIRECTORY, which is what keeps #2502's flag alive.
+
+    The same shape at the wrong place — the note lands in `_pipeline/eval`, a directory no run
+    that taught the step ever used. That is the 2026-09-22 root-rename trap seen from the other
+    half of #2502: a credit that asked only "did this run write some markdown recently?" would
+    forgive the run that published its pointer into the wrong tree, which is precisely the failure
+    the directory test was built to catch. So the reason stays `missing_structural_step`, the
+    draft stays filed, and `artifact_written_at_other_path` remains what a run earns only for
+    writing the learned BASENAME itself somewhere else — which this run did not do.
+    """
+    corpus = tmp_path / "corpus"
+    _slug_corpus(corpus, other_slug_dir=corpus / "_pipeline" / "eval")
+    proc = _run_cli(corpus, tmp_path / "backlog", "--days", "14", "--support", "1.0",
+                    "--escalate-writes", "--dry-run")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert f"missing {SLUG_LEARNED_STEP!r}" in proc.stdout, proc.stdout[-2000:]
+    assert sc.REASON_OTHER_SLUG not in proc.stdout, proc.stdout[-2000:]
+    assert "escalations_filed=1/1" in proc.stdout, proc.stdout[-400:]
