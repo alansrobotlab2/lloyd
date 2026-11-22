@@ -43,6 +43,8 @@ The metrics, each defined where it is computed:
  19  derived work            share of new items that only witness, record or pin
                              an earlier item's claim; how many owed-check filed
  20  tests rung              median wall seconds of the gate's `tests` rung
+ 21  inflow yield            per source, over 30 d: items filed, landed, still
+                             open (scripts/automod/source_yield.py)
 """
 
 from __future__ import annotations
@@ -800,6 +802,12 @@ def _provenance(path: Path, since: float) -> dict[str, Any]:
 _TEST_PATH = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|\.test\.[tj]sx?$")
 
 
+#: Row 21 reads a longer window than the rest of the row: an item filed this
+#: week has mostly not closed yet, and a yield over what has is a rate off the
+#: fastest items only.
+SY_WINDOW_DAYS = 30.0
+
+
 def _tree_growth(repo: Path, since_ts: float) -> dict[str, Any]:
     """Lines added and deleted on `repo`'s history since `since_ts`, split into
     tests, prose (`*.md`) and everything else.
@@ -1197,7 +1205,16 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
         derived = {}
     tests_rung = _tests_rung(by("gate"))
 
+    # ── 21 inflow yield ─────────────────────────────────────────────────
+    try:
+        from scripts.automod import source_yield as SY
+        inflow = (SY.compute(days=SY_WINDOW_DAYS, backlog_dir=backlog_dir, now=now)
+                  if backlog_dir.exists() else {})
+    except Exception:
+        inflow = {}
+
     return {"tree_growth": growth, "derived_work": derived, "tests_rung": tests_rung,
+            "inflow_yield": inflow,
             "computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
@@ -1298,6 +1315,18 @@ def _render_growth_rows(row: dict) -> list[str]:
     else:
         out.append(f"| 20 | tests rung | {t['median_s']} s | median over {t['runs']} runs, "
                    f"lock wait included; {t['over_1800']} over 1800 s |")
+    y = row.get("inflow_yield")
+    if not isinstance(y, dict) or not y.get("sources"):
+        out.append("| 21 | inflow yield | — | not measured for this row |")
+    else:
+        def cell(name: str, r: dict) -> str:
+            rate = "—" if r.get("yield") is None else _pct(r["yield"])
+            return f"{name} {r['created']} filed, {r['landed']} landed ({rate}), {r['open']} open"
+        top = list(y["sources"].items())[:6]
+        total = y["total"]
+        out.append(f"| 21 | inflow yield | {total['created']} filed / {y['days']:g} d | "
+                   + "; ".join(cell(n, r) for n, r in top)
+                   + f"; {total['derived']} of all filed only witness an earlier item |")
     return out
 
 

@@ -4427,15 +4427,16 @@ is older than 23 h; autocode's housekeeping pass calls it (off the event loop,
 guarded like every other pass). Until then the only writer was the `--record`
 flag and nothing called it: the file held two rows, the newer from 2026-09-12.
 
-Rows 1–17 count what the loop did. Three more say what that did to the tree:
+Rows 1–17 count what the loop did. Four more say what that did to the tree and the board:
 
 | # | Row | Why |
 |---|---|---|
 | 18 | tree growth — lines added and deleted on `main`, split tests / prose / other | The first reading was +63,858 net lines in 7 days, 71 % of the additions tests, against 3,598 deleted. |
 | 19 | derived work — share of new items that only witness, record or pin an earlier item's claim; how many owed-check filed | 14 % of the week's 364 new items; the wording rule is `backlog.is_derived_name`. |
 | 20 | tests rung — median wall seconds, lock wait included | 1,129 s over 288 runs, 65 over 1,800 s; the suite's size is the loop's own output. |
+| 21 | inflow yield — per source over 30 d: items filed, landed, still open (`scripts/automod/source_yield.py`) | Owed-check filed 649 of the 1,312 items created, 191 of them derived, and landed 84 % of what closed. **Yield is not value**: the loop lands its own bookkeeping as readily as anything else, so no source is throttled on this number. It is read the other way — a source whose items mostly close unlanded is filing work nobody wanted. |
 
-None of the three is a gate. They exist so that a week in which the loop
+None of the four is a gate. They exist so that a week in which the loop
 landed 149 changes and deleted almost nothing does not read as healthy.
 `tests/test_loop_inflow_brakes.py`.
 

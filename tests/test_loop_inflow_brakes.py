@@ -267,7 +267,7 @@ def test_tests_rung_reads_only_the_tests_rung():
 
 def test_a_row_recorded_before_these_rows_existed_still_renders():
     lines = SC._render_growth_rows({})
-    assert [x.split("|")[1].strip() for x in lines] == ["18", "19", "20"]
+    assert [x.split("|")[1].strip() for x in lines] == ["18", "19", "20", "21"]
     assert all("—" in x for x in lines)
 
 
@@ -293,3 +293,51 @@ def test_a_torn_last_line_does_not_stop_the_record(tmp_path):
     stamp = datetime.fromtimestamp(NOW, tz=timezone.utc).isoformat(timespec="seconds")
     path.write_text(json.dumps({"computed_at": stamp}) + "\n" + '{"computed_at": "2026-', encoding="utf-8")
     assert SC.last_recorded_at(path) == NOW
+
+
+# ── row 21: what each source's items turned into ─────────────────────────
+
+def _yield_item(d: Path, item_id: int, name: str, *, tags=("backlog",), status="draft",
+                body="Body.", days_ago=1.0, **extra):
+    stamp = datetime.fromtimestamp(NOW - days_ago * DAY, tz=timezone.utc).replace(tzinfo=None).isoformat()
+    fm = {"status": status, "priority": "low", "board": "lloyd", "tags": list(tags),
+          "created": stamp, **extra}
+    (d / f"{item_id}-x.md").write_text(
+        f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n# {name}\n\n{body}\n", encoding="utf-8")
+
+
+def test_source_yield_attributes_and_classifies(tmp_path):
+    from scripts.automod import source_yield as SY
+    d = tmp_path / "backlog"
+    d.mkdir()
+    # owed-check: by tag, and by the body marker its older follow-ups carry
+    _yield_item(d, 1, "Commit #9's witness bytes", tags=("backlog", B.OWED_SPAWN_TAG),
+                status="done", automod_landed="abc")
+    _yield_item(d, 2, "Add the retry test", body=f"x\n\n{SY.OWED_BODY_MARKER}9's owed entry: y",
+                status="done", automod_landed="def")
+    _yield_item(d, 3, "Another follow-up", tags=("backlog", B.OWED_SPAWN_TAG))
+    _yield_item(d, 4, "A stale finding", tags=("spawned-by-triage",), status="done",
+                autotriage_retired="stale")
+    _yield_item(d, 5, "Nobody picked this up", tags=("spawned-by-review", B.EXPIRED_TAG), status="done")
+    _yield_item(d, 6, "A census signature", tags=("spawned-by-autonomy-92",), status="done")
+    _yield_item(d, 7, "Too old to count", tags=("spawned-by-triage",), days_ago=90)
+    out = SY.compute(days=30, backlog_dir=d, now=NOW)
+    s = out["sources"]
+    assert set(s) == {"owed-check", "triage", "arch-review", "scheduled-task"}
+    assert (s["owed-check"]["created"], s["owed-check"]["landed"], s["owed-check"]["open"],
+            s["owed-check"]["derived"]) == (3, 2, 1, 1)
+    assert s["triage"]["retired"] == 1 and s["arch-review"]["expired"] == 1
+    assert s["scheduled-task"]["closed"] == 1
+    assert out["total"]["created"] == 6
+    assert s["owed-check"]["yield"] is None            # two closed: not a rate
+    assert list(s)[0] == "owed-check"                  # largest first
+
+
+def test_a_yield_is_a_rate_only_over_enough_closed_items(tmp_path):
+    from scripts.automod import source_yield as SY
+    d = tmp_path / "backlog"
+    d.mkdir()
+    for n in range(SY.MIN_CLOSED):
+        _yield_item(d, n + 1, f"Finding {n}", tags=("spawned-by-triage",), status="done",
+                    **({"automod_landed": "abc"} if n < 2 else {"autotriage_retired": "stale"}))
+    assert SY.compute(days=30, backlog_dir=d, now=NOW)["sources"]["triage"]["yield"] == 0.4
