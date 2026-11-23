@@ -2233,7 +2233,7 @@ def _vault_commits_since(events: list[dict], item_id: int, since_ts: float,
     already cost one wrong close. Item #2039's finished row carried `vault_commits`
     naming only #2027, because both turns ran on session `20261001_154803_*`, and
     `scripts.automod.backlog.settled_landings` turned those shas into an
-    `item_landed` row for #2039 (backlog.py:3837-3841). This is the same rule
+    `item_landed` row for #2039 (backlog.py:4357-4361). This is the same rule
     `round_landing_rows` (backlog.py:823) has applied since #2903 narrowed it for
     the `landed` field: before this change the same turn was checked narrowly for
     that field and loosely for the close.

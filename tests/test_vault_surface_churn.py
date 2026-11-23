@@ -1119,7 +1119,7 @@ def test_a_report_that_names_ids_or_a_verdict_still_outranks_the_rescue(isolated
 # `landed` field. The finish-side reader it never touched —
 # `workers.sources.autocode._vault_commits_since` — decides two other things
 # from the same rows: the `vault_commits` list persisted on the
-# `backlog_implement` finished row, which `settled_landings` (backlog.py:3745)
+# `backlog_implement` finished row, which `settled_landings` (backlog.py:4247)
 # turns into an `item_landed` row for the item it is reading, and
 # `_vault_landed_since`, the turn-end sweep's gate on running that close at all.
 # So one turn was checked narrowly for `landed` and loosely for the close.
@@ -1213,7 +1213,7 @@ def test_an_item_whose_session_landed_only_other_items_is_never_closed_on_their_
     `reconcile_outcome_landing` already answers that one narrowly — it is the
     close: `settled_landings` turns this row's `vault_commits` into an
     `item_landed` row carrying the item's OWN id and the foreign sha
-    (backlog.py:3837-3841), so #2039 went to `done` on #2027's commit.
+    (backlog.py:4357-4361), so #2039 went to `done` on #2027's commit.
     """
     p = write_item(isolated, 2039, clauses=["clause a"])
     vault_commits = _foreign_landing_turn(2039)

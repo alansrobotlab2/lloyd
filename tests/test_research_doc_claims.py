@@ -2095,7 +2095,7 @@ def test_section_two_states_the_copy_and_the_module_still_does_what_it_says():
 
     # 6. The absence, with its control. `git add` appears in this module exactly
     #    once and it is prose: the code imports no subprocess, so it cannot stage
-    #    or commit anything anywhere — the trap at `scripts/automod/backlog.py:2153`
+    #    or commit anything anywhere — the trap at `scripts/automod/witness.py:465`
     #    and `scripts/autoresearch/promote.py:1432` is a test that ran `git add`
     #    against a live vault, and no test of this mechanism can.
     assert "Nothing here runs `git add`" in node

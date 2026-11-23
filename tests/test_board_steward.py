@@ -3134,7 +3134,7 @@ def _flip_ledger(tmp_path, *, applied=REVERT_APPLIED, moved_to=REVERT_TO,
     Every row goes through the REAL writer, `S.append_event(entry, path=…)`, with the
     payload copied from the two writers verbatim: `steward_move` from
     `workers/sources/board_steward.py:1606` (`from`/`to`/`note`/`tick`) and `status_moved`
-    from `scripts/automod/backlog.py:7007` (`from`/`to`/`reason`/`needs_human`/`owed`).
+    from `scripts/automod/backlog.py:6046` (`from`/`to`/`reason`/`needs_human`/`owed`).
     Writing through the writer is the point: `append_event` is what supplies the stamp
     (`scripts/automod/state.py:187` builds `{..., "created_at": now_iso(), **entry}`), so a
     row carries `created_at` and never `at`, and the entry's own keys win — which is how
@@ -3192,7 +3192,7 @@ def test_the_pair_is_found_only_in_the_field_names_the_writers_actually_stamp(tm
     status, while the stamp is `created_at` on EVERY row (`scripts/automod/state.py:187`,
     injected by `append_event`, never passed by a writer) and BOTH kinds write the status
     pair as `from`/`TO` (`workers/sources/board_steward.py:1606`;
-    `scripts/automod/backlog.py:6960`, `:7007`, `:8163` — `from_status`/`to_status` appear
+    `scripts/automod/backlog.py:5994`, `:6046`, `:7202` — `from_status`/`to_status` appear
     on neither). The cause was reading this module's own `_event`, which does add `at` to a
     `board_steward_disagreement` row, and assuming it described the rows this leg reads.
 
@@ -3220,7 +3220,7 @@ def test_the_pair_is_found_only_in_the_field_names_the_writers_actually_stamp(tm
     assert D.reverted_moves(_post_flip_window(), invented) == []
 
 
-#: The machine's own abstention echo, copied from `scripts/automod/backlog.py:7026-7028`
+#: The machine's own abstention echo, copied from `scripts/automod/backlog.py:5738-5740`
 #: (`desired_statuses`, the #3467 handover) and from the live row the store carries for
 #: #4240 at 2026-11-18T02:27:28Z. It is stamped `status_moved` — the very kind the revert
 #: leg reads — while saying the opposite of a put-back, which is #4409's second false pair.
@@ -3261,7 +3261,7 @@ def _applied(item, at, frm, to, note):
 
 
 def _machine_moved(item, at, frm, to, reason):
-    """A `status_moved` row with the payload `scripts/automod/backlog.py:7007` writes."""
+    """A `status_moved` row with the payload `scripts/automod/backlog.py:6046` writes."""
     return {"event": "status_moved", "item_id": item, "from": frm, "to": to,
             "reason": reason, "needs_human": False, "owed": False, "created_at": at}
 
@@ -6543,9 +6543,9 @@ def test_a_confirmed_item_the_steward_parks_is_still_scored_as_a_disagreement(
 # recover, because a bare `confirmed` is not one observation but two machine
 # branches wearing one word. `desired_statuses` asks a second question of a
 # confirmed verdict — `elif iid in confirmed and not is_human_only(...)`
-# (scripts/automod/backlog.py:6607) — and a human-only confirmation falls past
+# (scripts/automod/backlog.py:5939) — and a human-only confirmation falls past
 # it into `("draft", "triaged confirmed; not for the unattended loop")`
-# (scripts/automod/backlog.py:6615), while a plain one goes to `up_next`.
+# (scripts/automod/backlog.py:5953), while a plain one goes to `up_next`.
 # `_triage_map` never asked that second question: it mapped every confirmed id to
 # `confirmed`, and the prompt's `up_next` -> `draft` bullet in
 # workers/sources/board_steward.py:305-308 then orders the model to answer a

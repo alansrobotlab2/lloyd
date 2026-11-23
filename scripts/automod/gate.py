@@ -2152,7 +2152,7 @@ def contract_void_mark(item_id: int | None, *, ledger: Path | None = None) -> di
     """The latest `backlog_retriage` row for `item_id`, IF that mark voided it.
 
     A mark voids an item's confirmation exactly once, by `_after_mark`'s
-    precedence (`backlog.py:4332` — a verdict row at or BEFORE the mark counts
+    precedence (`backlog.py:3011` — a verdict row at or BEFORE the mark counts
     as no verdict at all), and it takes the item's front-matter clauses with
     it: after one, `item_contract` returns `clauses: []` for the contract a
     round was already graded on. That row is the event this path classifies,
@@ -2178,7 +2178,7 @@ def contract_void_mark(item_id: int | None, *, ledger: Path | None = None) -> di
         latest = _B.retriage_mark_rows(ledger=ledger or S.LEDGER_PATH).get(key)
         # `confirmed_verdicts` keeps only rows whose verdict is `confirmed` AND
         # which post-date the item's latest mark (`_after_mark`,
-        # `backlog.py:4332`), so the item's ABSENCE from it is precisely "this
+        # `backlog.py:3011`), so the item's ABSENCE from it is precisely "this
         # item has no standing confirmation" — there is no verdict vocabulary to
         # compare against, and an item whose confirmation is absent for a reason
         # other than a mark still has `latest` None and returns {} here.

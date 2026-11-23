@@ -2307,7 +2307,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         # Nothing downstream moves. `backlog.held_by_head_landing` takes its grading
         # from the `vault_review` event and says so in its own docstring, and
         # `vault_review_outcome` reads per-clause rows off an **ok** land row keyed by
-        # commit (`scripts/automod/backlog.py:5479-5481`), so a row with no commit
+        # commit (`scripts/automod/backlog.py:4453-4455`), so a row with no commit
         # never reaches it. This is instrument accuracy, not a rescue.
         graded = clauses if review == "pass" else []
         S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,

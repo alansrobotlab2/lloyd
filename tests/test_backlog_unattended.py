@@ -5650,7 +5650,7 @@ NOT_MET = {"acceptance": "not_met", "landed": True, "deferred_to": [],
 #: write a rehearsal has to hold back. The debt is the *item's* — `human_clauses` in
 #: its front matter is where triage and the round record what only a person or a
 #: later job can settle, and a `met` close mints one owed entry per clause
-#: (`backlog.py:3078-3082`). Plain `MET` closes an item and mints nothing, so with it
+#: (`backlog.py:4942-4943`). Plain `MET` closes an item and mints nothing, so with it
 #: the owed half of the byte-for-byte node below compares an empty list with an empty
 #: list and passes whatever the sweep does.
 MET_WITH_A_CHECK = {"acceptance": "met", "landed": True, "deferred_to": [],
@@ -5658,7 +5658,7 @@ MET_WITH_A_CHECK = {"acceptance": "met", "landed": True, "deferred_to": [],
                     "spawned": []}
 
 #: What #601 owes in the items below: a post-landing check, in the front-matter key
-#: the sweep reads (`human_clauses_of`, called at `backlog.py:3069`).
+#: the sweep reads (`human_clauses_of`, called at `backlog.py:4814`).
 OWED_CHECK = "run the dry run against the live ledger once and compare the count"
 
 
@@ -5717,7 +5717,7 @@ def test_backlog_dir_decides_which_board_the_sweep_reads(isolated, tmp_path):
     both carry a landed marker.
 
     #50 and #2 pin the second read. An umbrella's member lookup is its own
-    `open_items` call (`backlog.py:3142`), so a `backlog_dir` threaded into only the
+    `open_items` call (`backlog.py:4951`), so a `backlog_dir` threaded into only the
     candidate read would resolve members from the live tree — invisible here unless
     the two boards differ about #2, which they do: the live #2 already carries a
     landed marker and the sweep skips a marked member, so only a member read that
@@ -5781,7 +5781,7 @@ def test_a_dry_run_reports_each_landing_with_the_ledger_row_it_would_write(isola
     # the rehearsal would make the two records unreadable side by side.
     assert decided[603]["closed"] is False and decided[603]["acceptance"] is None
     # Each `reason` to its exact string, taken from the writer's branches
-    # (`backlog.py:3099-3118`) rather than paraphrased: this sentence is what a
+    # (`backlog.py:4855-4881`) rather than paraphrased: this sentence is what a
     # person decides on, and a rehearsal whose reason reads plausibly but does not
     # match the record it stands in for is the failure mode to catch here.
     assert decided[601]["reason"] == ("the round reported the acceptance check met"
@@ -6455,7 +6455,7 @@ def test_a_reap_holds_the_item_while_another_round_of_it_is_unsettled(isolated, 
     """The #3524 shape. The reaper closed one round of the item and, in the same breath,
     put the item back in the pool while a second round of it sat promoted-and-unsettled on
     `main`. The wrong status is walked back by the next reconciler pass (its unfinished-round
-    branch at `backlog.py:6200`), so what is pinned here is that the move never happens:
+    branch at `backlog.py:5879`), so what is pinned here is that the move never happens:
     readiness holds an item only while a gate or landing is RUNNING, so through that window
     the item was offerable and could be given a fresh round while its earlier change was
     still under observation.

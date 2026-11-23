@@ -116,7 +116,7 @@ EVENT_KIND_APPLIED = "steward_move"
 EVENT_KIND_REVERT = "status_moved"
 
 #: The two halves of the reason the state machine stamps on its OWN abstention, and why
-#: neither one of them is a revert. `scripts/automod/backlog.py:7026-7028`
+#: neither one of them is a revert. `scripts/automod/backlog.py:5738-5740`
 #: (`desired_statuses`, the #3467 handover) writes, for an item whose latest
 #: `steward_move` still stands: `the board steward moved it to {claim[1]}
 #: (`steward_move`: {claim[2]}); the machine abstains until this item lands, is promoted or
@@ -226,7 +226,7 @@ def reverted_moves(window: dict, ledger: Path) -> list[dict]:
     "its one unattended attempt is spent; …", "needs_human": false, "owed": false}`. And
     BOTH kinds write the status pair as `from`/`TO`: `steward_move` at
     `workers/sources/board_steward.py:1606` and all three `status_moved` writers
-    (`scripts/automod/backlog.py:6960`, `:7007`, `:8163`); `from_status`/`to_status` appear
+    (`scripts/automod/backlog.py:5994`, `:6046`, `:7202`); `from_status`/`to_status` appear
     on neither. The cause that put the wrong spellings here was reading this module's
     `_event` — the disagreement filer's own writer — and assuming it described the rows
     this leg has to read. `test_the_pair_is_found_only_in_the_field_names_the_writers_
@@ -1044,7 +1044,7 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"move the machine put back — the second is the one the 7-day stop condition is "
         f"watched for, and a reader cannot tell them apart from the counts alone.\n"
     )
-    # `new_item` (host:scripts/automod/backlog.py:8607) returns the loaded Item and
+    # `new_item` (host:scripts/automod/backlog.py:8488) returns the loaded Item and
     # takes no activity line — the create's record is this body plus the ledger
     # row below, which is exactly one write and no second chance to fail.
     it = B.new_item(NAME, body, priority="medium", tags=[TAG], status="draft",

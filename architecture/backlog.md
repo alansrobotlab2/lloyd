@@ -948,13 +948,14 @@ most active is the worst possible reading of "bounded".
 
 ## Splitting `scripts/automod/backlog.py`: assessed 2026-11-22, cut from 2026-11-23
 
-**Done so far**, bottom-up as planned below (the module went from 10,805 lines to
-10,263):
+**Done so far**, bottom-up as planned below, then the witness block (the module
+went from 10,805 lines to 10,263, then to 8,946):
 
 | module | what | names | lines |
 |---|---|---|---|
 | `scripts/automod/red_tree.py` | red-tree items (`file_red_tree_item`, `close_healed_red_tree*`, `open_red_tree_items`) | 11 | 344 |
 | `scripts/automod/sweep.py` | the sweep's functions (`sweep_pool`, `record_sweep_verdicts`, `unfold_oversized_umbrellas`, ...) | 9 | 202 |
+| `scripts/automod/witness.py` | witness artefacts: `_witness_artifact` and its naming rules (`_RETIRED_WITNESS_NAMES`, `_ROLLING_STATE_NAMES`, the dated-sibling probes), `commit_anchor_witness` and `ANCHOR_WITNESS_*`, `_over_bound_extract_demand`, `add_witness_artifact_clause` | 29 | 1,321 (old 1,893–3,213) |
 
 The mechanics, done by one script so each cut is the same:
 
@@ -975,7 +976,27 @@ The mechanics, done by one script so each cut is the same:
   bare global lookup from code still in `backlog`, which the sweep needed.)
 - **Constants and the comments that explain them stay in `backlog`**
   (`RED_TREE_TAG`, `SWEEP_VERDICTS`, `SWEEP_SCHEMA`, ...), as does `new_item`,
-  which sits in the red-tree section but is a general constructor.
+  which sits in the red-tree section but is a general constructor. The witness
+  cut is the exception: its constants (`_ROLLING_STATE_NAMES`, `ANCHOR_WITNESS_*`)
+  are interleaved with its functions, so they moved with the block and are bound
+  back like the rest; a patch on `backlog` still reaches them, because the moved
+  code reads them as `B.<name>`.
+- **A name `backlog` imports from the project is read as `B.<name>` too**
+  (`--b-project-imports`): ten witness tests patch `backlog.now_stamp`, which
+  `backlog` imports from `app.backlog_move`, and a fresh import of it in the new
+  module would have left those tests green and testing nothing.
+
+The witness cut starts at old line 1,893, not at the witness constants above it
+(`WITNESS_ARTIFACT_DIR` :1426, `WITNESS_MAX_BYTES` :1450, `_rederive_command`,
+`_witness_within_size_bound`). Those stay, at the same lines, because the vault's
+`skills/autonomy-data-pipeline` prose cites them by number and
+`tests/test_skill_stranded_ruled_sets.py` grades the cite against this file, and a
+vault file cannot change in a code commit. The clause-numbering helpers between
+them (`_self_numbered`, `_join_wrapped_clause`, called only by `clean_clauses`)
+are not witness code, so the one contiguous cut begins below them. It shifted 42
+`backlog.py:<line>` pins in code, tests and comments, each re-pointed by finding the
+line its prose describes (two into `witness.py`). Most were already stale before
+the cut — they pointed at unrelated lines — and were corrected in the same pass.
 
 Verified on the backlog/sweep/gate/automod/doc-claim selection: 7,980 passed and
 three failed. Two of them fail the same way on the unmodified tree because they
@@ -984,10 +1005,9 @@ alone. A clone also lacks `refs/automod/*`, which several of the corpus tests
 read; `git -C ~/lloyd-sandbox fetch ~/lloyd 'refs/automod/*:refs/automod/*'`
 supplies them.
 
-Next by the same rule: the witness and clause-artefact machinery is the largest
-win (about 1,500 lines), but it sits at lines 1,236–3,200, above every one of
-the 45 `backlog.py:<line>` pins, so its cut re-points them all in the same
-commit.
+Next: the rest of the witness code (old lines 1,357–1,773) stays until the vault's
+cites to `:1450` and the `_rederive_command` emitter move; the ledger readers
+(table below) are next, and their cut re-points the pins under it the same way.
 
 What follows is the assessment as written before the first cut. The module was 10,695 lines: 264 top-level functions (84 of
 them private), 2 classes, 160 module-level assignments. Who holds on to it:

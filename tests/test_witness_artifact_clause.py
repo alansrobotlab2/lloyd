@@ -288,7 +288,7 @@ def _is_tracked(repo: Path, rel: str) -> bool:
 #: A basename no checkout on this box can contain, so the temp repository below
 #: is the ONLY tree that can supply the pin. The #2248 fixture name cannot carry
 #: that claim: `_pinned_candidates` tries a relative citation against the CWD and
-#: then against the repository root of the module (backlog.py:1245), so inside a
+#: then against the repository root of the module (witness.py:1025), so inside a
 #: real checkout `tests/fixtures/vllm_prefix_miss_2026-10-01.json` also resolves
 #: to this repo's own committed fixture, and the skip would fire with or without
 #: the temp tree. The control node below uses this name instead, which is what

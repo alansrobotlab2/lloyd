@@ -5783,7 +5783,7 @@ def _open_draft(board: Path, item_id: int) -> None:
     """One open `draft` item on the board the proof reads.
 
     A `draft` with no triage row is the pool; the same draft WITH a terminal triage row is
-    `draft.triaged` instead (`backlog.py:5919`), and that flip is the change owed clause 3
+    `draft.triaged` instead (`backlog.py:8325`), and that flip is the change owed clause 3
     says the fold can cause. So this is the fixture both directions are measured against.
     """
     (board / f"{item_id}-an-open-draft.md").write_text(

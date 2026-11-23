@@ -921,7 +921,7 @@ hold_note = _hold_note
 #
 # Scope, stated rather than slipped: this is owed-check's route to `done`. Three
 # other routes reach `done` — the landing sweep's close branch, the member-fold and
-# `desired_statuses`' met-landing branch (`backlog.py:5920-5927`, enumerated in
+# `desired_statuses`' met-landing branch (`backlog.py:4894-4901`, enumerated in
 # `hand_run_pending`'s docstring) — and they read no carrier guard. #3017 made its
 # predicate a shared four-closer check with a cross-surface test; widening this one
 # the same way is the ruling #4242 owes after landing, not a decision to sneak in.
@@ -964,7 +964,7 @@ def _cites_item(text: str, item_id: int) -> bool:
 
 def _item_id_of_path(path: Path | None) -> int | None:
     """The id an item file's name carries, by `load_item`'s own pattern
-    (`backlog.py:3445`), so the guard needs no second parse of the file."""
+    (`backlog.py:2386`), so the guard needs no second parse of the file."""
     if path is None:
         return None
     # `path.name`, not the whole path: `load_item` matches the item file's NAME, and

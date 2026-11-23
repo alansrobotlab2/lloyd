@@ -1216,7 +1216,7 @@ def test_a_written_note_deleted_from_the_working_tree_is_still_recoverable(tmp_p
 def test_the_snapshot_root_is_an_injected_value_and_stages_nothing_in_the_vault(tmp_path):
     """Clause 2, and the trap the item names: a unit test must never run `git add`
     against the live vault (the precedent is recorded at
-    `scripts/automod/backlog.py:2153` and `scripts/autoresearch/promote.py:1432`).
+    `scripts/automod/witness.py:465` and `scripts/autoresearch/promote.py:1432`).
 
     So the vault here is a real temporary git repo and the note is a file it has
     never tracked — the exact state topic 829's note was in when it vanished. The

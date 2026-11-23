@@ -2691,12 +2691,12 @@ LEDGER_REWRITE_ATTEMPTS = 5
 #: The `board_health()` keys the neutrality proof may let move, and the only ones (#3650).
 #:
 #: What the proof exists to catch is a fold that changes what the board panel ANSWERS.
-#: `board_health()` (`scripts/automod/backlog.py:8345`) is what the dashboard's backlog
+#: `board_health()` (`scripts/automod/backlog.py:8268`) is what the dashboard's backlog
 #: panel, the scorecard's net-flow row and the board steward's prompt all read, so a
 #: rewrite of the audit ledger that moved any other figure of its payload would be this
 #: sweep editing the board rather than bounding a file — that is the difference a refusal
 #: is for. The two arms below are the exception, and the exception belongs to one reader:
-#: `triaged_ids` (`scripts/automod/backlog.py:3803`) is handed a ledger file and reads
+#: `triaged_ids` (`scripts/automod/backlog.py:3162`) is handed a ledger file and reads
 #: nothing else, so an open `draft` item whose ONLY `backlog_triage` row is past
 #: `LEDGER_ARCHIVE_AGE_DAYS` reads as never-triaged on the folded side and moves from
 #: `draft.triaged` into `draft.pool`. Its item file is not in this write and its status
@@ -2707,7 +2707,7 @@ LEDGER_REWRITE_ATTEMPTS = 5
 #:
 #: Exact dotted paths in a `frozenset`, compared with membership — not a prefix, not a
 #: subtree: `draft` is a partition that counts each item once
-#: (`scripts/automod/backlog.py:8382`), so a fold that changed how many items sit in `draft`
+#: (`scripts/automod/backlog.py:8280`), so a fold that changed how many items sit in `draft`
 #: would move `.draft.total` with it, and that key stays refused. Spelling this `"draft"` or
 #: `draft.*` would excuse every arm and the total along with them, which is a guard that
 #: refuses nothing; `tests/test_retention_sweep.py` pins this value by equality and pins a
