@@ -2510,8 +2510,8 @@ def _build_prompt(candidate, triage, budget: int, reoffer: str,
         check=triage.get("check") or "(none recorded)",
         evidence=(triage.get("evidence") or "(none recorded)")[:2000],
         acceptance=triage.get("acceptance") or "",
-        clauses="\n".join(f"    {i}. {c}" for i, c in enumerate(
-            B.acceptance_clauses_of(triage), 1)) or "    (the contract above is one clause)",
+        clauses=("\n".join(f"    {i}. {c}" for i, c in enumerate(
+            B.acceptance_clauses_of(triage), 1)) or "    (the contract above is one clause)") + B._IC.contract_note(candidate),
         human_clauses=_human_clauses_block(
             B.human_clauses_for_item(getattr(candidate, "path", None), triage)),
         surface_rules=_surface_rules(triage.get("surface") or "code", candidate.id),

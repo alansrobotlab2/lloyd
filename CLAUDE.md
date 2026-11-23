@@ -345,6 +345,8 @@ bookkeeping (journal, toast, voice). Re-announcing a recorded state through
 - A contract is at most six clauses (`MAX_CLAUSES`) (§3.2d).
 - **The sweep** ranks every open item (`worth` × `size`); the human's
   `priority` orders every pool, and a `high` item is picked up next (§3.2e).
+- **Item class**: triage writes `class:`/`metric:`; `automod.selection.*` (off) reads
+  them inside a priority band (`scripts/automod/item_class.py`, §3.2e).
 
 ### Depth and landing
 

@@ -529,7 +529,7 @@ EIGHT_CONSTANTS = (
     ("TRIAGE_VERDICT", "human_clauses[]",
      "scripts.automod.backlog", "CLAUSE_MAX_CHARS"),
     ("GROUP_TRIAGE", "umbrella.acceptance_clauses[]",
-     "scripts.automod.backlog", "CLAUSE_MAX_CHARS"),
+     "scripts.automod.backlog", "CLAUSE_MAX_CHARS"), ("TRIAGE_VERDICT", "metric", "scripts.automod.item_class", "METRIC_KEEP"),
 )
 
 # String leaves with no Python slice to read a cap off, pinned at the declared value
@@ -594,7 +594,7 @@ def test_all_eight_verdict_schemas_are_bounded_and_their_controls_are_not():
 
 
 def test_opening_any_single_leaf_of_the_eight_makes_it_read_unbounded():
-    """The can-fail half of the node above, one leaf at a time, across all 31.
+    """The can-fail half of the node above, one leaf at a time, across all 32.
 
     Stripping every cap is not the test: the eight contain `enum` leaves, and an enum
     is finite on its own, so a fully-stripped copy stays bounded by its vocabularies
@@ -625,8 +625,8 @@ def test_opening_any_single_leaf_of_the_eight_makes_it_read_unbounded():
                 f"{key}.{path} has its cap removed and the schema still reads as "
                 "bounded: the predicate is not looking at this leaf")
             checked += 1
-    assert checked == 31, (
-        f"{checked} leaves checked, not 31 — the eight schemas have changed shape, so "
+    assert checked == 32, (
+        f"{checked} leaves checked, not 32 — the eight schemas have changed shape, so "
         "every field table in this file needs re-counting against them")
 
 

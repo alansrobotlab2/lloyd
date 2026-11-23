@@ -611,7 +611,7 @@ def _parse_spawned(value: str) -> list[int]:
 
 
 _FIELD = re.compile(
-    r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE_CLAUSES|HUMAN_CLAUSES|ACCEPTANCE|SPAWNED):\s*(.*)$",
+    r"^(VERDICT|SURFACE|CHECK|EVIDENCE|ACCEPTANCE_CLAUSES|HUMAN_CLAUSES|ACCEPTANCE|SPAWNED|(?-i:CLASS|METRIC)):\s*(.*)$",
     re.I)
 
 
@@ -705,7 +705,7 @@ def parse_verdict(text: str, structured: dict | None = None) -> dict | None:
         "clauses_dropped_text": dropped,
         "human_clauses": _clauses(joined("HUMAN_CLAUSES", 4000)),
         "spawned": _parse_spawned(joined("SPAWNED", 400)),
-        "source": "regex",
+        "source": "regex", **_IC.class_from_fields(fields),
     }
 
 
@@ -751,7 +751,7 @@ def _from_structured(obj: dict, verdicts, surfaces) -> dict | None:
         "clauses_dropped_text": dropped,
         "human_clauses": _clauses(obj.get("human_clauses")),
         "spawned": spawned,
-        "source": "structured",
+        "source": "structured", **_IC.class_from_structured(obj),
     }
 
 
@@ -1344,7 +1344,7 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
                                      dropped_clauses=parsed.get("clauses_dropped_text") or (),
                                      hold=hold, surface_note=surface_note) is None
     close = close and not close_refused
-
+    class_fields = _IC.write_to_item(candidate, parsed, closed=close)
     # The cap is a prompt instruction, and the items exist on disk by the time
     # we read SPAWNED — unfiling them would destroy real findings. So it is
     # recorded rather than enforced: a number that can be watched, on the one
@@ -1377,7 +1377,7 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
                     "clauses_dropped": int(parsed.get("clauses_dropped") or 0),
                     "clauses_dropped_text": parsed.get("clauses_dropped_text") or [],
                     "human_clauses": parsed.get("human_clauses") or [],
-                    "closed": close,
+                    "closed": close, **class_fields,
                     # Present only when the close was asked for and refused: the ledger
                     # is where a reader learns that a `stale` verdict left a carrier open,
                     # and with what the receipt said (#4284).
@@ -1582,3 +1582,13 @@ def _sweep_out_of_budget(batch_id: str, member_ids: list[int], budget: int, *, s
     return {"status": "skipped" if outcome == B.INCOMPLETE else "success",
             "batch_id": batch_id,
             "summary": f"sweep {batch_id}: no verdict ({stop_reason}); {outcome}"}
+
+
+# Item class (2026-11-22): the single-item prompt asks what kind of work the
+# item is. Imported and spliced here, at the foot, because the lines above are
+# pinned by number; the paragraph and the two block lines live in
+# `scripts/automod/item_class.py`, and `_IC` is resolved at call time by the
+# parse paths and `execute`.
+from scripts.automod import item_class as _IC  # noqa: E402
+
+PROMPT = _IC.splice_triage_prompt(PROMPT)

@@ -132,7 +132,7 @@ from scripts.automod import frontend_probe as _fe_probe
 from scripts.automod import layout_fixture as _layout_fixture
 from scripts.automod import prose_consumers as PC
 from scripts.automod import recovery as REC
-from scripts.automod import spec, state as S, testpaths as TP, typecheck as TC, \
+from scripts.automod import item_class as IC, spec, state as S, testpaths as TP, typecheck as TC, \
     vet as V, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -2986,7 +2986,7 @@ class Gate:
                 return False, (f"item #{self.item_id} has {len(contract['clauses'])} acceptance "
                                f"clause(s) and this diff changes code with no test under "
                                f"a pytest testpath — nothing pins a clause"), data
-            data["item_id"] = self.item_id
+            data.update(item_id=self.item_id, **IC.gate_data(self.item_id, self.base, self.worktree))
             data["clauses"] = len(contract["clauses"])
 
         # A busy port is a stale canary only when no gate holds the canary

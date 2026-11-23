@@ -230,6 +230,8 @@ actually on disk:
 | `clause_amendments` | list | Pending clause rewrites, ratified or refused by the next review. |
 | `automod_landed` | sha | The commit that landed it. Legacy spellings `autoimplement_landed`, `selfmod_landed` are still read; only the new one is written. |
 | `autotriage_retired` | verdict | Why triage closed it. Legacy `selfmod_retired` on 33 items. |
+| `class` | enum | `improvement` \| `fix` \| `maintenance` \| `simplify`. What kind of work the item is, stated by single-item triage on a `confirmed` verdict (2026-11-22, `scripts/automod/item_class.py`). Optional: absent on every item triaged before that day, on umbrellas, and whenever the verdict named none; absent or unknown reads as unclassified, which is ordered exactly as before. See "Item class". |
+| `metric` | string | The bench an `improvement` is expected to move, one line, at most 80 characters. Written only beside `class: improvement`, and removed when a re-triage calls the item something else. |
 
 **None of these is a status**, and the relation keys are the ones most often
 mistaken for one: a folded member is `draft` with a `group`, not a fifth state.
@@ -240,6 +242,81 @@ heading; 33 old items carry a `title:`). The dashboard's `recent_open` list
 reads `fm.get("name") or path.stem`, so those rows show the filename stem —
 harmless, and worth knowing before reading it as corruption. `due_date`/`due`
 are read by `app/routers/backlog.py` and appear on zero items.
+
+### Item class
+
+Until 2026-11-22 the loop chose its next item with no notion of whether the
+item was meant to move a measured behaviour, repair something, or keep the
+books. `scripts/automod/item_class.py` is all of it; the hooks in
+`backlog.py`, `autotriage.py`, `autocode.py`, `gate.py` and `scorecard.py`
+are single lines, kept line-neutral because those files are pinned by line
+number.
+
+| Class | Means |
+|---|---|
+| `improvement` | Expected to move a named, measured bench — `metric` says which. The names come from `eval/fitness/manifest.yaml` when that file exists (`bench_names`; the prompt then lists them and selection requires one of them), free text otherwise. |
+| `fix` | Something is broken and this repairs it. |
+| `simplify` | Same behaviour, fewer lines. Deletion is creditable work. |
+| `maintenance` | Everything else: tests, docs, bookkeeping, plumbing. |
+
+**Where it is stated.** The single-item triage prompt gains one bullet and two
+block lines, `CLASS:` and `METRIC:`, spliced in at import
+(`splice_triage_prompt`: under 800 characters, and a prompt reworded past
+either anchor raises rather than silently never asking).
+`TRIAGE_VERDICT_SCHEMA` gains `class` and `metric` at the foot of `backlog.py`
+(`extend_triage_schema`). Both are in the schema's `required` list, because
+that schema requires every property it declares
+(`tests/test_structured_verdict.py`) and the request goes out `strict`; what
+makes them optional is the value space and the reader — `class` may be
+`none`, `metric` may be empty, and a missing key, a `none` and a word outside
+the vocabulary all parse to *no class*, which yields exactly the dict the
+parser returned before the keys existed. The text path reads the two lines
+through `_FIELD`, where they match in capitals only, so an evidence line that
+begins `Class:` stays evidence. Group triage and the sweep do not state a
+class: an umbrella is unclassified.
+
+**Where it is written.** `autotriage.execute` calls `item_class.write_to_item`
+straight after `record_verdict`, for a `confirmed` verdict that named a class
+and did not close the item; it goes through `update_frontmatter`, and the
+`backlog_triage` ledger row carries the same two keys. Fail-open: a write that
+raises costs the keys and a warning, never the triage. Every writer of an item
+file — `update_frontmatter`, `_apply_status` (the reconciler's), `record_verdict`,
+the board route's `_write_task_file`, the MCP `backlog_write_task` path —
+re-dumps the dict it parsed, so the keys survive later rewrites
+(`tests/test_item_class.py::test_the_class_survives_every_writer_that_rewrites_an_item`).
+`Item` does not carry them; `item_class.class_of` reads the memoised front
+matter, and only when a preference is on.
+
+**What selection does with it.** `select_confirmed` puts
+`item_class.selection_rank_of` after the human's `priority` and the near tier
+and ahead of the sweep's rank, and not at all within `high`, where recency
+alone decides. Two switches under `automod.selection`, both shipped off and
+read at boot:
+
+- `prefer_improvement: false` — on, an `improvement` that names a metric goes
+  ahead of the rest of its priority band. An `improvement` with no metric is
+  not preferred: the class is a claim, the bench is what could check it.
+- `net_lines_budget: null` — a number of net non-test lines per 7 days. While
+  the tree's recorded growth is over it, `simplify` items go first in their
+  band (ahead of a preferred improvement). The figure is `tree_growth.net_non_test`
+  on the newest row of `scorecard.jsonl` — housekeeping records one every 23 h —
+  read from the file's tail and never by running `git log` in the selection
+  path. A row that is missing, older than three days, unmeasured, or from
+  before the field existed reads as *unknown*, and unknown is never over
+  budget.
+
+With both off every item ranks 0, no item file is opened, and the order is
+what it was (`tests/test_item_class.py`, "switched off").
+
+**`simplify`: the implicit check.** The implement prompt appends one
+un-numbered note to a `simplify` item's contract — net non-test Python lines
+removed must be positive (`item_class.net_lines` over `git diff --numstat`:
+`.py` files outside `tests/`, `test_*.py` and `conftest.py`, deleted minus
+added). The gate's `preflight` rung records the number as `simplify` in its
+data (`gate_data`: `added`, `deleted`, `net_removed`, `ok`). **Observe-only**:
+a round that grows the tree is not refused for it yet. It is not a numbered
+clause either, because the review grades the clauses on the triage row and a
+clause with no test file to end on is downgraded to `partial`.
 
 ### Tags are a list of strings, however they arrive
 

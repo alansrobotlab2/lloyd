@@ -1715,6 +1715,14 @@ automod:
     restart_after_s: 2700
     restart_batch_max: 4
     batch_suspend_after_rollback_s: 21600
+  # What `select_confirmed` prefers INSIDE one human `priority` band, from the
+  # `class:` triage writes on an item (scripts/automod/item_class.py). Both
+  # ship off, which is the order as it was. `net_lines_budget`: a number of
+  # net non-test lines per 7 days (scorecard row 18's recorded figure); over
+  # it, `simplify` items go first. Read at boot: a change needs a restart.
+  selection:
+    prefer_improvement: false
+    net_lines_budget: null
 
 # Write-time dedupe for backlog_write_task (agent_mcp/backlog_similar.py).
 # Every create is checked against the board: the qmd daemon's reranked vector

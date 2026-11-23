@@ -1172,7 +1172,7 @@ tail waits in the open. Four moves, each with a switch:
   `tests/test_backlog_priority.py` pin it.
 - *Swept ids are in `released_ids`*, so a swept self-spawn enters single
   triage. The single prompt's `<origin>` says the sweep's rank so the
-  contract fits the size.
+  contract fits the size. *Item class (2026-11-22).* Single triage also states what kind of work a confirmed item is — `class: improvement | fix | maintenance | simplify`, plus `metric:` for an improvement — and `select_confirmed` reads it inside one priority band, after the near tier and ahead of the sweep's rank, never within `high`: `automod.selection.prefer_improvement` (ships false) puts an improvement that names a metric first, and `automod.selection.net_lines_budget` (ships null) puts `simplify` items first while the recorded weekly net non-test growth (scorecard row 18, read from `scorecard.jsonl`, never from git) is over it. A `simplify` round's net non-test Python lines removed are recorded by `preflight`, observe-only. All of it is `scripts/automod/item_class.py`; long version in `architecture/backlog.md` "Item class".
 - *2026-09-17, what #1199's three rounds taught.* (1) A worker turn may
   not restart or stop an engine or a service: `app/harness/service_control.py`
   is the fourth check in `safety.check_bash_command`, keyed on the session

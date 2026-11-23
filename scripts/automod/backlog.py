@@ -1173,7 +1173,7 @@ def unmet_clauses(outcome: dict | None) -> list[int]:
 # truncated at N tokens" with its one re-draw instead of advice to raise
 # `harness.finalizer.max_tokens` (8192); the 723 of 1046 ledger rows sitting at the
 # reader's 1000-char `evidence` clamp are the pile owed-check #2444/1 watches.
-TRIAGE_VERDICT_SCHEMA: dict = {
+TRIAGE_VERDICT_SCHEMA: dict = {  # + `class`, `metric`: added at the foot of this module (item_class)
     "type": "object",
     "title": "backlog_triage_verdict",
     "properties": {
@@ -8272,11 +8272,11 @@ def select_confirmed(ledger: Path,
     # item a person had just raised — re-offered with its branch — 27th.
     # A high re-offer cannot monopolise the loop the way that key guards
     # against elsewhere: its review-retry and incomplete caps bound it.
-    def _key(pair):
+    def _key(pair, _prefs=_IC.current_prefs()):
         item, ev = pair
         high = is_high(item)
         return (priority_key(item),
-                item.id not in near,
+                item.id not in near, _IC.selection_rank_of(item, _prefs) if not high else 0,
                 rank_key(item) if not high else (0, 0, 0),
                 (item.clause_count or len(acceptance_clauses_of(ev))) if not high else 0,
                 item.id in outcomes if not high else False,
@@ -10693,3 +10693,13 @@ def is_derived_name(name: str) -> bool:
     """True when an item's name says it only witnesses, records or pins an
     earlier item's claim. See `_DERIVED_NAME`."""
     return bool(_DERIVED_NAME.search(str(name or "").strip()))
+
+
+# Item class (2026-11-22): what kind of work an item is, written at triage and
+# read by `select_confirmed`. Imported here, at the foot, because every line
+# above is pinned by number from tests and docs and `item_class` imports this
+# module lazily; `_IC` is resolved at call time by the one hook above
+# (`select_confirmed._key`). The schema gains its two fields in place.
+from scripts.automod import item_class as _IC  # noqa: E402
+
+_IC.extend_triage_schema(TRIAGE_VERDICT_SCHEMA)

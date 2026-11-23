@@ -816,7 +816,7 @@ def _tree_growth(repo: Path, since_ts: float) -> dict[str, Any]:
     ~68k lines a week against ~3.6k deleted (measured 2026-11-22), 70 % of it
     tests. `measured` is False when git could not be read, which is not zero."""
     out: dict[str, Any] = {"measured": False, "commits": 0, "added": 0, "deleted": 0,
-                           "added_tests": 0, "added_prose": 0, "added_other": 0}
+                           "added_tests": 0, "added_prose": 0, "added_other": 0, "deleted_tests": 0}
     since = datetime.fromtimestamp(since_ts, tz=timezone.utc).isoformat()
     try:
         r = subprocess.run(
@@ -839,8 +839,8 @@ def _tree_growth(repo: Path, since_ts: float) -> dict[str, Any]:
         out["deleted"] += deleted
         key = ("added_tests" if _TEST_PATH.search(path)
                else "added_prose" if path.endswith(".md") else "added_other")
-        out[key] += added
-    out["net"] = out["added"] - out["deleted"]
+        out.update({key: out[key] + added, "deleted_tests": out["deleted_tests"] + (deleted if key == "added_tests" else 0)})
+    out.update(net=out["added"] - out["deleted"], net_non_test=(out["added"] - out["added_tests"]) - (out["deleted"] - out["deleted_tests"]))
     out["test_share"] = _rate(out["added_tests"], out["added"])
     return out
 
