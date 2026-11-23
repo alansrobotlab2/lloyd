@@ -470,3 +470,15 @@ def prune_orphans(repo: Path | None = None) -> list[str]:
     repo = repo or LIVE_ROOT
     git(repo, "worktree", "prune")
     return list_registered(repo)
+
+
+#: Seconds a READ-ONLY git call made while a landing holds the automod lock may
+#: take before it raises `subprocess.TimeoutExpired` instead of holding that lock
+#: for ever. `git()` above has always carried 120 s; the promoter's and the round
+#: CLI's raw `subprocess.run(["git", ...])` reads (rev-parse, merge-base, diff)
+#: carried none until 2026-11-22. A local `rev-parse` answers in milliseconds, so
+#: the bound is a hang detector, never a budget. The two `merge --ff-only` calls
+#: in `promote.py` are deliberately NOT bounded: `subprocess.run` enforces a
+#: timeout by killing the child, and a merge killed part-way leaves production's
+#: working tree half moved under an unmoved HEAD, which is worse than a hang.
+GIT_READ_TIMEOUT_S = 120.0

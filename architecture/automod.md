@@ -1223,7 +1223,7 @@ Sprint settings to undo when `unswept` reads 0: `autotriage.interval_seconds`
 300 → 900; `form_umbrellas` back on once `implement_pool.ready` is under
 `bound`. `tests/test_backlog_sweep.py` pins the pool, the parser, the
 recorder, the rank ordering in all three pools, the yield, the umbrella
-switch and the unfold.
+switch and the unfold. Since 2026-11-22 a sweep does not retire an item whose round is running, and an abandoned batch stays abandoned across the ledger's 14-day fold (`sweep_verdicts_not_mid_round`; §12.2 rows 3 and 5).
 
 ### 3.2f Depth: more than one round, more than one triage turn
 
@@ -1359,7 +1359,7 @@ next incident open:
 
 `tests/test_landing_killed.py` pins all three, the second with a real child
 process and a real SIGTERM. (The handlers `round.land` installs are also why
-a test's process must get them back — §4.3.)
+a test's process must get them back — §4.3.) A fourth layer since 2026-11-22: a landing that raises before the merge with no `land_failed` written leaves a `land_refused` row, which is a record and never a verdict (`round._landing_raised`; §12.2 row 1).
 
 ### 3.2g Between the gate and `main`: a finished change is not lost
 
@@ -4482,6 +4482,30 @@ None of the four is a gate. They exist so that a week in which the loop
 landed 149 changes and deleted almost nothing does not read as healthy.
 `tests/test_loop_inflow_brakes.py`.
 
+### 12.2 The 2026-11-22 defect survey: ten hypotheses against the ledger
+
+A code survey listed ten suspected defects in the loop. Each was treated as a
+hypothesis and checked twice — in the code, and against the whole ledger (the
+live file plus the three monthly rotations: 91,527 rows, 37,082 of them
+`gate`, 2,905 rounds). Most were narrower than stated or already handled. What
+was real is fixed and pinned by `tests/test_automod_survey_fixes.py`; what was
+not is recorded here so nobody re-derives it from the code alone.
+
+| # | Hypothesis | Measured | Outcome |
+|---|---|---|---|
+| 1 | A landing that fails before the merge writes no row, so the reaper starts a second, unrecorded attempt | 1,955 landings reached their `land_wait_rounds` row; **1** (SM_20261119_002107, "promotions are halted") ended with no `land_failed`, no `promoted`. The promoter's bare raises (halt, BROKEN, a promotion under observation, the denylist, an unreadable HEAD) are the only paths with no row; everything else goes through `_land_failed`. The item was not lost: `gate_passed_unlanded_rounds` re-offered it as `external` and it landed 16 h later | **Fixed, small.** `round._landing_raised` writes a `land_refused` row (exception type and message) when `land` raises before the merge and no `land_failed` was written. It is deliberately not `land_failed`: that event decides whether the attempt is spent and whether the reaper may still rescue the round, and neither moves |
+| 2 | A triage with no verdict leaves a ledger-only `unverifiable` and a draft nobody reads | 32 such rows in the whole history (`auto: true`; 5 since #2394 gave the first occurrence a retry). **0** of the 32 items is open. The reader exists: a promotion asked of such an item is answered `owe` by `backlog.promotion_ruling`, which puts the decision on the item's `owed` list — the five recent ones reached owed-check within a day | **Not a bug**, left alone |
+| 3 | The sweep can close an `up_next` item while a round is implementing it | True in the code: `sweep_pool` skipped ids a triage turn held but not ids an implement turn held, and `record_sweep_verdicts` did not ask again. **0** of 3,126 sweep judgments (1,526 batches, 177 retirements) fell on an item whose latest implement row was `started` | **Fixed** (§3.2e): the pool skips implement claims, and a retirement of an item with a turn, gate or landing running is dropped and the item stays unswept. A ranking is still written |
+| 4 | An xdist or worker timeout on the `tests` rung spends an attempt | 4,542 `tests` rows, 786 failed; **4** were `TimeoutExpired`, the last three (10-11, 10-16, 10-18) being the whole-suite serial re-run #3205 removed. **0 since** (1,573 runs); the 3 `whole-suite rerun refused` rows since then carry `external_blocker` | **Already fixed** by #3205. One path is still unflagged and has never fired: the parallel run's own 1,800 s ceiling in `Gate._run_suite` raises into `_rung`'s generic handler. Watch scorecard row 20 — the suite's own time (lock wait excluded) went from a 458 s median in early October to 1,013 s in late November |
+| 5 | Attempt caps reset: hash-keyed caps when membership changes, live-file readers after the 14-day rotation | Hash-keyed: `sweep_incomplete_attempts` (batch id) and the group-triage count (cluster id) — 5 and 1 no-verdict rows ever, 0 re-keyed repeats. Live-only: `retriage_counts`, `sweep_abandoned_ids`, `incomplete_counts`, `no_measurement_attempts`. 292 items were re-triaged, 74 of them now only in an archive, 1 of those still open (#3024); no item was re-triaged twice across a rotation. Implement attempts, external and review retries already read the rotations (#3612) | **Fixed for the two "ever" questions**: `retriage_counts` and `sweep_abandoned_ids` read the rotations, as `swept_ids` has since #3612. The two triage retry counters are left live-only: their attempts are hours apart, and no pair on the ledger is 14 days apart |
+| 6 | `git` calls with no timeout can hold the landing lock for ever | `worktree.git` (120 s) and `promote._git_live` (120 s) are the wrappers and cover all but 12 raw calls. No git timeout appears in 37,082 gate rows, through wrappers that would have reported one | **Bounded where safe**: the promoter's two pre-merge HEAD reads and four of the round CLI's reads take `worktree.GIT_READ_TIMEOUT_S` (120 s), and a timeout there is a `land_refused` row. The two `merge --ff-only` calls are deliberately unbounded — a timeout is enforced by killing the child, and a merge killed part-way leaves production half moved — and so are the post-merge reads, where a timeout would be read as a failed landing and rolled back |
+| 7 | Synchronous ledger appends and verdict records block the event loop | `append_event` on a copy of the 21.6 MB live ledger: **0.70 ms median, 1.4 ms max** of 200 (one `write` + `fsync`, no lock). The cost is on the *read* side: any append invalidates the decoded-row cache and the next reader re-decodes the file, **0.37–0.41 s**. The verdict recorders are single-file read-modify-writes | **Appends left where they are.** Four whole-ledger or whole-board reads in the triage source, and `record_sweep_verdicts` (whose new guard reads the implement history), moved to `asyncio.to_thread`; an AST rail keeps them off the loop. Not built: an incremental decode of the appended tail, which would take that 0.4 s off every reader — see §13 |
+| 8 | A swallowed exception in `_dedupe` and `_apply_promotion` makes a failed check look like "no duplicate" | True by construction, and uncountable for that reason | **Fixed**: `agent_mcp.backlog._swallowed` logs a WARNING with the exception type for `_dedupe`, `_promotion` and `_apply_promotion`, and a failed dedupe also writes a `dedupe_failed` row to the decision log. Still fail-open |
+| 9 | ~2,900 round state directories and nothing prunes them | 2,904 dirs, 176 MB (`du`), on a btrfs volume with 2.0 TB free and no inode table. A pruner under the delete-only-what-you-created rules would be eligible for 2,050 of them (76.6 MiB of file bytes). `~/lloyd-work/<round>` worktrees are already reclaimed at 7 days by the retention sweep | **Not built.** These dirs are held on purpose (#1037's ruling), measured every sweep by `measure_state_rounds`, and the hold reopens at 10,000 dirs or 500 MB (#4060). Four readers outside the loop open old `gate.json` reports. 80 MB is not worth a new deleter on this box |
+| 10 | Is the ledger rotated, and what reads only the live file? | Yes: the retention sweep moves rows older than 14 days into `promotions-archive-<YYYYMM>.jsonl.gz`, keeping each round's newest row live (3,750 of the 17,318 live rows are those). The live file is 21.6 MB because a fortnight is ~13,500 rows | **Working as designed.** The live-only readers that asked an "ever" question are row 5's |
+
+`land_refused` is a new ledger event; nothing reads it as a verdict.
+
 ## 13. Known limits
 
 - **A change that is correct, boots, and is quietly worse** in ways no eval
@@ -4567,6 +4591,17 @@ landed 149 changes and deleted almost nothing does not read as healthy.
   when no client fingerprint is forwarded. The guardian files rollback tasks
   through it over loopback; `/api/automod/drain` was restricted because it can
   silence every user turn for ten minutes, this one can only create a note.
+- **Every ledger append costs the next reader a full decode.** `state.ledger_rows`
+  serves a cached decode only while the file's (mtime, size, inode) match, and
+  `append_event` grows the size, so the first read after any append re-decodes
+  the whole live file: 0.37–0.41 s for 21.6 MB / 17,318 rows (measured
+  2026-11-22), at roughly 1,240 appends a day. On a thread that is CPU the GIL
+  shares with the event loop; on the loop it is a stall. The shape of the fix
+  is known and not built: same inode and a larger size means an append, so only
+  the new bytes need decoding, with a check of the last bytes already read to
+  catch a rewrite. It was left because the cache's tests count
+  `Path.read_text` calls on the ledger and a tail read is not one — the
+  instrument has to change with the reader.
 
 ---
 

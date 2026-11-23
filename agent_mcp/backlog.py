@@ -593,8 +593,8 @@ def _promotion(task_id, task: dict, args: dict, creating: bool) -> dict | None:
                                "confirmed, and triage reads draft (a live blocker first)"}
         ruling = B.promotion_ruling(int(task_id), session_class=_session_class()[0])
         return None if ruling["move"] else ruling
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as exc:  # noqa: BLE001
+        return _swallowed("promotion ruling", exc, None)
 
 
 def _apply_promotion(task_id, promotion: dict, why: str) -> None:
@@ -602,8 +602,8 @@ def _apply_promotion(task_id, promotion: dict, why: str) -> None:
         from scripts.automod import backlog as B
         cls, sid = _session_class()
         B.apply_promotion_ruling(int(task_id), promotion, why, session_class=cls, session_id=sid)
-    except Exception:  # noqa: BLE001 — the item write already succeeded
-        pass
+    except Exception as exc:  # noqa: BLE001 — the item write already succeeded
+        _swallowed("apply promotion ruling", exc, None)
 
 
 # Tags that mark a write as the loop's own. `backlog_write_task` puts one on
@@ -794,8 +794,8 @@ def _dedupe(args: dict) -> tuple[list[dict], str | None, dict | None]:
             return similar, None, _closed_ref(closed) if closed else None
         out = _merge_into(target, args, similar)
         return similar, out, None
-    except Exception:  # noqa: BLE001 — a dedupe failure never blocks a write
-        return [], None, None
+    except Exception as exc:  # noqa: BLE001 — a dedupe failure never blocks a write
+        return _swallowed("dedupe", exc, ([], None, None), journal=True)
 
 
 def _djev_shadow_dedupe(args: dict, similar: list[dict], target: dict | None,
@@ -936,3 +936,26 @@ def _merge_into(target: dict, args: dict, similar: list[dict]) -> str | None:
                                    f"already covers this finding; cite that id as what you "
                                    f"filed (pass force: true to create a separate item)")})
 
+
+def _swallowed(what: str, exc: BaseException, value, *, journal: bool = False):
+    """Say that a fail-open step failed, and return what it returned before.
+
+    `_dedupe`, `_promotion` and `_apply_promotion` are fail-open on purpose — a
+    backlog write must never be blocked by its own bookkeeping — and until
+    2026-11-22 each swallowed its exception without a word. For the dedupe that
+    made a FAILED check indistinguishable from "no duplicate found": the write
+    went through as a new item and nothing anywhere recorded that no check had
+    run, so the failure rate of the write-time merge rule was unknowable. The
+    behaviour is unchanged; the failure is now a WARNING carrying the exception
+    type, and for the dedupe a `dedupe_failed` row in the same decision log the
+    successful paths write (`SIM.log_decision`), so it is countable beside them.
+    """
+    logger.warning("backlog write: %s failed and was skipped (%s: %s)",
+                   what, type(exc).__name__, str(exc)[:300])
+    if journal:
+        try:
+            SIM.log_decision({"action": "dedupe_failed", "error_type": type(exc).__name__,
+                              "error": str(exc)[:300]})
+        except Exception:  # noqa: BLE001 — the warning above is the record of last resort
+            pass
+    return value

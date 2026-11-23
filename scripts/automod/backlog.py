@@ -9342,7 +9342,7 @@ def unfold_spent_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAUL
 def retriage_counts(ledger: Path) -> dict[int, int]:
     """How many times each item has been sent back through triage."""
     counts: dict[int, int] = {}
-    for d in _ledger_events(ledger, "backlog_retriage"):
+    for d in _ledger_events(ledger, "backlog_retriage", merged=True):
         i = int(d["item_id"])
         counts[i] = counts.get(i, 0) + 1
     return counts
@@ -9791,7 +9791,7 @@ def sweep_abandoned_ids(ledger: Path) -> set[int]:
     """Items in a batch that ran out of budget twice. Left unswept for the
     ordinary passes rather than retried forever."""
     out: set[int] = set()
-    for d in _ledger_events(ledger, "backlog_sweep", require_item=False):
+    for d in _ledger_events(ledger, "backlog_sweep", require_item=False, merged=True):
         if d.get("verdict") == "abandoned":
             out |= {int(i) for i in (d.get("item_ids") or [])}
     return out
@@ -9817,7 +9817,7 @@ def sweep_pool(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     # across the fold, which is the refusal this whole change is about (#3612).
     done = swept_ids(ledger, merged=True) | sweep_abandoned_ids(ledger)
     seen = triaged_ids(ledger)
-    claimed = triage_claimed_ids()
+    claimed = triage_claimed_ids() | implement_claimed_ids()
     pool = [i for i in (items if items is not None else open_items(boards))
             if i.status in SWEEP_POOL_STATUSES and i.id not in done
             and i.id not in claimed
@@ -9868,7 +9868,7 @@ def record_sweep_verdicts(batch_id: str, members: list[Item], verdicts: dict[int
     ledger = ledger or LEDGER_DEFAULT()
     by_id = {m.id: m for m in members}
     member_ids = set(by_id)
-    verdicts = {int(i): dict(v) for i, v in verdicts.items() if int(i) in member_ids}
+    verdicts = sweep_verdicts_not_mid_round(verdicts, member_ids, ledger)
     # A target outside the batch counts as a member for chain resolution
     # when it is open on disk; anything else `_resolve_duplicates` turns
     # into a keep.
@@ -10703,3 +10703,67 @@ def is_derived_name(name: str) -> bool:
 from scripts.automod import item_class as _IC  # noqa: E402
 
 _IC.extend_triage_schema(TRIAGE_VERDICT_SCHEMA)
+
+# ── A sweep does not retire an item whose round is running (2026-11-22) ─────
+#
+# `sweep_pool` offers `up_next` items as well as drafts — "a confirmed item is
+# ranked so the implement order can prefer it, and can still be retired if its
+# premise has gone" — and it skipped ids another TRIAGE turn held but not ids an
+# IMPLEMENT turn held. A sweep batch takes minutes, so an item could be claimed
+# by a round after the batch was chosen, and `record_sweep_verdicts` closed
+# whatever the turn retired without asking again. Measured before the change:
+# 0 of the 3,126 sweep judgments on the ledger (1,526 batches, 177 of them
+# retirements) fell on an item whose latest implement row was `started`, so
+# this closes a window nothing had yet walked through. Both halves fail closed
+# and neither drops a ranking: a `keep` only writes `worth`/`size` and the
+# `swept` tag, which is safe beside a round.
+SWEEP_RETIRING_VERDICTS = frozenset(RETIRING) | {"duplicate_of"}
+
+
+def sweep_verdicts_not_mid_round(verdicts: dict, member_ids, ledger: Path) -> dict[int, dict]:
+    """The sweep's verdicts for its own members, minus any RETIREMENT of an item
+    that is mid-round right now.
+
+    Mid-round here means something is RUNNING: the item's latest implement row
+    is `started`, a gate or a landing of its latest round is live
+    (`items_being_gated_or_landed`), or an implement turn in this process holds
+    it and has not yet written its `started` row (`implement_claimed_ids`). It
+    is deliberately narrower than `items_with_unfinished_rounds`, which also
+    holds an item whose round promoted and was never reverted: that state can
+    last as long as the item is open, and a verdict dropped here is not
+    recorded as judged — the item stays unswept and is offered again — so a
+    hold with no end would have the sweep re-read one item in every batch.
+    If the set cannot be read, every retirement in the batch is dropped:
+    unsure means unfinished.
+    """
+    members = {int(i) for i in member_ids}
+    out = {int(i): dict(v) for i, v in (verdicts or {}).items() if int(i) in members}
+    retiring = [i for i, v in out.items()
+                if str(v.get("verdict") or "keep") in SWEEP_RETIRING_VERDICTS]
+    if not retiring:
+        return out
+    try:
+        history = implement_history(ledger)
+        busy = ({iid for iid, rows in history.items()
+                 if rows and str(rows[-1].get("phase") or "") == "started"}
+                | items_being_gated_or_landed(ledger, history=history)
+                | implement_claimed_ids())
+    except Exception as exc:  # noqa: BLE001 — unsure means unfinished
+        logger.warning("sweep: cannot tell which items are mid-round (%s: %s); no item is "
+                    "retired by this batch", type(exc).__name__, exc)
+        busy = set(retiring)
+    for i in retiring:
+        if i in busy:
+            logger.warning("sweep: #%d was judged %s while its round is still running; the "
+                        "verdict is dropped and the item stays unswept",
+                        i, out[i].get("verdict"))
+            out.pop(i)
+    return out
+
+
+def group_triage_events(ledger: Path) -> list[dict]:
+    """Every `backlog_group_triage` row of the live ledger. A named reader so the
+    triage source can hand it to `asyncio.to_thread`: a ledger read after any
+    append re-decodes the whole file (0.4 s for 21.6 MB, measured 2026-11-22),
+    and that must not happen on the backend's event loop."""
+    return _ledger_events(ledger, "backlog_group_triage", require_item=False)

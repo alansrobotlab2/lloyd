@@ -84,7 +84,7 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
         rid = _round_id()
         base = base or subprocess.run(
             ["git", "-C", str(LIVE_ROOT), "rev-parse", "HEAD"],
-            capture_output=True, text=True).stdout.strip()
+            capture_output=True, text=True, timeout=W.GIT_READ_TIMEOUT_S).stdout.strip()
 
         # Prune only: `start` never used the list, and `list_registered` now
         # raises on a failed read, which must not be able to refuse a round
@@ -361,7 +361,7 @@ def _recorded_base(branch: str) -> str | None:
     if not base:
         return None
     ok = subprocess.run(["git", "-C", str(LIVE_ROOT), "merge-base", "--is-ancestor", base, branch],
-                        capture_output=True).returncode == 0
+                        capture_output=True, timeout=W.GIT_READ_TIMEOUT_S).returncode == 0
     return base if ok else None
 
 
@@ -538,8 +538,8 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             lock.release()
         if not dry_run:
             W.remove(round_id, keep_branch=False, repo=LIVE_ROOT)
-    except LandingKilled:
-        _clear_dead_landing_record(round_id)
+    except Exception as exc:  # noqa: BLE001 — recorded, then re-raised unchanged
+        _landing_raised(round_id, exc, dry_run=dry_run)
         raise
     finally:
         if not dry_run:
@@ -910,7 +910,7 @@ def _status_live_dirty() -> dict:
 def status() -> dict:
     lkg = S.read_lkg()
     head = subprocess.run(["git", "-C", str(LIVE_ROOT), "rev-parse", "HEAD"],
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, timeout=W.GIT_READ_TIMEOUT_S).stdout.strip()
     return {
         "enabled": S.is_enabled(LIVE_ROOT),
         "head": head,
@@ -1012,7 +1012,7 @@ def bless(note: str = "") -> dict:
     """
     from scripts.automod.promote import _get, BACKEND
     head = subprocess.run(["git", "-C", str(LIVE_ROOT), "rev-parse", "HEAD"],
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, timeout=W.GIT_READ_TIMEOUT_S).stdout.strip()
     if not head:
         raise RuntimeError("cannot read HEAD")
     _, body = _get(f"{BACKEND}/health")
@@ -1311,6 +1311,56 @@ def sweep_status() -> dict:
     return {"enabled": B.sweep_enabled(), "sweep": health["sweep"], "draft": health["draft"],
             "up_next": health["up_next"], "worth_by_size": dict(sorted(grid.items())),
             "batches": len(rows), "recent": recent}
+
+
+#: The row a landing writes when it stopped before the merge and nothing else
+#: recorded why. Deliberately NOT `land_failed`: that event is a verdict two
+#: readers act on — `backlog._last_gate_per_round` (is the attempt spent) and
+#: the reaper's `_land_if_passed` (one rescue per round, none after a
+#: `land_failed`) — and this row must change neither. It only makes the reason
+#: countable; until 2026-11-22 it lived in the round's `land.log` alone.
+LAND_REFUSED_EVENT = "land_refused"
+
+
+def _landing_raised(round_id: str, exc: BaseException, *, dry_run: bool) -> None:
+    """Record why `land` is about to raise, when nobody else has.
+
+    Every refusal the promoter makes through `_land_failed` writes its own
+    `land_failed` row, and a signal writes one in `_die_loudly_on_signal`. What
+    wrote nothing were the bare raises before the merge: promotions halted, the
+    guardian BROKEN, a promotion still under observation, the denylist, a lock
+    that never came free, a missing or failed gate report, and any exception
+    nobody anticipated. Measured over the whole ledger on 2026-11-22: 1,955
+    landings got as far as their `land_wait_rounds` row and 1 of them
+    (SM_20261119_002107, "promotions are halted") ended with no row at all —
+    its reviewed 5-of-5 round was abandoned and the reason was in `land.log`.
+
+    Never raises and never changes what `land` does: the caller re-raises the
+    same exception. Nothing is written for a dry run, after the merge (the
+    promoter's post-merge handler writes `land_failed` with what the rollback
+    did), or when a `land_failed` row for this round is already on the ledger
+    since this landing took its marker.
+    """
+    try:
+        if isinstance(exc, LandingKilled):
+            _clear_dead_landing_record(round_id)
+            return
+        if dry_run or P.landing_merged():
+            return
+        marker = S.read_land_marker(round_id) or {}
+        since = float(marker.get("started_at") or 0.0)
+        detail = str(exc)
+        for row in reversed(S.read_events(limit=200)):
+            if row.get("round_id") != round_id or row.get("event") != "land_failed":
+                continue
+            if float(row.get("ts") or 0) >= since or str(row.get("detail") or "") == detail[:500]:
+                return
+        S.append_event({"event": LAND_REFUSED_EVENT, "round_id": round_id, "ok": False,
+                        "error_type": type(exc).__name__, "detail": detail[:500],
+                        "recorded_by": "round.land"})
+    except Exception as err:  # noqa: BLE001 — a record that failed must not mask the refusal
+        print(f"round land: could not record the refusal of {round_id}: "
+              f"{type(err).__name__}: {err}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

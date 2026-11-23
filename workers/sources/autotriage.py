@@ -1212,7 +1212,7 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
 
     if not parsed:
         if stop_reason == "max_turns":
-            attempt = B.incomplete_counts(S.LEDGER_PATH).get(candidate.id, 0) + 1
+            attempt = (await asyncio.to_thread(B.incomplete_counts, S.LEDGER_PATH)).get(candidate.id, 0) + 1
             if attempt < B.MAX_INCOMPLETE_ATTEMPTS:
                 S.append_event({"event": "backlog_triage", "item_id": candidate.id,
                                 "verdict": B.INCOMPLETE, "attempt": attempt,
@@ -1237,7 +1237,7 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
             # and triaged-out for promotion, forever (#2378). The first
             # occurrence now retries; only the second is terminal, and it says
             # so in its own `verdict_source`.
-            nm = B.no_measurement_attempts(S.LEDGER_PATH).get(candidate.id, {})
+            nm = (await asyncio.to_thread(B.no_measurement_attempts, S.LEDGER_PATH)).get(candidate.id, {})
             prior = int(nm.get("count") or 0)
             prior_sid = str(nm.get("last_session") or "")
             if prior < B.MAX_NO_MEASUREMENT_ATTEMPTS:
@@ -1456,7 +1456,7 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
     structured = run.get("structured")
     parsed = parse_group_verdict(run.get("text") or "", structured, member_ids)
     if not parsed:
-        attempts = sum(1 for d in B._ledger_events(S.LEDGER_PATH, "backlog_group_triage", require_item=False)
+        attempts = sum(1 for d in await asyncio.to_thread(B.group_triage_events, S.LEDGER_PATH)
                        if d.get("cluster_id") == cid and d.get("verdict") == B.INCOMPLETE) + 1
         outcome = B.INCOMPLETE if attempts < B.MAX_INCOMPLETE_ATTEMPTS else "abandoned"
         S.append_event({"event": "backlog_group_triage", "cluster_id": cid, "item_ids": member_ids,
@@ -1479,7 +1479,7 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
     umbrella = None
     uid = int(parsed["umbrella"].get("item_id") or 0)
     if uid and uid > id_floor:
-        umbrella = next((i for i in B.open_items(None) if i.id == uid), None)
+        umbrella = next((i for i in await asyncio.to_thread(B.open_items, None) if i.id == uid), None)
     fold_ids = [i for i, v in parsed["items"].items() if v["verdict"] == "fold"]
     if umbrella is not None and len(fold_ids) < 2:
         # One fold is a keep, and an umbrella over one item is just a copy.
@@ -1550,8 +1550,8 @@ async def _execute_sweep(item: QueueItem, members: list) -> dict[str, Any]:
     if not parsed:
         return _sweep_out_of_budget(batch_id, member_ids, budget, session_id=session_id,
                                     stop_reason=str(stop_reason), num_turns=run.get("num_turns"))
-    result = B.record_sweep_verdicts(batch_id, members, parsed["items"], session_id=session_id,
-                                     extra={"verdict_source": parsed["source"],
+    result = await asyncio.to_thread(B.record_sweep_verdicts, batch_id, members, parsed["items"],
+                                     session_id=session_id, extra={"verdict_source": parsed["source"],
                                             "structured_error": str(run.get("structured_error") or ""),
                                             "stop_reason": stop_reason,
                                             "num_turns": run.get("num_turns"), "budget": budget,

@@ -1545,7 +1545,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
                "and has been re-derived)" if tree_hash and not S.is_denied(commit=head)
                else ""))
     live_head = subprocess.run(["git", "-C", str(live), "rev-parse", "HEAD"],
-                               capture_output=True, text=True).stdout.strip()
+                               capture_output=True, text=True, timeout=W.GIT_READ_TIMEOUT_S).stdout.strip()
     if live_head != base:
         # The tree is shared. Rebase and retest rather than refuse — the
         # gate's own preflight does the rebase; see `_regate_after_move`.
@@ -1687,7 +1687,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # underneath the retest; re-arm the drain afterwards because a gate
         # run can outlast its TTL.
         live_now = subprocess.run(["git", "-C", str(live), "rev-parse", "HEAD"],
-                                  capture_output=True, text=True).stdout.strip()
+                                  capture_output=True, text=True, timeout=W.GIT_READ_TIMEOUT_S).stdout.strip()
         if live_now != base:
             base, head, gate_report = _regate_after_move(round_id, Path(worktree), live,
                                                          base, live_now)
