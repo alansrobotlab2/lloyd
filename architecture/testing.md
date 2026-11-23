@@ -449,6 +449,35 @@ anything. Sites are found by **searching for the guard's own symbol**, never by 
 pinned line number, because a number is a snapshot and the symbol moves with the
 code.
 
+## The triage replay set
+
+`eval/triage_replay/cases.json` holds 42 past single-triage decisions whose label
+is what happened to the item, never what a model thought of it: 40 `good_confirm`
+(confirmed, landed, closed, and not reopened in 14+ days; bookkeeping-named items
+left out; taken across inflow sources) and 2 `bad_confirm` (confirmed, then closed
+by a person as superseded). Each case stores the item as triage saw it — the file
+at the last vault commit before the verdict — plus the vault and tree shas of that
+moment. `build.py` regenerates it from the ledger and the vault's history and is a
+hand tool; `run.py` renders each case through the production
+`autotriage.render_prompt`, sends it to a `prompt -> text` callable, parses with the
+production `parse_verdict`, and reports agreement per label with a Wilson interval,
+`unmeasured` under n = 20.
+
+Two limits, both stated in the files. The set is **one-sided**: the record holds
+1,996 candidates for the first label and 2 for the second, because nothing in the
+loop ever revisits a retirement and a round's `rejected`/`unnecessary` turned out,
+read one by one, to mean "did not land" or "another landing got there first"
+(`architecture/automod.md` §12.3). It can say whether a prompt change stops
+confirming work that landed; it cannot say whether triage confirms too much. And
+the replay is a **plain completion with no tools**: a tooled turn against today's
+tree would correctly call every `good_confirm` `already_done`, since its fix has
+landed. It is not run by the gate and it needs the engine:
+
+    .venvs/lloyd/bin/python eval/triage_replay/run.py plan
+    .venvs/lloyd/bin/python eval/triage_replay/run.py run --base-url http://127.0.0.1:8096
+
+`tests/test_triage_replay.py` drives the runner with a fake model.
+
 ## See also
 
 [[automod]] for the rungs, the promoter and rollback · [[vault-protection]] for

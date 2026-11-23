@@ -9821,7 +9821,7 @@ def sweep_pool(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     pool = [i for i in (items if items is not None else open_items(boards))
             if i.status in SWEEP_POOL_STATUSES and i.id not in done
             and i.id not in claimed
-            and not is_swept(i) and not is_parked(i) and not is_high(i)
+            and not has_standing_rank(i) and not is_parked(i) and not is_high(i)
             and not is_grouped(i) and not is_umbrella(i)
             and NEEDS_HUMAN_TAG not in i.tags and EXPIRED_TAG not in i.tags]
     return sorted(pool, key=lambda i: (i.id in seen, priority_key(i), i.created or "9999", i.id))
@@ -9881,7 +9881,7 @@ def record_sweep_verdicts(batch_id: str, members: list[Item], verdicts: dict[int
             target = item_by_id(t)
             if target is not None and target.status in OPEN_STATUSES and not is_parked(target):
                 external.add(t)
-    verdicts = _resolve_duplicates(verdicts, member_ids | external)
+    verdicts = _ranked_only(_resolve_duplicates(verdicts, member_ids | external))
     counts = {"retired": 0, "duplicates": 0, "kept": 0, "parked": 0}
     judged: dict[str, str] = {}
     ranked: dict[str, str] = {}
@@ -10767,3 +10767,39 @@ def group_triage_events(ledger: Path) -> list[dict]:
     append re-decodes the whole file (0.4 s for 21.6 MB, measured 2026-11-22),
     and that must not happen on the backend's event loop."""
     return _ledger_events(ledger, "backlog_group_triage", require_item=False)
+
+# ── A `swept` tag is a rank only when there is a rank ───────────────────────
+#
+# `swept` took an item out of the sweep's pool, out of quarantine's release and
+# out of expiry (`EXPIRY_EXEMPT_TAGS`) on the tag alone, and two paths could
+# put the tag on an item that carried no `worth`:
+#
+# * **A filer copied it.** `backlog_write_task` takes whatever tags the session
+#   passes, and a triage turn filing a follow-up to a swept item has copied its
+#   parent's tags. Measured 2026-11-22: 3 of the 4 items that ever carried
+#   `swept` with no `worth` have no `backlog_sweep` row at all (#3006, #3175,
+#   #4225), and #4225 was open — a self-filed draft, so quarantined; never read
+#   by the sweep, so never released; tagged `swept`, so never expired. In no
+#   pool, for good.
+# * **A `keep` the turn ranked with nothing.** `record_sweep_verdicts` tagged
+#   it `swept`, recorded it in `judged` (so `swept_ids` held it for ever) and
+#   left it at `rank_key`'s unranked slot. Measured over the whole ledger: 0 of
+#   2,949 sweep keeps — the structured finalizer has always filled the field —
+#   so this half is closed by construction rather than observed.
+#
+# Both now mean "not swept yet": the tag alone does not keep an item out of
+# `sweep_pool`, and a keep with no worth is not recorded, exactly as an item
+# the turn did not list is not (`parse_sweep_verdict`: "a rank the turn never
+# wrote is not a rank"). A real sweep row still settles it: `swept_ids` is
+# checked separately, so nothing is re-read that the sweep has ruled on.
+
+def has_standing_rank(item: Item) -> bool:
+    """Tagged `swept` AND carrying the `worth` the tag promises."""
+    return is_swept(item) and bool(item.worth)
+
+
+def _ranked_only(verdicts: dict[int, dict]) -> dict[int, dict]:
+    """Drop a `keep` that names no `worth`: the item stays unswept and is
+    offered to the next batch."""
+    return {i: v for i, v in verdicts.items()
+            if str(v.get("verdict") or "keep") != "keep" or _level(v.get("worth"), WORTH_LEVELS)}

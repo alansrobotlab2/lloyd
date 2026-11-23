@@ -1214,7 +1214,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
         inflow = {}
 
     return {"tree_growth": growth, "derived_work": derived, "tests_rung": tests_rung,
-            "inflow_yield": inflow,
+            "inflow_yield": inflow, "verdict_outcomes": _verdict_outcomes(ledger, backlog_dir, now),
             "computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
@@ -1288,7 +1288,7 @@ def render(row: dict) -> str:
     lines.append(_render_denials(row))
     lines.append(_render_provenance(row))
     lines.extend(_render_growth_rows(row))
-    return "\n".join(lines)
+    return "\n".join(lines + [_render_verdict_outcomes(row)])
 
 
 def _render_growth_rows(row: dict) -> list[str]:
@@ -1496,6 +1496,62 @@ def main(argv=None) -> int:
     if args.record:
         print(f"\nrecorded → {record(row)}")
     return 0
+
+
+# ── 23: what became of the items each decider ruled on ───────────────────
+#
+#  23  verdict outcomes        per decider, over 30 d: confirmed items that landed
+#                              and stayed landed, retired items that came back
+#                              (scripts/automod/verdict_outcomes.py)
+#
+# Listed here rather than in the module docstring's table: tests and docs pin
+# line numbers in this file, and three lines at the top would move all of them.
+
+#: Row 23 is a 30-day reading and the dashboard recomputes the whole scorecard
+#: every minute: the join (≈1 s over the 91,527-row store, measured 2026-11-22)
+#: is reused for this long. Keyed on the ledger and the board it was read from.
+VO_TTL_S = 900.0
+_VO_MEMO: dict[tuple[str, str], tuple[float, dict]] = {}
+
+
+def _verdict_outcomes(ledger: Path | None, backlog_dir: Path, now: float) -> dict:
+    """Row 23's payload, `{}` when it cannot be read. Same 30 d window as row
+    21 and for the same reason: a verdict of this week has mostly no outcome."""
+    key = (str(ledger), str(backlog_dir))
+    hit = _VO_MEMO.get(key)
+    if hit is not None and 0 <= now - hit[0] < VO_TTL_S:
+        return hit[1]
+    try:
+        if not backlog_dir.exists():
+            return {}
+        from scripts.automod import verdict_outcomes as VO
+        reading = VO.compute(days=SY_WINDOW_DAYS, ledger=ledger, backlog_dir=backlog_dir, now=now)
+        out = {"days": reading["days"], "verdicts": reading["verdicts"],
+               "min_n": reading["min_n"], "deciders": VO.scorecard_summary(reading)}
+    except Exception:
+        return {}
+    _VO_MEMO[key] = (now, out)
+    return out
+
+
+def _render_verdict_outcomes(row: dict) -> str:
+    """Row 23. A decider under the minimum n reads `unmeasured`, never a rate."""
+    v = row.get("verdict_outcomes")
+    if not isinstance(v, dict) or not v.get("deciders"):
+        return "| 23 | verdict outcomes | — | not measured for this row |"
+
+    def rate(r: dict | None) -> str:
+        if not r or not r.get("n"):
+            return "none"
+        if r.get("rate") is None:
+            return f"unmeasured ({r['k']}/{r['n']})"
+        return f"{_pct(r['rate'])} ({r['k']}/{r['n']})"
+
+    cells = [f"{name}: confirmed→landed-kept {rate(d.get('confirm_landed_kept'))}, "
+             f"retired→reopened {rate(d.get('retire_reopened'))}"
+             for name, d in v["deciders"].items()]
+    return (f"| 23 | verdict outcomes | {v.get('verdicts', 0)} verdicts / {v.get('days', 0):g} d | "
+            + "; ".join(cells) + f"; a rate needs n ≥ {v.get('min_n')}, open items excluded |")
 
 
 if __name__ == "__main__":

@@ -4506,6 +4506,100 @@ not is recorded here so nobody re-derives it from the code alone.
 
 `land_refused` is a new ledger event; nothing reads it as a verdict.
 
+### 12.3 Outcome feedback: what became of what each decider ruled on (2026-11-22)
+
+Until this section nothing joined a verdict to the item's fate. `board_decisions`
+joins a *promotion* to its first exit from the pool, pooled; row 21 reads what a
+*source's* items turned into. Whether single triage's confirmations land, whether
+the sweep's retirements come back, and whether `worth: high` means anything were
+all unmeasured, although `rank_key` orders every pool on the last one.
+
+`scripts/automod/verdict_outcomes.py` is the join: every verdict in a window —
+read off the ledger's own vocabulary (`backlog_triage` verdicts by decider,
+`backlog_sweep` keeps, `owed_check`'s `result.moved`, `steward_move`) — against
+what the ledger says happened to that item afterwards. The outcomes are
+`landed_kept`, `landed_reopened`, `round_rejected`, `retired_later`, `expired`,
+`owed_closed`, `spent`, `open`, `closed_other`, and for a retirement
+`stayed_closed` / `reopened`. One item counts once per (decider, verdict); `open`
+and `spent` are left out of every denominator; a rate needs n ≥ 20 and carries a
+95 % Wilson interval.
+
+    python -m scripts.automod.verdict_outcomes --days 30
+    python -m scripts.automod.verdict_outcomes --days 80 --worth --min-age-days 14
+
+| # | Row | Why |
+|---|---|---|
+| 23 | verdict outcomes — per decider over 30 d: confirmed→landed-kept, retired→reopened, `unmeasured` under n = 20 (`scripts/automod/verdict_outcomes.py`) | First reading, 30 d to 2026-11-22, 2,547 item verdicts: triage confirmed→landed-kept 86 % (784/913), sweep 82 % (719/875), gate (red-tree) 42 % (42/100 — 53 of the rest healed on their own and were closed `already_done`), board steward and owed-check unmeasured (11/14, 13/17). Retired→reopened: 1 of 281 across every decider. The join is reused for 15 minutes (`scorecard.VO_TTL_S`) because the dashboard recomputes the scorecard every minute. |
+
+**What the first reading says, and what it cannot.**
+
+* *A confirmation that reaches a round lands.* Over 80 d, 2,251 of 2,860 resolved
+  single-triage confirmations landed and stayed landed (79 %); 426 more were closed
+  by owed-check with no landing, 67 retired by a later pass, 42 closed by their
+  round `rejected`/`unnecessary`. Row 21's warning applies unchanged: this is a rate
+  of landing, not of value, and **nothing may throttle a decider or a source on it**.
+* *A retirement is never revisited.* 1 of 895 retirements in 80 d came back, and
+  that one (#4432) is open only because its close was held — its own body says it
+  was withdrawn. This is not evidence that retirements are right. It is evidence
+  that the loop has no path that would ever find a wrong one: a retired item is
+  closed, and nothing re-reads closed items. The figure is a floor.
+* *`round_rejected` is not "triage was wrong".* The 42 were read one by one: about
+  20 say the change was complete and never landed (a gate still running at the
+  turn's end, an external red tree, a held promotion), 11 that the acceptance was
+  already true on main — and in every one that names the fixing commit, the commit
+  landed 0.1 to 6 h *after* the triage verdict, a race with another round or a hand
+  merge — 4 carry no reason, one is a measured proposal rejection whose premise was
+  true, one a premise that expired afterwards.
+* *By source* (30 d, each item once): owed-check 85 % landed-kept of resolved
+  (442/523), scheduled-task 84 %, triage 83 %, arch-review 80 %, autocode 69 %,
+  other 66 %, youtube-eval 66 %, red-tree 43 %.
+
+**`worth` and `size`, measured — no correction built.** Sweep keeps at least 14 d
+old, 80 d window, 2,521 ranked:
+
+| worth | ranked | attempted | landed-kept of ranked | landed-kept of attempted | unwanted of resolved | attempts / landing | review refusals / landing |
+|---|---|---|---|---|---|---|---|
+| high | 618 | 525 | 78 % [75–81] | 92 % [90–94] | 8 % [6–11] | 1.57 | 0.40 |
+| medium | 1,533 | 1,195 | 72 % [70–75] | 93 % [91–94] | 7 % [6–8] | 1.37 | 0.28 |
+| low | 370 | 211 | 53 % [48–58] | 93 % [89–96] | 14 % [11–18] | 1.18 | 0.11 |
+
+| size | ranked | attempted | landed-kept of attempted | attempts / landing | review refusals / landing |
+|---|---|---|---|---|---|
+| small | 1,720 | 1,390 | 93 % [92–94] | 1.29 | 0.20 |
+| medium | 736 | 509 | 92 % [89–94] | 1.64 | 0.52 |
+| large | 65 | 32 | 88 % [72–95] | 2.61 | 0.86 |
+
+"Unwanted" is closed by its round as rejected/unnecessary, retired by a later pass,
+or expired. Reading it:
+
+* The share of *ranked* items that landed falls with worth (78 / 72 / 53 %), but
+  that is the order the label itself caused: `rank_key` takes `high` first and a
+  `low` draft is parked. Over items a round actually *attempted*, the three labels
+  are indistinguishable — 92 / 93 / 93 %, every interval overlapping.
+* `low` is the one label the outcomes separate: twice as often unwanted (14 % against
+  7–8 %, intervals disjoint from `medium`'s). The sweep's "this is a nice-to-have"
+  is right more often than not, and parking it costs little.
+* `high` against `medium` is not separated on any outcome. `high` items cost more
+  per landing (1.57 attempts and 0.40 review refusals against 1.37 and 0.28), which
+  is what "a bug in the loop or the harness" should cost. Nothing observable says a
+  `high` item was worth more — but the ledger records no measure of worth at all, so
+  it could not.
+* `size` is the well-calibrated label: attempts per landing 1.29 → 1.64 → 2.61 and
+  refusals 0.20 → 0.52 → 0.86 rise with it in order.
+
+No label is inverted, so `automod.selection.worth_correction` was **not** built and
+`rank_key` is unchanged (`tests/test_verdict_outcomes.py` pins that it carries no
+correction). What would justify one is a `high` that does worse than `medium` on
+"unwanted", with disjoint intervals, over a window like this one.
+
+**The replay set** (`eval/triage_replay/`, `architecture/testing.md` "The triage
+replay set") is the same join turned into cases: 40 single-triage confirmations
+that landed and stayed landed 14+ days, with the item text as triage saw it from
+the vault's git history, and the 2 a person later closed as superseded. It is
+one-sided because the record is — see the three bullets above.
+
+`tests/test_verdict_outcomes.py`, `tests/test_triage_replay.py`.
+
 ## 13. Known limits
 
 - **A change that is correct, boots, and is quietly worse** in ways no eval
