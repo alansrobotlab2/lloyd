@@ -263,7 +263,7 @@ def _surface_rules(surface: str, item_id: int) -> str:
     return VAULT_SURFACE_RULES.format(item_id=item_id)
 
 
-ABANDON_GRACE_SECONDS = 20 * 60
+# (No fixed abandon grace: `_abandon_grace_seconds()` reads the config, default 0.)
 
 
 def _reoffer_block(reason: str, *, prior: tuple[int, ...] | list[int] = (),
@@ -638,7 +638,7 @@ def _reap_abandoned_rounds(now: float | None = None, *,
     and the whole feature was live at 17:34. A reaper that aborted at turn end
     would have raced the rescue and thrown away 875 lines the gate then
     passed. So while that follow-up existed the observer was the first
-    responder and this the backstop, `ABANDON_GRACE_SECONDS` after the turn
+    responder and this the backstop, a fixed twenty minutes after the turn
     ended. It no longer exists (`_abandon_grace_seconds`), and a grace with
     nothing to wait for only held the loop closed: 15 rounds in the week to
     2026-09-14 waited a median 26 minutes each. So `_run_and_record` calls

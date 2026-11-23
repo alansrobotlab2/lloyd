@@ -169,7 +169,7 @@ def test_the_expiry_bound_comes_from_config_and_falls_back_to_the_constant(monke
     assert B.spawn_expiry_days() == 14
     monkeypatch.setitem(CFG.CONFIG, "workers", {"sources": {"autocode": {}}})
     assert B.spawn_expiry_days() == B.SPAWN_EXPIRY_DAYS
-    assert B.SPAWN_TRIAGE_MIN_AGE_DAYS == B.SPAWN_EXPIRY_DAYS, "the old name is an alias"
+    assert not hasattr(B, "SPAWN_TRIAGE_MIN_AGE_DAYS"), "the unread alias is gone"
 
 
 def test_expiry_never_touches_grouped_umbrella_needs_human_or_human_authored(isolated):
@@ -586,7 +586,7 @@ def test_quarantine_still_keys_on_exactly_the_four_loop_tags():
                             "spawned-by-autoimplement", "spawned-by-selfmod"}
     assert B.REVIEW_SPAWN_TAGS == {REVIEW_TAG}
     assert B.EVAL_SPAWN_TAGS == {EVAL_TAG}
-    assert B.QUARANTINE_TAGS == B.SPAWN_TAGS | B.EVAL_SPAWN_TAGS
+    assert B.SPAWN_TAGS <= B.quarantine_tags() <= B.SPAWN_TAGS | B.EVAL_SPAWN_TAGS
     assert B.LOOP_SPAWN_TAGS == B.SPAWN_TAGS | B.REVIEW_SPAWN_TAGS | B.EVAL_SPAWN_TAGS
     assert REVIEW_TAG not in B.quarantine_tags()
 

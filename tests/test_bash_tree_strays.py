@@ -2010,6 +2010,10 @@ async def test_the_probe_reached_the_file_read_only_and_wrote_nothing(
     monkeypatch.setattr(_subprocess, "Popen", no_subprocess)
     before = _stat3(path)
     siblings_before = sorted(p.name for p in cwd.iterdir())
+    # What the interpreter held BEFORE the probe, so the last two assertions are about the
+    # probe and not about the worker: under the gate's `-n 8 --dist loadfile` a file run
+    # earlier on the same worker may have imported the guardian's `datawatch` for itself.
+    datawatch_before, sys_path_before = sys.modules.get("datawatch"), list(sys.path)
     tables = _bash_tree_strays._schema_only_tables(str(path), size)
     after = _stat3(path)
 
@@ -2029,9 +2033,18 @@ async def test_the_probe_reached_the_file_read_only_and_wrote_nothing(
     # an exec-from-file loader with cleanup instead of an import. `datawatch` is asserted
     # rather than `policy` because a sibling test legitimately imports the guardian's
     # `policy` at top level, and this node has no claim on that one.
-    assert "datawatch" not in sys.modules, "the content probe stranded the guardian module"
-    assert "/".join(_bash_tree_strays._GUARDIAN_SUBDIR) not in " ".join(
-        str(p) for p in sys.path), "the guardian directory is still on sys.path"
+    #
+    # Both are before/after comparisons since 2026-11-22. As absolute statements ("no
+    # `datawatch` in `sys.modules`", "no guardian directory on `sys.path`") they were true
+    # of this file run alone and false of the worker the gate runs it on, where another
+    # file had already imported the guardian's `datawatch`: the node failed under parallel
+    # load and passed its serial re-run in 164 of the 164 green full `tests` rungs of the
+    # week to 2026-11-22 (530 of 667 over 30 days), which is one extra pytest process per
+    # round and a "failed only under parallel load" line on every verdict. Identity, not
+    # mere presence: a probe that REPLACED a module someone else imported fails here too.
+    assert sys.modules.get("datawatch") is datawatch_before, (
+        "the content probe stranded the guardian module")
+    assert sys.path == sys_path_before, "the guardian directory is still on sys.path"
 
 
 async def test_the_note_for_a_byte_bearing_hit_says_schema_only_with_its_count(

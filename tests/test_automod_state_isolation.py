@@ -78,6 +78,11 @@ def test_a_test_that_used_isolated_state_leaves_the_session_where_the_caller_put
 
 def test_a_landing_gives_back_the_signal_handlers_it_took(monkeypatch, tmp_path):
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    # This node is about a landing that has NOT merged: the handler raises only then, and
+    # `promote._LANDING_MERGED` is a process global another file on the same xdist worker
+    # can leave set. Left unpinned it read "DID NOT RAISE LandingKilled" under parallel
+    # load in 65 of the 164 green full `tests` rungs of the week to 2026-11-22.
+    monkeypatch.setattr(R.P, "_LANDING_MERGED", False)
     before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
     restore = R._die_loudly_on_signal("SM_X")
     try:

@@ -348,7 +348,7 @@ behind a fifteen-line helper. `tests/test_backlog_tags_shape.py` pins it.
 | Tag | Meaning |
 |---|---|
 | `spawned-by-triage` / `spawned-by-autocode` | This loop filed this item. Two earlier spellings — `spawned-by-autoimplement`, `spawned-by-selfmod` — are still **read** (`SPAWN_TAGS`), because quarantine that stopped recognising an old tag would re-admit every item carrying it to the triage pool at once. Write the newest. |
-| `spawned-by-review` / `youtube-eval` | The other two producers of loop output: the architecture reviewer (`workers/sources/arch_review.py`) and the YouTube channel digest (`workers/sources/youtube_digest.py`). Three readers, three deliberately different sets (`scripts/automod/backlog.py`): merge at write time keys on the `spawned-by-` **prefix** plus `youtube-eval`; quarantine reads `QUARANTINE_TAGS`, the union of `SPAWN_TAGS` and `EVAL_SPAWN_TAGS`; expiry and the scorecard gauge read `LOOP_SPAWN_TAGS`, the union of all three. A review finding is therefore bounded by expiry but **not** quarantined — it describes the tree as of one commit and single triage is exactly the pass that should decide whether it still holds, whereas an eval written against today's profile cannot answer the staleness question. The prefix rule is there because the enumeration is only ever the mints someone thought of in advance: measured 2026-09-17, 43 of 412 open loop-tagged items were rejected by it and the gauge undercounted the loop's own output by 10 %. |
+| `spawned-by-review` / `youtube-eval` | The other two producers of loop output: the architecture reviewer (`workers/sources/arch_review.py`) and the YouTube channel digest (`workers/sources/youtube_digest.py`). Three readers, three deliberately different sets (`scripts/automod/backlog.py`): merge at write time keys on the `spawned-by-` **prefix** plus `youtube-eval`; quarantine reads `quarantine_tags()`, the union of `SPAWN_TAGS` and `EVAL_SPAWN_TAGS`; expiry and the scorecard gauge read `LOOP_SPAWN_TAGS`, the union of all three. A review finding is therefore bounded by expiry but **not** quarantined — it describes the tree as of one commit and single triage is exactly the pass that should decide whether it still holds, whereas an eval written against today's profile cannot answer the staleness question. The prefix rule is there because the enumeration is only ever the mints someone thought of in advance: measured 2026-09-17, 43 of 412 open loop-tagged items were rejected by it and the gauge undercounted the loop's own output by 10 %. |
 | `spawned-by-owed` | Stamped on every follow-up `owed.apply_verdict` files (2026-11-22). Until then owed-check filed through `new_item` with no tag, so its follow-ups read as a person's: no expiry, absent from the gauge — and on that day they were **112 of the 160 open items**. The `spawned-by-` prefix gives them expiry and the gauge; like a review finding they are **not** quarantined. A follow-up whose name only witnesses, records or pins the parent's own claim (`backlog.is_derived_name`: the word `witness`, or a bookkeeping verb leading a name that cites `#N`) is **not filed at all**: the debt stays on the parent's `owed` list, where `MAX_RECHECKS` bounds it. Scorecard row 19 counts both. `tests/test_loop_inflow_brakes.py`. |
 | `spawned-by-fitness` | Stamped by the two writers that file on a measurement (2026-11-22, both ship off): `scripts/automod/fitness_intake.py` files at most one `class: improvement` draft a day against the behaviour bench that most regressed outside its noise floor, and `scripts/automod/measured_close.py` files one revert proposal when a landed improvement did not move its bench. Every such item also carries `fitness_bench: <bench>`, and **one open item per bench** is the rule both writers check before filing — against `metric:` or `fitness_bench:`, because a re-triage that calls the item anything but `improvement` removes `metric`. Like `spawned-by-owed` the tag is covered by the `spawned-by-` prefix (expiry, the gauge) and is **not** quarantined; `source_yield.source_of` reads it as its own `fitness` source in scorecard row 21. [[automod]] §12.4. `tests/test_fitness_intake.py`. |
 | `swept` / `parked` | Written by the autotriage **sweep** (`workers.sources.autotriage.sweep: true`, `sweep_batch: 8`, `select_sweep_batch`/`record_sweep_verdicts`): one pass that reads every open item once and ranks it (`worth`, `size`) instead of expiring it. Both tags are expiry-exempt; `parked` is also its own bucket in `board_health`'s `draft` partition. Group and single triage yield to the sweep while `unswept` is non-zero. **The `swept` tag is a rank only with a `worth` beside it** (2026-11-22, `has_standing_rank`): an item filed with a copied `swept` tag and no rank is still read by the sweep — #4225 sat in no pool that way, quarantined as self-filed, never swept, and exempt from expiry on the tag — and a `keep` the turn ranked with no `worth` is not recorded, so the item is offered again (0 of 2,949 keeps on the ledger; closed by construction). |
@@ -945,6 +945,60 @@ most active is the worst possible reading of "bounded".
   `amend_clause`. `write_item`'s own re-read refuses the same shape, because a
   primitive that reads bytes it did not ask for must refuse for the same reason
   the lanes do (#1020).
+
+## Splitting `scripts/automod/backlog.py`: an assessment, not a plan in motion (2026-11-22)
+
+Nothing was moved. The module is 10,695 lines: 264 top-level functions (84 of
+them private), 2 classes, 160 module-level assignments. Who holds on to it:
+
+- **Importers:** 31 non-test modules and 81 test files.
+- **Private names used from tests:** 273 references to 37 distinct `_names` in 27
+  files — `_split_frontmatter` 69, `_witness_artifact` 36,
+  `_over_bound_extract_demand` 30, `_rederive_command` 16, `_ledger_events` 11.
+- **Monkeypatched globals:** 160 `monkeypatch.setattr(B, "<name>")` sites on 39
+  names in 55 files — `BACKLOG_DIR` 53, `desired_statuses` 13, `now_stamp` 11,
+  `implement_pool_full` 9, `select_confirmed` 6.
+- **Line and source pins:** 45 `backlog.py:<line>` mentions in tests (none in
+  `architecture/`), and 38 test files that name the module's path as a string.
+
+The seams that already exist, by where the code sits today:
+
+| lines (approx.) | what | defs / lines | used from elsewhere in the file | backlog names it calls |
+|---|---|---|---|---|
+| 10,010–10,400 | red-tree items (`file_red_tree_item`, `close_healed_red_tree*`) | 10 / 322 | 0 | 9 |
+| 9,600–10,000 | the sweep (`sweep_pool`, `record_sweep_verdicts`, `unfold_oversized_umbrellas`) | 9 / 186 | 1 | 26 |
+| 1,236–3,200 | witness and clause-artefact machinery (`_witness_*`, `commit_anchor_witness`, `add_witness_artifact_clause`, `_over_bound_extract_demand`) | 36 / 1,504 | 4 | 3 |
+| 4,000–5,200 | ledger readers (`implement_history`, `implement_outcomes`, `confirmed_verdicts`, `gate_duration_stats`) | 43 / 939 | 19 | 10 |
+| 7,600–8,500 | pools, claims and selection (`triage_pool`, `select_confirmed`, `ready_confirmed`, `release_held_confirmations`) | 34 / 750 | 11 | 33 |
+| 6,400–7,400 | the reconciler (`desired_statuses` is 461 lines, `reconcile_statuses`, `_apply_status`) | 20 / 962 | 9 | 32 |
+| 3,440–3,990 | `Item`, front matter, `BACKLOG_DIR`, `all_items` — the core that stays | 22 / 454 | 13 | 5 |
+
+"Lines" is function bodies only; the comment blocks between them move with them.
+The two right-hand columns count top-level names by AST within this file, so they
+say how much re-export and call-through each cut needs, not who imports it.
+
+What keeps each step mechanical:
+
+1. **Move bottom-up** — red-tree, then the sweep, then upward. A cut at the
+   bottom of the file shifts no pin above it; a cut at line 1,230 shifts every
+   one of the 45.
+2. **`backlog.py` re-exports every moved name**, private ones included, so the 31
+   importers and the 273 private references do not change in the move commit.
+3. **A moved function reads patched globals through the module, at call time**
+   (`backlog.BACKLOG_DIR`, `backlog.desired_statuses(...)`), never through a name
+   it imported. This is the one way the split can go wrong quietly: a
+   `monkeypatch.setattr(B, "implement_pool_full", ...)` that the moved caller no
+   longer sees leaves the test green and testing nothing. Before each move, list
+   which of the 39 patched names the moved code reads or defines, and for each
+   name the move *defines*, re-point its patch sites to the new module in the
+   same commit.
+4. **One module per commit, no edits inside the moved bodies**, and the 38
+   path-naming test files plus `-k "doc_claims or citation or line_pin or cites"`
+   run after each.
+
+Witness removes the most lines for the least coupling (4 names in, 3 out);
+red-tree, with no inbound name at all, is the cheapest rehearsal of the mechanics. The reconciler should not move until
+the pools have, because its callers are what the patches above stand in for.
 
 ## Migration history
 

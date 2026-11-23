@@ -692,7 +692,7 @@ def _isolate_default_store(request, tmp_path_factory):
     from app import kg_store
     original = kg_store._default_path
     kg_store.reset()
-    kg_store._default_path = tmp_path_factory.mktemp("kg") / "kg.sqlite"
+    kg_store._default_path = _fresh_scratch_dir(tmp_path_factory, "kg") / "kg.sqlite"
     yield
     kg_store.reset()
     kg_store._default_path = original
@@ -710,7 +710,7 @@ def _isolate_research_store(tmp_path_factory):
     from app import research_store
     original = research_store._default_path
     research_store.reset()
-    research_store._default_path = tmp_path_factory.mktemp("research") / "research.db"
+    research_store._default_path = _fresh_scratch_dir(tmp_path_factory, "research") / "research.db"
     yield
     research_store.reset()
     research_store._default_path = original
@@ -731,7 +731,7 @@ def _isolate_background_records(tmp_path_factory, monkeypatch):
     production directory. A test that patches these itself still wins, because
     its `monkeypatch` runs after this fixture's.
     """
-    root = tmp_path_factory.mktemp("lloyd-records")
+    root = _fresh_scratch_dir(tmp_path_factory, "lloyd-records")
     monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", root / "sessions")
     monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", root / "event_logs")
     monkeypatch.setattr("app.event_log.BLOBS_DIR", root / "event_logs" / "blobs")
@@ -749,7 +749,7 @@ def _isolate_usage_store(tmp_path_factory, monkeypatch):
     connection cache cannot carry a test's writes into the next one's file.
     """
     monkeypatch.setattr("app.usage_store.DB_PATH",
-                        tmp_path_factory.mktemp("usage") / "usage.db")
+                        _fresh_scratch_dir(tmp_path_factory, "usage") / "usage.db")
 
 
 @pytest.fixture(autouse=True)
@@ -773,7 +773,7 @@ def _isolate_backlog_dedupe(tmp_path_factory, monkeypatch):
     except Exception:          # module not importable in this test's env
         return
     monkeypatch.setattr(SIM, "DEDUPE_LOG",
-                        tmp_path_factory.mktemp("dedupe") / "dedupe.jsonl")
+                        _fresh_scratch_dir(tmp_path_factory, "dedupe") / "dedupe.jsonl")
     monkeypatch.setattr(SIM, "semantic_candidates", lambda text, **kw: [])
     monkeypatch.setattr(SIM, "dedupe_config", lambda: dict(SIM.DEFAULTS))
 
@@ -862,7 +862,7 @@ def _isolate_automod_backlog(tmp_path_factory, monkeypatch):
     except Exception:          # module not importable in this test's env
         return
     monkeypatch.setattr(AUTOMOD_BACKLOG, "BACKLOG_DIR",
-                        tmp_path_factory.mktemp("automod-backlog"))
+                        _fresh_scratch_dir(tmp_path_factory, "automod-backlog"))
 
 
 @pytest.fixture(autouse=True)
@@ -1141,3 +1141,37 @@ def credential_vault(tmp_path, monkeypatch):
         key, _, value = line.partition("=")
         monkeypatch.setenv(key.strip(), value.strip())
     return home
+
+
+# ── per-test scratch directories that do not scan the base temp ────────────
+#
+# Six autouse fixtures above each hand every test a fresh directory, and until
+# 2026-11-22 they asked `tmp_path_factory.mktemp(<prefix>)` for it. That call is
+# `make_numbered_dir`: it lists the WHOLE base temp to find the highest
+# `<prefix>N` before it creates the next one, and nothing removes these
+# directories while the session runs — so every test left six more entries
+# behind for every later test to list, six times over (seven with `tmp_path`).
+# The cost per test grows with the number of tests the worker has already run,
+# which makes the suite's setup cost quadratic in its own size. Measured on this
+# box: six `mktemp` calls cost 0.7 ms in an empty base temp, 45.5 ms at 20,000
+# entries and 91.8 ms at 40,000, and a `-n 4` run of the 26,176-test suite ended
+# with 22,041-53,220 entries per worker. `architecture/testing.md`, "Where the
+# tests rung's time goes".
+#
+# Same contract as before for every caller: a new, empty, existing directory
+# (mode 0700) that no other test was given, kept for the session. What changed
+# is where it lives (`<basetemp>/isolate/<prefix>-<n>`, one level down, so
+# `tmp_path`'s own numbering scan no longer walks them either) and how its name
+# is chosen (a process-wide counter instead of a directory listing).
+import itertools as _itertools
+
+_SCRATCH_SEQ = _itertools.count()
+
+
+def _fresh_scratch_dir(factory, prefix: str) -> Path:
+    """A new empty directory for one test, without listing the base temp."""
+    root = Path(factory.getbasetemp()) / "isolate"
+    root.mkdir(mode=0o700, exist_ok=True)
+    path = root / f"{prefix}-{next(_SCRATCH_SEQ)}"
+    path.mkdir(mode=0o700)       # never exist_ok: a reused name is a bug, loudly
+    return path

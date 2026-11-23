@@ -298,7 +298,7 @@ Two more were found by the first unattended run itself (#229, 2026-09-07:
   moment there is nothing else left; on 2026-09-08 that moment was three hours
   and 6 items away. `backlog.is_quarantined` holds an item tagged
   `spawned-by-triage` or `spawned-by-autocode` out of the single-item pool.
-  The first cut released it at `SPAWN_TRIAGE_MIN_AGE_DAYS` (30) on the theory
+  The first cut released it at 30 days (`SPAWN_TRIAGE_MIN_AGE_DAYS`) on the theory
   that an unimplemented item can go stale; by 2026-09-11 that was 291 items
   due back in triage in October, each spawning ~2 more, so **age no longer
   releases**. The exits are the ones that do not re-enter the queue: the
@@ -738,8 +738,8 @@ triaged, implemented, clustered or tagged in `spawn_expiry_days()` —
 `workers.sources.autocode.expire_spawns_after_days`, 7 since 2026-09-14 (14
 from 09-13, when it still had never fired: the oldest open self-spawn was 7.0
 days old),
-failing open to `SPAWN_EXPIRY_DAYS` (30; `SPAWN_TRIAGE_MIN_AGE_DAYS` is its
-old alias). At a hardcoded 30 it had never triggered — the oldest self-spawn was
+failing open to `SPAWN_EXPIRY_DAYS` (30; its unread alias
+`SPAWN_TRIAGE_MIN_AGE_DAYS` was removed 2026-11-22). At a hardcoded 30 it had never triggered — the oldest self-spawn was
 six days old — while 400 self-spawned items sat open, and `over_bound 0`
 read healthy throughout. Expiry, autotriage's skip summary and the scorecard
 gauge all read the one function, or `over_bound` would be measured against
@@ -1045,8 +1045,8 @@ nothing when it cannot read the session snapshot, and a YouTube filing merged
 into another item verifies.
 
 **youtube-eval is loop output** (Alan, 2026-09-14). `EVAL_SPAWN_TAGS`
-(`youtube-eval`) is in `LOOP_SPAWN_TAGS` (expiry, gauge) and a new
-`QUARANTINE_TAGS`, with `SPAWN_TAGS` itself unchanged; the MCP dedupe merges a
+(`youtube-eval`) is in `LOOP_SPAWN_TAGS` (expiry, gauge) and in what
+`quarantine_tags()` returns, with `SPAWN_TAGS` itself unchanged; the MCP dedupe merges a
 `youtube-eval` write like a `spawned-by-*` one. Readers call
 `quarantine_tags()` / `loop_spawn_tags()`, which honour
 `workers.sources.youtube-digest.loop_spawned`. 125 were filed in the week and

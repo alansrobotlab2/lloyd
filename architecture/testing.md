@@ -731,6 +731,192 @@ measured, nothing can be reported as moved, by construction.
 `tests/test_automod_fitness.py`; the index arms are pinned in
 `tests/test_eval_instrument_index.py`.
 
+## Where the tests rung's time goes (measured 2026-11-22)
+
+The rung's cost grew faster than the suite. Green full 8-worker runs, per week,
+from the ledger's `gate` rows (`rung: tests`, median seconds; median tests passed):
+
+| week of | 09-14 | 09-28 | 10-12 | 10-26 | 11-09 | 11-16 |
+|---|---|---|---|---|---|---|
+| rung, s | 93 | 269 | 558 | 714 | 814 | 1,035 |
+| tests passed | 6,671 | 14,344 | 19,348 | 21,913 | 24,812 | 25,748 |
+| ms per test | 14 | 19 | 29 | 33 | 33 | 40 |
+
+In the week to 2026-11-22, over the 164 rounds whose last gate report
+(`rounds/<id>/gate.json`) holds a green full run: median 1,004 s (896 s net of
+the `gate-tests.lock` wait, which averaged 291 s), and **all 164 paid a serial
+re-run** for at least one test that failed only under parallel load.
+
+**The profile.** One full run from a clean worktree of `28c0743e`, the gate's own
+argv and child environment (`-m "not live_vault and not fault_injection" --dist
+loadfile`, round-home `HOME`, scratch `LLOYD_DATA`, on-disk `TMPDIR`) at `-n 4`
+with `--durations=0 --durations-min=0.5`: 26,176 tests in 916 files, 1,855.7 s
+wall. 56 failed and none of them is a finding about time: the 11 clone-only nodes;
+37 that reproduce serially in that hand-built worktree and round home and in no
+gate run (194 green full rungs in the ledger that week), cause not chased; and 8
+that are order-dependent (six in `test_kv_gate.py`, plus the two fixed below).
+
+- **Collection and startup are not the cost.** `--collect-only` takes 11.2 s
+  (14.9 s for the process); each xdist worker pays it once, in parallel. Test time
+  summed over the four workers is 7,011 s of 7,423 worker-seconds (94 %).
+- **Setup vs call, among the 1,258 phase rows of 0.5 s or more:** call 4,448 s,
+  setup 88 s, teardown 25 s. No module fixture is slow enough to matter; the one
+  slow setup is `test_degradation_selection.py` (48 s).
+- **The tail is short and heavy.** 153 tests take 5 s or more and are 3,125 s
+  (45 %); 829 take 1 s or more and are 4,373 s (62 %). The top 10 files are 28.5 %
+  of the time, the top 40 are 50.1 %.
+- **The body was fixture overhead.** The other 25,347 tests total 2,638 s; the
+  median test took 83 ms, and most of that was `conftest.py`, not the test (below).
+- **By kind** (static classification of each test function, times from this run):
+  tests that spawn a subprocess, 1,865 tests and 1,751 s (25 %); tests that read
+  live data off the machine, 510 and 379 s; the citation rails (below), 2,214 and
+  777 s.
+
+Top 40 files by summed test time (`-n 4` run, before any change below):
+
+| file (`tests/`) | seconds | tests | share |
+|---|---|---|---|
+| `test_architecture_coverage_doc_claims.py` | 330 | 307 | 4.7% |
+| `test_eval_corpus_guard.py` | 329 | 77 | 4.7% |
+| `test_automod_code_rules.py` | 307 | 82 | 4.4% |
+| `test_thinking_trace.py` | 248 | 46 | 3.5% |
+| `test_landed_outcomes_human_input.py` | 205 | 24 | 2.9% |
+| `test_dashboard_responsive.py` | 142 | 23 | 2.0% |
+| `test_uptake.py` | 127 | 118 | 1.8% |
+| `test_automod_vault_round.py` | 108 | 267 | 1.5% |
+| `test_automod_frontend_probe_canary.py` | 106 | 15 | 1.5% |
+| `test_dashboard_yaml_loader.py` | 98 | 11 | 1.4% |
+| `test_vllm_doc_claims.py` | 97 | 150 | 1.4% |
+| `test_guard_arm_matrix.py` | 89 | 15 | 1.3% |
+| `test_automod_vet.py` | 85 | 20 | 1.2% |
+| `test_validate_tasks_linter.py` | 81 | 75 | 1.2% |
+| `test_flash_next_launcher.py` | 71 | 66 | 1.0% |
+| `test_eval_ci_reporting.py` | 68 | 9 | 1.0% |
+| `test_run_egress_arms.py` | 60 | 23 | 0.9% |
+| `test_dashboard_pin_accounting.py` | 59 | 12 | 0.8% |
+| `test_automod_frontend_probe.py` | 50 | 25 | 0.7% |
+| `test_degradation_selection.py` | 49 | 4 | 0.7% |
+| `test_retention_sweep.py` | 49 | 281 | 0.7% |
+| `test_gate_parallel_tests.py` | 48 | 40 | 0.7% |
+| `test_outbound_content_gate.py` | 45 | 96 | 0.6% |
+| `test_run_persistence_arms.py` | 44 | 19 | 0.6% |
+| `test_automod_gate.py` | 44 | 191 | 0.6% |
+| `test_eval_scorer.py` | 43 | 83 | 0.6% |
+| `test_autoresearch_bench_runner_sdk.py` | 43 | 64 | 0.6% |
+| `test_path_sandbox_skip_accounting.py` | 43 | 10 | 0.6% |
+| `test_guard_vacuity.py` | 43 | 56 | 0.6% |
+| `test_browser_upload.py` | 42 | 26 | 0.6% |
+| `test_code_rules_census.py` | 41 | 15 | 0.6% |
+| `test_bench_mine_source.py` | 40 | 14 | 0.6% |
+| `test_autonomy_scheduler.py` | 40 | 161 | 0.6% |
+| `test_vault_commit_attribution.py` | 39 | 35 | 0.6% |
+| `test_run_kv_dtype_arm.py` | 39 | 26 | 0.6% |
+| `test_dashboard_cold_render.py` | 36 | 43 | 0.5% |
+| `test_workers_pool.py` | 34 | 121 | 0.5% |
+| `test_check_health_census.py` | 32 | 19 | 0.5% |
+| `test_bench_side_effects.py` | 32 | 8 | 0.5% |
+| `test_loop_depth.py` | 32 | 56 | 0.4% |
+
+### What was changed
+
+1. **The six per-test scratch directories no longer list the base temp**
+   (`tests/conftest.py`, `_fresh_scratch_dir`). Six autouse fixtures each called
+   `tmp_path_factory.mktemp(<prefix>)` for every test. That is pytest's
+   `make_numbered_dir`, which lists the whole base temp to find the next number,
+   and nothing removes those directories during the session — so each test left
+   six more entries for every later test to list six times. Setup cost was
+   quadratic in the number of tests a worker had run: six `mktemp` calls cost
+   0.7 ms in an empty base temp, 45.5 ms at 20,000 entries, 91.8 ms at 40,000,
+   and the profile run ended with 22,041–53,220 entries per worker. The
+   directories are now `<basetemp>/isolate/<prefix>-<n>`, named from a counter.
+   Same contract: a fresh, empty, existing directory per test, kept for the
+   session. **Measured:** the same 6,516 tests from 119 files, one process,
+   6,508 passed both times — 564.6 s before, 175.3 s after (−69 %). Fitted cost
+   9.2 µs × (tests the worker has run)², which is ~98 s per worker at an even
+   8-way split of 26,176 tests and more on whichever worker `loadfile` hands the
+   most tests. This is also the term that made ms-per-test rise in the table above.
+2. **`test_automod_code_rules.py` asks its whole-tree question once**
+   (`_whole_tree_run`). Eight nodes each ran `CR.run` over every tracked `.py`
+   (37–39 s apiece). The pass is memoised on the file list, the rule file's bytes
+   and the tree's HEAD plus diff, and every caller gets a deep copy. File total
+   307 s in the profile → 34.9 s alone, same 81 passed / 1 clone-only failure.
+3. **Two parallel-only failures that were process-state leaks, not load.**
+   `test_bash_tree_strays.py::test_the_probe_reached_the_file_read_only_and_wrote_nothing`
+   asserted that `datawatch` was absent from `sys.modules`, true only when no
+   earlier file on the worker had imported the guardian's module: it failed and
+   was re-run serially in 164 of those 164 rungs (530 of 667 over 30
+   days). It compares before and after the probe now, by identity.
+   `test_automod_state_isolation.py::test_a_landing_gives_back_the_signal_handlers_it_took`
+   (65 of 164) read `promote._LANDING_MERGED`, a process global another file can
+   leave set; the node pins it to the pre-merge state it is about.
+4. **Three dead names removed** (plan 5.5): `backlog.QUARANTINE_TAGS` and
+   `backlog.SPAWN_TRIAGE_MIN_AGE_DAYS` (no reader but one identity assertion
+   each; the readers are `quarantine_tags()` and `spawn_expiry_days()`), and
+   `autocode.ABANDON_GRACE_SECONDS` (no production reader since the grace became
+   `abandon_grace_seconds`, default 0; four tests used it as a number). All three
+   removals are line-neutral.
+
+**Estimated effect on the rung** (not measured at `-n 8`; only the gate can):
+about 100 s from (1), about 34 s from (2) (272 worker-seconds), 12–20 s from the
+re-run every round no longer makes — roughly 150 s of a 900 s run, and the
+quadratic term is gone, so the next 10,000 tests cost what they cost and no more.
+
+### What was left as a proposal
+
+| proposal | what it would save | why it was not taken |
+|---|---|---|
+| Fix the remaining order- and load-dependent nodes: `test_dashboard_responsive.py` (re-run in 64 of 164 rungs, and its serial re-run is ~140 s of real browser), `test_skills_search_metadata_gate.py` (41), `test_tsc_runner.py` (29), `test_thinking_fidelity_scan_single_walk.py` (22), `test_kv_gate.py` (17: `SOURCE_REGISTRY` read after another file replaced it) | ~70 s per rung on average, almost all of it the dashboard file | each needs its own diagnosis; the two fixed above were the ones whose cause was one line |
+| `automod.gate.test_workers` 8 → 12 or 16 (the box has 32 cores) | up to half the run, in proportion | a config value with a load cost: every parallel-only failure above gets likelier, and the engines share the box. Needs a measured trial with the pool's own turns running |
+| Move tests that wait on a live service or scan a live store off the per-round rung to a scheduled run: the `eval/run_eval.py` CLI nodes (`test_eval_corpus_guard.py`, `test_eval_ci_reporting.py`; ~33 s each, 7 s of it CPU, the rest the live qmd daemon), `test_thinking_trace.py`'s live-store node (243 s), `test_landed_outcomes_human_input.py` (three nodes, 61–73 s), `test_dashboard_yaml_loader.py` (72 s) | ~1,000 worker-seconds, ~125 s per rung | it removes coverage from the gate; that is a ruling, not a speed-up |
+| `test_architecture_coverage_doc_claims.py`: one node runs a child pytest for 163 s, another 57 s | ~220 worker-seconds | the child run is the assertion; splitting it needs its author's intent |
+| Affected-test selection (below) | unknown until shadowed | skipping tests in the gate is a safety change |
+
+**Affected-test selection.** The gate selects in exactly one case today:
+`_tests_delta_only` re-runs only the changed test files when the delta since a
+cached green run at the same base is test files alone (no `conftest.py`, no
+`tests/_*.py`). Everything else is a full run. A wider selection from the code
+graph (`agent_mcp/code_graph.py`, `graph_affected`: reverse-BFS from the changed
+symbols to the test files that import them) is plausible and should be built in
+this order, each step measured before the next:
+
+1. **Shadow.** Compute the selected set, run the full suite anyway, and record on
+   the rung's data which failing nodes the selection would have missed. No verdict
+   changes.
+2. **The always-run set is most of the design.** The graph is an AST import graph
+   and is blind to everything this suite is unusually full of: 2,214 tests that
+   read source or docs as text (the rails), 1,865 that execute a script in a
+   subprocess, monkeypatches by dotted string, the HTTP/MCP seams, `config.yaml`
+   and every non-Python file. Any change to `conftest.py`, a `tests/_*.py` helper,
+   a data file or a config file is a full run.
+3. **Promote only on zero misses** over a few hundred shadowed rounds, and keep a
+   full run somewhere a miss cannot land past — the landing re-gate, or the first
+   gate after a rebase.
+
+The risk is the quiet one: a missed test is a green rung, and nothing in the
+ledger distinguishes it from a real pass until something breaks in production.
+
+### The citation rails, counted
+
+2,214 collected tests (8.5 %) are citation rails by this count: the 1,395 in the
+31 files named `*doc_claims*`, `*citation*`, `*cites*` or `*doc_repoint*`, plus
+every other test whose body carries a `file.ext:<line>` string literal (925 with
+such a literal in all). They cost 777 s of the 7,011 s profile (11 %), 330 s of it
+`test_architecture_coverage_doc_claims.py` alone.
+
+What they cost in red rungs, from every `tests` gate event in the ledger:
+
+| window | red rungs | name a node | name at least one rail | name only rails | rung time on the only-rail reds |
+|---|---|---|---|---|---|
+| 7 days | 46 | 46 | 32 (70 %) | 26 (57 %) | 14.3 h of 23.9 h |
+| 30 days | 204 | 197 | 111 (56 %) | 77 (39 %) | 34.0 h of 78.7 h |
+
+`test_architecture_coverage_doc_claims.py` is 181 of the rail nodes blamed in the
+30-day rounds' final gates; no other file has more than 14. A red rail is often
+the rail working — the round moved a line and owes the re-point — so this is the
+price of the rails, not a count of false alarms. The classification is static and
+approximate: a `file:line` literal in a fixture string counts, a rail that builds
+its citation at run time does not.
+
 ## See also
 
 [[automod]] for the rungs, the promoter and rollback · [[vault-protection]] for
@@ -766,3 +952,10 @@ suite exercises · [[data-home]] for where the live data moved on 2026-09-22.
   vacuity probes, tmpwatch's fractions, and both incident records. Filed: the two
   1000-test floors are under 5% of what they were set for (#3250), and
   `scripts/automod/gate.py` names closed #2214 as the live ruling on the figure (#3251).
+- 2026-11-22 — **profiled**: "Where the tests rung's time goes" added — one full
+  `-n 4` run of 26,176 tests (1,855.7 s), the ledger's weekly rung medians, the
+  top-40 table, the quadratic base-temp scan in six autouse fixtures (fixed), the
+  eight-fold whole-tree pass in `test_automod_code_rules.py` (shared), two
+  process-state leaks behind "failed only under parallel load" (fixed), the rails'
+  share of red rungs, and the proposals not taken. The opening "~21,300 tests" is
+  stale by ~4,900 and was left for the next pass that re-verifies the whole page.

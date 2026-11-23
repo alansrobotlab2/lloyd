@@ -114,7 +114,7 @@ EVAL_SPAWN_TAGS = frozenset({"youtube-eval"})
 #
 #   merge at write time   `spawned-by-` prefix   (agent_mcp/backlog.py)
 #                         + `youtube-eval`
-#   quarantine            QUARANTINE_TAGS        (is_quarantined, below)
+#   quarantine            quarantine_tags()      (is_quarantined, below)
 #   expiry and the gauge  LOOP_SPAWN_TAGS        (this union)
 #                         + the `spawned-by-` prefix
 #
@@ -140,7 +140,7 @@ EVAL_SPAWN_TAGS = frozenset({"youtube-eval"})
 # triage every `spawned-by-review` item whose comment says it should be
 # re-checked, and would re-admit nothing the enumeration had already held.
 LOOP_SPAWN_TAGS = SPAWN_TAGS | REVIEW_SPAWN_TAGS | EVAL_SPAWN_TAGS
-QUARANTINE_TAGS = SPAWN_TAGS | EVAL_SPAWN_TAGS
+# (Quarantine has no exact-set constant: its one reader is `quarantine_tags()`.)
 
 
 def eval_items_loop_spawned() -> bool:
@@ -203,9 +203,9 @@ def loop_spawn_tag(tags) -> str:
 # Expiry had never fired by 2026-09-13: the oldest self-spawn was six days old
 # against a 30-day bound while 400 open self-spawned items accrued.
 SPAWN_EXPIRY_DAYS = 30
-# The pre-knob name, from when the number was a quarantine age. Alias only;
-# read `spawn_expiry_days()`.
-SPAWN_TRIAGE_MIN_AGE_DAYS = SPAWN_EXPIRY_DAYS
+# (`SPAWN_TRIAGE_MIN_AGE_DAYS`, the pre-knob alias of this number from when it
+# was a quarantine age, is gone since 2026-11-22: nothing read it. The reader
+# is `spawn_expiry_days()`.)
 
 
 def spawn_expiry_days() -> int:
@@ -10670,7 +10670,7 @@ def status_pass_store_mismatch(ledger: Path | str,
 # from #N" in their body and 232 of the 523 items numbered 4000 and up did: the
 # largest inflow the loop had was the one nothing counted. The tag carries the
 # `spawned-by-` prefix, so expiry and the gauge pick it up by the prefix rule
-# below. It is NOT in `QUARANTINE_TAGS`, for the reason a review finding is not:
+# below. It is NOT in `quarantine_tags()`, for the reason a review finding is not:
 # a follow-up describes the tree after a landing, and single triage is the pass
 # that should decide whether it still holds.
 OWED_SPAWN_TAG = "spawned-by-owed"

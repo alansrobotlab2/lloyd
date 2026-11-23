@@ -747,8 +747,8 @@ def _tracked_python(tree: Path) -> list[str]:
 def test_the_live_tree_scores_zero_or_exactly_the_named_allowlist(rule_id):
     rules = {r.id: r for r in CR.load_rules(RULES_PATH)}
     rule = rules[rule_id]
-    res = CR.run("HEAD", ROOT, rules_path=RULES_PATH,
-                 files=_tracked_python(ROOT), whole_tree=True)
+    # One whole-tree pass per session, shared by the nodes that ask this same question:
+    res = _whole_tree_run(_tracked_python(ROOT))
     assert res["status"] == CR.EVALUATED, res
     assert res["totals"]["files"] > 100, "the control must actually read the tree"
 
@@ -855,7 +855,7 @@ def test_the_live_tree_control_asks_what_it_actually_covered():
     """
     tracked = _tracked_python(ROOT)
     rules = CR.load_rules(RULES_PATH)
-    res = CR.run("HEAD", ROOT, rules_path=RULES_PATH, files=tracked, whole_tree=True)
+    res = _whole_tree_run(tracked)
     assert res["status"] == CR.EVALUATED, res
     assert res["totals"]["files"] > 100, "the control must actually read the tree"
 
@@ -1052,7 +1052,7 @@ def test_the_widening_shows_up_as_this_rules_census_and_nobody_elses():
         "another rule's scope changed in the same breath as this one, so its census "
         f"figure is no longer the one its own clause was graded against: {others}")
 
-    res = CR.run("HEAD", ROOT, rules_path=RULES_PATH, files=tracked, whole_tree=True)
+    res = _whole_tree_run(tracked)
     assert res["status"] == CR.EVALUATED, res
     recorded = res["totals"]["coverage"]["naive-now-in-artifact-name"]
     assert recorded["covered"] == len(now_cov), (
@@ -1074,8 +1074,8 @@ def test_the_whole_tree_control_is_still_zero_hits_over_exactly_seven_allowed_si
     whenever those files are edited, so what is pinned is the count and the paths, which
     is the part that carries the claim "no new violator slipped in behind the widening".
     """
-    res = CR.run("HEAD", ROOT, rules_path=RULES_PATH,
-                 files=_tracked_python(ROOT), whole_tree=True)
+    # One whole-tree pass per session, shared by the nodes that ask this same question:
+    res = _whole_tree_run(_tracked_python(ROOT))
     assert res["status"] == CR.EVALUATED, res
     assert res["hits"] == [], (
         "new violators on the live tree under the widened scope: "
@@ -2372,3 +2372,67 @@ def test_this_round_moved_no_rule_and_no_figure_in_the_rules_file():
         f"the shipped rule ids moved: {ids}")
     assert len(EXTRACT_COPY.read_bytes()) == 286_886, (
         "the extract copy changed size, so it is no longer the bytes the vault witness holds")
+
+
+# ── one whole-tree pass, asked once ─────────────────────────────────────────
+#
+# Eight nodes above ask the identical question — `CR.run("HEAD", ROOT, files=<every
+# tracked .py>, whole_tree=True)` — and each used to pay for its own answer: the five
+# `test_the_live_tree_scores_zero_or_exactly_the_named_allowlist[...]` cases, the two
+# census nodes and the seven-allowed-sites control. One pass parses every tracked Python
+# file in the repo; measured in the 2026-11-22 full-suite profile it cost 37.0-39.1 s per
+# node, 303 s of this file's 307 s, for one result computed eight times
+# (`architecture/testing.md`, "Where the tests rung's time goes").
+#
+# The answer is a pure function of three things, and the key is all three: the file
+# list, the bytes of the rule file, and the tree's HEAD plus its uncommitted diff (so a
+# node that ever edits the tree, or a hand run on a dirty checkout between two sessions
+# of one process, cannot be handed a stale pass). Each caller gets its own deep copy, so
+# no node can see another's mutation, and a pass that did not evaluate is never kept —
+# the next node asks again and fails on its own evidence.
+_WHOLE_TREE_RUNS: dict = {}
+
+
+def _whole_tree_run(tracked: list[str]) -> dict:
+    import copy
+    import hashlib
+    state = hashlib.sha256()
+    state.update(RULES_PATH.read_bytes())
+    state.update(_git(ROOT, "rev-parse", "HEAD").encode())
+    state.update(_git(ROOT, "status", "--porcelain", "--untracked-files=no").encode())
+    state.update(_git(ROOT, "diff", "HEAD", "--", "*.py").encode())
+    key = (tuple(tracked), state.hexdigest())
+    if key not in _WHOLE_TREE_RUNS:
+        res = CR.run("HEAD", ROOT, rules_path=RULES_PATH, files=list(tracked),
+                     whole_tree=True)
+        if res.get("status") != CR.EVALUATED:
+            return res
+        _WHOLE_TREE_RUNS[key] = res
+    return copy.deepcopy(_WHOLE_TREE_RUNS[key])
+
+
+def test_the_shared_whole_tree_pass_is_one_run_and_nobody_shares_its_object(monkeypatch):
+    """The memo above must not turn eight verdicts into one object eight nodes can bend."""
+    tracked = _tracked_python(ROOT)
+    first = _whole_tree_run(tracked)
+    assert first["status"] == CR.EVALUATED and first["totals"]["files"] > 100, first["totals"]
+
+    calls = []
+    real_run = CR.run
+    monkeypatch.setattr(CR, "run", lambda *a, **k: calls.append(k) or real_run(*a, **k))
+    second = _whole_tree_run(tracked)
+    assert calls == [], "the same question on the same tree was computed a second time"
+    assert second == first and second is not first
+    second["hits"].append({"rule": "planted"})
+    second["totals"]["files"] = -1
+    assert _whole_tree_run(tracked) == first, "one caller's mutation reached the next caller"
+
+    # A different question is a different run: the key is the file list, not the tree alone.
+    narrow = _whole_tree_run(["scripts/automod/code_rules.py"])
+    assert len(calls) == 1 and narrow["totals"]["files"] == 1, (calls, narrow["totals"])
+
+    # And a pass that could not evaluate is never kept as the answer.
+    monkeypatch.setattr(CR, "run", lambda *a, **k: {"status": CR.UNEVALUATED, "reason": "x"})
+    assert _whole_tree_run(["app/config.py"])["status"] == CR.UNEVALUATED
+    monkeypatch.setattr(CR, "run", real_run)
+    assert _whole_tree_run(["app/config.py"])["status"] == CR.EVALUATED

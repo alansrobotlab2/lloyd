@@ -1899,7 +1899,7 @@ def test_reaper_closes_a_round_left_open_after_the_grace(isolated, monkeypatch, 
     write_item(isolated, 2)
     aborted = _reaper_env(monkeypatch, tmp_path)
     _finished()
-    later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
+    later = _t.time() + _PAST_ANY_GRACE + 1
     assert I.reap_abandoned_rounds(now=later) and aborted == ["SM_X"]
     ev = S.read_events(path=S.LEDGER_PATH)[-1]
     assert ev["event"] == "round_abandoned" and ev["branch"] == "automod/SM_X" and ev["item_id"] == 2
@@ -1916,12 +1916,12 @@ def test_reaper_is_not_the_first_responder(isolated, monkeypatch, tmp_path):
     aborted = _reaper_env(monkeypatch, tmp_path, busy=("s1",))
     _finished()
     assert I.reap_abandoned_rounds(now=_t.time() + 60) == [] and aborted == []
-    assert I.reap_abandoned_rounds(now=_t.time() + I.ABANDON_GRACE_SECONDS + 1) == [], "session busy"
+    assert I.reap_abandoned_rounds(now=_t.time() + _PAST_ANY_GRACE + 1) == [], "session busy"
 
 
 def test_reaper_leaves_landed_observed_and_cleaned_rounds_alone(isolated, monkeypatch, tmp_path):
     import time as _t
-    later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
+    later = _t.time() + _PAST_ANY_GRACE + 1
     aborted = _reaper_env(monkeypatch, tmp_path, current={"round_id": "SM_OBS", "state": "observing"})
     _finished("SM_LANDED"); S.append_event({"event": "promoted", "round_id": "SM_LANDED"}, path=S.LEDGER_PATH)
     _finished("SM_OBS")
@@ -1982,7 +1982,7 @@ def test_a_round_with_a_running_gate_or_landing_is_never_reaped(isolated, monkey
                         lambda pid, started_at=None: S.pid_alive(pid))
     write = S.write_gate_marker if marker == "gate" else S.write_land_marker
     write("SM_X", pid=os.getpid())
-    later = _t.time() + I.ABANDON_GRACE_SECONDS + 1
+    later = _t.time() + _PAST_ANY_GRACE + 1
     assert I.reap_abandoned_rounds(now=later, finished_session="s1") == [] and aborted == []
     # A marker whose process is dead protects nothing.
     write("SM_X", pid=2 ** 22 + 12345)
@@ -7190,3 +7190,12 @@ def test_the_never_triaged_arm_still_parks_on_the_board_s_own_store(isolated, mo
              for m in B.reconcile_statuses(S.LEDGER_PATH, None)]
     assert moved == [(9312, "up_next", "draft")], (
         "and the pass writes that move, booking its row in the store it read")
+
+
+#: "Long after the turn ended", for the reaper nodes above that pass `now=`. Twenty
+#: minutes is the fixed grace `workers.sources.autocode` carried as
+#: `ABANDON_GRACE_SECONDS` until 2026-11-22; nothing in production had read that
+#: constant since the grace became `autocode.abandon_grace_seconds` (default 0), and
+#: these four call sites were its only readers. The number is kept so each node still
+#: asks about a moment past any grace a config could plausibly set.
+_PAST_ANY_GRACE = 20 * 60
