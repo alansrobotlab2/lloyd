@@ -893,3 +893,9 @@ JUDGE_CONFIG_DENIED_KEYS: tuple[str, ...] = (
     "workers.sources.fitness",
 )
 CONFIG_DENIED_KEYS = CONFIG_DENIED_KEYS + JUDGE_CONFIG_DENIED_KEYS
+
+#: Nor may a round change how its own tests rung is measured
+#: (`scripts/automod/affected_tests.py`): a selection that skips tests is a safety
+#: change, and its shadow is the evidence it would be decided on.
+GATE_SELECTION_DENIED_KEYS: tuple[str, ...] = ("automod.gate.test_selection",)
+CONFIG_DENIED_KEYS = CONFIG_DENIED_KEYS + GATE_SELECTION_DENIED_KEYS

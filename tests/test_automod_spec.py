@@ -810,6 +810,8 @@ def test_the_denied_key_set_is_the_one_landed():
         # name; these were admitted, and they decide where every alert goes.
         "discord.home_channel",
         "discord.owner_id", *spec.JUDGE_CONFIG_DENIED_KEYS,  # tests/test_judgment_replay.py pins these
+        # 2026-11-23: how the tests rung is measured (scripts/automod/affected_tests.py).
+        *spec.GATE_SELECTION_DENIED_KEYS,
     )
     # The names `_diff_paths` refuses for ARRIVING one level down, derived from the
     # tuple above: adding `guardian:` under an existing `automod:` is the case.

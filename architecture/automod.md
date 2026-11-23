@@ -4920,6 +4920,7 @@ on, and what each needs first:
 | 4 | `workers.sources.fitness.file_items` | about 8 nightly rows per bench | waits on 1 |
 | 5 | `automod.landing.measured_close` | a week of `fitness_intake report` read by hand | waits on 4 |
 | — | `automod.gate.judgment_replay: enforce` | a floor from more than one pair of runs | waits on advisory rows |
+| — | `automod.gate.test_selection: shadow` | nothing: it records, never selects | **on 2026-11-23** (`architecture/testing.md`, "Affected-test selection"); a selecting mode is not built and waits on a few hundred shadowed rungs |
 
 Measured, and so not built:
 
@@ -4931,15 +4932,20 @@ Measured, and so not built:
 - **ReasoningBank.** The A/B ran 2026-09-26 → 10-04 and was null (#1677); it
   was not re-armed unchanged.
 - **A round-directory pruner.** 176 MB, kept on purpose by #1037.
+- **Removing the `confirm` second reader.** It ships off and stays, as a
+  bounded capability rather than an amputated one: the 2026-11-22 calibration's
+  two false mets were both the grader accepting, on a second reading, a head it
+  had refused once — the run-to-run disagreement a second reading is priced
+  against — so it is the cheapest candidate fix for the one error measured.
 - **Throttling a source on its yield.** owed-check was the largest inflow and
   84 % of its witness items land; landing rate is not value. The brake is on
   what is filed (§3.2c), not on who files.
 
 Not done: the one-time board pass closed nothing (17 open low-worth derived
 items, six closable — #4068, #4081, #4316, #4371, #4430, #4470 — left for a
-person); loop prompts as experiments (plan 7.3); the `backlog.py` split and the
-`confirm` second-reader removal (assessed only, `architecture/backlog.md`,
-`architecture/testing.md`); test selection by affected files; hand labels for
+person); loop prompts as experiments (plan 7.3), which needs the next item
+first; the rest of the `backlog.py` split (two cuts landed 2026-11-23,
+`architecture/backlog.md`); hand labels for
 "triage confirms too much", which the replay set's two `bad_confirm` cases
 cannot measure.
 

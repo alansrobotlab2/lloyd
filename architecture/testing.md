@@ -910,7 +910,7 @@ quadratic term is gone, so the next 10,000 tests cost what they cost and no more
 | `automod.gate.test_workers` 8 → 12 or 16 (the box has 32 cores) | up to half the run, in proportion | a config value with a load cost: every parallel-only failure above gets likelier, and the engines share the box. Needs a measured trial with the pool's own turns running |
 | Move tests that wait on a live service or scan a live store off the per-round rung to a scheduled run: the `eval/run_eval.py` CLI nodes (`test_eval_corpus_guard.py`, `test_eval_ci_reporting.py`; ~33 s each, 7 s of it CPU, the rest the live qmd daemon), `test_thinking_trace.py`'s live-store node (243 s), `test_landed_outcomes_human_input.py` (three nodes, 61–73 s), `test_dashboard_yaml_loader.py` (72 s) | ~1,000 worker-seconds, ~125 s per rung | it removes coverage from the gate; that is a ruling, not a speed-up |
 | `test_architecture_coverage_doc_claims.py`: one node runs a child pytest for 163 s, another 57 s | ~220 worker-seconds | the child run is the assertion; splitting it needs its author's intent |
-| Affected-test selection (below) | unknown until shadowed | skipping tests in the gate is a safety change |
+| Affected-test selection (below) | unknown until shadowed — the shadow runs since 2026-11-23 | skipping tests in the gate is a safety change |
 
 **Affected-test selection.** The gate selects in exactly one case today:
 `_tests_delta_only` re-runs only the changed test files when the delta since a
@@ -935,6 +935,41 @@ this order, each step measured before the next:
 
 The risk is the quiet one: a missed test is a green rung, and nothing in the
 ledger distinguishes it from a real pass until something breaks in production.
+
+**Step 1 is built (2026-11-23): `scripts/automod/affected_tests.py`, mode
+`automod.gate.test_selection: shadow`.** `gate.py` wraps `Gate.rung_tests` at
+its foot: the rung runs the whole suite exactly as before and its result is
+returned untouched; afterwards one `test_selection_shadow` ledger row (and
+`selection_shadow` in the rung's data) records two selections and what each
+would have missed. The selection is the AST import graph of `app`, `agent_mcp`,
+`scripts`, `workers`, `eval` and `tests` plus a text search of every test file
+for the changed path and, for a `.py`, its dotted module name. Step 2's
+always-run rule is in it: a changed `conftest.py`, `tests/_*.py` helper,
+`config.yaml`, `pytest.ini`, requirements file, any non-Python non-Markdown
+file, or Python outside those packages is recorded as a full run. A rung that
+already ran a selection of its own (`_tests_delta_only`) is not shadowed.
+
+The first dry runs, against the live tree, already answer half the question:
+
+| changed file | transitive selection | direct only |
+|---|---|---|
+| `scripts/automod/sweep.py` | 651 of 930 test files | 0 |
+| `workers/sources/autotriage.py` | 651 | 27 |
+| `agent_mcp/backlog.py` | 651 | 26 |
+| `app/harness/loop.py` | 656 | 93 |
+| `architecture/backlog.md` | 3 | 3 |
+
+The import graph is so connected (most modules reach `backlog`, `app.config` or
+`app.paths`, which most tests import) that a transitive selection keeps about
+70 % of the files: safe, and worth a fraction of the rung at most. `direct` keeps
+only files that import the changed module themselves or name it — a real saving,
+and blind to exactly the case the sweep's own move showed (`sweep.py` is reached
+only through `backlog`'s re-binding, so `direct` selects nothing for it). The
+shadow therefore records `missed` and `missed_direct` side by side, and a
+selecting mode, if one is ever built, is decided on those two counts over a few
+hundred rounds. The computation costs about 8.5 s after the rung.
+`python -m scripts.automod.affected_tests report` reads the rows;
+`... select <paths>` is the dry run above. `tests/test_affected_tests.py`.
 
 ### The citation rails, counted
 

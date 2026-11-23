@@ -5615,5 +5615,16 @@ def _rung_judgment_replay(self):
 Gate.rung_judgment_replay = _rung_judgment_replay
 
 
+# ── Affected-test selection, in shadow (2026-11-23) ─────────────────────────
+# The `tests` rung still runs the whole suite; afterwards the wrapper records
+# what an import-graph selection would have run and which blamed red nodes it
+# would have missed. It returns the rung's own result untouched and swallows its
+# own errors: a measurement never costs a round its rung.
+# `scripts/automod/affected_tests.py` holds the account.
+from scripts.automod import affected_tests as _affected_tests  # noqa: E402
+
+_affected_tests.attach(Gate)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

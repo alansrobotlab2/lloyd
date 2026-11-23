@@ -1619,6 +1619,13 @@ automod:
     # process at start: no restart needed. "advisory" since 2026-11-23, once
     # both baselines existed (architecture/automod.md 12.5).
     judgment_replay: "advisory"
+    # Affected-test selection in SHADOW (scripts/automod/affected_tests.py,
+    # architecture/testing.md "Affected-test selection"): the tests rung still
+    # runs every test; afterwards one `test_selection_shadow` ledger row says
+    # what an import-graph selection would have run and which blamed red nodes
+    # it would have missed. Changes no verdict. "off" skips the measurement.
+    # There is no selecting mode. A round may not change this key.
+    test_selection: "shadow"
   # The review rung's policy knobs. The rung refused 86% of the rounds it
   # graded over 2026-09-11 and the two largest contributors were both
   # findings that are real and usually unfixable INSIDE the round.
