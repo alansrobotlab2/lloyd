@@ -153,7 +153,7 @@ ordinary Tuesday.
 ### The KV budget gate
 
 A source that declares `LONG_LIVED = True` — `autocode`, `autotriage`,
-`deep-research`, `arch-review`, `owed-check` — is not claimed while the primary's KV usage
+`deep-research`, `arch-review`, `owed-check`, `fitness` — is not claimed while the primary's KV usage
 is above `workers.kv_gate.max_kv_usage` (0.60); every other source claims as
 before. The flag in `workers/sources/<name>.py` is the truth and this list is
 a copy of it: `tests/test_kv_gate_docs.py` fails when a source flips the flag

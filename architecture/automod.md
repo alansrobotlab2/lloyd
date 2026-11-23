@@ -4290,7 +4290,7 @@ than the one this prevents.
   `automod.landing`, `workers.enabled`, `workers.slots`,
   `knowledge_graph.write_gate` (#2344, fenced 2026-10-08),
   `discord.home_channel` / `discord.owner_id` (#3472, fenced 2026-10-30), and
-  `automod.gate.judgment_replay` / `automod.selection` (2026-11-22: the loop may
+  `automod.gate.judgment_replay` / `automod.selection` / `workers.sources.fitness` (2026-11-22: the loop may not arm the source that files work from its own measurement, may
   not switch off the rung that measures its own judges, nor flip the preference
   its own selection runs on; appended at the foot of `spec.py` as
   `JUDGE_CONFIG_DENIED_KEYS`) — the

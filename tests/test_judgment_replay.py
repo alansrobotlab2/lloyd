@@ -651,7 +651,11 @@ def test_the_rest_of_the_worker_sources_are_not_swept_in():
 
 
 def test_a_round_may_not_switch_off_the_guard_nor_flip_its_own_selection():
-    assert spec.JUDGE_CONFIG_DENIED_KEYS == ("automod.gate.judgment_replay", "automod.selection")
+    assert spec.JUDGE_CONFIG_DENIED_KEYS == ("automod.gate.judgment_replay", "automod.selection",
+                                             "workers.sources.fitness")
+    assert spec._config_denied_prefix("workers.sources.fitness.file_items") == "workers.sources.fitness"
+    assert spec._config_denied_prefix("workers.sources.fitness.enabled") == "workers.sources.fitness"
+    assert spec._config_denied_prefix("workers.sources.arch-review.spawn_cap") is None
     gate = 'automod:\n  gate:\n    judgment_replay: "{}"\n    test_workers: {}\n'
     ok, why, _ = spec.config_value_change(gate.format("enforce", 8), gate.format("off", 8))
     assert not ok and "automod.gate.judgment_replay" in why

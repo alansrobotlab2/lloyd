@@ -887,5 +887,9 @@ PROTECTED_GLOBS = PROTECTED_GLOBS + JUDGE_SOURCE_GLOBS
 JUDGE_CONFIG_DENIED_KEYS: tuple[str, ...] = (
     "automod.gate.judgment_replay",
     "automod.selection",
+    # Nor arm the source that measures it and files work from the measurement
+    # (`enabled`, `file_items`, `file_lowest`): the loop choosing its own
+    # intake is the step a person turns on, after the noise floors are read.
+    "workers.sources.fitness",
 )
 CONFIG_DENIED_KEYS = CONFIG_DENIED_KEYS + JUDGE_CONFIG_DENIED_KEYS
