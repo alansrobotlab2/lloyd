@@ -1214,7 +1214,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
         inflow = {}
 
     return {"tree_growth": growth, "derived_work": derived, "tests_rung": tests_rung,
-            "inflow_yield": inflow, "verdict_outcomes": _verdict_outcomes(ledger, backlog_dir, now), "fitness": _fitness(now), "grader_error": _grader_error(now),
+            "inflow_yield": inflow, "verdict_outcomes": _verdict_outcomes(ledger, backlog_dir, now), "fitness": _fitness(now), "grader_error": _grader_error(now), "measured_closes": _measured_closes(ledger, since),
             "computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
@@ -1288,7 +1288,7 @@ def render(row: dict) -> str:
     lines.append(_render_denials(row))
     lines.append(_render_provenance(row))
     lines.extend(_render_growth_rows(row) + _render_fitness_row(row))
-    return "\n".join(lines + [_render_verdict_outcomes(row), _render_grader_error(row)])
+    return "\n".join(lines + [_render_verdict_outcomes(row), _render_grader_error(row), _render_measured_closes(row)])
 
 
 def _render_growth_rows(row: dict) -> list[str]:
@@ -1620,6 +1620,28 @@ def _render_grader_error(row: dict) -> str:
     except Exception:
         cells = "— | calibration reading unreadable"
     return f"| 24 | grader error (labels the grader did not write) | {cells} |"
+
+
+# ── 25: measured closes ──────────────────────────────────────────────────
+#
+#  25  measured closes         improvement items with a manifest `metric`: landed,
+#                              measured met, measured rejected, pending a fitness row
+#                              (scripts/automod/measured_close.py)
+#
+# Pending is read over the whole ledger — a landing opened ten days ago and
+# still unmeasured is this week's news.
+
+def _measured_closes(ledger: Path | None, since: float) -> dict:
+    try:
+        from scripts.automod import measured_close as MC
+        return MC.scorecard_block(_events(ledger), since)
+    except Exception:
+        return {}
+
+
+def _render_measured_closes(row: dict) -> str:
+    from scripts.automod import measured_close as MC
+    return MC.render_scorecard_row(row.get("measured_closes"))
 
 
 if __name__ == "__main__":

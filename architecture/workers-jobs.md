@@ -666,6 +666,19 @@ skipped. Measured the same day: 14 runs, 14 applied — rulings with items filed
 (#1572 → #1680, #1418 → #1671, #1241 → #1668) and one `outside` reaching the
 Mission Control panel.
 
+**One entry it settles without a session** (2026-11-22, ships off:
+`automod.landing.measured_close: off`). A landed `class: improvement` item whose
+`metric` names a fitness bench owes that bench's measurement, and the question
+has a deterministic answer, so no model is asked: at the end of every tick
+`enqueue_if_due` calls `scripts/automod/measured_close.py::tick` in a thread —
+at most one pass per 900 s, never under `apply: false`, fail-open. The pass opens
+the debt (an `owed` entry dated one day past its 14-day bound, so the session
+does not rule on it first), settles it `met` or `rejected` from the first
+fitness row at or after the landing, files at most one revert *proposal* on a
+`rejected`, and releases it `unmeasured` at the bound. If the switch is turned
+off with entries outstanding they fall due and this job's session rules on them
+like any other. [[automod]] §12.4.
+
 ### `autotriage` — is this backlog item still true?
 
 **Wakes** every 900 s, enqueues one item under `autotriage:triage` with the
@@ -850,6 +863,18 @@ as one subprocess off the event loop.
 - **Failures are returned.** A run that measured nothing (a held
   `regression.lock`, every bench skipped) is a returned failure; a partial run is
   a success whose summary names what was not measured.
+- **It can file one item, behind `file_items` (ships false).** After a run that
+  measured something, and only when the queue row was enqueued with
+  `workers.sources.fitness.file_items: true`, `execute` calls
+  `scripts/automod/fitness_intake.py::run` in a thread: at most one
+  `class: improvement` draft a day, tagged `spawned-by-fitness`, against the
+  bench that most regressed outside its noise floor — never while an open item
+  names that bench, never for a bench with no floor. `file_lowest` adds the
+  "furthest below its own 30-day best" arm for a night where nothing moved. The
+  two switches travel in the row's payload (`intake_flags`; `{}` when off, so an
+  off row is unchanged), the decision is a `fitness_intake` ledger event and is
+  appended to the job's summary, and a broken intake costs a warning, never the
+  run. [[automod]] §12.4.
 
 ### `autoresearch` — the gate-less week, and why it runs again now
 

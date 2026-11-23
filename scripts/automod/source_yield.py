@@ -66,6 +66,8 @@ def source_of(tags, body: str = "") -> str:
             return "triage"
         if t in B.SPAWN_TAGS:
             return "autocode"
+    if "spawned-by-fitness" in tags:   # scripts/automod/fitness_intake.py, measured_close.py
+        return "fitness"
     if any(t.startswith("spawned-by-") for t in tags):
         # `backlog_write_task` stamps `spawned-by-<whatever the session called
         # itself>`: 50-odd names in a month, most used once. One bucket.

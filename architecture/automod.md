@@ -4731,6 +4731,136 @@ one-sided because the record is — see the three bullets above.
 
 `tests/test_verdict_outcomes.py`, `tests/test_triage_replay.py`.
 
+### 12.4 Closing the loop: the measurement files work and closes it (2026-11-22)
+
+Three things existed and did not touch: the behaviour benches say whether Lloyd
+got better or worse at something ([[testing]] "Behaviour benches"), triage says
+which items are meant to move a bench ([[backlog]] "Item class"), and the review
+rung says whether a change did what its clauses say. Nothing made a measured
+regression into work, and nothing checked an `improvement` against the number it
+named. Two modules do, each behind its own switch, **both shipping off**.
+
+**Intake — `scripts/automod/fitness_intake.py`,
+`workers.sources.fitness.file_items: false`.** After a nightly fitness run that
+measured something, `workers/sources/fitness.py::execute` calls `run()` in a
+thread. It files **at most one item a day**: a `draft`, `class: improvement`,
+`metric: <bench>`, tagged `spawned-by-fitness`, against the bench that most
+regressed outside its noise floor (`fitness.moves`; the largest absolute delta,
+since every value is a share in 0..1 and dividing by the spread would let a
+deterministic bench win every night). With `file_lowest: true` a night where
+nothing moved may instead file against the bench furthest below its own 30-day
+best, under the same two bounds. The rules:
+
+* **One open item per bench.** An open item naming the bench in `metric:` or in
+  `fitness_bench:` holds it. The second key is why the rule survives triage:
+  `item_class.write_to_item` removes `metric` when a re-triage calls the item
+  anything but `improvement`.
+* **Never without a floor.** No measured noise floor, or `too-noisy`: not filed.
+* **One a day**, counted off the ledger — `fitness_intake` events that filed plus
+  `measured_close` events that filed a revert proposal, one shared budget.
+* **The body is the measurement**: both values with n and 95% interval, the
+  commits they were taken at, the landings between them (the `fitness_move`
+  event's own list when there is one), the re-run command
+  `python -m scripts.automod.fitness run --once --only <bench>`, and where the
+  failing cases can be read (`fitness_intake.CASE_ROWS`, checked per manifest
+  bench: six of the seven artifacts carry per-case rows, five of them only under
+  `--keep-scratch`; `refusal_detour`'s manifest command writes none). A test
+  fails when a manifest bench has no entry in that table.
+* **The acceptance clause is the measured one**: "`<bench>` is above <the
+  regressed value plus the noise floor> on a `fitness run` after landing"
+  (`below` … `minus` for a lower-is-better bench).
+* **Every decision is one `fitness_intake` ledger event**: `filed` with the item
+  id, or `held` with the reason and each candidate passed over.
+
+The tag is not in `QUARANTINE_TAGS`, for the reason `spawned-by-owed` is not:
+single triage is the pass that should decide whether a measured regression is
+worth a round. The `spawned-by-` prefix gives it expiry and the gauge, and
+`source_yield.source_of` gives it its own `fitness` bucket in scorecard row 21.
+
+**Measured close — `scripts/automod/measured_close.py`,
+`automod.landing.measured_close: off`.** A landed item with `class: improvement`
+and a `metric` that names a manifest bench owes that bench's measurement.
+
+    ruling(facts, fitness_rows, noise) -> met | rejected | pending
+
+* `met` — the FIRST measured row at or after the landing (later nights carry
+  other landings) moved in the bench's good direction against the last row before
+  it, by more than the measured spread, and its own Wilson interval does not
+  cover the earlier value: `fitness.bench_delta`'s two bounds.
+* `rejected` — both rows and a floor exist and it did not. The item is not
+  reopened and its status is not moved: "tried, did not measurably help" is a
+  clean close (§3.2b). The numbers go on the item, and **one** draft is filed
+  proposing the revert of that landing — `class: improvement` on the same bench
+  when the landing made the bench worse outside noise, `class: simplify` when it
+  moved nothing. It is a backlog item, not a rollback request: nothing here
+  writes `rollback_request.json`, and nothing reverts. It is not filed while an
+  open item already names the bench, and one pass files at most one.
+* `pending` — no post-landing row yet, or a question that cannot be asked (no
+  floor, `too-noisy`, no row before the landing). Bounded: after
+  `MAX_PENDING_DAYS` (14) the debt is released with a recorded `unmeasured` note
+  saying which of those it was. Nothing parks.
+
+"At or after the landing" is time AND code: `make_contains` asks git whether the
+row's `commit` (the checkout the bench ran from) and, for an engine bench, its
+`backend_commit` have the landing as an ancestor — a land train can merge hours
+before the backend restarts onto it. A row with no recorded commit, or a git that
+cannot answer, is judged by time alone.
+
+**The seam.** The item still closes `done` on the review, as before. Five writers
+reach `done` on a met landing (`owed.hand_run_pending`'s docstring lists them),
+and holding the status open would be a hook in each; instead the debt rides what
+already carries "landed, closed, still owes a post-landing check" (§3.2k):
+
+1. No landing writer is touched. `settle_pass` joins the ledger's `item_landed`
+   rows (newest per item, `acceptance: met`, not a vault landing) to the board's
+   `class`/`metric`, so the debt is opened on the first pass after the landing.
+   A landing already older than the bound and never opened is history from before
+   the switch, and is left alone.
+2. Opening writes a `measured_close: {bench, commit, landed_at, verdict: pending}`
+   block — this module's own state — and one `check` entry on `owed`, dated one
+   day past the bound, so the owed-check *session* does not rule on it first.
+3. Settling moves that one entry to `owed_settled` (`settled` for `met`, `ruling`
+   otherwise) and writes the verdict and both rows into the block. It is a narrow
+   write of its own and deliberately not `owed.apply_verdict`, which re-dates
+   every entry it is handed no answer for.
+4. The hook is one line in `workers/sources/owed_check.py::enqueue_if_due`, off
+   the event loop, at most one pass per `TICK_EVERY_S` (900), never under
+   `apply: false`, fail-open.
+
+Known edges, stated rather than hidden. The owed-check session can still reach
+the entry early: `apply_verdict` re-dates an unanswered entry to tomorrow when it
+answers another entry on the same item. The entry's text tells it to answer
+`recheck`, and a session that settles it anyway changes nothing here — the
+verdict lives in the `measured_close` block, and the pass still rules. If the
+switch is turned off with debts open, or the ledger rotates the `item_landed`
+row away, each entry falls due on its date and owed-check rules on it like any
+other entry: a debt cannot be stranded. `refusal_detour` scores the last 30 days
+of live transcripts, so its first post-landing row is mostly pre-landing
+traffic and will usually read `rejected`; do not hang an `improvement` on it
+until that bench has a per-commit reading.
+
+`python -m scripts.automod.measured_close report` prints what the pass would do
+for every landed improvement item and writes nothing, whatever the switch says;
+`python -m scripts.automod.fitness_intake report` does the same for intake.
+Scorecard **row 25, "measured closes"**: over the window, landings opened, `met`,
+`rejected`, released `unmeasured`, revert proposals filed; `pending` is read over
+the whole ledger. It renders `—` until the switch has written a row.
+
+Measured on 2026-11-22, before either switch: the fitness series and the noise
+file do not exist yet, no item on the board carries `class:` or `metric:`, and
+the ledger holds no `fitness_move` event — so both reports say "nothing", and
+neither switch should be turned on until the list below is true.
+
+Before `file_items`: a noise floor measured with the pool paused for every bench
+to be filed against (`fitness noise --repeat 5`), the nightly source on, at least
+8 nightly rows per bench (a 7-day delta needs a row a week older than the
+latest), and a week of `fitness_intake report` read by hand. Before
+`measured_close`: all of that, triage writing `class`/`metric` on live items,
+`owed-check` running with `apply: true`, and one `measured_close report` that
+shows a ruling a person agrees with.
+
+`tests/test_fitness_intake.py`, `tests/test_measured_close.py`.
+
 ## 13. Known limits
 
 - **A change that is correct, boots, and is quietly worse** in ways no eval

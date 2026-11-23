@@ -117,7 +117,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict, *,
             return
     new_id = await asyncio.to_thread(
         queue.enqueue, source=NAME, kind="fitness",
-        payload={"command": f"python -m {MODULE} run --once --pool-job"},
+        payload={"command": f"python -m {MODULE} run --once --pool-job", **intake_flags(src_cfg)},
         priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
         dedup_key=DEDUP_KEY)
     if new_id is not None:
@@ -192,4 +192,38 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         line += " (" + "; ".join(str(x) for x in meta["not_measured"]) + ")"
     if not measured:
         return _failed(line, meta=meta, **base)
+    if (item.payload or {}).get("file_items"):
+        intake = await asyncio.to_thread(_file_items, bool(item.payload.get("file_lowest")))
+        meta["intake"] = intake
+        line += f"; intake {intake.get('decision')}" + (
+            f" #{intake['item_id']}" if intake.get("item_id") else "")
     return {"status": "success", "summary": line, "meta": meta, **base}
+
+
+# ── fitness-driven intake (scripts/automod/fitness_intake.py) ────────────────
+#
+# At the foot so no line above moves. After a run that measured something, and
+# only when `workers.sources.fitness.file_items` is true (ships false), at most
+# one `improvement` item a day is filed against the bench that most regressed
+# outside its noise floor. The switches travel in the queue row's payload
+# because `execute` is not handed the source's config.
+
+def intake_flags(src_cfg: dict) -> dict[str, bool]:
+    """The payload keys the intake hook reads; `{}` when it is off, so a row
+    enqueued with the switch off is byte-identical to one from before it existed."""
+    if not bool((src_cfg or {}).get("file_items", False)):
+        return {}
+    return {"file_items": True, "file_lowest": bool(src_cfg.get("file_lowest", False))}
+
+
+def _file_items(file_lowest: bool) -> dict[str, Any]:
+    """Runs in a thread. Fail-open: a broken intake costs a warning and its
+    journal row, never the measurement that was just recorded."""
+    try:
+        from scripts.automod import fitness_intake as FI
+        out = FI.run(file_lowest=file_lowest)
+        return {k: out.get(k) for k in ("decision", "bench", "item_id", "why") if out.get(k)}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fitness intake failed (%s: %s)", type(exc).__name__, exc)
+        return {"decision": "error", "why": f"{type(exc).__name__}: {exc}"[:200]}
+

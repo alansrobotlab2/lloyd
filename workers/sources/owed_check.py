@@ -391,7 +391,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         )
         if new_id is not None:
             logger.info("Enqueued owed-check id=%d for #%d", new_id, owing.item.id)
-    return None
+    return await asyncio.to_thread(_measured_close_tick, apply)  # line-neutral; defined at the foot
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
@@ -508,3 +508,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             # own `apply` key, so the reference stays the item either way.
             "meta": {"session_id": run.get("session_id"), "item_id": owing.item.id},
             "artifact_path": backlog_artifact(owing.item.id)}
+
+
+# ── measured close (scripts/automod/measured_close.py) ───────────────────────
+#
+# At the foot so no line above moves. The one owed entry no session settles: a
+# landed `improvement` item's bench measurement is ruled from the fitness series
+# by a pure function, and this tick is what runs it. Off unless
+# `automod.landing.measured_close` is on; throttled inside `tick`; never when
+# this source runs with `apply: false`. Fail-open: it must not cost a tick.
+
+def _measured_close_tick(apply: bool) -> None:
+    try:
+        from scripts.automod import measured_close as MC
+        for row in MC.tick(apply=apply):
+            logger.info("measured close: #%s %s — %s", row.get("item_id"),
+                        row.get("verdict"), row.get("summary"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("measured close tick failed (%s: %s)", type(exc).__name__, exc)
+    return None

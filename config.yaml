@@ -1727,6 +1727,15 @@ automod:
     restart_after_s: 2700
     restart_batch_max: 4
     batch_suspend_after_rollback_s: 21600
+    # Measured close (scripts/automod/measured_close.py). off | on, SHIPS OFF.
+    # On: a landed item with `class: improvement` and a `metric` naming a
+    # fitness bench owes that bench's measurement after it closes. The owed-check
+    # tick settles it from the fitness series with no session — `met` when the
+    # first row at or after the landing moved the right way outside the noise
+    # floor, else `rejected` with the numbers on the item and ONE draft proposing
+    # the revert (never a rollback); released `unmeasured` after 14 days with no
+    # usable row. Read from this file each pass: no restart needed.
+    measured_close: off
   # What `select_confirmed` prefers INSIDE one human `priority` band, from the
   # `class:` triage writes on an item (scripts/automod/item_class.py). Both
   # ship off, which is the order as it was. `net_lines_budget`: a number of
@@ -2881,8 +2890,18 @@ workers:
     # before `max_duration_seconds` and the script stops starting benches 120 s
     # before that (`workers/sources/fitness.py::timers`); the manifest's engine
     # budget is 60 minutes, so the cap is 75.
+    # `file_items` (SHIPS FALSE): after a run that measured something, file at
+    # most ONE backlog item a day — class `improvement`, `metric: <bench>`, tag
+    # `spawned-by-fitness` — against the bench that most regressed outside its
+    # noise floor; never while an open item names that bench, never for a bench
+    # with no floor or flagged too-noisy. `file_lowest` also lets a night where
+    # nothing moved file against the bench furthest below its own 30-day best.
+    # scripts/automod/fitness_intake.py; every decision is a `fitness_intake`
+    # ledger event. Read when the nightly row is enqueued.
     fitness:
       enabled: false
+      file_items: false
+      file_lowest: false
       interval_seconds: 1800
       min_interval_seconds: 72000
       window_start_hour: 1
