@@ -1606,6 +1606,18 @@ automod:
     # moved, and re-graded serially when the rung passed over pre-existing
     # failures the grader must be told about. false = the serial ladder.
     concurrent_review: true
+    # The `judgment_replay` rung (scripts/automod/judgment_replay.py): a round
+    # whose diff changes the TEXT of a judging prompt is measured before it
+    # lands — the triage replay against a recorded run of the base's prompt
+    # (paired per case, provisional thresholds), a fixed calibration subset
+    # for the review grader (refused on a new false `met`). "off" = the rung
+    # is skipped; "advisory" = it runs and records, refuses nothing; "enforce".
+    # No recorded baseline is an external blocker under enforce, never a pass:
+    # record both first (`python -m scripts.automod.judgment_replay record
+    # triage|grader`). Quoted — YAML reads a bare off as false. A round may
+    # not change this key (spec.CONFIG_DENIED_KEYS). Read by each gate
+    # process at start: no restart needed.
+    judgment_replay: "off"
   # The review rung's policy knobs. The rung refused 86% of the rounds it
   # graded over 2026-09-11 and the two largest contributors were both
   # findings that are real and usually unfixable INSIDE the round.

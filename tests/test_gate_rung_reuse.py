@@ -355,7 +355,7 @@ def test_the_ladder_still_boots_the_canary_immediately_before_the_smoke(monkeypa
     assert names.index("canary_boot") == names.index("canary_smoke") - 1, names
     assert names == ["preflight", "vet", "code_rules", "recovery", "static", "pyright",
                      "prose_consumers", "frontend", "tests", "prompt_surface", "review",
-                     "venv", "canary_boot", "canary_smoke", "drill"], names
+                     "venv", "judgment_replay", "canary_boot", "canary_smoke", "drill"], names
 
 
 @pytest.mark.parametrize("delta,reused", [

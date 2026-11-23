@@ -1126,7 +1126,7 @@ RUNG_NUMBERS = {**NUMBER_WORDS, "eleven": 11, "twelve": 12, "thirteen": 13,
 # Extended with the fourteenth rung (#3538) and the fifteenth (#3930's
 # `recovery`), which is what the comment above instructs; `_ORDINALS` below
 # already carried both words.
-                "fourteen": 14, "fifteen": 15}
+                "fourteen": 14, "fifteen": 15, "sixteen": 16}
 
 
 def _real_ladder(monkeypatch) -> list[str]:

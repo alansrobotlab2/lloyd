@@ -858,3 +858,34 @@ def validate_code_run_spec(spec: dict) -> str | None:
         if not code.get(key):
             return f"code.{key} is required"
     return None
+
+
+# ── the judges (2026-11-22) ──────────────────────────────────────────────
+# Appended at the foot, not written into the tuples above, because every entry
+# up there moves the `path:NNN` citations below it. Both names are read at call
+# time by `classify` and `_config_denied_prefix`, so extending them here is the
+# same as listing them there.
+#
+# The three worker sources that hold a judge's prompt take the drill like the
+# rest of the loop's own code. Priced before it was added: of the last 500
+# landings (2026-10-30..11-22) 12 touched one of the three (2.4%; autotriage 3,
+# autocode 5, owed_check 6), and `protected` costs a round the `drill` rung and
+# nothing else — one rehearsed rollback, ~35 s. `scripts/automod/review.py`,
+# `owed.py` and `item_class.py` were protected already.
+JUDGE_SOURCE_GLOBS: tuple[str, ...] = (
+    "workers/sources/autotriage.py",
+    "workers/sources/autocode.py",
+    "workers/sources/owed_check.py",
+)
+PROTECTED_GLOBS = PROTECTED_GLOBS + JUDGE_SOURCE_GLOBS
+
+# The loop may not switch off the rung that measures its own judges
+# (`scripts/automod/judgment_replay.py`), nor flip the preference its own
+# selection runs on (`automod.selection.*`, read by `select_confirmed`).
+# Dotted, so neither joins `CONFIG_DENIED_BLOCKS`; the rest of `automod.gate`
+# stays a tunable.
+JUDGE_CONFIG_DENIED_KEYS: tuple[str, ...] = (
+    "automod.gate.judgment_replay",
+    "automod.selection",
+)
+CONFIG_DENIED_KEYS = CONFIG_DENIED_KEYS + JUDGE_CONFIG_DENIED_KEYS

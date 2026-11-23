@@ -809,7 +809,7 @@ def test_the_denied_key_set_is_the_one_landed():
         # and the fence did not. `discord.token` was caught by the `token` LEAF
         # name; these were admitted, and they decide where every alert goes.
         "discord.home_channel",
-        "discord.owner_id",
+        "discord.owner_id", *spec.JUDGE_CONFIG_DENIED_KEYS,  # tests/test_judgment_replay.py pins these
     )
     # The names `_diff_paths` refuses for ARRIVING one level down, derived from the
     # tuple above: adding `guardian:` under an existing `automod:` is the case.

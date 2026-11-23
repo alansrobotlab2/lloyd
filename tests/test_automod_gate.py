@@ -103,7 +103,7 @@ class _StubGate(G.Gate):
 # is `unevaluated`.
 RUNGS = ("preflight", "vet", "code_rules", "recovery", "static", "pyright",
          "prose_consumers", "frontend", "tests", "prompt_surface",
-         "review", "venv", "canary_boot", "canary_smoke", "drill")
+         "review", "venv", "judgment_replay", "canary_boot", "canary_smoke", "drill")
 ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
 

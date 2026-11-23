@@ -2168,7 +2168,7 @@ the worktree that `gate.py` and `promote.py` refuse when dirty.
 
 ## 4. The gate
 
-Fifteen rungs, cheapest first, short-circuiting. **Every rung fails closed** —
+Sixteen rungs, cheapest first, short-circuiting. **Every rung fails closed** —
 `_rung` catches exceptions and records them as failures, because with no human
 review tier a rung that errors and reads as "didn't fail" silently removes a
 check.
@@ -2190,6 +2190,7 @@ candidate that weakens the gate is judged by the old gate.
 | prompt_surface | conditional | a scored regression in what the model is told (only when the prompt surface moved) |
 | review | 3.5-6.5m | a diff that does not do what the item asked — §4.5 |
 | venv | 3s–5m | only when `requirements.txt` or `requirements.lock` changed — not `requirements-dev.txt`, §10 |
+| judgment_replay | conditional, up to ~60m | a round's rewrite of a judge that made the judging worse: the triage prompt that stops confirming work that landed, the grader that passes a known-bad change. Only when a judging prompt's **text** changed, and only when `automod.gate.judgment_replay` is not `off` (it ships off) — §4.6 |
 | canary_boot | ~2-30s | a build that will not start |
 | canary_smoke | ~5-15s | a build that starts but cannot dispatch a tool — and only that. The structural trace it records beside the verdict (event sequence, event count, turns, response length, plus the diff against the previous passing smoke) is **informational and must never fail this rung** (#3055, on #828's ruling): the four deterministic assertions in `canary_smoke.run` are the only thing it can report, and no agreement floor is armed on any trace feature |
 | drill | ~35s | only when the diff touches the rollback path |
@@ -2203,8 +2204,8 @@ same serial `tests` rung took 430-600 s and `review` a median 401 s
 off the ledger rather than from this table.
 
 Every rung is in `gate.json`; not every rung is on the ledger. Since
-2026-09-24 a **skipped** `frontend`, `prompt_surface`, `venv` or
-`canary_smoke` writes no `gate` row (`Gate.QUIET_SKIP_RUNGS`) — ~1,900
+2026-09-24 a **skipped** `frontend`, `prompt_surface`, `venv`,
+`judgment_replay` or `canary_smoke` writes no `gate` row (`Gate.QUIET_SKIP_RUNGS`) — ~1,900
 zero-second rows a week that said only "not this round", read by nothing.
 `drill` is always written, skipped or not, because
 `backlog._last_gate_per_round` and `gate_passed_unlanded_rounds` key a full
@@ -2770,6 +2771,107 @@ structurally different second reader would have to be before `on` could be
 re-armed — is the comment above `confirm: off` in `config.yaml`. That comment
 and this section are two carriers of one measurement;
 `tests/test_automod_doc_claims.py` fails if they ever state different figures.
+
+### 4.6 The judgment_replay rung: a round that rewrites a judge is measured (2026-11-22)
+
+The loop can edit its own judges — the triage prompt, the implement prompt, the
+owed-check prompt, the review grader — and every rung above reads the diff. A
+prompt that confirms less of the work that lands, or a grader that passes a
+change with its tests taken out, is green on all of them. `judgment_replay` is
+the rung that asks; `scripts/automod/judgment_replay.py` is all of it, attached
+to `Gate` at the foot of `gate.py`, and it runs after `venv` and before the
+canary takes its ports.
+
+**It fires on the prompt's text, not on the file.** `SURFACES` names, per judge,
+the module-level symbols a prompt is rendered from. A surface's fingerprint is a
+hash of the AST of those symbols plus every module-level name they reach in the
+same file (docstrings and comments left out), and the rung fires only when a
+fingerprint differs between the round's base and its head. Measured from the
+ledger on 2026-11-22, last 500 landings (2026-10-30 to 11-22):
+
+| file | landings that touched it | of those, moved a prompt fingerprint |
+|---|---|---|
+| `workers/sources/autotriage.py` | 3 (0.6 %) | 0 |
+| `workers/sources/autocode.py` | 5 (1.0 %) | 0 |
+| `workers/sources/owed_check.py` | 6 (1.2 %) | 3 |
+| `scripts/automod/owed.py` | 11 (2.2 %) | — (it holds no prompt) |
+| `scripts/automod/review.py` | 2 (0.4 %) | 0 |
+
+Twenty landings touched one of the five; three would have fired the rung, all
+three on the owed-check prompt. Over all 2,021 landings on the ledger the
+figures are 82 and 21 (single triage 4, batch triage 1, owed 5, grader 5, the
+grader's vault and confirm prompts 6, implement 0). A file trigger would have
+run an hour of engine for the other 17.
+
+**Two instruments exist, so two surfaces are measured.**
+
+| surface | roots | instrument | refuses on |
+|---|---|---|---|
+| `triage` | `autotriage.render_prompt`, `item_class.splice_triage_prompt` | `eval/triage_replay/run.py`, launched from the round's worktree so the prompt is the round's | flips to wrong outnumbering flips to right by 3 or more, with a one-sided sign test at or under 0.125 |
+| `grader` | `review.build_prompt`, `REVIEW_SCHEMA` | eleven calibration cases graded by the round's `review.py` through the live backend: the five constructed defects whose own tests stay green, then six good landings | any **new** false `met`: a known-bad case the base's grader refused and the round's passes |
+| `triage_batch`, `implement`, `owed`, `grader_other` | the group and sweep prompts, `autocode._build_prompt`, `owed_check.build_prompt` and its schema, the vault and confirm prompts | none | nothing — recorded as `uncovered` |
+
+The triage comparison is **paired per case**: the same 42 cases under the base's
+prompt and the head's, counted as flips between agreeing and disagreeing with
+the outcome label. Both thresholds are **provisional**. No repeat-run noise
+floor has been measured for this set, so `TRIAGE_NET_FLIPS = 3` and
+`TRIAGE_SIGN_ALPHA = 0.125` (exactly three flips to wrong and none to right, the
+smallest result that can refuse) are a first guess sized to be hard to trip;
+two identical-prompt runs on the primary are what replaces them. The set is
+40 good confirmations and 2 bad, so the one thing it can detect is a prompt
+that stopped confirming work that landed and stayed landed — it cannot say a
+prompt confirms too much. The grader's rule is one flip of five cases and is
+exposed to the same run-to-run noise; new false refusals among the six good
+landings are reported in the rung data and refuse nothing.
+
+An uncovered surface is let through, said out loud: there is no baseline anyone
+could record that would unblock it, so blocking it would freeze the owed-check
+and implement prompts until someone builds a replay set. The three firings in
+the measured window were all of that kind.
+
+**A baseline is keyed by fingerprint, never by commit.** One recorded run
+stands for every base that renders the same prompt. Runs are rows in
+`judgment_replay.jsonl` in the state dir (§11): surface, fingerprint, the hash
+of `cases.json` for triage, and the verdict per case. The grader's baseline is
+also read from `review_calibration.jsonl` (`calibrate --record`, partial runs
+included), each row admitted when its commit renders the base's grader prompt.
+A round's own run is written under its **head's** fingerprint, which does two
+things: a re-gate or the promoter's rebase chase of the same prompt is answered
+from the store without the engine, and once the round lands its run is the next
+round's baseline. Only the first baseline is recorded by hand:
+
+    python -m scripts.automod.judgment_replay status
+    python -m scripts.automod.judgment_replay record triage    # 42 completions, ~20-40 min
+    python -m scripts.automod.judgment_replay record grader    # 11 grading turns, ~45-60 min
+
+**What is not a verdict.** No recorded baseline is `unmeasured`; a lock still
+held after 30 minutes, an engine that does not answer, a run that timed out
+(60 minutes each, the child's whole process group killed) or came back with too
+few answers is `external`. Under `enforce` both fail the rung with
+`external_blocker` — the round's attempt is not spent, `automod_gate_wait` tells
+it to wait and gate again — and `unmeasured` names the `record` command. Neither
+is ever a pass, and neither is ever a refusal. A calibration run cut short after
+the five known-bad cases still decides; one cut short before them does not.
+
+The rung holds `regression.lock` and then `primary.lock` for the length of a
+run, so it never overlaps a regression check, a GPU experiment or an eval
+driver. The cost of that: a promotion that lands meanwhile has its regression
+check deferred to the next runner start, because the runner takes that lock
+without waiting.
+
+**Mode** is `automod.gate.judgment_replay`: `off` (ships; the rung is a quiet
+skip), `advisory` (runs, records the result in `gate.json` and a
+`judgment_replay_gate` ledger row, refuses nothing), `enforce`. YAML reads a
+bare `off` as false, which is read as off; an unrecognised value is `advisory`,
+so a typo neither removes the guard nor starts refusing rounds. A round cannot
+change the key (§10). Before `enforce`: record both baselines, or the first
+round that touches a measured prompt blocks as external until someone does.
+
+The child runs the round's code with the rung's usual scratch state
+(`Gate._child_env`), and the comparison runs in the gate's own process from the
+live tree — the candidate renders the prompt, the old gate judges the answers.
+`tests/test_judgment_replay.py` drives every branch with fakes: no engine and
+no clock.
 
 ### 4.1 pyflakes is a diff, not a bar
 
@@ -4186,8 +4288,12 @@ than the one this prevents.
   `CONFIG_DENIED_KEYS` prefix — `mcp_servers`, `models`, `model`,
   `subagents`, `server`, `services`, `guardian`, `automod.enabled`,
   `automod.landing`, `workers.enabled`, `workers.slots`,
-  `knowledge_graph.write_gate` (#2344, fenced 2026-10-08) and
-  `discord.home_channel` / `discord.owner_id` (#3472, fenced 2026-10-30) — the
+  `knowledge_graph.write_gate` (#2344, fenced 2026-10-08),
+  `discord.home_channel` / `discord.owner_id` (#3472, fenced 2026-10-30), and
+  `automod.gate.judgment_replay` / `automod.selection` (2026-11-22: the loop may
+  not switch off the rung that measures its own judges, nor flip the preference
+  its own selection runs on; appended at the foot of `spec.py` as
+  `JUDGE_CONFIG_DENIED_KEYS`) — the
   config half of what `PROTECTED_GLOBS` is for code: the lock-out, the
   rollback path, the engine's identity, the loop editing its own budget. The
   undotted entries of that tuple are additionally derived into
@@ -4214,7 +4320,12 @@ than the one this prevents.
   unreachable as before.
 - **protected** — the gate itself, the guardian, the supervisor confs, and the
   health/restart path the rollback depends on. Allowed, but only with a
-  passing drill.
+  passing drill. Since 2026-11-22 also the three worker sources that hold a
+  judge's prompt — `workers/sources/autotriage.py`, `autocode.py` and
+  `owed_check.py` (`spec.JUDGE_SOURCE_GLOBS`). Priced first: 12 of the last 500
+  landings touched one of them (2.4 %), and `protected` costs a round the
+  `drill` rung (~35 s) and nothing else. The drill proves the rollback still
+  works; whether the judging got worse is §4.6's question.
 - **allowed** — ordinary code.
 
 The two files the `venv` rung installs from — `requirements.txt` and
@@ -4348,6 +4459,7 @@ ruled out when it was gitignored but still inside the tree; it has lived in
 | `dedupe.jsonl` | `backlog_write_task` | every write-time merge decision, for tuning the threshold from data rather than from the three points measured when it landed |
 | `review_backfill.jsonl` | `review_tools backfill` | the grader's verdict beside the author's. **Its own file on purpose**: a backfilled verdict measures the grader, and `implement_outcomes` must never read it as a verdict on the round |
 | `review_calibration.jsonl` | `review_tools calibrate --set … --record` | one row per calibration run: false met and false refusal as `k/N` with Wilson intervals, per label source, and each case's verdict. A measurement of the grader like the backfill, and its own file for the same reason; `calibration_cases.scorecard_reading()` reads it (§4.5) |
+| `judgment_replay.jsonl` | the `judgment_replay` rung, and `judgment_replay record` | one row per replay of a judging prompt: surface, prompt fingerprint, case-file hash, verdict per case. The baseline a later round's rewrite is compared with (§4.6) |
 | `scorecard.jsonl` | `round scorecard --record` | the trend, so a row survives the terminal it was printed in |
 | `eval-noise.json` | regression worker | the measured noise floor (§8.1) |
 | `arch_review.json` | `arch-review` worker | per-unit review cursor: verdict, `reviewed_commit`, attempts, the ids each unit filed (`workers/sources/arch_review.py:243`) |

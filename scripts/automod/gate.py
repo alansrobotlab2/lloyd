@@ -1,4 +1,4 @@
-"""The promotion gate: fifteen rungs, cheapest first, every one fails closed.
+"""The promotion gate: sixteen rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -85,11 +85,11 @@ without the prose being renumbered.
                           whether the item is retried or handed to a human.
                           Skipped (recorded) only when no item is bound.
  11 venv        0-300s    only when requirements changed (reflink + uv)
- 12 canary_boot  ~30s    both /health green, tool floor, config-follows-code
- 13 canary_smoke ~30s    one real turn, sentinel through a real Bash call
-                          (recorded as SKIPPED when the engine is unreachable;
-                           `skip_smoke` is refused while it answers)
- 14 drill        ~90s    only when the diff touches the rollback path
+ 12 judgment_replay cond. CONDITIONAL rung: only when a judging prompt's TEXT changed (judgment_replay.py)
+ 13 canary_boot  ~30s    both /health green, tool floor, config-follows-code
+ 14 canary_smoke ~30s    one real turn, sentinel through a real Bash call (recorded as
+                          SKIPPED when the engine is unreachable; `skip_smoke` is refused while it answers)
+ 15 drill        ~90s    only when the diff touches the rollback path
 
 `frontend` (7) and `prompt_surface` (9) are numbered where they run rather than
 listed beside the ladder, because a rung that is unnumbered is a rung a citation
@@ -2444,7 +2444,7 @@ class Gate:
     # round" — and nothing reads them: `backlog._last_gate_per_round` keys a
     # failed run on its failing rung and a full pass on an ok `drill` row, so
     # `drill` is never on this list, skipped or not.
-    QUIET_SKIP_RUNGS = frozenset({"frontend", "prompt_surface", "venv", "canary_smoke"})
+    QUIET_SKIP_RUNGS = frozenset({"frontend", "prompt_surface", "venv", "canary_smoke", "judgment_replay"})
 
     def _quiet_skip(self, name: str, data: dict, ok: bool = True) -> bool:
         return (ok and name in self.QUIET_SKIP_RUNGS
@@ -2729,7 +2729,7 @@ class Gate:
                   ("tests", self.rung_tests),
                   ("prompt_surface", self.rung_prompt_surface),
                   ("review", self.rung_review),
-                  ("venv", self.rung_venv),
+                  ("venv", self.rung_venv), ("judgment_replay", self.rung_judgment_replay),
                   ("canary_boot", self.rung_canary_boot),
                   ("canary_smoke", self.rung_canary_smoke),
                   ("drill", self.rung_drill)]
@@ -5599,6 +5599,20 @@ def grader_served_model(model_alias: str = GRADER_MODEL_ALIAS) -> str:
         served = ""
     return served.strip() or GRADER_SERVED_UNKNOWN
 
+
+
+# ── judgment_replay: the rung that measures a round's edit to a judge ────────
+# Defined in its own module and attached here, at the foot, for the reason the
+# block above gives: a method added inside `Gate` would move every cited line
+# below it. `scripts/automod/judgment_replay.py` holds the whole account — what
+# fires it (a judging prompt's text, not its file), the two instruments, and why
+# a missing baseline or a busy engine is an external blocker and never a pass.
+def _rung_judgment_replay(self):
+    from scripts.automod import judgment_replay as JR
+    return JR.rung(self)
+
+
+Gate.rung_judgment_replay = _rung_judgment_replay
 
 
 if __name__ == "__main__":

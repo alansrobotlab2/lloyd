@@ -37,7 +37,7 @@ from scripts.automod import worktree as W
 # pins this tuple against `Gate.run`; this file pins the recovery row's content.
 LADDER = ("preflight", "vet", "code_rules", "recovery", "static", "pyright",
           "prose_consumers", "frontend", "tests", "prompt_surface",
-          "review", "venv", "canary_boot", "canary_smoke", "drill")
+          "review", "venv", "judgment_replay", "canary_boot", "canary_smoke", "drill")
 
 
 def _git(root: Path, *args: str) -> str:
