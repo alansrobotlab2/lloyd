@@ -440,3 +440,18 @@ def test_record_without_a_set_is_refused(capsys):
     with pytest.raises(SystemExit):
         RT.main(["calibrate", "--record"])
     assert "--record needs --set" in capsys.readouterr().err
+
+
+def test_scorecard_row_24_reads_unmeasured_without_a_recorded_run_and_never_zero(monkeypatch):
+    from scripts.automod import scorecard as SC
+    monkeypatch.setattr(calibration_cases_module(), "scorecard_reading",
+                        lambda **_: {"measured": False, "runs": 0})
+    assert SC._grader_error(0.0) == {"measured": False, "runs": 0}
+    line = SC._render_grader_error({"grader_error": {"measured": False}})
+    assert line.startswith("| 24 | grader error") and "unmeasured, not zero" in line
+    assert SC._render_grader_error({}).startswith("| 24 | grader error")
+
+
+def calibration_cases_module():
+    from scripts.automod import calibration_cases
+    return calibration_cases

@@ -1214,7 +1214,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
         inflow = {}
 
     return {"tree_growth": growth, "derived_work": derived, "tests_rung": tests_rung,
-            "inflow_yield": inflow, "verdict_outcomes": _verdict_outcomes(ledger, backlog_dir, now), "fitness": _fitness(now),
+            "inflow_yield": inflow, "verdict_outcomes": _verdict_outcomes(ledger, backlog_dir, now), "fitness": _fitness(now), "grader_error": _grader_error(now),
             "computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
@@ -1288,7 +1288,7 @@ def render(row: dict) -> str:
     lines.append(_render_denials(row))
     lines.append(_render_provenance(row))
     lines.extend(_render_growth_rows(row) + _render_fitness_row(row))
-    return "\n".join(lines + [_render_verdict_outcomes(row)])
+    return "\n".join(lines + [_render_verdict_outcomes(row), _render_grader_error(row)])
 
 
 def _render_growth_rows(row: dict) -> list[str]:
@@ -1594,6 +1594,32 @@ def _render_verdict_outcomes(row: dict) -> str:
              for name, d in v["deciders"].items()]
     return (f"| 23 | verdict outcomes | {v.get('verdicts', 0)} verdicts / {v.get('days', 0):g} d | "
             + "; ".join(cells) + f"; a rate needs n ≥ {v.get('min_n')}, open items excluded |")
+
+
+# ── row 24: the review grader's measured error (2026-11-22) ────────────────
+#
+# Rows 2 and 3 compare the grader with the author's own claim; neither says how
+# often the grader is WRONG. `review_tools calibrate --set negative --set
+# independent --record` grades cases whose labels the grader did not write and
+# appends one row per run; this reads the newest. No recorded run is
+# `unmeasured`, never 0, and a failed read costs the row and nothing else.
+
+def _grader_error(now: float) -> dict[str, Any]:
+    try:
+        from scripts.automod import calibration_cases as CC
+        return CC.scorecard_reading(now=now)
+    except Exception as exc:  # the scorecard never fails on one row
+        return {"measured": False, "error": type(exc).__name__}
+
+
+def _render_grader_error(row: dict) -> str:
+    from scripts.automod import calibration_cases as CC
+    reading = row.get("grader_error") or {"measured": False}
+    try:
+        cells = CC.render_scorecard_reading(reading)
+    except Exception:
+        cells = "— | calibration reading unreadable"
+    return f"| 24 | grader error (labels the grader did not write) | {cells} |"
 
 
 if __name__ == "__main__":

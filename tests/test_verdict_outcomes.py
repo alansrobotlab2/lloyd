@@ -275,8 +275,8 @@ def test_row_23_says_unmeasured_under_the_minimum_and_a_rate_above_it(tmp_path):
     full = SC.compute(since_days=7, ledger=empty, backlog_dir=tmp_path / "nope",
                       repo=tmp_path / "norepo", now=NOW)
     assert full["verdict_outcomes"] == {}
-    assert SC.render(full).splitlines()[-1] == "| 23 | verdict outcomes | — | not measured for this row |"
-    assert SC.render({**full, **row}).splitlines()[-1] == line
+    assert "| 23 | verdict outcomes | — | not measured for this row |" in SC.render(full).splitlines()
+    assert line in SC.render({**full, **row}).splitlines()
 
 
 def test_row_23_is_computed_from_the_ledger_and_reused_within_its_ttl(board, tmp_path, monkeypatch):

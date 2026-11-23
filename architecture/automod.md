@@ -4496,6 +4496,11 @@ commits, and nothing bisects or rolls back on it. The benches, the runner and
 the noise rule are in `architecture/testing.md`, "Behaviour benches";
 `tests/test_automod_fitness.py`.
 
+Row 24 is the review grader's measured error: false `met` and false refusal over the
+`negative` and `independent` calibration sets, whose labels the grader did not write
+(§4.5), read from the newest row `review_tools calibrate --set negative --set independent
+--record` appended. No recorded run reads `unmeasured`, never 0.
+
 ### 12.2 The 2026-11-22 defect survey: ten hypotheses against the ledger
 
 A code survey listed ten suspected defects in the loop. Each was treated as a
